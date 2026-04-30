@@ -1,0 +1,21 @@
+{
+  "name": "whygraph",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Rationale layer over CodeGraph: why code exists, not just what it does.",
+  "scripts": {
+    "whygraph": "tsx src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

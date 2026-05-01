@@ -74,7 +74,7 @@ export class GitHubEvidenceCollector {
       '--repo',
       this.repo,
       '--json',
-      'number,title,body,state,merged,mergedAt,createdAt,author,url,closingIssuesReferences',
+      'number,title,body,state,mergedAt,createdAt,author,url',
     ]);
     if (out === null) {
       this.prDetails.set(number, null);
@@ -87,17 +87,19 @@ export class GitHubEvidenceCollector {
       this.prDetails.set(number, null);
       return null;
     }
+    const body = raw.body ?? '';
+    const mergedAt = raw.mergedAt ?? null;
     const payload: GitHubPRPayload = {
       number: raw.number,
       title: raw.title ?? '',
-      body: raw.body ?? '',
+      body,
       state: raw.state ?? '',
-      merged: raw.merged ?? false,
-      merged_at: raw.mergedAt ?? null,
+      merged: mergedAt !== null || (raw.state ?? '').toUpperCase() === 'MERGED',
+      merged_at: mergedAt,
       created_at: raw.createdAt ?? null,
       author: raw.author?.login ?? '',
       url: raw.url ?? '',
-      closes_issues: (raw.closingIssuesReferences ?? []).map((r) => r.number),
+      closes_issues: parseClosingRefs(body),
     };
     this.prDetails.set(number, payload);
     return payload;
@@ -159,12 +161,40 @@ interface PrJson {
   title?: string;
   body?: string;
   state?: string;
-  merged?: boolean;
   mergedAt?: string | null;
   createdAt?: string | null;
   author?: { login?: string };
   url?: string;
-  closingIssuesReferences?: Array<{ number: number }>;
+}
+
+// GitHub's official linking keywords. Match `closes #123`, `Fix #45`,
+// `resolved: #67` etc., case-insensitive. Returns deduped numbers.
+const CLOSING_REF_RE =
+  /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d{1,7})\b/gi;
+
+export function parseClosingRefs(text: string): number[] {
+  const set = new Set<number>();
+  for (const m of text.matchAll(CLOSING_REF_RE)) {
+    const n = Number.parseInt(m[1], 10);
+    if (Number.isFinite(n)) set.add(n);
+  }
+  return [...set];
+}
+
+// Generic `#NNN` references in commit subjects/bodies. Used as a fallback
+// when /repos/<o>/<r>/commits/<sha>/pulls returns empty (typical for
+// squash-merged commits whose new SHA on mainline isn't associated with
+// the original PR record). Squash-merge subjects look like
+// `Some title (#589)`; we also pick up bare `#589` references.
+const HASH_REF_RE = /(?:^|[\s(])#(\d{1,7})\b/g;
+
+export function parseHashRefs(text: string): number[] {
+  const set = new Set<number>();
+  for (const m of text.matchAll(HASH_REF_RE)) {
+    const n = Number.parseInt(m[1], 10);
+    if (Number.isFinite(n)) set.add(n);
+  }
+  return [...set];
 }
 
 interface IssueJson {

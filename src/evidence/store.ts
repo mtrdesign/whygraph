@@ -35,11 +35,18 @@ interface RawEvidenceRow {
   collected_at: number;
 }
 
+export interface BundleMeta {
+  bundle_hash: string;
+  built_at: number;
+  head_at_collection: string | null;
+}
+
 export class EvidenceStore {
   private readonly insertStmt;
   private readonly purgeStmt;
   private readonly selectByNode;
   private readonly upsertBundle;
+  private readonly selectBundleMeta;
 
   constructor(private readonly db: Database.Database) {
     this.insertStmt = db.prepare(`
@@ -55,16 +62,25 @@ export class EvidenceStore {
       'SELECT * FROM evidence WHERE node_id = ? ORDER BY id'
     );
     this.upsertBundle = db.prepare(`
-      INSERT INTO evidence_bundles (node_id, bundle_hash, built_at)
-      VALUES (?, ?, ?)
+      INSERT INTO evidence_bundles (node_id, bundle_hash, built_at, head_at_collection)
+      VALUES (?, ?, ?, ?)
       ON CONFLICT(node_id) DO UPDATE SET
         bundle_hash = excluded.bundle_hash,
-        built_at = excluded.built_at
+        built_at = excluded.built_at,
+        head_at_collection = excluded.head_at_collection
     `);
+    this.selectBundleMeta = db.prepare(
+      'SELECT bundle_hash, built_at, head_at_collection FROM evidence_bundles WHERE node_id = ?'
+    );
   }
 
   // Replaces all evidence for a node atomically. Returns the new bundle hash.
-  replace(nodeId: string, qualifiedName: string, rows: EvidenceRow[]): string {
+  replace(
+    nodeId: string,
+    qualifiedName: string,
+    rows: EvidenceRow[],
+    headAtCollection: string | null
+  ): string {
     const now = Date.now();
     const tx = this.db.transaction(() => {
       this.purgeStmt.run(nodeId);
@@ -79,17 +95,19 @@ export class EvidenceStore {
         });
       }
       const hash = computeBundleHash(rows);
-      this.upsertBundle.run(nodeId, hash, now);
+      this.upsertBundle.run(nodeId, hash, now, headAtCollection);
       return hash;
     });
     return tx();
   }
 
+  bundleMetaFor(nodeId: string): BundleMeta | null {
+    const row = this.selectBundleMeta.get(nodeId) as BundleMeta | undefined;
+    return row ?? null;
+  }
+
   bundleHashFor(nodeId: string): string | null {
-    const row = this.db
-      .prepare('SELECT bundle_hash FROM evidence_bundles WHERE node_id = ?')
-      .get(nodeId) as { bundle_hash: string } | undefined;
-    return row?.bundle_hash ?? null;
+    return this.bundleMetaFor(nodeId)?.bundle_hash ?? null;
   }
 
   forNode(nodeId: string): EvidenceRecord[] {

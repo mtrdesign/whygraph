@@ -26,6 +26,15 @@ npm run whygraph ingest                       # OPTIONAL batch warm-up over ever
 
 `rationale` calls Claude (default `claude-sonnet-4-6`, override with `WHYGRAPH_MODEL`) and caches by `(bundle_hash, prompt_version, model)`. `ingest` is now optional — useful for batch warm-up before a demo or in CI. Use `--no-github` to skip the GitHub side, `--refresh` to recollect everything.
 
+### Two backends for rationale generation
+
+`WHYGRAPH_RATIONALE_BACKEND` selects how Claude is called:
+
+- `api` (default) — direct Anthropic SDK call billed against `ANTHROPIC_API_KEY`'s API credit balance.
+- `claude_cli` — shells out to `claude -p` (the Claude Code CLI) with `ANTHROPIC_API_KEY` stripped from the subprocess env, so it falls back to Claude Code's OAuth and bills against your **Claude Pro/Max subscription tokens** instead of API credits. Requires `claude` to be installed and signed in.
+
+Use `claude_cli` when you have a Claude Code subscription but no API credits on the same workspace.
+
 GitHub collection requires the [`gh`](https://cli.github.com/) CLI authenticated against your account, and a `github.com` `origin` remote. Anything else auto-skips silently per symbol.
 
 ## MCP integration (Claude Code)

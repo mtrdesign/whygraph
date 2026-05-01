@@ -69,55 +69,98 @@ interface ServerDeps {
   model: string;
 }
 
-export async function runMcpServer(): Promise<void> {
-  const config = loadConfig();
-  const codeGraphPath =
-    config.codeGraphDbPath ?? findCodeGraphDb(config.repoRoot);
-  if (!codeGraphPath) {
-    console.error(
-      '[whygraph-mcp] No CodeGraph DB found. Set CODEGRAPH_DB or run from a CodeGraph-initialized project.'
+class NoCodeGraphError extends Error {
+  constructor(repoRoot: string) {
+    super(
+      `No CodeGraph DB found at or above ${repoRoot} (looked for .codegraph/codegraph.db). ` +
+        'This project has not been indexed by CodeGraph yet. Index it first, or set CODEGRAPH_DB to an absolute path.'
     );
-    process.exit(1);
+    this.name = 'NoCodeGraphError';
   }
+}
 
-  const reader = new CodeGraphReader(codeGraphPath);
-  const db = openWhyGraphDb(config.whyGraphDbPath);
-  const evidenceStore = new EvidenceStore(db);
-  const rationaleStore = new RationaleStore(db);
-  const git = new GitEvidenceCollector(config.repoRoot);
-  const github = new GitHubEvidenceCollector(config.repoRoot);
-  const service = new EvidenceService(
-    evidenceStore,
-    git,
-    github,
-    config.repoRoot,
-    { ttlMs: config.evidenceTtlMs }
-  );
+// Global installs reuse a single server entry across many projects, but only
+// some of those projects have a CodeGraph DB. Failing fast at startup turns
+// every `claude mcp list` into a confusing "Failed to connect" — so we defer
+// dep construction until first tool call and return a clean error then.
+function makeDepsResolver(): () => ServerDeps {
+  let cached: ServerDeps | null = null;
+  let cleanup: (() => void) | null = null;
+  process.on('SIGINT', () => {
+    cleanup?.();
+    process.exit(0);
+  });
+  process.on('SIGTERM', () => {
+    cleanup?.();
+    process.exit(0);
+  });
 
-  let generator: RationaleGenerator | null = null;
-  function ensureGenerator(): RationaleGenerator {
-    if (generator) return generator;
-    if (config.rationaleBackend === 'api' && !config.anthropicApiKey) {
-      throw new Error(
-        'ANTHROPIC_API_KEY is not set. Set it in the MCP server environment, or set WHYGRAPH_RATIONALE_BACKEND=claude_cli to use the local claude CLI.'
-      );
+  return () => {
+    if (cached) return cached;
+    const config = loadConfig();
+    const codeGraphPath =
+      config.codeGraphDbPath ?? findCodeGraphDb(config.repoRoot);
+    if (!codeGraphPath) throw new NoCodeGraphError(config.repoRoot);
+
+    const reader = new CodeGraphReader(codeGraphPath);
+    const db = openWhyGraphDb(config.whyGraphDbPath);
+    const evidenceStore = new EvidenceStore(db);
+    const rationaleStore = new RationaleStore(db);
+    const git = new GitEvidenceCollector(config.repoRoot);
+    const github = new GitHubEvidenceCollector(config.repoRoot);
+    const service = new EvidenceService(
+      evidenceStore,
+      git,
+      github,
+      config.repoRoot,
+      { ttlMs: config.evidenceTtlMs }
+    );
+
+    let generator: RationaleGenerator | null = null;
+    function ensureGenerator(): RationaleGenerator {
+      if (generator) return generator;
+      if (config.rationaleBackend === 'api' && !config.anthropicApiKey) {
+        throw new Error(
+          'ANTHROPIC_API_KEY is not set. Set it in the MCP server environment, or set WHYGRAPH_RATIONALE_BACKEND=claude_cli to use the local claude CLI.'
+        );
+      }
+      generator = new RationaleGenerator({
+        backend: config.rationaleBackend,
+        apiKey: config.anthropicApiKey,
+        model: config.model,
+      });
+      return generator;
     }
-    generator = new RationaleGenerator({
-      backend: config.rationaleBackend,
-      apiKey: config.anthropicApiKey,
-      model: config.model,
-    });
-    return generator;
-  }
 
-  const deps: ServerDeps = {
-    reader,
-    db,
-    service,
-    rationaleStore,
-    ensureGenerator,
-    model: config.model,
+    cached = {
+      reader,
+      db,
+      service,
+      rationaleStore,
+      ensureGenerator,
+      model: config.model,
+    };
+    cleanup = () => {
+      try {
+        reader.close();
+      } catch {
+        /* ignore */
+      }
+      try {
+        db.close();
+      } catch {
+        /* ignore */
+      }
+    };
+    console.error(
+      `[whygraph-mcp] ready (codegraph=${codeGraphPath}, whygraph=${config.whyGraphDbPath}, model=${config.model})`
+    );
+    return cached;
   };
+}
+
+export async function runMcpServer(): Promise<void> {
+  const resolveDeps = makeDepsResolver();
 
   const server = new McpServer({
     name: 'whygraph-mcp-server',
@@ -150,7 +193,7 @@ export async function runMcpServer(): Promise<void> {
     },
     async (input) => {
       try {
-        return await handlePreEditBrief(deps, input);
+        return await handlePreEditBrief(resolveDeps(), input);
       } catch (err) {
         return errorResult(formatError(err));
       }
@@ -180,39 +223,16 @@ export async function runMcpServer(): Promise<void> {
     },
     async (input) => {
       try {
-        return handleEvidenceFor(deps, input);
+        return handleEvidenceFor(resolveDeps(), input);
       } catch (err) {
         return errorResult(formatError(err));
       }
     }
   );
 
-  const cleanup = (): void => {
-    try {
-      reader.close();
-    } catch {
-      /* ignore */
-    }
-    try {
-      db.close();
-    } catch {
-      /* ignore */
-    }
-  };
-  process.on('SIGINT', () => {
-    cleanup();
-    process.exit(0);
-  });
-  process.on('SIGTERM', () => {
-    cleanup();
-    process.exit(0);
-  });
-
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(
-    `[whygraph-mcp] connected via stdio (codegraph=${codeGraphPath}, whygraph=${config.whyGraphDbPath}, model=${config.model})`
-  );
+  console.error('[whygraph-mcp] connected via stdio (deps will load on first tool call)');
 }
 
 async function handlePreEditBrief(

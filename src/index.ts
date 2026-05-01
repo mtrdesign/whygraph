@@ -9,6 +9,7 @@ import { computeConfidence } from './rationale/confidence.js';
 import { RationaleGenerator } from './rationale/generator.js';
 import { RationaleStore } from './rationale/store.js';
 import { PROMPT_VERSION } from './rationale/prompt.js';
+import { runMcpServer } from './mcp/server.js';
 
 function usage(): never {
   console.error('Usage: whygraph <command> [args]');
@@ -18,6 +19,7 @@ function usage(): never {
   console.error('  ingest                    Collect git evidence for every CodeGraph node');
   console.error('  evidence <node|qname>     Show stored evidence for a symbol');
   console.error('  rationale <node|qname>    Show or generate rationale for a symbol (--force to regenerate)');
+  console.error('  mcp                       Run the MCP stdio server (for Claude Code)');
   process.exit(1);
 }
 
@@ -294,6 +296,8 @@ async function main(): Promise<void> {
       const force = rest.includes('--force');
       return cmdRationale(config, positional[0], force);
     }
+    case 'mcp':
+      return runMcpServer();
     default:
       usage();
   }

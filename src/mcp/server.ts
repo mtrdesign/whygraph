@@ -97,12 +97,13 @@ export async function runMcpServer(): Promise<void> {
   let generator: RationaleGenerator | null = null;
   function ensureGenerator(): RationaleGenerator {
     if (generator) return generator;
-    if (!config.anthropicApiKey) {
+    if (config.rationaleBackend === 'api' && !config.anthropicApiKey) {
       throw new Error(
-        'ANTHROPIC_API_KEY is not set. Set it in the MCP server environment to allow rationale generation.'
+        'ANTHROPIC_API_KEY is not set. Set it in the MCP server environment, or set WHYGRAPH_RATIONALE_BACKEND=claude_cli to use the local claude CLI.'
       );
     }
     generator = new RationaleGenerator({
+      backend: config.rationaleBackend,
       apiKey: config.anthropicApiKey,
       model: config.model,
     });

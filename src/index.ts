@@ -233,16 +233,19 @@ async function cmdRationale(
 
     let record = cached;
     if (!cacheHit) {
-      if (!config.anthropicApiKey) {
-        console.error('ANTHROPIC_API_KEY is not set. Export it to generate a rationale.');
+      if (config.rationaleBackend === 'api' && !config.anthropicApiKey) {
+        console.error(
+          'ANTHROPIC_API_KEY is not set. Export it to generate via the api backend, or set WHYGRAPH_RATIONALE_BACKEND=claude_cli.'
+        );
         process.exit(1);
       }
       const generator = new RationaleGenerator({
+        backend: config.rationaleBackend,
         apiKey: config.anthropicApiKey,
         model: config.model,
       });
       console.error(
-        `Generating rationale for ${node.qualified_name} (model=${config.model}, prompt=${PROMPT_VERSION}, evidence=${collection.source})...`
+        `Generating rationale for ${node.qualified_name} (backend=${config.rationaleBackend}, model=${config.model}, prompt=${PROMPT_VERSION}, evidence=${collection.source})...`
       );
       const result = await generator.generate({ node }, collection.evidence);
       const confidence = computeConfidence(collection.evidence);

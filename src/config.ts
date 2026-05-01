@@ -1,5 +1,7 @@
 import { resolve } from 'node:path';
 
+export type RationaleBackend = 'api' | 'claude_cli';
+
 export interface WhyGraphConfig {
   repoRoot: string;
   whyGraphDbPath: string;
@@ -7,6 +9,7 @@ export interface WhyGraphConfig {
   anthropicApiKey: string | undefined;
   model: string;
   evidenceTtlMs: number;
+  rationaleBackend: RationaleBackend;
 }
 
 const DEFAULT_TTL_DAYS = 14;
@@ -26,5 +29,9 @@ export function loadConfig(): WhyGraphConfig {
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
     model: process.env.WHYGRAPH_MODEL ?? 'claude-sonnet-4-6',
     evidenceTtlMs: ttlDays * 24 * 60 * 60 * 1000,
+    rationaleBackend:
+      process.env.WHYGRAPH_RATIONALE_BACKEND === 'claude_cli'
+        ? 'claude_cli'
+        : 'api',
   };
 }

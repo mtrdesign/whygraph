@@ -5,7 +5,9 @@ import type { EvidenceRecord } from '../evidence/store.js';
 // Bump whenever SYSTEM_PROMPT, RationaleSchema, or buildUserPrompt changes
 // in a way that should invalidate cached rationale.
 //   v1 → v2: added PR + issue evidence formatting.
-export const PROMPT_VERSION = 'v2';
+//   v2 → v3: inlined the JSON output schema in SYSTEM_PROMPT so the
+//            claude_cli backend (no output_config) produces the right shape.
+export const PROMPT_VERSION = 'v3';
 
 export const RationaleSchema = z.object({
   purpose: z
@@ -46,7 +48,17 @@ Guidelines:
 - For constraints / tradeoffs / risks: only include items you can defend from the evidence. An empty array is the correct answer when there's no signal.
 - Keep each list entry to one or two sentences. Keep "purpose" to one sentence and "why" to one short paragraph.
 
-Output a JSON object matching the provided schema. Do not include extra fields, prose outside the JSON, or markdown formatting.`;
+Output a JSON object with this exact shape (and no other fields, prose, or markdown formatting):
+
+{
+  "purpose": "one sentence describing what this code does",
+  "why": "one short paragraph explaining why this code exists, citing relevant commit subjects or short SHAs",
+  "constraints": ["string", "string"],
+  "tradeoffs": ["string", "string"],
+  "risks": ["string", "string"]
+}
+
+constraints / tradeoffs / risks are arrays of short strings; an empty array is the correct answer when there is no evidence to support an entry.`;
 
 export interface SymbolContext {
   node: CodeGraphNode;

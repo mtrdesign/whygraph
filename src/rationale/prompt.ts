@@ -4,7 +4,8 @@ import type { EvidenceRecord } from '../evidence/store.js';
 
 // Bump whenever SYSTEM_PROMPT, RationaleSchema, or buildUserPrompt changes
 // in a way that should invalidate cached rationale.
-export const PROMPT_VERSION = 'v1';
+//   v1 → v2: added PR + issue evidence formatting.
+export const PROMPT_VERSION = 'v2';
 
 export const RationaleSchema = z.object({
   purpose: z
@@ -69,13 +70,58 @@ export function buildUserPrompt(
     lines.push(node.docstring);
   }
 
+  const prs = evidence.filter((e) => e.source === 'pr');
+  const issues = evidence.filter((e) => e.source === 'issue');
   const commits = evidence
     .filter((e) => e.source === 'git_commit')
     .sort((a, b) => commitTime(b) - commitTime(a));
   const blames = evidence.filter((e) => e.source === 'git_blame');
 
   lines.push('');
-  lines.push(`Evidence: ${evidence.length} item(s) — ${commits.length} commit(s), ${blames.length} blame entr(ies).`);
+  lines.push(
+    `Evidence: ${evidence.length} item(s) — ${prs.length} PR(s), ${issues.length} issue(s), ${commits.length} commit(s), ${blames.length} blame entr(ies).`
+  );
+
+  if (prs.length > 0) {
+    lines.push('');
+    lines.push('Pull requests (highest-signal narrative — read first):');
+    for (const pr of prs) {
+      const p = (pr.payload ?? {}) as Record<string, unknown>;
+      const num = pr.ref ?? '?';
+      const title = (p.title as string | undefined) ?? '';
+      const author = (p.author as string | undefined) ?? 'unknown';
+      const merged = isoDay(parseDate(p.merged_at as string | null | undefined));
+      const closes = (p.closes_issues as number[] | undefined) ?? [];
+      const body = ((p.body as string | undefined) ?? '').trim();
+      lines.push('');
+      lines.push(`  PR #${num}  merged ${merged}  by ${author}`);
+      lines.push(`    ${title}`);
+      if (closes.length > 0) lines.push(`    Closes: ${closes.map((n) => `#${n}`).join(', ')}`);
+      if (body) {
+        for (const bodyLine of body.split('\n')) lines.push(`    ${bodyLine}`);
+      }
+    }
+  }
+
+  if (issues.length > 0) {
+    lines.push('');
+    lines.push('Linked issues (motivation / problem statement):');
+    for (const issue of issues) {
+      const p = (issue.payload ?? {}) as Record<string, unknown>;
+      const num = issue.ref ?? '?';
+      const title = (p.title as string | undefined) ?? '';
+      const labels = (p.labels as string[] | undefined) ?? [];
+      const body = ((p.body as string | undefined) ?? '').trim();
+      lines.push('');
+      lines.push(
+        `  ISSUE #${num}${labels.length > 0 ? '  [' + labels.join(', ') + ']' : ''}`
+      );
+      lines.push(`    ${title}`);
+      if (body) {
+        for (const bodyLine of body.split('\n')) lines.push(`    ${bodyLine}`);
+      }
+    }
+  }
 
   if (commits.length > 0) {
     lines.push('');
@@ -112,6 +158,13 @@ export function buildUserPrompt(
   }
 
   return lines.join('\n');
+}
+
+function parseDate(value: string | null | undefined): number | undefined {
+  if (!value) return undefined;
+  const ms = Date.parse(value);
+  if (Number.isNaN(ms)) return undefined;
+  return Math.floor(ms / 1000);
 }
 
 function commitTime(r: EvidenceRecord): number {

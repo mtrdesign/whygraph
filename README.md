@@ -56,7 +56,27 @@ cp -R /path/to/whygraph/examples/skills/whygraph-pre-edit ./.claude/skills/
 
 This tells Claude Code *when* to call the brief tool — before edits, refactors, deletions, and "why does this exist?" questions.
 
-### 2. Wire up the MCP server
+### 2. (Optional) Install the `/rationale` slash command
+
+Copy the example command into your project for an explicit lookup shortcut:
+
+```bash
+mkdir -p .claude/commands
+cp /path/to/whygraph/examples/commands/rationale.md .claude/commands/
+```
+
+Then in Claude Code, type:
+
+```
+/rationale Page              # markdown brief
+/rationale Page --json       # raw JSON payload
+/rationale Page --refresh    # recollect upstream evidence first
+/rationale Page --force      # bypass rationale cache, regenerate
+```
+
+The command calls the MCP tool and prints the result verbatim. Read-only — never edits files.
+
+### 3. Wire up the MCP server
 
 ```json
 {

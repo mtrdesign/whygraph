@@ -19,9 +19,11 @@ function usage(): never {
   console.error('  init                                Create the WhyGraph DB at .whygraph/whygraph.db');
   console.error('  codegraph-stats                     Print summary stats from the CodeGraph DB');
   console.error('  ingest [--no-github] [--refresh]    Batch warm-up: collect evidence for every CodeGraph node');
-  console.error('  evidence <node|qname> [--refresh]   Show stored evidence for a symbol (auto-collects on first call)');
+  console.error('  evidence <node|qname>               Show stored evidence for a symbol (auto-collects on first call)');
+  console.error('             [--refresh] [--json]      --refresh recollects upstream; --json prints structured JSON');
   console.error('  rationale <node|qname>              Show or generate rationale for a symbol');
-  console.error('             [--force] [--refresh-evidence]  --force regenerates rationale; --refresh-evidence recollects upstream');
+  console.error('             [--force] [--refresh-evidence] [--json]');
+  console.error('                                       --force regenerates rationale; --refresh-evidence recollects upstream; --json prints structured JSON');
   console.error('  mcp                                 Run the MCP stdio server (for Claude Code)');
   process.exit(1);
 }
@@ -154,10 +156,10 @@ function cmdIngest(
 function cmdEvidence(
   config: WhyGraphConfig,
   target: string | undefined,
-  opts: { refresh: boolean }
+  opts: { refresh: boolean; json: boolean }
 ): void {
   if (!target) {
-    console.error('Usage: whygraph evidence <node-id|qualified-name> [--refresh]');
+    console.error('Usage: whygraph evidence <node-id|qualified-name> [--refresh] [--json]');
     process.exit(1);
   }
   const ctx = buildServiceCtx(config);
@@ -170,6 +172,31 @@ function cmdEvidence(
     }
 
     const result = ctx.service.forNode(node, { force: opts.refresh });
+
+    if (opts.json) {
+      console.log(
+        JSON.stringify(
+          {
+            node_id: node.id,
+            qualified_name: node.qualified_name,
+            kind: node.kind,
+            file_path: node.file_path,
+            start_line: node.start_line,
+            end_line: node.end_line,
+            language: node.language,
+            source: result.source,
+            bundle_hash: result.bundleHash,
+            head_at_collection: result.headAtCollection,
+            collected_at: result.collectedAt,
+            evidence: result.evidence,
+          },
+          null,
+          2
+        )
+      );
+      return;
+    }
+
     console.log(
       `${node.qualified_name}  (${node.kind}, ${node.file_path}:${node.start_line}-${node.end_line})`
     );
@@ -195,11 +222,11 @@ function cmdEvidence(
 async function cmdRationale(
   config: WhyGraphConfig,
   target: string | undefined,
-  opts: { force: boolean; refreshEvidence: boolean }
+  opts: { force: boolean; refreshEvidence: boolean; json: boolean }
 ): Promise<void> {
   if (!target) {
     console.error(
-      'Usage: whygraph rationale <node-id|qualified-name> [--force] [--refresh-evidence]'
+      'Usage: whygraph rationale <node-id|qualified-name> [--force] [--refresh-evidence] [--json]'
     );
     process.exit(1);
   }
@@ -267,7 +294,39 @@ async function cmdRationale(
       process.exit(1);
     }
 
-    printRationale(node.qualified_name, record, cacheHit ? 'cached' : 'generated');
+    const source = cacheHit ? 'cached' : 'generated';
+    if (opts.json) {
+      console.log(
+        JSON.stringify(
+          {
+            node_id: node.id,
+            qualified_name: node.qualified_name,
+            kind: node.kind,
+            file_path: node.file_path,
+            start_line: node.start_line,
+            end_line: node.end_line,
+            language: node.language,
+            source,
+            evidence_source: collection.source,
+            bundle_hash: record.bundle_hash,
+            prompt_version: record.prompt_version,
+            model: record.model,
+            confidence: record.confidence,
+            generated_at: record.generated_at,
+            purpose: record.purpose,
+            why: record.why,
+            constraints: record.constraints,
+            tradeoffs: record.tradeoffs,
+            risks: record.risks,
+          },
+          null,
+          2
+        )
+      );
+      return;
+    }
+
+    printRationale(node.qualified_name, record, source);
   } finally {
     closeCtx(ctx);
   }
@@ -333,13 +392,15 @@ async function main(): Promise<void> {
     case 'evidence': {
       const positional = rest.filter((a) => !a.startsWith('--'));
       const refresh = rest.includes('--refresh');
-      return cmdEvidence(config, positional[0], { refresh });
+      const json = rest.includes('--json');
+      return cmdEvidence(config, positional[0], { refresh, json });
     }
     case 'rationale': {
       const positional = rest.filter((a) => !a.startsWith('--'));
       const force = rest.includes('--force');
       const refreshEvidence = rest.includes('--refresh-evidence');
-      return cmdRationale(config, positional[0], { force, refreshEvidence });
+      const json = rest.includes('--json');
+      return cmdRationale(config, positional[0], { force, refreshEvidence, json });
     }
     case 'mcp':
       return runMcpServer();

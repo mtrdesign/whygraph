@@ -14,10 +14,13 @@ Requires Node 18+ (`.nvmrc` pins to 22).
 nvm use         # picks up .nvmrc
 npm install
 npm run whygraph init
-npm run whygraph codegraph-stats   # needs a .codegraph/codegraph.db nearby
+npm run whygraph codegraph-stats              # needs a .codegraph/codegraph.db nearby
+npm run whygraph ingest                       # collect git evidence for every node
+npm run whygraph evidence <node|qname>        # inspect stored evidence
+ANTHROPIC_API_KEY=… npm run whygraph rationale <node|qname>  # generate or fetch cached rationale
 ```
 
-`init` creates `.whygraph/whygraph.db` in the current directory. `codegraph-stats` walks up from `cwd` to find a `.codegraph/codegraph.db` (override with `CODEGRAPH_DB`) and prints summary counts.
+`init` creates `.whygraph/whygraph.db` in the current directory. `codegraph-stats` walks up from `cwd` to find a `.codegraph/codegraph.db` (override with `CODEGRAPH_DB`). `ingest` writes git evidence for every CodeGraph node into the WhyGraph DB. `rationale` calls Claude (default `claude-sonnet-4-6`, override with `WHYGRAPH_MODEL`) and caches by `(bundle_hash, prompt_version, model)` — pass `--force` to regenerate.
 
 ## Layout
 

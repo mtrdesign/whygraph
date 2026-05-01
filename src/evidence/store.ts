@@ -85,6 +85,13 @@ export class EvidenceStore {
     return tx();
   }
 
+  bundleHashFor(nodeId: string): string | null {
+    const row = this.db
+      .prepare('SELECT bundle_hash FROM evidence_bundles WHERE node_id = ?')
+      .get(nodeId) as { bundle_hash: string } | undefined;
+    return row?.bundle_hash ?? null;
+  }
+
   forNode(nodeId: string): EvidenceRecord[] {
     const rows = this.selectByNode.all(nodeId) as RawEvidenceRow[];
     return rows.map((r) => ({

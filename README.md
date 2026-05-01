@@ -15,14 +15,18 @@ nvm use         # picks up .nvmrc
 npm install
 npm run whygraph init
 npm run whygraph codegraph-stats              # needs a .codegraph/codegraph.db nearby
-npm run whygraph ingest                       # collect git evidence for every node
-npm run whygraph evidence <node|qname>        # inspect stored evidence
-ANTHROPIC_API_KEY=… npm run whygraph rationale <node|qname>  # generate or fetch cached rationale
+ANTHROPIC_API_KEY=… npm run whygraph rationale <node|qname>  # collect evidence + generate brief on demand
+npm run whygraph evidence <node|qname>        # inspect (or auto-collect) raw evidence
+npm run whygraph ingest                       # OPTIONAL batch warm-up over every node
 ```
 
-`init` creates `.whygraph/whygraph.db` in the current directory. `codegraph-stats` walks up from `cwd` to find a `.codegraph/codegraph.db` (override with `CODEGRAPH_DB`). `ingest` writes evidence (git blame + commits, plus GitHub PRs/issues for commits with linked PRs) for every CodeGraph node — pass `--no-github` to skip the GitHub fetch. `rationale` calls Claude (default `claude-sonnet-4-6`, override with `WHYGRAPH_MODEL`) and caches by `(bundle_hash, prompt_version, model)` — pass `--force` to regenerate.
+`init` creates `.whygraph/whygraph.db` in the current directory. `codegraph-stats` walks up from `cwd` to find a `.codegraph/codegraph.db` (override with `CODEGRAPH_DB`).
 
-GitHub collection requires the [`gh`](https://cli.github.com/) CLI authenticated against your account, and a `github.com` `origin` remote. Anything else auto-skips with a log line.
+**Lazy by default.** `rationale` and `evidence` collect upstream signals (git blame + commits, plus GitHub PRs/issues if available) on first request for a symbol and cache them. Subsequent requests reuse the cache for `WHYGRAPH_EVIDENCE_TTL_DAYS` days (default 14) unless the file has new commits since collection — in which case the cache is refreshed automatically. Pass `--refresh-evidence` (rationale) or `--refresh` (evidence) to force re-collection. `--force` (rationale only) bypasses the rationale cache so Claude regenerates against fresh evidence.
+
+`rationale` calls Claude (default `claude-sonnet-4-6`, override with `WHYGRAPH_MODEL`) and caches by `(bundle_hash, prompt_version, model)`. `ingest` is now optional — useful for batch warm-up before a demo or in CI. Use `--no-github` to skip the GitHub side, `--refresh` to recollect everything.
+
+GitHub collection requires the [`gh`](https://cli.github.com/) CLI authenticated against your account, and a `github.com` `origin` remote. Anything else auto-skips silently per symbol.
 
 ## MCP integration (Claude Code)
 

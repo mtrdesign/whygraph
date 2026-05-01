@@ -6,10 +6,18 @@ export interface WhyGraphConfig {
   codeGraphDbPath: string | null;
   anthropicApiKey: string | undefined;
   model: string;
+  evidenceTtlMs: number;
 }
+
+const DEFAULT_TTL_DAYS = 14;
 
 export function loadConfig(): WhyGraphConfig {
   const repoRoot = process.cwd();
+  const ttlDaysRaw = Number.parseInt(
+    process.env.WHYGRAPH_EVIDENCE_TTL_DAYS ?? '',
+    10
+  );
+  const ttlDays = Number.isFinite(ttlDaysRaw) && ttlDaysRaw > 0 ? ttlDaysRaw : DEFAULT_TTL_DAYS;
   return {
     repoRoot,
     whyGraphDbPath:
@@ -17,5 +25,6 @@ export function loadConfig(): WhyGraphConfig {
     codeGraphDbPath: process.env.CODEGRAPH_DB ?? null,
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
     model: process.env.WHYGRAPH_MODEL ?? 'claude-sonnet-4-6',
+    evidenceTtlMs: ttlDays * 24 * 60 * 60 * 1000,
   };
 }

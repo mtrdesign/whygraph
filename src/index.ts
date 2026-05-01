@@ -1,11 +1,12 @@
 #!/usr/bin/env node
+import type Database from 'better-sqlite3';
 import { loadConfig, type WhyGraphConfig } from './config.js';
 import { CodeGraphReader, findCodeGraphDb } from './codegraph/reader.js';
 import { openWhyGraphDb } from './db/client.js';
 import { GitEvidenceCollector } from './evidence/git.js';
 import { GitHubEvidenceCollector } from './evidence/github.js';
-import { collectGitEvidence, collectGitHubEvidence } from './evidence/collector.js';
-import { EvidenceStore, computeBundleHash } from './evidence/store.js';
+import { EvidenceService } from './evidence/service.js';
+import { EvidenceStore } from './evidence/store.js';
 import { computeConfidence } from './rationale/confidence.js';
 import { RationaleGenerator } from './rationale/generator.js';
 import { RationaleStore } from './rationale/store.js';
@@ -15,12 +16,13 @@ import { runMcpServer } from './mcp/server.js';
 function usage(): never {
   console.error('Usage: whygraph <command> [args]');
   console.error('Commands:');
-  console.error('  init                      Create the WhyGraph DB at .whygraph/whygraph.db');
-  console.error('  codegraph-stats           Print summary stats from the CodeGraph DB');
-  console.error('  ingest [--no-github]      Collect git (and GitHub) evidence for every CodeGraph node');
-  console.error('  evidence <node|qname>     Show stored evidence for a symbol');
-  console.error('  rationale <node|qname>    Show or generate rationale for a symbol (--force to regenerate)');
-  console.error('  mcp                       Run the MCP stdio server (for Claude Code)');
+  console.error('  init                                Create the WhyGraph DB at .whygraph/whygraph.db');
+  console.error('  codegraph-stats                     Print summary stats from the CodeGraph DB');
+  console.error('  ingest [--no-github] [--refresh]    Batch warm-up: collect evidence for every CodeGraph node');
+  console.error('  evidence <node|qname> [--refresh]   Show stored evidence for a symbol (auto-collects on first call)');
+  console.error('  rationale <node|qname>              Show or generate rationale for a symbol');
+  console.error('             [--force] [--refresh-evidence]  --force regenerates rationale; --refresh-evidence recollects upstream');
+  console.error('  mcp                                 Run the MCP stdio server (for Claude Code)');
   process.exit(1);
 }
 
@@ -32,6 +34,37 @@ function resolveCodeGraphDb(config: WhyGraphConfig): string {
     process.exit(1);
   }
   return path;
+}
+
+interface ServiceCtx {
+  config: WhyGraphConfig;
+  reader: CodeGraphReader;
+  db: Database.Database;
+  evidenceStore: EvidenceStore;
+  service: EvidenceService;
+}
+
+function buildServiceCtx(
+  config: WhyGraphConfig,
+  opts?: { skipGitHub?: boolean }
+): ServiceCtx {
+  const codeGraphPath = resolveCodeGraphDb(config);
+  const reader = new CodeGraphReader(codeGraphPath);
+  const db = openWhyGraphDb(config.whyGraphDbPath);
+  const evidenceStore = new EvidenceStore(db);
+  const git = new GitEvidenceCollector(config.repoRoot);
+  const github = opts?.skipGitHub
+    ? null
+    : new GitHubEvidenceCollector(config.repoRoot);
+  const service = new EvidenceService(evidenceStore, git, github, config.repoRoot, {
+    ttlMs: config.evidenceTtlMs,
+  });
+  return { config, reader, db, evidenceStore, service };
+}
+
+function closeCtx(ctx: ServiceCtx): void {
+  ctx.reader.close();
+  ctx.db.close();
 }
 
 function cmdInit(config: WhyGraphConfig): void {
@@ -69,14 +102,12 @@ function cmdCodeGraphStats(config: WhyGraphConfig): void {
   }
 }
 
-function cmdIngest(config: WhyGraphConfig, skipGitHub: boolean): void {
-  const codeGraphPath = resolveCodeGraphDb(config);
-  const reader = new CodeGraphReader(codeGraphPath);
-  const db = openWhyGraphDb(config.whyGraphDbPath);
-  const store = new EvidenceStore(db);
-  const git = new GitEvidenceCollector(config.repoRoot);
-  const github = skipGitHub ? null : new GitHubEvidenceCollector(config.repoRoot);
-
+function cmdIngest(
+  config: WhyGraphConfig,
+  opts: { skipGitHub: boolean; refresh: boolean }
+): void {
+  const ctx = buildServiceCtx(config, { skipGitHub: opts.skipGitHub });
+  const github = opts.skipGitHub ? null : new GitHubEvidenceCollector(config.repoRoot);
   if (github) {
     if (github.isAvailable()) {
       console.error(`  GitHub: ${github.repo} (via gh CLI)`);
@@ -87,145 +118,137 @@ function cmdIngest(config: WhyGraphConfig, skipGitHub: boolean): void {
   }
 
   const startedAt = Date.now();
-  const startStmt = db.prepare('INSERT INTO ingest_runs (started_at) VALUES (?)');
-  const finishStmt = db.prepare(
+  const startStmt = ctx.db.prepare('INSERT INTO ingest_runs (started_at) VALUES (?)');
+  const finishStmt = ctx.db.prepare(
     'UPDATE ingest_runs SET finished_at = ?, symbols_seen = ?, symbols_with_evidence = ? WHERE id = ?'
   );
   const runId = Number(startStmt.run(startedAt).lastInsertRowid);
 
   let seen = 0;
   let withEvidence = 0;
+  let collected = 0;
+  let cached = 0;
   try {
-    for (const node of reader.iterateNodes()) {
+    for (const node of ctx.reader.iterateNodes()) {
       seen++;
-      const gitRows = collectGitEvidence(git, node);
-      if (gitRows.length === 0) continue;
-      const ghRows = github && github.isAvailable() ? collectGitHubEvidence(github, gitRows) : [];
-      const rows = gitRows.concat(ghRows);
-      store.replace(node.id, node.qualified_name, rows);
-      withEvidence++;
+      const result = ctx.service.forNode(node, { force: opts.refresh });
+      if (result.source === 'collected') collected++;
+      else cached++;
+      if (result.evidence.length > 0) withEvidence++;
       if (seen % 100 === 0) {
-        console.error(`  ${seen} symbols, ${withEvidence} with evidence...`);
+        console.error(
+          `  ${seen} symbols  (${collected} collected, ${cached} cached, ${withEvidence} with evidence)...`
+        );
       }
     }
     finishStmt.run(Date.now(), seen, withEvidence, runId);
     console.log(
-      `Ingest complete: ${seen} symbols seen, ${withEvidence} with evidence`
+      `Ingest complete: ${seen} symbols seen, ${withEvidence} with evidence (${collected} fresh, ${cached} from cache)`
     );
     console.log(`Elapsed: ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
   } finally {
-    reader.close();
-    db.close();
+    closeCtx(ctx);
   }
 }
 
-function cmdEvidence(config: WhyGraphConfig, target: string | undefined): void {
+function cmdEvidence(
+  config: WhyGraphConfig,
+  target: string | undefined,
+  opts: { refresh: boolean }
+): void {
   if (!target) {
-    console.error('Usage: whygraph evidence <node-id|qualified-name>');
+    console.error('Usage: whygraph evidence <node-id|qualified-name> [--refresh]');
     process.exit(1);
   }
-  const codeGraphPath = resolveCodeGraphDb(config);
-  const reader = new CodeGraphReader(codeGraphPath);
-  const db = openWhyGraphDb(config.whyGraphDbPath);
-  const store = new EvidenceStore(db);
-
+  const ctx = buildServiceCtx(config);
   try {
     const node =
-      reader.getNode(target) ?? reader.findNodesByQualifiedName(target)[0];
+      ctx.reader.getNode(target) ?? ctx.reader.findNodesByQualifiedName(target)[0];
     if (!node) {
       console.error(`Symbol not found in CodeGraph: ${target}`);
       process.exit(1);
     }
 
-    const rows = store.forNode(node.id);
+    const result = ctx.service.forNode(node, { force: opts.refresh });
     console.log(
       `${node.qualified_name}  (${node.kind}, ${node.file_path}:${node.start_line}-${node.end_line})`
     );
-    console.log(`evidence rows: ${rows.length}`);
-    for (const r of rows) {
+    console.log(
+      `evidence rows: ${result.evidence.length}  [${result.source}]  head=${result.headAtCollection?.slice(0, 12) ?? '-'}`
+    );
+    for (const r of result.evidence) {
       const payload = r.payload as Record<string, unknown> | null;
       const summary =
         payload && typeof payload === 'object'
           ? (payload.summary as string | undefined) ??
             (payload.subject as string | undefined) ??
+            (payload.title as string | undefined) ??
             ''
           : '';
       console.log(`  [${r.source}] ${r.ref ?? '-'}  ${summary}`);
     }
   } finally {
-    reader.close();
-    db.close();
+    closeCtx(ctx);
   }
 }
 
 async function cmdRationale(
   config: WhyGraphConfig,
   target: string | undefined,
-  force: boolean
+  opts: { force: boolean; refreshEvidence: boolean }
 ): Promise<void> {
   if (!target) {
-    console.error('Usage: whygraph rationale <node-id|qualified-name> [--force]');
+    console.error(
+      'Usage: whygraph rationale <node-id|qualified-name> [--force] [--refresh-evidence]'
+    );
     process.exit(1);
   }
 
-  const codeGraphPath = resolveCodeGraphDb(config);
-  const reader = new CodeGraphReader(codeGraphPath);
-  const db = openWhyGraphDb(config.whyGraphDbPath);
-  const evidenceStore = new EvidenceStore(db);
-  const rationaleStore = new RationaleStore(db);
+  const ctx = buildServiceCtx(config);
+  const rationaleStore = new RationaleStore(ctx.db);
 
   try {
     const node =
-      reader.getNode(target) ?? reader.findNodesByQualifiedName(target)[0];
+      ctx.reader.getNode(target) ?? ctx.reader.findNodesByQualifiedName(target)[0];
     if (!node) {
       console.error(`Symbol not found in CodeGraph: ${target}`);
       process.exit(1);
     }
 
-    const evidence = evidenceStore.forNode(node.id);
-    if (evidence.length === 0) {
+    const collection = ctx.service.forNode(node, { force: opts.refreshEvidence });
+    if (collection.evidence.length === 0) {
       console.error(
-        `No evidence for ${node.qualified_name}. Run \`whygraph ingest\` first.`
+        `No evidence for ${node.qualified_name}: file has no git history (${node.file_path}).`
       );
       process.exit(1);
     }
 
-    const bundleHash =
-      evidenceStore.bundleHashFor(node.id) ??
-      computeBundleHash(
-        evidence.map((e) => ({ source: e.source, ref: e.ref, payload: e.payload }))
-      );
-
     const cached = rationaleStore.get(node.id);
     const cacheHit =
-      !force &&
+      !opts.force &&
       cached &&
-      cached.bundle_hash === bundleHash &&
+      cached.bundle_hash === collection.bundleHash &&
       cached.prompt_version === PROMPT_VERSION &&
       cached.model === config.model;
 
     let record = cached;
     if (!cacheHit) {
       if (!config.anthropicApiKey) {
-        console.error(
-          'ANTHROPIC_API_KEY is not set. Export it to generate a rationale.'
-        );
+        console.error('ANTHROPIC_API_KEY is not set. Export it to generate a rationale.');
         process.exit(1);
       }
-
       const generator = new RationaleGenerator({
         apiKey: config.anthropicApiKey,
         model: config.model,
       });
-
       console.error(
-        `Generating rationale for ${node.qualified_name} (model=${config.model}, prompt=${PROMPT_VERSION})...`
+        `Generating rationale for ${node.qualified_name} (model=${config.model}, prompt=${PROMPT_VERSION}, evidence=${collection.source})...`
       );
-      const result = await generator.generate({ node }, evidence);
-      const confidence = computeConfidence(evidence);
+      const result = await generator.generate({ node }, collection.evidence);
+      const confidence = computeConfidence(collection.evidence);
       record = rationaleStore.upsert({
         node_id: node.id,
-        bundle_hash: bundleHash,
+        bundle_hash: collection.bundleHash,
         prompt_version: result.promptVersion,
         model: result.model,
         ...result.rationale,
@@ -243,8 +266,7 @@ async function cmdRationale(
 
     printRationale(node.qualified_name, record, cacheHit ? 'cached' : 'generated');
   } finally {
-    reader.close();
-    db.close();
+    closeCtx(ctx);
   }
 }
 
@@ -301,13 +323,20 @@ async function main(): Promise<void> {
     case 'codegraph-stats':
       return cmdCodeGraphStats(config);
     case 'ingest':
-      return cmdIngest(config, rest.includes('--no-github'));
-    case 'evidence':
-      return cmdEvidence(config, rest[0]);
+      return cmdIngest(config, {
+        skipGitHub: rest.includes('--no-github'),
+        refresh: rest.includes('--refresh') || rest.includes('--refresh-evidence'),
+      });
+    case 'evidence': {
+      const positional = rest.filter((a) => !a.startsWith('--'));
+      const refresh = rest.includes('--refresh');
+      return cmdEvidence(config, positional[0], { refresh });
+    }
     case 'rationale': {
       const positional = rest.filter((a) => !a.startsWith('--'));
       const force = rest.includes('--force');
-      return cmdRationale(config, positional[0], force);
+      const refreshEvidence = rest.includes('--refresh-evidence');
+      return cmdRationale(config, positional[0], { force, refreshEvidence });
     }
     case 'mcp':
       return runMcpServer();

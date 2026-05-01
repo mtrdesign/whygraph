@@ -12,5 +12,22 @@ export function openWhyGraphDb(path: string): Database.Database {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.exec(readFileSync(SCHEMA_PATH, 'utf8'));
+  migrate(db);
   return db;
+}
+
+interface ColumnInfo {
+  name: string;
+}
+
+// Apply small column-add migrations for DBs created by older versions.
+// CREATE TABLE IF NOT EXISTS doesn't add new columns to an existing table,
+// so we detect missing columns via PRAGMA table_info and ALTER as needed.
+function migrate(db: Database.Database): void {
+  const cols = db
+    .prepare('PRAGMA table_info(evidence_bundles)')
+    .all() as ColumnInfo[];
+  if (!cols.some((c) => c.name === 'head_at_collection')) {
+    db.exec('ALTER TABLE evidence_bundles ADD COLUMN head_at_collection TEXT');
+  }
 }

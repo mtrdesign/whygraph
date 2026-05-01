@@ -9,11 +9,10 @@ import {
   type CodeGraphNode,
 } from '../codegraph/reader.js';
 import { openWhyGraphDb } from '../db/client.js';
-import {
-  EvidenceStore,
-  computeBundleHash,
-  type EvidenceRecord,
-} from '../evidence/store.js';
+import { GitEvidenceCollector } from '../evidence/git.js';
+import { GitHubEvidenceCollector } from '../evidence/github.js';
+import { EvidenceService, type CollectionResult } from '../evidence/service.js';
+import { EvidenceStore } from '../evidence/store.js';
 import { computeConfidence } from '../rationale/confidence.js';
 import { RationaleGenerator } from '../rationale/generator.js';
 import { RationaleStore, type RationaleRecord } from '../rationale/store.js';
@@ -34,6 +33,12 @@ const PreEditBriefInputShape = {
     .describe(
       'If true, bypass the rationale cache and regenerate via Claude. Default: false.'
     ),
+  refresh_evidence: z
+    .boolean()
+    .default(false)
+    .describe(
+      'If true, recollect git/GitHub evidence even if cached and fresh. Implies bypassing the rationale cache. Default: false.'
+    ),
   response_format: ResponseFormat.default('markdown').describe(
     "Output format: 'markdown' for a human-readable brief or 'json' for full structured data."
   ),
@@ -46,6 +51,10 @@ const EvidenceForInputShape = {
     .describe(
       'Symbol identifier — either a CodeGraph node ID or a qualified_name.'
     ),
+  refresh: z
+    .boolean()
+    .default(false)
+    .describe('If true, recollect evidence even if cached and fresh. Default: false.'),
   response_format: ResponseFormat.default('markdown').describe(
     "Output format: 'markdown' or 'json'."
   ),
@@ -54,7 +63,7 @@ const EvidenceForInputShape = {
 interface ServerDeps {
   reader: CodeGraphReader;
   db: Database.Database;
-  evidenceStore: EvidenceStore;
+  service: EvidenceService;
   rationaleStore: RationaleStore;
   ensureGenerator(): RationaleGenerator;
   model: string;
@@ -75,6 +84,15 @@ export async function runMcpServer(): Promise<void> {
   const db = openWhyGraphDb(config.whyGraphDbPath);
   const evidenceStore = new EvidenceStore(db);
   const rationaleStore = new RationaleStore(db);
+  const git = new GitEvidenceCollector(config.repoRoot);
+  const github = new GitHubEvidenceCollector(config.repoRoot);
+  const service = new EvidenceService(
+    evidenceStore,
+    git,
+    github,
+    config.repoRoot,
+    { ttlMs: config.evidenceTtlMs }
+  );
 
   let generator: RationaleGenerator | null = null;
   function ensureGenerator(): RationaleGenerator {
@@ -94,7 +112,7 @@ export async function runMcpServer(): Promise<void> {
   const deps: ServerDeps = {
     reader,
     db,
-    evidenceStore,
+    service,
     rationaleStore,
     ensureGenerator,
     model: config.model,
@@ -111,14 +129,16 @@ export async function runMcpServer(): Promise<void> {
       title: 'WhyGraph: Rationale Pre-Edit Brief',
       description:
         'Return the rationale for a code symbol before editing it: purpose, why it exists, constraints to preserve, tradeoffs, and risks of modification. ' +
-        'Returns the cached result when (bundle_hash, prompt_version, model) matches; otherwise calls Claude to regenerate. ' +
+        'Lazily collects evidence (git blame + commits, plus GitHub PRs/issues if available) on first request for a symbol; subsequent requests reuse the cache for ~14 days unless the file has new commits. ' +
+        'Returns the cached rationale when (bundle_hash, prompt_version, model) matches; otherwise calls Claude. ' +
         'Use this BEFORE making non-trivial changes to a symbol so the edit respects the original intent.\n\n' +
         'Args:\n' +
         '  - target (string): Either a CodeGraph node ID or a qualified_name (e.g. "config.loadConfig").\n' +
-        '  - force (boolean, optional): Bypass cache and regenerate. Default false.\n' +
+        '  - force (boolean, optional): Bypass the rationale cache and regenerate. Default false.\n' +
+        '  - refresh_evidence (boolean, optional): Recollect upstream evidence even if cached. Default false.\n' +
         '  - response_format ("markdown" | "json", optional): Default "markdown".\n\n' +
         'Returns: structured rationale with confidence (0-1, capped at 0.85 in v0). ' +
-        'Returns isError=true with a clear message when the symbol is unknown, no evidence has been ingested, or the API key is missing on a cache miss.',
+        'Returns isError=true with a clear message when the symbol is unknown, the file has no git history, or the API key is missing on a cache miss.',
       inputSchema: PreEditBriefInputShape,
       annotations: {
         readOnlyHint: false,
@@ -141,19 +161,20 @@ export async function runMcpServer(): Promise<void> {
     {
       title: 'WhyGraph: Evidence For Symbol',
       description:
-        'Return the raw evidence rows stored for a symbol — git commits, blame, and (later) PRs/issues. ' +
-        'Useful for inspecting what a generated rationale was based on, or for debugging missing/wrong rationale. ' +
-        'Read-only: never calls Claude.\n\n' +
+        'Return the raw evidence rows stored for a symbol — git commits, blame, and (when available) PRs/issues. ' +
+        'Auto-collects on first request; subsequent requests reuse the cache for ~14 days unless the file has new commits. ' +
+        'Useful for inspecting what a generated rationale was based on, or for debugging. Never calls Claude.\n\n' +
         'Args:\n' +
         '  - target (string): CodeGraph node ID or qualified_name.\n' +
+        '  - refresh (boolean, optional): Recollect evidence even if cached. Default false.\n' +
         '  - response_format ("markdown" | "json", optional): Default "markdown".\n\n' +
-        'Returns: list of evidence items each with source, ref (commit sha / PR# / etc.), payload, and collected_at timestamp.',
+        'Returns: list of evidence items each with source, ref (commit sha / PR# / etc.), payload, and collected_at timestamp; plus the cache source ("cache" or "collected").',
       inputSchema: EvidenceForInputShape,
       annotations: {
-        readOnlyHint: true,
+        readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: true,
-        openWorldHint: false,
+        openWorldHint: true,
       },
     },
     async (input) => {
@@ -198,6 +219,7 @@ async function handlePreEditBrief(
   input: {
     target: string;
     force: boolean;
+    refresh_evidence: boolean;
     response_format: 'markdown' | 'json';
   }
 ) {
@@ -205,35 +227,31 @@ async function handlePreEditBrief(
   if (!node) {
     return errorResult(`Symbol not found in CodeGraph: ${input.target}`);
   }
-  const evidence = deps.evidenceStore.forNode(node.id);
-  if (evidence.length === 0) {
+
+  console.error(`[whygraph-mcp] rationale: ${node.qualified_name}`);
+  const collection = deps.service.forNode(node, { force: input.refresh_evidence });
+  if (collection.evidence.length === 0) {
     return errorResult(
-      `No evidence stored for ${node.qualified_name}. Run \`whygraph ingest\` first.`
+      `No evidence for ${node.qualified_name}: file has no git history (${node.file_path}).`
     );
   }
-
-  const bundleHash =
-    deps.evidenceStore.bundleHashFor(node.id) ??
-    computeBundleHash(
-      evidence.map((e) => ({ source: e.source, ref: e.ref, payload: e.payload }))
-    );
 
   const cached = deps.rationaleStore.get(node.id);
   const cacheHit =
     !input.force &&
     !!cached &&
-    cached.bundle_hash === bundleHash &&
+    cached.bundle_hash === collection.bundleHash &&
     cached.prompt_version === PROMPT_VERSION &&
     cached.model === deps.model;
 
   let record: RationaleRecord | null = cached;
   let source: 'cached' | 'generated' = 'cached';
   if (!cacheHit) {
-    const result = await deps.ensureGenerator().generate({ node }, evidence);
-    const confidence = computeConfidence(evidence);
+    const result = await deps.ensureGenerator().generate({ node }, collection.evidence);
+    const confidence = computeConfidence(collection.evidence);
     record = deps.rationaleStore.upsert({
       node_id: node.id,
-      bundle_hash: bundleHash,
+      bundle_hash: collection.bundleHash,
       prompt_version: result.promptVersion,
       model: result.model,
       ...result.rationale,
@@ -251,6 +269,7 @@ async function handlePreEditBrief(
     kind: node.kind,
     location: `${node.file_path}:${node.start_line}-${node.end_line}`,
     source,
+    evidence_source: collection.source,
     model: record.model,
     prompt_version: record.prompt_version,
     bundle_hash: record.bundle_hash,
@@ -276,20 +295,27 @@ async function handlePreEditBrief(
 
 function handleEvidenceFor(
   deps: ServerDeps,
-  input: { target: string; response_format: 'markdown' | 'json' }
+  input: {
+    target: string;
+    refresh: boolean;
+    response_format: 'markdown' | 'json';
+  }
 ) {
   const node = resolveSymbol(deps.reader, input.target);
   if (!node) {
     return errorResult(`Symbol not found in CodeGraph: ${input.target}`);
   }
-  const evidence = deps.evidenceStore.forNode(node.id);
-  const bundleHash = deps.evidenceStore.bundleHashFor(node.id);
+  console.error(`[whygraph-mcp] evidence: ${node.qualified_name}`);
+  const collection = deps.service.forNode(node, { force: input.refresh });
   const output = {
     qualified_name: node.qualified_name,
     node_id: node.id,
     location: `${node.file_path}:${node.start_line}-${node.end_line}`,
-    bundle_hash: bundleHash,
-    evidence: evidence.map((e) => ({
+    source: collection.source,
+    bundle_hash: collection.bundleHash,
+    head_at_collection: collection.headAtCollection,
+    collected_at: collection.collectedAt,
+    evidence: collection.evidence.map((e) => ({
       source: e.source,
       ref: e.ref,
       collected_at: e.collected_at,
@@ -299,7 +325,7 @@ function handleEvidenceFor(
   const text =
     input.response_format === 'json'
       ? JSON.stringify(output, null, 2)
-      : formatEvidenceMarkdown(output, evidence);
+      : formatEvidenceMarkdown(output, collection);
   return {
     content: [{ type: 'text' as const, text }],
     structuredContent: output,
@@ -332,6 +358,7 @@ function formatRationaleMarkdown(o: {
   kind: string;
   location: string;
   source: 'cached' | 'generated';
+  evidence_source: 'cache' | 'collected';
   model: string;
   prompt_version: string;
   bundle_hash: string;
@@ -349,7 +376,7 @@ function formatRationaleMarkdown(o: {
     `- **Location**: ${o.location}`,
     `- **Model**: ${o.model} (prompt ${o.prompt_version})`,
     `- **Confidence**: ${o.confidence.toFixed(2)}`,
-    `- **Source**: ${o.source} (bundle ${o.bundle_hash.slice(0, 12)})`,
+    `- **Rationale**: ${o.source} · **Evidence**: ${o.evidence_source} (bundle ${o.bundle_hash.slice(0, 12)})`,
     '',
     `## Purpose`,
     o.purpose || '_(none)_',
@@ -377,23 +404,26 @@ function formatEvidenceMarkdown(
   o: {
     qualified_name: string;
     location: string;
-    bundle_hash: string | null;
+    bundle_hash: string;
+    head_at_collection: string | null;
   },
-  evidence: EvidenceRecord[]
+  collection: CollectionResult
 ): string {
   const lines = [
     `# Evidence: \`${o.qualified_name}\``,
     '',
     `- **Location**: ${o.location}`,
-    `- **Bundle hash**: ${o.bundle_hash ?? '(none)'}`,
-    `- **Items**: ${evidence.length}`,
+    `- **Source**: ${collection.source} (bundle ${o.bundle_hash.slice(0, 12)})`,
+    `- **HEAD at collection**: ${o.head_at_collection?.slice(0, 12) ?? '(none)'}`,
+    `- **Items**: ${collection.evidence.length}`,
     '',
   ];
-  for (const e of evidence) {
+  for (const e of collection.evidence) {
     const p = (e.payload ?? {}) as Record<string, unknown>;
     const summary =
       (p.summary as string | undefined) ??
       (p.subject as string | undefined) ??
+      (p.title as string | undefined) ??
       '';
     const refStr = e.ref ? `\`${e.ref.slice(0, 12)}\`` : '`-`';
     lines.push(`- **${e.source}** ${refStr} — ${summary}`);

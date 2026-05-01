@@ -25,10 +25,13 @@ CREATE INDEX IF NOT EXISTS idx_evidence_qname ON evidence(qualified_name);
 
 -- One row per node summarising the current evidence bundle.
 -- bundle_hash is the cache key for rationale.
+-- head_at_collection is the file's HEAD sha when evidence was last collected;
+-- the EvidenceService uses it (alongside built_at + a TTL) to decide freshness.
 CREATE TABLE IF NOT EXISTS evidence_bundles (
     node_id TEXT PRIMARY KEY,
     bundle_hash TEXT NOT NULL,
-    built_at INTEGER NOT NULL
+    built_at INTEGER NOT NULL,
+    head_at_collection TEXT
 );
 
 -- Cached rationale. Regenerated when bundle_hash, prompt_version, or model changes.

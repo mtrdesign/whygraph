@@ -3,7 +3,8 @@ import { loadConfig, type WhyGraphConfig } from './config.js';
 import { CodeGraphReader, findCodeGraphDb } from './codegraph/reader.js';
 import { openWhyGraphDb } from './db/client.js';
 import { GitEvidenceCollector } from './evidence/git.js';
-import { collectGitEvidence } from './evidence/collector.js';
+import { GitHubEvidenceCollector } from './evidence/github.js';
+import { collectGitEvidence, collectGitHubEvidence } from './evidence/collector.js';
 import { EvidenceStore, computeBundleHash } from './evidence/store.js';
 import { computeConfidence } from './rationale/confidence.js';
 import { RationaleGenerator } from './rationale/generator.js';
@@ -16,7 +17,7 @@ function usage(): never {
   console.error('Commands:');
   console.error('  init                      Create the WhyGraph DB at .whygraph/whygraph.db');
   console.error('  codegraph-stats           Print summary stats from the CodeGraph DB');
-  console.error('  ingest                    Collect git evidence for every CodeGraph node');
+  console.error('  ingest [--no-github]      Collect git (and GitHub) evidence for every CodeGraph node');
   console.error('  evidence <node|qname>     Show stored evidence for a symbol');
   console.error('  rationale <node|qname>    Show or generate rationale for a symbol (--force to regenerate)');
   console.error('  mcp                       Run the MCP stdio server (for Claude Code)');
@@ -68,12 +69,22 @@ function cmdCodeGraphStats(config: WhyGraphConfig): void {
   }
 }
 
-function cmdIngest(config: WhyGraphConfig): void {
+function cmdIngest(config: WhyGraphConfig, skipGitHub: boolean): void {
   const codeGraphPath = resolveCodeGraphDb(config);
   const reader = new CodeGraphReader(codeGraphPath);
   const db = openWhyGraphDb(config.whyGraphDbPath);
   const store = new EvidenceStore(db);
   const git = new GitEvidenceCollector(config.repoRoot);
+  const github = skipGitHub ? null : new GitHubEvidenceCollector(config.repoRoot);
+
+  if (github) {
+    if (github.isAvailable()) {
+      console.error(`  GitHub: ${github.repo} (via gh CLI)`);
+    } else {
+      const reason = github.repo === null ? 'no GitHub remote' : 'gh CLI unavailable';
+      console.error(`  GitHub: skipped (${reason})`);
+    }
+  }
 
   const startedAt = Date.now();
   const startStmt = db.prepare('INSERT INTO ingest_runs (started_at) VALUES (?)');
@@ -87,8 +98,10 @@ function cmdIngest(config: WhyGraphConfig): void {
   try {
     for (const node of reader.iterateNodes()) {
       seen++;
-      const rows = collectGitEvidence(git, node);
-      if (rows.length === 0) continue;
+      const gitRows = collectGitEvidence(git, node);
+      if (gitRows.length === 0) continue;
+      const ghRows = github && github.isAvailable() ? collectGitHubEvidence(github, gitRows) : [];
+      const rows = gitRows.concat(ghRows);
       store.replace(node.id, node.qualified_name, rows);
       withEvidence++;
       if (seen % 100 === 0) {
@@ -97,7 +110,7 @@ function cmdIngest(config: WhyGraphConfig): void {
     }
     finishStmt.run(Date.now(), seen, withEvidence, runId);
     console.log(
-      `Ingest complete: ${seen} symbols seen, ${withEvidence} with git evidence`
+      `Ingest complete: ${seen} symbols seen, ${withEvidence} with evidence`
     );
     console.log(`Elapsed: ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
   } finally {
@@ -288,7 +301,7 @@ async function main(): Promise<void> {
     case 'codegraph-stats':
       return cmdCodeGraphStats(config);
     case 'ingest':
-      return cmdIngest(config);
+      return cmdIngest(config, rest.includes('--no-github'));
     case 'evidence':
       return cmdEvidence(config, rest[0]);
     case 'rationale': {

@@ -1,5 +1,6 @@
 import type { CodeGraphNode } from '../codegraph/reader.js';
 import type { GitEvidenceCollector } from './git.js';
+import type { GitHubEvidenceCollector } from './github.js';
 import type { EvidenceRow } from './store.js';
 
 export interface BlamePayload {
@@ -60,6 +61,41 @@ export function collectGitEvidence(
       parents: info.parents,
     };
     rows.push({ source: 'git_commit', ref: info.sha, payload });
+  }
+
+  return rows;
+}
+
+export function collectGitHubEvidence(
+  github: GitHubEvidenceCollector,
+  gitRows: EvidenceRow[]
+): EvidenceRow[] {
+  if (!github.isAvailable()) return [];
+
+  const commitShas = new Set<string>();
+  for (const row of gitRows) {
+    if (row.source === 'git_commit' && row.ref) commitShas.add(row.ref);
+  }
+
+  const prNumbers = new Set<number>();
+  for (const sha of commitShas) {
+    for (const num of github.prNumbersForCommit(sha)) prNumbers.add(num);
+  }
+
+  const rows: EvidenceRow[] = [];
+  const issueNumbers = new Set<number>();
+
+  for (const num of prNumbers) {
+    const pr = github.pr(num);
+    if (!pr) continue;
+    rows.push({ source: 'pr', ref: String(pr.number), payload: pr });
+    for (const issueNum of pr.closes_issues) issueNumbers.add(issueNum);
+  }
+
+  for (const num of issueNumbers) {
+    const issue = github.issue(num);
+    if (!issue) continue;
+    rows.push({ source: 'issue', ref: String(issue.number), payload: issue });
   }
 
   return rows;

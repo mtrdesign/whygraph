@@ -20,7 +20,9 @@ npm run whygraph evidence <node|qname>        # inspect stored evidence
 ANTHROPIC_API_KEY=… npm run whygraph rationale <node|qname>  # generate or fetch cached rationale
 ```
 
-`init` creates `.whygraph/whygraph.db` in the current directory. `codegraph-stats` walks up from `cwd` to find a `.codegraph/codegraph.db` (override with `CODEGRAPH_DB`). `ingest` writes git evidence for every CodeGraph node into the WhyGraph DB. `rationale` calls Claude (default `claude-sonnet-4-6`, override with `WHYGRAPH_MODEL`) and caches by `(bundle_hash, prompt_version, model)` — pass `--force` to regenerate.
+`init` creates `.whygraph/whygraph.db` in the current directory. `codegraph-stats` walks up from `cwd` to find a `.codegraph/codegraph.db` (override with `CODEGRAPH_DB`). `ingest` writes evidence (git blame + commits, plus GitHub PRs/issues for commits with linked PRs) for every CodeGraph node — pass `--no-github` to skip the GitHub fetch. `rationale` calls Claude (default `claude-sonnet-4-6`, override with `WHYGRAPH_MODEL`) and caches by `(bundle_hash, prompt_version, model)` — pass `--force` to regenerate.
+
+GitHub collection requires the [`gh`](https://cli.github.com/) CLI authenticated against your account, and a `github.com` `origin` remote. Anything else auto-skips with a log line.
 
 ## MCP integration (Claude Code)
 

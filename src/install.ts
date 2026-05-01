@@ -1,4 +1,6 @@
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import {
   copyFileSync,
@@ -17,9 +19,149 @@ export interface InstallOpts {
   targetDir: string;
   backend: RationaleBackend;
   force: boolean;
+  global: boolean;
 }
 
 const WHYGRAPH_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+export function runInstall(opts: InstallOpts): void {
+  if (opts.global) {
+    cmdInstallGlobal(opts);
+  } else {
+    cmdInstall(opts);
+  }
+}
+
+function cmdInstallGlobal(opts: InstallOpts): void {
+  const indexEntry = join(WHYGRAPH_ROOT, 'src', 'index.ts');
+  if (!existsSync(indexEntry)) {
+    console.error(`whygraph entry point not found: ${indexEntry}`);
+    process.exit(1);
+  }
+
+  if (!hasClaudeCli()) {
+    console.error(
+      'The `claude` CLI was not found on PATH. Install Claude Code first: https://docs.claude.com/en/docs/claude-code'
+    );
+    process.exit(1);
+  }
+
+  console.log(`Installing whygraph globally (user scope)`);
+  console.log(`  whygraph source: ${WHYGRAPH_ROOT}`);
+  console.log(`  backend:         ${opts.backend}`);
+
+  // Skill + slash command at user scope.
+  const userClaudeDir = join(homedir(), '.claude');
+  const skillSrc = join(WHYGRAPH_ROOT, 'examples', 'skills', 'whygraph-pre-edit');
+  const skillDst = join(userClaudeDir, 'skills', 'whygraph-pre-edit');
+  copyDirRecursive(skillSrc, skillDst, opts.force);
+  console.log(`  Skill:           ${skillDst}`);
+
+  const cmdSrc = join(WHYGRAPH_ROOT, 'examples', 'commands', 'rationale.md');
+  const cmdDstDir = join(userClaudeDir, 'commands');
+  const cmdDst = join(cmdDstDir, 'rationale.md');
+  if (!existsSync(cmdDstDir)) mkdirSync(cmdDstDir, { recursive: true });
+  if (existsSync(cmdDst) && !opts.force) {
+    console.log(
+      `  /rationale:      ${cmdDst} (exists, skipped — pass --force to overwrite)`
+    );
+  } else {
+    copyFileSync(cmdSrc, cmdDst);
+    console.log(`  /rationale:      ${cmdDst}`);
+  }
+
+  // Register the MCP server at user scope. No project-specific paths in env;
+  // the server discovers .codegraph/.whygraph by walking up from cwd at runtime.
+  const env: Record<string, string> = {
+    WHYGRAPH_RATIONALE_BACKEND: opts.backend,
+  };
+  if (opts.backend === 'api') {
+    env.ANTHROPIC_API_KEY = '${ANTHROPIC_API_KEY}';
+  }
+  const serverConfig = {
+    type: 'stdio' as const,
+    command: 'npx',
+    args: ['tsx', indexEntry, 'mcp'],
+    env,
+  };
+
+  if (mcpServerExists('whygraph', 'user')) {
+    if (!opts.force) {
+      console.log(
+        `  MCP (user):      'whygraph' already registered — left untouched (pass --force to re-register)`
+      );
+      printGlobalNextSteps(opts);
+      return;
+    }
+    console.log(`  MCP (user):      removing existing 'whygraph' (--force)`);
+    runClaude(['mcp', 'remove', '-s', 'user', 'whygraph']);
+  }
+
+  const addResult = spawnSync(
+    'claude',
+    [
+      'mcp',
+      'add-json',
+      '-s',
+      'user',
+      'whygraph',
+      JSON.stringify(serverConfig),
+    ],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
+  );
+  if (addResult.status !== 0) {
+    console.error(`Failed to register MCP server via claude CLI:`);
+    if (addResult.stdout) console.error(addResult.stdout.trim());
+    if (addResult.stderr) console.error(addResult.stderr.trim());
+    process.exit(1);
+  }
+  console.log(`  MCP (user):      whygraph registered (claude mcp add-json -s user)`);
+
+  printGlobalNextSteps(opts);
+}
+
+function printGlobalNextSteps(opts: InstallOpts): void {
+  console.log('');
+  console.log('Done. Next steps:');
+  console.log('  1. Restart Claude Code so it picks up the new MCP server, skill, and slash command.');
+  if (opts.backend === 'api') {
+    console.log('  2. Export ANTHROPIC_API_KEY in the shell where you launch Claude Code.');
+  } else {
+    console.log('  2. Make sure you are signed into your Claude Pro/Max subscription (claude already running).');
+  }
+  console.log('  3. In any project that has a .codegraph/codegraph.db, try /rationale <SymbolName>.');
+  console.log('     The .whygraph/whygraph.db is created automatically on first call.');
+}
+
+function hasClaudeCli(): boolean {
+  try {
+    execFileSync('claude', ['--version'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function mcpServerExists(name: string, scope: 'user' | 'project' | 'local'): boolean {
+  const result = spawnSync('claude', ['mcp', 'get', name], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (result.status !== 0) return false;
+  const out = `${result.stdout ?? ''}`;
+  // `claude mcp get` reports the scope it found — match it loosely.
+  return out.toLowerCase().includes(scope);
+}
+
+function runClaude(args: string[]): void {
+  const r = spawnSync('claude', args, { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' });
+  if (r.status !== 0) {
+    console.error(`claude ${args.join(' ')} failed:`);
+    if (r.stdout) console.error(r.stdout.trim());
+    if (r.stderr) console.error(r.stderr.trim());
+    process.exit(1);
+  }
+}
 
 export function cmdInstall(opts: InstallOpts): void {
   const target = resolve(opts.targetDir);

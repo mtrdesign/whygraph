@@ -46,26 +46,49 @@ GitHub collection requires the [`gh`](https://cli.github.com/) CLI authenticated
 
 `target` is a CodeGraph node ID or qualified_name.
 
-### Install everything in one shot
+### Install once, use everywhere (recommended)
 
 From your whygraph checkout:
 
 ```bash
+npm run whygraph install -- --global
+# or:  npm run whygraph install -- --global --backend api --force
+```
+
+This:
+
+- Registers a `whygraph` MCP server at user scope via `claude mcp add-json -s user` (lives in `~/.claude.json`, available in every project).
+- Copies the `whygraph-pre-edit` skill into `~/.claude/skills/`.
+- Copies the `/rationale` slash command into `~/.claude/commands/`.
+
+The MCP entry has **no project-specific paths** — at runtime the server walks up from Claude Code's working directory to find `.codegraph/codegraph.db` and `.whygraph/whygraph.db`. The `.whygraph/whygraph.db` is created automatically on first call.
+
+Per-project requirement: each project must have a `.codegraph/codegraph.db` (run CodeGraph there first). If absent, the MCP tools return a friendly error instead of failing silently.
+
+`--force` re-registers the MCP server and overwrites the skill/command files. Backend defaults to `claude_cli` (uses your Claude Pro/Max subscription); pass `--backend api` to bill against `ANTHROPIC_API_KEY` instead — the install drops a `${ANTHROPIC_API_KEY}` placeholder so you set it in the launching shell, not in the config file.
+
+> **Path coupling.** The user-scope MCP entry contains an absolute path to your whygraph checkout. If you move the whygraph repo, re-run install with `--force`.
+
+### Install into a single project
+
+If you'd rather scope WhyGraph to one repo (project-level `.mcp.json`, project-local DB), drop `--global`:
+
+```bash
 npm run whygraph install -- --dir /path/to/your/project
-# or:  npm run whygraph install -- --dir /path/to/your/project --backend api --force
 ```
 
 This:
 
 - Verifies a CodeGraph DB exists at `<target>/.codegraph/codegraph.db`.
 - Creates `<target>/.whygraph/whygraph.db` (with a local `.gitignore` so the DB never gets committed).
-- Copies the `whygraph-pre-edit` skill into `<target>/.claude/skills/`.
-- Copies the `/rationale` slash command into `<target>/.claude/commands/`.
+- Copies the skill into `<target>/.claude/skills/` and the slash command into `<target>/.claude/commands/`.
 - Writes (or merges) `<target>/.mcp.json` with a `whygraph` server entry pointing at this checkout's `src/index.ts`.
 
-Defaults: `--dir` is `cwd`, `--backend` is `claude_cli` (uses your Claude Pro/Max subscription via the `claude` CLI). Pass `--backend api` to bill against `ANTHROPIC_API_KEY` instead — the install drops a `${ANTHROPIC_API_KEY}` placeholder in `.mcp.json` so you set it in the launching shell, not in the file. `--force` overwrites an existing `whygraph` entry, slash command, or skill files; the WhyGraph DB is always preserved.
+`--force` overwrites the `whygraph` entry, slash command, and skill files; the WhyGraph DB is always preserved. Project-level entries override user-level ones, so a project-scope install always takes precedence over `--global`.
 
-After install, restart Claude Code in the target project. Then:
+### Using the install
+
+After either install, restart Claude Code in the target project. Then:
 
 ```
 /rationale Page              # markdown brief

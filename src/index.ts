@@ -12,7 +12,7 @@ import { RationaleGenerator } from './rationale/generator.js';
 import { RationaleStore } from './rationale/store.js';
 import { PROMPT_VERSION } from './rationale/prompt.js';
 import { runMcpServer } from './mcp/server.js';
-import { cmdInstall } from './install.js';
+import { runInstall } from './install.js';
 import type { RationaleBackend } from './config.js';
 
 function usage(): never {
@@ -26,7 +26,7 @@ function usage(): never {
   console.error('  rationale <node|qname>              Show or generate rationale for a symbol');
   console.error('             [--force] [--refresh-evidence] [--json]');
   console.error('                                       --force regenerates rationale; --refresh-evidence recollects upstream; --json prints structured JSON');
-  console.error('  install [--dir <path>]              Install whygraph (MCP, skill, /rationale) into a target project');
+  console.error('  install [--dir <path> | --global]   Install whygraph (MCP, skill, /rationale) into a project (default) or globally for the current user');
   console.error('             [--backend api|claude_cli] [--force]');
   console.error('  mcp                                 Run the MCP stdio server (for Claude Code)');
   process.exit(1);
@@ -417,12 +417,13 @@ async function main(): Promise<void> {
       return cmdRationale(config, positional[0], { force, refreshEvidence, json });
     }
     case 'install': {
+      const global = rest.includes('--global');
       const targetDir = readFlag(rest, '--dir') ?? process.cwd();
       const backendArg = readFlag(rest, '--backend');
       const backend: RationaleBackend =
         backendArg === 'api' ? 'api' : 'claude_cli';
       const force = rest.includes('--force');
-      return cmdInstall({ targetDir, backend, force });
+      return runInstall({ targetDir, backend, force, global });
     }
     case 'mcp':
       return runMcpServer();

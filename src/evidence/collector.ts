@@ -1,6 +1,6 @@
 import type { CodeGraphNode } from '../codegraph/reader.js';
 import type { GitEvidenceCollector } from './git.js';
-import type { GitHubEvidenceCollector } from './github.js';
+import { type GitHubEvidenceCollector, parseHashRefs } from './github.js';
 import type { EvidenceRow } from './store.js';
 
 export interface BlamePayload {
@@ -72,14 +72,24 @@ export function collectGitHubEvidence(
 ): EvidenceRow[] {
   if (!github.isAvailable()) return [];
 
-  const commitShas = new Set<string>();
+  const prNumbers = new Set<number>();
+
+  // Primary path: GitHub knows which PR each commit SHA belongs to.
   for (const row of gitRows) {
-    if (row.source === 'git_commit' && row.ref) commitShas.add(row.ref);
+    if (row.source !== 'git_commit' || !row.ref) continue;
+    for (const num of github.prNumbersForCommit(row.ref)) prNumbers.add(num);
   }
 
-  const prNumbers = new Set<number>();
-  for (const sha of commitShas) {
-    for (const num of github.prNumbersForCommit(sha)) prNumbers.add(num);
+  // Fallback: squash-merged commits typically have a new SHA on mainline
+  // that isn't associated with the original PR record, but their subject
+  // line preserves "(#NNN)". Extract those refs from commit subjects/bodies
+  // so we recover the PR descriptions even for squash-merged history.
+  for (const row of gitRows) {
+    if (row.source !== 'git_commit') continue;
+    const payload = (row.payload ?? {}) as { subject?: string; body?: string };
+    for (const num of parseHashRefs(`${payload.subject ?? ''}\n${payload.body ?? ''}`)) {
+      prNumbers.add(num);
+    }
   }
 
   const rows: EvidenceRow[] = [];
@@ -87,7 +97,7 @@ export function collectGitHubEvidence(
 
   for (const num of prNumbers) {
     const pr = github.pr(num);
-    if (!pr) continue;
+    if (!pr) continue; // not a PR (could be an issue, or just doesn't exist)
     rows.push({ source: 'pr', ref: String(pr.number), payload: pr });
     for (const issueNum of pr.closes_issues) issueNumbers.add(issueNum);
   }

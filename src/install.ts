@@ -24,23 +24,23 @@ export interface InstallOpts {
 
 const WHYGRAPH_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-// Pin the MCP `command` to the absolute path of the Node binary that ran
+// Build an MCP launch tuple that pins the Node major to whichever Node ran
 // `whygraph install`. Claude Code's harness inherits its own PATH (often a
-// different Node major), and a bare `npx` will pick up whichever node it
-// finds — which mismatches the Node version that built better-sqlite3 in
-// node_modules and crashes with NODE_MODULE_VERSION errors. Pinning to
-// process.execPath guarantees the MCP subprocess uses the same Node we
-// installed under, regardless of Claude Code's PATH.
-function resolveNpxPath(): string {
+// different Node major), and `npx`/`tsx` both have `#!/usr/bin/env node`
+// shebangs — so even an absolute npx path re-resolves `node` from PATH and
+// we still load native deps (better-sqlite3) under the wrong Node, hitting
+// NODE_MODULE_VERSION crashes. Calling `node <abs tsx cli.mjs> ...` directly
+// bypasses both shebangs and locks the subprocess to process.execPath.
+function buildMcpLaunch(indexEntry: string): { command: string; args: string[] } {
   const nodeBin = process.execPath;
-  const npxBin = join(dirname(nodeBin), 'npx');
-  if (existsSync(npxBin)) return npxBin;
-  // Fall back to bare `npx` and warn — better than failing the install.
-  console.error(
-    `Warning: could not find npx next to ${nodeBin}; falling back to "npx" on PATH. ` +
-      'If the MCP server fails with NODE_MODULE_VERSION, set MCP "command" to an absolute npx path manually.'
-  );
-  return 'npx';
+  const tsxCli = resolve(WHYGRAPH_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+  if (!existsSync(tsxCli)) {
+    console.error(
+      `Could not find tsx CLI at ${tsxCli}. Run \`npm install\` in ${WHYGRAPH_ROOT} before installing whygraph.`
+    );
+    process.exit(1);
+  }
+  return { command: nodeBin, args: [tsxCli, indexEntry, 'mcp'] };
 }
 
 export function runInstall(opts: InstallOpts): void {
@@ -97,10 +97,11 @@ function cmdInstallGlobal(opts: InstallOpts): void {
   if (opts.backend === 'api') {
     env.ANTHROPIC_API_KEY = '${ANTHROPIC_API_KEY}';
   }
+  const launch = buildMcpLaunch(indexEntry);
   const serverConfig = {
     type: 'stdio' as const,
-    command: resolveNpxPath(),
-    args: ['tsx', indexEntry, 'mcp'],
+    command: launch.command,
+    args: launch.args,
     env,
   };
 
@@ -256,9 +257,10 @@ export function cmdInstall(opts: InstallOpts): void {
   if (opts.backend === 'api') {
     env.ANTHROPIC_API_KEY = '${ANTHROPIC_API_KEY}';
   }
+  const launch = buildMcpLaunch(indexEntry);
   const whygraphServer = {
-    command: resolveNpxPath(),
-    args: ['tsx', indexEntry, 'mcp'],
+    command: launch.command,
+    args: launch.args,
     env,
   };
 

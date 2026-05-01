@@ -12,6 +12,8 @@ import { RationaleGenerator } from './rationale/generator.js';
 import { RationaleStore } from './rationale/store.js';
 import { PROMPT_VERSION } from './rationale/prompt.js';
 import { runMcpServer } from './mcp/server.js';
+import { cmdInstall } from './install.js';
+import type { RationaleBackend } from './config.js';
 
 function usage(): never {
   console.error('Usage: whygraph <command> [args]');
@@ -24,6 +26,8 @@ function usage(): never {
   console.error('  rationale <node|qname>              Show or generate rationale for a symbol');
   console.error('             [--force] [--refresh-evidence] [--json]');
   console.error('                                       --force regenerates rationale; --refresh-evidence recollects upstream; --json prints structured JSON');
+  console.error('  install [--dir <path>]              Install whygraph (MCP, skill, /rationale) into a target project');
+  console.error('             [--backend api|claude_cli] [--force]');
   console.error('  mcp                                 Run the MCP stdio server (for Claude Code)');
   process.exit(1);
 }
@@ -372,6 +376,16 @@ function printList(label: string, items: string[]): void {
   for (const item of items) console.log(`  - ${item}`);
 }
 
+function readFlag(args: string[], name: string): string | undefined {
+  const eqMatch = args.find((a) => a.startsWith(`${name}=`));
+  if (eqMatch) return eqMatch.slice(name.length + 1);
+  const idx = args.indexOf(name);
+  if (idx >= 0 && idx + 1 < args.length && !args[idx + 1].startsWith('--')) {
+    return args[idx + 1];
+  }
+  return undefined;
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const [cmd, ...rest] = args;
@@ -401,6 +415,14 @@ async function main(): Promise<void> {
       const refreshEvidence = rest.includes('--refresh-evidence');
       const json = rest.includes('--json');
       return cmdRationale(config, positional[0], { force, refreshEvidence, json });
+    }
+    case 'install': {
+      const targetDir = readFlag(rest, '--dir') ?? process.cwd();
+      const backendArg = readFlag(rest, '--backend');
+      const backend: RationaleBackend =
+        backendArg === 'api' ? 'api' : 'claude_cli';
+      const force = rest.includes('--force');
+      return cmdInstall({ targetDir, backend, force });
     }
     case 'mcp':
       return runMcpServer();

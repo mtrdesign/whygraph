@@ -41,31 +41,31 @@ GitHub collection requires the [`gh`](https://cli.github.com/) CLI authenticated
 
 `whygraph mcp` runs a stdio MCP server exposing two tools:
 
-- `whygraph_rationale_pre_edit_brief({target, force?, response_format?})` — cached or freshly-generated rationale for a symbol (calls Claude on cache miss; needs `ANTHROPIC_API_KEY`).
+- `whygraph_rationale_pre_edit_brief({target, force?, response_format?})` — cached or freshly-generated rationale for a symbol (calls Claude on cache miss).
 - `whygraph_evidence_for({target, response_format?})` — raw evidence rows for a symbol (read-only).
 
 `target` is a CodeGraph node ID or qualified_name.
 
-### 1. Install the skill
+### Install everything in one shot
 
-Copy `examples/skills/whygraph-pre-edit/` into your project's `.claude/skills/` directory:
-
-```bash
-cp -R /path/to/whygraph/examples/skills/whygraph-pre-edit ./.claude/skills/
-```
-
-This tells Claude Code *when* to call the brief tool — before edits, refactors, deletions, and "why does this exist?" questions.
-
-### 2. (Optional) Install the `/rationale` slash command
-
-Copy the example command into your project for an explicit lookup shortcut:
+From your whygraph checkout:
 
 ```bash
-mkdir -p .claude/commands
-cp /path/to/whygraph/examples/commands/rationale.md .claude/commands/
+npm run whygraph install -- --dir /path/to/your/project
+# or:  npm run whygraph install -- --dir /path/to/your/project --backend api --force
 ```
 
-Then in Claude Code, type:
+This:
+
+- Verifies a CodeGraph DB exists at `<target>/.codegraph/codegraph.db`.
+- Creates `<target>/.whygraph/whygraph.db` (with a local `.gitignore` so the DB never gets committed).
+- Copies the `whygraph-pre-edit` skill into `<target>/.claude/skills/`.
+- Copies the `/rationale` slash command into `<target>/.claude/commands/`.
+- Writes (or merges) `<target>/.mcp.json` with a `whygraph` server entry pointing at this checkout's `src/index.ts`.
+
+Defaults: `--dir` is `cwd`, `--backend` is `claude_cli` (uses your Claude Pro/Max subscription via the `claude` CLI). Pass `--backend api` to bill against `ANTHROPIC_API_KEY` instead — the install drops a `${ANTHROPIC_API_KEY}` placeholder in `.mcp.json` so you set it in the launching shell, not in the file. `--force` overwrites an existing `whygraph` entry, slash command, or skill files; the WhyGraph DB is always preserved.
+
+After install, restart Claude Code in the target project. Then:
 
 ```
 /rationale Page              # markdown brief
@@ -74,9 +74,13 @@ Then in Claude Code, type:
 /rationale Page --force      # bypass rationale cache, regenerate
 ```
 
-The command calls the MCP tool and prints the result verbatim. Read-only — never edits files.
+The skill also tells Claude Code to call `whygraph_rationale_pre_edit_brief` automatically before edits, refactors, deletions, and "why does this exist?" questions.
 
-### 3. Wire up the MCP server
+> The MCP config writes absolute paths (your whygraph checkout, the project's CodeGraph/WhyGraph DBs). If you move the whygraph checkout or the project, re-run install with `--force`. `.mcp.json` is project-local — review it before committing.
+
+### Manual setup (alternative)
+
+If you'd rather wire it up by hand, drop this into `<target>/.mcp.json`:
 
 ```json
 {
@@ -87,12 +91,14 @@ The command calls the MCP tool and prints the result verbatim. Read-only — nev
       "env": {
         "CODEGRAPH_DB": "/absolute/path/to/your/project/.codegraph/codegraph.db",
         "WHYGRAPH_DB": "/absolute/path/to/your/project/.whygraph/whygraph.db",
-        "ANTHROPIC_API_KEY": "..."
+        "WHYGRAPH_RATIONALE_BACKEND": "claude_cli"
       }
     }
   }
 }
 ```
+
+Copy the skill (`examples/skills/whygraph-pre-edit/`) and slash command (`examples/commands/rationale.md`) into `<target>/.claude/skills/` and `<target>/.claude/commands/` respectively.
 
 ## Layout
 

@@ -29,7 +29,19 @@ ANTHROPIC_API_KEY=… npm run whygraph rationale <node|qname>  # generate or fet
 - `whygraph_rationale_pre_edit_brief({target, force?, response_format?})` — cached or freshly-generated rationale for a symbol (calls Claude on cache miss; needs `ANTHROPIC_API_KEY`).
 - `whygraph_evidence_for({target, response_format?})` — raw evidence rows for a symbol (read-only).
 
-`target` is a CodeGraph node ID or qualified_name. Wire it into Claude Code's MCP config:
+`target` is a CodeGraph node ID or qualified_name.
+
+### 1. Install the skill
+
+Copy `examples/skills/whygraph-pre-edit/` into your project's `.claude/skills/` directory:
+
+```bash
+cp -R /path/to/whygraph/examples/skills/whygraph-pre-edit ./.claude/skills/
+```
+
+This tells Claude Code *when* to call the brief tool — before edits, refactors, deletions, and "why does this exist?" questions.
+
+### 2. Wire up the MCP server
 
 ```json
 {

@@ -133,6 +133,16 @@ def fake_codegraph_db(tmp_path: Path) -> Path:
     return build_fake_codegraph_db(tmp_path / "codegraph.db")
 
 
+@pytest.fixture(autouse=True)
+def _reset_mcp_deps():
+    """Force the lazy-cached deps in mcp_server to be rebuilt per test."""
+    from whygraph import mcp_server
+
+    mcp_server._reset_deps()
+    yield
+    mcp_server._reset_deps()
+
+
 @pytest.fixture
 def codegraph_db_factory(tmp_path: Path):
     counter = {"n": 0}

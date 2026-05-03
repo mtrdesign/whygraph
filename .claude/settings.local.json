@@ -14,7 +14,31 @@
       "Bash(UV_NATIVE_TLS=1 uv sync)",
       "Read(//Users/tsvetoslav.nikolov/Projects/pfizer/**)",
       "Bash(unset SSL_CERT_FILE)",
-      "Bash(uv run *)"
+      "Bash(uv run *)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(curl -sf \"https://api.github.com/repos/safishamsi/graphify\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(f\\\\\"stars={d['stargazers_count']}, forks={d['forks_count']}, open_issues={d['open_issues_count']}, last_push={d['pushed_at']}, default_branch={d['default_branch']}, license={\\(d.get\\('license'\\) or {}\\).get\\('spdx_id'\\)}\\\\\"\\)\")",
+      "Bash(curl -sf \"https://api.github.com/repos/colbymchenry/codegraph\")",
+      "Bash(curl -sf https://raw.githubusercontent.com/colbymchenry/codegraph/main/package.json)",
+      "Bash(python3 -c \"import json,sys; pkg=json.load\\(sys.stdin\\); deps={**pkg.get\\('dependencies',{}\\),**pkg.get\\('devDependencies',{}\\)}; ts=[k for k in deps if k.startswith\\('tree-sitter-'\\) and k!='tree-sitter-cli']; print\\('\\\\n'.join\\(sorted\\(ts\\)\\)\\)\")",
+      "Bash(curl -sf https://raw.githubusercontent.com/safishamsi/graphify/v6/pyproject.toml)",
+      "Bash(curl -sf https://api.github.com/repos/colbymchenry/codegraph/contents/src)",
+      "Bash(python3 -c \"import json,sys; print\\('\\\\n'.join\\(item['name'] for item in json.load\\(sys.stdin\\)\\)\\)\")",
+      "Bash(curl -sf https://api.github.com/repos/colbymchenry/codegraph/contents/src/extractors)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('\\\\n'.join\\(item['name'] for item in d\\)\\) if isinstance\\(d, list\\) else print\\(d.get\\('message','no extractors dir'\\)\\)\")",
+      "Bash(curl -sf https://api.github.com/repos/colbymchenry/codegraph/contents/src/parsers)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('\\\\n'.join\\(item['name'] for item in d\\)\\) if isinstance\\(d, list\\) else print\\(d.get\\('message','no parsers dir'\\)\\)\")",
+      "Bash(curl -sf https://api.github.com/search/code -G --data-urlencode \"q=tree-sitter repo:colbymchenry/codegraph\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(d.get\\('message', f\\\\\"items={d.get\\('total_count',0\\)}\\\\\"\\)\\); [print\\(i['path']\\) for i in d.get\\('items',[]\\)[:20]]\")",
+      "Bash(curl -sf https://api.github.com/repos/colbymchenry/codegraph/contents/src/extraction)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('\\\\n'.join\\(item['name'] for item in d\\)\\)\")",
+      "Bash(curl -sf https://raw.githubusercontent.com/colbymchenry/codegraph/main/README.md)",
+      "Bash(curl -sf https://api.github.com/repos/colbymchenry/codegraph/contents/src/extraction/languages)",
+      "Bash(curl -sf https://api.github.com/repos/colbymchenry/codegraph/contents/src/extraction/wasm)",
+      "Bash(git *)",
+      "Bash(gh api *)"
     ]
   }
 }

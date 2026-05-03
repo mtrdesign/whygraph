@@ -7,8 +7,10 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+import anthropic
 from pydantic import BaseModel, ValidationError
 
+from whygraph.config import Config
 from whygraph.prompts import PROMPT_VERSION, Rationale
 
 
@@ -187,3 +189,104 @@ class ClaudeCliClient:
             prompt_version=PROMPT_VERSION,
             usage=_extract_usage(envelope),
         )
+
+
+def _extract_text_from_sdk_response(response: Any) -> str:
+    content = getattr(response, "content", None)
+    if not isinstance(content, list):
+        raise ValueError("Anthropic response.content is not a list")
+    for block in content:
+        if getattr(block, "type", None) == "text":
+            text = getattr(block, "text", None)
+            if isinstance(text, str):
+                return text
+    raise ValueError("Anthropic response had no text content block")
+
+
+def _sdk_usage(response: Any) -> LLMUsage:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return LLMUsage()
+
+    def _num(v: Any) -> int:
+        return int(v) if isinstance(v, (int, float)) else 0
+
+    return LLMUsage(
+        input_tokens=_num(getattr(usage, "input_tokens", 0)),
+        cache_read_input_tokens=_num(getattr(usage, "cache_read_input_tokens", 0)),
+        cache_creation_input_tokens=_num(
+            getattr(usage, "cache_creation_input_tokens", 0)
+        ),
+        output_tokens=_num(getattr(usage, "output_tokens", 0)),
+    )
+
+
+class AnthropicSdkClient:
+    """Direct API path. Activated via WHYGRAPH_RATIONALE_BACKEND=api or by
+    setting ANTHROPIC_API_KEY (which auto-selects this backend in load_config).
+
+    Uses plain messages.create + Pydantic validation rather than v0's
+    messages.parse + output_config (a beta SDK helper).
+    """
+
+    backend = "api"
+
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        *,
+        max_tokens: int = 2048,
+    ) -> None:
+        self.model = model
+        self._client = anthropic.Anthropic(api_key=api_key)
+        self._max_tokens = max_tokens
+
+    def generate(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        schema: type[BaseModel] = Rationale,
+    ) -> LLMResult:
+        response = self._client.messages.create(
+            model=self.model,
+            max_tokens=self._max_tokens,
+            system=[
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+
+        text = _extract_text_from_sdk_response(response)
+        parsed = _extract_json(text)
+        try:
+            validated = Rationale.model_validate(parsed)
+        except ValidationError as e:
+            raise ValueError(
+                f"Anthropic SDK output failed schema validation: {e}"
+            ) from e
+
+        return LLMResult(
+            rationale=validated,
+            model=self.model,
+            backend=self.backend,
+            prompt_version=PROMPT_VERSION,
+            usage=_sdk_usage(response),
+        )
+
+
+def make_llm_client(config: Config) -> LLMClient:
+    if config.rationale_backend == "api":
+        if not config.anthropic_api_key:
+            raise ValueError(
+                "ANTHROPIC_API_KEY is not set. Set it in the MCP server "
+                "environment, or set WHYGRAPH_RATIONALE_BACKEND=claude_cli "
+                "to use the local claude CLI."
+            )
+        return AnthropicSdkClient(config.model, config.anthropic_api_key)
+    return ClaudeCliClient(config.model)

@@ -804,6 +804,7 @@ source = { editable = "." }
 dependencies = [
     { name = "click" },
     { name = "mcp", extra = ["cli"] },
+    { name = "pydantic" },
 ]
 
 [package.dev-dependencies]
@@ -815,6 +816,7 @@ dev = [
 requires-dist = [
     { name = "click", specifier = ">=8.1" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.2" },
+    { name = "pydantic", specifier = ">=2" },
 ]
 
 [package.metadata.requires-dev]

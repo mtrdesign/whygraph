@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
+import sqlite3
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from whygraph.backend import SymbolNode
 
@@ -145,6 +148,13 @@ class GitEvidenceCollector:
         if stdout is None:
             return []
         return _parse_line_porcelain(stdout)
+
+    def file_head_sha(self, file_path: str) -> str | None:
+        out = self._git(["log", "-1", "--format=%H", "--", file_path])
+        if out is None:
+            return None
+        sha = out.strip()
+        return sha or None
 
     def commit_info(self, sha: str) -> GitCommitInfo | None:
         cached = self._commit_cache.get(sha)
@@ -541,3 +551,218 @@ def collect_git_evidence(
         )
 
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Bundle hash, store, service.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EvidenceRecord:
+    id: int
+    node_id: str
+    qualified_name: str
+    source: str
+    ref: str | None
+    payload: Any
+    collected_at: int
+
+
+@dataclass(frozen=True)
+class BundleMeta:
+    bundle_hash: str
+    built_at: int
+    head_at_collection: str | None
+
+
+@dataclass(frozen=True)
+class CollectionResult:
+    evidence: list[EvidenceRecord]
+    bundle_hash: str
+    source: str  # "cache" | "collected"
+    collected_at: int
+    head_at_collection: str | None
+
+
+def _stable_json(value: Any) -> str:
+    # json.dumps with sort_keys recursively sorts dict keys at every depth,
+    # matching v0's hand-rolled stableStringify for our payload shapes.
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def compute_bundle_hash(rows: list[EvidenceRow]) -> str:
+    sorted_rows = sorted(rows, key=lambda r: (r.source, r.ref or ""))
+    h = hashlib.sha256()
+    for r in sorted_rows:
+        h.update(r.source.encode("utf-8"))
+        h.update(b"|")
+        h.update((r.ref or "").encode("utf-8"))
+        h.update(b"|")
+        h.update(_stable_json(r.payload).encode("utf-8"))
+        h.update(b"\n")
+    return h.hexdigest()
+
+
+class EvidenceStore:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def replace(
+        self,
+        node_id: str,
+        qualified_name: str,
+        rows: list[EvidenceRow],
+        head_at_collection: str | None,
+        *,
+        now: int,
+    ) -> str:
+        bundle_hash = compute_bundle_hash(rows)
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._conn.execute(
+                "DELETE FROM evidence WHERE node_id = ?", (node_id,)
+            )
+            for row in rows:
+                self._conn.execute(
+                    "INSERT INTO evidence "
+                    "(node_id, qualified_name, source, ref, payload, collected_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        node_id,
+                        qualified_name,
+                        row.source,
+                        row.ref,
+                        json.dumps(row.payload),
+                        now,
+                    ),
+                )
+            self._conn.execute(
+                "INSERT INTO evidence_bundles "
+                "(node_id, bundle_hash, built_at, head_at_collection) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(node_id) DO UPDATE SET "
+                "bundle_hash = excluded.bundle_hash, "
+                "built_at = excluded.built_at, "
+                "head_at_collection = excluded.head_at_collection",
+                (node_id, bundle_hash, now, head_at_collection),
+            )
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        return bundle_hash
+
+    def bundle_meta_for(self, node_id: str) -> BundleMeta | None:
+        row = self._conn.execute(
+            "SELECT bundle_hash, built_at, head_at_collection "
+            "FROM evidence_bundles WHERE node_id = ?",
+            (node_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return BundleMeta(
+            bundle_hash=row["bundle_hash"],
+            built_at=int(row["built_at"]),
+            head_at_collection=row["head_at_collection"],
+        )
+
+    def for_node(self, node_id: str) -> list[EvidenceRecord]:
+        rows = self._conn.execute(
+            "SELECT id, node_id, qualified_name, source, ref, payload, collected_at "
+            "FROM evidence WHERE node_id = ? ORDER BY id",
+            (node_id,),
+        ).fetchall()
+        records = []
+        for r in rows:
+            try:
+                payload = json.loads(r["payload"])
+            except (ValueError, TypeError):
+                payload = r["payload"]
+            records.append(
+                EvidenceRecord(
+                    id=int(r["id"]),
+                    node_id=r["node_id"],
+                    qualified_name=r["qualified_name"],
+                    source=r["source"],
+                    ref=r["ref"],
+                    payload=payload,
+                    collected_at=int(r["collected_at"]),
+                )
+            )
+        return records
+
+
+class EvidenceService:
+    def __init__(
+        self,
+        store: EvidenceStore,
+        git: GitEvidenceCollector,
+        github: GitHubEvidenceCollector | None,
+        repo_root: Path,
+        ttl_seconds: int,
+        *,
+        now: Callable[[], int] | None = None,
+        head_sha_fn: Callable[[str], str | None] | None = None,
+    ) -> None:
+        self._store = store
+        self._git = git
+        self._github = github
+        self._repo_root = repo_root
+        self._ttl_seconds = ttl_seconds
+        self._now = now or (lambda: int(time.time()))
+        self._head_sha_fn = head_sha_fn or (
+            lambda file_path: git.file_head_sha(file_path)
+        )
+
+    def for_node(
+        self, node: SymbolNode, *, force: bool = False
+    ) -> CollectionResult:
+        if not force:
+            cached = self._check_cache(node)
+            if cached is not None:
+                return cached
+        return self._collect(node)
+
+    def _check_cache(self, node: SymbolNode) -> CollectionResult | None:
+        meta = self._store.bundle_meta_for(node.id)
+        if meta is None:
+            return None
+        age = self._now() - meta.built_at
+        if age > self._ttl_seconds:
+            return None
+        if meta.head_at_collection is not None:
+            current = self._head_sha_fn(node.file_path)
+            if current is None or current != meta.head_at_collection:
+                return None
+        # head_at_collection is None → trust TTL alone (no git history at
+        # collection time means no per-file sha to compare; recollecting on
+        # every call would be wasteful).
+        return CollectionResult(
+            evidence=self._store.for_node(node.id),
+            bundle_hash=meta.bundle_hash,
+            source="cache",
+            collected_at=meta.built_at,
+            head_at_collection=meta.head_at_collection,
+        )
+
+    def _collect(self, node: SymbolNode) -> CollectionResult:
+        git_rows = collect_git_evidence(self._git, node)
+        gh_rows = (
+            collect_github_evidence(self._github, git_rows)
+            if self._github is not None and self._github.is_available()
+            else []
+        )
+        rows = git_rows + gh_rows
+        head = self._head_sha_fn(node.file_path)
+        now = self._now()
+        bundle_hash = self._store.replace(
+            node.id, node.qualified_name, rows, head, now=now
+        )
+        return CollectionResult(
+            evidence=self._store.for_node(node.id),
+            bundle_hash=bundle_hash,
+            source="collected",
+            collected_at=now,
+            head_at_collection=head,
+        )

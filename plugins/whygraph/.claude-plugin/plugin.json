@@ -1,0 +1,9 @@
+{
+  "name": "whygraph",
+  "version": "0.1.0",
+  "description": "Reads the intent behind code before editing it.",
+  "author": {
+    "name": "cvetty",
+    "url": "https://github.com/cvetty"
+  }
+}

@@ -32,6 +32,16 @@ uv run whygraph version  # CLI sanity check
 uv run whygraph-mcp      # launch the MCP server on stdio (Ctrl-C to exit)
 ```
 
+### Debug the MCP server with MCP Inspector
+
+The [MCP Inspector](https://github.com/modelcontextprotocol/inspector) is the official web UI for poking at a stdio MCP server — list tools, call them with custom args, see raw responses, and tail stderr.
+
+```bash
+npx @modelcontextprotocol/inspector uv run whygraph-mcp
+```
+
+It prints a `http://localhost:…` URL with a one-time auth token; open it. The Inspector spawns `whygraph-mcp` as a subprocess and connects via stdio. Use **Reconnect** to pick up code changes.
+
 ## Install as a Claude Code plugin
 
 From any project where you want WhyGraph available:

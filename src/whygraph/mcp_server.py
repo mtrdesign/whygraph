@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import atexit
 import sqlite3
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
@@ -27,40 +29,92 @@ mcp = FastMCP("whygraph")
 ResponseFormat = Literal["markdown", "json"]
 
 
-def _resolve_symbol(backend: GraphBackend, target: str) -> SymbolNode | None:
-    return backend.get_node_by_id(target) or backend.get_node(target)
+class NoCodeGraphError(ValueError):
+    """Raised when no .codegraph/codegraph.db is reachable from the cwd."""
 
 
-def _open_backend(config: Config) -> GraphBackend:
+@dataclass
+class _Deps:
+    backend: GraphBackend
+    conn: sqlite3.Connection
+    evidence_service: EvidenceService
+    rationale_service: RationaleService
+    model: str
+
+    def close(self) -> None:
+        try:
+            self.backend.close()
+        except Exception:
+            pass
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+
+
+# Global installs reuse a single MCP server entry across many projects, but
+# only some of those projects have a CodeGraph DB. Failing fast at startup
+# turns every `claude mcp list` into a confusing "Failed to connect", so we
+# defer dep construction until the first tool call and return a clean error
+# then.
+_DEPS: _Deps | None = None
+
+
+def _resolve_deps(config: Config) -> _Deps:
     if config.codegraph_db_path is None:
-        raise ValueError(
+        raise NoCodeGraphError(
             f"No CodeGraph DB found at or above {config.repo_root} "
             "(looked for .codegraph/codegraph.db). Index this project with "
             "CodeGraph first, or set CODEGRAPH_DB to an absolute path."
         )
-    return SqliteCodegraphBackend(config.codegraph_db_path)
-
-
-def _build_evidence_service(
-    config: Config, conn: sqlite3.Connection
-) -> EvidenceService:
-    return EvidenceService(
+    backend = SqliteCodegraphBackend(config.codegraph_db_path)
+    conn = open_whygraph_db(config.whygraph_db_path)
+    evidence_service = EvidenceService(
         EvidenceStore(conn),
         GitEvidenceCollector(config.repo_root),
         GitHubEvidenceCollector(config.repo_root),
         config.repo_root,
         config.evidence_ttl_seconds,
     )
-
-
-def _build_rationale_service(
-    config: Config, conn: sqlite3.Connection
-) -> RationaleService:
-    return RationaleService(
+    rationale_service = RationaleService(
         RationaleStore(conn),
         make_llm_client(config),
         model=config.model,
     )
+    return _Deps(
+        backend=backend,
+        conn=conn,
+        evidence_service=evidence_service,
+        rationale_service=rationale_service,
+        model=config.model,
+    )
+
+
+def _get_deps() -> _Deps:
+    global _DEPS
+    if _DEPS is None:
+        _DEPS = _resolve_deps(load_config())
+    return _DEPS
+
+
+def _reset_deps() -> None:
+    """Test helper: close and clear cached deps."""
+    global _DEPS
+    if _DEPS is not None:
+        _DEPS.close()
+        _DEPS = None
+
+
+def _atexit_close() -> None:
+    if _DEPS is not None:
+        _DEPS.close()
+
+
+atexit.register(_atexit_close)
+
+
+def _resolve_symbol(backend: GraphBackend, target: str) -> SymbolNode | None:
+    return backend.get_node_by_id(target) or backend.get_node(target)
 
 
 def _evidence_payload(node: SymbolNode, collection: CollectionResult) -> dict[str, Any]:
@@ -85,13 +139,12 @@ def _evidence_payload(node: SymbolNode, collection: CollectionResult) -> dict[st
 
 
 def _evidence_summary(payload: dict[str, Any]) -> str:
-    summary = (
+    return (
         payload.get("summary")
         or payload.get("subject")
         or payload.get("title")
         or ""
     )
-    return summary
 
 
 def format_evidence_markdown(
@@ -198,21 +251,14 @@ def evidence_for(
     refresh: bool = False,
     response_format: ResponseFormat = "markdown",
 ) -> dict[str, Any] | str:
-    config = load_config()
-    backend = _open_backend(config)
-    conn = open_whygraph_db(config.whygraph_db_path)
-    try:
-        node = _resolve_symbol(backend, target)
-        if node is None:
-            raise ValueError(f"Symbol not found in CodeGraph: {target}")
-        service = _build_evidence_service(config, conn)
-        collection = service.for_node(node, force=refresh)
-        if response_format == "json":
-            return _evidence_payload(node, collection)
-        return format_evidence_markdown(node, collection)
-    finally:
-        conn.close()
-        backend.close()
+    deps = _get_deps()
+    node = _resolve_symbol(deps.backend, target)
+    if node is None:
+        raise ValueError(f"Symbol not found in CodeGraph: {target}")
+    collection = deps.evidence_service.for_node(node, force=refresh)
+    if response_format == "json":
+        return _evidence_payload(node, collection)
+    return format_evidence_markdown(node, collection)
 
 
 @mcp.tool(
@@ -239,36 +285,25 @@ def rationale_pre_edit_brief(
     refresh_evidence: bool = False,
     response_format: ResponseFormat = "markdown",
 ) -> dict[str, Any] | str:
-    config = load_config()
-    backend = _open_backend(config)
-    conn = open_whygraph_db(config.whygraph_db_path)
-    try:
-        node = _resolve_symbol(backend, target)
-        if node is None:
-            raise ValueError(f"Symbol not found in CodeGraph: {target}")
-
-        evidence_service = _build_evidence_service(config, conn)
-        collection = evidence_service.for_node(node, force=refresh_evidence)
-        if not collection.evidence:
-            raise ValueError(
-                f"No evidence for {node.qualified_name}: file has no git "
-                f"history ({node.file_path})."
-            )
-
-        rationale_service = _build_rationale_service(config, conn)
-        record, source = rationale_service.get_or_generate(
-            node,
-            collection.evidence,
-            collection.bundle_hash,
-            force=force or refresh_evidence,
+    deps = _get_deps()
+    node = _resolve_symbol(deps.backend, target)
+    if node is None:
+        raise ValueError(f"Symbol not found in CodeGraph: {target}")
+    collection = deps.evidence_service.for_node(node, force=refresh_evidence)
+    if not collection.evidence:
+        raise ValueError(
+            f"No evidence for {node.qualified_name}: file has no git "
+            f"history ({node.file_path})."
         )
-
-        if response_format == "json":
-            return _rationale_payload(node, collection, record, source)
-        return format_rationale_markdown(node, collection, record, source)
-    finally:
-        conn.close()
-        backend.close()
+    record, source = deps.rationale_service.get_or_generate(
+        node,
+        collection.evidence,
+        collection.bundle_hash,
+        force=force or refresh_evidence,
+    )
+    if response_format == "json":
+        return _rationale_payload(node, collection, record, source)
+    return format_rationale_markdown(node, collection, record, source)
 
 
 def main() -> None:

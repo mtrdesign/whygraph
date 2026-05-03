@@ -8,3 +8,6 @@ __pycache__/
 dist/
 build/
 .DS_Store
+
+# WhyGraph per-repo cache (evidence + rationale SQLite).
+.whygraph/

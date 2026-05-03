@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "whygraph": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}/../..",
+        "whygraph-mcp"
+      ]
+    }
+  }
+}

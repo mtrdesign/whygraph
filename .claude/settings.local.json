@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /Users/tsvetoslav.nikolov/Projects/demos/whygraph branch -a)",
+      "Bash(git -C /Users/tsvetoslav.nikolov/Projects/demos/whygraph show main:README.md)",
+      "Bash(uv --version)",
+      "Bash(uv python *)",
+      "Bash(command -v python3)",
+      "Bash(command -v pipx)",
+      "Bash(pipx --version)",
+      "Bash(command -v brew)",
+      "Bash(brew install *)",
+      "Bash(uv sync *)",
+      "Bash(UV_NATIVE_TLS=1 uv sync)",
+      "Read(//Users/tsvetoslav.nikolov/Projects/pfizer/**)",
+      "Bash(unset SSL_CERT_FILE)",
+      "Bash(uv run *)"
+    ]
+  }
+}

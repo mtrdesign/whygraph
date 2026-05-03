@@ -15,6 +15,12 @@ from whygraph.evidence import (
     GitEvidenceCollector,
     GitHubEvidenceCollector,
 )
+from whygraph.rationale import (
+    RationaleRecord,
+    RationaleService,
+    RationaleStore,
+    make_llm_client,
+)
 
 mcp = FastMCP("whygraph")
 
@@ -44,6 +50,16 @@ def _build_evidence_service(
         GitHubEvidenceCollector(config.repo_root),
         config.repo_root,
         config.evidence_ttl_seconds,
+    )
+
+
+def _build_rationale_service(
+    config: Config, conn: sqlite3.Connection
+) -> RationaleService:
+    return RationaleService(
+        RationaleStore(conn),
+        make_llm_client(config),
+        model=config.model,
     )
 
 
@@ -101,6 +117,70 @@ def format_evidence_markdown(
     return "\n".join(lines)
 
 
+def _rationale_payload(
+    node: SymbolNode,
+    collection: CollectionResult,
+    record: RationaleRecord,
+    source: str,
+) -> dict[str, Any]:
+    return {
+        "qualified_name": node.qualified_name,
+        "kind": node.kind,
+        "location": f"{node.file_path}:{node.start_line}-{node.end_line}",
+        "source": source,
+        "evidence_source": collection.source,
+        "model": record.model,
+        "prompt_version": record.prompt_version,
+        "bundle_hash": record.bundle_hash,
+        "cache_key": record.cache_key,
+        "generated_at": record.generated_at,
+        "purpose": record.purpose,
+        "why": record.why,
+        "constraints": record.constraints,
+        "tradeoffs": record.tradeoffs,
+        "risks": record.risks,
+    }
+
+
+def _bullets(items: list[str]) -> list[str]:
+    return ["_(none)_"] if not items else [f"- {item}" for item in items]
+
+
+def format_rationale_markdown(
+    node: SymbolNode,
+    collection: CollectionResult,
+    record: RationaleRecord,
+    source: str,
+) -> str:
+    lines = [
+        f"# Rationale: `{node.qualified_name}`",
+        "",
+        f"- **Kind**: {node.kind}",
+        f"- **Location**: {node.file_path}:{node.start_line}-{node.end_line}",
+        f"- **Model**: {record.model} (prompt {record.prompt_version})",
+        (
+            f"- **Rationale**: {source} · **Evidence**: {collection.source} "
+            f"(bundle {record.bundle_hash[:12]})"
+        ),
+        "",
+        "## Purpose",
+        record.purpose or "_(none)_",
+        "",
+        "## Why",
+        record.why or "_(none)_",
+        "",
+        "## Constraints",
+    ]
+    lines.extend(_bullets(record.constraints))
+    lines.append("")
+    lines.append("## Tradeoffs")
+    lines.extend(_bullets(record.tradeoffs))
+    lines.append("")
+    lines.append("## Risks")
+    lines.extend(_bullets(record.risks))
+    return "\n".join(lines)
+
+
 @mcp.tool(
     name="whygraph_evidence_for",
     description=(
@@ -130,6 +210,62 @@ def evidence_for(
         if response_format == "json":
             return _evidence_payload(node, collection)
         return format_evidence_markdown(node, collection)
+    finally:
+        conn.close()
+        backend.close()
+
+
+@mcp.tool(
+    name="whygraph_rationale_pre_edit_brief",
+    description=(
+        "Return the rationale for a code symbol BEFORE editing it: purpose, "
+        "why it exists, constraints to preserve, tradeoffs, and risks of "
+        "modification. Lazily collects evidence (git blame + commits, plus "
+        "GitHub PRs/issues if available) on first request; subsequent "
+        "requests reuse the cache when (bundle_hash, prompt_version, model) "
+        "matches.\n\n"
+        "Args:\n"
+        "  target: CodeGraph node ID or qualified_name.\n"
+        "  force: If true, bypass the rationale cache and regenerate. "
+        "Default false.\n"
+        "  refresh_evidence: If true, recollect evidence even if cached "
+        "(implies bypassing the rationale cache). Default false.\n"
+        "  response_format: 'markdown' or 'json'. Default 'markdown'."
+    ),
+)
+def rationale_pre_edit_brief(
+    target: str,
+    force: bool = False,
+    refresh_evidence: bool = False,
+    response_format: ResponseFormat = "markdown",
+) -> dict[str, Any] | str:
+    config = load_config()
+    backend = _open_backend(config)
+    conn = open_whygraph_db(config.whygraph_db_path)
+    try:
+        node = _resolve_symbol(backend, target)
+        if node is None:
+            raise ValueError(f"Symbol not found in CodeGraph: {target}")
+
+        evidence_service = _build_evidence_service(config, conn)
+        collection = evidence_service.for_node(node, force=refresh_evidence)
+        if not collection.evidence:
+            raise ValueError(
+                f"No evidence for {node.qualified_name}: file has no git "
+                f"history ({node.file_path})."
+            )
+
+        rationale_service = _build_rationale_service(config, conn)
+        record, source = rationale_service.get_or_generate(
+            node,
+            collection.evidence,
+            collection.bundle_hash,
+            force=force or refresh_evidence,
+        )
+
+        if response_format == "json":
+            return _rationale_payload(node, collection, record, source)
+        return format_rationale_markdown(node, collection, record, source)
     finally:
         conn.close()
         backend.close()

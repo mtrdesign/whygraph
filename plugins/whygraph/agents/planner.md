@@ -40,6 +40,8 @@ If impact returns more, rank by direct distance from seeds (1-hop > 2-hop > deep
 
 The result is a **working set of rationale cards** — one entry per node with `{qualified_name, file_path, line_range, purpose, why, constraints[], tradeoffs[], risks[], confidence}` (or an `isError` marker).
 
+`confidence` may come back as `null`/missing on real data (the field is nullable in the WhyGraph store). Treat null confidence as **low** (`< 0.4`) for any threshold check below, and display it as `—` in the working set table — never invent a numeric value.
+
 ## Phase 2 — Branch on mode
 
 ### Single-pass mode (`DEEP: false`)
@@ -52,7 +54,7 @@ You are now an orchestrator. Do **not** synthesize yourself.
 
 **2a. Decide whether fan-out is warranted.**
 - Working set has **<5 nodes** → fall back to single-pass and prepend the notice: *"Note: `--deep` requested but impact set is small (<5 nodes). Falling back to single-pass — fan-out would be ceremony."*
-- **>60% of cards** are `isError` or have `confidence < 0.4` → fall back to single-pass and prepend the notice: *"Note: `--deep` requested but rationale is thin (most working-set nodes have no usable rationale). Falling back to single-pass — researchers would have nothing to dig into."*
+- **>60% of cards** are `isError`, have null/missing confidence, or have `confidence < 0.4` → fall back to single-pass and prepend the notice: *"Note: `--deep` requested but rationale is thin (most working-set nodes have no usable rationale). Falling back to single-pass — researchers would have nothing to dig into."*
 - Otherwise continue.
 
 **2b. Pick dimensions based on impact size.**
@@ -108,6 +110,7 @@ RESEARCHER REPORTS:
 | Symbol | Location | Rationale confidence |
 |---|---|---|
 | `qualified.name` | path/to/file.py:LN-LN | 0.7 |
+| `qualified.other` | path/to/other.py:LN-LN | — |
 | ... | ... | ... |
 
 ## Blockers

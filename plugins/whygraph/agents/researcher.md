@@ -43,7 +43,7 @@ Apply the lens that matches your `DIMENSION`:
 - *Question:* which constraints and risks from the rationale does this change endanger?
 - Surface every `constraint` from the cards verbatim. For each, judge whether the user's task is likely to violate it.
 - Surface every `risk` from the cards verbatim. Prioritise ones the change is likely to trigger.
-- Treat low-confidence cards (`< 0.4`) as hints, not directives — note that explicitly when you cite them.
+- Treat low-confidence cards (`< 0.4`) as hints, not directives — note that explicitly when you cite them. Cards with null/missing confidence count as low.
 
 ### test-gaps
 - *Question:* what test coverage exists for the affected symbols, and where are the gaps?

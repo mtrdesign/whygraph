@@ -40,7 +40,7 @@ Read, Grep, Glob, Bash — for spot-checking only. You do **not** have MCP tools
 
 ## Process
 
-**1. Reconstruct the working set table** from cards mentioned across the researcher reports. Each researcher cites symbols by `qualified_name`/`file:line` — collate the union into the **Working set** table. Confidence values come from the cards (researchers should have surfaced them when relevant).
+**1. Reconstruct the working set table** from cards mentioned across the researcher reports. Each researcher cites symbols by `qualified_name`/`file:line` — collate the union into the **Working set** table. Confidence values come from the cards (researchers should have surfaced them when relevant). Display null/missing confidence as `—`, never invent a numeric value.
 
 **2. Identify Blockers.** Scan the `risk` report for any constraint cited verbatim that the task description appears to violate. If you find one, hoist it into the **Blockers** section. Otherwise omit the section entirely — never include an empty placeholder.
 

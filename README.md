@@ -43,9 +43,9 @@ Both accept `target` (CodeGraph node ID or `qualified_name`) and `response_forma
 | `CODEGRAPH_DB` | walk-up search for `.codegraph/codegraph.db` | Path to the CodeGraph SQLite DB. |
 | `WHYGRAPH_DB` | walk-up search → `<repo>/.whygraph/whygraph.db` | Where WhyGraph stores its evidence + rationale cache. |
 | `WHYGRAPH_MODEL` | `claude-sonnet-4-6` | Model used when generating rationale. |
-| `WHYGRAPH_RATIONALE_BACKEND` | `claude_cli` (or `api` if `ANTHROPIC_API_KEY` is set) | `claude_cli` spawns the local `claude` CLI (uses your Pro/Max plan via OAuth). `api` calls the Anthropic API directly. |
+| `WHYGRAPH_RATIONALE_BACKEND` | `claude_cli` | `claude_cli` spawns the local `claude` CLI (uses your Pro/Max plan via OAuth). `api` calls the Anthropic API directly — opt in explicitly with `WHYGRAPH_RATIONALE_BACKEND=api`. |
 | `WHYGRAPH_EVIDENCE_TTL_DAYS` | `14` | How long an evidence bundle stays fresh before recollection. |
-| `ANTHROPIC_API_KEY` | unset | Required iff backend is `api`. Stripped from the child env when backend is `claude_cli` so the CLI falls back to OAuth instead of direct-API billing. |
+| `ANTHROPIC_API_KEY` | unset | Required iff backend is `api`. The presence of this variable alone does NOT switch the backend — that prevented a footgun where a stray key in the env silently routed inference through direct-API billing. Stripped from the child env when backend is `claude_cli` so the CLI falls back to OAuth. |
 
 The `claude_cli` backend is the default because it routes inference through your existing Claude Code session (no separate API billing). MCP sampling — the architecturally correct path for this — is not yet supported by Claude Code (issue [#1785](https://github.com/anthropics/claude-code/issues/1785)). When it lands, an `McpSamplingClient` will slot in cleanly behind the existing `LLMClient` Protocol.
 

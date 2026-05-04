@@ -44,25 +44,30 @@ def test_load_config_defaults_to_claude_cli_backend(tmp_path: Path) -> None:
     assert cfg.evidence_ttl_seconds == DEFAULT_TTL_DAYS * 24 * 60 * 60
 
 
-def test_load_config_picks_api_backend_when_anthropic_api_key_set(
+def test_load_config_key_alone_does_not_switch_to_api(
     tmp_path: Path,
 ) -> None:
+    """ANTHROPIC_API_KEY must NOT auto-promote to the api backend.
+
+    A stray key in the environment was silently switching users to the
+    direct-API billing path; we now require an explicit
+    WHYGRAPH_RATIONALE_BACKEND=api opt-in.
+    """
     cfg = load_config(env={"ANTHROPIC_API_KEY": "sk-test"}, cwd=tmp_path)
-    assert cfg.rationale_backend == "api"
-    assert cfg.anthropic_api_key == "sk-test"
+    assert cfg.rationale_backend == "claude_cli"
+    assert cfg.anthropic_api_key == "sk-test"  # still captured for `api` use
 
 
-def test_load_config_explicit_backend_overrides_key_presence(
-    tmp_path: Path,
-) -> None:
+def test_load_config_explicit_api_with_key(tmp_path: Path) -> None:
     cfg = load_config(
         env={
             "ANTHROPIC_API_KEY": "sk-test",
-            "WHYGRAPH_RATIONALE_BACKEND": "claude_cli",
+            "WHYGRAPH_RATIONALE_BACKEND": "api",
         },
         cwd=tmp_path,
     )
-    assert cfg.rationale_backend == "claude_cli"
+    assert cfg.rationale_backend == "api"
+    assert cfg.anthropic_api_key == "sk-test"
 
 
 def test_load_config_explicit_api_backend(tmp_path: Path) -> None:

@@ -80,9 +80,11 @@ def load_config(
     backend_env = e.get("WHYGRAPH_RATIONALE_BACKEND")
     if backend_env in ("api", "claude_cli"):
         backend: RationaleBackend = backend_env  # type: ignore[assignment]
-    elif api_key:
-        backend = "api"
     else:
+        # Default unconditionally to claude_cli so a stray ANTHROPIC_API_KEY
+        # in the env doesn't silently switch the backend (and start billing
+        # the user's API account). Opt in to the SDK path via
+        # WHYGRAPH_RATIONALE_BACKEND=api.
         backend = "claude_cli"
 
     return Config(

@@ -259,7 +259,13 @@ def test_factory_returns_sdk_for_api_backend(
         "whygraph.rationale.anthropic.Anthropic",
         lambda *, api_key: SimpleNamespace(messages=SimpleNamespace()),
     )
-    config = load_config(env={"ANTHROPIC_API_KEY": "sk-x"}, cwd=tmp_path)
+    config = load_config(
+        env={
+            "ANTHROPIC_API_KEY": "sk-x",
+            "WHYGRAPH_RATIONALE_BACKEND": "api",
+        },
+        cwd=tmp_path,
+    )
     assert config.rationale_backend == "api"
     client = make_llm_client(config)
     assert isinstance(client, AnthropicSdkClient)

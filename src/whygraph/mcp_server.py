@@ -8,7 +8,14 @@ from typing import Any, Literal
 from mcp.server.fastmcp import FastMCP
 
 from whygraph.backend import GraphBackend, SqliteCodegraphBackend, SymbolNode
+from whygraph.cochange.service import (
+    CoChangeService,
+    VolatilityService,
+    cochange_fingerprint,
+    volatility_fingerprint,
+)
 from whygraph.config import Config, load_config
+from whygraph.context import RationaleContext
 from whygraph.db import open_whygraph_db
 from whygraph.evidence.git import GitEvidenceCollector
 from whygraph.evidence.github import GitHubEvidenceCollector
@@ -16,7 +23,6 @@ from whygraph.evidence.service import EvidenceService
 from whygraph.evidence.store import EvidenceStore
 from whygraph.evidence.types import CollectionResult
 from whygraph.neighbors import (
-    RationaleNeighbors,
     collect_neighbors,
     combine_bundle_hash,
     neighbor_fingerprint,
@@ -43,6 +49,8 @@ class _Deps:
     conn: sqlite3.Connection
     evidence_service: EvidenceService
     rationale_service: RationaleService
+    cochange_service: CoChangeService
+    volatility_service: VolatilityService
     model: str
 
     def close(self) -> None:
@@ -85,11 +93,15 @@ def _resolve_deps(config: Config) -> _Deps:
         make_llm_client(config),
         model=config.model,
     )
+    cochange_service = CoChangeService(conn, config.repo_root)
+    volatility_service = VolatilityService(config.repo_root)
     return _Deps(
         backend=backend,
         conn=conn,
         evidence_service=evidence_service,
         rationale_service=rationale_service,
+        cochange_service=cochange_service,
+        volatility_service=volatility_service,
         model=config.model,
     )
 
@@ -179,8 +191,10 @@ def _rationale_payload(
     collection: CollectionResult,
     record: RationaleRecord,
     source: str,
-    neighbors: RationaleNeighbors,
+    context: RationaleContext,
 ) -> dict[str, Any]:
+    neighbors = context.neighbors
+    volatility = context.volatility
     return {
         "qualified_name": node.qualified_name,
         "kind": node.kind,
@@ -199,6 +213,12 @@ def _rationale_payload(
         "risks": record.risks,
         "caller_count": len(neighbors.callers) + neighbors.truncated_callers,
         "callee_count": len(neighbors.callees) + neighbors.truncated_callees,
+        "cochange_count": len(context.cochange.neighbors),
+        "volatility": {
+            "commits_total": volatility.commits_total,
+            "commits_90d": volatility.commits_90d,
+            "days_since_last_change": volatility.days_since_last_change,
+        },
     }
 
 
@@ -206,12 +226,34 @@ def _bullets(items: list[str]) -> list[str]:
     return ["_(none)_"] if not items else [f"- {item}" for item in items]
 
 
-def _format_context_line(neighbors: RationaleNeighbors) -> str:
+def _format_context_line(context: RationaleContext) -> str:
+    neighbors = context.neighbors
     caller_total = len(neighbors.callers) + neighbors.truncated_callers
     callee_total = len(neighbors.callees) + neighbors.truncated_callees
-    if caller_total == 0 and callee_total == 0:
-        return "- **Context**: (no callers or callees)"
-    return f"- **Context**: {caller_total} caller(s), {callee_total} callee(s)"
+    cochange_total = len(context.cochange.neighbors)
+    if caller_total == 0 and callee_total == 0 and cochange_total == 0:
+        return "- **Context**: (no callers, callees, or co-change signal)"
+    return (
+        f"- **Context**: {caller_total} caller(s), {callee_total} callee(s), "
+        f"{cochange_total} co-change peer(s)"
+    )
+
+
+def _format_volatility_line(context: RationaleContext) -> str:
+    v = context.volatility
+    if v.commits_total == 0:
+        return "- **Volatility**: (no git history)"
+    days = v.days_since_last_change
+    if days is None:
+        last = "unknown"
+    elif days == 0:
+        last = "today"
+    else:
+        last = f"{days}d ago"
+    return (
+        f"- **Volatility**: {v.commits_total} commit(s), "
+        f"{v.commits_90d} in last 90d, last touched {last}"
+    )
 
 
 def format_rationale_markdown(
@@ -219,7 +261,7 @@ def format_rationale_markdown(
     collection: CollectionResult,
     record: RationaleRecord,
     source: str,
-    neighbors: RationaleNeighbors,
+    context: RationaleContext,
 ) -> str:
     lines = [
         f"# Rationale: `{node.qualified_name}`",
@@ -231,7 +273,8 @@ def format_rationale_markdown(
             f"- **Rationale**: {source} · **Evidence**: {collection.source} "
             f"(bundle {record.bundle_hash[:12]})"
         ),
-        _format_context_line(neighbors),
+        _format_context_line(context),
+        _format_volatility_line(context),
         "",
         "## Purpose",
         record.purpose or "_(none)_",
@@ -313,19 +356,27 @@ def rationale_pre_edit_brief(
             f"history ({node.file_path})."
         )
     neighbors = collect_neighbors(deps.backend, node.id)
+    cochange = deps.cochange_service.report_for(node.file_path)
+    volatility = deps.volatility_service.report_for(node.file_path)
+    context = RationaleContext(
+        neighbors=neighbors, cochange=cochange, volatility=volatility
+    )
     combined_hash = combine_bundle_hash(
-        collection.bundle_hash, neighbor_fingerprint(neighbors)
+        collection.bundle_hash,
+        neighbor_fingerprint(neighbors),
+        cochange_fingerprint(cochange),
+        volatility_fingerprint(volatility),
     )
     record, source = deps.rationale_service.get_or_generate(
         node,
         collection.evidence,
-        neighbors,
+        context,
         combined_hash,
         force=force or refresh_evidence,
     )
     if response_format == "json":
-        return _rationale_payload(node, collection, record, source, neighbors)
-    return format_rationale_markdown(node, collection, record, source, neighbors)
+        return _rationale_payload(node, collection, record, source, context)
+    return format_rationale_markdown(node, collection, record, source, context)
 
 
 def main() -> None:

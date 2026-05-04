@@ -6,8 +6,10 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from whygraph.backend import SymbolNode
+from whygraph.cochange.service import MIN_COMMITS_FOR_DISPLAY
+from whygraph.cochange.types import CoChangeReport, VolatilityReport
+from whygraph.context import RationaleContext
 from whygraph.evidence.types import EvidenceRecord
-from whygraph.neighbors import RationaleNeighbors
 
 # Bump whenever SYSTEM_PROMPT, Rationale schema, or build_user_prompt
 # changes in a way that should invalidate cached rationale.
@@ -16,7 +18,9 @@ from whygraph.neighbors import RationaleNeighbors
 #            claude_cli backend (no output_config) produces the right shape.
 #   v3 → v4: added Callers / Callees structural-context sections; added the
 #            "structural context, not evidence" guideline to SYSTEM_PROMPT.
-PROMPT_VERSION = "v4"
+#   v4 → v5: added Co-evolves with + Volatility sections (git-derived
+#            signals); build_user_prompt now takes a RationaleContext.
+PROMPT_VERSION = "v5"
 
 
 class Rationale(BaseModel):
@@ -63,6 +67,8 @@ Guidelines:
 - For constraints / tradeoffs / risks: only include items you can defend from the evidence. An empty array is the correct answer when there's no signal.
 - Keep each list entry to one or two sentences. Keep "purpose" to one sentence and "why" to one short paragraph.
 - Use the Callers / Callees sections (when present) to reason about blast radius and consumer-facing constraints — but treat them as structural context, not as evidence in their own right. Don't claim a constraint exists just because a caller exists; cite commit/PR evidence for the claim itself.
+- The "Co-evolves with" section lists files historically modified in the same commits as the target. Treat as evidence of intent coupling — useful for "constraints" and "risks" — but cite the underlying commits/PRs when making specific claims, not the raw co-change percentage.
+- The "Volatility" section indicates whether this code is stable or actively churning. Calibrate confidence accordingly: a single recent commit is thin history; many recent commits across multiple authors signals an active design that may not be settled.
 
 Output a JSON object with this exact shape (and no other fields, prose, or markdown formatting):
 
@@ -124,11 +130,66 @@ def _neighbor_section_header(
     return f"{label} ({included} — {relation} {target_qname}):"
 
 
+def _format_cochange_section(report: CoChangeReport) -> list[str]:
+    if (
+        report.commits_considered < MIN_COMMITS_FOR_DISPLAY
+        or not report.neighbors
+    ):
+        return []
+    if report.truncated > 0:
+        total = len(report.neighbors) + report.truncated
+        header = (
+            f"Co-evolves with (top {len(report.neighbors)} of {total} — "
+            f"files modified in the same commits as {report.target_file}):"
+        )
+    else:
+        header = (
+            f"Co-evolves with ({len(report.neighbors)} — files modified in "
+            f"the same commits as {report.target_file}):"
+        )
+    lines: list[str] = ["", header]
+    for n in report.neighbors:
+        pct = round(n.percent)
+        lines.append(
+            f"  {pct:3d}%  ({n.cochange_count}/{n.target_commits_total})  "
+            f"{n.file_path}"
+        )
+    return lines
+
+
+def _format_volatility_section(report: VolatilityReport) -> list[str]:
+    if report.commits_total == 0:
+        return []
+    if report.days_since_last_change is None:
+        last = "unknown"
+    elif report.days_since_last_change == 0:
+        last = "today"
+    elif report.days_since_last_change == 1:
+        last = "1 day ago"
+    else:
+        last = f"{report.days_since_last_change} days ago"
+    author_word = "author" if report.distinct_authors == 1 else "authors"
+    return [
+        "",
+        "Volatility (this file, all-time):",
+        (
+            f"  Last changed: {last} — {report.commits_total} "
+            f"commit(s) total — {report.distinct_authors} distinct {author_word}"
+        ),
+        (
+            f"  Recent: {report.commits_90d} in last 90d, "
+            f"{report.commits_180d} in last 180d, "
+            f"{report.commits_365d} in last 365d"
+        ),
+    ]
+
+
 def build_user_prompt(
     node: SymbolNode,
     evidence: list[EvidenceRecord],
-    neighbors: RationaleNeighbors,
+    context: RationaleContext,
 ) -> str:
+    neighbors = context.neighbors
     lines: list[str] = []
     lines.append(f"Symbol: {node.qualified_name}")
     lines.append(f"Kind: {node.kind}")
@@ -258,5 +319,8 @@ def build_user_prompt(
         for callee in neighbors.callees:
             lines.append("")
             lines.extend(_format_neighbor_block("callee", callee))
+
+    lines.extend(_format_cochange_section(context.cochange))
+    lines.extend(_format_volatility_section(context.volatility))
 
     return "\n".join(lines)

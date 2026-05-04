@@ -52,8 +52,6 @@ Install locally: `/plugin marketplace add /absolute/path/to/whygraph` then `/plu
 
 ## Working principles
 
-Adapted from [andrej-karpathy-skills/EXAMPLES.md](https://github.com/forrestchang/andrej-karpathy-skills/blob/main/EXAMPLES.md). These guide how to approach work in this repo.
-
 ### 1. Think before coding
 
 Surface assumptions before writing code. If a request has multiple plausible interpretations, name them and ask — don't pick silently.

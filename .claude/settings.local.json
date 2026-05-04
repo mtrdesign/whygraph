@@ -38,7 +38,15 @@
       "Bash(curl -sf https://api.github.com/repos/colbymchenry/codegraph/contents/src/extraction/languages)",
       "Bash(curl -sf https://api.github.com/repos/colbymchenry/codegraph/contents/src/extraction/wasm)",
       "Bash(git *)",
-      "Bash(gh api *)"
+      "Bash(gh api *)",
+      "WebSearch",
+      "Bash(gh issue *)",
+      "Read(//Users/tsvetoslav.nikolov/.claude/plans/**)",
+      "Read(//Users/tsvetoslav.nikolov/.claude/**)",
+      "Bash(SSL_CERT_FILE= uv run *)",
+      "Bash(SSL_CERT_FILE= timeout 2 uv run whygraph-mcp)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(SSL_CERT_FILE= uv sync *)"
     ]
   }
 }

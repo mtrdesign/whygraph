@@ -42,7 +42,12 @@ Apply it like this:
 - **Low confidence (< 0.4)**: treat the brief as a hint, not a directive — verify against the code itself.
 - **High confidence (≥ 0.7)**: weight it heavily; it's well-supported by history.
 
-If the tool returns `isError: true` with a "no evidence" message, the project hasn't been ingested into WhyGraph yet. Tell the user to run `whygraph ingest` and proceed with the edit using your own judgment.
+If the tool returns `isError: true`, the cause is one of:
+- **No CodeGraph DB in this project** — surface the error verbatim; the user needs to index the project with CodeGraph first (WhyGraph reads from CodeGraph's SQLite).
+- **Symbol not found in CodeGraph** — likely a stale graph or a symbol added since the last index.
+- **No git history for the file** — brand-new code with nothing to summarise.
+
+In every case, proceed with the edit using your own judgment after flagging the cause to the user. WhyGraph collects evidence lazily on demand, so there's no separate "ingest" step to run.
 
 ## When to also call `whygraph_evidence_for`
 

@@ -16,6 +16,7 @@ from pydantic import BaseModel, ValidationError
 from whygraph.backend import SymbolNode
 from whygraph.config import Config
 from whygraph.evidence.types import EvidenceRecord
+from whygraph.neighbors import RationaleNeighbors
 from whygraph.prompts import PROMPT_VERSION, Rationale, build_user_prompt, SYSTEM_PROMPT
 
 
@@ -475,6 +476,7 @@ class RationaleService:
         self,
         node: SymbolNode,
         evidence: list[EvidenceRecord],
+        neighbors: RationaleNeighbors,
         bundle_hash: str,
         *,
         force: bool = False,
@@ -491,7 +493,7 @@ class RationaleService:
             if cached is not None:
                 return cached, "cached"
 
-        user_prompt = build_user_prompt(node, evidence)
+        user_prompt = build_user_prompt(node, evidence, neighbors)
         result = self._llm.generate(
             system_prompt=SYSTEM_PROMPT,
             user_prompt=user_prompt,

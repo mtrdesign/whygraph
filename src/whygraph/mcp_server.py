@@ -15,6 +15,12 @@ from whygraph.evidence.github import GitHubEvidenceCollector
 from whygraph.evidence.service import EvidenceService
 from whygraph.evidence.store import EvidenceStore
 from whygraph.evidence.types import CollectionResult
+from whygraph.neighbors import (
+    RationaleNeighbors,
+    collect_neighbors,
+    combine_bundle_hash,
+    neighbor_fingerprint,
+)
 from whygraph.rationale import (
     RationaleRecord,
     RationaleService,
@@ -173,6 +179,7 @@ def _rationale_payload(
     collection: CollectionResult,
     record: RationaleRecord,
     source: str,
+    neighbors: RationaleNeighbors,
 ) -> dict[str, Any]:
     return {
         "qualified_name": node.qualified_name,
@@ -190,6 +197,8 @@ def _rationale_payload(
         "constraints": record.constraints,
         "tradeoffs": record.tradeoffs,
         "risks": record.risks,
+        "caller_count": len(neighbors.callers) + neighbors.truncated_callers,
+        "callee_count": len(neighbors.callees) + neighbors.truncated_callees,
     }
 
 
@@ -197,11 +206,20 @@ def _bullets(items: list[str]) -> list[str]:
     return ["_(none)_"] if not items else [f"- {item}" for item in items]
 
 
+def _format_context_line(neighbors: RationaleNeighbors) -> str:
+    caller_total = len(neighbors.callers) + neighbors.truncated_callers
+    callee_total = len(neighbors.callees) + neighbors.truncated_callees
+    if caller_total == 0 and callee_total == 0:
+        return "- **Context**: (no callers or callees)"
+    return f"- **Context**: {caller_total} caller(s), {callee_total} callee(s)"
+
+
 def format_rationale_markdown(
     node: SymbolNode,
     collection: CollectionResult,
     record: RationaleRecord,
     source: str,
+    neighbors: RationaleNeighbors,
 ) -> str:
     lines = [
         f"# Rationale: `{node.qualified_name}`",
@@ -213,6 +231,7 @@ def format_rationale_markdown(
             f"- **Rationale**: {source} · **Evidence**: {collection.source} "
             f"(bundle {record.bundle_hash[:12]})"
         ),
+        _format_context_line(neighbors),
         "",
         "## Purpose",
         record.purpose or "_(none)_",
@@ -293,15 +312,20 @@ def rationale_pre_edit_brief(
             f"No evidence for {node.qualified_name}: file has no git "
             f"history ({node.file_path})."
         )
+    neighbors = collect_neighbors(deps.backend, node.id)
+    combined_hash = combine_bundle_hash(
+        collection.bundle_hash, neighbor_fingerprint(neighbors)
+    )
     record, source = deps.rationale_service.get_or_generate(
         node,
         collection.evidence,
-        collection.bundle_hash,
+        neighbors,
+        combined_hash,
         force=force or refresh_evidence,
     )
     if response_format == "json":
-        return _rationale_payload(node, collection, record, source)
-    return format_rationale_markdown(node, collection, record, source)
+        return _rationale_payload(node, collection, record, source, neighbors)
+    return format_rationale_markdown(node, collection, record, source, neighbors)
 
 
 def main() -> None:

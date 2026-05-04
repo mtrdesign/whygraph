@@ -41,9 +41,11 @@ class _CountingLLM:
     def __init__(self, rationale: Rationale = _RAT) -> None:
         self.rationale = rationale
         self.calls = 0
+        self.last_user_prompt = ""
 
     def generate(self, *, system_prompt: str, user_prompt: str, schema=None) -> LLMResult:
         self.calls += 1
+        self.last_user_prompt = user_prompt
         return LLMResult(
             rationale=self.rationale,
             model="m",
@@ -90,6 +92,8 @@ def test_rationale_first_call_generates(
     assert result["model"] == "test-model"
     assert "cache_key" in result
     assert "confidence" not in result  # v1 deviation
+    assert result["caller_count"] == 0  # _setup builds with edges=[]
+    assert result["callee_count"] == 0
     assert llm.calls == 1
 
 
@@ -178,6 +182,7 @@ def test_rationale_markdown_format_omits_confidence(
 def test_rationale_markdown_renders_empty_lists_as_none() -> None:
     from whygraph.backend import SymbolNode
     from whygraph.evidence.types import CollectionResult
+    from whygraph.neighbors import RationaleNeighbors
     from whygraph.rationale import RationaleRecord, cache_key
 
     node = SymbolNode(
@@ -212,8 +217,11 @@ def test_rationale_markdown_renders_empty_lists_as_none() -> None:
         generated_at=0,
         cache_key=cache_key("pkg.x", "src/x.py", PROMPT_VERSION, "m", "0" * 64),
     )
-    text = format_rationale_markdown(node, collection, record, "cached")
-    # All five sections fall back to _(none)_.
+    no_neighbors = RationaleNeighbors([], [], 0, 0)
+    text = format_rationale_markdown(node, collection, record, "cached", no_neighbors)
+    # All five rationale sections fall back to _(none)_; the new Context
+    # line uses "(no callers or callees)" — different sentinel, doesn't bump
+    # the count.
     assert text.count("_(none)_") == 5
 
 
@@ -224,3 +232,99 @@ def test_both_tools_are_registered() -> None:
     names = {t.name for t in tools}
     assert "whygraph_evidence_for" in names
     assert "whygraph_rationale_pre_edit_brief" in names
+
+
+# ---------------------------------------------------------------------------
+# Neighbor enrichment (v4 prompt) — flow-through + cache invalidation.
+# ---------------------------------------------------------------------------
+
+
+def _setup_with_caller(
+    init_git_repo,
+    git_commit,
+    codegraph_db_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    caller_signature: str,
+):
+    """Like _setup, but seeds CodeGraph with a caller node + 'calls' edge."""
+    repo = init_git_repo()
+    git_commit(repo, "src/a.py", "l1\nl2\nl3\n", message="init")
+
+    target = _node_dict("src/a.py", "pkg.a", "n_a")
+    caller = _node_dict("src/caller.py", "pkg.special_caller", "n_c")
+    caller["signature"] = caller_signature
+
+    cg_path = codegraph_db_factory(
+        nodes=[target, caller],
+        edges=[("n_c", "n_a", "calls")],
+    )
+    monkeypatch.setenv("CODEGRAPH_DB", str(cg_path))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("WHYGRAPH_DB", raising=False)
+    monkeypatch.setenv("WHYGRAPH_MODEL", "test-model")
+    monkeypatch.chdir(repo)
+
+    llm = _CountingLLM()
+    monkeypatch.setattr(
+        "whygraph.mcp_server.make_llm_client", lambda config: llm
+    )
+    return repo, llm
+
+
+def test_rationale_prompt_includes_caller_qualified_name(
+    init_git_repo, git_commit, codegraph_db_factory, monkeypatch
+) -> None:
+    _, llm = _setup_with_caller(
+        init_git_repo,
+        git_commit,
+        codegraph_db_factory,
+        monkeypatch,
+        caller_signature="def special_caller()",
+    )
+    result = rationale_pre_edit_brief(target="pkg.a", response_format="json")
+    assert result["caller_count"] == 1
+    assert "pkg.special_caller" in llm.last_user_prompt
+    assert "Callers (1" in llm.last_user_prompt
+
+
+def test_rationale_invalidates_when_caller_signature_changes(
+    init_git_repo, git_commit, codegraph_db_factory, monkeypatch
+) -> None:
+    """A meaningful change to a caller's signature should bust the cache.
+
+    Mechanism: collect_neighbors picks up the new signature; neighbor
+    fingerprint changes; combine_bundle_hash returns a different combined
+    hash; rationale store lookup misses; LLM is called again.
+    """
+    from whygraph import mcp_server
+
+    repo, llm = _setup_with_caller(
+        init_git_repo,
+        git_commit,
+        codegraph_db_factory,
+        monkeypatch,
+        caller_signature="def special_caller()",
+    )
+    first = rationale_pre_edit_brief(target="pkg.a", response_format="json")
+    assert first["source"] == "generated"
+    assert llm.calls == 1
+
+    # Swap to a CodeGraph DB where the caller signature differs. Need to
+    # close + reopen the backend so the cached deps pick up the new path.
+    mcp_server._reset_deps()
+    target = _node_dict("src/a.py", "pkg.a", "n_a")
+    caller_v2 = _node_dict("src/caller.py", "pkg.special_caller", "n_c")
+    caller_v2["signature"] = "def special_caller(x: int)"
+    cg_v2 = codegraph_db_factory(
+        nodes=[target, caller_v2],
+        edges=[("n_c", "n_a", "calls")],
+    )
+    monkeypatch.setenv("CODEGRAPH_DB", str(cg_v2))
+
+    second = rationale_pre_edit_brief(target="pkg.a", response_format="json")
+    assert second["source"] == "generated"
+    assert llm.calls == 2
+    assert second["bundle_hash"] != first["bundle_hash"]
+    # New caller signature is in the new prompt.
+    assert "def special_caller(x: int)" in llm.last_user_prompt

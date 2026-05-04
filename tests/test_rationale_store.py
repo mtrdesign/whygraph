@@ -7,6 +7,7 @@ import pytest
 from whygraph.backend import SymbolNode
 from whygraph.db import open_whygraph_db
 from whygraph.evidence.types import EvidenceRecord
+from whygraph.neighbors import RationaleNeighbors
 from whygraph.prompts import PROMPT_VERSION, Rationale
 from whygraph.rationale import (
     LLMResult,
@@ -15,6 +16,8 @@ from whygraph.rationale import (
     RationaleStore,
     cache_key,
 )
+
+_NO_NEIGHBORS = RationaleNeighbors(callers=[], callees=[], truncated_callers=0, truncated_callees=0)
 
 
 _RAT = Rationale(
@@ -342,7 +345,7 @@ def _service(tmp_path: Path, llm: _FakeLLM | None = None) -> tuple[RationaleServ
 
 def test_service_first_call_generates(tmp_path: Path) -> None:
     service, fake = _service(tmp_path)
-    rec, source = service.get_or_generate(_node(), [], "b1")
+    rec, source = service.get_or_generate(_node(), [], _NO_NEIGHBORS, "b1")
     assert source == "generated"
     assert rec.bundle_hash == "b1"
     assert rec.purpose == _RAT.purpose
@@ -351,8 +354,8 @@ def test_service_first_call_generates(tmp_path: Path) -> None:
 
 def test_service_second_call_is_cached(tmp_path: Path) -> None:
     service, fake = _service(tmp_path)
-    service.get_or_generate(_node(), [], "b1")
-    rec, source = service.get_or_generate(_node(), [], "b1")
+    service.get_or_generate(_node(), [], _NO_NEIGHBORS, "b1")
+    rec, source = service.get_or_generate(_node(), [], _NO_NEIGHBORS, "b1")
     assert source == "cached"
     assert len(fake.calls) == 1  # LLM not called again
     assert rec.bundle_hash == "b1"
@@ -360,16 +363,16 @@ def test_service_second_call_is_cached(tmp_path: Path) -> None:
 
 def test_service_force_bypasses_cache(tmp_path: Path) -> None:
     service, fake = _service(tmp_path)
-    service.get_or_generate(_node(), [], "b1")
-    _, source = service.get_or_generate(_node(), [], "b1", force=True)
+    service.get_or_generate(_node(), [], _NO_NEIGHBORS, "b1")
+    _, source = service.get_or_generate(_node(), [], _NO_NEIGHBORS, "b1", force=True)
     assert source == "generated"
     assert len(fake.calls) == 2
 
 
 def test_service_bundle_hash_change_invalidates_cache(tmp_path: Path) -> None:
     service, fake = _service(tmp_path)
-    service.get_or_generate(_node(), [], "b1")
-    _, source = service.get_or_generate(_node(), [], "b2")
+    service.get_or_generate(_node(), [], _NO_NEIGHBORS, "b1")
+    _, source = service.get_or_generate(_node(), [], _NO_NEIGHBORS, "b2")
     assert source == "generated"
     assert len(fake.calls) == 2
 
@@ -387,7 +390,7 @@ def test_service_passes_user_prompt_to_llm(tmp_path: Path) -> None:
             collected_at=0,
         )
     ]
-    service.get_or_generate(_node(), evidence, "b1")
+    service.get_or_generate(_node(), evidence, _NO_NEIGHBORS, "b1")
     user = fake.calls[0]["user"]
     assert "Symbol: pkg.a" in user
     assert "fix bug" in user
@@ -395,5 +398,5 @@ def test_service_passes_user_prompt_to_llm(tmp_path: Path) -> None:
 
 def test_service_uses_stored_now_for_generated_at(tmp_path: Path) -> None:
     service, _ = _service(tmp_path)
-    rec, _ = service.get_or_generate(_node(), [], "b1")
+    rec, _ = service.get_or_generate(_node(), [], _NO_NEIGHBORS, "b1")
     assert rec.generated_at == 1000

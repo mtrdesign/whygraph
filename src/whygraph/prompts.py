@@ -7,13 +7,16 @@ from pydantic import BaseModel, Field
 
 from whygraph.backend import SymbolNode
 from whygraph.evidence.types import EvidenceRecord
+from whygraph.neighbors import RationaleNeighbors
 
 # Bump whenever SYSTEM_PROMPT, Rationale schema, or build_user_prompt
 # changes in a way that should invalidate cached rationale.
 #   v1 → v2: added PR + issue evidence formatting.
 #   v2 → v3: inlined the JSON output schema in SYSTEM_PROMPT so the
 #            claude_cli backend (no output_config) produces the right shape.
-PROMPT_VERSION = "v3"
+#   v3 → v4: added Callers / Callees structural-context sections; added the
+#            "structural context, not evidence" guideline to SYSTEM_PROMPT.
+PROMPT_VERSION = "v4"
 
 
 class Rationale(BaseModel):
@@ -59,6 +62,7 @@ Guidelines:
 - Prefer the language of the original commits over your own paraphrasing.
 - For constraints / tradeoffs / risks: only include items you can defend from the evidence. An empty array is the correct answer when there's no signal.
 - Keep each list entry to one or two sentences. Keep "purpose" to one sentence and "why" to one short paragraph.
+- Use the Callers / Callees sections (when present) to reason about blast radius and consumer-facing constraints — but treat them as structural context, not as evidence in their own right. Don't claim a constraint exists just because a caller exists; cite commit/PR evidence for the claim itself.
 
 Output a JSON object with this exact shape (and no other fields, prose, or markdown formatting):
 
@@ -100,7 +104,31 @@ def _commit_time(record: EvidenceRecord) -> int:
     return t if isinstance(t, int) else 0
 
 
-def build_user_prompt(node: SymbolNode, evidence: list[EvidenceRecord]) -> str:
+def _format_neighbor_block(label: str, sym: SymbolNode) -> list[str]:
+    lines = [f"  {sym.qualified_name}"]
+    if sym.signature:
+        lines.append(f"    {sym.signature}")
+    if sym.docstring:
+        # Indent each docstring line; trim trailing whitespace per line.
+        for doc_line in sym.docstring.splitlines():
+            lines.append(f"    {doc_line.rstrip()}")
+    return lines
+
+
+def _neighbor_section_header(
+    label: str, included: int, truncated: int, target_qname: str, relation: str
+) -> str:
+    if truncated > 0:
+        total = included + truncated
+        return f"{label} ({included} of {total} — {relation} {target_qname}):"
+    return f"{label} ({included} — {relation} {target_qname}):"
+
+
+def build_user_prompt(
+    node: SymbolNode,
+    evidence: list[EvidenceRecord],
+    neighbors: RationaleNeighbors,
+) -> str:
     lines: list[str] = []
     lines.append(f"Symbol: {node.qualified_name}")
     lines.append(f"Kind: {node.kind}")
@@ -200,5 +228,35 @@ def build_user_prompt(node: SymbolNode, evidence: list[EvidenceRecord]) -> str:
             line_total = p.get("line_total") or 0
             summary = p.get("summary") or ""
             lines.append(f"  {sha}  {line_count}/{line_total} lines  — {summary}")
+
+    if neighbors.callers:
+        lines.append("")
+        lines.append(
+            _neighbor_section_header(
+                "Callers",
+                len(neighbors.callers),
+                neighbors.truncated_callers,
+                node.qualified_name,
+                "symbols that call",
+            )
+        )
+        for caller in neighbors.callers:
+            lines.append("")
+            lines.extend(_format_neighbor_block("caller", caller))
+
+    if neighbors.callees:
+        lines.append("")
+        lines.append(
+            _neighbor_section_header(
+                "Callees",
+                len(neighbors.callees),
+                neighbors.truncated_callees,
+                node.qualified_name,
+                "symbols called by",
+            )
+        )
+        for callee in neighbors.callees:
+            lines.append("")
+            lines.extend(_format_neighbor_block("callee", callee))
 
     return "\n".join(lines)

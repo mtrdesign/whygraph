@@ -4,7 +4,7 @@ Rationale layer over [CodeGraph](https://github.com/colbymchenry/codegraph): exp
 
 For each symbol, WhyGraph collects evidence from git history, GitHub, tests, and code comments, then generates a rationale (purpose, constraints, tradeoffs, risks) with a deterministic confidence score. Exposed to Claude Code via MCP so AI assistants can read the *intent* behind code before editing it.
 
-> **Status:** v1.x rewrite in progress — both MCP tools (`whygraph_evidence_for` and `whygraph_rationale_pre_edit_brief`) are functional, backed by a `GraphBackend` abstraction with `SqliteCodegraphBackend` as the first implementation. Slash command (`/whygraph-plan`) and planner subagent are still ahead. The TS POC lives on [`main`](https://github.com/cvetty/whygraph/tree/main).
+> **Status:** v1.x in progress — both MCP tools (`whygraph_evidence_for` and `whygraph_rationale_pre_edit_brief`) are functional, backed by a `GraphBackend` abstraction with `SqliteCodegraphBackend` as the first implementation. Slash command (`/whygraph-plan`) and planner subagent are still ahead.
 
 ## Layout
 

@@ -67,6 +67,22 @@ CREATE TABLE IF NOT EXISTS ingest_runs (
     errors TEXT
 );
 
+-- Per-commit file-list cache shared across symbols. Commits are immutable, so
+-- a row never needs invalidation. Populated on demand by CoChangeService;
+-- presence in commit_cache_meta is the "is this sha cached" marker (commits
+-- with zero files would otherwise look uncached forever).
+CREATE TABLE IF NOT EXISTS commit_files (
+    commit_sha TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    PRIMARY KEY (commit_sha, file_path)
+);
+CREATE INDEX IF NOT EXISTS idx_commit_files_path ON commit_files(file_path);
+
+CREATE TABLE IF NOT EXISTS commit_cache_meta (
+    commit_sha TEXT PRIMARY KEY,
+    cached_at INTEGER NOT NULL
+);
+
 INSERT OR IGNORE INTO schema_version (version, applied_at)
 VALUES (1, strftime('%s', 'now') * 1000);
 """

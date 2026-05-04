@@ -181,6 +181,8 @@ def test_rationale_markdown_format_omits_confidence(
 
 def test_rationale_markdown_renders_empty_lists_as_none() -> None:
     from whygraph.backend import SymbolNode
+    from whygraph.cochange.types import CoChangeReport, VolatilityReport
+    from whygraph.context import RationaleContext
     from whygraph.evidence.types import CollectionResult
     from whygraph.neighbors import RationaleNeighbors
     from whygraph.rationale import RationaleRecord, cache_key
@@ -217,11 +219,29 @@ def test_rationale_markdown_renders_empty_lists_as_none() -> None:
         generated_at=0,
         cache_key=cache_key("pkg.x", "src/x.py", PROMPT_VERSION, "m", "0" * 64),
     )
-    no_neighbors = RationaleNeighbors([], [], 0, 0)
-    text = format_rationale_markdown(node, collection, record, "cached", no_neighbors)
-    # All five rationale sections fall back to _(none)_; the new Context
-    # line uses "(no callers or callees)" — different sentinel, doesn't bump
-    # the count.
+    context = RationaleContext(
+        neighbors=RationaleNeighbors([], [], 0, 0),
+        cochange=CoChangeReport(
+            target_file="src/x.py",
+            head_sha="",
+            commits_considered=0,
+            neighbors=[],
+            truncated=0,
+        ),
+        volatility=VolatilityReport(
+            target_file="src/x.py",
+            head_sha="",
+            commits_total=0,
+            commits_90d=0,
+            commits_180d=0,
+            commits_365d=0,
+            distinct_authors=0,
+            days_since_last_change=None,
+        ),
+    )
+    text = format_rationale_markdown(node, collection, record, "cached", context)
+    # All five rationale sections fall back to _(none)_; the Context and
+    # Volatility lines use different sentinels, so the count stays at 5.
     assert text.count("_(none)_") == 5
 
 

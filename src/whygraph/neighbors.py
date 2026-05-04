@@ -58,12 +58,18 @@ def neighbor_fingerprint(n: RationaleNeighbors) -> str:
     return h.hexdigest()
 
 
-def combine_bundle_hash(evidence_hash: str, neighbors_hash: str) -> str:
-    """Fold evidence + neighbor fingerprints into a single rationale cache key.
+def combine_bundle_hash(*fingerprints: str) -> str:
+    """Fold N independent fingerprints into a single rationale cache key.
+
+    Order matters and is set by the caller — every signal added to
+    `RationaleContext` should append a fingerprint in a stable position so
+    re-orderings don't mass-invalidate caches.
 
     Kept separate from `compute_bundle_hash` (which hashes raw evidence rows)
-    so the evidence-cache layer never sees neighbor data.
+    so the evidence-cache layer never sees rationale-context data.
     """
-    return hashlib.sha256(
-        f"{evidence_hash}|{neighbors_hash}".encode("utf-8")
-    ).hexdigest()
+    h = hashlib.sha256()
+    for fp in fingerprints:
+        h.update(fp.encode("utf-8"))
+        h.update(b"\n")
+    return h.hexdigest()

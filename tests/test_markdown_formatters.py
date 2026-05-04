@@ -1,13 +1,41 @@
 from __future__ import annotations
 
 from whygraph.backend import SymbolNode
+from whygraph.cochange.types import CoChangeReport, VolatilityReport
+from whygraph.context import RationaleContext
 from whygraph.evidence.types import CollectionResult, EvidenceRecord
 from whygraph.mcp_server import format_evidence_markdown, format_rationale_markdown
 from whygraph.neighbors import RationaleNeighbors
 from whygraph.prompts import PROMPT_VERSION
 from whygraph.rationale import RationaleRecord, cache_key
 
-_NO_NEIGHBORS = RationaleNeighbors(callers=[], callees=[], truncated_callers=0, truncated_callees=0)
+
+def _empty_context(target_file: str = "src/pkg/a.py") -> RationaleContext:
+    return RationaleContext(
+        neighbors=RationaleNeighbors(
+            callers=[], callees=[], truncated_callers=0, truncated_callees=0
+        ),
+        cochange=CoChangeReport(
+            target_file=target_file,
+            head_sha="",
+            commits_considered=0,
+            neighbors=[],
+            truncated=0,
+        ),
+        volatility=VolatilityReport(
+            target_file=target_file,
+            head_sha="",
+            commits_total=0,
+            commits_90d=0,
+            commits_180d=0,
+            commits_365d=0,
+            distinct_authors=0,
+            days_since_last_change=None,
+        ),
+    )
+
+
+_NO_CONTEXT = _empty_context()
 
 
 def _node() -> SymbolNode:
@@ -148,7 +176,7 @@ def test_rationale_markdown_renders_all_sections() -> None:
             risks=["claim shape change"],
         ),
         "cached",
-        _NO_NEIGHBORS,
+        _NO_CONTEXT,
     )
     for header in ("## Purpose", "## Why", "## Constraints", "## Tradeoffs", "## Risks"):
         assert header in text
@@ -158,7 +186,7 @@ def test_rationale_markdown_renders_all_sections() -> None:
 
 def test_rationale_markdown_renders_empty_lists_as_none() -> None:
     text = format_rationale_markdown(
-        _node(), _collection(), _record(), "generated", _NO_NEIGHBORS
+        _node(), _collection(), _record(), "generated", _NO_CONTEXT
     )
     # All five sections fall back to _(none)_ — three empty lists plus
     # purpose/why fall back when empty (tested separately below).
@@ -167,7 +195,7 @@ def test_rationale_markdown_renders_empty_lists_as_none() -> None:
 
 def test_rationale_markdown_renders_empty_purpose_and_why_as_none() -> None:
     text = format_rationale_markdown(
-        _node(), _collection(), _record(purpose="", why=""), "generated", _NO_NEIGHBORS
+        _node(), _collection(), _record(purpose="", why=""), "generated", _NO_CONTEXT
     )
     assert text.count("_(none)_") == 5
 
@@ -175,7 +203,7 @@ def test_rationale_markdown_renders_empty_purpose_and_why_as_none() -> None:
 def test_rationale_markdown_truncates_bundle_hash_to_12() -> None:
     bh = _bundle_hash("feedface00000000")
     text = format_rationale_markdown(
-        _node(), _collection(bundle_hash=bh), _record(bundle_hash=bh), "cached", _NO_NEIGHBORS
+        _node(), _collection(bundle_hash=bh), _record(bundle_hash=bh), "cached", _NO_CONTEXT
     )
     assert "bundle feedface0000" in text
     assert bh not in text
@@ -183,7 +211,7 @@ def test_rationale_markdown_truncates_bundle_hash_to_12() -> None:
 
 def test_rationale_markdown_omits_confidence() -> None:
     text = format_rationale_markdown(
-        _node(), _collection(), _record(), "generated", _NO_NEIGHBORS
+        _node(), _collection(), _record(), "generated", _NO_CONTEXT
     )
     assert "Confidence" not in text
     assert "confidence" not in text
@@ -191,14 +219,14 @@ def test_rationale_markdown_omits_confidence() -> None:
 
 def test_rationale_markdown_includes_source_and_evidence_source() -> None:
     text = format_rationale_markdown(
-        _node(), _collection(source="cache"), _record(), "generated", _NO_NEIGHBORS
+        _node(), _collection(source="cache"), _record(), "generated", _NO_CONTEXT
     )
     assert "**Rationale**: generated · **Evidence**: cache" in text
 
 
 def test_rationale_markdown_includes_model_and_prompt_version() -> None:
     text = format_rationale_markdown(
-        _node(), _collection(), _record(), "generated", _NO_NEIGHBORS
+        _node(), _collection(), _record(), "generated", _NO_CONTEXT
     )
     assert f"**Model**: m (prompt {PROMPT_VERSION})" in text
 
@@ -209,7 +237,7 @@ def test_rationale_markdown_renders_constraints_as_bullets() -> None:
         _collection(),
         _record(constraints=["one", "two", "three"]),
         "generated",
-        _NO_NEIGHBORS,
+        _NO_CONTEXT,
     )
     assert "- one" in text
     assert "- two" in text
@@ -218,9 +246,9 @@ def test_rationale_markdown_renders_constraints_as_bullets() -> None:
 
 def test_rationale_markdown_context_line_zero_neighbors() -> None:
     text = format_rationale_markdown(
-        _node(), _collection(), _record(), "generated", _NO_NEIGHBORS
+        _node(), _collection(), _record(), "generated", _NO_CONTEXT
     )
-    assert "**Context**: (no callers or callees)" in text
+    assert "**Context**: (no callers, callees, or co-change signal)" in text
 
 
 def test_rationale_markdown_context_line_with_neighbors() -> None:
@@ -241,8 +269,42 @@ def test_rationale_markdown_context_line_with_neighbors() -> None:
     neighbors = RationaleNeighbors(
         callers=callers, callees=[], truncated_callers=2, truncated_callees=0
     )
+    context = RationaleContext(
+        neighbors=neighbors,
+        cochange=_NO_CONTEXT.cochange,
+        volatility=_NO_CONTEXT.volatility,
+    )
     text = format_rationale_markdown(
-        _node(), _collection(), _record(), "generated", neighbors
+        _node(), _collection(), _record(), "generated", context
     )
     # Total caller count = 1 shown + 2 truncated.
-    assert "**Context**: 3 caller(s), 0 callee(s)" in text
+    assert "**Context**: 3 caller(s), 0 callee(s), 0 co-change peer(s)" in text
+
+
+def test_rationale_markdown_volatility_line_no_history() -> None:
+    text = format_rationale_markdown(
+        _node(), _collection(), _record(), "generated", _NO_CONTEXT
+    )
+    assert "**Volatility**: (no git history)" in text
+
+
+def test_rationale_markdown_volatility_line_with_history() -> None:
+    vol = VolatilityReport(
+        target_file="src/pkg/a.py",
+        head_sha="h",
+        commits_total=8,
+        commits_90d=3,
+        commits_180d=5,
+        commits_365d=8,
+        distinct_authors=2,
+        days_since_last_change=14,
+    )
+    context = RationaleContext(
+        neighbors=_NO_CONTEXT.neighbors,
+        cochange=_NO_CONTEXT.cochange,
+        volatility=vol,
+    )
+    text = format_rationale_markdown(
+        _node(), _collection(), _record(), "generated", context
+    )
+    assert "**Volatility**: 8 commit(s), 3 in last 90d, last touched 14d ago" in text

@@ -6,7 +6,7 @@ import pytest
 
 from whygraph.backend import SymbolNode
 from whygraph.db import open_whygraph_db
-from whygraph.evidence import EvidenceRecord
+from whygraph.evidence.types import EvidenceRecord
 from whygraph.prompts import PROMPT_VERSION, Rationale
 from whygraph.rationale import (
     LLMResult,

@@ -159,7 +159,7 @@ def test_resolve_symbol_helper_unchanged(fake_codegraph_db) -> None:
 
 def test_format_evidence_markdown_empty_evidence_block(tmp_path: Path) -> None:
     from whygraph.backend import SymbolNode
-    from whygraph.evidence import CollectionResult
+    from whygraph.evidence.types import CollectionResult
 
     node = SymbolNode(
         id="n_x",

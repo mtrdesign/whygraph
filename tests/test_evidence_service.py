@@ -7,12 +7,9 @@ import pytest
 
 from whygraph.backend import SymbolNode
 from whygraph.db import open_whygraph_db
-from whygraph.evidence import (
-    EvidenceRow,
-    EvidenceService,
-    EvidenceStore,
-    compute_bundle_hash,
-)
+from whygraph.evidence.service import EvidenceService
+from whygraph.evidence.store import EvidenceStore
+from whygraph.evidence.types import EvidenceRow, compute_bundle_hash
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +283,7 @@ def test_service_uses_real_git_evidence_when_blame_present(
     tmp_path: Path,
 ) -> None:
     """Sanity: collect_git_evidence is called, not just stub returning []."""
-    from whygraph.evidence import GitBlameEntry, GitCommitInfo
+    from whygraph.evidence.git import GitBlameEntry, GitCommitInfo
 
     conn = open_whygraph_db(tmp_path / "wg.db")
     store = EvidenceStore(conn)

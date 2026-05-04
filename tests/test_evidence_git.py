@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from whygraph.backend import SymbolNode
-from whygraph.evidence import (
+from whygraph.evidence.git import (
     GitEvidenceCollector,
     _parse_line_porcelain,
     collect_git_evidence,
@@ -154,7 +154,7 @@ def test_commit_info_caches(
         calls["n"] += 1
         return real_run(*args, **kwargs)
 
-    monkeypatch.setattr("whygraph.evidence.subprocess.run", counting_run)
+    monkeypatch.setattr("whygraph.evidence.git.subprocess.run", counting_run)
     git.commit_info(sha)
     assert calls["n"] == 0  # served from cache, no subprocess
 

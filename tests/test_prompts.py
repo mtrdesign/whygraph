@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from whygraph.backend import SymbolNode
-from whygraph.evidence import EvidenceRecord
+from whygraph.evidence.types import EvidenceRecord
 from whygraph.prompts import (
     PROMPT_VERSION,
     SYSTEM_PROMPT,

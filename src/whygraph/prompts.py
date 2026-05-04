@@ -6,7 +6,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from whygraph.backend import SymbolNode
-from whygraph.evidence import EvidenceRecord
+from whygraph.evidence.types import EvidenceRecord
 
 # Bump whenever SYSTEM_PROMPT, Rationale schema, or build_user_prompt
 # changes in a way that should invalidate cached rationale.

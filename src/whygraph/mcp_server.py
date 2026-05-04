@@ -10,13 +10,11 @@ from mcp.server.fastmcp import FastMCP
 from whygraph.backend import GraphBackend, SqliteCodegraphBackend, SymbolNode
 from whygraph.config import Config, load_config
 from whygraph.db import open_whygraph_db
-from whygraph.evidence import (
-    CollectionResult,
-    EvidenceService,
-    EvidenceStore,
-    GitEvidenceCollector,
-    GitHubEvidenceCollector,
-)
+from whygraph.evidence.git import GitEvidenceCollector
+from whygraph.evidence.github import GitHubEvidenceCollector
+from whygraph.evidence.service import EvidenceService
+from whygraph.evidence.store import EvidenceStore
+from whygraph.evidence.types import CollectionResult
 from whygraph.rationale import (
     RationaleRecord,
     RationaleService,

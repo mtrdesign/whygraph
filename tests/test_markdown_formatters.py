@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from whygraph.backend import SymbolNode
-from whygraph.evidence import CollectionResult, EvidenceRecord
+from whygraph.evidence.types import CollectionResult, EvidenceRecord
 from whygraph.mcp_server import format_evidence_markdown, format_rationale_markdown
 from whygraph.prompts import PROMPT_VERSION
 from whygraph.rationale import RationaleRecord, cache_key

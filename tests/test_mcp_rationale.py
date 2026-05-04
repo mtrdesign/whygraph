@@ -177,7 +177,7 @@ def test_rationale_markdown_format_omits_confidence(
 
 def test_rationale_markdown_renders_empty_lists_as_none() -> None:
     from whygraph.backend import SymbolNode
-    from whygraph.evidence import CollectionResult
+    from whygraph.evidence.types import CollectionResult
     from whygraph.rationale import RationaleRecord, cache_key
 
     node = SymbolNode(

@@ -15,7 +15,7 @@ from pydantic import BaseModel, ValidationError
 
 from whygraph.backend import SymbolNode
 from whygraph.config import Config
-from whygraph.evidence import EvidenceRecord
+from whygraph.evidence.types import EvidenceRecord
 from whygraph.prompts import PROMPT_VERSION, Rationale, build_user_prompt, SYSTEM_PROMPT
 
 

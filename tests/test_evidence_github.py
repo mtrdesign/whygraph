@@ -7,8 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from whygraph.evidence import (
-    EvidenceRow,
+from whygraph.evidence.github import (
     GitHubEvidenceCollector,
     collect_github_evidence,
     detect_github_repo,
@@ -16,6 +15,7 @@ from whygraph.evidence import (
     parse_github_repo,
     parse_hash_refs,
 )
+from whygraph.evidence.types import EvidenceRow
 
 
 def test_parse_closing_refs_basic() -> None:

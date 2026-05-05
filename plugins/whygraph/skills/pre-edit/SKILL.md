@@ -32,7 +32,7 @@ The tool returns:
 - `constraints[]` — things that must be preserved
 - `tradeoffs[]` — design tradeoffs visible in the history
 - `risks[]` — risks of modification
-- `confidence` — 0 to 1 (capped at 0.85 in v0, since refactor lineage isn't tracked yet)
+- `confidence` — 0 to 0.85 (the ceiling lifts when refactor-lineage detection lands)
 
 Apply it like this:
 

@@ -91,7 +91,9 @@ def test_rationale_first_call_generates(
     assert result["purpose"] == _RAT.purpose
     assert result["model"] == "test-model"
     assert "cache_key" in result
-    assert "confidence" not in result  # v1 deviation
+    assert "confidence" in result
+    assert isinstance(result["confidence"], float)
+    assert 0.0 <= result["confidence"] <= 0.85
     assert result["caller_count"] == 0  # _setup builds with edges=[]
     assert result["callee_count"] == 0
     assert llm.calls == 1
@@ -166,7 +168,7 @@ def test_rationale_unknown_symbol_raises(
         rationale_pre_edit_brief(target="pkg.nope")
 
 
-def test_rationale_markdown_format_omits_confidence(
+def test_rationale_markdown_format_includes_confidence(
     init_git_repo, git_commit, codegraph_db_factory, monkeypatch
 ) -> None:
     _setup(init_git_repo, git_commit, codegraph_db_factory, monkeypatch)
@@ -176,7 +178,8 @@ def test_rationale_markdown_format_omits_confidence(
     assert "## Purpose" in text
     assert "## Why" in text
     assert "## Constraints" in text
-    assert "Confidence" not in text  # v1 deviation
+    assert "**Confidence**:" in text
+    assert "(capped at 0.85)" in text
 
 
 def test_rationale_markdown_renders_empty_lists_as_none() -> None:

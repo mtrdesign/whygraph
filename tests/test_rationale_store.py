@@ -311,7 +311,30 @@ def test_upsert_replaces_existing_row(tmp_path: Path) -> None:
         conn.close()
 
 
-def test_confidence_column_is_null_after_upsert(tmp_path: Path) -> None:
+def test_confidence_defaults_to_null_when_not_supplied(tmp_path: Path) -> None:
+    conn = open_whygraph_db(tmp_path / "wg.db")
+    try:
+        store = RationaleStore(conn)
+        # Backwards compat: callers that don't pass confidence get NULL.
+        store.upsert(
+            qualified_name="pkg.a",
+            file_path="src/a.py",
+            node_id="n_a",
+            bundle_hash="b1",
+            prompt_version="v3",
+            model="m",
+            rationale=_RAT,
+            now=100,
+        )
+        row = conn.execute(
+            "SELECT confidence FROM rationale WHERE node_id = ?", ("n_a",)
+        ).fetchone()
+        assert row["confidence"] is None
+    finally:
+        conn.close()
+
+
+def test_confidence_is_persisted_when_supplied(tmp_path: Path) -> None:
     conn = open_whygraph_db(tmp_path / "wg.db")
     try:
         store = RationaleStore(conn)
@@ -324,6 +347,80 @@ def test_confidence_column_is_null_after_upsert(tmp_path: Path) -> None:
             model="m",
             rationale=_RAT,
             now=100,
+            confidence=0.42,
+        )
+        got = store.get(
+            qualified_name="pkg.a",
+            file_path="src/a.py",
+            node_id="n_a",
+            bundle_hash="b1",
+            prompt_version="v3",
+            model="m",
+        )
+        assert got is not None
+        assert got.confidence == pytest.approx(0.42)
+    finally:
+        conn.close()
+
+
+def test_update_confidence_backfills_null_row(tmp_path: Path) -> None:
+    conn = open_whygraph_db(tmp_path / "wg.db")
+    try:
+        store = RationaleStore(conn)
+        store.upsert(
+            qualified_name="pkg.a",
+            file_path="src/a.py",
+            node_id="n_a",
+            bundle_hash="b1",
+            prompt_version="v3",
+            model="m",
+            rationale=_RAT,
+            now=100,
+        )
+        store.update_confidence(
+            node_id="n_a",
+            bundle_hash="b1",
+            prompt_version="v3",
+            model="m",
+            confidence=0.5,
+        )
+        got = store.get(
+            qualified_name="pkg.a",
+            file_path="src/a.py",
+            node_id="n_a",
+            bundle_hash="b1",
+            prompt_version="v3",
+            model="m",
+        )
+        assert got is not None
+        assert got.confidence == pytest.approx(0.5)
+    finally:
+        conn.close()
+
+
+def test_update_confidence_does_not_touch_stale_bundle(tmp_path: Path) -> None:
+    """A row whose bundle_hash has moved on shouldn't be retroactively scored
+    using stale evidence — update_confidence is scoped to the full content
+    tuple."""
+    conn = open_whygraph_db(tmp_path / "wg.db")
+    try:
+        store = RationaleStore(conn)
+        store.upsert(
+            qualified_name="pkg.a",
+            file_path="src/a.py",
+            node_id="n_a",
+            bundle_hash="b1",
+            prompt_version="v3",
+            model="m",
+            rationale=_RAT,
+            now=100,
+        )
+        store.update_confidence(
+            node_id="n_a",
+            bundle_hash="b2",  # stale match — different bundle
+            prompt_version="v3",
+            model="m",
+            confidence=0.9,
         )
         row = conn.execute(
             "SELECT confidence FROM rationale WHERE node_id = ?", ("n_a",)
@@ -423,3 +520,78 @@ def test_service_uses_stored_now_for_generated_at(tmp_path: Path) -> None:
     service, _ = _service(tmp_path)
     rec, _ = service.get_or_generate(_node(), [], _NO_CONTEXT, "b1")
     assert rec.generated_at == 1000
+
+
+def test_service_writes_confidence_on_generate(tmp_path: Path) -> None:
+    service, _ = _service(tmp_path)
+    rec, source = service.get_or_generate(_node(), [], _NO_CONTEXT, "b1")
+    assert source == "generated"
+    # Empty evidence + the _RAT fixture has constraints + risks → only the
+    # has_rationale_content term fires (0.20). Capped at 0.85 after clamp.
+    assert rec.confidence is not None
+    assert rec.confidence == pytest.approx(0.20 * 0.85)
+
+
+def test_service_backfills_confidence_on_cached_hit(tmp_path: Path) -> None:
+    """Existing NULL-confidence rows (written before scoring landed) get
+    transparently backfilled on the next read."""
+    conn = open_whygraph_db(tmp_path / "wg.db")
+    try:
+        store = RationaleStore(conn)
+        # Simulate a pre-existing row with NULL confidence.
+        store.upsert(
+            qualified_name="pkg.a",
+            file_path="src/a.py",
+            node_id="n_a",
+            bundle_hash="b1",
+            prompt_version=PROMPT_VERSION,
+            model="m",
+            rationale=_RAT,
+            now=100,
+        )
+        evidence = [
+            EvidenceRecord(
+                id=1,
+                node_id="n_a",
+                qualified_name="pkg.a",
+                source="git_commit",
+                ref="abc",
+                payload={"author": "Alice", "subject": "x"},
+                collected_at=0,
+            )
+        ]
+        service = RationaleService(store, _FakeLLM(), model="m", now=lambda: 999)
+        rec, source = service.get_or_generate(_node(), evidence, _NO_CONTEXT, "b1")
+        assert source == "cached"
+        # Backfill should have run: confidence is now numeric, persisted.
+        assert rec.confidence is not None and rec.confidence > 0
+        row = conn.execute(
+            "SELECT confidence FROM rationale WHERE node_id = ?", ("n_a",)
+        ).fetchone()
+        assert row["confidence"] is not None
+        assert float(row["confidence"]) == pytest.approx(rec.confidence)
+    finally:
+        conn.close()
+
+
+def test_service_does_not_rescore_when_already_set(tmp_path: Path) -> None:
+    conn = open_whygraph_db(tmp_path / "wg.db")
+    try:
+        store = RationaleStore(conn)
+        store.upsert(
+            qualified_name="pkg.a",
+            file_path="src/a.py",
+            node_id="n_a",
+            bundle_hash="b1",
+            prompt_version=PROMPT_VERSION,
+            model="m",
+            rationale=_RAT,
+            now=100,
+            confidence=0.123,  # arbitrary frozen value
+        )
+        service = RationaleService(store, _FakeLLM(), model="m", now=lambda: 999)
+        rec, source = service.get_or_generate(_node(), [], _NO_CONTEXT, "b1")
+        assert source == "cached"
+        assert rec.confidence == pytest.approx(0.123)
+    finally:
+        conn.close()

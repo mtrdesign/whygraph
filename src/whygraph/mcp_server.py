@@ -211,6 +211,7 @@ def _rationale_payload(
         "constraints": record.constraints,
         "tradeoffs": record.tradeoffs,
         "risks": record.risks,
+        "confidence": record.confidence,
         "caller_count": len(neighbors.callers) + neighbors.truncated_callers,
         "callee_count": len(neighbors.callees) + neighbors.truncated_callees,
         "cochange_count": len(context.cochange.neighbors),
@@ -256,6 +257,12 @@ def _format_volatility_line(context: RationaleContext) -> str:
     )
 
 
+def _format_confidence_line(record: RationaleRecord) -> str:
+    if record.confidence is None:
+        return "- **Confidence**: (not scored)"
+    return f"- **Confidence**: {record.confidence:.2f} (capped at 0.85)"
+
+
 def format_rationale_markdown(
     node: SymbolNode,
     collection: CollectionResult,
@@ -275,6 +282,7 @@ def format_rationale_markdown(
         ),
         _format_context_line(context),
         _format_volatility_line(context),
+        _format_confidence_line(record),
         "",
         "## Purpose",
         record.purpose or "_(none)_",

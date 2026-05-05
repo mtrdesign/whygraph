@@ -7,7 +7,7 @@ import re
 import sqlite3
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Literal, Protocol
 
 import anthropic
@@ -303,6 +303,55 @@ def make_llm_client(config: Config) -> LLMClient:
 # ---------------------------------------------------------------------------
 
 
+# Until refactor-lineage detection lands, we can't be sure the symbol's git
+# history is *its* history (rename / move / extract collapses the chain).
+# Cap the score so the field never claims certainty we don't have.
+CONFIDENCE_CEILING: float = 0.85
+
+
+def score_confidence(
+    *,
+    evidence: list[EvidenceRecord],
+    constraints: list[str],
+    risks: list[str],
+) -> float:
+    """Deterministic confidence score for a rationale, in [0, 0.85].
+
+    Blends six objective signals from the evidence bundle and the rationale
+    itself. We deliberately do not ask the LLM for self-reported confidence
+    — LLMs are systematically miscalibrated about their own certainty in
+    ways that vary per prompt and per model, so the score stays
+    auditable, reproducible, and free.
+    """
+    commits = [e for e in evidence if e.source == "git_commit"]
+
+    has_any_commits = 1.0 if commits else 0.0
+    num_commits_norm = min(len(commits) / 5.0, 1.0)
+
+    authors: set[str] = set()
+    for c in commits:
+        if not isinstance(c.payload, dict):
+            continue
+        author = c.payload.get("author")
+        if isinstance(author, str) and author:
+            authors.add(author)
+    num_authors_norm = min(len(authors) / 3.0, 1.0)
+
+    has_pr = 1.0 if any(e.source == "pr" for e in evidence) else 0.0
+    has_issue = 1.0 if any(e.source == "issue" for e in evidence) else 0.0
+    has_rationale_content = 1.0 if (constraints or risks) else 0.0
+
+    raw = (
+        0.20 * has_any_commits
+        + 0.20 * num_commits_norm
+        + 0.20 * num_authors_norm
+        + 0.10 * has_pr
+        + 0.10 * has_issue
+        + 0.20 * has_rationale_content
+    )
+    return min(raw, 1.0) * CONFIDENCE_CEILING
+
+
 def cache_key(
     qualified_name: str,
     file_path: str,
@@ -336,6 +385,7 @@ class RationaleRecord:
     risks: list[str]
     generated_at: int
     cache_key: str
+    confidence: float | None = None
 
 
 def _parse_array(text: Any) -> list[str]:
@@ -349,6 +399,7 @@ def _parse_array(text: Any) -> list[str]:
 
 
 def _row_to_record(row: sqlite3.Row, *, ck: str) -> RationaleRecord:
+    raw_conf = row["confidence"]
     return RationaleRecord(
         node_id=row["node_id"],
         bundle_hash=row["bundle_hash"],
@@ -361,6 +412,7 @@ def _row_to_record(row: sqlite3.Row, *, ck: str) -> RationaleRecord:
         risks=_parse_array(row["risks"]),
         generated_at=int(row["generated_at"]),
         cache_key=ck,
+        confidence=float(raw_conf) if raw_conf is not None else None,
     )
 
 
@@ -370,8 +422,11 @@ class RationaleStore:
     CodeGraph re-index can't surface a wrong rationale because bundle_hash
     won't match.
 
-    The schema's confidence column is kept for forward compat but always
-    written as NULL; v1 omits confidence until lineage detection lands.
+    Confidence is computed deterministically from evidence + rationale
+    content (see score_confidence) and persisted alongside the rest of the
+    rationale. Rows written before this landed have NULL and are
+    transparently backfilled by RationaleService.get_or_generate on the
+    next read.
     """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
@@ -408,13 +463,14 @@ class RationaleStore:
         model: str,
         rationale: Rationale,
         now: int,
+        confidence: float | None = None,
     ) -> RationaleRecord:
         self._conn.execute(
             "INSERT INTO rationale ("
             "node_id, bundle_hash, prompt_version, model, "
             "purpose, why, constraints, tradeoffs, risks, "
             "confidence, generated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(node_id) DO UPDATE SET "
             "bundle_hash = excluded.bundle_hash, "
             "prompt_version = excluded.prompt_version, "
@@ -424,7 +480,7 @@ class RationaleStore:
             "constraints = excluded.constraints, "
             "tradeoffs = excluded.tradeoffs, "
             "risks = excluded.risks, "
-            "confidence = NULL, "
+            "confidence = excluded.confidence, "
             "generated_at = excluded.generated_at",
             (
                 node_id,
@@ -436,6 +492,7 @@ class RationaleStore:
                 json.dumps(rationale.constraints),
                 json.dumps(rationale.tradeoffs),
                 json.dumps(rationale.risks),
+                confidence,
                 now,
             ),
         )
@@ -453,6 +510,26 @@ class RationaleStore:
             cache_key=cache_key(
                 qualified_name, file_path, prompt_version, model, bundle_hash
             ),
+            confidence=confidence,
+        )
+
+    def update_confidence(
+        self,
+        *,
+        node_id: str,
+        bundle_hash: str,
+        prompt_version: str,
+        model: str,
+        confidence: float,
+    ) -> None:
+        """Backfill the confidence column on a row written before scoring
+        landed. Scoped to (node_id, bundle_hash, prompt_version, model) so
+        a stale row from a previous bundle isn't accidentally updated."""
+        self._conn.execute(
+            "UPDATE rationale SET confidence = ? "
+            "WHERE node_id = ? AND bundle_hash = ? "
+            "AND prompt_version = ? AND model = ?",
+            (confidence, node_id, bundle_hash, prompt_version, model),
         )
 
 
@@ -491,12 +568,31 @@ class RationaleService:
                 model=self._model,
             )
             if cached is not None:
+                if cached.confidence is None:
+                    score = score_confidence(
+                        evidence=evidence,
+                        constraints=cached.constraints,
+                        risks=cached.risks,
+                    )
+                    self._store.update_confidence(
+                        node_id=node.id,
+                        bundle_hash=bundle_hash,
+                        prompt_version=self._prompt_version,
+                        model=self._model,
+                        confidence=score,
+                    )
+                    cached = replace(cached, confidence=score)
                 return cached, "cached"
 
         user_prompt = build_user_prompt(node, evidence, context)
         result = self._llm.generate(
             system_prompt=SYSTEM_PROMPT,
             user_prompt=user_prompt,
+        )
+        score = score_confidence(
+            evidence=evidence,
+            constraints=result.rationale.constraints,
+            risks=result.rationale.risks,
         )
         record = self._store.upsert(
             qualified_name=node.qualified_name,
@@ -507,5 +603,6 @@ class RationaleService:
             model=self._model,
             rationale=result.rationale,
             now=self._now(),
+            confidence=score,
         )
         return record, "generated"

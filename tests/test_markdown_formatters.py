@@ -82,6 +82,7 @@ def _record(
     tradeoffs: list[str] | None = None,
     risks: list[str] | None = None,
     bundle_hash: str | None = None,
+    confidence: float | None = None,
 ) -> RationaleRecord:
     bh = bundle_hash or _bundle_hash()
     return RationaleRecord(
@@ -96,6 +97,7 @@ def _record(
         risks=risks or [],
         generated_at=0,
         cache_key=cache_key("pkg.a", "src/pkg/a.py", PROMPT_VERSION, "m", bh),
+        confidence=confidence,
     )
 
 
@@ -209,12 +211,24 @@ def test_rationale_markdown_truncates_bundle_hash_to_12() -> None:
     assert bh not in text
 
 
-def test_rationale_markdown_omits_confidence() -> None:
+def test_rationale_markdown_renders_confidence_when_scored() -> None:
+    text = format_rationale_markdown(
+        _node(),
+        _collection(),
+        _record(confidence=0.42),
+        "generated",
+        _NO_CONTEXT,
+    )
+    assert "**Confidence**: 0.42 (capped at 0.85)" in text
+
+
+def test_rationale_markdown_renders_unscored_confidence_explicitly() -> None:
+    """Pre-backfill NULL rows render as '(not scored)' rather than being
+    silently omitted — so a missing score is visible to readers."""
     text = format_rationale_markdown(
         _node(), _collection(), _record(), "generated", _NO_CONTEXT
     )
-    assert "Confidence" not in text
-    assert "confidence" not in text
+    assert "**Confidence**: (not scored)" in text
 
 
 def test_rationale_markdown_includes_source_and_evidence_source() -> None:

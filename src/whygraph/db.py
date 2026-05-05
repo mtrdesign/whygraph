@@ -43,7 +43,9 @@ CREATE TABLE IF NOT EXISTS evidence_bundles (
 -- Cached rationale. Lookup matches only when (node_id, bundle_hash,
 -- prompt_version, model) all agree, which makes cache hits content-addressable
 -- and survives a CodeGraph re-index that shifts node_id values.
--- confidence column kept for forward-compat; v1 leaves it NULL.
+-- confidence is computed deterministically by score_confidence() in
+-- rationale.py and capped at 0.85 until refactor-lineage detection lands.
+-- Pre-existing rows can have NULL here; the read path backfills them.
 CREATE TABLE IF NOT EXISTS rationale (
     node_id TEXT PRIMARY KEY,
     bundle_hash TEXT NOT NULL,

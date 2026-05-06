@@ -110,13 +110,18 @@ def test_evidence_for_path_returns_blame_owners(repo_and_db) -> None:
     out = mcp_server.whygraph_evidence_for(
         path="f.txt", line_start=1, line_end=3, min_score_pct=0.0
     )
-    shas = {item["sha"] for item in out}
+    items = out["evidence"]
+    shas = {item["sha"] for item in items}
     assert shas == {sha1, sha2}
-    by_sha = {item["sha"]: item for item in out}
+    by_sha = {item["sha"]: item for item in items}
     assert by_sha[sha1]["blame_lines"] == 2  # alpha + beta
     assert by_sha[sha2]["blame_lines"] == 1  # gamma
     assert by_sha[sha1]["narrative"] == "added f.txt with alpha and beta lines"
     assert by_sha[sha1]["narrative_source"] == "llm_description"
+    # Path+lines targeting → no graph node → empty neighbour lists.
+    assert out["callers"] == []
+    assert out["callees"] == []
+    assert out["target"]["qualified_name"] is None
 
 
 def test_evidence_for_subset_lines_only(repo_and_db) -> None:
@@ -125,13 +130,44 @@ def test_evidence_for_subset_lines_only(repo_and_db) -> None:
     out = mcp_server.whygraph_evidence_for(
         path="f.txt", line_start=3, line_end=3, min_score_pct=0.0
     )
-    assert {item["sha"] for item in out} == {sha2}
+    assert {item["sha"] for item in out["evidence"]} == {sha2}
 
 
-def test_evidence_for_drops_commits_failing_gate(repo_and_db, monkeypatch) -> None:
-    """Without an llm_description and with a strict gate, sha2 should be dropped."""
+def test_evidence_for_surfaces_blame_when_sha_missing_from_db(
+    repo_and_db, monkeypatch
+) -> None:
+    """Stale scan DB: blame returns SHAs that aren't in commits — we
+    still surface them with blame-derived metadata and db_commit_present
+    set to False, instead of silently dropping the entry."""
     repo_root, sha1, sha2, db_path = repo_and_db
-    # Make sha2 unable to pass: score 0 and no llm_description.
+    # Add a third commit AFTER the scan was simulated; this commit's SHA
+    # will appear in blame but not in the DB.
+    (repo_root / "f.txt").write_text("alpha\nbeta\ngamma\ndelta\n")
+    _git(repo_root, "add", "f.txt")
+    _git(repo_root, "config", "user.email", "carol@example.com")
+    _git(repo_root, "config", "user.name", "Carol")
+    _git(repo_root, "commit", "-q", "-m", "add delta")
+    sha3 = _git_out(repo_root, "rev-parse", "HEAD")
+    out = mcp_server.whygraph_evidence_for(
+        path="f.txt", line_start=4, line_end=4, min_score_pct=0.0
+    )
+    items = out["evidence"]
+    assert len(items) == 1
+    item = items[0]
+    assert item["sha"] == sha3
+    assert item["db_commit_present"] is False
+    assert item["blame_lines"] == 1
+    assert item["narrative_source"] == "git_blame_summary"
+    assert item["narrative"] == "add delta"
+    assert item["commit_author"]["email"] == "carol@example.com"
+    assert item["commit_author"]["name"] == "Carol"
+    assert item["committed_at"] is not None
+
+
+def test_evidence_for_keeps_commit_with_null_narrative(repo_and_db, monkeypatch) -> None:
+    """Commits failing the narrative gate still surface — blame is signal."""
+    repo_root, sha1, sha2, db_path = repo_and_db
+    # Make sha2 unable to pass via narrative: zero scores, no llm_description.
     with Database(db_path) as db:
         cur = db._conn.cursor()
         cur.execute(
@@ -142,10 +178,14 @@ def test_evidence_for_drops_commits_failing_gate(repo_and_db, monkeypatch) -> No
     out = mcp_server.whygraph_evidence_for(
         path="f.txt", line_start=1, line_end=3, min_score_pct=0.5
     )
-    shas = {item["sha"] for item in out}
-    # sha1 still in via llm_description; sha2 dropped.
-    assert sha1 in shas
-    assert sha2 not in shas
+    by_sha = {item["sha"]: item for item in out["evidence"]}
+    # sha1 still in via llm_description.
+    assert by_sha[sha1]["narrative_source"] == "llm_description"
+    # sha2 surfaces with narrative=None — blame line ownership is preserved.
+    assert sha2 in by_sha
+    assert by_sha[sha2]["narrative"] is None
+    assert by_sha[sha2]["narrative_source"] is None
+    assert by_sha[sha2]["blame_lines"] == 1
 
 
 def test_evidence_for_includes_pr_and_authors(repo_and_db) -> None:
@@ -187,8 +227,9 @@ def test_evidence_for_includes_pr_and_authors(repo_and_db) -> None:
     out = mcp_server.whygraph_evidence_for(
         path="f.txt", line_start=3, line_end=3, min_score_pct=0.0
     )
-    assert len(out) == 1
-    item = out[0]
+    items = out["evidence"]
+    assert len(items) == 1
+    item = items[0]
     assert item["sha"] == sha2
     assert len(item["prs"]) == 1
     assert item["prs"][0]["number"] == 42
@@ -229,5 +270,11 @@ def test_evidence_for_qualified_name_resolves_via_backend(
     out = mcp_server.whygraph_evidence_for(
         qualified_name="pkg.a", min_score_pct=0.0
     )
-    # Whatever evidence comes back, the resolution path worked (no exception).
-    assert isinstance(out, list)
+    # Resolution path worked.
+    assert out["target"]["qualified_name"] == "pkg.a"
+    assert out["target"]["path"] == "src/pkg/a.py"
+    # The fake CodeGraph defines pkg.a → calls pkg.b. So callees has pkg.b.
+    callee_qns = {n["qualified_name"] for n in out["callees"]}
+    assert "pkg.b" in callee_qns
+    # No callers point at pkg.a in the fixture.
+    assert out["callers"] == []

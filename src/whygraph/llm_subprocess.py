@@ -42,6 +42,7 @@ def invoke_claude(
     model: str,
     timeout_sec: int,
     anthropic_api_key: str | None = None,
+    system_prompt: str | None = None,
 ) -> str:
     """Run `claude --print --model <model>` with `prompt` on stdin.
 
@@ -49,15 +50,23 @@ def invoke_claude(
     env so `claude` falls through to subscription billing. Passing a value
     exports it as ANTHROPIC_API_KEY (API billing).
 
+    `system_prompt`, when provided, is passed via `--system-prompt` and
+    REPLACES Claude Code's default agentic system prompt. Use this for
+    one-shot deterministic generation (e.g. JSON output) where the model
+    must not "decide to read a file" mid-response.
+
     Returns trimmed stdout. Raises `LlmError` on missing CLI, timeout,
     non-zero exit, or empty output.
     """
     env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
     if anthropic_api_key:
         env["ANTHROPIC_API_KEY"] = anthropic_api_key
+    cmd = ["claude", "--print", "--model", model, *_LEAN_FLAGS]
+    if system_prompt is not None:
+        cmd.extend(["--system-prompt", system_prompt])
     try:
         result = subprocess.run(
-            ["claude", "--print", "--model", model, *_LEAN_FLAGS],
+            cmd,
             input=prompt,
             text=True,
             capture_output=True,

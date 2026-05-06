@@ -22,7 +22,7 @@ from whygraph.scan import db as db_module
 from whygraph.scan import git as git_module
 from whygraph.scan.scoring import ValueGate
 
-DEFAULT_RATIONALE_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_RATIONALE_MODEL = "claude-opus-4-7"
 DEFAULT_RATIONALE_TIMEOUT_SEC = 180
 CONFIDENCE_CEILING = 0.85
 
@@ -191,16 +191,30 @@ def issue_resource(number: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _node_to_dict(node: backend_module.SymbolNode) -> dict:
+    return {
+        "qualified_name": node.qualified_name,
+        "kind": node.kind,
+        "file_path": node.file_path,
+        "start_line": node.start_line,
+        "end_line": node.end_line,
+        "signature": node.signature,
+    }
+
+
 def _resolve_target(
     *,
     path: str | None,
     line_start: int | None,
     line_end: int | None,
     qualified_name: str | None,
-) -> tuple[str, int, int, str | None]:
-    """Validate and normalize a tool target.
+) -> dict:
+    """Validate and normalize a tool target; fetch neighbours on the same pass.
 
-    Returns ``(path, line_start, line_end, resolved_qualified_name)``.
+    Returns ``{path, line_start, line_end, qualified_name, callers, callees}``.
+    ``callers`` / ``callees`` are populated only when ``qualified_name`` was
+    provided (path+lines targeting has no graph node to anchor to).
+
     Raises ``WhyGraphError`` on bad input.
     """
     if qualified_name:
@@ -217,11 +231,22 @@ def _resolve_target(
         backend = backend_module.SqliteCodegraphBackend(cg_path)
         try:
             node = backend.get_node(qualified_name)
+            if node is None:
+                raise WhyGraphError(
+                    f"qualified_name {qualified_name!r} not found in CodeGraph"
+                )
+            callers = [_node_to_dict(n) for n in backend.get_callers(node.id)]
+            callees = [_node_to_dict(n) for n in backend.get_callees(node.id)]
         finally:
             backend.close()
-        if node is None:
-            raise WhyGraphError(f"qualified_name {qualified_name!r} not found in CodeGraph")
-        return node.file_path, node.start_line, node.end_line, qualified_name
+        return {
+            "path": node.file_path,
+            "line_start": node.start_line,
+            "line_end": node.end_line,
+            "qualified_name": qualified_name,
+            "callers": callers,
+            "callees": callees,
+        }
 
     if not (path and line_start and line_end):
         raise WhyGraphError(
@@ -229,22 +254,65 @@ def _resolve_target(
         )
     if line_start < 1 or line_end < line_start:
         raise WhyGraphError("line_start must be ≥ 1 and line_end ≥ line_start")
-    return path, line_start, line_end, None
+    return {
+        "path": path,
+        "line_start": line_start,
+        "line_end": line_end,
+        "qualified_name": None,
+        "callers": [],
+        "callees": [],
+    }
 
 
 def _build_evidence_item(
     db: db_module.Database,
     *,
     sha: str,
-    blame_lines: int,
+    blame_entry: dict,
     gate: ValueGate,
-) -> dict | None:
+) -> dict:
+    """Assemble an evidence item from blame + DB rows.
+
+    If the SHA is missing from the scan DB (stale scan, partial walk), the
+    blame's own author/summary metadata is surfaced instead and
+    `db_commit_present` flips to ``False``. The agent can use that to
+    decide whether to suggest a re-scan.
+    """
+    blame_lines = blame_entry["lines_owned"]
     commit = db.get_commit(sha)
     if commit is None:
-        return None
+        return {
+            "sha": sha,
+            "narrative": blame_entry.get("summary"),
+            "narrative_source": "git_blame_summary"
+            if blame_entry.get("summary")
+            else None,
+            "committed_at": blame_entry.get("committed_at"),
+            "blame_lines": blame_lines,
+            "commit_author": {
+                "name": blame_entry.get("author_name"),
+                "email": blame_entry.get("author_email"),
+            },
+            "prs": [],
+            "issues": [],
+            "all_authors": (
+                [
+                    {
+                        "login": None,
+                        "name": blame_entry.get("author_name"),
+                        "email": blame_entry.get("author_email"),
+                    }
+                ]
+                if blame_entry.get("author_name") or blame_entry.get("author_email")
+                else []
+            ),
+            "db_commit_present": False,
+        }
+    # If the commit has neither an llm_description nor a body/subject above
+    # the gate, narrative is None — but we still surface the entry. The
+    # blame `lines_owned` is itself signal (matches how PRs and issues are
+    # surfaced even when their own narratives fail the gate).
     narrative, source = mcp_queries.commit_narrative(commit, gate)
-    if narrative is None:
-        return None
 
     prs_raw = mcp_queries.prs_containing_commit(db, sha)
     prs: list[dict] = []
@@ -310,17 +378,20 @@ def _build_evidence_item(
         "prs": prs,
         "issues": list(issues_collected.values()),
         "all_authors": all_authors,
+        "db_commit_present": True,
     }
 
 
 @mcp.tool(
     name="whygraph_evidence_for",
     description=(
-        "Find historical evidence (commits + PRs + closing issues) explaining "
-        "a chunk of code. Pass either (path, line_start, line_end) or a "
-        "qualified_name (resolved via CodeGraph). Filtered by TF-IDF "
-        "harshness; commit narrative prefers llm_description, then body, "
-        "then subject."
+        "Find historical evidence (commits + PRs + closing issues) and graph "
+        "neighbours (callers/callees) for a chunk of code. Pass either "
+        "(path, line_start, line_end) or a qualified_name (resolved via "
+        "CodeGraph). Returns {target, evidence, callers, callees}. Evidence "
+        "is filtered by TF-IDF harshness; commit narrative prefers "
+        "llm_description, then body, then subject. Callers/callees are "
+        "populated only when qualified_name is given."
     ),
 )
 def whygraph_evidence_for(
@@ -330,13 +401,13 @@ def whygraph_evidence_for(
     qualified_name: str | None = None,
     min_score_pct: float = 0.5,
     limit: int = 10,
-) -> list[dict]:
+) -> dict:
     if not 0.0 <= min_score_pct <= 1.0:
         raise WhyGraphError("min_score_pct must be in [0, 1]")
     if limit < 1:
         raise WhyGraphError("limit must be ≥ 1")
 
-    target_path, target_start, target_end, _qn = _resolve_target(
+    target = _resolve_target(
         path=path,
         line_start=line_start,
         line_end=line_end,
@@ -345,27 +416,33 @@ def whygraph_evidence_for(
     repo_root = _resolve_repo_root()
 
     blame = mcp_queries.blame_line_range(
-        repo_root, target_path, target_start, target_end
+        repo_root, target["path"], target["line_start"], target["line_end"]
     )
-    if not blame:
-        return []
 
     items: list[dict] = []
-    with db_module.Database(_resolve_db_path()) as db:
-        gate = ValueGate.percentile(db, fraction=min_score_pct)
-        for sha, lines_owned in blame.items():
-            item = _build_evidence_item(
-                db, sha=sha, blame_lines=lines_owned, gate=gate
-            )
-            if item is None:
-                continue
-            items.append(item)
+    if blame:
+        with db_module.Database(_resolve_db_path()) as db:
+            gate = ValueGate.percentile(db, fraction=min_score_pct)
+            for sha, blame_entry in blame.items():
+                items.append(
+                    _build_evidence_item(
+                        db, sha=sha, blame_entry=blame_entry, gate=gate
+                    )
+                )
+        items.sort(key=lambda it: (it.get("committed_at") or ""), reverse=True)
+        items = items[:limit]
 
-    items.sort(
-        key=lambda it: (it.get("committed_at") or ""),
-        reverse=True,
-    )
-    return items[:limit]
+    return {
+        "target": {
+            "path": target["path"],
+            "line_start": target["line_start"],
+            "line_end": target["line_end"],
+            "qualified_name": target["qualified_name"],
+        },
+        "evidence": items,
+        "callers": target["callers"],
+        "callees": target["callees"],
+    }
 
 
 @mcp.tool(
@@ -439,23 +516,36 @@ def whygraph_velocity_summary(
 
 
 _RATIONALE_SYSTEM_PROMPT = """\
-You produce a five-section pre-edit rationale card for a chunk of source code, grounded strictly in the evidence bundle the user gives you.
+You are a deterministic JSON producer. You receive a code-rationale evidence bundle and emit ONE JSON object — nothing else.
 
-Audience: an LLM that will read this card to decide how to edit the code.
+You CANNOT read files, run tools, search the codebase, or access anything beyond the evidence bundle the user provides. The bundle is your COMPLETE input. Do not request more information; do not narrate what you would check; do not propose tool calls.
 
-Output format: a single JSON object with EXACTLY these top-level keys, no others:
-- "purpose": one sentence stating what the code does today.
-- "why": one paragraph explaining historical and contextual rationale — why this code exists in its current shape, drawn from commits/PRs/issues.
-- "constraints": JSON array of strings; each string is an invariant or contract the next editor must preserve. May be empty.
-- "tradeoffs": JSON array of strings; each is a notable design decision visible in evidence. May be empty.
-- "risks": JSON array of strings; each is a risk of modifying this code (regressions, breaking changes, compliance). May be empty.
+Output schema (these top-level keys, no others):
+{
+  "purpose":     <string>  // one sentence stating what the code does today
+  "why":         <string>  // one paragraph of historical/contextual rationale drawn from commits/PRs/issues
+  "constraints": <array of strings>  // invariants/contracts the next editor must preserve
+  "tradeoffs":   <array of strings>  // notable design decisions visible in evidence
+  "risks":       <array of strings>  // risks of modifying this code
+}
 
-Rules:
-- Cite only what the evidence supports. Prefer commit "narrative" (especially when narrative_source = "llm_description") over the human-written subject; the llm_description is a verbatim diff summary and is the highest-confidence narrative.
-- No hedging language ("seems", "may", "appears"). No invented rationale.
-- Use exact identifiers (file paths, function names) from the evidence; do not paraphrase.
-- If a section has no evidence, return an empty array (never invent items).
-- Output ONLY the JSON object. No prose, no fences, no preamble.
+If the evidence bundle is sparse:
+- "purpose" and "why" become short, factual sentences citing only what the bundle contains. If the bundle has zero entries, "why" may say "No evidence available in the scan."
+- "constraints", "tradeoffs", "risks" become EMPTY ARRAYS [].
+- NEVER substitute prose explaining what you would need. The output is JSON, period.
+
+Evidence rules:
+- Prefer commit narratives where narrative_source == "llm_description" — those are verbatim diff summaries and outrank human-written subjects/bodies.
+- When narrative_source == "git_blame_summary", db_commit_present is false: the SHA exists in git but not in the scan DB. Still cite it; just don't claim PR/issue context for it.
+- Use exact identifiers (file paths, function/class names) verbatim; do not paraphrase.
+- No hedging ("seems", "may", "appears"). No invented rationale.
+
+Graph neighbours (callers / callees):
+- "callers" lists nodes that depend on the target. Use them to populate "risks" with concrete blast-radius items: "modifying X breaks <caller.qualified_name> at <caller.file_path>:<caller.start_line>".
+- "callees" lists nodes the target depends on. Use them to populate "constraints" only when a real contract is visible (e.g. the target relies on <callee.qualified_name>'s signature). Do not fabricate contracts from a callee just because it exists.
+- Only cite callers/callees that the bundle explicitly contains. Do not infer additional callers from imports or type names.
+
+Output format: RAW JSON only. No prose, no code fences, no preamble, no trailing remarks. The first character of your output MUST be '{' and the last character MUST be '}'.
 """
 
 
@@ -463,10 +553,14 @@ def _build_rationale_user_prompt(
     *,
     target: dict,
     evidence: list[dict],
+    callers: list[dict],
+    callees: list[dict],
 ) -> str:
     payload = {
         "target": target,
         "evidence": evidence,
+        "callers": callers,
+        "callees": callees,
     }
     return (
         "Produce the rationale JSON for this target.\n\n"
@@ -518,12 +612,41 @@ def _validate_rationale(payload: dict) -> dict:
     return out
 
 
+_NARRATIVE_TIER: dict[str | None, float] = {
+    "llm_description": 1.0,    # verbatim diff summary — highest signal
+    "body": 0.5,               # human-written body above the gate
+    "subject": 0.5,            # human-written subject above the gate
+    "git_blame_summary": 0.25, # SHA missing from scan DB; only blame metadata
+    None: 0.0,                 # narrative failed the gate; only structural data
+}
+
+
+def _evidence_tier(ev: dict) -> float:
+    return _NARRATIVE_TIER.get(ev.get("narrative_source"), 0.0)
+
+
 def _score_confidence(
     *, evidence: list[dict], constraints: list[str], risks: list[str]
 ) -> float:
-    """v1's deterministic confidence — blend of commit count, authors, PR/issue presence."""
-    has_any_commits = 1.0 if evidence else 0.0
-    num_commits_norm = min(len(evidence) / 5.0, 1.0)
+    """Deterministic confidence in [0, 0.85].
+
+    Tiered commit weighting (vs v1's flat 1.0-per-commit):
+
+    - llm_description:    1.0   verbatim diff summary, highest signal
+    - body / subject:     0.5   human-written, above the harshness gate
+    - git_blame_summary:  0.25  blame-only (SHA missing from scan DB)
+    - None:               0.0   narrative failed the gate
+
+    `has_any_commits` and `num_commits_norm` use the tier sum, so a result
+    composed of only weak evidence gets a proportionally lower score.
+    Author / PR / issue / rationale-content signals are unchanged from v1
+    — author info is useful regardless of narrative quality, and PR/issue
+    structural links + non-empty constraints/risks already vouch for
+    themselves.
+    """
+    tier_sum = sum(_evidence_tier(ev) for ev in evidence)
+    has_any_commits = 1.0 if tier_sum > 0 else 0.0
+    num_commits_norm = min(tier_sum / 5.0, 1.0)
 
     authors: set[str] = set()
     for ev in evidence:
@@ -567,33 +690,30 @@ def whygraph_rationale_brief(
     timeout_sec: int = DEFAULT_RATIONALE_TIMEOUT_SEC,
     anthropic_api_key: str | None = None,
 ) -> dict:
-    target_path, target_start, target_end, qn = _resolve_target(
+    bundle = whygraph_evidence_for(
         path=path,
         line_start=line_start,
         line_end=line_end,
         qualified_name=qualified_name,
-    )
-    evidence = whygraph_evidence_for(
-        path=target_path,
-        line_start=target_start,
-        line_end=target_end,
         min_score_pct=min_score_pct,
         limit=20,
     )
+    target = bundle["target"]
+    evidence = bundle["evidence"]
+    callers = bundle["callers"]
+    callees = bundle["callees"]
     user_prompt = _build_rationale_user_prompt(
-        target={
-            "path": target_path,
-            "line_start": target_start,
-            "line_end": target_end,
-            "qualified_name": qn,
-        },
+        target=target,
         evidence=evidence,
+        callers=callers,
+        callees=callees,
     )
     raw = llm_subprocess.invoke_claude(
-        f"{_RATIONALE_SYSTEM_PROMPT}\n\n{user_prompt}",
+        user_prompt,
         model=model,
         timeout_sec=timeout_sec,
         anthropic_api_key=anthropic_api_key,
+        system_prompt=_RATIONALE_SYSTEM_PROMPT,
     )
     parsed = _extract_rationale_json(raw)
     rationale = _validate_rationale(parsed)
@@ -603,18 +723,15 @@ def whygraph_rationale_brief(
         risks=rationale["risks"],
     )
     return {
-        "target": {
-            "path": target_path,
-            "line_start": target_start,
-            "line_end": target_end,
-            "qualified_name": qn,
-        },
+        "target": target,
         **rationale,
         "confidence": confidence,
         "evidence_count": {
             "commits": len(evidence),
             "prs": sum(len(ev.get("prs") or []) for ev in evidence),
             "issues": sum(len(ev.get("issues") or []) for ev in evidence),
+            "callers": len(callers),
+            "callees": len(callees),
         },
         "model": model,
     }

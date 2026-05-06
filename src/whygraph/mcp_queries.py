@@ -21,27 +21,69 @@ from whygraph.scan.scoring import ValueGate
 
 def blame_line_range(
     repo_root: Path, path: str, line_start: int, line_end: int
-) -> dict[str, int]:
-    """Return ``{sha: lines_owned}`` for the requested ``[start, end]`` range.
+) -> dict[str, dict]:
+    """Return ``{sha: {lines_owned, author_name, author_email, summary, committed_at}}``.
 
-    Uses ``git blame --porcelain`` and counts header lines (one per blamed
-    line). All SHAs are full 40-char.
+    Parses ``git blame --porcelain`` output. Each block-leading header
+    repeats the SHA on the first line and emits metadata (`author`,
+    `author-mail`, `committer-time`, `summary`, …) on the following lines.
+    Repeat-block headers (subsequent lines from the same commit) only have
+    `<sha> <orig> <final>`. We accumulate per-SHA metadata once and bump
+    ``lines_owned`` for every header occurrence.
     """
     out = git_module._run_git(
         repo_root,
         ["blame", f"-L{line_start},{line_end}", "--porcelain", "--", path],
     )
-    counts: Counter[str] = Counter()
+    entries: dict[str, dict] = {}
+    current_sha: str | None = None
     for line in out.splitlines():
-        parts = line.split()
-        if len(parts) >= 3 and len(parts[0]) == 40:
+        if line.startswith("\t"):
+            # Source-line content; not metadata.
+            continue
+        parts = line.split(" ", 3)
+        if parts and len(parts[0]) == 40 and len(parts) >= 3:
             try:
                 int(parts[1])
                 int(parts[2])
             except ValueError:
+                pass
+            else:
+                sha = parts[0]
+                entry = entries.setdefault(
+                    sha,
+                    {
+                        "lines_owned": 0,
+                        "author_name": None,
+                        "author_email": None,
+                        "summary": None,
+                        "committed_at": None,
+                    },
+                )
+                entry["lines_owned"] += 1
+                current_sha = sha
                 continue
-            counts[parts[0]] += 1
-    return dict(counts)
+        if current_sha is None:
+            continue
+        entry = entries[current_sha]
+        if line.startswith("author "):
+            entry["author_name"] = line[len("author "):].strip() or None
+        elif line.startswith("author-mail "):
+            mail = line[len("author-mail "):].strip()
+            if mail.startswith("<") and mail.endswith(">"):
+                mail = mail[1:-1]
+            entry["author_email"] = mail or None
+        elif line.startswith("summary "):
+            entry["summary"] = line[len("summary "):].strip() or None
+        elif line.startswith("committer-time "):
+            try:
+                ts = int(line[len("committer-time "):].strip())
+                entry["committed_at"] = datetime.fromtimestamp(
+                    ts, tz=timezone.utc
+                ).isoformat()
+            except ValueError:
+                pass
+    return entries
 
 _NARRATIVE_PRIORITY_COMMIT: tuple[str, ...] = ("llm_description", "body", "subject")
 _NARRATIVE_PRIORITY_PR_ISSUE: tuple[str, ...] = ("body", "title")

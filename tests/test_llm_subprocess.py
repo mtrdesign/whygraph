@@ -38,6 +38,39 @@ def test_invoke_claude_passes_prompt_on_stdin_and_uses_lean_flags() -> None:
     assert captured["timeout"] == 11
 
 
+def test_invoke_claude_passes_system_prompt_when_provided() -> None:
+    captured: dict = {}
+
+    def fake_run(args, *, input, **kw):
+        captured["args"] = args
+        return _FakeResult(returncode=0, stdout="ok")
+
+    with patch("whygraph.llm_subprocess.subprocess.run", side_effect=fake_run):
+        invoke_claude(
+            "user msg",
+            model="m",
+            timeout_sec=5,
+            system_prompt="be terse",
+        )
+
+    args = captured["args"]
+    assert "--system-prompt" in args
+    assert args[args.index("--system-prompt") + 1] == "be terse"
+
+
+def test_invoke_claude_omits_system_prompt_flag_when_none() -> None:
+    captured: dict = {}
+
+    def fake_run(args, *, input, **kw):
+        captured["args"] = args
+        return _FakeResult(returncode=0, stdout="ok")
+
+    with patch("whygraph.llm_subprocess.subprocess.run", side_effect=fake_run):
+        invoke_claude("p", model="m", timeout_sec=5)
+
+    assert "--system-prompt" not in captured["args"]
+
+
 def test_invoke_claude_strips_api_key_by_default(monkeypatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-leak")
     captured: dict = {}

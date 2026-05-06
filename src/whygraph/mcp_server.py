@@ -281,6 +281,15 @@ def _lazy_describe_one(
         return None
 
 
+def _shas_in_db(db: db_module.Database, shas: list[str]) -> set[str]:
+    if not shas:
+        return set()
+    cur = db._conn.cursor()
+    placeholders = ",".join(["?"] * len(shas))
+    cur.execute(f"SELECT sha FROM commits WHERE sha IN ({placeholders})", shas)
+    return {row[0] for row in cur.fetchall()}
+
+
 def _lazy_fill_descriptions(
     db: db_module.Database,
     repo_root: Path,
@@ -292,19 +301,21 @@ def _lazy_fill_descriptions(
 ) -> int:
     """Fill ``commits.llm_description`` for up to ``limit`` blame SHAs that lack one.
 
-    Selection rules:
-    - SHA must exist in the scan DB (blame-only / stale-DB rows are skipped;
-      ``set_llm_description`` would no-op silently otherwise).
-    - SHA must currently have ``llm_description IS NULL``.
+    Self-heals a stale scan DB: blame SHAs that aren't in the ``commits``
+    table yet get upserted from ``git_module.get_commit(sha)`` first, so
+    the subsequent ``set_llm_description`` has a row to target.
+
+    Selection rules (highest-impact first):
     - SHA must have a successor on the first-parent walk (tip-of-branch
       commits have no diff partner; leave them NULL forever).
+    - SHA must need a fill: either already in DB with NULL llm_description,
+      OR not in DB at all (we'll upsert, then describe).
     - Sorted by ``blame_lines`` descending — fill the SHAs that own the
-      most of the requested range first, since they're the highest-impact
-      narratives for this query.
+      most of the requested range first.
 
     Skips silently if the ``claude`` CLI isn't installed. Per-SHA errors
-    are dropped (the next call will retry), matching scan's run_phase
-    behavior. Returns the number of SHAs successfully filled.
+    (git lookup or claude subprocess) are dropped; next call retries.
+    Returns the number of SHAs successfully described.
     """
     if limit <= 0 or not blame_entries:
         return 0
@@ -322,32 +333,55 @@ def _lazy_fill_descriptions(
         return 0
     sha_to_next = dict(zip(walked[:-1], walked[1:], strict=True))
 
-    # Highest-blame-impact SHAs first.
-    ordered_shas = [
+    # Highest-blame-impact SHAs first; must have a successor.
+    eligible = [
         sha
         for sha, _ in sorted(
             blame_entries.items(),
             key=lambda kv: kv[1].get("lines_owned", 0),
             reverse=True,
         )
+        if sha in sha_to_next
     ]
-    candidates = [sha for sha in ordered_shas if sha in sha_to_next]
-    if not candidates:
+    if not eligible:
         return 0
-    needs = db.commits_without_llm_description(candidates)
-    fillable = [sha for sha in candidates if sha in needs][:limit]
+
+    in_db = _shas_in_db(db, eligible)
+    needs_existing = db.commits_without_llm_description(eligible)
+    # An eligible SHA needs filling if it's missing from DB OR present but NULL.
+    fillable = [
+        sha
+        for sha in eligible
+        if (sha not in in_db) or (sha in needs_existing)
+    ][:limit]
     if not fillable:
         return 0
 
+    # Upsert missing-from-DB rows so set_llm_description has a target.
+    # Per-SHA git failures drop the SHA from the describe pass.
+    to_describe: list[str] = []
+    for sha in fillable:
+        if sha in in_db:
+            to_describe.append(sha)
+            continue
+        try:
+            commit = git_module.get_commit(repo_root, sha)
+        except git_module.GitError:
+            continue
+        db.upsert_commit(commit)
+        to_describe.append(sha)
+    if not to_describe:
+        return 0
+
     config = scan_llm.LlmConfig(model=model, anthropic_api_key=anthropic_api_key)
-    workers = min(len(fillable), DEFAULT_LAZY_FILL_WORKERS)
+    workers = min(len(to_describe), DEFAULT_LAZY_FILL_WORKERS)
     filled = 0
     with ThreadPoolExecutor(
         max_workers=workers, thread_name_prefix="whygraph-lazy-llm"
     ) as ex:
         futures = {
             ex.submit(_lazy_describe_one, repo_root, sha, sha_to_next[sha], config): sha
-            for sha in fillable
+            for sha in to_describe
         }
         for fut in as_completed(futures):
             sha = futures[fut]

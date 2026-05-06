@@ -407,6 +407,55 @@ def test_evidence_for_lazy_fill_caps_at_limit(repo_and_db, monkeypatch) -> None:
     assert out["lazy_filled"] == 1
 
 
+def test_evidence_for_lazy_fill_inserts_missing_commit(
+    repo_and_db, monkeypatch
+) -> None:
+    """Blame returns a SHA not in the scan DB; lazy fill upserts it via
+    git_module.get_commit, then describes it. The subsequent evidence
+    item should surface as a fully DB-resident row with
+    narrative_source='llm_description'."""
+    repo_root, sha1, sha2, db_path = repo_and_db
+    # Add sha3 (NEW commit, not in DB yet) and sha4 (so sha3 has a successor).
+    (repo_root / "f.txt").write_text("alpha\nbeta\ngamma\ndelta\n")
+    _git(repo_root, "add", "f.txt")
+    _git(repo_root, "commit", "-q", "-m", "add delta")
+    sha3 = _git_out(repo_root, "rev-parse", "HEAD")
+    (repo_root / "f.txt").write_text("alpha\nbeta\ngamma\ndelta\nepsilon\n")
+    _git(repo_root, "add", "f.txt")
+    _git(repo_root, "commit", "-q", "-m", "add epsilon")
+
+    canned = "self-heal: added delta on line 4"
+    with patch(
+        "whygraph.mcp_server.scan_llm.describe_pair", return_value=canned
+    ), patch(
+        "whygraph.mcp_server.scan_llm.claude_cli_available", return_value=True
+    ):
+        out = mcp_server.whygraph_evidence_for(
+            # Line 4 is owned only by sha3; line 5 by the tip (epsilon).
+            path="f.txt",
+            line_start=4,
+            line_end=4,
+            min_score_pct=0.0,
+            lazy_fill_limit=5,
+        )
+
+    item = next(it for it in out["evidence"] if it["sha"] == sha3)
+    assert item["db_commit_present"] is True
+    assert item["narrative"] == canned
+    assert item["narrative_source"] == "llm_description"
+
+    # Verify the upsert actually persisted to the DB.
+    with Database(db_path) as db:
+        assert db.commit_exists(sha3)
+        cur = db._conn.cursor()
+        cur.execute(
+            "SELECT subject, llm_description FROM commits WHERE sha = ?", (sha3,)
+        )
+        row = cur.fetchone()
+        assert row[0] == "add delta"
+        assert row[1] == canned
+
+
 def test_evidence_for_lazy_fill_silent_when_cli_missing(repo_and_db) -> None:
     repo_root, sha1, sha2, db_path = repo_and_db
     (repo_root / "f.txt").write_text("alpha\nbeta\ngamma\ndelta\n")

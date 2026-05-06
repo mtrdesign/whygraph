@@ -46,7 +46,15 @@
       "Bash(SSL_CERT_FILE= uv run *)",
       "Bash(SSL_CERT_FILE= timeout 2 uv run whygraph-mcp)",
       "Bash(echo \"exit=$?\")",
-      "Bash(SSL_CERT_FILE= uv sync *)"
+      "Bash(SSL_CERT_FILE= uv sync *)",
+      "Bash(sqlite3 .codegraph/codegraph.db \".schema nodes\")",
+      "Bash(sqlite3 .codegraph/codegraph.db \".schema edges\")",
+      "Bash(sqlite3 .codegraph/codegraph.db ' *)",
+      "Bash(python3 whygraph_signal_validation.py)",
+      "Bash(gh pr *)",
+      "Bash(python3 *)",
+      "Bash(codegraph --help)",
+      "Bash(sqlite3 *)"
     ]
   }
 }

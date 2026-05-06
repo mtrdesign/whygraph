@@ -1,5 +1,6 @@
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -253,6 +254,178 @@ def test_evidence_for_qualified_name_requires_codegraph(repo_and_db, monkeypatch
     monkeypatch.delenv("CODEGRAPH_DB", raising=False)
     with pytest.raises(mcp_server.WhyGraphError, match="CodeGraph"):
         mcp_server.whygraph_evidence_for(qualified_name="pkg.foo")
+
+
+def test_evidence_for_lazy_fills_missing_descriptions(
+    repo_and_db, monkeypatch
+) -> None:
+    """When a blame SHA exists in DB but lacks llm_description and has a
+    successor on the first-parent walk, lazy fill describes it on the fly."""
+    repo_root, sha1, sha2, db_path = repo_and_db
+    # Add a third commit so sha2 has a successor (the diff partner needed
+    # to compute the lazy description).
+    (repo_root / "f.txt").write_text("alpha\nbeta\ngamma\ndelta\n")
+    _git(repo_root, "add", "f.txt")
+    _git(repo_root, "commit", "-q", "-m", "add delta")
+    sha3 = _git_out(repo_root, "rev-parse", "HEAD")
+    # Add sha3 to the DB so it doesn't appear as missing (we're focused on
+    # sha2's lazy fill here, not blame-only fallback).
+    with Database(db_path) as db:
+        from whygraph.scan.git import Commit as _Commit
+
+        db.upsert_commit(
+            _Commit(
+                sha=sha3,
+                parent_shas=[sha2],
+                author_name="Alice",
+                author_email="alice@example.com",
+                authored_at="2026-04-02T00:00:00+00:00",
+                committed_at="2026-04-02T00:00:00+00:00",
+                subject="add delta",
+                body="",
+                files_changed=1,
+                insertions=1,
+                deletions=0,
+            )
+        )
+
+    canned = "lazy: added delta line in f.txt"
+    with patch(
+        "whygraph.mcp_server.scan_llm.describe_pair", return_value=canned
+    ), patch(
+        "whygraph.mcp_server.scan_llm.claude_cli_available", return_value=True
+    ):
+        out = mcp_server.whygraph_evidence_for(
+            path="f.txt",
+            line_start=1,
+            line_end=4,
+            min_score_pct=0.0,
+            lazy_fill_limit=5,
+        )
+
+    items = {it["sha"]: it for it in out["evidence"]}
+    # sha2 had no llm_description before the call; lazy fill set it.
+    assert items[sha2]["narrative"] == canned
+    assert items[sha2]["narrative_source"] == "llm_description"
+    assert out["lazy_filled"] >= 1
+
+
+def test_evidence_for_lazy_fill_skips_tip_commit(repo_and_db) -> None:
+    """The most recent commit on the branch has no successor, so it can't be filled."""
+    _, sha1, sha2, _ = repo_and_db
+    canned = "should never run"
+    described: list[str] = []
+
+    def _fake_describe(diff, config):
+        described.append(diff)
+        return canned
+
+    with patch(
+        "whygraph.mcp_server.scan_llm.describe_pair", side_effect=_fake_describe
+    ), patch(
+        "whygraph.mcp_server.scan_llm.claude_cli_available", return_value=True
+    ):
+        out = mcp_server.whygraph_evidence_for(
+            # Line 3 → only blamed by sha2 (the tip on the test branch).
+            path="f.txt",
+            line_start=3,
+            line_end=3,
+            min_score_pct=0.0,
+            lazy_fill_limit=5,
+        )
+
+    # No describe_pair call because sha2 is tip (no successor) AND sha1
+    # already has a non-NULL llm_description.
+    assert described == []
+    assert out["lazy_filled"] == 0
+
+
+def test_evidence_for_lazy_fill_disabled_when_zero(
+    repo_and_db, monkeypatch
+) -> None:
+    repo_root, sha1, sha2, db_path = repo_and_db
+    (repo_root / "f.txt").write_text("alpha\nbeta\ngamma\ndelta\n")
+    _git(repo_root, "add", "f.txt")
+    _git(repo_root, "commit", "-q", "-m", "add delta")
+
+    with patch(
+        "whygraph.mcp_server.scan_llm.describe_pair",
+        side_effect=AssertionError("must not be called"),
+    ), patch(
+        "whygraph.mcp_server.scan_llm.claude_cli_available", return_value=True
+    ):
+        out = mcp_server.whygraph_evidence_for(
+            path="f.txt",
+            line_start=1,
+            line_end=4,
+            min_score_pct=0.0,
+            lazy_fill_limit=0,
+        )
+    assert out["lazy_filled"] == 0
+
+
+def test_evidence_for_lazy_fill_caps_at_limit(repo_and_db, monkeypatch) -> None:
+    """If two SHAs need fills but limit=1, only the higher-blame-impact one runs."""
+    repo_root, sha1, sha2, db_path = repo_and_db
+    # Strip sha1's llm_description so it ALSO needs filling.
+    with Database(db_path) as db:
+        cur = db._conn.cursor()
+        cur.execute(
+            "UPDATE commits SET llm_description = NULL, "
+            "llm_description_model = NULL WHERE sha = ?",
+            (sha1,),
+        )
+        db._conn.commit()
+    # Add sha3 and a sha4 so both sha1 and sha2 have successors.
+    (repo_root / "f.txt").write_text("alpha\nbeta\ngamma\ndelta\n")
+    _git(repo_root, "add", "f.txt")
+    _git(repo_root, "commit", "-q", "-m", "add delta")
+    (repo_root / "f.txt").write_text("alpha\nbeta\ngamma\ndelta\nepsilon\n")
+    _git(repo_root, "add", "f.txt")
+    _git(repo_root, "commit", "-q", "-m", "add epsilon")
+
+    calls: list[str] = []
+
+    def _fake_describe(diff, config):
+        calls.append(diff[:30])
+        return "described"
+
+    with patch(
+        "whygraph.mcp_server.scan_llm.describe_pair", side_effect=_fake_describe
+    ), patch(
+        "whygraph.mcp_server.scan_llm.claude_cli_available", return_value=True
+    ):
+        out = mcp_server.whygraph_evidence_for(
+            path="f.txt",
+            line_start=1,
+            line_end=3,
+            min_score_pct=0.0,
+            lazy_fill_limit=1,
+        )
+
+    assert len(calls) == 1
+    assert out["lazy_filled"] == 1
+
+
+def test_evidence_for_lazy_fill_silent_when_cli_missing(repo_and_db) -> None:
+    repo_root, sha1, sha2, db_path = repo_and_db
+    (repo_root / "f.txt").write_text("alpha\nbeta\ngamma\ndelta\n")
+    _git(repo_root, "add", "f.txt")
+    _git(repo_root, "commit", "-q", "-m", "add delta")
+    with patch(
+        "whygraph.mcp_server.scan_llm.claude_cli_available", return_value=False
+    ), patch(
+        "whygraph.mcp_server.scan_llm.describe_pair",
+        side_effect=AssertionError("must not be called"),
+    ):
+        out = mcp_server.whygraph_evidence_for(
+            path="f.txt",
+            line_start=1,
+            line_end=4,
+            min_score_pct=0.0,
+            lazy_fill_limit=5,
+        )
+    assert out["lazy_filled"] == 0
 
 
 def test_evidence_for_qualified_name_resolves_via_backend(

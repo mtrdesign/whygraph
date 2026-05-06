@@ -15,15 +15,21 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from whygraph import backend as backend_module
 from whygraph import llm_subprocess, mcp_queries
 from whygraph.llm_subprocess import LlmError
 from whygraph.scan import db as db_module
 from whygraph.scan import git as git_module
+from whygraph.scan import llm_descriptions as scan_llm
 from whygraph.scan.scoring import ValueGate
 
 DEFAULT_RATIONALE_MODEL = "claude-opus-4-7"
 DEFAULT_RATIONALE_TIMEOUT_SEC = 180
+DEFAULT_LAZY_FILL_LIMIT = 3
+DEFAULT_LAZY_FILL_MODEL = scan_llm.DEFAULT_MODEL
+DEFAULT_LAZY_FILL_WORKERS = 4
 CONFIDENCE_CEILING = 0.85
 
 mcp = FastMCP("whygraph")
@@ -264,6 +270,95 @@ def _resolve_target(
     }
 
 
+def _lazy_describe_one(
+    repo_root: Path, sha: str, next_sha: str, config: scan_llm.LlmConfig
+) -> str | None:
+    """Worker: compute the diff and describe it. None on any error."""
+    try:
+        diff = scan_llm.get_pair_diff(repo_root, sha, next_sha)
+        return scan_llm.describe_pair(diff, config)
+    except (git_module.GitError, LlmError):
+        return None
+
+
+def _lazy_fill_descriptions(
+    db: db_module.Database,
+    repo_root: Path,
+    blame_entries: dict[str, dict],
+    *,
+    limit: int,
+    model: str,
+    anthropic_api_key: str | None,
+) -> int:
+    """Fill ``commits.llm_description`` for up to ``limit`` blame SHAs that lack one.
+
+    Selection rules:
+    - SHA must exist in the scan DB (blame-only / stale-DB rows are skipped;
+      ``set_llm_description`` would no-op silently otherwise).
+    - SHA must currently have ``llm_description IS NULL``.
+    - SHA must have a successor on the first-parent walk (tip-of-branch
+      commits have no diff partner; leave them NULL forever).
+    - Sorted by ``blame_lines`` descending — fill the SHAs that own the
+      most of the requested range first, since they're the highest-impact
+      narratives for this query.
+
+    Skips silently if the ``claude`` CLI isn't installed. Per-SHA errors
+    are dropped (the next call will retry), matching scan's run_phase
+    behavior. Returns the number of SHAs successfully filled.
+    """
+    if limit <= 0 or not blame_entries:
+        return 0
+    if not scan_llm.claude_cli_available():
+        return 0
+
+    try:
+        branch = git_module._run_git(
+            repo_root, ["rev-parse", "--abbrev-ref", "HEAD"]
+        ).strip()
+    except git_module.GitError:
+        return 0
+    walked = list(git_module.walk_first_parent(repo_root, branch))
+    if len(walked) < 2:
+        return 0
+    sha_to_next = dict(zip(walked[:-1], walked[1:], strict=True))
+
+    # Highest-blame-impact SHAs first.
+    ordered_shas = [
+        sha
+        for sha, _ in sorted(
+            blame_entries.items(),
+            key=lambda kv: kv[1].get("lines_owned", 0),
+            reverse=True,
+        )
+    ]
+    candidates = [sha for sha in ordered_shas if sha in sha_to_next]
+    if not candidates:
+        return 0
+    needs = db.commits_without_llm_description(candidates)
+    fillable = [sha for sha in candidates if sha in needs][:limit]
+    if not fillable:
+        return 0
+
+    config = scan_llm.LlmConfig(model=model, anthropic_api_key=anthropic_api_key)
+    workers = min(len(fillable), DEFAULT_LAZY_FILL_WORKERS)
+    filled = 0
+    with ThreadPoolExecutor(
+        max_workers=workers, thread_name_prefix="whygraph-lazy-llm"
+    ) as ex:
+        futures = {
+            ex.submit(_lazy_describe_one, repo_root, sha, sha_to_next[sha], config): sha
+            for sha in fillable
+        }
+        for fut in as_completed(futures):
+            sha = futures[fut]
+            description = fut.result()
+            if description is None:
+                continue
+            db.set_llm_description(sha, description, model)
+            filled += 1
+    return filled
+
+
 def _build_evidence_item(
     db: db_module.Database,
     *,
@@ -391,7 +486,10 @@ def _build_evidence_item(
         "CodeGraph). Returns {target, evidence, callers, callees}. Evidence "
         "is filtered by TF-IDF harshness; commit narrative prefers "
         "llm_description, then body, then subject. Callers/callees are "
-        "populated only when qualified_name is given."
+        "populated only when qualified_name is given. Up to "
+        "`lazy_fill_limit` blame SHAs missing an llm_description will be "
+        "filled on the fly via the local `claude` CLI (highest-blame-impact "
+        "first); set 0 to disable."
     ),
 )
 def whygraph_evidence_for(
@@ -401,11 +499,16 @@ def whygraph_evidence_for(
     qualified_name: str | None = None,
     min_score_pct: float = 0.5,
     limit: int = 10,
+    lazy_fill_limit: int = DEFAULT_LAZY_FILL_LIMIT,
+    lazy_fill_model: str = DEFAULT_LAZY_FILL_MODEL,
+    anthropic_api_key: str | None = None,
 ) -> dict:
     if not 0.0 <= min_score_pct <= 1.0:
         raise WhyGraphError("min_score_pct must be in [0, 1]")
     if limit < 1:
         raise WhyGraphError("limit must be ≥ 1")
+    if lazy_fill_limit < 0:
+        raise WhyGraphError("lazy_fill_limit must be ≥ 0 (0 disables)")
 
     target = _resolve_target(
         path=path,
@@ -420,8 +523,17 @@ def whygraph_evidence_for(
     )
 
     items: list[dict] = []
+    lazy_filled = 0
     if blame:
         with db_module.Database(_resolve_db_path()) as db:
+            lazy_filled = _lazy_fill_descriptions(
+                db,
+                repo_root,
+                blame,
+                limit=lazy_fill_limit,
+                model=lazy_fill_model,
+                anthropic_api_key=anthropic_api_key,
+            )
             gate = ValueGate.percentile(db, fraction=min_score_pct)
             for sha, blame_entry in blame.items():
                 items.append(
@@ -442,6 +554,7 @@ def whygraph_evidence_for(
         "evidence": items,
         "callers": target["callers"],
         "callees": target["callees"],
+        "lazy_filled": lazy_filled,
     }
 
 
@@ -689,6 +802,8 @@ def whygraph_rationale_brief(
     model: str = DEFAULT_RATIONALE_MODEL,
     timeout_sec: int = DEFAULT_RATIONALE_TIMEOUT_SEC,
     anthropic_api_key: str | None = None,
+    lazy_fill_limit: int = DEFAULT_LAZY_FILL_LIMIT,
+    lazy_fill_model: str = DEFAULT_LAZY_FILL_MODEL,
 ) -> dict:
     bundle = whygraph_evidence_for(
         path=path,
@@ -697,6 +812,9 @@ def whygraph_rationale_brief(
         qualified_name=qualified_name,
         min_score_pct=min_score_pct,
         limit=20,
+        lazy_fill_limit=lazy_fill_limit,
+        lazy_fill_model=lazy_fill_model,
+        anthropic_api_key=anthropic_api_key,
     )
     target = bundle["target"]
     evidence = bundle["evidence"]
@@ -733,6 +851,7 @@ def whygraph_rationale_brief(
             "callers": len(callers),
             "callees": len(callees),
         },
+        "lazy_filled": bundle.get("lazy_filled", 0),
         "model": model,
     }
 

@@ -2,36 +2,35 @@
 
 from __future__ import annotations
 
-import os
-import shutil
-import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
 from rich.progress import Progress, TaskID
 
+from whygraph import llm_subprocess
+from whygraph.llm_subprocess import LlmError, claude_cli_available
 from whygraph.scan import db as db_module
 from whygraph.scan import git as git_module
+
+__all__ = [
+    "DEFAULT_MODEL",
+    "DEFAULT_MAX_DIFF_CHARS",
+    "DEFAULT_TIMEOUT_SEC",
+    "DEFAULT_MAX_WORKERS",
+    "LlmConfig",
+    "LlmError",
+    "claude_cli_available",
+    "commits_to_describe",
+    "describe_pair",
+    "get_pair_diff",
+    "run_phase",
+]
 
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_MAX_DIFF_CHARS = 50_000
 DEFAULT_TIMEOUT_SEC = 120
 DEFAULT_MAX_WORKERS = 4
-
-# Flags passed to every `claude --print` invocation. Trims the agent
-# runtime of work the description prompt doesn't need: MCP servers, tool
-# init, slash command/skill discovery, on-disk session persistence.
-# Cuts cold start ~40-50% in this repo's measurements.
-_LEAN_FLAGS: tuple[str, ...] = (
-    "--strict-mcp-config",
-    "--mcp-config",
-    '{"mcpServers":{}}',
-    "--tools",
-    "",
-    "--disable-slash-commands",
-    "--no-session-persistence",
-)
 
 
 @dataclass(frozen=True)
@@ -44,10 +43,6 @@ class LlmConfig:
     # `claude` falls through to subscription billing. If set, the value is
     # exported to the subprocess as ANTHROPIC_API_KEY (API billing).
     anthropic_api_key: str | None = None
-
-
-class LlmError(RuntimeError):
-    pass
 
 
 _PROMPT_TEMPLATE = """\
@@ -67,10 +62,6 @@ Diff:
 
 Output only the description.
 """
-
-
-def claude_cli_available() -> bool:
-    return shutil.which("claude") is not None
 
 
 def get_pair_diff(repo_root: Path, sha_a: str, sha_b: str) -> str:
@@ -96,30 +87,12 @@ def describe_pair(diff: str, config: LlmConfig) -> str:
         omitted = len(diff) - config.max_diff_chars
         diff = diff[: config.max_diff_chars] + f"\n[truncated: {omitted} chars omitted]"
     prompt = _PROMPT_TEMPLATE.format(diff=diff)
-    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
-    if config.anthropic_api_key:
-        env["ANTHROPIC_API_KEY"] = config.anthropic_api_key
-    try:
-        result = subprocess.run(
-            ["claude", "--print", "--model", config.model, *_LEAN_FLAGS],
-            input=prompt,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=config.timeout_sec,
-            env=env,
-        )
-    except FileNotFoundError as exc:
-        raise LlmError("claude CLI is not installed") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise LlmError(f"claude timed out after {config.timeout_sec}s") from exc
-    if result.returncode != 0:
-        stderr = (result.stderr or "").strip() or (result.stdout or "").strip()
-        raise LlmError(f"claude exited {result.returncode}: {stderr}")
-    text = (result.stdout or "").strip()
-    if not text:
-        raise LlmError("claude returned empty output")
-    return text
+    return llm_subprocess.invoke_claude(
+        prompt,
+        model=config.model,
+        timeout_sec=config.timeout_sec,
+        anthropic_api_key=config.anthropic_api_key,
+    )
 
 
 def _process_pair(

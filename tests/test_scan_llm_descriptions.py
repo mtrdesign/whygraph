@@ -112,78 +112,6 @@ def test_commits_to_describe_handles_single_commit(tmp_path: Path) -> None:
         assert commits_to_describe(db, root, "main") == []
 
 
-def test_describe_pair_invokes_claude_with_stdin() -> None:
-    captured = {}
-
-    def fake_run(args, *, input, **kw):
-        captured["args"] = args
-        captured["input"] = input
-        captured["timeout"] = kw.get("timeout")
-        return _FakeResult(returncode=0, stdout="  added foo bar  \n")
-
-    with patch(
-        "whygraph.scan.llm_descriptions.subprocess.run", side_effect=fake_run
-    ):
-        out = describe_pair("DIFF_CONTENT", LlmConfig(model="haiku", timeout_sec=11))
-    assert out == "added foo bar"
-    args = captured["args"]
-    assert args[0] == "claude"
-    assert "--print" in args
-    assert args[args.index("--model") + 1] == "haiku"
-    # Lean flags reduce per-call cold start (MCP, tools, skills, sessions).
-    assert "--strict-mcp-config" in args
-    assert "--tools" in args
-    assert "--disable-slash-commands" in args
-    assert "--no-session-persistence" in args
-    assert "DIFF_CONTENT" in captured["input"]
-    assert captured["timeout"] == 11
-
-
-def test_describe_pair_strips_api_key_by_default(monkeypatch) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-leak")
-    captured = {}
-
-    def fake_run(args, *, input, env, **kw):
-        captured["env"] = env
-        return _FakeResult(returncode=0, stdout="ok")
-
-    with patch(
-        "whygraph.scan.llm_descriptions.subprocess.run", side_effect=fake_run
-    ):
-        describe_pair("d", LlmConfig())
-    assert "ANTHROPIC_API_KEY" not in captured["env"]
-
-
-def test_describe_pair_sets_api_key_when_provided(monkeypatch) -> None:
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    captured = {}
-
-    def fake_run(args, *, input, env, **kw):
-        captured["env"] = env
-        return _FakeResult(returncode=0, stdout="ok")
-
-    with patch(
-        "whygraph.scan.llm_descriptions.subprocess.run", side_effect=fake_run
-    ):
-        describe_pair("d", LlmConfig(anthropic_api_key="sk-explicit"))
-    assert captured["env"]["ANTHROPIC_API_KEY"] == "sk-explicit"
-
-
-def test_describe_pair_explicit_key_overrides_inherited(monkeypatch) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-inherited")
-    captured = {}
-
-    def fake_run(args, *, input, env, **kw):
-        captured["env"] = env
-        return _FakeResult(returncode=0, stdout="ok")
-
-    with patch(
-        "whygraph.scan.llm_descriptions.subprocess.run", side_effect=fake_run
-    ):
-        describe_pair("d", LlmConfig(anthropic_api_key="sk-explicit"))
-    assert captured["env"]["ANTHROPIC_API_KEY"] == "sk-explicit"
-
-
 def test_describe_pair_truncates_oversize_diff() -> None:
     captured = {}
 
@@ -192,53 +120,12 @@ def test_describe_pair_truncates_oversize_diff() -> None:
         return _FakeResult(returncode=0, stdout="ok")
 
     big = "x" * 60_000
-    with patch(
-        "whygraph.scan.llm_descriptions.subprocess.run", side_effect=fake_run
-    ):
+    with patch("whygraph.llm_subprocess.subprocess.run", side_effect=fake_run):
         describe_pair(big, LlmConfig(model="m", max_diff_chars=50_000))
     prompt = captured["input"]
     assert "[truncated:" in prompt
-    # Prompt size is bounded: truncated diff (50_000) + truncation marker
-    # + template overhead. Originally 60k of 'x' should not all reach the prompt.
     assert len(prompt) < 55_000
-    # Confirm the original 60k wasn't sent verbatim.
     assert prompt.count("x") < 51_000
-
-
-def test_describe_pair_handles_missing_cli() -> None:
-    with patch(
-        "whygraph.scan.llm_descriptions.subprocess.run",
-        side_effect=FileNotFoundError,
-    ):
-        with pytest.raises(LlmError, match="not installed"):
-            describe_pair("d", LlmConfig())
-
-
-def test_describe_pair_handles_timeout() -> None:
-    with patch(
-        "whygraph.scan.llm_descriptions.subprocess.run",
-        side_effect=subprocess.TimeoutExpired(cmd="claude", timeout=1),
-    ):
-        with pytest.raises(LlmError, match="timed out"):
-            describe_pair("d", LlmConfig(timeout_sec=1))
-
-
-def test_describe_pair_handles_nonzero_exit() -> None:
-    with patch(
-        "whygraph.scan.llm_descriptions.subprocess.run",
-        return_value=_FakeResult(returncode=2, stderr="bad model"),
-    ):
-        with pytest.raises(LlmError, match="exited 2"):
-            describe_pair("d", LlmConfig())
-
-
-def test_describe_pair_handles_empty_output() -> None:
-    with patch(
-        "whygraph.scan.llm_descriptions.subprocess.run",
-        return_value=_FakeResult(returncode=0, stdout="   "),
-    ):
-        with pytest.raises(LlmError, match="empty"):
-            describe_pair("d", LlmConfig())
 
 
 def test_run_phase_writes_back(tmp_path: Path) -> None:

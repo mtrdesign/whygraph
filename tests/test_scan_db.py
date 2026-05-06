@@ -254,6 +254,41 @@ def test_set_llm_description_and_filter(tmp_path: Path) -> None:
         assert cur.fetchone() == ("added foo", "claude-haiku-4-5-20251001")
 
 
+def test_get_commit_returns_full_row(tmp_path: Path) -> None:
+    with Database(tmp_path / "whygraph.db") as db:
+        commit = _sample_commit()
+        db.upsert_commit(commit)
+        row = db.get_commit(commit.sha)
+        assert row is not None
+        assert row["sha"] == commit.sha
+        assert row["author_email"] == "alice@example.com"
+        assert row["subject"] == "Initial commit"
+        assert row["llm_description"] is None
+        assert row["body_tfidf_score"] == 0
+        assert db.get_commit("nonexistent") is None
+
+
+def test_get_pull_request_returns_full_row(tmp_path: Path) -> None:
+    with Database(tmp_path / "whygraph.db") as db:
+        db.upsert_pull_request(_sample_pr(number=42))
+        row = db.get_pull_request(42)
+        assert row is not None
+        assert row["number"] == 42
+        assert row["title"] == "PR #42"
+        assert row["draft"] == 0
+        assert db.get_pull_request(999) is None
+
+
+def test_get_issue_returns_full_row(tmp_path: Path) -> None:
+    with Database(tmp_path / "whygraph.db") as db:
+        db.upsert_issue(_sample_issue(number=7))
+        row = db.get_issue(7)
+        assert row is not None
+        assert row["number"] == 7
+        assert row["title"] == "Issue #7"
+        assert db.get_issue(999) is None
+
+
 def test_pr_join_with_commits(tmp_path: Path) -> None:
     with Database(tmp_path / "whygraph.db") as db:
         commit = _sample_commit(sha="b" * 40)

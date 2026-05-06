@@ -129,6 +129,10 @@ def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
 
+def _row_to_dict(cur: sqlite3.Cursor, row: tuple) -> dict:
+    return dict(zip([d[0] for d in cur.description], row, strict=True))
+
+
 class Database:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -366,6 +370,31 @@ class Database:
         cur = self._conn.cursor()
         cur.execute("SELECT COUNT(*) FROM issues")
         return int(cur.fetchone()[0])
+
+    def get_commit(self, sha: str) -> dict | None:
+        """Return a single commit row as a dict (or None if not found)."""
+        cur = self._conn.cursor()
+        cur.execute("SELECT * FROM commits WHERE sha = ?", (sha,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return _row_to_dict(cur, row)
+
+    def get_pull_request(self, number: int) -> dict | None:
+        cur = self._conn.cursor()
+        cur.execute("SELECT * FROM pull_requests WHERE number = ?", (number,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return _row_to_dict(cur, row)
+
+    def get_issue(self, number: int) -> dict | None:
+        cur = self._conn.cursor()
+        cur.execute("SELECT * FROM issues WHERE number = ?", (number,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return _row_to_dict(cur, row)
 
     def commits_without_llm_description(self, shas: list[str]) -> set[str]:
         """Return the subset of `shas` whose `llm_description IS NULL`."""

@@ -1,6 +1,702 @@
+"""WhyGraph MCP server: resources/tools/prompts over the scan DB.
+
+The scan DB at ``<repo_root>/.whygraph/whygraph.db`` is the single source of
+truth. All resources/tools open it read-only per call. The CodeGraph DB
+(used for symbol-name resolution) is opened lazily by tools that need it.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from pathlib import Path
+from typing import Any
+
 from mcp.server.fastmcp import FastMCP
 
+from whygraph import backend as backend_module
+from whygraph import llm_subprocess, mcp_queries
+from whygraph.llm_subprocess import LlmError
+from whygraph.scan import db as db_module
+from whygraph.scan import git as git_module
+from whygraph.scan.scoring import ValueGate
+
+DEFAULT_RATIONALE_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_RATIONALE_TIMEOUT_SEC = 180
+CONFIDENCE_CEILING = 0.85
+
 mcp = FastMCP("whygraph")
+
+
+class WhyGraphError(RuntimeError):
+    pass
+
+
+def _resolve_codegraph_db_path() -> Path | None:
+    if override := os.environ.get("CODEGRAPH_DB"):
+        return Path(override)
+    try:
+        root = git_module.repo_root(Path.cwd())
+    except git_module.GitError:
+        root = Path.cwd()
+    candidate = root / ".codegraph" / "codegraph.db"
+    return candidate if candidate.exists() else None
+
+
+def _resolve_repo_root() -> Path:
+    try:
+        return git_module.repo_root(Path.cwd())
+    except git_module.GitError:
+        return Path.cwd()
+
+
+def _resolve_db_path() -> Path:
+    """Locate the scan DB.
+
+    Order: ``WHYGRAPH_DB`` env override, then ``git rev-parse --show-toplevel``
+    from CWD, else CWD itself. Tests set ``WHYGRAPH_DB`` to a fixture path.
+    """
+    if override := os.environ.get("WHYGRAPH_DB"):
+        return Path(override)
+    try:
+        root = git_module.repo_root(Path.cwd())
+    except git_module.GitError:
+        root = Path.cwd()
+    return db_module.default_db_path(root)
+
+
+def _parse_json_list(raw: Any) -> list:
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return raw
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _hydrate_pr(row: dict) -> dict:
+    """Decode JSON columns on a PR row in place."""
+    out = dict(row)
+    out["labels"] = _parse_json_list(out.get("labels"))
+    out["commit_titles"] = _parse_json_list(out.get("commit_titles"))
+    out["comments"] = _parse_json_list(out.get("comments"))
+    return out
+
+
+def _hydrate_issue(row: dict) -> dict:
+    out = dict(row)
+    out["labels"] = _parse_json_list(out.get("labels"))
+    return out
+
+
+def _hydrate_commit(row: dict) -> dict:
+    out = dict(row)
+    out["parent_shas"] = _parse_json_list(out.get("parent_shas"))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+
+
+@mcp.resource(
+    "whygraph://repo/overview",
+    name="repo_overview",
+    description=(
+        "Summary of the scanned repo: counts, scan freshness, scoring + LLM "
+        "coverage, and top contributors."
+    ),
+    mime_type="application/json",
+)
+def repo_overview() -> dict:
+    with db_module.Database(_resolve_db_path()) as db:
+        return mcp_queries.repo_overview(db)
+
+
+@mcp.resource(
+    "whygraph://commit/{sha}",
+    name="commit",
+    description=(
+        "Full commit row plus PRs that contain it and the closing issues "
+        "for each linked PR."
+    ),
+    mime_type="application/json",
+)
+def commit_resource(sha: str) -> dict:
+    with db_module.Database(_resolve_db_path()) as db:
+        row = db.get_commit(sha)
+        if row is None:
+            return {"error": "not_found", "sha": sha}
+        prs = [_hydrate_pr(p) for p in mcp_queries.prs_containing_commit(db, sha)]
+        for pr in prs:
+            pr["closing_issues"] = [
+                _hydrate_issue(i)
+                for i in mcp_queries.closing_issues_for_pr(db, pr["number"])
+            ]
+        return {"commit": _hydrate_commit(row), "linked_prs": prs}
+
+
+@mcp.resource(
+    "whygraph://pr/{number}",
+    name="pull_request",
+    description="Full PR row including commit_titles dicts, comments, and closing issues.",
+    mime_type="application/json",
+)
+def pr_resource(number: str) -> dict:
+    n = int(number)
+    with db_module.Database(_resolve_db_path()) as db:
+        row = db.get_pull_request(n)
+        if row is None:
+            return {"error": "not_found", "number": n}
+        closing = [
+            _hydrate_issue(i) for i in mcp_queries.closing_issues_for_pr(db, n)
+        ]
+        return {"pull_request": _hydrate_pr(row), "closing_issues": closing}
+
+
+@mcp.resource(
+    "whygraph://issue/{number}",
+    name="issue",
+    description="Full issue row plus PRs that close it.",
+    mime_type="application/json",
+)
+def issue_resource(number: str) -> dict:
+    n = int(number)
+    with db_module.Database(_resolve_db_path()) as db:
+        row = db.get_issue(n)
+        if row is None:
+            return {"error": "not_found", "number": n}
+        cur = db._conn.cursor()
+        cur.execute(
+            """
+            SELECT p.* FROM pull_requests p
+              JOIN pr_issue_links l ON l.pr_number = p.number
+             WHERE l.issue_number = ? AND l.link_kind = 'closes'
+             ORDER BY p.number
+            """,
+            (n,),
+        )
+        cols = [d[0] for d in cur.description]
+        prs = [_hydrate_pr(dict(zip(cols, row, strict=True))) for row in cur.fetchall()]
+        return {"issue": _hydrate_issue(row), "closing_prs": prs}
+
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
+
+
+def _resolve_target(
+    *,
+    path: str | None,
+    line_start: int | None,
+    line_end: int | None,
+    qualified_name: str | None,
+) -> tuple[str, int, int, str | None]:
+    """Validate and normalize a tool target.
+
+    Returns ``(path, line_start, line_end, resolved_qualified_name)``.
+    Raises ``WhyGraphError`` on bad input.
+    """
+    if qualified_name:
+        if path or line_start or line_end:
+            raise WhyGraphError(
+                "Pass either qualified_name OR (path, line_start, line_end), not both."
+            )
+        cg_path = _resolve_codegraph_db_path()
+        if cg_path is None:
+            raise WhyGraphError(
+                "qualified_name targeting requires CodeGraph. Set CODEGRAPH_DB or "
+                "run `codegraph init` to create .codegraph/codegraph.db."
+            )
+        backend = backend_module.SqliteCodegraphBackend(cg_path)
+        try:
+            node = backend.get_node(qualified_name)
+        finally:
+            backend.close()
+        if node is None:
+            raise WhyGraphError(f"qualified_name {qualified_name!r} not found in CodeGraph")
+        return node.file_path, node.start_line, node.end_line, qualified_name
+
+    if not (path and line_start and line_end):
+        raise WhyGraphError(
+            "Must pass either qualified_name OR all of (path, line_start, line_end)."
+        )
+    if line_start < 1 or line_end < line_start:
+        raise WhyGraphError("line_start must be ≥ 1 and line_end ≥ line_start")
+    return path, line_start, line_end, None
+
+
+def _build_evidence_item(
+    db: db_module.Database,
+    *,
+    sha: str,
+    blame_lines: int,
+    gate: ValueGate,
+) -> dict | None:
+    commit = db.get_commit(sha)
+    if commit is None:
+        return None
+    narrative, source = mcp_queries.commit_narrative(commit, gate)
+    if narrative is None:
+        return None
+
+    prs_raw = mcp_queries.prs_containing_commit(db, sha)
+    prs: list[dict] = []
+    issues_collected: dict[int, dict] = {}
+    all_authors: list[dict] = []
+    seen_logins: set[str] = set()
+    seen_email_name: set[tuple[str | None, str | None]] = set()
+
+    def _add_author(login: str | None, name: str | None, email: str | None) -> None:
+        if login:
+            if login in seen_logins:
+                return
+            seen_logins.add(login)
+        else:
+            key = (name, email)
+            if key == (None, None) or key in seen_email_name:
+                return
+            seen_email_name.add(key)
+        all_authors.append({"login": login, "name": name, "email": email})
+
+    _add_author(None, commit.get("author_name"), commit.get("author_email"))
+
+    for pr in prs_raw:
+        narrative_pr, source_pr = mcp_queries.pr_narrative(pr, gate)
+        pr_entry = {
+            "number": pr["number"],
+            "narrative": narrative_pr,
+            "narrative_source": source_pr,
+            "author": pr.get("author"),
+            "html_url": pr.get("html_url"),
+            "merged_at": pr.get("merged_at"),
+        }
+        commit_authors = mcp_queries.pr_authors(pr)
+        pr_entry["commit_authors"] = commit_authors
+        for a in commit_authors:
+            _add_author(a.get("login"), a.get("name"), a.get("email"))
+        prs.append(pr_entry)
+
+        for issue in mcp_queries.closing_issues_for_pr(db, pr["number"]):
+            if issue["number"] in issues_collected:
+                continue
+            narrative_issue, source_issue = mcp_queries.issue_narrative(issue, gate)
+            issues_collected[issue["number"]] = {
+                "number": issue["number"],
+                "narrative": narrative_issue,
+                "narrative_source": source_issue,
+                "author": issue.get("author"),
+                "html_url": issue.get("html_url"),
+            }
+            if issue.get("author"):
+                _add_author(issue["author"], None, None)
+
+    return {
+        "sha": sha,
+        "narrative": narrative,
+        "narrative_source": source,
+        "committed_at": commit.get("committed_at"),
+        "blame_lines": blame_lines,
+        "commit_author": {
+            "name": commit.get("author_name"),
+            "email": commit.get("author_email"),
+        },
+        "prs": prs,
+        "issues": list(issues_collected.values()),
+        "all_authors": all_authors,
+    }
+
+
+@mcp.tool(
+    name="whygraph_evidence_for",
+    description=(
+        "Find historical evidence (commits + PRs + closing issues) explaining "
+        "a chunk of code. Pass either (path, line_start, line_end) or a "
+        "qualified_name (resolved via CodeGraph). Filtered by TF-IDF "
+        "harshness; commit narrative prefers llm_description, then body, "
+        "then subject."
+    ),
+)
+def whygraph_evidence_for(
+    path: str | None = None,
+    line_start: int | None = None,
+    line_end: int | None = None,
+    qualified_name: str | None = None,
+    min_score_pct: float = 0.5,
+    limit: int = 10,
+) -> list[dict]:
+    if not 0.0 <= min_score_pct <= 1.0:
+        raise WhyGraphError("min_score_pct must be in [0, 1]")
+    if limit < 1:
+        raise WhyGraphError("limit must be ≥ 1")
+
+    target_path, target_start, target_end, _qn = _resolve_target(
+        path=path,
+        line_start=line_start,
+        line_end=line_end,
+        qualified_name=qualified_name,
+    )
+    repo_root = _resolve_repo_root()
+
+    blame = mcp_queries.blame_line_range(
+        repo_root, target_path, target_start, target_end
+    )
+    if not blame:
+        return []
+
+    items: list[dict] = []
+    with db_module.Database(_resolve_db_path()) as db:
+        gate = ValueGate.percentile(db, fraction=min_score_pct)
+        for sha, lines_owned in blame.items():
+            item = _build_evidence_item(
+                db, sha=sha, blame_lines=lines_owned, gate=gate
+            )
+            if item is None:
+                continue
+            items.append(item)
+
+    items.sort(
+        key=lambda it: (it.get("committed_at") or ""),
+        reverse=True,
+    )
+    return items[:limit]
+
+
+@mcp.tool(
+    name="whygraph_search",
+    description=(
+        "LIKE-match query across commits/PRs/issues, ranked by TF-IDF. "
+        "Commits with non-NULL llm_description always pass the harshness "
+        "gate. Returns typed hits with id, narrative, score, authors."
+    ),
+)
+def whygraph_search(
+    query: str,
+    kinds: list[str] | None = None,
+    limit: int = 20,
+    min_score_pct: float = 0.5,
+) -> list[dict]:
+    if not 0.0 <= min_score_pct <= 1.0:
+        raise WhyGraphError("min_score_pct must be in [0, 1]")
+    if limit < 1:
+        raise WhyGraphError("limit must be ≥ 1")
+    valid_kinds = {"commit", "pr", "issue"}
+    selected = tuple(kinds) if kinds else ("commit", "pr", "issue")
+    bad = set(selected) - valid_kinds
+    if bad:
+        raise WhyGraphError(
+            f"unknown kinds {sorted(bad)} (allowed: {sorted(valid_kinds)})"
+        )
+    with db_module.Database(_resolve_db_path()) as db:
+        gate = ValueGate.percentile(db, fraction=min_score_pct)
+        return mcp_queries.search_text(
+            db, query, kinds=selected, gate=gate, limit=limit
+        )
+
+
+@mcp.tool(
+    name="whygraph_velocity_summary",
+    description=(
+        "Per-author commit velocity (window + all-time + recency, files "
+        "touched, PRs authored), or per-path-prefix touch counts when "
+        "group_by='path_prefix'. Path-prefix mode shells out to git log."
+    ),
+)
+def whygraph_velocity_summary(
+    window_days: int = 90,
+    group_by: str = "author",
+    top_n: int = 10,
+) -> list[dict]:
+    if window_days < 1:
+        raise WhyGraphError("window_days must be ≥ 1")
+    if top_n < 1:
+        raise WhyGraphError("top_n must be ≥ 1")
+    if group_by == "author":
+        with db_module.Database(_resolve_db_path()) as db:
+            return mcp_queries.velocity_by_author(
+                db, window_days=window_days, top_n=top_n
+            )
+    if group_by == "path_prefix":
+        repo_root = _resolve_repo_root()
+        try:
+            branch = git_module._run_git(
+                repo_root, ["rev-parse", "--abbrev-ref", "HEAD"]
+            ).strip()
+        except git_module.GitError:
+            branch = "HEAD"
+        return mcp_queries.velocity_by_path_prefix(
+            repo_root, branch, window_days=window_days, top_n=top_n
+        )
+    raise WhyGraphError(
+        f"unknown group_by {group_by!r} (allowed: 'author', 'path_prefix')"
+    )
+
+
+_RATIONALE_SYSTEM_PROMPT = """\
+You produce a five-section pre-edit rationale card for a chunk of source code, grounded strictly in the evidence bundle the user gives you.
+
+Audience: an LLM that will read this card to decide how to edit the code.
+
+Output format: a single JSON object with EXACTLY these top-level keys, no others:
+- "purpose": one sentence stating what the code does today.
+- "why": one paragraph explaining historical and contextual rationale — why this code exists in its current shape, drawn from commits/PRs/issues.
+- "constraints": JSON array of strings; each string is an invariant or contract the next editor must preserve. May be empty.
+- "tradeoffs": JSON array of strings; each is a notable design decision visible in evidence. May be empty.
+- "risks": JSON array of strings; each is a risk of modifying this code (regressions, breaking changes, compliance). May be empty.
+
+Rules:
+- Cite only what the evidence supports. Prefer commit "narrative" (especially when narrative_source = "llm_description") over the human-written subject; the llm_description is a verbatim diff summary and is the highest-confidence narrative.
+- No hedging language ("seems", "may", "appears"). No invented rationale.
+- Use exact identifiers (file paths, function names) from the evidence; do not paraphrase.
+- If a section has no evidence, return an empty array (never invent items).
+- Output ONLY the JSON object. No prose, no fences, no preamble.
+"""
+
+
+def _build_rationale_user_prompt(
+    *,
+    target: dict,
+    evidence: list[dict],
+) -> str:
+    payload = {
+        "target": target,
+        "evidence": evidence,
+    }
+    return (
+        "Produce the rationale JSON for this target.\n\n"
+        f"{json.dumps(payload, indent=2, default=str)}\n"
+    )
+
+
+_FENCE_RE = re.compile(r"^```(?:json|JSON)?\s*\n|\n```\s*$")
+
+
+def _extract_rationale_json(text: str) -> dict:
+    trimmed = text.strip()
+    try:
+        return json.loads(trimmed)
+    except ValueError:
+        pass
+    stripped = re.sub(r"^```(?:json|JSON)?\s*\r?\n", "", trimmed)
+    stripped = re.sub(r"\r?\n```\s*$", "", stripped)
+    if stripped != trimmed:
+        try:
+            return json.loads(stripped.strip())
+        except ValueError:
+            pass
+    raise WhyGraphError(
+        f"could not parse JSON from claude rationale output (first 200 chars: {trimmed[:200]})"
+    )
+
+
+def _validate_rationale(payload: dict) -> dict:
+    """Validate shape; coerce list fields. Raises WhyGraphError on bad shape."""
+    required_str = ("purpose", "why")
+    required_lists = ("constraints", "tradeoffs", "risks")
+    out: dict = {}
+    for key in required_str:
+        val = payload.get(key)
+        if not isinstance(val, str):
+            raise WhyGraphError(f"rationale: '{key}' must be a string, got {type(val).__name__}")
+        out[key] = val
+    for key in required_lists:
+        val = payload.get(key)
+        if val is None:
+            out[key] = []
+            continue
+        if not isinstance(val, list):
+            raise WhyGraphError(f"rationale: '{key}' must be a list, got {type(val).__name__}")
+        if not all(isinstance(item, str) for item in val):
+            raise WhyGraphError(f"rationale: '{key}' must contain strings only")
+        out[key] = val
+    return out
+
+
+def _score_confidence(
+    *, evidence: list[dict], constraints: list[str], risks: list[str]
+) -> float:
+    """v1's deterministic confidence — blend of commit count, authors, PR/issue presence."""
+    has_any_commits = 1.0 if evidence else 0.0
+    num_commits_norm = min(len(evidence) / 5.0, 1.0)
+
+    authors: set[str] = set()
+    for ev in evidence:
+        for a in ev.get("all_authors") or []:
+            key = a.get("login") or a.get("email") or a.get("name")
+            if key:
+                authors.add(key)
+    num_authors_norm = min(len(authors) / 3.0, 1.0)
+
+    has_pr = 1.0 if any(ev.get("prs") for ev in evidence) else 0.0
+    has_issue = 1.0 if any(ev.get("issues") for ev in evidence) else 0.0
+    has_rationale_content = 1.0 if (constraints or risks) else 0.0
+
+    raw = (
+        0.20 * has_any_commits
+        + 0.20 * num_commits_norm
+        + 0.20 * num_authors_norm
+        + 0.10 * has_pr
+        + 0.10 * has_issue
+        + 0.20 * has_rationale_content
+    )
+    return round(min(raw, 1.0) * CONFIDENCE_CEILING, 4)
+
+
+@mcp.tool(
+    name="whygraph_rationale_brief",
+    description=(
+        "Generate the 5-section rationale card (purpose/why/constraints/"
+        "tradeoffs/risks + confidence) for a code chunk. Calls the local "
+        "`claude` CLI; uses subscription billing unless anthropic_api_key is "
+        "passed. Lazy: no caching."
+    ),
+)
+def whygraph_rationale_brief(
+    path: str | None = None,
+    line_start: int | None = None,
+    line_end: int | None = None,
+    qualified_name: str | None = None,
+    min_score_pct: float = 0.5,
+    model: str = DEFAULT_RATIONALE_MODEL,
+    timeout_sec: int = DEFAULT_RATIONALE_TIMEOUT_SEC,
+    anthropic_api_key: str | None = None,
+) -> dict:
+    target_path, target_start, target_end, qn = _resolve_target(
+        path=path,
+        line_start=line_start,
+        line_end=line_end,
+        qualified_name=qualified_name,
+    )
+    evidence = whygraph_evidence_for(
+        path=target_path,
+        line_start=target_start,
+        line_end=target_end,
+        min_score_pct=min_score_pct,
+        limit=20,
+    )
+    user_prompt = _build_rationale_user_prompt(
+        target={
+            "path": target_path,
+            "line_start": target_start,
+            "line_end": target_end,
+            "qualified_name": qn,
+        },
+        evidence=evidence,
+    )
+    raw = llm_subprocess.invoke_claude(
+        f"{_RATIONALE_SYSTEM_PROMPT}\n\n{user_prompt}",
+        model=model,
+        timeout_sec=timeout_sec,
+        anthropic_api_key=anthropic_api_key,
+    )
+    parsed = _extract_rationale_json(raw)
+    rationale = _validate_rationale(parsed)
+    confidence = _score_confidence(
+        evidence=evidence,
+        constraints=rationale["constraints"],
+        risks=rationale["risks"],
+    )
+    return {
+        "target": {
+            "path": target_path,
+            "line_start": target_start,
+            "line_end": target_end,
+            "qualified_name": qn,
+        },
+        **rationale,
+        "confidence": confidence,
+        "evidence_count": {
+            "commits": len(evidence),
+            "prs": sum(len(ev.get("prs") or []) for ev in evidence),
+            "issues": sum(len(ev.get("issues") or []) for ev in evidence),
+        },
+        "model": model,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Prompts (composition templates — wire tools into agent-friendly recipes)
+# ---------------------------------------------------------------------------
+
+
+@mcp.prompt(
+    name="explain_change",
+    description=(
+        "Generate a 5-section pre-edit rationale for a code chunk. Calls "
+        "whygraph_rationale_brief and presents the card with citations."
+    ),
+)
+def prompt_explain_change(
+    path: str, line_start: str, line_end: str
+) -> str:
+    return (
+        f"Use the whygraph_rationale_brief tool with path='{path}', "
+        f"line_start={line_start}, line_end={line_end} and present the five "
+        "sections (purpose, why, constraints, tradeoffs, risks) along with "
+        "the confidence score. For each non-trivial claim, cite the "
+        "supporting commit SHA, PR number, or issue number from the "
+        "evidence_count breakdown. Do not invent details the rationale "
+        "doesn't support."
+    )
+
+
+@mcp.prompt(
+    name="debug_history",
+    description=(
+        "Find historical candidate causes for a bug symptom. Combines "
+        "whygraph_search and (optionally) whygraph_evidence_for to surface "
+        "commits/PRs/issues most likely to explain a regression."
+    ),
+)
+def prompt_debug_history(
+    symptom: str,
+    hint_path: str = "",
+    hint_line_start: str = "",
+    hint_line_end: str = "",
+) -> str:
+    parts = [
+        f"Investigate this bug symptom: \"{symptom}\".",
+        "1. Call whygraph_search with the symptom keywords across all kinds.",
+    ]
+    if hint_path and hint_line_start and hint_line_end:
+        parts.append(
+            f"2. Call whygraph_evidence_for with path='{hint_path}', "
+            f"line_start={hint_line_start}, line_end={hint_line_end} to "
+            "surface the commits/PRs that touched that range."
+        )
+        parts.append("3. Cross-reference: cluster results that mention the same SHAs, PRs, or issue numbers.")
+    else:
+        parts.append("2. Cross-reference: cluster results by author, file, or shared PR/issue.")
+    parts.append(
+        "Output: a ranked list of candidate causes with SHA / PR / issue references "
+        "and a one-sentence rationale per candidate. Do not speculate — only cite "
+        "items returned by the tools."
+    )
+    return "\n".join(parts)
+
+
+@mcp.prompt(
+    name="team_pulse",
+    description=(
+        "Produce a project-velocity narrative combining per-author stats and "
+        "hot path-prefixes for the chosen window."
+    ),
+)
+def prompt_team_pulse(window_days: str = "30") -> str:
+    return (
+        f"Call whygraph_velocity_summary with window_days={window_days} and "
+        "group_by='author', then call it again with group_by='path_prefix'. "
+        "Produce a one-page narrative covering: top contributors (by window "
+        "commits + files touched), days-since-last-commit per top author, "
+        "and the hottest path-prefixes. Cite numbers from the tool output; "
+        "do not estimate."
+    )
 
 
 def main() -> None:

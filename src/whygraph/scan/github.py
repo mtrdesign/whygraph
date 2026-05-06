@@ -32,7 +32,10 @@ class PullRequest:
     author: str | None
     html_url: str
     labels: list[str]
-    commit_titles: list[str] = field(default_factory=list)
+    # JSON-encoded into pull_requests.commit_titles. Each entry is a dict
+    # with: oid (full SHA), headline, author_login (GitHub username or None),
+    # author_name, author_email. Field name kept for column-name parity.
+    commit_titles: list[dict] = field(default_factory=list)
     closing_issue_numbers: list[int] = field(default_factory=list)
     comments: list[dict] = field(default_factory=list)
 
@@ -115,7 +118,19 @@ query($owner: String!, $name: String!, $cursor: String) {
         headRefOid headRefName baseRefName
         author { login }
         labels(first: 20) { nodes { name } }
-        commits(first: 250) { nodes { commit { oid messageHeadline } } }
+        commits(first: 250) {
+          nodes {
+            commit {
+              oid
+              messageHeadline
+              author {
+                name
+                email
+                user { login }
+              }
+            }
+          }
+        }
         closingIssuesReferences(first: 50) { nodes { number } }
         comments(first: 100) {
           nodes { author { login } body createdAt }
@@ -227,7 +242,7 @@ def _parse_pr_node(node: dict) -> PullRequest:
         html_url=node["url"],
         labels=[lbl["name"] for lbl in label_nodes if lbl.get("name")],
         commit_titles=[
-            f"{(c['commit']['oid'] or '')[:7]} {c['commit'].get('messageHeadline', '')}".strip()
+            _build_commit_entry(c["commit"])
             for c in commit_nodes
             if c.get("commit")
         ],
@@ -241,6 +256,19 @@ def _parse_pr_node(node: dict) -> PullRequest:
             for c in comment_nodes
         ],
     )
+
+
+def _build_commit_entry(commit: dict) -> dict:
+    """Shape a single PR commit node into the dict stored in commit_titles."""
+    author = commit.get("author") or {}
+    user = author.get("user") or {}
+    return {
+        "oid": commit.get("oid") or "",
+        "headline": commit.get("messageHeadline", ""),
+        "author_login": user.get("login"),
+        "author_name": author.get("name"),
+        "author_email": author.get("email"),
+    }
 
 
 def _parse_issue_node(node: dict) -> Issue:

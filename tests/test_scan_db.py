@@ -143,15 +143,30 @@ def test_upsert_pr_roundtrips_comments(tmp_path: Path) -> None:
 
 
 def test_upsert_pr_roundtrips_commit_titles(tmp_path: Path) -> None:
-    titles = ["abc1234 first", "def5678 second"]
+    entries = [
+        {
+            "oid": "abc1234",
+            "headline": "first",
+            "author_login": "alice",
+            "author_name": "Alice",
+            "author_email": "alice@example.com",
+        },
+        {
+            "oid": "def5678",
+            "headline": "second",
+            "author_login": None,
+            "author_name": "Bob",
+            "author_email": "bob@example.com",
+        },
+    ]
     with Database(tmp_path / "whygraph.db") as db:
-        db.upsert_pull_request(_sample_pr(commit_titles=titles))
+        db.upsert_pull_request(_sample_pr(commit_titles=entries))
         cur = db._conn.cursor()
         cur.execute("SELECT commit_titles FROM pull_requests WHERE number = 1")
         (raw,) = cur.fetchone()
         import json as _json
 
-        assert _json.loads(raw) == titles
+        assert _json.loads(raw) == entries
 
 
 def test_upsert_issue_inserts_then_idempotent(tmp_path: Path) -> None:
@@ -205,6 +220,38 @@ def test_migration_v6_adds_score_columns(tmp_path: Path) -> None:
             (commit.sha,),
         )
         assert cur.fetchone() == (0, 0)
+
+
+def test_migration_v7_adds_llm_columns(tmp_path: Path) -> None:
+    with Database(tmp_path / "whygraph.db") as db:
+        cur = db._conn.cursor()
+        cols = {row[1] for row in cur.execute("PRAGMA table_info(commits)")}
+        assert {"llm_description", "llm_description_model"} <= cols
+        commit = _sample_commit()
+        db.upsert_commit(commit)
+        cur.execute(
+            "SELECT llm_description, llm_description_model FROM commits WHERE sha = ?",
+            (commit.sha,),
+        )
+        assert cur.fetchone() == (None, None)
+
+
+def test_set_llm_description_and_filter(tmp_path: Path) -> None:
+    with Database(tmp_path / "whygraph.db") as db:
+        a = _sample_commit(sha="a" * 40)
+        b = _sample_commit(sha="b" * 40)
+        db.upsert_commit(a)
+        db.upsert_commit(b)
+        # both NULL initially
+        assert db.commits_without_llm_description([a.sha, b.sha]) == {a.sha, b.sha}
+        db.set_llm_description(a.sha, "added foo", "claude-haiku-4-5-20251001")
+        assert db.commits_without_llm_description([a.sha, b.sha]) == {b.sha}
+        cur = db._conn.cursor()
+        cur.execute(
+            "SELECT llm_description, llm_description_model FROM commits WHERE sha = ?",
+            (a.sha,),
+        )
+        assert cur.fetchone() == ("added foo", "claude-haiku-4-5-20251001")
 
 
 def test_pr_join_with_commits(tmp_path: Path) -> None:

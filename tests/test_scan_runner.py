@@ -26,7 +26,7 @@ def _fake_pr(
     number: int,
     merge_commit_sha: str | None = None,
     closing_issue_numbers: list[int] | None = None,
-    commit_titles: list[str] | None = None,
+    commit_titles: list[dict] | None = None,
 ) -> PullRequest:
     return PullRequest(
         number=number,
@@ -67,9 +67,16 @@ def _fake_issue(number: int) -> Issue:
 
 def test_run_scan_both_crawlers(tmp_path: Path) -> None:
     root = _make_repo(tmp_path)
+    sample_entry = {
+        "oid": "abc1234",
+        "headline": "sample",
+        "author_login": "alice",
+        "author_name": "Alice",
+        "author_email": "alice@example.com",
+    }
     pr = _fake_pr(
         1,
-        commit_titles=["abc1234 sample"],
+        commit_titles=[sample_entry],
         closing_issue_numbers=[7],
     )
     with (
@@ -92,7 +99,7 @@ def test_run_scan_both_crawlers(tmp_path: Path) -> None:
         (raw,) = cur.fetchone()
         import json as _json
 
-        assert _json.loads(raw) == ["abc1234 sample"]
+        assert _json.loads(raw) == [sample_entry]
         cur.execute(
             "SELECT issue_number, link_kind FROM pr_issue_links WHERE pr_number = 1"
         )
@@ -153,3 +160,16 @@ def test_run_scan_no_score_skips_scoring(tmp_path: Path) -> None:
         cur.execute("SELECT subject_tfidf_score, body_tfidf_score FROM commits")
         for row in cur.fetchall():
             assert row == (0, 0)
+
+
+def test_run_scan_no_llm_description_skips_phase(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    rc = run_scan(repo_root=root, skip_llm_descriptions=True)
+    assert rc == 0
+    with db_module.Database(db_module.default_db_path(root)) as db:
+        cur = db._conn.cursor()
+        cur.execute(
+            "SELECT llm_description, llm_description_model FROM commits"
+        )
+        for row in cur.fetchall():
+            assert row == (None, None)

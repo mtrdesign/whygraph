@@ -10,7 +10,7 @@ from pathlib import Path
 from whygraph.scan.git import Commit
 from whygraph.scan.github import Issue, PullRequest
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 DB_DIR_NAME = ".whygraph"
 DB_FILE_NAME = "whygraph.db"
@@ -113,6 +113,10 @@ _MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE pull_requests ADD COLUMN body_tfidf_score    REAL NOT NULL DEFAULT 0",
         "ALTER TABLE issues        ADD COLUMN title_tfidf_score   REAL NOT NULL DEFAULT 0",
         "ALTER TABLE issues        ADD COLUMN body_tfidf_score    REAL NOT NULL DEFAULT 0",
+    ],
+    7: [
+        "ALTER TABLE commits ADD COLUMN llm_description       TEXT",
+        "ALTER TABLE commits ADD COLUMN llm_description_model TEXT",
     ],
 }
 
@@ -362,6 +366,34 @@ class Database:
         cur = self._conn.cursor()
         cur.execute("SELECT COUNT(*) FROM issues")
         return int(cur.fetchone()[0])
+
+    def commits_without_llm_description(self, shas: list[str]) -> set[str]:
+        """Return the subset of `shas` whose `llm_description IS NULL`."""
+        if not shas:
+            return set()
+        cur = self._conn.cursor()
+        placeholders = ",".join(["?"] * len(shas))
+        cur.execute(
+            f"SELECT sha FROM commits "
+            f"WHERE sha IN ({placeholders}) AND llm_description IS NULL",
+            shas,
+        )
+        return {row[0] for row in cur.fetchall()}
+
+    def set_llm_description(
+        self, sha: str, description: str, model: str
+    ) -> None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE commits
+               SET llm_description       = ?,
+                   llm_description_model = ?
+             WHERE sha = ?
+            """,
+            (description, model, sha),
+        )
+        self._conn.commit()
 
     def set_pr_closing_issues(
         self, pr_number: int, issue_numbers: list[int]

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import click
 from rich.console import Console
+from rich.panel import Panel
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -16,14 +17,23 @@ from rich.progress import (
     TextColumn,
     TimeElapsedColumn,
 )
+from rich.table import Table
 
 from whygraph.scan import db as db_module
 from whygraph.scan import git as git_module
 from whygraph.scan import github as github_module
+from whygraph.scan import llm_descriptions as llm_module
 from whygraph.scan import scoring as scoring_module
 
 
-def run_scan(repo_root: Path | None = None, *, skip_score: bool = False) -> int:
+def run_scan(
+    repo_root: Path | None = None,
+    *,
+    skip_score: bool = False,
+    skip_llm_descriptions: bool = False,
+    anthropic_api_key: str | None = None,
+    llm_workers: int = llm_module.DEFAULT_MAX_WORKERS,
+) -> int:
     cwd = repo_root if repo_root is not None else Path.cwd()
     try:
         root = git_module.repo_root(cwd)
@@ -40,8 +50,23 @@ def run_scan(repo_root: Path | None = None, *, skip_score: bool = False) -> int:
     branch = git_module.default_branch(root)
     shas = list(git_module.walk_first_parent(root, branch))
 
+    llm_config = llm_module.LlmConfig(
+        anthropic_api_key=anthropic_api_key,
+        max_workers=llm_workers,
+    )
+
     console = Console()
-    console.print(f"Scanning [bold]{root}[/bold] ({len(shas)} commits on {branch})")
+    console.print(
+        _build_overview_panel(
+            root=root,
+            branch=branch,
+            commit_count=len(shas),
+            db_path=db_path,
+            skip_score=skip_score,
+            skip_llm_descriptions=skip_llm_descriptions,
+            llm_config=llm_config,
+        )
+    )
 
     rc = 0
     summaries: dict[str, str] = {}
@@ -57,6 +82,7 @@ def run_scan(repo_root: Path | None = None, *, skip_score: bool = False) -> int:
         git_task = progress.add_task("git   ", total=len(shas) or 1)
         github_task = progress.add_task("github", total=None)
         score_task = progress.add_task("score ", total=None, start=False)
+        llm_task = progress.add_task("llm   ", total=None, start=False)
 
         with ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="whygraph-crawler"
@@ -96,6 +122,37 @@ def run_scan(repo_root: Path | None = None, *, skip_score: bool = False) -> int:
             )
             summaries["score"] = "skipped (crawler failure)"
 
+        if skip_llm_descriptions:
+            progress.update(
+                llm_task, total=1, completed=1, description="llm (skipped)"
+            )
+            summaries["llm"] = "skipped (--no-llm-description)"
+        elif rc == 0:
+            if not llm_module.claude_cli_available():
+                progress.update(
+                    llm_task, total=1, completed=1, description="llm (skipped)"
+                )
+                summaries["llm"] = "skipped (claude CLI not installed)"
+            else:
+                progress.start_task(llm_task)
+                try:
+                    summaries["llm"] = llm_module.run_phase(
+                        db_path,
+                        root,
+                        branch,
+                        llm_config,
+                        progress,
+                        llm_task,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    summaries["llm"] = f"failed: {exc}"
+                    rc = 1
+        else:
+            progress.update(
+                llm_task, total=1, completed=1, description="llm (skipped)"
+            )
+            summaries["llm"] = "skipped (prior phase failed)"
+
     for label, summary in summaries.items():
         if summary.startswith("failed:"):
             console.print(f"[red]\\[{label}] {summary}[/red]")
@@ -105,6 +162,40 @@ def run_scan(repo_root: Path | None = None, *, skip_score: bool = False) -> int:
     if rc == 0:
         console.print(f"Done. Database at [bold]{db_path}[/bold]")
     return rc
+
+
+def _build_overview_panel(
+    *,
+    root: Path,
+    branch: str,
+    commit_count: int,
+    db_path: Path,
+    skip_score: bool,
+    skip_llm_descriptions: bool,
+    llm_config: llm_module.LlmConfig,
+) -> Panel:
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="dim", justify="right")
+    grid.add_column()
+    grid.add_row("Repo", str(root))
+    grid.add_row("Branch", f"{branch} ([bold]{commit_count}[/bold] commits)")
+    grid.add_row("DB", str(db_path))
+    if skip_score:
+        grid.add_row("Score", "[yellow]skipped[/yellow] (--no-score)")
+    else:
+        grid.add_row("Score", "TF-IDF")
+    if skip_llm_descriptions:
+        grid.add_row("LLM", "[yellow]skipped[/yellow] (--no-llm-description)")
+    elif not llm_module.claude_cli_available():
+        grid.add_row("LLM", "[yellow]skipped[/yellow] (claude CLI not installed)")
+    else:
+        billing = "API key" if llm_config.anthropic_api_key else "subscription"
+        grid.add_row(
+            "LLM",
+            f"[bold]{llm_config.model}[/bold] · {billing} · "
+            f"{llm_config.max_workers} workers",
+        )
+    return Panel(grid, title="whygraph scan", title_align="left", border_style="cyan")
 
 
 def _git_crawler(

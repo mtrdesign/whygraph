@@ -41,8 +41,28 @@ _PR_NODE = {
     "labels": {"nodes": [{"name": "bug"}, {"name": "priority"}]},
     "commits": {
         "nodes": [
-            {"commit": {"oid": "abc1234deadbeef", "messageHeadline": "fix tests"}},
-            {"commit": {"oid": "def5678cafebabe", "messageHeadline": "implement"}},
+            {
+                "commit": {
+                    "oid": "abc1234deadbeef",
+                    "messageHeadline": "fix tests",
+                    "author": {
+                        "name": "Alice",
+                        "email": "alice@example.com",
+                        "user": {"login": "alice"},
+                    },
+                }
+            },
+            {
+                "commit": {
+                    "oid": "def5678cafebabe",
+                    "messageHeadline": "implement",
+                    "author": {
+                        "name": "Bob",
+                        "email": "bob@example.com",
+                        "user": None,
+                    },
+                }
+            },
         ]
     },
     "closingIssuesReferences": {"nodes": [{"number": 1}, {"number": 7}]},
@@ -191,7 +211,22 @@ def test_parse_pr_node_full() -> None:
     assert pr.head_sha == "feedface" * 5
     assert pr.author == "alice"
     assert pr.labels == ["bug", "priority"]
-    assert pr.commit_titles == ["abc1234 fix tests", "def5678 implement"]
+    assert pr.commit_titles == [
+        {
+            "oid": "abc1234deadbeef",
+            "headline": "fix tests",
+            "author_login": "alice",
+            "author_name": "Alice",
+            "author_email": "alice@example.com",
+        },
+        {
+            "oid": "def5678cafebabe",
+            "headline": "implement",
+            "author_login": None,
+            "author_name": "Bob",
+            "author_email": "bob@example.com",
+        },
+    ]
     assert pr.closing_issue_numbers == [1, 7]
     assert pr.comments == [
         {"author": "bob", "body": "LGTM", "created_at": "2026-01-02T10:00:00Z"},

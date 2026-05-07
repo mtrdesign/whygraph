@@ -1,8 +1,10 @@
 from importlib.metadata import version as _pkg_version
+from pathlib import Path
 
 import click
 
 from whygraph.init import run_init
+from whygraph.render import run_render, run_serve
 from whygraph.scan import llm_descriptions as llm_module
 from whygraph.scan.runner import run_scan
 
@@ -106,4 +108,68 @@ def scan_cmd(
             llm_recent=llm_recent,
             llm_model=llm_model,
         )
+    )
+
+
+@main.command(name="render")
+@click.option(
+    "--out",
+    "out_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Output HTML path. Default: <repo_root>/.whygraph/whygraph.html",
+)
+@click.option(
+    "--open",
+    "open_browser",
+    is_flag=True,
+    default=False,
+    help="Open the rendered HTML in your default browser.",
+)
+@click.option(
+    "--depth",
+    "depth",
+    type=click.IntRange(min=1, max=4),
+    default=1,
+    show_default=True,
+    help=(
+        "Levels of the kind hierarchy to populate with per-node details. "
+        "1 = Modules only (fast first paint). "
+        "2 = + Classes. 3 = + Functions/Methods. 4 = Everything. "
+        "Higher-level nodes still appear in the slider; only their "
+        "detail panel is gated."
+    ),
+)
+def render_cmd(out_path: Path | None, open_browser: bool, depth: int) -> None:
+    """Render a self-contained HTML viewer of the CodeGraph + WhyGraph data."""
+    raise SystemExit(
+        run_render(out_path=out_path, open_browser=open_browser, depth=depth)
+    )
+
+
+@main.command(name="serve")
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    show_default=True,
+    help="Bind host. Defaults to localhost — do not expose externally.",
+)
+@click.option(
+    "--port",
+    type=int,
+    default=8765,
+    show_default=True,
+    help="Bind port.",
+)
+@click.option(
+    "--open",
+    "open_browser",
+    is_flag=True,
+    default=False,
+    help="Open the viewer in your default browser after the server starts.",
+)
+def serve_cmd(host: str, port: int, open_browser: bool) -> None:
+    """Serve the live viewer with on-demand rationale generation."""
+    raise SystemExit(
+        run_serve(host=host, port=port, open_browser=open_browser)
     )

@@ -74,6 +74,8 @@ This puts `whygraph` and `whygraph-mcp` on your `PATH`, independent of any Claud
 | `whygraph version` | Print installed package version. |
 | `whygraph init [-y]` | Bootstrap CodeGraph in the current repo. Detects/installs Node ≥ 22 via nvm if needed, then runs `codegraph init -i`. |
 | `whygraph scan` | Walk first-parent history and populate `.whygraph/whygraph.db`: commits + GitHub PRs/issues + TF-IDF scoring + per-commit LLM diff descriptions. Idempotent. |
+| `whygraph render [--out PATH] [--open] [--depth N]` | Render a self-contained HTML viewer of the CodeGraph + WhyGraph data. Single file, vendored Cytoscape, opens with double-click. Cached rationale only. `--depth N` (1–4, default 1) caps which nodes get a populated detail block — fast first paint at default 1 (modules only); pass `--depth 4` for full data. |
+| `whygraph serve [--port 8765] [--open]` | Long-running localhost viewer with on-demand rationale generation. Same UI as `render`, plus a "Generate rationale" button on uncached nodes. |
 | `whygraph-mcp` | Launch the FastMCP stdio server. Used by `.mcp.json` in the plugin and by MCP clients. |
 
 ### `whygraph scan` flags
@@ -142,6 +144,21 @@ Auto-mode heuristic: single-pass when working set < 5 nodes OR > 60% of rational
 ### Skill
 
 `plan-change` — auto-trigger description that nudges the user toward `/whygraph-plan` on planning-shaped prompts (e.g. *"plan how to refactor X"*, *"design a migration for Y"*). Suggestion-only; never auto-runs the planner — the slash command is the user's opt-in cost gate.
+
+## HTML viewer
+
+```bash
+whygraph render --open    # static, self-contained HTML
+whygraph serve --open     # localhost viewer with on-demand rationale
+```
+
+`render` writes `.whygraph/whygraph.html` — a single self-contained file (Cytoscape.js vendored inline) with three tabs:
+
+- **Graph** — Cytoscape view of CodeGraph nodes/edges. Nodes are coloured by hierarchy level (Modules / Classes / Methods / Leaves); the slider buttons double as a legend. Cached rationale is shown as a green border. A **level slider** in the top bar controls how deep the graph displays — defaults to "Modules" for fast first paint. Edges aggregate up to the nearest visible ancestor when deeper levels are hidden. Click a node → side panel with top contributors (from blame), per-month activity, recent commits + linked PRs/issues, and the cached rationale card if any. Nodes deeper than the rendered `--depth` show a "re-render with `--depth N`" placeholder when clicked.
+- **Dashboard** — repo overview (commits/PRs/issues counts), top contributors over the last 90 days, hottest path-prefixes, monthly activity bars.
+- **Authors** — list of identities (resolved through the `authors` table); click → recent activity over the last 180 days.
+
+`serve` starts a localhost-only HTTP server (default `127.0.0.1:8765`) with the same UI plus a "Generate rationale" button on uncached nodes. The button calls `whygraph_rationale_brief` server-side (~30s on first call, then cached); subsequent `whygraph render` runs include the newly-cached rationale in the static dump.
 
 ## Environment variables
 

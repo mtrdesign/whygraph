@@ -487,6 +487,32 @@ class Database:
                 out[key] = []
         return out
 
+    def get_rationale_cache_by_qname(self, qualified_name: str) -> dict | None:
+        """Return the most recent cached rationale for a qualified_name.
+
+        When multiple cache rows exist for the same symbol (across model /
+        prompt-version churn), this picks the latest by ``created_at``.
+        Used by the renderer to surface "the rationale we have" without
+        recomputing the cache_key.
+        """
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT * FROM rationale_cache "
+            "WHERE target_qualified_name = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (qualified_name,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        out = _row_to_dict(cur, row)
+        for key in ("constraints", "tradeoffs", "risks"):
+            try:
+                out[key] = json.loads(out[key])
+            except (TypeError, json.JSONDecodeError):
+                out[key] = []
+        return out
+
     def set_rationale_cache(
         self,
         *,

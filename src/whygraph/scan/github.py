@@ -96,9 +96,7 @@ def check_auth() -> None:
             "gh CLI is not installed. Install from https://cli.github.com/"
         ) from exc
     if result.returncode != 0:
-        raise GitHubError(
-            "gh CLI is not authenticated. Run `gh auth login` and retry."
-        )
+        raise GitHubError("gh CLI is not authenticated. Run `gh auth login` and retry.")
 
 
 _PRS_QUERY = """
@@ -242,9 +240,7 @@ def _parse_pr_node(node: dict) -> PullRequest:
         html_url=node["url"],
         labels=[lbl["name"] for lbl in label_nodes if lbl.get("name")],
         commit_titles=[
-            _build_commit_entry(c["commit"])
-            for c in commit_nodes
-            if c.get("commit")
+            _build_commit_entry(c["commit"]) for c in commit_nodes if c.get("commit")
         ],
         closing_issue_numbers=[int(n["number"]) for n in closing_nodes],
         comments=[

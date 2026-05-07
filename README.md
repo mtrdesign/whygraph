@@ -4,7 +4,7 @@ Rationale layer over [CodeGraph](https://github.com/colbymchenry/codegraph): exp
 
 For each symbol, WhyGraph collects evidence from git history and GitHub (commits, blame, PRs, closing issues, callers/callees from CodeGraph), then exposes it to AI assistants over MCP plus an on-demand rationale (purpose, why, constraints, tradeoffs, risks) with a deterministic confidence score and persistent cache.
 
-> **Status:** v1.x in progress on the `feature/scan-and-scoring` branch. The MCP surface (resources, tools, prompts) is functional; the slash command (`/whygraph-plan`) and planner sub-agent are still ahead.
+> **Status:** v1.x in progress on the `feature/scan-and-scoring` branch. MCP surface (resources, tools, prompts) is functional. The `/whygraph-plan` slash command + fan-out/fan-in planner subagents shipped in v1.3.
 
 ## Prerequisites
 
@@ -127,7 +127,21 @@ WhyGraph deliberately does not expose graph-traversal tools. The split:
 | **CodeGraph** (its MCP server / Claude's Explore agent) | "what is connected to what" — `findUsages`, `getCallers`, `find_symbols`, type hierarchy |
 | **WhyGraph** | "why does this exist + when did it change" — evidence, rationale, windowed analytics |
 
-The `whygraph_plan` prompt explicitly delegates symbol resolution to CodeGraph. For ad-hoc traversal mid-conversation, agents should call CodeGraph's tools directly.
+The `whygraph_plan` prompt and the `/whygraph-plan` slash command both explicitly delegate symbol resolution to CodeGraph. For ad-hoc traversal mid-conversation, agents should call CodeGraph's tools directly.
+
+### Slash command
+
+`/whygraph-plan <task description> [--shallow|--deep] [--no-questions]` — produces a step-by-step implementation plan grounded in CodeGraph (impact) and WhyGraph (rationale). The plugin ships three subagents:
+
+- **`whygraph-planner`** — orchestrator. Builds the working set via CodeGraph, warms the rationale cache, then either writes a plan single-pass (small scope) or fans out.
+- **`whygraph-researcher`** — fan-out worker, instantiated three times in parallel with one of three dimensions: `impact` (blast radius via CodeGraph callers), `constraints_risks` (verbatim from rationale cards), `prior_art` (similar past PRs via `whygraph_search` / `whygraph_window`).
+- **`whygraph-synthesizer`** — fan-in combiner. Folds the three reports into the final plan markdown with a confidence floor = lowest researcher confidence.
+
+Auto-mode heuristic: single-pass when working set < 5 nodes OR > 60% of rationale cards are empty/low-confidence; fan-out otherwise. `--shallow` and `--deep` override.
+
+### Skill
+
+`plan-change` — auto-trigger description that nudges the user toward `/whygraph-plan` on planning-shaped prompts (e.g. *"plan how to refactor X"*, *"design a migration for Y"*). Suggestion-only; never auto-runs the planner — the slash command is the user's opt-in cost gate.
 
 ## Environment variables
 
@@ -144,7 +158,10 @@ The `whygraph_plan` prompt explicitly delegates symbol resolution to CodeGraph. 
 ├── .claude-plugin/marketplace.json     # single-plugin marketplace
 ├── plugins/whygraph/
 │   ├── .claude-plugin/plugin.json      # plugin manifest
-│   └── .mcp.json                       # MCP server launch config
+│   ├── .mcp.json                       # MCP server launch config
+│   ├── commands/whygraph-plan.md       # /whygraph-plan slash command
+│   ├── agents/                         # planner / researcher / synthesizer
+│   └── skills/plan-change/SKILL.md     # auto-suggest skill
 ├── src/whygraph/
 │   ├── cli.py                          # `whygraph` CLI (init, scan, version)
 │   ├── init.py                         # CodeGraph bootstrap (nvm + codegraph init -i)

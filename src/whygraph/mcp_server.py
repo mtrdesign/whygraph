@@ -18,6 +18,7 @@ from mcp.server.fastmcp import FastMCP
 
 from whygraph import backend as backend_module
 from whygraph import llm_subprocess, mcp_queries
+from whygraph.scan import authors as authors_module
 from whygraph.scan import db as db_module
 from whygraph.scan import git as git_module
 from whygraph.scan.scoring import ValueGate
@@ -189,18 +190,6 @@ def issue_resource(number: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _node_to_dict(node: backend_module.SymbolNode) -> dict:
-    return {
-        "qualified_name": node.qualified_name,
-        "kind": node.kind,
-        "file_path": node.file_path,
-        "start_line": node.start_line,
-        "end_line": node.end_line,
-        "signature": node.signature,
-        "docstring": node.docstring,
-    }
-
-
 def _resolve_target(
     *,
     path: str | None,
@@ -208,11 +197,12 @@ def _resolve_target(
     line_end: int | None,
     qualified_name: str | None,
 ) -> dict:
-    """Validate and normalize a tool target; fetch neighbours on the same pass.
+    """Validate and normalize a tool target.
 
-    Returns ``{path, line_start, line_end, qualified_name, callers, callees}``.
-    ``callers`` / ``callees`` are populated only when ``qualified_name`` was
-    provided (path+lines targeting has no graph node to anchor to).
+    Returns ``{path, line_start, line_end, qualified_name}``. ``qualified_name``
+    is a *targeting convenience*: it resolves to the symbol's file/line range
+    via CodeGraph but does not pull neighbours. For caller/callee context, use
+    CodeGraph's MCP server or Claude Code's Explore agent.
 
     Raises ``WhyGraphError`` on bad input.
     """
@@ -234,8 +224,6 @@ def _resolve_target(
                 raise WhyGraphError(
                     f"qualified_name {qualified_name!r} not found in CodeGraph"
                 )
-            callers = [_node_to_dict(n) for n in backend.get_callers(node.id)]
-            callees = [_node_to_dict(n) for n in backend.get_callees(node.id)]
         finally:
             backend.close()
         return {
@@ -243,8 +231,6 @@ def _resolve_target(
             "line_start": node.start_line,
             "line_end": node.end_line,
             "qualified_name": qualified_name,
-            "callers": callers,
-            "callees": callees,
         }
 
     if not (path and line_start and line_end):
@@ -258,8 +244,6 @@ def _resolve_target(
         "line_start": line_start,
         "line_end": line_end,
         "qualified_name": None,
-        "callers": [],
-        "callees": [],
     }
 
 
@@ -376,63 +360,18 @@ def _build_evidence_item(
     }
 
 
-_NEIGHBOUR_EVIDENCE_LIMIT = 3
-
-
-def _enrich_neighbour(
-    *,
-    db: db_module.Database,
-    repo_root: Path,
-    node_dict: dict,
-    gate: ValueGate,
-    limit: int = _NEIGHBOUR_EVIDENCE_LIMIT,
-) -> dict:
-    """Attach top-N evidence items to a neighbour node dict.
-
-    Runs blame on the neighbour's full span (start_line..end_line as
-    given by CodeGraph) and reuses ``_build_evidence_item`` per SHA so
-    neighbours carry the same shape as the target's evidence list.
-    Sorted by ``committed_at`` desc, capped at ``limit``.
-
-    Best-effort: an empty list is returned when blame fails (file
-    missing, renamed, binary), so the neighbour itself stays in the
-    bundle even if its history can't be resolved.
-    """
-    out = dict(node_dict)
-    out["evidence"] = []
-    file_path = node_dict.get("file_path")
-    start = node_dict.get("start_line")
-    end = node_dict.get("end_line")
-    if not file_path or not start or not end:
-        return out
-    try:
-        blame = mcp_queries.blame_line_range(repo_root, file_path, start, end)
-    except git_module.GitError:
-        return out
-    if not blame:
-        return out
-    items = [
-        _build_evidence_item(db, sha=sha, blame_entry=entry, gate=gate)
-        for sha, entry in blame.items()
-    ]
-    items.sort(key=lambda it: it.get("committed_at") or "", reverse=True)
-    out["evidence"] = items[:limit]
-    return out
-
-
 @mcp.tool(
     name="whygraph_evidence_for",
     description=(
-        "Find historical evidence (commits + PRs + closing issues) and graph "
-        "neighbours (callers/callees) for a chunk of code. Pass either "
-        "(path, line_start, line_end) or a qualified_name (resolved via "
-        "CodeGraph). Returns {target, evidence, callers, callees}. Evidence "
-        "is filtered by TF-IDF harshness; commit narrative prefers "
-        "llm_description, then body, then subject. When qualified_name is "
-        "given, each caller/callee is enriched with its own top-3 commits "
-        "by recency (same evidence shape as the target). Run `whygraph "
-        "scan` first to populate llm_descriptions — this tool does not "
-        "call the LLM."
+        "Find historical evidence (commits + PRs + closing issues) for a "
+        "chunk of code. Pass either (path, line_start, line_end) or a "
+        "qualified_name (CodeGraph resolves it to a file/line range — no "
+        "graph traversal). Returns {target, evidence}. Evidence is filtered "
+        "by TF-IDF harshness; commit narratives ship llm_description + "
+        "subject + body when each clears the gate. For caller/callee "
+        "context, query CodeGraph or the Explore agent separately. Run "
+        "`whygraph scan` first to populate llm_descriptions — this tool "
+        "does not call the LLM."
     ),
 )
 def whygraph_evidence_for(
@@ -461,29 +400,15 @@ def whygraph_evidence_for(
     )
 
     items: list[dict] = []
-    callers = target["callers"]
-    callees = target["callees"]
-    if blame or callers or callees:
+    if blame:
         with db_module.Database(_resolve_db_path()) as db:
             gate = ValueGate.percentile(db, fraction=min_score_pct)
-            for sha, blame_entry in (blame or {}).items():
+            for sha, blame_entry in blame.items():
                 items.append(
                     _build_evidence_item(
                         db, sha=sha, blame_entry=blame_entry, gate=gate
                     )
                 )
-            callers = [
-                _enrich_neighbour(
-                    db=db, repo_root=repo_root, node_dict=n, gate=gate
-                )
-                for n in callers
-            ]
-            callees = [
-                _enrich_neighbour(
-                    db=db, repo_root=repo_root, node_dict=n, gate=gate
-                )
-                for n in callees
-            ]
         items.sort(key=lambda it: it.get("committed_at") or "", reverse=True)
         items = items[:limit]
 
@@ -495,8 +420,6 @@ def whygraph_evidence_for(
             "qualified_name": target["qualified_name"],
         },
         "evidence": items,
-        "callers": callers,
-        "callees": callees,
     }
 
 
@@ -570,8 +493,93 @@ def whygraph_velocity_summary(
     )
 
 
+_VALID_KINDS = ("commit", "pr", "issue")
+_VALID_STATES = ("merged", "open", "closed")
+
+
+@mcp.tool(
+    name="whygraph_window",
+    description=(
+        "Window query over the scan DB. One generic primitive — compose "
+        "with prompts (changelog / feature_timeline / user_profile) "
+        "instead of asking for a per-report tool. "
+        "Filters: since/until (ISO date or relative '30d'/'3m'/'1y'); "
+        "kinds (subset of ['commit','pr','issue']); author (login | "
+        "email | name → resolved via authors table); path_prefix "
+        "(commits only); label (PR/issue exact match); state "
+        "('merged'|'open'|'closed'). Returns time-ordered rows with "
+        "kind/id/at/narratives/author."
+    ),
+)
+def whygraph_window(
+    since: str,
+    until: str | None = None,
+    kinds: list[str] | None = None,
+    author: str | None = None,
+    path_prefix: str | None = None,
+    label: str | None = None,
+    state: str | None = None,
+    min_score_pct: float = 0.5,
+    limit: int = 100,
+) -> list[dict]:
+    if not 0.0 <= min_score_pct <= 1.0:
+        raise WhyGraphError("min_score_pct must be in [0, 1]")
+    if limit < 1:
+        raise WhyGraphError("limit must be ≥ 1")
+
+    selected = tuple(kinds) if kinds else _VALID_KINDS
+    bad = set(selected) - set(_VALID_KINDS)
+    if bad:
+        raise WhyGraphError(
+            f"unknown kinds {sorted(bad)} (allowed: {list(_VALID_KINDS)})"
+        )
+    if state is not None and state not in _VALID_STATES:
+        raise WhyGraphError(
+            f"unknown state {state!r} (allowed: {list(_VALID_STATES)})"
+        )
+
+    try:
+        since_dt = mcp_queries.parse_window_bound(since)
+        until_dt = (
+            mcp_queries.parse_window_bound(until) if until else mcp_queries.parse_window_bound("now")
+        )
+    except ValueError as exc:
+        raise WhyGraphError(str(exc)) from exc
+    if since_dt > until_dt:
+        raise WhyGraphError(f"since ({since}) is after until ({until})")
+
+    repo_root = _resolve_repo_root()
+    with db_module.Database(_resolve_db_path()) as db:
+        gate = ValueGate.percentile(db, fraction=min_score_pct)
+        author_emails: list[str] | None = None
+        author_logins: list[str] | None = None
+        if author:
+            resolved = authors_module.resolve_author(db, author)
+            if resolved is None:
+                raise WhyGraphError(
+                    f"author {author!r} did not resolve to any identity in the "
+                    "authors table (run `whygraph scan` to rebuild it)"
+                )
+            author_emails = list(resolved.get("emails") or [])
+            author_logins = list(resolved.get("logins") or [])
+        return mcp_queries.window_query(
+            db,
+            repo_root,
+            since=since_dt,
+            until=until_dt,
+            kinds=selected,
+            author_emails=author_emails,
+            author_logins=author_logins,
+            path_prefix=path_prefix,
+            label=label,
+            state=state,
+            gate=gate,
+            limit=limit,
+        )
+
+
 _RATIONALE_SYSTEM_PROMPT = """\
-You are an analyst that explains why code exists, not just what it does. Given a code symbol's location and a bundle of evidence (commits, blame data, linked PRs and issues, plus direct callers and callees), generate a structured rationale grounded strictly in that bundle.
+You are an analyst that explains why code exists, not just what it does. Given a code symbol's location and a bundle of evidence (commits, blame data, linked PRs and issues), generate a structured rationale grounded strictly in that bundle.
 
 You CANNOT read files, run tools, search the codebase, or access anything beyond the bundle the user provides. The bundle is your COMPLETE input. Do not request more information; do not narrate what you would check; do not propose tool calls.
 
@@ -597,13 +605,7 @@ Be specific and honest:
 - Cite supporting evidence when making a claim: short SHA prefixes for commits, `#<n>` for PRs and issues.
 - If the evidence bundle is sparse, write short factual sentences referencing only what's there. If the bundle has zero entries, `why` may read "Insufficient evidence in the scan." `constraints`, `tradeoffs`, and `risks` should then be empty arrays.
 - No hedging ("seems", "may", "appears"). No invented rationale. An empty array is the correct answer when nothing supports an entry.
-
-Graph neighbours (callers / callees):
-- The `Callers` section lists nodes that depend on the target. Use it to populate `risks` with concrete blast-radius items: "modifying X breaks <caller.qualified_name> at <caller.file_path>:<caller.start_line>".
-- The `Callees` section lists nodes the target depends on. Use it to populate `constraints` only when a real contract is visible (e.g. the target relies on a specific callee signature). Do not fabricate contracts from a callee just because it exists.
-- Each neighbour carries `Recent commits` (top 3 by recency) with the same narrative shape as the target's commits. Use that history to enrich risk/constraint statements: "modifying X breaks <caller> (last changed in PR #<n> to <reason>; preserve <invariant>)".
-- Cite neighbour signatures and docstrings verbatim when they clarify the contract.
-- Only cite SHAs / PR numbers / issue numbers that appear in the bundle — either in the target's evidence or in a neighbour's `Recent commits`. Do not infer additional callers from type names, and do not invent neighbour history.
+- Only cite SHAs / PR numbers / issue numbers that appear in the bundle. Do not infer additional context from identifiers that are not in the evidence.
 
 Output format: RAW JSON only. No prose, no code fences, no preamble, no trailing remarks. The first character of your output MUST be '{' and the last character MUST be '}'.
 """
@@ -716,43 +718,16 @@ def _format_evidence_block(ev: dict, indent: str) -> list[str]:
     return lines
 
 
-def _format_neighbour_block(neighbour: dict, label: str) -> list[str]:
-    qn = neighbour.get("qualified_name") or "?"
-    file_path = neighbour.get("file_path") or "?"
-    start = neighbour.get("start_line")
-    end = neighbour.get("end_line")
-    location = f"{file_path}:{start}-{end}" if start and end else file_path
-    lines = [f"  {qn}  {location}"]
-    sig = neighbour.get("signature")
-    if sig:
-        lines.append(f"    Signature: {sig}")
-    doc = neighbour.get("docstring")
-    if doc:
-        lines.append("    Docstring:")
-        for doc_line in doc.splitlines():
-            lines.append(f"      {doc_line.rstrip()}")
-    evidence = neighbour.get("evidence") or []
-    if evidence:
-        lines.append("    Recent commits:")
-        for ev in evidence:
-            lines.append("")
-            lines.extend(_format_evidence_block(ev, "      "))
-    return lines
-
-
 def _build_rationale_user_prompt(
     *,
     target: dict,
     evidence: list[dict],
-    callers: list[dict],
-    callees: list[dict],
 ) -> str:
     """Render the evidence bundle as a structured text document.
 
-    Sections in order: target header, evidence-count summary, commits
-    (newest first, with linked PRs and issues nested per commit), then
-    callers and callees (each with recent commits). The model reads
-    headers as editorial cues, so order matters.
+    Sections in order: target header, evidence-count summary, then commits
+    (newest first, with linked PRs and issues nested per commit). The model
+    reads headers as editorial cues, so order matters.
     """
     pr_count = sum(len(ev.get("prs") or []) for ev in evidence)
     issue_count = sum(len(ev.get("issues") or []) for ev in evidence)
@@ -764,8 +739,7 @@ def _build_rationale_user_prompt(
     lines.append("")
     lines.append(
         f"Evidence: {len(evidence)} commit(s), {pr_count} PR(s), "
-        f"{issue_count} issue(s), {len(callers)} caller(s), "
-        f"{len(callees)} callee(s)."
+        f"{issue_count} issue(s)."
     )
 
     if evidence:
@@ -774,22 +748,6 @@ def _build_rationale_user_prompt(
         for ev in evidence:
             lines.append("")
             lines.extend(_format_evidence_block(ev, "  "))
-
-    if callers:
-        lines.append("")
-        target_qn = target.get("qualified_name") or "the target"
-        lines.append(f"Callers ({len(callers)} — symbols that call {target_qn}):")
-        for c in callers:
-            lines.append("")
-            lines.extend(_format_neighbour_block(c, "caller"))
-
-    if callees:
-        lines.append("")
-        target_qn = target.get("qualified_name") or "the target"
-        lines.append(f"Callees ({len(callees)} — symbols called by {target_qn}):")
-        for c in callees:
-            lines.append("")
-            lines.extend(_format_neighbour_block(c, "callee"))
 
     return "\n".join(lines) + "\n"
 
@@ -914,7 +872,10 @@ def _score_confidence(
 # invalidates every cached row.
 #   v1 → v2: structured text bundle, multi-narrative commits, analyst-tone
 #            system prompt (was: dense JSON dump + winner-takes-all).
-_PROMPT_VERSION = "v2"
+#   v2 → v3: dropped graph neighbours (callers/callees) from the bundle
+#            and the system prompt — WhyGraph no longer does graph
+#            traversal; CodeGraph / Explore agent owns that.
+_PROMPT_VERSION = "v3"
 
 
 def _target_id(target: dict) -> str:
@@ -933,63 +894,35 @@ def _target_id(target: dict) -> str:
     return f"loc:{path}:{start}-{end}"
 
 
-def _compute_bundle_signature(
-    evidence: list[dict],
-    callers: list[dict],
-    callees: list[dict],
-) -> str:
+def _compute_bundle_signature(evidence: list[dict]) -> str:
     """Hash the *content* of the evidence bundle.
 
     Captures every identifier the rationale could legitimately depend
-    on: target commit SHAs, linked PR/issue numbers, neighbour commit
-    SHAs, neighbour qualified_names. When any of those change (a new
-    commit lands on the lines, a caller is added, etc.), the signature
-    flips and the cache misses.
+    on: target commit SHAs and linked PR/issue numbers. When any of
+    those change (a new commit lands on the lines, a PR gets linked,
+    etc.), the signature flips and the cache misses.
 
     Sorted before hashing so the signature is stable regardless of how
     evidence was ordered in the bundle.
     """
-
-    def _evidence_ids(evs: list[dict]) -> tuple[set[str], set[int], set[int]]:
-        shas: set[str] = set()
-        prs: set[int] = set()
-        issues: set[int] = set()
-        for ev in evs:
-            sha = ev.get("sha")
-            if sha:
-                shas.add(sha)
-            for pr in ev.get("prs") or []:
-                if pr.get("number") is not None:
-                    prs.add(int(pr["number"]))
-            for issue in ev.get("issues") or []:
-                if issue.get("number") is not None:
-                    issues.add(int(issue["number"]))
-        return shas, prs, issues
-
-    shas, prs, issues = _evidence_ids(evidence)
-    caller_qns: set[str] = set()
-    callee_qns: set[str] = set()
-    for n in callers:
-        if n.get("qualified_name"):
-            caller_qns.add(n["qualified_name"])
-        n_shas, n_prs, n_issues = _evidence_ids(n.get("evidence") or [])
-        shas |= n_shas
-        prs |= n_prs
-        issues |= n_issues
-    for n in callees:
-        if n.get("qualified_name"):
-            callee_qns.add(n["qualified_name"])
-        n_shas, n_prs, n_issues = _evidence_ids(n.get("evidence") or [])
-        shas |= n_shas
-        prs |= n_prs
-        issues |= n_issues
+    shas: set[str] = set()
+    prs: set[int] = set()
+    issues: set[int] = set()
+    for ev in evidence:
+        sha = ev.get("sha")
+        if sha:
+            shas.add(sha)
+        for pr in ev.get("prs") or []:
+            if pr.get("number") is not None:
+                prs.add(int(pr["number"]))
+        for issue in ev.get("issues") or []:
+            if issue.get("number") is not None:
+                issues.add(int(issue["number"]))
 
     payload = {
         "shas": sorted(shas),
         "prs": sorted(prs),
         "issues": sorted(issues),
-        "callers": sorted(caller_qns),
-        "callees": sorted(callee_qns),
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True).encode("utf-8")
@@ -1042,10 +975,8 @@ def whygraph_rationale_brief(
     )
     target = bundle["target"]
     evidence = bundle["evidence"]
-    callers = bundle["callers"]
-    callees = bundle["callees"]
 
-    bundle_signature = _compute_bundle_signature(evidence, callers, callees)
+    bundle_signature = _compute_bundle_signature(evidence)
     cache_key = _compute_cache_key(
         target=target,
         bundle_signature=bundle_signature,
@@ -1069,8 +1000,6 @@ def whygraph_rationale_brief(
                     "commits": len(evidence),
                     "prs": sum(len(ev.get("prs") or []) for ev in evidence),
                     "issues": sum(len(ev.get("issues") or []) for ev in evidence),
-                    "callers": len(callers),
-                    "callees": len(callees),
                 },
                 "model": cached["model"],
                 "cached": True,
@@ -1079,8 +1008,6 @@ def whygraph_rationale_brief(
     user_prompt = _build_rationale_user_prompt(
         target=target,
         evidence=evidence,
-        callers=callers,
-        callees=callees,
     )
     raw = llm_subprocess.invoke_claude(
         user_prompt,
@@ -1124,8 +1051,6 @@ def whygraph_rationale_brief(
             "commits": len(evidence),
             "prs": sum(len(ev.get("prs") or []) for ev in evidence),
             "issues": sum(len(ev.get("issues") or []) for ev in evidence),
-            "callers": len(callers),
-            "callees": len(callees),
         },
         "model": model,
     }
@@ -1209,6 +1134,155 @@ def prompt_team_pulse(window_days: str = "30") -> str:
         "commits + files touched), days-since-last-commit per top author, "
         "and the hottest path-prefixes. Cite numbers from the tool output; "
         "do not estimate."
+    )
+
+
+@mcp.prompt(
+    name="changelog",
+    description=(
+        "Produce a themed markdown changelog of merged PRs in a date "
+        "window, optionally scoped to a path prefix."
+    ),
+)
+def prompt_changelog(since: str, until: str = "now", scope: str = "") -> str:
+    scope_arg = f", path_prefix={scope!r}" if scope else ""
+    scope_line = (
+        f"Scope: only PRs touching files under '{scope}'."
+        if scope
+        else "Scope: entire repo."
+    )
+    return "\n".join(
+        [
+            f'Build a changelog for the period since={since!r} until={until!r}.',
+            scope_line,
+            "",
+            "1. Call whygraph_window with:",
+            f"   since={since!r}, until={until!r}, "
+            f"kinds=['pr'], state='merged'{scope_arg}, limit=200.",
+            "2. Group merged PRs into themed buckets (e.g. 'Features', "
+            "'Bug fixes', 'Refactors', 'Docs') based on their titles, "
+            "labels, and narratives. Use ONLY information returned by "
+            "the tool — do not infer themes from PR numbers alone.",
+            "3. For each bucket, list PRs as `- #<n> <title> — <one-line "
+            "rationale from the narrative>`. Cite the PR number verbatim.",
+            "4. Add a closing line with totals: `N PRs across M themes`.",
+            "Do not speculate. If a PR has no narrative, list it under "
+            "'Other' with just the title.",
+        ]
+    )
+
+
+@mcp.prompt(
+    name="feature_timeline",
+    description=(
+        "Render a Mermaid `timeline` block showing merged PRs (features) "
+        "and issues opened in a date window."
+    ),
+)
+def prompt_feature_timeline(since: str, until: str = "now") -> str:
+    return "\n".join(
+        [
+            f'Render a Mermaid timeline for since={since!r} until={until!r}.',
+            "",
+            "1. Call whygraph_window twice:",
+            f"   - kinds=['pr'], state='merged', since={since!r}, "
+            f"until={until!r}, limit=200",
+            f"   - kinds=['issue'], since={since!r}, until={until!r}, "
+            "limit=200",
+            "2. Output a single fenced ```mermaid block containing a "
+            "`timeline` diagram. Group entries by month (YYYY-MM):",
+            "   timeline",
+            "       title Feature timeline",
+            "       2026-01 : PR #42 short title",
+            "                : PR #43 short title",
+            "       2026-02 : Issue #50 short title",
+            "3. Use the PR's merged_at (or issue's created_at) for the "
+            "month bucket. Truncate titles to 60 characters. Cite IDs "
+            "verbatim.",
+            "4. After the diagram, add a one-paragraph commentary on "
+            "what was shipped vs what was raised. Cite numbers only "
+            "from the tool output.",
+        ]
+    )
+
+
+@mcp.prompt(
+    name="user_profile",
+    description=(
+        "Per-user contribution profile (commits, PRs, areas owned, "
+        "issues closed) over a date window."
+    ),
+)
+def prompt_user_profile(identity: str, since: str, until: str = "now") -> str:
+    return "\n".join(
+        [
+            f'Build a contribution profile for identity={identity!r} '
+            f'between since={since!r} and until={until!r}.',
+            "",
+            "1. Call whygraph_window with:",
+            f"   author={identity!r}, since={since!r}, until={until!r}, "
+            "limit=500",
+            "   This returns the user's commits, PRs, and issues in window. "
+            "If the tool errors with 'did not resolve', tell the user to "
+            "run `whygraph scan` and try a different spelling (login, "
+            "email, or local-part).",
+            "2. Call whygraph_velocity_summary with group_by='path_prefix' "
+            "for repo-wide context on the hottest areas (gives the user's "
+            "areas a baseline to compare against).",
+            "3. Produce a markdown profile with these sections:",
+            "   - **Activity**: total commits / PRs authored / issues "
+            "raised in window.",
+            "   - **Areas touched**: top 5 path prefixes derived from "
+            "the commits' file paths or PR titles. Cite counts.",
+            "   - **Highlights**: top 3 commits or PRs by narrative "
+            "richness (longest llm_description / body). Quote one line "
+            "per item.",
+            "   - **Closing issues**: issues whose closing PR they "
+            "authored in window (if any).",
+            "Cite SHAs (short), PR numbers, issue numbers verbatim. Do "
+            "not infer information not present in the tool output.",
+        ]
+    )
+
+
+@mcp.prompt(
+    name="whygraph_plan",
+    description=(
+        "Plan an implementation task using rationale cards. Composes "
+        "whygraph_search → CodeGraph (or Explore agent) for symbol "
+        "resolution → whygraph_rationale_brief per candidate symbol."
+    ),
+)
+def prompt_whygraph_plan(task: str) -> str:
+    return "\n".join(
+        [
+            f'Plan an implementation approach for this task: "{task}".',
+            "",
+            "1. Call whygraph_search with task keywords (kinds=['commit',"
+            "'pr','issue'], limit=20). Note the file paths and symbols "
+            "that surface most often — these are likely affected.",
+            "2. Symbol resolution: WhyGraph does NOT do graph traversal. "
+            "For each likely-affected file, use CodeGraph (codegraph_* "
+            "tools) or Claude Code's Explore agent to identify the "
+            "specific functions/classes/methods that match the task's "
+            "intent. Collect their qualified_names.",
+            "3. For each candidate qualified_name, call "
+            "whygraph_rationale_brief(qualified_name=<...>) — cached "
+            "calls are sub-millisecond. Capture the purpose / why / "
+            "constraints / tradeoffs / risks per symbol.",
+            "4. Produce the plan with these sections:",
+            "   - **Affected symbols**: bulleted list of "
+            "<qualified_name> @ <file>:<lines> with one-line purpose.",
+            "   - **Rationale per symbol**: nested under each, the "
+            "key constraints and risks (cite SHAs/#PRs from the cards).",
+            "   - **Steps**: ordered, surgical change list. Each step "
+            "names the symbol(s) it touches and the constraint it "
+            "must preserve.",
+            "   - **Open questions**: anything the cards didn't "
+            "answer, framed as a question for the user.",
+            "Refuse to write code. The output is a plan; implementation "
+            "happens in a follow-up turn.",
+        ]
     )
 
 

@@ -19,6 +19,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
+from whygraph.scan import authors as authors_module
 from whygraph.scan import db as db_module
 from whygraph.scan import git as git_module
 from whygraph.scan import github as github_module
@@ -87,6 +88,7 @@ def run_scan(
         github_task = progress.add_task("github", total=None)
         score_task = progress.add_task("score ", total=None, start=False)
         llm_task = progress.add_task("llm   ", total=None, start=False)
+        authors_task = progress.add_task("authors", total=None, start=False)
 
         with ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="whygraph-crawler"
@@ -157,6 +159,33 @@ def run_scan(
                 llm_task, total=1, completed=1, description="llm (skipped)"
             )
             summaries["llm"] = "skipped (prior phase failed)"
+
+        # Authors phase rebuilds the identity table from the data the prior
+        # phases just landed. Cheap (single pass over commits + PRs +
+        # issues) so it runs unconditionally when the rest succeeded.
+        if rc == 0:
+            progress.start_task(authors_task)
+            try:
+                with db_module.Database(db_path) as db:
+                    written = authors_module.build_authors(db)
+                progress.update(
+                    authors_task,
+                    total=max(written, 1),
+                    completed=max(written, 1),
+                    description="authors",
+                )
+                summaries["authors"] = f"{written} identities resolved"
+            except Exception as exc:  # noqa: BLE001
+                summaries["authors"] = f"failed: {exc}"
+                rc = 1
+        else:
+            progress.update(
+                authors_task,
+                total=1,
+                completed=1,
+                description="authors (skipped)",
+            )
+            summaries["authors"] = "skipped (prior phase failed)"
 
     for label, summary in summaries.items():
         if summary.startswith("failed:"):

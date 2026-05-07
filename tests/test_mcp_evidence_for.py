@@ -1,4 +1,3 @@
-import os
 import subprocess
 from pathlib import Path
 
@@ -121,9 +120,8 @@ def test_evidence_for_path_returns_blame_owners(repo_and_db) -> None:
         by_sha[sha1]["narratives"]["llm_description"]
         == "added f.txt with alpha and beta lines"
     )
-    # Path+lines targeting → no graph node → empty neighbour lists.
-    assert out["callers"] == []
-    assert out["callees"] == []
+    # WhyGraph no longer returns graph neighbours — that's CodeGraph's job.
+    assert set(out.keys()) == {"target", "evidence"}
     assert out["target"]["qualified_name"] is None
 
 
@@ -259,9 +257,9 @@ def test_evidence_for_qualified_name_requires_codegraph(repo_and_db, monkeypatch
 def test_evidence_for_qualified_name_resolves_via_backend(
     repo_and_db, fake_codegraph_db, monkeypatch
 ) -> None:
-    """Use the conftest CodeGraph fixture to simulate symbol resolution."""
+    """qualified_name is a *targeting convenience*: it resolves to the
+    symbol's file/line range via CodeGraph but does not pull neighbours."""
     repo_root, sha1, sha2, _ = repo_and_db
-    # The fake CodeGraph has node pkg.a → src/pkg/a.py lines 1-5; create a matching file.
     target_dir = repo_root / "src" / "pkg"
     target_dir.mkdir(parents=True)
     (target_dir / "a.py").write_text("alpha\nbeta\ngamma\ndelta\nepsilon\n")
@@ -274,181 +272,6 @@ def test_evidence_for_qualified_name_resolves_via_backend(
     # Resolution path worked.
     assert out["target"]["qualified_name"] == "pkg.a"
     assert out["target"]["path"] == "src/pkg/a.py"
-    # The fake CodeGraph defines pkg.a → calls pkg.b. So callees has pkg.b.
-    callee_qns = {n["qualified_name"] for n in out["callees"]}
-    assert "pkg.b" in callee_qns
-    # No callers point at pkg.a in the fixture.
-    assert out["callers"] == []
-
-
-def _commit_pkg_b(
-    repo_root: Path, content: str, message: str, *, when: str | None = None
-) -> str:
-    """Write src/pkg/b.py and commit. Returns the new SHA.
-
-    ``when`` (ISO-8601, e.g. ``2026-04-01T10:00:00+00:00``) pins the
-    author/committer timestamps so blame ordering is deterministic.
-    """
-    target_dir = repo_root / "src" / "pkg"
-    target_dir.mkdir(parents=True, exist_ok=True)
-    (target_dir / "b.py").write_text(content)
-    _git(repo_root, "add", "src/pkg/b.py")
-    if when:
-        env = {"GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when}
-        subprocess.run(
-            ["git", "-C", str(repo_root), "commit", "-q", "-m", message],
-            check=True,
-            capture_output=True,
-            env={**os.environ, **env},
-        )
-    else:
-        _git(repo_root, "commit", "-q", "-m", message)
-    return _git_out(repo_root, "rev-parse", "HEAD")
-
-
-def test_evidence_for_enriches_neighbour_with_top3_recent(
-    repo_and_db, fake_codegraph_db, monkeypatch
-) -> None:
-    """pkg.b (callee of pkg.a) should be enriched with its own top-3
-    commits sorted by recency."""
-    repo_root, *_ = repo_and_db
-    # Target file (pkg.a) needs to exist for the target-side blame call.
-    (repo_root / "src" / "pkg").mkdir(parents=True, exist_ok=True)
-    (repo_root / "src" / "pkg" / "a.py").write_text(
-        "alpha\nbeta\ngamma\ndelta\nepsilon\n"
-    )
-    _git(repo_root, "add", "src/pkg/a.py")
-    _git(repo_root, "commit", "-q", "-m", "add a.py")
-    # 5 commits to b.py — each overwrites a different line so blame
-    # attributes 5 distinct SHAs to lines 1..5. Pinned timestamps so
-    # the recency sort is deterministic regardless of how fast pytest
-    # runs.
-    shas = []
-    body = ["L1", "L2", "L3", "L4", "L5"]
-    for i in range(5):
-        body[i] = f"L{i + 1}-v{i + 1}"
-        when = f"2026-04-{i + 1:02d}T10:00:00+00:00"
-        shas.append(
-            _commit_pkg_b(
-                repo_root, "\n".join(body) + "\n", f"b-rev-{i + 1}", when=when
-            )
-        )
-    monkeypatch.setenv("CODEGRAPH_DB", str(fake_codegraph_db))
-    out = mcp_server.whygraph_evidence_for(
-        qualified_name="pkg.a", min_score_pct=0.0
-    )
-    callees_by_qn = {n["qualified_name"]: n for n in out["callees"]}
-    pkg_b = callees_by_qn["pkg.b"]
-    assert "evidence" in pkg_b
-    # Top-3 cap.
-    assert len(pkg_b["evidence"]) == 3
-    # Recency sort: first item should be the most recent SHA.
-    times = [ev.get("committed_at") for ev in pkg_b["evidence"]]
-    assert times == sorted(times, reverse=True)
-    assert pkg_b["evidence"][0]["sha"] == shas[-1]
-    # Each evidence item carries the same shape as the target's items.
-    first = pkg_b["evidence"][0]
-    assert "narratives" in first
-    assert "prs" in first
-    assert "issues" in first
-
-
-def test_evidence_for_neighbour_missing_file_returns_empty_evidence(
-    repo_and_db, codegraph_db_factory, monkeypatch
-) -> None:
-    """Neighbour whose file_path doesn't exist on disk should still
-    appear, with evidence=[] rather than raising."""
-    repo_root, *_ = repo_and_db
-    (repo_root / "src" / "pkg").mkdir(parents=True, exist_ok=True)
-    (repo_root / "src" / "pkg" / "a.py").write_text(
-        "alpha\nbeta\ngamma\ndelta\nepsilon\n"
-    )
-    _git(repo_root, "add", "src/pkg/a.py")
-    _git(repo_root, "commit", "-q", "-m", "add a.py")
-    cg_path = codegraph_db_factory(
-        nodes=[
-            {
-                "id": "n_a",
-                "kind": "function",
-                "name": "a",
-                "qualified_name": "pkg.a",
-                "file_path": "src/pkg/a.py",
-                "language": "python",
-                "start_line": 1,
-                "end_line": 5,
-                "docstring": "doc-a",
-                "signature": "def a()",
-            },
-            {
-                "id": "n_ghost",
-                "kind": "function",
-                "name": "ghost",
-                "qualified_name": "pkg.ghost",
-                "file_path": "src/pkg/ghost.py",  # never created on disk
-                "language": "python",
-                "start_line": 1,
-                "end_line": 5,
-                "docstring": "ghostly callee",
-                "signature": "def ghost()",
-            },
-        ],
-        edges=[("n_a", "n_ghost", "calls")],
-    )
-    monkeypatch.setenv("CODEGRAPH_DB", str(cg_path))
-    out = mcp_server.whygraph_evidence_for(
-        qualified_name="pkg.a", min_score_pct=0.0
-    )
-    callees_by_qn = {n["qualified_name"]: n for n in out["callees"]}
-    ghost = callees_by_qn["pkg.ghost"]
-    assert ghost["evidence"] == []
-    # Docstring still propagates from the graph node.
-    assert ghost["docstring"] == "ghostly callee"
-
-
-def test_evidence_for_neighbour_propagates_docstring(
-    repo_and_db, codegraph_db_factory, monkeypatch
-) -> None:
-    """SymbolNode.docstring must surface in the neighbour dict."""
-    repo_root, *_ = repo_and_db
-    (repo_root / "src" / "pkg").mkdir(parents=True, exist_ok=True)
-    (repo_root / "src" / "pkg" / "a.py").write_text(
-        "alpha\nbeta\ngamma\ndelta\nepsilon\n"
-    )
-    _git(repo_root, "add", "src/pkg/a.py")
-    _git(repo_root, "commit", "-q", "-m", "add a.py")
-    _commit_pkg_b(repo_root, "L1\nL2\nL3\nL4\nL5\n", "init b")
-    cg_path = codegraph_db_factory(
-        nodes=[
-            {
-                "id": "n_a",
-                "kind": "function",
-                "name": "a",
-                "qualified_name": "pkg.a",
-                "file_path": "src/pkg/a.py",
-                "language": "python",
-                "start_line": 1,
-                "end_line": 5,
-                "docstring": "doc-a",
-                "signature": "def a()",
-            },
-            {
-                "id": "n_b",
-                "kind": "function",
-                "name": "b",
-                "qualified_name": "pkg.b",
-                "file_path": "src/pkg/b.py",
-                "language": "python",
-                "start_line": 1,
-                "end_line": 5,
-                "docstring": "computes the b-thing",
-                "signature": "def b()",
-            },
-        ],
-        edges=[("n_a", "n_b", "calls")],
-    )
-    monkeypatch.setenv("CODEGRAPH_DB", str(cg_path))
-    out = mcp_server.whygraph_evidence_for(
-        qualified_name="pkg.a", min_score_pct=0.0
-    )
-    callees_by_qn = {n["qualified_name"]: n for n in out["callees"]}
-    assert callees_by_qn["pkg.b"]["docstring"] == "computes the b-thing"
+    # No graph traversal — caller/callee context is the agent's job to
+    # pull from CodeGraph or the Explore agent.
+    assert set(out.keys()) == {"target", "evidence"}

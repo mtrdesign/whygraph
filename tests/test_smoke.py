@@ -25,6 +25,7 @@ def test_mcp_server_registers_full_surface() -> None:
         "whygraph_search",
         "whygraph_velocity_summary",
         "whygraph_rationale_brief",
+        "whygraph_window",
     } <= tool_names
 
     resources = asyncio.run(mcp.list_resource_templates()) + asyncio.run(
@@ -40,4 +41,12 @@ def test_mcp_server_registers_full_surface() -> None:
 
     prompts = asyncio.run(mcp.list_prompts())
     prompt_names = {p.name for p in prompts}
-    assert {"explain_change", "debug_history", "team_pulse"} <= prompt_names
+    assert {
+        "explain_change",
+        "debug_history",
+        "team_pulse",
+        "changelog",
+        "feature_timeline",
+        "user_profile",
+        "whygraph_plan",
+    } <= prompt_names

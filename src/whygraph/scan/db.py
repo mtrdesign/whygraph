@@ -10,7 +10,7 @@ from pathlib import Path
 from whygraph.scan.git import Commit
 from whygraph.scan.github import Issue, PullRequest
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 DB_DIR_NAME = ".whygraph"
 DB_FILE_NAME = "whygraph.db"
@@ -139,6 +139,26 @@ _MIGRATIONS: dict[int, list[str]] = {
         )
         """,
         "CREATE INDEX idx_rationale_cache_qname ON rationale_cache(target_qualified_name)",
+    ],
+    9: [
+        """
+        CREATE TABLE authors (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          primary_login TEXT,
+          primary_name TEXT,
+          primary_email TEXT,
+          emails TEXT NOT NULL,
+          logins TEXT NOT NULL,
+          names TEXT NOT NULL,
+          first_seen TEXT,
+          last_seen TEXT,
+          commit_count INTEGER NOT NULL DEFAULT 0,
+          pr_count INTEGER NOT NULL DEFAULT 0,
+          issue_count INTEGER NOT NULL DEFAULT 0
+        )
+        """,
+        "CREATE INDEX idx_authors_primary_login ON authors(primary_login)",
+        "CREATE INDEX idx_authors_primary_email ON authors(primary_email)",
     ],
 }
 
@@ -551,3 +571,75 @@ class Database:
                 (pr_number, n),
             )
         self._conn.commit()
+
+    def clear_authors(self) -> None:
+        """Wipe the authors table. Used at the start of a rebuild."""
+        cur = self._conn.cursor()
+        cur.execute("DELETE FROM authors")
+        # Reset AUTOINCREMENT so ids stay small across rebuilds.
+        cur.execute("DELETE FROM sqlite_sequence WHERE name = 'authors'")
+        self._conn.commit()
+
+    def insert_author(
+        self,
+        *,
+        primary_login: str | None,
+        primary_name: str | None,
+        primary_email: str | None,
+        emails: list[str],
+        logins: list[str],
+        names: list[str],
+        first_seen: str | None,
+        last_seen: str | None,
+        commit_count: int,
+        pr_count: int,
+        issue_count: int,
+    ) -> int:
+        """Insert one author row. Returns the new ``id``."""
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO authors (
+              primary_login, primary_name, primary_email,
+              emails, logins, names,
+              first_seen, last_seen,
+              commit_count, pr_count, issue_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                primary_login,
+                primary_name,
+                primary_email,
+                json.dumps(sorted(set(emails))),
+                json.dumps(sorted(set(logins))),
+                json.dumps(sorted(set(names))),
+                first_seen,
+                last_seen,
+                commit_count,
+                pr_count,
+                issue_count,
+            ),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid)
+
+    def iter_authors(self) -> list[dict]:
+        """Return all authors with ``emails`` / ``logins`` / ``names``
+        decoded back into Python lists."""
+        cur = self._conn.cursor()
+        cur.execute("SELECT * FROM authors ORDER BY commit_count DESC, id ASC")
+        out: list[dict] = []
+        for row in cur.fetchall():
+            d = _row_to_dict(cur, row)
+            for key in ("emails", "logins", "names"):
+                try:
+                    d[key] = json.loads(d[key])
+                except (TypeError, json.JSONDecodeError):
+                    d[key] = []
+            out.append(d)
+        return out
+
+    def author_count(self) -> int:
+        cur = self._conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM authors")
+        return int(cur.fetchone()[0])

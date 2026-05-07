@@ -122,6 +122,41 @@ def test_rationale_force_refresh_bypasses_cache(repo_and_db) -> None:
     assert third["purpose"] == "second"
 
 
+def test_rationale_cache_invalidates_on_prompt_version_bump(
+    repo_and_db, monkeypatch
+) -> None:
+    """A cache row written under the v2 prompt must NOT satisfy a v3 call.
+
+    Simulates a user upgrading WhyGraph: the cache table still contains
+    rows produced by the v2 bundle (which embedded callers/callees) but
+    the v3 bundle is shaped differently. The cache key includes
+    ``prompt_version``, so v2 rows are dead weight — the tool must miss
+    them and re-invoke the LLM.
+    """
+    invocations = {"n": 0}
+
+    def fake_invoke(prompt, *, model, timeout_sec, anthropic_api_key=None, system_prompt=None):
+        invocations["n"] += 1
+        return _canned_rationale(purpose=f"v{invocations['n']}")
+
+    with patch("whygraph.mcp_server.llm_subprocess.invoke_claude", side_effect=fake_invoke):
+        # Populate the cache under the old version.
+        monkeypatch.setattr(mcp_server, "_PROMPT_VERSION", "v2")
+        first = mcp_server.whygraph_rationale_brief(
+            path="f.py", line_start=1, line_end=2, min_score_pct=0.0
+        )
+        # Restore to v3 — same bundle content, same target, different prompt
+        # version → cache miss.
+        monkeypatch.setattr(mcp_server, "_PROMPT_VERSION", "v3")
+        second = mcp_server.whygraph_rationale_brief(
+            path="f.py", line_start=1, line_end=2, min_score_pct=0.0
+        )
+    assert invocations["n"] == 2
+    assert first["cached"] is False
+    assert second["cached"] is False
+    assert first["purpose"] != second["purpose"]
+
+
 def test_rationale_cache_invalidates_when_bundle_changes(repo_and_db) -> None:
     """A new commit on the lines must change the bundle signature and miss
     the cache, even though the call args are identical."""

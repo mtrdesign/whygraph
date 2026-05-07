@@ -100,14 +100,34 @@ The plugin's `.mcp.json` launches `whygraph-mcp`, which registers:
 
 ### Tools
 
-- **`whygraph_evidence_for`** — historical evidence (commits + PRs + closing issues) plus graph neighbours (callers/callees, each with their own top-3 commits) for a code chunk. Pass `(path, line_start, line_end)` or `qualified_name` (resolved via CodeGraph). Multi-narrative output: each commit ships `llm_description` + `subject` + `body` when each clears the harshness gate.
+- **`whygraph_evidence_for`** — historical evidence (commits + PRs + closing issues) for a code chunk. Pass `(path, line_start, line_end)` or `qualified_name` (CodeGraph resolves it to a file/line range — no graph traversal). Multi-narrative output: each commit ships `llm_description` + `subject` + `body` when each clears the harshness gate. For caller/callee context, query CodeGraph or Claude Code's Explore agent separately.
 - **`whygraph_search`** — LIKE-match query across commits/PRs/issues, ranked by TF-IDF.
-- **`whygraph_velocity_summary`** — per-author commit velocity or per-path-prefix touch counts over a window.
+- **`whygraph_velocity_summary`** — per-author commit velocity or per-path-prefix touch counts over a window. Author resolution goes through the `authors` identity table (replaces the old email-localpart heuristic).
+- **`whygraph_window`** — generic windowed query over the scan DB. Filters: `since` / `until` (ISO date or relative shorthand `30d`/`3m`/`1y`), `kinds` (`commit` / `pr` / `issue`), `author` (login | email | name → resolved via `authors`), `path_prefix`, `label`, `state` (`merged` | `open` | `closed`). Returns time-ordered rows; the data spine for the analytics prompts below.
 - **`whygraph_rationale_brief`** — generates the 5-section rationale card (purpose / why / constraints / tradeoffs / risks + confidence) by feeding the evidence bundle to a `claude` subprocess. **Cached** in the scan DB by `(target + bundle content + model + prompt version)` — re-invocation on unchanged code is a sub-millisecond DB read. Pass `force_refresh=True` to bypass.
 
 ### Prompts
 
-`explain_change`, `debug_history`, `team_pulse` — orchestration recipes that wire the tools above into common workflows.
+Orchestration recipes that wire the tools above into common workflows:
+
+- `explain_change` — pre-edit rationale for a code chunk.
+- `debug_history` — find historical candidate causes for a bug symptom.
+- `team_pulse` — per-author + per-path velocity over a rolling window.
+- `changelog(since, until, scope?)` — themed markdown changelog of merged PRs in a date window.
+- `feature_timeline(since, until)` — Mermaid `timeline` of merged PRs and issues opened in the window.
+- `user_profile(identity, since, until)` — per-user contribution profile (commits, PRs, areas owned, issues closed).
+- `whygraph_plan(task)` — composes search → CodeGraph (for symbol resolution) → rationale_brief into an ordered implementation plan.
+
+### Composition with CodeGraph
+
+WhyGraph deliberately does not expose graph-traversal tools. The split:
+
+| Layer | Owns |
+|---|---|
+| **CodeGraph** (its MCP server / Claude's Explore agent) | "what is connected to what" — `findUsages`, `getCallers`, `find_symbols`, type hierarchy |
+| **WhyGraph** | "why does this exist + when did it change" — evidence, rationale, windowed analytics |
+
+The `whygraph_plan` prompt explicitly delegates symbol resolution to CodeGraph. For ad-hoc traversal mid-conversation, agents should call CodeGraph's tools directly.
 
 ## Environment variables
 
@@ -137,6 +157,7 @@ The plugin's `.mcp.json` launches `whygraph-mcp`, which registers:
 │       ├── git.py / github.py          # data sources
 │       ├── db.py                       # WhyGraph SQLite schema + migrations
 │       ├── scoring.py                  # TF-IDF + ValueGate
+│       ├── authors.py                  # identity dedup + resolver
 │       └── llm_descriptions.py         # per-commit diff-description phase
 ├── tests/
 └── pyproject.toml                      # uv-managed

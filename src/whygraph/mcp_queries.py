@@ -19,6 +19,45 @@ from whygraph.scan import git as git_module
 from whygraph.scan.scoring import ValueGate
 
 
+_RELATIVE_RE = re.compile(r"^(\d+)\s*([dwmy])$", re.IGNORECASE)
+
+
+def parse_window_bound(value: str, *, now: datetime | None = None) -> datetime:
+    """Parse a ``since`` / ``until`` value into a UTC ``datetime``.
+
+    Accepts:
+    - ``"30d"`` / ``"4w"`` / ``"3m"`` / ``"1y"`` — relative to ``now``
+      (months treated as 30 days, years as 365 days; this is fine for
+      windowing, not calendar arithmetic).
+    - Any string ``datetime.fromisoformat`` accepts, e.g. ``"2026-01-01"``
+      or ``"2026-01-01T10:00:00+00:00"``. Naïve dates are interpreted as
+      UTC.
+    - ``"now"`` — the same as omitting an upper bound.
+    """
+    if now is None:
+        now = datetime.now(tz=timezone.utc)
+    if not value or not value.strip():
+        raise ValueError("window bound is empty")
+    s = value.strip()
+    if s.lower() == "now":
+        return now
+    if (m := _RELATIVE_RE.match(s)) is not None:
+        n = int(m.group(1))
+        unit = m.group(2).lower()
+        days = {"d": 1, "w": 7, "m": 30, "y": 365}[unit] * n
+        return now - timedelta(days=days)
+    try:
+        parsed = datetime.fromisoformat(s)
+    except ValueError as exc:
+        raise ValueError(
+            f"could not parse window bound {value!r}: expected ISO date "
+            f"(2026-01-01) or relative shorthand (30d/3m/1y)"
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def blame_line_range(
     repo_root: Path, path: str, line_start: int, line_end: int
 ) -> dict[str, dict]:
@@ -413,12 +452,15 @@ def velocity_by_author(
 ) -> list[dict]:
     """Per-author commit velocity (window + all-time + last-commit recency).
 
-    PRs authored in window are joined heuristically: the PR's `author`
-    column holds a GitHub login; commits don't carry login. We approximate
-    by counting PRs authored by each `author_email`'s local-part match
-    against PR `author` — imperfect but the only deterministic key. Callers
-    needing exact join should consume `commit_titles[].author_login`.
+    PRs authored in window are joined through the ``authors`` table built
+    by ``whygraph.scan.authors.build_authors``: the PR's ``author`` (a
+    GitHub login) is mapped to the same identity that owns the commit's
+    ``author_email``. Commits whose email never showed up in any PR's
+    ``commit_titles[].author_email`` get zero PRs — that's the honest
+    answer rather than the old localpart heuristic's false positives.
     """
+    from whygraph.scan import authors as authors_module
+
     cur = db._conn.cursor()
     if now is None:
         now = datetime.now(tz=timezone.utc)
@@ -449,6 +491,16 @@ def velocity_by_author(
     )
     prs_by_login: dict[str, int] = {row[0]: int(row[1]) for row in cur.fetchall()}
 
+    # Build {key → author_id} once; then prs_by_author_id sums PR counts
+    # across every login that maps to the same identity.
+    lookup = authors_module.author_lookup_table(db)
+    prs_by_author_id: dict[int, int] = {}
+    for login, count in prs_by_login.items():
+        author_id = lookup.get(login)
+        if author_id is None:
+            continue
+        prs_by_author_id[author_id] = prs_by_author_id.get(author_id, 0) + count
+
     out: list[dict] = []
     for email, name, all_commits, win_commits, win_files, last_at in rows:
         last_dt = (
@@ -457,8 +509,8 @@ def velocity_by_author(
         days_since = (
             (now - last_dt).days if last_dt is not None else None
         )
-        local_part = (email or "").split("@", 1)[0] or None
-        prs_in_window = prs_by_login.get(local_part or "", 0)
+        author_id = lookup.get((email or "").lower()) if email else None
+        prs_in_window = prs_by_author_id.get(author_id, 0) if author_id else 0
         out.append(
             {
                 "author_email": email,
@@ -534,6 +586,267 @@ def velocity_by_path_prefix(
             }
         )
     return out
+
+
+def _commits_in_window(
+    db: db_module.Database,
+    repo_root: Path,
+    *,
+    since: datetime,
+    until: datetime,
+    author_emails: list[str] | None,
+    path_prefix: str | None,
+    gate: ValueGate,
+) -> list[dict]:
+    """Window-query commits.
+
+    ``author_emails`` filters by exact email match (case-insensitive).
+    ``path_prefix`` filters by top-level path prefix; this requires
+    shelling out to ``git log --name-only`` because the scan DB stores
+    file counts, not file paths — same trick ``velocity_by_path_prefix``
+    uses.
+    """
+    cur = db._conn.cursor()
+    where = ["committed_at >= ?", "committed_at <= ?"]
+    params: list[object] = [since.isoformat(), until.isoformat()]
+    if author_emails:
+        placeholders = ",".join(["?"] * len(author_emails))
+        where.append(f"LOWER(author_email) IN ({placeholders})")
+        params.extend(e.lower() for e in author_emails)
+    sql = (
+        "SELECT * FROM commits "
+        f"WHERE {' AND '.join(where)} "
+        "ORDER BY committed_at DESC"
+    )
+    cur.execute(sql, params)
+    rows = [_row_to_dict(cur, row) for row in cur.fetchall()]
+
+    if path_prefix:
+        try:
+            log = git_module._run_git(
+                repo_root,
+                [
+                    "log",
+                    f"--since={since.isoformat()}",
+                    f"--until={until.isoformat()}",
+                    "--name-only",
+                    "--pretty=format:>>>%H<<<",
+                ],
+            )
+        except git_module.GitError:
+            log = ""
+        keep: set[str] = set()
+        current = ""
+        for line in log.splitlines():
+            if line.startswith(">>>") and line.endswith("<<<"):
+                current = line[3:-3]
+                continue
+            if not line.strip() or not current:
+                continue
+            if line.strip().startswith(path_prefix):
+                keep.add(current)
+        rows = [r for r in rows if r["sha"] in keep]
+
+    out: list[dict] = []
+    for r in rows:
+        narratives = commit_narratives(r, gate)
+        # Surface a tiny llm_description-only narrative even when the gate
+        # rejects everything — `whygraph_window` is for "what happened",
+        # not for the harshness gate's stricter "what's worth quoting"
+        # cut. Empty narratives → still surface the row, agent decides.
+        out.append(
+            {
+                "kind": "commit",
+                "id": r["sha"],
+                "at": r.get("committed_at"),
+                "narratives": narratives,
+                "subject": r.get("subject"),
+                "author": {
+                    "login": None,
+                    "name": r.get("author_name"),
+                    "email": r.get("author_email"),
+                },
+                "files_changed": r.get("files_changed"),
+                "insertions": r.get("insertions"),
+                "deletions": r.get("deletions"),
+            }
+        )
+    return out
+
+
+def _prs_in_window(
+    db: db_module.Database,
+    *,
+    since: datetime,
+    until: datetime,
+    author_logins: list[str] | None,
+    label: str | None,
+    state: str | None,
+    gate: ValueGate,
+) -> list[dict]:
+    cur = db._conn.cursor()
+    where = ["created_at >= ?", "created_at <= ?"]
+    params: list[object] = [since.isoformat(), until.isoformat()]
+    if author_logins:
+        placeholders = ",".join(["?"] * len(author_logins))
+        where.append(f"author IN ({placeholders})")
+        params.extend(author_logins)
+    if state == "merged":
+        where.append("merged_at IS NOT NULL")
+    elif state in ("open", "closed"):
+        where.append("state = ?")
+        params.append(state)
+    if label:
+        where.append("labels LIKE ?")
+        params.append(f'%"{label}"%')
+    sql = (
+        "SELECT * FROM pull_requests "
+        f"WHERE {' AND '.join(where)} "
+        "ORDER BY COALESCE(merged_at, closed_at, created_at) DESC"
+    )
+    cur.execute(sql, params)
+    rows = [_row_to_dict(cur, row) for row in cur.fetchall()]
+    out: list[dict] = []
+    for r in rows:
+        narratives = pr_narratives(r, gate)
+        out.append(
+            {
+                "kind": "pr",
+                "id": r["number"],
+                "at": r.get("merged_at") or r.get("closed_at") or r.get("created_at"),
+                "narratives": narratives,
+                "title": r.get("title"),
+                "state": r.get("state"),
+                "merged_at": r.get("merged_at"),
+                "html_url": r.get("html_url"),
+                "labels": _parse_json_list_safe(r.get("labels")),
+                "authors": pr_authors(r),
+            }
+        )
+    return out
+
+
+def _issues_in_window(
+    db: db_module.Database,
+    *,
+    since: datetime,
+    until: datetime,
+    author_logins: list[str] | None,
+    label: str | None,
+    state: str | None,
+    gate: ValueGate,
+) -> list[dict]:
+    cur = db._conn.cursor()
+    where = ["created_at >= ?", "created_at <= ?"]
+    params: list[object] = [since.isoformat(), until.isoformat()]
+    if author_logins:
+        placeholders = ",".join(["?"] * len(author_logins))
+        where.append(f"author IN ({placeholders})")
+        params.extend(author_logins)
+    if state in ("open", "closed"):
+        where.append("state = ?")
+        params.append(state)
+    if label:
+        where.append("labels LIKE ?")
+        params.append(f'%"{label}"%')
+    sql = (
+        "SELECT * FROM issues "
+        f"WHERE {' AND '.join(where)} "
+        "ORDER BY COALESCE(closed_at, created_at) DESC"
+    )
+    cur.execute(sql, params)
+    rows = [_row_to_dict(cur, row) for row in cur.fetchall()]
+    out: list[dict] = []
+    for r in rows:
+        narratives = issue_narratives(r, gate)
+        out.append(
+            {
+                "kind": "issue",
+                "id": r["number"],
+                "at": r.get("closed_at") or r.get("created_at"),
+                "narratives": narratives,
+                "title": r.get("title"),
+                "state": r.get("state"),
+                "html_url": r.get("html_url"),
+                "labels": _parse_json_list_safe(r.get("labels")),
+                "author": r.get("author"),
+            }
+        )
+    return out
+
+
+def _parse_json_list_safe(raw: object) -> list:
+    if isinstance(raw, list):
+        return raw
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def window_query(
+    db: db_module.Database,
+    repo_root: Path,
+    *,
+    since: datetime,
+    until: datetime,
+    kinds: tuple[str, ...],
+    author_emails: list[str] | None,
+    author_logins: list[str] | None,
+    path_prefix: str | None,
+    label: str | None,
+    state: str | None,
+    gate: ValueGate,
+    limit: int,
+) -> list[dict]:
+    """Mixed-kind windowed query for the ``whygraph_window`` MCP tool.
+
+    Returns a single time-ordered list of typed rows (newest first),
+    capped at ``limit``. Path-prefix filtering only meaningfully applies
+    to commits.
+    """
+    out: list[dict] = []
+    if "commit" in kinds:
+        out.extend(
+            _commits_in_window(
+                db,
+                repo_root,
+                since=since,
+                until=until,
+                author_emails=author_emails,
+                path_prefix=path_prefix,
+                gate=gate,
+            )
+        )
+    if "pr" in kinds:
+        out.extend(
+            _prs_in_window(
+                db,
+                since=since,
+                until=until,
+                author_logins=author_logins,
+                label=label,
+                state=state,
+                gate=gate,
+            )
+        )
+    if "issue" in kinds:
+        out.extend(
+            _issues_in_window(
+                db,
+                since=since,
+                until=until,
+                author_logins=author_logins,
+                label=label,
+                state=state,
+                gate=gate,
+            )
+        )
+    out.sort(key=lambda r: r.get("at") or "", reverse=True)
+    return out[:limit]
 
 
 def repo_overview(db: db_module.Database) -> dict:

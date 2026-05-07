@@ -85,6 +85,7 @@ This puts `whygraph` and `whygraph-mcp` on your `PATH`, independent of any Claud
 | `--anthropic-key TEXT` | unset | If set, the `claude` subprocess uses API billing with this key. If omitted, the subprocess inherits a stripped env (no `ANTHROPIC_API_KEY`), forcing Claude.ai subscription billing. |
 | `--llm-workers N` | `4` | Parallel `claude` subprocesses in the LLM phase. |
 | `--llm-recent N` | unbounded | Limit the LLM phase to the most recent N commits on the default branch. Other phases still cover full history. |
+| `--llm-model TEXT` | `claude-sonnet-4-6` | Model used by the `claude` subprocess in the LLM phase. Also persisted to `commits.llm_description_model` per row. Use Opus on small repos for higher-quality descriptions; default is Sonnet for throughput on large scans. |
 
 ## MCP surface
 

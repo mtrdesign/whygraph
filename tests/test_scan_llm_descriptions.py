@@ -82,6 +82,24 @@ def test_prompt_template_only_has_diff_placeholder() -> None:
     assert "{title}" not in _PROMPT_TEMPLATE
 
 
+def test_prompt_template_frames_audience_as_llm_future_self() -> None:
+    """The description is an LLM-internal artifact. The prompt must not
+    pitch it as documentation for humans/developers, and must communicate
+    the two anchors (token efficiency, no ambiguity)."""
+    lower = _PROMPT_TEMPLATE.lower()
+    # Audience reframing.
+    assert "future self" in lower
+    assert "no human reads" in lower
+    # Anchors are stated explicitly.
+    assert "token efficiency" in lower
+    assert "no ambiguity" in lower
+    # No prescriptive format/identifier rules — those are the explicit
+    # anti-pattern this rewrite drops.
+    assert "verbatim identifiers" not in lower
+    assert "before→after" not in _PROMPT_TEMPLATE
+    assert "no hedging" not in lower
+
+
 def test_get_pair_diff_returns_unified_diff(tmp_path: Path) -> None:
     root, shas = _make_repo_with_n_commits(tmp_path, 2)
     diff = get_pair_diff(root, shas[0], shas[1])

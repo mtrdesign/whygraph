@@ -34,6 +34,7 @@ def run_scan(
     anthropic_api_key: str | None = None,
     llm_workers: int = llm_module.DEFAULT_MAX_WORKERS,
     llm_recent: int | None = None,
+    llm_model: str = llm_module.DEFAULT_MODEL,
 ) -> int:
     cwd = repo_root if repo_root is not None else Path.cwd()
     try:
@@ -52,6 +53,7 @@ def run_scan(
     shas = list(git_module.walk_first_parent(root, branch))
 
     llm_config = llm_module.LlmConfig(
+        model=llm_model,
         anthropic_api_key=anthropic_api_key,
         max_workers=llm_workers,
     )

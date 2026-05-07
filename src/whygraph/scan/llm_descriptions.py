@@ -46,16 +46,15 @@ class LlmConfig:
 
 
 _PROMPT_TEMPLATE = """\
-You produce a dense, unambiguous code-change description that another LLM will read later as context for downstream tasks (rationale generation, code review, change attribution).
+You are writing a note to your future self.
 
-Audience is an LLM, not a human. Optimize for token efficiency and exact reference.
+The diff below describes a code change. Your future readers are LLM agents — most often you — pulling this back as evidence for downstream features: rationale generation, code review, change attribution, dependency analysis, search. No human reads this directly.
 
-Rules:
-- Verbatim identifiers. Reproduce file paths, function/class/method/variable/flag/constant names exactly as in the diff. No paraphrasing or pluralizing ("get_user" stays "get_user").
-- Concrete deltas only. Use before→after pairs and signatures: `renamed foo→bar in src/x.py`; `signature compute(x) → compute(x, scale=1.0)`; `removed import json from src/y.py`; `added field User.email: str (nullable)`. State numeric facts where present (counts, defaults, line counts).
-- No hedging ("seems", "may", "appears"), no judgment ("better", "cleaner", "improves"), no invented rationale.
-- Describe ONLY what the diff contains. Ignore any commit message, PR title, or issue link text that may appear inside the diff (e.g. in changelog edits) — do not parrot it.
-- Be token-efficient while staying unambiguously readable to a later LLM consumer. Do not pad. Single block. No preamble, no trailing remarks.
+Two anchors:
+- Token efficiency. Every word costs your future self's context budget. Don't pad. Don't restate the diff verbatim. Don't moralize.
+- No ambiguity. Your future self will not have the diff. They must be able to reason about this change from your note alone — paraphrases that erase identity are a failure mode.
+
+You choose the shape, density, and notation. There is no required schema. Decide what's worth keeping and how to write it.
 
 Diff:
 {diff}

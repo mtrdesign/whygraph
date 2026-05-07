@@ -3,6 +3,7 @@ from importlib.metadata import version as _pkg_version
 import click
 
 from whygraph.init import run_init
+from whygraph.scan import llm_descriptions as llm_module
 from whygraph.scan.runner import run_scan
 
 
@@ -76,12 +77,24 @@ def init_cmd(assume_yes: bool) -> None:
         "GitHub fetch, scoring) still cover the full history."
     ),
 )
+@click.option(
+    "--llm-model",
+    "llm_model",
+    default=llm_module.DEFAULT_MODEL,
+    show_default=True,
+    help=(
+        "Model used by the `claude` subprocess in the LLM phase. The "
+        "string is also persisted to commits.llm_description_model so "
+        "downstream readers know which model wrote each row."
+    ),
+)
 def scan_cmd(
     skip_score: bool,
     skip_llm_descriptions: bool,
     anthropic_api_key: str | None,
     llm_workers: int,
     llm_recent: int | None,
+    llm_model: str,
 ) -> None:
     """Walk the repo's history and populate the WhyGraph evidence database."""
     raise SystemExit(
@@ -91,5 +104,6 @@ def scan_cmd(
             anthropic_api_key=anthropic_api_key,
             llm_workers=llm_workers,
             llm_recent=llm_recent,
+            llm_model=llm_model,
         )
     )

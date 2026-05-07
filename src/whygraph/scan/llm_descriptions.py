@@ -27,7 +27,7 @@ __all__ = [
     "run_phase",
 ]
 
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_MAX_DIFF_CHARS = 50_000
 DEFAULT_TIMEOUT_SEC = 120
 DEFAULT_MAX_WORKERS = 4

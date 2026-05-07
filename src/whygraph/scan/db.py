@@ -10,7 +10,7 @@ from pathlib import Path
 from whygraph.scan.git import Commit
 from whygraph.scan.github import Issue, PullRequest
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 DB_DIR_NAME = ".whygraph"
 DB_FILE_NAME = "whygraph.db"
@@ -117,6 +117,28 @@ _MIGRATIONS: dict[int, list[str]] = {
     7: [
         "ALTER TABLE commits ADD COLUMN llm_description       TEXT",
         "ALTER TABLE commits ADD COLUMN llm_description_model TEXT",
+    ],
+    8: [
+        """
+        CREATE TABLE rationale_cache (
+          cache_key TEXT PRIMARY KEY,
+          target_qualified_name TEXT,
+          target_path TEXT,
+          target_line_start INTEGER,
+          target_line_end INTEGER,
+          bundle_signature TEXT NOT NULL,
+          model TEXT NOT NULL,
+          prompt_version TEXT NOT NULL,
+          purpose TEXT NOT NULL,
+          why TEXT NOT NULL,
+          constraints TEXT NOT NULL,
+          tradeoffs TEXT NOT NULL,
+          risks TEXT NOT NULL,
+          confidence REAL NOT NULL,
+          created_at TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX idx_rationale_cache_qname ON rationale_cache(target_qualified_name)",
     ],
 }
 
@@ -421,6 +443,92 @@ class Database:
              WHERE sha = ?
             """,
             (description, model, sha),
+        )
+        self._conn.commit()
+
+    def get_rationale_cache(self, cache_key: str) -> dict | None:
+        """Return a cached rationale row by cache_key, or None on miss.
+
+        ``constraints``, ``tradeoffs``, ``risks`` are decoded from JSON
+        back into lists so callers can use the row directly.
+        """
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT * FROM rationale_cache WHERE cache_key = ?", (cache_key,)
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        out = _row_to_dict(cur, row)
+        for key in ("constraints", "tradeoffs", "risks"):
+            try:
+                out[key] = json.loads(out[key])
+            except (TypeError, json.JSONDecodeError):
+                out[key] = []
+        return out
+
+    def set_rationale_cache(
+        self,
+        *,
+        cache_key: str,
+        target_qualified_name: str | None,
+        target_path: str | None,
+        target_line_start: int | None,
+        target_line_end: int | None,
+        bundle_signature: str,
+        model: str,
+        prompt_version: str,
+        purpose: str,
+        why: str,
+        constraints: list[str],
+        tradeoffs: list[str],
+        risks: list[str],
+        confidence: float,
+    ) -> None:
+        """Upsert a cached rationale by ``cache_key``."""
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO rationale_cache (
+              cache_key, target_qualified_name, target_path,
+              target_line_start, target_line_end,
+              bundle_signature, model, prompt_version,
+              purpose, why, constraints, tradeoffs, risks,
+              confidence, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cache_key) DO UPDATE SET
+              target_qualified_name = excluded.target_qualified_name,
+              target_path           = excluded.target_path,
+              target_line_start     = excluded.target_line_start,
+              target_line_end       = excluded.target_line_end,
+              bundle_signature      = excluded.bundle_signature,
+              model                 = excluded.model,
+              prompt_version        = excluded.prompt_version,
+              purpose               = excluded.purpose,
+              why                   = excluded.why,
+              constraints           = excluded.constraints,
+              tradeoffs             = excluded.tradeoffs,
+              risks                 = excluded.risks,
+              confidence            = excluded.confidence,
+              created_at            = excluded.created_at
+            """,
+            (
+                cache_key,
+                target_qualified_name,
+                target_path,
+                target_line_start,
+                target_line_end,
+                bundle_signature,
+                model,
+                prompt_version,
+                purpose,
+                why,
+                json.dumps(constraints),
+                json.dumps(tradeoffs),
+                json.dumps(risks),
+                confidence,
+                _now_iso(),
+            ),
         )
         self._conn.commit()
 

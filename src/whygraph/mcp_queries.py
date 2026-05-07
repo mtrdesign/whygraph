@@ -145,6 +145,66 @@ def issue_narrative(issue: dict, gate: ValueGate) -> tuple[str | None, str | Non
     return None, None
 
 
+def commit_narratives(commit: dict, gate: ValueGate) -> dict[str, str]:
+    """Return all qualifying commit narratives keyed by source.
+
+    ``llm_description`` always passes when present — it's a mechanical
+    diff summary with no human bias, so the gate doesn't apply. ``body``
+    and ``subject`` clear the harshness gate independently and may
+    appear alongside ``llm_description``.
+
+    Empty dict means no qualifying narrative; the evidence item still
+    surfaces (blame `lines_owned` is itself signal).
+    """
+    out: dict[str, str] = {}
+    llm = commit.get("llm_description")
+    if llm:
+        out["llm_description"] = llm
+    body = (commit.get("body") or "").strip()
+    if body and gate.is_above(
+        "commits", "body", float(commit.get("body_tfidf_score") or 0.0)
+    ):
+        out["body"] = body
+    subject = (commit.get("subject") or "").strip()
+    if subject and gate.is_above(
+        "commits", "subject", float(commit.get("subject_tfidf_score") or 0.0)
+    ):
+        out["subject"] = subject
+    return out
+
+
+def pr_narratives(pr: dict, gate: ValueGate) -> dict[str, str]:
+    """Return PR title + body if each clears the gate."""
+    out: dict[str, str] = {}
+    body = (pr.get("body") or "").strip()
+    if body and gate.is_above(
+        "pull_requests", "body", float(pr.get("body_tfidf_score") or 0.0)
+    ):
+        out["body"] = body
+    title = (pr.get("title") or "").strip()
+    if title and gate.is_above(
+        "pull_requests", "title", float(pr.get("title_tfidf_score") or 0.0)
+    ):
+        out["title"] = title
+    return out
+
+
+def issue_narratives(issue: dict, gate: ValueGate) -> dict[str, str]:
+    """Return issue title + body if each clears the gate."""
+    out: dict[str, str] = {}
+    body = (issue.get("body") or "").strip()
+    if body and gate.is_above(
+        "issues", "body", float(issue.get("body_tfidf_score") or 0.0)
+    ):
+        out["body"] = body
+    title = (issue.get("title") or "").strip()
+    if title and gate.is_above(
+        "issues", "title", float(issue.get("title_tfidf_score") or 0.0)
+    ):
+        out["title"] = title
+    return out
+
+
 def prs_containing_commit(db: db_module.Database, sha: str) -> list[dict]:
     """Return PR rows structurally linked to ``sha``.
 

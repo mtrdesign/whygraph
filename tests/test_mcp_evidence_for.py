@@ -1,6 +1,6 @@
+import os
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -117,8 +117,10 @@ def test_evidence_for_path_returns_blame_owners(repo_and_db) -> None:
     by_sha = {item["sha"]: item for item in items}
     assert by_sha[sha1]["blame_lines"] == 2  # alpha + beta
     assert by_sha[sha2]["blame_lines"] == 1  # gamma
-    assert by_sha[sha1]["narrative"] == "added f.txt with alpha and beta lines"
-    assert by_sha[sha1]["narrative_source"] == "llm_description"
+    assert (
+        by_sha[sha1]["narratives"]["llm_description"]
+        == "added f.txt with alpha and beta lines"
+    )
     # Path+lines targeting → no graph node → empty neighbour lists.
     assert out["callers"] == []
     assert out["callees"] == []
@@ -158,8 +160,7 @@ def test_evidence_for_surfaces_blame_when_sha_missing_from_db(
     assert item["sha"] == sha3
     assert item["db_commit_present"] is False
     assert item["blame_lines"] == 1
-    assert item["narrative_source"] == "git_blame_summary"
-    assert item["narrative"] == "add delta"
+    assert item["narratives"] == {"git_blame_summary": "add delta"}
     assert item["commit_author"]["email"] == "carol@example.com"
     assert item["commit_author"]["name"] == "Carol"
     assert item["committed_at"] is not None
@@ -181,11 +182,10 @@ def test_evidence_for_keeps_commit_with_null_narrative(repo_and_db, monkeypatch)
     )
     by_sha = {item["sha"]: item for item in out["evidence"]}
     # sha1 still in via llm_description.
-    assert by_sha[sha1]["narrative_source"] == "llm_description"
-    # sha2 surfaces with narrative=None — blame line ownership is preserved.
+    assert "llm_description" in by_sha[sha1]["narratives"]
+    # sha2 surfaces with empty narratives — blame line ownership is preserved.
     assert sha2 in by_sha
-    assert by_sha[sha2]["narrative"] is None
-    assert by_sha[sha2]["narrative_source"] is None
+    assert by_sha[sha2]["narratives"] == {}
     assert by_sha[sha2]["blame_lines"] == 1
 
 
@@ -256,227 +256,6 @@ def test_evidence_for_qualified_name_requires_codegraph(repo_and_db, monkeypatch
         mcp_server.whygraph_evidence_for(qualified_name="pkg.foo")
 
 
-def test_evidence_for_lazy_fills_missing_descriptions(
-    repo_and_db, monkeypatch
-) -> None:
-    """When a blame SHA exists in DB but lacks llm_description and has a
-    successor on the first-parent walk, lazy fill describes it on the fly."""
-    repo_root, sha1, sha2, db_path = repo_and_db
-    # Add a third commit so sha2 has a successor (the diff partner needed
-    # to compute the lazy description).
-    (repo_root / "f.txt").write_text("alpha\nbeta\ngamma\ndelta\n")
-    _git(repo_root, "add", "f.txt")
-    _git(repo_root, "commit", "-q", "-m", "add delta")
-    sha3 = _git_out(repo_root, "rev-parse", "HEAD")
-    # Add sha3 to the DB so it doesn't appear as missing (we're focused on
-    # sha2's lazy fill here, not blame-only fallback).
-    with Database(db_path) as db:
-        from whygraph.scan.git import Commit as _Commit
-
-        db.upsert_commit(
-            _Commit(
-                sha=sha3,
-                parent_shas=[sha2],
-                author_name="Alice",
-                author_email="alice@example.com",
-                authored_at="2026-04-02T00:00:00+00:00",
-                committed_at="2026-04-02T00:00:00+00:00",
-                subject="add delta",
-                body="",
-                files_changed=1,
-                insertions=1,
-                deletions=0,
-            )
-        )
-
-    canned = "lazy: added delta line in f.txt"
-    with patch(
-        "whygraph.mcp_server.scan_llm.describe_pair", return_value=canned
-    ), patch(
-        "whygraph.mcp_server.scan_llm.claude_cli_available", return_value=True
-    ):
-        out = mcp_server.whygraph_evidence_for(
-            path="f.txt",
-            line_start=1,
-            line_end=4,
-            min_score_pct=0.0,
-            lazy_fill_limit=5,
-        )
-
-    items = {it["sha"]: it for it in out["evidence"]}
-    # sha2 had no llm_description before the call; lazy fill set it.
-    assert items[sha2]["narrative"] == canned
-    assert items[sha2]["narrative_source"] == "llm_description"
-    assert out["lazy_filled"] >= 1
-
-
-def test_evidence_for_lazy_fill_skips_tip_commit(repo_and_db) -> None:
-    """The most recent commit on the branch has no successor, so it can't be filled."""
-    _, sha1, sha2, _ = repo_and_db
-    canned = "should never run"
-    described: list[str] = []
-
-    def _fake_describe(diff, config):
-        described.append(diff)
-        return canned
-
-    with patch(
-        "whygraph.mcp_server.scan_llm.describe_pair", side_effect=_fake_describe
-    ), patch(
-        "whygraph.mcp_server.scan_llm.claude_cli_available", return_value=True
-    ):
-        out = mcp_server.whygraph_evidence_for(
-            # Line 3 → only blamed by sha2 (the tip on the test branch).
-            path="f.txt",
-            line_start=3,
-            line_end=3,
-            min_score_pct=0.0,
-            lazy_fill_limit=5,
-        )
-
-    # No describe_pair call because sha2 is tip (no successor) AND sha1
-    # already has a non-NULL llm_description.
-    assert described == []
-    assert out["lazy_filled"] == 0
-
-
-def test_evidence_for_lazy_fill_disabled_when_zero(
-    repo_and_db, monkeypatch
-) -> None:
-    repo_root, sha1, sha2, db_path = repo_and_db
-    (repo_root / "f.txt").write_text("alpha\nbeta\ngamma\ndelta\n")
-    _git(repo_root, "add", "f.txt")
-    _git(repo_root, "commit", "-q", "-m", "add delta")
-
-    with patch(
-        "whygraph.mcp_server.scan_llm.describe_pair",
-        side_effect=AssertionError("must not be called"),
-    ), patch(
-        "whygraph.mcp_server.scan_llm.claude_cli_available", return_value=True
-    ):
-        out = mcp_server.whygraph_evidence_for(
-            path="f.txt",
-            line_start=1,
-            line_end=4,
-            min_score_pct=0.0,
-            lazy_fill_limit=0,
-        )
-    assert out["lazy_filled"] == 0
-
-
-def test_evidence_for_lazy_fill_caps_at_limit(repo_and_db, monkeypatch) -> None:
-    """If two SHAs need fills but limit=1, only the higher-blame-impact one runs."""
-    repo_root, sha1, sha2, db_path = repo_and_db
-    # Strip sha1's llm_description so it ALSO needs filling.
-    with Database(db_path) as db:
-        cur = db._conn.cursor()
-        cur.execute(
-            "UPDATE commits SET llm_description = NULL, "
-            "llm_description_model = NULL WHERE sha = ?",
-            (sha1,),
-        )
-        db._conn.commit()
-    # Add sha3 and a sha4 so both sha1 and sha2 have successors.
-    (repo_root / "f.txt").write_text("alpha\nbeta\ngamma\ndelta\n")
-    _git(repo_root, "add", "f.txt")
-    _git(repo_root, "commit", "-q", "-m", "add delta")
-    (repo_root / "f.txt").write_text("alpha\nbeta\ngamma\ndelta\nepsilon\n")
-    _git(repo_root, "add", "f.txt")
-    _git(repo_root, "commit", "-q", "-m", "add epsilon")
-
-    calls: list[str] = []
-
-    def _fake_describe(diff, config):
-        calls.append(diff[:30])
-        return "described"
-
-    with patch(
-        "whygraph.mcp_server.scan_llm.describe_pair", side_effect=_fake_describe
-    ), patch(
-        "whygraph.mcp_server.scan_llm.claude_cli_available", return_value=True
-    ):
-        out = mcp_server.whygraph_evidence_for(
-            path="f.txt",
-            line_start=1,
-            line_end=3,
-            min_score_pct=0.0,
-            lazy_fill_limit=1,
-        )
-
-    assert len(calls) == 1
-    assert out["lazy_filled"] == 1
-
-
-def test_evidence_for_lazy_fill_inserts_missing_commit(
-    repo_and_db, monkeypatch
-) -> None:
-    """Blame returns a SHA not in the scan DB; lazy fill upserts it via
-    git_module.get_commit, then describes it. The subsequent evidence
-    item should surface as a fully DB-resident row with
-    narrative_source='llm_description'."""
-    repo_root, sha1, sha2, db_path = repo_and_db
-    # Add sha3 (NEW commit, not in DB yet) and sha4 (so sha3 has a successor).
-    (repo_root / "f.txt").write_text("alpha\nbeta\ngamma\ndelta\n")
-    _git(repo_root, "add", "f.txt")
-    _git(repo_root, "commit", "-q", "-m", "add delta")
-    sha3 = _git_out(repo_root, "rev-parse", "HEAD")
-    (repo_root / "f.txt").write_text("alpha\nbeta\ngamma\ndelta\nepsilon\n")
-    _git(repo_root, "add", "f.txt")
-    _git(repo_root, "commit", "-q", "-m", "add epsilon")
-
-    canned = "self-heal: added delta on line 4"
-    with patch(
-        "whygraph.mcp_server.scan_llm.describe_pair", return_value=canned
-    ), patch(
-        "whygraph.mcp_server.scan_llm.claude_cli_available", return_value=True
-    ):
-        out = mcp_server.whygraph_evidence_for(
-            # Line 4 is owned only by sha3; line 5 by the tip (epsilon).
-            path="f.txt",
-            line_start=4,
-            line_end=4,
-            min_score_pct=0.0,
-            lazy_fill_limit=5,
-        )
-
-    item = next(it for it in out["evidence"] if it["sha"] == sha3)
-    assert item["db_commit_present"] is True
-    assert item["narrative"] == canned
-    assert item["narrative_source"] == "llm_description"
-
-    # Verify the upsert actually persisted to the DB.
-    with Database(db_path) as db:
-        assert db.commit_exists(sha3)
-        cur = db._conn.cursor()
-        cur.execute(
-            "SELECT subject, llm_description FROM commits WHERE sha = ?", (sha3,)
-        )
-        row = cur.fetchone()
-        assert row[0] == "add delta"
-        assert row[1] == canned
-
-
-def test_evidence_for_lazy_fill_silent_when_cli_missing(repo_and_db) -> None:
-    repo_root, sha1, sha2, db_path = repo_and_db
-    (repo_root / "f.txt").write_text("alpha\nbeta\ngamma\ndelta\n")
-    _git(repo_root, "add", "f.txt")
-    _git(repo_root, "commit", "-q", "-m", "add delta")
-    with patch(
-        "whygraph.mcp_server.scan_llm.claude_cli_available", return_value=False
-    ), patch(
-        "whygraph.mcp_server.scan_llm.describe_pair",
-        side_effect=AssertionError("must not be called"),
-    ):
-        out = mcp_server.whygraph_evidence_for(
-            path="f.txt",
-            line_start=1,
-            line_end=4,
-            min_score_pct=0.0,
-            lazy_fill_limit=5,
-        )
-    assert out["lazy_filled"] == 0
-
-
 def test_evidence_for_qualified_name_resolves_via_backend(
     repo_and_db, fake_codegraph_db, monkeypatch
 ) -> None:
@@ -500,3 +279,176 @@ def test_evidence_for_qualified_name_resolves_via_backend(
     assert "pkg.b" in callee_qns
     # No callers point at pkg.a in the fixture.
     assert out["callers"] == []
+
+
+def _commit_pkg_b(
+    repo_root: Path, content: str, message: str, *, when: str | None = None
+) -> str:
+    """Write src/pkg/b.py and commit. Returns the new SHA.
+
+    ``when`` (ISO-8601, e.g. ``2026-04-01T10:00:00+00:00``) pins the
+    author/committer timestamps so blame ordering is deterministic.
+    """
+    target_dir = repo_root / "src" / "pkg"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "b.py").write_text(content)
+    _git(repo_root, "add", "src/pkg/b.py")
+    if when:
+        env = {"GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when}
+        subprocess.run(
+            ["git", "-C", str(repo_root), "commit", "-q", "-m", message],
+            check=True,
+            capture_output=True,
+            env={**os.environ, **env},
+        )
+    else:
+        _git(repo_root, "commit", "-q", "-m", message)
+    return _git_out(repo_root, "rev-parse", "HEAD")
+
+
+def test_evidence_for_enriches_neighbour_with_top3_recent(
+    repo_and_db, fake_codegraph_db, monkeypatch
+) -> None:
+    """pkg.b (callee of pkg.a) should be enriched with its own top-3
+    commits sorted by recency."""
+    repo_root, *_ = repo_and_db
+    # Target file (pkg.a) needs to exist for the target-side blame call.
+    (repo_root / "src" / "pkg").mkdir(parents=True, exist_ok=True)
+    (repo_root / "src" / "pkg" / "a.py").write_text(
+        "alpha\nbeta\ngamma\ndelta\nepsilon\n"
+    )
+    _git(repo_root, "add", "src/pkg/a.py")
+    _git(repo_root, "commit", "-q", "-m", "add a.py")
+    # 5 commits to b.py — each overwrites a different line so blame
+    # attributes 5 distinct SHAs to lines 1..5. Pinned timestamps so
+    # the recency sort is deterministic regardless of how fast pytest
+    # runs.
+    shas = []
+    body = ["L1", "L2", "L3", "L4", "L5"]
+    for i in range(5):
+        body[i] = f"L{i + 1}-v{i + 1}"
+        when = f"2026-04-{i + 1:02d}T10:00:00+00:00"
+        shas.append(
+            _commit_pkg_b(
+                repo_root, "\n".join(body) + "\n", f"b-rev-{i + 1}", when=when
+            )
+        )
+    monkeypatch.setenv("CODEGRAPH_DB", str(fake_codegraph_db))
+    out = mcp_server.whygraph_evidence_for(
+        qualified_name="pkg.a", min_score_pct=0.0
+    )
+    callees_by_qn = {n["qualified_name"]: n for n in out["callees"]}
+    pkg_b = callees_by_qn["pkg.b"]
+    assert "evidence" in pkg_b
+    # Top-3 cap.
+    assert len(pkg_b["evidence"]) == 3
+    # Recency sort: first item should be the most recent SHA.
+    times = [ev.get("committed_at") for ev in pkg_b["evidence"]]
+    assert times == sorted(times, reverse=True)
+    assert pkg_b["evidence"][0]["sha"] == shas[-1]
+    # Each evidence item carries the same shape as the target's items.
+    first = pkg_b["evidence"][0]
+    assert "narratives" in first
+    assert "prs" in first
+    assert "issues" in first
+
+
+def test_evidence_for_neighbour_missing_file_returns_empty_evidence(
+    repo_and_db, codegraph_db_factory, monkeypatch
+) -> None:
+    """Neighbour whose file_path doesn't exist on disk should still
+    appear, with evidence=[] rather than raising."""
+    repo_root, *_ = repo_and_db
+    (repo_root / "src" / "pkg").mkdir(parents=True, exist_ok=True)
+    (repo_root / "src" / "pkg" / "a.py").write_text(
+        "alpha\nbeta\ngamma\ndelta\nepsilon\n"
+    )
+    _git(repo_root, "add", "src/pkg/a.py")
+    _git(repo_root, "commit", "-q", "-m", "add a.py")
+    cg_path = codegraph_db_factory(
+        nodes=[
+            {
+                "id": "n_a",
+                "kind": "function",
+                "name": "a",
+                "qualified_name": "pkg.a",
+                "file_path": "src/pkg/a.py",
+                "language": "python",
+                "start_line": 1,
+                "end_line": 5,
+                "docstring": "doc-a",
+                "signature": "def a()",
+            },
+            {
+                "id": "n_ghost",
+                "kind": "function",
+                "name": "ghost",
+                "qualified_name": "pkg.ghost",
+                "file_path": "src/pkg/ghost.py",  # never created on disk
+                "language": "python",
+                "start_line": 1,
+                "end_line": 5,
+                "docstring": "ghostly callee",
+                "signature": "def ghost()",
+            },
+        ],
+        edges=[("n_a", "n_ghost", "calls")],
+    )
+    monkeypatch.setenv("CODEGRAPH_DB", str(cg_path))
+    out = mcp_server.whygraph_evidence_for(
+        qualified_name="pkg.a", min_score_pct=0.0
+    )
+    callees_by_qn = {n["qualified_name"]: n for n in out["callees"]}
+    ghost = callees_by_qn["pkg.ghost"]
+    assert ghost["evidence"] == []
+    # Docstring still propagates from the graph node.
+    assert ghost["docstring"] == "ghostly callee"
+
+
+def test_evidence_for_neighbour_propagates_docstring(
+    repo_and_db, codegraph_db_factory, monkeypatch
+) -> None:
+    """SymbolNode.docstring must surface in the neighbour dict."""
+    repo_root, *_ = repo_and_db
+    (repo_root / "src" / "pkg").mkdir(parents=True, exist_ok=True)
+    (repo_root / "src" / "pkg" / "a.py").write_text(
+        "alpha\nbeta\ngamma\ndelta\nepsilon\n"
+    )
+    _git(repo_root, "add", "src/pkg/a.py")
+    _git(repo_root, "commit", "-q", "-m", "add a.py")
+    _commit_pkg_b(repo_root, "L1\nL2\nL3\nL4\nL5\n", "init b")
+    cg_path = codegraph_db_factory(
+        nodes=[
+            {
+                "id": "n_a",
+                "kind": "function",
+                "name": "a",
+                "qualified_name": "pkg.a",
+                "file_path": "src/pkg/a.py",
+                "language": "python",
+                "start_line": 1,
+                "end_line": 5,
+                "docstring": "doc-a",
+                "signature": "def a()",
+            },
+            {
+                "id": "n_b",
+                "kind": "function",
+                "name": "b",
+                "qualified_name": "pkg.b",
+                "file_path": "src/pkg/b.py",
+                "language": "python",
+                "start_line": 1,
+                "end_line": 5,
+                "docstring": "computes the b-thing",
+                "signature": "def b()",
+            },
+        ],
+        edges=[("n_a", "n_b", "calls")],
+    )
+    monkeypatch.setenv("CODEGRAPH_DB", str(cg_path))
+    out = mcp_server.whygraph_evidence_for(
+        qualified_name="pkg.a", min_score_pct=0.0
+    )
+    callees_by_qn = {n["qualified_name"]: n for n in out["callees"]}
+    assert callees_by_qn["pkg.b"]["docstring"] == "computes the b-thing"

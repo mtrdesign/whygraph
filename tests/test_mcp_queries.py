@@ -142,6 +142,74 @@ def test_commit_narrative_returns_none_when_all_fail() -> None:
     assert text is None and src is None
 
 
+def test_commit_narratives_returns_llm_and_body_together() -> None:
+    """When both llm_description and body qualify, both ship — the
+    plural helper does not pick a winner."""
+    gate = _open_gate_admitting_everything()
+    commit = {
+        "llm_description": "added foo",
+        "body": "long human body",
+        "subject": "subj",
+        "body_tfidf_score": 0.5,
+        "subject_tfidf_score": 0.5,
+    }
+    out = mcp_queries.commit_narratives(commit, gate)
+    assert out["llm_description"] == "added foo"
+    assert out["body"] == "long human body"
+    assert out["subject"] == "subj"
+
+
+def test_commit_narratives_llm_passes_even_with_strict_gate() -> None:
+    """`llm_description` is mechanical and bypasses the harshness gate;
+    body/subject are still gated."""
+    gate = _strict_gate()
+    commit = {
+        "llm_description": "added foo",
+        "body": "human body",
+        "subject": "subj",
+        "body_tfidf_score": 0.0,
+        "subject_tfidf_score": 0.0,
+    }
+    out = mcp_queries.commit_narratives(commit, gate)
+    assert out == {"llm_description": "added foo"}
+
+
+def test_commit_narratives_returns_empty_when_nothing_qualifies() -> None:
+    gate = _strict_gate()
+    commit = {
+        "llm_description": None,
+        "body": "body",
+        "subject": "subj",
+        "body_tfidf_score": 0.0,
+        "subject_tfidf_score": 0.0,
+    }
+    assert mcp_queries.commit_narratives(commit, gate) == {}
+
+
+def test_pr_narratives_returns_title_and_body_when_both_qualify() -> None:
+    gate = _open_gate_admitting_everything()
+    pr = {
+        "title": "Add gamma",
+        "body": "Rationale here",
+        "title_tfidf_score": 0.5,
+        "body_tfidf_score": 0.5,
+    }
+    out = mcp_queries.pr_narratives(pr, gate)
+    assert out == {"title": "Add gamma", "body": "Rationale here"}
+
+
+def test_issue_narratives_returns_title_and_body_when_both_qualify() -> None:
+    gate = _open_gate_admitting_everything()
+    issue = {
+        "title": "Bug X",
+        "body": "Steps to reproduce",
+        "title_tfidf_score": 0.5,
+        "body_tfidf_score": 0.5,
+    }
+    out = mcp_queries.issue_narratives(issue, gate)
+    assert out == {"title": "Bug X", "body": "Steps to reproduce"}
+
+
 def test_prs_containing_commit_matches_merge_head_and_oid(tmp_path: Path) -> None:
     target = "a" * 40
     other = "b" * 40

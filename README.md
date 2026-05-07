@@ -2,77 +2,50 @@
 
 Rationale layer over [CodeGraph](https://github.com/colbymchenry/codegraph): explains *why* code exists, not just what it does.
 
-For each symbol, WhyGraph collects evidence from git history, GitHub, tests, and code comments, then generates a rationale (purpose, constraints, tradeoffs, risks) with a deterministic confidence score. Exposed to Claude Code via MCP so AI assistants can read the *intent* behind code before editing it.
+For each symbol, WhyGraph collects evidence from git history and GitHub (commits, blame, PRs, closing issues, callers/callees from CodeGraph), then exposes it to AI assistants over MCP plus an on-demand rationale (purpose, why, constraints, tradeoffs, risks) with a deterministic confidence score and persistent cache.
 
-> **Status:** v1.x in progress — both MCP tools (`whygraph_evidence_for` and `whygraph_rationale_pre_edit_brief`) are functional, backed by a `GraphBackend` abstraction with `SqliteCodegraphBackend` as the first implementation. Slash command (`/whygraph-plan`) and planner subagent are still ahead.
+> **Status:** v1.x in progress on the `feature/scan-and-scoring` branch. The MCP surface (resources, tools, prompts) is functional; the slash command (`/whygraph-plan`) and planner sub-agent are still ahead.
 
-## Layout
+## Prerequisites
 
-```
-.
-├── .claude-plugin/marketplace.json       # single-plugin marketplace
-├── plugins/whygraph/                     # the Claude Code plugin
-│   ├── .claude-plugin/plugin.json        # plugin manifest
-│   └── .mcp.json                         # MCP server launch config
-├── src/whygraph/                         # Python package
-│   ├── cli.py                            # `whygraph` CLI
-│   ├── mcp_server.py                     # FastMCP stdio server (tools below)
-│   ├── config.py                         # env-injected Config + DB path discovery
-│   ├── db.py                             # WhyGraph SQLite (evidence + rationale)
-│   ├── backend.py                        # GraphBackend Protocol + SqliteCodegraphBackend
-│   ├── evidence.py                       # git + GitHub collectors, cache w/ HEAD-sha staleness
-│   ├── prompts.py                        # Pydantic Rationale schema + prompt v3
-│   └── rationale.py                      # LLM clients (CLI default, SDK opt-in) + cache
-├── tests/
-└── pyproject.toml                        # uv-managed
-```
+- **[uv](https://docs.astral.sh/uv/)** — Python toolchain. Installs Python 3.11+ automatically.
+- **git** — repo history is the primary evidence source.
+- **[`gh` CLI](https://cli.github.com/)**, authenticated (`gh auth login`) — required only if your repo is on GitHub. Without it, the GitHub crawl phase is skipped silently.
+- **Node ≥ 22** — required by CodeGraph (used for graph queries). `whygraph init` bootstraps this for you via nvm if needed.
+- **`claude` CLI** — required only for the LLM diff-description phase of `whygraph scan` and for `whygraph_rationale_brief`. Both phases skip cleanly if the CLI is missing. Defaults to your Claude.ai subscription billing.
 
-## Tools exposed
+## Quickstart
 
-The MCP server registers two tools:
-
-- **`whygraph_evidence_for`** — returns raw evidence rows (git commits, blame, optional GitHub PRs/issues) for a code symbol. Cached per project; recollects when the file's HEAD sha advances or after the TTL. Never calls Claude.
-- **`whygraph_rationale_pre_edit_brief`** — returns the rationale (purpose, why, constraints, tradeoffs, risks) for a code symbol *before* editing it. Lazily collects evidence on first request and caches the generated rationale; subsequent requests reuse the cache when `(bundle_hash, prompt_version, model)` matches.
-
-Both accept `target` (CodeGraph node ID or `qualified_name`) and `response_format` (`markdown` default, or `json`). The rationale tool also takes `force` (bypass rationale cache) and `refresh_evidence` (recollect evidence).
-
-## Environment variables
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `CODEGRAPH_DB` | walk-up search for `.codegraph/codegraph.db` | Path to the CodeGraph SQLite DB. |
-| `WHYGRAPH_DB` | walk-up search → `<repo>/.whygraph/whygraph.db` | Where WhyGraph stores its evidence + rationale cache. |
-| `WHYGRAPH_MODEL` | `claude-sonnet-4-6` | Model used when generating rationale. |
-| `WHYGRAPH_RATIONALE_BACKEND` | `claude_cli` | `claude_cli` spawns the local `claude` CLI (uses your Pro/Max plan via OAuth). `api` calls the Anthropic API directly — opt in explicitly with `WHYGRAPH_RATIONALE_BACKEND=api`. |
-| `WHYGRAPH_EVIDENCE_TTL_DAYS` | `14` | How long an evidence bundle stays fresh before recollection. |
-| `ANTHROPIC_API_KEY` | unset | Required iff backend is `api`. The presence of this variable alone does NOT switch the backend — that prevented a footgun where a stray key in the env silently routed inference through direct-API billing. Stripped from the child env when backend is `claude_cli` so the CLI falls back to OAuth. |
-
-The `claude_cli` backend is the default because it routes inference through your existing Claude Code session (no separate API billing). MCP sampling — the architecturally correct path for this — is not yet supported by Claude Code (issue [#1785](https://github.com/anthropics/claude-code/issues/1785)). When it lands, an `McpSamplingClient` will slot in cleanly behind the existing `LLMClient` Protocol.
-
-## Develop
-
-Requires [uv](https://docs.astral.sh/uv/) and Python ≥ 3.11 (uv installs the pinned version automatically).
+In the repository you want to analyse:
 
 ```bash
-uv sync                  # bootstrap .venv and install deps
-uv run pytest            # smoke tests
-uv run whygraph version  # CLI sanity check
-uv run whygraph-mcp      # launch the MCP server on stdio (Ctrl-C to exit)
+# 1. Bootstrap CodeGraph (Node ≥ 22, then runs `codegraph init -i`).
+uv run --project /absolute/path/to/whygraph whygraph init
+
+# 2. Scan: walks git history, fetches PRs/issues, runs TF-IDF scoring,
+#    generates an LLM diff description per commit. Writes to
+#    .whygraph/whygraph.db in the current repo.
+uv run --project /absolute/path/to/whygraph whygraph scan
+
+# 3. Verify the MCP server can launch.
+uv run --project /absolute/path/to/whygraph whygraph-mcp   # Ctrl-C to exit
 ```
 
-### Debug the MCP server with MCP Inspector
-
-The [MCP Inspector](https://github.com/modelcontextprotocol/inspector) is the official web UI for poking at a stdio MCP server — list tools, call them with custom args, see raw responses, and tail stderr.
+The full scan touches every commit on the default branch. On large or remote-heavy repos you may want to bound the LLM phase only:
 
 ```bash
-npx @modelcontextprotocol/inspector uv run whygraph-mcp
+# Run scan + LLM only on the 50 most recent commits. Other phases
+# (git crawl, GitHub fetch, TF-IDF scoring) still cover full history.
+uv run whygraph scan --llm-recent 50
 ```
 
-It prints a `http://localhost:…` URL with a one-time auth token; open it. The Inspector spawns `whygraph-mcp` as a subprocess and connects via stdio. Use **Reconnect** to pick up code changes.
+## Installation
 
-## Install as a Claude Code plugin
+There are two ways to make WhyGraph available to a project: as a **Claude Code plugin** (recommended for AI-assistant use) or as a **standalone CLI** (for one-off scans, CI jobs, scripting).
 
-From any project where you want WhyGraph available:
+### As a Claude Code plugin
+
+From any project where you want WhyGraph available to Claude Code:
 
 ```
 /plugin marketplace add /absolute/path/to/whygraph
@@ -81,13 +54,111 @@ From any project where you want WhyGraph available:
 
 (Once published, replace the local path with `cvetty/whygraph`.)
 
-After install, the `whygraph` MCP server is launched on demand by Claude Code via `uv run --project <plugin-checkout> whygraph-mcp`. Verify it loaded with `/mcp`.
+After install, the `whygraph` MCP server is launched on demand by Claude Code via `uv run --project <plugin-checkout> whygraph-mcp`. Verify with `/mcp`.
 
-## Install the standalone CLI
+### As a standalone CLI
 
 ```bash
 uv tool install /absolute/path/to/whygraph
 whygraph version
+whygraph init
+whygraph scan
 ```
 
-This puts `whygraph` and `whygraph-mcp` on your `PATH`, independent of the plugin.
+This puts `whygraph` and `whygraph-mcp` on your `PATH`, independent of any Claude Code plugin.
+
+## CLI commands
+
+| Command | Purpose |
+|---|---|
+| `whygraph version` | Print installed package version. |
+| `whygraph init [-y]` | Bootstrap CodeGraph in the current repo. Detects/installs Node ≥ 22 via nvm if needed, then runs `codegraph init -i`. |
+| `whygraph scan` | Walk first-parent history and populate `.whygraph/whygraph.db`: commits + GitHub PRs/issues + TF-IDF scoring + per-commit LLM diff descriptions. Idempotent. |
+| `whygraph-mcp` | Launch the FastMCP stdio server. Used by `.mcp.json` in the plugin and by MCP clients. |
+
+### `whygraph scan` flags
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--no-score` | off | Skip TF-IDF scoring after data collection. |
+| `--no-llm-description` | off | Skip the per-commit LLM diff-description phase entirely. |
+| `--anthropic-key TEXT` | unset | If set, the `claude` subprocess uses API billing with this key. If omitted, the subprocess inherits a stripped env (no `ANTHROPIC_API_KEY`), forcing Claude.ai subscription billing. |
+| `--llm-workers N` | `4` | Parallel `claude` subprocesses in the LLM phase. |
+| `--llm-recent N` | unbounded | Limit the LLM phase to the most recent N commits on the default branch. Other phases still cover full history. |
+
+## MCP surface
+
+The plugin's `.mcp.json` launches `whygraph-mcp`, which registers:
+
+### Resources
+
+- `whygraph://repo/overview` — counts, scan freshness, scoring + LLM coverage, top contributors.
+- `whygraph://commit/{sha}` — full commit row + linked PRs + closing issues.
+- `whygraph://pr/{number}` — full PR row + closing issues.
+- `whygraph://issue/{number}` — full issue row + closing PRs.
+
+### Tools
+
+- **`whygraph_evidence_for`** — historical evidence (commits + PRs + closing issues) plus graph neighbours (callers/callees, each with their own top-3 commits) for a code chunk. Pass `(path, line_start, line_end)` or `qualified_name` (resolved via CodeGraph). Multi-narrative output: each commit ships `llm_description` + `subject` + `body` when each clears the harshness gate.
+- **`whygraph_search`** — LIKE-match query across commits/PRs/issues, ranked by TF-IDF.
+- **`whygraph_velocity_summary`** — per-author commit velocity or per-path-prefix touch counts over a window.
+- **`whygraph_rationale_brief`** — generates the 5-section rationale card (purpose / why / constraints / tradeoffs / risks + confidence) by feeding the evidence bundle to a `claude` subprocess. **Cached** in the scan DB by `(target + bundle content + model + prompt version)` — re-invocation on unchanged code is a sub-millisecond DB read. Pass `force_refresh=True` to bypass.
+
+### Prompts
+
+`explain_change`, `debug_history`, `team_pulse` — orchestration recipes that wire the tools above into common workflows.
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `WHYGRAPH_DB` | `<repo>/.whygraph/whygraph.db` | Where WhyGraph stores its evidence + rationale cache. Used by both the CLI and the MCP tools. |
+| `CODEGRAPH_DB` | `<repo>/.codegraph/codegraph.db` | CodeGraph SQLite location. Required for `qualified_name` targeting on `whygraph_evidence_for`. |
+| `ANTHROPIC_API_KEY` | unset | Honoured by the `claude` subprocess only when `--anthropic-key` is passed (or the equivalent tool argument). Not a runtime switch by itself. |
+
+## Layout
+
+```
+.
+├── .claude-plugin/marketplace.json     # single-plugin marketplace
+├── plugins/whygraph/
+│   ├── .claude-plugin/plugin.json      # plugin manifest
+│   └── .mcp.json                       # MCP server launch config
+├── src/whygraph/
+│   ├── cli.py                          # `whygraph` CLI (init, scan, version)
+│   ├── init.py                         # CodeGraph bootstrap (nvm + codegraph init -i)
+│   ├── mcp_server.py                   # FastMCP stdio server (resources/tools/prompts)
+│   ├── mcp_queries.py                  # composite SQL for the MCP layer
+│   ├── backend.py                      # GraphBackend Protocol + SqliteCodegraphBackend
+│   ├── llm_subprocess.py               # `claude` CLI invocation helpers
+│   └── scan/
+│       ├── runner.py                   # parallel crawler orchestration
+│       ├── git.py / github.py          # data sources
+│       ├── db.py                       # WhyGraph SQLite schema + migrations
+│       ├── scoring.py                  # TF-IDF + ValueGate
+│       └── llm_descriptions.py         # per-commit diff-description phase
+├── tests/
+└── pyproject.toml                      # uv-managed
+```
+
+## Develop
+
+```bash
+uv sync                       # bootstrap .venv and install deps
+uv run pytest                 # full test suite
+uv run pytest tests/test_smoke.py::test_imports   # single test
+uv run whygraph version       # CLI sanity check
+uv run whygraph-mcp           # launch MCP server on stdio
+```
+
+If `uv` fails with `UnknownIssuer` SSL errors off-VPN, prefix with `SSL_CERT_FILE= ` (works around a corp-only cert bundle).
+
+### Debug the MCP server with MCP Inspector
+
+The [MCP Inspector](https://github.com/modelcontextprotocol/inspector) is the official web UI for poking at a stdio MCP server — list tools, call them with custom args, see raw responses, tail stderr.
+
+```bash
+npx @modelcontextprotocol/inspector uv run whygraph-mcp
+```
+
+Open the printed `http://localhost:…` URL with the one-time auth token. Use **Reconnect** to pick up code changes.

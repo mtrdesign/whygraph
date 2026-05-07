@@ -112,6 +112,44 @@ def test_commits_to_describe_handles_single_commit(tmp_path: Path) -> None:
         assert commits_to_describe(db, root, "main") == []
 
 
+def test_commits_to_describe_limit_keeps_only_most_recent_pairs(
+    tmp_path: Path,
+) -> None:
+    """walk_first_parent yields oldest→newest, so the last N pairs are
+    the most recent. With 5 commits there are 4 pairs; limit=2 should
+    keep the two newest."""
+    root, shas = _make_repo_with_n_commits(tmp_path, 5)
+    db_path = tmp_path / "whygraph.db"
+    with db_module.Database(db_path) as db:
+        for sha in shas:
+            db.upsert_commit(_sample_commit(sha))
+        pairs = commits_to_describe(db, root, "main", limit=2)
+    # Last two pairs cover commits 2→3 and 3→4 (HEAD is index 4, never
+    # described because it has no child).
+    assert pairs == [(shas[2], shas[3]), (shas[3], shas[4])]
+
+
+def test_commits_to_describe_limit_larger_than_history_returns_all(
+    tmp_path: Path,
+) -> None:
+    root, shas = _make_repo_with_n_commits(tmp_path, 3)
+    db_path = tmp_path / "whygraph.db"
+    with db_module.Database(db_path) as db:
+        for sha in shas:
+            db.upsert_commit(_sample_commit(sha))
+        pairs = commits_to_describe(db, root, "main", limit=99)
+    assert pairs == [(shas[0], shas[1]), (shas[1], shas[2])]
+
+
+def test_commits_to_describe_limit_zero_returns_empty(tmp_path: Path) -> None:
+    root, shas = _make_repo_with_n_commits(tmp_path, 3)
+    db_path = tmp_path / "whygraph.db"
+    with db_module.Database(db_path) as db:
+        for sha in shas:
+            db.upsert_commit(_sample_commit(sha))
+        assert commits_to_describe(db, root, "main", limit=0) == []
+
+
 def test_describe_pair_truncates_oversize_diff() -> None:
     captured = {}
 

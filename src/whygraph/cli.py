@@ -65,11 +65,23 @@ def init_cmd(assume_yes: bool) -> None:
     show_default=True,
     help="Parallel `claude` subprocesses in the LLM phase.",
 )
+@click.option(
+    "--llm-recent",
+    "llm_recent",
+    type=click.IntRange(min=1),
+    default=None,
+    help=(
+        "Limit the LLM diff-description phase to the most recent N "
+        "commits on the default branch. Other phases (git crawl, "
+        "GitHub fetch, scoring) still cover the full history."
+    ),
+)
 def scan_cmd(
     skip_score: bool,
     skip_llm_descriptions: bool,
     anthropic_api_key: str | None,
     llm_workers: int,
+    llm_recent: int | None,
 ) -> None:
     """Walk the repo's history and populate the WhyGraph evidence database."""
     raise SystemExit(
@@ -78,5 +90,6 @@ def scan_cmd(
             skip_llm_descriptions=skip_llm_descriptions,
             anthropic_api_key=anthropic_api_key,
             llm_workers=llm_workers,
+            llm_recent=llm_recent,
         )
     )

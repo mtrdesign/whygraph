@@ -72,11 +72,24 @@ def commits_to_describe(
     db: db_module.Database,
     repo_root: Path,
     branch: str,
+    *,
+    limit: int | None = None,
 ) -> list[tuple[str, str]]:
+    """Pairs of (older, newer) commits that still need an LLM description.
+
+    ``walk_first_parent`` yields oldest → newest, so the most recent
+    pairs sit at the end of the list. ``limit`` keeps only the last N
+    pairs *before* the missing-description filter — so re-runs on a
+    repo with stale descriptions still touch only those last N commits.
+    """
     shas = list(git_module.walk_first_parent(repo_root, branch))
     if len(shas) < 2:
         return []
     pairs = list(zip(shas[:-1], shas[1:], strict=True))
+    if limit is not None:
+        if limit < 1:
+            return []
+        pairs = pairs[-limit:]
     candidate_shas = [sha for sha, _ in pairs]
     needs = db.commits_without_llm_description(candidate_shas)
     return [(sha, next_sha) for sha, next_sha in pairs if sha in needs]
@@ -117,9 +130,11 @@ def run_phase(
     config: LlmConfig,
     progress: Progress,
     task_id: TaskID,
+    *,
+    limit: int | None = None,
 ) -> str:
     with db_module.Database(db_path) as db:
-        pairs = commits_to_describe(db, repo_root, branch)
+        pairs = commits_to_describe(db, repo_root, branch, limit=limit)
 
     total = len(pairs)
     progress.update(task_id, total=total or 1, completed=0, description="llm")
@@ -144,9 +159,7 @@ def run_phase(
             sha, description, error = fut.result()
             if error is not None:
                 failed += 1
-                progress.console.log(
-                    f"[yellow][llm] {sha[:7]}: {error}[/yellow]"
-                )
+                progress.console.log(f"[yellow][llm] {sha[:7]}: {error}[/yellow]")
             else:
                 assert description is not None
                 db.set_llm_description(sha, description, config.model)

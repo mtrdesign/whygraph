@@ -33,6 +33,7 @@ def run_scan(
     skip_llm_descriptions: bool = False,
     anthropic_api_key: str | None = None,
     llm_workers: int = llm_module.DEFAULT_MAX_WORKERS,
+    llm_recent: int | None = None,
 ) -> int:
     cwd = repo_root if repo_root is not None else Path.cwd()
     try:
@@ -65,6 +66,7 @@ def run_scan(
             skip_score=skip_score,
             skip_llm_descriptions=skip_llm_descriptions,
             llm_config=llm_config,
+            llm_recent=llm_recent,
         )
     )
 
@@ -143,6 +145,7 @@ def run_scan(
                         llm_config,
                         progress,
                         llm_task,
+                        limit=llm_recent,
                     )
                 except Exception as exc:  # noqa: BLE001
                     summaries["llm"] = f"failed: {exc}"
@@ -173,6 +176,7 @@ def _build_overview_panel(
     skip_score: bool,
     skip_llm_descriptions: bool,
     llm_config: llm_module.LlmConfig,
+    llm_recent: int | None = None,
 ) -> Panel:
     grid = Table.grid(padding=(0, 2))
     grid.add_column(style="dim", justify="right")
@@ -190,10 +194,15 @@ def _build_overview_panel(
         grid.add_row("LLM", "[yellow]skipped[/yellow] (claude CLI not installed)")
     else:
         billing = "API key" if llm_config.anthropic_api_key else "subscription"
+        scope = (
+            f" · last {llm_recent} commit(s)"
+            if llm_recent is not None
+            else ""
+        )
         grid.add_row(
             "LLM",
             f"[bold]{llm_config.model}[/bold] · {billing} · "
-            f"{llm_config.max_workers} workers",
+            f"{llm_config.max_workers} workers{scope}",
         )
     return Panel(grid, title="whygraph scan", title_align="left", border_style="cyan")
 

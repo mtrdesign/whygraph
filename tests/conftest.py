@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import shutil
 import sqlite3
-import subprocess
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Iterable
 
 import pytest
 
@@ -133,16 +131,6 @@ def fake_codegraph_db(tmp_path: Path) -> Path:
     return build_fake_codegraph_db(tmp_path / "codegraph.db")
 
 
-@pytest.fixture(autouse=True)
-def _reset_mcp_deps():
-    """Force the lazy-cached deps in mcp_server to be rebuilt per test."""
-    from whygraph import mcp_server
-
-    mcp_server._reset_deps()
-    yield
-    mcp_server._reset_deps()
-
-
 @pytest.fixture
 def codegraph_db_factory(tmp_path: Path):
     counter = {"n": 0}
@@ -157,77 +145,3 @@ def codegraph_db_factory(tmp_path: Path):
         return build_fake_codegraph_db(path, nodes=nodes, edges=edges)
 
     return _factory
-
-
-def _git_available() -> bool:
-    return shutil.which("git") is not None
-
-
-def _run(cmd: list[str], cwd: Path, env: dict | None = None) -> None:
-    subprocess.run(cmd, cwd=str(cwd), check=True, capture_output=True, env=env)
-
-
-@pytest.fixture
-def init_git_repo(tmp_path: Path) -> Callable[..., Path]:
-    """Factory: create an isolated git repo with deterministic identity."""
-    if not _git_available():
-        pytest.skip("git not available on PATH")
-
-    counter = {"n": 0}
-
-    def _factory(*, name: str | None = None) -> Path:
-        counter["n"] += 1
-        repo = tmp_path / (name or f"repo_{counter['n']}")
-        repo.mkdir()
-        env = {
-            "GIT_AUTHOR_NAME": "Test",
-            "GIT_AUTHOR_EMAIL": "test@example.com",
-            "GIT_COMMITTER_NAME": "Test",
-            "GIT_COMMITTER_EMAIL": "test@example.com",
-            "PATH": "/usr/bin:/bin:/usr/local/bin",
-            "HOME": str(tmp_path),
-        }
-        _run(["git", "init", "-q", "-b", "main"], cwd=repo, env=env)
-        _run(["git", "config", "user.email", "test@example.com"], cwd=repo, env=env)
-        _run(["git", "config", "user.name", "Test"], cwd=repo, env=env)
-        _run(["git", "config", "commit.gpgsign", "false"], cwd=repo, env=env)
-        return repo
-
-    return _factory
-
-
-@pytest.fixture
-def git_commit() -> Callable[..., str]:
-    """Factory: write a file in a repo and commit it. Returns the new HEAD sha."""
-
-    def _commit(
-        repo: Path,
-        file_path: str,
-        content: str,
-        *,
-        message: str = "wip",
-    ) -> str:
-        full = repo / file_path
-        full.parent.mkdir(parents=True, exist_ok=True)
-        full.write_text(content)
-        env = {
-            "GIT_AUTHOR_NAME": "Test",
-            "GIT_AUTHOR_EMAIL": "test@example.com",
-            "GIT_COMMITTER_NAME": "Test",
-            "GIT_COMMITTER_EMAIL": "test@example.com",
-            "PATH": "/usr/bin:/bin:/usr/local/bin",
-            "HOME": str(repo.parent),
-        }
-        _run(["git", "add", file_path], cwd=repo, env=env)
-        _run(["git", "commit", "-q", "-m", message], cwd=repo, env=env)
-        out = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(repo),
-            check=True,
-            capture_output=True,
-            text=True,
-            env=env,
-        )
-        return out.stdout.strip()
-
-    return _commit

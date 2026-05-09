@@ -5,9 +5,9 @@ description: Before editing, refactoring, renaming, deleting, or replacing exist
 
 # WhyGraph Pre-Edit Brief
 
-WhyGraph stores a structured rationale for each code symbol in this project — purpose, why it exists, constraints to preserve, tradeoffs, and risks — derived from git history (and later PRs/issues). Before changing existing code, pull this brief so the edit respects the original intent rather than rediscovering it from scratch.
+WhyGraph stores a structured rationale for each code chunk in this project — purpose, why it exists, constraints to preserve, tradeoffs, and risks — derived from git history (and PRs/issues when the scan picked them up). Before changing existing code, pull this brief so the edit respects the original intent rather than rediscovering it from scratch.
 
-## When to call `whygraph_rationale_pre_edit_brief`
+## When to call `whygraph_rationale_brief`
 
 **Call before:**
 - Editing the body of an existing function, method, or class
@@ -21,7 +21,18 @@ WhyGraph stores a structured rationale for each code symbol in this project — 
 - You already fetched the brief for the same symbol earlier in this conversation and the underlying code hasn't changed
 - The user has explicitly told you to skip the brief
 
-Pass the symbol's `qualified_name` (e.g. `auth.session.refresh_token`) when you can identify it from the file. Fall back to the CodeGraph node ID if that's all you have.
+## How to call it
+
+The tool accepts two ways to identify the chunk — pass one, not both:
+
+- **By location** (preferred when you have it): `path` + `line_start` + `line_end`. Most accurate, no name resolution needed.
+- **By name**: `qualified_name` (e.g. `auth.session.refresh_token`). CodeGraph resolves it to a file/line range.
+
+Other useful args:
+
+- `force_refresh=True` — bypass the rationale cache (use when the underlying code has clearly changed since the last brief).
+- `model` and `timeout_sec` — leave at defaults unless you have a reason.
+- `min_score_pct` — leave at default (0.5); raises evidence harshness if increased.
 
 ## How to use the result
 
@@ -33,6 +44,8 @@ The tool returns:
 - `tradeoffs[]` — design tradeoffs visible in the history
 - `risks[]` — risks of modification
 - `confidence` — 0 to 0.85 (the ceiling lifts when refactor-lineage detection lands)
+- `evidence_count` — `{commits, prs, issues}` summarising how much history backed the card
+- `cached` — `True` if served from the rationale cache
 
 Apply it like this:
 
@@ -41,13 +54,14 @@ Apply it like this:
 - **Risks** are flagged to the user *before* the change, not after.
 - **Low confidence (< 0.4)**: treat the brief as a hint, not a directive — verify against the code itself.
 - **High confidence (≥ 0.7)**: weight it heavily; it's well-supported by history.
+- **Empty `evidence_count`**: the chunk has no meaningful git history yet (e.g. brand-new code). The brief will be thin — proceed with your own judgment.
 
 If the tool returns `isError: true`, the cause is one of:
-- **No CodeGraph DB in this project** — surface the error verbatim; the user needs to index the project with CodeGraph first (WhyGraph reads from CodeGraph's SQLite).
-- **Symbol not found in CodeGraph** — likely a stale graph or a symbol added since the last index.
-- **No git history for the file** — brand-new code with nothing to summarise.
+- **No scan DB in this project** — surface the error verbatim; the user needs to run `whygraph scan` first.
+- **No CodeGraph DB** when calling by `qualified_name` — fall back to calling by `path` + `line_start` + `line_end`.
+- **Symbol not found** when calling by `qualified_name` — likely a stale graph; try the path+lines form instead.
 
-In every case, proceed with the edit using your own judgment after flagging the cause to the user. WhyGraph collects evidence lazily on demand, so there's no separate "ingest" step to run.
+In every case, proceed with the edit using your own judgment after flagging the cause to the user.
 
 ## When to also call `whygraph_evidence_for`
 
@@ -57,10 +71,10 @@ Use this read-only companion tool when:
 - The user asks for the *history* of a symbol, not just its rationale
 - Confidence is low and you want to ground-check a specific claim against raw evidence
 
-Don't call it routinely — the brief already summarises the evidence.
+It takes the same `path/line_start/line_end` or `qualified_name` arguments and returns `{target, evidence}` with commits + linked PRs/issues. Don't call it routinely — the brief already summarises the evidence.
 
 ## What you should NOT do
 
 - Don't dump the full brief verbatim to the user unless asked. Use it to inform *your* edit, then mention only the parts that affect the change ("Note: this function previously had a workaround for X — preserving that behavior in the rewrite.").
-- Don't call the tool repeatedly for the same symbol within one task.
+- Don't call the tool repeatedly for the same chunk within one task.
 - Don't treat the brief as authoritative if the code clearly diverges from what it describes — flag the divergence to the user.

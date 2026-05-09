@@ -124,8 +124,6 @@ def test_walk_neighbors_depth_1_returns_immediate_neighbors(
 ) -> None:
     backend = SqliteCodegraphBackend(fake_codegraph_db)
     try:
-        # n_b is reachable from n_a (a→b) and reaches n_c (b→c).
-        # Depth 1 from n_b → both directions.
         neighbors = backend.walk_neighbors("n_b", depth=1)
         assert {n.id for n in neighbors} == {"n_a", "n_c"}
     finally:
@@ -143,7 +141,6 @@ def test_walk_neighbors_depth_0_is_empty(fake_codegraph_db: Path) -> None:
 def test_walk_neighbors_depth_2_reaches_2_hops(fake_codegraph_db: Path) -> None:
     backend = SqliteCodegraphBackend(fake_codegraph_db)
     try:
-        # From n_a, depth 2: n_b (1 hop), n_c (2 hops).
         neighbors = backend.walk_neighbors("n_a", depth=2)
         assert {n.id for n in neighbors} == {"n_b", "n_c"}
     finally:
@@ -151,7 +148,6 @@ def test_walk_neighbors_depth_2_reaches_2_hops(fake_codegraph_db: Path) -> None:
 
 
 def test_walk_neighbors_caps_at_max_depth(codegraph_db_factory) -> None:
-    # Chain of 5 nodes a→b→c→d→e
     nodes = [
         {
             "id": f"n_{ch}",
@@ -176,7 +172,6 @@ def test_walk_neighbors_caps_at_max_depth(codegraph_db_factory) -> None:
     path = codegraph_db_factory(nodes=nodes, edges=edges)
     backend = SqliteCodegraphBackend(path)
     try:
-        # Asking for depth 10 should cap at 3 → reach b, c, d (not e).
         neighbors = backend.walk_neighbors("n_a", depth=10)
         ids = {n.id for n in neighbors}
         assert ids == {"n_b", "n_c", "n_d"}
@@ -204,5 +199,4 @@ def test_backend_implements_protocol_shape(fake_codegraph_db: Path) -> None:
 
 
 def test_protocol_is_typing_only() -> None:
-    # Sanity: Protocol is importable but not runtime-checkable.
     assert GraphBackend is not None

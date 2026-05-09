@@ -1,353 +1,491 @@
-from __future__ import annotations
-
+import json
+import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from whygraph.prompts import PROMPT_VERSION, Rationale
-from whygraph.rationale import LLMResult, LLMUsage
-from whygraph.mcp_server import (
-    format_rationale_markdown,
-    mcp,
-    rationale_pre_edit_brief,
-)
+from whygraph import mcp_server
+from whygraph.scan.db import Database
+from whygraph.scan.git import Commit
 
 
-_RAT = Rationale(
-    purpose="Validates JWT.",
-    why="Replaces legacy cookie validator.",
-    constraints=["must be sync"],
-    tradeoffs=["JWK lookup cached"],
-    risks=["claim shape change"],
-)
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True)
 
 
-def _node_dict(file_path: str = "src/a.py", qname: str = "pkg.a", node_id: str = "n_a") -> dict:
+def _git_out(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+@pytest.fixture
+def repo_and_db(tmp_path: Path, monkeypatch):
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "config", "user.email", "alice@example.com")
+    _git(tmp_path, "config", "user.name", "Alice")
+    _git(tmp_path, "config", "commit.gpgsign", "false")
+    (tmp_path / "f.py").write_text("def foo():\n    return 1\n")
+    _git(tmp_path, "add", "f.py")
+    _git(tmp_path, "commit", "-q", "-m", "initial")
+    sha = _git_out(tmp_path, "rev-parse", "HEAD")
+    db_path = tmp_path / ".whygraph" / "whygraph.db"
+    monkeypatch.setenv("WHYGRAPH_DB", str(db_path))
+    monkeypatch.chdir(tmp_path)
+    with Database(db_path) as db:
+        db.upsert_commit(
+            Commit(
+                sha=sha,
+                parent_shas=[],
+                author_name="Alice",
+                author_email="alice@example.com",
+                authored_at="2026-04-01T00:00:00+00:00",
+                committed_at="2026-04-01T00:00:00+00:00",
+                subject="initial",
+                body="",
+                files_changed=1,
+                insertions=2,
+                deletions=0,
+            )
+        )
+        db.set_llm_description(sha, "added f.py with foo()", "haiku")
+    return tmp_path, sha
+
+
+def _canned_rationale(**overrides: object) -> str:
+    payload = {
+        "purpose": "p",
+        "why": "w",
+        "constraints": [],
+        "tradeoffs": [],
+        "risks": [],
+    }
+    payload.update(overrides)
+    return json.dumps(payload)
+
+
+def test_rationale_cache_hit_skips_llm(repo_and_db) -> None:
+    """Second call with identical evidence must read from cache and never
+    re-invoke the LLM."""
+    invocations = {"n": 0}
+
+    def fake_invoke(prompt, *, model, timeout_sec, anthropic_api_key=None, system_prompt=None):
+        invocations["n"] += 1
+        return _canned_rationale(purpose="cached purpose")
+
+    with patch("whygraph.mcp_server.llm_subprocess.invoke_claude", side_effect=fake_invoke):
+        first = mcp_server.whygraph_rationale_brief(
+            path="f.py", line_start=1, line_end=2, min_score_pct=0.0
+        )
+        second = mcp_server.whygraph_rationale_brief(
+            path="f.py", line_start=1, line_end=2, min_score_pct=0.0
+        )
+    assert invocations["n"] == 1
+    assert first["cached"] is False
+    assert second["cached"] is True
+    assert second["purpose"] == "cached purpose"
+    assert second["why"] == first["why"]
+
+
+def test_rationale_force_refresh_bypasses_cache(repo_and_db) -> None:
+    """force_refresh=True must hit the LLM even when a cached row exists,
+    and must overwrite the cached row."""
+    sequence = iter(
+        [
+            _canned_rationale(purpose="first"),
+            _canned_rationale(purpose="second"),
+        ]
+    )
+
+    def fake_invoke(prompt, *, model, timeout_sec, anthropic_api_key=None, system_prompt=None):
+        return next(sequence)
+
+    with patch("whygraph.mcp_server.llm_subprocess.invoke_claude", side_effect=fake_invoke):
+        mcp_server.whygraph_rationale_brief(
+            path="f.py", line_start=1, line_end=2, min_score_pct=0.0
+        )
+        refreshed = mcp_server.whygraph_rationale_brief(
+            path="f.py",
+            line_start=1,
+            line_end=2,
+            min_score_pct=0.0,
+            force_refresh=True,
+        )
+        # Now the cache holds "second" — a vanilla call returns it.
+        third = mcp_server.whygraph_rationale_brief(
+            path="f.py", line_start=1, line_end=2, min_score_pct=0.0
+        )
+    assert refreshed["cached"] is False
+    assert refreshed["purpose"] == "second"
+    assert third["cached"] is True
+    assert third["purpose"] == "second"
+
+
+def test_rationale_cache_invalidates_on_prompt_version_bump(
+    repo_and_db, monkeypatch
+) -> None:
+    """A cache row written under the v2 prompt must NOT satisfy a v3 call.
+
+    Simulates a user upgrading WhyGraph: the cache table still contains
+    rows produced by the v2 bundle (which embedded callers/callees) but
+    the v3 bundle is shaped differently. The cache key includes
+    ``prompt_version``, so v2 rows are dead weight — the tool must miss
+    them and re-invoke the LLM.
+    """
+    invocations = {"n": 0}
+
+    def fake_invoke(prompt, *, model, timeout_sec, anthropic_api_key=None, system_prompt=None):
+        invocations["n"] += 1
+        return _canned_rationale(purpose=f"v{invocations['n']}")
+
+    with patch("whygraph.mcp_server.llm_subprocess.invoke_claude", side_effect=fake_invoke):
+        # Populate the cache under the old version.
+        monkeypatch.setattr(mcp_server, "_PROMPT_VERSION", "v2")
+        first = mcp_server.whygraph_rationale_brief(
+            path="f.py", line_start=1, line_end=2, min_score_pct=0.0
+        )
+        # Restore to v3 — same bundle content, same target, different prompt
+        # version → cache miss.
+        monkeypatch.setattr(mcp_server, "_PROMPT_VERSION", "v3")
+        second = mcp_server.whygraph_rationale_brief(
+            path="f.py", line_start=1, line_end=2, min_score_pct=0.0
+        )
+    assert invocations["n"] == 2
+    assert first["cached"] is False
+    assert second["cached"] is False
+    assert first["purpose"] != second["purpose"]
+
+
+def test_rationale_cache_invalidates_when_bundle_changes(repo_and_db) -> None:
+    """A new commit on the lines must change the bundle signature and miss
+    the cache, even though the call args are identical."""
+    repo_root, _sha = repo_and_db
+    invocations = {"n": 0}
+
+    def fake_invoke(prompt, *, model, timeout_sec, anthropic_api_key=None, system_prompt=None):
+        invocations["n"] += 1
+        return _canned_rationale(purpose=f"v{invocations['n']}")
+
+    with patch("whygraph.mcp_server.llm_subprocess.invoke_claude", side_effect=fake_invoke):
+        first = mcp_server.whygraph_rationale_brief(
+            path="f.py", line_start=1, line_end=2, min_score_pct=0.0
+        )
+        # Add a new commit that touches the same lines so blame attributes
+        # the new SHA to at least one of them.
+        (repo_root / "f.py").write_text("def foo():\n    return 99\n")
+        _git(repo_root, "add", "f.py")
+        _git(repo_root, "config", "user.email", "carol@example.com")
+        _git(repo_root, "config", "user.name", "Carol")
+        _git(repo_root, "commit", "-q", "-m", "bump")
+        new_sha = _git_out(repo_root, "rev-parse", "HEAD")
+        # Insert the new commit into the scan DB so blame's SHA isn't
+        # treated as missing-from-DB.
+        from whygraph.scan.db import Database
+
+        with Database(repo_root / ".whygraph" / "whygraph.db") as db:
+            db.upsert_commit(
+                Commit(
+                    sha=new_sha,
+                    parent_shas=[],
+                    author_name="Carol",
+                    author_email="carol@example.com",
+                    authored_at="2026-04-02T00:00:00+00:00",
+                    committed_at="2026-04-02T00:00:00+00:00",
+                    subject="bump",
+                    body="",
+                    files_changed=1,
+                    insertions=1,
+                    deletions=1,
+                )
+            )
+
+        second = mcp_server.whygraph_rationale_brief(
+            path="f.py", line_start=1, line_end=2, min_score_pct=0.0
+        )
+    assert invocations["n"] == 2
+    assert first["cached"] is False
+    assert second["cached"] is False
+    assert first["purpose"] != second["purpose"]
+
+
+def test_rationale_brief_invokes_claude_and_parses_json(repo_and_db) -> None:
+    repo_root, sha = repo_and_db
+    canned = json.dumps(
+        {
+            "purpose": "returns 1",
+            "why": "added by initial commit",
+            "constraints": ["foo must return an int"],
+            "tradeoffs": [],
+            "risks": ["any caller relying on return type 1 specifically"],
+        }
+    )
+    captured: dict = {}
+
+    def fake_invoke(prompt, *, model, timeout_sec, anthropic_api_key=None, system_prompt=None):
+        captured["prompt"] = prompt
+        captured["system_prompt"] = system_prompt
+        captured["model"] = model
+        return canned
+
+    with patch("whygraph.mcp_server.llm_subprocess.invoke_claude", side_effect=fake_invoke):
+        out = mcp_server.whygraph_rationale_brief(
+            path="f.py", line_start=1, line_end=2, min_score_pct=0.0, model="m"
+        )
+
+    assert out["purpose"] == "returns 1"
+    assert "constraints" in out and out["constraints"] == ["foo must return an int"]
+    assert out["risks"] == ["any caller relying on return type 1 specifically"]
+    assert out["model"] == "m"
+    assert out["target"]["path"] == "f.py"
+    assert out["evidence_count"]["commits"] >= 1
+    # Confidence formula has 0.85 ceiling.
+    assert 0.0 <= out["confidence"] <= 0.85
+    assert "Produce the rationale" in captured["prompt"]
+    # System prompt is sent via --system-prompt, not concatenated into stdin.
+    assert captured["system_prompt"] is not None
+    assert "analyst that explains why code exists" in captured["system_prompt"]
+    assert "RAW JSON only" in captured["system_prompt"]
+    assert "analyst" not in captured["prompt"]
+    # Bundle is structured text now, not JSON. The target header and the
+    # commits section must be present even when neighbours are empty.
+    assert "Symbol:" in captured["prompt"]
+    assert "Evidence:" in captured["prompt"]
+    assert "Commits (newest first):" in captured["prompt"]
+    # llm_description on the seed commit shows up under its labelled section.
+    assert "LLM diff summary: added f.py with foo()" in captured["prompt"]
+
+
+def test_rationale_prompt_includes_both_llm_summary_and_human_body(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When a commit carries both llm_description and a body that passes
+    the gate, the rendered prompt must show both under their labels — no
+    winner-takes-all suppression."""
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "config", "user.email", "alice@example.com")
+    _git(tmp_path, "config", "user.name", "Alice")
+    _git(tmp_path, "config", "commit.gpgsign", "false")
+    (tmp_path / "f.py").write_text("def foo():\n    return 1\n")
+    _git(tmp_path, "add", "f.py")
+    _git(tmp_path, "commit", "-q", "-m", "initial")
+    sha = _git_out(tmp_path, "rev-parse", "HEAD")
+    db_path = tmp_path / ".whygraph" / "whygraph.db"
+    monkeypatch.setenv("WHYGRAPH_DB", str(db_path))
+    monkeypatch.chdir(tmp_path)
+    with Database(db_path) as db:
+        db.upsert_commit(
+            Commit(
+                sha=sha,
+                parent_shas=[],
+                author_name="Alice",
+                author_email="alice@example.com",
+                authored_at="2026-04-01T00:00:00+00:00",
+                committed_at="2026-04-01T00:00:00+00:00",
+                subject="initial",
+                body="The reason we did this is to satisfy the legacy auth path.",
+                files_changed=1,
+                insertions=2,
+                deletions=0,
+            )
+        )
+        # Sibling commit with zero-scored fields so the percentile gate
+        # sits below the real commit's body/subject scores.
+        db.upsert_commit(
+            Commit(
+                sha="0" * 40,
+                parent_shas=[],
+                author_name="Alice",
+                author_email="alice@example.com",
+                authored_at="2026-04-01T00:00:00+00:00",
+                committed_at="2026-04-01T00:00:00+00:00",
+                subject="empty",
+                body="",
+                files_changed=0,
+                insertions=0,
+                deletions=0,
+            )
+        )
+        db.set_llm_description(sha, "added f.py with foo()", "haiku")
+        cur = db._conn.cursor()
+        # Force the real commit's scores above the gate; sibling stays
+        # at the default 0 and pulls the threshold down.
+        cur.execute(
+            "UPDATE commits SET body_tfidf_score = 1.0, "
+            "subject_tfidf_score = 1.0 WHERE sha = ?",
+            (sha,),
+        )
+        db._conn.commit()
+
+    captured: dict = {}
+
+    def fake_invoke(prompt, *, model, timeout_sec, anthropic_api_key=None, system_prompt=None):
+        captured["prompt"] = prompt
+        return json.dumps(
+            {
+                "purpose": "p",
+                "why": "w",
+                "constraints": [],
+                "tradeoffs": [],
+                "risks": [],
+            }
+        )
+
+    with patch("whygraph.mcp_server.llm_subprocess.invoke_claude", side_effect=fake_invoke):
+        mcp_server.whygraph_rationale_brief(
+            path="f.py", line_start=1, line_end=2, min_score_pct=0.0
+        )
+
+    prompt = captured["prompt"]
+    # All three commit-narrative kinds appear under their labels.
+    assert "LLM diff summary: added f.py with foo()" in prompt
+    assert "Subject: initial" in prompt
+    assert "Body:" in prompt
+    assert "satisfy the legacy auth path" in prompt
+    # Section header tells the model to read commits in recency order.
+    assert "Commits (newest first):" in prompt
+
+
+def test_rationale_brief_strips_json_fences(repo_and_db) -> None:
+    fenced = (
+        "```json\n"
+        + json.dumps(
+            {
+                "purpose": "p",
+                "why": "w",
+                "constraints": [],
+                "tradeoffs": [],
+                "risks": [],
+            }
+        )
+        + "\n```"
+    )
+    with patch(
+        "whygraph.mcp_server.llm_subprocess.invoke_claude", return_value=fenced
+    ):
+        out = mcp_server.whygraph_rationale_brief(
+            path="f.py", line_start=1, line_end=2, min_score_pct=0.0
+        )
+    assert out["purpose"] == "p"
+
+
+def test_rationale_brief_raises_on_bad_json(repo_and_db) -> None:
+    with patch(
+        "whygraph.mcp_server.llm_subprocess.invoke_claude",
+        return_value="not json at all",
+    ):
+        with pytest.raises(mcp_server.WhyGraphError, match="parse JSON"):
+            mcp_server.whygraph_rationale_brief(
+                path="f.py", line_start=1, line_end=2, min_score_pct=0.0
+            )
+
+
+def test_rationale_brief_raises_on_missing_required_field(repo_and_db) -> None:
+    bad = json.dumps({"purpose": "p", "constraints": [], "tradeoffs": [], "risks": []})
+    with patch("whygraph.mcp_server.llm_subprocess.invoke_claude", return_value=bad):
+        with pytest.raises(mcp_server.WhyGraphError, match="why"):
+            mcp_server.whygraph_rationale_brief(
+                path="f.py", line_start=1, line_end=2, min_score_pct=0.0
+            )
+
+
+def test_score_confidence_signals_blend() -> None:
+    evidence_full = [
+        {
+            "sha": "a" * 40,
+            "narratives": {"llm_description": "x"},
+            "all_authors": [{"login": "alice", "name": None, "email": None}],
+            "prs": [{"number": 1}],
+            "issues": [{"number": 7}],
+        }
+    ]
+    high = mcp_server._score_confidence(
+        evidence=evidence_full,
+        constraints=["c"],
+        risks=["r"],
+    )
+    low = mcp_server._score_confidence(
+        evidence=[],
+        constraints=[],
+        risks=[],
+    )
+    assert high > low
+    assert high <= mcp_server.CONFIDENCE_CEILING
+    assert low == 0.0
+
+
+def _ev(narrative_source: str | None) -> dict:
+    """Build a minimal evidence item using the new `narratives` shape."""
+    narratives = {narrative_source: "x"} if narrative_source else {}
     return {
-        "id": node_id,
-        "kind": "function",
-        "name": qname.rsplit(".", 1)[-1],
-        "qualified_name": qname,
-        "file_path": file_path,
-        "language": "python",
-        "start_line": 1,
-        "end_line": 3,
-        "docstring": None,
-        "signature": None,
+        "sha": "a" * 40,
+        "narratives": narratives,
+        "all_authors": [{"login": "alice", "name": None, "email": None}],
+        "prs": [],
+        "issues": [],
     }
 
 
-class _CountingLLM:
-    def __init__(self, rationale: Rationale = _RAT) -> None:
-        self.rationale = rationale
-        self.calls = 0
-        self.last_user_prompt = ""
-
-    def generate(self, *, system_prompt: str, user_prompt: str, schema=None) -> LLMResult:
-        self.calls += 1
-        self.last_user_prompt = user_prompt
-        return LLMResult(
-            rationale=self.rationale,
-            model="m",
-            backend="fake",
-            prompt_version=PROMPT_VERSION,
-            usage=LLMUsage(),
-        )
-
-
-def _setup(
-    init_git_repo,
-    git_commit,
-    codegraph_db_factory,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    file_content: str = "l1\nl2\nl3\n",
-    fake_llm: _CountingLLM | None = None,
-) -> tuple[Path, _CountingLLM]:
-    repo = init_git_repo()
-    git_commit(repo, "src/a.py", file_content, message="init")
-    cg_path = codegraph_db_factory(nodes=[_node_dict("src/a.py")], edges=[])
-    monkeypatch.setenv("CODEGRAPH_DB", str(cg_path))
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("WHYGRAPH_DB", raising=False)
-    # Force the model name to be deterministic across configs.
-    monkeypatch.setenv("WHYGRAPH_MODEL", "test-model")
-    monkeypatch.chdir(repo)
-
-    llm = fake_llm or _CountingLLM()
-    monkeypatch.setattr(
-        "whygraph.mcp_server.make_llm_client", lambda config: llm
+def test_score_confidence_tiers_llm_description_above_subject() -> None:
+    llm = mcp_server._score_confidence(
+        evidence=[_ev("llm_description")], constraints=[], risks=[]
     )
-    return repo, llm
-
-
-def test_rationale_first_call_generates(
-    init_git_repo, git_commit, codegraph_db_factory, monkeypatch
-) -> None:
-    _, llm = _setup(init_git_repo, git_commit, codegraph_db_factory, monkeypatch)
-    result = rationale_pre_edit_brief(target="pkg.a", response_format="json")
-    assert isinstance(result, dict)
-    assert result["source"] == "generated"
-    assert result["purpose"] == _RAT.purpose
-    assert result["model"] == "test-model"
-    assert "cache_key" in result
-    assert "confidence" in result
-    assert isinstance(result["confidence"], float)
-    assert 0.0 <= result["confidence"] <= 0.85
-    assert result["caller_count"] == 0  # _setup builds with edges=[]
-    assert result["callee_count"] == 0
-    assert llm.calls == 1
-
-
-def test_rationale_second_call_is_cached(
-    init_git_repo, git_commit, codegraph_db_factory, monkeypatch
-) -> None:
-    _, llm = _setup(init_git_repo, git_commit, codegraph_db_factory, monkeypatch)
-    rationale_pre_edit_brief(target="pkg.a", response_format="json")
-    second = rationale_pre_edit_brief(target="pkg.a", response_format="json")
-    assert second["source"] == "cached"
-    assert llm.calls == 1
-
-
-def test_rationale_force_bypasses_cache(
-    init_git_repo, git_commit, codegraph_db_factory, monkeypatch
-) -> None:
-    _, llm = _setup(init_git_repo, git_commit, codegraph_db_factory, monkeypatch)
-    rationale_pre_edit_brief(target="pkg.a", response_format="json")
-    forced = rationale_pre_edit_brief(
-        target="pkg.a", force=True, response_format="json"
+    sub = mcp_server._score_confidence(
+        evidence=[_ev("subject")], constraints=[], risks=[]
     )
-    assert forced["source"] == "generated"
-    assert llm.calls == 2
-
-
-def test_rationale_refresh_evidence_invalidates_rationale(
-    init_git_repo, git_commit, codegraph_db_factory, monkeypatch
-) -> None:
-    repo, llm = _setup(
-        init_git_repo, git_commit, codegraph_db_factory, monkeypatch
+    blame = mcp_server._score_confidence(
+        evidence=[_ev("git_blame_summary")], constraints=[], risks=[]
     )
-    first = rationale_pre_edit_brief(target="pkg.a", response_format="json")
-    assert first["source"] == "generated"
-
-    # New commit modifies lines 1-3 → blame on the symbol's line range
-    # points at a new SHA → bundle_hash changes → cache miss.
-    git_commit(repo, "src/a.py", "alpha\nbeta\ngamma\n", message="rewrite")
-    second = rationale_pre_edit_brief(
-        target="pkg.a", refresh_evidence=True, response_format="json"
+    null_src = mcp_server._score_confidence(
+        evidence=[_ev(None)], constraints=[], risks=[]
     )
-    assert second["source"] == "generated"
-    assert second["bundle_hash"] != first["bundle_hash"]
-    assert llm.calls == 2
+    # Strict ordering by tier weight.
+    assert llm > sub > blame > null_src
+    # Empty narratives contribute nothing to commit-tier signals.
+    # Authors still count (one author across the single item).
+    assert null_src > 0  # authors signal still fires
 
 
-def test_rationale_returns_error_when_no_evidence(
-    init_git_repo, codegraph_db_factory, monkeypatch
-) -> None:
-    repo = init_git_repo()
-    # File exists but is uncommitted → no blame → empty evidence.
-    (repo / "src").mkdir()
-    (repo / "src" / "a.py").write_text("uncommitted\n")
-    cg_path = codegraph_db_factory(nodes=[_node_dict("src/a.py")], edges=[])
-    monkeypatch.setenv("CODEGRAPH_DB", str(cg_path))
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("WHYGRAPH_DB", raising=False)
-    monkeypatch.chdir(repo)
-    monkeypatch.setattr(
-        "whygraph.mcp_server.make_llm_client", lambda config: _CountingLLM()
+def test_score_confidence_multi_narrative_uses_max_tier() -> None:
+    """A commit with both llm_description and body should score at
+    llm_description's tier (1.0), not double-count."""
+    multi = {
+        "sha": "a" * 40,
+        "narratives": {"llm_description": "x", "body": "y"},
+        "all_authors": [{"login": "alice", "name": None, "email": None}],
+        "prs": [],
+        "issues": [],
+    }
+    multi_score = mcp_server._score_confidence(
+        evidence=[multi], constraints=[], risks=[]
     )
-    with pytest.raises(ValueError, match="No evidence for pkg.a"):
-        rationale_pre_edit_brief(target="pkg.a")
-
-
-def test_rationale_unknown_symbol_raises(
-    init_git_repo, git_commit, codegraph_db_factory, monkeypatch
-) -> None:
-    _setup(init_git_repo, git_commit, codegraph_db_factory, monkeypatch)
-    with pytest.raises(ValueError, match="Symbol not found"):
-        rationale_pre_edit_brief(target="pkg.nope")
-
-
-def test_rationale_markdown_format_includes_confidence(
-    init_git_repo, git_commit, codegraph_db_factory, monkeypatch
-) -> None:
-    _setup(init_git_repo, git_commit, codegraph_db_factory, monkeypatch)
-    text = rationale_pre_edit_brief(target="pkg.a")  # markdown is default
-    assert isinstance(text, str)
-    assert text.startswith("# Rationale: `pkg.a`")
-    assert "## Purpose" in text
-    assert "## Why" in text
-    assert "## Constraints" in text
-    assert "**Confidence**:" in text
-    assert "(capped at 0.85)" in text
-
-
-def test_rationale_markdown_renders_empty_lists_as_none() -> None:
-    from whygraph.backend import SymbolNode
-    from whygraph.cochange.types import CoChangeReport, VolatilityReport
-    from whygraph.context import RationaleContext
-    from whygraph.evidence.types import CollectionResult
-    from whygraph.neighbors import RationaleNeighbors
-    from whygraph.rationale import RationaleRecord, cache_key
-
-    node = SymbolNode(
-        id="n_x",
-        kind="function",
-        name="x",
-        qualified_name="pkg.x",
-        file_path="src/x.py",
-        language="python",
-        start_line=1,
-        end_line=2,
-        docstring=None,
-        signature=None,
+    llm_only_score = mcp_server._score_confidence(
+        evidence=[_ev("llm_description")], constraints=[], risks=[]
     )
-    collection = CollectionResult(
-        evidence=[],
-        bundle_hash="0" * 64,
-        source="cache",
-        collected_at=0,
-        head_at_collection=None,
+    assert multi_score == llm_only_score
+
+
+def test_score_confidence_blame_only_evidence_caps_low() -> None:
+    """A bundle of 10 blame-only items shouldn't approach the ceiling."""
+    evidence = [_ev("git_blame_summary") for _ in range(10)]
+    score = mcp_server._score_confidence(
+        evidence=evidence, constraints=[], risks=[]
     )
-    record = RationaleRecord(
-        node_id="n_x",
-        bundle_hash="0" * 64,
-        prompt_version=PROMPT_VERSION,
-        model="m",
-        purpose="",
-        why="",
-        constraints=[],
-        tradeoffs=[],
-        risks=[],
-        generated_at=0,
-        cache_key=cache_key("pkg.x", "src/x.py", PROMPT_VERSION, "m", "0" * 64),
+    # Tier sum = 10 * 0.25 = 2.5 → num_commits_norm = 0.5
+    # has_any_commits = 1.0, num_authors_norm = 0.333 (one alice).
+    # raw = 0.20 + 0.10 + 0.067 + 0 + 0 + 0 = 0.367 → 0.367 * 0.85 ≈ 0.312
+    assert 0.25 < score < 0.40
+
+
+def test_score_confidence_saturates_at_5_strong_commits() -> None:
+    five_strong = [_ev("llm_description") for _ in range(5)]
+    ten_strong = [_ev("llm_description") for _ in range(10)]
+    score_five = mcp_server._score_confidence(
+        evidence=five_strong, constraints=["c"], risks=["r"]
     )
-    context = RationaleContext(
-        neighbors=RationaleNeighbors([], [], 0, 0),
-        cochange=CoChangeReport(
-            target_file="src/x.py",
-            head_sha="",
-            commits_considered=0,
-            neighbors=[],
-            truncated=0,
-        ),
-        volatility=VolatilityReport(
-            target_file="src/x.py",
-            head_sha="",
-            commits_total=0,
-            commits_90d=0,
-            commits_180d=0,
-            commits_365d=0,
-            distinct_authors=0,
-            days_since_last_change=None,
-        ),
+    score_ten = mcp_server._score_confidence(
+        evidence=ten_strong, constraints=["c"], risks=["r"]
     )
-    text = format_rationale_markdown(node, collection, record, "cached", context)
-    # All five rationale sections fall back to _(none)_; the Context and
-    # Volatility lines use different sentinels, so the count stays at 5.
-    assert text.count("_(none)_") == 5
-
-
-def test_both_tools_are_registered() -> None:
-    import anyio
-
-    tools = anyio.run(mcp.list_tools)
-    names = {t.name for t in tools}
-    assert "whygraph_evidence_for" in names
-    assert "whygraph_rationale_pre_edit_brief" in names
-
-
-# ---------------------------------------------------------------------------
-# Neighbor enrichment (v4 prompt) — flow-through + cache invalidation.
-# ---------------------------------------------------------------------------
-
-
-def _setup_with_caller(
-    init_git_repo,
-    git_commit,
-    codegraph_db_factory,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    caller_signature: str,
-):
-    """Like _setup, but seeds CodeGraph with a caller node + 'calls' edge."""
-    repo = init_git_repo()
-    git_commit(repo, "src/a.py", "l1\nl2\nl3\n", message="init")
-
-    target = _node_dict("src/a.py", "pkg.a", "n_a")
-    caller = _node_dict("src/caller.py", "pkg.special_caller", "n_c")
-    caller["signature"] = caller_signature
-
-    cg_path = codegraph_db_factory(
-        nodes=[target, caller],
-        edges=[("n_c", "n_a", "calls")],
-    )
-    monkeypatch.setenv("CODEGRAPH_DB", str(cg_path))
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("WHYGRAPH_DB", raising=False)
-    monkeypatch.setenv("WHYGRAPH_MODEL", "test-model")
-    monkeypatch.chdir(repo)
-
-    llm = _CountingLLM()
-    monkeypatch.setattr(
-        "whygraph.mcp_server.make_llm_client", lambda config: llm
-    )
-    return repo, llm
-
-
-def test_rationale_prompt_includes_caller_qualified_name(
-    init_git_repo, git_commit, codegraph_db_factory, monkeypatch
-) -> None:
-    _, llm = _setup_with_caller(
-        init_git_repo,
-        git_commit,
-        codegraph_db_factory,
-        monkeypatch,
-        caller_signature="def special_caller()",
-    )
-    result = rationale_pre_edit_brief(target="pkg.a", response_format="json")
-    assert result["caller_count"] == 1
-    assert "pkg.special_caller" in llm.last_user_prompt
-    assert "Callers (1" in llm.last_user_prompt
-
-
-def test_rationale_invalidates_when_caller_signature_changes(
-    init_git_repo, git_commit, codegraph_db_factory, monkeypatch
-) -> None:
-    """A meaningful change to a caller's signature should bust the cache.
-
-    Mechanism: collect_neighbors picks up the new signature; neighbor
-    fingerprint changes; combine_bundle_hash returns a different combined
-    hash; rationale store lookup misses; LLM is called again.
-    """
-    from whygraph import mcp_server
-
-    repo, llm = _setup_with_caller(
-        init_git_repo,
-        git_commit,
-        codegraph_db_factory,
-        monkeypatch,
-        caller_signature="def special_caller()",
-    )
-    first = rationale_pre_edit_brief(target="pkg.a", response_format="json")
-    assert first["source"] == "generated"
-    assert llm.calls == 1
-
-    # Swap to a CodeGraph DB where the caller signature differs. Need to
-    # close + reopen the backend so the cached deps pick up the new path.
-    mcp_server._reset_deps()
-    target = _node_dict("src/a.py", "pkg.a", "n_a")
-    caller_v2 = _node_dict("src/caller.py", "pkg.special_caller", "n_c")
-    caller_v2["signature"] = "def special_caller(x: int)"
-    cg_v2 = codegraph_db_factory(
-        nodes=[target, caller_v2],
-        edges=[("n_c", "n_a", "calls")],
-    )
-    monkeypatch.setenv("CODEGRAPH_DB", str(cg_v2))
-
-    second = rationale_pre_edit_brief(target="pkg.a", response_format="json")
-    assert second["source"] == "generated"
-    assert llm.calls == 2
-    assert second["bundle_hash"] != first["bundle_hash"]
-    # New caller signature is in the new prompt.
-    assert "def special_caller(x: int)" in llm.last_user_prompt
+    # num_commits_norm caps at 1.0 by 5 strong commits, so adding more
+    # doesn't push the score higher.
+    assert score_five == score_ten

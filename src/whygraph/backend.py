@@ -4,7 +4,7 @@ import sqlite3
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Protocol
+from typing import Iterable, Iterator, Protocol
 
 
 @dataclass(frozen=True)
@@ -120,6 +120,21 @@ class SqliteCodegraphBackend:
             (like, like, limit),
         ).fetchall()
         return _rows_to_nodes(rows)
+
+    def iter_nodes(self) -> Iterator[SymbolNode]:
+        """Stream every node in the graph. Used by the renderer to build a
+        full node list — protocol-level callers should still go through
+        ``get_node`` / ``find_symbols``."""
+        cur = self._conn.execute(_NODE_SELECT)
+        for row in cur:
+            yield _row_to_node(row)
+
+    def iter_edges(self) -> Iterator[tuple[str, str, str]]:
+        """Stream every edge as ``(source_id, target_id, kind)``. Used by
+        the renderer."""
+        cur = self._conn.execute("SELECT source, target, kind FROM edges")
+        for row in cur:
+            yield (row["source"], row["target"], row["kind"])
 
     def walk_neighbors(self, node_id: str, depth: int = 1) -> list[SymbolNode]:
         depth = min(max(depth, 0), _MAX_DEPTH)

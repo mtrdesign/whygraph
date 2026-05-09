@@ -12,5 +12,8 @@ build/
 # WhyGraph per-repo cache (evidence + rationale SQLite).
 .whygraph/
 
+# CodeGraph per-repo cache (symbol graph SQLite + config).
+.codegraph/
+
 # Personal Claude Configurations
 .claude/settings.local.json

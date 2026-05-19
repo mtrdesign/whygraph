@@ -2,16 +2,33 @@ from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 import click
+from rich.progress import Progress
 
-from whygraph.init import run_init
-from whygraph.render import run_render, run_serve
-from whygraph.scan import llm_descriptions as llm_module
-from whygraph.scan.runner import run_scan
+from whygraph import clients
+from whygraph.scan import Crawler, GitCrawler
 
 
 @click.group()
 def main() -> None:
     """WhyGraph — rationale layer over CodeGraph."""
+    # Logging is configured per-command so the top-level group does not
+    # blow up when sibling modules (e.g. config resolution) are mid-rewrite.
+    pass
+
+
+def _configure_logging_best_effort() -> None:
+    """Configure logging if the core dependency chain is healthy.
+
+    Failures here are tolerated so the CLI can still expose pure-CLI
+    surfaces (``--help``, ``--list-clients``) while parts of the package
+    are in flux.
+    """
+    try:
+        from whygraph.core import configure_logging, get_config
+
+        configure_logging(get_config().log_level)
+    except Exception:  # noqa: BLE001 — best-effort, intentional
+        pass
 
 
 @main.command(name="version")
@@ -22,154 +39,135 @@ def version_cmd() -> None:
 
 @main.command(name="init")
 @click.option(
-    "--yes",
-    "-y",
-    "assume_yes",
-    is_flag=True,
-    default=False,
-    help="Skip the confirmation prompt when bootstrapping nvm.",
+    "--client",
+    "client_name",
+    type=click.Choice(clients.known_client_names(), case_sensitive=False),
+    default=None,
+    help="Wire the WhyGraph MCP server into the named LLM client's config.",
 )
-def init_cmd(assume_yes: bool) -> None:
-    """Bootstrap CodeGraph in the current repository."""
-    raise SystemExit(run_init(assume_yes=assume_yes))
+@click.option(
+    "--print",
+    "print_only",
+    is_flag=True,
+    help="Print the MCP snippet to stdout instead of writing any config file.",
+)
+@click.option(
+    "--list-clients",
+    "list_clients",
+    is_flag=True,
+    help="List supported clients (with config-file paths) and exit.",
+)
+def init_cmd(client_name: str | None, print_only: bool, list_clients: bool) -> None:
+    """Initialize the WhyGraph database under ``.whygraph/whygraph.db``.
+
+    With ``--client X``, also register the WhyGraph MCP server with the
+    named client. Project-scoped clients (Claude Code, Cursor, VS Code /
+    Copilot) get their config file written/merged in the repo. User-scoped
+    clients (Codex, Claude Desktop) get the snippet printed for the
+    developer to paste manually.
+
+    Idempotent — re-running on an already-initialized DB just confirms
+    both schema layers are at head.
+    """
+    _configure_logging_best_effort()
+
+    if list_clients:
+        _print_client_list()
+        return
+
+    db_path = _ensure_db_initialized()
+    click.echo(f"Initialized WhyGraph database at {db_path}")
+
+    if client_name is None:
+        click.echo(
+            "Tip: run `whygraph init --list-clients` to see supported editors,"
+            " then `whygraph init --client <name>` to wire it up."
+        )
+        return
+
+    target = clients.resolve_client(client_name)
+    project_root = Path.cwd()
+    snippet = clients.render_snippet(target)
+
+    if print_only or not clients.is_write_supported(target):
+        _print_snippet(target, project_root, snippet)
+    else:
+        path = clients.write_snippet(target, project_root)
+        click.echo(f"Wrote whygraph MCP entry to {path}")
+
+    if target.name == "claude":
+        click.echo(
+            "Tip: for slash commands and skills, also install the Claude Code"
+            " plugin:\n"
+            "  /plugin marketplace add /absolute/path/to/whygraph\n"
+            "  /plugin install whygraph@whygraph"
+        )
 
 
 @main.command(name="scan")
-@click.option(
-    "--no-score",
-    "skip_score",
-    is_flag=True,
-    default=False,
-    help="Skip TF-IDF scoring after data collection.",
-)
-@click.option(
-    "--no-llm-description",
-    "skip_llm_descriptions",
-    is_flag=True,
-    default=False,
-    help="Skip the per-commit LLM diff description phase.",
-)
-@click.option(
-    "--anthropic-key",
-    "anthropic_api_key",
-    default=None,
-    help=(
-        "Anthropic API key for the LLM phase. If set, the `claude` "
-        "subprocess uses API billing with this key. If omitted, the "
-        "subprocess inherits a stripped env (no ANTHROPIC_API_KEY), "
-        "which forces Claude.ai subscription billing."
-    ),
-)
-@click.option(
-    "--llm-workers",
-    "llm_workers",
-    type=click.IntRange(min=1),
-    default=4,
-    show_default=True,
-    help="Parallel `claude` subprocesses in the LLM phase.",
-)
-@click.option(
-    "--llm-recent",
-    "llm_recent",
-    type=click.IntRange(min=1),
-    default=None,
-    help=(
-        "Limit the LLM diff-description phase to the most recent N "
-        "commits on the default branch. Other phases (git crawl, "
-        "GitHub fetch, scoring) still cover the full history."
-    ),
-)
-@click.option(
-    "--llm-model",
-    "llm_model",
-    default=llm_module.DEFAULT_MODEL,
-    show_default=True,
-    help=(
-        "Model used by the `claude` subprocess in the LLM phase. The "
-        "string is also persisted to commits.llm_description_model so "
-        "downstream readers know which model wrote each row."
-    ),
-)
-def scan_cmd(
-    skip_score: bool,
-    skip_llm_descriptions: bool,
-    anthropic_api_key: str | None,
-    llm_workers: int,
-    llm_recent: int | None,
-    llm_model: str,
+def scan_cmd() -> None:
+    """Run all configured crawlers concurrently."""
+    _configure_logging_best_effort()
+
+    # Lazy-imported so that --help and other lightweight CLI surfaces
+    # don't fail when the DB or git layers are mid-rewrite.
+    from whygraph.db import ensure_initialized
+    from whygraph.services.git import Repository
+
+    ensure_initialized()
+    repository = Repository(Path.cwd())
+
+    with Progress() as progress:
+        crawlers: list[Crawler] = [GitCrawler(progress, repository=repository)]
+        for c in crawlers:
+            c.start()
+        for c in crawlers:
+            c.join()
+
+    failed = [c for c in crawlers if c.error is not None]
+    for c in failed:
+        click.echo(f"crawler {c.name!r} failed: {c.error}", err=True)
+    if failed:
+        raise click.exceptions.Exit(1)
+
+
+def _ensure_db_initialized() -> Path:
+    """Bootstrap the WhyGraph DB, lazy-importing the heavy chain.
+
+    Imported here (not at module top) so that lightweight CLI surfaces
+    like ``--list-clients`` and ``--help`` don't fail when the DB layer
+    or its dependencies are mid-rewrite.
+    """
+    from whygraph.db import ensure_initialized
+
+    return ensure_initialized()
+
+
+def _print_client_list() -> None:
+    click.echo("Supported clients:")
+    for name in sorted(clients.CLIENTS):
+        target = clients.CLIENTS[name]
+        aliases = f" (aliases: {', '.join(target.aliases)})" if target.aliases else ""
+        path = clients.config_path_for(target, Path.cwd())
+        scope = "project" if target.scope == "project" else "user"
+        click.echo(f"  {target.name}{aliases}")
+        click.echo(f"    scope: {scope}  format: {target.format}")
+        click.echo(f"    path:  {path}")
+        click.echo(f"    note:  {target.description}")
+
+
+def _print_snippet(
+    target: clients.ClientTarget, project_root: Path, snippet: str
 ) -> None:
-    """Walk the repo's history and populate the WhyGraph evidence database."""
-    raise SystemExit(
-        run_scan(
-            skip_score=skip_score,
-            skip_llm_descriptions=skip_llm_descriptions,
-            anthropic_api_key=anthropic_api_key,
-            llm_workers=llm_workers,
-            llm_recent=llm_recent,
-            llm_model=llm_model,
+    path = clients.config_path_for(target, project_root)
+    click.echo(f"Paste the following into {path}:")
+    click.echo("")
+    click.echo(snippet.rstrip("\n"))
+    if (
+        target.name == "claude-desktop"
+        and not clients.claude_desktop_supported_platform()
+    ):
+        click.echo(
+            "\nNote: the path above is the macOS location. On Windows/Linux,"
+            " Claude Desktop's config lives elsewhere — check its docs."
         )
-    )
-
-
-@main.command(name="render")
-@click.option(
-    "--out",
-    "out_path",
-    type=click.Path(dir_okay=False, path_type=Path),
-    default=None,
-    help="Output HTML path. Default: <repo_root>/.whygraph/whygraph.html",
-)
-@click.option(
-    "--open",
-    "open_browser",
-    is_flag=True,
-    default=False,
-    help="Open the rendered HTML in your default browser.",
-)
-@click.option(
-    "--depth",
-    "depth",
-    type=click.IntRange(min=1, max=4),
-    default=1,
-    show_default=True,
-    help=(
-        "Levels of the kind hierarchy to populate with per-node details. "
-        "1 = Modules only (fast first paint). "
-        "2 = + Classes. 3 = + Functions/Methods. 4 = Everything. "
-        "Higher-level nodes still appear in the slider; only their "
-        "detail panel is gated."
-    ),
-)
-def render_cmd(out_path: Path | None, open_browser: bool, depth: int) -> None:
-    """Render a self-contained HTML viewer of the CodeGraph + WhyGraph data."""
-    raise SystemExit(
-        run_render(out_path=out_path, open_browser=open_browser, depth=depth)
-    )
-
-
-@main.command(name="serve")
-@click.option(
-    "--host",
-    default="127.0.0.1",
-    show_default=True,
-    help="Bind host. Defaults to localhost — do not expose externally.",
-)
-@click.option(
-    "--port",
-    type=int,
-    default=8765,
-    show_default=True,
-    help="Bind port.",
-)
-@click.option(
-    "--open",
-    "open_browser",
-    is_flag=True,
-    default=False,
-    help="Open the viewer in your default browser after the server starts.",
-)
-def serve_cmd(host: str, port: int, open_browser: bool) -> None:
-    """Serve the live viewer with on-demand rationale generation."""
-    raise SystemExit(
-        run_serve(host=host, port=port, open_browser=open_browser)
-    )

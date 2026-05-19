@@ -54,7 +54,9 @@
       "Bash(gh pr *)",
       "Bash(python3 *)",
       "Bash(codegraph --help)",
-      "Bash(sqlite3 *)"
+      "Bash(sqlite3 *)",
+      "Read(//private/tmp/whygraph-init-smoke/**)",
+      "Read(//private/tmp/whygraph-init-smoke/.whygraph/**)"
     ]
   }
 }

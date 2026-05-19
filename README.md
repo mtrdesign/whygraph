@@ -67,6 +67,27 @@ whygraph scan
 
 This puts `whygraph` and `whygraph-mcp` on your `PATH`, independent of any Claude Code plugin.
 
+## Wire WhyGraph into your editor
+
+WhyGraph's MCP server (`whygraph-mcp`) is a standalone console script, so any LLM client that speaks MCP can use it. `whygraph init --client X` writes the right snippet to the right file for each supported client.
+
+Run from the repo you want WhyGraph to analyse:
+
+```bash
+whygraph init                          # DB only, no client wiring (safe default)
+whygraph init --client claude          # writes .mcp.json at repo root
+whygraph init --client cursor          # writes .cursor/mcp.json
+whygraph init --client vscode          # writes .vscode/mcp.json (alias: copilot)
+whygraph init --client codex           # prints snippet for ~/.codex/config.toml
+whygraph init --client claude-desktop  # prints snippet for Claude Desktop config
+whygraph init --client X --print       # prints, never writes
+whygraph init --list-clients           # show all supported clients + paths
+```
+
+**Project-scoped clients** (Claude Code, Cursor, VS Code / Copilot) get a config file written inside the repo so you can commit it — every contributor's editor picks it up automatically. **User-scoped clients** (Codex, Claude Desktop) are print-only: the command emits the snippet and tells you where to paste it, so WhyGraph never silently edits files outside the repo.
+
+For Claude Code specifically, `--client claude` only wires the MCP server. To also get the `/whygraph-plan` slash command, skills, and planner subagents, install the Claude Code plugin as well (see [As a Claude Code plugin](#as-a-claude-code-plugin) above).
+
 ## CLI commands
 
 | Command | Purpose |

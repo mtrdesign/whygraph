@@ -49,6 +49,8 @@ Install locally: `/plugin marketplace add /absolute/path/to/whygraph` then `/plu
 - **Don't add new top-level dirs** without updating `[tool.hatch.build.targets.wheel].packages` in `pyproject.toml` (currently `["src/whygraph"]`).
 - **Tests live in `tests/`** (configured via `[tool.pytest.ini_options].testpaths`). `test_smoke.py` asserts the package imports and the MCP server is named `"whygraph"` — preserve both invariants when restructuring.
 - **Companion repo:** CodeGraph upstream is `colbymchenry/codegraph`. WhyGraph reads its SQLite output and joins by `node_id`. Schema reference: tables `nodes`, `edges`, `files`, `nodes_fts`, `unresolved_refs`.
+- **Docstrings.** All public modules, classes, and functions in `src/whygraph/` use [NumPy-style docstrings](https://numpydoc.readthedocs.io/en/latest/format.html) — sections `Parameters`, `Returns`, `Raises`, `Attributes`, `Notes`, `Examples` as applicable. Private helpers (`_foo`) get a one-line summary unless behavior is non-obvious. This overrides the global "no multi-line docstrings" default for this project. Do **not** retrofit docstrings as drive-by changes on unrelated PRs — that's a focused, standalone change.
+- **Intra-package imports use the relative form.** Inside `src/whygraph/`, when a module imports from another module in the **same package**, use the relative path (`from .commit import Commit`), not the absolute (`from whygraph.services.git.commit import Commit`). Cross-package imports inside `src/whygraph/` (e.g. a `services/git/` module importing from `whygraph.core`) stay absolute. Tests and console-script entry points always use absolute imports. Don't retrofit existing absolute intra-package imports as drive-by changes — that's a focused standalone PR.
 
 ## Working principles
 

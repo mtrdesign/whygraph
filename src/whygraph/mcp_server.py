@@ -17,6 +17,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from whygraph import backend as backend_module
+from whygraph.core import configure_logging, get_config
 from whygraph import llm_subprocess, mcp_queries
 from whygraph.scan import authors as authors_module
 from whygraph.scan import db as db_module
@@ -1287,6 +1288,7 @@ def prompt_whygraph_plan(task: str) -> str:
 
 
 def main() -> None:
+    configure_logging(get_config().log_level)
     mcp.run(transport="stdio")
 
 

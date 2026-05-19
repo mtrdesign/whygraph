@@ -5,7 +5,7 @@ import click
 from rich.progress import Progress
 
 from whygraph import clients
-from whygraph.scan import Crawler, GitCrawler
+from whygraph.scan import Crawler, GitCrawler, GitHubCrawler
 
 
 @click.group()
@@ -113,12 +113,21 @@ def scan_cmd() -> None:
     # don't fail when the DB or git layers are mid-rewrite.
     from whygraph.db import ensure_initialized
     from whygraph.services.git import Repository
+    from whygraph.services.github import GitHubClient
 
     ensure_initialized()
     repository = Repository(Path.cwd())
+    github_client = GitHubClient.for_repository(repository)
 
     with Progress() as progress:
         crawlers: list[Crawler] = [GitCrawler(progress, repository=repository)]
+        if github_client is None:
+            click.echo(
+                "github crawler skipped: origin is not a GitHub remote",
+                err=True,
+            )
+        else:
+            crawlers.append(GitHubCrawler(progress, client=github_client))
         for c in crawlers:
             c.start()
         for c in crawlers:

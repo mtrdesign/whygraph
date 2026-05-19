@@ -4,13 +4,19 @@ The :class:`Config` value object holds all user-tunable settings. It is
 loaded once from ``<project_root>/whygraph.toml`` (see
 :func:`whygraph.core.get_config`) or falls back to :meth:`Config.defaults`
 if the file is absent.
+
+LLM provider settings are kept as typed sub-dataclasses
+(:class:`AnthropicConfig`, :class:`OpenAIConfig`, …) grouped under
+:class:`LlmConfig`. Each adapter in :mod:`whygraph.services.llm`
+consumes its own typed section via ``from_config``; the values are
+loaded from ``[llm.<provider>]`` tables in ``whygraph.toml``.
 """
 
 from __future__ import annotations
 
 import logging
 import tomllib
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from whygraph.core.logger import LogLevel
@@ -25,6 +31,167 @@ class ConfigError(RuntimeError):
     runtime errors so callers can surface a clean message instead of a
     stack trace.
     """
+
+
+@dataclass(frozen=True, slots=True)
+class AnthropicConfig:
+    """Configuration for :class:`AnthropicAdapter` (anthropic SDK).
+
+    Attributes
+    ----------
+    model : str
+        Anthropic model identifier (e.g. ``"claude-opus-4-7"``).
+    api_key : str or None
+        Explicit API key. ``None`` (default) lets the SDK read
+        ``ANTHROPIC_API_KEY`` from the environment.
+    timeout_sec : int
+        Per-request timeout in seconds. Default ``60``.
+    """
+
+    model: str = "claude-opus-4-7"
+    api_key: str | None = None
+    timeout_sec: int = 60
+
+
+@dataclass(frozen=True, slots=True)
+class OpenAIConfig:
+    """Configuration for :class:`OpenAIAdapter` (openai SDK).
+
+    Attributes
+    ----------
+    model : str
+        OpenAI model identifier (e.g. ``"gpt-4o"``).
+    api_key : str or None
+        Explicit API key. ``None`` (default) lets the SDK read
+        ``OPENAI_API_KEY`` from the environment.
+    base_url : str or None
+        Override the API endpoint. ``None`` (default) keeps the SDK's
+        built-in ``https://api.openai.com/v1``.
+    timeout_sec : int
+        Per-request timeout in seconds. Default ``60``.
+    """
+
+    model: str = "gpt-4o"
+    api_key: str | None = None
+    base_url: str | None = None
+    timeout_sec: int = 60
+
+
+@dataclass(frozen=True, slots=True)
+class DeepSeekConfig:
+    """Configuration for :class:`DeepSeekAdapter` (openai SDK + DeepSeek URL).
+
+    Attributes
+    ----------
+    model : str
+        DeepSeek model identifier (e.g. ``"deepseek-chat"``).
+    api_key : str or None
+        Explicit API key. ``None`` (default) reads ``DEEPSEEK_API_KEY``
+        from the environment (the adapter handles this — DeepSeek does
+        *not* use ``OPENAI_API_KEY``).
+    timeout_sec : int
+        Per-request timeout in seconds. Default ``60``.
+    """
+
+    model: str = "deepseek-chat"
+    api_key: str | None = None
+    timeout_sec: int = 60
+
+
+@dataclass(frozen=True, slots=True)
+class OllamaConfig:
+    """Configuration for :class:`OllamaAdapter` (local ollama server).
+
+    Attributes
+    ----------
+    model : str
+        Local Ollama model tag (e.g. ``"llama3"``).
+    host : str or None
+        Override the Ollama server URL. ``None`` (default) keeps
+        ``http://localhost:11434``.
+    timeout_sec : int
+        Per-request timeout in seconds. Default ``120`` — local models
+        are slower than hosted ones, so the default is generous.
+    """
+
+    model: str = "llama3"
+    host: str | None = None
+    timeout_sec: int = 120
+
+
+@dataclass(frozen=True, slots=True)
+class ClaudeCliConfig:
+    """Configuration for :class:`ClaudeCliAdapter` (``claude --print``).
+
+    Attributes
+    ----------
+    model : str
+        Claude model identifier (e.g. ``"claude-opus-4-7"``).
+    api_key : str or None
+        ``None`` (default) strips ``ANTHROPIC_API_KEY`` from the
+        subprocess env so the CLI falls through to subscription billing.
+        Passing a value exports it as ``ANTHROPIC_API_KEY`` (API billing).
+    timeout_sec : int
+        Per-invocation timeout in seconds. Default ``120``.
+    """
+
+    model: str = "claude-opus-4-7"
+    api_key: str | None = None
+    timeout_sec: int = 120
+
+
+@dataclass(frozen=True, slots=True)
+class LlmConfig:
+    """Aggregate of every per-provider :class:`LlmClient` configuration.
+
+    Populated from ``[llm.<provider>]`` tables in ``whygraph.toml``.
+    Each adapter in :mod:`whygraph.services.llm` is constructed from
+    its matching sub-attribute via ``Adapter.from_config(cfg.<provider>)``.
+    """
+
+    anthropic: AnthropicConfig = field(default_factory=AnthropicConfig)
+    openai: OpenAIConfig = field(default_factory=OpenAIConfig)
+    deepseek: DeepSeekConfig = field(default_factory=DeepSeekConfig)
+    ollama: OllamaConfig = field(default_factory=OllamaConfig)
+    claude_cli: ClaudeCliConfig = field(default_factory=ClaudeCliConfig)
+
+
+# TOML section name → (Config attribute name, sub-dataclass) so the
+# TOML loader can build typed sections from raw dicts in one pass.
+_LLM_SECTIONS: tuple[tuple[str, str, type], ...] = (
+    ("anthropic", "anthropic", AnthropicConfig),
+    ("openai", "openai", OpenAIConfig),
+    ("deepseek", "deepseek", DeepSeekConfig),
+    ("ollama", "ollama", OllamaConfig),
+    # `claude_cli` (Python attr) ↔ `claude-cli` (TOML section) — TOML
+    # idiomatically uses dashes; Python identifiers cannot, so we keep
+    # both forms and let either one parse.
+    ("claude_cli", "claude_cli", ClaudeCliConfig),
+    ("claude-cli", "claude_cli", ClaudeCliConfig),
+)
+
+
+def _build_llm_config(raw: dict) -> LlmConfig:
+    """Parse a raw ``[llm]`` dict into a typed :class:`LlmConfig`."""
+    sections: dict[str, object] = {}
+    known_attrs = {f.name for f in fields(LlmConfig)}
+    for toml_name, attr_name, cls in _LLM_SECTIONS:
+        block = raw.get(toml_name)
+        if block is None:
+            continue
+        if not isinstance(block, dict):
+            raise ConfigError(
+                f"[llm.{toml_name}] must be a table, got {type(block).__name__}"
+            )
+        known_fields = {f.name for f in fields(cls)}
+        for unknown in set(block) - known_fields:
+            _log.warning("ignoring unknown key in [llm.%s]: %r", toml_name, unknown)
+        sections[attr_name] = cls(
+            **{k: v for k, v in block.items() if k in known_fields}
+        )
+    for unknown in set(raw) - {n for n, *_ in _LLM_SECTIONS}:
+        _log.warning("ignoring unknown key in [llm]: %r", unknown)
+    return LlmConfig(**{k: v for k, v in sections.items() if k in known_attrs})
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +219,11 @@ class Config:
     codegraph_db : Path or None
         Override path to the CodeGraph SQLite DB. If ``None``, callers
         use the project-relative default ``.codegraph/codegraph.db``.
+    llm : LlmConfig
+        Per-provider LLM client settings. Loaded from
+        ``[llm.<provider>]`` tables; each :mod:`whygraph.services.llm`
+        adapter consumes its own typed sub-config via
+        ``Adapter.from_config(cfg.llm.<provider>)``.
     """
 
     log_level: str = "INFO"
@@ -59,6 +231,7 @@ class Config:
     scan_max_workers: int = 2
     whygraph_db: Path | None = None
     codegraph_db: Path | None = None
+    llm: LlmConfig = field(default_factory=LlmConfig)
 
     def __post_init__(self) -> None:
         """Validate field values immediately after construction.
@@ -119,6 +292,10 @@ class Config:
             raw["scan_max_workers"] = scan.pop("max_workers")
         for unknown in scan:
             _log.warning("ignoring unknown key in [scan]: %r", unknown)
+
+        llm_raw = raw.pop("llm", {}) or {}
+        if llm_raw:
+            raw["llm"] = _build_llm_config(llm_raw)
 
         base = path.parent
         for key in ("whygraph_db", "codegraph_db"):

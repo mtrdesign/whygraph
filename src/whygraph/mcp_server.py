@@ -18,7 +18,8 @@ from mcp.server.fastmcp import FastMCP
 
 from whygraph import backend as backend_module
 from whygraph.core import configure_logging, get_config
-from whygraph import llm_subprocess, mcp_queries
+from whygraph import mcp_queries
+from whygraph.services.llm import ClaudeCliAdapter, CompletionRequest
 from whygraph.scan import authors as authors_module
 from whygraph.scan import db as db_module
 from whygraph.scan import git as git_module
@@ -1010,13 +1011,14 @@ def whygraph_rationale_brief(
         target=target,
         evidence=evidence,
     )
-    raw = llm_subprocess.invoke_claude(
-        user_prompt,
+    _llm_client = ClaudeCliAdapter(
         model=model,
+        api_key=anthropic_api_key,
         timeout_sec=timeout_sec,
-        anthropic_api_key=anthropic_api_key,
-        system_prompt=_RATIONALE_SYSTEM_PROMPT,
     )
+    raw = _llm_client.complete(
+        CompletionRequest.of(user_prompt, system=_RATIONALE_SYSTEM_PROMPT)
+    ).text
     parsed = _extract_rationale_json(raw)
     rationale = _validate_rationale(parsed)
     confidence = _score_confidence(

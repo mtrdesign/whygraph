@@ -1,7 +1,7 @@
 # WhyGraph configuration — whygraph.toml
 # All fields are optional; shown values are the defaults.
 
-log_level = "DEBUG"           # DEBUG | INFO | WARN | ERROR | CRITICAL
+log_level = "INFO"           # DEBUG | INFO | WARN | ERROR | CRITICAL
 rationale_model = "claude-opus-4-7"
 
 [scan]
@@ -10,3 +10,36 @@ max_workers = 2
 # Uncomment to override default DB locations (relative to project root):
 # whygraph_db  = ".whygraph/whygraph.db"
 # codegraph_db = ".codegraph/codegraph.db"
+
+# Per-provider LLM client settings. Each table is consumed by the
+# matching adapter in whygraph.services.llm via Adapter.from_config.
+# Omit api_key to read the standard env var (ANTHROPIC_API_KEY,
+# OPENAI_API_KEY, DEEPSEEK_API_KEY); omit a section entirely to use
+# the dataclass defaults shown below.
+
+[llm.anthropic]
+model = "claude-opus-4-7"
+# api_key = "sk-ant-..."     # default: read ANTHROPIC_API_KEY from env
+timeout_sec = 60
+
+[llm.openai]
+model = "gpt-4o"
+# api_key = "sk-..."          # default: read OPENAI_API_KEY from env
+# base_url = "..."            # default: https://api.openai.com/v1
+timeout_sec = 60
+
+[llm.deepseek]
+model = "deepseek-chat"
+# api_key = "sk-..."          # default: read DEEPSEEK_API_KEY from env
+timeout_sec = 60
+
+[llm.ollama]
+model = "llama3"
+# host = "http://localhost:11434"
+timeout_sec = 120
+
+# `claude_cli` (Python attribute) and `claude-cli` (TOML idiom) both parse.
+[llm.claude_cli]
+model = "claude-opus-4-7"
+# api_key = "sk-ant-..."     # default: subscription billing (strips env var)
+timeout_sec = 120

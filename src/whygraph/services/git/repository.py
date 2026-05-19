@@ -7,7 +7,7 @@ from pathlib import Path
 
 from whygraph.core import Shell, ShellError
 
-from .commands import GitCurrentBranchCmd
+from .commands import GitCurrentBranchCmd, GitOriginUrlCmd
 from .commits import Commits
 from .exceptions import GitError
 
@@ -86,3 +86,31 @@ class Repository:
             bound to this repository's :attr:`root` and current branch.
         """
         return Commits(self.root, self.current_branch)
+
+    @cached_property
+    def origin_url(self) -> str | None:
+        """The configured ``origin`` remote URL, or ``None`` if unset.
+
+        Used downstream by
+        :meth:`whygraph.services.github.GitHubClient.for_repository` to
+        derive ``owner/name``. A missing ``origin`` remote is a normal
+        state (forks, local-only repos), not an error — so the property
+        returns ``None`` instead of raising. Genuine git failures (the
+        ``git`` binary is missing, ``self.root`` is not a repository at
+        all) still surface as :class:`GitError`.
+
+        Returns
+        -------
+        str or None
+            The ``origin`` URL exactly as configured (no normalization),
+            or ``None`` when no ``origin`` remote is set.
+
+        Raises
+        ------
+        GitError
+            If ``git`` itself cannot be invoked.
+        """
+        try:
+            return self._shell.run(GitOriginUrlCmd, cwd=self.root, check=False)
+        except ShellError as exc:
+            raise GitError(f"failed to resolve origin URL at {self.root}") from exc

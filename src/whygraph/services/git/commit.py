@@ -1,9 +1,10 @@
 """In-memory value objects for a parsed Git commit.
 
-Exposes :class:`DiffStats` and :class:`Commit` plus the ``git log``
-format string and per-record parser that produce them. The parser
-lives here (not in the :mod:`Commits` collection) so that "what one
-git-log record looks like" is owned by the class that represents it.
+Exposes :class:`DiffStats`, :class:`Commit`, and :class:`CommitSummary`
+plus the ``git log`` format string and per-record parser that produce
+them. The parsers live here (not in the :mod:`Commits` collection or
+the github service) so that "what one commit record looks like" is
+owned by the class that represents it.
 """
 
 from __future__ import annotations
@@ -135,6 +136,73 @@ class Commit:
             subject=subject,
             body=body,
             stats=_parse_shortstat(tail),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CommitSummary:
+    """A narrow commit reference — SHA, headline, and author identity.
+
+    Used where the full :class:`Commit` shape (parents, timestamps, diff
+    stats) is not needed — most commonly, the list of commits attached
+    to a GitHub pull request via the GraphQL ``commits`` connection.
+
+    Lives in :mod:`whygraph.services.git` rather than the github service
+    because it is a value object describing *a commit* — the source it
+    arrived from (a local ``git log`` walk, GitHub's GraphQL API, or
+    something else) is incidental. Construct via
+    :meth:`from_graphql_node` for github responses, or directly for
+    other sources.
+
+    Attributes
+    ----------
+    oid : str
+        Full commit SHA.
+    headline : str
+        First line of the commit message.
+    author_login : str or None
+        GitHub username of the commit author, when known. ``None`` for
+        commits authored outside GitHub (e.g. by an unmapped email).
+    author_name : str or None
+        Display name from the commit metadata.
+    author_email : str or None
+        Email from the commit metadata.
+    """
+
+    oid: str
+    headline: str
+    author_login: str | None
+    author_name: str | None
+    author_email: str | None
+
+    @classmethod
+    def from_graphql_node(cls, commit: dict) -> "CommitSummary":
+        """Build a :class:`CommitSummary` from a GitHub GraphQL ``commit`` node.
+
+        ``commit`` is the inner object yielded by a GraphQL query that
+        selects ``oid``, ``messageHeadline``, and an ``author`` block
+        with ``name``, ``email``, and ``user { login }``. Missing fields
+        degrade to ``""`` (for ``oid`` / ``headline``) or ``None`` (for
+        author identity), matching the underlying GraphQL nullability.
+
+        Parameters
+        ----------
+        commit : dict
+            One GraphQL ``commit`` node.
+
+        Returns
+        -------
+        CommitSummary
+            The parsed summary.
+        """
+        author = commit.get("author") or {}
+        user = author.get("user") or {}
+        return cls(
+            oid=commit.get("oid") or "",
+            headline=commit.get("messageHeadline", ""),
+            author_login=user.get("login"),
+            author_name=author.get("name"),
+            author_email=author.get("email"),
         )
 
 

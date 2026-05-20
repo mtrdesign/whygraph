@@ -141,6 +141,38 @@ class ClaudeCliConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class AnalyzeConfig:
+    """Configuration for the LLM-driven commit descriptor.
+
+    Loaded from the ``[analyze]`` table in ``whygraph.toml``. Consumed
+    by :class:`whygraph.analyze.LlmDescriptor.from_config` to construct
+    a descriptor against an existing :class:`LlmConfig`-backed provider.
+
+    Attributes
+    ----------
+    provider : str
+        Tag of the :class:`whygraph.services.llm.LlmClient` adapter to
+        use. Must match one of :attr:`LlmClientFactory.providers` at
+        construction time; unknown providers surface as
+        :class:`whygraph.services.llm.LlmError` from
+        :meth:`~whygraph.analyze.LlmDescriptor.from_config`, not here —
+        ``core/config`` deliberately does not import from
+        ``services/llm`` to keep the dependency direction clean.
+    max_diff_chars : int
+        Cap on diff length before prompting. Diffs longer than this are
+        truncated with an explicit marker so the model knows the input
+        was clipped. Must be ``>= 1``.
+    timeout_sec : int or None
+        Per-call timeout forwarded into :class:`CompletionRequest`.
+        ``None`` (default) defers to the bound adapter's default.
+    """
+
+    provider: str = "anthropic"
+    max_diff_chars: int = 50_000
+    timeout_sec: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class LlmConfig:
     """Aggregate of every per-provider :class:`LlmClient` configuration.
 
@@ -194,6 +226,14 @@ def _build_llm_config(raw: dict) -> LlmConfig:
     return LlmConfig(**{k: v for k, v in sections.items() if k in known_attrs})
 
 
+def _build_analyze_config(raw: dict) -> AnalyzeConfig:
+    """Parse a raw ``[analyze]`` dict into a typed :class:`AnalyzeConfig`."""
+    known = {f.name for f in fields(AnalyzeConfig)}
+    for unknown in set(raw) - known:
+        _log.warning("ignoring unknown key in [analyze]: %r", unknown)
+    return AnalyzeConfig(**{k: v for k, v in raw.items() if k in known})
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     """Immutable runtime configuration for the WhyGraph package.
@@ -224,6 +264,10 @@ class Config:
         ``[llm.<provider>]`` tables; each :mod:`whygraph.services.llm`
         adapter consumes its own typed sub-config via
         ``Adapter.from_config(cfg.llm.<provider>)``.
+    analyze : AnalyzeConfig
+        Settings for the LLM commit descriptor. Loaded from the
+        ``[analyze]`` table; consumed by
+        :meth:`whygraph.analyze.LlmDescriptor.from_config`.
     """
 
     log_level: str = "INFO"
@@ -232,6 +276,7 @@ class Config:
     whygraph_db: Path | None = None
     codegraph_db: Path | None = None
     llm: LlmConfig = field(default_factory=LlmConfig)
+    analyze: AnalyzeConfig = field(default_factory=AnalyzeConfig)
 
     def __post_init__(self) -> None:
         """Validate field values immediately after construction.
@@ -239,8 +284,9 @@ class Config:
         Raises
         ------
         ConfigError
-            If ``log_level`` is not a known :class:`LogLevel` name, or
-            if ``scan_max_workers`` is less than ``1``.
+            If ``log_level`` is not a known :class:`LogLevel` name, if
+            ``scan_max_workers`` is less than ``1``, or if
+            ``analyze.max_diff_chars`` is less than ``1``.
         """
         try:
             LogLevel[self.log_level.upper()]
@@ -249,6 +295,11 @@ class Config:
         if self.scan_max_workers < 1:
             raise ConfigError(
                 f"scan_max_workers must be >= 1, got {self.scan_max_workers}"
+            )
+        if self.analyze.max_diff_chars < 1:
+            raise ConfigError(
+                "analyze.max_diff_chars must be >= 1, "
+                f"got {self.analyze.max_diff_chars}"
             )
 
     @classmethod
@@ -296,6 +347,10 @@ class Config:
         llm_raw = raw.pop("llm", {}) or {}
         if llm_raw:
             raw["llm"] = _build_llm_config(llm_raw)
+
+        analyze_raw = raw.pop("analyze", {}) or {}
+        if analyze_raw:
+            raw["analyze"] = _build_analyze_config(analyze_raw)
 
         base = path.parent
         for key in ("whygraph_db", "codegraph_db"):

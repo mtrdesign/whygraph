@@ -73,6 +73,32 @@ class GitRevListCountCmd(ShellCommand[int]):
         return int(result.stdout.strip() or "0")
 
 
+class GitDiffCmd(ShellCommand[str]):
+    """``git diff --no-color <revspec...>`` — raw unified diff text.
+
+    The argv after ``--no-color`` is passed verbatim; callers own the
+    revspec semantics (``A..B``, ``<sha>^!``, ``--root <sha>``, …). The
+    parser returns captured stdout unchanged — diff text *is* the
+    interface, and any further structuring is the consumer's job.
+
+    Parameters
+    ----------
+    revspec : tuple[str, ...]
+        One or more arguments appended after ``--no-color``. Supplied
+        as separate tokens so the call site does not have to worry
+        about shell quoting (e.g. ``("--root", sha)`` for a root commit).
+    """
+
+    def __init__(self, *revspec: str) -> None:
+        self.revspec = revspec
+
+    def argv(self) -> list[str]:
+        return ["git", "diff", "--no-color", *self.revspec]
+
+    def parse(self, result: CompletedProcess[str]) -> str:
+        return result.stdout
+
+
 class GitLogShortstatCmd(ShellCommand[Iterator[Commit]]):
     """``git log --shortstat --pretty=format:Commit.LOG_FORMAT <ref>``.
 

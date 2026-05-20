@@ -7,7 +7,8 @@ from pathlib import Path
 
 from whygraph.core import Shell, ShellError
 
-from .commands import GitCurrentBranchCmd, GitOriginUrlCmd
+from .commands import GitCurrentBranchCmd, GitDiffCmd, GitOriginUrlCmd
+from .commit import Commit
 from .commits import Commits
 from .exceptions import GitError
 
@@ -114,3 +115,35 @@ class Repository:
             return self._shell.run(GitOriginUrlCmd, cwd=self.root, check=False)
         except ShellError as exc:
             raise GitError(f"failed to resolve origin URL at {self.root}") from exc
+
+    def diff(self, commit: Commit) -> str:
+        """Raw unified-diff text for ``commit`` against its first parent.
+
+        Root commits (no parents) are diffed against the empty tree via
+        ``git diff --no-color --root <sha>`` — git's documented form for
+        "what does this commit introduce". Merge commits diff against
+        their first parent, matching the convention already in use for
+        :attr:`Commit.stats`.
+
+        Returns
+        -------
+        str
+            The raw ``git diff`` output. May be empty for a commit that
+            touched no files (e.g. an empty merge); callers can treat
+            ``""`` as "nothing to describe".
+
+        Raises
+        ------
+        GitError
+            If ``git`` itself fails (unknown sha, repository broken).
+        """
+        if not commit.parent_shas:
+            argv = ("--root", commit.sha)
+        else:
+            argv = (f"{commit.parent_shas[0]}..{commit.sha}",)
+        try:
+            return self._shell.run(GitDiffCmd(*argv), cwd=self.root)
+        except ShellError as exc:
+            raise GitError(
+                f"failed to diff {commit.sha[:7]} against its parent"
+            ) from exc

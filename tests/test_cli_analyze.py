@@ -61,7 +61,7 @@ def _no_logging_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
     mutation that would otherwise bleed into unrelated tests' ``caplog``.
     """
     monkeypatch.setattr(
-        "whygraph.cli._configure_logging_best_effort", lambda: None
+        "whygraph.cli.commands.analyze._configure_logging_best_effort", lambda: None
     )
 
 

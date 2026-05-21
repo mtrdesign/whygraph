@@ -165,7 +165,7 @@ def stub_init(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         fake_db.touch()
         return fake_db
 
-    monkeypatch.setattr("whygraph.cli._ensure_db_initialized", _fake)
+    monkeypatch.setattr("whygraph.cli.commands.init._ensure_db_initialized", _fake)
     return fake_db
 
 
@@ -184,7 +184,7 @@ def test_init_list_clients_does_not_touch_db(
         called["n"] += 1
         return tmp_path / "x.db"
 
-    monkeypatch.setattr("whygraph.cli._ensure_db_initialized", _fake)
+    monkeypatch.setattr("whygraph.cli.commands.init._ensure_db_initialized", _fake)
     runner = CliRunner()
     result = runner.invoke(whygraph_main, ["init", "--list-clients"])
     assert result.exit_code == 0, result.output

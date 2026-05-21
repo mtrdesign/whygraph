@@ -16,6 +16,7 @@ config instance instead.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import ClassVar
 
 from whygraph.core import get_config
@@ -81,7 +82,9 @@ class LlmClientFactory:
         """Sorted tuple of currently registered provider tags."""
         return tuple(sorted(self._registry))
 
-    def make(self, provider: str, **overrides) -> LlmClient:
+    def make(
+        self, provider: str, *, model: str | None = None, **overrides
+    ) -> LlmClient:
         """Construct an :class:`LlmClient` for the given provider tag.
 
         Parameters
@@ -90,6 +93,11 @@ class LlmClientFactory:
             One of :attr:`providers`. The built-ins are listed in
             :attr:`BUILTIN_PROVIDERS`; third-party tags added via
             :meth:`register` are also accepted.
+        model : str, optional
+            Override the model bound by the provider's config. ``None``
+            (default) uses the model from the registered config section.
+            Every provider config is a dataclass with a ``model`` field,
+            so the override is applied via :func:`dataclasses.replace`.
         **overrides
             Forwarded to the adapter's ``from_config`` (e.g. ``client=``
             to inject a stub SDK in tests).
@@ -111,6 +119,8 @@ class LlmClientFactory:
                 f"available: {self.providers}"
             )
         cls, config_obj = entry
+        if model is not None:
+            config_obj = dataclasses.replace(config_obj, model=model)
         return cls.from_config(config_obj, **overrides)
 
     def register(

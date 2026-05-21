@@ -17,7 +17,7 @@ dependencies = [
 
 [project.scripts]
 whygraph = "whygraph.cli:main"
-whygraph-mcp = "whygraph.mcp_server:main"
+whygraph-mcp = "whygraph.mcp.server:main"
 
 [build-system]
 requires = ["hatchling"]

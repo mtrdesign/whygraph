@@ -14,6 +14,7 @@ from subprocess import CompletedProcess
 
 from whygraph.core import ShellCommand
 
+from .blame import BlameHunk
 from .commit import Commit
 
 GitRevParseCmd = ShellCommand(
@@ -97,6 +98,41 @@ class GitDiffCmd(ShellCommand[str]):
 
     def parse(self, result: CompletedProcess[str]) -> str:
         return result.stdout
+
+
+class GitBlameCmd(ShellCommand[tuple[BlameHunk, ...]]):
+    """``git blame -L<a>,<b> --porcelain -- <path>`` — line ownership.
+
+    Blames a contiguous line range of one file and parses the porcelain
+    output into per-commit :class:`BlameHunk` records.
+
+    Parameters
+    ----------
+    path : str
+        File to blame, relative to the repository root.
+    line_start : int
+        First line of the range (1-based, inclusive).
+    line_end : int
+        Last line of the range (1-based, inclusive).
+    """
+
+    def __init__(self, path: str, line_start: int, line_end: int) -> None:
+        self.path = path
+        self.line_start = line_start
+        self.line_end = line_end
+
+    def argv(self) -> list[str]:
+        return [
+            "git",
+            "blame",
+            f"-L{self.line_start},{self.line_end}",
+            "--porcelain",
+            "--",
+            self.path,
+        ]
+
+    def parse(self, result: CompletedProcess[str]) -> tuple[BlameHunk, ...]:
+        return BlameHunk.from_porcelain(result.stdout)
 
 
 class GitLogShortstatCmd(ShellCommand[Iterator[Commit]]):

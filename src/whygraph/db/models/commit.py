@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import REAL, Text, text
+from sqlalchemy import Text
 from sqlmodel import Field
 
 from whygraph.db.base import WhygraphTable
@@ -23,11 +23,5 @@ class Commit(WhygraphTable, table=True):
     insertions: int
     deletions: int
     scanned_at: str = Field(sa_type=Text)
-    subject_tfidf_score: float = Field(
-        default=0.0, sa_type=REAL, sa_column_kwargs={"server_default": text("0")}
-    )
-    body_tfidf_score: float = Field(
-        default=0.0, sa_type=REAL, sa_column_kwargs={"server_default": text("0")}
-    )
     llm_description: str | None = Field(default=None, sa_type=Text)
     llm_description_model: str | None = Field(default=None, sa_type=Text)

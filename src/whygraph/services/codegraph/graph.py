@@ -21,7 +21,9 @@ from .exceptions import CodeGraphError
 from .relation import Relation
 from .symbol import NODE_COLUMNS, Symbol
 
-# Location of the CodeGraph database within a repository.
+# Default location of the CodeGraph database within a repository. Overridable
+# per-project by the ``codegraph_db`` key in ``whygraph.toml`` — see
+# :meth:`CodeGraph.for_repository`.
 _DB_RELPATH = Path(".codegraph") / "codegraph.db"
 
 # ``SELECT`` of the node columns Symbol.from_row needs — bare for plain node
@@ -39,9 +41,10 @@ _CALLS = "calls"
 class CodeGraph:
     """Read-only view of a CodeGraph knowledge graph.
 
-    Construct directly from a database path, or via :meth:`for_repository` to
-    resolve ``<root>/.codegraph/codegraph.db``. The connection is opened
-    read-only; the instance is a context manager, so the idiomatic use is::
+    Construct directly from a database path, or via :meth:`for_repository`,
+    which resolves ``<root>/.codegraph/codegraph.db`` (or a ``whygraph.toml``
+    override). The connection is opened read-only; the instance is a context
+    manager, so the idiomatic use is::
 
         with CodeGraph.for_repository(repo_root) as graph:
             symbol = graph.symbol("pkg.module.func")
@@ -81,26 +84,34 @@ class CodeGraph:
         self._conn.row_factory = sqlite3.Row
 
     @classmethod
-    def for_repository(cls, root: Path) -> "CodeGraph":
+    def for_repository(
+        cls, root: Path, *, codegraph_db: Path | None = None
+    ) -> "CodeGraph":
         """Open the CodeGraph database for a repository.
 
         Parameters
         ----------
         root : Path
             The repository root — the directory that contains ``.codegraph/``.
+        codegraph_db : Path, optional
+            Explicit database path that overrides the default location. Pass
+            :attr:`whygraph.core.config.Config.codegraph_db` here to honour a
+            ``codegraph_db`` entry in ``whygraph.toml``. When ``None``
+            (default), the project-relative ``<root>/.codegraph/codegraph.db``
+            is used.
 
         Returns
         -------
         CodeGraph
-            A view bound to ``<root>/.codegraph/codegraph.db``.
+            A view bound to the resolved database path.
 
         Raises
         ------
         CodeGraphError
-            If ``.codegraph/codegraph.db`` does not exist under ``root`` — most
-            often because ``codegraph init`` has not been run there.
+            If the resolved database does not exist — most often because
+            ``codegraph init`` has not been run.
         """
-        return cls(root / _DB_RELPATH)
+        return cls(codegraph_db if codegraph_db is not None else root / _DB_RELPATH)
 
     def __repr__(self) -> str:
         return f"CodeGraph(db_path={self.db_path!r})"

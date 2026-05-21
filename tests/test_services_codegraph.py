@@ -45,6 +45,17 @@ def test_for_repository_opens_db_at_conventional_path(
         assert graph.symbol("pkg.a") is not None
 
 
+def test_for_repository_honours_codegraph_db_override(
+    tmp_path: Path, fake_codegraph_db: Path
+) -> None:
+    # The explicit override (a `whygraph.toml` `codegraph_db` entry) wins over
+    # the <root>/.codegraph/... default — note `tmp_path` has no `.codegraph/`.
+    with CodeGraph.for_repository(
+        tmp_path, codegraph_db=fake_codegraph_db
+    ) as graph:
+        assert graph.symbol("pkg.a") is not None
+
+
 def test_context_manager_closes_the_connection(fake_codegraph_db: Path) -> None:
     with CodeGraph(fake_codegraph_db) as graph:
         pass

@@ -23,13 +23,19 @@ CREATE TABLE edges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source TEXT NOT NULL,
     target TEXT NOT NULL,
-    kind TEXT NOT NULL
+    kind TEXT NOT NULL,
+    line INTEGER
 );
 CREATE TABLE files (
     path TEXT PRIMARY KEY,
     language TEXT
 );
 """
+
+
+# An edge fixture row: (source, target, kind), or (source, target, kind, line)
+# when a test needs to exercise the edge's recorded line.
+EdgeRow = tuple[str, str, str] | tuple[str, str, str, int | None]
 
 
 _NODE_FIELDS = (
@@ -54,12 +60,11 @@ def _insert_nodes(conn: sqlite3.Connection, nodes: Iterable[dict]) -> None:
     )
 
 
-def _insert_edges(
-    conn: sqlite3.Connection, edges: Iterable[tuple[str, str, str]]
-) -> None:
+def _insert_edges(conn: sqlite3.Connection, edges: Iterable[EdgeRow]) -> None:
+    rows = [(e[0], e[1], e[2], e[3] if len(e) > 3 else None) for e in edges]
     conn.executemany(
-        "INSERT INTO edges(source, target, kind) VALUES (?, ?, ?)",
-        list(edges),
+        "INSERT INTO edges(source, target, kind, line) VALUES (?, ?, ?, ?)",
+        rows,
     )
 
 
@@ -67,7 +72,7 @@ def build_fake_codegraph_db(
     path: Path,
     *,
     nodes: list[dict] | None = None,
-    edges: list[tuple[str, str, str]] | None = None,
+    edges: list[EdgeRow] | None = None,
 ) -> Path:
     """Create a minimal CodeGraph-shaped SQLite DB for tests.
 
@@ -138,7 +143,7 @@ def codegraph_db_factory(tmp_path: Path):
     def _factory(
         *,
         nodes: list[dict] | None = None,
-        edges: list[tuple[str, str, str]] | None = None,
+        edges: list[EdgeRow] | None = None,
     ) -> Path:
         counter["n"] += 1
         path = tmp_path / f"codegraph_{counter['n']}.db"

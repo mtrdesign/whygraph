@@ -1,7 +1,8 @@
 """LLM-driven rationale for a piece of code's change history.
 
 This is the raw service that turns an evidence bundle — scanned commits
-with their linked pull requests and issues — into a structured
+with their linked pull requests and issues, optionally enriched with the
+target symbol's code-graph context — into a structured
 :class:`~whygraph.analyze.Rationale` card explaining *why* the code exists.
 It owns only the prompt + LLM round-trip:
 
@@ -23,6 +24,7 @@ from collections.abc import Sequence
 
 from whygraph.core.config import RationaleConfig
 from whygraph.db.models import Commit, Issue, PullRequest
+from whygraph.services.codegraph import Relation, SymbolContext
 from whygraph.services.llm import (
     CompletionRequest,
     LlmClient,
@@ -137,6 +139,87 @@ def _format_evidence(evidence: Sequence[CommitEvidence]) -> str:
             lines.extend(_format_issue(issue))
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks)
+
+
+# Cap on the target docstring excerpt — keeps the structural section from
+# crowding out the change-history evidence.
+_DOCSTRING_EXCERPT_CHARS = 240
+
+
+def _first_paragraph(text: str, limit: int = _DOCSTRING_EXCERPT_CHARS) -> str:
+    """Return ``text``'s first paragraph, whitespace-collapsed and clipped.
+
+    Splits on the first blank line, collapses runs of whitespace to single
+    spaces, and truncates to ``limit`` characters with an ellipsis marker.
+    """
+    paragraph = " ".join(text.strip().split("\n\n", 1)[0].split())
+    if len(paragraph) > limit:
+        return paragraph[:limit].rstrip() + "…"
+    return paragraph
+
+
+def _format_relation(relation: Relation) -> str:
+    """Render one caller/callee :class:`Relation` as a single bullet line.
+
+    Falls back to the neighbour symbol's own start line when the edge did not
+    record a site line.
+    """
+    symbol = relation.symbol
+    line = relation.line if relation.line is not None else symbol.start_line
+    return f"  - {symbol.qualified_name} ({symbol.kind})  {symbol.file_path}:{line}"
+
+
+def _format_relations(header: str, relations: Sequence[Relation]) -> list[str]:
+    """Render a labelled caller/callee block — ``header`` plus one line each.
+
+    An empty ``relations`` yields a single ``(none recorded)`` line so the
+    block's meaning stays explicit.
+    """
+    lines = [header]
+    if relations:
+        lines.extend(_format_relation(r) for r in relations)
+    else:
+        lines.append("  (none recorded)")
+    return lines
+
+
+def _format_symbol_context(context: SymbolContext) -> str:
+    """Render a :class:`SymbolContext` as the structural-evidence section.
+
+    The block names the target symbol — kind, location, signature, and a
+    docstring excerpt — then lists its callers (fan-in) and callees (fan-out).
+    It is prepended to the change-history evidence so the model sees *what the
+    code is* before *how it got there*.
+    """
+    target = context.target
+    lines = [
+        "CODE GRAPH CONTEXT",
+        "",
+        f"Target: {target.qualified_name} ({target.kind})",
+        f"  {target.file_path}:{target.start_line}-{target.end_line}",
+    ]
+    if target.signature and target.signature.strip():
+        # CodeGraph stores signatures verbatim — often multi-line; collapse to
+        # one line so the block's indentation stays consistent.
+        lines.append(f"  {' '.join(target.signature.split())}")
+    if target.docstring and target.docstring.strip():
+        lines.append(f"  {_first_paragraph(target.docstring)}")
+    lines.append("")
+    lines.extend(
+        _format_relations(
+            f"Called by ({len(context.callers)} caller(s) — "
+            "blast radius of a change):",
+            context.callers,
+        )
+    )
+    lines.append("")
+    lines.extend(
+        _format_relations(
+            f"Calls ({len(context.callees)} callee(s) — what this depends on):",
+            context.callees,
+        )
+    )
+    return "\n".join(lines)
 
 
 def _strip_code_fence(text: str) -> str:
@@ -298,7 +381,12 @@ class RationaleGenerator:
         client = factory.make(config.provider, model=config.model)
         return cls(client, timeout_sec=config.timeout_sec)
 
-    def generate(self, evidence: Sequence[CommitEvidence]) -> Rationale:
+    def generate(
+        self,
+        evidence: Sequence[CommitEvidence],
+        *,
+        symbol_context: SymbolContext | None = None,
+    ) -> Rationale:
         """Generate a rationale card for one evidence bundle.
 
         Parameters
@@ -307,6 +395,12 @@ class RationaleGenerator:
             The commits — with their linked pull requests and issues —
             whose history explains the code. Formatted into the prompt in
             the order given.
+        symbol_context : SymbolContext, optional
+            The target symbol's code-graph context — its signature,
+            docstring, callers, and callees. When given, it is rendered as a
+            ``CODE GRAPH CONTEXT`` section ahead of the change history, so the
+            rationale is grounded in code structure as well as commit prose.
+            ``None`` (default) omits the section.
 
         Returns
         -------
@@ -329,6 +423,8 @@ class RationaleGenerator:
         # TODO: capping bundle size belongs to the future evidence-bundle
         # builder — the generator neither truncates nor chunks its input.
         bundle = _format_evidence(evidence)
+        if symbol_context is not None:
+            bundle = f"{_format_symbol_context(symbol_context)}\n\n{bundle}"
         task = render(
             self._rationale_prompt.task, bundle, placeholder=RATIONALE_PLACEHOLDER
         )

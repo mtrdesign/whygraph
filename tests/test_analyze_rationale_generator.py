@@ -23,9 +23,13 @@ from whygraph.analyze import (
     RationaleError,
     RationaleGenerator,
 )
-from whygraph.analyze.rationale_generator import _format_evidence
+from whygraph.analyze.rationale_generator import (
+    _format_evidence,
+    _format_symbol_context,
+)
 from whygraph.core.config import RationaleConfig
 from whygraph.db.models import Commit, Issue, PullRequest
+from whygraph.services.codegraph import Relation, Symbol, SymbolContext
 from whygraph.services.llm import (
     CompletionRequest,
     CompletionResponse,
@@ -153,6 +157,55 @@ def _issue(
         html_url="https://example.com/issue/7",
         labels='["perf", "regression"]',
         fetched_at="2026-05-02T00:00:00Z",
+    )
+
+
+def _symbol(
+    *,
+    id: str = "n_target",
+    kind: str = "method",
+    name: str = "generate",
+    qualified_name: str = "whygraph.analyze.RationaleGenerator.generate",
+    file_path: str = "src/whygraph/analyze/rationale_generator.py",
+    start_line: int = 301,
+    end_line: int = 357,
+    docstring: str | None = "Generate a rationale card for one evidence bundle.",
+    signature: str | None = "def generate(self, evidence, *, symbol_context=None)",
+) -> Symbol:
+    """A CodeGraph :class:`Symbol` with sensible defaults for tests."""
+    return Symbol(
+        id=id,
+        kind=kind,
+        name=name,
+        qualified_name=qualified_name,
+        file_path=file_path,
+        language="python",
+        start_line=start_line,
+        end_line=end_line,
+        docstring=docstring,
+        signature=signature,
+    )
+
+
+def _relation(
+    *,
+    qualified_name: str = "whygraph.cli.analyze",
+    kind: str = "calls",
+    line: int | None = 42,
+) -> Relation:
+    """A caller/callee :class:`Relation` with sensible defaults for tests."""
+    return Relation(
+        symbol=_symbol(
+            id=f"n_{qualified_name}",
+            kind="function",
+            name=qualified_name.rsplit(".", 1)[-1],
+            qualified_name=qualified_name,
+            file_path="src/whygraph/cli.py",
+            docstring=None,
+            signature=None,
+        ),
+        kind=kind,
+        line=line,
     )
 
 
@@ -421,6 +474,82 @@ def test_format_evidence_omits_absent_llm_description() -> None:
     bundle = _format_evidence([CommitEvidence(_commit(llm_description=None))])
 
     assert "Summary:" not in bundle
+
+
+# ---- _format_symbol_context ---------------------------------------------
+
+
+def test_format_symbol_context_renders_target_callers_and_callees() -> None:
+    context = SymbolContext(
+        target=_symbol(),
+        callers=(_relation(qualified_name="whygraph.cli.analyze", line=42),),
+        callees=(
+            _relation(qualified_name="whygraph.analyze.prompt.render", line=120),
+        ),
+    )
+
+    text = _format_symbol_context(context)
+
+    assert "CODE GRAPH CONTEXT" in text
+    assert (
+        "Target: whygraph.analyze.RationaleGenerator.generate (method)" in text
+    )
+    assert "def generate(self, evidence, *, symbol_context=None)" in text
+    assert "Called by (1 caller(s)" in text
+    assert "whygraph.cli.analyze (function)" in text
+    assert "Calls (1 callee(s)" in text
+    assert "whygraph.analyze.prompt.render (function)" in text
+
+
+def test_format_symbol_context_marks_empty_caller_and_callee_blocks() -> None:
+    context = SymbolContext(target=_symbol(), callers=(), callees=())
+
+    text = _format_symbol_context(context)
+
+    assert text.count("(none recorded)") == 2
+
+
+def test_format_symbol_context_falls_back_to_symbol_line_when_edge_lacks_one() -> (
+    None
+):
+    context = SymbolContext(
+        target=_symbol(),
+        callers=(_relation(qualified_name="pkg.caller", line=None),),
+        callees=(),
+    )
+
+    text = _format_symbol_context(context)
+
+    # _relation defaults the caller symbol's start_line to 301.
+    assert "src/whygraph/cli.py:301" in text
+
+
+def test_generate_includes_symbol_context_in_user_message() -> None:
+    client = _StubClient()
+    generator = RationaleGenerator(client)
+    context = SymbolContext(
+        target=_symbol(qualified_name="pkg.thing"),
+        callers=(_relation(qualified_name="pkg.caller"),),
+        callees=(),
+    )
+
+    generator.generate([CommitEvidence(_commit())], symbol_context=context)
+
+    user_message = client.requests[0].messages[1].content
+    assert "CODE GRAPH CONTEXT" in user_message
+    assert "pkg.thing" in user_message
+    assert "pkg.caller" in user_message
+    # The change-history evidence is still present alongside the new section.
+    assert "COMMIT" in user_message
+
+
+def test_generate_omits_graph_section_when_no_symbol_context() -> None:
+    client = _StubClient()
+    generator = RationaleGenerator(client)
+
+    generator.generate([CommitEvidence(_commit())])
+
+    assert "CODE GRAPH CONTEXT" not in client.requests[0].messages[1].content
 
 
 # ---- from_config ---------------------------------------------------------

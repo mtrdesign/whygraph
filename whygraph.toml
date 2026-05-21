@@ -5,7 +5,14 @@ log_level = "INFO"           # DEBUG | INFO | WARN | ERROR | CRITICAL
 rationale_model = "claude-opus-4-7"
 
 [scan]
-max_workers = 2
+max_workers = 2              # parallel LLM calls in the diff-analyzer crawler
+
+[analyze]
+# LLM that writes a per-commit "git diff" description during `whygraph scan`.
+provider = "ollama"             # which [llm.*] adapter to use
+# model = "claude-haiku-4-5"    # override the provider's model for analysis only
+# max_diff_chars = 50000        # diff truncated past this length before prompting
+# timeout_sec = 60              # per-call timeout; default: the adapter's own
 
 # Uncomment to override default DB locations (relative to project root):
 # whygraph_db  = ".whygraph/whygraph.db"
@@ -34,7 +41,7 @@ model = "deepseek-chat"
 timeout_sec = 60
 
 [llm.ollama]
-model = "llama3"
+model = "qwen3:0.6b"
 # host = "http://localhost:11434"
 timeout_sec = 120
 

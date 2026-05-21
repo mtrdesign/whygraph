@@ -16,9 +16,9 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from whygraph import backend as backend_module
 from whygraph.core import configure_logging, get_config
 from whygraph import mcp_queries
+from whygraph.services.codegraph import CodeGraph
 from whygraph.services.llm import ClaudeCliAdapter, CompletionRequest
 from whygraph.scan import authors as authors_module
 from whygraph.scan import db as db_module
@@ -219,15 +219,12 @@ def _resolve_target(
                 "qualified_name targeting requires CodeGraph. Set CODEGRAPH_DB or "
                 "run `codegraph init` to create .codegraph/codegraph.db."
             )
-        backend = backend_module.SqliteCodegraphBackend(cg_path)
-        try:
-            node = backend.get_node(qualified_name)
-            if node is None:
-                raise WhyGraphError(
-                    f"qualified_name {qualified_name!r} not found in CodeGraph"
-                )
-        finally:
-            backend.close()
+        with CodeGraph(cg_path) as graph:
+            node = graph.symbol(qualified_name)
+        if node is None:
+            raise WhyGraphError(
+                f"qualified_name {qualified_name!r} not found in CodeGraph"
+            )
         return {
             "path": node.file_path,
             "line_start": node.start_line,

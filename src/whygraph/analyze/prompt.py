@@ -12,11 +12,11 @@ Layout — ``prompts/<component>/<key>/<file>``:
 * ``key`` is the resolution rung — a model id, a provider tag, or
   ``default``.
 * Each LLM call needs two files: a ``system`` message (standing
-  instructions) and a ``task`` message (the payload). The descriptor
-  runs two *operations* — ``describe`` and ``synthesis`` — and the
-  operation is a filename prefix: ``describe`` uses ``system.md`` /
-  ``task.md``, ``synthesis`` uses ``synthesis.system.md`` /
-  ``synthesis.task.md``.
+  instructions) and a ``task`` message (the payload). A component may
+  prompt for one or more *operations*, and the operation is a filename
+  prefix mapped by :data:`_OPERATION_INFIX`: ``describe`` and
+  ``rationale`` use ``system.md`` / ``task.md``, ``synthesis`` uses
+  ``synthesis.system.md`` / ``synthesis.task.md``.
 
 Resolution is layered and *per file*: for a given ``(provider, model)``
 each file is looked up on its own, the first that exists winning, in the
@@ -50,8 +50,11 @@ SYNTHESIS_PLACEHOLDER = "{{DESCRIPTIONS}}"
 """Placeholder token for the joined chunk descriptions in a ``synthesis``
 task prompt."""
 
-PromptOperation = Literal["describe", "synthesis"]
-"""The two operations the descriptor prompts for — see the module docstring."""
+RATIONALE_PLACEHOLDER = "{{EVIDENCE}}"
+"""Placeholder token for the evidence bundle in a ``rationale`` task prompt."""
+
+PromptOperation = Literal["describe", "synthesis", "rationale"]
+"""The operations an analyze module prompts for — see the module docstring."""
 
 PromptRole = Literal["system", "task"]
 """The two files a resolved prompt is made of."""
@@ -59,6 +62,7 @@ PromptRole = Literal["system", "task"]
 _OPERATION_INFIX: dict[PromptOperation, str] = {
     "describe": "",
     "synthesis": "synthesis.",
+    "rationale": "",
 }
 
 _DEFAULT_KEY = "default"

@@ -178,6 +178,38 @@ class AnalyzeConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class RationaleConfig:
+    """Configuration for the LLM-driven rationale generator.
+
+    Loaded from the ``[rationale]`` table in ``whygraph.toml``. Consumed by
+    :meth:`whygraph.analyze.RationaleGenerator.from_config` to construct a
+    generator against an existing :class:`LlmConfig`-backed provider.
+
+    Attributes
+    ----------
+    provider : str
+        Tag of the :class:`whygraph.services.llm.LlmClient` adapter to use.
+        Must match one of :attr:`LlmClientFactory.providers` at construction
+        time; unknown providers surface as
+        :class:`whygraph.services.llm.LlmError` from
+        :meth:`~whygraph.analyze.RationaleGenerator.from_config`, not here —
+        ``core/config`` deliberately does not import from ``services/llm``
+        to keep the dependency direction clean.
+    model : str or None
+        Model identifier the generator should use. ``None`` (default)
+        defers to the provider's own ``[llm.<provider>]`` model; otherwise
+        it overrides that model for rationale generation only.
+    timeout_sec : int or None
+        Per-call timeout forwarded into :class:`CompletionRequest`.
+        ``None`` (default) defers to the bound adapter's default.
+    """
+
+    provider: str = "anthropic"
+    model: str | None = None
+    timeout_sec: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class LlmConfig:
     """Aggregate of every per-provider :class:`LlmClient` configuration.
 
@@ -239,6 +271,14 @@ def _build_analyze_config(raw: dict) -> AnalyzeConfig:
     return AnalyzeConfig(**{k: v for k, v in raw.items() if k in known})
 
 
+def _build_rationale_config(raw: dict) -> RationaleConfig:
+    """Parse a raw ``[rationale]`` dict into a typed :class:`RationaleConfig`."""
+    known = {f.name for f in fields(RationaleConfig)}
+    for unknown in set(raw) - known:
+        _log.warning("ignoring unknown key in [rationale]: %r", unknown)
+    return RationaleConfig(**{k: v for k, v in raw.items() if k in known})
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     """Immutable runtime configuration for the WhyGraph package.
@@ -252,9 +292,6 @@ class Config:
     log_level : str
         Logging verbosity; must match a :class:`LogLevel` member name
         (case-insensitive). Default ``"INFO"``.
-    rationale_model : str
-        Claude model identifier used when generating rationale cards.
-        Default ``"claude-opus-4-7"``.
     scan_max_workers : int
         Thread-pool size for the scan phase. Must be ``>= 1``.
         Default ``2``.
@@ -273,15 +310,19 @@ class Config:
         Settings for the LLM commit descriptor. Loaded from the
         ``[analyze]`` table; consumed by
         :meth:`whygraph.analyze.LlmDescriptor.from_config`.
+    rationale : RationaleConfig
+        Settings for the LLM rationale generator. Loaded from the
+        ``[rationale]`` table; consumed by
+        :meth:`whygraph.analyze.RationaleGenerator.from_config`.
     """
 
     log_level: str = "INFO"
-    rationale_model: str = "claude-opus-4-7"
     scan_max_workers: int = 2
     whygraph_db: Path | None = None
     codegraph_db: Path | None = None
     llm: LlmConfig = field(default_factory=LlmConfig)
     analyze: AnalyzeConfig = field(default_factory=AnalyzeConfig)
+    rationale: RationaleConfig = field(default_factory=RationaleConfig)
 
     def __post_init__(self) -> None:
         """Validate field values immediately after construction.
@@ -356,6 +397,10 @@ class Config:
         analyze_raw = raw.pop("analyze", {}) or {}
         if analyze_raw:
             raw["analyze"] = _build_analyze_config(analyze_raw)
+
+        rationale_raw = raw.pop("rationale", {}) or {}
+        if rationale_raw:
+            raw["rationale"] = _build_rationale_config(rationale_raw)
 
         base = path.parent
         for key in ("whygraph_db", "codegraph_db"):

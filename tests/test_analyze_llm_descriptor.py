@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from whygraph.analyze import AnalyzeError, Description, LlmDescriptor
+from whygraph.analyze import AnalyzeError, Description, LlmDescriptor, Prompt
 from whygraph.core.config import AnalyzeConfig
 from whygraph.services.llm import (
     CompletionRequest,
@@ -143,7 +143,7 @@ def test_describe_returns_description_with_response_metadata() -> None:
     assert desc.truncated is False
 
 
-def test_describe_renders_prompt_with_diff_body() -> None:
+def test_describe_sends_system_then_user_with_diff_body() -> None:
     client = _StubClient()
     descriptor = LlmDescriptor(client)
     diff = "diff --git a/x b/x\nbody-here"
@@ -151,9 +151,12 @@ def test_describe_renders_prompt_with_diff_body() -> None:
     descriptor.describe(diff)
 
     assert len(client.requests) == 1
-    rendered = client.requests[0].messages[-1].content
-    assert diff in rendered
-    assert rendered.rstrip().endswith("Output only the description.")
+    messages = client.requests[0].messages
+    assert [m.role for m in messages] == ["system", "user"]
+    # The diff body is interpolated into the user (task) message only.
+    assert diff in messages[1].content
+    assert diff not in messages[0].content
+    assert messages[0].content.strip()  # system carries standing instructions
 
 
 def test_describe_forwards_timeout_into_request() -> None:
@@ -165,28 +168,34 @@ def test_describe_forwards_timeout_into_request() -> None:
     assert client.requests[0].timeout_sec == 42
 
 
-def test_describe_uses_custom_prompt_template() -> None:
+def test_describe_uses_custom_describe_prompt() -> None:
+    """An explicit describe_prompt skips resolution: its system goes out
+    verbatim, its task is rendered with the diff."""
     client = _StubClient()
-    descriptor = LlmDescriptor(client, prompt_template="ONLY: {{DIFF}}")
+    descriptor = LlmDescriptor(
+        client, describe_prompt=Prompt(system="SYS", task="ONLY: {{DIFF}}")
+    )
 
     descriptor.describe("body")
 
-    assert client.requests[0].messages[-1].content == "ONLY: body"
+    messages = client.requests[0].messages
+    assert messages[0].content == "SYS"
+    assert messages[1].content == "ONLY: body"
 
 
-def test_describe_resolves_packaged_default_when_no_template_given() -> None:
-    """With no ``prompt_template``, the descriptor resolves a markdown
-    prompt by the client's provider/model. The stub matches no per-model
-    or per-provider file, so resolution lands on the packaged default."""
+def test_describe_resolves_packaged_describe_prompt_when_none_given() -> None:
+    """With no describe_prompt, the descriptor resolves the packaged
+    llm_descriptor markdown by the client's provider/model. The stub
+    matches no override folder, so resolution lands on default/."""
     client = _StubClient()
-    descriptor = LlmDescriptor(client)  # no prompt_template
+    descriptor = LlmDescriptor(client)  # no describe_prompt
 
     descriptor.describe("the diff body")
 
-    rendered = client.requests[0].messages[-1].content
-    assert "the diff body" in rendered
-    assert "writing a note to your future self" in rendered
-    assert rendered.rstrip().endswith("Output only the description.")
+    messages = client.requests[0].messages
+    # The persona lives in the system message, the diff in the user one.
+    assert "writing a note to your future self" in messages[0].content
+    assert "the diff body" in messages[1].content
 
 
 # ---- describe: truncation ------------------------------------------------
@@ -322,8 +331,8 @@ def test_describe_splits_large_diff_into_chunk_calls_plus_synthesis() -> None:
     descriptor = LlmDescriptor(
         client,
         max_diff_chars=60,
-        prompt_template="DESCRIBE {{DIFF}}",
-        synthesis_template="SYNTH {{DESCRIPTIONS}}",
+        describe_prompt=Prompt(system="DS", task="DESCRIBE {{DIFF}}"),
+        synthesis_prompt=Prompt(system="SS", task="SYNTH {{DESCRIPTIONS}}"),
     )
     diff = _diff_file("a", 50) + _diff_file("b", 50) + _diff_file("c", 50)
     assert len(diff) > 60  # precondition: over the split threshold
@@ -340,7 +349,9 @@ def test_describe_splits_large_diff_into_chunk_calls_plus_synthesis() -> None:
 def test_describe_synthesis_request_carries_each_chunk_description() -> None:
     client = _ScriptedClient(["DESC-A", "DESC-B", "DESC-C", "MERGED"])
     descriptor = LlmDescriptor(
-        client, max_diff_chars=60, synthesis_template="{{DESCRIPTIONS}}"
+        client,
+        max_diff_chars=60,
+        synthesis_prompt=Prompt(system="SS", task="{{DESCRIPTIONS}}"),
     )
     diff = _diff_file("a", 50) + _diff_file("b", 50) + _diff_file("c", 50)
 
@@ -353,17 +364,21 @@ def test_describe_synthesis_request_carries_each_chunk_description() -> None:
     assert desc.text == "MERGED"
 
 
-def test_describe_resolves_packaged_synthesis_when_no_template_given() -> None:
-    """With no ``synthesis_template``, the descriptor resolves the
-    packaged synthesis.md and uses it for the merge call."""
+def test_describe_resolves_packaged_synthesis_prompt_when_none_given() -> None:
+    """With no synthesis_prompt, the descriptor resolves the packaged
+    synthesis markdown (system + task) for the merge call."""
     client = _StubClient()
-    descriptor = LlmDescriptor(client, max_diff_chars=60)  # no templates
+    descriptor = LlmDescriptor(client, max_diff_chars=60)  # no overrides
     diff = _diff_file("a", 50) + _diff_file("b", 50) + _diff_file("c", 50)
 
     descriptor.describe(diff)
 
-    synthesis_body = client.requests[-1].messages[-1].content
-    assert synthesis_body.rstrip().endswith("Output only the merged description.")
+    synthesis = client.requests[-1].messages
+    assert [m.role for m in synthesis] == ["system", "user"]
+    # The synthesis system prompt frames the merge; the user message
+    # carries the joined chunk descriptions.
+    assert "merge" in synthesis[0].content.lower()
+    assert "--- chunk 1 ---" in synthesis[1].content
 
 
 def test_describe_single_oversized_file_truncates_without_synthesis() -> None:

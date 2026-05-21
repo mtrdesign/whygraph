@@ -31,9 +31,13 @@ from whygraph.services.llm import (
 from .description import Description
 from .diff_split import split_into_chunks
 from .exceptions import AnalyzeError
-from .prompt import SYNTHESIS_PLACEHOLDER, render, resolve
+from .prompt import SYNTHESIS_PLACEHOLDER, Prompt, render, resolve
 
 _TRUNCATION_MARKER = "\n[truncated: {omitted} chars omitted]"
+
+# Prompt component tag — the subtree under ``analyze/prompts/`` that
+# holds this class's ``system`` / ``task`` markdown files.
+_PROMPT_COMPONENT = "llm_descriptor"
 
 
 def _sum_tokens(values: list[int | None]) -> int | None:
@@ -79,20 +83,21 @@ class LlmDescriptor:
     timeout_sec : int or None
         Per-call timeout forwarded into the :class:`CompletionRequest`.
         ``None`` (default) defers to the adapter's bound default.
-    prompt_template : str, optional
-        Override the ``describe`` prompt template. When ``None``
-        (default), the template is resolved from markdown by the
-        client's provider and model — see
-        :func:`whygraph.analyze.prompt.resolve`. An explicit string
-        skips resolution entirely; it should contain the
+    describe_prompt : Prompt, optional
+        Override the ``describe`` prompt — the ``system`` + ``task``
+        pair. When ``None`` (default), it is resolved from markdown by
+        the client's provider and model — see
+        :func:`whygraph.analyze.prompt.resolve`. An explicit
+        :class:`~whygraph.analyze.prompt.Prompt` skips resolution; its
+        ``task`` should contain the
         :data:`~whygraph.analyze.prompt.PLACEHOLDER` token. Mostly used
         in tests and one-off overrides.
-    synthesis_template : str, optional
-        Override the ``synthesis`` prompt template, used to merge
-        per-chunk descriptions of a split diff. Resolution mirrors
-        ``prompt_template`` (``kind="synthesis"``); an explicit string
-        should contain the
-        :data:`~whygraph.analyze.prompt.SYNTHESIS_PLACEHOLDER` token.
+    synthesis_prompt : Prompt, optional
+        Override the ``synthesis`` prompt, used to merge per-chunk
+        descriptions of a split diff. Resolution mirrors
+        ``describe_prompt``; an explicit
+        :class:`~whygraph.analyze.prompt.Prompt` ``task`` should contain
+        the :data:`~whygraph.analyze.prompt.SYNTHESIS_PLACEHOLDER` token.
 
     Examples
     --------
@@ -109,23 +114,27 @@ class LlmDescriptor:
         *,
         max_diff_chars: int = 50_000,
         timeout_sec: int | None = None,
-        prompt_template: str | None = None,
-        synthesis_template: str | None = None,
+        describe_prompt: Prompt | None = None,
+        synthesis_prompt: Prompt | None = None,
     ) -> None:
         if max_diff_chars < 1:
             raise ValueError(f"max_diff_chars must be >= 1, got {max_diff_chars}")
         self._client = client
         self._max_diff_chars = max_diff_chars
         self._timeout_sec = timeout_sec
-        self._prompt_template = (
-            prompt_template
-            if prompt_template is not None
-            else resolve(client.provider, client.model)
+        self._describe_prompt = (
+            describe_prompt
+            if describe_prompt is not None
+            else resolve(
+                _PROMPT_COMPONENT, "describe", client.provider, client.model
+            )
         )
-        self._synthesis_template = (
-            synthesis_template
-            if synthesis_template is not None
-            else resolve(client.provider, client.model, kind="synthesis")
+        self._synthesis_prompt = (
+            synthesis_prompt
+            if synthesis_prompt is not None
+            else resolve(
+                _PROMPT_COMPONENT, "synthesis", client.provider, client.model
+            )
         )
 
     def __repr__(self) -> str:
@@ -224,8 +233,12 @@ class LlmDescriptor:
         unit the chunk-split path calls once per chunk.
         """
         clipped, truncated = self._truncate(body)
-        prompt = render(self._prompt_template, clipped)
-        request = CompletionRequest.of(prompt, timeout_sec=self._timeout_sec)
+        task = render(self._describe_prompt.task, clipped)
+        request = CompletionRequest.of(
+            task,
+            system=self._describe_prompt.system,
+            timeout_sec=self._timeout_sec,
+        )
 
         try:
             response = self._client.complete(request)
@@ -253,10 +266,14 @@ class LlmDescriptor:
         joined = "\n\n".join(
             f"--- chunk {n} ---\n{part.text}" for n, part in enumerate(parts, start=1)
         )
-        prompt = render(
-            self._synthesis_template, joined, placeholder=SYNTHESIS_PLACEHOLDER
+        task = render(
+            self._synthesis_prompt.task, joined, placeholder=SYNTHESIS_PLACEHOLDER
         )
-        request = CompletionRequest.of(prompt, timeout_sec=self._timeout_sec)
+        request = CompletionRequest.of(
+            task,
+            system=self._synthesis_prompt.system,
+            timeout_sec=self._timeout_sec,
+        )
 
         try:
             response = self._client.complete(request)

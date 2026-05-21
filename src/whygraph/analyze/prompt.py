@@ -1,28 +1,40 @@
-"""Markdown-backed prompt templates for the LLM commit descriptor.
+"""Markdown-backed system + task prompts for the analyze package.
 
 Prompts live as ``.md`` files under ``analyze/prompts/`` rather than as
 Python string constants. This lets the prompt vary per model without
 code changes, and keeps prose where prose belongs.
 
-There are two prompt *kinds*: ``describe`` turns one diff (or diff
-chunk) into a description, ``synthesis`` merges several chunk
-descriptions into one. Each kind resolves independently.
+Layout — ``prompts/<component>/<key>/<file>``:
 
-Resolution is layered: for a given ``(provider, model)`` the first file
-that exists wins. For ``describe`` the order is ``<model>.md`` →
-``<provider>.md`` → ``default.md``; for ``synthesis`` it is
-``<model>.synthesis.md`` → ``<provider>.synthesis.md`` →
-``synthesis.md``. Only the two defaults ship; per-provider and
-per-model files are dropped in by the user as needed.
+* ``component`` groups prompts by the analyze module that uses them
+  (e.g. ``llm_descriptor``), so a future module drops its prompts into
+  its own subtree without colliding.
+* ``key`` is the resolution rung — a model id, a provider tag, or
+  ``default``.
+* Each LLM call needs two files: a ``system`` message (standing
+  instructions) and a ``task`` message (the payload). The descriptor
+  runs two *operations* — ``describe`` and ``synthesis`` — and the
+  operation is a filename prefix: ``describe`` uses ``system.md`` /
+  ``task.md``, ``synthesis`` uses ``synthesis.system.md`` /
+  ``synthesis.task.md``.
+
+Resolution is layered and *per file*: for a given ``(provider, model)``
+each file is looked up on its own, the first that exists winning, in the
+order ``<model>/`` → ``<provider>/`` → ``default/``. An override folder
+may therefore carry just one file (e.g. a model-specific ``task.md``)
+and inherit the rest from ``default/``. Only the ``default/`` files
+ship; per-provider and per-model folders are dropped in as needed.
 
 Interpolation is a literal :meth:`str.replace` of a placeholder token —
 *not* :meth:`str.format` — so braces in the markdown (code fences, JSON
-examples) survive untouched.
+examples) survive untouched. Only the ``task`` file carries a
+placeholder; the ``system`` file is static.
 """
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from importlib import resources
 from importlib.resources.abc import Traversable
 from pathlib import Path
@@ -31,22 +43,49 @@ from typing import Literal
 from .exceptions import AnalyzeError
 
 PLACEHOLDER = "{{DIFF}}"
-"""Placeholder token for the diff body in a ``describe`` prompt. Chosen
-so it never collides with literal braces in prompt prose."""
+"""Placeholder token for the diff body in a ``describe`` task prompt.
+Chosen so it never collides with literal braces in prompt prose."""
 
 SYNTHESIS_PLACEHOLDER = "{{DESCRIPTIONS}}"
 """Placeholder token for the joined chunk descriptions in a ``synthesis``
-prompt."""
+task prompt."""
 
-PromptKind = Literal["describe", "synthesis"]
-"""The two prompt kinds — see the module docstring."""
+PromptOperation = Literal["describe", "synthesis"]
+"""The two operations the descriptor prompts for — see the module docstring."""
 
-_DEFAULT_NAME = "default.md"
-_SYNTHESIS_NAME = "synthesis.md"
+PromptRole = Literal["system", "task"]
+"""The two files a resolved prompt is made of."""
 
-# A prompt key (provider tag or model id) is only used to build a
-# filename when it is a plain path component — no separators, no `..`.
+_OPERATION_INFIX: dict[PromptOperation, str] = {
+    "describe": "",
+    "synthesis": "synthesis.",
+}
+
+_DEFAULT_KEY = "default"
+
+# A prompt key (provider tag or model id) is only used to build a path
+# component when it is plain — no separators, no `..`.
 _SAFE_KEY = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+@dataclass(frozen=True, slots=True)
+class Prompt:
+    """A resolved prompt — the ``system`` and ``task`` halves of one call.
+
+    Attributes
+    ----------
+    system : str
+        Standing instructions, sent as the ``"system"`` message. Static —
+        carries no placeholder.
+    task : str
+        The payload framing, sent as the ``"user"`` message. Carries the
+        operation's placeholder (:data:`PLACEHOLDER` or
+        :data:`SYNTHESIS_PLACEHOLDER`); pass it through :func:`render`
+        before use.
+    """
+
+    system: str
+    task: str
 
 
 def _packaged_prompts_dir() -> Traversable:
@@ -54,54 +93,70 @@ def _packaged_prompts_dir() -> Traversable:
     return resources.files("whygraph.analyze") / "prompts"
 
 
-def _candidate_names(provider: str, model: str, kind: PromptKind) -> list[str]:
-    """Ordered prompt filenames to try for ``(provider, model, kind)``.
-
-    Most specific first. Keys that are not safe filename components are
-    dropped silently — resolution falls through to the next candidate.
-    The ``synthesis`` kind carries a ``.synthesis`` infix so its files
-    sit alongside the ``describe`` ones without colliding.
-    """
-    if kind == "synthesis":
-        infix, default_name = ".synthesis", _SYNTHESIS_NAME
-    else:
-        infix, default_name = "", _DEFAULT_NAME
-    names: list[str] = []
-    for key in (model, provider):
-        if _SAFE_KEY.match(key):
-            names.append(f"{key}{infix}.md")
-    names.append(default_name)
-    return names
+def _filename(operation: PromptOperation, role: PromptRole) -> str:
+    """Build the ``.md`` filename for an ``(operation, role)`` pair."""
+    return f"{_OPERATION_INFIX[operation]}{role}.md"
 
 
-def resolve(
+def _resolve_file(
+    component: str,
+    operation: PromptOperation,
+    role: PromptRole,
     provider: str,
     model: str,
     *,
-    kind: PromptKind = "describe",
-    prompts_dir: Traversable | Path | None = None,
+    directory: Traversable | Path,
 ) -> str:
-    """Return the prompt template for a ``(provider, model, kind)`` tuple.
+    """Resolve one prompt file down the ``model -> provider -> default`` ladder.
 
-    Resolution order — the first file that exists wins. For
-    ``kind="describe"``::
+    Returns the text of the first ``<component>/<key>/<filename>`` that
+    exists. Keys that are not safe path components are skipped silently.
 
-        prompts/<model>.md  ->  prompts/<provider>.md  ->  prompts/default.md
+    Raises
+    ------
+    AnalyzeError
+        If not even the ``default`` file is found — a packaging bug for
+        the shipped files, otherwise a missing override.
+    """
+    filename = _filename(operation, role)
+    for key in (model, provider, _DEFAULT_KEY):
+        if not _SAFE_KEY.match(key):
+            continue
+        candidate = directory / component / key / filename
+        if candidate.is_file():
+            return candidate.read_text(encoding="utf-8")
+    raise AnalyzeError(
+        f"no {operation} {role} prompt found for component={component!r} "
+        f"provider={provider!r} model={model!r}; "
+        f"{component}/{_DEFAULT_KEY}/{filename} is missing from {directory}"
+    )
 
-    For ``kind="synthesis"``::
 
-        <model>.synthesis.md -> <provider>.synthesis.md -> synthesis.md
+def resolve(
+    component: str,
+    operation: PromptOperation,
+    provider: str,
+    model: str,
+    *,
+    prompts_dir: Traversable | Path | None = None,
+) -> Prompt:
+    """Resolve the ``system`` + ``task`` prompt for one operation.
+
+    The two files are resolved independently — see the module docstring
+    — so the returned :class:`Prompt` may mix rungs (e.g. a model-level
+    ``task`` with the ``default`` ``system``).
 
     Parameters
     ----------
+    component : str
+        Analyze module the prompt belongs to (e.g. ``"llm_descriptor"``).
+    operation : {"describe", "synthesis"}
+        Which operation to resolve the prompt for.
     provider : str
         Provider tag of the resolved :class:`~whygraph.services.llm.LlmClient`
         (e.g. ``"anthropic"``).
     model : str
         Model identifier bound to the client (e.g. ``"claude-opus-4-7"``).
-    kind : {"describe", "synthesis"}, optional
-        Which prompt to resolve. ``"describe"`` (default) turns a diff
-        into a description; ``"synthesis"`` merges chunk descriptions.
     prompts_dir : Traversable or Path, optional
         Directory to resolve against. ``None`` (default) uses the
         packaged ``analyze/prompts/`` directory. Tests inject a tmp
@@ -109,25 +164,22 @@ def resolve(
 
     Returns
     -------
-    str
-        The raw template text, ready for :func:`render`.
+    Prompt
+        The ``system`` and ``task`` text, ready for :func:`render`.
 
     Raises
     ------
     AnalyzeError
-        If not even the kind's default file is found — that means the
-        package data is missing, a packaging bug rather than a user
-        error.
+        If either file cannot be resolved, even at the ``default`` rung.
     """
     directory = prompts_dir if prompts_dir is not None else _packaged_prompts_dir()
-    names = _candidate_names(provider, model, kind)
-    for name in names:
-        candidate = directory / name
-        if candidate.is_file():
-            return candidate.read_text(encoding="utf-8")
-    raise AnalyzeError(
-        f"no {kind} prompt template found for provider={provider!r} "
-        f"model={model!r}; {names[-1]} is missing from {directory}"
+    return Prompt(
+        system=_resolve_file(
+            component, operation, "system", provider, model, directory=directory
+        ),
+        task=_resolve_file(
+            component, operation, "task", provider, model, directory=directory
+        ),
     )
 
 
@@ -142,7 +194,8 @@ def render(template: str, value: str, *, placeholder: str = PLACEHOLDER) -> str:
     Parameters
     ----------
     template : str
-        A resolved prompt template (see :func:`resolve`).
+        The ``task`` half of a resolved :class:`Prompt`. The ``system``
+        half is static and never rendered.
     value : str
         Text to interpolate. For a ``describe`` prompt this is the raw
         diff (truncation is the caller's concern —
@@ -156,7 +209,7 @@ def render(template: str, value: str, *, placeholder: str = PLACEHOLDER) -> str:
     Returns
     -------
     str
-        The rendered prompt, ready as the body of a
+        The rendered task text, ready as the ``user`` message of a
         :class:`whygraph.services.llm.CompletionRequest`.
     """
     return template.replace(placeholder, value)

@@ -1,4 +1,11 @@
-"""Tests for :mod:`whygraph.analyze.prompt` — the markdown prompt resolver."""
+"""Tests for :mod:`whygraph.analyze.prompt` — the markdown prompt resolver.
+
+``resolve`` reads a ``system`` + ``task`` pair from
+``prompts/<component>/<key>/`` and returns a :class:`Prompt`; the two
+files resolve independently down a ``<model> -> <provider> -> default``
+ladder. ``render`` interpolates the diff (or chunk descriptions) into the
+task half.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from whygraph.analyze import AnalyzeError, PLACEHOLDER, SYNTHESIS_PLACEHOLDER
+from whygraph.analyze import (
+    AnalyzeError,
+    PLACEHOLDER,
+    Prompt,
+    SYNTHESIS_PLACEHOLDER,
+)
 from whygraph.analyze.prompt import render, resolve
 
 
@@ -32,85 +44,6 @@ def test_render_multiple_placeholders_all_replaced() -> None:
     assert render(f"{PLACEHOLDER}/{PLACEHOLDER}", "x") == "x/x"
 
 
-# ---- resolve: layering ---------------------------------------------------
-
-
-def _write(directory: Path, name: str, body: str) -> None:
-    (directory / name).write_text(body, encoding="utf-8")
-
-
-def test_resolve_falls_back_to_default(tmp_path: Path) -> None:
-    _write(tmp_path, "default.md", "DEFAULT BODY")
-
-    assert resolve("openai", "gpt-4o", prompts_dir=tmp_path) == "DEFAULT BODY"
-
-
-def test_resolve_prefers_provider_over_default(tmp_path: Path) -> None:
-    _write(tmp_path, "default.md", "DEFAULT")
-    _write(tmp_path, "anthropic.md", "ANTHROPIC")
-
-    assert resolve("anthropic", "any-model", prompts_dir=tmp_path) == "ANTHROPIC"
-    # A provider with no file still falls through to default.
-    assert resolve("openai", "any-model", prompts_dir=tmp_path) == "DEFAULT"
-
-
-def test_resolve_prefers_model_over_provider(tmp_path: Path) -> None:
-    _write(tmp_path, "default.md", "DEFAULT")
-    _write(tmp_path, "anthropic.md", "ANTHROPIC")
-    _write(tmp_path, "claude-opus-4-7.md", "MODEL")
-
-    assert (
-        resolve("anthropic", "claude-opus-4-7", prompts_dir=tmp_path) == "MODEL"
-    )
-    # A sibling model with no file drops to the provider file.
-    assert (
-        resolve("anthropic", "claude-haiku-4-5", prompts_dir=tmp_path)
-        == "ANTHROPIC"
-    )
-
-
-def test_resolve_raises_when_default_missing(tmp_path: Path) -> None:
-    """An empty prompts dir is a packaging bug — surface it clearly."""
-    with pytest.raises(AnalyzeError, match="default.md"):
-        resolve("anthropic", "claude-opus-4-7", prompts_dir=tmp_path)
-
-
-# ---- resolve: filename safety -------------------------------------------
-
-
-def test_resolve_skips_unsafe_keys_without_traversal(tmp_path: Path) -> None:
-    """A model id with path separators must not escape the prompts dir;
-    resolution simply falls through to the next safe candidate."""
-    _write(tmp_path, "default.md", "DEFAULT")
-    _write(tmp_path, "anthropic.md", "ANTHROPIC")
-    # Plant a file one level up that a traversal could otherwise reach.
-    (tmp_path.parent / "secrets.md").write_text("SECRET", encoding="utf-8")
-
-    assert (
-        resolve("anthropic", "../secrets", prompts_dir=tmp_path) == "ANTHROPIC"
-    )
-
-
-def test_resolve_unsafe_provider_falls_through_to_default(tmp_path: Path) -> None:
-    _write(tmp_path, "default.md", "DEFAULT")
-
-    assert resolve("../../etc/passwd", "x/y", prompts_dir=tmp_path) == "DEFAULT"
-
-
-# ---- resolve: the real packaged prompts ---------------------------------
-
-
-def test_resolve_packaged_default_is_shipped() -> None:
-    """With no prompts_dir override, resolve() reads the packaged
-    default.md — the resolution backstop must always be present."""
-    template = resolve("no-such-provider", "no-such-model")
-    assert PLACEHOLDER in template
-    assert template.rstrip().endswith("Output only the description.")
-
-
-# ---- render: synthesis placeholder --------------------------------------
-
-
 def test_render_substitutes_synthesis_placeholder() -> None:
     rendered = render(
         f"before {SYNTHESIS_PLACEHOLDER} after",
@@ -127,61 +60,171 @@ def test_render_default_placeholder_leaves_synthesis_token_untouched() -> None:
     assert rendered == f"{SYNTHESIS_PLACEHOLDER} and D"
 
 
-# ---- resolve: the synthesis kind ----------------------------------------
+# ---- resolve: helper -----------------------------------------------------
 
 
-def test_resolve_synthesis_falls_back_to_default(tmp_path: Path) -> None:
-    _write(tmp_path, "synthesis.md", "SYNTH DEFAULT")
-
-    assert (
-        resolve("openai", "gpt-4o", kind="synthesis", prompts_dir=tmp_path)
-        == "SYNTH DEFAULT"
-    )
-
-
-def test_resolve_synthesis_prefers_model_then_provider(tmp_path: Path) -> None:
-    _write(tmp_path, "synthesis.md", "SYNTH")
-    _write(tmp_path, "anthropic.synthesis.md", "SYNTH ANTHROPIC")
-    _write(tmp_path, "claude-opus-4-7.synthesis.md", "SYNTH MODEL")
-
-    assert (
-        resolve(
-            "anthropic", "claude-opus-4-7", kind="synthesis", prompts_dir=tmp_path
-        )
-        == "SYNTH MODEL"
-    )
-    # A sibling model with no file drops to the provider synthesis file.
-    assert (
-        resolve("anthropic", "other-model", kind="synthesis", prompts_dir=tmp_path)
-        == "SYNTH ANTHROPIC"
-    )
-    # A provider with no file drops to the synthesis default.
-    assert (
-        resolve("openai", "gpt-4o", kind="synthesis", prompts_dir=tmp_path)
-        == "SYNTH"
-    )
-
-
-def test_resolve_describe_and_synthesis_ladders_are_independent(
-    tmp_path: Path,
+def _write(
+    prompts_dir: Path, component: str, key: str, filename: str, body: str
 ) -> None:
-    """A dir holding only describe prompts resolves describe but not
-    synthesis — the two kinds never borrow each other's files."""
-    _write(tmp_path, "default.md", "DESCRIBE")
-
-    assert resolve("openai", "gpt-4o", prompts_dir=tmp_path) == "DESCRIBE"
-    with pytest.raises(AnalyzeError, match="synthesis.md"):
-        resolve("openai", "gpt-4o", kind="synthesis", prompts_dir=tmp_path)
+    """Create ``<prompts_dir>/<component>/<key>/<filename>`` with ``body``."""
+    path = prompts_dir / component / key / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
 
 
-def test_resolve_synthesis_raises_when_default_missing(tmp_path: Path) -> None:
+# ---- resolve: the system + task pair -------------------------------------
+
+
+def test_resolve_reads_system_and_task(tmp_path: Path) -> None:
+    _write(tmp_path, "comp", "default", "system.md", "SYS")
+    _write(tmp_path, "comp", "default", "task.md", "TASK {{DIFF}}")
+
+    prompt = resolve("comp", "describe", "openai", "gpt-4o", prompts_dir=tmp_path)
+
+    assert isinstance(prompt, Prompt)
+    assert prompt.system == "SYS"
+    assert prompt.task == "TASK {{DIFF}}"
+
+
+# ---- resolve: the model -> provider -> default ladder --------------------
+
+
+def test_resolve_prefers_model_then_provider_then_default(tmp_path: Path) -> None:
+    for key in ("default", "anthropic", "claude-opus-4-7"):
+        _write(tmp_path, "comp", key, "system.md", f"SYS:{key}")
+        _write(tmp_path, "comp", key, "task.md", f"TASK:{key}")
+
+    # The model folder wins outright.
+    model = resolve(
+        "comp", "describe", "anthropic", "claude-opus-4-7", prompts_dir=tmp_path
+    )
+    assert model.system == "SYS:claude-opus-4-7"
+    assert model.task == "TASK:claude-opus-4-7"
+
+    # A sibling model with no folder drops to the provider folder.
+    provider = resolve(
+        "comp", "describe", "anthropic", "claude-haiku-4-5", prompts_dir=tmp_path
+    )
+    assert provider.system == "SYS:anthropic"
+
+    # An unknown provider drops to default.
+    default = resolve("comp", "describe", "openai", "gpt-4o", prompts_dir=tmp_path)
+    assert default.system == "SYS:default"
+
+
+def test_resolve_mixes_rungs_per_file(tmp_path: Path) -> None:
+    """system.md and task.md resolve independently: a model folder can
+    override just the task and inherit the default system prompt."""
+    _write(tmp_path, "comp", "default", "system.md", "SYS:default")
+    _write(tmp_path, "comp", "default", "task.md", "TASK:default")
+    # The model folder carries only task.md.
+    _write(tmp_path, "comp", "claude-opus-4-7", "task.md", "TASK:model")
+
+    prompt = resolve(
+        "comp", "describe", "anthropic", "claude-opus-4-7", prompts_dir=tmp_path
+    )
+
+    assert prompt.task == "TASK:model"  # from the model folder
+    assert prompt.system == "SYS:default"  # inherited from default/
+
+
+# ---- resolve: the synthesis operation ------------------------------------
+
+
+def test_resolve_synthesis_uses_prefixed_filenames(tmp_path: Path) -> None:
+    _write(tmp_path, "comp", "default", "synthesis.system.md", "SYN-SYS")
+    _write(
+        tmp_path, "comp", "default", "synthesis.task.md", "SYN {{DESCRIPTIONS}}"
+    )
+
+    prompt = resolve("comp", "synthesis", "openai", "gpt-4o", prompts_dir=tmp_path)
+
+    assert prompt.system == "SYN-SYS"
+    assert prompt.task == "SYN {{DESCRIPTIONS}}"
+
+
+def test_resolve_describe_and_synthesis_are_independent(tmp_path: Path) -> None:
+    """A folder with only the describe files resolves describe but not
+    synthesis — the prefixed filenames keep the operations apart."""
+    _write(tmp_path, "comp", "default", "system.md", "SYS")
+    _write(tmp_path, "comp", "default", "task.md", "TASK")
+
+    assert resolve("comp", "describe", "openai", "gpt-4o", prompts_dir=tmp_path)
     with pytest.raises(AnalyzeError, match="synthesis"):
-        resolve(
-            "anthropic", "claude-opus-4-7", kind="synthesis", prompts_dir=tmp_path
-        )
+        resolve("comp", "synthesis", "openai", "gpt-4o", prompts_dir=tmp_path)
 
 
-def test_resolve_packaged_synthesis_is_shipped() -> None:
-    """The synthesis backstop must ship alongside default.md."""
-    template = resolve("no-such-provider", "no-such-model", kind="synthesis")
-    assert SYNTHESIS_PLACEHOLDER in template
+# ---- resolve: missing files ----------------------------------------------
+
+
+def test_resolve_raises_when_system_file_missing(tmp_path: Path) -> None:
+    _write(tmp_path, "comp", "default", "task.md", "TASK")  # no system.md
+
+    with pytest.raises(AnalyzeError, match="system"):
+        resolve("comp", "describe", "openai", "gpt-4o", prompts_dir=tmp_path)
+
+
+def test_resolve_raises_when_task_file_missing(tmp_path: Path) -> None:
+    _write(tmp_path, "comp", "default", "system.md", "SYS")  # no task.md
+
+    with pytest.raises(AnalyzeError, match="task"):
+        resolve("comp", "describe", "openai", "gpt-4o", prompts_dir=tmp_path)
+
+
+def test_resolve_isolates_components(tmp_path: Path) -> None:
+    """Each component resolves only its own subtree."""
+    _write(tmp_path, "comp_a", "default", "system.md", "A-SYS")
+    _write(tmp_path, "comp_a", "default", "task.md", "A-TASK")
+
+    assert (
+        resolve("comp_a", "describe", "p", "m", prompts_dir=tmp_path).system
+        == "A-SYS"
+    )
+    with pytest.raises(AnalyzeError):
+        resolve("comp_b", "describe", "p", "m", prompts_dir=tmp_path)
+
+
+# ---- resolve: filename safety --------------------------------------------
+
+
+def test_resolve_skips_unsafe_keys_without_traversal(tmp_path: Path) -> None:
+    """A model id with path separators must not escape the component
+    folder; resolution falls through to the next safe key."""
+    _write(tmp_path, "comp", "default", "system.md", "DEFAULT")
+    _write(tmp_path, "comp", "default", "task.md", "DEFAULT")
+    # Plant files exactly where a `comp/../secrets/` traversal would land.
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    (secrets / "system.md").write_text("SECRET", encoding="utf-8")
+    (secrets / "task.md").write_text("SECRET", encoding="utf-8")
+
+    prompt = resolve(
+        "comp", "describe", "anthropic", "../secrets", prompts_dir=tmp_path
+    )
+
+    assert prompt.system == "DEFAULT"
+
+
+def test_resolve_unsafe_provider_falls_through_to_default(tmp_path: Path) -> None:
+    _write(tmp_path, "comp", "default", "system.md", "DEFAULT")
+    _write(tmp_path, "comp", "default", "task.md", "DEFAULT")
+
+    prompt = resolve("comp", "describe", "../../etc", "x/y", prompts_dir=tmp_path)
+    assert prompt.system == "DEFAULT"
+
+
+# ---- resolve: the real packaged prompts ----------------------------------
+
+
+def test_resolve_packaged_describe_prompt_is_shipped() -> None:
+    """With no prompts_dir override, resolve() reads the packaged
+    llm_descriptor describe prompt — the resolution backstop."""
+    prompt = resolve("llm_descriptor", "describe", "no-such", "no-such")
+    assert PLACEHOLDER in prompt.task
+    assert prompt.system.strip()
+
+
+def test_resolve_packaged_synthesis_prompt_is_shipped() -> None:
+    prompt = resolve("llm_descriptor", "synthesis", "no-such", "no-such")
+    assert SYNTHESIS_PLACEHOLDER in prompt.task
+    assert prompt.system.strip()

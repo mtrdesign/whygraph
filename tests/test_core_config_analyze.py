@@ -86,3 +86,20 @@ def test_analyze_config_is_frozen() -> None:
     cfg = AnalyzeConfig()
     with pytest.raises(Exception):  # FrozenInstanceError
         cfg.provider = "openai"  # type: ignore[misc]
+
+
+def test_analyze_model_defaults_to_none(tmp_path: Path) -> None:
+    config = _write(tmp_path / "whygraph.toml", "")
+    cfg = Config.from_toml(config)
+
+    assert cfg.analyze.model is None
+
+
+def test_analyze_model_parsed(tmp_path: Path) -> None:
+    config = _write(
+        tmp_path / "whygraph.toml",
+        '[analyze]\nmodel = "claude-haiku-4-5"\n',
+    )
+    cfg = Config.from_toml(config)
+
+    assert cfg.analyze.model == "claude-haiku-4-5"

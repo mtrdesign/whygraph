@@ -158,6 +158,10 @@ class AnalyzeConfig:
         :meth:`~whygraph.analyze.LlmDescriptor.from_config`, not here —
         ``core/config`` deliberately does not import from
         ``services/llm`` to keep the dependency direction clean.
+    model : str or None
+        Model identifier the analyzer should use. ``None`` (default)
+        defers to the provider's own ``[llm.<provider>]`` model;
+        otherwise it overrides that model for commit descriptions only.
     max_diff_chars : int
         Cap on diff length before prompting. Diffs longer than this are
         truncated with an explicit marker so the model knows the input
@@ -168,6 +172,7 @@ class AnalyzeConfig:
     """
 
     provider: str = "anthropic"
+    model: str | None = None
     max_diff_chars: int = 50_000
     timeout_sec: int | None = None
 

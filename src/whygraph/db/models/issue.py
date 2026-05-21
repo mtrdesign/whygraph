@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import REAL, Text, text
+from sqlalchemy import Text
 from sqlmodel import Field
 
 from whygraph.db.base import WhygraphTable
@@ -22,9 +22,3 @@ class Issue(WhygraphTable, table=True):
     html_url: str = Field(sa_type=Text)
     labels: str = Field(sa_type=Text)
     fetched_at: str = Field(sa_type=Text)
-    title_tfidf_score: float = Field(
-        default=0.0, sa_type=REAL, sa_column_kwargs={"server_default": text("0")}
-    )
-    body_tfidf_score: float = Field(
-        default=0.0, sa_type=REAL, sa_column_kwargs={"server_default": text("0")}
-    )

@@ -1,8 +1,8 @@
 """initial schema
 
-Revision ID: 1facaeb7bddb
+Revision ID: 4ebdddf127cf
 Revises: 
-Create Date: 2026-05-17 17:09:26.439020
+Create Date: 2026-05-21 15:40:59.833772
 
 """
 from typing import Sequence, Union
@@ -13,7 +13,7 @@ import sqlmodel
 
 
 # revision identifiers, used by Alembic.
-revision: str = '1facaeb7bddb'
+revision: str = '4ebdddf127cf'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -54,8 +54,6 @@ def upgrade() -> None:
     sa.Column('insertions', sa.Integer(), nullable=False),
     sa.Column('deletions', sa.Integer(), nullable=False),
     sa.Column('scanned_at', sa.Text(), nullable=False),
-    sa.Column('subject_tfidf_score', sa.REAL(), server_default=sa.text('0'), nullable=False),
-    sa.Column('body_tfidf_score', sa.REAL(), server_default=sa.text('0'), nullable=False),
     sa.Column('llm_description', sa.Text(), nullable=True),
     sa.Column('llm_description_model', sa.Text(), nullable=True),
     sa.PrimaryKeyConstraint('sha')
@@ -75,8 +73,6 @@ def upgrade() -> None:
     sa.Column('html_url', sa.Text(), nullable=False),
     sa.Column('labels', sa.Text(), nullable=False),
     sa.Column('fetched_at', sa.Text(), nullable=False),
-    sa.Column('title_tfidf_score', sa.REAL(), server_default=sa.text('0'), nullable=False),
-    sa.Column('body_tfidf_score', sa.REAL(), server_default=sa.text('0'), nullable=False),
     sa.PrimaryKeyConstraint('number')
     )
     with op.batch_alter_table('issue', schema=None) as batch_op:
@@ -111,8 +107,6 @@ def upgrade() -> None:
     sa.Column('fetched_at', sa.Text(), nullable=False),
     sa.Column('commit_titles', sa.Text(), server_default=sa.text("'[]'"), nullable=False),
     sa.Column('comments', sa.Text(), server_default=sa.text("'[]'"), nullable=False),
-    sa.Column('title_tfidf_score', sa.REAL(), server_default=sa.text('0'), nullable=False),
-    sa.Column('body_tfidf_score', sa.REAL(), server_default=sa.text('0'), nullable=False),
     sa.PrimaryKeyConstraint('number')
     )
     with op.batch_alter_table('pull_request', schema=None) as batch_op:

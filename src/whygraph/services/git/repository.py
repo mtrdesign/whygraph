@@ -12,6 +12,12 @@ from .commit import Commit
 from .commits import Commits
 from .exceptions import GitError
 
+# Git's well-known empty-tree object (SHA-1 repositories). Diffing a root
+# commit against it yields exactly what that commit introduced. Note that
+# ``git diff --root <sha>`` does NOT do this — ``--root`` is a no-op for
+# plain ``git diff``, which then compares ``<sha>`` to the working tree.
+_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
 
 class Repository:
     """A git repository rooted at a specific working tree on disk.
@@ -119,11 +125,10 @@ class Repository:
     def diff(self, commit: Commit) -> str:
         """Raw unified-diff text for ``commit`` against its first parent.
 
-        Root commits (no parents) are diffed against the empty tree via
-        ``git diff --no-color --root <sha>`` — git's documented form for
-        "what does this commit introduce". Merge commits diff against
-        their first parent, matching the convention already in use for
-        :attr:`Commit.stats`.
+        Root commits (no parents) are diffed against git's empty-tree
+        object, so the result is exactly what the commit introduced.
+        Merge commits diff against their first parent, matching the
+        convention already in use for :attr:`Commit.stats`.
 
         Returns
         -------
@@ -138,7 +143,7 @@ class Repository:
             If ``git`` itself fails (unknown sha, repository broken).
         """
         if not commit.parent_shas:
-            argv = ("--root", commit.sha)
+            argv = (f"{_EMPTY_TREE}..{commit.sha}",)
         else:
             argv = (f"{commit.parent_shas[0]}..{commit.sha}",)
         try:
@@ -147,3 +152,35 @@ class Repository:
             raise GitError(
                 f"failed to diff {commit.sha[:7]} against its parent"
             ) from exc
+
+    def diff_range(self, base: str, head: str) -> str:
+        """Raw unified-diff text for the range ``base..head``.
+
+        Unlike :meth:`diff` — which always compares a commit to its first
+        parent — this compares two arbitrary commit-ishes. Used by callers
+        that want "what changed between these two commits" rather than
+        "what this commit introduced".
+
+        Parameters
+        ----------
+        base : str
+            Commit-ish on the left of the ``..`` range — the state being
+            compared *from*.
+        head : str
+            Commit-ish on the right — the state being compared *to*.
+
+        Returns
+        -------
+        str
+            The raw ``git diff base..head`` output. Empty when the two
+            trees are identical (e.g. ``base == head``).
+
+        Raises
+        ------
+        GitError
+            If ``git`` itself fails (unknown commit-ish, broken repo).
+        """
+        try:
+            return self._shell.run(GitDiffCmd(f"{base}..{head}"), cwd=self.root)
+        except ShellError as exc:
+            raise GitError(f"failed to diff {base[:7]}..{head[:7]}") from exc

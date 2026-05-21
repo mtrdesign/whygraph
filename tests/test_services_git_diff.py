@@ -62,7 +62,7 @@ def test_diff_against_first_parent_contains_added_file(tmp_path: Path) -> None:
     assert "+world" in diff
 
 
-def test_diff_for_root_commit_uses_root_revspec(tmp_path: Path) -> None:
+def test_diff_for_root_commit_shows_only_its_introduction(tmp_path: Path) -> None:
     root = _make_repo(tmp_path)
     repo = Repository(root)
     initial = _commits_newest_first(root)[-1]  # oldest
@@ -70,9 +70,12 @@ def test_diff_for_root_commit_uses_root_revspec(tmp_path: Path) -> None:
 
     diff = repo.diff(initial)
 
-    assert diff  # non-empty
+    # Exactly what the root commit introduced: a.txt as a new file.
     assert "a.txt" in diff
     assert "+hello" in diff
+    # b.txt is added by a *later* commit; diffing the root against the
+    # working tree (the old `--root` no-op bug) would wrongly include it.
+    assert "b.txt" not in diff
 
 
 def test_diff_captures_modification_not_addition(tmp_path: Path) -> None:
@@ -127,3 +130,49 @@ def test_diff_raises_git_error_for_unknown_sha(tmp_path: Path) -> None:
 
     with pytest.raises(GitError):
         repo.diff(bogus)
+
+
+# ---- diff_range ----------------------------------------------------------
+
+
+def test_diff_range_between_two_commits(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    repo = Repository(root)
+    third, _second, first = _commits_newest_first(root)
+
+    diff = repo.diff_range(first.sha, third.sha)
+
+    # first -> third: b.txt added, a.txt edited.
+    assert "b.txt" in diff
+    assert "+world" in diff
+    assert "+hello updated" in diff
+
+
+def test_diff_range_is_directional(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    repo = Repository(root)
+    third, _second, first = _commits_newest_first(root)
+
+    forward = repo.diff_range(first.sha, third.sha)
+    reverse = repo.diff_range(third.sha, first.sha)
+
+    assert "+hello updated" in forward
+    # The reverse range shows that edit being undone, not applied.
+    assert "+hello updated" not in reverse
+
+
+def test_diff_range_of_commit_against_itself_is_empty(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    repo = Repository(root)
+    head = _commits_newest_first(root)[0]
+
+    assert repo.diff_range(head.sha, head.sha) == ""
+
+
+def test_diff_range_raises_git_error_for_unknown_ref(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    repo = Repository(root)
+    real = _commits_newest_first(root)[0]
+
+    with pytest.raises(GitError):
+        repo.diff_range("0" * 40, real.sha)

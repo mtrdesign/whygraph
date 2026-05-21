@@ -17,6 +17,7 @@ from whygraph.analyze import (
     AnalyzeError,
     PLACEHOLDER,
     Prompt,
+    RATIONALE_PLACEHOLDER,
     SYNTHESIS_PLACEHOLDER,
 )
 from whygraph.analyze.prompt import render, resolve
@@ -58,6 +59,15 @@ def test_render_default_placeholder_leaves_synthesis_token_untouched() -> None:
     in the template survives unless it is explicitly requested."""
     rendered = render(f"{SYNTHESIS_PLACEHOLDER} and {PLACEHOLDER}", "D")
     assert rendered == f"{SYNTHESIS_PLACEHOLDER} and D"
+
+
+def test_render_substitutes_rationale_placeholder() -> None:
+    rendered = render(
+        f"before {RATIONALE_PLACEHOLDER} after",
+        "EVIDENCE",
+        placeholder=RATIONALE_PLACEHOLDER,
+    )
+    assert rendered == "before EVIDENCE after"
 
 
 # ---- resolve: helper -----------------------------------------------------
@@ -227,4 +237,12 @@ def test_resolve_packaged_describe_prompt_is_shipped() -> None:
 def test_resolve_packaged_synthesis_prompt_is_shipped() -> None:
     prompt = resolve("llm_descriptor", "synthesis", "no-such", "no-such")
     assert SYNTHESIS_PLACEHOLDER in prompt.task
+    assert prompt.system.strip()
+
+
+def test_resolve_packaged_rationale_prompt_is_shipped() -> None:
+    """With no prompts_dir override, resolve() reads the packaged
+    rationale_generator prompt — the resolution backstop."""
+    prompt = resolve("rationale_generator", "rationale", "no-such", "no-such")
+    assert RATIONALE_PLACEHOLDER in prompt.task
     assert prompt.system.strip()

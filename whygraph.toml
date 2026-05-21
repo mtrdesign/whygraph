@@ -2,7 +2,6 @@
 # All fields are optional; shown values are the defaults.
 
 log_level = "INFO"           # DEBUG | INFO | WARN | ERROR | CRITICAL
-rationale_model = "claude-opus-4-7"
 
 [scan]
 max_workers = 2              # parallel LLM calls in the diff-analyzer crawler
@@ -12,6 +11,12 @@ max_workers = 2              # parallel LLM calls in the diff-analyzer crawler
 provider = "ollama"             # which [llm.*] adapter to use
 # model = "claude-haiku-4-5"    # override the provider's model for analysis only
 # max_diff_chars = 50000        # diff truncated past this length before prompting
+# timeout_sec = 60              # per-call timeout; default: the adapter's own
+
+[rationale]
+# LLM that writes a structured "why this code exists" rationale card.
+provider = "anthropic"          # which [llm.*] adapter to use
+# model = "claude-haiku-4-5"    # override the provider's model for rationale only
 # timeout_sec = 60              # per-call timeout; default: the adapter's own
 
 # Uncomment to override default DB locations (relative to project root):

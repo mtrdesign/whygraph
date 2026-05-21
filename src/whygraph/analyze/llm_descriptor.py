@@ -1,17 +1,21 @@
 """LLM-driven descriptions of git diffs.
 
-This is the raw service consumed by future orchestration (a crawler
-that walks commits, parallelizes via :class:`ThreadPoolExecutor`, and
-persists results to :attr:`Commit.llm_description`). The descriptor
-itself owns *only* the prompt + LLM round-trip:
+This is the raw service consumed by
+:class:`~whygraph.scan.analyze_crawler.AnalyzeCrawler`, which walks
+commits, parallelizes via :class:`ThreadPoolExecutor`, and persists
+results to ``commit.llm_description``. The descriptor itself owns *only*
+the prompt + LLM round-trip(s):
 
 * No git access — the diff is an input.
 * No DB writes — the :class:`Description` is an output.
-* No concurrency — one diff in, one description out.
+* No concurrency — one diff in, one description out. A diff over
+  :attr:`max_diff_chars` is split into per-file chunks and described
+  with one *sequential* LLM call per chunk plus a synthesis call; no
+  threads are spawned, since the crawler already parallelizes commits.
 
-Composing those concerns lives in the (deferred) crawler module so this
-class stays trivially testable: feed a stub :class:`LlmClient` and a
-diff string, assert on the returned :class:`Description`.
+Composing those concerns lives in the crawler module so this class
+stays trivially testable: feed a stub :class:`LlmClient` and a diff
+string, assert on the returned :class:`Description`.
 """
 
 from __future__ import annotations
@@ -25,10 +29,22 @@ from whygraph.services.llm import (
 )
 
 from .description import Description
+from .diff_split import split_into_chunks
 from .exceptions import AnalyzeError
-from .prompt import render
+from .prompt import SYNTHESIS_PLACEHOLDER, render, resolve
 
 _TRUNCATION_MARKER = "\n[truncated: {omitted} chars omitted]"
+
+
+def _sum_tokens(values: list[int | None]) -> int | None:
+    """Sum reported token counts, ignoring the ones a provider omitted.
+
+    Returns ``None`` only when *every* value is ``None`` — so a summed
+    count is absent only when no call reported one, not merely when one
+    call did.
+    """
+    present = [value for value in values if value is not None]
+    return sum(present) if present else None
 
 
 class LlmDescriptor:
@@ -37,11 +53,20 @@ class LlmDescriptor:
     The descriptor:
 
     1. Validates the diff is non-empty.
-    2. Truncates to :attr:`max_diff_chars` if needed, appending an
-       explicit marker so the model knows the input was clipped.
-    3. Renders the prompt template with the (possibly truncated) diff.
-    4. Calls :meth:`LlmClient.complete` with a single user message.
-    5. Returns a :class:`Description` value object.
+    2. A diff within :attr:`max_diff_chars` is described in a single LLM
+       call: render the ``describe`` prompt, call
+       :meth:`LlmClient.complete`, return a :class:`Description`.
+    3. A diff over :attr:`max_diff_chars` is split at file boundaries
+       into chunks (see
+       :func:`whygraph.analyze.diff_split.split_into_chunks`); each
+       chunk is described with its own call, then one synthesis call
+       merges the chunk descriptions into a single :class:`Description`.
+    4. A chunk that is itself over :attr:`max_diff_chars` (a single huge
+       file) is truncated with an explicit marker so the model knows
+       its input was clipped.
+    5. For a split diff the returned :class:`Description` sums its token
+       counts across every call, and ``truncated`` is set if any chunk
+       was clipped.
 
     Parameters
     ----------
@@ -49,13 +74,25 @@ class LlmDescriptor:
         Pre-configured adapter. Inject a stub in tests; in production,
         :meth:`from_config` builds one via :class:`LlmClientFactory`.
     max_diff_chars : int
-        Cap on the diff body before prompting. Defaults to ``50_000``.
+        Both the per-chunk truncation cap and the threshold above which
+        a diff is split into per-file chunks. Defaults to ``50_000``.
     timeout_sec : int or None
         Per-call timeout forwarded into the :class:`CompletionRequest`.
         ``None`` (default) defers to the adapter's bound default.
     prompt_template : str, optional
-        Override the default prompt template. Must contain ``{diff}``.
-        Mostly used in tests; production wiring relies on the default.
+        Override the ``describe`` prompt template. When ``None``
+        (default), the template is resolved from markdown by the
+        client's provider and model — see
+        :func:`whygraph.analyze.prompt.resolve`. An explicit string
+        skips resolution entirely; it should contain the
+        :data:`~whygraph.analyze.prompt.PLACEHOLDER` token. Mostly used
+        in tests and one-off overrides.
+    synthesis_template : str, optional
+        Override the ``synthesis`` prompt template, used to merge
+        per-chunk descriptions of a split diff. Resolution mirrors
+        ``prompt_template`` (``kind="synthesis"``); an explicit string
+        should contain the
+        :data:`~whygraph.analyze.prompt.SYNTHESIS_PLACEHOLDER` token.
 
     Examples
     --------
@@ -73,13 +110,23 @@ class LlmDescriptor:
         max_diff_chars: int = 50_000,
         timeout_sec: int | None = None,
         prompt_template: str | None = None,
+        synthesis_template: str | None = None,
     ) -> None:
         if max_diff_chars < 1:
             raise ValueError(f"max_diff_chars must be >= 1, got {max_diff_chars}")
         self._client = client
         self._max_diff_chars = max_diff_chars
         self._timeout_sec = timeout_sec
-        self._prompt_template = prompt_template
+        self._prompt_template = (
+            prompt_template
+            if prompt_template is not None
+            else resolve(client.provider, client.model)
+        )
+        self._synthesis_template = (
+            synthesis_template
+            if synthesis_template is not None
+            else resolve(client.provider, client.model, kind="synthesis")
+        )
 
     def __repr__(self) -> str:
         return (
@@ -119,7 +166,7 @@ class LlmDescriptor:
             Propagated directly so the user sees the available providers.
         """
         factory = factory if factory is not None else LlmClientFactory()
-        client = factory.make(config.provider)
+        client = factory.make(config.provider, model=config.model)
         return cls(
             client,
             max_diff_chars=config.max_diff_chars,
@@ -128,6 +175,11 @@ class LlmDescriptor:
 
     def describe(self, diff: str) -> Description:
         """Generate a description for one diff.
+
+        A diff within :attr:`max_diff_chars` is described in a single
+        call. A larger diff is split into per-file chunks, each chunk is
+        described separately, and a final synthesis call merges the
+        results — see the class docstring.
 
         Parameters
         ----------
@@ -138,20 +190,41 @@ class LlmDescriptor:
         Returns
         -------
         Description
-            The model's description plus provenance.
+            The model's description plus provenance. For a split diff,
+            token counts are summed across every call and ``truncated``
+            is ``True`` if any chunk was clipped.
 
         Raises
         ------
         AnalyzeError
-            If ``diff`` is empty/whitespace-only, or if the underlying
+            If ``diff`` is empty/whitespace-only, or if any underlying
             :meth:`LlmClient.complete` raises :class:`LlmError`. The
             original exception is preserved as ``__cause__``.
         """
         if not diff or not diff.strip():
             raise AnalyzeError("empty diff: nothing to describe")
 
-        body, truncated = self._truncate(diff)
-        prompt = render(body, template=self._prompt_template)
+        if len(diff) <= self._max_diff_chars:
+            return self._describe_one(diff)
+
+        chunks = split_into_chunks(diff, self._max_diff_chars)
+        if len(chunks) == 1:
+            # One file larger than the cap — nothing to synthesise; the
+            # lone chunk is truncated and described on its own.
+            return self._describe_one(chunks[0])
+
+        parts = [self._describe_one(chunk) for chunk in chunks]
+        return self._synthesize(parts)
+
+    def _describe_one(self, body: str) -> Description:
+        """Describe one diff body — a whole diff or a single chunk.
+
+        Truncates ``body`` to :attr:`max_diff_chars` if needed, renders
+        the ``describe`` prompt, and runs one completion. This is the
+        unit the chunk-split path calls once per chunk.
+        """
+        clipped, truncated = self._truncate(body)
+        prompt = render(self._prompt_template, clipped)
         request = CompletionRequest.of(prompt, timeout_sec=self._timeout_sec)
 
         try:
@@ -166,6 +239,41 @@ class LlmDescriptor:
             input_tokens=response.input_tokens,
             output_tokens=response.output_tokens,
             truncated=truncated,
+        )
+
+    def _synthesize(self, parts: list[Description]) -> Description:
+        """Merge per-chunk descriptions into one via a final LLM call.
+
+        The chunk descriptions are joined, labelled, and fed through the
+        ``synthesis`` prompt. Token counts on the returned
+        :class:`Description` are summed across every chunk call *and*
+        this synthesis call; ``truncated`` is ``True`` if any chunk was
+        clipped by :meth:`_truncate`.
+        """
+        joined = "\n\n".join(
+            f"--- chunk {n} ---\n{part.text}" for n, part in enumerate(parts, start=1)
+        )
+        prompt = render(
+            self._synthesis_template, joined, placeholder=SYNTHESIS_PLACEHOLDER
+        )
+        request = CompletionRequest.of(prompt, timeout_sec=self._timeout_sec)
+
+        try:
+            response = self._client.complete(request)
+        except LlmError as exc:
+            raise AnalyzeError(f"LLM synthesis call failed: {exc}") from exc
+
+        return Description(
+            text=response.text.strip(),
+            model=response.model,
+            provider=response.provider,
+            input_tokens=_sum_tokens(
+                [p.input_tokens for p in parts] + [response.input_tokens]
+            ),
+            output_tokens=_sum_tokens(
+                [p.output_tokens for p in parts] + [response.output_tokens]
+            ),
+            truncated=any(p.truncated for p in parts),
         )
 
     def _truncate(self, diff: str) -> tuple[str, bool]:

@@ -8,9 +8,12 @@ Public API
   knobs.
 * :class:`Description` — the value object returned by
   :meth:`LlmDescriptor.describe`.
-* :data:`DEFAULT_PROMPT_TEMPLATE`, :func:`render_prompt` — the prompt
-  template and its renderer, exposed for callers (and tests) that need
-  to inspect or override the wording.
+* :func:`resolve_prompt`, :func:`render_prompt`, :data:`PLACEHOLDER`,
+  :data:`SYNTHESIS_PLACEHOLDER` — the markdown prompt resolver, its
+  renderer, and the placeholder tokens for the ``describe`` and
+  ``synthesis`` prompts. Prompts live as ``.md`` files under
+  ``analyze/prompts/`` and resolve per ``(provider, model)``; exposed
+  for callers (and tests) that need to inspect or override the wording.
 * :class:`AnalyzeError` — single domain exception. Wraps underlying
   ``LlmError`` / ``GitError`` so consumers handle one type.
 
@@ -37,12 +40,19 @@ scope for this module — both live in the orchestrator that consumes
 from .description import Description
 from .exceptions import AnalyzeError
 from .llm_descriptor import LlmDescriptor
-from .prompt import DEFAULT_PROMPT_TEMPLATE, render as render_prompt
+from .prompt import (
+    PLACEHOLDER,
+    SYNTHESIS_PLACEHOLDER,
+    render as render_prompt,
+    resolve as resolve_prompt,
+)
 
 __all__ = [
-    "DEFAULT_PROMPT_TEMPLATE",
+    "PLACEHOLDER",
+    "SYNTHESIS_PLACEHOLDER",
     "AnalyzeError",
     "Description",
     "LlmDescriptor",
     "render_prompt",
+    "resolve_prompt",
 ]

@@ -6,19 +6,21 @@ Public API
   subprocess config and constructs :class:`Repository` instances.
 * :class:`Repository` — typed read-only view of a working tree, with
   semantic methods (head, history, diff stats, branches/tags, remotes).
-* :class:`Commit`, :class:`DiffStats`, :class:`CommitSummary` — value
-  objects returned by :class:`Repository` and consumed by the github
-  service (the latter for PR commit lists).
+* :class:`Commit`, :class:`DiffStats`, :class:`CommitSummary`,
+  :class:`BlameHunk` — value objects returned by :class:`Repository` and
+  consumed by the github service (the commit ones, for PR commit lists).
 * :class:`GitError` — raised on any git failure (missing binary,
   non-zero exit, malformed output).
 """
 
+from .blame import BlameHunk
 from .commit import Commit, CommitSummary, DiffStats
 from .commits import Commits
 from .exceptions import GitError
 from .repository import Repository
 
 __all__ = [
+    "BlameHunk",
     "Commit",
     "CommitSummary",
     "Commits",

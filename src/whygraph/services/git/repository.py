@@ -7,7 +7,8 @@ from pathlib import Path
 
 from whygraph.core import Shell, ShellError
 
-from .commands import GitCurrentBranchCmd, GitDiffCmd, GitOriginUrlCmd
+from .blame import BlameHunk
+from .commands import GitBlameCmd, GitCurrentBranchCmd, GitDiffCmd, GitOriginUrlCmd
 from .commit import Commit
 from .commits import Commits
 from .exceptions import GitError
@@ -151,6 +152,45 @@ class Repository:
         except ShellError as exc:
             raise GitError(
                 f"failed to diff {commit.sha[:7]} against its parent"
+            ) from exc
+
+    def blame(
+        self, path: str, line_start: int, line_end: int
+    ) -> tuple[BlameHunk, ...]:
+        """Blame a contiguous line range of one file.
+
+        Reports which commit owns each line of ``path`` between
+        ``line_start`` and ``line_end`` (both 1-based, inclusive),
+        aggregated into one :class:`BlameHunk` per commit.
+
+        Parameters
+        ----------
+        path : str
+            File to blame, relative to :attr:`root`.
+        line_start : int
+            First line of the range (1-based, inclusive).
+        line_end : int
+            Last line of the range (1-based, inclusive).
+
+        Returns
+        -------
+        tuple[BlameHunk, ...]
+            One hunk per commit owning lines in the range, in
+            first-appearance order. Uncommitted lines surface as a hunk
+            with the all-zero SHA — see :attr:`BlameHunk.is_uncommitted`.
+
+        Raises
+        ------
+        GitError
+            If ``git`` fails — unknown path, or a range outside the file.
+        """
+        try:
+            return self._shell.run(
+                GitBlameCmd(path, line_start, line_end), cwd=self.root
+            )
+        except ShellError as exc:
+            raise GitError(
+                f"failed to blame {path}:{line_start}-{line_end}"
             ) from exc
 
     def diff_range(self, base: str, head: str) -> str:

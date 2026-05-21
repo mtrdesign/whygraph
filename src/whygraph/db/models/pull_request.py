@@ -1,4 +1,4 @@
-"""SQLModel for the ``pullrequest`` table."""
+"""SQLModel for the ``pull_request`` table."""
 
 from __future__ import annotations
 

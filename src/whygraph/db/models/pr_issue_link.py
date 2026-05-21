@@ -1,4 +1,4 @@
-"""SQLModel for the ``prissuelink`` join table."""
+"""SQLModel for the ``pr_issue_link`` join table."""
 
 from __future__ import annotations
 

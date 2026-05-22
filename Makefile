@@ -23,15 +23,14 @@ test:  ## Run the test suite
 scan:  ## Re-scan this repo so WhyGraph is tested against itself
 	uv run whygraph scan
 
-db:  ## Start the SQLite viewers (whygraph :8081, codegraph :8082)
+db:  ## Start the DBGate database viewer (http://localhost:8081)
 	@test -f docker-compose.yml || { echo "error: docker-compose.yml missing - run: cp docker-compose.example.yml docker-compose.yml"; exit 1; }
 	@test -f .whygraph/whygraph.db || echo "warning: .whygraph/whygraph.db missing - run 'make scan' first"
 	@test -f .codegraph/codegraph.db || echo "warning: .codegraph/codegraph.db missing - run 'whygraph init' first"
 	docker compose up -d
-	@echo "whygraph.db  -> http://localhost:8081"
-	@echo "codegraph.db -> http://localhost:8082"
+	@echo "DBGate -> http://localhost:8081  (WhyGraph + CodeGraph in the sidebar)"
 
-db-down:  ## Stop the SQLite viewers
+db-down:  ## Stop the DBGate database viewer
 	docker compose down
 
 inspect:  ## MCP Inspector vs whygraph-mcp (REPO=/path/to/repo targets another checkout)

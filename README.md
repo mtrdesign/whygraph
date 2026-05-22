@@ -234,13 +234,15 @@ A `Makefile` wraps the common dev tasks; run `make` to list them — `make sync`
 
 ### Browse the databases
 
-WhyGraph is developed by running it against its own repo, so it helps to eyeball the two SQLite databases it touches — `.whygraph/whygraph.db` (its own evidence/rationale data) and `.codegraph/codegraph.db` (CodeGraph's symbol graph). `make db` brings up a [sqlite-web](https://github.com/coleifer/sqlite-web) viewer for each in Docker:
+WhyGraph is developed by running it against its own repo, so it helps to eyeball the two SQLite databases it touches — `.whygraph/whygraph.db` (its own evidence/rationale data) and `.codegraph/codegraph.db` (CodeGraph's symbol graph). `make db` brings up [DBGate](https://dbgate.org/) in Docker with both databases wired up as connections:
 
 ```bash
 cp docker-compose.example.yml docker-compose.yml   # one-time; the copy is git-ignored
-make db                                            # whygraph.db :8081, codegraph.db :8082
-make db-down                                       # stop the viewers
+make db                                            # DBGate at http://localhost:8081
+make db-down                                       # stop the viewer
 ```
+
+Both databases appear in the DBGate sidebar; the CodeGraph one is opened read-only since CodeGraph rewrites it on re-index. Toggle the dark theme in DBGate's Settings — it persists across restarts.
 
 ### Debug the MCP server with MCP Inspector
 

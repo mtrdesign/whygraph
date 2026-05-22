@@ -1,0 +1,38 @@
+# Dev-only — SQLite web viewers for the two databases WhyGraph touches when
+# run against its own repo. NOT part of the shipped package.
+#
+# Usage: copy this template to docker-compose.yml (git-ignored), then `make db`:
+#   cp docker-compose.example.yml docker-compose.yml
+#
+#   whygraph.db  -> http://localhost:8081  (WhyGraph's own evidence/rationale DB)
+#   codegraph.db -> http://localhost:8082  (CodeGraph's symbol graph)
+#
+# sqlite-web opens the files read-write, so you can edit rows/DDL by hand.
+# codegraph.db is owned by CodeGraph upstream — hand-edits there may be
+# overwritten when CodeGraph re-indexes. Edit whygraph.db freely.
+#
+# If whygraph.toml overrides `whygraph_db` / `codegraph_db`, update the
+# bind-mount source paths below to match.
+
+services:
+  whygraph-db:
+    image: coleifer/sqlite-web:latest
+    container_name: whygraph-db-viewer
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./.whygraph:/data
+    environment:
+      SQLITE_DATABASE: whygraph.db
+    restart: unless-stopped
+
+  codegraph-db:
+    image: coleifer/sqlite-web:latest
+    container_name: codegraph-db-viewer
+    ports:
+      - "8082:8080"
+    volumes:
+      - ./.codegraph:/data
+    environment:
+      SQLITE_DATABASE: codegraph.db
+    restart: unless-stopped

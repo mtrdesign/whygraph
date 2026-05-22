@@ -228,14 +228,27 @@ uv run whygraph version       # CLI sanity check
 uv run whygraph-mcp           # launch MCP server on stdio
 ```
 
-If `uv` fails with `UnknownIssuer` SSL errors off-VPN, prefix with `SSL_CERT_FILE= ` (works around a corp-only cert bundle).
+If `uv` fails with `UnknownIssuer` SSL errors off-VPN, prefix with `SSL_CERT_FILE= ` (works around a corp-only cert bundle) — this applies to `make` targets too, e.g. `SSL_CERT_FILE= make sync`.
+
+A `Makefile` wraps the common dev tasks; run `make` to list them — `make sync`, `make test`, `make scan`, `make db` / `make db-down`, `make inspect`.
+
+### Browse the databases
+
+WhyGraph is developed by running it against its own repo, so it helps to eyeball the two SQLite databases it touches — `.whygraph/whygraph.db` (its own evidence/rationale data) and `.codegraph/codegraph.db` (CodeGraph's symbol graph). `make db` brings up a [sqlite-web](https://github.com/coleifer/sqlite-web) viewer for each in Docker:
+
+```bash
+cp docker-compose.example.yml docker-compose.yml   # one-time; the copy is git-ignored
+make db                                            # whygraph.db :8081, codegraph.db :8082
+make db-down                                       # stop the viewers
+```
 
 ### Debug the MCP server with MCP Inspector
 
 The [MCP Inspector](https://github.com/modelcontextprotocol/inspector) is the official web UI for poking at a stdio MCP server — list tools, call them with custom args, see raw responses, tail stderr.
 
 ```bash
-npx @modelcontextprotocol/inspector uv run whygraph-mcp
+make inspect                           # against this checkout
+make inspect REPO=/path/to/other/repo  # against another repo's databases
 ```
 
-Open the printed `http://localhost:…` URL with the one-time auth token. Use **Reconnect** to pick up code changes.
+`make inspect` needs Node ≥ 20 active — the same modern Node CodeGraph requires (`nvm use 22`). Open the printed `http://localhost:…` URL with the one-time auth token. Use **Reconnect** to pick up code changes.

@@ -15,5 +15,8 @@ build/
 # CodeGraph per-repo cache (symbol graph SQLite + config).
 .codegraph/
 
+# Local copy of the dev compose file (template: docker-compose.example.yml).
+/docker-compose.yml
+
 # Personal Claude Configurations
 .claude/settings.local.json

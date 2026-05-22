@@ -27,6 +27,8 @@ uv run whygraph-mcp           # launch MCP server on stdio (Ctrl-C to exit)
 
 If `uv` fails with `UnknownIssuer` SSL errors, prefix with `SSL_CERT_FILE= ` (the user's `SSL_CERT_FILE` env var points at a corp-only bundle that breaks public TLS off-VPN).
 
+A root `Makefile` wraps these plus dev-only tooling — `make` lists targets; `make db` / `make db-down` run sqlite-web viewers for both databases (via `docker-compose.example.yml`), `make inspect` launches the MCP Inspector.
+
 ## Architecture (current scaffold)
 
 - `src/whygraph/cli.py` — Click group exposing the `whygraph` command. Subcommands attach to `main`.

@@ -13,6 +13,7 @@ def _configure_logging_best_effort() -> None:
     try:
         from whygraph.core import configure_logging, get_config
 
-        configure_logging(get_config().log_level)
+        cfg = get_config()
+        configure_logging(cfg.log_level, file_config=cfg.logging)
     except Exception:  # noqa: BLE001 — best-effort, intentional
         pass

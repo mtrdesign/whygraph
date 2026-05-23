@@ -25,7 +25,8 @@ rationale.register(mcp)
 
 def main() -> None:
     """Run the WhyGraph MCP server on stdio. Entry point for ``whygraph-mcp``."""
-    configure_logging(get_config().log_level)
+    cfg = get_config()
+    configure_logging(cfg.log_level, file_config=cfg.logging)
     mcp.run(transport="stdio")
 
 

@@ -10,6 +10,7 @@ rationale generator consumes. :mod:`whygraph.mcp.rationale` reuses
 from __future__ import annotations
 
 import json
+import logging
 
 from mcp.server.fastmcp import FastMCP
 from sqlalchemy.exc import OperationalError
@@ -21,6 +22,8 @@ from whygraph.db.models import Commit, Issue, PRIssueLink, PullRequest
 from whygraph.services.git import GitError, Repository
 
 from ._shared import Target, WhyGraphError, repo_root, resolve_target, target_dict
+
+_log = logging.getLogger(__name__)
 
 _TOOL_DESCRIPTION = (
     "Find the historical evidence behind a chunk of code: the commits that "
@@ -212,6 +215,15 @@ def whygraph_evidence_for(
 
     See :data:`_TOOL_DESCRIPTION` for the agent-facing summary.
     """
+    _log.debug(
+        "whygraph_evidence_for called: path=%r line_start=%r line_end=%r "
+        "qualified_name=%r limit=%d",
+        path,
+        line_start,
+        line_end,
+        qualified_name,
+        limit,
+    )
     if limit < 1:
         raise WhyGraphError("limit must be >= 1")
     target = resolve_target(

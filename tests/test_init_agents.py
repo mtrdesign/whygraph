@@ -1,8 +1,8 @@
-"""Tests for multi-client ``whygraph init`` wiring.
+"""Tests for multi-agent ``whygraph init`` wiring.
 
 Two layers of coverage:
 
-* Direct unit tests on :mod:`whygraph.clients` — these stand alone and
+* Direct unit tests on :mod:`whygraph.agents` — these stand alone and
   do not exercise the CLI or any DB code, so they're robust to the
   current mid-rewrite state of unrelated modules.
 * CLI-flow tests via :class:`click.testing.CliRunner` that patch
@@ -17,57 +17,57 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from whygraph import clients
+from whygraph import agents
 from whygraph.cli import main as whygraph_main
 
 
-# ---------- clients.py direct tests ----------------------------------------
+# ---------- agents.py direct tests ------------------------------------------
 
 
-def test_known_client_names_includes_canonical_and_aliases() -> None:
-    names = set(clients.known_client_names())
+def test_known_agent_names_includes_canonical_and_aliases() -> None:
+    names = set(agents.known_agent_names())
     assert {"claude", "cursor", "vscode", "copilot", "codex", "claude-desktop"} <= names
 
 
-def test_resolve_client_canonical() -> None:
-    target = clients.resolve_client("claude")
+def test_resolve_agent_canonical() -> None:
+    target = agents.resolve_agent("claude")
     assert target.name == "claude"
     assert target.scope == "project"
     assert target.format == "json"
 
 
-def test_resolve_client_alias_copilot_to_vscode() -> None:
-    target = clients.resolve_client("copilot")
+def test_resolve_agent_alias_copilot_to_vscode() -> None:
+    target = agents.resolve_agent("copilot")
     assert target.name == "vscode"
 
 
-def test_resolve_client_case_insensitive() -> None:
-    assert clients.resolve_client("CLAUDE").name == "claude"
-    assert clients.resolve_client("Cursor").name == "cursor"
+def test_resolve_agent_case_insensitive() -> None:
+    assert agents.resolve_agent("CLAUDE").name == "claude"
+    assert agents.resolve_agent("Cursor").name == "cursor"
 
 
-def test_resolve_client_unknown_raises() -> None:
-    with pytest.raises(clients.UnknownClientError):
-        clients.resolve_client("emacs")
+def test_resolve_agent_unknown_raises() -> None:
+    with pytest.raises(agents.UnknownAgentError):
+        agents.resolve_agent("emacs")
 
 
 def test_render_snippet_json_shape() -> None:
-    target = clients.resolve_client("claude")
-    snippet = clients.render_snippet(target)
+    target = agents.resolve_agent("claude")
+    snippet = agents.render_snippet(target)
     payload = json.loads(snippet)
     assert payload == {"mcpServers": {"whygraph": {"command": "whygraph-mcp"}}}
 
 
 def test_render_snippet_toml_shape() -> None:
-    target = clients.resolve_client("codex")
-    snippet = clients.render_snippet(target)
+    target = agents.resolve_agent("codex")
+    snippet = agents.render_snippet(target)
     assert "[mcp_servers.whygraph]" in snippet
     assert 'command = "whygraph-mcp"' in snippet
 
 
 def test_config_path_for_project_anchored_at_root(tmp_path: Path) -> None:
-    target = clients.resolve_client("cursor")
-    path = clients.config_path_for(target, tmp_path)
+    target = agents.resolve_agent("cursor")
+    path = agents.config_path_for(target, tmp_path)
     assert path == tmp_path / ".cursor" / "mcp.json"
 
 
@@ -76,36 +76,36 @@ def test_config_path_for_user_anchored_at_home(
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     # Path.home() reads $HOME on POSIX; resolve dynamically.
-    target = clients.resolve_client("codex")
+    target = agents.resolve_agent("codex")
     expected = Path.home() / ".codex" / "config.toml"
-    assert clients.config_path_for(target, tmp_path) == expected
+    assert agents.config_path_for(target, tmp_path) == expected
 
 
 def test_is_write_supported_only_project_json() -> None:
-    assert clients.is_write_supported(clients.resolve_client("claude"))
-    assert clients.is_write_supported(clients.resolve_client("cursor"))
-    assert clients.is_write_supported(clients.resolve_client("vscode"))
-    assert not clients.is_write_supported(clients.resolve_client("codex"))
-    assert not clients.is_write_supported(clients.resolve_client("claude-desktop"))
+    assert agents.is_write_supported(agents.resolve_agent("claude"))
+    assert agents.is_write_supported(agents.resolve_agent("cursor"))
+    assert agents.is_write_supported(agents.resolve_agent("vscode"))
+    assert not agents.is_write_supported(agents.resolve_agent("codex"))
+    assert not agents.is_write_supported(agents.resolve_agent("claude-desktop"))
 
 
 def test_write_snippet_creates_file(tmp_path: Path) -> None:
-    target = clients.resolve_client("claude")
-    path = clients.write_snippet(target, tmp_path)
+    target = agents.resolve_agent("claude")
+    path = agents.write_snippet(target, tmp_path)
     assert path == tmp_path / ".mcp.json"
     data = json.loads(path.read_text())
     assert data == {"mcpServers": {"whygraph": {"command": "whygraph-mcp"}}}
 
 
 def test_write_snippet_creates_nested_directory(tmp_path: Path) -> None:
-    target = clients.resolve_client("cursor")
-    path = clients.write_snippet(target, tmp_path)
+    target = agents.resolve_agent("cursor")
+    path = agents.write_snippet(target, tmp_path)
     assert path == tmp_path / ".cursor" / "mcp.json"
     assert path.exists()
 
 
 def test_write_snippet_merges_with_existing_servers(tmp_path: Path) -> None:
-    target = clients.resolve_client("claude")
+    target = agents.resolve_agent("claude")
     existing = tmp_path / ".mcp.json"
     existing.write_text(
         json.dumps(
@@ -115,7 +115,7 @@ def test_write_snippet_merges_with_existing_servers(tmp_path: Path) -> None:
             }
         )
     )
-    clients.write_snippet(target, tmp_path)
+    agents.write_snippet(target, tmp_path)
     data = json.loads(existing.read_text())
     assert data["mcpServers"]["other"] == {"command": "other-cmd"}
     assert data["mcpServers"]["whygraph"] == {"command": "whygraph-mcp"}
@@ -123,29 +123,29 @@ def test_write_snippet_merges_with_existing_servers(tmp_path: Path) -> None:
 
 
 def test_write_snippet_replaces_old_whygraph_entry(tmp_path: Path) -> None:
-    target = clients.resolve_client("claude")
+    target = agents.resolve_agent("claude")
     existing = tmp_path / ".mcp.json"
     existing.write_text(
         json.dumps({"mcpServers": {"whygraph": {"command": "old-cmd"}}})
     )
-    clients.write_snippet(target, tmp_path)
+    agents.write_snippet(target, tmp_path)
     data = json.loads(existing.read_text())
     assert data["mcpServers"]["whygraph"]["command"] == "whygraph-mcp"
 
 
 def test_write_snippet_overwrites_malformed_json(tmp_path: Path) -> None:
-    target = clients.resolve_client("claude")
+    target = agents.resolve_agent("claude")
     existing = tmp_path / ".mcp.json"
     existing.write_text("{not valid json")
-    clients.write_snippet(target, tmp_path)
+    agents.write_snippet(target, tmp_path)
     data = json.loads(existing.read_text())
     assert data == {"mcpServers": {"whygraph": {"command": "whygraph-mcp"}}}
 
 
 def test_write_snippet_rejects_user_scope(tmp_path: Path) -> None:
-    target = clients.resolve_client("codex")
+    target = agents.resolve_agent("codex")
     with pytest.raises(ValueError, match="print-only"):
-        clients.write_snippet(target, tmp_path)
+        agents.write_snippet(target, tmp_path)
 
 
 # ---------- CLI flow tests --------------------------------------------------
@@ -175,7 +175,7 @@ def _invoke_in(cwd: Path, *args: str):
         return runner.invoke(whygraph_main, list(args)), Path.cwd()
 
 
-def test_init_list_clients_does_not_touch_db(
+def test_init_list_agents_does_not_touch_db(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     called = {"n": 0}
@@ -186,7 +186,7 @@ def test_init_list_clients_does_not_touch_db(
 
     monkeypatch.setattr("whygraph.cli.commands.init._ensure_db_initialized", _fake)
     runner = CliRunner()
-    result = runner.invoke(whygraph_main, ["init", "--list-clients"])
+    result = runner.invoke(whygraph_main, ["init", "--list-agents"])
     assert result.exit_code == 0, result.output
     assert called["n"] == 0
     assert "claude" in result.output
@@ -194,7 +194,7 @@ def test_init_list_clients_does_not_touch_db(
     assert "codex" in result.output
 
 
-def test_init_no_flag_writes_no_client_config(
+def test_init_no_flag_writes_no_agent_config(
     stub_init, tmp_path: Path
 ) -> None:
     result, cwd = _invoke_in(tmp_path, "init")
@@ -205,58 +205,116 @@ def test_init_no_flag_writes_no_client_config(
     assert "Initialized WhyGraph database" in result.output
 
 
-def test_init_client_claude_writes_mcp_json(stub_init, tmp_path: Path) -> None:
-    result, cwd = _invoke_in(tmp_path, "init", "--client", "claude")
+def test_init_agent_claude_writes_mcp_json_and_installs_assets(
+    stub_init, tmp_path: Path
+) -> None:
+    result, cwd = _invoke_in(tmp_path, "init", "--agent", "claude")
     assert result.exit_code == 0, result.output
     mcp_path = cwd / ".mcp.json"
     assert mcp_path.exists()
     data = json.loads(mcp_path.read_text())
     assert data["mcpServers"]["whygraph"]["command"] == "whygraph-mcp"
     assert "Wrote whygraph MCP entry" in result.output
-    assert "/plugin marketplace add" in result.output  # Claude-specific tip
+    # Bundled assets land in .claude/.
+    assert (cwd / ".claude" / "agents" / "planner.md").is_file()
+    assert (cwd / ".claude" / "commands" / "rationale.md").is_file()
+    assert (cwd / ".claude" / "skills" / "pre-edit" / "SKILL.md").is_file()
+    assert "Installed Claude Code assets" in result.output
 
 
-def test_init_client_cursor_writes_nested_path(stub_init, tmp_path: Path) -> None:
-    result, cwd = _invoke_in(tmp_path, "init", "--client", "cursor")
+def test_init_agent_claude_no_install_assets_skips_dot_claude(
+    stub_init, tmp_path: Path
+) -> None:
+    result, cwd = _invoke_in(
+        tmp_path, "init", "--agent", "claude", "--no-install-assets"
+    )
+    assert result.exit_code == 0, result.output
+    assert (cwd / ".mcp.json").exists()
+    assert not (cwd / ".claude").exists()
+    assert "Installed Claude Code assets" not in result.output
+
+
+def test_init_agent_claude_force_overwrites_existing(
+    stub_init, tmp_path: Path
+) -> None:
+    # Pre-seed a user edit at the install destination.
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        cwd = Path.cwd()
+        (cwd / ".claude" / "agents").mkdir(parents=True)
+        (cwd / ".claude" / "agents" / "planner.md").write_text("USER EDIT")
+        result = runner.invoke(
+            whygraph_main, ["init", "--agent", "claude", "--force"]
+        )
+        assert result.exit_code == 0, result.output
+        text = (cwd / ".claude" / "agents" / "planner.md").read_text()
+        assert text != "USER EDIT"
+
+
+def test_init_agent_claude_default_skips_existing(
+    stub_init, tmp_path: Path
+) -> None:
+    """Without ``--force``, an existing .claude file is left alone."""
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        cwd = Path.cwd()
+        (cwd / ".claude" / "agents").mkdir(parents=True)
+        (cwd / ".claude" / "agents" / "planner.md").write_text("USER EDIT")
+        result = runner.invoke(whygraph_main, ["init", "--agent", "claude"])
+        assert result.exit_code == 0, result.output
+        text = (cwd / ".claude" / "agents" / "planner.md").read_text()
+        assert text == "USER EDIT"
+
+
+def test_init_agent_cursor_does_not_install_claude_assets(
+    stub_init, tmp_path: Path
+) -> None:
+    result, cwd = _invoke_in(tmp_path, "init", "--agent", "cursor")
     assert result.exit_code == 0, result.output
     cursor_path = cwd / ".cursor" / "mcp.json"
     assert cursor_path.exists()
     data = json.loads(cursor_path.read_text())
     assert data["mcpServers"]["whygraph"]["command"] == "whygraph-mcp"
+    assert not (cwd / ".claude").exists()
 
 
-def test_init_client_copilot_aliases_to_vscode(stub_init, tmp_path: Path) -> None:
-    result, cwd = _invoke_in(tmp_path, "init", "--client", "copilot")
+def test_init_agent_copilot_aliases_to_vscode(stub_init, tmp_path: Path) -> None:
+    result, cwd = _invoke_in(tmp_path, "init", "--agent", "copilot")
     assert result.exit_code == 0, result.output
     assert (cwd / ".vscode" / "mcp.json").exists()
+    assert not (cwd / ".claude").exists()
 
 
-def test_init_client_codex_prints_and_does_not_write(
+def test_init_agent_codex_prints_and_does_not_write(
     stub_init, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Route ~/ at a temp home so we can confirm no file appears there.
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    result, cwd = _invoke_in(tmp_path, "init", "--client", "codex")
+    result, cwd = _invoke_in(tmp_path, "init", "--agent", "codex")
     assert result.exit_code == 0, result.output
     assert "[mcp_servers.whygraph]" in result.output
     assert 'command = "whygraph-mcp"' in result.output
     assert not (home / ".codex" / "config.toml").exists()
+    assert not (cwd / ".claude").exists()
 
 
-def test_init_client_claude_with_print_does_not_write(
+def test_init_agent_claude_with_print_skips_mcp_write_but_installs_assets(
     stub_init, tmp_path: Path
 ) -> None:
-    result, cwd = _invoke_in(tmp_path, "init", "--client", "claude", "--print")
+    """``--print`` suppresses the MCP write; asset install runs normally."""
+    result, cwd = _invoke_in(tmp_path, "init", "--agent", "claude", "--print")
     assert result.exit_code == 0, result.output
     assert not (cwd / ".mcp.json").exists()
     # JSON snippet still printed for the user to paste.
     assert '"whygraph-mcp"' in result.output
+    # Assets are governed by --no-install-assets, not --print.
+    assert (cwd / ".claude" / "agents" / "planner.md").is_file()
 
 
-def test_init_unknown_client_errors(stub_init, tmp_path: Path) -> None:
-    result, _ = _invoke_in(tmp_path, "init", "--client", "emacs")
+def test_init_unknown_agent_errors(stub_init, tmp_path: Path) -> None:
+    result, _ = _invoke_in(tmp_path, "init", "--agent", "emacs")
     assert result.exit_code != 0
     # Click's Choice produces a usage error mentioning the bad value.
     assert "emacs" in result.output or "Invalid value" in result.output

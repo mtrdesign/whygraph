@@ -1,13 +1,14 @@
-"""Client registration: where to wire ``whygraph-mcp`` for each LLM client.
+"""Agent registration: where to wire ``whygraph-mcp`` for each LLM agent.
 
 WhyGraph's MCP server is a standalone console script (``whygraph-mcp``,
-declared in ``pyproject.toml``). To consume it, an LLM client needs an
-entry in its own MCP configuration file. The location and format of that
-file vary by client, so this module centralises:
+declared in ``pyproject.toml``). To consume it, an LLM agent (Claude
+Code, Cursor, VS Code / Copilot, Codex, Claude Desktop) needs an entry
+in its own MCP configuration file. The location and format of that
+file vary by agent, so this module centralises:
 
-* the registry of supported clients and their config-file conventions
-  (:data:`CLIENTS`, :func:`resolve_client`),
-* the snippet a client expects (:func:`render_snippet`), and
+* the registry of supported agents and their config-file conventions
+  (:data:`AGENTS`, :func:`resolve_agent`),
+* the snippet an agent expects (:func:`render_snippet`), and
 * a safe merge-write for project-scoped configs
   (:func:`write_snippet`).
 
@@ -17,11 +18,9 @@ User-scoped configs (e.g. ``~/.codex/config.toml``) are intentionally
 Notes
 -----
 The launch command embedded in every snippet is just ``whygraph-mcp``
-(no ``uv run``, no ``${CLAUDE_PLUGIN_ROOT}``). This assumes the user
-installed WhyGraph with ``uv tool install whygraph`` / ``pipx install
-whygraph`` so that the console script is on PATH. The Claude Code
-plugin (``plugins/whygraph/.mcp.json``) uses a different launch line
-and is unaffected by this module.
+— no ``uv run``, no path resolution. This assumes the user installed
+WhyGraph with ``uv tool install whygraph`` / ``pipx install whygraph``
+so that the console script is on PATH.
 """
 
 from __future__ import annotations
@@ -39,18 +38,18 @@ Scope = Literal["project", "user"]
 Format = Literal["json", "toml"]
 
 
-class UnknownClientError(ValueError):
-    """Raised when a caller asks for a client name that isn't registered."""
+class UnknownAgentError(ValueError):
+    """Raised when a caller asks for an agent name that isn't registered."""
 
 
 @dataclass(frozen=True, slots=True)
-class ClientTarget:
-    """Where and how to register the WhyGraph MCP server for one client.
+class AgentTarget:
+    """Where and how to register the WhyGraph MCP server for one agent.
 
     Attributes
     ----------
     name : str
-        Canonical client id (e.g. ``"claude"``, ``"cursor"``).
+        Canonical agent id (e.g. ``"claude"``, ``"cursor"``).
     aliases : tuple[str, ...]
         Alternate names that resolve to this target (e.g. ``"copilot"``
         is an alias of ``"vscode"``).
@@ -66,7 +65,7 @@ class ClientTarget:
         Serialization format of the target file. Determines which
         renderer :func:`render_snippet` uses.
     description : str
-        Short one-line description shown by ``whygraph init --list-clients``.
+        Short one-line description shown by ``whygraph init --list-agents``.
     """
 
     name: str
@@ -77,7 +76,7 @@ class ClientTarget:
     description: str
 
 
-_CLAUDE = ClientTarget(
+_CLAUDE = AgentTarget(
     name="claude",
     aliases=(),
     relative_path=(".mcp.json",),
@@ -86,7 +85,7 @@ _CLAUDE = ClientTarget(
     description="Claude Code (project-scoped .mcp.json at repo root)",
 )
 
-_CURSOR = ClientTarget(
+_CURSOR = AgentTarget(
     name="cursor",
     aliases=(),
     relative_path=(".cursor", "mcp.json"),
@@ -95,7 +94,7 @@ _CURSOR = ClientTarget(
     description="Cursor (.cursor/mcp.json at repo root)",
 )
 
-_VSCODE = ClientTarget(
+_VSCODE = AgentTarget(
     name="vscode",
     aliases=("copilot",),
     relative_path=(".vscode", "mcp.json"),
@@ -104,7 +103,7 @@ _VSCODE = ClientTarget(
     description="VS Code / GitHub Copilot (.vscode/mcp.json at repo root)",
 )
 
-_CODEX = ClientTarget(
+_CODEX = AgentTarget(
     name="codex",
     aliases=(),
     relative_path=(".codex", "config.toml"),
@@ -113,7 +112,7 @@ _CODEX = ClientTarget(
     description="OpenAI Codex (~/.codex/config.toml — print-only)",
 )
 
-_CLAUDE_DESKTOP = ClientTarget(
+_CLAUDE_DESKTOP = AgentTarget(
     name="claude-desktop",
     aliases=(),
     relative_path=(
@@ -128,59 +127,59 @@ _CLAUDE_DESKTOP = ClientTarget(
 )
 
 
-CLIENTS: dict[str, ClientTarget] = {
+AGENTS: dict[str, AgentTarget] = {
     t.name: t for t in (_CLAUDE, _CURSOR, _VSCODE, _CODEX, _CLAUDE_DESKTOP)
 }
 
 
-def known_client_names() -> list[str]:
-    """Return all client names and aliases that :func:`resolve_client` accepts.
+def known_agent_names() -> list[str]:
+    """Return all agent names and aliases that :func:`resolve_agent` accepts.
 
     Returns
     -------
     list[str]
         Sorted list of canonical names + aliases. Suitable for use as
-        ``click.Choice(known_client_names())``.
+        ``click.Choice(known_agent_names())``.
     """
     names: set[str] = set()
-    for target in CLIENTS.values():
+    for target in AGENTS.values():
         names.add(target.name)
         names.update(target.aliases)
     return sorted(names)
 
 
-def resolve_client(name: str) -> ClientTarget:
-    """Look up a :class:`ClientTarget` by canonical name or alias.
+def resolve_agent(name: str) -> AgentTarget:
+    """Look up an :class:`AgentTarget` by canonical name or alias.
 
     Parameters
     ----------
     name : str
-        Client identifier as supplied by the user. Case-insensitive.
+        Agent identifier as supplied by the user. Case-insensitive.
 
     Returns
     -------
-    ClientTarget
+    AgentTarget
         The matching target.
 
     Raises
     ------
-    UnknownClientError
+    UnknownAgentError
         If ``name`` is neither a canonical name nor an alias.
     """
     needle = name.strip().lower()
-    for target in CLIENTS.values():
+    for target in AGENTS.values():
         if needle == target.name or needle in target.aliases:
             return target
-    raise UnknownClientError(name)
+    raise UnknownAgentError(name)
 
 
-def config_path_for(target: ClientTarget, project_root: Path) -> Path:
+def config_path_for(target: AgentTarget, project_root: Path) -> Path:
     """Resolve the absolute config-file path for ``target``.
 
     Parameters
     ----------
-    target : ClientTarget
-        The client whose config path is wanted.
+    target : AgentTarget
+        The agent whose config path is wanted.
     project_root : Path
         Repository root, used as the anchor for project-scoped targets.
         Ignored for user-scoped targets.
@@ -202,7 +201,7 @@ def config_path_for(target: ClientTarget, project_root: Path) -> Path:
     return anchor.joinpath(*target.relative_path)
 
 
-def render_snippet(target: ClientTarget) -> str:
+def render_snippet(target: AgentTarget) -> str:
     """Render the registration snippet for ``target`` as a string.
 
     JSON snippets are pretty-printed with two-space indentation and a
@@ -212,8 +211,8 @@ def render_snippet(target: ClientTarget) -> str:
 
     Parameters
     ----------
-    target : ClientTarget
-        The client whose snippet format to render.
+    target : AgentTarget
+        The agent whose snippet format to render.
 
     Returns
     -------
@@ -230,7 +229,7 @@ def render_snippet(target: ClientTarget) -> str:
     return f'[mcp_servers.{MCP_SERVER_NAME}]\ncommand = "{MCP_COMMAND}"\n'
 
 
-def write_snippet(target: ClientTarget, project_root: Path) -> Path:
+def write_snippet(target: AgentTarget, project_root: Path) -> Path:
     """Merge the WhyGraph MCP entry into ``target``'s config file.
 
     Only valid for project-scoped JSON targets. User-scoped targets and
@@ -251,8 +250,8 @@ def write_snippet(target: ClientTarget, project_root: Path) -> Path:
 
     Parameters
     ----------
-    target : ClientTarget
-        The client to wire.
+    target : AgentTarget
+        The agent to wire.
     project_root : Path
         Repository root used to anchor project-scoped paths.
 
@@ -268,7 +267,7 @@ def write_snippet(target: ClientTarget, project_root: Path) -> Path:
     """
     if target.scope != "project" or target.format != "json":
         raise ValueError(
-            f"client {target.name!r} is print-only; use render_snippet() instead"
+            f"agent {target.name!r} is print-only; use render_snippet() instead"
         )
 
     path = config_path_for(target, project_root)
@@ -295,7 +294,7 @@ def write_snippet(target: ClientTarget, project_root: Path) -> Path:
     return path
 
 
-def is_write_supported(target: ClientTarget) -> bool:
+def is_write_supported(target: AgentTarget) -> bool:
     """Return ``True`` if :func:`write_snippet` accepts ``target``.
 
     Convenience for callers that need to branch on print-vs-write
@@ -317,16 +316,16 @@ def claude_desktop_supported_platform() -> bool:
 
 
 __all__ = [
-    "CLIENTS",
-    "ClientTarget",
+    "AGENTS",
+    "AgentTarget",
     "MCP_COMMAND",
     "MCP_SERVER_NAME",
-    "UnknownClientError",
+    "UnknownAgentError",
     "claude_desktop_supported_platform",
     "config_path_for",
     "is_write_supported",
-    "known_client_names",
+    "known_agent_names",
     "render_snippet",
-    "resolve_client",
+    "resolve_agent",
     "write_snippet",
 ]

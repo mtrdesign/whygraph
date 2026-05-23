@@ -34,17 +34,18 @@ A root `Makefile` wraps these plus dev-only tooling — `make` lists targets; `m
 - `src/whygraph/cli.py` — Click group exposing the `whygraph` command. Subcommands attach to `main`.
 - `src/whygraph/mcp_server.py` — `FastMCP("whygraph")` instance plus a `main()` that runs `transport="stdio"`. New MCP tools register on the module-level `mcp` object via `@mcp.tool()`.
 - `src/whygraph/__main__.py` — enables `python -m whygraph`.
-- Console scripts in `pyproject.toml`: `whygraph` → `cli:main`, `whygraph-mcp` → `mcp_server:main`. Both must keep working — the plugin's `.mcp.json` and `uv tool install` paths depend on them.
+- `src/whygraph/agents.py` — registry of supported LLM agents (Claude Code, Cursor, VS Code / Copilot, Codex, Claude Desktop) and the per-agent MCP config wiring (`write_snippet` / `render_snippet`). `whygraph init --agent X` reads from here.
+- `src/whygraph/assets.py` + `src/whygraph/assets/claude-code/` — bundled agent / command / skill markdown files, copied into a project's `.claude/` by `whygraph init --agent claude`. Loaded at runtime via `importlib.resources.files("whygraph") / "assets" / "claude-code"`; same packaging precedent as `src/whygraph/analyze/prompts/`.
+- Console scripts in `pyproject.toml`: `whygraph` → `cli:main`, `whygraph-mcp` → `mcp_server:main`. Both must keep working — `.mcp.json` files written by `whygraph init` and the `uv tool install` path depend on them.
 
-## Plugin & marketplace layout
+## Install path
 
-This repo doubles as a single-plugin Claude Code marketplace.
+WhyGraph installs **per project**, per agent:
 
-- `.claude-plugin/marketplace.json` — marketplace manifest, points at `./plugins/whygraph`.
-- `plugins/whygraph/.claude-plugin/plugin.json` — plugin manifest.
-- `plugins/whygraph/.mcp.json` — launches the MCP server with `uv run --project ${CLAUDE_PLUGIN_ROOT}/../.. whygraph-mcp`. The `${CLAUDE_PLUGIN_ROOT}/../..` path resolves to the repo root, so changing the plugin's directory depth requires updating this. Avoid replacing `uv` with bare `python` — the dev workflow assumes uv-managed venvs.
+1. `uv tool install whygraph` (or `pipx install whygraph`) so `whygraph` and `whygraph-mcp` are on `PATH`.
+2. From the target repo: `whygraph init --agent <name>` — `--agent claude` writes `.mcp.json` and copies the bundled assets into `.claude/`; other agents (cursor / vscode / codex / claude-desktop) just wire their MCP config.
 
-Install locally: `/plugin marketplace add /absolute/path/to/whygraph` then `/plugin install whygraph@whygraph`.
+There is no Claude Code marketplace install; `whygraph init --agent claude` is the only path. The bundled assets are version-controlled in this repo under `src/whygraph/assets/claude-code/` — that is the source of truth, the wheel ships them, and a re-run of `whygraph init` brings a project's `.claude/` up to date (use `--force` to overwrite local edits).
 
 ## Conventions
 

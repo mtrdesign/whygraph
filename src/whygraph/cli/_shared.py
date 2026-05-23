@@ -7,7 +7,7 @@ def _configure_logging_best_effort() -> None:
     """Configure logging if the core dependency chain is healthy.
 
     Failures here are tolerated so the CLI can still expose pure-CLI
-    surfaces (``--help``, ``--list-clients``) while parts of the package
+    surfaces (``--help``, ``--list-agents``) while parts of the package
     are in flux.
     """
     try:

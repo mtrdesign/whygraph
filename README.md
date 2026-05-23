@@ -41,52 +41,55 @@ uv run whygraph scan --llm-recent 50
 
 ## Installation
 
-There are two ways to make WhyGraph available to a project: as a **Claude Code plugin** (recommended for AI-assistant use) or as a **standalone CLI** (for one-off scans, CI jobs, scripting).
-
-### As a Claude Code plugin
-
-From any project where you want WhyGraph available to Claude Code:
-
-```
-/plugin marketplace add /absolute/path/to/whygraph
-/plugin install whygraph@whygraph
-```
-
-(Once published, replace the local path with `cvetty/whygraph`.)
-
-After install, the `whygraph` MCP server is launched on demand by Claude Code via `uv run --project <plugin-checkout> whygraph-mcp`. Verify with `/mcp`.
-
-### As a standalone CLI
+WhyGraph installs **per project**, per agent:
 
 ```bash
-uv tool install /absolute/path/to/whygraph
-whygraph version
-whygraph init
-whygraph scan
+# 1. Put `whygraph` and `whygraph-mcp` on your PATH.
+uv tool install /absolute/path/to/whygraph      # or: pipx install /absolute/path/to/whygraph
+# (Once published, replace the local path with `cvetty/whygraph`.)
+
+# 2. From each project you want WhyGraph to support, wire your agent.
+cd /path/to/your-project
+whygraph init --agent claude                    # Claude Code: writes .mcp.json + drops bundled assets in .claude/
 ```
 
-This puts `whygraph` and `whygraph-mcp` on your `PATH`, independent of any Claude Code plugin.
+`whygraph init --agent claude` writes `.mcp.json` at the repo root and copies the bundled agent / command / skill markdown into `<project>/.claude/agents`, `/.claude/commands`, `/.claude/skills`. Re-running is safe — pre-existing files are left alone; pass `--force` to overwrite, `--no-install-assets` to skip the copy entirely.
+
+### Migration from the Claude Code plugin
+
+Earlier versions shipped via the Claude Code plugin marketplace. That path is gone — there is no more `plugins/whygraph/` or `.claude-plugin/marketplace.json`, and an old `/plugin install whygraph@whygraph` will fail. To migrate:
+
+```
+# In your Claude Code session:
+/plugin uninstall whygraph@whygraph
+/plugin marketplace remove whygraph
+
+# Then in each project where you want WhyGraph:
+whygraph init --agent claude
+```
 
 ## Wire WhyGraph into your editor
 
-WhyGraph's MCP server (`whygraph-mcp`) is a standalone console script, so any LLM client that speaks MCP can use it. `whygraph init --client X` writes the right snippet to the right file for each supported client.
+WhyGraph's MCP server (`whygraph-mcp`) is a standalone console script, so any LLM agent that speaks MCP can use it. `whygraph init --agent X` writes the right snippet to the right file for each supported agent.
 
 Run from the repo you want WhyGraph to analyse:
 
 ```bash
-whygraph init                          # DB only, no client wiring (safe default)
-whygraph init --client claude          # writes .mcp.json at repo root
-whygraph init --client cursor          # writes .cursor/mcp.json
-whygraph init --client vscode          # writes .vscode/mcp.json (alias: copilot)
-whygraph init --client codex           # prints snippet for ~/.codex/config.toml
-whygraph init --client claude-desktop  # prints snippet for Claude Desktop config
-whygraph init --client X --print       # prints, never writes
-whygraph init --list-clients           # show all supported clients + paths
+whygraph init                          # DB only, no agent wiring (safe default)
+whygraph init --agent claude          # writes .mcp.json + populates .claude/
+whygraph init --agent cursor          # writes .cursor/mcp.json
+whygraph init --agent vscode          # writes .vscode/mcp.json (alias: copilot)
+whygraph init --agent codex           # prints snippet for ~/.codex/config.toml
+whygraph init --agent claude-desktop  # prints snippet for Claude Desktop config
+whygraph init --agent X --print       # prints the MCP snippet, never writes it
+whygraph init --agent claude --no-install-assets   # MCP only, skip .claude/ copy
+whygraph init --agent claude --force               # overwrite existing .claude/* files
+whygraph init --list-agents            # show all supported agents + paths
 ```
 
-**Project-scoped clients** (Claude Code, Cursor, VS Code / Copilot) get a config file written inside the repo so you can commit it — every contributor's editor picks it up automatically. **User-scoped clients** (Codex, Claude Desktop) are print-only: the command emits the snippet and tells you where to paste it, so WhyGraph never silently edits files outside the repo.
+**Project-scoped agents** (Claude Code, Cursor, VS Code / Copilot) get a config file written inside the repo so you can commit it — every contributor's editor picks it up automatically. **User-scoped agents** (Codex, Claude Desktop) are print-only: the command emits the snippet and tells you where to paste it, so WhyGraph never silently edits files outside the repo.
 
-For Claude Code specifically, `--client claude` only wires the MCP server. To also get the `/whygraph-plan` slash command, skills, and planner subagents, install the Claude Code plugin as well (see [As a Claude Code plugin](#as-a-claude-code-plugin) above).
+`--agent claude` is the only path that also installs the `/whygraph-plan` slash command, the `plan-change` skill, and the planner / researcher / synthesizer subagents — these only make sense for Claude Code, so they ship as `.claude/*` markdown rather than as part of the MCP surface.
 
 ## CLI commands
 
@@ -97,7 +100,7 @@ For Claude Code specifically, `--client claude` only wires the MCP server. To al
 | `whygraph scan` | Walk first-parent history and populate `.whygraph/whygraph.db`: commits + GitHub PRs/issues + TF-IDF scoring + per-commit LLM diff descriptions. Idempotent. |
 | `whygraph render [--out PATH] [--open] [--depth N]` | Render a self-contained HTML viewer of the CodeGraph + WhyGraph data. Single file, vendored Cytoscape, opens with double-click. Cached rationale only. `--depth N` (1–4, default 1) caps which nodes get a populated detail block — fast first paint at default 1 (modules only); pass `--depth 4` for full data. |
 | `whygraph serve [--port 8765] [--open]` | Long-running localhost viewer with on-demand rationale generation. Same UI as `render`, plus a "Generate rationale" button on uncached nodes. |
-| `whygraph-mcp` | Launch the FastMCP stdio server. Used by `.mcp.json` in the plugin and by MCP clients. |
+| `whygraph-mcp` | Launch the FastMCP stdio server. Referenced by the `.mcp.json` files `whygraph init --agent X` writes into each project. |
 
 ### `whygraph scan` flags
 
@@ -112,7 +115,7 @@ For Claude Code specifically, `--client claude` only wires the MCP server. To al
 
 ## MCP surface
 
-The plugin's `.mcp.json` launches `whygraph-mcp`, which registers:
+The `.mcp.json` written by `whygraph init --agent claude` (and the equivalents for other agents) launches `whygraph-mcp`, which registers:
 
 ### Resources
 
@@ -154,7 +157,7 @@ The `whygraph_plan` prompt and the `/whygraph-plan` slash command both explicitl
 
 ### Slash command
 
-`/whygraph-plan <task description> [--shallow|--deep] [--no-questions]` — produces a step-by-step implementation plan grounded in CodeGraph (impact) and WhyGraph (rationale). The plugin ships three subagents:
+`/whygraph-plan <task description> [--shallow|--deep] [--no-questions]` — produces a step-by-step implementation plan grounded in CodeGraph (impact) and WhyGraph (rationale). `whygraph init --agent claude` drops three subagents under `.claude/agents/`:
 
 - **`whygraph-planner`** — orchestrator. Builds the working set via CodeGraph, warms the rationale cache, then either writes a plan single-pass (small scope) or fans out.
 - **`whygraph-researcher`** — fan-out worker, instantiated three times in parallel with one of three dimensions: `impact` (blast radius via CodeGraph callers), `constraints_risks` (verbatim from rationale cards), `prior_art` (similar past PRs via `whygraph_search` / `whygraph_window`).
@@ -193,15 +196,14 @@ whygraph serve --open     # localhost viewer with on-demand rationale
 
 ```
 .
-├── .claude-plugin/marketplace.json     # single-plugin marketplace
-├── plugins/whygraph/
-│   ├── .claude-plugin/plugin.json      # plugin manifest
-│   ├── .mcp.json                       # MCP server launch config
-│   ├── commands/whygraph-plan.md       # /whygraph-plan slash command
-│   ├── agents/                         # planner / researcher / synthesizer
-│   └── skills/plan-change/SKILL.md     # auto-suggest skill
 ├── src/whygraph/
 │   ├── cli.py                          # `whygraph` CLI (init, scan, version)
+│   ├── agents.py                       # agent registry + MCP snippet writers
+│   ├── assets.py                       # .claude/ asset installer (skip-if-exists + --force)
+│   ├── assets/claude-code/             # bundled Claude Code assets (shipped in the wheel)
+│   │   ├── agents/                     # planner / researcher / synthesizer / implementor
+│   │   ├── commands/                   # /rationale, /whygraph-plan, /whygraph-implement
+│   │   └── skills/                     # ask-why / plan-change / pre-edit / implement-plan
 │   ├── init.py                         # CodeGraph bootstrap (nvm + codegraph init -i)
 │   ├── mcp_server.py                   # FastMCP stdio server (resources/tools/prompts)
 │   ├── mcp_queries.py                  # composite SQL for the MCP layer

@@ -1,7 +1,7 @@
 # WhyGraph configuration — whygraph.toml
 # All fields are optional; shown values are the defaults.
 
-log_level = "INFO"           # DEBUG | INFO | WARN | ERROR | CRITICAL
+log_level = "DEBUG"           # DEBUG | INFO | WARN | ERROR | CRITICAL
 
 [scan]
 max_workers = 2              # parallel LLM calls in the diff-analyzer crawler
@@ -15,7 +15,7 @@ provider = "ollama"             # which [llm.*] adapter to use
 
 [rationale]
 # LLM that writes a structured "why this code exists" rationale card.
-provider = "anthropic"          # which [llm.*] adapter to use
+provider = "ollama"          # which [llm.*] adapter to use
 # model = "claude-haiku-4-5"    # override the provider's model for rationale only
 # timeout_sec = 60              # per-call timeout; default: the adapter's own
 
@@ -26,11 +26,11 @@ provider = "anthropic"          # which [llm.*] adapter to use
 # Optional rotating file log. Console (stderr) logging is always on; this
 # section adds an *additional* file handler. Omit the section — or leave
 # `file` unset — to disable file logging entirely.
-# [logging]
-# file         = ".whygraph/logs/whygraph.log"   # resolved relative to this file
-# level        = "DEBUG"                          # default: inherit top-level log_level
-# max_bytes    = 5_000_000
-# backup_count = 3
+[logging]
+file         = ".whygraph/logs/whygraph.log"   # resolved relative to this file
+level        = "DEBUG"                          # default: inherit top-level log_level
+max_bytes    = 5_000_000
+backup_count = 3
 
 # Per-provider LLM client settings. Each table is consumed by the
 # matching adapter in whygraph.services.llm via Adapter.from_config.

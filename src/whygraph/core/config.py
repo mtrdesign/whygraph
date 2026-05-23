@@ -141,6 +141,65 @@ class ClaudeCliConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class LoggingConfig:
+    """Configuration for the file-logging side of :func:`configure_logging`.
+
+    Loaded from the ``[logging]`` table in ``whygraph.toml``. The Rich →
+    stderr handler is always attached by :func:`configure_logging`; this
+    config controls the **additional** rotating file handler.
+
+    Attributes
+    ----------
+    file : Path or None
+        Path to the rotating log file. ``None`` (default) disables file
+        logging entirely. Relative paths in the TOML are resolved against
+        the config file's directory (mirroring ``whygraph_db``).
+    level : str or None
+        Optional per-handler verbosity for the file. ``None`` (default)
+        means the file inherits the top-level ``log_level``; setting it
+        lets the file be more verbose than the console (e.g. file at
+        ``"DEBUG"`` while console stays at ``"INFO"``). Must match a
+        :class:`LogLevel` member name when set.
+    max_bytes : int
+        Size threshold at which the file rotates, in bytes. Must be
+        ``>= 1``. Default ``5_000_000`` (5 MB).
+    backup_count : int
+        How many rotated copies to keep alongside the live file. Must be
+        ``>= 0``. Default ``3``.
+    """
+
+    file: Path | None = None
+    level: str | None = None
+    max_bytes: int = 5_000_000
+    backup_count: int = 3
+
+    def __post_init__(self) -> None:
+        """Validate field values immediately after construction.
+
+        Raises
+        ------
+        ConfigError
+            If ``level`` is set but doesn't name a :class:`LogLevel`
+            member, if ``max_bytes < 1``, or if ``backup_count < 0``.
+        """
+        if self.level is not None:
+            try:
+                LogLevel[self.level.upper()]
+            except KeyError as exc:
+                raise ConfigError(
+                    f"invalid logging.level: {self.level!r}"
+                ) from exc
+        if self.max_bytes < 1:
+            raise ConfigError(
+                f"logging.max_bytes must be >= 1, got {self.max_bytes}"
+            )
+        if self.backup_count < 0:
+            raise ConfigError(
+                f"logging.backup_count must be >= 0, got {self.backup_count}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class AnalyzeConfig:
     """Configuration for the LLM-driven commit descriptor.
 
@@ -271,6 +330,22 @@ def _build_analyze_config(raw: dict) -> AnalyzeConfig:
     return AnalyzeConfig(**{k: v for k, v in raw.items() if k in known})
 
 
+def _build_logging_config(raw: dict, base: Path) -> LoggingConfig:
+    """Parse a raw ``[logging]`` dict into a typed :class:`LoggingConfig`.
+
+    ``base`` is the directory containing the TOML file — relative ``file``
+    paths resolve against it (same convention as ``whygraph_db``).
+    """
+    known = {f.name for f in fields(LoggingConfig)}
+    for unknown in set(raw) - known:
+        _log.warning("ignoring unknown key in [logging]: %r", unknown)
+    accepted = {k: v for k, v in raw.items() if k in known}
+    if "file" in accepted and accepted["file"] is not None:
+        p = Path(accepted["file"])
+        accepted["file"] = p if p.is_absolute() else (base / p).resolve()
+    return LoggingConfig(**accepted)
+
+
 def _build_rationale_config(raw: dict) -> RationaleConfig:
     """Parse a raw ``[rationale]`` dict into a typed :class:`RationaleConfig`."""
     known = {f.name for f in fields(RationaleConfig)}
@@ -306,6 +381,10 @@ class Config:
         ``[llm.<provider>]`` tables; each :mod:`whygraph.services.llm`
         adapter consumes its own typed sub-config via
         ``Adapter.from_config(cfg.llm.<provider>)``.
+    logging : LoggingConfig
+        Settings for the optional rotating file-log handler. Loaded from
+        the ``[logging]`` table; consumed by :func:`configure_logging` to
+        attach a ``RotatingFileHandler`` alongside the Rich → stderr one.
     analyze : AnalyzeConfig
         Settings for the LLM commit descriptor. Loaded from the
         ``[analyze]`` table; consumed by
@@ -321,6 +400,7 @@ class Config:
     whygraph_db: Path | None = None
     codegraph_db: Path | None = None
     llm: LlmConfig = field(default_factory=LlmConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
     analyze: AnalyzeConfig = field(default_factory=AnalyzeConfig)
     rationale: RationaleConfig = field(default_factory=RationaleConfig)
 
@@ -384,6 +464,8 @@ class Config:
         with path.open("rb") as f:
             raw = tomllib.load(f)
 
+        base = path.parent
+
         scan = raw.pop("scan", {}) or {}
         if "max_workers" in scan:
             raw["scan_max_workers"] = scan.pop("max_workers")
@@ -402,7 +484,10 @@ class Config:
         if rationale_raw:
             raw["rationale"] = _build_rationale_config(rationale_raw)
 
-        base = path.parent
+        logging_raw = raw.pop("logging", {}) or {}
+        if logging_raw:
+            raw["logging"] = _build_logging_config(logging_raw, base)
+
         for key in ("whygraph_db", "codegraph_db"):
             if key in raw:
                 p = Path(raw[key])

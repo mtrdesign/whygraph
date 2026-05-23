@@ -23,6 +23,15 @@ provider = "anthropic"          # which [llm.*] adapter to use
 # whygraph_db  = ".whygraph/whygraph.db"
 # codegraph_db = ".codegraph/codegraph.db"
 
+# Optional rotating file log. Console (stderr) logging is always on; this
+# section adds an *additional* file handler. Omit the section — or leave
+# `file` unset — to disable file logging entirely.
+# [logging]
+# file         = ".whygraph/logs/whygraph.log"   # resolved relative to this file
+# level        = "DEBUG"                          # default: inherit top-level log_level
+# max_bytes    = 5_000_000
+# backup_count = 3
+
 # Per-provider LLM client settings. Each table is consumed by the
 # matching adapter in whygraph.services.llm via Adapter.from_config.
 # Omit api_key to read the standard env var (ANTHROPIC_API_KEY,

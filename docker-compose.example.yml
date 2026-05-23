@@ -1,0 +1,53 @@
+# Dev-only — a DBGate web UI for the two SQLite databases WhyGraph touches when
+# run against its own repo. NOT part of the shipped package.
+#
+# Usage: copy this template to docker-compose.yml (git-ignored), then `make db`:
+#   cp docker-compose.example.yml docker-compose.yml
+#
+#   http://localhost:8081 — both databases appear in the DBGate sidebar:
+#     WhyGraph  — WhyGraph's own evidence/rationale DB  (read-write)
+#     CodeGraph — CodeGraph's symbol graph              (read-only)
+#
+# CodeGraph's DB is owned by CodeGraph upstream and rewritten on re-index, so
+# DBGate opens it read-only (READONLY_con2). Edit the WhyGraph DB freely —
+# DBGate shows a SQL change-script preview before applying row/DDL edits.
+#
+# Dark theme: toggle it in DBGate's Settings. The choice (and any saved
+# queries) persists in the dbgate-data volume across `make db-down` / `make db`.
+#
+# Pinned to linux/amd64: DBGate's arm64 image (7.1.x) ships an x86-64 build of
+# the better-sqlite3 native module, so on Apple Silicon the SQLite plugin fails
+# to load and clicking a database errors with "Cannot read properties of
+# undefined (reading 'database')". The amd64 image under emulation works fine —
+# it's only a dev viewer. On amd64 hosts this pin is a no-op; drop it once
+# DBGate ships a correct arm64 image.
+#
+# If whygraph.toml overrides `whygraph_db` / `codegraph_db`, update the
+# bind-mount source paths below to match.
+
+services:
+  dbgate:
+    image: dbgate/dbgate:latest
+    platform: linux/amd64  # see header note — works around the broken arm64 image
+    container_name: whygraph-dbgate
+    ports:
+      - "8081:3000"
+    volumes:
+      - ./.whygraph:/data/whygraph
+      - ./.codegraph:/data/codegraph
+      - dbgate-data:/root/.dbgate
+    environment:
+      CONNECTIONS: con1,con2
+
+      LABEL_con1: WhyGraph
+      FILE_con1: /data/whygraph/whygraph.db
+      ENGINE_con1: sqlite@dbgate-plugin-sqlite
+
+      LABEL_con2: CodeGraph
+      FILE_con2: /data/codegraph/codegraph.db
+      ENGINE_con2: sqlite@dbgate-plugin-sqlite
+      READONLY_con2: "1"
+    restart: unless-stopped
+
+volumes:
+  dbgate-data:

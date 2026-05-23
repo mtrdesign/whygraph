@@ -67,6 +67,27 @@ whygraph scan
 
 This puts `whygraph` and `whygraph-mcp` on your `PATH`, independent of any Claude Code plugin.
 
+## Wire WhyGraph into your editor
+
+WhyGraph's MCP server (`whygraph-mcp`) is a standalone console script, so any LLM client that speaks MCP can use it. `whygraph init --client X` writes the right snippet to the right file for each supported client.
+
+Run from the repo you want WhyGraph to analyse:
+
+```bash
+whygraph init                          # DB only, no client wiring (safe default)
+whygraph init --client claude          # writes .mcp.json at repo root
+whygraph init --client cursor          # writes .cursor/mcp.json
+whygraph init --client vscode          # writes .vscode/mcp.json (alias: copilot)
+whygraph init --client codex           # prints snippet for ~/.codex/config.toml
+whygraph init --client claude-desktop  # prints snippet for Claude Desktop config
+whygraph init --client X --print       # prints, never writes
+whygraph init --list-clients           # show all supported clients + paths
+```
+
+**Project-scoped clients** (Claude Code, Cursor, VS Code / Copilot) get a config file written inside the repo so you can commit it — every contributor's editor picks it up automatically. **User-scoped clients** (Codex, Claude Desktop) are print-only: the command emits the snippet and tells you where to paste it, so WhyGraph never silently edits files outside the repo.
+
+For Claude Code specifically, `--client claude` only wires the MCP server. To also get the `/whygraph-plan` slash command, skills, and planner subagents, install the Claude Code plugin as well (see [As a Claude Code plugin](#as-a-claude-code-plugin) above).
+
 ## CLI commands
 
 | Command | Purpose |
@@ -207,14 +228,29 @@ uv run whygraph version       # CLI sanity check
 uv run whygraph-mcp           # launch MCP server on stdio
 ```
 
-If `uv` fails with `UnknownIssuer` SSL errors off-VPN, prefix with `SSL_CERT_FILE= ` (works around a corp-only cert bundle).
+If `uv` fails with `UnknownIssuer` SSL errors off-VPN, prefix with `SSL_CERT_FILE= ` (works around a corp-only cert bundle) — this applies to `make` targets too, e.g. `SSL_CERT_FILE= make sync`.
+
+A `Makefile` wraps the common dev tasks; run `make` to list them — `make sync`, `make test`, `make scan`, `make db` / `make db-down`, `make inspect`.
+
+### Browse the databases
+
+WhyGraph is developed by running it against its own repo, so it helps to eyeball the two SQLite databases it touches — `.whygraph/whygraph.db` (its own evidence/rationale data) and `.codegraph/codegraph.db` (CodeGraph's symbol graph). `make db` brings up [DBGate](https://dbgate.org/) in Docker with both databases wired up as connections:
+
+```bash
+cp docker-compose.example.yml docker-compose.yml   # one-time; the copy is git-ignored
+make db                                            # DBGate at http://localhost:8081
+make db-down                                       # stop the viewer
+```
+
+Both databases appear in the DBGate sidebar; the CodeGraph one is opened read-only since CodeGraph rewrites it on re-index. Toggle the dark theme in DBGate's Settings — it persists across restarts.
 
 ### Debug the MCP server with MCP Inspector
 
 The [MCP Inspector](https://github.com/modelcontextprotocol/inspector) is the official web UI for poking at a stdio MCP server — list tools, call them with custom args, see raw responses, tail stderr.
 
 ```bash
-npx @modelcontextprotocol/inspector uv run whygraph-mcp
+make inspect                           # against this checkout
+make inspect REPO=/path/to/other/repo  # against another repo's databases
 ```
 
-Open the printed `http://localhost:…` URL with the one-time auth token. Use **Reconnect** to pick up code changes.
+`make inspect` needs Node ≥ 20 active — the same modern Node CodeGraph requires (`nvm use 22`). Open the printed `http://localhost:…` URL with the one-time auth token. Use **Reconnect** to pick up code changes.

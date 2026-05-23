@@ -15,7 +15,8 @@ from whygraph.core import get_config
 from whygraph.services.codegraph import CodeGraph, CodeGraphError, SymbolContext
 from whygraph.services.llm import LlmError
 
-from ._shared import Target, WhyGraphError, repo_root, resolve_target, target_dict
+from .errors import WhyGraphError
+from .targets import Target, repo_root, resolve_target, target_dict
 from .evidence import collect_evidence
 
 _TOOL_DESCRIPTION = (
@@ -74,7 +75,7 @@ def whygraph_rationale_brief(
         generator = RationaleGenerator.from_config(get_config().rationale)
         rationale = generator.generate(evidence, symbol_context=_symbol_context(target))
     except (AnalyzeError, LlmError) as exc:
-        raise WhyGraphError(f"rationale generation failed: {exc}") from exc
+        raise WhyGraphError.wrap("rationale generation failed", exc)
 
     return {
         "target": target_dict(target),

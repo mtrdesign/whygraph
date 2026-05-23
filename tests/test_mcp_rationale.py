@@ -15,7 +15,7 @@ import pytest
 from whygraph.analyze import AnalyzeError, CommitEvidence, Rationale
 from whygraph.db import get_session
 from whygraph.db.models import Commit
-from whygraph.mcp._shared import WhyGraphError
+from whygraph.mcp.errors import WhyGraphError
 from whygraph.mcp.rationale import whygraph_rationale_brief
 from whygraph.services.codegraph import SymbolContext
 from whygraph.services.git import Repository

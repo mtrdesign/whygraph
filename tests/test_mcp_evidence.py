@@ -12,7 +12,7 @@ import pytest
 
 from whygraph.db import get_session
 from whygraph.db.models import Commit, Issue, PRIssueLink, PullRequest
-from whygraph.mcp._shared import WhyGraphError
+from whygraph.mcp.errors import WhyGraphError
 from whygraph.mcp.evidence import whygraph_evidence_for
 from whygraph.services.git import Repository
 

@@ -1,10 +1,24 @@
-"""Helpers shared across WhyGraph's MCP feature modules.
+"""Target-shaping utilities for WhyGraph's MCP feature modules.
 
-Holds the package's error type, the code-chunk target abstraction, and
-repository-root resolution. Feature modules (:mod:`whygraph.mcp.evidence`,
-:mod:`whygraph.mcp.rationale`) import from here; this module imports no
-feature module and no ``server`` module, so it never closes an import
-cycle.
+A "target" is a resolved chunk of code — a file path plus a 1-based
+inclusive line range, optionally tagged with the dotted symbol name it
+came from. Every MCP tool operates on one: ``whygraph_evidence_for``
+joins blame to PRs/issues for a target, ``whygraph_rationale_brief``
+synthesises a card for one.
+
+This module owns:
+
+- :class:`Target` — the dataclass itself.
+- :func:`resolve_target` — the central input validator that funnels both
+  targeting modes (``qualified_name`` vs ``(path, line_start, line_end)``)
+  into a single :class:`Target`.
+- :func:`target_dict` — the JSON-payload serializer.
+- :func:`repo_root` — repository-root resolution, kept here because
+  :func:`resolve_target` calls it to feed CodeGraph lookups and the
+  feature modules call it for the same reason.
+
+Imports :mod:`whygraph.mcp.errors` for :class:`WhyGraphError`; imports no
+feature module, so it never closes an import cycle.
 """
 
 from __future__ import annotations
@@ -15,13 +29,7 @@ from pathlib import Path
 from whygraph.core import _resolve_root, get_config
 from whygraph.services.codegraph import CodeGraph, CodeGraphError
 
-
-class WhyGraphError(RuntimeError):
-    """Raised by an MCP tool when a request cannot be served.
-
-    Surfaces to the agent as the tool's error message — phrased for a
-    reader who will act on it (e.g. "run ``whygraph scan`` first").
-    """
+from .errors import WhyGraphError
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,9 +119,7 @@ def resolve_target(
             ) as graph:
                 symbol = graph.symbol(qualified_name)
         except CodeGraphError as exc:
-            raise WhyGraphError(
-                f"qualified_name targeting needs CodeGraph: {exc}"
-            ) from exc
+            raise WhyGraphError.wrap("qualified_name targeting needs CodeGraph", exc)
         if symbol is None:
             raise WhyGraphError(
                 f"qualified_name {qualified_name!r} not found in CodeGraph"

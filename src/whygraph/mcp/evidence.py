@@ -21,7 +21,8 @@ from whygraph.db import get_session
 from whygraph.db.models import Commit, Issue, PRIssueLink, PullRequest
 from whygraph.services.git import GitError, Repository
 
-from ._shared import Target, WhyGraphError, repo_root, resolve_target, target_dict
+from .errors import WhyGraphError
+from .targets import Target, repo_root, resolve_target, target_dict
 
 _log = logging.getLogger(__name__)
 
@@ -129,7 +130,7 @@ def collect_evidence(target: Target, *, limit: int = 20) -> list[CommitEvidence]
     try:
         hunks = repo.blame(target.path, target.line_start, target.line_end)
     except GitError as exc:
-        raise WhyGraphError(f"git blame failed: {exc}") from exc
+        raise WhyGraphError.wrap("git blame failed", exc)
 
     items: list[CommitEvidence] = []
     try:

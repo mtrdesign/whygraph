@@ -20,18 +20,10 @@ Conventions shared across these tables (so individual files stay terse):
 * Float columns use :class:`sqlalchemy.REAL` for the same reason.
 * Several columns are typed ``str`` even though they hold JSON-encoded
   Python lists (e.g. ``Commit.parent_shas``, ``PullRequest.labels``,
-  ``PullRequest.commit_titles``). Callers encode/decode with ``json`` at
-  the boundary. Moving to a proper JSON column type is a follow-up that
-  needs a real Alembic migration.
-
-Current models cover the five tables whose auto-derived snake_case name
-does *not* collide with the hand-rolled tables owned by
-:mod:`whygraph.scan.db`: ``Author``, ``Commit``, ``Issue``,
-``PullRequest``, ``PRIssueLink``. The remaining two scan-owned tables
-(``rationale_cache``, ``scan_state``) intentionally have no SQLModel
-yet — their natural snake_case names collide with scan/db.py, so they
-will get models as part of the eventual scanner-side migration to ORM
-rather than today.
+  ``PullRequest.commit_titles``, ``RationaleCache.constraints``).
+  Callers encode/decode with ``json`` at the boundary. Moving to a
+  proper JSON column type is a follow-up that needs a real Alembic
+  migration.
 """
 
 from __future__ import annotations
@@ -41,5 +33,6 @@ from whygraph.db.models.commit import Commit
 from whygraph.db.models.issue import Issue
 from whygraph.db.models.pr_issue_link import PRIssueLink
 from whygraph.db.models.pull_request import PullRequest
+from whygraph.db.models.rationale_cache import RationaleCache
 
-__all__ = ["Author", "Commit", "Issue", "PRIssueLink", "PullRequest"]
+__all__ = ["Author", "Commit", "Issue", "PRIssueLink", "PullRequest", "RationaleCache"]

@@ -19,7 +19,14 @@ from whygraph.core.config import Config
 from whygraph.db import engine as db_engine
 from whygraph.db.bootstrap import alembic_config
 
-SQLMODEL_TABLES = {"author", "commit", "issue", "pr_issue_link", "pull_request"}
+SQLMODEL_TABLES = {
+    "author",
+    "commit",
+    "issue",
+    "pr_issue_link",
+    "pull_request",
+    "rationale_cache",
+}
 
 
 @pytest.fixture(autouse=True)

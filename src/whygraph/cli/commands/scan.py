@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
 import click
-from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress
 from rich.table import Table
@@ -14,7 +13,7 @@ from rich.text import Text
 
 from whygraph.scan import Crawler, GitCrawler, GitHubCrawler
 
-from .._shared import _configure_logging_best_effort
+from ..console import console
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -29,8 +28,6 @@ _T = TypeVar("_T")
 @click.command(name="scan")
 def scan_cmd() -> None:
     """Run the source crawlers, then describe each commit with the LLM."""
-    _configure_logging_best_effort()
-
     # Lazy-imported so that --help and other lightweight CLI surfaces
     # don't fail when the DB or git layers are mid-rewrite.
     from whygraph.analyze import LlmDescriptor
@@ -54,7 +51,6 @@ def scan_cmd() -> None:
         analyze_skip = str(exc)
 
     _render_scan_panel(
-        Console(),
         repository=repository,
         github_client=github_client,
         config=config,
@@ -99,7 +95,6 @@ def scan_cmd() -> None:
 
 
 def _render_scan_panel(
-    console: Console,
     *,
     repository: "Repository",
     github_client: "GitHubClient | None",

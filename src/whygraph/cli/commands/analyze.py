@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING
 
 import click
-from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.text import Text
 
-from .._shared import _configure_logging_best_effort
+from ..console import console, fail
 
 if TYPE_CHECKING:
     from whygraph.analyze import Description
@@ -32,8 +31,6 @@ def analyze_cmd(target: str, baseline: str | None) -> None:
     WhyGraph database — run ``whygraph scan`` first. The generated
     description is printed, not persisted.
     """
-    _configure_logging_best_effort()
-
     # Lazy-imported so lightweight CLI surfaces (--help) don't fail when
     # sibling layers are mid-rewrite — same rationale as scan_cmd.
     from whygraph.analyze import AnalyzeError, LlmDescriptor
@@ -48,12 +45,12 @@ def analyze_cmd(target: str, baseline: str | None) -> None:
 
     target_commit = _resolve_commit(repo, target)
     if target_commit is None:
-        _fail(f"{target!r} is not a commit in this repository")
+        fail(f"{target!r} is not a commit in this repository")
     baseline_commit = None
     if baseline is not None:
         baseline_commit = _resolve_commit(repo, baseline)
         if baseline_commit is None:
-            _fail(f"{baseline!r} is not a commit in this repository")
+            fail(f"{baseline!r} is not a commit in this repository")
 
     checked = [target_commit]
     if baseline_commit is not None:
@@ -61,7 +58,7 @@ def analyze_cmd(target: str, baseline: str | None) -> None:
     with get_session() as session:
         for commit in checked:
             if session.get(CommitRow, commit.sha) is None:
-                _fail(
+                fail(
                     f"commit {commit.sha[:12]} is not in the WhyGraph database; "
                     f"run 'whygraph scan' first"
                 )
@@ -74,7 +71,7 @@ def analyze_cmd(target: str, baseline: str | None) -> None:
         descriptor = LlmDescriptor.from_config(get_config().analyze)
         description = descriptor.describe(diff)
     except (GitError, AnalyzeError, LlmError) as exc:
-        _fail(str(exc))
+        fail(str(exc))
 
     _echo_description(target_commit, baseline_commit, diff, description)
 
@@ -106,7 +103,6 @@ def _echo_description(
     description is wrapped in a panel so it stands out from the diff
     and the surrounding provenance metadata.
     """
-    console = Console()
     against = "its parent" if baseline is None else baseline.sha[:12]
     in_tok = "n/a" if description.input_tokens is None else description.input_tokens
     out_tok = "n/a" if description.output_tokens is None else description.output_tokens
@@ -132,9 +128,3 @@ def _echo_description(
             padding=(1, 2),
         )
     )
-
-
-def _fail(message: str) -> NoReturn:
-    """Print ``message`` to stderr and exit with a non-zero status."""
-    click.echo(message, err=True)
-    raise click.exceptions.Exit(1)

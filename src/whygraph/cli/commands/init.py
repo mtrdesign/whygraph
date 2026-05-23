@@ -8,8 +8,6 @@ import click
 
 from whygraph import agents, assets
 
-from .._shared import _configure_logging_best_effort
-
 
 @click.command(name="init")
 @click.option(
@@ -73,8 +71,6 @@ def init_cmd(
     Idempotent — re-running on an already-initialized DB just confirms
     both schema layers are at head.
     """
-    _configure_logging_best_effort()
-
     if list_agents:
         _print_agent_list()
         return

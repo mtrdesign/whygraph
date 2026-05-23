@@ -55,14 +55,16 @@ def _make_repo(root: Path) -> Path:
 def _no_logging_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep CLI tests from reconfiguring process-wide logging.
 
-    ``analyze`` calls ``_configure_logging_best_effort``, which attaches a
-    Rich handler to the ``whygraph`` logger and sets ``propagate = False``
-    behind a module-global guard that is never reset — a process-wide
-    mutation that would otherwise bleed into unrelated tests' ``caplog``.
+    The ``whygraph`` Click group's callback calls
+    :func:`whygraph.core.configure_logging`, which attaches a Rich handler
+    to the ``whygraph`` logger and sets ``propagate = False`` behind a
+    module-global guard that is never reset — a process-wide mutation
+    that would otherwise bleed into unrelated tests' ``caplog``. We patch
+    the reference the CLI package imported, not the source module, so
+    other tests that touch ``whygraph.core.configure_logging`` directly
+    are unaffected.
     """
-    monkeypatch.setattr(
-        "whygraph.cli.commands.analyze._configure_logging_best_effort", lambda: None
-    )
+    monkeypatch.setattr("whygraph.cli.configure_logging", lambda *a, **kw: None)
 
 
 @pytest.fixture

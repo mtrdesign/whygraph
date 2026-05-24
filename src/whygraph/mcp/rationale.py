@@ -15,9 +15,12 @@ from whygraph.core import get_config
 from whygraph.services.codegraph import CodeGraph, CodeGraphError, SymbolContext
 from whygraph.services.llm import LlmError
 
+from whygraph.analyze import CommitEvidence, Rationale
+
 from .errors import WhyGraphError
 from .targets import Target, repo_root, resolve_target, target_dict
 from .evidence import collect_evidence
+from .rationale_cache import lookup_cached, store_cached
 
 _TOOL_DESCRIPTION = (
     "Generate a structured rationale card (purpose / why / constraints / "
@@ -48,6 +51,31 @@ def _symbol_context(target: Target) -> SymbolContext | None:
         return None
 
 
+def _format_response(
+    target: Target,
+    rationale: Rationale,
+    evidence: list[CommitEvidence],
+    cached_at: str,
+) -> dict:
+    """Shape the MCP response payload around a (fresh or cached) rationale."""
+    return {
+        "target": target_dict(target),
+        "purpose": rationale.purpose,
+        "why": rationale.why,
+        "constraints": list(rationale.constraints),
+        "tradeoffs": list(rationale.tradeoffs),
+        "risks": list(rationale.risks),
+        "model": rationale.model,
+        "provider": rationale.provider,
+        "cached_at": cached_at,
+        "evidence_count": {
+            "commits": len(evidence),
+            "prs": sum(len(item.pull_requests) for item in evidence),
+            "issues": sum(len(item.issues) for item in evidence),
+        },
+    }
+
+
 def whygraph_rationale_brief(
     path: str | None = None,
     line_start: int | None = None,
@@ -57,6 +85,10 @@ def whygraph_rationale_brief(
     """MCP tool — a rationale card for a chunk of code.
 
     See :data:`_TOOL_DESCRIPTION` for the agent-facing summary.
+
+    A previously generated card is returned from the SQLite-backed cache
+    (see :mod:`whygraph.mcp.rationale_cache`) when the same target,
+    provider, model, and evidence fingerprint are all unchanged.
     """
     target = resolve_target(
         path=path,
@@ -71,27 +103,20 @@ def whygraph_rationale_brief(
             "scanned commit. Run `whygraph scan` to populate the database."
         )
 
+    config = get_config().rationale
+    cached = lookup_cached(target, evidence, config.provider, config.model)
+    if cached is not None:
+        rationale, cached_at = cached
+        return _format_response(target, rationale, evidence, cached_at)
+
     try:
-        generator = RationaleGenerator.from_config(get_config().rationale)
+        generator = RationaleGenerator.from_config(config)
         rationale = generator.generate(evidence, symbol_context=_symbol_context(target))
     except (AnalyzeError, LlmError) as exc:
         raise WhyGraphError.wrap("rationale generation failed", exc)
 
-    return {
-        "target": target_dict(target),
-        "purpose": rationale.purpose,
-        "why": rationale.why,
-        "constraints": list(rationale.constraints),
-        "tradeoffs": list(rationale.tradeoffs),
-        "risks": list(rationale.risks),
-        "model": rationale.model,
-        "provider": rationale.provider,
-        "evidence_count": {
-            "commits": len(evidence),
-            "prs": sum(len(item.pull_requests) for item in evidence),
-            "issues": sum(len(item.issues) for item in evidence),
-        },
-    }
+    cached_at = store_cached(target, evidence, rationale, config.provider, config.model)
+    return _format_response(target, rationale, evidence, cached_at)
 
 
 def register(mcp: FastMCP) -> None:

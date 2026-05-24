@@ -26,7 +26,19 @@ _T = TypeVar("_T")
 
 
 @click.command(name="scan")
-def scan_cmd() -> None:
+@click.option(
+    "--no-llm-descriptions",
+    "no_llm_descriptions",
+    is_flag=True,
+    default=False,
+    help=(
+        "Skip Phase 2 (per-commit LLM descriptions). The git and GitHub "
+        "crawlers still run. The MCP tools `whygraph_evidence_for` and "
+        "`whygraph_rationale_brief` lazily backfill descriptions on demand, "
+        "and a later `whygraph scan` (without this flag) backfills the rest."
+    ),
+)
+def scan_cmd(no_llm_descriptions: bool) -> None:
     """Run the source crawlers, then describe each commit with the LLM."""
     # Lazy-imported so that --help and other lightweight CLI surfaces
     # don't fail when the DB or git layers are mid-rewrite.
@@ -43,12 +55,19 @@ def scan_cmd() -> None:
     github_client = GitHubClient.for_repository(repository)
     config = get_config()
 
-    try:
-        descriptor = LlmDescriptor.from_config(config.analyze)
-        analyze_skip: str | None = None
-    except LlmError as exc:
+    if no_llm_descriptions:
+        # Bypass the LlmDescriptor probe entirely so a broken `[analyze]`
+        # config still lets users run a fast scan and rely on the MCP
+        # tools' lazy backfill for descriptions.
         descriptor = None
-        analyze_skip = str(exc)
+        analyze_skip: str | None = "--no-llm-descriptions"
+    else:
+        try:
+            descriptor = LlmDescriptor.from_config(config.analyze)
+            analyze_skip = None
+        except LlmError as exc:
+            descriptor = None
+            analyze_skip = str(exc)
 
     _render_scan_panel(
         repository=repository,

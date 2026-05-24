@@ -156,6 +156,37 @@ def collect_evidence(target: Target, *, limit: int = 20) -> list[CommitEvidence]
     return items[:limit]
 
 
+def backfill_evidence_descriptions(items: list[CommitEvidence]) -> None:
+    """Lazily backfill ``llm_description`` for any commit in ``items``.
+
+    The MCP tools that consume the evidence call this once they're sure
+    they actually need the description text — :func:`whygraph_evidence_for`
+    before serializing, :func:`whygraph.mcp.rationale.whygraph_rationale_brief`
+    only on a rationale-cache miss. Putting the call site in the tools (not
+    in :func:`collect_evidence`) keeps the rationale-cache path free of LLM
+    cost when it hits.
+
+    Silently degrades when the configured analyze provider is unavailable —
+    the row's ``llm_description`` stays ``None`` and downstream consumers
+    already gate on truthiness.
+    """
+    needs = [item.commit for item in items if item.commit.llm_description is None]
+    if not needs:
+        return
+    # Lazy imports mirror the pattern in `whygraph.cli.commands.scan.scan_cmd`
+    # and keep the module's import-time surface free of analyze/LLM deps.
+    from whygraph.analyze import LlmDescriptor, backfill_all
+    from whygraph.core import get_config
+    from whygraph.services.llm import LlmError
+
+    try:
+        descriptor = LlmDescriptor.from_config(get_config().analyze)
+    except LlmError as exc:
+        _log.debug("skipping lazy LLM description backfill: %s", exc)
+        return
+    backfill_all(needs, repository=Repository(repo_root()), descriptor=descriptor)
+
+
 def _commit_dict(commit: Commit) -> dict:
     """Serialize a scanned commit to a JSON-ready dict."""
     return {
@@ -234,6 +265,7 @@ def whygraph_evidence_for(
         qualified_name=qualified_name,
     )
     evidence = collect_evidence(target, limit=limit)
+    backfill_evidence_descriptions(evidence)
     return {
         "target": target_dict(target),
         "evidence": [_evidence_dict(item) for item in evidence],

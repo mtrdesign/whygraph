@@ -19,7 +19,7 @@ from whygraph.analyze import CommitEvidence, Rationale
 
 from .errors import WhyGraphError
 from .targets import Target, repo_root, resolve_target, target_dict
-from .evidence import collect_evidence
+from .evidence import backfill_evidence_descriptions, collect_evidence
 from .rationale_cache import lookup_cached, store_cached
 
 _TOOL_DESCRIPTION = (
@@ -108,6 +108,13 @@ def whygraph_rationale_brief(
     if cached is not None:
         rationale, cached_at = cached
         return _format_response(target, rationale, evidence, cached_at)
+
+    # Cache miss — lazily backfill any commit whose `llm_description` is
+    # NULL (e.g. after `whygraph scan --no-llm-descriptions`) so the
+    # rationale prompt sees the richer per-commit summaries. The cache
+    # fingerprint is sha256-over-sorted-SHAs, so backfilling here does
+    # not affect cache keys.
+    backfill_evidence_descriptions(evidence)
 
     try:
         generator = RationaleGenerator.from_config(config)

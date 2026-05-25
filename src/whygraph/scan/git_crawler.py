@@ -5,6 +5,15 @@ Replaces the earlier placeholder. The crawler reads commits via
 bar from ``len(commits)``, and inserts one row per *new* commit into
 the ``commit`` table. Existing SHAs are skipped, so re-scans on a
 repository whose history only grows are no-ops.
+
+Phase 2 of the layered evidence pipeline added the
+``commit_file_change`` index on top: for every commit the crawler
+sees, ``git diff-tree -M -C`` produces per-file structural records
+(``A``/``M``/``D``/``R``/``C``, ``renamed_from``, line counts) that
+become rows keyed by ``commit_sha``. Existence of file-change rows is
+checked independently of the commit row, so upgrading from a pre-Phase-2
+WhyGraph DB and re-running ``whygraph scan`` backfills the index without
+needing a separate command.
 """
 
 from __future__ import annotations
@@ -16,7 +25,8 @@ from sqlmodel import select
 
 from whygraph.db import get_session
 from whygraph.db.models.commit import Commit as CommitRow
-from whygraph.services.git import Repository
+from whygraph.db.models.commit_file_change import CommitFileChange
+from whygraph.services.git import FileChange, Repository
 from whygraph.services.git.commit import Commit as CommitDC
 
 from .crawler import Crawler
@@ -46,11 +56,19 @@ class GitCrawler(Crawler):
         self.set_total(len(commits))
 
         with get_session() as session:
-            existing: set[str] = set(session.exec(select(CommitRow.sha)).all())
+            existing_commits: set[str] = set(
+                session.exec(select(CommitRow.sha)).all()
+            )
+            existing_file_changes: set[str] = set(
+                session.exec(select(CommitFileChange.commit_sha).distinct()).all()
+            )
             scanned_at = datetime.now(timezone.utc).isoformat()
             for dc in commits:
-                if dc.sha not in existing:
+                if dc.sha not in existing_commits:
                     session.add(_to_row(dc, scanned_at=scanned_at))
+                if dc.sha not in existing_file_changes:
+                    for change in self._repository.commit_file_changes(dc):
+                        session.add(_to_file_change_row(dc.sha, change))
                 self.advance(1)
 
 
@@ -68,4 +86,16 @@ def _to_row(dc: CommitDC, *, scanned_at: str) -> CommitRow:
         insertions=dc.stats.insertions,
         deletions=dc.stats.deletions,
         scanned_at=scanned_at,
+    )
+
+
+def _to_file_change_row(commit_sha: str, change: FileChange) -> CommitFileChange:
+    return CommitFileChange(
+        commit_sha=commit_sha,
+        path=change.path,
+        change_type=change.change_type,
+        renamed_from=change.renamed_from,
+        similarity=change.similarity,
+        lines_added=change.lines_added,
+        lines_deleted=change.lines_deleted,
     )

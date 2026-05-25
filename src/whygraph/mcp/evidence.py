@@ -5,6 +5,13 @@ commits to the pull requests that contain them and the issues those PRs
 close — producing the :class:`~whygraph.analyze.CommitEvidence` bundle the
 rationale generator consumes. :mod:`whygraph.mcp.rationale` reuses
 :func:`collect_evidence`; the tool itself serializes the bundle to JSON.
+
+Phase 2 of the layered evidence pipeline added an area-history merge:
+when blame returns few commits — typical after a refactor that replaced
+every line in the target's current range — the collector fills the
+remainder from the ``commit_file_change`` index, walking rename edges
+backwards so commits that touched the file's predecessors are reachable
+even when those predecessors no longer exist at HEAD.
 """
 
 from __future__ import annotations
@@ -109,6 +116,13 @@ def collect_evidence(target: Target, *, limit: int = 20) -> list[CommitEvidence]
     predates the commit) are skipped — only scanned commits become
     evidence.
 
+    When blame returns fewer than ``limit`` commits — typical after a
+    refactor that rewrote every line in the range — the remainder is
+    filled from the area-history index: ``commit_file_change`` rows for
+    ``target.path`` and every historical alias the path has gone by
+    (via the ``renamed_from`` chain). When blame already fills the cap,
+    no area-history rows are added.
+
     Parameters
     ----------
     target : Target
@@ -133,6 +147,7 @@ def collect_evidence(target: Target, *, limit: int = 20) -> list[CommitEvidence]
         raise WhyGraphError.wrap("git blame failed", exc)
 
     items: list[CommitEvidence] = []
+    seen_shas: set[str] = set()
     try:
         with get_session() as session:
             for hunk in hunks:
@@ -142,6 +157,7 @@ def collect_evidence(target: Target, *, limit: int = 20) -> list[CommitEvidence]
                 prs = _linked_prs(session, hunk.sha)
                 issues = _linked_issues(session, prs)
                 items.append(CommitEvidence(commit, tuple(prs), tuple(issues)))
+                seen_shas.add(hunk.sha)
             # Detach the rows before the session commits + closes, so the
             # caller (and the rationale generator) can still read their
             # already-loaded columns. Expunged rows escape commit-time
@@ -151,6 +167,26 @@ def collect_evidence(target: Target, *, limit: int = 20) -> list[CommitEvidence]
         raise WhyGraphError(
             "WhyGraph DB is missing or unscanned — run `whygraph scan` first"
         ) from exc
+
+    # Area-history fill. We always try to merge; how aggressively we
+    # backfill depends on whether blame was thin or already rich.
+    remaining = limit - len(items)
+    if remaining > 0:
+        # Local import dodges the path_history -> evidence cycle that
+        # exists because path_history reuses _linked_prs / _linked_issues.
+        from .path_history import area_history_commits
+
+        try:
+            extra = area_history_commits(
+                target.path,
+                limit=remaining,
+                exclude_shas=seen_shas,
+            )
+        except OperationalError as exc:
+            raise WhyGraphError(
+                "WhyGraph DB is missing or unscanned — run `whygraph scan` first"
+            ) from exc
+        items.extend(extra)
 
     items.sort(key=lambda item: item.commit.committed_at or "", reverse=True)
     return items[:limit]

@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from whygraph.db import get_session
-from whygraph.db.models import Commit, Issue, PRIssueLink, PullRequest
+from whygraph.db.models import Commit, CommitFileChange, Issue, PRIssueLink, PullRequest
 from whygraph.mcp.errors import WhyGraphError
 from whygraph.mcp.evidence import whygraph_evidence_for
 from whygraph.services.git import Repository
@@ -225,6 +225,108 @@ def test_evidence_for_backfills_null_llm_description(
         row = session.get(Commit, newest.sha)
         assert row.llm_description == "backfilled summary"
         assert row.llm_description_model == "stub:stub-1"
+
+
+def test_evidence_for_merges_area_history_when_blame_is_thin(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the blame-derived list has slack under ``limit``, the remainder
+    is filled from ``commit_file_change`` rows — including commits that
+    touched the *predecessor* path of a renamed file."""
+    newest, oldest = list(Repository(temp_git_repo).commits)
+    # An older commit that touched a now-renamed predecessor file. It is
+    # NOT blamed because the predecessor file no longer exists at HEAD.
+    predecessor_sha = "deadbeef" * 5  # 40 chars
+    with get_session() as session:
+        session.add(
+            _db_commit(oldest.sha, committed_at="2026-01-01T00:00:00+00:00")
+        )
+        session.add(
+            _db_commit(newest.sha, committed_at="2026-02-01T00:00:00+00:00")
+        )
+        session.add(
+            _db_commit(
+                predecessor_sha,
+                subject="legacy edit",
+                committed_at="2024-06-01T00:00:00+00:00",
+            )
+        )
+        # Rename chain: legacy_sample.py → sample.py
+        session.add(
+            CommitFileChange(
+                commit_sha=predecessor_sha,
+                path="legacy_sample.py",
+                change_type="M",
+                renamed_from=None,
+                similarity=None,
+                lines_added=1,
+                lines_deleted=0,
+            )
+        )
+        session.add(
+            CommitFileChange(
+                commit_sha=oldest.sha,
+                path="sample.py",
+                change_type="R",
+                renamed_from="legacy_sample.py",
+                similarity=100,
+                lines_added=0,
+                lines_deleted=0,
+            )
+        )
+
+    monkeypatch.chdir(temp_git_repo)
+    result = whygraph_evidence_for(path="sample.py", line_start=1, line_end=3)
+
+    shas = [item["commit"]["sha"] for item in result["evidence"]]
+    # Newest first; the predecessor-touching commit comes through the
+    # area-history merge despite never appearing in blame.
+    assert newest.sha in shas
+    assert oldest.sha in shas
+    assert predecessor_sha in shas
+
+
+def test_evidence_for_does_not_duplicate_when_blame_and_area_agree(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A SHA produced by both blame and the area-history index appears once."""
+    newest, oldest = list(Repository(temp_git_repo).commits)
+    with get_session() as session:
+        session.add(
+            _db_commit(oldest.sha, committed_at="2026-01-01T00:00:00+00:00")
+        )
+        session.add(
+            _db_commit(newest.sha, committed_at="2026-02-01T00:00:00+00:00")
+        )
+        # Both blamed commits also have file-change rows for sample.py.
+        session.add(
+            CommitFileChange(
+                commit_sha=newest.sha,
+                path="sample.py",
+                change_type="M",
+                lines_added=1,
+                lines_deleted=0,
+            )
+        )
+        session.add(
+            CommitFileChange(
+                commit_sha=oldest.sha,
+                path="sample.py",
+                change_type="A",
+                lines_added=2,
+                lines_deleted=0,
+            )
+        )
+
+    monkeypatch.chdir(temp_git_repo)
+    result = whygraph_evidence_for(path="sample.py", line_start=1, line_end=3)
+
+    shas = [item["commit"]["sha"] for item in result["evidence"]]
+    assert sorted(shas) == sorted({newest.sha, oldest.sha})
 
 
 def test_evidence_for_silent_noop_when_analyze_misconfigured(

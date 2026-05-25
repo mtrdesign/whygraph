@@ -17,6 +17,7 @@ from whygraph.db import engine as db_engine
 from whygraph.db import get_session
 from whygraph.db.bootstrap import ensure_initialized
 from whygraph.db.models.commit import Commit as CommitRow
+from whygraph.db.models.commit_file_change import CommitFileChange
 from whygraph.scan.git_crawler import GitCrawler
 from whygraph.services.git import Repository
 
@@ -132,6 +133,64 @@ def test_progress_total_matches_commit_count(repo_root: Path) -> None:
     task = progress.tasks[0]
     assert task.total == 3
     assert task.completed == 3
+
+
+def test_first_scan_persists_per_file_changes(repo_root: Path) -> None:
+    """The crawler records one ``commit_file_change`` row per touched file."""
+    repo = Repository(repo_root)
+    GitCrawler(Progress(), repository=repo).run()
+
+    with get_session() as session:
+        materialized = [
+            {
+                "path": r.path,
+                "change_type": r.change_type,
+                "renamed_from": r.renamed_from,
+            }
+            for r in session.exec(select(CommitFileChange)).all()
+        ]
+
+    # 3 commits, each touches exactly one file → 3 file-change rows.
+    assert len(materialized) == 3
+    assert {r["path"] for r in materialized} == {"a.txt", "b.txt"}
+    # a.txt is added in the first commit and modified in the third.
+    a_rows = [r for r in materialized if r["path"] == "a.txt"]
+    assert {r["change_type"] for r in a_rows} == {"A", "M"}
+    # No renames in this fixture.
+    assert all(r["renamed_from"] is None for r in materialized)
+
+
+def test_rescan_does_not_duplicate_file_changes(repo_root: Path) -> None:
+    """File-change rows are keyed by commit_sha; re-running scan is a no-op."""
+    repo = Repository(repo_root)
+    GitCrawler(Progress(), repository=repo).run()
+    GitCrawler(Progress(), repository=repo).run()
+
+    with get_session() as session:
+        count = session.exec(
+            select(func.count(CommitFileChange.id))
+        ).one()
+    assert count == 3
+
+
+def test_scan_backfills_file_changes_for_pre_existing_commit_rows(
+    repo_root: Path,
+) -> None:
+    """A repo where commits were scanned before Phase 2 (commit rows exist,
+    but commit_file_change rows don't) gets backfilled on the next scan."""
+    repo = Repository(repo_root)
+    GitCrawler(Progress(), repository=repo).run()
+
+    # Simulate an upgrade by deleting only the file-change rows.
+    with get_session() as session:
+        for row in session.exec(select(CommitFileChange)).all():
+            session.delete(row)
+
+    GitCrawler(Progress(), repository=repo).run()
+
+    with get_session() as session:
+        count = session.exec(select(func.count(CommitFileChange.id))).one()
+    assert count == 3
 
 
 def test_persisted_fields_match_in_memory_commit(repo_root: Path) -> None:

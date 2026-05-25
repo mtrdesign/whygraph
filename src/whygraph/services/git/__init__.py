@@ -17,6 +17,7 @@ from .blame import BlameHunk
 from .commit import Commit, CommitSummary, DiffStats
 from .commits import Commits
 from .exceptions import GitError
+from .file_change import FileChange
 from .repository import Repository
 
 __all__ = [
@@ -25,6 +26,7 @@ __all__ = [
     "CommitSummary",
     "Commits",
     "DiffStats",
+    "FileChange",
     "GitError",
     "Repository",
 ]

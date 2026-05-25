@@ -28,4 +28,5 @@ def test_mcp_server_registers_evidence_and_rationale_tools() -> None:
     assert {t.name for t in tools} == {
         "whygraph_evidence_for",
         "whygraph_rationale_brief",
+        "whygraph_area_history",
     }

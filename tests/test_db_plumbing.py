@@ -22,6 +22,7 @@ from whygraph.db.bootstrap import alembic_config
 SQLMODEL_TABLES = {
     "author",
     "commit",
+    "commit_file_change",
     "issue",
     "pr_issue_link",
     "pull_request",

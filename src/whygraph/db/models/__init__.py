@@ -30,9 +30,18 @@ from __future__ import annotations
 
 from whygraph.db.models.author import Author
 from whygraph.db.models.commit import Commit
+from whygraph.db.models.commit_file_change import CommitFileChange
 from whygraph.db.models.issue import Issue
 from whygraph.db.models.pr_issue_link import PRIssueLink
 from whygraph.db.models.pull_request import PullRequest
 from whygraph.db.models.rationale_cache import RationaleCache
 
-__all__ = ["Author", "Commit", "Issue", "PRIssueLink", "PullRequest", "RationaleCache"]
+__all__ = [
+    "Author",
+    "Commit",
+    "CommitFileChange",
+    "Issue",
+    "PRIssueLink",
+    "PullRequest",
+    "RationaleCache",
+]

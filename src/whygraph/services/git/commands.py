@@ -16,6 +16,7 @@ from whygraph.core import ShellCommand
 
 from .blame import BlameHunk
 from .commit import Commit
+from .file_change import FileChange
 
 GitRevParseCmd = ShellCommand(
     argv=["git", "rev-parse", "--show-toplevel"],
@@ -164,6 +165,44 @@ class GitBlameCmd(ShellCommand[tuple[BlameHunk, ...]]):
 
     def parse(self, result: CompletedProcess[str]) -> tuple[BlameHunk, ...]:
         return BlameHunk.from_porcelain(result.stdout)
+
+
+class GitDiffTreeFileChangesCmd(ShellCommand[tuple[FileChange, ...]]):
+    """``git diff-tree -r -M -C --no-commit-id --root --raw --numstat <sha>``.
+
+    Returns one :class:`FileChange` per file the commit touched, with
+    rename and copy detection enabled. For merge commits ``diff-tree``
+    defaults to the first parent, matching the convention the rest of
+    WhyGraph uses (see :meth:`Repository.diff`). For root commits the
+    ``--root`` flag emits a full diff against git's empty tree, so the
+    very first commit in a history is recorded the same way every other
+    commit is.
+
+    Parameters
+    ----------
+    sha : str
+        The commit SHA to inspect.
+    """
+
+    def __init__(self, sha: str) -> None:
+        self.sha = sha
+
+    def argv(self) -> list[str]:
+        return [
+            "git",
+            "diff-tree",
+            "-r",
+            "-M",
+            "-C",
+            "--no-commit-id",
+            "--root",
+            "--raw",
+            "--numstat",
+            self.sha,
+        ]
+
+    def parse(self, result: CompletedProcess[str]) -> tuple[FileChange, ...]:
+        return FileChange.from_diff_tree(result.stdout)
 
 
 class GitLogShortstatCmd(ShellCommand[Iterator[Commit]]):

@@ -8,10 +8,17 @@ from pathlib import Path
 from whygraph.core import Shell, ShellError
 
 from .blame import BlameHunk
-from .commands import GitBlameCmd, GitCurrentBranchCmd, GitDiffCmd, GitOriginUrlCmd
+from .commands import (
+    GitBlameCmd,
+    GitCurrentBranchCmd,
+    GitDiffCmd,
+    GitDiffTreeFileChangesCmd,
+    GitOriginUrlCmd,
+)
 from .commit import Commit
 from .commits import Commits
 from .exceptions import GitError
+from .file_change import FileChange
 
 # Git's well-known empty-tree object (SHA-1 repositories). Diffing a root
 # commit against it yields exactly what that commit introduced. Note that
@@ -207,6 +214,44 @@ class Repository:
         except ShellError as exc:
             raise GitError(
                 f"failed to blame {path}:{line_start}-{line_end}"
+            ) from exc
+
+    def commit_file_changes(self, commit: Commit) -> tuple[FileChange, ...]:
+        """Per-file structural changes recorded by ``commit``.
+
+        Powers WhyGraph's per-commit path index (``commit_file_change``
+        rows). The underlying ``git diff-tree`` invocation enables
+        rename and copy detection (``-M -C``) so renames surface with
+        :attr:`FileChange.renamed_from` populated rather than collapsing
+        into the artificial "delete + add" pair git emits without it.
+        Merge commits are diffed against their first parent and root
+        commits against the empty tree, matching the convention
+        :meth:`diff` already uses.
+
+        Parameters
+        ----------
+        commit : Commit
+            The commit to inspect. Only its :attr:`Commit.sha` is used —
+            the rest of the value object is accepted to keep the call
+            site symmetric with :meth:`diff`.
+
+        Returns
+        -------
+        tuple[FileChange, ...]
+            One entry per touched file, empty for an empty merge commit.
+
+        Raises
+        ------
+        GitError
+            If ``git diff-tree`` fails (unknown sha, broken repo).
+        """
+        try:
+            return self._shell.run(
+                GitDiffTreeFileChangesCmd(commit.sha), cwd=self.root
+            )
+        except ShellError as exc:
+            raise GitError(
+                f"failed to inspect file changes for {commit.sha[:7]}"
             ) from exc
 
     def diff_range(self, base: str, head: str) -> str:

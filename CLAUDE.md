@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-This is the `1.x` branch — a Python rewrite in progress. Today the package is a **scaffold only**: a `whygraph` CLI with one `version` subcommand and an empty FastMCP stdio server (`whygraph-mcp`) that registers no tools. Features land incrementally on this branch. The merged TypeScript POC lives on [`main`](https://github.com/cvetty/whygraph/tree/main); commit history before `85fe8b3` ("initial codebase") describes the v0 design (CodeGraph reader, evidence collectors, rationale generator, MCP tools, slash command, install command) and is the reference for what v1 should re-implement in Python.
+WhyGraph v1 is the Python implementation, now living on `main`. Live components: the MCP server (evidence tool, rationale tool with SQLite-backed content-addressable cache, repo / commit / PR / issue resources, orchestration prompts), the CLI (`init`, `scan`, `analyze`, `version`), and the `/whygraph-plan` slash command + fan-out/fan-in planner subagents. The earlier HTML render/serve viewer was removed during the III iteration migration and is not currently in the CLI. The original TypeScript POC was retired; pre-`85fe8b3` commit history covers the v0 design for archaeology.
 
-`v1-plan.md` is the authoritative design note. Decisions already captured there — read it before adding architecture:
+Core architectural decisions that still apply — read these before adding architecture:
 
 - **Graph backend abstraction.** A `GraphBackend` Python protocol (`get_node`, `get_callers`, `get_callees`, `find_symbols`, `walk_neighbors`) with `SqliteCodegraphBackend` as the first impl (reads CodeGraph's SQLite directly — no subprocess, no MCP roundtrip). Other backends (`JsonGraphifyBackend`, `MCPBackend`) drop in later without re-architecting.
 - **Plugin shape, in order.** (1) MCP tools `whygraph_rationale_pre_edit_brief` and `whygraph_evidence_for`. (2) A `/whygraph-plan <task>` slash command that spawns a Plan subagent via the `Agent` tool with rationale cards **inlined at spawn time**. (3) Workers after the planner.
@@ -29,14 +29,22 @@ If `uv` fails with `UnknownIssuer` SSL errors, prefix with `SSL_CERT_FILE= ` (th
 
 A root `Makefile` wraps these plus dev-only tooling — `make` lists targets; `make db` / `make db-down` run a DBGate viewer for both databases (via `docker-compose.example.yml`), `make inspect` launches the MCP Inspector.
 
-## Architecture (current scaffold)
+## Architecture
 
-- `src/whygraph/cli.py` — Click group exposing the `whygraph` command. Subcommands attach to `main`.
-- `src/whygraph/mcp_server.py` — `FastMCP("whygraph")` instance plus a `main()` that runs `transport="stdio"`. New MCP tools register on the module-level `mcp` object via `@mcp.tool()`.
-- `src/whygraph/__main__.py` — enables `python -m whygraph`.
-- `src/whygraph/agents.py` — registry of supported LLM agents (Claude Code, Cursor, VS Code / Copilot, Codex, Claude Desktop) and the per-agent MCP config wiring (`write_snippet` / `render_snippet`). `whygraph init --agent X` reads from here.
-- `src/whygraph/assets.py` + `src/whygraph/assets/claude-code/` — bundled agent / command / skill markdown files, copied into a project's `.claude/` by `whygraph init --agent claude`. Loaded at runtime via `importlib.resources.files("whygraph") / "assets" / "claude-code"`; same packaging precedent as `src/whygraph/analyze/prompts/`.
-- Console scripts in `pyproject.toml`: `whygraph` → `cli:main`, `whygraph-mcp` → `mcp_server:main`. Both must keep working — `.mcp.json` files written by `whygraph init` and the `uv tool install` path depend on them.
+Top-level packages under `src/whygraph/`:
+
+- `cli/` — Click group + one module per subcommand under `cli/commands/` (`init`, `scan`, `analyze`, `version`). `cli/__init__.py` assembles the group, configures logging once per invocation, and exports `main`. Shared console formatting lives in `cli/console.py`.
+- `mcp/` — FastMCP stdio server. `server.py` builds the `FastMCP("whygraph")` instance and exposes `main()`; feature modules (`evidence.py`, `rationale.py`, `rationale_cache.py`, `targets.py`, `errors.py`) each register their tools via a `register(mcp)` function, so new MCP features land as new modules without growing a monolith.
+- `core/` — cross-cutting helpers: `config` (env / project config), `logger` (logging setup), `shell` / `shell_command` (subprocess helpers), `utils`.
+- `db/` — SQLite plumbing. `engine.py` + `bootstrap.py` set up the DB, `base.py` is the declarative base, `models/` holds the SQLModel classes, `migrations/` holds Alembic versions.
+- `services/` — external integrations: `git/`, `github/`, `codegraph/` (reads CodeGraph's SQLite by `node_id`), `llm/` (Anthropic / OpenAI / Ollama subprocess wrappers).
+- `scan/` — crawler orchestration. `crawler.py` drives `git_crawler.py`, `github_crawler.py`, and `analyze_crawler.py` per-source phases.
+- `analyze/` — LLM-backed analysis. `description.py` / `llm_descriptor.py` produce per-commit diff descriptions; `rationale.py` / `rationale_generator.py` produce the 5-section rationale cards; `backfill.py` runs the lazy on-read backfill. Prompt templates live under `analyze/prompts/`.
+- `agents.py` — registry of supported LLM agents (Claude Code, Cursor, VS Code / Copilot, Codex, Claude Desktop) and the per-agent MCP config wiring (`write_snippet` / `render_snippet`). `whygraph init --agent X` reads from here.
+- `assets.py` + `assets/claude-code/` — bundled Claude Code assets (agents, commands, skills) copied into a project's `.claude/` by `whygraph init --agent claude`. Loaded at runtime via `importlib.resources.files("whygraph") / "assets" / "claude-code"`; same packaging precedent as `analyze/prompts/`.
+- `__main__.py` — enables `python -m whygraph`.
+
+Console scripts in `pyproject.toml`: `whygraph` → `cli:main`, `whygraph-mcp` → `mcp.server:main`. Both must keep working — `.mcp.json` files written by `whygraph init` and the `uv tool install` path depend on them.
 
 ## Install path
 
@@ -61,7 +69,7 @@ There is no Claude Code marketplace install; `whygraph init --agent claude` is t
 
 Surface assumptions before writing code. If a request has multiple plausible interpretations, name them and ask — don't pick silently.
 
-- "Add caching for rationale cards" — in-memory per-process? On-disk under `~/.cache/whygraph`? Keyed by `node_id` or by `qualified_name + file_path`? `v1-plan.md` already pins the cache key to be content-addressable, but TTL, location, and invalidation are open. Ask before implementing.
+- "Add caching for rationale cards" — in-memory per-process? On-disk under `~/.cache/whygraph`? Keyed by `node_id` or by `qualified_name + file_path`? The cache key is settled (content-addressable, so cards survive a backend swap), but TTL, location, and invalidation are open. Ask before implementing.
 - "Make graph queries faster" — lower latency on a single `get_callers`, higher throughput across many calls, or perceived speed via streaming partial results? Each implies a different change.
 
 ### 2. Simplicity first
@@ -69,7 +77,7 @@ Surface assumptions before writing code. If a request has multiple plausible int
 Solve today's problem with the smallest thing that works. Add abstraction when a second concrete case forces it, not in anticipation.
 
 - For a one-off SQLite read, a function in `sqlite_codegraph_backend.py` is enough. Don't introduce a `QueryBuilder` class until a second backend actually needs to share query logic.
-- The `GraphBackend` protocol in `v1-plan.md` is the *exception that proves the rule*: it's introduced up-front because three concrete backends are already named (`SqliteCodegraphBackend`, `JsonGraphifyBackend`, `MCPBackend`). Without that, a single backend wouldn't justify a protocol.
+- The `GraphBackend` protocol is the *exception that proves the rule*: it's introduced up-front because three concrete backends are already named (`SqliteCodegraphBackend`, `JsonGraphifyBackend`, `MCPBackend`). Without that, a single backend wouldn't justify a protocol.
 
 ### 3. Surgical changes
 

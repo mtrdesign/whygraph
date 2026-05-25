@@ -16,19 +16,19 @@ For each symbol, WhyGraph collects evidence from git history and GitHub (commits
 
 ## Quickstart
 
-In the repository you want to analyse:
+Install WhyGraph once (see [Installation](#installation) below), then in the repository you want to analyse:
 
 ```bash
 # 1. Bootstrap CodeGraph (Node ≥ 22, then runs `codegraph init -i`).
-uv run --project /absolute/path/to/whygraph whygraph init
+whygraph init
 
 # 2. Scan: walks git history, fetches PRs/issues, runs TF-IDF scoring,
 #    generates an LLM diff description per commit. Writes to
 #    .whygraph/whygraph.db in the current repo.
-uv run --project /absolute/path/to/whygraph whygraph scan
+whygraph scan
 
 # 3. Verify the MCP server can launch.
-uv run --project /absolute/path/to/whygraph whygraph-mcp   # Ctrl-C to exit
+whygraph-mcp   # Ctrl-C to exit
 ```
 
 The full scan touches every commit on the default branch. On large or remote-heavy repos you may want to bound the LLM phase only:
@@ -36,24 +36,66 @@ The full scan touches every commit on the default branch. On large or remote-hea
 ```bash
 # Run scan + LLM only on the 50 most recent commits. Other phases
 # (git crawl, GitHub fetch, TF-IDF scoring) still cover full history.
-uv run whygraph scan --llm-recent 50
+whygraph scan --llm-recent 50
 ```
 
 ## Installation
 
-WhyGraph installs **per project**, per agent:
+WhyGraph follows a **one-global-install / use-anywhere** model — like `npx`, but for Python. You install the package once on your machine; that puts the `whygraph` and `whygraph-mcp` console scripts on your `PATH`. Then `whygraph init --agent <name>` wires up each individual project so its agent can launch the MCP server.
+
+Pick whichever install path fits where the project is in its lifecycle:
+
+### From PyPI (stable releases)
 
 ```bash
-# 1. Put `whygraph` and `whygraph-mcp` on your PATH.
-uv tool install /absolute/path/to/whygraph      # or: pipx install /absolute/path/to/whygraph
-# (Once published, replace the local path with `cvetty/whygraph`.)
-
-# 2. From each project you want WhyGraph to support, wire your agent.
-cd /path/to/your-project
-whygraph init --agent claude                    # Claude Code: writes .mcp.json + drops bundled assets in .claude/
+uv tool install whygraph        # or: pipx install whygraph
 ```
 
-`whygraph init --agent claude` writes `.mcp.json` at the repo root and copies the bundled agent / command / skill markdown into `<project>/.claude/agents`, `/.claude/commands`, `/.claude/skills`. Re-running is safe — pre-existing files are left alone; pass `--force` to overwrite, `--no-install-assets` to skip the copy entirely.
+> **Status:** WhyGraph is not yet published to PyPI. Use one of the GitHub or local-checkout paths below until v1 ships.
+
+### From GitHub (latest / pre-release)
+
+For unreleased features on `main`, a specific feature branch, or a tag:
+
+```bash
+# Latest from main:
+uv tool install "git+https://github.com/cvetty/whygraph.git"
+
+# A specific branch (e.g. an in-flight feature):
+uv tool install "git+https://github.com/cvetty/whygraph.git@feature/scan-and-scoring"
+
+# A specific tag (once tagged):
+uv tool install "git+https://github.com/cvetty/whygraph.git@v1.3.0"
+```
+
+Re-running upgrades in place. To switch refs, add `--force` (or `uv tool uninstall whygraph` first). `pipx` accepts the same `git+https://…` URLs.
+
+### From a local checkout (contributors)
+
+```bash
+git clone https://github.com/cvetty/whygraph.git
+uv tool install --editable ./whygraph
+```
+
+`--editable` lets your local edits show up immediately, without reinstalling.
+
+### Verify
+
+```bash
+whygraph version
+which whygraph-mcp
+```
+
+Both should resolve to the global tool install (under `~/.local/bin/` or `uv`'s shim directory).
+
+### Wire each project
+
+```bash
+cd /path/to/your-project
+whygraph init --agent claude     # Claude Code: writes .mcp.json + drops bundled assets in .claude/
+```
+
+`whygraph init --agent claude` writes `.mcp.json` at the repo root and copies the bundled agent / command / skill markdown into `<project>/.claude/agents`, `/.claude/commands`, `/.claude/skills`. The `.mcp.json` references `whygraph-mcp` by bare command name, so the same checked-in config works for every teammate who has WhyGraph installed globally — no absolute paths to scrub. Re-running is safe — pre-existing files are left alone; pass `--force` to overwrite, `--no-install-assets` to skip the asset copy entirely.
 
 ### Migration from the Claude Code plugin
 

@@ -116,12 +116,25 @@ def _format_issue(issue: Issue) -> list[str]:
     return lines
 
 
+_SOURCE_LABELS = {
+    "blame": "line-blame",
+    "blame-walked": "line-blame (skipped a refactor commit)",
+    "predecessor-blame": "line-blame on a pre-rename predecessor file",
+    "area": "area-history (touched the file but not these lines)",
+}
+
+
 def _format_evidence(evidence: Sequence[CommitEvidence]) -> str:
     """Render an evidence bundle as the text payload for the rationale prompt.
 
     Commits are formatted in the order given — the caller controls
-    ordering. Each commit block is followed by its linked pull requests and
-    issues. The JSON-encoded ``labels`` columns are decoded here.
+    ordering. Each commit block is followed by its linked pull requests
+    and issues. The JSON-encoded ``labels`` columns are decoded here.
+
+    Each commit block also carries a ``Source:`` line describing *how*
+    the row reached this bundle (line-blame, area-history, etc.), so the
+    LLM can weight precision-vs-coverage signals when synthesising the
+    rationale.
     """
     n_prs = sum(len(item.pull_requests) for item in evidence)
     n_issues = sum(len(item.issues) for item in evidence)
@@ -131,6 +144,10 @@ def _format_evidence(evidence: Sequence[CommitEvidence]) -> str:
     ]
     for item in evidence:
         lines = _format_commit(item.commit)
+        label = _SOURCE_LABELS.get(item.source, item.source)
+        # Insert the source line right after the COMMIT header so the
+        # LLM sees it before subject/body content.
+        lines.insert(1, f"  Source: {label}")
         for pr in item.pull_requests:
             lines.append("")
             lines.extend(_format_pr(pr))

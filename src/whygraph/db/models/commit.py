@@ -25,3 +25,8 @@ class Commit(WhygraphTable, table=True):
     scanned_at: str = Field(sa_type=Text)
     llm_description: str | None = Field(default=None, sa_type=Text)
     llm_description_model: str | None = Field(default=None, sa_type=Text)
+    # Phase 3 bridge — heuristic 0–100 score indicating how likely this
+    # commit is a refactor/formatter sweep. Phase 3's evidence collector
+    # uses it to drive ``git blame --ignore-rev`` walk-past so older
+    # authorship surfaces through commits that would otherwise mask it.
+    refactor_score: int = Field(default=0)

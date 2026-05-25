@@ -6,6 +6,7 @@ git repo, so the blame → commit → PR → issue join runs end to end.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,14 @@ from whygraph.db import get_session
 from whygraph.db.models import Commit, CommitFileChange, Issue, PRIssueLink, PullRequest
 from whygraph.mcp.errors import WhyGraphError
 from whygraph.mcp.evidence import whygraph_evidence_for
+from whygraph.scan.refactor_score import BORING_THRESHOLD
 from whygraph.services.git import Repository
+
+
+def _run_git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout
 
 
 def _db_commit(
@@ -327,6 +335,156 @@ def test_evidence_for_does_not_duplicate_when_blame_and_area_agree(
 
     shas = [item["commit"]["sha"] for item in result["evidence"]]
     assert sorted(shas) == sorted({newest.sha, oldest.sha})
+
+
+def _bootstrap_repo(repo: Path) -> None:
+    """Init a throwaway repo with deterministic identity configured."""
+    repo.mkdir()
+    _run_git(repo, "init")
+    _run_git(repo, "config", "user.email", "tester@example.com")
+    _run_git(repo, "config", "user.name", "Test User")
+    _run_git(repo, "config", "commit.gpgsign", "false")
+
+
+def _seed_commit_row(
+    session,
+    *,
+    sha: str,
+    parent_shas: str,
+    subject: str,
+    committed_at: str,
+    refactor_score: int = 0,
+) -> None:
+    row = Commit(
+        sha=sha,
+        parent_shas=parent_shas,
+        author_name="Test User",
+        author_email="tester@example.com",
+        authored_at=committed_at,
+        committed_at=committed_at,
+        subject=subject,
+        body="",
+        files_changed=1,
+        insertions=1,
+        deletions=0,
+        scanned_at="2026-05-26T00:00:00+00:00",
+        llm_description="diff summary",
+    )
+    row.refactor_score = refactor_score
+    session.add(row)
+
+
+def test_evidence_for_walks_past_refactor_heavy_commit(
+    tmp_path: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A boring commit between today's line and its real author is walked
+    past so the original author surfaces under ``source="blame-walked"``."""
+    repo = tmp_path / "repo"
+    _bootstrap_repo(repo)
+
+    sample = repo / "sample.py"
+    sample.write_text("x = 1\n")
+    _run_git(repo, "add", "sample.py")
+    _run_git(repo, "commit", "-m", "feat: author x")
+    original_sha = _run_git(repo, "rev-parse", "HEAD").strip()
+
+    sample.write_text("x = 42\n")
+    _run_git(repo, "add", "sample.py")
+    _run_git(repo, "commit", "-m", "refactor: bulk-rename constants")
+    boring_sha = _run_git(repo, "rev-parse", "HEAD").strip()
+
+    with get_session() as session:
+        _seed_commit_row(
+            session,
+            sha=original_sha,
+            parent_shas="",
+            subject="feat: author x",
+            committed_at="2026-01-01T00:00:00+00:00",
+        )
+        _seed_commit_row(
+            session,
+            sha=boring_sha,
+            parent_shas=original_sha,
+            subject="refactor: bulk-rename constants",
+            committed_at="2026-02-01T00:00:00+00:00",
+            refactor_score=BORING_THRESHOLD + 10,
+        )
+
+    monkeypatch.chdir(repo)
+    result = whygraph_evidence_for(path="sample.py", line_start=1, line_end=1)
+
+    by_sha = {item["commit"]["sha"]: item for item in result["evidence"]}
+    assert by_sha[boring_sha]["source"] == "blame"
+    assert original_sha in by_sha
+    assert by_sha[original_sha]["source"] == "blame-walked"
+
+
+def test_evidence_for_surfaces_predecessor_blame_via_rename(
+    tmp_path: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rename that also significantly rewrites the file hides the original
+    author from plain blame. Predecessor-blame re-blames the old path at the
+    rename event's parent and surfaces the original commit anyway."""
+    repo = tmp_path / "repo"
+    _bootstrap_repo(repo)
+
+    (repo / "old.py").write_text("x = 1\n")
+    _run_git(repo, "add", "old.py")
+    _run_git(repo, "commit", "-m", "feat: author x")
+    original_sha = _run_git(repo, "rev-parse", "HEAD").strip()
+
+    # Rename + heavy rewrite in one commit. Git's blame -M -C similarity
+    # detector should NOT follow the rename back because the contents are
+    # essentially different.
+    _run_git(repo, "rm", "old.py")
+    (repo / "new.py").write_text(
+        "# completely different file\n"
+        "def fetch_users():\n"
+        "    return database.query('SELECT * FROM users')\n"
+    )
+    _run_git(repo, "add", "new.py")
+    _run_git(repo, "commit", "-m", "refactor: replace constant with users module")
+    rewrite_sha = _run_git(repo, "rev-parse", "HEAD").strip()
+
+    with get_session() as session:
+        _seed_commit_row(
+            session,
+            sha=original_sha,
+            parent_shas="",
+            subject="feat: author x",
+            committed_at="2026-01-01T00:00:00+00:00",
+        )
+        _seed_commit_row(
+            session,
+            sha=rewrite_sha,
+            parent_shas=original_sha,
+            subject="refactor: replace constant with users module",
+            committed_at="2026-02-01T00:00:00+00:00",
+        )
+        # An explicit rename record drives predecessor-blame even though
+        # git's blame -M -C wouldn't follow the move on its own.
+        session.add(
+            CommitFileChange(
+                commit_sha=rewrite_sha,
+                path="new.py",
+                change_type="R",
+                renamed_from="old.py",
+                similarity=10,
+                lines_added=3,
+                lines_deleted=1,
+            )
+        )
+
+    monkeypatch.chdir(repo)
+    result = whygraph_evidence_for(path="new.py", line_start=1, line_end=1)
+
+    sources = {item["commit"]["sha"]: item["source"] for item in result["evidence"]}
+    assert original_sha in sources
+    assert sources[original_sha] == "predecessor-blame"
 
 
 def test_evidence_for_silent_noop_when_analyze_misconfigured(

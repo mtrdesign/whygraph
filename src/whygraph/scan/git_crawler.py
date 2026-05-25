@@ -30,6 +30,7 @@ from whygraph.services.git import FileChange, Repository
 from whygraph.services.git.commit import Commit as CommitDC
 
 from .crawler import Crawler
+from .refactor_score import compute_refactor_score
 
 
 class GitCrawler(Crawler):
@@ -64,15 +65,36 @@ class GitCrawler(Crawler):
             )
             scanned_at = datetime.now(timezone.utc).isoformat()
             for dc in commits:
-                if dc.sha not in existing_commits:
-                    session.add(_to_row(dc, scanned_at=scanned_at))
                 if dc.sha not in existing_file_changes:
-                    for change in self._repository.commit_file_changes(dc):
+                    file_changes = self._repository.commit_file_changes(dc)
+                    for change in file_changes:
                         session.add(_to_file_change_row(dc.sha, change))
+                else:
+                    file_changes = ()
+
+                score = compute_refactor_score(
+                    subject=dc.subject, file_changes=file_changes
+                )
+
+                if dc.sha not in existing_commits:
+                    session.add(
+                        _to_row(dc, scanned_at=scanned_at, refactor_score=score)
+                    )
+                elif file_changes:
+                    # Existing commit row but we just computed its file
+                    # changes for the first time — backfill the score so
+                    # an upgrade from a pre-Phase-3 DB picks up the
+                    # heuristic without needing a separate command.
+                    existing = session.get(CommitRow, dc.sha)
+                    if existing is not None and existing.refactor_score == 0:
+                        existing.refactor_score = score
+                        session.add(existing)
                 self.advance(1)
 
 
-def _to_row(dc: CommitDC, *, scanned_at: str) -> CommitRow:
+def _to_row(
+    dc: CommitDC, *, scanned_at: str, refactor_score: int = 0
+) -> CommitRow:
     return CommitRow(
         sha=dc.sha,
         parent_shas=" ".join(dc.parent_shas),
@@ -86,6 +108,7 @@ def _to_row(dc: CommitDC, *, scanned_at: str) -> CommitRow:
         insertions=dc.stats.insertions,
         deletions=dc.stats.deletions,
         scanned_at=scanned_at,
+        refactor_score=refactor_score,
     )
 
 

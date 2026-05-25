@@ -167,7 +167,13 @@ class Repository:
             ) from exc
 
     def blame(
-        self, path: str, line_start: int, line_end: int
+        self,
+        path: str,
+        line_start: int,
+        line_end: int,
+        *,
+        ignore_revs: tuple[str, ...] | None = None,
+        rev: str | None = None,
     ) -> tuple[BlameHunk, ...]:
         """Blame a contiguous line range of one file.
 
@@ -190,6 +196,15 @@ class Repository:
             First line of the range (1-based, inclusive).
         line_end : int
             Last line of the range (1-based, inclusive).
+        ignore_revs : tuple[str, ...] or None, optional
+            Extra commit SHAs to walk past for this single call. The
+            project-level ``.git-blame-ignore-revs`` file (when present)
+            still applies on top.
+        rev : str or None, optional
+            Revision to blame against. ``None`` (default) blames HEAD.
+            Pass a commit SHA to blame the working tree as of that
+            commit — used by the predecessor-blame bridge to reach
+            commits that touched a file at its pre-rename name.
 
         Returns
         -------
@@ -203,12 +218,19 @@ class Repository:
         GitError
             If ``git`` fails — unknown path, or a range outside the file.
         """
-        ignore_revs: str | None = None
+        ignore_revs_file: str | None = None
         if (self.root / _BLAME_IGNORE_REVS_FILE).is_file():
-            ignore_revs = _BLAME_IGNORE_REVS_FILE
+            ignore_revs_file = _BLAME_IGNORE_REVS_FILE
         try:
             return self._shell.run(
-                GitBlameCmd(path, line_start, line_end, ignore_revs_file=ignore_revs),
+                GitBlameCmd(
+                    path,
+                    line_start,
+                    line_end,
+                    ignore_revs_file=ignore_revs_file,
+                    ignore_revs=ignore_revs,
+                    rev=rev,
+                ),
                 cwd=self.root,
             )
         except ShellError as exc:

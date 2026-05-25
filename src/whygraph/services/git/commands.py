@@ -102,7 +102,7 @@ class GitDiffCmd(ShellCommand[str]):
 
 
 class GitBlameCmd(ShellCommand[tuple[BlameHunk, ...]]):
-    """``git blame -w -M -C -L<a>,<b> --porcelain -- <path>`` — line ownership.
+    """``git blame -w -M -C -L<a>,<b> --porcelain [rev] -- <path>``.
 
     Blames a contiguous line range of one file and parses the porcelain
     output into per-commit :class:`BlameHunk` records.
@@ -121,6 +121,13 @@ class GitBlameCmd(ShellCommand[tuple[BlameHunk, ...]]):
     is appended; git resolves the path relative to the shell ``cwd``, so
     callers typically pass the literal ``".git-blame-ignore-revs"`` and
     let :meth:`Repository.blame`'s ``cwd=self.root`` do the resolution.
+    ``ignore_revs`` adds dynamic per-call ``--ignore-rev <sha>`` entries
+    on top of the file (or instead of it) — used by the Phase 3 bridge
+    to walk past refactor-heavy commits at query time.
+
+    Passing ``rev`` blames against that revision instead of HEAD; the
+    predecessor-blame path uses this to attribute lines inside a
+    renamed-from file at the rename commit's parent.
 
     Parameters
     ----------
@@ -131,9 +138,15 @@ class GitBlameCmd(ShellCommand[tuple[BlameHunk, ...]]):
     line_end : int
         Last line of the range (1-based, inclusive).
     ignore_revs_file : str or None, optional
-        Path to an ``.git-blame-ignore-revs``-style file (one SHA per
-        line) listing commits blame should walk past. ``None`` means no
-        ignore list, which is the default for repos without one.
+        Path to an ``.git-blame-ignore-revs``-style file. ``None``
+        means no file-backed skip list, which is the default for repos
+        without one.
+    ignore_revs : tuple[str, ...] or None, optional
+        Extra SHAs to ignore for this single call. Each is passed via
+        ``--ignore-rev <sha>``. ``None`` adds none.
+    rev : str or None, optional
+        Revision to blame against. ``None`` (default) blames HEAD's
+        working tree.
     """
 
     def __init__(
@@ -142,11 +155,15 @@ class GitBlameCmd(ShellCommand[tuple[BlameHunk, ...]]):
         line_start: int,
         line_end: int,
         ignore_revs_file: str | None = None,
+        ignore_revs: tuple[str, ...] | None = None,
+        rev: str | None = None,
     ) -> None:
         self.path = path
         self.line_start = line_start
         self.line_end = line_end
         self.ignore_revs_file = ignore_revs_file
+        self.ignore_revs = ignore_revs
+        self.rev = rev
 
     def argv(self) -> list[str]:
         args = [
@@ -160,6 +177,10 @@ class GitBlameCmd(ShellCommand[tuple[BlameHunk, ...]]):
         ]
         if self.ignore_revs_file is not None:
             args.append(f"--ignore-revs-file={self.ignore_revs_file}")
+        for sha in self.ignore_revs or ():
+            args.extend(["--ignore-rev", sha])
+        if self.rev is not None:
+            args.append(self.rev)
         args.extend(["--", self.path])
         return args
 

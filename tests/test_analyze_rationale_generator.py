@@ -476,6 +476,22 @@ def test_format_evidence_omits_absent_llm_description() -> None:
     assert "Summary:" not in bundle
 
 
+def test_format_evidence_renders_source_label_per_commit() -> None:
+    bundle = _format_evidence(
+        [
+            CommitEvidence(_commit(subject="real edit"), source="blame"),
+            CommitEvidence(_commit(subject="behind refactor"), source="blame-walked"),
+            CommitEvidence(_commit(subject="pre-rename"), source="predecessor-blame"),
+            CommitEvidence(_commit(subject="area touch"), source="area"),
+        ]
+    )
+
+    assert "Source: line-blame\n" in bundle
+    assert "skipped a refactor commit" in bundle
+    assert "pre-rename predecessor" in bundle
+    assert "area-history" in bundle
+
+
 # ---- _format_symbol_context ---------------------------------------------
 
 

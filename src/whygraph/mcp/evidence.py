@@ -1,17 +1,12 @@
 """The ``whygraph_evidence_for`` MCP tool and its evidence collector.
 
-The collector walks ``git blame`` for a code chunk, then joins the owning
-commits to the pull requests that contain them and the issues those PRs
-close — producing the :class:`~whygraph.analyze.CommitEvidence` bundle the
-rationale generator consumes. :mod:`whygraph.mcp.rationale` reuses
-:func:`collect_evidence`; the tool itself serializes the bundle to JSON.
-
-Phase 2 of the layered evidence pipeline added an area-history merge:
-when blame returns few commits — typical after a refactor that replaced
-every line in the target's current range — the collector fills the
-remainder from the ``commit_file_change`` index, walking rename edges
-backwards so commits that touched the file's predecessors are reachable
-even when those predecessors no longer exist at HEAD.
+The collector combines four signals: line-blame at HEAD, line-blame
+after walking past refactor-heavy commits, line-blame against a rename
+predecessor at its pre-rename location, and area-history from the
+``commit_file_change`` index. Each commit is tagged with a ``source``
+label so the rationale generator can weight precision vs coverage.
+:mod:`whygraph.mcp.rationale` reuses :func:`collect_evidence`; the tool
+itself serializes the bundle to JSON.
 """
 
 from __future__ import annotations
@@ -25,11 +20,28 @@ from sqlmodel import Session, col, select
 
 from whygraph.analyze import CommitEvidence
 from whygraph.db import get_session
-from whygraph.db.models import Commit, Issue, PRIssueLink, PullRequest
-from whygraph.services.git import GitError, Repository
+from whygraph.db.models import Commit, CommitFileChange, Issue, PRIssueLink, PullRequest
+from whygraph.scan.refactor_score import BORING_THRESHOLD
+from whygraph.services.git import BlameHunk, GitError, Repository
 
 from .errors import WhyGraphError
 from .targets import Target, repo_root, resolve_target, target_dict
+
+# Cap on how many rounds of "blame returned a boring commit; ignore it
+# and try again" the collector will run. Each round is one extra git
+# blame invocation, so the bound keeps query latency predictable on
+# pathological refactor chains.
+_MAX_BORING_HOPS = 3
+
+# Source ordering for dedupe — a SHA that surfaces from multiple paths
+# is kept with the strongest source label only. ``blame`` beats every
+# other label; ``area`` is the weakest.
+_SOURCE_PRIORITY = {
+    "blame": 0,
+    "blame-walked": 1,
+    "predecessor-blame": 2,
+    "area": 3,
+}
 
 _log = logging.getLogger(__name__)
 
@@ -110,18 +122,28 @@ def _linked_issues(session: Session, prs: list[PullRequest]) -> list[Issue]:
 def collect_evidence(target: Target, *, limit: int = 20) -> list[CommitEvidence]:
     """Gather the historical evidence bundle for a code chunk.
 
-    Blames the chunk to find its owning commits, then joins each to its
-    pull requests and closing issues. SHAs that ``git blame`` reports but
-    that are absent from the WhyGraph DB (uncommitted lines, or a DB that
-    predates the commit) are skipped — only scanned commits become
-    evidence.
+    The collector combines four signals, each tagged with the
+    :attr:`CommitEvidence.source` label that describes how it was
+    discovered:
 
-    When blame returns fewer than ``limit`` commits — typical after a
-    refactor that rewrote every line in the range — the remainder is
-    filled from the area-history index: ``commit_file_change`` rows for
-    ``target.path`` and every historical alias the path has gone by
-    (via the ``renamed_from`` chain). When blame already fills the cap,
-    no area-history rows are added.
+    1. ``"blame"`` — line-level attribution from the target's current
+       range. The primary signal.
+    2. ``"blame-walked"`` — line-level attribution surfaced by walking
+       past refactor-heavy commits (scored at scan time). Each round
+       runs blame again with ``--ignore-rev`` for every boring SHA seen
+       so far; bounded by :data:`_MAX_BORING_HOPS`.
+    3. ``"predecessor-blame"`` — for every rename event in the target
+       path's lineage (``commit_file_change`` rows with ``change_type``
+       ``"R"``), blame the predecessor file at the rename commit's
+       parent so authorship for code that has been moved across files
+       still surfaces.
+    4. ``"area"`` — drawn from the ``commit_file_change`` index for the
+       target's path and every rename ancestor. Used to fill the cap
+       when the line-blame signals are thin.
+
+    SHAs that appear under multiple labels are kept once at the strongest
+    label (see :data:`_SOURCE_PRIORITY`). The final list is sorted newest
+    first and capped at ``limit``.
 
     Parameters
     ----------
@@ -142,54 +164,197 @@ def collect_evidence(target: Target, *, limit: int = 20) -> list[CommitEvidence]
     """
     repo = Repository(repo_root())
     try:
-        hunks = repo.blame(target.path, target.line_start, target.line_end)
+        initial = repo.blame(target.path, target.line_start, target.line_end)
     except GitError as exc:
         raise WhyGraphError.wrap("git blame failed", exc)
 
-    items: list[CommitEvidence] = []
-    seen_shas: set[str] = set()
     try:
-        with get_session() as session:
-            for hunk in hunks:
-                commit = session.get(Commit, hunk.sha)
-                if commit is None:
-                    continue
-                prs = _linked_prs(session, hunk.sha)
-                issues = _linked_issues(session, prs)
-                items.append(CommitEvidence(commit, tuple(prs), tuple(issues)))
-                seen_shas.add(hunk.sha)
-            # Detach the rows before the session commits + closes, so the
-            # caller (and the rationale generator) can still read their
-            # already-loaded columns. Expunged rows escape commit-time
-            # expiry.
-            session.expunge_all()
+        return _collect_evidence_against_db(repo, target, initial, limit)
     except OperationalError as exc:
         raise WhyGraphError(
             "WhyGraph DB is missing or unscanned — run `whygraph scan` first"
         ) from exc
 
-    # Area-history fill. We always try to merge; how aggressively we
-    # backfill depends on whether blame was thin or already rich.
+
+def _collect_evidence_against_db(
+    repo: Repository,
+    target: Target,
+    initial: tuple[BlameHunk, ...],
+    limit: int,
+) -> list[CommitEvidence]:
+    """The DB-dependent half of :func:`collect_evidence`.
+
+    Split out so the caller can wrap every DB touch — walk-past,
+    predecessor-blame, the main commit/PR/issue join, and the
+    area-history fill — in a single ``OperationalError`` translation.
+    """
+    walked_hunks, _boring = _walk_past_boring(repo, target, initial_hunks=initial)
+    predecessor_hunks = _predecessor_blame(repo, target)
+
+    labeled_hunks: list[tuple[BlameHunk, str]] = (
+        [(h, "blame") for h in initial]
+        + [(h, "blame-walked") for h in walked_hunks]
+        + [(h, "predecessor-blame") for h in predecessor_hunks]
+    )
+
+    by_sha: dict[str, CommitEvidence] = {}
+    with get_session() as session:
+        for hunk, source in labeled_hunks:
+            if hunk.is_uncommitted:
+                continue
+            commit = session.get(Commit, hunk.sha)
+            if commit is None:
+                continue
+            if not _should_replace(by_sha.get(hunk.sha), source):
+                continue
+            prs = _linked_prs(session, hunk.sha)
+            issues = _linked_issues(session, prs)
+            by_sha[hunk.sha] = CommitEvidence(
+                commit, tuple(prs), tuple(issues), source=source
+            )
+        # Detach so the loaded columns remain readable after the
+        # session closes.
+        session.expunge_all()
+
+    items = list(by_sha.values())
     remaining = limit - len(items)
     if remaining > 0:
-        # Local import dodges the path_history -> evidence cycle that
-        # exists because path_history reuses _linked_prs / _linked_issues.
         from .path_history import area_history_commits
 
-        try:
-            extra = area_history_commits(
-                target.path,
-                limit=remaining,
-                exclude_shas=seen_shas,
-            )
-        except OperationalError as exc:
-            raise WhyGraphError(
-                "WhyGraph DB is missing or unscanned — run `whygraph scan` first"
-            ) from exc
-        items.extend(extra)
+        extras = area_history_commits(
+            target.path,
+            limit=remaining,
+            exclude_shas=set(by_sha),
+        )
+        items.extend(extras)
 
     items.sort(key=lambda item: item.commit.committed_at or "", reverse=True)
     return items[:limit]
+
+
+def _should_replace(existing: CommitEvidence | None, new_source: str) -> bool:
+    """Whether a newly-discovered source supersedes a SHA we've already kept."""
+    if existing is None:
+        return True
+    return _SOURCE_PRIORITY.get(new_source, 99) < _SOURCE_PRIORITY.get(
+        existing.source, 99
+    )
+
+
+def _walk_past_boring(
+    repo: Repository, target: Target, *, initial_hunks: tuple[BlameHunk, ...]
+) -> tuple[list[BlameHunk], set[str]]:
+    """Re-run blame with refactor-heavy commits ignored, up to a cap.
+
+    Returns the set of hunks that *appeared only after* a boring commit
+    was ignored, along with the set of boring SHAs we ended up walking
+    past. Used by :func:`collect_evidence` to tag those hunks
+    ``source="blame-walked"``.
+    """
+    seen_shas = {h.sha for h in initial_hunks if not h.is_uncommitted}
+    boring_shas = _boring_shas_in(seen_shas)
+    if not boring_shas:
+        return [], set()
+
+    walked: list[BlameHunk] = []
+    ignored = set(boring_shas)
+    for _ in range(_MAX_BORING_HOPS):
+        try:
+            hunks = repo.blame(
+                target.path,
+                target.line_start,
+                target.line_end,
+                ignore_revs=tuple(sorted(ignored)),
+            )
+        except GitError:
+            # Walk-past is best-effort: if git refuses the call (e.g.
+            # an ignored SHA can't be resolved), bail out cleanly and
+            # keep whatever we already have.
+            break
+        new_walked = [h for h in hunks if not h.is_uncommitted and h.sha not in seen_shas]
+        walked.extend(new_walked)
+        seen_shas.update(h.sha for h in new_walked)
+        new_boring = _boring_shas_in({h.sha for h in new_walked}) - ignored
+        if not new_boring:
+            break
+        ignored.update(new_boring)
+    return walked, ignored
+
+
+def _boring_shas_in(shas: set[str]) -> set[str]:
+    """Return the subset of ``shas`` whose ``refactor_score`` is boring."""
+    if not shas:
+        return set()
+    with get_session() as session:
+        rows = session.exec(
+            select(Commit.sha)
+            .where(col(Commit.sha).in_(shas))
+            .where(col(Commit.refactor_score) >= BORING_THRESHOLD)
+        ).all()
+    return set(rows)
+
+
+def _predecessor_blame(repo: Repository, target: Target) -> list[BlameHunk]:
+    """Blame ``target``'s line range inside every rename predecessor.
+
+    For each rename event in the target's lineage, this re-runs blame
+    against the predecessor file as it existed at the rename commit's
+    parent. The line range is reused as-is — when the predecessor file
+    was too short for the range, git errors out and the event is
+    skipped (predecessor-blame is best-effort signal, not a strict
+    guarantee).
+    """
+    out: list[BlameHunk] = []
+    for rename_commit_sha, predecessor_path in _rename_events_for(target.path):
+        parent_sha = _first_parent_of(rename_commit_sha)
+        if parent_sha is None:
+            continue
+        try:
+            hunks = repo.blame(
+                predecessor_path,
+                target.line_start,
+                target.line_end,
+                rev=parent_sha,
+            )
+        except GitError:
+            continue
+        out.extend(h for h in hunks if not h.is_uncommitted)
+    return out
+
+
+def _rename_events_for(path: str) -> list[tuple[str, str]]:
+    """Return ``(rename_commit_sha, predecessor_path)`` for every rename in path's lineage."""
+    # Lazy import: path_history reuses _linked_prs / _linked_issues from
+    # this module, so eager imports would create a cycle.
+    from .path_history import resolve_path_aliases
+
+    out: list[tuple[str, str]] = []
+    with get_session() as session:
+        aliases = resolve_path_aliases(session, path)
+        if not aliases:
+            return []
+        rows = session.exec(
+            select(CommitFileChange.commit_sha, CommitFileChange.renamed_from)
+            .where(col(CommitFileChange.path).in_(aliases))
+            .where(col(CommitFileChange.change_type).in_(("R", "C")))
+            .where(col(CommitFileChange.renamed_from).is_not(None))
+        ).all()
+    for row in rows:
+        sha = row[0]
+        predecessor = row[1]
+        if sha and predecessor:
+            out.append((sha, predecessor))
+    return out
+
+
+def _first_parent_of(sha: str) -> str | None:
+    """First parent SHA of a scanned commit, or ``None`` if it's a root."""
+    with get_session() as session:
+        commit = session.get(Commit, sha)
+        if commit is None:
+            return None
+        parents = commit.parent_shas.split() if commit.parent_shas else []
+    return parents[0] if parents else None
 
 
 def backfill_evidence_descriptions(items: list[CommitEvidence]) -> None:
@@ -269,6 +434,7 @@ def _evidence_dict(item: CommitEvidence) -> dict:
         "commit": _commit_dict(item.commit),
         "pull_requests": [_pr_dict(pr) for pr in item.pull_requests],
         "issues": [_issue_dict(issue) for issue in item.issues],
+        "source": item.source,
     }
 
 

@@ -131,6 +131,8 @@ def area_history_commits(
         for commit in commits:
             prs = _linked_prs(session, commit.sha)
             issues = _linked_issues(session, prs)
-            items.append(CommitEvidence(commit, tuple(prs), tuple(issues)))
+            items.append(
+                CommitEvidence(commit, tuple(prs), tuple(issues), source="area")
+            )
         session.expunge_all()
     return items

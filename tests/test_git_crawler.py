@@ -193,6 +193,89 @@ def test_scan_backfills_file_changes_for_pre_existing_commit_rows(
     assert count == 3
 
 
+def test_scan_computes_refactor_score_for_boring_commit(tmp_path: Path) -> None:
+    """A ``refactor:``/``chore:``-prefixed mass-touch commit is flagged
+    above :data:`BORING_THRESHOLD` at scan time."""
+    from whygraph.scan.refactor_score import BORING_THRESHOLD
+
+    repo = tmp_path / "boring_repo"
+    repo.mkdir()
+
+    def _g(*args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(repo), *args], check=True, capture_output=True
+        )
+
+    _g("init", "-q", "-b", "main")
+    _g("config", "user.email", "test@example.com")
+    _g("config", "user.name", "Test User")
+    _g("config", "commit.gpgsign", "false")
+    # Twenty-plus files touched in one commit, ``refactor:`` subject ⇒
+    # combined score crosses the threshold.
+    for i in range(25):
+        (repo / f"file{i}.txt").write_text(f"line {i}\n")
+    _g("add", ".")
+    _g("commit", "-q", "-m", "refactor: scaffolding sweep")
+    boring_sha = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+    ).strip()
+
+    GitCrawler(Progress(), repository=Repository(repo)).run()
+
+    with get_session() as session:
+        row = session.get(CommitRow, boring_sha)
+        score = row.refactor_score if row else None
+    assert score is not None
+    assert score >= BORING_THRESHOLD
+
+
+def test_scan_backfills_refactor_score_when_file_changes_arrive_late(
+    tmp_path: Path,
+) -> None:
+    """A pre-Phase-3 ``commit`` row with default score 0 picks up its real
+    score on the next scan once file-change rows are populated."""
+    from whygraph.scan.refactor_score import BORING_THRESHOLD
+
+    repo = tmp_path / "late_repo"
+    repo.mkdir()
+
+    def _g(*args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(repo), *args], check=True, capture_output=True
+        )
+
+    _g("init", "-q", "-b", "main")
+    _g("config", "user.email", "test@example.com")
+    _g("config", "user.name", "Test User")
+    _g("config", "commit.gpgsign", "false")
+    for i in range(25):
+        (repo / f"f{i}.txt").write_text("x\n")
+    _g("add", ".")
+    _g("commit", "-q", "-m", "chore: scaffolding")
+    sha = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+    ).strip()
+
+    repository = Repository(repo)
+    GitCrawler(Progress(), repository=repository).run()
+
+    # Simulate a pre-Phase-3 DB: file-change rows were generated, but
+    # the score was never populated. Reset the score and the file-change
+    # rows so the next scan reaches the backfill branch.
+    with get_session() as session:
+        for row in session.exec(select(CommitFileChange)).all():
+            session.delete(row)
+        existing = session.get(CommitRow, sha)
+        existing.refactor_score = 0
+        session.add(existing)
+
+    GitCrawler(Progress(), repository=repository).run()
+
+    with get_session() as session:
+        score = session.get(CommitRow, sha).refactor_score
+    assert score >= BORING_THRESHOLD
+
+
 def test_persisted_fields_match_in_memory_commit(repo_root: Path) -> None:
     repo = Repository(repo_root)
     expected = {c.sha: c for c in repo.commits}

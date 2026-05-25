@@ -34,11 +34,32 @@ class CommitEvidence:
     issues : tuple[Issue, ...]
         Issues linked to ``commit`` (via its pull requests). Empty when none
         are linked.
+    source : str
+        How this evidence row was discovered. One of:
+
+        * ``"blame"`` — line-level attribution from the target's current
+          range (highest-precision signal).
+        * ``"blame-walked"`` — surfaced only after blame walked past a
+          refactor-heavy commit. Still line-level, but one or more boring
+          commits were skipped to reach this author.
+        * ``"predecessor-blame"`` — line-level attribution inside a
+          rename predecessor of the current file, at the commit just
+          before the rename event.
+        * ``"area"`` — drawn from the ``commit_file_change`` index
+          (touched the file or a rename ancestor, but not these specific
+          lines). Weaker than blame, reaches deleted-predecessor history
+          that blame cannot.
+
+        Older callers that construct :class:`CommitEvidence` directly
+        without specifying ``source`` get the default ``"blame"`` — which
+        matches the pre-Phase-3 behaviour where every entry came from
+        ``git blame``.
     """
 
     commit: Commit
     pull_requests: tuple[PullRequest, ...] = ()
     issues: tuple[Issue, ...] = ()
+    source: str = "blame"
 
 
 @dataclass(frozen=True, slots=True)

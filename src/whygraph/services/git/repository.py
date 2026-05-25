@@ -19,6 +19,11 @@ from .exceptions import GitError
 # plain ``git diff``, which then compares ``<sha>`` to the working tree.
 _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
+# Conventional filename for a project-level blame skip list. Git also reads
+# it via the ``blame.ignoreRevsFile`` config setting, but WhyGraph wires it
+# explicitly so behaviour does not depend on the user's local git config.
+_BLAME_IGNORE_REVS_FILE = ".git-blame-ignore-revs"
+
 
 class Repository:
     """A git repository rooted at a specific working tree on disk.
@@ -163,6 +168,13 @@ class Repository:
         ``line_start`` and ``line_end`` (both 1-based, inclusive),
         aggregated into one :class:`BlameHunk` per commit.
 
+        The underlying ``git blame`` invocation always runs with
+        whitespace-blind and move/copy detection enabled (see
+        :class:`GitBlameCmd`). When the working tree contains a
+        ``.git-blame-ignore-revs`` file at :attr:`root`, that file is
+        passed through too — so checked-in skip lists work without
+        requiring per-user ``blame.ignoreRevsFile`` config.
+
         Parameters
         ----------
         path : str
@@ -184,9 +196,13 @@ class Repository:
         GitError
             If ``git`` fails — unknown path, or a range outside the file.
         """
+        ignore_revs: str | None = None
+        if (self.root / _BLAME_IGNORE_REVS_FILE).is_file():
+            ignore_revs = _BLAME_IGNORE_REVS_FILE
         try:
             return self._shell.run(
-                GitBlameCmd(path, line_start, line_end), cwd=self.root
+                GitBlameCmd(path, line_start, line_end, ignore_revs_file=ignore_revs),
+                cwd=self.root,
             )
         except ShellError as exc:
             raise GitError(

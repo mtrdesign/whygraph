@@ -101,10 +101,25 @@ class GitDiffCmd(ShellCommand[str]):
 
 
 class GitBlameCmd(ShellCommand[tuple[BlameHunk, ...]]):
-    """``git blame -L<a>,<b> --porcelain -- <path>`` — line ownership.
+    """``git blame -w -M -C -L<a>,<b> --porcelain -- <path>`` — line ownership.
 
     Blames a contiguous line range of one file and parses the porcelain
     output into per-commit :class:`BlameHunk` records.
+
+    The default flag set deliberately strengthens blame against three
+    refactor-mask cases that the bare command misses:
+
+    - ``-w`` collapses whitespace-only edits, so a formatter sweep does
+      not steal attribution from the commit that wrote the actual code.
+    - ``-M`` detects intra-file moves, so lines that were shuffled within
+      the same file remain attributed to the commit that wrote them.
+    - ``-C`` detects cross-file copies and moves originating from files
+      changed in the same commit (a file split or extraction).
+
+    When ``ignore_revs_file`` is supplied, ``--ignore-revs-file=<path>``
+    is appended; git resolves the path relative to the shell ``cwd``, so
+    callers typically pass the literal ``".git-blame-ignore-revs"`` and
+    let :meth:`Repository.blame`'s ``cwd=self.root`` do the resolution.
 
     Parameters
     ----------
@@ -114,22 +129,38 @@ class GitBlameCmd(ShellCommand[tuple[BlameHunk, ...]]):
         First line of the range (1-based, inclusive).
     line_end : int
         Last line of the range (1-based, inclusive).
+    ignore_revs_file : str or None, optional
+        Path to an ``.git-blame-ignore-revs``-style file (one SHA per
+        line) listing commits blame should walk past. ``None`` means no
+        ignore list, which is the default for repos without one.
     """
 
-    def __init__(self, path: str, line_start: int, line_end: int) -> None:
+    def __init__(
+        self,
+        path: str,
+        line_start: int,
+        line_end: int,
+        ignore_revs_file: str | None = None,
+    ) -> None:
         self.path = path
         self.line_start = line_start
         self.line_end = line_end
+        self.ignore_revs_file = ignore_revs_file
 
     def argv(self) -> list[str]:
-        return [
+        args = [
             "git",
             "blame",
+            "-w",
+            "-M",
+            "-C",
             f"-L{self.line_start},{self.line_end}",
             "--porcelain",
-            "--",
-            self.path,
         ]
+        if self.ignore_revs_file is not None:
+            args.append(f"--ignore-revs-file={self.ignore_revs_file}")
+        args.extend(["--", self.path])
+        return args
 
     def parse(self, result: CompletedProcess[str]) -> tuple[BlameHunk, ...]:
         return BlameHunk.from_porcelain(result.stdout)

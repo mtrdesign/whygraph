@@ -15,13 +15,14 @@ from mcp.server.fastmcp import FastMCP
 
 from whygraph.core import configure_logging, get_config
 
-from . import area_history, evidence, rationale
+from . import area_history, evidence, rationale, resources
 
 mcp = FastMCP("whygraph")
 
 evidence.register(mcp)
 rationale.register(mcp)
 area_history.register(mcp)
+resources.register(mcp)
 
 
 def main() -> None:

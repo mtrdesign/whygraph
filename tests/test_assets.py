@@ -41,11 +41,25 @@ def test_packaged_claude_assets_present() -> None:
 
 
 def test_packaged_cursor_assets_present() -> None:
-    """The two bundled Cursor MDC rules are reachable via importlib.resources."""
+    """All bundled Cursor assets are reachable via importlib.resources.
+
+    Covers the full ported surface: 4 rules (skills equivalent), 3
+    commands (slash commands), and 4 subagents — mirroring the
+    ``claude-code/`` tree where Cursor has a native concept.
+    """
     root = assets.packaged_assets_for(agents.resolve_agent("cursor"))
     expected = (
         "rules/whygraph-pre-edit.mdc",
         "rules/whygraph-ask-why.mdc",
+        "rules/whygraph-plan-change.mdc",
+        "rules/whygraph-implement-plan.mdc",
+        "commands/rationale.md",
+        "commands/whygraph-plan.md",
+        "commands/whygraph-implement.md",
+        "agents/planner.md",
+        "agents/researcher.md",
+        "agents/synthesizer.md",
+        "agents/implementor.md",
     )
     for rel in expected:
         leaf = root

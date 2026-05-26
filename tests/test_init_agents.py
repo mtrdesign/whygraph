@@ -284,6 +284,9 @@ def test_init_agent_cursor_writes_mcp_json_and_installs_rules(
     # Bundled MDC rules land in .cursor/rules/.
     assert (cwd / ".cursor" / "rules" / "whygraph-pre-edit.mdc").is_file()
     assert (cwd / ".cursor" / "rules" / "whygraph-ask-why.mdc").is_file()
+    # Slash commands and subagents land in their respective subdirs.
+    assert (cwd / ".cursor" / "commands" / "whygraph-plan.md").is_file()
+    assert (cwd / ".cursor" / "agents" / "planner.md").is_file()
     assert "Installed assets for cursor" in result.output
     # No Claude-Code assets bleed into the Cursor target.
     assert not (cwd / ".claude").exists()

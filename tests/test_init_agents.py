@@ -12,6 +12,7 @@ Two layers of coverage:
 from __future__ import annotations
 
 import json
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -26,7 +27,7 @@ from whygraph.cli import main as whygraph_main
 
 def test_known_agent_names_includes_canonical_and_aliases() -> None:
     names = set(agents.known_agent_names())
-    assert {"claude", "cursor", "vscode", "copilot", "codex", "claude-desktop"} <= names
+    assert {"claude", "cursor", "vscode", "copilot", "codex"} == names
 
 
 def test_resolve_agent_canonical() -> None:
@@ -74,19 +75,31 @@ def test_config_path_for_project_anchored_at_root(tmp_path: Path) -> None:
 def test_config_path_for_user_anchored_at_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """``config_path_for`` anchors user-scoped targets at ``Path.home()``.
+
+    No registered agent is user-scoped anymore (Claude Desktop was
+    dropped in v1), so this exercises the ``else`` branch via a
+    synthetic target.
+    """
     monkeypatch.setenv("HOME", str(tmp_path))
-    # Path.home() reads $HOME on POSIX; resolve dynamically.
-    target = agents.resolve_agent("codex")
-    expected = Path.home() / ".codex" / "config.toml"
-    assert agents.config_path_for(target, tmp_path) == expected
+    user_scoped = agents.AgentTarget(
+        name="synthetic-user",
+        aliases=(),
+        relative_path=(".synthetic", "config.json"),
+        scope="user",
+        format="json",
+        description="synthetic user-scoped target",
+    )
+    expected = Path.home() / ".synthetic" / "config.json"
+    assert agents.config_path_for(user_scoped, tmp_path) == expected
 
 
-def test_is_write_supported_only_project_json() -> None:
+def test_is_write_supported_project_scoped() -> None:
+    """All registered (project-scoped) agents are writeable — JSON or TOML."""
     assert agents.is_write_supported(agents.resolve_agent("claude"))
     assert agents.is_write_supported(agents.resolve_agent("cursor"))
     assert agents.is_write_supported(agents.resolve_agent("vscode"))
-    assert not agents.is_write_supported(agents.resolve_agent("codex"))
-    assert not agents.is_write_supported(agents.resolve_agent("claude-desktop"))
+    assert agents.is_write_supported(agents.resolve_agent("codex"))
 
 
 def test_write_snippet_creates_file(tmp_path: Path) -> None:
@@ -143,9 +156,73 @@ def test_write_snippet_overwrites_malformed_json(tmp_path: Path) -> None:
 
 
 def test_write_snippet_rejects_user_scope(tmp_path: Path) -> None:
+    """The defensive guard still trips for synthetic user-scoped targets."""
+    user_scoped = agents.AgentTarget(
+        name="synthetic-user",
+        aliases=(),
+        relative_path=(".synthetic", "config.json"),
+        scope="user",
+        format="json",
+        description="synthetic user-scoped target",
+    )
+    with pytest.raises(ValueError, match="user-scoped"):
+        agents.write_snippet(user_scoped, tmp_path)
+
+
+# ---------- TOML write_snippet tests (Codex path) ---------------------------
+
+
+def test_write_snippet_toml_creates_file(tmp_path: Path) -> None:
     target = agents.resolve_agent("codex")
-    with pytest.raises(ValueError, match="print-only"):
-        agents.write_snippet(target, tmp_path)
+    path = agents.write_snippet(target, tmp_path)
+    assert path == tmp_path / ".codex" / "config.toml"
+    with path.open("rb") as f:
+        data = tomllib.load(f)
+    assert data == {"mcp_servers": {"whygraph": {"command": "whygraph-mcp"}}}
+
+
+def test_write_snippet_toml_merges_with_existing_servers(tmp_path: Path) -> None:
+    target = agents.resolve_agent("codex")
+    existing = tmp_path / ".codex" / "config.toml"
+    existing.parent.mkdir(parents=True)
+    # Top-level scalar must come before any table header — TOML scopes
+    # subsequent keys to the most recently opened table.
+    existing.write_text(
+        'unrelated_top_level = "keepme"\n\n'
+        '[mcp_servers.other]\ncommand = "other-cmd"\n',
+        encoding="utf-8",
+    )
+    agents.write_snippet(target, tmp_path)
+    with existing.open("rb") as f:
+        data = tomllib.load(f)
+    assert data["mcp_servers"]["other"] == {"command": "other-cmd"}
+    assert data["mcp_servers"]["whygraph"] == {"command": "whygraph-mcp"}
+    assert data["unrelated_top_level"] == "keepme"
+
+
+def test_write_snippet_toml_replaces_old_whygraph_entry(tmp_path: Path) -> None:
+    target = agents.resolve_agent("codex")
+    existing = tmp_path / ".codex" / "config.toml"
+    existing.parent.mkdir(parents=True)
+    existing.write_text(
+        '[mcp_servers.whygraph]\ncommand = "old-cmd"\n',
+        encoding="utf-8",
+    )
+    agents.write_snippet(target, tmp_path)
+    with existing.open("rb") as f:
+        data = tomllib.load(f)
+    assert data["mcp_servers"]["whygraph"]["command"] == "whygraph-mcp"
+
+
+def test_write_snippet_toml_overwrites_malformed(tmp_path: Path) -> None:
+    target = agents.resolve_agent("codex")
+    existing = tmp_path / ".codex" / "config.toml"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("not = valid = toml", encoding="utf-8")
+    agents.write_snippet(target, tmp_path)
+    with existing.open("rb") as f:
+        data = tomllib.load(f)
+    assert data == {"mcp_servers": {"whygraph": {"command": "whygraph-mcp"}}}
 
 
 # ---------- CLI flow tests --------------------------------------------------
@@ -360,19 +437,63 @@ def test_init_agent_vscode_merges_existing_copilot_instructions(
         )
 
 
-def test_init_agent_codex_prints_and_does_not_write(
-    stub_init, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_init_agent_codex_writes_and_installs_full_tree(
+    stub_init, tmp_path: Path
 ) -> None:
-    # Route ~/ at a temp home so we can confirm no file appears there.
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    """Codex gets project-scoped ``.codex/config.toml`` plus the bundled tree.
+
+    The TOML MCP config writes the ``[mcp_servers.whygraph]`` table at
+    ``.codex/config.toml``. The asset tree lands at the repo root —
+    ``AGENTS.md`` (append-merged) plus the ``.codex/agents/*.toml``
+    subagents. No user-global writes occur (the project-only rule).
+    """
     result, cwd = _invoke_in(tmp_path, "init", "--agent", "codex")
     assert result.exit_code == 0, result.output
-    assert "[mcp_servers.whygraph]" in result.output
-    assert 'command = "whygraph-mcp"' in result.output
-    assert not (home / ".codex" / "config.toml").exists()
+    # MCP config lands at project-scoped .codex/config.toml.
+    config_path = cwd / ".codex" / "config.toml"
+    assert config_path.exists()
+    with config_path.open("rb") as f:
+        config_data = tomllib.load(f)
+    assert (
+        config_data["mcp_servers"]["whygraph"]["command"] == "whygraph-mcp"
+    )
+    # AGENTS.md at the repo root has the WhyGraph block (append-merged).
+    agents_md = cwd / "AGENTS.md"
+    assert agents_md.is_file()
+    body = agents_md.read_text(encoding="utf-8")
+    assert "<!-- BEGIN whygraph -->" in body
+    assert "<!-- END whygraph -->" in body
+    # Subagents land under .codex/agents/.
+    assert (cwd / ".codex" / "agents" / "planner.toml").is_file()
+    assert "Installed assets for codex" in result.output
+    # No other agents' assets bleed in.
     assert not (cwd / ".claude").exists()
+    assert not (cwd / ".cursor").exists()
+
+
+def test_init_agent_codex_merges_existing_agents_md(
+    stub_init, tmp_path: Path
+) -> None:
+    """User-authored AGENTS.md is preserved; the WhyGraph block appends."""
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        cwd = Path.cwd()
+        (cwd / "AGENTS.md").write_text(
+            "# Our team rules\n\nWrite tests for everything.\n",
+            encoding="utf-8",
+        )
+        result = runner.invoke(whygraph_main, ["init", "--agent", "codex"])
+        assert result.exit_code == 0, result.output
+        merged = (cwd / "AGENTS.md").read_text(encoding="utf-8")
+        # User content preserved verbatim.
+        assert "# Our team rules" in merged
+        assert "Write tests for everything." in merged
+        # WhyGraph block appended after user content.
+        assert "<!-- BEGIN whygraph -->" in merged
+        assert "<!-- END whygraph -->" in merged
+        assert merged.find("Our team rules") < merged.find(
+            "<!-- BEGIN whygraph -->"
+        )
 
 
 def test_init_agent_claude_with_print_skips_mcp_write_but_installs_assets(

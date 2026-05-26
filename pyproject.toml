@@ -13,6 +13,7 @@ dependencies = [
     "anthropic>=0.40",
     "openai>=1.40",
     "ollama>=0.3",
+    "tomli-w>=1.0",
 ]
 
 [project.scripts]

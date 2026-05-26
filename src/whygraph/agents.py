@@ -2,9 +2,9 @@
 
 WhyGraph's MCP server is a standalone console script (``whygraph-mcp``,
 declared in ``pyproject.toml``). To consume it, an LLM agent (Claude
-Code, Cursor, VS Code / Copilot, Codex, Claude Desktop) needs an entry
-in its own MCP configuration file. The location and format of that
-file vary by agent, so this module centralises:
+Code, Cursor, VS Code / Copilot, Codex) needs an entry in its own MCP
+configuration file. The location and format of that file vary by agent,
+so this module centralises:
 
 * the registry of supported agents and their config-file conventions
   (:data:`AGENTS`, :func:`resolve_agent`),
@@ -12,8 +12,9 @@ file vary by agent, so this module centralises:
 * a safe merge-write for project-scoped configs
   (:func:`write_snippet`).
 
-User-scoped configs (e.g. ``~/.codex/config.toml``) are intentionally
-**print-only** in v1 — see :func:`write_snippet`'s docstring.
+All supported agents are **project-scoped** — we never write to
+user-global locations (``~/.codex/``, ``~/.cursor/``, etc.). Agents
+without a project-level config (e.g. Claude Desktop) are not supported.
 
 Notes
 -----
@@ -26,10 +27,12 @@ so that the console script is on PATH.
 from __future__ import annotations
 
 import json
-import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+import tomli_w
 
 MCP_SERVER_NAME = "whygraph"
 MCP_COMMAND = "whygraph-mcp"
@@ -144,28 +147,17 @@ _CODEX = AgentTarget(
     name="codex",
     aliases=(),
     relative_path=(".codex", "config.toml"),
-    scope="user",
+    scope="project",
     format="toml",
-    description="OpenAI Codex (~/.codex/config.toml — print-only)",
-)
-
-_CLAUDE_DESKTOP = AgentTarget(
-    name="claude-desktop",
-    aliases=(),
-    relative_path=(
-        "Library",
-        "Application Support",
-        "Claude",
-        "claude_desktop_config.json",
-    ),
-    scope="user",
-    format="json",
-    description="Claude Desktop on macOS (~/Library/.../claude_desktop_config.json — print-only)",
+    description="OpenAI Codex (.codex/config.toml + AGENTS.md + .codex/agents/ tree)",
+    assets_subdir="codex",
+    assets_dest=(),
+    assets_merge_files=("AGENTS.md",),
 )
 
 
 AGENTS: dict[str, AgentTarget] = {
-    t.name: t for t in (_CLAUDE, _CURSOR, _VSCODE, _CODEX, _CLAUDE_DESKTOP)
+    t.name: t for t in (_CLAUDE, _CURSOR, _VSCODE, _CODEX)
 }
 
 
@@ -226,13 +218,6 @@ def config_path_for(target: AgentTarget, project_root: Path) -> Path:
     Path
         Absolute path to the config file (whether or not it currently
         exists).
-
-    Notes
-    -----
-    For :data:`_CLAUDE_DESKTOP` the macOS-specific path is returned on
-    every platform. Windows/Linux Claude Desktop paths are not yet
-    handled — the print-only behavior means the worst case is a slightly
-    inaccurate "paste this into ..." hint on those platforms.
     """
     anchor = project_root if target.scope == "project" else Path.home()
     return anchor.joinpath(*target.relative_path)
@@ -269,20 +254,20 @@ def render_snippet(target: AgentTarget) -> str:
 def write_snippet(target: AgentTarget, project_root: Path) -> Path:
     """Merge the WhyGraph MCP entry into ``target``'s config file.
 
-    Only valid for project-scoped JSON targets. User-scoped targets and
-    TOML targets are print-only in v1 — callers should render with
-    :func:`render_snippet` and show the result instead.
+    Only valid for project-scoped targets — user-scoped paths are out
+    of scope (see the module docstring). Supports both JSON and TOML
+    formats; the branch is chosen by ``target.format``.
 
-    Behavior:
+    Behavior (identical across formats):
 
     * If the file does not exist, write a minimal config containing
       only the WhyGraph entry.
-    * If the file exists and is valid JSON with an ``mcpServers``
-      object, the WhyGraph entry is added/replaced; other servers and
-      top-level keys are preserved.
-    * If the file exists but is unreadable as JSON, a fresh minimal
-      config replaces it. This is a conscious trade-off: we surface
-      the new config rather than refuse to proceed. Callers can offer
+    * If the file exists and parses, the WhyGraph entry is added/
+      replaced under ``mcpServers`` (JSON) or ``[mcp_servers]`` (TOML);
+      other servers and top-level keys are preserved.
+    * If the file exists but is unparseable, a fresh minimal config
+      replaces it. This is a conscious trade-off: we surface the new
+      config rather than refuse to proceed. Callers can offer
       ``--print`` for users who'd rather merge by hand.
 
     Parameters
@@ -300,14 +285,29 @@ def write_snippet(target: AgentTarget, project_root: Path) -> Path:
     Raises
     ------
     ValueError
-        If ``target`` is user-scoped or non-JSON (i.e. print-only).
+        If ``target`` is user-scoped.
+
+    Notes
+    -----
+    Comments and incidental formatting in the existing config file are
+    not preserved across the read-modify-write cycle (``tomllib`` strips
+    comments on parse; ``json.load`` collapses whitespace). Users who
+    care about preserving their hand-formatted config should use
+    ``--print`` and merge the snippet manually.
     """
-    if target.scope != "project" or target.format != "json":
+    if target.scope != "project":
         raise ValueError(
-            f"agent {target.name!r} is print-only; use render_snippet() instead"
+            f"agent {target.name!r} is user-scoped; use render_snippet() instead"
         )
 
     path = config_path_for(target, project_root)
+    if target.format == "json":
+        return _write_json_snippet(path)
+    return _write_toml_snippet(path)
+
+
+def _write_json_snippet(path: Path) -> Path:
+    """JSON-formatted ``mcpServers`` merge for ``.mcp.json`` / ``.cursor/mcp.json`` / ``.vscode/mcp.json``."""
     existing: dict = {}
     if path.exists():
         try:
@@ -331,25 +331,38 @@ def write_snippet(target: AgentTarget, project_root: Path) -> Path:
     return path
 
 
+def _write_toml_snippet(path: Path) -> Path:
+    """TOML-formatted ``[mcp_servers.*]`` merge for ``.codex/config.toml``."""
+    existing: dict = {}
+    if path.exists():
+        try:
+            with path.open("rb") as f:
+                loaded = tomllib.load(f)
+            if isinstance(loaded, dict):
+                existing = loaded
+        except (tomllib.TOMLDecodeError, OSError):
+            existing = {}
+
+    servers = existing.get("mcp_servers")
+    if not isinstance(servers, dict):
+        servers = {}
+    servers[MCP_SERVER_NAME] = {"command": MCP_COMMAND}
+    existing["mcp_servers"] = servers
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as f:
+        tomli_w.dump(existing, f)
+    return path
+
+
 def is_write_supported(target: AgentTarget) -> bool:
     """Return ``True`` if :func:`write_snippet` accepts ``target``.
 
     Convenience for callers that need to branch on print-vs-write
-    without catching :class:`ValueError`.
+    without catching :class:`ValueError`. All project-scoped targets
+    (JSON or TOML) are writeable.
     """
-    return target.scope == "project" and target.format == "json"
-
-
-def claude_desktop_supported_platform() -> bool:
-    """Return ``True`` on platforms where the Claude Desktop path is accurate.
-
-    Notes
-    -----
-    Used by the CLI to optionally caveat the printed instruction.
-    Currently only macOS is supported; on other platforms the printed
-    path will not match Claude Desktop's actual location.
-    """
-    return sys.platform == "darwin"
+    return target.scope == "project"
 
 
 __all__ = [
@@ -358,7 +371,6 @@ __all__ = [
     "MCP_COMMAND",
     "MCP_SERVER_NAME",
     "UnknownAgentError",
-    "claude_desktop_supported_platform",
     "config_path_for",
     "is_write_supported",
     "known_agent_names",

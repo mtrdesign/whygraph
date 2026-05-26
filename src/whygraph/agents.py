@@ -75,6 +75,14 @@ class AgentTarget:
         project root) where the asset tree is copied. ``()`` means "drop
         at the repo root". ``None`` mirrors :attr:`assets_subdir` —
         agent has no bundled assets.
+    assets_merge_files : tuple[str, ...]
+        Paths (relative to :attr:`assets_dest`) of files that should be
+        **append-merged** rather than skip-or-overwritten. The installer
+        wraps the bundled body in ``<!-- BEGIN whygraph --> ... <!-- END
+        whygraph -->`` markers, replacing the block in-place on re-run
+        (idempotent) or appending after any existing user content.
+        Empty default — only agents with repo-shared instruction files
+        (e.g. ``copilot-instructions.md``, ``AGENTS.md``) populate this.
     """
 
     name: str
@@ -85,6 +93,7 @@ class AgentTarget:
     description: str
     assets_subdir: str | None = None
     assets_dest: tuple[str, ...] | None = None
+    assets_merge_files: tuple[str, ...] = ()
 
     @property
     def has_assets(self) -> bool:
@@ -125,7 +134,10 @@ _VSCODE = AgentTarget(
     relative_path=(".vscode", "mcp.json"),
     scope="project",
     format="json",
-    description="VS Code / GitHub Copilot (.vscode/mcp.json at repo root)",
+    description="VS Code / GitHub Copilot (.vscode/mcp.json + .github/ asset tree)",
+    assets_subdir="vscode",
+    assets_dest=(".github",),
+    assets_merge_files=("copilot-instructions.md",),
 )
 
 _CODEX = AgentTarget(

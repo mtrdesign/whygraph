@@ -292,11 +292,72 @@ def test_init_agent_cursor_writes_mcp_json_and_installs_rules(
     assert not (cwd / ".claude").exists()
 
 
+def test_init_agent_vscode_writes_mcp_and_installs_full_tree(
+    stub_init, tmp_path: Path
+) -> None:
+    """VS Code gets ``.vscode/mcp.json`` plus the bundled ``.github/`` asset tree.
+
+    Confirms the generalized asset installer fires for any agent whose
+    ``has_assets`` is True — and that the ``.github/`` destination is
+    correctly anchored under the project root.
+    """
+    result, cwd = _invoke_in(tmp_path, "init", "--agent", "vscode")
+    assert result.exit_code == 0, result.output
+    # MCP wiring lands in .vscode/mcp.json (writeable).
+    mcp_path = cwd / ".vscode" / "mcp.json"
+    assert mcp_path.exists()
+    data = json.loads(mcp_path.read_text())
+    assert data["mcpServers"]["whygraph"]["command"] == "whygraph-mcp"
+    # Bundled assets land under .github/.
+    assert (cwd / ".github" / "copilot-instructions.md").is_file()
+    assert (
+        cwd / ".github" / "instructions" / "pre-edit.instructions.md"
+    ).is_file()
+    assert (cwd / ".github" / "prompts" / "whygraph-plan.prompt.md").is_file()
+    assert (cwd / ".github" / "agents" / "planner.agent.md").is_file()
+    assert "Installed assets for vscode" in result.output
+    # No other agents' assets bleed in.
+    assert not (cwd / ".claude").exists()
+    assert not (cwd / ".cursor").exists()
+
+
 def test_init_agent_copilot_aliases_to_vscode(stub_init, tmp_path: Path) -> None:
+    """The ``copilot`` alias resolves to ``vscode`` and installs the same tree."""
     result, cwd = _invoke_in(tmp_path, "init", "--agent", "copilot")
     assert result.exit_code == 0, result.output
     assert (cwd / ".vscode" / "mcp.json").exists()
+    # Alias still routes to the vscode asset tree.
+    assert (cwd / ".github" / "copilot-instructions.md").is_file()
     assert not (cwd / ".claude").exists()
+
+
+def test_init_agent_vscode_merges_existing_copilot_instructions(
+    stub_init, tmp_path: Path
+) -> None:
+    """User-authored copilot-instructions.md is preserved; WhyGraph block appends."""
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        cwd = Path.cwd()
+        (cwd / ".github").mkdir()
+        (cwd / ".github" / "copilot-instructions.md").write_text(
+            "# Our team rules\n\nWrite tests for everything.\n",
+            encoding="utf-8",
+        )
+        result = runner.invoke(whygraph_main, ["init", "--agent", "vscode"])
+        assert result.exit_code == 0, result.output
+        merged = (cwd / ".github" / "copilot-instructions.md").read_text(
+            encoding="utf-8"
+        )
+        # User content preserved verbatim.
+        assert "# Our team rules" in merged
+        assert "Write tests for everything." in merged
+        # WhyGraph block appended after user content.
+        assert "<!-- BEGIN whygraph -->" in merged
+        assert "<!-- END whygraph -->" in merged
+        # User content comes first.
+        assert merged.find("Our team rules") < merged.find(
+            "<!-- BEGIN whygraph -->"
+        )
 
 
 def test_init_agent_codex_prints_and_does_not_write(

@@ -58,10 +58,9 @@ def init_cmd(
     """Initialize the WhyGraph database under ``.whygraph/whygraph.db``.
 
     With ``--agent X``, also register the WhyGraph MCP server with the
-    named agent. Project-scoped agents (Claude Code, Cursor, VS Code /
-    Copilot) get their config file written/merged in the repo. User-scoped
-    agents (Codex, Claude Desktop) get the snippet printed for the
-    developer to paste manually.
+    named agent. All supported agents are project-scoped — their MCP
+    config file is written / merged in the repo. Pass ``--print`` to
+    skip the write and emit the snippet for manual pasting.
 
     If the chosen agent ships a bundled asset tree (see
     :attr:`whygraph.agents.AgentTarget.has_assets`), the tree is copied
@@ -133,14 +132,6 @@ def _print_snippet(
     click.echo(f"Paste the following into {path}:")
     click.echo("")
     click.echo(snippet.rstrip("\n"))
-    if (
-        target.name == "claude-desktop"
-        and not agents.claude_desktop_supported_platform()
-    ):
-        click.echo(
-            "\nNote: the path above is the macOS location. On Windows/Linux,"
-            " Claude Desktop's config lives elsewhere — check its docs."
-        )
 
 
 def _print_install_summary(

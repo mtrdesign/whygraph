@@ -68,6 +68,31 @@ def test_packaged_cursor_assets_present() -> None:
         assert leaf.is_file(), f"missing packaged asset: {rel}"
 
 
+def test_packaged_codex_assets_present() -> None:
+    """All bundled Codex assets are reachable via importlib.resources.
+
+    Codex has no separate skill / slash-command surface, so the asset
+    tree is minimal: one ``AGENTS.md`` at the repo root (append-merged)
+    plus 4 subagents under ``.codex/agents/``. The source layout mirrors
+    the destination — ``.codex/`` is nested inside the source so the
+    installer (assets_dest = repo root) places files at the correct
+    Codex-expected paths.
+    """
+    root = assets.packaged_assets_for(agents.resolve_agent("codex"))
+    expected = (
+        "AGENTS.md",
+        ".codex/agents/planner.toml",
+        ".codex/agents/researcher.toml",
+        ".codex/agents/synthesizer.toml",
+        ".codex/agents/implementor.toml",
+    )
+    for rel in expected:
+        leaf = root
+        for part in rel.split("/"):
+            leaf = leaf / part
+        assert leaf.is_file(), f"missing packaged asset: {rel}"
+
+
 def test_packaged_vscode_assets_present() -> None:
     """All bundled VS Code Copilot assets are reachable via importlib.resources.
 
@@ -100,11 +125,22 @@ def test_packaged_vscode_assets_present() -> None:
 
 
 def test_packaged_assets_for_rejects_unconfigured_agent() -> None:
-    """Agents with ``assets_subdir=None`` raise ``ValueError``."""
-    codex = agents.resolve_agent("codex")
-    assert not codex.has_assets
+    """Agents with ``assets_subdir=None`` raise ``ValueError``.
+
+    All registered agents now ship assets; use a synthetic target to
+    exercise the defensive guard.
+    """
+    bare = agents.AgentTarget(
+        name="synthetic-bare",
+        aliases=(),
+        relative_path=("ignored",),
+        scope="project",
+        format="json",
+        description="synthetic target with no assets configured",
+    )
+    assert not bare.has_assets
     with pytest.raises(ValueError, match="no bundled assets"):
-        assets.packaged_assets_for(codex)
+        assets.packaged_assets_for(bare)
 
 
 # ---- install_assets: fresh project ---------------------------------------
@@ -240,10 +276,17 @@ def test_install_from_packaged_source(tmp_path: Path) -> None:
 
 def test_install_assets_rejects_unconfigured_agent(tmp_path: Path) -> None:
     """Calling install_assets on an agent with no bundled tree raises."""
-    codex = agents.resolve_agent("codex")
-    assert not codex.has_assets
+    bare = agents.AgentTarget(
+        name="synthetic-bare",
+        aliases=(),
+        relative_path=("ignored",),
+        scope="project",
+        format="json",
+        description="synthetic target with no assets configured",
+    )
+    assert not bare.has_assets
     with pytest.raises(ValueError, match="no bundled assets"):
-        assets.install_assets(codex, tmp_path)
+        assets.install_assets(bare, tmp_path)
 
 
 # ---- install_assets: append-merge for shared instruction files -----------

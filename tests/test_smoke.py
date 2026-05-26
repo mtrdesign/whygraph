@@ -43,3 +43,14 @@ def test_mcp_server_registers_resources() -> None:
         "whygraph://pr/{number}",
         "whygraph://issue/{number}",
     }
+
+
+def test_mcp_server_registers_prompts() -> None:
+    from whygraph.mcp.server import mcp
+
+    prompts = asyncio.run(mcp.list_prompts())
+    assert {p.name for p in prompts} == {
+        "whygraph_pre_edit_brief",
+        "whygraph_why_was_this_written",
+        "whygraph_triage_commit",
+    }

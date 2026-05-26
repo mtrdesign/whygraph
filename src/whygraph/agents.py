@@ -66,6 +66,15 @@ class AgentTarget:
         renderer :func:`render_snippet` uses.
     description : str
         Short one-line description shown by ``whygraph init --list-agents``.
+    assets_subdir : str or None
+        Name of the source directory under ``src/whygraph/assets/`` that
+        holds this agent's bundled asset tree, or ``None`` if the agent
+        has no bundled assets. Used by :func:`whygraph.assets.install_assets`.
+    assets_dest : tuple[str, ...] or None
+        Path components of the destination directory (relative to the
+        project root) where the asset tree is copied. ``()`` means "drop
+        at the repo root". ``None`` mirrors :attr:`assets_subdir` —
+        agent has no bundled assets.
     """
 
     name: str
@@ -74,6 +83,18 @@ class AgentTarget:
     scope: Scope
     format: Format
     description: str
+    assets_subdir: str | None = None
+    assets_dest: tuple[str, ...] | None = None
+
+    @property
+    def has_assets(self) -> bool:
+        """Return ``True`` if this agent has a bundled asset tree to install.
+
+        Both :attr:`assets_subdir` and :attr:`assets_dest` must be
+        configured. Callers should branch on this before invoking
+        :func:`whygraph.assets.install_assets`.
+        """
+        return self.assets_subdir is not None and self.assets_dest is not None
 
 
 _CLAUDE = AgentTarget(
@@ -83,6 +104,8 @@ _CLAUDE = AgentTarget(
     scope="project",
     format="json",
     description="Claude Code (project-scoped .mcp.json at repo root)",
+    assets_subdir="claude-code",
+    assets_dest=(".claude",),
 )
 
 _CURSOR = AgentTarget(
@@ -92,6 +115,8 @@ _CURSOR = AgentTarget(
     scope="project",
     format="json",
     description="Cursor (.cursor/mcp.json at repo root)",
+    assets_subdir="cursor",
+    assets_dest=(".cursor",),
 )
 
 _VSCODE = AgentTarget(

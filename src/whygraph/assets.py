@@ -1,14 +1,21 @@
 """Install bundled agent assets into a project.
 
-The package ships a tree of Claude Code agent / command / skill files
-under :mod:`whygraph.assets`. They live there — rather than in a
-sibling ``plugins/`` directory — so they ride along in the wheel under
-the existing ``[tool.hatch.build.targets.wheel].packages = ["src/whygraph"]``
+The package ships a per-agent tree of bundled asset files (markdown for
+sub-agents, slash commands, skills, rules, prompt files, etc.) under
+:mod:`whygraph.assets`. They live there — rather than in a sibling
+``plugins/`` directory — so they ride along in the wheel under the
+existing ``[tool.hatch.build.targets.wheel].packages = ["src/whygraph"]``
 config, exactly like ``src/whygraph/analyze/prompts/``.
 
-This module exposes a tiny installer that copies that tree into a
-target project's ``.claude/`` directory. It is invoked from
-``whygraph init --agent claude``.
+Each :class:`whygraph.agents.AgentTarget` declares its own
+``assets_subdir`` (source directory under ``src/whygraph/assets/``) and
+``assets_dest`` (destination directory relative to the project root).
+Agents without bundled assets leave both fields ``None`` — see
+:attr:`whygraph.agents.AgentTarget.has_assets`.
+
+This module exposes a small installer that copies the per-agent tree
+into the matching destination directory. It is invoked from
+``whygraph init --agent <name>``.
 
 Notes
 -----
@@ -26,15 +33,12 @@ from importlib import resources
 from importlib.resources.abc import Traversable
 from pathlib import Path
 
-CLAUDE_CODE_SUBDIRS: tuple[str, ...] = ("agents", "commands", "skills")
-"""Subdirectories under ``.claude/`` that whygraph populates."""
-
-_CLAUDE_DIR = ".claude"
+from .agents import AgentTarget
 
 
 @dataclass(frozen=True, slots=True)
 class InstallResult:
-    """Outcome of one :func:`install_claude_code_assets` call.
+    """Outcome of one :func:`install_assets` call.
 
     Attributes
     ----------
@@ -52,8 +56,14 @@ class InstallResult:
     overwritten: list[Path] = field(default_factory=list)
 
 
-def packaged_claude_code_assets() -> Traversable:
-    """Return the packaged ``assets/claude-code/`` directory as a resource.
+def packaged_assets_for(target: AgentTarget) -> Traversable:
+    """Return the packaged asset directory for ``target`` as a resource.
+
+    Parameters
+    ----------
+    target : AgentTarget
+        Agent whose bundled tree to locate. Must have
+        :attr:`AgentTarget.assets_subdir` set.
 
     Returns
     -------
@@ -62,53 +72,80 @@ def packaged_claude_code_assets() -> Traversable:
         :meth:`Traversable.iterdir` and read files with
         :meth:`Traversable.read_text`.
 
+    Raises
+    ------
+    ValueError
+        If ``target.assets_subdir`` is ``None``. Callers should branch
+        on :attr:`AgentTarget.has_assets` before invoking this.
+
     Notes
     -----
     Loaded the same way as :func:`whygraph.analyze.prompt._packaged_prompts_dir`
-    — via ``importlib.resources.files("whygraph") / "assets" / "claude-code"``.
-    Because the data dir does not need to be an importable Python
-    package, the name uses a dash (matching the user-facing agent id
-    ``claude-code``); ``importlib`` accepts arbitrary path components
-    after the package anchor.
+    — via ``importlib.resources.files("whygraph") / "assets" / <subdir>``.
+    The asset subdirectory does not need to be an importable Python
+    package, so hyphenated names like ``claude-code`` are fine;
+    ``importlib`` accepts arbitrary path components after the package
+    anchor.
     """
-    return resources.files("whygraph") / "assets" / "claude-code"
+    if target.assets_subdir is None:
+        raise ValueError(
+            f"agent {target.name!r} has no bundled assets "
+            "(assets_subdir is None)"
+        )
+    return resources.files("whygraph") / "assets" / target.assets_subdir
 
 
-def install_claude_code_assets(
+def install_assets(
+    target: AgentTarget,
     project_root: Path,
     *,
     force: bool = False,
     source: Traversable | Path | None = None,
 ) -> InstallResult:
-    """Copy the bundled Claude Code asset tree into ``<project_root>/.claude/``.
+    """Copy ``target``'s bundled asset tree into the project.
 
-    Mirrors the source layout under the destination — files at
-    ``source/agents/x.md`` land at ``project_root/.claude/agents/x.md``
-    and so on. Parent directories are created as needed.
+    Mirrors the source layout under the destination —
+    ``<source>/agents/x.md`` lands at
+    ``<project_root>/<target.assets_dest>/agents/x.md`` and so on.
+    Parent directories are created as needed.
 
     Parameters
     ----------
+    target : AgentTarget
+        Agent whose bundled tree to install. Must have
+        :attr:`AgentTarget.has_assets` ``True``.
     project_root : Path
-        Directory in which to create / populate ``.claude/``. Usually
-        the user's repository root (i.e. ``Path.cwd()`` from the CLI).
+        Directory in which to create / populate the destination tree.
+        Usually the user's repository root (i.e. ``Path.cwd()`` from
+        the CLI).
     force : bool, default False
         If ``True``, overwrite target files that already exist. The
         default leaves existing files alone so user edits survive a
         re-install.
     source : Traversable or Path, optional
         Asset tree to copy from. ``None`` (default) uses the packaged
-        tree returned by :func:`packaged_claude_code_assets`. Tests
-        inject a ``tmp_path`` here.
+        tree returned by :func:`packaged_assets_for`. Tests inject a
+        ``tmp_path`` here.
 
     Returns
     -------
     InstallResult
         Per-file outcome (written / skipped / overwritten).
+
+    Raises
+    ------
+    ValueError
+        If ``target`` has no bundled assets configured.
     """
+    if not target.has_assets:
+        raise ValueError(
+            f"agent {target.name!r} has no bundled assets to install"
+        )
     src: Traversable | Path = (
-        source if source is not None else packaged_claude_code_assets()
+        source if source is not None else packaged_assets_for(target)
     )
-    dest_root = project_root / _CLAUDE_DIR
+    assert target.assets_dest is not None  # for type checkers; has_assets guarantees this
+    dest_root = project_root.joinpath(*target.assets_dest)
     result = InstallResult()
     _copy_tree(src, dest_root, force=force, result=result)
     return result
@@ -148,8 +185,7 @@ def _copy_tree(
 
 
 __all__ = [
-    "CLAUDE_CODE_SUBDIRS",
     "InstallResult",
-    "install_claude_code_assets",
-    "packaged_claude_code_assets",
+    "install_assets",
+    "packaged_assets_for",
 ]

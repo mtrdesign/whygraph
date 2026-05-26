@@ -1,4 +1,4 @@
-"""Tests for ``whygraph.assets`` — bundled Claude Code asset installer."""
+"""Tests for ``whygraph.assets`` — bundled agent asset installer."""
 
 from __future__ import annotations
 
@@ -6,20 +6,20 @@ from pathlib import Path
 
 import pytest
 
-from whygraph import assets
+from whygraph import agents, assets
 
 
 # ---- packaged tree: the shipping smoke test ------------------------------
 
 
-def test_packaged_claude_code_assets_present() -> None:
+def test_packaged_claude_assets_present() -> None:
     """All 11 bundled .md files are reachable via importlib.resources.
 
     Guards against a packaging regression: if hatch stopped shipping
     ``src/whygraph/assets/claude-code/`` for any reason, this test
     fails before the CLI ever runs.
     """
-    root = assets.packaged_claude_code_assets()
+    root = assets.packaged_assets_for(agents.resolve_agent("claude"))
     expected = (
         "agents/planner.md",
         "agents/researcher.md",
@@ -40,7 +40,29 @@ def test_packaged_claude_code_assets_present() -> None:
         assert leaf.is_file(), f"missing packaged asset: {rel}"
 
 
-# ---- install_claude_code_assets: fresh project ---------------------------
+def test_packaged_cursor_assets_present() -> None:
+    """The two bundled Cursor MDC rules are reachable via importlib.resources."""
+    root = assets.packaged_assets_for(agents.resolve_agent("cursor"))
+    expected = (
+        "rules/whygraph-pre-edit.mdc",
+        "rules/whygraph-ask-why.mdc",
+    )
+    for rel in expected:
+        leaf = root
+        for part in rel.split("/"):
+            leaf = leaf / part
+        assert leaf.is_file(), f"missing packaged asset: {rel}"
+
+
+def test_packaged_assets_for_rejects_unconfigured_agent() -> None:
+    """Agents with ``assets_subdir=None`` raise ``ValueError``."""
+    codex = agents.resolve_agent("codex")
+    assert not codex.has_assets
+    with pytest.raises(ValueError, match="no bundled assets"):
+        assets.packaged_assets_for(codex)
+
+
+# ---- install_assets: fresh project ---------------------------------------
 
 
 def _make_source(tmp_path: Path) -> Path:
@@ -55,12 +77,17 @@ def _make_source(tmp_path: Path) -> Path:
     return src
 
 
-def test_install_writes_to_dot_claude(tmp_path: Path) -> None:
+def _claude_target() -> agents.AgentTarget:
+    """Return the Claude Code agent target — the only one with assets in v1."""
+    return agents.resolve_agent("claude")
+
+
+def test_install_writes_to_dest(tmp_path: Path) -> None:
     src = _make_source(tmp_path)
     project = tmp_path / "proj"
     project.mkdir()
 
-    result = assets.install_claude_code_assets(project, source=src)
+    result = assets.install_assets(_claude_target(), project, source=src)
 
     assert (project / ".claude" / "agents" / "x.md").read_text(
         encoding="utf-8"
@@ -77,18 +104,18 @@ def test_install_writes_to_dot_claude(tmp_path: Path) -> None:
 
 
 def test_install_creates_parents(tmp_path: Path) -> None:
-    """``.claude/`` and all nested dirs are mkdir'd as needed."""
+    """The destination dir and all nested dirs are mkdir'd as needed."""
     src = _make_source(tmp_path)
     project = tmp_path / "proj"
     project.mkdir()
     assert not (project / ".claude").exists()
 
-    assets.install_claude_code_assets(project, source=src)
+    assets.install_assets(_claude_target(), project, source=src)
 
     assert (project / ".claude" / "skills" / "y").is_dir()
 
 
-# ---- install_claude_code_assets: idempotency ------------------------------
+# ---- install_assets: idempotency -----------------------------------------
 
 
 def test_install_skips_existing(tmp_path: Path) -> None:
@@ -100,7 +127,7 @@ def test_install_skips_existing(tmp_path: Path) -> None:
     user_edit = project / ".claude" / "agents" / "x.md"
     user_edit.write_text("USER EDIT", encoding="utf-8")
 
-    result = assets.install_claude_code_assets(project, source=src)
+    result = assets.install_assets(_claude_target(), project, source=src)
 
     assert user_edit.read_text(encoding="utf-8") == "USER EDIT"
     assert user_edit in result.skipped
@@ -118,7 +145,9 @@ def test_install_force_overwrites(tmp_path: Path) -> None:
     user_edit = project / ".claude" / "agents" / "x.md"
     user_edit.write_text("USER EDIT", encoding="utf-8")
 
-    result = assets.install_claude_code_assets(project, source=src, force=True)
+    result = assets.install_assets(
+        _claude_target(), project, source=src, force=True
+    )
 
     assert user_edit.read_text(encoding="utf-8") == "X-AGENT"
     assert user_edit in result.overwritten
@@ -132,30 +161,41 @@ def test_install_re_run_is_a_noop(tmp_path: Path) -> None:
     src = _make_source(tmp_path)
     project = tmp_path / "proj"
     project.mkdir()
-    assets.install_claude_code_assets(project, source=src)
+    assets.install_assets(_claude_target(), project, source=src)
 
-    result = assets.install_claude_code_assets(project, source=src)
+    result = assets.install_assets(_claude_target(), project, source=src)
 
     assert len(result.skipped) == 3
     assert result.written == []
     assert result.overwritten == []
 
 
-# ---- install_claude_code_assets: real packaged source --------------------
+# ---- install_assets: real packaged source --------------------------------
 
 
 def test_install_from_packaged_source(tmp_path: Path) -> None:
     """No source override — real packaged assets land in the target tree.
 
-    End-to-end check that ``packaged_claude_code_assets()`` returns
-    something the installer can walk.
+    End-to-end check that ``packaged_assets_for()`` returns something
+    the installer can walk.
     """
     project = tmp_path / "proj"
     project.mkdir()
-    result = assets.install_claude_code_assets(project)
+    result = assets.install_assets(_claude_target(), project)
 
     assert (project / ".claude" / "agents" / "planner.md").is_file()
     assert (project / ".claude" / "commands" / "rationale.md").is_file()
     assert (project / ".claude" / "skills" / "pre-edit" / "SKILL.md").is_file()
     # 4 agents + 3 commands + 4 skills = 11 files.
     assert len(result.written) == 11
+
+
+# ---- install_assets: defensive guard -------------------------------------
+
+
+def test_install_assets_rejects_unconfigured_agent(tmp_path: Path) -> None:
+    """Calling install_assets on an agent with no bundled tree raises."""
+    codex = agents.resolve_agent("codex")
+    assert not codex.has_assets
+    with pytest.raises(ValueError, match="no bundled assets"):
+        assets.install_assets(codex, tmp_path)

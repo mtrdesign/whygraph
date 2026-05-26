@@ -219,7 +219,7 @@ def test_init_agent_claude_writes_mcp_json_and_installs_assets(
     assert (cwd / ".claude" / "agents" / "planner.md").is_file()
     assert (cwd / ".claude" / "commands" / "rationale.md").is_file()
     assert (cwd / ".claude" / "skills" / "pre-edit" / "SKILL.md").is_file()
-    assert "Installed Claude Code assets" in result.output
+    assert "Installed assets for claude" in result.output
 
 
 def test_init_agent_claude_no_install_assets_skips_dot_claude(
@@ -231,7 +231,7 @@ def test_init_agent_claude_no_install_assets_skips_dot_claude(
     assert result.exit_code == 0, result.output
     assert (cwd / ".mcp.json").exists()
     assert not (cwd / ".claude").exists()
-    assert "Installed Claude Code assets" not in result.output
+    assert "Installed assets for" not in result.output
 
 
 def test_init_agent_claude_force_overwrites_existing(
@@ -266,15 +266,26 @@ def test_init_agent_claude_default_skips_existing(
         assert text == "USER EDIT"
 
 
-def test_init_agent_cursor_does_not_install_claude_assets(
+def test_init_agent_cursor_writes_mcp_json_and_installs_rules(
     stub_init, tmp_path: Path
 ) -> None:
+    """Cursor gets ``.cursor/mcp.json`` plus the bundled MDC rule tree.
+
+    Confirms the generalized asset installer fires for any agent whose
+    ``has_assets`` is True — Claude-Code-specific assets do not bleed
+    into the Cursor target.
+    """
     result, cwd = _invoke_in(tmp_path, "init", "--agent", "cursor")
     assert result.exit_code == 0, result.output
     cursor_path = cwd / ".cursor" / "mcp.json"
     assert cursor_path.exists()
     data = json.loads(cursor_path.read_text())
     assert data["mcpServers"]["whygraph"]["command"] == "whygraph-mcp"
+    # Bundled MDC rules land in .cursor/rules/.
+    assert (cwd / ".cursor" / "rules" / "whygraph-pre-edit.mdc").is_file()
+    assert (cwd / ".cursor" / "rules" / "whygraph-ask-why.mdc").is_file()
+    assert "Installed assets for cursor" in result.output
+    # No Claude-Code assets bleed into the Cursor target.
     assert not (cwd / ".claude").exists()
 
 

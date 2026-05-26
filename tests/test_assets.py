@@ -68,6 +68,37 @@ def test_packaged_cursor_assets_present() -> None:
         assert leaf.is_file(), f"missing packaged asset: {rel}"
 
 
+def test_packaged_vscode_assets_present() -> None:
+    """All bundled VS Code Copilot assets are reachable via importlib.resources.
+
+    Covers the full ported surface: 1 top-level instructions file
+    (append-merged), 4 description-driven instructions (skills
+    equivalent), 3 prompt files (slash commands equivalent), and 4
+    custom agents — mirroring the ``claude-code/`` tree against VS
+    Code's 2026 Copilot conventions.
+    """
+    root = assets.packaged_assets_for(agents.resolve_agent("vscode"))
+    expected = (
+        "copilot-instructions.md",
+        "instructions/pre-edit.instructions.md",
+        "instructions/ask-why.instructions.md",
+        "instructions/plan-change.instructions.md",
+        "instructions/implement-plan.instructions.md",
+        "prompts/rationale.prompt.md",
+        "prompts/whygraph-plan.prompt.md",
+        "prompts/whygraph-implement.prompt.md",
+        "agents/planner.agent.md",
+        "agents/researcher.agent.md",
+        "agents/synthesizer.agent.md",
+        "agents/implementor.agent.md",
+    )
+    for rel in expected:
+        leaf = root
+        for part in rel.split("/"):
+            leaf = leaf / part
+        assert leaf.is_file(), f"missing packaged asset: {rel}"
+
+
 def test_packaged_assets_for_rejects_unconfigured_agent() -> None:
     """Agents with ``assets_subdir=None`` raise ``ValueError``."""
     codex = agents.resolve_agent("codex")
@@ -213,3 +244,124 @@ def test_install_assets_rejects_unconfigured_agent(tmp_path: Path) -> None:
     assert not codex.has_assets
     with pytest.raises(ValueError, match="no bundled assets"):
         assets.install_assets(codex, tmp_path)
+
+
+# ---- install_assets: append-merge for shared instruction files -----------
+
+
+def _make_merge_source(tmp_path: Path) -> Path:
+    """Build a source tree with one merge file at the root + one normal file.
+
+    Layout::
+
+        src/
+        ├── merge-me.md            ← merge file (root-level)
+        └── sidecar/keepme.md      ← normal file (skip-or-overwrite path)
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "merge-me.md").write_text("BUNDLED BODY", encoding="utf-8")
+    (src / "sidecar").mkdir()
+    (src / "sidecar" / "keepme.md").write_text("KEEPME", encoding="utf-8")
+    return src
+
+
+def _merge_target() -> agents.AgentTarget:
+    """Build an ephemeral AgentTarget that uses the append-merge path."""
+    return agents.AgentTarget(
+        name="test-merge",
+        aliases=(),
+        relative_path=("ignored",),
+        scope="project",
+        format="json",
+        description="ephemeral test target",
+        assets_subdir="ignored",         # source is injected via the source= arg
+        assets_dest=("dest",),
+        assets_merge_files=("merge-me.md",),
+    )
+
+
+def test_merge_writes_fresh_file_with_markers(tmp_path: Path) -> None:
+    """When the destination file doesn't exist, write the wrapped block fresh."""
+    src = _make_merge_source(tmp_path)
+    project = tmp_path / "proj"
+    project.mkdir()
+
+    result = assets.install_assets(_merge_target(), project, source=src)
+
+    dest = project / "dest" / "merge-me.md"
+    content = dest.read_text(encoding="utf-8")
+    assert assets.BEGIN_MARKER in content
+    assert assets.END_MARKER in content
+    assert "BUNDLED BODY" in content
+    assert dest in result.written
+    # The sidecar normal file also lands.
+    assert (project / "dest" / "sidecar" / "keepme.md").is_file()
+
+
+def test_merge_replaces_between_markers_on_re_run(tmp_path: Path) -> None:
+    """Re-running with markers present replaces the block in place.
+
+    Confirms idempotency: running twice doesn't grow the file with
+    repeated WhyGraph blocks, and any user content outside the markers
+    is preserved verbatim.
+    """
+    src = _make_merge_source(tmp_path)
+    project = tmp_path / "proj"
+    project.mkdir()
+    # First run plants the block.
+    assets.install_assets(_merge_target(), project, source=src)
+
+    # Add user content outside the markers (above and below).
+    dest = project / "dest" / "merge-me.md"
+    seeded = "user prefix\n\n" + dest.read_text(encoding="utf-8") + "user suffix\n"
+    dest.write_text(seeded, encoding="utf-8")
+
+    # Re-run: block should be re-merged in place, user content preserved.
+    result = assets.install_assets(_merge_target(), project, source=src)
+
+    content = dest.read_text(encoding="utf-8")
+    assert content.count(assets.BEGIN_MARKER) == 1
+    assert content.count(assets.END_MARKER) == 1
+    assert content.startswith("user prefix\n")
+    assert content.endswith("user suffix\n")
+    assert "BUNDLED BODY" in content
+    assert dest in result.overwritten
+
+
+def test_merge_appends_when_existing_has_no_markers(tmp_path: Path) -> None:
+    """If the destination exists without markers, append the wrapped block."""
+    src = _make_merge_source(tmp_path)
+    project = tmp_path / "proj"
+    project.mkdir()
+    dest = project / "dest" / "merge-me.md"
+    dest.parent.mkdir(parents=True)
+    dest.write_text("user content\n", encoding="utf-8")
+
+    result = assets.install_assets(_merge_target(), project, source=src)
+
+    content = dest.read_text(encoding="utf-8")
+    assert content.startswith("user content\n")
+    assert assets.BEGIN_MARKER in content
+    assert assets.END_MARKER in content
+    assert "BUNDLED BODY" in content
+    # User content is before the block, not replaced.
+    user_idx = content.find("user content")
+    begin_idx = content.find(assets.BEGIN_MARKER)
+    assert user_idx < begin_idx
+    assert dest in result.overwritten
+
+
+def test_merge_idempotent_byte_for_byte(tmp_path: Path) -> None:
+    """Two back-to-back installs produce byte-identical files."""
+    src = _make_merge_source(tmp_path)
+    project = tmp_path / "proj"
+    project.mkdir()
+    assets.install_assets(_merge_target(), project, source=src)
+    dest = project / "dest" / "merge-me.md"
+    first = dest.read_text(encoding="utf-8")
+
+    assets.install_assets(_merge_target(), project, source=src)
+    second = dest.read_text(encoding="utf-8")
+
+    assert first == second

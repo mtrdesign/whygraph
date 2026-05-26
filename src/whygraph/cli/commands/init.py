@@ -34,8 +34,8 @@ from whygraph import agents, assets
     "install_assets",
     default=True,
     help=(
-        "Claude Code only — copy bundled agents/commands/skills into the"
-        " project's .claude/ directory. Default: enabled."
+        "Copy the chosen agent's bundled assets (if any) into the project."
+        " Default: enabled. No-op for agents that ship no asset tree."
     ),
 )
 @click.option(
@@ -43,8 +43,9 @@ from whygraph import agents, assets
     "force",
     is_flag=True,
     help=(
-        "When installing assets, overwrite existing .claude/* files."
-        " Without this flag, existing files are left alone."
+        "When installing assets, overwrite existing files in the agent's"
+        " destination directory. Without this flag, existing files are"
+        " left alone."
     ),
 )
 def init_cmd(
@@ -62,11 +63,11 @@ def init_cmd(
     agents (Codex, Claude Desktop) get the snippet printed for the
     developer to paste manually.
 
-    For ``--agent claude`` (Claude Code), the bundled agent / command /
-    skill markdown files are additionally copied into the project's
-    ``.claude/`` directory. Pre-existing files are left alone unless
-    ``--force`` is passed; pass ``--no-install-assets`` to skip the copy
-    entirely.
+    If the chosen agent ships a bundled asset tree (see
+    :attr:`whygraph.agents.AgentTarget.has_assets`), the tree is copied
+    into the matching destination directory under the repo. Pre-existing
+    files are left alone unless ``--force`` is passed; pass
+    ``--no-install-assets`` to skip the copy entirely.
 
     Idempotent — re-running on an already-initialized DB just confirms
     both schema layers are at head.
@@ -95,9 +96,9 @@ def init_cmd(
         path = agents.write_snippet(target, project_root)
         click.echo(f"Wrote whygraph MCP entry to {path}")
 
-    if target.name == "claude" and install_assets:
-        result = assets.install_claude_code_assets(project_root, force=force)
-        _print_install_summary(project_root, result, force=force)
+    if install_assets and target.has_assets:
+        result = assets.install_assets(target, project_root, force=force)
+        _print_install_summary(target, project_root, result, force=force)
 
 
 def _ensure_db_initialized() -> Path:
@@ -143,11 +144,16 @@ def _print_snippet(
 
 
 def _print_install_summary(
-    project_root: Path, result: assets.InstallResult, *, force: bool
+    target: agents.AgentTarget,
+    project_root: Path,
+    result: assets.InstallResult,
+    *,
+    force: bool,
 ) -> None:
     """Echo a one-paragraph summary of the asset install."""
-    dest = project_root / ".claude"
-    click.echo(f"Installed Claude Code assets under {dest}/:")
+    assert target.assets_dest is not None  # guaranteed by target.has_assets
+    dest = project_root.joinpath(*target.assets_dest)
+    click.echo(f"Installed assets for {target.name} under {dest}/:")
     click.echo(f"  written:     {len(result.written):>3} files")
     suffix = "" if force else " (pass --force to overwrite)"
     click.echo(f"  skipped:     {len(result.skipped):>3} files{suffix}")

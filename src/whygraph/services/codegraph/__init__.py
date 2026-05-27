@@ -28,16 +28,22 @@ Examples
 ...         print(len(ctx.callers), "callers")
 """
 
+from .bootstrap import DEFAULT_CODEGRAPH_IMAGE, ensure_codegraph_db
 from .context import SymbolContext
-from .exceptions import CodeGraphError
+from .exceptions import CodeGraphBootstrapError, CodeGraphError
 from .graph import CodeGraph
+from .paths import CODEGRAPH_DB_RELPATH
 from .relation import Relation
 from .symbol import Symbol
 
 __all__ = [
+    "CODEGRAPH_DB_RELPATH",
     "CodeGraph",
+    "CodeGraphBootstrapError",
     "CodeGraphError",
+    "DEFAULT_CODEGRAPH_IMAGE",
     "Relation",
     "Symbol",
     "SymbolContext",
+    "ensure_codegraph_db",
 ]

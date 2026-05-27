@@ -10,16 +10,16 @@ For each symbol, WhyGraph collects evidence from git history and GitHub (commits
 
 - **[uv](https://docs.astral.sh/uv/)** — Python toolchain. Installs Python 3.11+ automatically.
 - **git** — repo history is the primary evidence source.
+- **Docker** — `whygraph init` runs a vendored container image to bootstrap CodeGraph in the current repo. No host Node install needed.
 - **[`gh` CLI](https://cli.github.com/)**, authenticated (`gh auth login`) — required only if your repo is on GitHub. Without it, the GitHub crawl phase is skipped silently.
-- **Node ≥ 22** — required by CodeGraph (used for graph queries). `whygraph init` bootstraps this for you via nvm if needed.
-- **`claude` CLI** — required only for the LLM diff-description phase of `whygraph scan` and for `whygraph_rationale_brief`. Both phases skip cleanly if the CLI is missing. Defaults to your Claude.ai subscription billing.
+- **`claude` CLI** *or* `ANTHROPIC_API_KEY` — needed for the LLM diff-description phase of `whygraph scan` and for `whygraph_rationale_brief`. Both phases skip cleanly if neither is available. The `claude` CLI defaults to your Claude.ai subscription billing.
 
 ## Quickstart
 
 Install WhyGraph once (see [Installation](#installation) below), then in the repository you want to analyse:
 
 ```bash
-# 1. Bootstrap CodeGraph (Node ≥ 22, then runs `codegraph init -i`).
+# 1. Bootstrap WhyGraph + CodeGraph (via Docker; idempotent — re-runs are no-ops).
 whygraph init
 
 # 2. Scan: walks git history, fetches PRs/issues, runs TF-IDF scoring,
@@ -59,13 +59,13 @@ For unreleased features on `main`, a specific feature branch, or a tag:
 
 ```bash
 # Latest from main:
-uv tool install "git+https://github.com/cvetty/whygraph.git"
+uv tool install "git+https://github.com/mtrdesign/whygraph.git"
 
 # A specific branch (e.g. an in-flight feature):
-uv tool install "git+https://github.com/cvetty/whygraph.git@feature/scan-and-scoring"
+uv tool install "git+https://github.com/mtrdesign/whygraph.git@feature/scan-and-scoring"
 
 # A specific tag (once tagged):
-uv tool install "git+https://github.com/cvetty/whygraph.git@v1.3.0"
+uv tool install "git+https://github.com/mtrdesign/whygraph.git@v1.3.0"
 ```
 
 Re-running upgrades in place. To switch refs, add `--force` (or `uv tool uninstall whygraph` first). `pipx` accepts the same `git+https://…` URLs.
@@ -73,7 +73,7 @@ Re-running upgrades in place. To switch refs, add `--force` (or `uv tool uninsta
 ### From a local checkout (contributors)
 
 ```bash
-git clone https://github.com/cvetty/whygraph.git
+git clone https://github.com/mtrdesign/whygraph.git
 uv tool install --editable ./whygraph
 ```
 
@@ -117,16 +117,18 @@ WhyGraph's MCP server (`whygraph-mcp`) is a standalone console script, so any LL
 Run from the repo you want WhyGraph to analyse:
 
 ```bash
-whygraph init                          # DB only, no agent wiring (safe default)
-whygraph init --agent claude          # writes .mcp.json + populates .claude/
+whygraph init                          # preflight + WhyGraph DB + CodeGraph via Docker (no agent wiring)
+whygraph init --no-codegraph           # skip the CodeGraph bootstrap step
+whygraph init --codegraph-image TAG    # pin a specific whygraph-codegraph image
+whygraph init --skip-preflight         # skip the host-tool diagnostics (CI escape hatch)
+whygraph init --agent claude          # all of the above + writes .mcp.json + populates .claude/
 whygraph init --agent cursor          # writes .cursor/mcp.json
 whygraph init --agent vscode          # writes .vscode/mcp.json (alias: copilot)
 whygraph init --agent codex           # prints snippet for ~/.codex/config.toml
-whygraph init --agent claude-desktop  # prints snippet for Claude Desktop config
 whygraph init --agent X --print       # prints the MCP snippet, never writes it
 whygraph init --agent claude --no-install-assets   # MCP only, skip .claude/ copy
 whygraph init --agent claude --force               # overwrite existing .claude/* files
-whygraph init --list-agents            # show all supported agents + paths
+whygraph init --list-agents            # show all supported agents + paths (no preflight, no bootstrap)
 ```
 
 **Project-scoped agents** (Claude Code, Cursor, VS Code / Copilot) get a config file written inside the repo so you can commit it — every contributor's editor picks it up automatically. **User-scoped agents** (Codex, Claude Desktop) are print-only: the command emits the snippet and tells you where to paste it, so WhyGraph never silently edits files outside the repo.
@@ -138,7 +140,7 @@ whygraph init --list-agents            # show all supported agents + paths
 | Command | Purpose |
 |---|---|
 | `whygraph version` | Print installed package version. |
-| `whygraph init [-y]` | Bootstrap CodeGraph in the current repo. Detects/installs Node ≥ 22 via nvm if needed, then runs `codegraph init -i`. |
+| `whygraph init [--no-codegraph]` | Run preflight diagnostics (git / docker / gh / LLM credential), bootstrap the WhyGraph DB, and pull the vendored Docker image to populate `.codegraph/codegraph.db`. Pass `--agent <name>` to also wire MCP for an editor. Idempotent. |
 | `whygraph scan` | Walk first-parent history and populate `.whygraph/whygraph.db`: commits + GitHub PRs/issues + TF-IDF scoring + per-commit LLM diff descriptions. Idempotent. |
 | `whygraph render [--out PATH] [--open] [--depth N]` | Render a self-contained HTML viewer of the CodeGraph + WhyGraph data. Single file, vendored Cytoscape, opens with double-click. Cached rationale only. `--depth N` (1–4, default 1) caps which nodes get a populated detail block — fast first paint at default 1 (modules only); pass `--depth 4` for full data. |
 | `whygraph serve [--port 8765] [--open]` | Long-running localhost viewer with on-demand rationale generation. Same UI as `render`, plus a "Generate rationale" button on uncached nodes. |

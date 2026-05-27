@@ -18,13 +18,9 @@ from pathlib import Path
 
 from .context import SymbolContext
 from .exceptions import CodeGraphError
+from .paths import CODEGRAPH_DB_RELPATH
 from .relation import Relation
 from .symbol import NODE_COLUMNS, Symbol
-
-# Default location of the CodeGraph database within a repository. Overridable
-# per-project by the ``codegraph_db`` key in ``whygraph.toml`` — see
-# :meth:`CodeGraph.for_repository`.
-_DB_RELPATH = Path(".codegraph") / "codegraph.db"
 
 # ``SELECT`` of the node columns Symbol.from_row needs — bare for plain node
 # queries, and table-qualified as ``n`` for the edge joins.
@@ -111,7 +107,7 @@ class CodeGraph:
             If the resolved database does not exist — most often because
             ``codegraph init`` has not been run.
         """
-        return cls(codegraph_db if codegraph_db is not None else root / _DB_RELPATH)
+        return cls(codegraph_db if codegraph_db is not None else root / CODEGRAPH_DB_RELPATH)
 
     def __repr__(self) -> str:
         return f"CodeGraph(db_path={self.db_path!r})"

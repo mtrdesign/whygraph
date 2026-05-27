@@ -230,19 +230,35 @@ def test_write_snippet_toml_overwrites_malformed(tmp_path: Path) -> None:
 
 @pytest.fixture
 def stub_init(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """Replace ``_ensure_db_initialized`` so CLI tests don't hit the DB layer.
+    """Neutralise the heavy init steps so CLI tests exercise just agent wiring.
 
-    The current branch has the DB bootstrap chain mid-rewrite; this stub
-    lets us exercise the new ``init_cmd`` flags without depending on it.
+    Stubs out:
+
+    * ``_ensure_db_initialized`` — the DB layer is mid-rewrite and the
+      tests don't care about it.
+    * ``_run_preflight`` — preflight probes the host (git/docker/gh/LLM)
+      and would fail or noisily warn in CI; tests focus on agent wiring.
+    * ``_ensure_codegraph_bootstrapped`` — would otherwise try to run
+      Docker; the codegraph bootstrap is covered by ``test_codegraph_bootstrap``.
     """
     fake_db = tmp_path / ".whygraph" / "whygraph.db"
 
-    def _fake() -> Path:
+    def _fake_db() -> Path:
         fake_db.parent.mkdir(parents=True, exist_ok=True)
         fake_db.touch()
         return fake_db
 
-    monkeypatch.setattr("whygraph.cli.commands.init._ensure_db_initialized", _fake)
+    monkeypatch.setattr(
+        "whygraph.cli.commands.init._ensure_db_initialized", _fake_db
+    )
+    monkeypatch.setattr(
+        "whygraph.cli.commands.init._run_preflight",
+        lambda project_root, *, with_codegraph: None,
+    )
+    monkeypatch.setattr(
+        "whygraph.cli.commands.init._ensure_codegraph_bootstrapped",
+        lambda project_root, *, image: None,
+    )
     return fake_db
 
 

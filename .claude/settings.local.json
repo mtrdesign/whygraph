@@ -61,7 +61,10 @@
       "Bash(docker compose *)",
       "Bash(docker image *)",
       "Bash(docker manifest *)",
-      "Bash(docker pull *)"
+      "Bash(docker pull *)",
+      "Bash(gh auth *)",
+      "Bash(cat)",
+      "Read(//private/tmp/whygraph-migration-gen/**)"
     ]
   }
 }

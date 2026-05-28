@@ -20,3 +20,6 @@ build/
 
 # Personal Claude Configurations
 .claude/settings.local.json
+
+# Per-repo WhyGraph config — holds local LLM API keys (template: whygraph.example.toml).
+whygraph.toml

@@ -24,7 +24,7 @@ from whygraph.db.models import Commit, CommitFileChange, Issue, PRIssueLink, Pul
 from whygraph.scan.refactor_score import BORING_THRESHOLD
 from whygraph.services.git import BlameHunk, GitError, Repository
 
-from .errors import WhyGraphError
+from .errors import WhyGraphError, log_tool_errors
 from .targets import Target, repo_root, resolve_target, target_dict
 
 # Cap on how many rounds of "blame returned a boring commit; ignore it
@@ -477,5 +477,5 @@ def whygraph_evidence_for(
 def register(mcp: FastMCP) -> None:
     """Attach the evidence tool to an MCP server."""
     mcp.tool(name="whygraph_evidence_for", description=_TOOL_DESCRIPTION)(
-        whygraph_evidence_for
+        log_tool_errors(whygraph_evidence_for)
     )

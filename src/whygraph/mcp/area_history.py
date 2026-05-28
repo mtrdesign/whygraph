@@ -18,7 +18,7 @@ import logging
 
 from mcp.server.fastmcp import FastMCP
 
-from .errors import WhyGraphError
+from .errors import WhyGraphError, log_tool_errors
 from .evidence import (
     _evidence_dict,
     backfill_evidence_descriptions,
@@ -91,5 +91,5 @@ def whygraph_area_history(
 def register(mcp: FastMCP) -> None:
     """Attach the area-history tool to an MCP server."""
     mcp.tool(name="whygraph_area_history", description=_TOOL_DESCRIPTION)(
-        whygraph_area_history
+        log_tool_errors(whygraph_area_history)
     )

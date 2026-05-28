@@ -17,7 +17,7 @@ from whygraph.services.llm import LlmError
 
 from whygraph.analyze import CommitEvidence, Rationale
 
-from .errors import WhyGraphError
+from .errors import WhyGraphError, log_tool_errors
 from .targets import Target, repo_root, resolve_target, target_dict
 from .evidence import backfill_evidence_descriptions, collect_evidence
 from .rationale_cache import lookup_cached, store_cached
@@ -129,5 +129,5 @@ def whygraph_rationale_brief(
 def register(mcp: FastMCP) -> None:
     """Attach the rationale tool to an MCP server."""
     mcp.tool(name="whygraph_rationale_brief", description=_TOOL_DESCRIPTION)(
-        whygraph_rationale_brief
+        log_tool_errors(whygraph_rationale_brief)
     )

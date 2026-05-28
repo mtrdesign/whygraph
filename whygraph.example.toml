@@ -1,0 +1,68 @@
+# WhyGraph configuration — whygraph.toml
+#
+# Scaffolded by `whygraph init`. Every field is optional and the values shown
+# are the built-in defaults, so an unedited file behaves exactly as if no
+# config were present. Uncomment and edit to override.
+
+log_level = "INFO"            # DEBUG | INFO | WARN | ERROR | CRITICAL
+
+[scan]
+max_workers = 2               # parallel LLM calls in the diff-analyzer crawler
+
+[analyze]
+# LLM that writes a per-commit "git diff" description during `whygraph scan`.
+provider = "anthropic"        # which [llm.*] adapter to use
+# model = "claude-haiku-4-5"  # override the provider's model for analysis only
+# max_diff_chars = 50000      # diff truncated past this length before prompting
+# timeout_sec = 60            # per-call timeout; default: the adapter's own
+
+[rationale]
+# LLM that writes a structured "why this code exists" rationale card.
+provider = "anthropic"        # which [llm.*] adapter to use
+# model = "claude-haiku-4-5"  # override the provider's model for rationale only
+# timeout_sec = 60            # per-call timeout; default: the adapter's own
+
+# Uncomment to override default DB locations (resolved relative to this file):
+# whygraph_db  = ".whygraph/whygraph.db"
+# codegraph_db = ".codegraph/codegraph.db"
+
+# Optional rotating file log. Console (stderr) logging is always on. Uncomment
+# this section to add an *additional* file handler; leave it out (or leave
+# `file` unset) to keep file logging off.
+# [logging]
+# file         = ".whygraph/logs/whygraph.log"   # resolved relative to this file
+# level        = "DEBUG"                          # default: inherit top-level log_level
+# max_bytes    = 5_000_000
+# backup_count = 3
+
+# Per-provider LLM client settings. Each table is consumed by the matching
+# adapter in whygraph.services.llm via Adapter.from_config. Omit api_key to
+# read the standard env var (ANTHROPIC_API_KEY, OPENAI_API_KEY,
+# DEEPSEEK_API_KEY); omit a section entirely to use the defaults shown.
+
+[llm.anthropic]
+model = "claude-opus-4-7"
+# api_key = "sk-ant-..."      # default: read ANTHROPIC_API_KEY from env
+timeout_sec = 60
+
+[llm.openai]
+model = "gpt-4o"
+# api_key = "sk-..."          # default: read OPENAI_API_KEY from env
+# base_url = "..."            # default: https://api.openai.com/v1
+timeout_sec = 60
+
+[llm.deepseek]
+model = "deepseek-chat"
+# api_key = "sk-..."          # default: read DEEPSEEK_API_KEY from env
+timeout_sec = 60
+
+[llm.ollama]
+model = "llama3"
+# host = "http://localhost:11434"
+timeout_sec = 120
+
+# `claude_cli` (Python attribute) and `claude-cli` (TOML idiom) both parse.
+[llm.claude_cli]
+model = "claude-opus-4-7"
+# api_key = "sk-ant-..."      # default: subscription billing (strips env var)
+timeout_sec = 120

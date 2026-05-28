@@ -298,6 +298,55 @@ def test_init_no_flag_writes_no_agent_config(
     assert "Initialized WhyGraph database" in result.output
 
 
+def test_init_writes_example_config_not_real_config(
+    stub_init, tmp_path: Path
+) -> None:
+    """A bare ``whygraph init`` drops a valid example, never whygraph.toml."""
+    result, cwd = _invoke_in(tmp_path, "init")
+    assert result.exit_code == 0, result.output
+    example = cwd / "whygraph.example.toml"
+    assert example.exists()
+    assert "Wrote example config" in result.output
+    # The real config is the user's copy to make — init must not create it.
+    assert not (cwd / "whygraph.toml").exists()
+    # The example parses and behaves as if no config were present.
+    with example.open("rb") as f:
+        data = tomllib.load(f)
+    assert data["log_level"] == "INFO"
+    assert data["analyze"]["provider"] == "anthropic"
+
+
+def test_init_adds_gitignore_entries(stub_init, tmp_path: Path) -> None:
+    """init keeps the user config + generated caches out of git."""
+    result, cwd = _invoke_in(tmp_path, "init")
+    assert result.exit_code == 0, result.output
+    assert "Updated .gitignore" in result.output
+    lines = (cwd / ".gitignore").read_text(encoding="utf-8").splitlines()
+    for entry in ("whygraph.toml", ".whygraph/", ".codegraph/"):
+        assert entry in lines
+    # The committable example stays trackable.
+    assert "whygraph.example.toml" not in lines
+
+
+def test_init_gitignore_idempotent(stub_init, tmp_path: Path) -> None:
+    """Pre-existing entries are not duplicated and re-runs are no-ops."""
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        cwd = Path.cwd()
+        (cwd / ".gitignore").write_text(
+            "node_modules/\n.whygraph/\n", encoding="utf-8"
+        )
+        result = runner.invoke(whygraph_main, ["init"])
+        assert result.exit_code == 0, result.output
+        body = (cwd / ".gitignore").read_text(encoding="utf-8")
+        # User content preserved; already-present entry not duplicated.
+        assert "node_modules/" in body
+        assert body.count(".whygraph/") == 1
+        # The remaining entries were appended.
+        assert "whygraph.toml" in body.splitlines()
+        assert ".codegraph/" in body.splitlines()
+
+
 def test_init_agent_claude_writes_mcp_json_and_installs_assets(
     stub_init, tmp_path: Path
 ) -> None:

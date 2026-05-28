@@ -19,12 +19,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from whygraph.core.config import Config, ConfigError
+from whygraph.core.config import CONFIG_FILENAME, Config, ConfigError
 from whygraph.core.logger import LogLevel, configure_logging, get_logger
 from whygraph.core.shell import Shell, ShellError
 from whygraph.core.shell_command import ShellCommand
 
-_CONFIG_FILENAME = "whygraph.toml"
 _config: Config | None = None
 
 
@@ -52,7 +51,7 @@ def get_config(project_root: Path | None = None) -> Config:
     global _config
     if _config is None:
         root = project_root or _resolve_root()
-        candidate = root / _CONFIG_FILENAME
+        candidate = root / CONFIG_FILENAME
         _config = (
             Config.from_toml(candidate) if candidate.exists() else Config.defaults()
         )

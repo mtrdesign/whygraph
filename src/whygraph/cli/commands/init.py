@@ -92,6 +92,12 @@ def init_cmd(
 ) -> None:
     """Initialize the WhyGraph database under ``.whygraph/whygraph.db``.
 
+    Also writes a committable ``whygraph.example.toml`` at the project root
+    (it documents every tunable and ships the built-in defaults — copy it
+    to ``whygraph.toml`` and edit to customize) and ensures the project's
+    ``.gitignore`` keeps the user-owned config and generated caches out of
+    git (``whygraph.toml``, ``.whygraph/``, ``.codegraph/``).
+
     Also bootstraps CodeGraph by default — runs the vendored Docker image
     to populate ``.codegraph/codegraph.db`` in the current repo. Pass
     ``--no-codegraph`` to skip that step.
@@ -121,6 +127,9 @@ def init_cmd(
 
     db_path = _ensure_db_initialized()
     click.echo(f"Initialized WhyGraph database at {db_path}")
+
+    _scaffold_example_config(project_root)
+    _ensure_gitignore(project_root)
 
     if install_codegraph:
         _ensure_codegraph_bootstrapped(project_root, image=codegraph_image)
@@ -166,9 +175,7 @@ def _run_preflight(project_root: Path, *, with_codegraph: bool) -> None:
         fail(str(exc))
 
 
-def _ensure_codegraph_bootstrapped(
-    project_root: Path, *, image: str | None
-) -> None:
+def _ensure_codegraph_bootstrapped(project_root: Path, *, image: str | None) -> None:
     """Idempotently materialise ``.codegraph/codegraph.db`` via Docker.
 
     Echoes a one-line status for both the "already initialized" and
@@ -178,8 +185,8 @@ def _ensure_codegraph_bootstrapped(
     """
     from whygraph.services.codegraph import (
         CODEGRAPH_DB_RELPATH,
-        CodeGraphBootstrapError,
         DEFAULT_CODEGRAPH_IMAGE,
+        CodeGraphBootstrapError,
         ensure_codegraph_db,
     )
 
@@ -195,6 +202,39 @@ def _ensure_codegraph_bootstrapped(
     except CodeGraphBootstrapError as exc:
         fail(f"CodeGraph bootstrap failed: {exc}")
     click.echo(f"Initialized CodeGraph database at {result_path}")
+
+
+def _scaffold_example_config(project_root: Path) -> None:
+    """Write the committable ``whygraph.example.toml`` at the project root.
+
+    Always refreshed so it tracks the shipped defaults. Lazy-imports the
+    config helper so lightweight surfaces like ``--list-agents`` and
+    ``--help`` don't pay the cost.
+    """
+    from whygraph.core.config import write_example_config
+
+    path = write_example_config(project_root)
+    click.echo(
+        f"Wrote example config to {path} — copy to whygraph.toml and edit to customize"
+    )
+
+
+def _ensure_gitignore(project_root: Path) -> None:
+    """Keep the user config and generated caches out of git.
+
+    Idempotently adds ``whygraph.toml``, ``.whygraph/`` and ``.codegraph/``
+    to the project's ``.gitignore`` (creating it if absent). Lazy-imports
+    the helper to keep lightweight CLI surfaces fast.
+    """
+    from whygraph.core.gitignore import ensure_gitignore_entries
+
+    added = ensure_gitignore_entries(
+        project_root, ["whygraph.toml", ".whygraph/", ".codegraph/"]
+    )
+    if added:
+        click.echo(f"Updated .gitignore (added: {', '.join(added)})")
+    else:
+        click.echo(".gitignore already covers WhyGraph entries")
 
 
 def _ensure_db_initialized() -> Path:

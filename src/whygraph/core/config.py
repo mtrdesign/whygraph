@@ -17,11 +17,22 @@ from __future__ import annotations
 import logging
 import tomllib
 from dataclasses import dataclass, field, fields
+from importlib import resources
 from pathlib import Path
 
 from whygraph.core.logger import LogLevel
 
 _log = logging.getLogger(__name__)
+
+CONFIG_FILENAME = "whygraph.toml"
+"""Name of the project-root config file loaded by :func:`whygraph.core.get_config`."""
+
+EXAMPLE_CONFIG_FILENAME = "whygraph.example.toml"
+"""Name of the committable example config scaffolded by ``whygraph init``.
+
+Users copy it to :data:`CONFIG_FILENAME` and edit; the real ``whygraph.toml``
+is gitignored (it may hold API keys), while the example tracks the package
+defaults and is safe to commit."""
 
 
 class ConfigError(RuntimeError):
@@ -510,3 +521,45 @@ class Config:
             A configuration object with every field set to its default.
         """
         return cls()
+
+
+def default_config_text() -> str:
+    """Return the bundled commented default config as text.
+
+    Read from the packaged ``whygraph/core/default_config.toml`` resource
+    (same ``importlib.resources`` mechanism as the analyze prompt
+    templates). The shown values match the :class:`Config` defaults, so a
+    copy with no edits behaves exactly as if no config were present.
+
+    Returns
+    -------
+    str
+        The full template, including comments and a trailing newline.
+    """
+    return (resources.files("whygraph.core") / "default_config.toml").read_text(
+        encoding="utf-8"
+    )
+
+
+def write_example_config(project_root: Path) -> Path:
+    """Scaffold :data:`EXAMPLE_CONFIG_FILENAME` into ``project_root``.
+
+    The example is a committable, package-owned reference (like
+    ``.env.example``): users copy it to :data:`CONFIG_FILENAME` and edit.
+    Because it tracks the package defaults rather than user edits, it is
+    **always (re)written** — re-running ``whygraph init`` refreshes it so
+    it stays in sync with the shipped defaults.
+
+    Parameters
+    ----------
+    project_root : Path
+        Directory to write the example into (usually the repo root).
+
+    Returns
+    -------
+    Path
+        The path of the written example config.
+    """
+    path = project_root / EXAMPLE_CONFIG_FILENAME
+    path.write_text(default_config_text(), encoding="utf-8")
+    return path

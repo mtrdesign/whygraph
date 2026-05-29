@@ -12,11 +12,11 @@ Each prompt expands into a single ``UserMessage`` that instructs the host
 model to call the relevant WhyGraph tools / read the relevant resources
 in the right order, then synthesize the result.
 
-Claude Code already has equivalent orchestration via the bundled slash
-commands (``/whygraph-plan``, ``/rationale``) and the ``pre-edit`` skill,
+Claude Code already has equivalent orchestration via the bundled skills
+(``/whygraph-plan``, ``/rationale``, and the auto-triggered ``pre-edit``),
 which can spawn subagents. Prompts can't spawn subagents — they only
 emit messages — so these prompts deliberately stay leaner than the
-slash-command flows. The audience is Cursor, Claude Desktop, VS Code,
+skill flows. The audience is Cursor, Claude Desktop, VS Code,
 Codex, and any other MCP client that doesn't have local orchestration
 hooks.
 """

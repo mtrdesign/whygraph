@@ -359,7 +359,7 @@ def test_init_agent_claude_writes_mcp_json_and_installs_assets(
     assert "Wrote whygraph MCP entry" in result.output
     # Bundled assets land in .claude/.
     assert (cwd / ".claude" / "agents" / "planner.md").is_file()
-    assert (cwd / ".claude" / "commands" / "rationale.md").is_file()
+    assert (cwd / ".claude" / "skills" / "rationale" / "SKILL.md").is_file()
     assert (cwd / ".claude" / "skills" / "pre-edit" / "SKILL.md").is_file()
     assert "Installed assets for claude" in result.output
 

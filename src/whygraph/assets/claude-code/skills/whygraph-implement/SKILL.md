@@ -1,7 +1,9 @@
 ---
+name: whygraph-implement
 description: Execute a reviewed WhyGraph plan markdown step by step. Reads the plan as a strict contract, runs Verify after each step, halts on first failure, appends an Implementation log to the plan.
 argument-hint: <plan.md> [--from-step N] [--commit-each-step] [--model sonnet|opus|haiku]
 allowed-tools: [Agent, Read]
+disable-model-invocation: true
 ---
 
 # /whygraph-implement

@@ -13,7 +13,7 @@ from whygraph import agents, assets
 
 
 def test_packaged_claude_assets_present() -> None:
-    """All 11 bundled .md files are reachable via importlib.resources.
+    """All 8 bundled .md files are reachable via importlib.resources.
 
     Guards against a packaging regression: if hatch stopped shipping
     ``src/whygraph/assets/claude-code/`` for any reason, this test
@@ -25,12 +25,9 @@ def test_packaged_claude_assets_present() -> None:
         "agents/researcher.md",
         "agents/synthesizer.md",
         "agents/implementor.md",
-        "commands/rationale.md",
-        "commands/whygraph-plan.md",
-        "commands/whygraph-implement.md",
-        "skills/ask-why/SKILL.md",
-        "skills/implement-plan/SKILL.md",
-        "skills/plan-change/SKILL.md",
+        "skills/whygraph-plan/SKILL.md",
+        "skills/whygraph-implement/SKILL.md",
+        "skills/rationale/SKILL.md",
         "skills/pre-edit/SKILL.md",
     )
     for rel in expected:
@@ -265,10 +262,12 @@ def test_install_from_packaged_source(tmp_path: Path) -> None:
     result = assets.install_assets(_claude_target(), project)
 
     assert (project / ".claude" / "agents" / "planner.md").is_file()
-    assert (project / ".claude" / "commands" / "rationale.md").is_file()
+    assert (
+        project / ".claude" / "skills" / "rationale" / "SKILL.md"
+    ).is_file()
     assert (project / ".claude" / "skills" / "pre-edit" / "SKILL.md").is_file()
-    # 4 agents + 3 commands + 4 skills = 11 files.
-    assert len(result.written) == 11
+    # 4 agents + 4 skills = 8 files.
+    assert len(result.written) == 8
 
 
 # ---- install_assets: defensive guard -------------------------------------

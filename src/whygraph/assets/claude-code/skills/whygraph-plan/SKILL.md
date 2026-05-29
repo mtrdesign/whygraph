@@ -1,7 +1,9 @@
 ---
+name: whygraph-plan
 description: Plan a non-trivial code change with WhyGraph rationale + CodeGraph symbols. Asks scoping questions, then runs a fan-out/fan-in pipeline (planner → 3 parallel researchers → synthesizer) to produce a step-by-step plan.
 argument-hint: <task description> [--shallow|--deep] [--no-questions] [--out <path>]
-allowed-tools: [Agent, AskUserQuestion, Write, Bash]
+allowed-tools: Agent, AskUserQuestion, Write, Bash(git rev-parse *), Bash(mkdir *)
+disable-model-invocation: true
 ---
 
 # /whygraph-plan

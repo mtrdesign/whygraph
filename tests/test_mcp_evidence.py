@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from sqlmodel import select
 
 from whygraph.db import get_session
 from whygraph.db.models import Commit, CommitFileChange, Issue, PRIssueLink, PullRequest
@@ -31,6 +32,7 @@ def _db_commit(
     subject: str = "a change",
     committed_at: str,
     parent_shas: str = "",
+    files_changed: int = 1,
     llm_description: str | None = "Mechanical diff summary.",
 ) -> Commit:
     """A WhyGraph ``commit`` row with sensible defaults for tests."""
@@ -43,7 +45,7 @@ def _db_commit(
         committed_at=committed_at,
         subject=subject,
         body="",
-        files_changed=1,
+        files_changed=files_changed,
         insertions=1,
         deletions=0,
         scanned_at="2026-05-01T00:00:00+00:00",
@@ -233,6 +235,69 @@ def test_evidence_for_backfills_null_llm_description(
         row = session.get(Commit, newest.sha)
         assert row.llm_description == "backfilled summary"
         assert row.llm_description_model == "stub:stub-1"
+
+
+def test_evidence_for_bulk_commit_uses_per_file_description(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bulk commit is described per-file against the queried path; the
+    file-specific text is returned and cached on the file-change row, while
+    the commit row keeps its cheap stub."""
+    newest, oldest = list(Repository(temp_git_repo).commits)
+    bulk_stub = "Bulk commit touching 50 files — per-file on demand."
+    with get_session() as session:
+        session.add(
+            _db_commit(oldest.sha, committed_at="2026-01-01T00:00:00+00:00")
+        )
+        # The newest commit is "bulk" (files_changed over the default
+        # threshold of 30) and carries only the stub at the commit level.
+        session.add(
+            _db_commit(
+                newest.sha,
+                committed_at="2026-02-01T00:00:00+00:00",
+                parent_shas=oldest.sha,
+                files_changed=50,
+                llm_description=bulk_stub,
+            )
+        )
+        # The scan recorded that the bulk commit touched sample.py.
+        session.add(
+            CommitFileChange(
+                commit_sha=newest.sha,
+                path="sample.py",
+                change_type="M",
+                lines_added=1,
+                lines_deleted=0,
+            )
+        )
+
+    seen = _install_stub_descriptor(monkeypatch)
+    monkeypatch.chdir(temp_git_repo)
+
+    result = whygraph_evidence_for(path="sample.py", line_start=1, line_end=3)
+
+    by_sha = {item["commit"]["sha"]: item["commit"] for item in result["evidence"]}
+    # The returned description for the bulk commit is the per-file text,
+    # not the stub.
+    assert by_sha[newest.sha]["llm_description"] == "backfilled summary"
+    # Exactly one descriptor call, and it was scoped to sample.py.
+    assert len(seen) == 1
+    assert "sample.py" in seen[0]
+
+    with get_session() as session:
+        # The commit row keeps its stub — per-file text lives on the
+        # file-change row instead.
+        commit_row = session.get(Commit, newest.sha)
+        assert commit_row.llm_description == bulk_stub
+        fc = session.exec(
+            select(CommitFileChange)
+            .where(CommitFileChange.commit_sha == newest.sha)
+            .where(CommitFileChange.path == "sample.py")
+        ).first()
+        assert fc.llm_description == "backfilled summary"
+        assert fc.llm_description_model == "stub:stub-1"
 
 
 def test_evidence_for_merges_area_history_when_blame_is_thin(

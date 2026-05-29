@@ -111,10 +111,11 @@ def whygraph_rationale_brief(
 
     # Cache miss — lazily backfill any commit whose `llm_description` is
     # NULL (e.g. after `whygraph scan --no-llm-descriptions`) so the
-    # rationale prompt sees the richer per-commit summaries. The cache
+    # rationale prompt sees the richer per-commit summaries. Bulk commits
+    # are described per-file against the target's path instead. The cache
     # fingerprint is sha256-over-sorted-SHAs, so backfilling here does
     # not affect cache keys.
-    backfill_evidence_descriptions(evidence)
+    backfill_evidence_descriptions(evidence, target_path=target.path)
 
     try:
         generator = RationaleGenerator.from_config(config)

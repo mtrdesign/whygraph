@@ -25,8 +25,11 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 
+from sqlmodel import select
+
 from whygraph.db import get_session
 from whygraph.db.models.commit import Commit as CommitRow
+from whygraph.db.models.commit_file_change import CommitFileChange
 from whygraph.services.git import Repository
 from whygraph.services.git.commit import Commit as CommitDC
 from whygraph.services.git.commit import DiffStats
@@ -34,6 +37,33 @@ from whygraph.services.git.commit import DiffStats
 from .llm_descriptor import LlmDescriptor
 
 _log = logging.getLogger(__name__)
+
+
+def bulk_commit_stub(files_changed: int) -> str:
+    """The placeholder ``llm_description`` for a bulk commit.
+
+    Bulk commits (more files than ``analyze.large_commit_file_count``)
+    are not described whole-diff — that would be one expensive LLM pass
+    producing a vague repo-wide summary. Instead the commit row carries
+    this cheap, deterministic stub so evidence payloads are never blank,
+    and the real per-file descriptions are filled in lazily on read by
+    :func:`backfill_file_description`.
+
+    Parameters
+    ----------
+    files_changed : int
+        The commit's file count, surfaced in the message so a reader
+        understands *why* there is no whole-diff summary.
+
+    Returns
+    -------
+    str
+        A one-line human-readable stub.
+    """
+    return (
+        f"Bulk commit touching {files_changed} files — too broad for a single "
+        "whole-diff summary; per-file descriptions are generated on demand."
+    )
 
 
 def _row_to_diff_dc(commit: CommitRow) -> CommitDC:
@@ -117,6 +147,84 @@ def backfill_commit_description(
     commit.llm_description = description.text
     commit.llm_description_model = model_label
     return True
+
+
+def _file_change_row(session, commit_sha: str, path: str) -> CommitFileChange | None:
+    """The ``commit_file_change`` row for ``(commit_sha, path)``, if any.
+
+    There is at most one row per ``(commit, path)`` (see
+    :class:`CommitFileChange`), so ``first()`` is exact rather than a
+    sampled pick.
+    """
+    return session.exec(
+        select(CommitFileChange)
+        .where(CommitFileChange.commit_sha == commit_sha)
+        .where(CommitFileChange.path == path)
+    ).first()
+
+
+def backfill_file_description(
+    commit: CommitRow,
+    path: str,
+    *,
+    repository: Repository,
+    descriptor: LlmDescriptor,
+) -> str | None:
+    """Generate (or fetch the cached) per-file description for one path.
+
+    For *bulk* commits the whole-commit diff is never described; instead
+    the slice for a single ``path`` is described lazily on read and
+    cached on that file's :class:`CommitFileChange` row, keyed by
+    ``(commit.sha, path)``. A second call for the same file returns the
+    cached text without an LLM round-trip.
+
+    Parameters
+    ----------
+    commit : Commit
+        The (typically detached) bulk-commit row. Only its ``sha`` and
+        ``parent_shas`` drive the diff.
+    path : str
+        Repository-relative path to describe — the file the caller is
+        actually asking about.
+    repository : Repository
+        Used to compute the path-scoped diff (``git diff … -- path``).
+    descriptor : LlmDescriptor
+        Pre-built descriptor; :meth:`LlmDescriptor.describe` runs
+        synchronously on the calling thread.
+
+    Returns
+    -------
+    str or None
+        The description text (freshly generated or from cache), or
+        ``None`` when the commit did not touch ``path`` (empty diff) so
+        there is nothing to describe — callers then fall back to the
+        commit-level stub.
+
+    Raises
+    ------
+    whygraph.services.git.GitError
+        If the diff computation fails (unknown sha, broken repo).
+    AnalyzeError
+        If :meth:`LlmDescriptor.describe` fails for any reason.
+    """
+    with get_session() as session:
+        row = _file_change_row(session, commit.sha, path)
+        if row is not None and row.llm_description is not None:
+            return row.llm_description
+
+    dc = _row_to_diff_dc(commit)
+    diff = repository.diff(dc, pathspec=path)
+    if not diff.strip():
+        return None
+
+    description = descriptor.describe(diff)
+    model_label = f"{description.provider}:{description.model}"
+    with get_session() as session:
+        row = _file_change_row(session, commit.sha, path)
+        if row is not None:
+            row.llm_description = description.text
+            row.llm_description_model = model_label
+    return description.text
 
 
 def backfill_all(

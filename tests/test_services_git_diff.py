@@ -132,6 +132,44 @@ def test_diff_raises_git_error_for_unknown_sha(tmp_path: Path) -> None:
         repo.diff(bogus)
 
 
+# ---- diff(pathspec=...) --------------------------------------------------
+
+
+def test_diff_pathspec_limits_to_one_file(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    repo = Repository(root)
+    second = _commits_newest_first(root)[1]  # added b.txt
+
+    diff = repo.diff(second, pathspec="b.txt")
+
+    assert "b.txt" in diff
+    assert "+world" in diff
+
+
+def test_diff_pathspec_for_untouched_path_is_empty(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    repo = Repository(root)
+    second = _commits_newest_first(root)[1]  # touched b.txt only, not a.txt
+
+    # The "second" commit did not touch a.txt, so scoping to it yields
+    # nothing — callers treat "" as "this commit has nothing for path".
+    assert repo.diff(second, pathspec="a.txt") == ""
+
+
+def test_diff_pathspec_on_root_commit_shows_file_contents(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    repo = Repository(root)
+    initial = _commits_newest_first(root)[-1]  # oldest, added a.txt
+    assert initial.parent_shas == ()
+
+    diff = repo.diff(initial, pathspec="a.txt")
+
+    # For a root commit the per-file slice against the empty tree is the
+    # file's full introduction.
+    assert "a.txt" in diff
+    assert "+hello" in diff
+
+
 # ---- diff_range ----------------------------------------------------------
 
 

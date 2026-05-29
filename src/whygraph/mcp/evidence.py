@@ -357,7 +357,9 @@ def _first_parent_of(sha: str) -> str | None:
     return parents[0] if parents else None
 
 
-def backfill_evidence_descriptions(items: list[CommitEvidence]) -> None:
+def backfill_evidence_descriptions(
+    items: list[CommitEvidence], *, target_path: str
+) -> None:
     """Lazily backfill ``llm_description`` for any commit in ``items``.
 
     The MCP tools that consume the evidence call this once they're sure
@@ -367,17 +369,55 @@ def backfill_evidence_descriptions(items: list[CommitEvidence]) -> None:
     in :func:`collect_evidence`) keeps the rationale-cache path free of LLM
     cost when it hits.
 
+    Two regimes, split on the commit's file count
+    (``analyze.large_commit_file_count``):
+
+    * **Normal commits** — described whole-diff via
+      :func:`~whygraph.analyze.backfill_all`, exactly as before, when
+      their ``llm_description`` is still ``NULL``.
+    * **Bulk commits** (imports / squash merges) — never described
+      whole-diff. Instead the slice for ``target_path`` is described via
+      :func:`~whygraph.analyze.backfill_file_description` (cached on the
+      ``commit_file_change`` row) and written onto the in-memory commit's
+      ``llm_description`` *for this request only*, so both the evidence
+      serializer and the rationale prompt see the file-specific text
+      while the DB ``commit`` row keeps its stub. If the bulk commit did
+      not touch ``target_path`` (e.g. a rename predecessor), the stub is
+      left in place.
+
     Silently degrades when the configured analyze provider is unavailable —
-    the row's ``llm_description`` stays ``None`` and downstream consumers
-    already gate on truthiness.
+    the commit keeps whatever ``llm_description`` it already had (a stub for
+    bulk commits, ``None`` otherwise) and downstream consumers already gate
+    on truthiness.
+
+    Parameters
+    ----------
+    items : list[CommitEvidence]
+        The evidence bundle whose descriptions to fill in.
+    target_path : str
+        The path the caller resolved the target to — the file used to
+        slice bulk commits' diffs. For blame / blame-walked / area
+        evidence this is the file the queried lines live in.
     """
-    needs = [item.commit for item in items if item.commit.llm_description is None]
-    if not needs:
+    from whygraph.core import get_config
+
+    threshold = get_config().analyze.large_commit_file_count
+    bulk = [it.commit for it in items if it.commit.files_changed > threshold]
+    normal = [
+        it.commit
+        for it in items
+        if it.commit.files_changed <= threshold
+        and it.commit.llm_description is None
+    ]
+    if not bulk and not normal:
         return
     # Lazy imports mirror the pattern in `whygraph.cli.commands.scan.scan_cmd`
     # and keep the module's import-time surface free of analyze/LLM deps.
-    from whygraph.analyze import LlmDescriptor, backfill_all
-    from whygraph.core import get_config
+    from whygraph.analyze import (
+        LlmDescriptor,
+        backfill_all,
+        backfill_file_description,
+    )
     from whygraph.services.llm import LlmError
 
     try:
@@ -385,7 +425,27 @@ def backfill_evidence_descriptions(items: list[CommitEvidence]) -> None:
     except LlmError as exc:
         _log.debug("skipping lazy LLM description backfill: %s", exc)
         return
-    backfill_all(needs, repository=Repository(repo_root()), descriptor=descriptor)
+
+    repository = Repository(repo_root())
+    for commit in bulk:
+        try:
+            text = backfill_file_description(
+                commit, target_path, repository=repository, descriptor=descriptor
+            )
+        except Exception as exc:  # noqa: BLE001 — one bad file must not poison the batch
+            _log.warning(
+                "lazy per-file description backfill failed for %s @ %s: %s",
+                commit.sha[:12],
+                target_path,
+                exc,
+            )
+            continue
+        if text is not None:
+            # In-memory override for this request: the serializer and the
+            # rationale prompt read commit.llm_description; the DB row
+            # keeps its bulk-commit stub.
+            commit.llm_description = text
+    backfill_all(normal, repository=repository, descriptor=descriptor)
 
 
 def _commit_dict(commit: Commit) -> dict:
@@ -467,7 +527,7 @@ def whygraph_evidence_for(
         qualified_name=qualified_name,
     )
     evidence = collect_evidence(target, limit=limit)
-    backfill_evidence_descriptions(evidence)
+    backfill_evidence_descriptions(evidence, target_path=target.path)
     return {
         "target": target_dict(target),
         "evidence": [_evidence_dict(item) for item in evidence],

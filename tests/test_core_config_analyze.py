@@ -27,6 +27,7 @@ def test_analyze_defaults_when_section_omitted(tmp_path: Path) -> None:
     assert cfg.analyze == AnalyzeConfig()
     assert cfg.analyze.provider == "anthropic"
     assert cfg.analyze.max_diff_chars == 50_000
+    assert cfg.analyze.large_commit_file_count == 30
     assert cfg.analyze.timeout_sec is None
 
 
@@ -79,6 +80,25 @@ def test_analyze_invalid_max_diff_chars_raises(tmp_path: Path) -> None:
         "[analyze]\nmax_diff_chars = 0\n",
     )
     with pytest.raises(ConfigError, match="max_diff_chars"):
+        Config.from_toml(config)
+
+
+def test_analyze_large_commit_file_count_parsed(tmp_path: Path) -> None:
+    config = _write(
+        tmp_path / "whygraph.toml",
+        "[analyze]\nlarge_commit_file_count = 75\n",
+    )
+    cfg = Config.from_toml(config)
+
+    assert cfg.analyze.large_commit_file_count == 75
+
+
+def test_analyze_invalid_large_commit_file_count_raises(tmp_path: Path) -> None:
+    config = _write(
+        tmp_path / "whygraph.toml",
+        "[analyze]\nlarge_commit_file_count = 0\n",
+    )
+    with pytest.raises(ConfigError, match="large_commit_file_count"):
         Config.from_toml(config)
 
 

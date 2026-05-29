@@ -93,6 +93,7 @@ def scan_cmd(no_llm_descriptions: bool) -> None:
                     repository=repository,
                     descriptor=descriptor,
                     max_workers=config.scan_max_workers,
+                    large_commit_file_count=config.analyze.large_commit_file_count,
                 )
             )
 

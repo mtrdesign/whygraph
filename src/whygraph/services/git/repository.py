@@ -135,7 +135,7 @@ class Repository:
         except ShellError as exc:
             raise GitError(f"failed to resolve origin URL at {self.root}") from exc
 
-    def diff(self, commit: Commit) -> str:
+    def diff(self, commit: Commit, *, pathspec: str | None = None) -> str:
         """Raw unified-diff text for ``commit`` against its first parent.
 
         Root commits (no parents) are diffed against git's empty-tree
@@ -143,12 +143,25 @@ class Repository:
         Merge commits diff against their first parent, matching the
         convention already in use for :attr:`Commit.stats`.
 
+        Parameters
+        ----------
+        commit : Commit
+            The commit to diff. Only :attr:`Commit.sha` and
+            :attr:`Commit.parent_shas` are read.
+        pathspec : str or None, optional
+            When set, limit the diff to a single path (``git diff … --
+            <pathspec>``). ``None`` (default) returns the whole commit
+            diff. Used by the per-file lazy description path to slice a
+            bulk commit down to the one file being queried — for a root
+            commit that slice is the file's full contents.
+
         Returns
         -------
         str
             The raw ``git diff`` output. May be empty for a commit that
-            touched no files (e.g. an empty merge); callers can treat
-            ``""`` as "nothing to describe".
+            touched no files (e.g. an empty merge), or — when
+            ``pathspec`` is set — a commit that did not touch that path;
+            callers can treat ``""`` as "nothing to describe".
 
         Raises
         ------
@@ -160,7 +173,9 @@ class Repository:
         else:
             argv = (f"{commit.parent_shas[0]}..{commit.sha}",)
         try:
-            return self._shell.run(GitDiffCmd(*argv), cwd=self.root)
+            return self._shell.run(
+                GitDiffCmd(*argv, pathspec=pathspec), cwd=self.root
+            )
         except ShellError as exc:
             raise GitError(
                 f"failed to diff {commit.sha[:7]} against its parent"

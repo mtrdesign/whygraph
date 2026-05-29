@@ -236,6 +236,14 @@ class AnalyzeConfig:
         Cap on diff length before prompting. Diffs longer than this are
         truncated with an explicit marker so the model knows the input
         was clipped. Must be ``>= 1``.
+    large_commit_file_count : int
+        Commits touching strictly more than this many files are treated
+        as *bulk* commits (imports, squash merges, repo-wide sweeps).
+        Their whole-diff description is skipped at scan time in favour of
+        a cheap stub, and descriptions are instead generated lazily
+        per-file on the MCP read path — so a single huge commit does not
+        cost a repo-wide LLM pass nor anchor every symbol to one vague
+        summary. Must be ``>= 1``.
     timeout_sec : int or None
         Per-call timeout forwarded into :class:`CompletionRequest`.
         ``None`` (default) defers to the bound adapter's default.
@@ -244,6 +252,7 @@ class AnalyzeConfig:
     provider: str = "anthropic"
     model: str | None = None
     max_diff_chars: int = 50_000
+    large_commit_file_count: int = 30
     timeout_sec: int | None = None
 
 
@@ -423,7 +432,8 @@ class Config:
         ConfigError
             If ``log_level`` is not a known :class:`LogLevel` name, if
             ``scan_max_workers`` is less than ``1``, or if
-            ``analyze.max_diff_chars`` is less than ``1``.
+            ``analyze.max_diff_chars`` or ``analyze.large_commit_file_count``
+            is less than ``1``.
         """
         try:
             LogLevel[self.log_level.upper()]
@@ -437,6 +447,11 @@ class Config:
             raise ConfigError(
                 "analyze.max_diff_chars must be >= 1, "
                 f"got {self.analyze.max_diff_chars}"
+            )
+        if self.analyze.large_commit_file_count < 1:
+            raise ConfigError(
+                "analyze.large_commit_file_count must be >= 1, "
+                f"got {self.analyze.large_commit_file_count}"
             )
 
     @classmethod

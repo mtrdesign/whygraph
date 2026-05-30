@@ -174,10 +174,21 @@ The generated `.mcp.json` launches `whygraph-mcp` by bare command name; your edi
 |---|---|
 | `whygraph version` | Print installed package version. |
 | `whygraph init [--no-codegraph]` | Run preflight diagnostics (git / docker / gh / LLM credential), bootstrap the WhyGraph DB, and pull the vendored Docker image to populate `.codegraph/codegraph.db`. Pass `--agent <name>` to also wire MCP for an editor. Idempotent. |
-| `whygraph scan` | Walk first-parent history and populate `.whygraph/whygraph.db`: commits + GitHub PRs/issues + TF-IDF scoring + per-commit LLM diff descriptions. Idempotent. |
+| `whygraph scan` | Walk first-parent history and populate `.whygraph/whygraph.db`: commits + GitHub PRs/issues + TF-IDF scoring + per-commit LLM diff descriptions. Idempotent. `--no-remote` skips the PR/issue crawl for a fast, offline, git-only scan. |
+| `whygraph hooks install / uninstall / status` | Opt-in git hooks (`post-commit` / `post-merge` / `post-rewrite`) that keep WhyGraph current as you commit — see [Keep it fresh automatically](#keep-it-fresh-automatically). |
 | `whygraph render [--out PATH] [--open] [--depth N]` | Render a self-contained HTML viewer of the CodeGraph + WhyGraph data. Single file, vendored Cytoscape, opens with double-click. Cached rationale only. `--depth N` (1–4, default 1) caps which nodes get a populated detail block — fast first paint at default 1 (modules only); pass `--depth 4` for full data. |
 | `whygraph serve [--port 8765] [--open]` | Long-running localhost viewer with on-demand rationale generation. Same UI as `render`, plus a "Generate rationale" button on uncached nodes. |
 | `whygraph-mcp` | Launch the FastMCP stdio server. Referenced by the `.mcp.json` files `whygraph init --agent X` writes into each project. |
+
+### Keep it fresh automatically
+
+Don't want to re-scan by hand? Install git hooks once and new commits refresh WhyGraph + CodeGraph on the fly:
+
+```bash
+whygraph hooks install      # opt-in; uninstall / status also available
+```
+
+This wires `post-commit`, `post-merge`, and `post-rewrite` to run an incremental scan **in the background** — git history + a CodeGraph `sync`, with **no LLM and no remote calls**, so commits stay instant and the scan is offline and token-free (LLM descriptions still backfill lazily; run a full `whygraph scan` for PRs/issues + descriptions). Rapid commits coalesce (single-flight), and an existing hook of your own is appended to, never overwritten. The hooks call whatever `whygraph` is on your `PATH` — so they work with both the Docker shim and a native install.
 
 ### `whygraph scan` flags
 

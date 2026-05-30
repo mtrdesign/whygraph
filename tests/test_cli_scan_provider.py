@@ -14,7 +14,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from whygraph.cli.commands.scan import _apply_github_token, _select_github_client
+from whygraph.cli.commands.scan import (
+    _apply_github_token,
+    _github_skip_reason,
+    _select_github_client,
+)
 
 
 def _cfg(provider: str, token: str | None) -> SimpleNamespace:
@@ -98,3 +102,12 @@ def test_github_token_env_promoted_to_gh_token(
     _apply_github_token(_cfg("auto", None))
 
     assert os.environ["GH_TOKEN"] == "ghp_github_env"
+
+
+def test_skip_reason_no_remote_takes_precedence() -> None:
+    # Even with provider="github", --no-remote is the reason shown.
+    assert _github_skip_reason(_cfg("github", None), False) == "skipped — --no-remote"
+
+
+def test_skip_reason_falls_back_to_provider_when_remote_enabled() -> None:
+    assert "provider = off" in _github_skip_reason(_cfg("off", None), True)

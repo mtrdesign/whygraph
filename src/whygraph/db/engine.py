@@ -67,17 +67,23 @@ def _resolved_db_path() -> Path:
 
 
 def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:  # noqa: ANN001
-    """SQLAlchemy ``connect`` listener: enable WAL + foreign keys.
+    """SQLAlchemy ``connect`` listener: enable WAL, foreign keys, busy timeout.
 
     Runs on the raw DBAPI connection (``sqlite3.Connection``) — not the
     SQLAlchemy ``Connection`` wrapper — so the PRAGMAs are scoped to the
     underlying file handle for the entire lifetime of that connection.
     Mirrors the behavior of :mod:`whygraph.scan.db`.
+
+    ``busy_timeout`` makes a second writer wait (up to 5s) instead of
+    failing immediately with ``SQLITE_BUSY`` — relevant once a background
+    git-hook rescan can overlap a manual ``whygraph scan``. WAL already
+    lets a reader (e.g. a live MCP container) run alongside the writer.
     """
     cursor = dbapi_connection.cursor()
     try:
         cursor.execute("PRAGMA journal_mode = WAL")
         cursor.execute("PRAGMA foreign_keys = ON")
+        cursor.execute("PRAGMA busy_timeout = 5000")
     finally:
         cursor.close()
 

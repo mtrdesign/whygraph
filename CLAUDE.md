@@ -75,7 +75,11 @@ Invariants that keep the shim correct — preserve them:
 
 CodeGraph runs from the **in-image `codegraph` binary** (no docker-in-docker, no host socket): `bootstrap.py` prefers the local binary and only falls back to `docker run` on hosts without it. `whygraph scan` refreshes the index each run — `codegraph sync -q` when an index exists, `codegraph init -i` on first run — gated by `--codegraph/--no-codegraph`.
 
-Deferred (net-new, not built yet): a git-event listener / project registry for auto-scans, a persistent/server mode, and per-branch CodeGraph/WhyGraph databases.
+### Auto-rescan git hooks
+
+`whygraph hooks install` (opt-in; `cli/commands/hooks.py`) wires `post-commit` / `post-merge` / `post-rewrite` to keep the DBs current as the developer works — no daemon. Each hook execs a shared helper (`.whygraph/hooks/whygraph-scan`, gitignored) that runs `whygraph scan --no-llm-descriptions --no-remote` (git history + `codegraph sync` only — fast, offline, no token; LLM descriptions stay on lazy backfill). The helper is **detached** (commits return instantly) and **single-flight + coalescing** (portable `mkdir` lock + a `pending` flag, since macOS has no `flock`), so rapid commits neither stack nor drop the latest `HEAD`. Installs are **sentinel-guarded** (`# >>> whygraph managed >>>`) and append to a foreign hook rather than clobber it. The `--no-remote` flag on `scan` exists for this path; `db/engine.py` sets `PRAGMA busy_timeout` so a background rescan and a manual scan don't collide.
+
+Deferred (net-new, not built yet): a project registry for cross-repo orchestration, a persistent/server mode, and per-branch CodeGraph/WhyGraph databases.
 
 ## Conventions
 

@@ -28,7 +28,11 @@ Examples
 ...         print(len(ctx.callers), "callers")
 """
 
-from .bootstrap import DEFAULT_CODEGRAPH_IMAGE, ensure_codegraph_db
+from .bootstrap import (
+    DEFAULT_CODEGRAPH_IMAGE,
+    ensure_codegraph_db,
+    refresh_codegraph_index,
+)
 from .context import SymbolContext
 from .exceptions import CodeGraphBootstrapError, CodeGraphError
 from .graph import CodeGraph
@@ -46,4 +50,5 @@ __all__ = [
     "Symbol",
     "SymbolContext",
     "ensure_codegraph_db",
+    "refresh_codegraph_index",
 ]

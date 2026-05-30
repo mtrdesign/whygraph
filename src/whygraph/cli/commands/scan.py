@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
@@ -38,7 +39,32 @@ _T = TypeVar("_T")
         "and a later `whygraph scan` (without this flag) backfills the rest."
     ),
 )
-def scan_cmd(no_llm_descriptions: bool) -> None:
+@click.option(
+    "--codegraph/--no-codegraph",
+    "refresh_codegraph",
+    default=True,
+    help=(
+        "Refresh the CodeGraph index before crawling — `codegraph sync` when "
+        "an index exists, `codegraph init -i` on first run. Uses the local "
+        "`codegraph` binary if present, else the vendored Docker image. The "
+        "crawl itself doesn't need CodeGraph (only the MCP rationale/evidence "
+        "tools do), so a failure here warns rather than aborting. Default: on."
+    ),
+)
+@click.option(
+    "--codegraph-image",
+    "codegraph_image",
+    default=None,
+    help=(
+        "Override the Docker image used for the CodeGraph refresh fallback "
+        "(ignored when a local `codegraph` binary is found)."
+    ),
+)
+def scan_cmd(
+    no_llm_descriptions: bool,
+    refresh_codegraph: bool,
+    codegraph_image: str | None,
+) -> None:
     """Run the source crawlers, then describe each commit with the LLM."""
     # Lazy-imported so that --help and other lightweight CLI surfaces
     # don't fail when the DB or git layers are mid-rewrite.
@@ -51,6 +77,7 @@ def scan_cmd(no_llm_descriptions: bool) -> None:
 
     db_path = ensure_initialized()
     config = get_config()
+    _apply_github_token(config)
     repository = Repository(Path.cwd(), origin_remote=config.scan_remote)
     github_client = _select_github_client(config.scan_provider, repository)
 
@@ -74,7 +101,14 @@ def scan_cmd(no_llm_descriptions: bool) -> None:
         config=config,
         db_path=db_path,
         analyze_skip=analyze_skip,
+        codegraph_enabled=refresh_codegraph,
     )
+
+    # CodeGraph refresh runs before the crawl and outside the Progress
+    # live-display (it streams its own output on first index). It's
+    # best-effort: the crawl doesn't depend on it.
+    if refresh_codegraph:
+        _refresh_codegraph(repository.root, image=codegraph_image)
 
     with Progress() as progress:
         # Phase 1 — source crawlers, run concurrently.
@@ -111,6 +145,67 @@ def scan_cmd(no_llm_descriptions: bool) -> None:
         click.echo(f"crawler {c.name!r} failed: {c.error}", err=True)
     if failed:
         raise click.exceptions.Exit(1)
+
+
+def _apply_github_token(config: "Config") -> None:
+    """Export the configured GitHub token so every ``gh`` subprocess sees it.
+
+    Resolves the token from ``[scan].token`` first, then the ambient
+    ``GH_TOKEN`` / ``GITHUB_TOKEN``. When one is found and ``GH_TOKEN`` is
+    not already set, it is written into ``os.environ`` so the GraphQL
+    pager, :meth:`GitHubClient.check_auth`, and any preflight ``gh`` probe
+    all authenticate uniformly — ``gh`` reads ``GH_TOKEN`` natively and
+    child processes inherit it.
+
+    A no-op when ``[scan].provider`` is ``"off"`` (no remote crawl). Each
+    scan runs as a fresh process per project, so mutating the environment
+    here cannot leak one project's token into another.
+
+    Parameters
+    ----------
+    config : Config
+        The loaded configuration; ``scan_token`` and ``scan_provider`` are
+        consulted.
+    """
+    if config.scan_provider == "off":
+        return
+    token = (
+        config.scan_token
+        or os.environ.get("GH_TOKEN")
+        or os.environ.get("GITHUB_TOKEN")
+    )
+    if token and not os.environ.get("GH_TOKEN"):
+        os.environ["GH_TOKEN"] = token
+
+
+def _refresh_codegraph(project_root: Path, *, image: str | None) -> None:
+    """Bring the CodeGraph index up to date before the crawl.
+
+    Best-effort: the git / GitHub / analyze crawl does not depend on the
+    CodeGraph index (only the MCP ``whygraph_rationale_brief`` and
+    ``whygraph_evidence_for`` tools read it), so a CodeGraph failure is
+    reported as a warning and the scan continues.
+
+    Parameters
+    ----------
+    project_root : Path
+        Repository root whose ``.codegraph/`` index is refreshed.
+    image : str or None
+        Docker image override for the fallback path; ``None`` uses the
+        pinned default. Ignored when a local ``codegraph`` binary is found.
+    """
+    from whygraph.services.codegraph import (
+        CodeGraphBootstrapError,
+        refresh_codegraph_index,
+    )
+
+    console.print("Refreshing CodeGraph index…")
+    try:
+        refresh_codegraph_index(project_root, image=image)
+    except CodeGraphBootstrapError as exc:
+        console.print(
+            Text(f"CodeGraph refresh skipped — {exc}", style="yellow")
+        )
 
 
 def _select_github_client(
@@ -153,6 +248,7 @@ def _render_scan_panel(
     config: "Config",
     db_path: Path,
     analyze_skip: str | None,
+    codegraph_enabled: bool,
 ) -> None:
     """Print a summary panel of what the upcoming scan will collect.
 
@@ -180,6 +276,12 @@ def _render_scan_panel(
         ("Repository", repo_label),
         ("Branch", str(branch) if branch is not None else "unknown"),
         ("Database", str(db_path)),
+        (
+            "CodeGraph",
+            "refresh index"
+            if codegraph_enabled
+            else Text("skipped — --no-codegraph", style="yellow"),
+        ),
         ("", ""),
         ("Git commits", str(git_count) if git_count is not None else "unavailable"),
     ]

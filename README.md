@@ -135,6 +135,26 @@ whygraph init --list-agents            # show all supported agents + paths (no p
 
 `--agent claude` is the only path that also installs the `/whygraph-plan` slash command, the `plan-change` skill, and the planner / researcher / synthesizer subagents — these only make sense for Claude Code, so they ship as `.claude/*` markdown rather than as part of the MCP surface.
 
+## Run with Docker (only Docker required)
+
+Don't want Python, Node, `gh`, and CodeGraph on your machine? WhyGraph ships as a self-contained image. The host needs **only Docker** — install a tiny shim, then it's the same `init` / `scan` as a native install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/main/scripts/install.sh | sh
+
+cd your-repo
+whygraph init      # bootstrap WhyGraph DB + CodeGraph index
+whygraph scan      # crawl history + refresh index + LLM descriptions
+```
+
+`install.sh` drops a `whygraph` (and `whygraph-mcp`) shim on your `PATH` that runs the published image (`ghcr.io/mtrdesign/whygraph`) against the current directory — `docker run --rm -v "$PWD:/workspace" … whygraph "$@"`. The container is ephemeral per command: no compose, no `docker exec`, nothing to start or stop.
+
+- **Everything is in the image** — Python + WhyGraph, `git`, the GitHub CLI, and Node + the CodeGraph CLI. CodeGraph indexes from the in-image binary, so there's no docker-in-docker.
+- **Per-project config just works.** Each command runs against the current repo, reading that repo's own `whygraph.toml`, `.whygraph/`, and `.codegraph/`. Generated files are written back owned by your user.
+- **GitHub token** goes in `[scan].token` of the repo's `whygraph.toml` (gitignored). The shim also passes through `GH_TOKEN` / `GITHUB_TOKEN` and `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` from your environment.
+
+Build the image yourself instead of pulling (e.g. while developing) with `docker build -f docker/whygraph/Dockerfile -t whygraph:latest .`, then `WHYGRAPH_IMAGE=whygraph:latest whygraph scan`.
+
 ## CLI commands
 
 | Command | Purpose |

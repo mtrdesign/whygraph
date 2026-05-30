@@ -87,3 +87,26 @@ def test_provider_and_remote_coexist_with_max_workers(tmp_path: Path) -> None:
     assert cfg.scan_max_workers == 4
     assert cfg.scan_provider == "github"
     assert cfg.scan_remote == "upstream"
+
+
+def test_token_defaults_to_none_when_omitted(tmp_path: Path) -> None:
+    cfg = Config.from_toml(_write(tmp_path / "whygraph.toml", ""))
+
+    assert cfg.scan_token is None
+
+
+def test_token_parses(tmp_path: Path) -> None:
+    cfg = Config.from_toml(
+        _write(tmp_path / "whygraph.toml", '[scan]\ntoken = "ghp_secret"\n')
+    )
+
+    assert cfg.scan_token == "ghp_secret"
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_empty_token_normalizes_to_none(tmp_path: Path, value: str) -> None:
+    cfg = Config.from_toml(
+        _write(tmp_path / "whygraph.toml", f'[scan]\ntoken = "{value}"\n')
+    )
+
+    assert cfg.scan_token is None

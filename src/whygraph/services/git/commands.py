@@ -76,7 +76,7 @@ class GitRevListCountCmd(ShellCommand[int]):
 
 
 class GitDiffCmd(ShellCommand[str]):
-    """``git diff --no-color <revspec...>`` — raw unified diff text.
+    """``git diff --no-color <revspec...> [-- <pathspec>]`` — raw unified diff text.
 
     The argv after ``--no-color`` is passed verbatim; callers own the
     revspec semantics (``A..B``, ``<sha>^!``, ``--root <sha>``, …). The
@@ -89,13 +89,22 @@ class GitDiffCmd(ShellCommand[str]):
         One or more arguments appended after ``--no-color``. Supplied
         as separate tokens so the call site does not have to worry
         about shell quoting (e.g. ``("--root", sha)`` for a root commit).
+    pathspec : str or None, optional
+        When set, limit the diff to a single path by appending
+        ``-- <pathspec>``. ``None`` (default) diffs every touched file.
+        Used by the per-file lazy description path to slice a bulk
+        commit's diff down to the one file being queried.
     """
 
-    def __init__(self, *revspec: str) -> None:
+    def __init__(self, *revspec: str, pathspec: str | None = None) -> None:
         self.revspec = revspec
+        self.pathspec = pathspec
 
     def argv(self) -> list[str]:
-        return ["git", "diff", "--no-color", *self.revspec]
+        args = ["git", "diff", "--no-color", *self.revspec]
+        if self.pathspec is not None:
+            args.extend(["--", self.pathspec])
+        return args
 
     def parse(self, result: CompletedProcess[str]) -> str:
         return result.stdout

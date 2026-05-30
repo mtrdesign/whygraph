@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.progress import Progress
 from sqlmodel import select
 
-from whygraph.analyze import AnalyzeError, LlmDescriptor
+from whygraph.analyze import AnalyzeError, LlmDescriptor, bulk_commit_stub
 from whygraph.db import get_session
 from whygraph.db.models.commit import Commit as CommitRow
 from whygraph.services.git import Repository
@@ -48,6 +48,13 @@ class AnalyzeCrawler(Crawler):
         from worker threads — each call is independent and stateless.
     max_workers : int
         Size of the thread pool running the LLM round-trips.
+    large_commit_file_count : int
+        Commits touching strictly more files than this are *bulk*
+        commits: their whole-diff description is skipped (it would be one
+        expensive LLM pass yielding a vague repo-wide summary) and a
+        cheap :func:`~whygraph.analyze.bulk_commit_stub` is written
+        instead. Real per-file descriptions are filled in lazily on the
+        MCP read path. Comes from ``analyze.large_commit_file_count``.
 
     Notes
     -----
@@ -67,11 +74,13 @@ class AnalyzeCrawler(Crawler):
         repository: Repository,
         descriptor: LlmDescriptor,
         max_workers: int,
+        large_commit_file_count: int,
     ) -> None:
         super().__init__("analyze", progress, total=None)
         self._repository = repository
         self._descriptor = descriptor
         self._max_workers = max_workers
+        self._large_commit_file_count = large_commit_file_count
 
     def work(self) -> None:
         # Warm the `commits` cached_property single-threaded before the
@@ -108,9 +117,23 @@ class AnalyzeCrawler(Crawler):
         """Describe one commit and persist it. Runs in a worker thread.
 
         Opens its own DB session — sessions are not shareable across
-        threads. Commits with an empty diff are skipped silently; any
-        other failure propagates and is collected by :meth:`work`.
+        threads. *Bulk* commits (more files than
+        ``large_commit_file_count``) skip the whole-diff LLM call and get
+        a cheap stub instead; their real per-file descriptions are filled
+        in lazily on read. Commits with an empty diff are skipped
+        silently; any other failure propagates and is collected by
+        :meth:`work`.
         """
+        if commit.stats.files_changed > self._large_commit_file_count:
+            with get_session() as session:
+                row = session.get(CommitRow, commit.sha)
+                if row is not None:
+                    # Leave llm_description_model NULL — the stub is not
+                    # LLM-generated, and a NULL model is the signal the
+                    # lazy read path uses to know a real per-file
+                    # description still needs generating.
+                    row.llm_description = bulk_commit_stub(commit.stats.files_changed)
+            return
         diff = self._repository.diff(commit)
         if not diff.strip():
             return

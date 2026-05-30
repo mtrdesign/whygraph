@@ -14,6 +14,9 @@ max_workers = 2               # parallel LLM calls in the diff-analyzer crawler
 provider = "anthropic"        # which [llm.*] adapter to use
 # model = "claude-haiku-4-5"  # override the provider's model for analysis only
 # max_diff_chars = 50000      # diff truncated past this length before prompting
+# large_commit_file_count = 30  # commits touching more files than this are described
+                              # per-file on demand (not whole-diff) — keeps a bulk
+                              # import / squash commit from costing a repo-wide pass
 # timeout_sec = 60            # per-call timeout; default: the adapter's own
 
 [rationale]

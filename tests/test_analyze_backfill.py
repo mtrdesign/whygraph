@@ -23,11 +23,13 @@ from whygraph.analyze import (
     Description,
     backfill_all,
     backfill_commit_description,
+    backfill_file_description,
 )
 from whygraph.core.config import Config
 from whygraph.db import engine as db_engine
 from whygraph.db import ensure_initialized, get_session
 from whygraph.db.models.commit import Commit as CommitRow
+from whygraph.db.models.commit_file_change import CommitFileChange
 from whygraph.services.git import Repository
 from whygraph.services.git.commits import Commits
 
@@ -119,6 +121,30 @@ def _insert(commits: list, *, described: tuple[str, ...] = ()) -> None:
     db_engine._reset_engine()
 
 
+def _insert_file_change(commit_sha: str, path: str) -> None:
+    """Insert a minimal ``commit_file_change`` row for ``(commit_sha, path)``."""
+    with get_session() as session:
+        session.add(
+            CommitFileChange(
+                commit_sha=commit_sha,
+                path=path,
+                change_type="A",
+            )
+        )
+    db_engine._reset_engine()
+
+
+def _file_change_desc(commit_sha: str, path: str) -> tuple[str | None, str | None]:
+    with get_session() as session:
+        row = session.exec(
+            select(CommitFileChange)
+            .where(CommitFileChange.commit_sha == commit_sha)
+            .where(CommitFileChange.path == path)
+        ).first()
+        assert row is not None
+        return row.llm_description, row.llm_description_model
+
+
 def _load_detached(sha: str) -> CommitRow:
     """Load a CommitRow and detach it (mirrors the MCP read path)."""
     with get_session() as session:
@@ -195,6 +221,75 @@ def test_backfill_noop_on_empty_diff(isolated_db: Path, repo_path: Path) -> None
     assert detached.llm_description is None
     assert _persisted(empty_sha) == (None, None)
     # Empty diff is rejected before the descriptor is called.
+    assert descriptor.seen == []
+
+
+def test_file_description_generates_and_caches(
+    isolated_db: Path, repo_path: Path
+) -> None:
+    commits = list(Commits(repo_path, "main"))
+    second = commits[0]  # newest = the commit that added b.txt
+    _insert(commits)
+    _insert_file_change(second.sha, "b.txt")
+
+    detached = _load_detached(second.sha)
+    descriptor = _StubDescriptor()
+
+    text = backfill_file_description(
+        detached, "b.txt", repository=Repository(repo_path), descriptor=descriptor
+    )
+
+    assert text == "DESCRIPTION"
+    # Only the b.txt slice was described — not the whole commit.
+    assert len(descriptor.seen) == 1
+    assert "b.txt" in descriptor.seen[0]
+    assert "+world" in descriptor.seen[0]
+    # Cached on the file-change row, keyed by (commit, path).
+    assert _file_change_desc(second.sha, "b.txt") == (
+        "DESCRIPTION",
+        "stub-provider:stub-model",
+    )
+
+
+def test_file_description_is_idempotent_cache_hit(
+    isolated_db: Path, repo_path: Path
+) -> None:
+    commits = list(Commits(repo_path, "main"))
+    second = commits[0]
+    _insert(commits)
+    _insert_file_change(second.sha, "b.txt")
+
+    detached = _load_detached(second.sha)
+    descriptor = _StubDescriptor()
+
+    first = backfill_file_description(
+        detached, "b.txt", repository=Repository(repo_path), descriptor=descriptor
+    )
+    again = backfill_file_description(
+        detached, "b.txt", repository=Repository(repo_path), descriptor=descriptor
+    )
+
+    assert first == again == "DESCRIPTION"
+    # Second call is a cache hit — no extra LLM round-trip.
+    assert len(descriptor.seen) == 1
+
+
+def test_file_description_noop_on_untouched_path(
+    isolated_db: Path, repo_path: Path
+) -> None:
+    commits = list(Commits(repo_path, "main"))
+    second = commits[0]  # touched b.txt only
+    _insert(commits)
+
+    detached = _load_detached(second.sha)
+    descriptor = _StubDescriptor()
+
+    # a.txt was not part of the "second" commit → empty slice → no work.
+    text = backfill_file_description(
+        detached, "a.txt", repository=Repository(repo_path), descriptor=descriptor
+    )
+
+    assert text is None
     assert descriptor.seen == []
 
 

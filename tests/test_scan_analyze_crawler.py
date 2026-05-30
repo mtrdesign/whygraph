@@ -138,13 +138,19 @@ def _descriptions() -> dict[str, tuple[str | None, str | None]]:
         }
 
 
-def _run(repo_path: Path, descriptor: _StubDescriptor, max_workers: int = 2):
+def _run(
+    repo_path: Path,
+    descriptor: _StubDescriptor,
+    max_workers: int = 2,
+    large_commit_file_count: int = 10_000,
+):
     with Progress() as progress:
         crawler = AnalyzeCrawler(
             progress,
             repository=Repository(repo_path),
             descriptor=descriptor,
             max_workers=max_workers,
+            large_commit_file_count=large_commit_file_count,
         )
         crawler.start()
         crawler.join()
@@ -163,6 +169,29 @@ def test_describes_every_pending_commit(isolated_db: Path, repo_path: Path) -> N
     for c in commits:
         assert descs[c.sha] == ("DESCRIPTION", "stub-provider:stub-model")
     assert len(descriptor.seen) == len(commits)
+
+
+def test_bulk_commits_get_stub_without_llm_call(
+    isolated_db: Path, repo_path: Path
+) -> None:
+    # large_commit_file_count=0 makes every commit (>= 1 file) "bulk", so
+    # none of them should reach the descriptor — they get a cheap stub.
+    from whygraph.analyze import bulk_commit_stub
+
+    commits = _commits(repo_path)
+    _insert(commits)
+    descriptor = _StubDescriptor()
+
+    crawler = _run(repo_path, descriptor, large_commit_file_count=0)
+
+    assert crawler.error is None
+    assert descriptor.seen == []  # zero LLM round-trips for bulk commits
+    descs = _descriptions()
+    for c in commits:
+        text, model = descs[c.sha]
+        # files_changed comes from the real git commit (1 file each here).
+        assert text == bulk_commit_stub(c.stats.files_changed)
+        assert model is None  # NULL model = "not LLM-generated"
 
 
 def test_skips_already_described_commits(

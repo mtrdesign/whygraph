@@ -80,7 +80,7 @@ def whygraph_area_history(
     items = area_history_commits(
         path, limit=limit, include_renames=include_renames
     )
-    backfill_evidence_descriptions(items)
+    backfill_evidence_descriptions(items, target_path=path)
     return {
         "path": path,
         "include_renames": include_renames,

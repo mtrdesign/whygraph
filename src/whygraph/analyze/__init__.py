@@ -34,6 +34,11 @@ Public API
   :class:`~whygraph.scan.analyze_crawler.AnalyzeCrawler` for the MCP
   request path. Fill in a ``NULL`` ``commit.llm_description`` on
   demand and persist it.
+* :func:`backfill_file_description`, :func:`bulk_commit_stub` — the
+  per-file variant for *bulk* commits (imports / squash merges): rather
+  than describing one huge whole-commit diff, describe just the queried
+  file's slice on demand and cache it on the ``commit_file_change`` row.
+  The commit itself carries a :func:`bulk_commit_stub` placeholder.
 
 Examples
 --------
@@ -55,7 +60,12 @@ scope for this module — both live in the orchestrator that consumes
 :class:`LlmDescriptor`.
 """
 
-from .backfill import backfill_all, backfill_commit_description
+from .backfill import (
+    backfill_all,
+    backfill_commit_description,
+    backfill_file_description,
+    bulk_commit_stub,
+)
 from .description import Description
 from .exceptions import AnalyzeError, RationaleError
 from .llm_descriptor import LlmDescriptor
@@ -84,6 +94,8 @@ __all__ = [
     "RationaleGenerator",
     "backfill_all",
     "backfill_commit_description",
+    "backfill_file_description",
+    "bulk_commit_stub",
     "render_prompt",
     "resolve_prompt",
 ]

@@ -47,13 +47,12 @@ def scan_cmd(no_llm_descriptions: bool) -> None:
     from whygraph.db import ensure_initialized
     from whygraph.scan import AnalyzeCrawler
     from whygraph.services.git import Repository
-    from whygraph.services.github import GitHubClient
     from whygraph.services.llm import LlmError
 
     db_path = ensure_initialized()
-    repository = Repository(Path.cwd())
-    github_client = GitHubClient.for_repository(repository)
     config = get_config()
+    repository = Repository(Path.cwd(), origin_remote=config.scan_remote)
+    github_client = _select_github_client(config.scan_provider, repository)
 
     if no_llm_descriptions:
         # Bypass the LlmDescriptor probe entirely so a broken `[analyze]`
@@ -114,6 +113,39 @@ def scan_cmd(no_llm_descriptions: bool) -> None:
         raise click.exceptions.Exit(1)
 
 
+def _select_github_client(
+    provider: str, repository: "Repository"
+) -> "GitHubClient | None":
+    """Resolve the GitHub client for the configured ``[scan].provider``.
+
+    Returns ``None`` when ``provider`` is ``"off"`` (remote crawling
+    disabled). For ``"github"`` and ``"auto"`` it delegates to
+    :meth:`GitHubClient.for_repository`, which inspects the repository's
+    remote URL and returns ``None`` if it is not a GitHub remote — so a
+    misconfigured ``"github"`` or a non-GitHub ``"auto"`` both degrade to
+    "no crawl" rather than erroring.
+
+    Parameters
+    ----------
+    provider : str
+        The validated ``[scan].provider`` value (``"off"`` / ``"github"``
+        / ``"auto"``).
+    repository : Repository
+        The repository whose remote URL is inspected.
+
+    Returns
+    -------
+    GitHubClient or None
+        A configured client, or ``None`` when crawling is off or the
+        remote is not a recognized GitHub URL.
+    """
+    if provider == "off":
+        return None
+    from whygraph.services.github import GitHubClient
+
+    return GitHubClient.for_repository(repository)
+
+
 def _render_scan_panel(
     *,
     repository: "Repository",
@@ -152,9 +184,7 @@ def _render_scan_panel(
         ("Git commits", str(git_count) if git_count is not None else "unavailable"),
     ]
     if github_client is None:
-        rows.append(
-            ("GitHub", Text("skipped — origin is not a GitHub remote", style="yellow"))
-        )
+        rows.append(("GitHub", Text(_github_skip_reason(config), style="yellow")))
     else:
         rows.append(
             ("Pull requests", str(pr_count) if pr_count is not None else "unavailable")
@@ -188,6 +218,21 @@ def _render_scan_panel(
         )
     )
     console.print()
+
+
+def _github_skip_reason(config: "Config") -> str:
+    """Explain why the GitHub crawl is being skipped, per ``[scan].provider``.
+
+    Called only when no GitHub client was resolved. ``"off"`` means the
+    user disabled remote crawling; otherwise the configured remote did
+    not resolve to a GitHub URL.
+    """
+    provider = config.scan_provider
+    if provider == "off":
+        return "skipped — source control disabled ([scan].provider = off)"
+    if provider == "auto":
+        return f"skipped — {config.scan_remote!r} remote is not a recognized remote"
+    return f"skipped — {config.scan_remote!r} remote is not a GitHub remote"
 
 
 def _best_effort(fn: "Callable[[], _T]") -> "_T | None":

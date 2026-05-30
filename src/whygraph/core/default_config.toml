@@ -8,6 +8,11 @@ log_level = "INFO"            # DEBUG | INFO | WARN | ERROR | CRITICAL
 
 [scan]
 max_workers = 2               # parallel LLM calls in the diff-analyzer crawler
+provider = "off"              # source-control backend for the PR/issue crawl:
+                              #   "off"    — skip remote crawl (default)
+                              #   "github" — pull PRs/issues from the GitHub remote
+                              #   "auto"   — detect from the remote URL (github only, for now)
+remote = "origin"             # git remote whose URL is inspected for provider/auto
 
 [analyze]
 # LLM that writes a per-commit "git diff" description during `whygraph scan`.

@@ -390,6 +390,17 @@ class Config:
     scan_max_workers : int
         Thread-pool size for the scan phase. Must be ``>= 1``.
         Default ``2``.
+    scan_provider : str
+        Source-control backend the scan crawls for PRs / issues. One of
+        ``"off"`` (default — pull nothing), ``"github"`` (pull from the
+        GitHub remote), or ``"auto"`` (detect the backend from the remote
+        URL; GitHub-only today). Loaded from ``[scan].provider``; an empty
+        value is treated as ``"off"``.
+    scan_remote : str
+        Name of the git remote whose URL is inspected to resolve the
+        provider for ``"github"`` / ``"auto"``. Default ``"origin"``.
+        Loaded from ``[scan].remote``; an empty value falls back to
+        ``"origin"``.
     whygraph_db : Path or None
         Override path to the WhyGraph SQLite DB. If ``None``, callers
         use the project-relative default ``.whygraph/whygraph.db``.
@@ -417,6 +428,8 @@ class Config:
 
     log_level: str = "INFO"
     scan_max_workers: int = 2
+    scan_provider: str = "off"
+    scan_remote: str = "origin"
     whygraph_db: Path | None = None
     codegraph_db: Path | None = None
     llm: LlmConfig = field(default_factory=LlmConfig)
@@ -431,7 +444,8 @@ class Config:
         ------
         ConfigError
             If ``log_level`` is not a known :class:`LogLevel` name, if
-            ``scan_max_workers`` is less than ``1``, or if
+            ``scan_max_workers`` is less than ``1``, if ``scan_provider``
+            is not one of ``"off"`` / ``"github"`` / ``"auto"``, or if
             ``analyze.max_diff_chars`` or ``analyze.large_commit_file_count``
             is less than ``1``.
         """
@@ -442,6 +456,11 @@ class Config:
         if self.scan_max_workers < 1:
             raise ConfigError(
                 f"scan_max_workers must be >= 1, got {self.scan_max_workers}"
+            )
+        if self.scan_provider not in {"off", "github", "auto"}:
+            raise ConfigError(
+                f"invalid scan.provider: {self.scan_provider!r}, "
+                'must be one of "off", "github", "auto"'
             )
         if self.analyze.max_diff_chars < 1:
             raise ConfigError(
@@ -495,6 +514,12 @@ class Config:
         scan = raw.pop("scan", {}) or {}
         if "max_workers" in scan:
             raw["scan_max_workers"] = scan.pop("max_workers")
+        if "provider" in scan:
+            provider = (scan.pop("provider") or "").strip().lower()
+            raw["scan_provider"] = provider or "off"
+        if "remote" in scan:
+            remote = (scan.pop("remote") or "").strip()
+            raw["scan_remote"] = remote or "origin"
         for unknown in scan:
             _log.warning("ignoring unknown key in [scan]: %r", unknown)
 

@@ -32,28 +32,40 @@ GitCurrentBranchCmd = ShellCommand(
 """``git rev-parse --abbrev-ref HEAD`` — the current branch name, or ``"HEAD"`` if detached."""
 
 
-def _parse_origin_url(result: CompletedProcess[str]) -> str | None:
-    """Parse ``git remote get-url origin`` into a URL or ``None``.
+def _parse_remote_url(result: CompletedProcess[str]) -> str | None:
+    """Parse ``git remote get-url <remote>`` into a URL or ``None``.
 
-    Returns ``None`` for a non-zero exit (no ``origin`` remote, not a
-    repo) or empty stdout; the trimmed URL otherwise. Designed to be
-    paired with ``check=False`` at the call site so a missing remote is
-    a value, not an exception.
+    Returns ``None`` for a non-zero exit (no such remote, not a repo) or
+    empty stdout; the trimmed URL otherwise. Designed to be paired with
+    ``check=False`` at the call site so a missing remote is a value, not
+    an exception.
     """
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
 
 
-GitOriginUrlCmd = ShellCommand(
-    argv=["git", "remote", "get-url", "origin"],
-    parse=_parse_origin_url,
-)
-"""``git remote get-url origin`` — the configured origin URL, or ``None`` if unset.
+class GitRemoteUrlCmd(ShellCommand[str | None]):
+    """``git remote get-url <remote>`` — the remote's URL, or ``None`` if unset.
 
-Must be run with ``check=False`` so the "no such remote" exit collapses
-to ``None`` rather than raising :class:`whygraph.core.ShellError`.
-"""
+    Must be run with ``check=False`` so the "no such remote" exit
+    collapses to ``None`` rather than raising
+    :class:`whygraph.core.ShellError`.
+
+    Parameters
+    ----------
+    remote : str, optional
+        Name of the git remote to read. Default ``"origin"``.
+    """
+
+    def __init__(self, remote: str = "origin") -> None:
+        self.remote = remote
+
+    def argv(self) -> list[str]:
+        return ["git", "remote", "get-url", self.remote]
+
+    def parse(self, result: CompletedProcess[str]) -> str | None:
+        return _parse_remote_url(result)
 
 
 class GitRevListCountCmd(ShellCommand[int]):

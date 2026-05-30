@@ -13,7 +13,7 @@ from .commands import (
     GitCurrentBranchCmd,
     GitDiffCmd,
     GitDiffTreeFileChangesCmd,
-    GitOriginUrlCmd,
+    GitRemoteUrlCmd,
 )
 from .commit import Commit
 from .commits import Commits
@@ -54,6 +54,10 @@ class Repository:
     ----------
     root : Path
         The repository working tree.
+    origin_remote : str, optional
+        Name of the git remote :attr:`origin_url` reads. Default
+        ``"origin"``; override to inspect a differently-named remote
+        (e.g. ``"upstream"``).
 
     Attributes
     ----------
@@ -61,8 +65,9 @@ class Repository:
         The repository working tree (as supplied at construction).
     """
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, origin_remote: str = "origin") -> None:
         self.root = root
+        self._origin_remote = origin_remote
         self._shell = Shell()
 
     def __repr__(self) -> str:
@@ -109,21 +114,22 @@ class Repository:
 
     @cached_property
     def origin_url(self) -> str | None:
-        """The configured ``origin`` remote URL, or ``None`` if unset.
+        """The configured remote URL, or ``None`` if unset.
 
-        Used downstream by
+        Reads the remote named by ``origin_remote`` (default ``origin``,
+        set at construction). Used downstream by
         :meth:`whygraph.services.github.GitHubClient.for_repository` to
-        derive ``owner/name``. A missing ``origin`` remote is a normal
-        state (forks, local-only repos), not an error — so the property
-        returns ``None`` instead of raising. Genuine git failures (the
-        ``git`` binary is missing, ``self.root`` is not a repository at
-        all) still surface as :class:`GitError`.
+        derive ``owner/name``. A missing remote is a normal state (forks,
+        local-only repos), not an error — so the property returns ``None``
+        instead of raising. Genuine git failures (the ``git`` binary is
+        missing, ``self.root`` is not a repository at all) still surface
+        as :class:`GitError`.
 
         Returns
         -------
         str or None
-            The ``origin`` URL exactly as configured (no normalization),
-            or ``None`` when no ``origin`` remote is set.
+            The remote URL exactly as configured (no normalization), or
+            ``None`` when the remote is not set.
 
         Raises
         ------
@@ -131,7 +137,9 @@ class Repository:
             If ``git`` itself cannot be invoked.
         """
         try:
-            return self._shell.run(GitOriginUrlCmd, cwd=self.root, check=False)
+            return self._shell.run(
+                GitRemoteUrlCmd(self._origin_remote), cwd=self.root, check=False
+            )
         except ShellError as exc:
             raise GitError(f"failed to resolve origin URL at {self.root}") from exc
 

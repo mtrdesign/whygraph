@@ -55,6 +55,28 @@ WhyGraph installs **per project**, per agent:
 
 There is no Claude Code marketplace install; `whygraph init --agent claude` is the only path. The bundled assets are version-controlled in this repo under `src/whygraph/assets/claude-code/` — that is the source of truth, the wheel ships them, and a re-run of `whygraph init` brings a project's `.claude/` up to date (use `--force` to overwrite local edits).
 
+## Docker delivery (the default install)
+
+WhyGraph ships as a self-contained image so a developer needs **only Docker** on the host — no Python / Node / gh / codegraph install. The whole UX is three steps:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/main/scripts/install.sh | sh
+whygraph init     # in a repo
+whygraph scan
+```
+
+`scripts/install.sh` drops a ~10-line `whygraph` (and `whygraph-mcp`) **shim** on PATH that wraps `docker run --rm -v "$PWD:/workspace" -w /workspace <image> whygraph "$@"` and pulls `ghcr.io/mtrdesign/whygraph`. The container is **ephemeral per command** — there is no compose, no `docker exec`, no long-running container. The image is built from `docker/whygraph/Dockerfile` (base `python:3.12-slim` + git + gh + Node 22 + pinned CodeGraph CLI + WhyGraph) and published by `.github/workflows/publish-whygraph-image.yml`.
+
+Invariants that keep the shim correct — preserve them:
+
+- **Each command is a fresh process against `cwd`.** `get_config()` is globally memoized and config / DB-path discovery walks up from `cwd` to the `.git` root (`core/__init__.py`, `db/engine.py`); the shim mounts the repo at `/workspace` and runs there, so each `whygraph` picks up that repo's own `whygraph.toml`, `.whygraph/`, `.codegraph/`. Ephemeral `docker run` makes this automatic — don't reintroduce an in-process loop that scans multiple repos without resetting config.
+- **Host-user file ownership.** The shim runs `--user "$(id -u):$(id -g)" -e HOME=/tmp` so `.whygraph/` and `.codegraph/` come back owned by the host user and git sees matching ownership (no "dubious ownership"). Keep these when editing the shim.
+- **GitHub token is per-project.** `[scan].token` in each repo's `whygraph.toml` (gitignored, never committed) is exported as `GH_TOKEN` for that scan's `gh` calls (`cli/commands/scan.py:_apply_github_token`), falling back to ambient `GH_TOKEN` / `GITHUB_TOKEN` (the shim passes those through). Do **not** bake a token into the image or assume a container-wide token.
+
+CodeGraph runs from the **in-image `codegraph` binary** (no docker-in-docker, no host socket): `bootstrap.py` prefers the local binary and only falls back to `docker run` on hosts without it. `whygraph scan` refreshes the index each run — `codegraph sync -q` when an index exists, `codegraph init -i` on first run — gated by `--codegraph/--no-codegraph`.
+
+Deferred (net-new, not built yet): a git-event listener / project registry for auto-scans, a persistent/server mode, and per-branch CodeGraph/WhyGraph databases.
+
 ## Conventions
 
 - **Don't add new top-level dirs** without updating `[tool.hatch.build.targets.wheel].packages` in `pyproject.toml` (currently `["src/whygraph"]`).

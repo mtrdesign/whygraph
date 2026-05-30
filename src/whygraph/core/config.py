@@ -401,6 +401,13 @@ class Config:
         provider for ``"github"`` / ``"auto"``. Default ``"origin"``.
         Loaded from ``[scan].remote``; an empty value falls back to
         ``"origin"``.
+    scan_token : str or None
+        GitHub token used to authenticate the ``gh`` CLI during the
+        remote crawl. Loaded from ``[scan].token``; an empty value is
+        treated as ``None``. When ``None``, the scan falls back to the
+        ambient ``GH_TOKEN`` / ``GITHUB_TOKEN`` environment variables (or
+        an existing ``gh auth login`` session). Kept per-project so one
+        shared scanning container can serve repos across different orgs.
     whygraph_db : Path or None
         Override path to the WhyGraph SQLite DB. If ``None``, callers
         use the project-relative default ``.whygraph/whygraph.db``.
@@ -430,6 +437,7 @@ class Config:
     scan_max_workers: int = 2
     scan_provider: str = "off"
     scan_remote: str = "origin"
+    scan_token: str | None = None
     whygraph_db: Path | None = None
     codegraph_db: Path | None = None
     llm: LlmConfig = field(default_factory=LlmConfig)
@@ -520,6 +528,9 @@ class Config:
         if "remote" in scan:
             remote = (scan.pop("remote") or "").strip()
             raw["scan_remote"] = remote or "origin"
+        if "token" in scan:
+            token = (scan.pop("token") or "").strip()
+            raw["scan_token"] = token or None
         for unknown in scan:
             _log.warning("ignoring unknown key in [scan]: %r", unknown)
 

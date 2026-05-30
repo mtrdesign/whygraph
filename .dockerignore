@@ -1,0 +1,18 @@
+# Keep the WhyGraph image build context small. Only pyproject.toml + src/
+# are needed to `pip install .`; everything below is noise or bloat.
+.git
+.venv
+.whygraph
+.codegraph
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+dist
+build
+*.egg-info
+tests
+docs
+docker-compose*.yml
+.env

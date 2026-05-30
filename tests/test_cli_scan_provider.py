@@ -9,9 +9,17 @@ delegate to it.
 
 from __future__ import annotations
 
+import os
+from types import SimpleNamespace
+
 import pytest
 
-from whygraph.cli.commands.scan import _select_github_client
+from whygraph.cli.commands.scan import _apply_github_token, _select_github_client
+
+
+def _cfg(provider: str, token: str | None) -> SimpleNamespace:
+    """Minimal stand-in exposing the two attrs ``_apply_github_token`` reads."""
+    return SimpleNamespace(scan_provider=provider, scan_token=token)
 
 
 def test_provider_off_returns_none_without_calling_for_repository(
@@ -51,3 +59,42 @@ def test_provider_delegates_to_for_repository(
     repo = object()
     assert _select_github_client(provider, repository=repo) is sentinel
     assert seen == [repo]
+
+
+def test_token_off_provider_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    _apply_github_token(_cfg("off", "ghp_should_be_ignored"))
+
+    assert "GH_TOKEN" not in os.environ
+
+
+def test_token_from_config_exported_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    _apply_github_token(_cfg("github", "ghp_from_toml"))
+
+    assert os.environ["GH_TOKEN"] == "ghp_from_toml"
+
+
+def test_existing_gh_token_left_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GH_TOKEN", "ghp_ambient")
+
+    _apply_github_token(_cfg("github", "ghp_from_toml"))
+
+    assert os.environ["GH_TOKEN"] == "ghp_ambient"
+
+
+def test_github_token_env_promoted_to_gh_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_github_env")
+
+    _apply_github_token(_cfg("auto", None))
+
+    assert os.environ["GH_TOKEN"] == "ghp_github_env"

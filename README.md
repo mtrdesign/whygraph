@@ -155,6 +155,19 @@ whygraph scan      # crawl history + refresh index + LLM descriptions
 
 Build the image yourself instead of pulling (e.g. while developing) with `docker build -f docker/whygraph/Dockerfile -t whygraph:latest .`, then `WHYGRAPH_IMAGE=whygraph:latest whygraph scan`.
 
+### Use it in your editor (MCP), still only Docker
+
+The MCP server is containerized too — `install.sh` drops a `whygraph-mcp` shim alongside `whygraph`, so there's nothing extra to install on the host. Wire your editor from inside the repo:
+
+```bash
+whygraph init --agent claude     # writes .mcp.json (also: --agent cursor / vscode)
+```
+
+The generated `.mcp.json` launches `whygraph-mcp` by bare command name; your editor resolves it to the shim, which starts a per-session container (`docker run -i … whygraph-mcp`) speaking MCP over stdio. It reads the repo's `.whygraph/` + `.codegraph/` over the same `/workspace` mount the scan writes to — so the editor and the scan share one on-disk source of truth.
+
+- Reading cached rationale / evidence needs **no credentials**.
+- On-demand rationale *generation* uses `ANTHROPIC_API_KEY` from the editor's environment (the shim passes it through) or the repo's `whygraph.toml [llm.*] api_key`.
+
 ## CLI commands
 
 | Command | Purpose |

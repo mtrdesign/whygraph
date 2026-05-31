@@ -58,6 +58,23 @@ COMMIT_EACH_STEP: <true | false>
 
 **Skip when**: no plan markdown exists, the "plan" is an informal chat-message bullet list (not a `# Plan:` markdown file with the standard schema), the change is trivial, the user is asking you to *review* the plan rather than execute it, or the plan has unresolved blockers.
 
+## Using CodeGraph for structural questions
+
+This project ships a CodeGraph index (`.codegraph/`) and the `codegraph_*` MCP tools — a tree-sitter knowledge graph of every symbol, edge, and file. Reach for them on **structural** questions; use grep/read only for literal text (string contents, comments, log messages) or once a file is already open.
+
+| Question | Tool |
+|---|---|
+| Where is X defined? / find a symbol by name | `codegraph_search` |
+| What calls Y? / what does Y call? | `codegraph_callers` / `codegraph_callees` |
+| What would break if I change Z? | `codegraph_impact` |
+| Show me Y's signature / source | `codegraph_node` |
+
+- **Trust the results** — they come from a full AST parse. Don't re-verify them with grep.
+- **Don't pull large `codegraph_explore` / `codegraph_context` output into your working context** for simple questions — those return whole source sections and bloat the conversation. Use the lightweight tools above for targeted lookups, and reserve the bulk-source tools for genuine deep dives.
+- **Index lag**: the watcher debounces ~500ms behind writes; don't re-query immediately after editing a file in the same turn.
+
+If `.codegraph/` doesn't exist, the MCP server reports "not initialized" — ask the user whether to run `whygraph scan` (which builds / refreshes the index) before relying on these tools.
+
 ## What NOT to do
 
 - Don't call `whygraph_rationale_brief` for brand-new code with no predecessor — there's no history to summarize.
@@ -65,3 +82,4 @@ COMMIT_EACH_STEP: <true | false>
 - Don't treat the brief as authoritative if the code clearly diverges from what it describes — flag the divergence.
 - Don't dispatch `whygraph-planner` or `whygraph-implementor` for trivial changes.
 - Don't draft your own plan or implementation in parallel "as a preview" while waiting on a subagent — pick one path.
+- Don't grep for a symbol you could find with `codegraph_search`, or re-verify codegraph results with grep.

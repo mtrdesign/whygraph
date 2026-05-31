@@ -118,6 +118,7 @@ _CLAUDE = AgentTarget(
     description="Claude Code (project-scoped .mcp.json at repo root)",
     assets_subdir="claude-code",
     assets_dest=(".claude",),
+    assets_merge_files=("CLAUDE.md",),
 )
 
 _CURSOR = AgentTarget(

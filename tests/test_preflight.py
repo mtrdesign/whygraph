@@ -56,7 +56,7 @@ def test_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
     # Must not raise.
-    run_preflight(tmp_path, with_codegraph=True)
+    run_preflight(tmp_path)
 
 
 def test_git_missing_raises(
@@ -67,29 +67,19 @@ def test_git_missing_raises(
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
 
     with pytest.raises(PreflightError, match="git"):
-        run_preflight(tmp_path, with_codegraph=False)
+        run_preflight(tmp_path)
 
 
-def test_docker_missing_with_codegraph_raises(
+def test_docker_absence_is_irrelevant(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _git_repo(tmp_path, remote_url=None)
     _patch_which(monkeypatch, missing={"docker"})
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
 
-    with pytest.raises(PreflightError, match="docker"):
-        run_preflight(tmp_path, with_codegraph=True)
-
-
-def test_docker_missing_without_codegraph_is_silent(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _git_repo(tmp_path, remote_url=None)
-    _patch_which(monkeypatch, missing={"docker"})
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
-
-    # Must not raise — docker is skipped when CodeGraph bootstrap is off.
-    run_preflight(tmp_path, with_codegraph=False)
+    # Docker is no longer a preflight concern — init doesn't index CodeGraph,
+    # and `whygraph scan` runs the in-image binary. Must not raise.
+    run_preflight(tmp_path)
 
 
 def test_gh_missing_on_github_repo_is_soft_warning(
@@ -100,7 +90,7 @@ def test_gh_missing_on_github_repo_is_soft_warning(
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
 
     # Soft — must not raise.
-    run_preflight(tmp_path, with_codegraph=True)
+    run_preflight(tmp_path)
 
 
 def test_gh_probe_skipped_on_non_github_repo(
@@ -117,7 +107,7 @@ def test_gh_probe_skipped_on_non_github_repo(
     monkeypatch.setattr(preflight.shutil, "which", counting_which)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
 
-    run_preflight(tmp_path, with_codegraph=False)
+    run_preflight(tmp_path)
 
     assert "gh" not in calls, "gh probe must not run on non-GitHub repos"
 
@@ -137,7 +127,7 @@ def test_gh_auth_status_nonzero_is_soft_warning(
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
 
     # Soft — must not raise.
-    run_preflight(tmp_path, with_codegraph=False)
+    run_preflight(tmp_path)
 
 
 def test_llm_missing_is_soft_warning(
@@ -147,7 +137,7 @@ def test_llm_missing_is_soft_warning(
     _patch_which(monkeypatch, missing={"claude"})
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-    run_preflight(tmp_path, with_codegraph=False)
+    run_preflight(tmp_path)
 
 
 def test_llm_ok_via_env_var_alone(
@@ -158,7 +148,7 @@ def test_llm_ok_via_env_var_alone(
     monkeypatch.setenv("ANTHROPIC_API_KEY", "real-key")
 
     # Env var alone satisfies the LLM check even without `claude` on PATH.
-    run_preflight(tmp_path, with_codegraph=False)
+    run_preflight(tmp_path)
 
 
 def test_llm_ok_via_claude_cli_alone(
@@ -169,19 +159,17 @@ def test_llm_ok_via_claude_cli_alone(
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
     # `claude` on PATH alone satisfies the LLM check.
-    run_preflight(tmp_path, with_codegraph=False)
+    run_preflight(tmp_path)
 
 
-def test_multiple_hard_missing_reported_together(
+def test_hard_missing_reported_in_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _git_repo(tmp_path, remote_url=None)
-    _patch_which(monkeypatch, missing={"git", "docker"})
+    _patch_which(monkeypatch, missing={"git"})
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
 
     with pytest.raises(PreflightError) as exc_info:
-        run_preflight(tmp_path, with_codegraph=True)
+        run_preflight(tmp_path)
 
-    msg = str(exc_info.value)
-    assert "git" in msg
-    assert "docker" in msg
+    assert "git" in str(exc_info.value)

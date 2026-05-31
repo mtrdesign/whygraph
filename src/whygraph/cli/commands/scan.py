@@ -46,9 +46,10 @@ _T = TypeVar("_T")
     help=(
         "Refresh the CodeGraph index before crawling — `codegraph sync` when "
         "an index exists, `codegraph init -i` on first run. Uses the local "
-        "`codegraph` binary if present, else the vendored Docker image. The "
-        "crawl itself doesn't need CodeGraph (only the MCP rationale/evidence "
-        "tools do), so a failure here warns rather than aborting. Default: on."
+        "`codegraph` binary if present, else runs it inside the WhyGraph "
+        "Docker image. The crawl itself doesn't need CodeGraph (only the MCP "
+        "rationale/evidence tools do), so a failure here warns rather than "
+        "aborting. Default: on."
     ),
 )
 @click.option(
@@ -57,7 +58,8 @@ _T = TypeVar("_T")
     default=None,
     help=(
         "Override the Docker image used for the CodeGraph refresh fallback "
-        "(ignored when a local `codegraph` binary is found)."
+        "(defaults to the pinned ghcr.io/mtrdesign/whygraph tag; ignored "
+        "when a local `codegraph` binary is found)."
     ),
 )
 @click.option(

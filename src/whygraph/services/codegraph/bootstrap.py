@@ -7,12 +7,14 @@ WhyGraph is run:
 * **Local binary.** When a ``codegraph`` executable is on ``PATH`` —
   notably inside the WhyGraph runtime container, which bakes in Node +
   the pinned npm package — it is invoked directly. No Docker, so this
-  works headless and avoids docker-in-docker.
-* **Docker fallback.** On a host without ``codegraph`` installed, the
-  vendored ``ghcr.io/mtrdesign/whygraph-codegraph`` image is run with the
-  project root bind-mounted to ``/workspace``. The image carries the
-  right Node version and pins the upstream package; the host only needs
-  Docker.
+  works headless and avoids docker-in-docker. This is the only path the
+  container delivery ever takes.
+* **Docker fallback.** On a native (e.g. ``uv tool install``) host
+  without ``codegraph`` installed, the WhyGraph image
+  (``ghcr.io/mtrdesign/whygraph``) is run as ``docker run … codegraph
+  …`` with the project root bind-mounted to ``/workspace``. That single
+  image already carries the right Node version and the pinned upstream
+  package, so the host only needs Docker.
 
 :func:`ensure_codegraph_db` is idempotent (used by ``whygraph init``);
 :func:`refresh_codegraph_index` re-syncs an existing index (used by
@@ -29,12 +31,14 @@ from pathlib import Path
 from .exceptions import CodeGraphBootstrapError
 from .paths import CODEGRAPH_DB_RELPATH
 
-DEFAULT_CODEGRAPH_IMAGE: str = "ghcr.io/mtrdesign/whygraph-codegraph:latest"
-"""Default tag run by the Docker fallback when no override is given.
+DEFAULT_CODEGRAPH_IMAGE: str = "ghcr.io/mtrdesign/whygraph:latest"
+"""Default image run by the Docker fallback when no override is given.
 
-The CLI exposes ``--codegraph-image`` for ad-hoc overrides; tests and
-CI pipelines can also pass an explicit ``image=`` to the functions here.
-Ignored when a local ``codegraph`` binary is used instead.
+The self-contained WhyGraph image bakes in the CodeGraph CLI, so the
+fallback runs ``codegraph`` inside it. ``whygraph scan`` exposes
+``--codegraph-image`` for ad-hoc overrides; tests and CI pipelines can
+also pass an explicit ``image=`` to the functions here. Ignored when a
+local ``codegraph`` binary is used instead.
 """
 
 
@@ -133,9 +137,9 @@ def _run_codegraph(
     """Run a ``codegraph`` subcommand against ``project_root``.
 
     Prefers a local ``codegraph`` binary (the container path — no Docker);
-    falls back to the vendored image bind-mounting the project root. The
-    Docker invocation is non-interactive (no ``-t``) so it works under
-    ``docker exec`` and in CI.
+    falls back to running ``codegraph`` inside the WhyGraph image,
+    bind-mounting the project root. The Docker invocation is
+    non-interactive (no ``-t``) so it works under ``docker exec`` and in CI.
 
     Parameters
     ----------
@@ -158,6 +162,8 @@ def _run_codegraph(
         cwd: Path | None = project_root
     elif shutil.which("docker") is not None:
         img = image or DEFAULT_CODEGRAPH_IMAGE
+        # The WhyGraph image has no ENTRYPOINT (its CMD is `whygraph
+        # --help`), so name the `codegraph` binary explicitly.
         cmd = [
             "docker",
             "run",
@@ -169,6 +175,7 @@ def _run_codegraph(
             "-w",
             "/workspace",
             img,
+            "codegraph",
             *args,
         ]
         cwd = None

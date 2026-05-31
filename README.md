@@ -10,7 +10,7 @@ For each symbol, WhyGraph collects evidence from git history and GitHub (commits
 
 - **[uv](https://docs.astral.sh/uv/)** — Python toolchain. Installs Python 3.11+ automatically.
 - **git** — repo history is the primary evidence source.
-- **Docker** — `whygraph init` runs a vendored container image to bootstrap CodeGraph in the current repo. No host Node install needed.
+- **Docker** *(native installs only)* — when no `codegraph` binary is on PATH, `whygraph scan` runs CodeGraph inside the WhyGraph image to index the repo. No host Node install needed. The pure-Docker install (below) already runs everything in that image.
 - **[`gh` CLI](https://cli.github.com/)**, authenticated (`gh auth login`) — required only if your repo is on GitHub. Without it, the GitHub crawl phase is skipped silently.
 - **`claude` CLI** *or* `ANTHROPIC_API_KEY` — needed for the LLM diff-description phase of `whygraph scan` and for `whygraph_rationale_brief`. Both phases skip cleanly if neither is available. The `claude` CLI defaults to your Claude.ai subscription billing.
 
@@ -117,9 +117,7 @@ WhyGraph's MCP server (`whygraph-mcp`) is a standalone console script, so any LL
 Run from the repo you want WhyGraph to analyse:
 
 ```bash
-whygraph init                          # preflight + WhyGraph DB + CodeGraph via Docker (no agent wiring)
-whygraph init --no-codegraph           # skip the CodeGraph bootstrap step
-whygraph init --codegraph-image TAG    # pin a specific whygraph-codegraph image
+whygraph init                          # preflight + WhyGraph DB + example config (no agent wiring)
 whygraph init --skip-preflight         # skip the host-tool diagnostics (CI escape hatch)
 whygraph init --agent claude          # all of the above + writes .mcp.json + populates .claude/
 whygraph init --agent cursor          # writes .cursor/mcp.json
@@ -143,8 +141,8 @@ Don't want Python, Node, `gh`, and CodeGraph on your machine? WhyGraph ships as 
 curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/main/scripts/install.sh | sh
 
 cd your-repo
-whygraph init      # bootstrap WhyGraph DB + CodeGraph index
-whygraph scan      # crawl history + refresh index + LLM descriptions
+whygraph init      # bootstrap WhyGraph DB + write config (+ optional --agent wiring)
+whygraph scan      # crawl history + build/refresh CodeGraph index + LLM descriptions
 ```
 
 `install.sh` drops a `whygraph` (and `whygraph-mcp`) shim on your `PATH` that runs the published image (`ghcr.io/mtrdesign/whygraph`) against the current directory — `docker run --rm -v "$PWD:/workspace" … whygraph "$@"`. The container is ephemeral per command: no compose, no `docker exec`, nothing to start or stop.
@@ -173,8 +171,8 @@ The generated `.mcp.json` launches `whygraph-mcp` by bare command name; your edi
 | Command | Purpose |
 |---|---|
 | `whygraph version` | Print installed package version. |
-| `whygraph init [--no-codegraph]` | Run preflight diagnostics (git / docker / gh / LLM credential), bootstrap the WhyGraph DB, and pull the vendored Docker image to populate `.codegraph/codegraph.db`. Pass `--agent <name>` to also wire MCP for an editor. Idempotent. |
-| `whygraph scan` | Walk first-parent history and populate `.whygraph/whygraph.db`: commits + GitHub PRs/issues + TF-IDF scoring + per-commit LLM diff descriptions. Idempotent. `--no-remote` skips the PR/issue crawl for a fast, offline, git-only scan. |
+| `whygraph init` | Run preflight diagnostics (git / gh / LLM credential), bootstrap the WhyGraph DB, and write the example config + `.gitignore` entries. Pass `--agent <name>` to also wire MCP for an editor. Idempotent. Does not index CodeGraph — that happens on `scan`. |
+| `whygraph scan` | Build or refresh the CodeGraph index (`.codegraph/codegraph.db`), then walk first-parent history and populate `.whygraph/whygraph.db`: commits + GitHub PRs/issues + TF-IDF scoring + per-commit LLM diff descriptions. Idempotent. `--no-codegraph` skips the index refresh; `--no-remote` skips the PR/issue crawl for a fast, offline, git-only scan. |
 | `whygraph hooks install / uninstall / status` | Opt-in git hooks (`post-commit` / `post-merge` / `post-rewrite`) that keep WhyGraph current as you commit — see [Keep it fresh automatically](#keep-it-fresh-automatically). |
 | `whygraph render [--out PATH] [--open] [--depth N]` | Render a self-contained HTML viewer of the CodeGraph + WhyGraph data. Single file, vendored Cytoscape, opens with double-click. Cached rationale only. `--depth N` (1–4, default 1) caps which nodes get a populated detail block — fast first paint at default 1 (modules only); pass `--depth 4` for full data. |
 | `whygraph serve [--port 8765] [--open]` | Long-running localhost viewer with on-demand rationale generation. Same UI as `render`, plus a "Generate rationale" button on uncached nodes. |
@@ -292,7 +290,7 @@ whygraph serve --open     # localhost viewer with on-demand rationale
 │   │   ├── agents/                     # planner / researcher / synthesizer / implementor
 │   │   ├── commands/                   # /rationale, /whygraph-plan, /whygraph-implement
 │   │   └── skills/                     # ask-why / plan-change / pre-edit / implement-plan
-│   ├── init.py                         # CodeGraph bootstrap (nvm + codegraph init -i)
+│   ├── init.py                         # WhyGraph DB + config + agent MCP wiring
 │   ├── mcp_server.py                   # FastMCP stdio server (resources/tools/prompts)
 │   ├── mcp_queries.py                  # composite SQL for the MCP layer
 │   ├── backend.py                      # GraphBackend Protocol + SqliteCodegraphBackend

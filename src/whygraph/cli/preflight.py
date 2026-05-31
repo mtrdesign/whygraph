@@ -1,9 +1,9 @@
 """Preflight diagnostics for the WhyGraph CLI.
 
 Runs as the first step of ``whygraph init``: probes the host for the tools
-the rest of the workflow expects (``git``, ``docker``, ``gh``, an LLM
-credential), prints a one-line status per check, and raises
-:class:`PreflightError` if a required tool is missing.
+the rest of the workflow expects (``git``, ``gh``, an LLM credential),
+prints a one-line status per check, and raises :class:`PreflightError` if
+a required tool is missing.
 
 Hard-required tools are collected and reported together so a fresh user
 sees the full punch list once. Soft checks print as warnings and don't
@@ -58,7 +58,7 @@ class _CheckResult:
 _GLYPH = {"ok": "✓", "missing": "✗", "skipped": "—"}
 
 
-def run_preflight(project_root: Path, *, with_codegraph: bool) -> None:
+def run_preflight(project_root: Path) -> None:
     """Echo a preflight checks block; raise if a hard requirement is missing.
 
     Parameters
@@ -66,21 +66,15 @@ def run_preflight(project_root: Path, *, with_codegraph: bool) -> None:
     project_root : Path
         Repository root — used to detect whether the project has a
         ``github.com`` remote (which makes the ``gh`` probe relevant).
-    with_codegraph : bool
-        If ``True``, ``docker`` is treated as a hard requirement (the
-        CodeGraph bootstrap step needs it). If ``False`` — i.e. the user
-        passed ``--no-codegraph`` — the docker probe is silently skipped.
 
     Raises
     ------
     PreflightError
-        If ``git`` is missing, or if ``docker`` is missing while
-        ``with_codegraph`` is ``True``. All missing hard requirements
-        are reported in a single error.
+        If ``git`` is missing. All missing hard requirements are reported
+        in a single error.
     """
     checks = [
         _check_git(),
-        _check_docker(required=with_codegraph),
         _check_gh(project_root),
         _check_llm(),
     ]
@@ -112,22 +106,6 @@ def _check_git() -> _CheckResult:
             hint="brew install git (macOS) / apt install git (Debian/Ubuntu)",
         )
     return _CheckResult(name="git", status="ok")
-
-
-def _check_docker(*, required: bool) -> _CheckResult:
-    if not required:
-        return _CheckResult(name="docker", status="skipped", soft=True)
-    if shutil.which("docker") is None:
-        return _CheckResult(
-            name="docker",
-            status="missing",
-            hint=(
-                "install Docker Desktop"
-                " (https://www.docker.com/products/docker-desktop/),"
-                " or pass --no-codegraph to skip the CodeGraph bootstrap"
-            ),
-        )
-    return _CheckResult(name="docker", status="ok")
 
 
 def _check_gh(project_root: Path) -> _CheckResult:

@@ -134,6 +134,8 @@ def test_docker_fallback_when_codegraph_absent(
     assert isinstance(cmd, list)
     assert cmd[0] == "docker"
     assert "run" in cmd
+    # The WhyGraph image has no ENTRYPOINT, so the binary is named explicitly.
+    assert "codegraph" in cmd
     assert "init" in cmd and "-i" in cmd
     assert DEFAULT_CODEGRAPH_IMAGE in cmd
     # Non-interactive: no TTY flag, so it works under `docker exec` / CI.
@@ -255,5 +257,6 @@ def test_refresh_sync_via_docker_fallback(
     cmd = captured["cmd"]
     assert isinstance(cmd, list)
     assert cmd[0] == "docker"
+    assert "codegraph" in cmd
     assert "sync" in cmd and "-q" in cmd
     assert DEFAULT_CODEGRAPH_IMAGE in cmd

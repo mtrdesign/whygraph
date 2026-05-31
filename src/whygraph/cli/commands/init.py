@@ -41,26 +41,6 @@ from ..console import fail
     ),
 )
 @click.option(
-    "--codegraph/--no-codegraph",
-    "install_codegraph",
-    default=True,
-    help=(
-        "Bootstrap CodeGraph via the vendored Docker image so the project"
-        " ends up with a populated `.codegraph/codegraph.db`. Default:"
-        " enabled. Idempotent — a re-run with the DB already present is"
-        " a no-op."
-    ),
-)
-@click.option(
-    "--codegraph-image",
-    "codegraph_image",
-    default=None,
-    help=(
-        "Override the Docker image used for the CodeGraph bootstrap."
-        " Defaults to the pinned ghcr.io/mtrdesign/whygraph-codegraph tag."
-    ),
-)
-@click.option(
     "--skip-preflight",
     "skip_preflight",
     is_flag=True,
@@ -85,8 +65,6 @@ def init_cmd(
     print_only: bool,
     list_agents: bool,
     install_assets: bool,
-    install_codegraph: bool,
-    codegraph_image: str | None,
     skip_preflight: bool,
     force: bool,
 ) -> None:
@@ -98,9 +76,9 @@ def init_cmd(
     ``.gitignore`` keeps the user-owned config and generated caches out of
     git (``whygraph.toml``, ``.whygraph/``, ``.codegraph/``).
 
-    Also bootstraps CodeGraph by default — runs the vendored Docker image
-    to populate ``.codegraph/codegraph.db`` in the current repo. Pass
-    ``--no-codegraph`` to skip that step.
+    Does **not** index CodeGraph — that happens on ``whygraph scan``,
+    which populates ``.codegraph/codegraph.db`` (and refreshes it on every
+    subsequent run).
 
     With ``--agent X``, registers the WhyGraph MCP server with the named
     agent. All supported agents are project-scoped — their MCP config
@@ -123,22 +101,13 @@ def init_cmd(
     project_root = Path.cwd()
 
     if not skip_preflight:
-        _run_preflight(project_root, with_codegraph=install_codegraph)
+        _run_preflight(project_root)
 
     db_path = _ensure_db_initialized()
     click.echo(f"Initialized WhyGraph database at {db_path}")
 
     _scaffold_example_config(project_root)
     _ensure_gitignore(project_root)
-
-    if install_codegraph:
-        _ensure_codegraph_bootstrapped(project_root, image=codegraph_image)
-    else:
-        click.echo(
-            "Skipped CodeGraph bootstrap. Re-run without `--no-codegraph`"
-            " — or run `codegraph init -i` against the repo by hand —"
-            " before using WhyGraph's rationale or evidence tools."
-        )
 
     if agent_name is None:
         click.echo(
@@ -161,7 +130,7 @@ def init_cmd(
         _print_install_summary(target, project_root, result, force=force)
 
 
-def _run_preflight(project_root: Path, *, with_codegraph: bool) -> None:
+def _run_preflight(project_root: Path) -> None:
     """Echo the diagnostics block; ``fail`` with a clean error on missing tools.
 
     Imported here (not at module top) so ``--list-agents`` and ``--help``
@@ -170,38 +139,9 @@ def _run_preflight(project_root: Path, *, with_codegraph: bool) -> None:
     from whygraph.cli.preflight import PreflightError, run_preflight
 
     try:
-        run_preflight(project_root, with_codegraph=with_codegraph)
+        run_preflight(project_root)
     except PreflightError as exc:
         fail(str(exc))
-
-
-def _ensure_codegraph_bootstrapped(project_root: Path, *, image: str | None) -> None:
-    """Idempotently materialise ``.codegraph/codegraph.db`` via Docker.
-
-    Echoes a one-line status for both the "already initialized" and
-    "bootstrapping now" cases, and ``fail``s with a clean message if the
-    container run blows up. Lazy import keeps lightweight CLI surfaces
-    fast (mirrors :func:`_ensure_db_initialized`).
-    """
-    from whygraph.services.codegraph import (
-        CODEGRAPH_DB_RELPATH,
-        DEFAULT_CODEGRAPH_IMAGE,
-        CodeGraphBootstrapError,
-        ensure_codegraph_db,
-    )
-
-    db_path = project_root / CODEGRAPH_DB_RELPATH
-    if db_path.exists():
-        click.echo(f"CodeGraph already initialized at {db_path}")
-        return
-
-    img = image or DEFAULT_CODEGRAPH_IMAGE
-    click.echo(f"Bootstrapping CodeGraph via Docker (image: {img})...")
-    try:
-        result_path = ensure_codegraph_db(project_root, image=image)
-    except CodeGraphBootstrapError as exc:
-        fail(f"CodeGraph bootstrap failed: {exc}")
-    click.echo(f"Initialized CodeGraph database at {result_path}")
 
 
 def _scaffold_example_config(project_root: Path) -> None:

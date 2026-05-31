@@ -5,8 +5,8 @@
 # the WhyGraph container against the current directory, then pulls the
 # image. After this, the whole workflow is just:
 #
-#   whygraph init      # in a repo: bootstrap DB + CodeGraph index
-#   whygraph scan      # crawl history + refresh index + LLM descriptions
+#   whygraph init      # in a repo: bootstrap DB + config (+ optional --agent wiring)
+#   whygraph scan      # crawl history + build/refresh CodeGraph index + LLM descriptions
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/main/scripts/install.sh | sh

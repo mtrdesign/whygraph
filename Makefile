@@ -9,7 +9,14 @@
 # checkout's databases. Defaults to this repo.
 REPO ?= .
 
-.PHONY: help sync test scan db db-down inspect
+# Local tag for the dev image built by `make image`. Override to test an
+# alternate tag, e.g. `make image IMAGE=whygraph:wip`.
+IMAGE ?= whygraph:dev
+
+# Name of the long-running container started by `make image-debug`.
+DEBUG_NAME ?= whygraph-debug
+
+.PHONY: help sync test scan db db-down inspect image image-test image-inspect image-debug image-debug-down
 
 help:  ## List available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN{FS=":.*?## "}{printf "  %-10s %s\n", $$1, $$2}'
@@ -36,3 +43,27 @@ db-down:  ## Stop the DBGate database viewer
 inspect:  ## MCP Inspector vs whygraph-mcp (REPO=/path/to/repo targets another checkout)
 	@node -e 'process.exit(+process.versions.node.split(".")[0]>=20?0:1)' 2>/dev/null || { echo "error: MCP Inspector needs Node >= 20 (have $$(node -v 2>/dev/null || echo none)) - try 'nvm use 22'"; exit 1; }
 	npx @modelcontextprotocol/inspector uv run --directory $(REPO) --project $(CURDIR) whygraph-mcp
+
+image:  ## Build the WhyGraph Docker image locally (override tag: IMAGE=...)
+	docker build -f docker/whygraph/Dockerfile -t $(IMAGE) .
+
+image-test: image  ## Build then smoke-test the image (CLI + bundled binaries)
+	docker run --rm $(IMAGE) whygraph version
+	docker run --rm $(IMAGE) sh -c 'for b in git gh node codegraph whygraph whygraph-mcp; do command -v "$$b" || { echo "missing: $$b" >&2; exit 1; }; done'
+	@echo "image smoke test OK -> $(IMAGE)"
+
+image-inspect: image  ## MCP Inspector vs the containerized whygraph-mcp
+	@node -e 'process.exit(+process.versions.node.split(".")[0]>=20?0:1)' 2>/dev/null || { echo "error: MCP Inspector needs Node >= 20 (have $$(node -v 2>/dev/null || echo none)) - try 'nvm use 22'"; exit 1; }
+	npx @modelcontextprotocol/inspector \
+		docker run --rm -i -v "$(CURDIR):/workspace" -w /workspace $(IMAGE) whygraph-mcp
+
+image-debug: image  ## Build, then run a detached container kept alive for `docker exec` debugging
+	-docker rm -f $(DEBUG_NAME) 2>/dev/null || true
+	docker run -d --name $(DEBUG_NAME) \
+		-v "$(CURDIR):/workspace" -w /workspace \
+		--user "$$(id -u):$$(id -g)" -e HOME=/tmp \
+		$(IMAGE) sleep infinity
+	@echo "container '$(DEBUG_NAME)' up -> docker exec -it $(DEBUG_NAME) bash"
+
+image-debug-down:  ## Stop and remove the debug container
+	-docker rm -f $(DEBUG_NAME)

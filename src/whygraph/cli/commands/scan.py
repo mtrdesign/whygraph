@@ -84,6 +84,7 @@ def scan_cmd(
     # don't fail when the DB or git layers are mid-rewrite.
     from whygraph.analyze import LlmDescriptor
     from whygraph.core import get_config
+    from whygraph.core.logger import scan_log_redirect
     from whygraph.db import ensure_initialized
     from whygraph.scan import AnalyzeCrawler
     from whygraph.services.git import Repository
@@ -122,7 +123,8 @@ def scan_cmd(
         remote_enabled=remote,
     )
 
-    with Progress() as progress:
+    scan_log_path = db_path.parent / "scan.log"
+    with scan_log_redirect(scan_log_path), Progress() as progress:
         # CodeGraph refresh — runs concurrently as its own crawler. It
         # writes .codegraph/ and has no data dependency on the WhyGraph DB,
         # so it overlaps the entire crawl (started with phase 1, joined
@@ -166,6 +168,8 @@ def scan_cmd(
             c.join()
         if codegraph_crawler is not None:
             codegraph_crawler.join()
+
+    console.print(f"Scan log: {scan_log_path}")
 
     if codegraph_crawler is not None and codegraph_crawler.warning is not None:
         console.print(Text(codegraph_crawler.warning, style="yellow"))

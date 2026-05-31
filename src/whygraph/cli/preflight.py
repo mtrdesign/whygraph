@@ -1,13 +1,13 @@
 """Preflight diagnostics for the WhyGraph CLI.
 
 Runs as the first step of ``whygraph init``: probes the host for the tools
-the rest of the workflow expects (``git``, ``gh``, an LLM credential),
-prints a one-line status per check, and raises :class:`PreflightError` if
-a required tool is missing.
+that ``init`` itself requires (currently only ``git``), prints a one-line
+status per check, and raises :class:`PreflightError` if a required tool is
+missing.
 
-Hard-required tools are collected and reported together so a fresh user
-sees the full punch list once. Soft checks print as warnings and don't
-affect exit code.
+Optional tooling (``gh``, LLM credentials) is *not* checked here — those
+are only meaningful at ``whygraph scan`` time, after the developer has
+configured ``whygraph.toml``.
 
 Designed to be importable from other commands later (``scan``) without
 restructuring — :func:`run_preflight` is the only public surface.
@@ -58,25 +58,20 @@ class _CheckResult:
 _GLYPH = {"ok": "✓", "missing": "✗", "skipped": "—"}
 
 
-def run_preflight(project_root: Path) -> None:
+def run_preflight() -> None:
     """Echo a preflight checks block; raise if a hard requirement is missing.
 
-    Parameters
-    ----------
-    project_root : Path
-        Repository root — used to detect whether the project has a
-        ``github.com`` remote (which makes the ``gh`` probe relevant).
+    Only hard-required tools are checked here. Optional tooling (``gh``,
+    LLM credentials) is left to the ``scan`` command, which runs after
+    the developer has configured ``whygraph.toml``.
 
     Raises
     ------
     PreflightError
-        If ``git`` is missing. All missing hard requirements are reported
-        in a single error.
+        If ``git`` is missing.
     """
     checks = [
         _check_git(),
-        _check_gh(project_root),
-        _check_llm(),
     ]
 
     console.print("Preflight checks:")

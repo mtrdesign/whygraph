@@ -4,6 +4,10 @@ The probes shell out to ``shutil.which`` and ``subprocess.run``; every
 test monkeypatches those so the suite runs hermetic regardless of what
 the host has installed. ``ANTHROPIC_API_KEY`` is managed via
 ``monkeypatch.setenv`` / ``delenv`` so test order can't matter.
+
+``run_preflight()`` only checks ``git`` — optional tooling (``gh``, LLM
+credentials) is tested against the private ``_check_gh`` / ``_check_llm``
+helpers directly, since those checks belong to ``scan`` time, not ``init``.
 """
 
 from __future__ import annotations
@@ -48,52 +52,73 @@ def _patch_gh_auth_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(preflight.subprocess, "run", fake_run)
 
 
-def test_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _git_repo(tmp_path, remote_url="git@github.com:org/repo.git")
+# ---------------------------------------------------------------------------
+# run_preflight() — git-only surface used by `whygraph init`
+# ---------------------------------------------------------------------------
+
+
+def test_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_which(monkeypatch, missing=set())
-    _patch_gh_auth_ok(monkeypatch)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
-    # Must not raise.
-    run_preflight(tmp_path)
+    # Must not raise regardless of gh / LLM state.
+    run_preflight()
 
 
-def test_git_missing_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _git_repo(tmp_path, remote_url=None)
+def test_git_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_which(monkeypatch, missing={"git"})
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
 
     with pytest.raises(PreflightError, match="git"):
-        run_preflight(tmp_path)
+        run_preflight()
 
 
-def test_docker_absence_is_irrelevant(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _git_repo(tmp_path, remote_url=None)
+def test_docker_absence_is_irrelevant(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_which(monkeypatch, missing={"docker"})
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
 
-    # Docker is no longer a preflight concern — init doesn't index CodeGraph,
-    # and `whygraph scan` runs the in-image binary. Must not raise.
-    run_preflight(tmp_path)
+    # Docker is no longer a preflight concern — must not raise.
+    run_preflight()
+
+
+def test_gh_and_llm_not_checked_by_run_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``run_preflight`` must succeed even when gh and LLM are absent."""
+    _patch_which(monkeypatch, missing={"gh", "claude"})
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    # Optional tools are not checked at init time — must not raise.
+    run_preflight()
+
+
+def test_hard_missing_reported_in_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_which(monkeypatch, missing={"git"})
+
+    with pytest.raises(PreflightError) as exc_info:
+        run_preflight()
+
+    assert "git" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# _check_gh() — available for scan-time use
+# ---------------------------------------------------------------------------
 
 
 def test_gh_missing_on_github_repo_is_soft_warning(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _git_repo(tmp_path, remote_url="git@github.com:org/repo.git")
+    root = _git_repo(tmp_path, remote_url="git@github.com:org/repo.git")
     _patch_which(monkeypatch, missing={"gh"})
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
 
-    # Soft — must not raise.
-    run_preflight(tmp_path)
+    result = preflight._check_gh(root)
+
+    assert result.status == "missing"
+    assert result.soft is True
 
 
 def test_gh_probe_skipped_on_non_github_repo(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _git_repo(tmp_path, remote_url="git@gitlab.com:org/repo.git")
+    root = _git_repo(tmp_path, remote_url="git@gitlab.com:org/repo.git")
 
     calls: dict[str, int] = {}
 
@@ -102,17 +127,17 @@ def test_gh_probe_skipped_on_non_github_repo(
         return f"/usr/bin/{name}"
 
     monkeypatch.setattr(preflight.shutil, "which", counting_which)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
 
-    run_preflight(tmp_path)
+    result = preflight._check_gh(root)
 
+    assert result.status == "skipped"
     assert "gh" not in calls, "gh probe must not run on non-GitHub repos"
 
 
 def test_gh_auth_status_nonzero_is_soft_warning(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _git_repo(tmp_path, remote_url="git@github.com:org/repo.git")
+    root = _git_repo(tmp_path, remote_url="git@github.com:org/repo.git")
     _patch_which(monkeypatch, missing=set())
 
     def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess:
@@ -121,52 +146,41 @@ def test_gh_auth_status_nonzero_is_soft_warning(
         )
 
     monkeypatch.setattr(preflight.subprocess, "run", fake_run)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
 
-    # Soft — must not raise.
-    run_preflight(tmp_path)
+    result = preflight._check_gh(root)
+
+    assert result.status == "missing"
+    assert result.soft is True
 
 
-def test_llm_missing_is_soft_warning(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _git_repo(tmp_path, remote_url=None)
+# ---------------------------------------------------------------------------
+# _check_llm() — available for scan-time use
+# ---------------------------------------------------------------------------
+
+
+def test_llm_missing_is_soft_warning(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_which(monkeypatch, missing={"claude"})
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-    run_preflight(tmp_path)
+    result = preflight._check_llm()
+
+    assert result.status == "missing"
+    assert result.soft is True
 
 
-def test_llm_ok_via_env_var_alone(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _git_repo(tmp_path, remote_url=None)
+def test_llm_ok_via_env_var_alone(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_which(monkeypatch, missing={"claude"})
     monkeypatch.setenv("ANTHROPIC_API_KEY", "real-key")
 
-    # Env var alone satisfies the LLM check even without `claude` on PATH.
-    run_preflight(tmp_path)
+    result = preflight._check_llm()
+
+    assert result.status == "ok"
 
 
-def test_llm_ok_via_claude_cli_alone(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _git_repo(tmp_path, remote_url=None)
+def test_llm_ok_via_claude_cli_alone(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_which(monkeypatch, missing=set())
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-    # `claude` on PATH alone satisfies the LLM check.
-    run_preflight(tmp_path)
+    result = preflight._check_llm()
 
-
-def test_hard_missing_reported_in_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _git_repo(tmp_path, remote_url=None)
-    _patch_which(monkeypatch, missing={"git"})
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
-
-    with pytest.raises(PreflightError) as exc_info:
-        run_preflight(tmp_path)
-
-    assert "git" in str(exc_info.value)
+    assert result.status == "ok"

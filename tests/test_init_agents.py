@@ -252,7 +252,7 @@ def stub_init(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr("whygraph.cli.commands.init._ensure_db_initialized", _fake_db)
     monkeypatch.setattr(
         "whygraph.cli.commands.init._run_preflight",
-        lambda project_root: None,
+        lambda: None,
     )
     return fake_db
 

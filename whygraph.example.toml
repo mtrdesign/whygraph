@@ -13,12 +13,21 @@ provider = "off"              # source-control backend for the PR/issue crawl:
                               #   "github" — pull PRs/issues from the GitHub remote
                               #   "auto"   — detect from the remote URL (github only, for now)
 remote = "origin"             # git remote whose URL is inspected for provider/auto
+# token = "ghp_..."           # GitHub token for the gh CLI during the remote crawl.
+                              # Default: read GH_TOKEN / GITHUB_TOKEN from env (or an
+                              # existing `gh auth login`). Set here to pin a per-project
+                              # token — handy when one shared container scans repos
+                              # across different orgs. whygraph.toml is gitignored, so a
+                              # token here is never committed.
 
 [analyze]
 # LLM that writes a per-commit "git diff" description during `whygraph scan`.
 provider = "anthropic"        # which [llm.*] adapter to use
 # model = "claude-haiku-4-5"  # override the provider's model for analysis only
 # max_diff_chars = 50000      # diff truncated past this length before prompting
+# large_commit_file_count = 30  # commits touching more files than this are described
+                              # per-file on demand (not whole-diff) — keeps a bulk
+                              # import / squash commit from costing a repo-wide pass
 # timeout_sec = 60            # per-call timeout; default: the adapter's own
 
 [rationale]

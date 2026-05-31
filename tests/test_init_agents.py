@@ -350,6 +350,10 @@ def test_init_agent_claude_writes_mcp_json_and_installs_assets(
     assert (cwd / ".claude" / "agents" / "planner.md").is_file()
     assert (cwd / ".claude" / "skills" / "rationale" / "SKILL.md").is_file()
     assert (cwd / ".claude" / "skills" / "pre-edit" / "SKILL.md").is_file()
+    # CodeGraph guidance is merged into .claude/CLAUDE.md (forcing block).
+    claude_md = (cwd / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "<!-- BEGIN whygraph -->" in claude_md
+    assert "## CodeGraph" in claude_md
     assert "Installed assets for claude" in result.output
 
 
@@ -391,6 +395,29 @@ def test_init_agent_claude_default_skips_existing(stub_init, tmp_path: Path) -> 
         assert text == "USER EDIT"
 
 
+def test_init_agent_claude_merges_existing_claude_md(stub_init, tmp_path: Path) -> None:
+    """User-authored .claude/CLAUDE.md is preserved; the WhyGraph block appends."""
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        cwd = Path.cwd()
+        (cwd / ".claude").mkdir()
+        (cwd / ".claude" / "CLAUDE.md").write_text(
+            "# Our team rules\n\nWrite tests for everything.\n",
+            encoding="utf-8",
+        )
+        result = runner.invoke(whygraph_main, ["init", "--agent", "claude"])
+        assert result.exit_code == 0, result.output
+        merged = (cwd / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+        # User content preserved verbatim.
+        assert "# Our team rules" in merged
+        assert "Write tests for everything." in merged
+        # WhyGraph block (CodeGraph guidance) appended after user content.
+        assert "<!-- BEGIN whygraph -->" in merged
+        assert "<!-- END whygraph -->" in merged
+        assert "## CodeGraph" in merged
+        assert merged.find("Our team rules") < merged.find("<!-- BEGIN whygraph -->")
+
+
 def test_init_agent_cursor_writes_mcp_json_and_installs_rules(
     stub_init, tmp_path: Path
 ) -> None:
@@ -409,6 +436,11 @@ def test_init_agent_cursor_writes_mcp_json_and_installs_rules(
     # Bundled MDC rules land in .cursor/rules/.
     assert (cwd / ".cursor" / "rules" / "whygraph-pre-edit.mdc").is_file()
     assert (cwd / ".cursor" / "rules" / "whygraph-ask-why.mdc").is_file()
+    # The CodeGraph forcing rule lands and is always-applied.
+    codegraph_rule = (cwd / ".cursor" / "rules" / "whygraph-codegraph.mdc").read_text(
+        encoding="utf-8"
+    )
+    assert "alwaysApply: true" in codegraph_rule
     # Slash commands and subagents land in their respective subdirs.
     assert (cwd / ".cursor" / "commands" / "whygraph-plan.md").is_file()
     assert (cwd / ".cursor" / "agents" / "planner.md").is_file()

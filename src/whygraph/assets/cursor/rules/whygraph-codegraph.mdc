@@ -1,0 +1,27 @@
+---
+description: Always-on guidance for using the CodeGraph (`codegraph_*`) MCP tools. Prefer them over grep for structural questions; don't pull large explore output into context; trust their AST-parsed results.
+alwaysApply: true
+---
+
+# Use CodeGraph for structural code questions
+
+This project ships a CodeGraph index (`.codegraph/`) and the `codegraph_*` MCP tools — a tree-sitter knowledge graph of every symbol, edge, and file. Reach for them on **structural** questions; use grep/read only for literal text (string contents, comments, log messages) or once a file is already open.
+
+## Prefer codegraph over grep
+
+| Question | Tool |
+|---|---|
+| Where is X defined? / find a symbol by name | `codegraph_search` |
+| What calls Y? / what does Y call? | `codegraph_callers` / `codegraph_callees` |
+| What would break if I change Z? | `codegraph_impact` |
+| Show me Y's signature / source | `codegraph_node` |
+
+## Rules
+
+- **Trust the results** — they come from a full AST parse. Don't re-verify them with grep; that's slower, less accurate, and wastes context.
+- **Don't pull large `codegraph_explore` / `codegraph_context` output into your working context** for simple questions — those return whole source sections and bloat the conversation. Use the lightweight tools above for targeted lookups, and reserve the bulk-source tools for genuine deep dives.
+- **Index lag**: the watcher debounces ~500ms behind writes; don't re-query immediately after editing a file in the same turn.
+
+## If `.codegraph/` does not exist
+
+The MCP server reports "not initialized." Ask the user whether to run `whygraph scan` (which builds / refreshes the CodeGraph index) before relying on these tools.

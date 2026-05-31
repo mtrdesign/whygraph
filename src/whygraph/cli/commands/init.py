@@ -101,7 +101,7 @@ def init_cmd(
     project_root = Path.cwd()
 
     if not skip_preflight:
-        _run_preflight(project_root)
+        _run_preflight()
 
     db_path = _ensure_db_initialized()
     click.echo(f"Initialized WhyGraph database at {db_path}")
@@ -130,7 +130,7 @@ def init_cmd(
         _print_install_summary(target, project_root, result, force=force)
 
 
-def _run_preflight(project_root: Path) -> None:
+def _run_preflight() -> None:
     """Echo the diagnostics block; ``fail`` with a clean error on missing tools.
 
     Imported here (not at module top) so ``--list-agents`` and ``--help``
@@ -139,7 +139,7 @@ def _run_preflight(project_root: Path) -> None:
     from whygraph.cli.preflight import PreflightError, run_preflight
 
     try:
-        run_preflight(project_root)
+        run_preflight()
     except PreflightError as exc:
         fail(str(exc))
 

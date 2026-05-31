@@ -14,8 +14,10 @@ knowing the package layout.
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from enum import IntEnum
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rich.console import Console
@@ -179,6 +181,54 @@ def configure_logging(
         root.addHandler(file_handler)
         _file_configured = True
     return root
+
+
+@contextmanager
+def scan_log_redirect(log_path: Path):
+    """Suppress console log output and redirect to *log_path* for the duration.
+
+    Intended to wrap Rich ``Progress`` blocks where ``RichHandler`` output
+    interleaves with progress-bar rendering, corrupting the terminal display.
+
+    The file is opened in ``'w'`` mode so each scan run starts fresh.
+    Any user-configured ``RotatingFileHandler`` (via ``[logging]`` in
+    ``whygraph.toml``) is left in place and continues writing in parallel.
+
+    The root logger level is temporarily lowered to ``DEBUG`` so the file
+    captures everything; it is restored to the original level on exit
+    regardless of whether an exception was raised.
+
+    Parameters
+    ----------
+    log_path : Path
+        Destination file; its parent directory is created if absent.
+
+    Yields
+    ------
+    Path
+        The resolved *log_path*, for callers that want to print it.
+    """
+    root = logging.getLogger(_ROOT_NAME)
+
+    console_handlers = [h for h in root.handlers if isinstance(h, RichHandler)]
+    for h in console_handlers:
+        root.removeHandler(h)
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter(_FILE_FORMAT))
+    prev_level = root.level
+    root.setLevel(logging.DEBUG)
+    root.addHandler(file_handler)
+
+    try:
+        yield log_path
+    finally:
+        root.setLevel(prev_level)
+        root.removeHandler(file_handler)
+        file_handler.close()
+        for h in console_handlers:
+            root.addHandler(h)
 
 
 def get_logger(name: str | None = None) -> logging.Logger:

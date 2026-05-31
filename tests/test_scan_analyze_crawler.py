@@ -194,9 +194,7 @@ def test_bulk_commits_get_stub_without_llm_call(
         assert model is None  # NULL model = "not LLM-generated"
 
 
-def test_skips_already_described_commits(
-    isolated_db: Path, repo_path: Path
-) -> None:
+def test_skips_already_described_commits(isolated_db: Path, repo_path: Path) -> None:
     commits = _commits(repo_path)
     already = commits[0].sha
     _insert(commits, described=(already,))
@@ -212,9 +210,7 @@ def test_skips_already_described_commits(
     assert len(descriptor.seen) == len(commits) - 1
 
 
-def test_skips_commit_with_empty_diff(
-    isolated_db: Path, repo_path: Path
-) -> None:
+def test_skips_commit_with_empty_diff(isolated_db: Path, repo_path: Path) -> None:
     _git(repo_path, "commit", "-q", "--allow-empty", "-m", "empty")
     commits = _commits(repo_path)
     empty_sha = commits[0].sha  # newest = the empty commit

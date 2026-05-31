@@ -114,9 +114,7 @@ def test_second_call_returns_cached(
     _seed_two_commits(temp_git_repo)
     monkeypatch.chdir(temp_git_repo)
     _CountingGenerator.reset()
-    monkeypatch.setattr(
-        "whygraph.mcp.rationale.RationaleGenerator", _CountingGenerator
-    )
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _CountingGenerator)
 
     first = whygraph_rationale_brief(path="sample.py", line_start=1, line_end=3)
     second = whygraph_rationale_brief(path="sample.py", line_start=1, line_end=3)
@@ -136,9 +134,7 @@ def test_new_commit_invalidates_cache(
     _seed_two_commits(temp_git_repo)
     monkeypatch.chdir(temp_git_repo)
     _CountingGenerator.reset()
-    monkeypatch.setattr(
-        "whygraph.mcp.rationale.RationaleGenerator", _CountingGenerator
-    )
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _CountingGenerator)
 
     first = whygraph_rationale_brief(path="sample.py", line_start=1, line_end=3)
     _add_third_commit(temp_git_repo)

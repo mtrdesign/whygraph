@@ -37,7 +37,9 @@ class LlmClient(abc.ABC):
         self.model = model
 
     def __repr__(self) -> str:
-        return f"{type(self).__name__}(provider={self.provider!r}, model={self.model!r})"
+        return (
+            f"{type(self).__name__}(provider={self.provider!r}, model={self.model!r})"
+        )
 
     @classmethod
     @abc.abstractmethod

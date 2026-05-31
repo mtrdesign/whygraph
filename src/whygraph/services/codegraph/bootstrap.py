@@ -190,8 +190,7 @@ def _run_codegraph(
         subprocess.run(cmd, check=True, cwd=cwd)
     except subprocess.CalledProcessError as exc:
         raise CodeGraphBootstrapError(
-            f"`codegraph {label}` failed (exit {exc.returncode})"
-            " — see output above"
+            f"`codegraph {label}` failed (exit {exc.returncode}) — see output above"
         ) from exc
 
 

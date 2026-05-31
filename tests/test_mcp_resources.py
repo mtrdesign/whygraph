@@ -201,14 +201,10 @@ def test_pr_resource_includes_full_blobs(
     whygraph_db_initialized: Path,
 ) -> None:
     """A direct PR read decodes ``commit_titles`` and ``comments`` as lists."""
-    commit_titles = json.dumps(
-        [{"oid": "c" * 40, "messageHeadline": "first"}]
-    )
+    commit_titles = json.dumps([{"oid": "c" * 40, "messageHeadline": "first"}])
     comments = json.dumps([{"author": "alice", "body": "lgtm"}])
     with get_session() as session:
-        session.add(
-            _db_pr(number=42, commit_titles=commit_titles, comments=comments)
-        )
+        session.add(_db_pr(number=42, commit_titles=commit_titles, comments=comments))
 
     result = _pr_resource(42)
     pr = result["pull_request"]
@@ -237,9 +233,7 @@ def test_pr_resource_link_kind_other_than_closes_is_ignored(
     with get_session() as session:
         session.add(_db_pr(number=12))
         session.add(_db_issue(number=200))
-        session.add(
-            PRIssueLink(pr_number=12, issue_number=200, link_kind="mentions")
-        )
+        session.add(PRIssueLink(pr_number=12, issue_number=200, link_kind="mentions"))
 
     result = _pr_resource(12)
     assert result["closing_issues"] == []

@@ -63,9 +63,7 @@ def test_file_handler_attached_and_dir_created(tmp_path: Path) -> None:
     log_path = tmp_path / "logs" / "whygraph.log"
     assert not log_path.parent.exists()
 
-    root = configure_logging(
-        "INFO", file_config=LoggingConfig(file=log_path)
-    )
+    root = configure_logging("INFO", file_config=LoggingConfig(file=log_path))
 
     handlers = _file_handlers(root)
     assert len(handlers) == 1

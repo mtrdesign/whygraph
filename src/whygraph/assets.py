@@ -110,8 +110,7 @@ def packaged_assets_for(target: AgentTarget) -> Traversable:
     """
     if target.assets_subdir is None:
         raise ValueError(
-            f"agent {target.name!r} has no bundled assets "
-            "(assets_subdir is None)"
+            f"agent {target.name!r} has no bundled assets (assets_subdir is None)"
         )
     return resources.files("whygraph") / "assets" / target.assets_subdir
 
@@ -167,17 +166,19 @@ def install_assets(
         If ``target`` has no bundled assets configured.
     """
     if not target.has_assets:
-        raise ValueError(
-            f"agent {target.name!r} has no bundled assets to install"
-        )
+        raise ValueError(f"agent {target.name!r} has no bundled assets to install")
     src: Traversable | Path = (
         source if source is not None else packaged_assets_for(target)
     )
-    assert target.assets_dest is not None  # for type checkers; has_assets guarantees this
+    assert (
+        target.assets_dest is not None
+    )  # for type checkers; has_assets guarantees this
     dest_root = project_root.joinpath(*target.assets_dest)
     merge_set = frozenset(target.assets_merge_files)
     result = InstallResult()
-    _copy_tree(src, dest_root, rel_prefix=(), merge_set=merge_set, force=force, result=result)
+    _copy_tree(
+        src, dest_root, rel_prefix=(), merge_set=merge_set, force=force, result=result
+    )
     return result
 
 
@@ -282,7 +283,11 @@ def _merge_block(
 
     # No markers — append the block after the existing content,
     # ensuring exactly one blank line of separation.
-    separator = "" if existing.endswith("\n\n") else ("\n" if existing.endswith("\n") else "\n\n")
+    separator = (
+        ""
+        if existing.endswith("\n\n")
+        else ("\n" if existing.endswith("\n") else "\n\n")
+    )
     dest_path.write_text(existing + separator + block, encoding="utf-8")
     result.overwritten.append(dest_path)
 

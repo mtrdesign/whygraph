@@ -197,13 +197,9 @@ class LoggingConfig:
             try:
                 LogLevel[self.level.upper()]
             except KeyError as exc:
-                raise ConfigError(
-                    f"invalid logging.level: {self.level!r}"
-                ) from exc
+                raise ConfigError(f"invalid logging.level: {self.level!r}") from exc
         if self.max_bytes < 1:
-            raise ConfigError(
-                f"logging.max_bytes must be >= 1, got {self.max_bytes}"
-            )
+            raise ConfigError(f"logging.max_bytes must be >= 1, got {self.max_bytes}")
         if self.backup_count < 0:
             raise ConfigError(
                 f"logging.backup_count must be >= 0, got {self.backup_count}"

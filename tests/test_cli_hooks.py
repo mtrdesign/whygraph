@@ -120,6 +120,11 @@ def test_generated_shell_is_valid() -> None:
         _git_init()
         _install(runner)
         # `sh -n` parses without executing — catches quoting/syntax errors.
-        for path in [Path(HELPER_RELPATH), *(Path(".git/hooks") / n for n in HOOK_NAMES)]:
-            check = subprocess.run(["sh", "-n", str(path)], capture_output=True, text=True)
+        for path in [
+            Path(HELPER_RELPATH),
+            *(Path(".git/hooks") / n for n in HOOK_NAMES),
+        ]:
+            check = subprocess.run(
+                ["sh", "-n", str(path)], capture_output=True, text=True
+            )
             assert check.returncode == 0, f"{path}: {check.stderr}"

@@ -221,9 +221,7 @@ def _refresh_codegraph(project_root: Path, *, image: str | None) -> None:
     try:
         refresh_codegraph_index(project_root, image=image)
     except CodeGraphBootstrapError as exc:
-        console.print(
-            Text(f"CodeGraph refresh skipped — {exc}", style="yellow")
-        )
+        console.print(Text(f"CodeGraph refresh skipped — {exc}", style="yellow"))
 
 
 def _select_github_client(
@@ -306,7 +304,10 @@ def _render_scan_panel(
     ]
     if github_client is None:
         rows.append(
-            ("GitHub", Text(_github_skip_reason(config, remote_enabled), style="yellow"))
+            (
+                "GitHub",
+                Text(_github_skip_reason(config, remote_enabled), style="yellow"),
+            )
         )
     else:
         rows.append(

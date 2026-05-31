@@ -69,9 +69,7 @@ def compute_refactor_score(
         score += 10
 
     if n_files > 0:
-        renames = sum(
-            1 for ch in file_changes if ch.change_type in ("R", "C")
-        )
+        renames = sum(1 for ch in file_changes if ch.change_type in ("R", "C"))
         ratio = renames / n_files
         if ratio >= 0.8:
             score += 40

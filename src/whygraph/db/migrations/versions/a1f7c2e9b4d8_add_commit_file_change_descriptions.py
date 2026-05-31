@@ -11,6 +11,7 @@ description for *bulk* commits (more files than
 Both are nullable and default ``NULL``; normal commits never populate
 them and keep using the whole-diff ``commit.llm_description``.
 """
+
 from typing import Sequence, Union
 
 from alembic import op

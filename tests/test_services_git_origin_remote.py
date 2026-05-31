@@ -23,7 +23,9 @@ def _repo_with_remotes(tmp_path: Path) -> Path:
     # rewrite (commonly https://github.com → git@github.com) can't change
     # the stored URL out from under the assertions.
     _git(tmp_path, "init", "-q", "-b", "main")
-    _git(tmp_path, "remote", "add", "origin", "https://example.test/acme/origin-repo.git")
+    _git(
+        tmp_path, "remote", "add", "origin", "https://example.test/acme/origin-repo.git"
+    )
     _git(
         tmp_path,
         "remote",

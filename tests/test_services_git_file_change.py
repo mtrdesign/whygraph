@@ -11,7 +11,6 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-import pytest
 
 from whygraph.services.git import FileChange, Repository
 from whygraph.services.git.file_change import (
@@ -47,9 +46,7 @@ def test_parse_raw_line_modification() -> None:
 
 
 def test_parse_raw_line_rename_with_similarity() -> None:
-    rec = _parse_raw_line(
-        ":100644 100644 abc1234 def5678 R98\tsrc/old.py\tsrc/new.py"
-    )
+    rec = _parse_raw_line(":100644 100644 abc1234 def5678 R98\tsrc/old.py\tsrc/new.py")
     assert rec == {
         "change_type": "R",
         "renamed_from": "src/old.py",
@@ -123,9 +120,7 @@ def test_from_diff_tree_resolves_rename_numstat_via_brace_form() -> None:
 
 def test_from_diff_tree_treats_binary_numstat_as_zero() -> None:
     stdout = (
-        ":100644 100644 abc1234 def5678 M\tassets/img.png\n"
-        "\n"
-        "-\t-\tassets/img.png\n"
+        ":100644 100644 abc1234 def5678 M\tassets/img.png\n\n-\t-\tassets/img.png\n"
     )
 
     changes = FileChange.from_diff_tree(stdout)

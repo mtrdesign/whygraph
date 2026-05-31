@@ -77,9 +77,7 @@ def whygraph_area_history(
     if limit < 1:
         raise WhyGraphError("limit must be >= 1")
 
-    items = area_history_commits(
-        path, limit=limit, include_renames=include_renames
-    )
+    items = area_history_commits(path, limit=limit, include_renames=include_renames)
     backfill_evidence_descriptions(items, target_path=path)
     return {
         "path": path,

@@ -96,12 +96,8 @@ def test_evidence_for_joins_commits_prs_and_issues(
 ) -> None:
     newest, oldest = list(Repository(temp_git_repo).commits)
     with get_session() as session:
-        session.add(
-            _db_commit(oldest.sha, committed_at="2026-01-01T00:00:00+00:00")
-        )
-        session.add(
-            _db_commit(newest.sha, committed_at="2026-02-01T00:00:00+00:00")
-        )
+        session.add(_db_commit(oldest.sha, committed_at="2026-01-01T00:00:00+00:00"))
+        session.add(_db_commit(newest.sha, committed_at="2026-02-01T00:00:00+00:00"))
         session.add(_db_pr(number=5, merge_commit_sha=newest.sha))
         session.add(_db_issue(number=9))
         session.add(PRIssueLink(pr_number=5, issue_number=9, link_kind="closes"))
@@ -137,9 +133,7 @@ def test_evidence_for_skips_blamed_sha_absent_from_db(
     newest, _oldest = list(Repository(temp_git_repo).commits)
     with get_session() as session:
         # Only the newest commit is scanned; the older one is absent.
-        session.add(
-            _db_commit(newest.sha, committed_at="2026-02-01T00:00:00+00:00")
-        )
+        session.add(_db_commit(newest.sha, committed_at="2026-02-01T00:00:00+00:00"))
 
     monkeypatch.chdir(temp_git_repo)
     result = whygraph_evidence_for(path="sample.py", line_start=1, line_end=3)
@@ -207,9 +201,7 @@ def test_evidence_for_backfills_null_llm_description(
     newest, oldest = list(Repository(temp_git_repo).commits)
     with get_session() as session:
         # The oldest commit already has a description — must NOT be re-described.
-        session.add(
-            _db_commit(oldest.sha, committed_at="2026-01-01T00:00:00+00:00")
-        )
+        session.add(_db_commit(oldest.sha, committed_at="2026-01-01T00:00:00+00:00"))
         # The newest commit's description is NULL — backfill should fill it in.
         session.add(
             _db_commit(
@@ -248,9 +240,7 @@ def test_evidence_for_bulk_commit_uses_per_file_description(
     newest, oldest = list(Repository(temp_git_repo).commits)
     bulk_stub = "Bulk commit touching 50 files — per-file on demand."
     with get_session() as session:
-        session.add(
-            _db_commit(oldest.sha, committed_at="2026-01-01T00:00:00+00:00")
-        )
+        session.add(_db_commit(oldest.sha, committed_at="2026-01-01T00:00:00+00:00"))
         # The newest commit is "bulk" (files_changed over the default
         # threshold of 30) and carries only the stub at the commit level.
         session.add(
@@ -313,12 +303,8 @@ def test_evidence_for_merges_area_history_when_blame_is_thin(
     # NOT blamed because the predecessor file no longer exists at HEAD.
     predecessor_sha = "deadbeef" * 5  # 40 chars
     with get_session() as session:
-        session.add(
-            _db_commit(oldest.sha, committed_at="2026-01-01T00:00:00+00:00")
-        )
-        session.add(
-            _db_commit(newest.sha, committed_at="2026-02-01T00:00:00+00:00")
-        )
+        session.add(_db_commit(oldest.sha, committed_at="2026-01-01T00:00:00+00:00"))
+        session.add(_db_commit(newest.sha, committed_at="2026-02-01T00:00:00+00:00"))
         session.add(
             _db_commit(
                 predecessor_sha,
@@ -369,12 +355,8 @@ def test_evidence_for_does_not_duplicate_when_blame_and_area_agree(
     """A SHA produced by both blame and the area-history index appears once."""
     newest, oldest = list(Repository(temp_git_repo).commits)
     with get_session() as session:
-        session.add(
-            _db_commit(oldest.sha, committed_at="2026-01-01T00:00:00+00:00")
-        )
-        session.add(
-            _db_commit(newest.sha, committed_at="2026-02-01T00:00:00+00:00")
-        )
+        session.add(_db_commit(oldest.sha, committed_at="2026-01-01T00:00:00+00:00"))
+        session.add(_db_commit(newest.sha, committed_at="2026-02-01T00:00:00+00:00"))
         # Both blamed commits also have file-change rows for sample.py.
         session.add(
             CommitFileChange(

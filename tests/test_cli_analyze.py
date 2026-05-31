@@ -221,9 +221,7 @@ def test_analyze_errors_when_baseline_not_in_db(
     assert stub_llm == []
 
 
-def test_analyze_rejects_unknown_ref(
-    isolated_db: Path, stub_llm: list[str]
-) -> None:
+def test_analyze_rejects_unknown_ref(isolated_db: Path, stub_llm: list[str]) -> None:
     result = CliRunner().invoke(whygraph_main, ["analyze", "nonexistentref"])
 
     assert result.exit_code == 1

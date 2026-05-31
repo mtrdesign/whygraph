@@ -51,9 +51,7 @@ def test_completion_request_of_with_system_prepends_system_message() -> None:
 
 
 def test_completion_request_of_forwards_overrides() -> None:
-    req = CompletionRequest.of(
-        "x", max_tokens=128, temperature=0.2, timeout_sec=15
-    )
+    req = CompletionRequest.of("x", max_tokens=128, temperature=0.2, timeout_sec=15)
     assert req.max_tokens == 128
     assert req.temperature == 0.2
     assert req.timeout_sec == 15

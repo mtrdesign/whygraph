@@ -71,11 +71,35 @@ def _seed_rename_history(session) -> tuple[str, str, str, str]:
         c_rename2    — R mid.py → final.py
         c_recent     — M final.py
     """
-    session.add(_commit("sha_old", subject="add legacy", committed_at="2025-01-01T00:00:00+00:00"))
-    session.add(_commit("sha_mid", subject="tweak legacy", committed_at="2025-02-01T00:00:00+00:00"))
-    session.add(_commit("sha_rename1", subject="rename to mid", committed_at="2025-03-01T00:00:00+00:00"))
-    session.add(_commit("sha_rename2", subject="rename to final", committed_at="2025-04-01T00:00:00+00:00"))
-    session.add(_commit("sha_recent", subject="edit final", committed_at="2025-05-01T00:00:00+00:00"))
+    session.add(
+        _commit(
+            "sha_old", subject="add legacy", committed_at="2025-01-01T00:00:00+00:00"
+        )
+    )
+    session.add(
+        _commit(
+            "sha_mid", subject="tweak legacy", committed_at="2025-02-01T00:00:00+00:00"
+        )
+    )
+    session.add(
+        _commit(
+            "sha_rename1",
+            subject="rename to mid",
+            committed_at="2025-03-01T00:00:00+00:00",
+        )
+    )
+    session.add(
+        _commit(
+            "sha_rename2",
+            subject="rename to final",
+            committed_at="2025-04-01T00:00:00+00:00",
+        )
+    )
+    session.add(
+        _commit(
+            "sha_recent", subject="edit final", committed_at="2025-05-01T00:00:00+00:00"
+        )
+    )
 
     session.add(_change(commit_sha="sha_old", path="legacy.py", change_type="A"))
     session.add(_change(commit_sha="sha_mid", path="legacy.py", change_type="M"))
@@ -117,7 +141,9 @@ def test_resolve_path_aliases_returns_only_seed_when_no_renames(
     whygraph_db_initialized: Path,
 ) -> None:
     with get_session() as session:
-        session.add(_commit("sha", subject="add", committed_at="2025-01-01T00:00:00+00:00"))
+        session.add(
+            _commit("sha", subject="add", committed_at="2025-01-01T00:00:00+00:00")
+        )
         session.add(_change(commit_sha="sha", path="foo.py", change_type="A"))
         session.commit()
         aliases = resolve_path_aliases(session, "foo.py")

@@ -50,9 +50,7 @@ def test_for_repository_honours_codegraph_db_override(
 ) -> None:
     # The explicit override (a `whygraph.toml` `codegraph_db` entry) wins over
     # the <root>/.codegraph/... default — note `tmp_path` has no `.codegraph/`.
-    with CodeGraph.for_repository(
-        tmp_path, codegraph_db=fake_codegraph_db
-    ) as graph:
+    with CodeGraph.for_repository(tmp_path, codegraph_db=fake_codegraph_db) as graph:
         assert graph.symbol("pkg.a") is not None
 
 

@@ -34,10 +34,7 @@ def test_analyze_defaults_when_section_omitted(tmp_path: Path) -> None:
 def test_analyze_section_parsed(tmp_path: Path) -> None:
     config = _write(
         tmp_path / "whygraph.toml",
-        '[analyze]\n'
-        'provider = "openai"\n'
-        'max_diff_chars = 1234\n'
-        'timeout_sec = 90\n',
+        '[analyze]\nprovider = "openai"\nmax_diff_chars = 1234\ntimeout_sec = 90\n',
     )
     cfg = Config.from_toml(config)
 
@@ -64,7 +61,7 @@ def test_analyze_unknown_key_warns_but_loads(
 ) -> None:
     config = _write(
         tmp_path / "whygraph.toml",
-        "[analyze]\nprovider = \"anthropic\"\nbogus = true\n",
+        '[analyze]\nprovider = "anthropic"\nbogus = true\n',
     )
 
     with caplog.at_level(logging.WARNING, logger="whygraph.core.config"):

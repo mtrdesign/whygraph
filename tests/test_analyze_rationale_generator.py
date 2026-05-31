@@ -15,7 +15,6 @@ from typing import Any
 import pytest
 
 from whygraph.analyze import (
-    RATIONALE_PLACEHOLDER,
     AnalyzeError,
     CommitEvidence,
     Prompt,
@@ -119,7 +118,10 @@ def _commit(
 
 
 def _pr(
-    *, number: int = 12, title: str = "Cache prompts", body: str | None = "Speeds up scans."
+    *,
+    number: int = 12,
+    title: str = "Cache prompts",
+    body: str | None = "Speeds up scans.",
 ) -> PullRequest:
     """A :class:`PullRequest` row with sensible defaults for tests."""
     return PullRequest(
@@ -340,9 +342,7 @@ def test_generate_raises_rationale_error_on_non_dict_json() -> None:
 
 
 def test_generate_raises_rationale_error_on_missing_key() -> None:
-    blob = json.dumps(
-        {"purpose": "p", "why": "w", "constraints": [], "tradeoffs": []}
-    )
+    blob = json.dumps({"purpose": "p", "why": "w", "constraints": [], "tradeoffs": []})
     client = _StubClient(text=blob)
     generator = RationaleGenerator(client)
 
@@ -428,9 +428,7 @@ def test_generate_ignores_unknown_keys_in_output() -> None:
 
 
 def test_rationale_is_frozen() -> None:
-    rationale = RationaleGenerator(_StubClient()).generate(
-        [CommitEvidence(_commit())]
-    )
+    rationale = RationaleGenerator(_StubClient()).generate([CommitEvidence(_commit())])
     with pytest.raises(Exception):  # FrozenInstanceError
         rationale.purpose = "changed"  # type: ignore[misc]
 
@@ -499,17 +497,13 @@ def test_format_symbol_context_renders_target_callers_and_callees() -> None:
     context = SymbolContext(
         target=_symbol(),
         callers=(_relation(qualified_name="whygraph.cli.analyze", line=42),),
-        callees=(
-            _relation(qualified_name="whygraph.analyze.prompt.render", line=120),
-        ),
+        callees=(_relation(qualified_name="whygraph.analyze.prompt.render", line=120),),
     )
 
     text = _format_symbol_context(context)
 
     assert "CODE GRAPH CONTEXT" in text
-    assert (
-        "Target: whygraph.analyze.RationaleGenerator.generate (method)" in text
-    )
+    assert "Target: whygraph.analyze.RationaleGenerator.generate (method)" in text
     assert "def generate(self, evidence, *, symbol_context=None)" in text
     assert "Called by (1 caller(s)" in text
     assert "whygraph.cli.analyze (function)" in text
@@ -525,9 +519,7 @@ def test_format_symbol_context_marks_empty_caller_and_callee_blocks() -> None:
     assert text.count("(none recorded)") == 2
 
 
-def test_format_symbol_context_falls_back_to_symbol_line_when_edge_lacks_one() -> (
-    None
-):
+def test_format_symbol_context_falls_back_to_symbol_line_when_edge_lacks_one() -> None:
     context = SymbolContext(
         target=_symbol(),
         callers=(_relation(qualified_name="pkg.caller", line=None),),

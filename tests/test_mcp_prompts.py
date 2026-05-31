@@ -37,16 +37,23 @@ def test_prompts_registered() -> None:
 
     # The targeted prompts surface four optional args; triage_commit has
     # a single required ``sha``.
-    pre_edit_args = {a.name: a.required for a in by_name["whygraph_pre_edit_brief"].arguments or []}
+    pre_edit_args = {
+        a.name: a.required for a in by_name["whygraph_pre_edit_brief"].arguments or []
+    }
     assert pre_edit_args == {
         "path": False,
         "line_start": False,
         "line_end": False,
         "qualified_name": False,
     }
-    why_args = {a.name: a.required for a in by_name["whygraph_why_was_this_written"].arguments or []}
+    why_args = {
+        a.name: a.required
+        for a in by_name["whygraph_why_was_this_written"].arguments or []
+    }
     assert why_args == pre_edit_args
-    triage_args = {a.name: a.required for a in by_name["whygraph_triage_commit"].arguments or []}
+    triage_args = {
+        a.name: a.required for a in by_name["whygraph_triage_commit"].arguments or []
+    }
     assert triage_args == {"sha": True}
 
 

@@ -34,10 +34,7 @@ def test_rationale_defaults_when_section_omitted(tmp_path: Path) -> None:
 def test_rationale_section_parsed(tmp_path: Path) -> None:
     config = _write(
         tmp_path / "whygraph.toml",
-        '[rationale]\n'
-        'provider = "openai"\n'
-        'model = "gpt-4o"\n'
-        'timeout_sec = 90\n',
+        '[rationale]\nprovider = "openai"\nmodel = "gpt-4o"\ntimeout_sec = 90\n',
     )
     cfg = Config.from_toml(config)
 

@@ -57,9 +57,7 @@ class GitCrawler(Crawler):
         self.set_total(len(commits))
 
         with get_session() as session:
-            existing_commits: set[str] = set(
-                session.exec(select(CommitRow.sha)).all()
-            )
+            existing_commits: set[str] = set(session.exec(select(CommitRow.sha)).all())
             existing_file_changes: set[str] = set(
                 session.exec(select(CommitFileChange.commit_sha).distinct()).all()
             )
@@ -92,9 +90,7 @@ class GitCrawler(Crawler):
                 self.advance(1)
 
 
-def _to_row(
-    dc: CommitDC, *, scanned_at: str, refactor_score: int = 0
-) -> CommitRow:
+def _to_row(dc: CommitDC, *, scanned_at: str, refactor_score: int = 0) -> CommitRow:
     return CommitRow(
         sha=dc.sha,
         parent_shas=" ".join(dc.parent_shas),

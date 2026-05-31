@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import Callable
 
 import pytest
 
@@ -59,9 +58,7 @@ def test_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     run_preflight(tmp_path)
 
 
-def test_git_missing_raises(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_git_missing_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _git_repo(tmp_path, remote_url=None)
     _patch_which(monkeypatch, missing={"git"})
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")

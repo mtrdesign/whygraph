@@ -189,9 +189,7 @@ def temp_git_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def whygraph_db(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Iterator[Path]:
+def whygraph_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """Point WhyGraph's DB layer at an isolated, empty per-test SQLite file.
 
     Yields the path. The schema is *not* created — use

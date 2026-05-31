@@ -107,7 +107,9 @@ class CodeGraph:
             If the resolved database does not exist — most often because
             ``codegraph init`` has not been run.
         """
-        return cls(codegraph_db if codegraph_db is not None else root / CODEGRAPH_DB_RELPATH)
+        return cls(
+            codegraph_db if codegraph_db is not None else root / CODEGRAPH_DB_RELPATH
+        )
 
     def __repr__(self) -> str:
         return f"CodeGraph(db_path={self.db_path!r})"

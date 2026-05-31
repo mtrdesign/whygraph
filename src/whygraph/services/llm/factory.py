@@ -115,8 +115,7 @@ class LlmClientFactory:
         entry = self._registry.get(provider)
         if entry is None:
             raise LlmError(
-                f"unknown LLM provider: {provider!r}; "
-                f"available: {self.providers}"
+                f"unknown LLM provider: {provider!r}; available: {self.providers}"
             )
         cls, config_obj = entry
         if model is not None:

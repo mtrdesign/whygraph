@@ -34,11 +34,11 @@ def test_logging_defaults_when_section_omitted(tmp_path: Path) -> None:
 def test_logging_section_parsed(tmp_path: Path) -> None:
     config = _write(
         tmp_path / "whygraph.toml",
-        '[logging]\n'
+        "[logging]\n"
         'file = "logs/whygraph.log"\n'
         'level = "DEBUG"\n'
-        'max_bytes = 1024\n'
-        'backup_count = 1\n',
+        "max_bytes = 1024\n"
+        "backup_count = 1\n",
     )
     cfg = Config.from_toml(config)
 

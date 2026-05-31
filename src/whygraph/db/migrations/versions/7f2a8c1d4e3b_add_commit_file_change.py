@@ -9,6 +9,7 @@ history queries (Phase 2 of the layered evidence pipeline). One row per
 (commit, path-at-that-commit); rename edges live in ``renamed_from``
 and are walked recursively at query time.
 """
+
 from typing import Sequence, Union
 
 from alembic import op
@@ -32,8 +33,12 @@ def upgrade() -> None:
         sa.Column("change_type", sa.Text(), nullable=False),
         sa.Column("renamed_from", sa.Text(), nullable=True),
         sa.Column("similarity", sa.Integer(), nullable=True),
-        sa.Column("lines_added", sa.Integer(), nullable=False, server_default=sa.text("0")),
-        sa.Column("lines_deleted", sa.Integer(), nullable=False, server_default=sa.text("0")),
+        sa.Column(
+            "lines_added", sa.Integer(), nullable=False, server_default=sa.text("0")
+        ),
+        sa.Column(
+            "lines_deleted", sa.Integer(), nullable=False, server_default=sa.text("0")
+        ),
         sa.ForeignKeyConstraint(["commit_sha"], ["commit.sha"]),
         sa.PrimaryKeyConstraint("id"),
     )

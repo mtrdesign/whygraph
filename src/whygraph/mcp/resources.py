@@ -246,15 +246,9 @@ def _repo_overview_resource() -> dict:
     _log.debug("repo overview resource read")
     try:
         with get_session() as session:
-            commit_count = session.exec(
-                select(func.count()).select_from(Commit)
-            ).one()
-            pr_count = session.exec(
-                select(func.count()).select_from(PullRequest)
-            ).one()
-            issue_count = session.exec(
-                select(func.count()).select_from(Issue)
-            ).one()
+            commit_count = session.exec(select(func.count()).select_from(Commit)).one()
+            pr_count = session.exec(select(func.count()).select_from(PullRequest)).one()
+            issue_count = session.exec(select(func.count()).select_from(Issue)).one()
             link_count = session.exec(
                 select(func.count()).select_from(PRIssueLink)
             ).one()
@@ -265,9 +259,7 @@ def _repo_overview_resource() -> dict:
                     func.max(Commit.authored_at),
                 )
             ).one()
-            latest_scanned_at = session.exec(
-                select(func.max(Commit.scanned_at))
-            ).one()
+            latest_scanned_at = session.exec(select(func.max(Commit.scanned_at))).one()
             latest_pr_fetched_at = session.exec(
                 select(func.max(PullRequest.fetched_at))
             ).one()

@@ -1,29 +1,14 @@
-name: Publish WhyGraph Docker image
+name: cd-deploy-whygraph
 
 # Builds and pushes ghcr.io/mtrdesign/whygraph — the self-contained
 # scanning-service image the `whygraph` host shim (scripts/install.sh)
-# runs. Triggers:
-#   - any push to main that touches the image, the package source, or this workflow
-#   - manual workflow_dispatch (with optional pinned codegraph version + release tag)
+# runs. Publishing is tied to releases: cutting a GitHub release (tagged
+# vX.Y.Z) builds the image and tags it to match that version, so the image
+# tag follows the release version 1:1.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'docker/whygraph/**'
-      - 'src/whygraph/**'
-      - 'pyproject.toml'
-      - '.github/workflows/publish-whygraph-image.yml'
-  workflow_dispatch:
-    inputs:
-      codegraph_version:
-        description: 'npm version of @colbymchenry/codegraph to bake in (e.g. 1.2.3 or "latest")'
-        required: false
-        default: 'latest'
-      release_tag:
-        description: 'Optional human-readable release tag (e.g. v1.2.3) — published alongside :latest and :sha-XXXX'
-        required: false
-        default: ''
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -31,6 +16,7 @@ permissions:
 
 jobs:
   build-and-push:
+    name: Build and push image
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -49,15 +35,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # The release tag drives the image tags. A release `v1.2.3` publishes
+      # :1.2.3, :1.2, :1 and :latest, so consumers can pin as loosely or as
+      # tightly as they like while the shim's default :latest tracks the
+      # newest release.
       - name: Compute image tags
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/mtrdesign/whygraph
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix=sha-
-            type=raw,value=${{ github.event.inputs.release_tag }},enable=${{ github.event.inputs.release_tag != '' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -69,6 +60,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            CODEGRAPH_VERSION=${{ github.event.inputs.codegraph_version || 'latest' }}
+            CODEGRAPH_VERSION=latest
           cache-from: type=gha
           cache-to: type=gha,mode=max

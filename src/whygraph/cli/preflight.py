@@ -87,9 +87,7 @@ def run_preflight(project_root: Path) -> None:
         if c.status == "missing" and c.hint:
             console.print(f"                  install: {c.hint}")
 
-    hard_missing = [
-        c.name for c in checks if c.status == "missing" and not c.soft
-    ]
+    hard_missing = [c.name for c in checks if c.status == "missing" and not c.soft]
     if hard_missing:
         names = ", ".join(hard_missing)
         raise PreflightError(

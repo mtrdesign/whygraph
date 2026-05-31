@@ -139,8 +139,7 @@ def _format_evidence(evidence: Sequence[CommitEvidence]) -> str:
     n_prs = sum(len(item.pull_requests) for item in evidence)
     n_issues = sum(len(item.issues) for item in evidence)
     blocks = [
-        f"Evidence: {len(evidence)} commit(s), {n_prs} PR(s), "
-        f"{n_issues} issue(s)."
+        f"Evidence: {len(evidence)} commit(s), {n_prs} PR(s), {n_issues} issue(s)."
     ]
     for item in evidence:
         lines = _format_commit(item.commit)
@@ -224,8 +223,7 @@ def _format_symbol_context(context: SymbolContext) -> str:
     lines.append("")
     lines.extend(
         _format_relations(
-            f"Called by ({len(context.callers)} caller(s) — "
-            "blast radius of a change):",
+            f"Called by ({len(context.callers)} caller(s) — blast radius of a change):",
             context.callers,
         )
     )
@@ -305,9 +303,7 @@ def _parse_rationale_json(text: str) -> dict:
         if not isinstance(value, list) or not all(
             isinstance(item, str) for item in value
         ):
-            raise RationaleError(
-                f"rationale key {key!r} must be a list of strings"
-            )
+            raise RationaleError(f"rationale key {key!r} must be a list of strings")
     return parsed
 
 
@@ -355,9 +351,7 @@ class RationaleGenerator:
         self._rationale_prompt = (
             rationale_prompt
             if rationale_prompt is not None
-            else resolve(
-                _PROMPT_COMPONENT, "rationale", client.provider, client.model
-            )
+            else resolve(_PROMPT_COMPONENT, "rationale", client.provider, client.model)
         )
 
     def __repr__(self) -> str:

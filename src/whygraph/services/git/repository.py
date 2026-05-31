@@ -181,9 +181,7 @@ class Repository:
         else:
             argv = (f"{commit.parent_shas[0]}..{commit.sha}",)
         try:
-            return self._shell.run(
-                GitDiffCmd(*argv, pathspec=pathspec), cwd=self.root
-            )
+            return self._shell.run(GitDiffCmd(*argv, pathspec=pathspec), cwd=self.root)
         except ShellError as exc:
             raise GitError(
                 f"failed to diff {commit.sha[:7]} against its parent"
@@ -257,9 +255,7 @@ class Repository:
                 cwd=self.root,
             )
         except ShellError as exc:
-            raise GitError(
-                f"failed to blame {path}:{line_start}-{line_end}"
-            ) from exc
+            raise GitError(f"failed to blame {path}:{line_start}-{line_end}") from exc
 
     def commit_file_changes(self, commit: Commit) -> tuple[FileChange, ...]:
         """Per-file structural changes recorded by ``commit``.
@@ -291,9 +287,7 @@ class Repository:
             If ``git diff-tree`` fails (unknown sha, broken repo).
         """
         try:
-            return self._shell.run(
-                GitDiffTreeFileChangesCmd(commit.sha), cwd=self.root
-            )
+            return self._shell.run(GitDiffTreeFileChangesCmd(commit.sha), cwd=self.root)
         except ShellError as exc:
             raise GitError(
                 f"failed to inspect file changes for {commit.sha[:7]}"

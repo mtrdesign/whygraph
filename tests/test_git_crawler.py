@@ -59,9 +59,7 @@ def repo_root(tmp_path: Path) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_db(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Iterator[Path]:
+def _isolate_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """Point WhyGraph at a per-test SQLite file and pre-create the schema."""
     db_path = tmp_path / "whygraph.db"
     monkeypatch.setattr(core, "_config", Config(whygraph_db=db_path))
@@ -103,8 +101,7 @@ def test_rescan_is_idempotent(repo_root: Path) -> None:
     GitCrawler(Progress(), repository=repo).run()
     with get_session() as session:
         first_rows = {
-            row.sha: row.scanned_at
-            for row in session.exec(select(CommitRow)).all()
+            row.sha: row.scanned_at for row in session.exec(select(CommitRow)).all()
         }
 
     # Ensure any newly-generated scanned_at would differ if rows were
@@ -114,8 +111,7 @@ def test_rescan_is_idempotent(repo_root: Path) -> None:
     GitCrawler(Progress(), repository=repo).run()
     with get_session() as session:
         second_rows = {
-            row.sha: row.scanned_at
-            for row in session.exec(select(CommitRow)).all()
+            row.sha: row.scanned_at for row in session.exec(select(CommitRow)).all()
         }
 
     assert first_rows == second_rows
@@ -167,9 +163,7 @@ def test_rescan_does_not_duplicate_file_changes(repo_root: Path) -> None:
     GitCrawler(Progress(), repository=repo).run()
 
     with get_session() as session:
-        count = session.exec(
-            select(func.count(CommitFileChange.id))
-        ).one()
+        count = session.exec(select(func.count(CommitFileChange.id))).one()
     assert count == 3
 
 
@@ -202,9 +196,7 @@ def test_scan_computes_refactor_score_for_boring_commit(tmp_path: Path) -> None:
     repo.mkdir()
 
     def _g(*args: str) -> None:
-        subprocess.run(
-            ["git", "-C", str(repo), *args], check=True, capture_output=True
-        )
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
 
     _g("init", "-q", "-b", "main")
     _g("config", "user.email", "test@example.com")
@@ -240,9 +232,7 @@ def test_scan_backfills_refactor_score_when_file_changes_arrive_late(
     repo.mkdir()
 
     def _g(*args: str) -> None:
-        subprocess.run(
-            ["git", "-C", str(repo), *args], check=True, capture_output=True
-        )
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
 
     _g("init", "-q", "-b", "main")
     _g("config", "user.email", "test@example.com")

@@ -8,6 +8,7 @@ Adds the Phase 3 ``refactor_score`` column on ``commit``. Default 0
 means every existing row is treated as "not boring" until the next scan
 recomputes scores from ``commit_file_change`` rows.
 """
+
 from typing import Sequence, Union
 
 from alembic import op

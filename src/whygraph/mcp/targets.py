@@ -110,8 +110,7 @@ def resolve_target(
     if qualified_name:
         if path or line_start or line_end:
             raise WhyGraphError(
-                "pass either qualified_name OR (path, line_start, line_end), "
-                "not both"
+                "pass either qualified_name OR (path, line_start, line_end), not both"
             )
         try:
             with CodeGraph.for_repository(

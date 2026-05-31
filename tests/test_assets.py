@@ -223,9 +223,7 @@ def test_install_force_overwrites(tmp_path: Path) -> None:
     user_edit = project / ".claude" / "agents" / "x.md"
     user_edit.write_text("USER EDIT", encoding="utf-8")
 
-    result = assets.install_assets(
-        _claude_target(), project, source=src, force=True
-    )
+    result = assets.install_assets(_claude_target(), project, source=src, force=True)
 
     assert user_edit.read_text(encoding="utf-8") == "X-AGENT"
     assert user_edit in result.overwritten
@@ -262,9 +260,7 @@ def test_install_from_packaged_source(tmp_path: Path) -> None:
     result = assets.install_assets(_claude_target(), project)
 
     assert (project / ".claude" / "agents" / "planner.md").is_file()
-    assert (
-        project / ".claude" / "skills" / "rationale" / "SKILL.md"
-    ).is_file()
+    assert (project / ".claude" / "skills" / "rationale" / "SKILL.md").is_file()
     assert (project / ".claude" / "skills" / "pre-edit" / "SKILL.md").is_file()
     # 4 agents + 4 skills = 8 files.
     assert len(result.written) == 8
@@ -317,7 +313,7 @@ def _merge_target() -> agents.AgentTarget:
         scope="project",
         format="json",
         description="ephemeral test target",
-        assets_subdir="ignored",         # source is injected via the source= arg
+        assets_subdir="ignored",  # source is injected via the source= arg
         assets_dest=("dest",),
         assets_merge_files=("merge-me.md",),
     )

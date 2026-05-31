@@ -106,9 +106,7 @@ def test_run_all_argv_path_unchanged() -> None:
 
 def test_run_all_command_path_returns_parsed_list_in_input_order() -> None:
     """A ShellCommand batch returns parser outputs in the same order as input."""
-    results = Shell().run_all(
-        [_EchoCommand("a"), _EchoCommand("b"), _EchoCommand("c")]
-    )
+    results = Shell().run_all([_EchoCommand("a"), _EchoCommand("b"), _EchoCommand("c")])
     assert results == ["a", "b", "c"]
     assert all(isinstance(r, str) for r in results)
 

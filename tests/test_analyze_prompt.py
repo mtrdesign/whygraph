@@ -143,9 +143,7 @@ def test_resolve_mixes_rungs_per_file(tmp_path: Path) -> None:
 
 def test_resolve_synthesis_uses_prefixed_filenames(tmp_path: Path) -> None:
     _write(tmp_path, "comp", "default", "synthesis.system.md", "SYN-SYS")
-    _write(
-        tmp_path, "comp", "default", "synthesis.task.md", "SYN {{DESCRIPTIONS}}"
-    )
+    _write(tmp_path, "comp", "default", "synthesis.task.md", "SYN {{DESCRIPTIONS}}")
 
     prompt = resolve("comp", "synthesis", "openai", "gpt-4o", prompts_dir=tmp_path)
 
@@ -187,8 +185,7 @@ def test_resolve_isolates_components(tmp_path: Path) -> None:
     _write(tmp_path, "comp_a", "default", "task.md", "A-TASK")
 
     assert (
-        resolve("comp_a", "describe", "p", "m", prompts_dir=tmp_path).system
-        == "A-SYS"
+        resolve("comp_a", "describe", "p", "m", prompts_dir=tmp_path).system == "A-SYS"
     )
     with pytest.raises(AnalyzeError):
         resolve("comp_b", "describe", "p", "m", prompts_dir=tmp_path)

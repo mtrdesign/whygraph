@@ -125,16 +125,12 @@ class LlmDescriptor:
         self._describe_prompt = (
             describe_prompt
             if describe_prompt is not None
-            else resolve(
-                _PROMPT_COMPONENT, "describe", client.provider, client.model
-            )
+            else resolve(_PROMPT_COMPONENT, "describe", client.provider, client.model)
         )
         self._synthesis_prompt = (
             synthesis_prompt
             if synthesis_prompt is not None
-            else resolve(
-                _PROMPT_COMPONENT, "synthesis", client.provider, client.model
-            )
+            else resolve(_PROMPT_COMPONENT, "synthesis", client.provider, client.model)
         )
 
     def __repr__(self) -> str:

@@ -271,7 +271,9 @@ def _walk_past_boring(
             # an ignored SHA can't be resolved), bail out cleanly and
             # keep whatever we already have.
             break
-        new_walked = [h for h in hunks if not h.is_uncommitted and h.sha not in seen_shas]
+        new_walked = [
+            h for h in hunks if not h.is_uncommitted and h.sha not in seen_shas
+        ]
         walked.extend(new_walked)
         seen_shas.update(h.sha for h in new_walked)
         new_boring = _boring_shas_in({h.sha for h in new_walked}) - ignored
@@ -406,8 +408,7 @@ def backfill_evidence_descriptions(
     normal = [
         it.commit
         for it in items
-        if it.commit.files_changed <= threshold
-        and it.commit.llm_description is None
+        if it.commit.files_changed <= threshold and it.commit.llm_description is None
     ]
     if not bulk and not normal:
         return

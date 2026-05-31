@@ -87,7 +87,9 @@ def test_complete_omits_system_prompt_flag_when_no_system_message() -> None:
     assert "--system-prompt" not in captured["cmd"]
 
 
-def test_complete_strips_anthropic_api_key_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_complete_strips_anthropic_api_key_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-from-env")
     captured: dict = {}
 
@@ -101,7 +103,9 @@ def test_complete_strips_anthropic_api_key_by_default(monkeypatch: pytest.Monkey
     assert "ANTHROPIC_API_KEY" not in captured["env"]
 
 
-def test_complete_sets_anthropic_api_key_when_provided(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_complete_sets_anthropic_api_key_when_provided(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     captured: dict = {}
 

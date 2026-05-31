@@ -145,7 +145,9 @@ def uninstall_cmd() -> None:
         removed_any = True
 
     console.print(
-        "Auto-rescan hooks uninstalled." if removed_any else "No WhyGraph hooks were installed."
+        "Auto-rescan hooks uninstalled."
+        if removed_any
+        else "No WhyGraph hooks were installed."
     )
 
 
@@ -163,7 +165,9 @@ def status_cmd() -> None:
 
     console.print(f"Hooks dir: {hooks_dir}")
     helper = project_root / HELPER_RELPATH
-    console.print(f"Helper:    {'present' if helper.exists() else 'missing'} ({helper})")
+    console.print(
+        f"Helper:    {'present' if helper.exists() else 'missing'} ({helper})"
+    )
     for name in HOOK_NAMES:
         hp = hooks_dir / name
         if hp.exists() and SENTINEL in hp.read_text():

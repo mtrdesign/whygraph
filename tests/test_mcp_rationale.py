@@ -85,9 +85,7 @@ def test_rationale_brief_returns_card(
 ) -> None:
     _seed_two_commits(temp_git_repo)
     monkeypatch.chdir(temp_git_repo)
-    monkeypatch.setattr(
-        "whygraph.mcp.rationale.RationaleGenerator", _FakeGenerator
-    )
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _FakeGenerator)
 
     result = whygraph_rationale_brief(path="sample.py", line_start=1, line_end=3)
 
@@ -108,9 +106,7 @@ def test_rationale_brief_errors_without_evidence(
 ) -> None:
     # No commits seeded — the blamed SHAs map to nothing in the DB.
     monkeypatch.chdir(temp_git_repo)
-    monkeypatch.setattr(
-        "whygraph.mcp.rationale.RationaleGenerator", _FakeGenerator
-    )
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _FakeGenerator)
 
     with pytest.raises(WhyGraphError, match="no historical evidence"):
         whygraph_rationale_brief(path="sample.py", line_start=1, line_end=3)
@@ -137,9 +133,7 @@ def test_rationale_brief_wraps_generator_failure(
         ) -> Rationale:
             raise AnalyzeError("model unavailable")
 
-    monkeypatch.setattr(
-        "whygraph.mcp.rationale.RationaleGenerator", _FailingGenerator
-    )
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _FailingGenerator)
 
     with pytest.raises(WhyGraphError, match="rationale generation failed"):
         whygraph_rationale_brief(path="sample.py", line_start=1, line_end=3)

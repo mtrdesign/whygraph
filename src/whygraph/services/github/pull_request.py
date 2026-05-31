@@ -140,9 +140,7 @@ class PullRequest:
         author = node.get("author") or {}
         label_nodes = ((node.get("labels") or {}).get("nodes")) or []
         commit_nodes = ((node.get("commits") or {}).get("nodes")) or []
-        closing_nodes = (
-            (node.get("closingIssuesReferences") or {}).get("nodes")
-        ) or []
+        closing_nodes = ((node.get("closingIssuesReferences") or {}).get("nodes")) or []
         comment_nodes = ((node.get("comments") or {}).get("nodes")) or []
 
         state_raw = str(node.get("state", "")).lower()

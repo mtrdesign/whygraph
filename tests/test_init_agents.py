@@ -395,9 +395,7 @@ def test_init_agent_claude_default_skips_existing(stub_init, tmp_path: Path) -> 
         assert text == "USER EDIT"
 
 
-def test_init_agent_claude_merges_existing_claude_md(
-    stub_init, tmp_path: Path
-) -> None:
+def test_init_agent_claude_merges_existing_claude_md(stub_init, tmp_path: Path) -> None:
     """User-authored .claude/CLAUDE.md is preserved; the WhyGraph block appends."""
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):

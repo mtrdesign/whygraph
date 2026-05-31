@@ -46,6 +46,7 @@ def ensure_codegraph_db(
     project_root: Path,
     *,
     image: str | None = None,
+    capture: bool = False,
 ) -> Path:
     """Idempotently materialize ``<project_root>/.codegraph/codegraph.db``.
 
@@ -61,6 +62,11 @@ def ensure_codegraph_db(
     image : str, optional
         Docker image tag for the fallback path. Defaults to
         :data:`DEFAULT_CODEGRAPH_IMAGE`.
+    capture : bool, optional
+        When ``True``, capture the subprocess output instead of letting it
+        stream to the terminal (so it can't corrupt a concurrent progress
+        display). The captured tail is folded into the error message on
+        failure. Default ``False`` (stream live).
 
     Returns
     -------
@@ -78,7 +84,7 @@ def ensure_codegraph_db(
     if db_path.exists():
         return db_path
 
-    _run_codegraph(project_root, ["init", "-i"], image=image)
+    _run_codegraph(project_root, ["init", "-i"], image=image, capture=capture)
 
     if not db_path.exists():
         raise CodeGraphBootstrapError(
@@ -92,6 +98,7 @@ def refresh_codegraph_index(
     project_root: Path,
     *,
     image: str | None = None,
+    capture: bool = False,
 ) -> Path:
     """Bring ``<project_root>/.codegraph/codegraph.db`` up to date.
 
@@ -107,6 +114,11 @@ def refresh_codegraph_index(
     image : str, optional
         Docker image tag for the fallback path. Defaults to
         :data:`DEFAULT_CODEGRAPH_IMAGE`.
+    capture : bool, optional
+        When ``True``, capture the subprocess output instead of streaming
+        it (see :func:`ensure_codegraph_db`). ``whygraph scan`` passes this
+        so the refresh can run concurrently under a live progress display.
+        Default ``False``.
 
     Returns
     -------
@@ -122,9 +134,9 @@ def refresh_codegraph_index(
     project_root = project_root.resolve()
     db_path = project_root / CODEGRAPH_DB_RELPATH
     if not db_path.exists():
-        return ensure_codegraph_db(project_root, image=image)
+        return ensure_codegraph_db(project_root, image=image, capture=capture)
 
-    _run_codegraph(project_root, ["sync", "-q"], image=image)
+    _run_codegraph(project_root, ["sync", "-q"], image=image, capture=capture)
     return db_path
 
 
@@ -133,6 +145,7 @@ def _run_codegraph(
     args: list[str],
     *,
     image: str | None,
+    capture: bool = False,
 ) -> None:
     """Run a ``codegraph`` subcommand against ``project_root``.
 
@@ -150,6 +163,10 @@ def _run_codegraph(
     image : str or None
         Docker image tag for the fallback path; ``None`` uses
         :data:`DEFAULT_CODEGRAPH_IMAGE`.
+    capture : bool, optional
+        When ``True``, capture stdout/stderr rather than streaming them to
+        the terminal, and fold the captured tail into the error message on
+        failure. Default ``False`` (stream live).
 
     Raises
     ------
@@ -187,8 +204,14 @@ def _run_codegraph(
         )
 
     try:
-        subprocess.run(cmd, check=True, cwd=cwd)
+        subprocess.run(cmd, check=True, cwd=cwd, capture_output=capture, text=capture)
     except subprocess.CalledProcessError as exc:
+        if capture:
+            tail = (exc.stderr or exc.stdout or "").strip()
+            detail = f"\n{tail}" if tail else ""
+            raise CodeGraphBootstrapError(
+                f"`codegraph {label}` failed (exit {exc.returncode}){detail}"
+            ) from exc
         raise CodeGraphBootstrapError(
             f"`codegraph {label}` failed (exit {exc.returncode}) — see output above"
         ) from exc

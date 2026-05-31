@@ -12,7 +12,7 @@ from rich.progress import Progress
 from rich.table import Table
 from rich.text import Text
 
-from whygraph.scan import Crawler, GitCrawler, GitHubCrawler
+from whygraph.scan import CodeGraphCrawler, Crawler, GitCrawler, GitHubCrawler
 
 from ..console import console
 
@@ -44,12 +44,12 @@ _T = TypeVar("_T")
     "refresh_codegraph",
     default=True,
     help=(
-        "Refresh the CodeGraph index before crawling — `codegraph sync` when "
-        "an index exists, `codegraph init -i` on first run. Uses the local "
-        "`codegraph` binary if present, else runs it inside the WhyGraph "
-        "Docker image. The crawl itself doesn't need CodeGraph (only the MCP "
-        "rationale/evidence tools do), so a failure here warns rather than "
-        "aborting. Default: on."
+        "Refresh the CodeGraph index concurrently with the crawl — "
+        "`codegraph sync` when an index exists, `codegraph init -i` on first "
+        "run. Uses the local `codegraph` binary if present, else runs it "
+        "inside the WhyGraph Docker image. The crawl itself doesn't need "
+        "CodeGraph (only the MCP rationale/evidence tools do), so a failure "
+        "here warns rather than aborting. Default: on."
     ),
 )
 @click.option(
@@ -122,13 +122,19 @@ def scan_cmd(
         remote_enabled=remote,
     )
 
-    # CodeGraph refresh runs before the crawl and outside the Progress
-    # live-display (it streams its own output on first index). It's
-    # best-effort: the crawl doesn't depend on it.
-    if refresh_codegraph:
-        _refresh_codegraph(repository.root, image=codegraph_image)
-
     with Progress() as progress:
+        # CodeGraph refresh — runs concurrently as its own crawler. It
+        # writes .codegraph/ and has no data dependency on the WhyGraph DB,
+        # so it overlaps the entire crawl (started with phase 1, joined
+        # last). Best-effort: failures land on .warning, not .error.
+        codegraph_crawler = (
+            CodeGraphCrawler(
+                progress, project_root=repository.root, image=codegraph_image
+            )
+            if refresh_codegraph
+            else None
+        )
+
         # Phase 1 — source crawlers, run concurrently.
         phase1: list[Crawler] = [GitCrawler(progress, repository=repository)]
         if github_client is not None:
@@ -148,6 +154,8 @@ def scan_cmd(
                 )
             )
 
+        if codegraph_crawler is not None:
+            codegraph_crawler.start()
         for c in phase1:
             c.start()
         for c in phase1:
@@ -156,8 +164,15 @@ def scan_cmd(
             c.start()
         for c in phase2:
             c.join()
+        if codegraph_crawler is not None:
+            codegraph_crawler.join()
+
+    if codegraph_crawler is not None and codegraph_crawler.warning is not None:
+        console.print(Text(codegraph_crawler.warning, style="yellow"))
 
     crawlers = phase1 + phase2
+    if codegraph_crawler is not None:
+        crawlers.append(codegraph_crawler)
     failed = [c for c in crawlers if c.error is not None]
     for c in failed:
         click.echo(f"crawler {c.name!r} failed: {c.error}", err=True)
@@ -194,34 +209,6 @@ def _apply_github_token(config: "Config") -> None:
     )
     if token and not os.environ.get("GH_TOKEN"):
         os.environ["GH_TOKEN"] = token
-
-
-def _refresh_codegraph(project_root: Path, *, image: str | None) -> None:
-    """Bring the CodeGraph index up to date before the crawl.
-
-    Best-effort: the git / GitHub / analyze crawl does not depend on the
-    CodeGraph index (only the MCP ``whygraph_rationale_brief`` and
-    ``whygraph_evidence_for`` tools read it), so a CodeGraph failure is
-    reported as a warning and the scan continues.
-
-    Parameters
-    ----------
-    project_root : Path
-        Repository root whose ``.codegraph/`` index is refreshed.
-    image : str or None
-        Docker image override for the fallback path; ``None`` uses the
-        pinned default. Ignored when a local ``codegraph`` binary is found.
-    """
-    from whygraph.services.codegraph import (
-        CodeGraphBootstrapError,
-        refresh_codegraph_index,
-    )
-
-    console.print("Refreshing CodeGraph index…")
-    try:
-        refresh_codegraph_index(project_root, image=image)
-    except CodeGraphBootstrapError as exc:
-        console.print(Text(f"CodeGraph refresh skipped — {exc}", style="yellow"))
 
 
 def _select_github_client(

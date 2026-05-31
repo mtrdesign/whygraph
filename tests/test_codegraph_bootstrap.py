@@ -45,10 +45,16 @@ def _capturing_run(
     """Fake ``subprocess.run`` recording ``cmd`` / ``cwd`` and faking success."""
 
     def fake_run(
-        cmd: list[str], *, check: bool = True, cwd: Path | None = None
+        cmd: list[str],
+        *,
+        check: bool = True,
+        cwd: Path | None = None,
+        capture_output: bool = False,
+        text: bool = False,
     ) -> subprocess.CompletedProcess:
         captured["cmd"] = cmd
         captured["cwd"] = cwd
+        captured["capture_output"] = capture_output
         if create_db_at is not None:
             _make_existing_db(create_db_at)
         return subprocess.CompletedProcess(args=cmd, returncode=0)
@@ -188,7 +194,12 @@ def test_raises_when_command_exits_nonzero(
     monkeypatch.setattr(bootstrap.shutil, "which", _which("codegraph"))
 
     def fake_run(
-        cmd: list[str], *, check: bool = True, cwd: Path | None = None
+        cmd: list[str],
+        *,
+        check: bool = True,
+        cwd: Path | None = None,
+        capture_output: bool = False,
+        text: bool = False,
     ) -> subprocess.CompletedProcess:
         raise subprocess.CalledProcessError(returncode=7, cmd=cmd)
 
@@ -260,3 +271,58 @@ def test_refresh_sync_via_docker_fallback(
     assert "codegraph" in cmd
     assert "sync" in cmd and "-q" in cmd
     assert DEFAULT_CODEGRAPH_IMAGE in cmd
+
+
+# --------------------------------------------------------------------------- #
+# capture=True — used by the concurrent CodeGraphCrawler under rich.Progress
+# --------------------------------------------------------------------------- #
+
+
+def test_capture_true_passes_capture_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _make_existing_db(tmp_path)
+    monkeypatch.setattr(bootstrap.shutil, "which", _which("codegraph"))
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(bootstrap.subprocess, "run", _capturing_run(captured))
+
+    refresh_codegraph_index(tmp_path, capture=True)
+
+    assert captured["capture_output"] is True
+
+
+def test_capture_default_streams_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _make_existing_db(tmp_path)
+    monkeypatch.setattr(bootstrap.shutil, "which", _which("codegraph"))
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(bootstrap.subprocess, "run", _capturing_run(captured))
+
+    refresh_codegraph_index(tmp_path)
+
+    assert captured["capture_output"] is False
+
+
+def test_capture_true_folds_stderr_into_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _make_existing_db(tmp_path)
+    monkeypatch.setattr(bootstrap.shutil, "which", _which("codegraph"))
+
+    def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = True,
+        cwd: Path | None = None,
+        capture_output: bool = False,
+        text: bool = False,
+    ) -> subprocess.CompletedProcess:
+        raise subprocess.CalledProcessError(
+            returncode=3, cmd=cmd, stderr="boom: index corrupt"
+        )
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", fake_run)
+
+    with pytest.raises(CodeGraphBootstrapError, match="boom: index corrupt"):
+        refresh_codegraph_index(tmp_path, capture=True)

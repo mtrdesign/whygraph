@@ -236,10 +236,11 @@ def stub_init(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
     * ``_ensure_db_initialized`` — the DB layer is mid-rewrite and the
       tests don't care about it.
-    * ``_run_preflight`` — preflight probes the host (git/docker/gh/LLM)
-      and would fail or noisily warn in CI; tests focus on agent wiring.
-    * ``_ensure_codegraph_bootstrapped`` — would otherwise try to run
-      Docker; the codegraph bootstrap is covered by ``test_codegraph_bootstrap``.
+    * ``_run_preflight`` — preflight probes the host (git/gh/LLM) and
+      would fail or noisily warn in CI; tests focus on agent wiring.
+
+    CodeGraph is not touched by ``init`` (it's indexed by ``whygraph
+    scan``), so there is nothing else to stub here.
     """
     fake_db = tmp_path / ".whygraph" / "whygraph.db"
 
@@ -253,11 +254,7 @@ def stub_init(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     )
     monkeypatch.setattr(
         "whygraph.cli.commands.init._run_preflight",
-        lambda project_root, *, with_codegraph: None,
-    )
-    monkeypatch.setattr(
-        "whygraph.cli.commands.init._ensure_codegraph_bootstrapped",
-        lambda project_root, *, image: None,
+        lambda project_root: None,
     )
     return fake_db
 

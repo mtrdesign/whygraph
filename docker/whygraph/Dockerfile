@@ -19,9 +19,9 @@
 
 FROM python:3.12-slim
 
-# Pinned the same way as docker/codegraph/Dockerfile so the version can be
-# advanced without editing the body. Defaults to `latest` for local
-# convenience; CI/publish should pass an explicit pin.
+# Pinned via build arg so the version can be advanced without editing the
+# body. Defaults to `latest` for local convenience; CI/publish should pass
+# an explicit pin.
 ARG CODEGRAPH_VERSION=latest
 ARG NODE_MAJOR=22
 

@@ -75,3 +75,11 @@ def test_alembic_upgrade_on_empty_db(_isolate_config_and_engine: Path) -> None:
 
     assert db_path.exists()
     assert _table_names(db_path) == SQLMODEL_TABLES | {"alembic_version"}
+
+
+def test_connect_pragmas_applied(_isolate_config_and_engine: Path) -> None:
+    """The connect listener enables WAL + a busy timeout for concurrent writers."""
+    engine = db_engine.get_engine()
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql("PRAGMA journal_mode").scalar().lower() == "wal"
+        assert conn.exec_driver_sql("PRAGMA busy_timeout").scalar() == 5000

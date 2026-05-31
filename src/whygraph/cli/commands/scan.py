@@ -60,10 +60,22 @@ _T = TypeVar("_T")
         "(ignored when a local `codegraph` binary is found)."
     ),
 )
+@click.option(
+    "--remote/--no-remote",
+    "remote",
+    default=True,
+    help=(
+        "Crawl the source-control remote (GitHub PRs / issues) per "
+        "`[scan].provider`. `--no-remote` skips it for a fast, offline, "
+        "token-free scan — git history + CodeGraph only. Used by the "
+        "auto-rescan git hooks (`whygraph hooks install`). Default: on."
+    ),
+)
 def scan_cmd(
     no_llm_descriptions: bool,
     refresh_codegraph: bool,
     codegraph_image: str | None,
+    remote: bool,
 ) -> None:
     """Run the source crawlers, then describe each commit with the LLM."""
     # Lazy-imported so that --help and other lightweight CLI surfaces
@@ -77,9 +89,12 @@ def scan_cmd(
 
     db_path = ensure_initialized()
     config = get_config()
-    _apply_github_token(config)
     repository = Repository(Path.cwd(), origin_remote=config.scan_remote)
-    github_client = _select_github_client(config.scan_provider, repository)
+    if remote:
+        _apply_github_token(config)
+        github_client = _select_github_client(config.scan_provider, repository)
+    else:
+        github_client = None
 
     if no_llm_descriptions:
         # Bypass the LlmDescriptor probe entirely so a broken `[analyze]`
@@ -102,6 +117,7 @@ def scan_cmd(
         db_path=db_path,
         analyze_skip=analyze_skip,
         codegraph_enabled=refresh_codegraph,
+        remote_enabled=remote,
     )
 
     # CodeGraph refresh runs before the crawl and outside the Progress
@@ -249,6 +265,7 @@ def _render_scan_panel(
     db_path: Path,
     analyze_skip: str | None,
     codegraph_enabled: bool,
+    remote_enabled: bool,
 ) -> None:
     """Print a summary panel of what the upcoming scan will collect.
 
@@ -286,7 +303,9 @@ def _render_scan_panel(
         ("Git commits", str(git_count) if git_count is not None else "unavailable"),
     ]
     if github_client is None:
-        rows.append(("GitHub", Text(_github_skip_reason(config), style="yellow")))
+        rows.append(
+            ("GitHub", Text(_github_skip_reason(config, remote_enabled), style="yellow"))
+        )
     else:
         rows.append(
             ("Pull requests", str(pr_count) if pr_count is not None else "unavailable")
@@ -322,13 +341,17 @@ def _render_scan_panel(
     console.print()
 
 
-def _github_skip_reason(config: "Config") -> str:
-    """Explain why the GitHub crawl is being skipped, per ``[scan].provider``.
+def _github_skip_reason(config: "Config", remote_enabled: bool = True) -> str:
+    """Explain why the GitHub crawl is being skipped.
 
-    Called only when no GitHub client was resolved. ``"off"`` means the
-    user disabled remote crawling; otherwise the configured remote did
-    not resolve to a GitHub URL.
+    Called only when no GitHub client was resolved. ``--no-remote`` takes
+    precedence (the crawl was disabled for this run); otherwise the reason
+    comes from ``[scan].provider``: ``"off"`` means the user disabled
+    remote crawling, and ``"github"`` / ``"auto"`` mean the configured
+    remote did not resolve to a GitHub URL.
     """
+    if not remote_enabled:
+        return "skipped — --no-remote"
     provider = config.scan_provider
     if provider == "off":
         return "skipped — source control disabled ([scan].provider = off)"

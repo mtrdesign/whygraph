@@ -28,6 +28,8 @@ provider = "anthropic"        # which [llm.*] adapter to use
 # large_commit_file_count = 30  # commits touching more files than this are described
                               # per-file on demand (not whole-diff) — keeps a bulk
                               # import / squash commit from costing a repo-wide pass
+# pr_origin_min_commits = 5   # recover a squash-merged PR's original commits once it
+                              # collapsed >= this many (file-bulk squashes recover too)
 # timeout_sec = 60            # per-call timeout; default: the adapter's own
 
 [rationale]

@@ -247,6 +247,74 @@ class GitDiffTreeFileChangesCmd(ShellCommand[tuple[FileChange, ...]]):
         return FileChange.from_diff_tree(result.stdout)
 
 
+class GitFetchRefsCmd(ShellCommand[None]):
+    """``git fetch <remote> <refspec...>`` — fetch one or more refspecs in one call.
+
+    Carries every refspec in a single ``git fetch`` invocation so the
+    squash-origin enricher pins all its candidate PR refs with one network
+    round-trip rather than one fetch per PR. The parser returns ``None`` —
+    the command is run for its effect (objects + refs land in the local
+    object store), not its stdout.
+
+    Parameters
+    ----------
+    refspecs : tuple[str, ...]
+        One or more ``<src>:<dst>`` refspecs, e.g.
+        ``"refs/pull/12/head:refs/whygraph/pull/12"``. Passed as separate
+        argv tokens, so no shell quoting is involved.
+    remote : str, optional
+        Name of the remote to fetch from. Default ``"origin"``.
+    """
+
+    def __init__(self, *refspecs: str, remote: str = "origin") -> None:
+        self.refspecs = refspecs
+        self.remote = remote
+
+    def argv(self) -> list[str]:
+        return ["git", "fetch", "--no-tags", self.remote, *self.refspecs]
+
+    def parse(self, result: CompletedProcess[str]) -> None:
+        return None
+
+
+class GitLogCommitCmd(ShellCommand[Commit]):
+    """``git log -1 --shortstat --pretty=format:Commit.LOG_FORMAT <ref>``.
+
+    Reads a *single* commit's full metadata (message body + diff stats)
+    and parses it via :meth:`Commit.from_git_log`. The ``-1`` is load
+    bearing: ``git log <ref>`` without it walks ``ref`` and all its
+    ancestors, so the cap restricts output to just ``ref``.
+
+    Used by the squash-origin enricher to materialize a recovered PR
+    commit from its oid once the object is local, reusing the same parser
+    as the main history walk rather than inventing a second one.
+
+    Parameters
+    ----------
+    ref : str
+        Any commit-ish ``git`` accepts (typically a full oid).
+    """
+
+    def __init__(self, ref: str) -> None:
+        self.ref = ref
+
+    def argv(self) -> list[str]:
+        return [
+            "git",
+            "log",
+            "-1",
+            f"--pretty=format:{Commit.LOG_FORMAT}",
+            "--shortstat",
+            self.ref,
+        ]
+
+    def parse(self, result: CompletedProcess[str]) -> Commit:
+        for block in result.stdout.split("\x1e"):
+            if block.strip():
+                return Commit.from_git_log(block)
+        raise ValueError(f"no commit record in git log output for {self.ref!r}")
+
+
 class GitLogShortstatCmd(ShellCommand[Iterator[Commit]]):
     """``git log --shortstat --pretty=format:Commit.LOG_FORMAT <ref>``.
 

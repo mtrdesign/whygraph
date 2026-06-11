@@ -243,6 +243,12 @@ class AnalyzeConfig:
     timeout_sec : int or None
         Per-call timeout forwarded into :class:`CompletionRequest`.
         ``None`` (default) defers to the bound adapter's default.
+    pr_origin_min_commits : int
+        Commit-rich half of the squash-merge enrichment gate
+        (:mod:`whygraph.scan.pr_origin_enricher`). A squash-merged PR has
+        its original feature-branch commits recovered when it collapsed at
+        least this many commits (the file-bulk half reuses
+        ``large_commit_file_count``). Must be ``>= 1``.
     """
 
     provider: str = "anthropic"
@@ -250,6 +256,7 @@ class AnalyzeConfig:
     max_diff_chars: int = 50_000
     large_commit_file_count: int = 30
     timeout_sec: int | None = None
+    pr_origin_min_commits: int = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -463,9 +470,10 @@ class Config:
             If ``log_level`` is not a known :class:`LogLevel` name, if
             ``scan_max_workers`` is less than ``1``, if ``scan_provider``
             is not one of ``"off"`` / ``"github"`` / ``"auto"``, if
-            ``analyze.max_diff_chars`` or ``analyze.large_commit_file_count``
-            is less than ``1``, or if any of the ``rationale`` PR-rendering
-            caps (``pr_roster_max_commits``, ``pr_discussion_max_comments``,
+            ``analyze.max_diff_chars``, ``analyze.large_commit_file_count``
+            or ``analyze.pr_origin_min_commits`` is less than ``1``, or if
+            any of the ``rationale`` PR-rendering caps
+            (``pr_roster_max_commits``, ``pr_discussion_max_comments``,
             ``pr_comment_max_chars``) is less than ``1``.
         """
         try:
@@ -490,6 +498,11 @@ class Config:
             raise ConfigError(
                 "analyze.large_commit_file_count must be >= 1, "
                 f"got {self.analyze.large_commit_file_count}"
+            )
+        if self.analyze.pr_origin_min_commits < 1:
+            raise ConfigError(
+                "analyze.pr_origin_min_commits must be >= 1, "
+                f"got {self.analyze.pr_origin_min_commits}"
             )
         if self.rationale.pr_roster_max_commits < 1:
             raise ConfigError(

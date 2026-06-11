@@ -12,7 +12,13 @@ from rich.progress import Progress
 from rich.table import Table
 from rich.text import Text
 
-from whygraph.scan import CodeGraphCrawler, Crawler, GitCrawler, GitHubCrawler
+from whygraph.scan import (
+    CodeGraphCrawler,
+    Crawler,
+    GitCrawler,
+    GitHubCrawler,
+    PROriginEnricher,
+)
 
 from ..console import console
 
@@ -73,11 +79,25 @@ _T = TypeVar("_T")
         "auto-rescan git hooks (`whygraph hooks install`). Default: on."
     ),
 )
+@click.option(
+    "--pr-origins/--no-pr-origins",
+    "enrich_pr_origins",
+    default=True,
+    help=(
+        "Recover a squash-merged PR's original feature-branch commits — "
+        "one targeted `git fetch` of the gated PRs' heads, persisted as "
+        "`commit` rows flagged off the default-branch walk so they enrich "
+        "evidence without polluting area-history / refactor-walk. Needs "
+        "the network, so it always runs in the remote phase and is skipped "
+        "under `--no-remote`. Default: on."
+    ),
+)
 def scan_cmd(
     no_llm_descriptions: bool,
     refresh_codegraph: bool,
     codegraph_image: str | None,
     remote: bool,
+    enrich_pr_origins: bool,
 ) -> None:
     """Run the source crawlers, then describe each commit with the LLM."""
     # Lazy-imported so that --help and other lightweight CLI surfaces
@@ -121,6 +141,7 @@ def scan_cmd(
         analyze_skip=analyze_skip,
         codegraph_enabled=refresh_codegraph,
         remote_enabled=remote,
+        pr_origins_enabled=enrich_pr_origins and github_client is not None,
     )
 
     scan_log_path = db_path.parent / "scan.log"
@@ -142,8 +163,11 @@ def scan_cmd(
         if github_client is not None:
             phase1.append(GitHubCrawler(progress, client=github_client))
 
-        # Phase 2 — the analyzer, started only once phase 1 has joined
-        # (it reads the commits phase 1 persisted).
+        # Phase 2 — started only once phase 1 has joined (it reads the
+        # commits + PRs phase 1 persisted). The analyzer and the PR-origin
+        # enricher run concurrently: analyze only touches main-walk commits,
+        # the enricher only inserts new on_default_branch=0 rows, so they
+        # never contend over the same commit row.
         phase2: list[Crawler] = []
         if descriptor is not None:
             phase2.append(
@@ -152,6 +176,18 @@ def scan_cmd(
                     repository=repository,
                     descriptor=descriptor,
                     max_workers=config.scan_max_workers,
+                    large_commit_file_count=config.analyze.large_commit_file_count,
+                )
+            )
+        # The enricher needs PR rows (the GitHub crawler ran) and the
+        # network for its fetch — so it is gated on a resolved client, which
+        # is itself None under --no-remote.
+        if enrich_pr_origins and github_client is not None:
+            phase2.append(
+                PROriginEnricher(
+                    progress,
+                    repository=repository,
+                    min_commits=config.analyze.pr_origin_min_commits,
                     large_commit_file_count=config.analyze.large_commit_file_count,
                 )
             )
@@ -257,6 +293,7 @@ def _render_scan_panel(
     analyze_skip: str | None,
     codegraph_enabled: bool,
     remote_enabled: bool,
+    pr_origins_enabled: bool,
 ) -> None:
     """Print a summary panel of what the upcoming scan will collect.
 
@@ -316,6 +353,14 @@ def _render_scan_panel(
             ("LLM descriptions", Text(f"skipped — {analyze_skip}", style="yellow"))
         )
     rows.append(("Worker threads", str(config.scan_max_workers)))
+    rows.append(
+        (
+            "PR commit recovery",
+            "recover squash-merged PR commits"
+            if pr_origins_enabled
+            else Text("skipped", style="yellow"),
+        )
+    )
 
     grid = Table.grid(padding=(0, 3))
     grid.add_column(style="bold cyan", justify="right", no_wrap=True)

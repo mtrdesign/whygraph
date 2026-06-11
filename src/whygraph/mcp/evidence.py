@@ -284,7 +284,14 @@ def _walk_past_boring(
 
 
 def _boring_shas_in(shas: set[str]) -> set[str]:
-    """Return the subset of ``shas`` whose ``refactor_score`` is boring."""
+    """Return the subset of ``shas`` whose ``refactor_score`` is boring.
+
+    Restricted to default-branch commits (``on_default_branch == 1``):
+    refactor-walk is a main-walk-only notion, and recovered PR-origin
+    commits (``0``) must never drive a walk-past — they carry no
+    ``commit_file_change`` rows and default ``refactor_score=0``, so the
+    guard is belt-and-suspenders against a future broad consumer.
+    """
     if not shas:
         return set()
     with get_session() as session:
@@ -292,6 +299,7 @@ def _boring_shas_in(shas: set[str]) -> set[str]:
             select(Commit.sha)
             .where(col(Commit.sha).in_(shas))
             .where(col(Commit.refactor_score) >= BORING_THRESHOLD)
+            .where(col(Commit.on_default_branch) == 1)
         ).all()
     return set(rows)
 

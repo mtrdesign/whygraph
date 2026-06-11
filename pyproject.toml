@@ -36,3 +36,7 @@ line-length = 88
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.8"]
+docs = [
+    "mkdocs-material[imaging]>=9.5",                   # [imaging] → cairosvg + pillow for social cards
+    "mkdocs-git-revision-date-localized-plugin>=1.2",  # per-page "last updated" dates
+]

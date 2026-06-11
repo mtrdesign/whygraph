@@ -1,0 +1,51 @@
+name: docs
+
+# Builds the Material for MkDocs site and deploys it to GitHub Pages.
+# Pages "Source" must be set to "GitHub Actions" once in repo Settings.
+on:
+  push:
+    branches: [main]
+    paths:                       # only rebuild when docs inputs change
+      - docs/**
+      - mkdocs.yml
+      - .github/workflows/docs.yml
+      - pyproject.toml
+  workflow_dispatch:             # allow manual rebuilds
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:                     # never run two deploys at once
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0         # full history → correct "last updated" dates
+      - name: Install Cairo/Pango for social cards
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev libfreetype6-dev libffi-dev \
+            libjpeg-dev libpng-dev libz-dev libpango-1.0-0 libpangocairo-1.0-0
+      - uses: astral-sh/setup-uv@v5
+        with: { enable-cache: true }
+      - run: uv sync --group docs
+      - run: uv run mkdocs build --strict   # CI=true ⇒ social cards generate; --strict fails on broken links
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: site }
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,99 @@
+site_name: WhyGraph
+site_description: Rationale layer over CodeGraph — explains why code exists, not just what it does.
+site_url: https://mtrdesign.github.io/whygraph/   # project-pages subpath (also drives social cards)
+repo_url: https://github.com/mtrdesign/whygraph
+repo_name: mtrdesign/whygraph
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; MTR Design
+
+theme:
+  name: material
+  language: en
+  icon:
+    repo: fontawesome/brands/github
+    logo: material/graph-outline      # built-in icon as logo until a brand asset exists
+  features:
+    - navigation.tabs                 # top-level sections as tabs
+    - navigation.tabs.sticky          # tabs stay pinned on scroll
+    - navigation.sections             # group pages in the sidebar
+    - navigation.indexes              # section landing pages (the section title is itself a page)
+    - navigation.top                  # back-to-top button
+    - navigation.instant              # SPA-like instant nav
+    - navigation.instant.progress     # top loading bar on navigation
+    - navigation.tracking             # URL tracks the scrolled-to anchor
+    - navigation.footer               # prev/next footer links
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy               # copy button on code blocks
+    - content.code.annotate           # annotated code blocks
+    - content.tabs.link               # linked content tabs (install variants, agents)
+    - content.tooltips                # rich hover tooltips
+    - announce.dismiss                # dismissible announcement bar
+  palette:                            # light/dark toggle
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle: { icon: material/brightness-7, name: Switch to dark mode }
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle: { icon: material/brightness-4, name: Switch to light mode }
+
+extra_css:
+  - stylesheets/extra.css             # near-empty hook for future brand tuning
+
+markdown_extensions:
+  - admonition                        # note/warning/tip callouts
+  - attr_list                         # required for grid-card homepage
+  - md_in_html                        # required for grid-card homepage
+  - tables
+  - toc: { permalink: true }
+  - pymdownx.highlight: { anchor_linenums: true }
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:             # required for mermaid diagrams
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed: { alternate_style: true }   # tabbed install/agent variants
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+plugins:
+  - search
+  - social:                           # Open Graph link-preview cards
+      cards: !ENV [CI, false]         # generate only in CI (needs Cairo/Pango); skip locally
+  - git-revision-date-localized:      # per-page "last updated" dates
+      enable_creation_date: true
+      type: timeago
+      fallback_to_build_date: true    # don't fail --strict on uncommitted pages
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - getting-started/index.md
+      - Installation: getting-started/installation.md
+      - Quickstart: getting-started/quickstart.md
+  - User Guide:
+      - guide/index.md
+      - Concepts: guide/concepts.md
+      - Scanning your repo: guide/scanning.md
+      - Wiring your editor: guide/editors.md
+      - Using WhyGraph (MCP): guide/mcp-usage.md
+  - Docker & Self-Hosting:
+      - deploy/index.md
+      - Run with Docker: deploy/docker.md
+      - WhyGraph as a service: deploy/service.md
+  - Reference:
+      - reference/index.md
+      - CLI: reference/cli.md
+      - MCP surface: reference/mcp.md
+      - Configuration: reference/configuration.md
+      - Source control providers: reference/providers.md
+  - Roadmap: roadmap.md

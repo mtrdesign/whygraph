@@ -26,3 +26,9 @@ whygraph.toml
 
 # Local scratch space for in-progress plan markdown (not version-controlled).
 plans/
+
+# MkDocs build output (the site is built and deployed by CI, never committed).
+site/
+
+# Material social-plugin font/image cache.
+.cache/

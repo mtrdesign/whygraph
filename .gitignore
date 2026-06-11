@@ -29,3 +29,6 @@ plans/
 
 # MkDocs build output (the site is built and deployed by CI, never committed).
 site/
+
+# Material social-plugin font/image cache.
+.cache/

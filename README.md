@@ -316,8 +316,6 @@ uv run whygraph version       # CLI sanity check
 uv run whygraph-mcp           # launch MCP server on stdio
 ```
 
-If `uv` fails with `UnknownIssuer` SSL errors off-VPN, prefix with `SSL_CERT_FILE= ` (works around a corp-only cert bundle) — this applies to `make` targets too, e.g. `SSL_CERT_FILE= make sync`.
-
 A `Makefile` wraps the common dev tasks; run `make` to list them — `make sync`, `make test`, `make scan`, `make db` / `make db-down`, `make inspect`.
 
 ### Browse the databases

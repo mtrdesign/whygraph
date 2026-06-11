@@ -23,3 +23,6 @@ build/
 
 # Per-repo WhyGraph config — holds local LLM API keys (template: whygraph.example.toml).
 whygraph.toml
+
+# Local scratch space for in-progress plan markdown (not version-controlled).
+plans/

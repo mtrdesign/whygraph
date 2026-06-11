@@ -1,7 +1,4 @@
 # WhyGraph dev tasks. Run `make` (or `make help`) to list targets.
-#
-# If `uv` or `npx` fail with `UnknownIssuer` SSL errors off-VPN, run e.g.
-# `SSL_CERT_FILE= make sync` — make propagates the empty var into the recipe.
 
 .DEFAULT_GOAL := help
 

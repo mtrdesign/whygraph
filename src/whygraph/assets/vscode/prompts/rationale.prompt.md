@@ -18,7 +18,7 @@ Parse the user's input as `<target> [--force]`:
 
 If no target was provided, respond with: `Usage: /rationale <qualified_name | path:line_start-line_end> [--force]` and stop.
 
-Otherwise call the MCP tool `whygraph_rationale_brief` with those arguments, then present the result verbatim. The tool returns a structured object with `purpose`, `why`, `constraints[]`, `tradeoffs[]`, `risks[]`, `confidence`, `evidence_count`, and `cached`. Render it as readable markdown — do not paraphrase or editorialise the rationale fields themselves.
+Otherwise call the MCP tool `whygraph_rationale_brief` with those arguments, then present the result verbatim. The tool returns a structured object with `purpose`, `why`, `constraints[]`, `tradeoffs[]`, `risks[]`, `evidence_count`, and `cached_at`. Render it as readable markdown — do not paraphrase or editorialise the rationale fields themselves.
 
 If the tool returns `isError: true`, print the error message verbatim and stop.
 

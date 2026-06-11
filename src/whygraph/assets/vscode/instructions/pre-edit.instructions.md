@@ -43,17 +43,14 @@ The tool returns:
 - `constraints[]` — things that must be preserved
 - `tradeoffs[]` — design tradeoffs visible in the history
 - `risks[]` — risks of modification
-- `confidence` — 0 to 0.85 (the ceiling lifts when refactor-lineage detection lands)
 - `evidence_count` — `{commits, prs, issues}` summarising how much history backed the card
-- `cached` — `True` if served from the rationale cache
+- `cached_at` — when the card was generated (ISO timestamp)
 
 Apply it like this:
 
 - **Constraints** are non-negotiable. Preserve them. If the user's request requires breaking one, surface that explicitly before making the change.
 - **Tradeoffs** explain why an obvious-looking improvement may have already been considered and rejected. Weigh them before "fixing" something.
 - **Risks** are flagged to the user *before* the change, not after.
-- **Low confidence (< 0.4)**: treat the brief as a hint, not a directive — verify against the code itself.
-- **High confidence (≥ 0.7)**: weight it heavily; it's well-supported by history.
 - **Empty `evidence_count`**: the chunk has no meaningful git history yet (e.g. brand-new code). The brief will be thin — proceed with your own judgment.
 
 If the tool returns `isError: true`, the cause is one of:

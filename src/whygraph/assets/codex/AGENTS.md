@@ -6,12 +6,11 @@ This repository uses WhyGraph (via the `whygraph` MCP server) to ground code-cha
 
 When the request is to **edit, refactor, rename, move, or delete** an existing function, class, or module — anything beyond a typo or formatter pass — call the `whygraph_rationale_brief` MCP tool first. Identify the symbol by `qualified_name` (preferred) or by `path` + `line_start` + `line_end`.
 
-The tool returns `purpose`, `why`, `constraints[]`, `tradeoffs[]`, `risks[]`, `confidence`, `evidence_count`. Use it to inform the change:
+The tool returns `purpose`, `why`, `constraints[]`, `tradeoffs[]`, `risks[]`, `evidence_count`, and `cached_at`. Use it to inform the change:
 
 - **Constraints are non-negotiable.** If the requested change would violate one, surface that to the user before editing.
 - **Tradeoffs** explain why an obvious-looking improvement may have already been considered and rejected.
 - **Risks** are flagged *before* the change, not after.
-- **Low confidence (< 0.4)**: treat as a hint, not a directive — verify against the code.
 - **Empty `evidence_count`**: the chunk has no meaningful history yet; proceed with judgement.
 
 If the tool returns `isError: true`, surface the error verbatim and proceed with your own judgment after flagging the cause to the user.

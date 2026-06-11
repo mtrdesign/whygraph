@@ -2,7 +2,7 @@
 
 Rationale layer over [CodeGraph](https://github.com/colbymchenry/codegraph): explains *why* code exists, not just what it does.
 
-For each symbol, WhyGraph collects evidence from git history and GitHub (commits, blame, PRs, closing issues, callers/callees from CodeGraph), then exposes it to AI assistants over MCP plus an on-demand rationale (purpose, why, constraints, tradeoffs, risks) with a deterministic confidence score and persistent cache.
+For each symbol, WhyGraph collects evidence from git history and GitHub (commits, blame, PRs, closing issues, callers/callees from CodeGraph), then exposes it to AI assistants over MCP plus an on-demand rationale (purpose, why, constraints, tradeoffs, risks) with a persistent cache.
 
 > **Status:** v1.x in progress on the `feature/scan-and-scoring` branch. MCP surface (resources, tools, prompts) is functional. The `/whygraph-plan` slash command + fan-out/fan-in planner subagents shipped in v1.3.
 

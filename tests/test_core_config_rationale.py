@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from whygraph.core.config import Config, RationaleConfig
+from whygraph.core.config import Config, ConfigError, RationaleConfig
 
 
 def _write(path: Path, body: str) -> Path:
@@ -69,6 +69,49 @@ def test_rationale_unknown_key_warns_but_loads(
 
     assert any("bogus" in r.message for r in caplog.records)
     assert cfg.rationale.provider == "anthropic"
+
+
+def test_rationale_pr_render_cap_defaults(tmp_path: Path) -> None:
+    config = _write(tmp_path / "whygraph.toml", "")
+    cfg = Config.from_toml(config)
+
+    assert cfg.rationale.pr_roster_max_commits == 30
+    assert cfg.rationale.pr_discussion_max_comments == 20
+    assert cfg.rationale.pr_comment_max_chars == 500
+
+
+def test_rationale_pr_render_caps_parsed(tmp_path: Path) -> None:
+    config = _write(
+        tmp_path / "whygraph.toml",
+        "[rationale]\n"
+        "pr_roster_max_commits = 5\n"
+        "pr_discussion_max_comments = 3\n"
+        "pr_comment_max_chars = 120\n",
+    )
+    cfg = Config.from_toml(config)
+
+    assert cfg.rationale.pr_roster_max_commits == 5
+    assert cfg.rationale.pr_discussion_max_comments == 3
+    assert cfg.rationale.pr_comment_max_chars == 120
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "pr_roster_max_commits",
+        "pr_discussion_max_comments",
+        "pr_comment_max_chars",
+    ],
+)
+def test_rationale_pr_render_cap_below_one_raises(
+    tmp_path: Path, field_name: str
+) -> None:
+    config = _write(
+        tmp_path / "whygraph.toml",
+        f"[rationale]\n{field_name} = 0\n",
+    )
+    with pytest.raises(ConfigError, match=field_name):
+        Config.from_toml(config)
 
 
 def test_rationale_config_is_frozen() -> None:

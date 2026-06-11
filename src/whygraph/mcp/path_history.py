@@ -119,6 +119,11 @@ def area_history_commits(
                 col(CommitFileChange.commit_sha) == col(Commit.sha),
             )
             .where(col(CommitFileChange.path).in_(aliases))
+            # Area-history is a main-walk-only view. Recovered PR-origin
+            # commits (on_default_branch=0) carry no commit_file_change
+            # rows so the join already excludes them; this makes the
+            # invariant explicit for a future broad consumer.
+            .where(col(Commit.on_default_branch) == 1)
         )
         if exclude_shas:
             stmt = stmt.where(col(Commit.sha).not_in(exclude_shas))

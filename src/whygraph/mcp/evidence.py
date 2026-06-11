@@ -1,8 +1,9 @@
 """The ``whygraph_evidence_for`` MCP tool and its evidence collector.
 
-The collector combines four signals: line-blame at HEAD, line-blame
+The collector combines five signals: line-blame at HEAD, line-blame
 after walking past refactor-heavy commits, line-blame against a rename
-predecessor at its pre-rename location, and area-history from the
+predecessor at its pre-rename location, per-line attribution back to a
+squash-merged PR's original commits, and area-history from the
 ``commit_file_change`` index. Each commit is tagged with a ``source``
 label so the rationale generator can weight precision vs coverage.
 :mod:`whygraph.mcp.rationale` reuses :func:`collect_evidence`; the tool
@@ -35,9 +36,12 @@ _MAX_BORING_HOPS = 3
 
 # Source ordering for dedupe — a SHA that surfaces from multiple paths
 # is kept with the strongest source label only. ``blame`` beats every
-# other label; ``area`` is the weakest.
+# other label; ``area`` is the weakest. ``pr-origin`` sits just below
+# ``blame`` (0.5): a real authoring commit reached through the squash is
+# high-precision, but a direct HEAD blame hit is still preferred.
 _SOURCE_PRIORITY = {
     "blame": 0,
+    "pr-origin": 0.5,
     "blame-walked": 1,
     "predecessor-blame": 2,
     "area": 3,
@@ -128,16 +132,20 @@ def collect_evidence(target: Target, *, limit: int = 20) -> list[CommitEvidence]
 
     1. ``"blame"`` — line-level attribution from the target's current
        range. The primary signal.
-    2. ``"blame-walked"`` — line-level attribution surfaced by walking
+    2. ``"pr-origin"`` — when a blamed line lands on a squash-merged PR's
+       commit that Stage 1 enriched, the same range is re-blamed at the
+       PR's ``head_sha`` so each line maps back to the original
+       feature-branch commit that authored it.
+    3. ``"blame-walked"`` — line-level attribution surfaced by walking
        past refactor-heavy commits (scored at scan time). Each round
        runs blame again with ``--ignore-rev`` for every boring SHA seen
        so far; bounded by :data:`_MAX_BORING_HOPS`.
-    3. ``"predecessor-blame"`` — for every rename event in the target
+    4. ``"predecessor-blame"`` — for every rename event in the target
        path's lineage (``commit_file_change`` rows with ``change_type``
        ``"R"``), blame the predecessor file at the rename commit's
        parent so authorship for code that has been moved across files
        still surfaces.
-    4. ``"area"`` — drawn from the ``commit_file_change`` index for the
+    5. ``"area"`` — drawn from the ``commit_file_change`` index for the
        target's path and every rename ancestor. Used to fill the cap
        when the line-blame signals are thin.
 
@@ -191,14 +199,24 @@ def _collect_evidence_against_db(
     walked_hunks, _boring = _walk_past_boring(repo, target, initial_hunks=initial)
     predecessor_hunks = _predecessor_blame(repo, target)
 
-    labeled_hunks: list[tuple[BlameHunk, str]] = (
+    base_labeled: list[tuple[BlameHunk, str]] = (
         [(h, "blame") for h in initial]
         + [(h, "blame-walked") for h in walked_hunks]
         + [(h, "predecessor-blame") for h in predecessor_hunks]
     )
+    # SHAs the queried lines actually blamed to — the candidates for being
+    # an enriched squash's merge_commit_sha.
+    blame_shas = {h.sha for h, _ in base_labeled if not h.is_uncommitted}
 
     by_sha: dict[str, CommitEvidence] = {}
     with get_session() as session:
+        # Per-line squash attribution: re-blame at each enriched squash PR's
+        # head_sha so origin commits surface with the existing dedupe /
+        # priority / cap machinery (no special-casing past the label).
+        origin_hunks = _attribute_squash_origins(
+            repo, target, blame_shas=blame_shas, session=session
+        )
+        labeled_hunks = base_labeled + [(h, "pr-origin") for h in origin_hunks]
         for hunk, source in labeled_hunks:
             if hunk.is_uncommitted:
                 continue
@@ -284,7 +302,14 @@ def _walk_past_boring(
 
 
 def _boring_shas_in(shas: set[str]) -> set[str]:
-    """Return the subset of ``shas`` whose ``refactor_score`` is boring."""
+    """Return the subset of ``shas`` whose ``refactor_score`` is boring.
+
+    Restricted to default-branch commits (``on_default_branch == 1``):
+    refactor-walk is a main-walk-only notion, and recovered PR-origin
+    commits (``0``) must never drive a walk-past — they carry no
+    ``commit_file_change`` rows and default ``refactor_score=0``, so the
+    guard is belt-and-suspenders against a future broad consumer.
+    """
     if not shas:
         return set()
     with get_session() as session:
@@ -292,6 +317,7 @@ def _boring_shas_in(shas: set[str]) -> set[str]:
             select(Commit.sha)
             .where(col(Commit.sha).in_(shas))
             .where(col(Commit.refactor_score) >= BORING_THRESHOLD)
+            .where(col(Commit.on_default_branch) == 1)
         ).all()
     return set(rows)
 
@@ -317,6 +343,77 @@ def _predecessor_blame(repo: Repository, target: Target) -> list[BlameHunk]:
                 target.line_start,
                 target.line_end,
                 rev=parent_sha,
+            )
+        except GitError:
+            continue
+        out.extend(h for h in hunks if not h.is_uncommitted)
+    return out
+
+
+def _enriched_squash_prs_for(
+    session: Session, blame_shas: set[str]
+) -> list[PullRequest]:
+    """Squash PRs in ``blame_shas`` that have recovered origin commits.
+
+    A PR qualifies when its ``merge_commit_sha`` is one of the blamed SHAs
+    (so the queried lines land on its squash commit) **and** at least one
+    of its ``commit_titles`` oids exists in ``commit`` as an origin row
+    (``on_default_branch == 0``) — i.e. Stage 1 actually enriched it, so
+    ``head_sha``'s objects are local and a re-blame there will resolve.
+    This gate-agnostic predicate covers exactly the PRs the enricher
+    recovered, whether they were gated as file-bulk or commit-rich.
+    """
+    if not blame_shas:
+        return []
+    prs = session.exec(
+        select(PullRequest).where(col(PullRequest.merge_commit_sha).in_(blame_shas))
+    ).all()
+    enriched: list[PullRequest] = []
+    for pr in prs:
+        oids = [
+            entry["oid"]
+            for entry in _json_list(pr.commit_titles)
+            if isinstance(entry, dict) and entry.get("oid")
+        ]
+        if not oids:
+            continue
+        has_origin = session.exec(
+            select(Commit.sha)
+            .where(col(Commit.sha).in_(oids))
+            .where(col(Commit.on_default_branch) == 0)
+            .limit(1)
+        ).first()
+        if has_origin is not None:
+            enriched.append(pr)
+    return enriched
+
+
+def _attribute_squash_origins(
+    repo: Repository,
+    target: Target,
+    *,
+    blame_shas: set[str],
+    session: Session,
+) -> list[BlameHunk]:
+    """Re-blame the target range at each enriched squash PR's ``head_sha``.
+
+    When a blamed line lands on a squash ``merge_commit_sha``, the squash
+    tree equals the PR's ``head_sha`` tree for that file, so blaming the
+    same range at ``head_sha`` maps each line back to the original
+    feature-branch commit that authored it — the same mechanism
+    predecessor-blame uses with ``rev=parent_sha``. Best-effort: a
+    squash-vs-head mismatch or absent object skips that PR (mirrors
+    :func:`_predecessor_blame`'s per-event ``GitError`` swallow), leaving
+    the PR-level Stage 1 evidence untouched.
+    """
+    out: list[BlameHunk] = []
+    for pr in _enriched_squash_prs_for(session, blame_shas):
+        try:
+            hunks = repo.blame(
+                target.path,
+                target.line_start,
+                target.line_end,
+                rev=pr.head_sha,
             )
         except GitError:
             continue
@@ -463,7 +560,16 @@ def _commit_dict(commit: Commit) -> dict:
 
 
 def _pr_dict(pr: PullRequest) -> dict:
-    """Serialize a pull request to a JSON-ready dict."""
+    """Serialize a pull request to a JSON-ready dict.
+
+    Notes
+    -----
+    ``commit_titles`` and ``comments`` are emitted **uncapped**: the
+    consumer of ``whygraph_evidence_for`` is an agent that can handle the
+    full lists. The size caps in :class:`RationaleConfig` apply only to the
+    LLM *rationale prompt* (see ``analyze.rationale_generator._format_pr``),
+    not to this raw tool output.
+    """
     return {
         "number": pr.number,
         "title": pr.title,
@@ -473,6 +579,8 @@ def _pr_dict(pr: PullRequest) -> dict:
         "author": pr.author,
         "html_url": pr.html_url,
         "labels": _json_list(pr.labels),
+        "commit_titles": _json_list(pr.commit_titles),
+        "comments": _json_list(pr.comments),
     }
 
 

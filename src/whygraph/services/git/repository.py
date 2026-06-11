@@ -13,6 +13,8 @@ from .commands import (
     GitCurrentBranchCmd,
     GitDiffCmd,
     GitDiffTreeFileChangesCmd,
+    GitFetchRefsCmd,
+    GitLogCommitCmd,
     GitRemoteUrlCmd,
 )
 from .commit import Commit
@@ -324,3 +326,70 @@ class Repository:
             return self._shell.run(GitDiffCmd(f"{base}..{head}"), cwd=self.root)
         except ShellError as exc:
             raise GitError(f"failed to diff {base[:7]}..{head[:7]}") from exc
+
+    def fetch_refs(self, refspecs: list[str], *, remote: str | None = None) -> None:
+        """Fetch one or more refspecs from ``remote`` in a single round-trip.
+
+        The only network-touching method on :class:`Repository`. It writes
+        refs and objects into the local store (not the working tree), so
+        the squash-origin enricher can pin a batch of PR refs
+        (``refs/pull/<N>/head:refs/whygraph/pull/<N>``) against local GC
+        with one ``git fetch`` rather than one per PR — keeping later
+        blame/diff offline. ``--no-tags`` keeps the fetch from dragging in
+        the remote's tag set.
+
+        Parameters
+        ----------
+        refspecs : list[str]
+            ``<src>:<dst>`` refspecs to fetch. An empty list is a no-op
+            (no ``git`` is invoked).
+        remote : str or None, optional
+            Remote to fetch from. ``None`` (default) uses the remote this
+            repository was constructed with (``origin_remote``).
+
+        Raises
+        ------
+        GitError
+            If ``git fetch`` fails — an unknown remote, a missing/GC'd
+            source ref, or no network. Callers that treat enrichment as
+            best-effort should catch this.
+        """
+        if not refspecs:
+            return
+        target = remote or self._origin_remote
+        try:
+            self._shell.run(GitFetchRefsCmd(*refspecs, remote=target), cwd=self.root)
+        except ShellError as exc:
+            raise GitError(
+                f"failed to fetch {len(refspecs)} refspec(s) from {target!r}"
+            ) from exc
+
+    def commit_metadata(self, ref: str) -> Commit:
+        """Full :class:`Commit` value object for a single commit-ish.
+
+        Reads one commit's message body and diff stats via
+        ``git log -1 --shortstat`` and parses it with the same
+        :meth:`Commit.from_git_log` the main history walk uses. The object
+        must already be local (the enricher calls :meth:`fetch_refs`
+        first); an unknown ``ref`` surfaces as :class:`GitError`.
+
+        Parameters
+        ----------
+        ref : str
+            Any commit-ish ``git`` accepts (typically a full oid).
+
+        Returns
+        -------
+        Commit
+            The parsed commit value object.
+
+        Raises
+        ------
+        GitError
+            If ``git`` fails — most commonly an unknown ``ref`` whose
+            object is not in the local store.
+        """
+        try:
+            return self._shell.run(GitLogCommitCmd(ref), cwd=self.root)
+        except ShellError as exc:
+            raise GitError(f"failed to read commit metadata for {ref[:7]}") from exc

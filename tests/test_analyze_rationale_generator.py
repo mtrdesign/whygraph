@@ -23,7 +23,9 @@ from whygraph.analyze import (
     RationaleGenerator,
 )
 from whygraph.analyze.rationale_generator import (
+    _PrRenderCaps,
     _format_evidence,
+    _format_pr,
     _format_symbol_context,
 )
 from whygraph.core.config import RationaleConfig
@@ -122,6 +124,8 @@ def _pr(
     number: int = 12,
     title: str = "Cache prompts",
     body: str | None = "Speeds up scans.",
+    commit_titles: str = "[]",
+    comments: str = "[]",
 ) -> PullRequest:
     """A :class:`PullRequest` row with sensible defaults for tests."""
     return PullRequest(
@@ -137,6 +141,8 @@ def _pr(
         author="octocat",
         html_url="https://example.com/pr/12",
         labels='["perf"]',
+        commit_titles=commit_titles,
+        comments=comments,
         fetched_at="2026-05-02T00:00:00Z",
     )
 
@@ -488,6 +494,109 @@ def test_format_evidence_renders_source_label_per_commit() -> None:
     assert "skipped a refactor commit" in bundle
     assert "pre-rename predecessor" in bundle
     assert "area-history" in bundle
+
+
+# ---- _format_pr roster + discussion --------------------------------------
+
+
+def _commit_titles(*headlines: str) -> str:
+    """JSON-encode a commit_titles roster the way the github crawler stores it."""
+    return json.dumps(
+        [
+            {"oid": f"{i:040x}", "headline": h, "author_name": "Jane"}
+            for i, h in enumerate(headlines, start=1)
+        ]
+    )
+
+
+def _comments(*pairs: tuple[str, str]) -> str:
+    """JSON-encode a PR comments list ([{author, body, created_at}, ...])."""
+    return json.dumps(
+        [
+            {"author": author, "body": body, "created_at": "2026-05-01T00:00:00Z"}
+            for author, body in pairs
+        ]
+    )
+
+
+def test_format_pr_renders_roster_and_discussion() -> None:
+    lines = _format_pr(
+        _pr(
+            commit_titles=_commit_titles("first commit", "second commit"),
+            comments=_comments(("alice", "looks good"), ("bob", "ship it")),
+        )
+    )
+    text = "\n".join(lines)
+
+    assert "Squashed commits:" in text
+    assert "first commit" in text
+    assert "second commit" in text
+    assert "Discussion:" in text
+    assert "[alice] looks good" in text
+    assert "[bob] ship it" in text
+
+
+def test_format_pr_empty_roster_and_discussion_add_no_lines() -> None:
+    lines = _format_pr(_pr())  # default commit_titles="[]", comments="[]"
+    text = "\n".join(lines)
+
+    assert "Squashed commits:" not in text
+    assert "Discussion:" not in text
+
+
+def test_format_pr_respects_caps() -> None:
+    caps = _PrRenderCaps(
+        pr_roster_max_commits=1,
+        pr_discussion_max_comments=1,
+        pr_comment_max_chars=4,
+    )
+    lines = _format_pr(
+        _pr(
+            commit_titles=_commit_titles("kept commit", "dropped commit"),
+            comments=_comments(("alice", "hello world"), ("bob", "dropped")),
+        ),
+        caps,
+    )
+    text = "\n".join(lines)
+
+    assert "kept commit" in text
+    assert "dropped commit" not in text
+    assert "[alice] hell" in text  # clipped to 4 chars
+    assert "hello world" not in text
+    assert "[bob]" not in text  # second comment dropped by the cap
+
+
+def test_format_pr_tolerates_malformed_json() -> None:
+    lines = _format_pr(_pr(commit_titles="not json", comments="{}"))
+    text = "\n".join(lines)
+
+    assert "Squashed commits:" not in text
+    assert "Discussion:" not in text
+
+
+# ---- RationaleConfig PR-rendering caps -----------------------------------
+
+
+def test_rationale_config_cap_defaults() -> None:
+    cfg = RationaleConfig()
+
+    assert cfg.pr_roster_max_commits == 30
+    assert cfg.pr_discussion_max_comments == 20
+    assert cfg.pr_comment_max_chars == 500
+
+
+def test_pr_render_caps_from_config_projects_fields() -> None:
+    caps = _PrRenderCaps.from_config(
+        RationaleConfig(
+            pr_roster_max_commits=3,
+            pr_discussion_max_comments=2,
+            pr_comment_max_chars=10,
+        )
+    )
+
+    assert caps.pr_roster_max_commits == 3
+    assert caps.pr_discussion_max_comments == 2
+    assert caps.pr_comment_max_chars == 10
 
 
 # ---- _format_symbol_context ---------------------------------------------

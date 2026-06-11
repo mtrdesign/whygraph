@@ -39,6 +39,10 @@ class CommitEvidence:
 
         * ``"blame"`` — line-level attribution from the target's current
           range (highest-precision signal).
+        * ``"pr-origin"`` — an original feature-branch commit recovered
+          from a squash-merged PR: when the queried lines blame to a
+          squash commit, they are re-blamed at the PR's ``head_sha`` so
+          each line maps back to the commit that actually authored it.
         * ``"blame-walked"`` — surfaced only after blame walked past a
           refactor-heavy commit. Still line-level, but one or more boring
           commits were skipped to reach this author.

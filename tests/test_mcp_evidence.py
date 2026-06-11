@@ -15,7 +15,7 @@ from sqlmodel import select
 from whygraph.db import get_session
 from whygraph.db.models import Commit, CommitFileChange, Issue, PRIssueLink, PullRequest
 from whygraph.mcp.errors import WhyGraphError
-from whygraph.mcp.evidence import whygraph_evidence_for
+from whygraph.mcp.evidence import _pr_dict, whygraph_evidence_for
 from whygraph.scan.refactor_score import BORING_THRESHOLD
 from whygraph.services.git import Repository
 
@@ -71,6 +71,33 @@ def _db_pr(*, number: int, merge_commit_sha: str) -> PullRequest:
         labels='["enhancement"]',
         fetched_at="2026-02-02T00:00:00+00:00",
     )
+
+
+# ---- _pr_dict serialization ---------------------------------------------
+
+
+def test_pr_dict_includes_decoded_commit_titles_and_comments() -> None:
+    pr = _db_pr(number=1, merge_commit_sha="squashsha")
+    pr.commit_titles = '[{"oid": "abc123", "headline": "first", "author_name": "Jane"}]'
+    pr.comments = '[{"author": "alice", "body": "lgtm", "created_at": "x"}]'
+
+    out = _pr_dict(pr)
+
+    assert out["commit_titles"] == [
+        {"oid": "abc123", "headline": "first", "author_name": "Jane"}
+    ]
+    assert out["comments"] == [{"author": "alice", "body": "lgtm", "created_at": "x"}]
+
+
+def test_pr_dict_malformed_commit_titles_and_comments_yield_empty_lists() -> None:
+    pr = _db_pr(number=1, merge_commit_sha="squashsha")
+    pr.commit_titles = "not json"
+    pr.comments = "{}"  # an object, not a list
+
+    out = _pr_dict(pr)
+
+    assert out["commit_titles"] == []
+    assert out["comments"] == []
 
 
 def _db_issue(*, number: int) -> Issue:

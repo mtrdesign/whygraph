@@ -78,9 +78,7 @@ def _db_pr(*, number: int, merge_commit_sha: str) -> PullRequest:
 
 def test_pr_dict_includes_decoded_commit_titles_and_comments() -> None:
     pr = _db_pr(number=1, merge_commit_sha="squashsha")
-    pr.commit_titles = (
-        '[{"oid": "abc123", "headline": "first", "author_name": "Jane"}]'
-    )
+    pr.commit_titles = '[{"oid": "abc123", "headline": "first", "author_name": "Jane"}]'
     pr.comments = '[{"author": "alice", "body": "lgtm", "created_at": "x"}]'
 
     out = _pr_dict(pr)

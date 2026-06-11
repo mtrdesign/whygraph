@@ -122,9 +122,7 @@ def test_commit_on_default_branch_default_and_explicit(
         default_on_main = session.get(Commit, "default_sha").on_default_branch
         origin_on_main = session.get(Commit, "origin_sha").on_default_branch
         on_main = set(
-            session.exec(
-                select(Commit.sha).where(Commit.on_default_branch == 1)
-            ).all()
+            session.exec(select(Commit.sha).where(Commit.on_default_branch == 1)).all()
         )
 
     assert default_on_main == 1

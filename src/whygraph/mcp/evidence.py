@@ -463,7 +463,16 @@ def _commit_dict(commit: Commit) -> dict:
 
 
 def _pr_dict(pr: PullRequest) -> dict:
-    """Serialize a pull request to a JSON-ready dict."""
+    """Serialize a pull request to a JSON-ready dict.
+
+    Notes
+    -----
+    ``commit_titles`` and ``comments`` are emitted **uncapped**: the
+    consumer of ``whygraph_evidence_for`` is an agent that can handle the
+    full lists. The size caps in :class:`RationaleConfig` apply only to the
+    LLM *rationale prompt* (see ``analyze.rationale_generator._format_pr``),
+    not to this raw tool output.
+    """
     return {
         "number": pr.number,
         "title": pr.title,
@@ -473,6 +482,8 @@ def _pr_dict(pr: PullRequest) -> dict:
         "author": pr.author,
         "html_url": pr.html_url,
         "labels": _json_list(pr.labels),
+        "commit_titles": _json_list(pr.commit_titles),
+        "comments": _json_list(pr.comments),
     }
 
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from whygraph.core.config import RationaleConfig
 from whygraph.db.models import Commit, Issue, PullRequest
@@ -66,6 +67,53 @@ def _labels_suffix(raw: str) -> str:
     return "  [" + ", ".join(str(label) for label in labels) + "]"
 
 
+def _json_list(raw: str | None) -> list:
+    """Decode a JSON-encoded list column; empty list on anything malformed.
+
+    Mirrors :func:`whygraph.mcp.evidence._json_list` — kept local so the
+    formatters do not depend on the MCP layer.
+    """
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+@dataclass(frozen=True, slots=True)
+class _PrRenderCaps:
+    """Size caps for rendering a PR block into the rationale prompt.
+
+    Passed explicitly into the module-level formatters (rather than read
+    from a global :func:`get_config`) so they stay pure and unit-testable.
+    Defaults mirror :class:`~whygraph.core.config.RationaleConfig`.
+
+    Attributes
+    ----------
+    pr_roster_max_commits : int
+        Max squashed-commit headlines rendered into a PR block.
+    pr_discussion_max_comments : int
+        Max PR comments rendered into a PR block.
+    pr_comment_max_chars : int
+        Per-comment body clip.
+    """
+
+    pr_roster_max_commits: int = 30
+    pr_discussion_max_comments: int = 20
+    pr_comment_max_chars: int = 500
+
+    @classmethod
+    def from_config(cls, config: RationaleConfig) -> "_PrRenderCaps":
+        """Project the three rendering caps out of a :class:`RationaleConfig`."""
+        return cls(
+            pr_roster_max_commits=config.pr_roster_max_commits,
+            pr_discussion_max_comments=config.pr_discussion_max_comments,
+            pr_comment_max_chars=config.pr_comment_max_chars,
+        )
+
+
 def _indent_block(text: str, prefix: str) -> str:
     """Indent every line of ``text`` by ``prefix``."""
     return "\n".join(prefix + line for line in text.splitlines())
@@ -90,8 +138,14 @@ def _format_commit(commit: Commit) -> list[str]:
     return lines
 
 
-def _format_pr(pr: PullRequest) -> list[str]:
-    """Render one pull request as the indented lines of an evidence block."""
+def _format_pr(pr: PullRequest, caps: _PrRenderCaps = _PrRenderCaps()) -> list[str]:
+    """Render one pull request as the indented lines of an evidence block.
+
+    Appends the squashed-commit roster and the PR discussion so the LLM
+    sees the narrative a squash merge collapsed. Both are clipped by
+    ``caps`` to bound the prompt size; ``pr.commit_titles`` / ``pr.comments``
+    are JSON-encoded list columns decoded via :func:`_json_list`.
+    """
     when = f"merged {pr.merged_at}" if pr.merged_at else pr.state
     author = f"by {pr.author}" if pr.author else "by unknown"
     lines = [f"  PR #{pr.number}  {author}  {when}{_labels_suffix(pr.labels)}"]
@@ -99,6 +153,23 @@ def _format_pr(pr: PullRequest) -> list[str]:
     if pr.body and pr.body.strip():
         lines.append("    Body:")
         lines.append(_indent_block(pr.body.strip(), "      "))
+    titles = _json_list(pr.commit_titles)[: caps.pr_roster_max_commits]
+    if titles:
+        lines.append("    Squashed commits:")
+        for c in titles:
+            if not isinstance(c, dict):
+                continue
+            oid = (c.get("oid") or "")[:9]
+            lines.append(f"      - {c.get('headline', '')}  ({oid})")
+    comments = _json_list(pr.comments)[: caps.pr_discussion_max_comments]
+    if comments:
+        lines.append("    Discussion:")
+        for cm in comments:
+            if not isinstance(cm, dict):
+                continue
+            who = cm.get("author") or "unknown"
+            body = (cm.get("body") or "").strip()[: caps.pr_comment_max_chars]
+            lines.append(_indent_block(f"[{who}] {body}", "      "))
     return lines
 
 
@@ -124,7 +195,9 @@ _SOURCE_LABELS = {
 }
 
 
-def _format_evidence(evidence: Sequence[CommitEvidence]) -> str:
+def _format_evidence(
+    evidence: Sequence[CommitEvidence], caps: _PrRenderCaps = _PrRenderCaps()
+) -> str:
     """Render an evidence bundle as the text payload for the rationale prompt.
 
     Commits are formatted in the order given — the caller controls
@@ -135,6 +208,9 @@ def _format_evidence(evidence: Sequence[CommitEvidence]) -> str:
     the row reached this bundle (line-blame, area-history, etc.), so the
     LLM can weight precision-vs-coverage signals when synthesising the
     rationale.
+
+    ``caps`` bounds the per-PR roster / discussion rendering (see
+    :func:`_format_pr`).
     """
     n_prs = sum(len(item.pull_requests) for item in evidence)
     n_issues = sum(len(item.issues) for item in evidence)
@@ -149,7 +225,7 @@ def _format_evidence(evidence: Sequence[CommitEvidence]) -> str:
         lines.insert(1, f"  Source: {label}")
         for pr in item.pull_requests:
             lines.append("")
-            lines.extend(_format_pr(pr))
+            lines.extend(_format_pr(pr, caps))
         for issue in item.issues:
             lines.append("")
             lines.extend(_format_issue(issue))
@@ -331,6 +407,11 @@ class RationaleGenerator:
         ``task`` should contain the
         :data:`~whygraph.analyze.prompt.RATIONALE_PLACEHOLDER` token. Mostly
         used in tests and one-off overrides.
+    caps : _PrRenderCaps, optional
+        Size caps for rendering each PR's squashed-commit roster and
+        discussion into the prompt. ``None`` (default) uses the
+        :class:`~whygraph.core.config.RationaleConfig` defaults;
+        :meth:`from_config` projects them from the loaded config.
 
     Examples
     --------
@@ -345,9 +426,11 @@ class RationaleGenerator:
         *,
         timeout_sec: int | None = None,
         rationale_prompt: Prompt | None = None,
+        caps: _PrRenderCaps | None = None,
     ) -> None:
         self._client = client
         self._timeout_sec = timeout_sec
+        self._caps = caps if caps is not None else _PrRenderCaps()
         self._rationale_prompt = (
             rationale_prompt
             if rationale_prompt is not None
@@ -390,7 +473,11 @@ class RationaleGenerator:
         """
         factory = factory if factory is not None else LlmClientFactory()
         client = factory.make(config.provider, model=config.model)
-        return cls(client, timeout_sec=config.timeout_sec)
+        return cls(
+            client,
+            timeout_sec=config.timeout_sec,
+            caps=_PrRenderCaps.from_config(config),
+        )
 
     def generate(
         self,
@@ -433,7 +520,7 @@ class RationaleGenerator:
 
         # TODO: capping bundle size belongs to the future evidence-bundle
         # builder — the generator neither truncates nor chunks its input.
-        bundle = _format_evidence(evidence)
+        bundle = _format_evidence(evidence, self._caps)
         if symbol_context is not None:
             bundle = f"{_format_symbol_context(symbol_context)}\n\n{bundle}"
         task = render(

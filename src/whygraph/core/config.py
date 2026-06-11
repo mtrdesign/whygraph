@@ -277,11 +277,24 @@ class RationaleConfig:
     timeout_sec : int or None
         Per-call timeout forwarded into :class:`CompletionRequest`.
         ``None`` (default) defers to the bound adapter's default.
+    pr_roster_max_commits : int
+        Cap on how many squashed-commit headlines are rendered into a
+        single PR block in the rationale prompt. Bounds the prompt size
+        when a squash collapsed a long feature branch. Must be ``>= 1``.
+    pr_discussion_max_comments : int
+        Cap on how many PR comments are rendered into a single PR block
+        in the rationale prompt. Must be ``>= 1``.
+    pr_comment_max_chars : int
+        Per-comment body clip applied before rendering a PR comment into
+        the rationale prompt. Must be ``>= 1``.
     """
 
     provider: str = "anthropic"
     model: str | None = None
     timeout_sec: int | None = None
+    pr_roster_max_commits: int = 30
+    pr_discussion_max_comments: int = 20
+    pr_comment_max_chars: int = 500
 
 
 @dataclass(frozen=True, slots=True)
@@ -449,9 +462,11 @@ class Config:
         ConfigError
             If ``log_level`` is not a known :class:`LogLevel` name, if
             ``scan_max_workers`` is less than ``1``, if ``scan_provider``
-            is not one of ``"off"`` / ``"github"`` / ``"auto"``, or if
+            is not one of ``"off"`` / ``"github"`` / ``"auto"``, if
             ``analyze.max_diff_chars`` or ``analyze.large_commit_file_count``
-            is less than ``1``.
+            is less than ``1``, or if any of the ``rationale`` PR-rendering
+            caps (``pr_roster_max_commits``, ``pr_discussion_max_comments``,
+            ``pr_comment_max_chars``) is less than ``1``.
         """
         try:
             LogLevel[self.log_level.upper()]
@@ -475,6 +490,21 @@ class Config:
             raise ConfigError(
                 "analyze.large_commit_file_count must be >= 1, "
                 f"got {self.analyze.large_commit_file_count}"
+            )
+        if self.rationale.pr_roster_max_commits < 1:
+            raise ConfigError(
+                "rationale.pr_roster_max_commits must be >= 1, "
+                f"got {self.rationale.pr_roster_max_commits}"
+            )
+        if self.rationale.pr_discussion_max_comments < 1:
+            raise ConfigError(
+                "rationale.pr_discussion_max_comments must be >= 1, "
+                f"got {self.rationale.pr_discussion_max_comments}"
+            )
+        if self.rationale.pr_comment_max_chars < 1:
+            raise ConfigError(
+                "rationale.pr_comment_max_chars must be >= 1, "
+                f"got {self.rationale.pr_comment_max_chars}"
             )
 
     @classmethod

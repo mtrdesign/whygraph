@@ -35,6 +35,11 @@ provider = "anthropic"        # which [llm.*] adapter to use
 provider = "anthropic"        # which [llm.*] adapter to use
 # model = "claude-haiku-4-5"  # override the provider's model for rationale only
 # timeout_sec = 60            # per-call timeout; default: the adapter's own
+# Caps on how much of a squash-merged PR is rendered into the rationale prompt
+# (the raw whygraph_evidence_for tool output is uncapped):
+# pr_roster_max_commits = 30      # squashed-commit headlines shown per PR
+# pr_discussion_max_comments = 20 # PR comments shown per PR
+# pr_comment_max_chars = 500      # each PR comment clipped to this length
 
 # Uncomment to override default DB locations (resolved relative to this file):
 # whygraph_db  = ".whygraph/whygraph.db"

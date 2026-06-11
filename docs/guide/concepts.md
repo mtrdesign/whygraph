@@ -34,8 +34,8 @@ to the configured LLM, and gets back a structured card with exactly five fields:
 The card comes back with provenance too — `model`, `provider`, `cached_at` — and an `evidence_count`
 summarizing how many commits, PRs, and issues fed it.
 
-!!! note "Five fields, no score"
-    A card carries those five narrative fields and nothing more. There's no confidence score — the
+!!! note "Five fields, nothing more"
+    A card carries those five narrative fields and nothing else — no extra score or rating. The
     rationale is the evidence-grounded explanation, full stop.
 
 ### Caching

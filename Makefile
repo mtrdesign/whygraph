@@ -13,7 +13,7 @@ IMAGE ?= whygraph:dev
 # Name of the long-running container started by `make image-debug`.
 DEBUG_NAME ?= whygraph-debug
 
-.PHONY: help sync test scan db db-down inspect image image-test image-inspect image-debug image-debug-down
+.PHONY: help sync test scan docs docs-build db db-down inspect image image-test image-inspect image-debug image-debug-down
 
 help:  ## List available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN{FS=":.*?## "}{printf "  %-10s %s\n", $$1, $$2}'
@@ -26,6 +26,12 @@ test:  ## Run the test suite
 
 scan:  ## Re-scan this repo so WhyGraph is tested against itself
 	uv run whygraph scan
+
+docs:  ## Serve the docs site locally with live reload (social cards skipped — no Cairo needed)
+	uv run mkdocs serve
+
+docs-build:  ## Build the static docs site into ./site (strict; cards skipped unless CI=true)
+	uv run mkdocs build --strict
 
 db:  ## Start the DBGate database viewer (http://localhost:8081)
 	@test -f docker-compose.yml || { echo "error: docker-compose.yml missing - run: cp docker-compose.example.yml docker-compose.yml"; exit 1; }

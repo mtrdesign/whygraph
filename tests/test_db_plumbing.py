@@ -77,6 +77,61 @@ def test_alembic_upgrade_on_empty_db(_isolate_config_and_engine: Path) -> None:
     assert _table_names(db_path) == SQLMODEL_TABLES | {"alembic_version"}
 
 
+def _insert_commit(sha: str, **overrides: object) -> None:
+    """Insert one minimal ``commit`` row, applying any field overrides."""
+    from whygraph.db import get_session
+    from whygraph.db.models import Commit
+
+    fields: dict[str, object] = dict(
+        sha=sha,
+        parent_shas="[]",
+        author_name="Jane",
+        author_email="jane@example.com",
+        authored_at="2026-01-01T00:00:00Z",
+        committed_at="2026-01-01T00:00:00Z",
+        subject="s",
+        body="",
+        files_changed=1,
+        insertions=1,
+        deletions=0,
+        scanned_at="2026-01-02T00:00:00Z",
+    )
+    fields.update(overrides)
+    with get_session() as session:
+        session.add(Commit(**fields))
+        session.commit()
+
+
+def test_commit_on_default_branch_default_and_explicit(
+    _isolate_config_and_engine: Path,
+) -> None:
+    """The column defaults to 1; an explicit 0 (PR-origin commit) persists."""
+    from sqlmodel import select
+
+    from whygraph.db import get_session
+    from whygraph.db.models import Commit
+
+    command.upgrade(alembic_config(), "head")
+    _insert_commit("default_sha")  # no on_default_branch → server default
+    _insert_commit("origin_sha", on_default_branch=0)
+
+    with get_session() as session:
+        # Read scalars inside the session: the default value is server-set, so
+        # accessing it on a detached row would trigger a refresh load and raise
+        # DetachedInstanceError.
+        default_on_main = session.get(Commit, "default_sha").on_default_branch
+        origin_on_main = session.get(Commit, "origin_sha").on_default_branch
+        on_main = set(
+            session.exec(
+                select(Commit.sha).where(Commit.on_default_branch == 1)
+            ).all()
+        )
+
+    assert default_on_main == 1
+    assert origin_on_main == 0
+    assert on_main == {"default_sha"}
+
+
 def test_connect_pragmas_applied(_isolate_config_and_engine: Path) -> None:
     """The connect listener enables WAL + a busy timeout for concurrent writers."""
     engine = db_engine.get_engine()

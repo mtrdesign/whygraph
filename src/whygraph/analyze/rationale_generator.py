@@ -189,6 +189,7 @@ def _format_issue(issue: Issue) -> list[str]:
 
 _SOURCE_LABELS = {
     "blame": "line-blame",
+    "pr-origin": "original commit recovered from a squash-merged PR",
     "blame-walked": "line-blame (skipped a refactor commit)",
     "predecessor-blame": "line-blame on a pre-rename predecessor file",
     "area": "area-history (touched the file but not these lines)",

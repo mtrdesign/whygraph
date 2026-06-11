@@ -1,8 +1,11 @@
 # Squash-Merge PR Commit Recovery — Implementation Plan
 
-> **Status: Reviewed — scope locked (all §0 decisions folded in) + consistency pass applied. Awaiting final approval before any code.**
-> Nothing in this document is implemented yet. Each phase is reviewed and gated separately;
-> no code is written until this plan is approved.
+> **Status: Implemented (2026-06-11) on `feature/squash-merge-recovery`.** All five rollout
+> steps (§8) landed as separate commits — Stage 0 (`feat(stage-0)`), the `on_default_branch`
+> column + migration, the scan enricher, the no-code Step 4 confirmation, and per-line
+> `pr-origin` attribution (`feat(stage-2)`). Full suite green (493 tests). The notes below are
+> preserved as the design record.
+> _Original status: Reviewed — scope locked (all §0 decisions folded in) + consistency pass applied._
 > **Consistency pass (2026-06-11):** corrected config placement — the three Stage-0 rendering caps
 > live in `RationaleConfig` (`[rationale]`), not `AnalyzeConfig`, because `RationaleGenerator` is
 > built from `RationaleConfig` (`config.py:256`); only the enrichment gate `pr_origin_min_commits`

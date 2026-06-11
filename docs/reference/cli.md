@@ -25,7 +25,7 @@ whygraph version
 
 Bootstrap the WhyGraph database under `.whygraph/whygraph.db`, write a committable
 `whygraph.example.toml` documenting every tunable, and add the right `.gitignore` entries. It's
-idempotent — re-running on an initialized project just confirms both databases are present.
+idempotent - re-running on an initialized project just confirms both databases are present.
 
 `init` does **not** index CodeGraph. That happens on [`scan`](#whygraph-scan).
 
@@ -46,13 +46,13 @@ See [Wiring your editor](../guide/editors.md) for the per-agent paths.
 ## `whygraph scan`
 
 Run the source crawlers, then describe each commit with the configured LLM. This is the command that
-populates `.whygraph/whygraph.db` and refreshes the CodeGraph index. It's idempotent — re-running
+populates `.whygraph/whygraph.db` and refreshes the CodeGraph index. It's idempotent - re-running
 picks up new commits and backfills what's missing.
 
 | Option | Default | Description |
 |---|---|---|
 | `--no-llm-descriptions` | off | Skip the per-commit LLM description phase. The git and GitHub crawlers still run; descriptions backfill lazily on demand and on a later full scan. |
-| `--codegraph / --no-codegraph` | on | Refresh the CodeGraph index concurrently with the crawl — `codegraph sync` when an index exists, `codegraph init -i` on first run. A failure here warns rather than aborting. |
+| `--codegraph / --no-codegraph` | on | Refresh the CodeGraph index concurrently with the crawl - `codegraph sync` when an index exists, `codegraph init -i` on first run. A failure here warns rather than aborting. |
 | `--codegraph-image TEXT` | pinned tag | Override the Docker image used for the CodeGraph refresh fallback. Ignored when a local `codegraph` binary is found. |
 | `--remote / --no-remote` | on | Crawl the source-control remote (GitHub PRs / issues) per `[scan].provider`. `--no-remote` skips it for a fast, offline, token-free scan. |
 | `--pr-origins / --no-pr-origins` | on | Recover a squash-merged PR's original feature-branch commits via one targeted `git fetch`. Needs the network, so it's skipped under `--no-remote`. |
@@ -77,12 +77,12 @@ whygraph analyze <TARGET> [BASELINE]
 
 ## `whygraph hooks`
 
-Manage opt-in git hooks that auto-rescan on new commits. There's no daemon — the hooks run a fast,
+Manage opt-in git hooks that auto-rescan on new commits. There's no daemon - the hooks run a fast,
 background, offline scan as you commit.
 
 | Subcommand | Description |
 |---|---|
-| `install` | Install the auto-rescan hooks into the current repository. Idempotent and non-clobbering — it appends to a foreign hook behind a sentinel guard. |
+| `install` | Install the auto-rescan hooks into the current repository. Idempotent and non-clobbering - it appends to a foreign hook behind a sentinel guard. |
 | `status` | Report whether the auto-rescan hooks are installed. |
 | `uninstall` | Remove the auto-rescan hooks, leaving any foreign hook content intact. |
 

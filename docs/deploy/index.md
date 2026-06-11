@@ -9,7 +9,7 @@ they differ in who's driving.
 
     ---
 
-    Install the Docker shim, then `init` and `scan` your repos and wire your editor — no Python or
+    Install the Docker shim, then `init` and `scan` your repos and wire your editor - no Python or
     Node on the host. This is the default install.
 
     [:octicons-arrow-right-24: Run with Docker](docker.md)
@@ -18,7 +18,7 @@ they differ in who's driving.
 
     ---
 
-    A containerized `whygraph-mcp` endpoint that real applications — not just editors — connect to
+    A containerized `whygraph-mcp` endpoint that real applications - not just editors - connect to
     for git-based analysis of a target repo.
 
     [:octicons-arrow-right-24: WhyGraph as a service](service.md)
@@ -26,5 +26,5 @@ they differ in who's driving.
 </div>
 
 Most people start with the local tool. Reach for the service model when you're building an
-application that needs the *why* behind code — a review bot, an onboarding assistant, an internal
+application that needs the *why* behind code - a review bot, an onboarding assistant, an internal
 portal.

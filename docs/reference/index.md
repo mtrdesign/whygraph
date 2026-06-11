@@ -1,6 +1,6 @@
 # Reference
 
-The exact surface — every command, tool, resource, and config key. This section is hand-written
+The exact surface - every command, tool, resource, and config key. This section is hand-written
 against the running code, so it stays in step with what `whygraph` actually does. Pick a page:
 
 <div class="grid cards" markdown>

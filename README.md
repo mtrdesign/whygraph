@@ -2,7 +2,7 @@
 
 Rationale layer over [CodeGraph](https://github.com/colbymchenry/codegraph): explains *why* code exists, not just what it does.
 
-For each chunk of code, WhyGraph collects evidence from git history and GitHub — commits, blame, PRs, the issues those PRs closed — then serves it to AI editors over MCP, plus an on-demand rationale card (purpose, why, constraints, tradeoffs, risks) with a persistent cache.
+For each chunk of code, WhyGraph collects evidence from git history and GitHub - commits, blame, PRs, the issues those PRs closed - then serves it to AI editors over MCP, plus an on-demand rationale card (purpose, why, constraints, tradeoffs, risks) with a persistent cache.
 
 > **📖 Full documentation → <https://mtrdesign.github.io/whygraph/>**
 >

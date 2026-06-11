@@ -1,10 +1,10 @@
 # Source control providers
 
 WhyGraph's remote crawl enriches your scan with pull requests and issues. You choose the backend with
-`[scan].provider` in `whygraph.toml`. Today there's one supported provider — GitHub — with others on
+`[scan].provider` in `whygraph.toml`. Today there's one supported provider - GitHub - with others on
 the way.
 
-## GitHub — supported
+## GitHub - supported
 
 Set the provider to `github` to pull PRs and issues from the GitHub remote:
 
@@ -25,7 +25,7 @@ The crawl uses the `gh` CLI, so you need it authenticated. Provide a token one o
 
 - An existing `gh auth login`.
 - `GH_TOKEN` or `GITHUB_TOKEN` in your environment.
-- `[scan].token` in `whygraph.toml` — handy when one container scans repos across different orgs.
+- `[scan].token` in `whygraph.toml` - handy when one container scans repos across different orgs.
 
 !!! note "Off by default"
     `provider` defaults to `"off"`, so a fresh scan stays git-only and needs no token. Opt into the

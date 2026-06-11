@@ -1,6 +1,6 @@
 # User Guide
 
-You've scanned a repo and wired an editor. This guide explains how the pieces fit together — and how
+You've scanned a repo and wired an editor. This guide explains how the pieces fit together - and how
 to get the most out of each.
 
 The flow is simple. You **scan** a repo to build the evidence database and refresh the CodeGraph

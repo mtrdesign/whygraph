@@ -21,10 +21,10 @@ image against the current directory:
 docker run --rm -v "$PWD:/workspace" -w /workspace ghcr.io/mtrdesign/whygraph whygraph "$@"
 ```
 
-The container is **ephemeral per command** — no compose, no `docker exec`, nothing to start or stop.
+The container is **ephemeral per command** - no compose, no `docker exec`, nothing to start or stop.
 Each invocation is a fresh process against the repo you're standing in.
 
-- **Everything's in the image** — Python and WhyGraph, `git`, the GitHub CLI, and Node with the
+- **Everything's in the image** - Python and WhyGraph, `git`, the GitHub CLI, and Node with the
   CodeGraph CLI. CodeGraph indexes from the in-image binary, so there's no docker-in-docker.
 - **Per-project config just works.** Each command reads the current repo's own `whygraph.toml`,
   `.whygraph/`, and `.codegraph/`.
@@ -52,12 +52,12 @@ whygraph init --agent claude     # writes .mcp.json (also: --agent cursor / vsco
 
 The generated config launches `whygraph-mcp` by bare command name. Your editor resolves it to the
 shim, which starts a per-session container speaking MCP over stdio. It reads the repo's `.whygraph/`
-and `.codegraph/` over the same `/workspace` mount the scan writes to — so the editor and the scan
+and `.codegraph/` over the same `/workspace` mount the scan writes to - so the editor and the scan
 share one source of truth on disk.
 
 ## Build the image yourself
 
-Building locally instead of pulling — say, while developing:
+Building locally instead of pulling - say, while developing:
 
 ```bash
 docker build -f docker/whygraph/Dockerfile -t whygraph:latest .

@@ -11,7 +11,7 @@ whygraph init --agent claude
 
 ## Supported agents
 
-Four agents are supported. **All of them are project-scoped** — the config file is written or merged
+Four agents are supported. **All of them are project-scoped** - the config file is written or merged
 inside the repo, so you can commit it and every teammate's editor picks it up.
 
 | `--agent` | Editor | Config file |
@@ -24,7 +24,7 @@ inside the repo, so you can commit it and every teammate's editor picks it up.
 Run `whygraph init --list-agents` to print these paths for your own checkout.
 
 The generated config launches `whygraph-mcp` by bare command name, so the same checked-in file works
-for everyone who has WhyGraph installed — no absolute paths to scrub.
+for everyone who has WhyGraph installed - no absolute paths to scrub.
 
 ## Claude Code assets
 

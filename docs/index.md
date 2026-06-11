@@ -11,8 +11,8 @@ Explains <em>why</em> code exists, not just what it does.
 </p>
 
 A rationale layer over [CodeGraph](https://github.com/colbymchenry/codegraph). It mines your git
-history and GitHub for the story behind each line — the commits, pull requests, and issues that put
-it there — and serves that story to any AI editor over MCP.
+history and GitHub for the story behind each line - the commits, pull requests, and issues that put
+it there - and serves that story to any AI editor over MCP.
 
 [Get started](getting-started/quickstart.md){ .md-button .md-button--primary }
 [View on GitHub](https://github.com/mtrdesign/whygraph){ .md-button }
@@ -26,7 +26,7 @@ it there — and serves that story to any AI editor over MCP.
     ---
 
     For any chunk of code, WhyGraph pulls the commits that touched it, the blame behind each line,
-    the PRs that merged it, and the issues those PRs closed — already linked together.
+    the PRs that merged it, and the issues those PRs closed - already linked together.
 
     [:octicons-arrow-right-24: Concepts](guide/concepts.md)
 
@@ -43,7 +43,7 @@ it there — and serves that story to any AI editor over MCP.
 
     ---
 
-    `whygraph-mcp` is a standard MCP server over stdio. Claude Code, Cursor, VS Code, Codex — any
+    `whygraph-mcp` is a standard MCP server over stdio. Claude Code, Cursor, VS Code, Codex - any
     editor that speaks MCP can call it. One command wires each project.
 
     [:octicons-arrow-right-24: Wire your editor](guide/editors.md)
@@ -53,7 +53,7 @@ it there — and serves that story to any AI editor over MCP.
     ---
 
     No Python, Node, `gh`, or CodeGraph on your host. A tiny shim runs everything inside one image,
-    ephemeral per command. Install, init, scan — done.
+    ephemeral per command. Install, init, scan - done.
 
     [:octicons-arrow-right-24: Run with Docker](deploy/docker.md)
 

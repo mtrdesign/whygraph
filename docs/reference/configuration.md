@@ -2,9 +2,9 @@
 
 WhyGraph reads an optional `whygraph.toml` at your repo root. Every field has a built-in default, so
 an unedited file behaves exactly as if none were present. `whygraph init` scaffolds a fully-commented
-`whygraph.example.toml` for you — copy it to `whygraph.toml` and edit what you need.
+`whygraph.example.toml` for you - copy it to `whygraph.toml` and edit what you need.
 
-!!! warning "`whygraph.toml` is gitignored — never commit a token"
+!!! warning "`whygraph.toml` is gitignored - never commit a token"
     `init` adds `whygraph.toml` to `.gitignore` precisely because it can hold API keys. Keep it that
     way. Use `whygraph.example.toml` (committed) for documentation, `whygraph.toml` (ignored) for
     secrets.
@@ -19,9 +19,9 @@ log_level = "INFO"            # DEBUG | INFO | WARN | ERROR | CRITICAL
 [scan]
 max_workers = 2               # parallel LLM calls in the diff-analyzer crawler
 provider = "off"              # source-control backend for the PR/issue crawl:
-                              #   "off"    — skip the remote crawl (default)
-                              #   "github" — pull PRs/issues from the GitHub remote
-                              #   "auto"   — detect from the remote URL (github only, for now)
+                              #   "off"    - skip the remote crawl (default)
+                              #   "github" - pull PRs/issues from the GitHub remote
+                              #   "auto"   - detect from the remote URL (github only, for now)
 remote = "origin"             # git remote whose URL is inspected for provider="auto"
 # token = "ghp_..."           # GitHub token for the gh CLI. Default: read GH_TOKEN /
                               # GITHUB_TOKEN from env (or an existing `gh auth login`).
@@ -87,11 +87,11 @@ timeout_sec = 120
 |---|---|
 | top-level `log_level` | Console log verbosity. |
 | `[scan]` | The crawl: parallelism, which remote provider to use, the git remote name, and an optional pinned GitHub token. |
-| `[analyze]` | The per-commit LLM diff descriptions written during `scan` — provider, model, and the truncation / per-file thresholds. |
-| `[rationale]` | The `whygraph_rationale_brief` card — provider, model, and how much of a squash-merged PR is rendered into the prompt. |
+| `[analyze]` | The per-commit LLM diff descriptions written during `scan` - provider, model, and the truncation / per-file thresholds. |
+| `[rationale]` | The `whygraph_rationale_brief` card - provider, model, and how much of a squash-merged PR is rendered into the prompt. |
 | `whygraph_db` / `codegraph_db` | Override either database path. |
 | `[logging]` | An optional rotating file log, in addition to the always-on stderr log. |
-| `[llm.*]` | Per-provider client settings — model, key, timeout, and `base_url` / `host` where relevant. |
+| `[llm.*]` | Per-provider client settings - model, key, timeout, and `base_url` / `host` where relevant. |
 
 ## Environment variables
 
@@ -106,5 +106,5 @@ instead.
 | `GH_TOKEN` / `GITHUB_TOKEN` | The `gh` CLI during the remote crawl, when `[scan].token` is unset. |
 
 !!! tip "Provider keys degrade gracefully"
-    Missing a key for the analysis or rationale phase isn't fatal — that phase skips, and the rest of
+    Missing a key for the analysis or rationale phase isn't fatal - that phase skips, and the rest of
     the scan still runs. Descriptions and cards backfill once a credential is available.

@@ -1,6 +1,6 @@
 # Installation
 
-WhyGraph follows a one-global-install, use-anywhere model — like `npx`, but for Python. You install
+WhyGraph follows a one-global-install, use-anywhere model - like `npx`, but for Python. You install
 the package once; that puts `whygraph` and `whygraph-mcp` on your `PATH`. Then
 `whygraph init --agent <name>` wires each project so its editor can launch the MCP server.
 
@@ -8,7 +8,7 @@ Pick the path that fits where you are.
 
 === "Docker (recommended)"
 
-    The host needs **only Docker** — no Python, Node, `gh`, or CodeGraph. A tiny shim runs everything
+    The host needs **only Docker** - no Python, Node, `gh`, or CodeGraph. A tiny shim runs everything
     inside one published image.
 
     ```bash
@@ -30,7 +30,7 @@ Pick the path that fits where you are.
 
 === "GitHub"
 
-    Install straight from the repo — latest `main`, a feature branch, or a tag:
+    Install straight from the repo - latest `main`, a feature branch, or a tag:
 
     ```bash
     # Latest from main:

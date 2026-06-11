@@ -1,6 +1,6 @@
 # MCP surface
 
-`whygraph-mcp` registers three tools, four resources, and three prompts. That's the whole surface —
+`whygraph-mcp` registers three tools, four resources, and three prompts. That's the whole surface -
 deliberately narrow. WhyGraph owns "why this exists and when it changed"; graph traversal
 ("what's connected to what") stays with CodeGraph.
 
@@ -11,28 +11,28 @@ For a usage-first walkthrough of how an agent calls these mid-task, see
 
 ### `whygraph_evidence_for`
 
-Historical evidence — commits, PRs, and closing issues — for a chunk of code. Line-blame-driven and
+Historical evidence - commits, PRs, and closing issues - for a chunk of code. Line-blame-driven and
 anchored to HEAD.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `path` | str | — | Source file path, relative to the repo root. |
-| `line_start` | int | — | First line of the chunk (1-indexed, inclusive). |
-| `line_end` | int | — | Last line of the chunk (1-indexed, inclusive). |
-| `qualified_name` | str | — | Fully-qualified symbol name. Use instead of `path`/lines when you know the symbol. CodeGraph resolves it to a file/line range. |
+| `path` | str | - | Source file path, relative to the repo root. |
+| `line_start` | int | - | First line of the chunk (1-indexed, inclusive). |
+| `line_end` | int | - | Last line of the chunk (1-indexed, inclusive). |
+| `qualified_name` | str | - | Fully-qualified symbol name. Use instead of `path`/lines when you know the symbol. CodeGraph resolves it to a file/line range. |
 | `limit` | int | `20` | Cap on the number of commits returned. |
 
 Returns `{ "target": {...}, "evidence": [ { "commit", "pull_requests", "issues", "source" }, ... ] }`.
 
 ### `whygraph_area_history`
 
-Every commit that touched a file path — or any path it was renamed from. Where `evidence_for` is
+Every commit that touched a file path - or any path it was renamed from. Where `evidence_for` is
 line-blame-driven, `area_history` reaches commits for code that's since been deleted, moved, or
 fully rewritten.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `path` | str | *required* | The file path, as it appears at HEAD (or any commit — the rename chain is bidirectional). |
+| `path` | str | *required* | The file path, as it appears at HEAD (or any commit - the rename chain is bidirectional). |
 | `limit` | int | `20` | Cap on commits returned, newest first. |
 | `include_renames` | bool | `true` | Walk the `renamed_from` chain to include commits that touched historical names. |
 
@@ -69,12 +69,12 @@ Returns the card:
 }
 ```
 
-The card carries exactly five narrative fields — **purpose, why, constraints, tradeoffs, risks** —
+The card carries exactly five narrative fields - **purpose, why, constraints, tradeoffs, risks** -
 plus provenance (`model`, `provider`, `cached_at`) and an `evidence_count` summary.
 
 !!! note "Calls the LLM on a cache miss"
     On a miss, this hits the configured provider and may take several seconds. A hit is sub-second.
-    Generation needs a credential — see [Configuration](configuration.md).
+    Generation needs a credential - see [Configuration](configuration.md).
 
 ## Resources
 
@@ -103,7 +103,7 @@ WhyGraph exposes no graph-traversal tools on purpose. The split:
 
 | Layer | Owns |
 |---|---|
-| **CodeGraph** | "what is connected to what" — callers, callees, symbol resolution, type hierarchy. |
-| **WhyGraph** | "why does this exist and when did it change" — evidence, rationale, history. |
+| **CodeGraph** | "what is connected to what" - callers, callees, symbol resolution, type hierarchy. |
+| **WhyGraph** | "why does this exist and when did it change" - evidence, rationale, history. |
 
 For traversal mid-conversation, call CodeGraph's own tools directly.

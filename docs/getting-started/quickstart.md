@@ -12,7 +12,7 @@ whygraph init
 ```
 
 This creates `.whygraph/whygraph.db`, writes a commented `whygraph.example.toml`, and adds the right
-`.gitignore` entries. It's idempotent — run it again any time. It does *not* index CodeGraph yet;
+`.gitignore` entries. It's idempotent - run it again any time. It does *not* index CodeGraph yet;
 that's the next step.
 
 ## 2. Scan
@@ -29,7 +29,7 @@ evidence WhyGraph serves.
     A fresh scan stays git-only and needs no token, because `[scan].provider` defaults to `"off"`. To
     pull PRs and issues, set `provider = "github"` (or `"auto"`) in `whygraph.toml`.
 
-For a fast, offline pass — no remote calls, no LLM — skip both phases:
+For a fast, offline pass - no remote calls, no LLM - skip both phases:
 
 ```bash
 whygraph scan --no-remote --no-llm-descriptions
@@ -47,7 +47,7 @@ whygraph init --agent claude
 ```
 
 That writes `.mcp.json` at the repo root and copies the bundled assets into `.claude/`. Other agents
-work the same way — `--agent cursor`, `--agent vscode`, `--agent codex`. See
+work the same way - `--agent cursor`, `--agent vscode`, `--agent codex`. See
 [Wiring your editor](../guide/editors.md) for each one's config path.
 
 ## 4. Sanity-check the server
@@ -56,7 +56,7 @@ work the same way — `--agent cursor`, `--agent vscode`, `--agent codex`. See
 whygraph-mcp   # Ctrl-C to exit
 ```
 
-If it launches without error, your editor can launch it too. That's it — ask your assistant why a
+If it launches without error, your editor can launch it too. That's it - ask your assistant why a
 function exists, and WhyGraph answers from history.
 
 ## Where to next

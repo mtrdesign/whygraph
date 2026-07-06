@@ -1,0 +1,82 @@
+# WhyGraph configuration — whygraph.toml
+#
+# Scaffolded by `whygraph init`. Every field is optional and the values shown
+# are the built-in defaults, so an unedited file behaves exactly as if no
+# config were present. Uncomment and edit to override.
+
+log_level = "INFO"            # DEBUG | INFO | WARN | ERROR | CRITICAL
+
+[scan]
+max_workers = 2               # parallel LLM calls in the diff-analyzer crawler
+provider = "${scan_provider}"              # source-control backend for the PR/issue crawl:
+                              #   "off"    — skip remote crawl (default)
+                              #   "github" — pull PRs/issues from the GitHub remote
+                              #   "auto"   — detect from the remote URL (github only, for now)
+remote = "origin"             # git remote whose URL is inspected for provider/auto
+${scan_token_line}
+                              # Default: read GH_TOKEN / GITHUB_TOKEN from env (or an
+                              # existing `gh auth login`). Set here to pin a per-project
+                              # token — handy when one shared container scans repos
+                              # across different orgs. whygraph.toml is gitignored, so a
+                              # token here is never committed.
+
+[analyze]
+# LLM that writes a per-commit "git diff" description during `whygraph scan`.
+provider = "${analyze_provider}"        # which [llm.*] adapter to use
+${analyze_model_line}
+# max_diff_chars = 50000      # diff truncated past this length before prompting
+# large_commit_file_count = 30  # commits touching more files than this are described
+                              # per-file on demand (not whole-diff) — keeps a bulk
+                              # import / squash commit from costing a repo-wide pass
+# timeout_sec = 60            # per-call timeout; default: the adapter's own
+
+[rationale]
+# LLM that writes a structured "why this code exists" rationale card.
+provider = "${rationale_provider}"        # which [llm.*] adapter to use
+${rationale_model_line}
+# timeout_sec = 60            # per-call timeout; default: the adapter's own
+
+# Uncomment to override default DB locations (resolved relative to this file):
+# whygraph_db  = ".whygraph/whygraph.db"
+# codegraph_db = ".codegraph/codegraph.db"
+
+# Optional rotating file log. Console (stderr) logging is always on. Uncomment
+# this section to add an *additional* file handler; leave it out (or leave
+# `file` unset) to keep file logging off.
+# [logging]
+# file         = ".whygraph/logs/whygraph.log"   # resolved relative to this file
+# level        = "DEBUG"                          # default: inherit top-level log_level
+# max_bytes    = 5_000_000
+# backup_count = 3
+
+# Per-provider LLM client settings. Each table is consumed by the matching
+# adapter in whygraph.services.llm via Adapter.from_config. Omit api_key to
+# read the standard env var (ANTHROPIC_API_KEY, OPENAI_API_KEY,
+# DEEPSEEK_API_KEY); omit a section entirely to use the defaults shown.
+
+[llm.anthropic]
+model = "${llm_anthropic_model}"
+${llm_anthropic_key_line}
+timeout_sec = 60
+
+[llm.openai]
+model = "${llm_openai_model}"
+${llm_openai_key_line}
+# base_url = "..."            # default: https://api.openai.com/v1
+timeout_sec = 60
+
+[llm.deepseek]
+model = "${llm_deepseek_model}"
+${llm_deepseek_key_line}
+timeout_sec = 60
+
+[llm.ollama]
+model = "${llm_ollama_model}"
+# host = "http://localhost:11434"
+timeout_sec = 120
+
+# `claude_cli` (Python attribute) and `claude-cli` (TOML idiom) both parse.
+[llm.claude_cli]
+model = "${llm_claude_cli_model}"
+${llm_claude_cli_key_line}
+timeout_sec = 120

@@ -19,6 +19,7 @@ import tomllib
 from dataclasses import dataclass, field, fields
 from importlib import resources
 from pathlib import Path
+from string import Template
 
 from whygraph.core.logger import LogLevel
 
@@ -613,37 +614,217 @@ class Config:
         return cls()
 
 
+@dataclass(frozen=True)
+class InitAnswers:
+    """User choices collected by ``whygraph init`` (interactive or defaulted).
+
+    A plain data holder passed to :func:`render_config` to produce both
+    the committable ``whygraph.example.toml`` (secrets omitted) and the
+    ready-to-run ``whygraph.toml`` (secrets included). It lives in
+    ``core`` rather than the CLI so ``core/config`` never imports upward
+    into ``cli`` — the interactive prompt layer imports *this*.
+
+    Attributes
+    ----------
+    agent : str or None
+        Canonical agent name to wire (``"claude"``, …), or ``None`` to
+        skip MCP wiring. Not written into either TOML — used only by the
+        command to drive agent wiring.
+    analyze_provider : str
+        Provider tag for ``[analyze].provider``. **Hyphen form** for the
+        CLI adapter (``"claude-cli"``), matching the factory tag.
+    analyze_model : str
+        Model for ``[analyze].model``. Empty string means "no override"
+        — the rendered line stays the commented hint so the provider's
+        own ``[llm.<provider>].model`` applies.
+    rationale_provider : str
+        Provider tag for ``[rationale].provider`` (hyphen form).
+    rationale_model : str
+        Model for ``[rationale].model``; empty means "no override".
+    api_keys : dict[str, str]
+        ``{provider: key}`` for key-bearing providers the user supplied a
+        key for (``anthropic`` / ``openai`` / ``deepseek``). Rendered as
+        an active ``api_key`` line **only** into ``whygraph.toml``.
+    scan_provider : str
+        Value for ``[scan].provider`` — ``"off"`` / ``"github"`` /
+        ``"auto"``.
+    scan_token : str or None
+        Value for ``[scan].token``; rendered active **only** into
+        ``whygraph.toml`` when present.
+    reconfigure_toml : bool
+        ``True`` when the command should (over)write ``whygraph.toml``.
+        ``False`` (default, and always in non-interactive runs) preserves
+        an existing ``whygraph.toml``.
+    """
+
+    agent: str | None = None
+    analyze_provider: str = "anthropic"
+    analyze_model: str = ""
+    rationale_provider: str = "anthropic"
+    rationale_model: str = ""
+    api_keys: dict[str, str] = field(default_factory=dict)
+    scan_provider: str = "off"
+    scan_token: str | None = None
+    reconfigure_toml: bool = False
+
+
+DEFAULT_ANSWERS = InitAnswers()
+"""Non-interactive baseline: every provider ``anthropic``, no overrides, no
+secrets, scan ``off``. :func:`render_config` with these + ``include_tokens=
+False`` reproduces the bundled template byte-for-byte (golden test)."""
+
+
+# Verbatim commented-hint lines from the template. Kept here (not in the
+# ``.tmpl``) because each is a *whole-line* placeholder that flips between
+# this hint (secret omitted) and an active assignment (secret written). The
+# golden fixture test guards these against drift.
+_SCAN_TOKEN_HINT = (
+    '# token = "ghp_..."           '
+    "# GitHub token for the gh CLI during the remote crawl."
+)
+_ANALYZE_MODEL_HINT = (
+    '# model = "claude-haiku-4-5"  '
+    "# override the provider's model for analysis only"
+)
+_RATIONALE_MODEL_HINT = (
+    '# model = "claude-haiku-4-5"  '
+    "# override the provider's model for rationale only"
+)
+_LLM_KEY_HINTS: dict[str, str] = {
+    "anthropic": '# api_key = "sk-ant-..."      # default: read ANTHROPIC_API_KEY from env',
+    "openai": '# api_key = "sk-..."          # default: read OPENAI_API_KEY from env',
+    "deepseek": '# api_key = "sk-..."          # default: read DEEPSEEK_API_KEY from env',
+    "claude_cli": '# api_key = "sk-ant-..."      # default: subscription billing (strips env var)',
+}
+
+
+def _template_text() -> str:
+    """Return the raw ``default_config.toml.tmpl`` resource text."""
+    return (resources.files("whygraph.core") / "default_config.toml.tmpl").read_text(
+        encoding="utf-8"
+    )
+
+
+def _model_line(model: str, hint: str, purpose: str) -> str:
+    """Render an ``[analyze]/[rationale]`` model line.
+
+    ``model`` empty → the commented ``hint`` verbatim (byte-exact
+    default). Otherwise an active override line whose trailing comment
+    (``for <purpose> only``) stays accurate.
+    """
+    if model:
+        return f'model = "{model}"  # override the provider\'s model for {purpose} only'
+    return hint
+
+
+def _scan_token_line(answers: InitAnswers, include_tokens: bool) -> str:
+    """Active ``token = "…"`` only when writing secrets and one was given."""
+    if include_tokens and answers.scan_token:
+        return f'token = "{answers.scan_token}"'
+    return _SCAN_TOKEN_HINT
+
+
+def _key_line(provider: str, answers: InitAnswers, include_tokens: bool) -> str:
+    """Active ``api_key = "…"`` only when writing secrets and one was given.
+
+    ``claude_cli`` never carries a key (subscription billing), so it
+    always renders its hint.
+    """
+    if include_tokens and answers.api_keys.get(provider):
+        return f'api_key = "{answers.api_keys[provider]}"'
+    return _LLM_KEY_HINTS[provider]
+
+
+def render_config(answers: InitAnswers, *, include_tokens: bool) -> str:
+    """Render ``whygraph.toml`` text from ``answers``.
+
+    A single renderer feeds both outputs: the committable example
+    (``include_tokens=False`` — every secret line stays a commented hint)
+    and the real config (``include_tokens=True`` — a secret is written as
+    an active line only when the user supplied one). The full commented
+    reference is always preserved; non-chosen ``[llm.*]`` sections keep
+    their default model so the file stays a complete reference.
+
+    Parameters
+    ----------
+    answers : InitAnswers
+        The collected choices.
+    include_tokens : bool
+        When ``True``, active ``api_key`` / ``token`` lines are emitted
+        for any secret present in ``answers``; when ``False``, all secret
+        lines stay commented (used for the committable example).
+
+    Returns
+    -------
+    str
+        The full rendered config, including comments and trailing newline.
+
+    Notes
+    -----
+    ``render_config(DEFAULT_ANSWERS, include_tokens=False)`` reproduces the
+    bundled ``default_config.toml.tmpl`` in its unfilled form byte-for-byte
+    (pinned by the golden fixture test).
+    """
+    subs = {
+        "scan_provider": answers.scan_provider,
+        "analyze_provider": answers.analyze_provider,
+        "rationale_provider": answers.rationale_provider,
+        "llm_anthropic_model": AnthropicConfig().model,
+        "llm_openai_model": OpenAIConfig().model,
+        "llm_deepseek_model": DeepSeekConfig().model,
+        "llm_ollama_model": OllamaConfig().model,
+        "llm_claude_cli_model": ClaudeCliConfig().model,
+        "scan_token_line": _scan_token_line(answers, include_tokens),
+        "analyze_model_line": _model_line(
+            answers.analyze_model, _ANALYZE_MODEL_HINT, "analysis"
+        ),
+        "rationale_model_line": _model_line(
+            answers.rationale_model, _RATIONALE_MODEL_HINT, "rationale"
+        ),
+        "llm_anthropic_key_line": _key_line("anthropic", answers, include_tokens),
+        "llm_openai_key_line": _key_line("openai", answers, include_tokens),
+        "llm_deepseek_key_line": _key_line("deepseek", answers, include_tokens),
+        # claude_cli is never key-prompted — always its hint.
+        "llm_claude_cli_key_line": _LLM_KEY_HINTS["claude_cli"],
+    }
+    return Template(_template_text()).substitute(subs)
+
+
 def default_config_text() -> str:
     """Return the bundled commented default config as text.
 
-    Read from the packaged ``whygraph/core/default_config.toml`` resource
-    (same ``importlib.resources`` mechanism as the analyze prompt
-    templates). The shown values match the :class:`Config` defaults, so a
-    copy with no edits behaves exactly as if no config were present.
+    Rendered from ``whygraph/core/default_config.toml.tmpl`` with the
+    non-interactive baseline (:data:`DEFAULT_ANSWERS`) and no secrets, so
+    the shown values match the :class:`Config` defaults and an unedited
+    copy behaves exactly as if no config were present.
 
     Returns
     -------
     str
         The full template, including comments and a trailing newline.
     """
-    return (resources.files("whygraph.core") / "default_config.toml").read_text(
-        encoding="utf-8"
-    )
+    return render_config(DEFAULT_ANSWERS, include_tokens=False)
 
 
-def write_example_config(project_root: Path) -> Path:
+def write_example_config(
+    project_root: Path, answers: InitAnswers = DEFAULT_ANSWERS
+) -> Path:
     """Scaffold :data:`EXAMPLE_CONFIG_FILENAME` into ``project_root``.
 
     The example is a committable, package-owned reference (like
     ``.env.example``): users copy it to :data:`CONFIG_FILENAME` and edit.
-    Because it tracks the package defaults rather than user edits, it is
-    **always (re)written** — re-running ``whygraph init`` refreshes it so
-    it stays in sync with the shipped defaults.
+    Secrets are **never** written here — key/token lines stay commented
+    hints regardless of ``answers``. It is **always (re)written** so a
+    re-run of ``whygraph init`` keeps it in sync with the chosen (or
+    default) non-secret values.
 
     Parameters
     ----------
     project_root : Path
         Directory to write the example into (usually the repo root).
+    answers : InitAnswers
+        Non-secret choices to bake in (provider/model/scan). Defaults to
+        :data:`DEFAULT_ANSWERS`, reproducing the shipped template.
 
     Returns
     -------
@@ -651,5 +832,30 @@ def write_example_config(project_root: Path) -> Path:
         The path of the written example config.
     """
     path = project_root / EXAMPLE_CONFIG_FILENAME
-    path.write_text(default_config_text(), encoding="utf-8")
+    path.write_text(render_config(answers, include_tokens=False), encoding="utf-8")
+    return path
+
+
+def write_user_config(project_root: Path, answers: InitAnswers) -> Path:
+    """Write the ready-to-run :data:`CONFIG_FILENAME` into ``project_root``.
+
+    Unlike :func:`write_example_config`, this emits active ``api_key`` /
+    ``token`` lines for any secret the user supplied in ``answers``. The
+    file is gitignored by ``whygraph init`` before it is written, so a
+    secret here is never committed.
+
+    Parameters
+    ----------
+    project_root : Path
+        Directory to write ``whygraph.toml`` into (usually the repo root).
+    answers : InitAnswers
+        The collected choices, including any secrets.
+
+    Returns
+    -------
+    Path
+        The path of the written config.
+    """
+    path = project_root / CONFIG_FILENAME
+    path.write_text(render_config(answers, include_tokens=True), encoding="utf-8")
     return path

@@ -14,6 +14,7 @@ dependencies = [
     "openai>=1.40",
     "ollama>=0.3",
     "tomli-w>=1.0",
+    "questionary>=2.0",
 ]
 
 [project.scripts]

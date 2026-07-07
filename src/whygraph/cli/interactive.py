@@ -254,9 +254,7 @@ def _prompt_llm(prompter: Prompter) -> tuple[str, str, str, str]:
     )
     analyze_model = str(
         _require(
-            prompter.text(
-                "Analyze model?", _PROVIDER_DEFAULT_MODEL[analyze_provider]
-            )
+            prompter.text("Analyze model?", _PROVIDER_DEFAULT_MODEL[analyze_provider])
         )
     ).strip()
 
@@ -292,9 +290,7 @@ def _prompt_api_keys(
         env_var = _PROVIDER_ENV_VAR[provider]
         key = str(
             _require(
-                prompter.password(
-                    f"API key for {provider} (blank → read ${env_var})"
-                )
+                prompter.password(f"API key for {provider} (blank → read ${env_var})")
             )
         ).strip()
         if key:
@@ -306,9 +302,7 @@ def _prompt_scan(prompter: Prompter) -> tuple[str, str | None]:
     """Prompt the scan provider and (for github/auto) the token (step 7)."""
     scan_provider = str(
         _require(
-            prompter.select(
-                "Source-control provider?", list(_SCAN_PROVIDERS), "off"
-            )
+            prompter.select("Source-control provider?", list(_SCAN_PROVIDERS), "off")
         )
     )
     scan_token: str | None = None

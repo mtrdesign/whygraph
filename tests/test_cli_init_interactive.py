@@ -30,9 +30,7 @@ class ScriptedPrompter:
     recorded in :attr:`calls` for assertions on what was asked.
     """
 
-    def __init__(
-        self, *, selects=(), texts=(), passwords=(), confirms=()
-    ) -> None:
+    def __init__(self, *, selects=(), texts=(), passwords=(), confirms=()) -> None:
         self.selects = list(selects)
         self.texts = list(texts)
         self.passwords = list(passwords)

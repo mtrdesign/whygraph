@@ -683,12 +683,10 @@ _SCAN_TOKEN_HINT = (
     "# GitHub token for the gh CLI during the remote crawl."
 )
 _ANALYZE_MODEL_HINT = (
-    '# model = "claude-haiku-4-5"  '
-    "# override the provider's model for analysis only"
+    '# model = "claude-haiku-4-5"  # override the provider\'s model for analysis only'
 )
 _RATIONALE_MODEL_HINT = (
-    '# model = "claude-haiku-4-5"  '
-    "# override the provider's model for rationale only"
+    '# model = "claude-haiku-4-5"  # override the provider\'s model for rationale only'
 )
 _LLM_KEY_HINTS: dict[str, str] = {
     "anthropic": '# api_key = "sk-ant-..."      # default: read ANTHROPIC_API_KEY from env',

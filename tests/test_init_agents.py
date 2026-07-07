@@ -602,9 +602,9 @@ def test_init_yes_writes_both_files_with_defaults(stub_init, tmp_path: Path) -> 
         data = tomllib.load(f)
     assert data["analyze"]["provider"] == "anthropic"
     # No secrets in the default whygraph.toml.
-    assert "sk-" not in user.read_text(encoding="utf-8").replace("sk-ant-...", "").replace(
-        "sk-...", ""
-    )
+    assert "sk-" not in user.read_text(encoding="utf-8").replace(
+        "sk-ant-...", ""
+    ).replace("sk-...", "")
 
 
 def test_init_yes_preserves_existing_whygraph_toml(stub_init, tmp_path: Path) -> None:
@@ -651,9 +651,7 @@ def test_init_interactive_abort_writes_nothing(
 
     # Force the interactive branch (CliRunner swaps the real sys.stdin, so we
     # replace the module's `sys` reference — init only reads sys.stdin.isatty).
-    fake_sys = types.SimpleNamespace(
-        stdin=types.SimpleNamespace(isatty=lambda: True)
-    )
+    fake_sys = types.SimpleNamespace(stdin=types.SimpleNamespace(isatty=lambda: True))
     monkeypatch.setattr("whygraph.cli.commands.init.sys", fake_sys)
     called = {"db": 0}
     monkeypatch.setattr(

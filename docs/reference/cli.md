@@ -27,6 +27,13 @@ Bootstrap the WhyGraph database under `.whygraph/whygraph.db`, write a committab
 `whygraph.example.toml` documenting every tunable, and add the right `.gitignore` entries. It's
 idempotent - re-running on an initialized project just confirms both databases are present.
 
+On a terminal, `init` runs a guided, arrow-key setup: pick the agent, the analyze/rationale LLMs
+(with optional API keys), and the source-control provider (with an optional GitHub token). It shows a
+summary that masks every secret, asks *"Write these files?"*, then writes both `whygraph.example.toml`
+(secret-free) and a ready-to-run `whygraph.toml` (with the secrets you entered). Every prompt is
+defaulted. `--yes` (and any non-TTY invocation) skips the prompts, uses defaults, and never clobbers
+an existing `whygraph.toml`.
+
 `init` does **not** index CodeGraph. That happens on [`scan`](#whygraph-scan).
 
 With `--agent X`, it also wires the WhyGraph MCP server into that agent's config. All supported
@@ -34,7 +41,8 @@ agents are project-scoped, so the config file is written inside the repo.
 
 | Option | Description |
 |---|---|
-| `--agent [claude\|codex\|copilot\|cursor\|vscode]` | Wire the MCP server into the named agent's config. |
+| `--agent [claude\|codex\|copilot\|cursor\|vscode]` | Wire the MCP server into the named agent's config. On a terminal, skips the interactive agent prompt. |
+| `--yes` / `-y` | Accept all defaults without prompting (also implied off a TTY). Writes a default `whygraph.toml` only if none exists. |
 | `--print` | Print the MCP snippet to stdout instead of writing any config file. |
 | `--list-agents` | List supported agents (with config-file paths) and exit. |
 | `--install-assets / --no-install-assets` | Copy the chosen agent's bundled assets into the project. Default: enabled. No-op for agents that ship no asset tree. |

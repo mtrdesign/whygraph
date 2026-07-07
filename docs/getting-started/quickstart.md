@@ -11,9 +11,16 @@ From the repo you want to analyze:
 whygraph init
 ```
 
-This creates `.whygraph/whygraph.db`, writes a commented `whygraph.example.toml`, and adds the right
-`.gitignore` entries. It's idempotent - run it again any time. It does *not* index CodeGraph yet;
-that's the next step.
+On a terminal this runs a short guided setup - pick your agent, the analyze/rationale LLMs (with
+optional API keys), and the source-control provider (with an optional GitHub token), then review a
+summary that masks every secret and confirm. It creates `.whygraph/whygraph.db`, writes a commented
+`whygraph.example.toml` (never any secrets) and a ready-to-run `whygraph.toml` (with the secrets you
+entered), and adds the right `.gitignore` entries. Every prompt is defaulted, so a bare Enter accepts
+it. It's idempotent - run it again any time; an existing `whygraph.toml` is only touched if you ask.
+It does *not* index CodeGraph yet; that's the next step.
+
+Prefer no prompts? `whygraph init --yes` (and any non-interactive shell - pipes, CI, the git hooks)
+accepts every default without asking, writing a default `whygraph.toml` only if none exists.
 
 ## 2. Scan
 

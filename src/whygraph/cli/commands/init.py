@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import click
@@ -60,6 +61,18 @@ from ..console import fail
         " left alone."
     ),
 )
+@click.option(
+    "--yes",
+    "-y",
+    "yes",
+    is_flag=True,
+    help=(
+        "Accept all defaults without prompting. Also implied whenever"
+        " stdin is not a TTY (pipes, CI, the git hooks). Writes a"
+        " default whygraph.toml if none exists and never clobbers an"
+        " existing one."
+    ),
+)
 def init_cmd(
     agent_name: str | None,
     print_only: bool,
@@ -67,14 +80,26 @@ def init_cmd(
     install_assets: bool,
     skip_preflight: bool,
     force: bool,
+    yes: bool,
 ) -> None:
     """Initialize the WhyGraph database under ``.whygraph/whygraph.db``.
 
-    Also writes a committable ``whygraph.example.toml`` at the project root
-    (it documents every tunable and ships the built-in defaults — copy it
-    to ``whygraph.toml`` and edit to customize) and ensures the project's
-    ``.gitignore`` keeps the user-owned config and generated caches out of
-    git (``whygraph.toml``, ``.whygraph/``, ``.codegraph/``).
+    On a terminal this runs a guided, arrow-key setup — pick the agent,
+    the analyze/rationale LLMs (+ API keys), and the source-control
+    provider (+ token), review a summary that masks every secret, then
+    confirm. It writes a committable ``whygraph.example.toml`` (never any
+    secrets) and, once confirmed, a ready-to-run ``whygraph.toml`` (with
+    the secrets you entered). Every prompt is defaulted, so a bare Enter
+    accepts it.
+
+    ``--yes`` (and any non-TTY invocation: pipes, CI, the git hooks)
+    skips all prompts and uses defaults — writing a default
+    ``whygraph.toml`` only if none exists and never clobbering an existing
+    one. A bare non-TTY ``init`` refreshes only the example, as before.
+
+    Either way it ensures the project's ``.gitignore`` keeps the
+    user-owned config and generated caches out of git (``whygraph.toml``,
+    ``.whygraph/``, ``.codegraph/``).
 
     Does **not** index CodeGraph — that happens on ``whygraph scan``,
     which populates ``.codegraph/codegraph.db`` (and refreshes it on every
@@ -103,20 +128,28 @@ def init_cmd(
     if not skip_preflight:
         _run_preflight()
 
+    # Prompt only on a real terminal and only when not told to accept
+    # defaults. Pipes / CI / the git hooks have no TTY and fall straight
+    # through to defaults — identical to the pre-interactive behaviour.
+    interactive = sys.stdin.isatty() and not yes
+    answers = _gather_answers(project_root, agent_name, interactive=interactive)
+
     db_path = _ensure_db_initialized()
     click.echo(f"Initialized WhyGraph database at {db_path}")
 
-    _scaffold_example_config(project_root)
+    _scaffold_example_config(project_root, answers)
+    _maybe_write_user_config(project_root, answers, write_user=interactive or yes)
     _ensure_gitignore(project_root)
 
-    if agent_name is None:
+    resolved_agent = answers.agent or agent_name
+    if resolved_agent is None:
         click.echo(
             "Tip: run `whygraph init --list-agents` to see supported agents,"
             " then `whygraph init --agent <name>` to wire it up."
         )
         return
 
-    target = agents.resolve_agent(agent_name)
+    target = agents.resolve_agent(resolved_agent)
     snippet = agents.render_snippet(target)
 
     if print_only or not agents.is_write_supported(target):
@@ -144,19 +177,80 @@ def _run_preflight() -> None:
         fail(str(exc))
 
 
-def _scaffold_example_config(project_root: Path) -> None:
+def _gather_answers(project_root: Path, agent_name: str | None, *, interactive: bool):
+    """Collect the init choices — interactively, or from defaults.
+
+    In interactive mode this runs the guided flow (agent + LLMs + scan +
+    a summary panel + confirm) and returns its answers. A Ctrl-C / EOF at
+    any prompt or a declined confirm raises :class:`InitAborted`, which we
+    turn into a clean non-zero exit **before** any file is written or the
+    DB is bootstrapped. Non-interactive callers get the defaults with the
+    ``--agent`` value threaded in.
+
+    Lazy-imports the interactive module so lightweight surfaces stay fast.
+    """
+    from whygraph.core.config import DEFAULT_ANSWERS, InitAnswers
+
+    if not interactive:
+        return InitAnswers(agent=agent_name, reconfigure_toml=False)
+
+    from whygraph.cli.interactive import InitAborted, prompt_for_init
+
+    try:
+        return prompt_for_init(
+            project_root,
+            preset_agent=agent_name,
+            on_summary=_render_summary_panel,
+        )
+    except InitAborted:
+        fail("Aborted — no changes written.")
+    # Unreachable (fail raises); satisfies type-checkers.
+    return DEFAULT_ANSWERS
+
+
+def _render_summary_panel(summary: str) -> None:
+    """Render the pre-write review summary as a Rich panel on stderr."""
+    from rich.panel import Panel
+
+    from ..console import console
+
+    console.print(
+        Panel(summary, title="Review your choices", border_style="cyan", expand=False)
+    )
+
+
+def _scaffold_example_config(project_root: Path, answers) -> None:
     """Write the committable ``whygraph.example.toml`` at the project root.
 
-    Always refreshed so it tracks the shipped defaults. Lazy-imports the
-    config helper so lightweight surfaces like ``--list-agents`` and
+    Always refreshed so it tracks the shipped defaults and any non-secret
+    choices from ``answers``. Secrets are never written here. Lazy-imports
+    the config helper so lightweight surfaces like ``--list-agents`` and
     ``--help`` don't pay the cost.
     """
     from whygraph.core.config import write_example_config
 
-    path = write_example_config(project_root)
+    path = write_example_config(project_root, answers)
     click.echo(
         f"Wrote example config to {path} — copy to whygraph.toml and edit to customize"
     )
+
+
+def _maybe_write_user_config(project_root: Path, answers, *, write_user: bool) -> None:
+    """Write ``whygraph.toml`` when appropriate, else preserve an existing one.
+
+    Writes only when ``write_user`` (interactive or ``--yes``) **and** the
+    file is absent or the user chose to reconfigure it. A bare non-TTY
+    ``init`` never writes it (``write_user`` is ``False``), preserving the
+    historical scaffold-only behaviour.
+    """
+    from whygraph.core.config import CONFIG_FILENAME, write_user_config
+
+    user_path = project_root / CONFIG_FILENAME
+    if write_user and (not user_path.exists() or answers.reconfigure_toml):
+        path = write_user_config(project_root, answers)
+        click.echo(f"Wrote {path} — gitignored; holds any secrets you entered")
+    elif user_path.exists():
+        click.echo(f"Kept existing {user_path}")
 
 
 def _ensure_gitignore(project_root: Path) -> None:

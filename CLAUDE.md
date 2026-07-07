@@ -27,6 +27,18 @@ uv run whygraph-mcp           # launch MCP server on stdio (Ctrl-C to exit)
 
 A root `Makefile` wraps these plus dev-only tooling — `make` lists targets; `make db` / `make db-down` run a DBGate viewer for both databases (via `docker-compose.example.yml`), `make inspect` launches the MCP Inspector.
 
+## Before pushing
+
+CI (`ci-code-checks`) gates every PR on two parallel jobs: **lint** (`uv run ruff check src/ tests/` *and* `uv run ruff format --check src/ tests/` — both, not just the first) and **tests** (`uv run pytest`). Run all three locally before pushing or opening a PR:
+
+```bash
+uv run ruff check src/ tests/
+uv run ruff format --check src/ tests/   # `ruff check` passing does NOT imply this passes
+uv run pytest
+```
+
+If `ruff format --check` fails, run `uv run ruff format src/ tests/` to fix it in place, then re-run the check before pushing.
+
 ## Architecture
 
 Top-level packages under `src/whygraph/`:

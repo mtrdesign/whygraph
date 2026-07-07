@@ -584,3 +584,93 @@ def test_init_unknown_agent_errors(stub_init, tmp_path: Path) -> None:
     assert result.exit_code != 0
     # Click's Choice produces a usage error mentioning the bad value.
     assert "emacs" in result.output or "Invalid value" in result.output
+
+
+# ---------- --yes / non-interactive config writing --------------------------
+
+
+def test_init_yes_writes_both_files_with_defaults(stub_init, tmp_path: Path) -> None:
+    """``init --yes`` (non-TTY) writes both files with defaults, no prompts."""
+    result, cwd = _invoke_in(tmp_path, "init", "--yes")
+    assert result.exit_code == 0, result.output
+
+    example = cwd / "whygraph.example.toml"
+    user = cwd / "whygraph.toml"
+    assert example.exists()
+    assert user.exists()
+    with user.open("rb") as f:
+        data = tomllib.load(f)
+    assert data["analyze"]["provider"] == "anthropic"
+    # No secrets in the default whygraph.toml.
+    assert "sk-" not in user.read_text(encoding="utf-8").replace(
+        "sk-ant-...", ""
+    ).replace("sk-...", "")
+
+
+def test_init_yes_preserves_existing_whygraph_toml(stub_init, tmp_path: Path) -> None:
+    """``--yes`` never clobbers an existing whygraph.toml."""
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        cwd = Path.cwd()
+        (cwd / "whygraph.toml").write_text('log_level = "DEBUG"\n', encoding="utf-8")
+        result = runner.invoke(whygraph_main, ["init", "--yes"])
+        assert result.exit_code == 0, result.output
+        # Untouched.
+        assert (cwd / "whygraph.toml").read_text(encoding="utf-8") == (
+            'log_level = "DEBUG"\n'
+        )
+        assert "Kept existing" in result.output
+
+
+def test_bare_init_non_tty_writes_no_whygraph_toml(stub_init, tmp_path: Path) -> None:
+    """A bare (no --yes) non-TTY init keeps the scaffold-only behaviour."""
+    result, cwd = _invoke_in(tmp_path, "init")
+    assert result.exit_code == 0, result.output
+    assert (cwd / "whygraph.example.toml").exists()
+    assert not (cwd / "whygraph.toml").exists()
+
+
+def test_init_agent_claude_yes_wires_and_writes_config(
+    stub_init, tmp_path: Path
+) -> None:
+    """``init --agent claude --yes`` wires MCP + assets and writes both files."""
+    result, cwd = _invoke_in(tmp_path, "init", "--agent", "claude", "--yes")
+    assert result.exit_code == 0, result.output
+    assert (cwd / ".mcp.json").exists()
+    assert (cwd / "whygraph.toml").exists()
+    assert (cwd / ".claude" / "agents" / "planner.md").is_file()
+
+
+def test_init_interactive_abort_writes_nothing(
+    stub_init, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A Ctrl-C / declined confirm exits non-zero and touches no files or DB."""
+    import types
+
+    from whygraph.cli.interactive import InitAborted
+
+    # Force the interactive branch (CliRunner swaps the real sys.stdin, so we
+    # replace the module's `sys` reference — init only reads sys.stdin.isatty).
+    fake_sys = types.SimpleNamespace(stdin=types.SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("whygraph.cli.commands.init.sys", fake_sys)
+    called = {"db": 0}
+    monkeypatch.setattr(
+        "whygraph.cli.commands.init._ensure_db_initialized",
+        lambda: called.__setitem__("db", called["db"] + 1) or (tmp_path / "x.db"),
+    )
+
+    def _abort(*_a, **_k):
+        raise InitAborted("boom")
+
+    monkeypatch.setattr("whygraph.cli.interactive.prompt_for_init", _abort)
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        cwd = Path.cwd()
+        result = runner.invoke(whygraph_main, ["init", "--skip-preflight"])
+        assert result.exit_code != 0
+        assert "Aborted" in result.output
+        # No files written, and the DB was never bootstrapped.
+        assert not (cwd / "whygraph.toml").exists()
+        assert not (cwd / "whygraph.example.toml").exists()
+        assert called["db"] == 0

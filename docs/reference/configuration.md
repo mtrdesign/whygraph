@@ -1,8 +1,11 @@
 # Configuration
 
 WhyGraph reads an optional `whygraph.toml` at your repo root. Every field has a built-in default, so
-an unedited file behaves exactly as if none were present. `whygraph init` scaffolds a fully-commented
-`whygraph.example.toml` for you - copy it to `whygraph.toml` and edit what you need.
+an unedited file behaves exactly as if none were present. On a terminal, `whygraph init` walks you
+through the common choices (agent, analyze/rationale LLMs + keys, source-control provider + token)
+and writes both a fully-commented `whygraph.example.toml` (secret-free, committable) and a ready-to-run
+`whygraph.toml` (with any secrets you entered). You can always edit `whygraph.toml` by hand afterwards,
+or start from the example. `whygraph init --yes` skips the prompts and uses defaults.
 
 !!! warning "`whygraph.toml` is gitignored - never commit a token"
     `init` adds `whygraph.toml` to `.gitignore` precisely because it can hold API keys. Keep it that

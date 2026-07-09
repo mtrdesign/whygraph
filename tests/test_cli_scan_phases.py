@@ -165,7 +165,7 @@ def test_three_phases_run_in_order_with_llm_last(
     assert "done in" in result.output
 
 
-def test_no_llm_descriptions_drops_the_llm_phase(
+def test_skip_analyze_drops_the_llm_phase(
     isolated_db: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     order: list[tuple[str, str]] = []
@@ -174,7 +174,7 @@ def test_no_llm_descriptions_drops_the_llm_phase(
         scan_mod, "_select_github_client", lambda *a, **k: _DummyClient()
     )
 
-    result = CliRunner().invoke(whygraph_main, ["scan", "--no-llm-descriptions"])
+    result = CliRunner().invoke(whygraph_main, ["scan", "--skip-analyze"])
 
     assert result.exit_code == 0, result.output
     # Two phases: structural + pr-origin recovery; no LLM phase.
@@ -191,7 +191,7 @@ def test_single_phase_when_remote_and_llm_disabled(
     stubs = _patch_crawlers(monkeypatch, order)
 
     result = CliRunner().invoke(
-        whygraph_main, ["scan", "--no-remote", "--no-llm-descriptions"]
+        whygraph_main, ["scan", "--no-remote", "--skip-analyze"]
     )
 
     assert result.exit_code == 0, result.output

@@ -55,7 +55,7 @@ log="$root/.whygraph/logs/hooks.log"
     if mkdir "$lock" 2>/dev/null; then
       trap 'rmdir "$lock" 2>/dev/null' EXIT INT TERM
       rm -f "$pending"
-      whygraph scan --no-llm-descriptions --no-remote >> "$log" 2>&1
+      whygraph scan --skip-analyze --no-remote >> "$log" 2>&1
       rmdir "$lock" 2>/dev/null
       trap - EXIT INT TERM
     else

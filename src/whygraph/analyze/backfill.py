@@ -2,7 +2,7 @@
 
 The :class:`~whygraph.scan.analyze_crawler.AnalyzeCrawler` describes
 every undescribed commit in bulk at scan time. When a scan is run with
-``whygraph scan --no-llm-descriptions`` (or when a commit was added to
+``whygraph scan --skip-analyze`` (or when a commit was added to
 the database before its description could be generated), the
 ``commit.llm_description`` column is left ``NULL``. The MCP tools
 :func:`whygraph.mcp.evidence.whygraph_evidence_for` and

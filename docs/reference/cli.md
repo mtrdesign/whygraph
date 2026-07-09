@@ -41,13 +41,11 @@ agents are project-scoped, so the config file is written inside the repo.
 
 | Option | Description |
 |---|---|
-| `--agent [claude\|codex\|copilot\|cursor\|vscode]` | Wire the MCP server into the named agent's config. On a terminal, skips the interactive agent prompt. |
+| `--agent [claude\|codex\|copilot\|cursor\|vscode]` | Wire the MCP server into the named agent's config. On a terminal, skips the interactive agent prompt. Run `whygraph init --help` for the full list of supported agents. |
 | `--yes` / `-y` | Accept all defaults without prompting (also implied off a TTY). Writes a default `whygraph.toml` only if none exists. |
-| `--print` | Print the MCP snippet to stdout instead of writing any config file. |
-| `--list-agents` | List supported agents (with config-file paths) and exit. |
-| `--install-assets / --no-install-assets` | Copy the chosen agent's bundled assets into the project. Default: enabled. No-op for agents that ship no asset tree. |
-| `--skip-preflight` | Skip the host-tool diagnostics that normally run first. For known-good scripted environments. |
 | `--force` | When installing assets, overwrite existing files in the agent's destination directory. |
+
+Preflight diagnostics and asset install both always run — the chosen agent's bundled assets are copied into the repo automatically (use `--force` to overwrite local edits).
 
 See [Wiring your editor](../guide/editors.md) for the per-agent paths.
 
@@ -59,7 +57,7 @@ picks up new commits and backfills what's missing.
 
 | Option | Default | Description |
 |---|---|---|
-| `--no-llm-descriptions` | off | Skip the per-commit LLM description phase. The git and GitHub crawlers still run; descriptions backfill lazily on demand and on a later full scan. |
+| `--skip-analyze` | off | Skip the per-commit LLM description phase. The git and GitHub crawlers still run; descriptions backfill lazily on demand and on a later full scan. |
 | `--codegraph / --no-codegraph` | on | Refresh the CodeGraph index concurrently with the crawl - `codegraph sync` when an index exists, `codegraph init -i` on first run. A failure here warns rather than aborting. |
 | `--codegraph-image TEXT` | pinned tag | Override the Docker image used for the CodeGraph refresh fallback. Ignored when a local `codegraph` binary is found. |
 | `--remote / --no-remote` | on | Crawl the source-control remote (GitHub PRs / issues) per `[scan].provider`. `--no-remote` skips it for a fast, offline, token-free scan. |
@@ -99,5 +97,5 @@ whygraph hooks install
 ```
 
 The hooks wire `post-commit`, `post-merge`, and `post-rewrite` to run
-`whygraph scan --no-remote --no-llm-descriptions` in the background. See
+`whygraph scan --no-remote --skip-analyze` in the background. See
 [Keep it fresh](../guide/scanning.md#keep-it-fresh) for the details.

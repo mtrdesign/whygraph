@@ -110,7 +110,7 @@ def whygraph_rationale_brief(
         return _format_response(target, rationale, evidence, cached_at)
 
     # Cache miss — lazily backfill any commit whose `llm_description` is
-    # NULL (e.g. after `whygraph scan --no-llm-descriptions`) so the
+    # NULL (e.g. after `whygraph scan --skip-analyze`) so the
     # rationale prompt sees the richer per-commit summaries. Bulk commits
     # are described per-file against the target's path instead. The cache
     # fingerprint is sha256-over-sorted-SHAs, so backfilling here does

@@ -263,23 +263,31 @@ def _invoke_in(cwd: Path, *args: str):
         return runner.invoke(whygraph_main, list(args)), Path.cwd()
 
 
-def test_init_list_agents_does_not_touch_db(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_init_help_lists_agents_without_touching_db(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """``init --help`` lists the supported agents and never bootstraps the DB.
+
+    The supported-agents block moved from the removed ``--list-agents``
+    command into the ``--help`` epilog. ``--help`` short-circuits in
+    Click before the command body, so the DB is never touched.
+    """
     called = {"n": 0}
 
     def _fake() -> Path:
         called["n"] += 1
-        return tmp_path / "x.db"
+        return Path("x.db")
 
     monkeypatch.setattr("whygraph.cli.commands.init._ensure_db_initialized", _fake)
     runner = CliRunner()
-    result = runner.invoke(whygraph_main, ["init", "--list-agents"])
+    result = runner.invoke(whygraph_main, ["init", "--help"])
     assert result.exit_code == 0, result.output
     assert called["n"] == 0
+    assert "Supported agents" in result.output
     assert "claude" in result.output
     assert "cursor" in result.output
     assert "codex" in result.output
+    assert "vscode" in result.output
 
 
 def test_init_no_flag_writes_no_agent_config(stub_init, tmp_path: Path) -> None:
@@ -355,18 +363,6 @@ def test_init_agent_claude_writes_mcp_json_and_installs_assets(
     assert "<!-- BEGIN whygraph -->" in claude_md
     assert "## CodeGraph" in claude_md
     assert "Installed assets for claude" in result.output
-
-
-def test_init_agent_claude_no_install_assets_skips_dot_claude(
-    stub_init, tmp_path: Path
-) -> None:
-    result, cwd = _invoke_in(
-        tmp_path, "init", "--agent", "claude", "--no-install-assets"
-    )
-    assert result.exit_code == 0, result.output
-    assert (cwd / ".mcp.json").exists()
-    assert not (cwd / ".claude").exists()
-    assert "Installed assets for" not in result.output
 
 
 def test_init_agent_claude_force_overwrites_existing(stub_init, tmp_path: Path) -> None:
@@ -566,19 +562,6 @@ def test_init_agent_codex_merges_existing_agents_md(stub_init, tmp_path: Path) -
         assert merged.find("Our team rules") < merged.find("<!-- BEGIN whygraph -->")
 
 
-def test_init_agent_claude_with_print_skips_mcp_write_but_installs_assets(
-    stub_init, tmp_path: Path
-) -> None:
-    """``--print`` suppresses the MCP write; asset install runs normally."""
-    result, cwd = _invoke_in(tmp_path, "init", "--agent", "claude", "--print")
-    assert result.exit_code == 0, result.output
-    assert not (cwd / ".mcp.json").exists()
-    # JSON snippet still printed for the user to paste.
-    assert '"whygraph-mcp"' in result.output
-    # Assets are governed by --no-install-assets, not --print.
-    assert (cwd / ".claude" / "agents" / "planner.md").is_file()
-
-
 def test_init_unknown_agent_errors(stub_init, tmp_path: Path) -> None:
     result, _ = _invoke_in(tmp_path, "init", "--agent", "emacs")
     assert result.exit_code != 0
@@ -667,7 +650,7 @@ def test_init_interactive_abort_writes_nothing(
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
         cwd = Path.cwd()
-        result = runner.invoke(whygraph_main, ["init", "--skip-preflight"])
+        result = runner.invoke(whygraph_main, ["init"])
         assert result.exit_code != 0
         assert "Aborted" in result.output
         # No files written, and the DB was never bootstrapped.

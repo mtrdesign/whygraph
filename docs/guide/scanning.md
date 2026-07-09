@@ -29,7 +29,7 @@ without polluting area history.
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--no-llm-descriptions` | off | Skip the per-commit LLM phase. Git and GitHub crawlers still run; descriptions backfill lazily and on a later full scan. |
+| `--skip-analyze` | off | Skip the per-commit LLM phase. Git and GitHub crawlers still run; descriptions backfill lazily and on a later full scan. |
 | `--codegraph / --no-codegraph` | on | Refresh the CodeGraph index concurrently with the crawl. |
 | `--codegraph-image TEXT` | pinned tag | Override the Docker image for the CodeGraph fallback. Ignored when a local `codegraph` binary is found. |
 | `--remote / --no-remote` | on | Crawl the remote for PRs and issues per `[scan].provider`. `--no-remote` is a fast, offline, token-free scan. |
@@ -38,7 +38,7 @@ without polluting area history.
 A common fast pass while iterating:
 
 ```bash
-whygraph scan --no-remote --no-llm-descriptions
+whygraph scan --no-remote --skip-analyze
 ```
 
 !!! tip "Lazy backfill"
@@ -55,7 +55,7 @@ whygraph hooks install
 ```
 
 This wires `post-commit`, `post-merge`, and `post-rewrite` to run
-`whygraph scan --no-remote --no-llm-descriptions` **in the background**. Git history and a CodeGraph
+`whygraph scan --no-remote --skip-analyze` **in the background**. Git history and a CodeGraph
 `sync` only - no LLM, no remote calls - so commits stay instant and the scan is offline and
 token-free.
 

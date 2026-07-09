@@ -39,7 +39,7 @@ evidence WhyGraph serves.
 For a fast, offline pass - no remote calls, no LLM - skip both phases:
 
 ```bash
-whygraph scan --no-remote --no-llm-descriptions
+whygraph scan --no-remote --skip-analyze
 ```
 
 Descriptions backfill lazily later, so this is a fine way to get started quickly. See

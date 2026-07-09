@@ -68,7 +68,7 @@ class AgentTarget:
         Serialization format of the target file. Determines which
         renderer :func:`render_snippet` uses.
     description : str
-        Short one-line description shown by ``whygraph init --list-agents``.
+        Short one-line description shown in ``whygraph init --help``.
     assets_subdir : str or None
         Name of the source directory under ``src/whygraph/assets/`` that
         holds this agent's bundled asset tree, or ``None`` if the agent
@@ -268,8 +268,8 @@ def write_snippet(target: AgentTarget, project_root: Path) -> Path:
       other servers and top-level keys are preserved.
     * If the file exists but is unparseable, a fresh minimal config
       replaces it. This is a conscious trade-off: we surface the new
-      config rather than refuse to proceed. Callers can offer
-      ``--print`` for users who'd rather merge by hand.
+      config rather than refuse to proceed. Users who'd rather merge by
+      hand can render the snippet with ``render_snippet()`` instead.
 
     Parameters
     ----------
@@ -293,8 +293,8 @@ def write_snippet(target: AgentTarget, project_root: Path) -> Path:
     Comments and incidental formatting in the existing config file are
     not preserved across the read-modify-write cycle (``tomllib`` strips
     comments on parse; ``json.load`` collapses whitespace). Users who
-    care about preserving their hand-formatted config should use
-    ``--print`` and merge the snippet manually.
+    care about preserving their hand-formatted config should render the
+    snippet with ``render_snippet()`` and merge it manually.
     """
     if target.scope != "project":
         raise ValueError(

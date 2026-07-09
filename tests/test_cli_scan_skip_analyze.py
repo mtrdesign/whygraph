@@ -1,4 +1,4 @@
-"""Tests for ``whygraph scan --no-llm-descriptions``.
+"""Tests for ``whygraph scan --skip-analyze``.
 
 The crawlers themselves have dedicated tests (``test_git_crawler.py``,
 ``test_scan_analyze_crawler.py``). This module pins the flag wiring:
@@ -115,7 +115,7 @@ def no_github(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def test_scan_no_llm_descriptions_skips_phase_two(
+def test_scan_skip_analyze_skips_phase_two(
     isolated_db: Path,
     stub_crawlers: dict[str, type],
     no_github: None,
@@ -132,7 +132,7 @@ def test_scan_no_llm_descriptions_skips_phase_two(
 
     monkeypatch.setattr("whygraph.analyze.LlmDescriptor", _FailIfProbed)
 
-    result = CliRunner().invoke(whygraph_main, ["scan", "--no-llm-descriptions"])
+    result = CliRunner().invoke(whygraph_main, ["scan", "--skip-analyze"])
 
     assert result.exit_code == 0, result.output
     assert stub_crawlers["git"].constructed == 1
@@ -140,10 +140,10 @@ def test_scan_no_llm_descriptions_skips_phase_two(
     assert probe_calls == []  # descriptor probe bypassed entirely
     # Panel text — split because Rich may insert soft wraps.
     assert "skipped" in result.output
-    assert "--no-llm-descriptions" in result.output
+    assert "--skip-analyze" in result.output
 
 
-def test_scan_no_llm_descriptions_tolerates_broken_analyze_config(
+def test_scan_skip_analyze_tolerates_broken_analyze_config(
     isolated_db: Path,
     stub_crawlers: dict[str, type],
     no_github: None,
@@ -158,7 +158,7 @@ def test_scan_no_llm_descriptions_tolerates_broken_analyze_config(
 
     monkeypatch.setattr("whygraph.analyze.LlmDescriptor", _AlwaysFails)
 
-    result = CliRunner().invoke(whygraph_main, ["scan", "--no-llm-descriptions"])
+    result = CliRunner().invoke(whygraph_main, ["scan", "--skip-analyze"])
 
     assert result.exit_code == 0, result.output
     assert stub_crawlers["analyze"].constructed == 0

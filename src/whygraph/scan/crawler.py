@@ -50,6 +50,12 @@ class Crawler(threading.Thread, abc.ABC):
         Exception raised by :meth:`work`, captured so callers can
         inspect it after :meth:`threading.Thread.join`. ``None`` on
         success.
+    summary : str or None
+        One-line outcome delta set by :meth:`work` at the end of a
+        successful crawl (e.g. ``"45 commits"``), for the orchestrator's
+        closing results panel. Written from the worker thread and read
+        only after :meth:`threading.Thread.join`, mirroring the safety
+        model of :attr:`error`. ``None`` until set.
     """
 
     def __init__(
@@ -63,6 +69,7 @@ class Crawler(threading.Thread, abc.ABC):
         self._progress = progress
         self._task_id: TaskID = progress.add_task(name, total=total)
         self.error: BaseException | None = None
+        self.summary: str | None = None
 
     # --- subclass hooks ------------------------------------------------
 

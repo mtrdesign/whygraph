@@ -226,6 +226,84 @@ def test_skips_commit_with_empty_diff(isolated_db: Path, repo_path: Path) -> Non
     assert len(described) == 3  # the three real commits
 
 
+def test_summary_reports_described_count(isolated_db: Path, repo_path: Path) -> None:
+    commits = _commits(repo_path)
+    _insert(commits)
+
+    crawler = _run(repo_path, _StubDescriptor())
+
+    assert crawler.error is None
+    assert crawler.summary == "3 described"
+
+
+def test_summary_reports_bulk_stubbed(isolated_db: Path, repo_path: Path) -> None:
+    commits = _commits(repo_path)
+    _insert(commits)
+
+    # large_commit_file_count=0 makes every commit "bulk" — none described.
+    crawler = _run(repo_path, _StubDescriptor(), large_commit_file_count=0)
+
+    assert crawler.error is None
+    assert crawler.summary == "0 described · 3 bulk-stubbed"
+
+
+def test_summary_up_to_date_when_nothing_pending(
+    isolated_db: Path, repo_path: Path
+) -> None:
+    commits = _commits(repo_path)
+    _insert(commits, described=tuple(c.sha for c in commits))
+
+    crawler = _run(repo_path, _StubDescriptor())
+
+    assert crawler.error is None
+    assert crawler.summary == "up to date"
+
+
+def test_origin_commits_stay_lazy(isolated_db: Path, repo_path: Path) -> None:
+    """A recovered on_default_branch=0 commit is never described.
+
+    ``AnalyzeCrawler`` bounds its work to ``repository.commits`` (the main
+    walk), so PR-origin rows — off the default branch — stay NULL for the
+    lazy on-read backfill, regardless of when the analyze phase runs. Pins
+    the §2 invariant that makes sequencing analyze last behavior-preserving.
+    """
+    commits = _commits(repo_path)
+    _insert(commits)  # main-walk commits, all NULL descriptions
+
+    origin_sha = "0" * 40  # not on `main`, so not in repository.commits
+    with get_session() as session:
+        session.add(
+            CommitRow(
+                sha=origin_sha,
+                parent_shas="",
+                author_name="Origin Author",
+                author_email="origin@example.com",
+                authored_at="2026-01-01T00:00:00+00:00",
+                committed_at="2026-01-01T00:00:00+00:00",
+                subject="recovered origin commit",
+                body="",
+                files_changed=0,
+                insertions=0,
+                deletions=0,
+                scanned_at="2026-01-01T00:00:00+00:00",
+                llm_description=None,
+                on_default_branch=0,
+            )
+        )
+    db_engine._reset_engine()
+
+    crawler = _run(repo_path, _StubDescriptor())
+
+    assert crawler.error is None
+    descs = _descriptions()
+    # Origin commit untouched — stays lazy.
+    assert descs[origin_sha] == (None, None)
+    # Every main-walk commit still described.
+    for c in commits:
+        assert descs[c.sha][0] == "DESCRIPTION"
+    assert crawler.summary == "3 described"
+
+
 def test_one_failing_commit_does_not_block_the_rest(
     isolated_db: Path, repo_path: Path
 ) -> None:

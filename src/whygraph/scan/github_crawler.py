@@ -88,6 +88,8 @@ class GitHubCrawler(Crawler):
                     session.add(_issue_to_row(issue, fetched_at=fetched_at))
                 self.advance(1)
 
+        self.summary = f"{len(prs)} PRs · {len(issues)} issues"
+
 
 def _pr_to_row(dc: PullRequestDC, *, fetched_at: str) -> PullRequestRow:
     return PullRequestRow(

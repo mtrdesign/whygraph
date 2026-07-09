@@ -214,6 +214,7 @@ class PROriginEnricher(Crawler):
             )
             self.set_total(len(candidates))
             if not candidates:
+                self.summary = "no squash candidates"
                 return
 
             # ONE batched fetch — only the gated candidates' refs, never the
@@ -228,6 +229,7 @@ class PROriginEnricher(Crawler):
                     len(candidates),
                     exc,
                 )
+                self.summary = "fetch skipped"
                 return
 
             scanned_at = datetime.now(timezone.utc).isoformat()
@@ -246,3 +248,5 @@ class PROriginEnricher(Crawler):
                     session.add(_to_origin_row(dc, scanned_at=scanned_at))
                     inserted.add(oid)
                 self.advance(1)
+
+        self.summary = f"{len(inserted)} commits recovered"

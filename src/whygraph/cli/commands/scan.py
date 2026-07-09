@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
 import click
 from rich.panel import Panel
-from rich.progress import Progress
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 from rich.table import Table
 from rich.text import Text
 
@@ -31,6 +39,13 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
+# Per-phase icons for the live headers and the closing results panel.
+# Kept in one place so the whole set is trivially swappable (plan §10.5).
+_ICON_STRUCTURAL = "🔎"
+_ICON_PR_ORIGINS = "🔗"
+_ICON_LLM = "🧠"
+_ICON_CODEGRAPH = "🕸"
+
 
 @click.command(name="scan")
 @click.option(
@@ -39,8 +54,9 @@ _T = TypeVar("_T")
     is_flag=True,
     default=False,
     help=(
-        "Skip Phase 2 (per-commit LLM descriptions). The git and GitHub "
-        "crawlers still run. The MCP tools `whygraph_evidence_for` and "
+        "Skip the final LLM-descriptions phase (per-commit descriptions). "
+        "The git and GitHub crawlers still run. The MCP tools "
+        "`whygraph_evidence_for` and "
         "`whygraph_rationale_brief` lazily backfill descriptions on demand, "
         "and a later `whygraph scan` (without this flag) backfills the rest."
     ),
@@ -144,12 +160,34 @@ def scan_cmd(
         pr_origins_enabled=enrich_pr_origins and github_client is not None,
     )
 
+    # Which optional phases have work — decided up front so the phase
+    # headers can be numbered against the count of phases that actually run.
+    run_pr_origins = enrich_pr_origins and github_client is not None
+    run_analyze = descriptor is not None
+    phase_total = 1 + int(run_pr_origins) + int(run_analyze)  # Phase 1 always runs
+
     scan_log_path = db_path.parent / "scan.log"
-    with scan_log_redirect(scan_log_path), Progress() as progress:
-        # CodeGraph refresh — runs concurrently as its own crawler. It
-        # writes .codegraph/ and has no data dependency on the WhyGraph DB,
-        # so it overlaps the entire crawl (started with phase 1, joined
-        # last). Best-effort: failures land on .warning, not .error.
+    phase_timings: dict[str, float] = {}
+    ran: list[Crawler] = []
+    scan_t0 = time.monotonic()
+    # Share the stderr `console` with Progress so the phase headers render
+    # above the live bars on one stream, and add an M-of-N + elapsed column
+    # so the slow LLM phase reports "12/45 · 0:00:31".
+    with (
+        scan_log_redirect(scan_log_path),
+        Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress,
+    ):
+        # CodeGraph refresh — a background crawler. It writes .codegraph/
+        # and has no data dependency on the WhyGraph DB, so it overlaps the
+        # entire crawl (started before Phase 1, joined last). Best-effort:
+        # failures land on .warning, not .error.
         codegraph_crawler = (
             CodeGraphCrawler(
                 progress, project_root=repository.root, image=codegraph_image
@@ -157,60 +195,99 @@ def scan_cmd(
             if refresh_codegraph
             else None
         )
+        if codegraph_crawler is not None:
+            codegraph_crawler.start()
 
-        # Phase 1 — source crawlers, run concurrently.
+        n = 0
+
+        # ── Phase 1 · Structural crawl — git + GitHub, concurrent. ──
+        n += 1
+        console.rule(
+            f"{_ICON_STRUCTURAL} Phase {n}/{phase_total} · Structural crawl",
+            style="cyan",
+        )
+        t0 = time.monotonic()
         phase1: list[Crawler] = [GitCrawler(progress, repository=repository)]
         if github_client is not None:
             phase1.append(GitHubCrawler(progress, client=github_client))
-
-        # Phase 2 — started only once phase 1 has joined (it reads the
-        # commits + PRs phase 1 persisted). The analyzer and the PR-origin
-        # enricher run concurrently: analyze only touches main-walk commits,
-        # the enricher only inserts new on_default_branch=0 rows, so they
-        # never contend over the same commit row.
-        phase2: list[Crawler] = []
-        if descriptor is not None:
-            phase2.append(
-                AnalyzeCrawler(
-                    progress,
-                    repository=repository,
-                    descriptor=descriptor,
-                    max_workers=config.scan_max_workers,
-                    large_commit_file_count=config.analyze.large_commit_file_count,
-                )
-            )
-        # The enricher needs PR rows (the GitHub crawler ran) and the
-        # network for its fetch — so it is gated on a resolved client, which
-        # is itself None under --no-remote.
-        if enrich_pr_origins and github_client is not None:
-            phase2.append(
-                PROriginEnricher(
-                    progress,
-                    repository=repository,
-                    min_commits=config.analyze.pr_origin_min_commits,
-                    large_commit_file_count=config.analyze.large_commit_file_count,
-                )
-            )
-
-        if codegraph_crawler is not None:
-            codegraph_crawler.start()
+        ran += phase1
         for c in phase1:
             c.start()
         for c in phase1:
             c.join()
-        for c in phase2:
-            c.start()
-        for c in phase2:
-            c.join()
+        phase_timings["Structural crawl"] = time.monotonic() - t0
+        _print_phase_done(
+            "Structural crawl",
+            phase_timings["Structural crawl"],
+            ok=all(c.error is None for c in phase1),
+        )
+
+        # ── Phase 2 · PR-origin recovery — needs Phase 1's git + PR rows.
+        # Gated on a resolved client, which is None under --no-remote. ──
+        if run_pr_origins:
+            n += 1
+            console.rule(
+                f"{_ICON_PR_ORIGINS} Phase {n}/{phase_total} · PR-origin recovery",
+                style="cyan",
+            )
+            t0 = time.monotonic()
+            enricher = PROriginEnricher(
+                progress,
+                repository=repository,
+                min_commits=config.analyze.pr_origin_min_commits,
+                large_commit_file_count=config.analyze.large_commit_file_count,
+            )
+            ran.append(enricher)
+            enricher.start()
+            enricher.join()
+            phase_timings["PR-origin recovery"] = time.monotonic() - t0
+            _print_phase_done(
+                "PR-origin recovery",
+                phase_timings["PR-origin recovery"],
+                ok=enricher.error is None,
+            )
+
+        # ── Phase 3 · LLM descriptions — the slow, token-heavy long pole,
+        # run strictly last and alone. Only ever describes main-walk
+        # commits, so the recovered on_default_branch=0 rows stay lazy. ──
+        if run_analyze:
+            n += 1
+            console.rule(
+                f"{_ICON_LLM} Phase {n}/{phase_total} · LLM descriptions",
+                style="cyan",
+            )
+            t0 = time.monotonic()
+            analyzer = AnalyzeCrawler(
+                progress,
+                repository=repository,
+                descriptor=descriptor,
+                max_workers=config.scan_max_workers,
+                large_commit_file_count=config.analyze.large_commit_file_count,
+            )
+            ran.append(analyzer)
+            analyzer.start()
+            analyzer.join()
+            phase_timings["LLM descriptions"] = time.monotonic() - t0
+            _print_phase_done(
+                "LLM descriptions",
+                phase_timings["LLM descriptions"],
+                ok=analyzer.error is None,
+            )
+
         if codegraph_crawler is not None:
             codegraph_crawler.join()
 
-    console.print(f"Scan log: {scan_log_path}")
+    total_elapsed = time.monotonic() - scan_t0
+    _render_results_panel(
+        ran=ran,
+        codegraph_crawler=codegraph_crawler,
+        db_path=db_path,
+        scan_log_path=scan_log_path,
+        phase_timings=phase_timings,
+        total_elapsed=total_elapsed,
+    )
 
-    if codegraph_crawler is not None and codegraph_crawler.warning is not None:
-        console.print(Text(codegraph_crawler.warning, style="yellow"))
-
-    crawlers = phase1 + phase2
+    crawlers = list(ran)
     if codegraph_crawler is not None:
         crawlers.append(codegraph_crawler)
     failed = [c for c in crawlers if c.error is not None]
@@ -218,6 +295,138 @@ def scan_cmd(
         click.echo(f"crawler {c.name!r} failed: {c.error}", err=True)
     if failed:
         raise click.exceptions.Exit(1)
+
+
+def _fmt_elapsed(seconds: float) -> str:
+    """Format an elapsed duration as ``"4.1s"`` or ``"2m 08s"``."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, secs = divmod(int(round(seconds)), 60)
+    return f"{minutes}m {secs:02d}s"
+
+
+def _print_phase_done(title: str, seconds: float, *, ok: bool) -> None:
+    """Print the dim per-phase completion line under that phase's bars.
+
+    ``ok`` reflects whether every crawler in the phase finished without an
+    error; a failed phase gets a red ``✗`` (the real error is also surfaced
+    by the closing failure sweep and results panel).
+    """
+    glyph = "✓" if ok else "✗"
+    console.print(
+        f"  {glyph} {title} · {_fmt_elapsed(seconds)}",
+        style="dim" if ok else "red",
+    )
+
+
+def _status_glyph(*, ok: bool, warn: bool = False) -> Text:
+    """Return the results-panel status cell: ``✓`` / ``⚠`` / ``✗``."""
+    if not ok:
+        return Text("✗", style="red")
+    if warn:
+        return Text("⚠", style="yellow")
+    return Text("✓", style="green")
+
+
+def _optional_phase_cells(
+    crawler: "Crawler | None", timing: str
+) -> tuple[object, object, str]:
+    """Return the (status, summary, timing) cells for an optional phase.
+
+    A crawler that never ran (phase skipped via ``--no-remote`` /
+    ``--no-llm-descriptions``) renders a dim ``— skipped`` status with no
+    summary or timing.
+    """
+    if crawler is None:
+        return Text("— skipped", style="dim"), "", ""
+    return _status_glyph(ok=crawler.error is None), crawler.summary or "—", timing
+
+
+def _render_results_panel(
+    *,
+    ran: "list[Crawler]",
+    codegraph_crawler: "Crawler | None",
+    db_path: Path,
+    scan_log_path: Path,
+    phase_timings: "dict[str, float]",
+    total_elapsed: float,
+) -> None:
+    """Print the closing results panel — a bookend to the pre-scan panel.
+
+    One row per phase (git + GitHub merge into the structural row), each
+    carrying a status glyph, the crawler's own one-line summary, and the
+    phase's elapsed time; then the database / scan-log paths. CodeGraph is
+    a background task, so it gets a row but no per-phase timing. Pure
+    formatting over data already in hand — no DB or network access — so it
+    can never turn a successful crawl into a crash.
+    """
+    by_name = {c.name: c for c in ran}
+    git = by_name.get("git")
+    github = by_name.get("github")
+    enricher = by_name.get("pr-origins")
+    analyzer = by_name.get("analyze")
+
+    def _timing(title: str) -> str:
+        seconds = phase_timings.get(title)
+        return _fmt_elapsed(seconds) if seconds is not None else ""
+
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(no_wrap=True)  # icon
+    grid.add_column(style="bold cyan", no_wrap=True)  # label
+    grid.add_column(justify="center", no_wrap=True)  # status
+    grid.add_column(overflow="fold")  # summary
+    grid.add_column(justify="right", no_wrap=True)  # timing
+
+    # Structural row — git + GitHub combined into one phase row.
+    structural = [c for c in (git, github) if c is not None]
+    structural_summary = " · ".join(c.summary for c in structural if c.summary) or "—"
+    grid.add_row(
+        _ICON_STRUCTURAL,
+        "Structural crawl",
+        _status_glyph(ok=all(c.error is None for c in structural)),
+        structural_summary,
+        _timing("Structural crawl"),
+    )
+    grid.add_row(
+        _ICON_PR_ORIGINS,
+        "PR-origin recovery",
+        *_optional_phase_cells(enricher, _timing("PR-origin recovery")),
+    )
+    grid.add_row(
+        _ICON_LLM,
+        "LLM descriptions",
+        *_optional_phase_cells(analyzer, _timing("LLM descriptions")),
+    )
+
+    # CodeGraph — background task; no per-phase timing.
+    if codegraph_crawler is None:
+        grid.add_row(
+            _ICON_CODEGRAPH, "CodeGraph", Text("— skipped", style="dim"), "", ""
+        )
+    else:
+        warning = getattr(codegraph_crawler, "warning", None)
+        grid.add_row(
+            _ICON_CODEGRAPH,
+            "CodeGraph",
+            _status_glyph(ok=codegraph_crawler.error is None, warn=warning is not None),
+            codegraph_crawler.summary or warning or "—",
+            "",
+        )
+
+    grid.add_row("", "", "", "", "")
+    grid.add_row("", "Database", "", str(db_path), "")
+    grid.add_row("", "Scan log", "", str(scan_log_path), "")
+
+    console.print(
+        Panel(
+            grid,
+            title=f"whygraph scan · done in {_fmt_elapsed(total_elapsed)}",
+            title_align="left",
+            border_style="cyan",
+            padding=(1, 2),
+        )
+    )
+    console.print()
 
 
 def _apply_github_token(config: "Config") -> None:

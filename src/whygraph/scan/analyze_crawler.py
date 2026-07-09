@@ -95,9 +95,11 @@ class AnalyzeCrawler(Crawler):
         todo = [c for c in commits if c.sha in pending]
         self.set_total(len(todo))
         if not todo:
+            self.summary = "up to date"
             return
 
         failures: list[tuple[str, BaseException]] = []
+        described = bulk = 0
         with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
             futures = {pool.submit(self._describe_commit, c): c.sha for c in todo}
             for future in as_completed(futures):
@@ -105,6 +107,15 @@ class AnalyzeCrawler(Crawler):
                 exc = future.exception()
                 if exc is not None:
                     failures.append((futures[future], exc))
+                elif future.result() == "bulk":
+                    bulk += 1
+                elif future.result() == "described":
+                    described += 1
+
+        parts = [f"{described} described"]
+        if bulk:
+            parts.append(f"{bulk} bulk-stubbed")
+        self.summary = " · ".join(parts)
 
         if failures:
             sha, exc = failures[0]
@@ -113,7 +124,7 @@ class AnalyzeCrawler(Crawler):
                 f"first failure {sha[:12]}: {exc}"
             )
 
-    def _describe_commit(self, commit: CommitDC) -> None:
+    def _describe_commit(self, commit: CommitDC) -> str:
         """Describe one commit and persist it. Runs in a worker thread.
 
         Opens its own DB session — sessions are not shareable across
@@ -123,6 +134,13 @@ class AnalyzeCrawler(Crawler):
         in lazily on read. Commits with an empty diff are skipped
         silently; any other failure propagates and is collected by
         :meth:`work`.
+
+        Returns
+        -------
+        str
+            The outcome kind — ``"bulk"`` (stub written), ``"empty"``
+            (empty diff, skipped), or ``"described"`` (LLM description
+            written) — tallied by :meth:`work` for its summary.
         """
         if commit.stats.files_changed > self._large_commit_file_count:
             with get_session() as session:
@@ -133,10 +151,10 @@ class AnalyzeCrawler(Crawler):
                     # lazy read path uses to know a real per-file
                     # description still needs generating.
                     row.llm_description = bulk_commit_stub(commit.stats.files_changed)
-            return
+            return "bulk"
         diff = self._repository.diff(commit)
         if not diff.strip():
-            return
+            return "empty"
         description = self._descriptor.describe(diff)
         with get_session() as session:
             row = session.get(CommitRow, commit.sha)
@@ -145,3 +163,4 @@ class AnalyzeCrawler(Crawler):
                 row.llm_description_model = (
                     f"{description.provider}:{description.model}"
                 )
+        return "described"

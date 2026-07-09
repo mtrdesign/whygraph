@@ -77,6 +77,19 @@ def _count_commits() -> int:
         return session.exec(select(func.count(CommitRow.sha))).one()
 
 
+def test_summary_reports_commit_counts(repo_root: Path) -> None:
+    repo = Repository(repo_root)
+
+    crawler = GitCrawler(Progress(), repository=repo)
+    crawler.run()
+    assert crawler.summary == "3 commits (3 new)"
+
+    # A rescan sees the same commits, none new.
+    rescan = GitCrawler(Progress(), repository=repo)
+    rescan.run()
+    assert rescan.summary == "3 commits (0 new)"
+
+
 def test_first_scan_persists_all_commits(repo_root: Path) -> None:
     repo = Repository(repo_root)
     expected_shas = {c.sha for c in repo.commits}

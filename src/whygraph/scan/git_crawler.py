@@ -62,6 +62,7 @@ class GitCrawler(Crawler):
                 session.exec(select(CommitFileChange.commit_sha).distinct()).all()
             )
             scanned_at = datetime.now(timezone.utc).isoformat()
+            inserted = 0
             for dc in commits:
                 if dc.sha not in existing_file_changes:
                     file_changes = self._repository.commit_file_changes(dc)
@@ -78,6 +79,7 @@ class GitCrawler(Crawler):
                     session.add(
                         _to_row(dc, scanned_at=scanned_at, refactor_score=score)
                     )
+                    inserted += 1
                 elif file_changes:
                     # Existing commit row but we just computed its file
                     # changes for the first time — backfill the score so
@@ -88,6 +90,8 @@ class GitCrawler(Crawler):
                         existing.refactor_score = score
                         session.add(existing)
                 self.advance(1)
+
+        self.summary = f"{len(commits)} commits ({inserted} new)"
 
 
 def _to_row(dc: CommitDC, *, scanned_at: str, refactor_score: int = 0) -> CommitRow:

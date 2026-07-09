@@ -82,3 +82,4 @@ class CodeGraphCrawler(Crawler):
         # on a clean "complete" once the refresh returns.
         self.set_total(1)
         self.advance(1)
+        self.summary = "synced" if verb == "sync" else "indexed"

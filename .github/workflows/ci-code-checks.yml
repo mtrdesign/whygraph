@@ -1,4 +1,4 @@
-name: ci-code-checks
+name: CI Code Checks
 
 # Runs on every pull request: lints with ruff (lint + format check) and runs
 # the pytest suite. Both jobs run in parallel and gate the PR.
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   lint:
-    name: Lint (ruff)
+    name: Lint (Ruff)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -32,7 +32,7 @@ jobs:
         run: uv run ruff format --check src/ tests/
 
   test:
-    name: Unit tests (pytest)
+    name: Unit Tests (pytest)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

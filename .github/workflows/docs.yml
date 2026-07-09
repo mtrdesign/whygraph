@@ -1,4 +1,4 @@
-name: docs
+name: Deploy Docs Site
 
 # Builds the Material for MkDocs site and deploys it to GitHub Pages.
 # Pages "Source" must be set to "GitHub Actions" once in repo Settings.
@@ -23,6 +23,7 @@ concurrency:                     # never run two deploys at once
 
 jobs:
   build:
+    name: Build Site
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,6 +42,7 @@ jobs:
         with: { path: site }
 
   deploy:
+    name: Deploy to GitHub Pages
     needs: build
     runs-on: ubuntu-latest
     environment:

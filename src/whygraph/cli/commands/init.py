@@ -12,44 +12,39 @@ from whygraph import agents, assets
 from ..console import fail
 
 
-@click.command(name="init")
+def _agents_epilog() -> str:
+    """Render the supported-agents block for ``whygraph init --help``.
+
+    Lists each agent's name, aliases, scope, format, and one-line
+    description — the discoverability the old ``--list-agents`` command
+    provided, minus its cwd-relative config path (help text isn't
+    cwd-anchored; the write step still echoes the real path). Built at
+    import from :data:`whygraph.agents.AGENTS`.
+
+    The leading ``\\b`` marker tells Click's help formatter not to
+    re-wrap the block, so the indented per-agent layout survives. Click
+    ends a "no-rewrap" paragraph at the first blank line, so the whole
+    block is kept as a single paragraph with no interior blank lines.
+    """
+    lines = ["\b", "Supported agents (use with --agent):"]
+    for name in sorted(agents.AGENTS):
+        target = agents.AGENTS[name]
+        aliases = f" (aliases: {', '.join(target.aliases)})" if target.aliases else ""
+        scope = "project" if target.scope == "project" else "user"
+        lines.append(
+            f"  {target.name}{aliases}  —  scope: {scope}, format: {target.format}"
+        )
+        lines.append(f"      {target.description}")
+    return "\n".join(lines)
+
+
+@click.command(name="init", epilog=_agents_epilog())
 @click.option(
     "--agent",
     "agent_name",
     type=click.Choice(agents.known_agent_names(), case_sensitive=False),
     default=None,
     help="Wire the WhyGraph MCP server into the named LLM agent's config.",
-)
-@click.option(
-    "--print",
-    "print_only",
-    is_flag=True,
-    help="Print the MCP snippet to stdout instead of writing any config file.",
-)
-@click.option(
-    "--list-agents",
-    "list_agents",
-    is_flag=True,
-    help="List supported agents (with config-file paths) and exit.",
-)
-@click.option(
-    "--install-assets/--no-install-assets",
-    "install_assets",
-    default=True,
-    help=(
-        "Copy the chosen agent's bundled assets (if any) into the project."
-        " Default: enabled. No-op for agents that ship no asset tree."
-    ),
-)
-@click.option(
-    "--skip-preflight",
-    "skip_preflight",
-    is_flag=True,
-    help=(
-        "Skip the host-tool diagnostics that normally run at the top of"
-        " `whygraph init`. Use only in scripted environments where the"
-        " environment is known-good."
-    ),
 )
 @click.option(
     "--force",
@@ -75,10 +70,6 @@ from ..console import fail
 )
 def init_cmd(
     agent_name: str | None,
-    print_only: bool,
-    list_agents: bool,
-    install_assets: bool,
-    skip_preflight: bool,
     force: bool,
     yes: bool,
 ) -> None:
@@ -106,27 +97,22 @@ def init_cmd(
     subsequent run).
 
     With ``--agent X``, registers the WhyGraph MCP server with the named
-    agent. All supported agents are project-scoped — their MCP config
-    file is written / merged in the repo. Pass ``--print`` to skip the
-    write and emit the snippet for manual pasting.
+    agent (run ``whygraph init --help`` for the list of supported
+    agents). All supported agents are project-scoped — their MCP config
+    file is written / merged in the repo. Agents whose config can't be
+    written automatically get the snippet printed for manual pasting.
 
     If the chosen agent ships a bundled asset tree (see
     :attr:`whygraph.agents.AgentTarget.has_assets`), the tree is copied
     into the matching destination directory under the repo. Pre-existing
-    files are left alone unless ``--force`` is passed; pass
-    ``--no-install-assets`` to skip the copy entirely.
+    files are left alone unless ``--force`` is passed.
 
     Idempotent — re-running on an already-initialized project just
     confirms both databases are present and at head.
     """
-    if list_agents:
-        _print_agent_list()
-        return
-
     project_root = Path.cwd()
 
-    if not skip_preflight:
-        _run_preflight()
+    _run_preflight()
 
     # Prompt only on a real terminal and only when not told to accept
     # defaults. Pipes / CI / the git hooks have no TTY and fall straight
@@ -144,7 +130,7 @@ def init_cmd(
     resolved_agent = answers.agent or agent_name
     if resolved_agent is None:
         click.echo(
-            "Tip: run `whygraph init --list-agents` to see supported agents,"
+            "Tip: run `whygraph init --help` to see supported agents,"
             " then `whygraph init --agent <name>` to wire it up."
         )
         return
@@ -152,13 +138,13 @@ def init_cmd(
     target = agents.resolve_agent(resolved_agent)
     snippet = agents.render_snippet(target)
 
-    if print_only or not agents.is_write_supported(target):
+    if not agents.is_write_supported(target):
         _print_snippet(target, project_root, snippet)
     else:
         path = agents.write_snippet(target, project_root)
         click.echo(f"Wrote whygraph MCP entry to {path}")
 
-    if install_assets and target.has_assets:
+    if target.has_assets:
         result = assets.install_assets(target, project_root, force=force)
         _print_install_summary(target, project_root, result, force=force)
 
@@ -166,8 +152,8 @@ def init_cmd(
 def _run_preflight() -> None:
     """Echo the diagnostics block; ``fail`` with a clean error on missing tools.
 
-    Imported here (not at module top) so ``--list-agents`` and ``--help``
-    don't pay the import cost.
+    Imported here (not at module top) so ``--help`` doesn't pay the
+    import cost.
     """
     from whygraph.cli.preflight import PreflightError, run_preflight
 
@@ -224,8 +210,8 @@ def _scaffold_example_config(project_root: Path, answers) -> None:
 
     Always refreshed so it tracks the shipped defaults and any non-secret
     choices from ``answers``. Secrets are never written here. Lazy-imports
-    the config helper so lightweight surfaces like ``--list-agents`` and
-    ``--help`` don't pay the cost.
+    the config helper so lightweight surfaces like ``--help`` don't pay
+    the cost.
     """
     from whygraph.core.config import write_example_config
 
@@ -275,25 +261,12 @@ def _ensure_db_initialized() -> Path:
     """Bootstrap the WhyGraph DB, lazy-importing the heavy chain.
 
     Imported here (not at module top) so that lightweight CLI surfaces
-    like ``--list-agents`` and ``--help`` don't fail when the DB layer
-    or its dependencies are mid-rewrite.
+    like ``--help`` don't fail when the DB layer or its dependencies are
+    mid-rewrite.
     """
     from whygraph.db import ensure_initialized
 
     return ensure_initialized()
-
-
-def _print_agent_list() -> None:
-    click.echo("Supported agents:")
-    for name in sorted(agents.AGENTS):
-        target = agents.AGENTS[name]
-        aliases = f" (aliases: {', '.join(target.aliases)})" if target.aliases else ""
-        path = agents.config_path_for(target, Path.cwd())
-        scope = "project" if target.scope == "project" else "user"
-        click.echo(f"  {target.name}{aliases}")
-        click.echo(f"    scope: {scope}  format: {target.format}")
-        click.echo(f"    path:  {path}")
-        click.echo(f"    note:  {target.description}")
 
 
 def _print_snippet(

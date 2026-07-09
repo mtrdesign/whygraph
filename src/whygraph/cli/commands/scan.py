@@ -49,8 +49,8 @@ _ICON_CODEGRAPH = "🕸"
 
 @click.command(name="scan")
 @click.option(
-    "--no-llm-descriptions",
-    "no_llm_descriptions",
+    "--skip-analyze",
+    "skip_analyze",
     is_flag=True,
     default=False,
     help=(
@@ -109,7 +109,7 @@ _ICON_CODEGRAPH = "🕸"
     ),
 )
 def scan_cmd(
-    no_llm_descriptions: bool,
+    skip_analyze: bool,
     refresh_codegraph: bool,
     codegraph_image: str | None,
     remote: bool,
@@ -135,12 +135,12 @@ def scan_cmd(
     else:
         github_client = None
 
-    if no_llm_descriptions:
+    if skip_analyze:
         # Bypass the LlmDescriptor probe entirely so a broken `[analyze]`
         # config still lets users run a fast scan and rely on the MCP
         # tools' lazy backfill for descriptions.
         descriptor = None
-        analyze_skip: str | None = "--no-llm-descriptions"
+        analyze_skip: str | None = "--skip-analyze"
     else:
         try:
             descriptor = LlmDescriptor.from_config(config.analyze)
@@ -334,7 +334,7 @@ def _optional_phase_cells(
     """Return the (status, summary, timing) cells for an optional phase.
 
     A crawler that never ran (phase skipped via ``--no-remote`` /
-    ``--no-llm-descriptions``) renders a dim ``— skipped`` status with no
+    ``--skip-analyze``) renders a dim ``— skipped`` status with no
     summary or timing.
     """
     if crawler is None:

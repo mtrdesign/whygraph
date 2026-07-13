@@ -67,15 +67,15 @@ There is no Claude Code marketplace install; `whygraph init --agent claude` is t
 
 ## Docker delivery (the default install)
 
-WhyGraph ships as a self-contained image so a developer needs **only Docker** on the host — no Python / Node / gh / codegraph install. The whole UX is three steps:
+WhyGraph ships as a self-contained image so a developer needs **only Docker** on the host — no Python / Node / gh / codegraph install. The **image is the single install channel** — there is no GitHub-hosted install script. The whole UX is three steps:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/main/scripts/install.sh | sh
+docker run --rm ghcr.io/mtrdesign/whygraph install | sh   # tag selects version; :latest is default
 whygraph init     # in a repo
 whygraph scan
 ```
 
-`scripts/install.sh` drops a ~10-line `whygraph` (and `whygraph-mcp`) **shim** on PATH that wraps `docker run --rm -v "$PWD:/workspace" -w /workspace <image> whygraph "$@"` and pulls `ghcr.io/mtrdesign/whygraph`. The container is **ephemeral per command** — there is no compose, no `docker exec`, no long-running container. The image is built from `docker/whygraph/Dockerfile` (base `python:3.12-slim` + git + gh + Node 22 + pinned CodeGraph CLI + WhyGraph) and published by `.github/workflows/publish-whygraph-image.yml`.
+The in-image **`whygraph install` command** (`cli/commands/install.py`) prints a POSIX `sh` installer to stdout; piping it to `sh` writes the `whygraph` (and `whygraph-mcp`) **shims** onto PATH, each wrapping `docker run --rm -v "$PWD:/workspace" -w /workspace <image> whygraph "$@"`. `docker run … install` is reached via a tiny **image-only launcher** (`/usr/local/bin/install` → `exec whygraph install`); there is deliberately **no `ENTRYPOINT`** so `docker run <image> codegraph …` and `<image> whygraph-mcp` still resolve. The shims bake `ghcr.io/mtrdesign/whygraph:<version>` from the image's `WHYGRAPH_VERSION` (baked at build), so an install **pins the concrete release** even via `:latest`; each shim still honours a `WHYGRAPH_IMAGE` override at run time. The container is **ephemeral per command** — no compose, no `docker exec`, no long-running container. The image is built from `docker/whygraph/Dockerfile` (base `python:3.12-slim` + git + gh + Node 22 + pinned CodeGraph CLI + WhyGraph) and published by `.github/workflows/cd-deploy-whygraph.yml` (which passes `WHYGRAPH_VERSION` + a pinned `CODEGRAPH_VERSION` as build-args).
 
 Invariants that keep the shim correct — preserve them:
 

@@ -1,21 +1,24 @@
 # Run with Docker
 
 Don't want Python, Node, `gh`, and CodeGraph on your machine? WhyGraph ships as a self-contained
-image. Your host needs **only Docker**. Install a tiny shim, then it's the same `init` and `scan` as a
-native install.
+image. Your host needs **only Docker**. One command installs the shims from inside the image, then
+it's the same `init` and `scan` as a native install.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/main/scripts/install.sh | sh
+docker run --rm ghcr.io/mtrdesign/whygraph install | sh
 
 cd your-repo
 whygraph init      # bootstrap the WhyGraph DB + write config
 whygraph scan      # crawl history + refresh CodeGraph + LLM descriptions
 ```
 
+Pick a version with the image tag - `docker run --rm ghcr.io/mtrdesign/whygraph:1.2.3 install | sh`
+pins that release; `:latest` (the default) installs the newest.
+
 ## How the shim works
 
-`install.sh` drops `whygraph` and `whygraph-mcp` shims on your `PATH`. Each one runs the published
-image against the current directory:
+`docker run … install` prints a short installer to stdout; piping it to `sh` drops `whygraph` and
+`whygraph-mcp` shims on your `PATH`. Each one runs the published image against the current directory:
 
 ```bash
 docker run --rm -v "$PWD:/workspace" -w /workspace ghcr.io/mtrdesign/whygraph whygraph "$@"
@@ -43,7 +46,7 @@ The shim passes your environment through. A GitHub token goes in `[scan].token` 
 
 ## Wire your editor, still only Docker
 
-The MCP server is containerized too. `install.sh` drops a `whygraph-mcp` shim alongside `whygraph`, so
+The MCP server is containerized too. The installer drops a `whygraph-mcp` shim alongside `whygraph`, so
 there's nothing extra to install. Wire your editor from inside the repo:
 
 ```bash

@@ -15,6 +15,12 @@ def test_imports() -> None:
     from whygraph.mcp import server  # noqa: F401
 
 
+def test_cli_registers_install_command() -> None:
+    from whygraph.cli import main
+
+    assert "install" in main.commands
+
+
 def test_mcp_server_name() -> None:
     from whygraph.mcp.server import mcp
 

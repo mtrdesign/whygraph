@@ -1,10 +1,12 @@
 name: Deploy WhyGraph Image
 
 # Builds and pushes ghcr.io/mtrdesign/whygraph — the self-contained
-# scanning-service image the `whygraph` host shim (scripts/install.sh)
-# runs. Publishing is tied to releases: cutting a GitHub release (tagged
-# vX.Y.Z) builds the image and tags it to match that version, so the image
-# tag follows the release version 1:1.
+# scanning-service image. It is the single install channel:
+# `docker run --rm ghcr.io/mtrdesign/whygraph install | sh` emits the host
+# shims (via the in-image `whygraph install` command). Publishing is tied to
+# releases: cutting a GitHub release (tagged vX.Y.Z) builds the image, tags it
+# to match that version, and bakes WHYGRAPH_VERSION so the shims pin that
+# release. The image tag follows the release version 1:1.
 
 on:
   release:
@@ -60,6 +62,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            CODEGRAPH_VERSION=latest
+            CODEGRAPH_VERSION=1.4.1
+            WHYGRAPH_VERSION=${{ steps.meta.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

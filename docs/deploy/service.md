@@ -62,8 +62,8 @@ docker run --rm -i \
 ```
 
 The `-i` flag keeps stdin open for the MCP stdio transport. Your app spawns this command and talks
-JSON-RPC to it, exactly as an editor would. The [`install.sh` shim](docker.md) wraps the same call as
-a bare `whygraph-mcp` on `PATH`.
+JSON-RPC to it, exactly as an editor would. The [`whygraph-mcp` shim](docker.md) — dropped by
+`docker run … install | sh` — wraps the same call as a bare `whygraph-mcp` on `PATH`.
 
 ## Credentials
 

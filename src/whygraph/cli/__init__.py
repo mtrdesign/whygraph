@@ -16,6 +16,7 @@ from whygraph.core import configure_logging, get_config
 from .commands.analyze import analyze_cmd
 from .commands.hooks import hooks_cmd
 from .commands.init import init_cmd
+from .commands.install import install_cmd
 from .commands.scan import scan_cmd
 from .commands.version import version_cmd
 
@@ -32,3 +33,4 @@ main.add_command(init_cmd)
 main.add_command(scan_cmd)
 main.add_command(analyze_cmd)
 main.add_command(hooks_cmd)
+main.add_command(install_cmd)

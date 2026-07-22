@@ -19,10 +19,11 @@ whygraph init --agent claude  # wire the MCP server into your editor
 whygraph-mcp                  # sanity-check the server (Ctrl-C to exit)
 ```
 
-The only-Docker install needs nothing but Docker on the host:
+The only-Docker install needs nothing but Docker on the host — one command pulls the image and
+installs the shims from inside it (pin a version with the image tag):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/main/scripts/install.sh | sh
+docker run --rm ghcr.io/mtrdesign/whygraph install | sh
 ```
 
 See the [Getting Started guide](https://mtrdesign.github.io/whygraph/getting-started/) for every install path and the [Quickstart](https://mtrdesign.github.io/whygraph/getting-started/quickstart/) for the walkthrough.

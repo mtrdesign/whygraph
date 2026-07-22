@@ -8,14 +8,16 @@ Pick the path that fits where you are.
 
 === "Docker (recommended)"
 
-    The host needs **only Docker** - no Python, Node, `gh`, or CodeGraph. A tiny shim runs everything
-    inside one published image.
+    The host needs **only Docker** - no Python, Node, `gh`, or CodeGraph. One command pulls the
+    published image and installs the shims from inside it:
 
     ```bash
-    curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/main/scripts/install.sh | sh
+    docker run --rm ghcr.io/mtrdesign/whygraph install | sh
     ```
 
-    This drops `whygraph` and `whygraph-mcp` shims on your `PATH`. Each wraps a
+    Pin a specific version with the image tag - `docker run --rm ghcr.io/mtrdesign/whygraph:1.2.3
+    install | sh`; `:latest` (the default) installs the newest release. This drops `whygraph` and
+    `whygraph-mcp` shims on your `PATH`. Each wraps a
     `docker run --rm -v "$PWD:/workspace" … ghcr.io/mtrdesign/whygraph` against the current repo. The
     container is ephemeral per command. See [Run with Docker](../deploy/docker.md) for the full story.
 

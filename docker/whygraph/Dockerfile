@@ -51,12 +51,30 @@ RUN set -eux; \
     apt-get purge -y --auto-remove gnupg; \
     rm -rf /var/lib/apt/lists/*
 
+# WhyGraph's own version, baked so `whygraph install` can pin the generated
+# shims to a concrete release even when the image is pulled via `:latest`. The
+# publish workflow passes the release tag; `latest` is the local-build default.
+# Declared here (not with the top ARGs) so bumping it never busts the
+# apt/node/codegraph layers above.
+ARG WHYGRAPH_VERSION=latest
+ENV WHYGRAPH_VERSION=${WHYGRAPH_VERSION}
+
 # Install WhyGraph itself so the `whygraph` and `whygraph-mcp` console
 # scripts land on PATH. Copy the build inputs hatchling needs and install.
 WORKDIR /opt/whygraph
 COPY pyproject.toml ./
 COPY src ./src
 RUN pip install --no-cache-dir .
+
+# Image-only shortcut so `docker run IMAGE install | sh` works without an
+# ENTRYPOINT — an entrypoint of `whygraph` would break `docker run IMAGE
+# codegraph …` (services/codegraph/bootstrap.py) and the whygraph-mcp shim.
+# Deliberately NOT a pyproject [project.scripts] entry, so a native
+# `uv tool install` never drops a bare `install` on a user's PATH (it would
+# shadow coreutils `install`). Added last so no earlier build step depends on
+# coreutils `install`.
+RUN printf '#!/bin/sh\nexec whygraph install "$@"\n' > /usr/local/bin/install \
+    && chmod +x /usr/local/bin/install
 
 # The host shim bind-mounts the current repo here and sets the command
 # (e.g. `whygraph scan`). A bare `docker run IMAGE` prints CLI help.

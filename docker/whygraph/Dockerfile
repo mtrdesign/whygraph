@@ -17,6 +17,22 @@
 
 # syntax=docker/dockerfile:1.7
 
+# --- Playground build stage -----------------------------------------------
+# Builds the Explorer SPA (src/playground/) into a static bundle that the final
+# stage copies into the wheel. `--platform=$BUILDPLATFORM` pins this to the
+# native builder: JS output is arch-independent, so we avoid QEMU emulating
+# the npm build once per target arch (the multi-arch gotcha).
+FROM --platform=$BUILDPLATFORM node:22-slim AS playground-build
+WORKDIR /playground
+COPY src/playground/package.json src/playground/package-lock.json ./
+RUN npm ci
+COPY src/playground/ ./
+# Override the outDir to a stage-local `dist` (the checked-in vite.config.ts
+# writes straight into the package for local `make playground`); the final stage
+# COPYs it to the packaged location.
+RUN npm run build -- --outDir dist --emptyOutDir
+
+# --- Runtime stage --------------------------------------------------------
 FROM python:3.12-slim
 
 # Pinned via build arg so the version can be advanced without editing the
@@ -63,7 +79,13 @@ ENV WHYGRAPH_VERSION=${WHYGRAPH_VERSION}
 # scripts land on PATH. Copy the build inputs hatchling needs and install.
 WORKDIR /opt/whygraph
 COPY pyproject.toml ./
+COPY hatch_build.py ./
 COPY src ./src
+# The pre-built SPA bundle must exist under src/ BEFORE `pip install .` so
+# hatchling packs it into the wheel. Copied from the playground stage, which
+# means the hatch build hook (§9.3) finds static/ already populated and no-ops
+# — the image build never runs npm.
+COPY --from=playground-build /playground/dist ./src/whygraph/serve/static
 RUN pip install --no-cache-dir .
 
 # Image-only shortcut so `docker run IMAGE install | sh` works without an

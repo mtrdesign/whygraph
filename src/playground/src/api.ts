@@ -155,19 +155,23 @@ class ApiError extends Error {
 }
 
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`/api${path}`);
+  return parse<T>(await fetch(`/api${path}`));
+}
+
+async function post<T>(path: string): Promise<T> {
+  return parse<T>(await fetch(`/api${path}`, { method: "POST" }));
+}
+
+// Turn a Response into JSON, with clear errors. A non-JSON body on a 200 (e.g. an
+// unmatched /api route falling through to the SPA's index.html) becomes a plain
+// ApiError instead of a cryptic "did not match the expected pattern" JSON crash.
+async function parse<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new ApiError(res.status, body.detail ?? body.error ?? res.statusText);
   }
-  return res.json() as Promise<T>;
-}
-
-async function post<T>(path: string): Promise<T> {
-  const res = await fetch(`/api${path}`, { method: "POST" });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new ApiError(res.status, body.detail ?? body.error ?? res.statusText);
+  if (!res.headers.get("content-type")?.includes("application/json")) {
+    throw new ApiError(res.status, "unexpected non-JSON response from the API");
   }
   return res.json() as Promise<T>;
 }
@@ -190,13 +194,15 @@ export const api = {
     get<OverviewGraph>(`/graph/overview?expanded=${encodeURIComponent(expanded)}`),
   ego: (qualified_name: string) =>
     get<EgoGraph>(`/graph/ego?qualified_name=${q(qualified_name)}`),
-  node: (qualified_name: string) => get<NodeDetail>(`/node/${q(qualified_name)}`),
+  // qualified_name goes in the query string (a file node's qn is a path with
+  // slashes; a path segment would break routing — see serve/routes.py).
+  node: (qualified_name: string) => get<NodeDetail>(`/node?qualified_name=${q(qualified_name)}`),
   rationaleRead: (qualified_name: string) =>
-    get<RationaleCard>(`/node/${q(qualified_name)}/rationale`),
+    get<RationaleCard>(`/node/rationale?qualified_name=${q(qualified_name)}`),
   rationaleGenerate: (qualified_name: string) =>
-    post<RationaleCard>(`/node/${q(qualified_name)}/rationale`),
+    post<RationaleCard>(`/node/rationale?qualified_name=${q(qualified_name)}`),
   evidence: (qualified_name: string, limit = 20) =>
-    get<EvidenceResponse>(`/node/${q(qualified_name)}/evidence?limit=${limit}`),
+    get<EvidenceResponse>(`/node/evidence?qualified_name=${q(qualified_name)}&limit=${limit}`),
   history: (path: string, limit = 20) =>
     get<HistoryResponse>(`/history?path=${encodeURIComponent(path)}&limit=${limit}`),
 };

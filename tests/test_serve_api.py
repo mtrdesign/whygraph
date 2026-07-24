@@ -196,7 +196,7 @@ def test_overview_expanded_reveals_files(serve_client) -> None:
 
 
 def test_node_detail_groups_relations(serve_client) -> None:
-    body = serve_client.get("/api/node/pkg.a.A.m").json()
+    body = serve_client.get("/api/node?qualified_name=pkg.a.A.m").json()
     assert body["symbol"]["qualified_name"] == "pkg.a.A.m"
     rel = body["relations"]
     assert [c["qualified_name"] for c in rel["callers"]] == ["pkg.b.caller"]
@@ -205,7 +205,21 @@ def test_node_detail_groups_relations(serve_client) -> None:
 
 
 def test_node_detail_404_for_unknown(serve_client) -> None:
-    assert serve_client.get("/api/node/pkg.nope").status_code == 404
+    assert serve_client.get("/api/node?qualified_name=pkg.nope").status_code == 404
+
+
+def test_node_detail_handles_file_node_with_slashes_in_qn(serve_client) -> None:
+    # A `file` node's qualified_name is a path with slashes (e.g. "src/pkg/a.py").
+    # As a query param this must resolve cleanly and return JSON — not fall through
+    # to the SPA (which previously returned index.html with a 200).
+    r = serve_client.get("/api/node?qualified_name=src/pkg/a.py")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/json")
+    body = r.json()
+    assert body["symbol"]["qualified_name"] == "src/pkg/a.py"
+    assert body["symbol"]["kind"] == "file"
+    # A file contains its class(es); no callers/callees.
+    assert [c["qualified_name"] for c in body["relations"]["children"]] == ["pkg.a.A"]
 
 
 # ---- rationale split (the resolved Q3 design) ----------------------------
@@ -220,7 +234,7 @@ def test_rationale_get_no_evidence_makes_no_llm_call(serve_client, monkeypatch) 
     gen = mock.Mock()
     monkeypatch.setattr(routes, "whygraph_rationale_brief", gen)
 
-    body = serve_client.get("/api/node/pkg.a.A.m/rationale").json()
+    body = serve_client.get("/api/node/rationale?qualified_name=pkg.a.A.m").json()
 
     assert body["status"] == "no_evidence"
     gen.assert_not_called()
@@ -236,7 +250,7 @@ def test_rationale_get_not_generated_makes_no_llm_call(
     gen = mock.Mock()
     monkeypatch.setattr(routes, "whygraph_rationale_brief", gen)
 
-    body = serve_client.get("/api/node/pkg.a.A.m/rationale").json()
+    body = serve_client.get("/api/node/rationale?qualified_name=pkg.a.A.m").json()
 
     assert body["status"] == "not_generated"
     gen.assert_not_called()
@@ -267,7 +281,7 @@ def test_rationale_get_returns_cached_card(serve_client, monkeypatch) -> None:
     gen = mock.Mock()
     monkeypatch.setattr(routes, "whygraph_rationale_brief", gen)
 
-    body = serve_client.get("/api/node/pkg.a.A.m/rationale").json()
+    body = serve_client.get("/api/node/rationale?qualified_name=pkg.a.A.m").json()
 
     assert body["status"] == "cached"
     assert body["purpose"] == "the purpose"
@@ -283,7 +297,7 @@ def test_rationale_post_calls_brief_verbatim(serve_client, monkeypatch) -> None:
     gen = mock.Mock(return_value=card)
     monkeypatch.setattr(routes, "whygraph_rationale_brief", gen)
 
-    body = serve_client.post("/api/node/pkg.a.A.m/rationale").json()
+    body = serve_client.post("/api/node/rationale?qualified_name=pkg.a.A.m").json()
 
     assert body["status"] == "cached"
     assert body["purpose"] == "generated purpose"

@@ -94,6 +94,12 @@ The button is **disabled** when the symbol has no historical evidence to reason 
 because the repo hasn't been scanned, or the code isn't committed yet. Run `whygraph scan` and the
 button lights up. The **Evidence** and **History** tabs never call an LLM, so they always work.
 
+Generation uses the rationale LLM you configured in `whygraph.toml` - `[rationale] provider` and the
+matching `[llm.<provider>]` (with its `api_key`), exactly as `whygraph init` sets it up and the same
+provider the MCP tool uses. If you leave `api_key` unset, the provider's conventional env var (e.g.
+`ANTHROPIC_API_KEY`) is the fallback; the Docker container reads your repo's `whygraph.toml` directly.
+See [Configuration](../reference/configuration.md).
+
 ### Coverage heatmap
 
 Because rationale cards are generated lazily, the overview colors each directory and file by how much

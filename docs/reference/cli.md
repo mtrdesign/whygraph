@@ -1,7 +1,7 @@
 # CLI reference
 
 Every WhyGraph command and its flags. Run `whygraph <command> --help` to see the same text from your
-own install. There are five commands.
+own install. There are six commands.
 
 ```console
 $ whygraph --help
@@ -10,6 +10,7 @@ Commands:
   hooks    Manage opt-in git hooks that auto-rescan on new commits.
   init     Initialize the WhyGraph database under .whygraph/whygraph.db.
   scan     Run the source crawlers, then describe each commit with the LLM.
+  serve    Serve the WhyGraph Explorer panel for this repository.
   version  Print installed whygraph version.
 ```
 
@@ -64,6 +65,28 @@ picks up new commits and backfills what's missing.
 | `--pr-origins / --no-pr-origins` | on | Recover a squash-merged PR's original feature-branch commits via one targeted `git fetch`. Needs the network, so it's skipped under `--no-remote`. |
 
 See [Scanning your repo](../guide/scanning.md) for what each phase does.
+
+## `whygraph serve`
+
+Serve the read-only **Explorer playground** for this repository - a local web panel over the code
+graph, evidence, and rationale. On the Docker install it runs as its own long-lived container, published
+to `127.0.0.1` only. Run `whygraph scan` first so there's an index and evidence to show.
+
+| Option | Default | Description |
+|---|---|---|
+| `--port` | `8765` | Port to bind. On the Docker install, set the port via the `WHYGRAPH_PORT` environment variable instead (the shim controls both the published and in-container port). |
+| `--host` | `127.0.0.1` | Bind address. The Docker shim passes `0.0.0.0` for the container so the loopback port-forward can reach it; you rarely set this by hand. |
+
+On the Docker install the shim also adds container-lifecycle verbs - these are **not** flags of the
+Python command, they're handled on the host before the container starts:
+
+| Command | What it does |
+|---|---|
+| `whygraph serve --detach` | Start in the background and return immediately. |
+| `whygraph serve --logs` | Tail the detached server's logs. |
+| `whygraph serve --stop` | Stop and remove the running server. |
+
+See [The Explorer playground](../guide/playground.md) for the panel itself.
 
 ## `whygraph analyze`
 

@@ -45,6 +45,11 @@ whygraph scan --no-remote --skip-analyze
 Descriptions backfill lazily later, so this is a fine way to get started quickly. See
 [Scanning your repo](../guide/scanning.md) for what each phase does.
 
+!!! tip "Prefer a visual view?"
+    Once you've scanned, `whygraph serve` opens a local, read-only web panel over the graph, evidence,
+    and rationale - browse it in the browser instead of (or alongside) your editor. See
+    [The Explorer playground](../guide/playground.md).
+
 ## 3. Wire your editor
 
 Register the MCP server with your agent. For Claude Code:
@@ -85,5 +90,13 @@ function exists, and WhyGraph answers from history.
     How an agent calls the tools mid-task.
 
     [:octicons-arrow-right-24: MCP usage](../guide/mcp-usage.md)
+
+-   :material-graph-outline:{ .lg .middle } __Explorer playground__
+
+    ---
+
+    Browse the graph, evidence, and rationale in a local web panel.
+
+    [:octicons-arrow-right-24: Playground](../guide/playground.md)
 
 </div>

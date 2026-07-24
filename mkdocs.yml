@@ -86,6 +86,7 @@ nav:
       - Scanning your repo: guide/scanning.md
       - Wiring your editor: guide/editors.md
       - Using WhyGraph (MCP): guide/mcp-usage.md
+      - Explorer playground: guide/playground.md
   - Docker & Self-Hosting:
       - deploy/index.md
       - Run with Docker: deploy/docker.md

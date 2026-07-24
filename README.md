@@ -17,6 +17,7 @@ whygraph init                 # bootstrap the WhyGraph DB + write config
 whygraph scan                 # crawl history + refresh CodeGraph + LLM descriptions
 whygraph init --agent claude  # wire the MCP server into your editor
 whygraph-mcp                  # sanity-check the server (Ctrl-C to exit)
+whygraph serve                # browse the graph, evidence + rationale in a local web panel
 ```
 
 The only-Docker install needs nothing but Docker on the host — one command pulls the image and

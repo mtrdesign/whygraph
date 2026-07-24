@@ -43,4 +43,12 @@ Start with the concepts, then dig into whichever piece you need.
 
     [:octicons-arrow-right-24: MCP usage](mcp-usage.md)
 
+-   :material-graph-outline:{ .lg .middle } __Explorer playground__
+
+    ---
+
+    A local, read-only web panel over the graph, evidence, and rationale.
+
+    [:octicons-arrow-right-24: Playground](playground.md)
+
 </div>

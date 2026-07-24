@@ -229,6 +229,86 @@ def test_neighbors_caps_at_max_depth(codegraph_db_factory) -> None:
     assert "n_e" not in ids
 
 
+# ---- relations / imports_ / container / children / files -----------------
+
+
+def _tree_nodes() -> list[dict]:
+    """A file → class → method containment tree plus an imported module."""
+    specs = [
+        ("n_file", "file", "a.py", "src/pkg/a.py"),
+        ("n_cls", "class", "A", "pkg.a.A"),
+        ("n_m", "method", "m", "pkg.a.A.m"),
+        ("n_mod", "file", "b.py", "src/pkg/b.py"),
+    ]
+    return [
+        {
+            "id": nid,
+            "kind": kind,
+            "name": name,
+            "qualified_name": qname,
+            "file_path": "src/pkg/a.py" if kind != "file" else qname,
+            "language": "python",
+            "start_line": 1,
+            "end_line": 5,
+            "docstring": None,
+            "signature": None,
+        }
+        for nid, kind, name, qname in specs
+    ]
+
+
+def test_relations_filters_by_edge_kind(codegraph_db_factory) -> None:
+    path = codegraph_db_factory(
+        edges=[("n_a", "n_b", "imports"), ("n_a", "n_b", "calls")],
+    )
+    with CodeGraph(path) as graph:
+        outgoing = graph.relations("n_a", "imports", incoming=False)
+
+    assert [r.symbol.id for r in outgoing] == ["n_b"]
+    assert [r.kind for r in outgoing] == ["imports"]
+
+
+def test_imports_returns_outgoing_import_edges(codegraph_db_factory) -> None:
+    path = codegraph_db_factory(
+        edges=[("n_a", "n_b", "imports"), ("n_b", "n_c", "calls")],
+    )
+    with CodeGraph(path) as graph:
+        imports = graph.imports_("n_a")
+        assert [r.symbol.id for r in imports] == ["n_b"]
+        assert graph.imports_("n_c") == []  # only `calls` fan-in, no imports
+
+
+def test_container_returns_incoming_contains_parent(codegraph_db_factory) -> None:
+    path = codegraph_db_factory(
+        nodes=_tree_nodes(),
+        edges=[("n_file", "n_cls", "contains"), ("n_cls", "n_m", "contains")],
+    )
+    with CodeGraph(path) as graph:
+        assert graph.container("n_m").id == "n_cls"
+        assert graph.container("n_cls").id == "n_file"
+        assert graph.container("n_file") is None
+
+
+def test_children_returns_outgoing_contains_members(codegraph_db_factory) -> None:
+    path = codegraph_db_factory(
+        nodes=_tree_nodes(),
+        edges=[("n_file", "n_cls", "contains"), ("n_cls", "n_m", "contains")],
+    )
+    with CodeGraph(path) as graph:
+        assert [s.id for s in graph.children("n_file")] == ["n_cls"]
+        assert [s.id for s in graph.children("n_cls")] == ["n_m"]
+        assert graph.children("n_m") == []
+
+
+def test_files_returns_file_nodes_ordered_by_path(codegraph_db_factory) -> None:
+    path = codegraph_db_factory(nodes=_tree_nodes())
+    with CodeGraph(path) as graph:
+        files = graph.files()
+
+    assert [s.id for s in files] == ["n_file", "n_mod"]
+    assert all(s.kind == "file" for s in files)
+
+
 # ---- context -------------------------------------------------------------
 
 

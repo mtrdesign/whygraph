@@ -27,6 +27,13 @@ whygraph.toml
 # Local scratch space for in-progress plan markdown (not version-controlled).
 plans/
 
+# Explorer playground: node deps, Vite output, and the built bundle packed into
+# the wheel at build time (Docker COPY --from / hatch build hook) — never committed.
+src/playground/node_modules/
+src/playground/dist/
+src/playground/*.tsbuildinfo
+src/whygraph/serve/static/
+
 # MkDocs build output (the site is built and deployed by CI, never committed).
 site/
 

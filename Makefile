@@ -13,7 +13,7 @@ IMAGE ?= whygraph:dev
 # Name of the long-running container started by `make image-debug`.
 DEBUG_NAME ?= whygraph-debug
 
-.PHONY: help sync test scan docs docs-build db db-down inspect image image-test image-inspect image-debug image-debug-down
+.PHONY: help sync test scan node-check playground-deps playground playground-dev dev serve docs docs-build db db-down inspect image image-test image-inspect image-debug image-debug-down
 
 help:  ## List available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN{FS=":.*?## "}{printf "  %-10s %s\n", $$1, $$2}'
@@ -26,6 +26,29 @@ test:  ## Run the test suite
 
 scan:  ## Re-scan this repo so WhyGraph is tested against itself
 	uv run whygraph scan
+
+node-check:  # (internal) assert Node >= 18 for the playground toolchain
+	@node -e 'process.exit(+process.versions.node.split(".")[0]>=18?0:1)' 2>/dev/null || { echo "error: the playground needs Node >= 18 (have $$(node -v 2>/dev/null || echo none)) - try 'nvm use 22'"; exit 1; }
+
+playground-deps: node-check  # (internal) install node_modules only if missing
+	@[ -d src/playground/node_modules ] || npm --prefix src/playground ci
+
+playground: node-check  ## Production build of the Explorer SPA into src/whygraph/serve/static
+	npm --prefix src/playground ci
+	npm --prefix src/playground run build
+
+playground-dev: playground-deps  ## Vite dev server with HMR (:5173, proxies /api to :8765) - pair with a backend or use 'make dev'
+	npm --prefix src/playground run dev
+
+dev: playground-deps  ## Dev loop: backend (:8765) + Vite HMR (:5173) together; open :5173; Ctrl-C stops both
+	@echo "backend -> http://localhost:8765   playground (HMR) -> http://localhost:5173  (open :5173)"
+	@uv run whygraph serve & \
+	 api_pid=$$!; \
+	 trap 'kill $$api_pid 2>/dev/null' EXIT INT TERM; \
+	 npm --prefix src/playground run dev
+
+serve: playground  ## Production preview: build the SPA then serve it from whygraph serve (:8765)
+	uv run whygraph serve
 
 docs:  ## Serve the docs site locally with live reload (social cards skipped — no Cairo needed)
 	uv run mkdocs serve

@@ -32,6 +32,14 @@ _MAX_DEPTH = 3
 
 # The edge kind that records one symbol invoking another.
 _CALLS = "calls"
+# The edge kind that records one symbol importing another.
+_IMPORTS = "imports"
+# The edge kind that records structural containment (file → class → method).
+_CONTAINS = "contains"
+# The node kind for a source file — the roots of the containment tree.
+_FILE = "file"
+# Node kinds a rationale card can be generated for — used by coverage counting.
+_DEFINABLE_KINDS = ("function", "method", "class")
 
 
 class CodeGraph:
@@ -204,7 +212,7 @@ class CodeGraph:
             One :class:`Relation` per incoming ``calls`` edge; each
             :attr:`Relation.symbol` is a caller. Empty when nothing calls it.
         """
-        return self._calls_relations(node_id, incoming=True)
+        return self.relations(node_id, _CALLS, incoming=True)
 
     def callees(self, node_id: str) -> list[Relation]:
         """Symbols the given symbol calls — its fan-out.
@@ -220,15 +228,32 @@ class CodeGraph:
             One :class:`Relation` per outgoing ``calls`` edge; each
             :attr:`Relation.symbol` is a callee. Empty when it calls nothing.
         """
-        return self._calls_relations(node_id, incoming=False)
+        return self.relations(node_id, _CALLS, incoming=False)
 
-    def _calls_relations(self, node_id: str, *, incoming: bool) -> list[Relation]:
-        """Resolve the ``calls`` edges on one side of a symbol.
+    def relations(self, node_id: str, kind: str, *, incoming: bool) -> list[Relation]:
+        """Resolve the edges of one ``kind`` on one side of a symbol.
 
-        ``incoming`` selects callers — the edge ``target`` is ``node_id`` and
-        the neighbour is the edge ``source``; otherwise callees, the mirror.
-        The edge's ``kind`` and ``line`` are aliased to ``edge_kind`` /
-        ``edge_line`` so they do not collide with the node's own ``kind``.
+        Generalises callers/callees to any edge ``kind`` (``calls``,
+        ``imports``, ``contains``). ``incoming`` selects the edges whose
+        ``target`` is ``node_id`` (the neighbour is then the edge ``source``);
+        otherwise the mirror — edges whose ``source`` is ``node_id``. The
+        edge's ``kind`` and ``line`` are aliased to ``edge_kind`` / ``edge_line``
+        so they do not collide with the node's own ``kind``.
+
+        Parameters
+        ----------
+        node_id : str
+            The :attr:`Symbol.id` to anchor the traversal on.
+        kind : str
+            The edge kind to filter on, e.g. ``"calls"`` or ``"contains"``.
+        incoming : bool
+            When ``True``, return edges pointing *at* ``node_id`` (fan-in);
+            when ``False``, edges pointing *away* from it (fan-out).
+
+        Returns
+        -------
+        list[Relation]
+            One :class:`Relation` per matching edge; empty when there are none.
         """
         anchor, neighbour = ("target", "source") if incoming else ("source", "target")
         rows = self._conn.execute(
@@ -236,9 +261,132 @@ class CodeGraph:
             "e.kind AS edge_kind, e.line AS edge_line "
             f"FROM edges e JOIN nodes n ON n.id = e.{neighbour} "
             f"WHERE e.{anchor} = ? AND e.kind = ?",
-            (node_id, _CALLS),
+            (node_id, kind),
         ).fetchall()
         return [Relation.from_row(r) for r in rows]
+
+    def imports_(self, node_id: str) -> list[Relation]:
+        """Symbols the given symbol imports — its outgoing ``imports`` edges.
+
+        Parameters
+        ----------
+        node_id : str
+            The :attr:`Symbol.id` of the importing symbol.
+
+        Returns
+        -------
+        list[Relation]
+            One :class:`Relation` per outgoing ``imports`` edge; empty when it
+            imports nothing.
+        """
+        return self.relations(node_id, _IMPORTS, incoming=False)
+
+    def container(self, node_id: str) -> Symbol | None:
+        """The symbol that structurally contains the given symbol.
+
+        A ``file`` node *contains* a ``class``; a ``class`` *contains* a
+        ``method``. The parent is therefore the source of an **incoming**
+        ``contains`` edge (this symbol is the target).
+
+        Parameters
+        ----------
+        node_id : str
+            The :attr:`Symbol.id` of the contained symbol.
+
+        Returns
+        -------
+        Symbol or None
+            The containing symbol, or ``None`` when the symbol has no
+            ``contains`` parent (e.g. a ``file`` node).
+        """
+        rels = self.relations(node_id, _CONTAINS, incoming=True)
+        return rels[0].symbol if rels else None
+
+    def children(self, node_id: str) -> list[Symbol]:
+        """The symbols the given symbol structurally contains.
+
+        The mirror of :meth:`container` — the targets of **outgoing**
+        ``contains`` edges (a file's classes/functions, a class's methods).
+
+        Parameters
+        ----------
+        node_id : str
+            The :attr:`Symbol.id` of the containing symbol.
+
+        Returns
+        -------
+        list[Symbol]
+            The contained symbols, in edge order; empty when it contains none.
+        """
+        return [r.symbol for r in self.relations(node_id, _CONTAINS, incoming=False)]
+
+    def files(self) -> list[Symbol]:
+        """All ``file`` nodes — the roots of the containment tree.
+
+        Returns
+        -------
+        list[Symbol]
+            Every symbol whose ``kind`` is ``"file"``, ordered by ``file_path``.
+        """
+        rows = self._conn.execute(
+            f"{_NODE_SELECT} WHERE kind = ? ORDER BY file_path",
+            (_FILE,),
+        ).fetchall()
+        return [Symbol.from_row(r) for r in rows]
+
+    def file_edges(self, kinds: tuple[str, ...]) -> list[tuple[str, str, str]]:
+        """Every edge of the given kinds, projected onto endpoint file paths.
+
+        Joins each edge's ``source`` and ``target`` to their nodes and returns
+        the *defining file paths* of both ends. The Phase-2 edge-lifting
+        aggregation (:mod:`whygraph.serve.lifting`) group-bys over these to roll
+        low-level ``calls`` / ``imports`` edges up to directory/file super-nodes.
+
+        Parameters
+        ----------
+        kinds : tuple of str
+            Edge kinds to include, e.g. ``("calls", "imports")``.
+
+        Returns
+        -------
+        list of (str, str, str)
+            ``(source_file_path, target_file_path, edge_kind)`` per matching edge.
+        """
+        if not kinds:
+            return []
+        placeholders = ",".join("?" * len(kinds))
+        rows = self._conn.execute(
+            "SELECT s.file_path AS src, t.file_path AS tgt, e.kind AS k "
+            "FROM edges e "
+            "JOIN nodes s ON s.id = e.source "
+            "JOIN nodes t ON t.id = e.target "
+            f"WHERE e.kind IN ({placeholders})",
+            kinds,
+        ).fetchall()
+        return [(r["src"], r["tgt"], r["k"]) for r in rows]
+
+    def definition_ranges(self) -> list[tuple[str, int, int]]:
+        """The ``(file_path, start_line, end_line)`` of every definable symbol.
+
+        "Definable" means a ``function``, ``method``, or ``class`` — the symbols
+        a rationale card can be generated for. The Phase-2 coverage aggregation
+        (:mod:`whygraph.serve.coverage`) joins these line ranges against the
+        ``rationale_cache`` to compute per-file/dir "analyzed" fractions.
+
+        Returns
+        -------
+        list of (str, int, int)
+            One tuple per definable symbol.
+        """
+        placeholders = ",".join("?" * len(_DEFINABLE_KINDS))
+        rows = self._conn.execute(
+            f"SELECT file_path, start_line, end_line FROM nodes "
+            f"WHERE kind IN ({placeholders})",
+            _DEFINABLE_KINDS,
+        ).fetchall()
+        return [
+            (r["file_path"], int(r["start_line"]), int(r["end_line"])) for r in rows
+        ]
 
     def neighbors(self, node_id: str, depth: int = 1) -> list[Symbol]:
         """Walk outward from a symbol over edges of any kind.

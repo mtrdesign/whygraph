@@ -139,10 +139,16 @@ def graph_ego(
 
 
 # ---- node detail ---------------------------------------------------------
+#
+# `qualified_name` travels as a QUERY parameter, not a path segment: a CodeGraph
+# `file` node's qualified_name is a path (e.g. "src/pkg/a.py"), so a path segment
+# would carry slashes — uvicorn decodes `%2F` to `/`, the single-segment route
+# stops matching, and the request falls through to the SPA catch-all (returning
+# index.html). A query param sidesteps that entirely.
 
 
-@router.get("/node/{qualified_name}")
-def node_detail(qualified_name: str) -> dict:
+@router.get("/node")
+def node_detail(qualified_name: str = Query(...)) -> dict:
     """Identity + typed relationships for a symbol (the Relationships tab)."""
     with _open_graph() as graph:
         symbol = graph.symbol(qualified_name)
@@ -157,8 +163,8 @@ def node_detail(qualified_name: str) -> dict:
         }
 
 
-@router.get("/node/{qualified_name}/rationale")
-def rationale_read(qualified_name: str) -> dict:
+@router.get("/node/rationale")
+def rationale_read(qualified_name: str = Query(...)) -> dict:
     """Cache-only rationale read — never calls an LLM (the resolved Q3 split).
 
     Returns ``{status: "cached", ...card}`` on a cache hit,
@@ -183,8 +189,8 @@ def rationale_read(qualified_name: str) -> dict:
     }
 
 
-@router.post("/node/{qualified_name}/rationale")
-def rationale_generate(qualified_name: str) -> dict:
+@router.post("/node/rationale")
+def rationale_generate(qualified_name: str = Query(...)) -> dict:
     """Generate + cache a rationale card (the explicit "Generate" action).
 
     Runs :func:`whygraph_rationale_brief` verbatim — the same generate-and-cache
@@ -195,8 +201,10 @@ def rationale_generate(qualified_name: str) -> dict:
     return {"status": "cached", **card}
 
 
-@router.get("/node/{qualified_name}/evidence")
-def evidence(qualified_name: str, limit: int = Query(20, ge=1, le=100)) -> dict:
+@router.get("/node/evidence")
+def evidence(
+    qualified_name: str = Query(...), limit: int = Query(20, ge=1, le=100)
+) -> dict:
     """Historical evidence for a symbol (the Evidence tab)."""
     return whygraph_evidence_for(qualified_name=qualified_name, limit=limit)
 

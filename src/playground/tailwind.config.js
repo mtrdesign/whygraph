@@ -1,3 +1,5 @@
+import typography from "@tailwindcss/typography";
+
 /** @type {import('tailwindcss').Config} */
 export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
@@ -20,5 +22,7 @@ export default {
       },
     },
   },
-  plugins: [],
+  // `prose` classes silently do nothing without this — the chat bubbles
+  // rely on them for markdown typography.
+  plugins: [typography],
 };

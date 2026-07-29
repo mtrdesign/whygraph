@@ -585,9 +585,10 @@ def test_init_yes_writes_both_files_with_defaults(stub_init, tmp_path: Path) -> 
         data = tomllib.load(f)
     assert data["analyze"]["provider"] == "anthropic"
     # No secrets in the default whygraph.toml.
-    assert "sk-" not in user.read_text(encoding="utf-8").replace(
-        "sk-ant-...", ""
-    ).replace("sk-...", "")
+    text = user.read_text(encoding="utf-8")
+    for placeholder in ("sk-ant-...", "sk-or-...", "sk-..."):
+        text = text.replace(placeholder, "")
+    assert "sk-" not in text
 
 
 def test_init_yes_preserves_existing_whygraph_toml(stub_init, tmp_path: Path) -> None:

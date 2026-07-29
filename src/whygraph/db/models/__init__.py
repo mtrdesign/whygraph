@@ -24,11 +24,18 @@ Conventions shared across these tables (so individual files stay terse):
   Callers encode/decode with ``json`` at the boundary. Moving to a
   proper JSON column type is a follow-up that needs a real Alembic
   migration.
+* :class:`ChatMessage` collides by name with the chat *port* dataclass
+  :class:`whygraph.services.llm.chat.ChatMessage`. Both names are correct
+  in their own layer; code that holds both imports this one as
+  ``ChatMessage as ChatMessageRow`` (and never aliases the port side,
+  which tests and adapters reference constantly).
 """
 
 from __future__ import annotations
 
 from whygraph.db.models.author import Author
+from whygraph.db.models.chat_message import ChatMessage
+from whygraph.db.models.chat_session import ChatSession
 from whygraph.db.models.commit import Commit
 from whygraph.db.models.commit_file_change import CommitFileChange
 from whygraph.db.models.issue import Issue
@@ -38,6 +45,8 @@ from whygraph.db.models.rationale_cache import RationaleCache
 
 __all__ = [
     "Author",
+    "ChatMessage",
+    "ChatSession",
     "Commit",
     "CommitFileChange",
     "Issue",

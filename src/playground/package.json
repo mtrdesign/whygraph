@@ -17,9 +17,12 @@
     "elkjs": "^0.9.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "react-markdown": "^9.0.1",
+    "remark-gfm": "^4.0.0",
     "zustand": "^5.0.1"
   },
   "devDependencies": {
+    "@tailwindcss/typography": "^0.5.15",
     "@types/node": "^22.20.1",
     "@types/react": "^18.3.11",
     "@types/react-dom": "^18.3.1",

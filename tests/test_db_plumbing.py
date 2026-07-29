@@ -21,6 +21,8 @@ from whygraph.db.bootstrap import alembic_config
 
 SQLMODEL_TABLES = {
     "author",
+    "chat_message",
+    "chat_session",
     "commit",
     "commit_file_change",
     "issue",
@@ -136,3 +138,107 @@ def test_connect_pragmas_applied(_isolate_config_and_engine: Path) -> None:
     with engine.connect() as conn:
         assert conn.exec_driver_sql("PRAGMA journal_mode").scalar().lower() == "wal"
         assert conn.exec_driver_sql("PRAGMA busy_timeout").scalar() == 5000
+
+
+# ---------- chat tables (plan §6) -------------------------------------------
+
+
+def test_chat_tables_exist_after_upgrade(_isolate_config_and_engine: Path) -> None:
+    """Both chat tables and the session_id index land at head."""
+    db_path = _isolate_config_and_engine
+    command.upgrade(alembic_config(), "head")
+
+    assert {"chat_session", "chat_message"} <= _table_names(db_path)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        indexes = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    assert "ix_chat_message_session_id" in indexes
+
+
+def test_ensure_initialized_is_idempotent(_isolate_config_and_engine: Path) -> None:
+    """A second bootstrap over an already-migrated DB is a no-op, not an error.
+
+    ``create_app`` calls this on every ``whygraph serve``, so re-running it
+    against an existing DB has to be safe.
+    """
+    from whygraph.db.bootstrap import ensure_initialized
+
+    ensure_initialized()
+    before = _table_names(_isolate_config_and_engine)
+    ensure_initialized()
+    assert _table_names(_isolate_config_and_engine) == before
+
+
+def test_chat_message_roundtrips_with_tool_calls_default(
+    _isolate_config_and_engine: Path,
+) -> None:
+    """A tool-call-free row gets ``"[]"`` from the server default; FKs hold."""
+    from sqlmodel import select
+
+    from whygraph.db import get_session
+    from whygraph.db.models import ChatMessage as ChatMessageRow
+    from whygraph.db.models import ChatSession as ChatSessionRow
+
+    command.upgrade(alembic_config(), "head")
+
+    with get_session() as session:
+        row = ChatSessionRow(
+            title="New chat",
+            provider="anthropic",
+            model="claude-opus-4-7",
+            created_at="2026-07-29T00:00:00Z",
+            updated_at="2026-07-29T00:00:00Z",
+        )
+        session.add(row)
+        session.commit()
+        session_id = row.id
+
+    with get_session() as session:
+        session.add(
+            ChatMessageRow(
+                session_id=session_id,
+                role="user",
+                content="why is this here?",
+                created_at="2026-07-29T00:00:01Z",
+            )
+        )
+        session.commit()
+
+    with get_session() as session:
+        stored = session.exec(
+            select(ChatMessageRow).where(ChatMessageRow.session_id == session_id)
+        ).one()
+        assert stored.role == "user"
+        assert stored.tool_calls == "[]"
+        assert stored.tool_call_id is None
+        assert stored.input_tokens is None
+
+
+def test_chat_message_rejects_unknown_session(_isolate_config_and_engine: Path) -> None:
+    """``foreign_keys=ON`` (engine.py) makes an orphan message fail."""
+    from sqlalchemy.exc import IntegrityError
+
+    from whygraph.db import get_session
+    from whygraph.db.models import ChatMessage as ChatMessageRow
+
+    command.upgrade(alembic_config(), "head")
+
+    with pytest.raises(IntegrityError):
+        with get_session() as session:
+            session.add(
+                ChatMessageRow(
+                    session_id=999,
+                    role="user",
+                    content="orphan",
+                    created_at="2026-07-29T00:00:00Z",
+                )
+            )
+            session.commit()

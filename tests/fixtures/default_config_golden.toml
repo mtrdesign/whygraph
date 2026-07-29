@@ -36,6 +36,17 @@ provider = "anthropic"        # which [llm.*] adapter to use
 # model = "claude-haiku-4-5"  # override the provider's model for rationale only
 # timeout_sec = 60            # per-call timeout; default: the adapter's own
 
+[chat]
+# The `whygraph serve` chat assistant. Provider/model here are only DEFAULTS for
+# new sessions — each session stores the pair it was started with, so changing
+# these never rewrites an existing conversation.
+provider = "anthropic"        # anthropic | openai | deepseek | openrouter
+# model = "claude-opus-4-7"   # default: the provider's own [llm.*] model
+# max_tool_rounds = 8         # hard bound on tool rounds per user turn
+# max_rationale_generations = 2  # uncached rationale cards one turn may generate
+                              # (0 = cache-only). Bounds nested LLM spend.
+# context_token_budget = 60000   # history sent to the model, ~chars/4 estimate
+
 # Uncomment to override default DB locations (resolved relative to this file):
 # whygraph_db  = ".whygraph/whygraph.db"
 # codegraph_db = ".codegraph/codegraph.db"
@@ -52,7 +63,8 @@ provider = "anthropic"        # which [llm.*] adapter to use
 # Per-provider LLM client settings. Each table is consumed by the matching
 # adapter in whygraph.services.llm via Adapter.from_config. Omit api_key to
 # read the standard env var (ANTHROPIC_API_KEY, OPENAI_API_KEY,
-# DEEPSEEK_API_KEY); omit a section entirely to use the defaults shown.
+# DEEPSEEK_API_KEY, OPENROUTER_API_KEY); omit a section entirely to use the
+# defaults shown.
 
 [llm.anthropic]
 model = "claude-opus-4-7"
@@ -68,6 +80,14 @@ timeout_sec = 60
 [llm.deepseek]
 model = "deepseek-chat"
 # api_key = "sk-..."          # default: read DEEPSEEK_API_KEY from env
+timeout_sec = 60
+
+[llm.openrouter]
+model = "openrouter/auto"
+# api_key = "sk-or-..."       # default: read OPENROUTER_API_KEY from env
+                              # Note: "openrouter/auto" routes automatically, but not every
+                              # routed model supports tool calling — pin a tool-capable
+                              # model when using OpenRouter for chat.
 timeout_sec = 60
 
 [llm.ollama]

@@ -111,6 +111,30 @@ class DeepSeekConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class OpenRouterConfig:
+    """Configuration for :class:`OpenRouterAdapter` (openai SDK + OpenRouter URL).
+
+    Attributes
+    ----------
+    model : str
+        OpenRouter model identifier (e.g. ``"openrouter/auto"``, which
+        lets OpenRouter route the prompt itself). Note that not every
+        routed model supports tool calling — pin a tool-capable model
+        when using OpenRouter for chat.
+    api_key : str or None
+        Explicit API key. ``None`` (default) reads ``OPENROUTER_API_KEY``
+        from the environment (the adapter handles this — OpenRouter does
+        *not* use ``OPENAI_API_KEY``).
+    timeout_sec : int
+        Per-request timeout in seconds. Default ``60``.
+    """
+
+    model: str = "openrouter/auto"
+    api_key: str | None = None
+    timeout_sec: int = 60
+
+
+@dataclass(frozen=True, slots=True)
 class OllamaConfig:
     """Configuration for :class:`OllamaAdapter` (local ollama server).
 
@@ -306,6 +330,48 @@ class RationaleConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ChatConfig:
+    """Configuration for the ``whygraph serve`` chat assistant.
+
+    Loaded from the ``[chat]`` table in ``whygraph.toml``. Provider and
+    model here are only **defaults for new sessions** — each session
+    records its own pair on its row, so changing this never rewrites an
+    existing conversation's model.
+
+    Attributes
+    ----------
+    provider : str
+        Default chat provider for new sessions. Must be one of
+        ``anthropic`` / ``openai`` / ``deepseek`` / ``openrouter``;
+        unknown or non-chat tags surface as
+        :class:`whygraph.services.llm.LlmError` from
+        :func:`whygraph.services.llm.make_chat_client`, not here —
+        ``core/config`` deliberately does not import from ``services/llm``.
+    model : str
+        Default model. Empty (default) defers to the provider's own
+        ``[llm.<provider>].model``.
+    max_tool_rounds : int
+        Hard bound on tool rounds in one user turn. Must be ``>= 1``.
+        Hitting it ends the turn with whatever text has accumulated,
+        rather than looping forever on a model that keeps calling tools.
+    max_rationale_generations : int
+        How many uncached rationale cards one user turn may generate.
+        Must be ``>= 0``; ``0`` makes the tool cache-only. This is what
+        keeps one question from fanning out into N nested LLM calls.
+    context_token_budget : int
+        Approximate token ceiling for the history sent to the model
+        (estimated as chars/4). Must be ``>= 1000``. Older messages stay
+        in the DB and the UI — only the model's view is windowed.
+    """
+
+    provider: str = "anthropic"
+    model: str = ""
+    max_tool_rounds: int = 8
+    max_rationale_generations: int = 2
+    context_token_budget: int = 60_000
+
+
+@dataclass(frozen=True, slots=True)
 class LlmConfig:
     """Aggregate of every per-provider :class:`LlmClient` configuration.
 
@@ -317,6 +383,7 @@ class LlmConfig:
     anthropic: AnthropicConfig = field(default_factory=AnthropicConfig)
     openai: OpenAIConfig = field(default_factory=OpenAIConfig)
     deepseek: DeepSeekConfig = field(default_factory=DeepSeekConfig)
+    openrouter: OpenRouterConfig = field(default_factory=OpenRouterConfig)
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     claude_cli: ClaudeCliConfig = field(default_factory=ClaudeCliConfig)
 
@@ -327,6 +394,7 @@ _LLM_SECTIONS: tuple[tuple[str, str, type], ...] = (
     ("anthropic", "anthropic", AnthropicConfig),
     ("openai", "openai", OpenAIConfig),
     ("deepseek", "deepseek", DeepSeekConfig),
+    ("openrouter", "openrouter", OpenRouterConfig),
     ("ollama", "ollama", OllamaConfig),
     # `claude_cli` (Python attr) ↔ `claude-cli` (TOML section) — TOML
     # idiomatically uses dashes; Python identifiers cannot, so we keep
@@ -391,6 +459,14 @@ def _build_rationale_config(raw: dict) -> RationaleConfig:
     return RationaleConfig(**{k: v for k, v in raw.items() if k in known})
 
 
+def _build_chat_config(raw: dict) -> ChatConfig:
+    """Parse a raw ``[chat]`` dict into a typed :class:`ChatConfig`."""
+    known = {f.name for f in fields(ChatConfig)}
+    for unknown in set(raw) - known:
+        _log.warning("ignoring unknown key in [chat]: %r", unknown)
+    return ChatConfig(**{k: v for k, v in raw.items() if k in known})
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     """Immutable runtime configuration for the WhyGraph package.
@@ -448,6 +524,10 @@ class Config:
         Settings for the LLM rationale generator. Loaded from the
         ``[rationale]`` table; consumed by
         :meth:`whygraph.analyze.RationaleGenerator.from_config`.
+    chat : ChatConfig
+        Settings for the ``whygraph serve`` chat assistant. Loaded from the
+        ``[chat]`` table; consumed by :mod:`whygraph.chat` and
+        :mod:`whygraph.serve.chat`.
     """
 
     log_level: str = "INFO"
@@ -461,6 +541,7 @@ class Config:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     analyze: AnalyzeConfig = field(default_factory=AnalyzeConfig)
     rationale: RationaleConfig = field(default_factory=RationaleConfig)
+    chat: ChatConfig = field(default_factory=ChatConfig)
 
     def __post_init__(self) -> None:
         """Validate field values immediately after construction.
@@ -519,6 +600,20 @@ class Config:
             raise ConfigError(
                 "rationale.pr_comment_max_chars must be >= 1, "
                 f"got {self.rationale.pr_comment_max_chars}"
+            )
+        if self.chat.max_tool_rounds < 1:
+            raise ConfigError(
+                f"chat.max_tool_rounds must be >= 1, got {self.chat.max_tool_rounds}"
+            )
+        if self.chat.max_rationale_generations < 0:
+            raise ConfigError(
+                "chat.max_rationale_generations must be >= 0, "
+                f"got {self.chat.max_rationale_generations}"
+            )
+        if self.chat.context_token_budget < 1000:
+            raise ConfigError(
+                "chat.context_token_budget must be >= 1000, "
+                f"got {self.chat.context_token_budget}"
             )
 
     @classmethod
@@ -586,6 +681,10 @@ class Config:
         if rationale_raw:
             raw["rationale"] = _build_rationale_config(rationale_raw)
 
+        chat_raw = raw.pop("chat", {}) or {}
+        if chat_raw:
+            raw["chat"] = _build_chat_config(chat_raw)
+
         logging_raw = raw.pop("logging", {}) or {}
         if logging_raw:
             raw["logging"] = _build_logging_config(logging_raw, base)
@@ -643,7 +742,8 @@ class InitAnswers:
         Model for ``[rationale].model``; empty means "no override".
     api_keys : dict[str, str]
         ``{provider: key}`` for key-bearing providers the user supplied a
-        key for (``anthropic`` / ``openai`` / ``deepseek``). Rendered as
+        key for (``anthropic`` / ``openai`` / ``deepseek`` /
+        ``openrouter``). Rendered as
         an active ``api_key`` line **only** into ``whygraph.toml``.
     scan_provider : str
         Value for ``[scan].provider`` — ``"off"`` / ``"github"`` /
@@ -692,6 +792,7 @@ _LLM_KEY_HINTS: dict[str, str] = {
     "anthropic": '# api_key = "sk-ant-..."      # default: read ANTHROPIC_API_KEY from env',
     "openai": '# api_key = "sk-..."          # default: read OPENAI_API_KEY from env',
     "deepseek": '# api_key = "sk-..."          # default: read DEEPSEEK_API_KEY from env',
+    "openrouter": '# api_key = "sk-or-..."       # default: read OPENROUTER_API_KEY from env',
     "claude_cli": '# api_key = "sk-ant-..."      # default: subscription billing (strips env var)',
 }
 
@@ -767,9 +868,14 @@ def render_config(answers: InitAnswers, *, include_tokens: bool) -> str:
         "scan_provider": answers.scan_provider,
         "analyze_provider": answers.analyze_provider,
         "rationale_provider": answers.rationale_provider,
+        # Chat is not prompted for by `whygraph init` — the [chat] block
+        # renders its built-in default so the file stays a complete
+        # reference and the shown value tracks ChatConfig.
+        "chat_provider": ChatConfig().provider,
         "llm_anthropic_model": AnthropicConfig().model,
         "llm_openai_model": OpenAIConfig().model,
         "llm_deepseek_model": DeepSeekConfig().model,
+        "llm_openrouter_model": OpenRouterConfig().model,
         "llm_ollama_model": OllamaConfig().model,
         "llm_claude_cli_model": ClaudeCliConfig().model,
         "scan_token_line": _scan_token_line(answers, include_tokens),
@@ -782,6 +888,7 @@ def render_config(answers: InitAnswers, *, include_tokens: bool) -> str:
         "llm_anthropic_key_line": _key_line("anthropic", answers, include_tokens),
         "llm_openai_key_line": _key_line("openai", answers, include_tokens),
         "llm_deepseek_key_line": _key_line("deepseek", answers, include_tokens),
+        "llm_openrouter_key_line": _key_line("openrouter", answers, include_tokens),
         # claude_cli is never key-prompted — always its hint.
         "llm_claude_cli_key_line": _LLM_KEY_HINTS["claude_cli"],
     }

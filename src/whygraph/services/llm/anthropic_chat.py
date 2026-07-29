@@ -24,6 +24,7 @@ the whole turn.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -35,6 +36,7 @@ from .chat import (
     ChatMessage,
     ChatRequest,
     ChatStreamEvent,
+    ModelInfo,
     TextDelta,
     ToolCall,
     ToolCallMade,
@@ -42,6 +44,8 @@ from .chat import (
     TurnDone,
 )
 from .exceptions import LlmError
+
+_ENV_VAR = "ANTHROPIC_API_KEY"
 
 
 @dataclass(slots=True)
@@ -199,12 +203,43 @@ class AnthropicChatAdapter(ChatClient):
         if self._injected_client is not None:
             return self._injected_client
         if self.__sdk_client is None:
+            # Check for a key before handing off: with none resolvable the SDK
+            # raises a bare `TypeError`, which neither reads as a
+            # configuration problem nor is safe to catch broadly (it would
+            # also swallow genuine bugs in our own translation code).
+            if not (self._api_key or os.environ.get(_ENV_VAR)):
+                raise LlmError(
+                    f"anthropic is not configured — set {_ENV_VAR} or "
+                    "[llm.anthropic].api_key in whygraph.toml"
+                )
             self.__sdk_client = (
                 anthropic.Anthropic(api_key=self._api_key)
                 if self._api_key
                 else anthropic.Anthropic()
             )
         return self.__sdk_client
+
+    def list_models(self) -> tuple[ModelInfo, ...]:
+        """List models via ``client.models.list()``.
+
+        Anthropic is the only one of the four providers that returns a
+        human display name, so the dropdown gets "Claude Opus 5" rather
+        than a bare id here.
+
+        Note that a **scoped API key can 401 on this endpoint while working
+        fine for ``/messages``** — the caller is expected to fall back.
+        """
+        try:
+            # Iterating the pager auto-paginates; `.data` would be page one only.
+            return tuple(
+                ModelInfo(
+                    id=model.id,
+                    display_name=getattr(model, "display_name", None) or model.id,
+                )
+                for model in self._client.models.list()
+            )
+        except anthropic.AnthropicError as exc:
+            raise LlmError(f"anthropic model listing failed: {exc}") from exc
 
     def stream_turn(self, request: ChatRequest) -> Iterator[ChatStreamEvent]:
         """Stream one turn from the Messages API.
@@ -291,7 +326,7 @@ class AnthropicChatAdapter(ChatClient):
                         continue
         except LlmError:
             raise
-        except anthropic.APIError as exc:
+        except anthropic.AnthropicError as exc:
             raise LlmError(f"anthropic API error: {exc}") from exc
 
         # A stream cut short before content_block_stop still owes its

@@ -154,6 +154,21 @@ export interface ChatProvider {
   env_var: string | null;
 }
 
+export interface ChatModel {
+  id: string;
+  display_name: string;
+}
+
+export interface ChatModels {
+  provider: string;
+  // "live" = fetched from the provider; "fallback" = the built-in short list,
+  // used when listing failed (a scoped key can chat but not enumerate).
+  source: "live" | "fallback";
+  default_model: string;
+  models: ChatModel[];
+  error?: string;
+}
+
 export interface ChatSession {
   id: number;
   title: string;
@@ -178,6 +193,10 @@ export interface ChatMessage {
   tool_call_id: string | null;
   input_tokens: number | null;
   output_tokens: number | null;
+  // Which provider/model produced this row — assistant rows only. Recorded
+  // per row because the model can be switched mid-conversation.
+  provider: string | null;
+  model: string | null;
   created_at: string;
 }
 
@@ -276,12 +295,16 @@ export const api = {
 
   // ---- chat -----------------------------------------------------------------
   chatProviders: () => get<ChatProvider[]>("/chat/providers"),
+  chatModels: (provider: string) =>
+    get<ChatModels>(`/chat/models?provider=${encodeURIComponent(provider)}`),
   chatSessions: () => get<ChatSession[]>("/chat/sessions"),
   chatCreateSession: (body: { provider?: string; model?: string; title?: string }) =>
     send<ChatSession>("POST", "/chat/sessions", body),
   chatTranscript: (id: number) => get<ChatTranscript>(`/chat/sessions/${id}`),
-  chatRenameSession: (id: number, title: string) =>
-    send<ChatSession>("PATCH", `/chat/sessions/${id}`, { title }),
+  chatUpdateSession: (
+    id: number,
+    body: { title?: string; provider?: string; model?: string },
+  ) => send<ChatSession>("PATCH", `/chat/sessions/${id}`, body),
   chatDeleteSession: async (id: number): Promise<void> => {
     const res = await fetch(`/api/chat/sessions/${id}`, { method: "DELETE" });
     if (!res.ok) {

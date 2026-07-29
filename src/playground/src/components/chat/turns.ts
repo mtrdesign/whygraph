@@ -60,6 +60,9 @@ export function turnsFromMessages(messages: ChatMessage[]): Turn[] {
           output: message.output_tokens,
         };
       }
+      // Attribution is per row, so a transcript spanning a mid-session model
+      // switch shows each turn's real model rather than the current selection.
+      if (message.model) current.model = message.model;
       continue;
     }
 

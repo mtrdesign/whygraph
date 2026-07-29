@@ -30,7 +30,7 @@ import os
 from collections.abc import Iterator
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import col, func, select
@@ -50,10 +50,12 @@ from whygraph.services.llm import LlmError
 from whygraph.services.llm.chat import (
     CHAT_PROVIDERS,
     ChatMessage,
+    ModelInfo,
     TextDelta,
     ToolCall,
     TurnDone,
     chat_provider_env_var,
+    fallback_models,
     make_chat_client,
 )
 
@@ -91,10 +93,16 @@ class CreateSessionBody(BaseModel):
     title: str | None = None
 
 
-class RenameSessionBody(BaseModel):
-    """Body for ``PATCH /api/chat/sessions/{id}``."""
+class UpdateSessionBody(BaseModel):
+    """Body for ``PATCH /api/chat/sessions/{id}``. Every field optional.
 
-    title: str
+    Provider and model are mutable so the header dropdowns can switch
+    models mid-conversation; the change applies from the next turn.
+    """
+
+    title: str | None = None
+    provider: str | None = None
+    model: str | None = None
 
 
 class SendMessageBody(BaseModel):
@@ -141,6 +149,8 @@ def _message_dict(row: ChatMessageRow) -> dict:
         "tool_call_id": row.tool_call_id,
         "input_tokens": row.input_tokens,
         "output_tokens": row.output_tokens,
+        "provider": row.provider,
+        "model": row.model,
         "created_at": row.created_at,
     }
 
@@ -183,6 +193,54 @@ def providers() -> list[dict]:
         }
         for provider in CHAT_PROVIDERS
     ]
+
+
+@router.get("/models")
+def models(provider: str = Query(...)) -> dict:
+    """List a provider's models for the model dropdown.
+
+    Asks the provider rather than shipping a hardcoded catalogue, which
+    would rot on every model release and could never cover OpenRouter.
+
+    Listing is **allowed to fail** and still returns 200: a scoped
+    Anthropic key can be valid for ``/messages`` yet 401 here, so a
+    provider that chats perfectly well may refuse to enumerate. In that
+    case the response carries the short built-in list with
+    ``source: "fallback"`` and the provider's error, so the dropdown is
+    never empty and the UI can say why it looks short.
+    """
+    if provider not in CHAT_PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{provider!r} is not a chat provider; available: {CHAT_PROVIDERS}",
+        )
+
+    configured_model = getattr(get_config().llm, provider).model
+    try:
+        client = make_chat_client(provider)
+        listed = client.list_models()
+        if not listed:
+            raise LlmError("provider returned an empty model list")
+        return {
+            "provider": provider,
+            "source": "live",
+            "default_model": configured_model,
+            "models": [{"id": m.id, "display_name": m.display_name} for m in listed],
+        }
+    except LlmError as exc:
+        _log.info("live model listing failed for %s: %s", provider, exc)
+        # Include the configured model even if it isn't in the static list —
+        # it is by definition one the user intends to use.
+        entries = list(fallback_models(provider))
+        if configured_model and all(m.id != configured_model for m in entries):
+            entries.insert(0, ModelInfo(configured_model, configured_model))
+        return {
+            "provider": provider,
+            "source": "fallback",
+            "default_model": configured_model,
+            "error": str(exc),
+            "models": [{"id": m.id, "display_name": m.display_name} for m in entries],
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -267,14 +325,44 @@ def get_transcript(session_id: int) -> dict:
 
 
 @router.patch("/sessions/{session_id}")
-def rename_session(session_id: int, body: RenameSessionBody) -> dict:
-    """Rename a session. An explicit rename beats first-message titling."""
-    title = body.title.strip()
-    if not title:
-        raise HTTPException(status_code=400, detail="title must not be empty")
+def update_session(session_id: int, body: UpdateSessionBody) -> dict:
+    """Update a session's title, provider, and/or model.
+
+    A title set here always wins over first-message titling. A provider or
+    model change takes effect on the **next** turn — turns already in the
+    transcript keep their own recorded attribution, so switching never
+    rewrites history.
+    """
+    if body.provider is not None and body.provider not in CHAT_PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{body.provider!r} is not a chat provider; available: {CHAT_PROVIDERS}"
+            ),
+        )
+
     with get_session() as session:
         row = _require_session(session, session_id)
-        row.title = title[:TITLE_MAX_CHARS]
+
+        if body.title is not None:
+            title = body.title.strip()
+            if not title:
+                raise HTTPException(status_code=400, detail="title must not be empty")
+            row.title = title[:TITLE_MAX_CHARS]
+
+        if body.provider is not None and body.provider != row.provider:
+            row.provider = body.provider
+            # Switching provider invalidates the old model id, so resolve a
+            # default for the new one unless this same request names a model.
+            if body.model is None:
+                row.model = getattr(get_config().llm, body.provider).model
+
+        if body.model is not None:
+            model = body.model.strip()
+            if not model:
+                raise HTTPException(status_code=400, detail="model must not be empty")
+            row.model = model
+
         row.updated_at = _now_iso()
         session.add(row)
         session.commit()
@@ -379,8 +467,15 @@ def _persist_assistant_turn(
     text: str,
     calls: list[ToolCall],
     done: TurnDone | None,
+    provider: str,
+    model: str,
 ) -> int:
-    """Write one completed assistant turn and return its row id."""
+    """Write one completed assistant turn and return its row id.
+
+    ``provider`` / ``model`` are recorded on the row rather than read back
+    from the session later: the session's pair can change between turns, so
+    only the value in force *at this turn* is a truthful attribution.
+    """
     now = _now_iso()
     with get_session() as session:
         row = _require_session(session, session_id)
@@ -395,6 +490,8 @@ def _persist_assistant_turn(
             ),
             input_tokens=done.input_tokens if done else None,
             output_tokens=done.output_tokens if done else None,
+            provider=provider,
+            model=model,
             created_at=now,
         )
         session.add(message)
@@ -459,6 +556,8 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
             text="".join(text_parts),
             calls=round_calls,
             done=last_done,
+            provider=provider,
+            model=model,
         )
         for call, result in round_results:
             _persist_tool_result(session_id, call, result)

@@ -29,6 +29,7 @@ from .chat import (
     ChatMessage,
     ChatRequest,
     ChatStreamEvent,
+    ModelInfo,
     TextDelta,
     ToolCall,
     ToolCallMade,
@@ -213,8 +214,36 @@ class OpenAIChatAdapter(ChatClient):
             return self._injected_client
         if self.__sdk_client is None:
             key = self._api_key or os.environ.get(self._env_var)
+            # Say which env var is missing rather than letting the SDK's
+            # generic "Missing credentials" surface — the provider tag is
+            # what the user needs to act on.
+            if not key:
+                raise LlmError(
+                    f"{self.provider} is not configured — set {self._env_var} or "
+                    f"[llm.{self.provider}].api_key in whygraph.toml"
+                )
             self.__sdk_client = openai.OpenAI(api_key=key, base_url=self._base_url)
         return self.__sdk_client
+
+    def list_models(self) -> tuple[ModelInfo, ...]:
+        """List models via the OpenAI-compatible ``/models`` endpoint.
+
+        All three providers on this adapter expose it. The payload carries
+        no display name, so the id doubles as the label — OpenRouter ids
+        (``anthropic/claude-opus-5``) are already readable, and OpenAI's
+        are conventional enough.
+
+        OpenRouter serves ``/models`` without authentication and returns
+        several hundred entries, which is why the UI filters rather than
+        rendering them all flat.
+        """
+        try:
+            return tuple(
+                ModelInfo(id=model.id, display_name=model.id)
+                for model in self._client.models.list()
+            )
+        except openai.OpenAIError as exc:
+            raise LlmError(f"{self.provider} model listing failed: {exc}") from exc
 
     def stream_turn(self, request: ChatRequest) -> Iterator[ChatStreamEvent]:
         """Stream one turn from the chat-completions endpoint.
@@ -281,7 +310,7 @@ class OpenAIChatAdapter(ChatClient):
                     flushed = True
         except LlmError:
             raise
-        except openai.APIError as exc:
+        except openai.OpenAIError as exc:
             raise LlmError(f"openai API error: {exc}") from exc
 
         # Defensive: a stream that ends without a finish_reason (a

@@ -40,6 +40,7 @@ from whygraph.services.llm import (
     ToolSpec,
     TurnDone,
     chat_provider_env_var,
+    fallback_models,
     make_chat_client,
 )
 
@@ -676,3 +677,80 @@ def test_openai_adapter_json_round_trip_is_lossless() -> None:
     )
     wire = fake.last_kwargs["messages"][1]["tool_calls"][0]["function"]["arguments"]
     assert json.loads(wire) == arguments
+
+
+# ---------------------------------------------------------------------------
+# SDK-base-exception handling
+# ---------------------------------------------------------------------------
+#
+# The SDKs raise their *base* error class (openai.OpenAIError /
+# anthropic.AnthropicError) for missing credentials at client-construction
+# time — APIError is only for responses that came back. Catching APIError
+# alone let that escape as an unhandled 500 from `GET /api/chat/models`, so
+# both adapters catch the base class instead.
+
+
+def test_openai_missing_credentials_names_the_env_var(monkeypatch) -> None:
+    """An unconfigured provider is a clear LlmError, not an SDK error."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    adapter = OpenAIChatAdapter(model="gpt-4o")  # no client= → lazy real SDK
+
+    for call in (adapter.list_models, lambda: list(adapter.stream_turn(_request()))):
+        with pytest.raises(LlmError, match="openai is not configured"):
+            call()
+
+
+def test_deepseek_missing_credentials_names_its_own_env_var(monkeypatch) -> None:
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    adapter = OpenAIChatAdapter(
+        provider="deepseek", model="deepseek-chat", env_var="DEEPSEEK_API_KEY"
+    )
+    with pytest.raises(LlmError, match="DEEPSEEK_API_KEY"):
+        adapter.list_models()
+
+
+def test_anthropic_missing_credentials_names_the_env_var(monkeypatch) -> None:
+    """The SDK raises a bare TypeError here, so the adapter checks first."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    adapter = AnthropicChatAdapter(model="claude-opus-5")
+
+    with pytest.raises(LlmError, match="anthropic is not configured"):
+        adapter.list_models()
+    with pytest.raises(LlmError, match="ANTHROPIC_API_KEY"):
+        list(adapter.stream_turn(_request()))
+
+
+def test_openai_list_models_maps_ids(monkeypatch) -> None:
+    fake = _FakeOpenAI([])
+    fake.models = SimpleNamespace(
+        list=lambda: [SimpleNamespace(id="gpt-4o"), SimpleNamespace(id="gpt-4o-mini")]
+    )
+    adapter = OpenAIChatAdapter(model="gpt-4o", client=fake)
+    listed = adapter.list_models()
+    assert [m.id for m in listed] == ["gpt-4o", "gpt-4o-mini"]
+    # No display name in the payload, so the id doubles as the label.
+    assert listed[0].display_name == "gpt-4o"
+
+
+def test_anthropic_list_models_uses_display_names() -> None:
+    fake = _FakeAnthropic([])
+    fake.models = SimpleNamespace(
+        list=lambda: [
+            SimpleNamespace(id="claude-opus-5", display_name="Claude Opus 5"),
+            SimpleNamespace(id="claude-haiku-4-5", display_name=None),
+        ]
+    )
+    adapter = AnthropicChatAdapter(model="claude-opus-5", client=fake)
+    listed = adapter.list_models()
+    assert (listed[0].id, listed[0].display_name) == ("claude-opus-5", "Claude Opus 5")
+    # A null display_name falls back to the id rather than rendering "None".
+    assert listed[1].display_name == "claude-haiku-4-5"
+
+
+def test_fallback_models_cover_every_chat_provider() -> None:
+    """The dropdown must never be empty for a provider the picker offers."""
+    for provider in CHAT_PROVIDERS:
+        entries = fallback_models(provider)
+        assert entries, f"no fallback models for {provider}"
+        assert all(m.id and m.display_name for m in entries)
+    assert fallback_models("nonesuch") == ()

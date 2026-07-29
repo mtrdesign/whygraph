@@ -41,7 +41,7 @@ export function SessionList() {
 
   const rename = useMutation({
     mutationFn: (vars: { id: number; title: string }) =>
-      api.chatRenameSession(vars.id, vars.title),
+      api.chatUpdateSession(vars.id, { title: vars.title }),
     onSuccess: () => {
       setRenamingId(null);
       invalidate();

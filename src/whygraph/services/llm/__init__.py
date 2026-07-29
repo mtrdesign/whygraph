@@ -45,17 +45,20 @@ from .anthropic import AnthropicAdapter
 from .anthropic_chat import AnthropicChatAdapter
 from .chat import (
     CHAT_PROVIDERS,
+    FALLBACK_MODELS,
     ChatClient,
     ChatMessage,
     ChatRequest,
     ChatRole,
     ChatStreamEvent,
+    ModelInfo,
     TextDelta,
     ToolCall,
     ToolCallMade,
     ToolSpec,
     TurnDone,
     chat_provider_env_var,
+    fallback_models,
     make_chat_client,
 )
 from .claude_cli import ClaudeCliAdapter
@@ -71,6 +74,7 @@ from .types import CompletionRequest, CompletionResponse, Message
 
 __all__ = [
     "CHAT_PROVIDERS",
+    "FALLBACK_MODELS",
     "AnthropicAdapter",
     "AnthropicChatAdapter",
     "ChatClient",
@@ -86,6 +90,7 @@ __all__ = [
     "LlmClientFactory",
     "LlmError",
     "Message",
+    "ModelInfo",
     "OllamaAdapter",
     "OpenAIAdapter",
     "OpenAIChatAdapter",
@@ -96,5 +101,6 @@ __all__ = [
     "ToolSpec",
     "TurnDone",
     "chat_provider_env_var",
+    "fallback_models",
     "make_chat_client",
 ]

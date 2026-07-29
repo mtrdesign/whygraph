@@ -24,7 +24,7 @@ from whygraph.core.config import ChatConfig, Config, LlmConfig, OpenAIConfig
 from whygraph.db import engine as db_engine
 from whygraph.serve import chat as serve_chat
 from whygraph.serve.app import create_app
-from whygraph.services.llm.chat import TextDelta, ToolCall, TurnDone
+from whygraph.services.llm.chat import ModelInfo, TextDelta, ToolCall, TurnDone
 from whygraph.services.llm.exceptions import LlmError
 
 
@@ -537,3 +537,171 @@ def test_chat_router_does_not_shadow_explorer_routes(chat_client) -> None:
     # An Explorer route with no CodeGraph index still 503s (its own contract),
     # rather than 404-ing because the chat prefix swallowed it.
     assert chat_client.get("/api/tree").status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# Model listing (live + fallback)
+# ---------------------------------------------------------------------------
+
+
+def _stub_list_models(monkeypatch, models=None, error: str | None = None):
+    """Replace make_chat_client with one whose list_models is scripted."""
+
+    class _Client:
+        def list_models(self):
+            if error is not None:
+                raise LlmError(error)
+            return tuple(models or ())
+
+    monkeypatch.setattr(serve_chat, "make_chat_client", lambda *a, **k: _Client())
+
+
+def test_models_live_listing(chat_client, monkeypatch) -> None:
+    _stub_list_models(
+        monkeypatch,
+        [
+            ModelInfo(id="claude-opus-5", display_name="Claude Opus 5"),
+            ModelInfo(id="claude-haiku-4-5", display_name="Claude Haiku 4.5"),
+        ],
+    )
+    payload = chat_client.get(
+        "/api/chat/models", params={"provider": "anthropic"}
+    ).json()
+
+    assert payload["source"] == "live"
+    assert [m["id"] for m in payload["models"]] == ["claude-opus-5", "claude-haiku-4-5"]
+    assert payload["models"][0]["display_name"] == "Claude Opus 5"
+    assert "error" not in payload
+
+
+def test_models_falls_back_when_listing_fails(chat_client, monkeypatch) -> None:
+    """A scoped key can chat but not enumerate — the dropdown must still fill."""
+    _stub_list_models(monkeypatch, error="401 API key is invalid")
+    payload = chat_client.get(
+        "/api/chat/models", params={"provider": "anthropic"}
+    ).json()
+
+    assert payload["source"] == "fallback"
+    assert "401" in payload["error"]
+    ids = [m["id"] for m in payload["models"]]
+    assert ids, "fallback list must never be empty"
+    # The configured default is always offered, and is not duplicated.
+    assert payload["default_model"] in ids
+    assert len(ids) == len(set(ids))
+
+
+def test_models_fallback_includes_a_configured_model_absent_from_the_static_list(
+    chat_client, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        core,
+        "_config",
+        Config(llm=LlmConfig(openai=OpenAIConfig(model="gpt-9-custom"))),
+    )
+    _stub_list_models(monkeypatch, error="network down")
+    payload = chat_client.get("/api/chat/models", params={"provider": "openai"}).json()
+    assert payload["models"][0]["id"] == "gpt-9-custom"
+
+
+def test_models_empty_live_list_is_treated_as_a_failure(
+    chat_client, monkeypatch
+) -> None:
+    """An empty list would render an empty dropdown — fall back instead."""
+    _stub_list_models(monkeypatch, [])
+    payload = chat_client.get(
+        "/api/chat/models", params={"provider": "deepseek"}
+    ).json()
+    assert payload["source"] == "fallback"
+    assert payload["models"]
+
+
+def test_models_rejects_a_non_chat_provider(chat_client) -> None:
+    response = chat_client.get("/api/chat/models", params={"provider": "ollama"})
+    assert response.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Switching provider / model mid-session
+# ---------------------------------------------------------------------------
+
+
+def test_patch_switches_model(chat_client) -> None:
+    session = _new_session(chat_client, provider="anthropic", model="claude-opus-5")
+    updated = chat_client.patch(
+        f"/api/chat/sessions/{session['id']}", json={"model": "claude-haiku-4-5"}
+    ).json()
+    assert (updated["provider"], updated["model"]) == ("anthropic", "claude-haiku-4-5")
+
+
+def test_patch_switching_provider_resolves_a_new_default_model(chat_client) -> None:
+    """The old model id is meaningless on the new provider."""
+    session = _new_session(chat_client, provider="anthropic", model="claude-opus-5")
+    updated = chat_client.patch(
+        f"/api/chat/sessions/{session['id']}", json={"provider": "openrouter"}
+    ).json()
+    assert updated["provider"] == "openrouter"
+    assert updated["model"] == "openrouter/auto"
+
+
+def test_patch_provider_and_model_together_keeps_the_given_model(chat_client) -> None:
+    session = _new_session(chat_client, provider="anthropic")
+    updated = chat_client.patch(
+        f"/api/chat/sessions/{session['id']}",
+        json={"provider": "openrouter", "model": "anthropic/claude-opus-5"},
+    ).json()
+    assert (updated["provider"], updated["model"]) == (
+        "openrouter",
+        "anthropic/claude-opus-5",
+    )
+
+
+def test_patch_rejects_a_non_chat_provider_and_blank_values(chat_client) -> None:
+    session = _new_session(chat_client)
+    sid = session["id"]
+    assert (
+        chat_client.patch(
+            f"/api/chat/sessions/{sid}", json={"provider": "ollama"}
+        ).status_code
+        == 400
+    )
+    assert (
+        chat_client.patch(f"/api/chat/sessions/{sid}", json={"model": "  "}).status_code
+        == 400
+    )
+    assert (
+        chat_client.patch(f"/api/chat/sessions/{sid}", json={"title": "  "}).status_code
+        == 400
+    )
+
+
+def test_patch_title_only_leaves_provider_and_model_alone(chat_client) -> None:
+    session = _new_session(chat_client, provider="deepseek", model="deepseek-reasoner")
+    updated = chat_client.patch(
+        f"/api/chat/sessions/{session['id']}", json={"title": "Renamed"}
+    ).json()
+    assert updated["title"] == "Renamed"
+    assert (updated["provider"], updated["model"]) == ("deepseek", "deepseek-reasoner")
+
+
+def test_assistant_rows_record_the_model_that_produced_them(
+    chat_client, monkeypatch
+) -> None:
+    """Switching mid-session must not rewrite earlier turns' attribution."""
+    _stub_harness(monkeypatch, [TextDelta(text="from opus"), TurnDone("stop")])
+    session = _new_session(chat_client, provider="anthropic", model="claude-opus-5")
+    sid = session["id"]
+    chat_client.post(f"/api/chat/sessions/{sid}/messages", json={"content": "q1"})
+
+    chat_client.patch(f"/api/chat/sessions/{sid}", json={"model": "claude-haiku-4-5"})
+    _stub_harness(monkeypatch, [TextDelta(text="from haiku"), TurnDone("stop")])
+    chat_client.post(f"/api/chat/sessions/{sid}/messages", json={"content": "q2"})
+
+    messages = chat_client.get(f"/api/chat/sessions/{sid}").json()["messages"]
+    assistants = [m for m in messages if m["role"] == "assistant"]
+    assert [(a["content"], a["model"]) for a in assistants] == [
+        ("from opus", "claude-opus-5"),
+        ("from haiku", "claude-haiku-4-5"),
+    ]
+    assert all(a["provider"] == "anthropic" for a in assistants)
+    # User rows carry no attribution.
+    assert all(m["model"] is None for m in messages if m["role"] == "user")

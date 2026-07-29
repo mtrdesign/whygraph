@@ -16,6 +16,8 @@ export interface AssistantTurn {
   segments: string[];
   activityGroups: ToolActivity[][];
   usage?: { input: number | null; output: number | null };
+  /** Which model produced this turn — shown because it can differ per turn. */
+  model?: string | null;
   error?: string;
   roundLimit?: number;
 }
@@ -71,9 +73,14 @@ function AssistantBubble({ turn }: { turn: AssistantTurn }) {
           </div>
         )}
 
-        {turn.usage && (turn.usage.input || turn.usage.output) && (
-          <div className="mt-2 text-[10px] text-muted">
-            {turn.usage.input ?? "?"} in / {turn.usage.output ?? "?"} out tokens
+        {(turn.model || (turn.usage && (turn.usage.input || turn.usage.output))) && (
+          <div className="mt-2 flex items-center gap-2 text-[10px] text-muted">
+            {turn.model && <span className="font-mono">{turn.model}</span>}
+            {turn.usage && (turn.usage.input || turn.usage.output) && (
+              <span>
+                {turn.usage.input ?? "?"} in / {turn.usage.output ?? "?"} out tokens
+              </span>
+            )}
           </div>
         )}
       </div>

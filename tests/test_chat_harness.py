@@ -33,6 +33,7 @@ from whygraph.core.config import ChatConfig, Config
 from whygraph.services.llm.chat import (
     ChatClient,
     ChatMessage,
+    ModelInfo,
     TextDelta,
     ToolCall,
     ToolCallMade,
@@ -71,6 +72,10 @@ class ScriptedClient(ChatClient):
         if index >= len(self._rounds):
             raise AssertionError(f"loop asked for round {index}, script has none")
         yield from self._rounds[index]
+
+    def list_models(self):
+        """Part of the port, unused by the harness (the picker calls it)."""
+        return (ModelInfo(id="scripted-1", display_name="Scripted"),)
 
 
 class StubRegistry:

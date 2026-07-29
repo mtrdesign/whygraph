@@ -60,6 +60,42 @@ parameter and ``"tool"`` messages become a ``user`` message carrying
 CHAT_PROVIDERS: tuple[str, ...] = ("anthropic", "openai", "deepseek", "openrouter")
 """Provider tags :func:`make_chat_client` accepts, in picker order."""
 
+FALLBACK_MODELS: dict[str, tuple[tuple[str, str], ...]] = {
+    # Anthropic's /models endpoint rejects scoped keys that are perfectly
+    # valid for /messages, so this list is load-bearing rather than
+    # theoretical — a user whose key can chat may still never see a live list.
+    "anthropic": (
+        ("claude-opus-5", "Claude Opus 5"),
+        ("claude-sonnet-5", "Claude Sonnet 5"),
+        ("claude-opus-4-8", "Claude Opus 4.8"),
+        ("claude-haiku-4-5", "Claude Haiku 4.5"),
+    ),
+    "openai": (
+        ("gpt-4o", "GPT-4o"),
+        ("gpt-4o-mini", "GPT-4o mini"),
+    ),
+    "deepseek": (
+        ("deepseek-chat", "DeepSeek Chat"),
+        ("deepseek-reasoner", "DeepSeek Reasoner"),
+    ),
+    # OpenRouter's /models needs no key, so this is only reached when the
+    # network itself is unavailable.
+    "openrouter": (("openrouter/auto", "Auto (OpenRouter picks)"),),
+}
+"""Per-provider models to offer when live listing fails.
+
+Deliberately short: it exists so the dropdown is never empty, not as a
+catalogue. The live list is the source of truth whenever it is reachable.
+"""
+
+
+def fallback_models(provider: str) -> tuple[ModelInfo, ...]:
+    """Return the offline model list for ``provider`` (empty if unknown)."""
+    return tuple(
+        ModelInfo(id=model_id, display_name=label)
+        for model_id, label in FALLBACK_MODELS.get(provider, ())
+    )
+
 
 @dataclass(frozen=True, slots=True)
 class ToolSpec:
@@ -222,6 +258,24 @@ ChatStreamEvent = TextDelta | ToolCallMade | TurnDone
 """What :meth:`ChatClient.stream_turn` yields."""
 
 
+@dataclass(frozen=True, slots=True)
+class ModelInfo:
+    """One selectable model, for the UI's model dropdown.
+
+    Attributes
+    ----------
+    id : str
+        The model identifier to send as :attr:`ChatClient.model`.
+    display_name : str
+        Human label. Falls back to :attr:`id` when the provider does not
+        supply one (the OpenAI-compatible ``/models`` payload has no
+        display name — only Anthropic's does).
+    """
+
+    id: str
+    display_name: str
+
+
 class ChatClient(abc.ABC):
     """Abstract port for a streaming, tool-calling chat client.
 
@@ -269,6 +323,31 @@ class ChatClient(abc.ABC):
             malformed tool-argument payload. Same contract as
             :meth:`whygraph.services.llm.LlmClient.complete`; the
             originating exception is preserved as ``__cause__``.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def list_models(self) -> tuple[ModelInfo, ...]:
+        """List the models this provider currently offers.
+
+        Powers the UI's model dropdown. Hardcoding a model list would rot
+        every time a provider ships a model, so the picker asks the
+        provider — which also means OpenRouter's several-hundred-model
+        catalogue works without WhyGraph tracking it.
+
+        Returns
+        -------
+        tuple[ModelInfo, ...]
+            Whatever the provider reports, in the provider's own order.
+
+        Raises
+        ------
+        LlmError
+            If listing fails. This is **expected in normal operation** and
+            callers must handle it: a scoped Anthropic key can be valid
+            for ``/messages`` yet 401 on ``/models``, so a provider that
+            chats fine may still refuse to enumerate. Callers fall back to
+            :data:`FALLBACK_MODELS`.
         """
         raise NotImplementedError
 
@@ -417,16 +496,19 @@ def make_chat_client(
 
 __all__ = [
     "CHAT_PROVIDERS",
+    "FALLBACK_MODELS",
     "ChatClient",
     "ChatMessage",
     "ChatRequest",
     "ChatRole",
     "ChatStreamEvent",
+    "ModelInfo",
     "TextDelta",
     "ToolCall",
     "ToolCallMade",
     "ToolSpec",
     "TurnDone",
     "chat_provider_env_var",
+    "fallback_models",
     "make_chat_client",
 ]

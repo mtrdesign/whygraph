@@ -54,8 +54,21 @@ class ChatMessage(WhygraphTable, table=True):
         provider gives it.
     output_tokens : int or None
         Completion-token usage, same caveat.
+    provider : str or None
+        Provider that produced an assistant row. ``None`` for user and
+        tool rows.
+    model : str or None
+        Model that produced an assistant row. ``None`` for user and tool
+        rows.
     created_at : str
         ISO-8601 UTC timestamp, stored as text.
+
+    Notes
+    -----
+    ``provider`` / ``model`` are recorded **per row**, not just on the
+    session, because the UI lets the model be switched mid-conversation.
+    Without them a transcript containing two models would attribute every
+    turn to whichever one happened to be selected last.
     """
 
     id: int | None = Field(default=None, primary_key=True)
@@ -70,4 +83,6 @@ class ChatMessage(WhygraphTable, table=True):
     tool_call_id: str | None = Field(default=None, sa_type=Text)
     input_tokens: int | None = Field(default=None)
     output_tokens: int | None = Field(default=None)
+    provider: str | None = Field(default=None, sa_type=Text)
+    model: str | None = Field(default=None, sa_type=Text)
     created_at: str = Field(sa_type=Text)

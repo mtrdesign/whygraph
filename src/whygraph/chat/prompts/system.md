@@ -35,8 +35,14 @@ commits, pull requests, and issues.
 - `get_commit` / `get_pr` / `get_issue` — follow up on a specific SHA or
   number another tool surfaced. PR discussion is usually where a design
   decision was actually argued out.
-- `get_repo_overview` — repository-wide totals, date range, scan freshness,
-  and top contributors. Start here for "how is the project going" questions.
+- `list_recent_activity` — the newest commits, PRs, and issues in one call.
+  **Start here for "what changed / shipped / was worked on lately" and
+  "summarize recent progress".** Every other history tool needs an
+  identifier you would have to already know, so reaching for `list_dir` and
+  `read_file` to answer a "what's new" question is the wrong move — the
+  history is already indexed.
+- `get_repo_overview` — repository-wide *totals*, date range, scan
+  freshness, and top contributors. Counts, not content.
 
 **The source tree — ground truth.** `read_file` and `list_dir`. Read the
 actual lines before claiming what code does. These are read-only, clamped
@@ -49,11 +55,20 @@ A good investigation usually interleaves them: find the symbol
 
 When you name a symbol the user might want to inspect, link it:
 
-    [run_turn](whygraph://symbol/whygraph.chat.harness.run_turn)
+    [run_turn](whygraph://symbol/run_turn)
+    [ToolRegistry.dispatch](whygraph://symbol/ToolRegistry::dispatch)
 
 Those links open the symbol in the Explorer's graph view, so prefer them
-over bare code spans for any symbol you found via CodeGraph. Use the exact
-`qualified_name` a tool returned — a guessed name produces a dead link.
+over bare code spans for any symbol you found via CodeGraph.
+
+**Use the exact `qualified_name` a tool returned — never assemble one.**
+CodeGraph names module-level symbols by their bare name (`run_turn`), methods
+as `Class::method` (`ToolRegistry::dispatch`), and file nodes by repo-relative
+path (`src/whygraph/serve/chat.py`). A dotted path like
+`whygraph.chat.harness.run_turn` is **not** a symbol name: it will fail
+`get_symbol` / `get_rationale` / `get_evidence` and produce a dead link. If
+you don't have the exact name, `search_symbols` first. The link *label* is
+free text, so write it however reads best.
 
 ## How to answer
 

@@ -85,8 +85,8 @@ function AssistantBubble({ turn }: { turn: AssistantTurn }) {
 
         {turn.roundLimit !== undefined && (
           <div className="mt-2 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-xs text-amber-300">
-            Stopped after {turn.roundLimit} tool rounds — the answer above is what
-            the assistant had. Ask a narrower question to go further.
+            Reached the {turn.roundLimit}-round tool limit — the assistant answered
+            with what it had gathered. Ask a narrower question to go further.
           </div>
         )}
 

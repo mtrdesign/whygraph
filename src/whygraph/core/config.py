@@ -351,9 +351,12 @@ class ChatConfig:
         Default model. Empty (default) defers to the provider's own
         ``[llm.<provider>].model``.
     max_tool_rounds : int
-        Hard bound on tool rounds in one user turn. Must be ``>= 1``.
-        Hitting it ends the turn with whatever text has accumulated,
-        rather than looping forever on a model that keeps calling tools.
+        Hard bound on tool *rounds* — model round-trips, not individual
+        tool calls, of which one round may contain many. Must be ``>= 1``.
+        Hitting it stops the loop and spends one final call with no tools
+        offered, so the turn ends in prose rather than looping forever on a
+        model that keeps calling tools (see
+        :class:`whygraph.chat.harness.RoundLimit`).
     max_rationale_generations : int
         How many uncached rationale cards one user turn may generate.
         Must be ``>= 0``; ``0`` makes the tool cache-only. This is what

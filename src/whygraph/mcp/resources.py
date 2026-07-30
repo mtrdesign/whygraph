@@ -233,6 +233,127 @@ def _issue_resource(number: int) -> dict:
         raise WhyGraphError(_DB_UNSCANNED_MESSAGE) from exc
 
 
+_RECENT_DESCRIPTION_CHARS = 240
+"""``llm_description`` is truncated in the recent-activity listing: the point
+is a cheap index the model can scan in one round, and a dozen full paragraphs
+would cost more context than the drill-down calls it replaces."""
+
+
+def _recent_activity_resource(limit: int = 10) -> dict:
+    """Most recent commits, pull requests, and issues — a scannable index.
+
+    Exists because every other history read needs an identifier the caller
+    must already know (a SHA, a PR number, a file path). That left
+    "what shipped lately?" with no entry point: the assistant had to walk
+    the tree and read files, which burns tool rounds and still misses the
+    history sitting in the DB.
+
+    Deliberately **compact** — subject / title / author / timestamp and a
+    truncated description, no bodies or comment threads. It is an index:
+    the model picks what matters and drills in with
+    :func:`_commit_resource` or :func:`_pr_resource`.
+
+    Commits are restricted to the first-parent main walk
+    (``on_default_branch == 1``), matching area-history and the
+    refactor-walk — "what shipped" is a default-branch question, and
+    PR-origin commits recovered from squash merges would double-count.
+
+    Parameters
+    ----------
+    limit : int, optional
+        Maximum rows per category (not in total). Default 10.
+
+    Returns
+    -------
+    dict
+        ``{"limit", "commits", "pull_requests", "issues"}``. A category
+        with nothing scanned comes back as an empty list rather than
+        being omitted, so the model can tell "none" from "not asked".
+
+    Raises
+    ------
+    WhyGraphError
+        The DB is missing or unscanned.
+
+    Notes
+    -----
+    Lives beside the resource bodies to reuse their session handling and
+    ``OperationalError`` contract, but is **not** registered in
+    :func:`register` — the chat tool is its only caller, and WhyGraph's MCP
+    surface deliberately stays narrow.
+    """
+    _log.debug("recent activity resource read: limit=%r", limit)
+    limit = max(1, limit)
+    try:
+        with get_session() as session:
+            commits = session.exec(
+                select(Commit)
+                .where(Commit.on_default_branch == 1)
+                .order_by(col(Commit.authored_at).desc())
+                .limit(limit)
+            ).all()
+            prs = session.exec(
+                select(PullRequest)
+                .order_by(col(PullRequest.updated_at).desc())
+                .limit(limit)
+            ).all()
+            issues = session.exec(
+                select(Issue).order_by(col(Issue.updated_at).desc()).limit(limit)
+            ).all()
+
+            return {
+                "limit": limit,
+                "commits": [
+                    {
+                        "sha": c.sha,
+                        "subject": c.subject,
+                        "description": _truncate(c.llm_description),
+                        "author_name": c.author_name,
+                        "authored_at": c.authored_at,
+                        "files_changed": c.files_changed,
+                        "insertions": c.insertions,
+                        "deletions": c.deletions,
+                    }
+                    for c in commits
+                ],
+                "pull_requests": [
+                    {
+                        "number": p.number,
+                        "title": p.title,
+                        "state": p.state,
+                        "draft": p.draft,
+                        "merged_at": p.merged_at,
+                        "updated_at": p.updated_at,
+                        "author": p.author,
+                        "labels": _json_list(p.labels),
+                    }
+                    for p in prs
+                ],
+                "issues": [
+                    {
+                        "number": i.number,
+                        "title": i.title,
+                        "state": i.state,
+                        "closed_at": i.closed_at,
+                        "updated_at": i.updated_at,
+                        "author": i.author,
+                    }
+                    for i in issues
+                ],
+            }
+    except OperationalError as exc:
+        raise WhyGraphError(_DB_UNSCANNED_MESSAGE) from exc
+
+
+def _truncate(text: str | None) -> str | None:
+    """Clip a commit description to :data:`_RECENT_DESCRIPTION_CHARS`."""
+    if text is None:
+        return None
+    if len(text) <= _RECENT_DESCRIPTION_CHARS:
+        return text
+    return text[:_RECENT_DESCRIPTION_CHARS] + "…"
+
+
 def _repo_overview_resource() -> dict:
     """Read the resource backing ``whygraph://repo/overview``.
 

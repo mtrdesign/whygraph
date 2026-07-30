@@ -245,7 +245,12 @@ def test_parallel_calls_dispatch_sequentially_in_model_order() -> None:
 
 
 def test_max_tool_rounds_cuts_the_loop_off() -> None:
-    """A model that never stops calling tools still terminates."""
+    """A model that never stops calling tools still terminates.
+
+    The bound governs *tool* rounds; one extra answer round follows it (see
+    :class:`RoundLimit`), so the client sees ``rounds + 1`` requests and only
+    ``rounds`` dispatches.
+    """
     forever = [
         ToolCallMade(call=_call("search_symbols", query="x")),
         TurnDone("tool_calls"),
@@ -254,7 +259,7 @@ def test_max_tool_rounds_cuts_the_loop_off() -> None:
     registry = StubRegistry()
     events = _run(client, registry, max_tool_rounds=3)
 
-    assert len(client.requests) == 3
+    assert len(client.requests) == 4
     assert len(registry.dispatched) == 3
     assert events[-2] == RoundLimit(rounds=3)
     assert isinstance(events[-1], TurnDone)
@@ -266,13 +271,77 @@ def test_round_limit_of_one_still_dispatches_then_stops() -> None:
             [
                 ToolCallMade(call=_call("search_symbols", query="x")),
                 TurnDone("tool_calls"),
-            ]
+            ],
+            [TextDelta(text="here is what I found"), TurnDone("stop")],
         ]
     )
     registry = StubRegistry()
     events = _run(client, registry, max_tool_rounds=1)
     assert len(registry.dispatched) == 1
-    assert events[-2] == RoundLimit(rounds=1)
+    assert isinstance(events[-1], TurnDone)
+
+
+def test_the_answer_round_offers_no_tools_and_yields_prose() -> None:
+    """A round-limited turn must not end as tool cards with no answer.
+
+    The exhausted turn's last tool results are in the transcript but were
+    never sent; the extra call ships them with ``tools=()`` so the model can
+    only write up what it has.
+    """
+    forever = [
+        ToolCallMade(call=_call("search_symbols", query="x")),
+        TurnDone("tool_calls"),
+    ]
+    client = ScriptedClient(
+        [
+            list(forever),
+            list(forever),
+            [
+                TextDelta(text="Short version: "),
+                TextDelta(text="it's the cache."),
+                TurnDone("stop"),
+            ],
+        ]
+    )
+    events = _run(client, StubRegistry(), max_tool_rounds=2)
+
+    kinds = [type(e).__name__ for e in events]
+    assert kinds.count("RoundLimit") == 1
+    # Prose after the cap notice, and the turn still ends on TurnDone.
+    assert kinds.index("RoundLimit") < kinds.index(
+        "TextDelta", kinds.index("RoundLimit")
+    )
+    assert isinstance(events[-1], TurnDone)
+    text = "".join(e.text for e in events if isinstance(e, TextDelta))
+    assert text == "Short version: it's the cache."
+
+    # Two tool rounds plus the answer round, and that last one offers no tools
+    # (what the tool rounds offer is covered by the registry-specs test).
+    assert len(client.requests) == 3
+    assert client.requests[-1].tools == ()
+    # It still carries the full transcript, including the last round's results.
+    roles = [m.role for m in client.requests[-1].messages]
+    assert roles.count("tool") == 2
+
+
+def test_a_tool_call_in_the_answer_round_is_dropped() -> None:
+    """A provider that returns a call despite ``tools=()`` can't loop us."""
+    client = ScriptedClient(
+        [
+            [
+                ToolCallMade(call=_call("search_symbols", query="x")),
+                TurnDone("tool_calls"),
+            ],
+            [ToolCallMade(call=_call("search_symbols", query="y")), TurnDone("stop")],
+        ]
+    )
+    registry = StubRegistry()
+    events = _run(client, registry, max_tool_rounds=1)
+
+    # Only the in-budget round dispatched; the stray call was ignored.
+    assert len(registry.dispatched) == 1
+    assert len(client.requests) == 2
+    assert isinstance(events[-1], TurnDone)
 
 
 def test_tool_error_result_is_recoverable_not_fatal() -> None:
@@ -346,12 +415,13 @@ def test_specs_and_bounds_come_from_config_by_default(
             registry=StubRegistry(),
         )
     )
-    assert len(client.requests) == 2
+    # Two tool rounds from config, plus the answer round.
+    assert len(client.requests) == 3
     assert events[-2] == RoundLimit(rounds=2)
 
 
 def test_registry_specs_are_offered_to_the_model() -> None:
-    """A real registry's 11 specs reach the request."""
+    """A real registry's 12 specs reach the request."""
     client = ScriptedClient([[TextDelta(text="hi"), TurnDone("stop")]])
     registry = ToolRegistry(max_rationale_generations=0)
     list(
@@ -362,7 +432,7 @@ def test_registry_specs_are_offered_to_the_model() -> None:
             max_tool_rounds=1,
         )
     )
-    assert len(client.requests[0].tools) == 11
+    assert len(client.requests[0].tools) == 12
 
 
 # ---------------------------------------------------------------------------

@@ -125,10 +125,10 @@ def _result(registry: ToolRegistry, name: str, **arguments) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_eleven_tools_with_unique_names_and_object_schemas() -> None:
+def test_twelve_tools_with_unique_names_and_object_schemas() -> None:
     names = [spec.name for spec in TOOL_SPECS]
-    assert len(names) == 11
-    assert len(set(names)) == 11
+    assert len(names) == 12
+    assert len(set(names)) == 12
     assert set(names) == {
         "search_symbols",
         "get_symbol",
@@ -139,12 +139,32 @@ def test_eleven_tools_with_unique_names_and_object_schemas() -> None:
         "get_pr",
         "get_issue",
         "get_repo_overview",
+        "list_recent_activity",
         "read_file",
         "list_dir",
     }
     for spec in TOOL_SPECS:
         assert spec.parameters["type"] == "object"
         assert spec.description  # the model's only guidance
+
+
+def test_symbol_tools_document_the_real_qualified_name_shapes() -> None:
+    """Regression guard on a costly documentation bug.
+
+    All three symbol-keyed tools used to describe ``qualified_name`` as a
+    "Dotted symbol name". CodeGraph uses bare names, ``Class::method``, and
+    file paths — never a dotted symbol path — so the model followed the
+    description, missed every lookup, and burned tool rounds guessing.
+    """
+    keyed = ["get_symbol", "get_rationale", "get_evidence"]
+    for name in keyed:
+        spec = next(s for s in TOOL_SPECS if s.name == name)
+        description = spec.parameters["properties"]["qualified_name"]["description"]
+        assert "::" in description, f"{name} must document the method shape"
+        assert "not valid" in description.lower(), (
+            f"{name} must warn that a dotted path does not resolve"
+        )
+        assert "dotted symbol name" not in description.lower()
 
 
 def test_every_spec_has_a_handler() -> None:
@@ -587,3 +607,145 @@ def test_list_dir_caps_entry_count(chat_repo: Path) -> None:
     result = _result(registry, "list_dir", path="many")
     assert len(result["entries"]) == files.MAX_ENTRIES
     assert result["truncated"] is True
+
+
+# ---------------------------------------------------------------------------
+# list_recent_activity (the "what shipped lately" entry point)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def seeded_history(chat_repo: Path):
+    """A migrated WhyGraph DB with commits, a PR, and an issue.
+
+    ``chat_repo`` points config at an *empty* DB file; this migrates it and
+    seeds enough rows to assert ordering, the default-branch filter, and the
+    per-category cap.
+    """
+    from alembic import command
+
+    from whygraph.db import get_session
+    from whygraph.db.bootstrap import alembic_config
+    from whygraph.db.models import Commit, Issue, PullRequest
+
+    command.upgrade(alembic_config(), "head")
+    with get_session() as session:
+        for n, (sha, day, on_main) in enumerate(
+            [
+                ("aaa", "2026-07-01", 1),
+                ("bbb", "2026-07-03", 1),
+                ("ccc", "2026-07-05", 1),
+                # A PR-origin commit recovered from a squash merge: newest of
+                # all, and must NOT appear (same rule area-history follows).
+                ("ddd", "2026-07-09", 0),
+            ]
+        ):
+            session.add(
+                Commit(
+                    sha=sha,
+                    parent_shas="",
+                    author_name=f"dev{n}",
+                    author_email=f"dev{n}@example.com",
+                    authored_at=f"{day}T00:00:00+00:00",
+                    committed_at=f"{day}T00:00:00+00:00",
+                    subject=f"subject {sha}",
+                    body="",
+                    files_changed=1,
+                    insertions=2,
+                    deletions=3,
+                    scanned_at="2026-07-30T00:00:00+00:00",
+                    llm_description="D" * 500 if sha == "ccc" else None,
+                    on_default_branch=on_main,
+                )
+            )
+        session.add(
+            PullRequest(
+                number=7,
+                title="the PR",
+                state="closed",
+                created_at="2026-07-02T00:00:00+00:00",
+                updated_at="2026-07-06T00:00:00+00:00",
+                merged_at="2026-07-06T00:00:00+00:00",
+                head_sha="bbb",
+                base_ref="main",
+                author="dev1",
+                html_url="https://example.invalid/pr/7",
+                labels="[]",
+                fetched_at="2026-07-30T00:00:00+00:00",
+            )
+        )
+        session.add(
+            Issue(
+                number=3,
+                title="the issue",
+                state="open",
+                created_at="2026-07-01T00:00:00+00:00",
+                updated_at="2026-07-04T00:00:00+00:00",
+                author="dev0",
+                html_url="https://example.invalid/issue/3",
+                labels="[]",
+                fetched_at="2026-07-30T00:00:00+00:00",
+            )
+        )
+        session.commit()
+    return chat_repo
+
+
+def test_recent_activity_returns_all_three_categories_newest_first(
+    seeded_history: Path,
+) -> None:
+    registry = ToolRegistry(max_rationale_generations=0)
+    result = _result(registry, "list_recent_activity")
+
+    # Newest first, and the off-main squash-merge commit is excluded.
+    assert [c["sha"] for c in result["commits"]] == ["ccc", "bbb", "aaa"]
+    assert [p["number"] for p in result["pull_requests"]] == [7]
+    assert [i["number"] for i in result["issues"]] == [3]
+    # One call answers "what shipped lately" — that is the whole point.
+    assert result["commits"][0]["subject"] == "subject ccc"
+    assert result["pull_requests"][0]["merged_at"].startswith("2026-07-06")
+
+
+def test_recent_activity_caps_each_category_and_clamps_a_bad_limit(
+    seeded_history: Path,
+) -> None:
+    registry = ToolRegistry(max_rationale_generations=0)
+    assert len(_result(registry, "list_recent_activity", limit=2)["commits"]) == 2
+    # limit is per category, not a total, and 0/negative clamps to 1.
+    assert len(_result(registry, "list_recent_activity", limit=0)["commits"]) == 1
+
+
+def test_recent_activity_truncates_long_descriptions(seeded_history: Path) -> None:
+    """A dozen full paragraphs would cost more context than it saves."""
+    from whygraph.mcp.resources import _RECENT_DESCRIPTION_CHARS
+
+    registry = ToolRegistry(max_rationale_generations=0)
+    newest = _result(registry, "list_recent_activity")["commits"][0]
+    assert newest["description"].endswith("…")
+    assert len(newest["description"]) == _RECENT_DESCRIPTION_CHARS + 1
+
+
+def test_recent_activity_empty_categories_are_lists_not_omitted(
+    chat_repo: Path,
+) -> None:
+    """ "None scanned" must be distinguishable from "not returned"."""
+    from alembic import command
+
+    from whygraph.db.bootstrap import alembic_config
+
+    command.upgrade(alembic_config(), "head")
+    registry = ToolRegistry(max_rationale_generations=0)
+    result = _result(registry, "list_recent_activity")
+    assert result["commits"] == []
+    assert result["pull_requests"] == []
+    assert result["issues"] == []
+
+
+def test_recent_activity_on_an_unscanned_db_is_a_result_not_an_exception(
+    chat_repo: Path,
+) -> None:
+    """Dispatch discipline: a missing DB can't end the user's turn."""
+    registry = ToolRegistry(max_rationale_generations=0)
+    result = _result(registry, "list_recent_activity")
+    assert "error" in result
+    assert "scan" in result["error"]

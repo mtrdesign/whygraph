@@ -8,7 +8,7 @@ developer can converse with the repo's accumulated knowledge.
 
 Layout
 ------
-* :mod:`.tools` — the eleven :class:`~whygraph.services.llm.chat.ToolSpec`
+* :mod:`.tools` — the twelve :class:`~whygraph.services.llm.chat.ToolSpec`
   definitions plus :class:`~whygraph.chat.tools.ToolRegistry`, which
   dispatches to the same plain functions the MCP tools call.
 * :mod:`.files` — clamped read-only file access, the one genuinely new

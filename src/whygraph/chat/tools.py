@@ -6,7 +6,7 @@ drift from the rest of WhyGraph, because there is one implementation per
 capability and both surfaces are adapters over it. No MCP protocol
 roundtrip is involved — these are plain in-process calls.
 
-The eleven tools span **three sources**, and the system prompt tells the
+The twelve tools span **three sources**, and the system prompt tells the
 model which to reach for:
 
 * **CodeGraph** answers *what the code is* — structure, relationships.
@@ -42,6 +42,7 @@ from whygraph.mcp.resources import (
     _commit_resource,
     _issue_resource,
     _pr_resource,
+    _recent_activity_resource,
     _repo_overview_resource,
 )
 from whygraph.mcp.targets import repo_root, resolve_target, target_dict
@@ -71,6 +72,22 @@ missing index degrades the conversation rather than ending it."""
 # Descriptions are the model's only guidance, so each one carries its
 # behavioural caveats (case-sensitivity, cost, default limits). Where the
 # MCP layer already has an agent-facing description, it is reused verbatim.
+
+_QUALIFIED_NAME_DESC = (
+    "The EXACT qualified_name from an earlier result — never construct one. "
+    "CodeGraph names are bare for module-level symbols ('run_turn'), "
+    "'Class::method' for methods ('ToolRegistry::dispatch'), and a "
+    "repo-relative path for file nodes ('src/whygraph/serve/chat.py'). A "
+    "dotted path such as 'whygraph.chat.harness.run_turn' is NOT valid and "
+    "will not resolve — call search_symbols first if you don't have the name."
+)
+"""Shared by the three symbol-keyed tools.
+
+One constant rather than three copies because the copies drifted: all three
+used to say "Dotted symbol name", which is the one shape CodeGraph does not
+use for symbols. The model followed the description, every lookup missed,
+and it burned tool rounds guessing variants.
+"""
 
 _SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -109,7 +126,7 @@ _SPECS: tuple[ToolSpec, ...] = (
             "properties": {
                 "qualified_name": {
                     "type": "string",
-                    "description": "Dotted symbol name, or a file path for a file node.",
+                    "description": _QUALIFIED_NAME_DESC,
                 }
             },
             "required": ["qualified_name"],
@@ -133,7 +150,7 @@ _SPECS: tuple[ToolSpec, ...] = (
             "properties": {
                 "qualified_name": {
                     "type": "string",
-                    "description": "Dotted symbol name.",
+                    "description": _QUALIFIED_NAME_DESC,
                 }
             },
             "required": ["qualified_name"],
@@ -153,7 +170,7 @@ _SPECS: tuple[ToolSpec, ...] = (
             "properties": {
                 "qualified_name": {
                     "type": "string",
-                    "description": "Dotted symbol name.",
+                    "description": _QUALIFIED_NAME_DESC,
                 },
                 "limit": {
                     "type": "integer",
@@ -237,9 +254,32 @@ _SPECS: tuple[ToolSpec, ...] = (
             "Get repository-wide totals: commit / PR / issue counts, the date "
             "range of scanned history, when the last scan ran, how much of "
             "the history has LLM descriptions, and the top contributors. "
-            "Start here for 'summarize project progress' questions."
+            "Counts and coverage only — for the actual recent work, use "
+            "list_recent_activity."
         ),
         parameters={"type": "object", "properties": {}},
+    ),
+    ToolSpec(
+        name="list_recent_activity",
+        description=(
+            "List the most recent commits, pull requests, and issues in one "
+            "call, newest first. THE place to start for 'what changed / "
+            "shipped / was worked on lately', 'summarize recent progress', "
+            "or 'what has the team been doing' — every other history tool "
+            "needs an identifier you would have to already know (a SHA, a PR "
+            "number, an exact file path). Returns a compact index — subject "
+            "or title, author, date, a truncated description — then use "
+            "get_commit / get_pr / get_issue on the entries that matter."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Max entries per category. Default 10.",
+                }
+            },
+        },
     ),
     ToolSpec(
         name="read_file",
@@ -375,6 +415,11 @@ def _get_repo_overview() -> dict:
     return _repo_overview_resource()
 
 
+def _list_recent_activity(limit: int = 10) -> dict:
+    """Handler for ``list_recent_activity``."""
+    return _recent_activity_resource(limit=int(limit))
+
+
 class ToolRegistry:
     """One turn's tool dispatch, carrying that turn's generation budget.
 
@@ -414,6 +459,7 @@ class ToolRegistry:
             "get_pr": _get_pr,
             "get_issue": _get_issue,
             "get_repo_overview": _get_repo_overview,
+            "list_recent_activity": _list_recent_activity,
             "read_file": files.read_file,
             "list_dir": files.list_dir,
         }

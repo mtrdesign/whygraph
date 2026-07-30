@@ -99,11 +99,17 @@ class ToolResultReady:
 
 @dataclass(frozen=True, slots=True)
 class RoundLimit:
-    """The turn hit ``max_tool_rounds``.
+    """The turn hit ``max_tool_rounds``; an answer round follows.
 
-    The accumulated text stands as the answer — the harness does not
-    attempt a further forced no-tools turn, because that would spend
-    another model call to paper over a loop that is already misbehaving.
+    Emitted **before** one final model call made with no tools offered, so
+    the turn always ends in prose. Earlier this event was terminal on the
+    reasoning that a forced no-tools turn only papers over a misbehaving
+    loop. Observed behaviour overruled that: the exhausted turns were not
+    loops but ordinary broad questions ("what shipped lately") where the
+    model had no efficient tool for the job, and the last round's tool
+    results are appended to the transcript yet never sent — so the user got
+    tool cards, an amber banner, and no answer at all. One extra call is
+    cheap next to a turn that cost eight and said nothing.
 
     Attributes
     ----------
@@ -303,8 +309,9 @@ def run_turn(
     calls, dispatch them **sequentially in the order the model asked**,
     append the assistant message and one tool message per result, and
     stream again. Stop when a turn ends with no tool calls, or when
-    ``max_tool_rounds`` is reached (then a single :class:`RoundLimit` and
-    the accumulated text stands).
+    ``max_tool_rounds`` is reached — then a single :class:`RoundLimit`,
+    followed by one last call with **no tools offered** so the turn ends in
+    prose rather than a bare cap notice.
 
     Sequential dispatch rather than concurrent is a real choice: tool
     latency here is dominated by local SQLite reads, so parallelism would
@@ -401,8 +408,21 @@ def run_turn(
             "chat round %d dispatched %d tool call(s)", round_index + 1, len(calls)
         )
 
+    # Rounds exhausted with the model still asking for tools. Its final round's
+    # results are already in `messages` but were never sent anywhere, so ending
+    # here ships tool cards and no answer. One more call with no tools offered
+    # leaves the model nothing to do but write up what it already gathered.
     _log.info("chat turn hit the %d-round tool limit", max_tool_rounds)
     yield RoundLimit(rounds=max_tool_rounds)
+    for event in client.stream_turn(
+        ChatRequest(messages=(system, *messages), tools=(), max_tokens=max_tokens)
+    ):
+        if isinstance(event, TextDelta):
+            yield event
+        elif isinstance(event, TurnDone):
+            last_done = event
+        # A ToolCallMade cannot arrive with `tools=()`; if a provider sends one
+        # regardless, dropping it is correct — there is no round left to run it.
     yield last_done
 
 

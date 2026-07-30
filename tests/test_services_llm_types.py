@@ -26,6 +26,7 @@ from whygraph.services.llm import (
     Message,
     OllamaAdapter,
     OpenAIAdapter,
+    OpenRouterAdapter,
 )
 
 
@@ -126,6 +127,7 @@ def test_factory_lists_builtin_providers() -> None:
         AnthropicAdapter.provider,
         OpenAIAdapter.provider,
         DeepSeekAdapter.provider,
+        OpenRouterAdapter.provider,
         OllamaAdapter.provider,
         ClaudeCliAdapter.provider,
     }

@@ -1,5 +1,12 @@
+import { forwardRef } from "react";
 import { clsx } from "clsx";
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import type {
+  ButtonHTMLAttributes,
+  InputHTMLAttributes,
+  ReactNode,
+  SelectHTMLAttributes,
+  TextareaHTMLAttributes,
+} from "react";
 
 // A small, self-contained set of Tailwind-styled primitives in the shadcn/Linear
 // idiom — enough for the panel without pulling the full shadcn generator.
@@ -73,4 +80,68 @@ export function Spinner({ label }: { label?: string }) {
 
 export function EmptyState({ children }: { children: ReactNode }) {
   return <div className="p-4 text-sm text-muted">{children}</div>;
+}
+
+// ---- form primitives (added for the Chat view) -----------------------------
+//
+// Same flat-token vocabulary as the rest of this file: bg-panel2 surfaces,
+// border-border edges, accent2 focus rings. No Radix, no CVA.
+
+const FIELD_CLASS =
+  "w-full rounded-md border border-border bg-panel2 px-3 py-2 text-sm text-fg " +
+  "placeholder:text-muted focus:border-accent2 focus:outline-none " +
+  "disabled:cursor-not-allowed disabled:opacity-50";
+
+// forwardRef so the Composer can refocus after sending.
+export const Textarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement>>(
+  function Textarea({ className, ...rest }, ref) {
+    return (
+      <textarea
+        {...rest}
+        ref={ref}
+        className={clsx(FIELD_CLASS, "resize-none", className)}
+      />
+    );
+  },
+);
+
+export function Input({ className, ...rest }: InputHTMLAttributes<HTMLInputElement>) {
+  return <input {...rest} className={clsx(FIELD_CLASS, className)} />;
+}
+
+export function Select({
+  className,
+  children,
+  ...rest
+}: SelectHTMLAttributes<HTMLSelectElement>) {
+  // A native <select> on purpose: it is keyboard- and screen-reader-correct for
+  // free, and a custom listbox would be the single largest chunk of new UI code
+  // here for no functional gain.
+  return (
+    <select {...rest} className={clsx(FIELD_CLASS, "cursor-pointer", className)}>
+      {children}
+    </select>
+  );
+}
+
+interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+  label: string;
+  children: ReactNode;
+}
+
+export function IconButton({ label, className, children, ...rest }: IconButtonProps) {
+  return (
+    <button
+      {...rest}
+      title={label}
+      aria-label={label}
+      className={clsx(
+        "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted " +
+          "transition-colors hover:bg-panel2 hover:text-fg disabled:opacity-40",
+        className,
+      )}
+    >
+      {children}
+    </button>
+  );
 }

@@ -7,7 +7,8 @@ Public API
 * :class:`Message`, :class:`CompletionRequest`,
   :class:`CompletionResponse` — value objects exchanged across the port.
 * :class:`AnthropicAdapter`, :class:`OpenAIAdapter`,
-  :class:`DeepSeekAdapter`, :class:`OllamaAdapter`,
+  :class:`DeepSeekAdapter`, :class:`OpenRouterAdapter`,
+  :class:`OllamaAdapter`,
   :class:`ClaudeCliAdapter` — concrete adapters. Each has a typed
   ``from_config(<provider>Config)`` classmethod that maps the
   matching ``[llm.<provider>]`` TOML section onto the constructor.
@@ -15,6 +16,13 @@ Public API
   config-driven construction; supports runtime
   :meth:`~LlmClientFactory.register` of third-party adapters.
 * :class:`LlmError` — single exception type for all provider failures.
+
+The **chat port** is a second, parallel port for streaming tool-calling
+conversation (:mod:`whygraph.services.llm.chat`): :class:`ChatClient` +
+:func:`make_chat_client` over :class:`ChatMessage` / :class:`ChatRequest`,
+yielding :class:`TextDelta` / :class:`ToolCallMade` / :class:`TurnDone`.
+It exists beside :class:`LlmClient` rather than widening it — see that
+module's docstring for why.
 
 Examples
 --------
@@ -34,6 +42,25 @@ Config-driven construction via the factory (preferred for production wiring)::
 """
 
 from .anthropic import AnthropicAdapter
+from .anthropic_chat import AnthropicChatAdapter
+from .chat import (
+    CHAT_PROVIDERS,
+    FALLBACK_MODELS,
+    ChatClient,
+    ChatMessage,
+    ChatRequest,
+    ChatRole,
+    ChatStreamEvent,
+    ModelInfo,
+    TextDelta,
+    ToolCall,
+    ToolCallMade,
+    ToolSpec,
+    TurnDone,
+    chat_provider_env_var,
+    fallback_models,
+    make_chat_client,
+)
 from .claude_cli import ClaudeCliAdapter
 from .client import LlmClient
 from .deepseek import DeepSeekAdapter
@@ -41,10 +68,20 @@ from .exceptions import LlmError
 from .factory import LlmClientFactory
 from .ollama import OllamaAdapter
 from .openai import OpenAIAdapter
+from .openai_chat import OpenAIChatAdapter
+from .openrouter import OpenRouterAdapter
 from .types import CompletionRequest, CompletionResponse, Message
 
 __all__ = [
+    "CHAT_PROVIDERS",
+    "FALLBACK_MODELS",
     "AnthropicAdapter",
+    "AnthropicChatAdapter",
+    "ChatClient",
+    "ChatMessage",
+    "ChatRequest",
+    "ChatRole",
+    "ChatStreamEvent",
     "ClaudeCliAdapter",
     "CompletionRequest",
     "CompletionResponse",
@@ -53,6 +90,17 @@ __all__ = [
     "LlmClientFactory",
     "LlmError",
     "Message",
+    "ModelInfo",
     "OllamaAdapter",
     "OpenAIAdapter",
+    "OpenAIChatAdapter",
+    "OpenRouterAdapter",
+    "TextDelta",
+    "ToolCall",
+    "ToolCallMade",
+    "ToolSpec",
+    "TurnDone",
+    "chat_provider_env_var",
+    "fallback_models",
+    "make_chat_client",
 ]

@@ -1,8 +1,9 @@
 """FastAPI application factory for the Explorer panel.
 
-:func:`create_app` wires the ``/api`` router (:mod:`whygraph.serve.routes`) onto a
-FastAPI instance, translates the shared :class:`WhyGraphError` into HTTP responses,
-and serves the built React bundle from ``static/`` with an SPA fallback.
+:func:`create_app` wires the ``/api`` router (:mod:`whygraph.serve.routes`) and the
+``/api/chat`` router (:mod:`whygraph.serve.chat`) onto a FastAPI instance,
+translates the shared :class:`WhyGraphError` into HTTP responses, and serves the
+built React bundle from ``static/`` with an SPA fallback.
 
 The bundle is gitignored and produced only at build time (Docker ``COPY --from`` or
 the hatch build hook), so a **source checkout** may have no ``static/``. The factory
@@ -22,6 +23,7 @@ from whygraph.core.config import Config
 from whygraph.db import ensure_initialized
 from whygraph.mcp.errors import WhyGraphError
 
+from .chat import router as chat_router
 from .routes import router
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -60,6 +62,7 @@ def create_app(config: Config) -> FastAPI:
         return JSONResponse(status_code=status, content={"error": str(exc)})
 
     app.include_router(router, prefix="/api")
+    app.include_router(chat_router, prefix="/api/chat")
     _mount_static(app)
     return app
 

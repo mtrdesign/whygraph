@@ -547,12 +547,23 @@ def backfill_evidence_descriptions(
 
 
 def _commit_dict(commit: Commit) -> dict:
-    """Serialize a scanned commit to a JSON-ready dict."""
+    """Serialize a scanned commit to a JSON-ready dict.
+
+    Notes
+    -----
+    ``llm_description`` leads deliberately. It is generated from the diff
+    alone — the developer's commit message is never shown to that generator
+    (see :meth:`whygraph.analyze.LlmDescriptor.describe`) — so it is the
+    reliable account of what changed, while ``subject`` / ``body`` are human
+    prose that may be terse, stale, or wrong. An agent anchors on the field it
+    reads first, and for years that was ``subject``. The key **set** is
+    unchanged, so this is not a contract change for the MCP tools.
+    """
     return {
         "sha": commit.sha,
+        "llm_description": commit.llm_description,
         "subject": commit.subject,
         "body": commit.body,
-        "llm_description": commit.llm_description,
         "author_name": commit.author_name,
         "author_email": commit.author_email,
         "committed_at": commit.committed_at,

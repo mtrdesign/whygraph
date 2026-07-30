@@ -53,6 +53,7 @@ exec docker run --rm -i $tty \\
     -v "$PWD:/workspace" -w /workspace \\
     -e GH_TOKEN -e GITHUB_TOKEN \\
     -e ANTHROPIC_API_KEY -e OPENAI_API_KEY -e DEEPSEEK_API_KEY \\
+    -e OPENROUTER_API_KEY \\
     "$IMAGE" __NAME__ "$@"
 """
 
@@ -91,6 +92,7 @@ if [ "${1:-}" = "serve" ]; then
         -v "$PWD:/workspace" -w /workspace \\
         -e GH_TOKEN -e GITHUB_TOKEN \\
         -e ANTHROPIC_API_KEY -e OPENAI_API_KEY -e DEEPSEEK_API_KEY \\
+        -e OPENROUTER_API_KEY \\
         "$IMAGE" whygraph serve --host 0.0.0.0 --port "$PORT"
 fi
 
@@ -102,6 +104,7 @@ exec docker run --rm -i $tty \\
     -v "$PWD:/workspace" -w /workspace \\
     -e GH_TOKEN -e GITHUB_TOKEN \\
     -e ANTHROPIC_API_KEY -e OPENAI_API_KEY -e DEEPSEEK_API_KEY \\
+    -e OPENROUTER_API_KEY \\
     "$IMAGE" whygraph "$@"
 """
 

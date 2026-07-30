@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-WhyGraph v1 is the Python implementation, now living on `main`. Live components: the MCP server (evidence tool, rationale tool with SQLite-backed content-addressable cache, repo / commit / PR / issue resources, orchestration prompts), the CLI (`init`, `scan`, `analyze`, `version`), and the `/whygraph-plan` slash command + fan-out/fan-in planner subagents. The earlier HTML render/serve viewer was removed during the III iteration migration and is not currently in the CLI. The original TypeScript POC was retired; pre-`85fe8b3` commit history covers the v0 design for archaeology.
+WhyGraph v1 is the Python implementation, now living on `main`. Live components: the MCP server (evidence tool, rationale tool with SQLite-backed content-addressable cache, repo / commit / PR / issue resources, orchestration prompts), the CLI (`init`, `scan`, `analyze`, `serve`, `version`), the `whygraph serve` playground (the Explorer graph view, and the **Chat** assistant — an in-house streaming tool-calling harness over OpenRouter / OpenAI / Anthropic / DeepSeek, with sessions in the WhyGraph DB; see `plans/chat-assistant-plan.md`), and the `/whygraph-plan` slash command + fan-out/fan-in planner subagents. The earlier *static HTML* render viewer was removed during the III iteration migration; the current viewer is the React playground served by `whygraph serve`. The original TypeScript POC was retired; pre-`85fe8b3` commit history covers the v0 design for archaeology.
 
 Core architectural decisions that still apply — read these before adding architecture:
 
@@ -29,15 +29,15 @@ A root `Makefile` wraps these plus dev-only tooling — `make` lists targets; `m
 
 ## Before pushing
 
-CI (`ci-code-checks`) gates every PR on two parallel jobs: **lint** (`uv run ruff check src/ tests/` *and* `uv run ruff format --check src/ tests/` — both, not just the first) and **tests** (`uv run pytest`). Run all three locally before pushing or opening a PR:
+CI (`ci-code-checks`) gates every PR on two parallel jobs: **lint** (`uv run ruff check src/ tests/ scripts/` *and* `uv run ruff format --check src/ tests/ scripts/` — both, not just the first) and **tests** (`uv run pytest`). `scripts/` is linted but **not** collected by pytest (`testpaths` is `tests/`) — it holds live-provider tooling that must never gate CI. Run all three locally before pushing or opening a PR:
 
 ```bash
-uv run ruff check src/ tests/
-uv run ruff format --check src/ tests/   # `ruff check` passing does NOT imply this passes
+uv run ruff check src/ tests/ scripts/
+uv run ruff format --check src/ tests/ scripts/   # `ruff check` passing does NOT imply this passes
 uv run pytest
 ```
 
-If `ruff format --check` fails, run `uv run ruff format src/ tests/` to fix it in place, then re-run the check before pushing.
+If `ruff format --check` fails, run `uv run ruff format src/ tests/ scripts/` to fix it in place, then re-run the check before pushing.
 
 ## Architecture
 
@@ -47,7 +47,9 @@ Top-level packages under `src/whygraph/`:
 - `mcp/` — FastMCP stdio server. `server.py` builds the `FastMCP("whygraph")` instance and exposes `main()`; feature modules (`evidence.py`, `rationale.py`, `rationale_cache.py`, `targets.py`, `errors.py`) each register their tools via a `register(mcp)` function, so new MCP features land as new modules without growing a monolith.
 - `core/` — cross-cutting helpers: `config` (env / project config), `logger` (logging setup), `shell` / `shell_command` (subprocess helpers), `utils`.
 - `db/` — SQLite plumbing. `engine.py` + `bootstrap.py` set up the DB, `base.py` is the declarative base, `models/` holds the SQLModel classes, `migrations/` holds Alembic versions.
-- `services/` — external integrations: `git/`, `github/`, `codegraph/` (reads CodeGraph's SQLite by `node_id`), `llm/` (Anthropic / OpenAI / Ollama subprocess wrappers).
+- `serve/` — the `whygraph serve` playground backend. `app.py` is the FastAPI factory (mounts `routes.py` at `/api` and `chat.py` at `/api/chat`, then the SPA from `static/`); `graphdata.py` shapes CodeGraph reads for the UI; `coverage.py` computes rationale coverage. **Every handler is a sync `def`** — FastAPI runs them in the threadpool, one `get_session()` and one `CodeGraph` handle per request. The React source lives in `src/playground/` and builds into `serve/static/`.
+- `chat/` — the serve Chat view's agentic harness (a third adapter over the same core as `mcp/` and `serve/`). `tools.py` holds the 15 tool specs + `ToolRegistry` (instantiated **once per user turn** — it carries the rationale-generation budget); `files.py` is the clamped read-only file access; `stats_sql.py` is the statistics surface — read-only, **aggregate-only** SQL behind a SQLite authorizer, with a table allowlist that denies `chat_*` and `rationale_cache` (see its module docstring for the four layers); `harness.py` is `run_turn` (the tool loop) and `build_window` (token-budgeted context trimming); `prompts/system.md` is the packaged system prompt. The harness is **persistence-free** — `serve/chat.py` owns every row.
+- `services/` — external integrations: `git/`, `github/`, `codegraph/` (reads CodeGraph's SQLite by `node_id`), `llm/` (Anthropic / OpenAI / OpenRouter / DeepSeek / Ollama / claude-cli). Two **parallel ports** live here: `client.py`'s `LlmClient` (sync `complete()`, used by analyze/rationale) and `chat.py`'s `ChatClient` (streaming + tool-calling, used by `chat/`). They are deliberately separate — see `chat.py`'s docstring.
 - `scan/` — crawler orchestration. `crawler.py` drives `git_crawler.py`, `github_crawler.py`, and `analyze_crawler.py` per-source phases.
 - `analyze/` — LLM-backed analysis. `description.py` / `llm_descriptor.py` produce per-commit diff descriptions; `rationale.py` / `rationale_generator.py` produce the 5-section rationale cards; `backfill.py` runs the lazy on-read backfill. Prompt templates live under `analyze/prompts/`.
 - `agents.py` — registry of supported LLM agents (Claude Code, Cursor, VS Code / Copilot, Codex, Claude Desktop) and the per-agent MCP config wiring (`write_snippet` / `render_snippet`). `whygraph init --agent X` reads from here.

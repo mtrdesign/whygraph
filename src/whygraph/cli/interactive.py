@@ -39,10 +39,18 @@ from whygraph.core.config import (
     InitAnswers,
     OllamaConfig,
     OpenAIConfig,
+    OpenRouterConfig,
 )
 
 # Provider tags (hyphen form — matches the LLM factory tag).
-_PROVIDERS = ("anthropic", "openai", "deepseek", "ollama", "claude-cli")
+_PROVIDERS = (
+    "anthropic",
+    "openai",
+    "deepseek",
+    "openrouter",
+    "ollama",
+    "claude-cli",
+)
 
 # Provider → its built-in default model, read straight from the config
 # sub-dataclasses so the prompt defaults never drift from the real ones.
@@ -50,6 +58,7 @@ _PROVIDER_DEFAULT_MODEL: dict[str, str] = {
     "anthropic": AnthropicConfig().model,
     "openai": OpenAIConfig().model,
     "deepseek": DeepSeekConfig().model,
+    "openrouter": OpenRouterConfig().model,
     "ollama": OllamaConfig().model,
     "claude-cli": ClaudeCliConfig().model,
 }
@@ -61,6 +70,7 @@ _PROVIDER_ENV_VAR: dict[str, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
 }
 
 _SCAN_PROVIDERS = ("off", "github", "auto")

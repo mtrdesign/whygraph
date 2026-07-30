@@ -7,8 +7,8 @@ Construction-time inputs:
 * a registry of ``provider tag → (adapter class, bound config)``.
 
 Each factory instance owns its own registry copy, so calling
-:meth:`register` does not affect other factories. The five built-in
-adapters (anthropic, openai, deepseek, ollama, claude-cli) are
+:meth:`register` does not affect other factories. The six built-in
+adapters (anthropic, openai, deepseek, openrouter, ollama, claude-cli) are
 pre-resolved against the bound :class:`LlmConfig` at construction time;
 third-party adapters added via :meth:`register` bring their own typed
 config instance instead.
@@ -29,6 +29,7 @@ from .deepseek import DeepSeekAdapter
 from .exceptions import LlmError
 from .ollama import OllamaAdapter
 from .openai import OpenAIAdapter
+from .openrouter import OpenRouterAdapter
 
 # provider tag → (adapter class, attribute name on LlmConfig).
 # Used only by :meth:`LlmClientFactory.__init__` to resolve the bound
@@ -37,6 +38,7 @@ _BUILTIN_DEFAULTS: dict[str, tuple[type[LlmClient], str]] = {
     AnthropicAdapter.provider: (AnthropicAdapter, "anthropic"),
     OpenAIAdapter.provider: (OpenAIAdapter, "openai"),
     DeepSeekAdapter.provider: (DeepSeekAdapter, "deepseek"),
+    OpenRouterAdapter.provider: (OpenRouterAdapter, "openrouter"),
     OllamaAdapter.provider: (OllamaAdapter, "ollama"),
     ClaudeCliAdapter.provider: (ClaudeCliAdapter, "claude_cli"),
 }

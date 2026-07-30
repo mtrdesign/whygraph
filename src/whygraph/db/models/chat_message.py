@@ -60,6 +60,12 @@ class ChatMessage(WhygraphTable, table=True):
     model : str or None
         Model that produced an assistant row. ``None`` for user and tool
         rows.
+    error : str or None
+        Why this assistant turn failed — a provider error message, or
+        ``"Stopped."`` for a user abort. ``None`` on success. Persisted so
+        the failure survives a refresh instead of living only in the SSE
+        stream; an error that arrives before the first token still writes a
+        row (with empty ``content``) so no user message is left unanswered.
     created_at : str
         ISO-8601 UTC timestamp, stored as text.
 
@@ -85,4 +91,5 @@ class ChatMessage(WhygraphTable, table=True):
     output_tokens: int | None = Field(default=None)
     provider: str | None = Field(default=None, sa_type=Text)
     model: str | None = Field(default=None, sa_type=Text)
+    error: str | None = Field(default=None, sa_type=Text)
     created_at: str = Field(sa_type=Text)

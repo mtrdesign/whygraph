@@ -479,9 +479,12 @@ def test_unconfigured_provider_yields_a_single_error_frame(
     assert [f["type"] for f in frames] == ["error"]
     assert "OPENROUTER_API_KEY" in frames[0]["message"]
 
-    # The question is still in the transcript, so a retry needs no retyping.
+    # The question is still in the transcript, so a retry needs no retyping —
+    # and the failure is a row, not just a frame, so a refresh replays it.
     messages = chat_client.get(f"/api/chat/sessions/{session['id']}").json()["messages"]
-    assert [m["role"] for m in messages] == ["user"]
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+    assert messages[-1]["content"] == ""
+    assert "OPENROUTER_API_KEY" in messages[-1]["error"]
 
 
 def test_mid_stream_provider_error_is_in_band_and_keeps_partial_text(
@@ -507,6 +510,82 @@ def test_mid_stream_provider_error_is_in_band_and_keeps_partial_text(
         ("user", "hi"),
         ("assistant", "I was saying"),
     ]
+    # The partial text AND the reason it stopped, on the same row.
+    assert messages[-1]["error"] == "connection reset"
+
+
+def test_provider_error_before_any_token_still_persists_a_reply_row(
+    chat_client, monkeypatch
+) -> None:
+    """A 401 before the first delta must not leave the user unanswered.
+
+    Nothing is buffered at that point, so the empty-buffer guard in
+    ``_flush_round`` has to yield to the error and write a row anyway.
+    """
+
+    def _immediate(*, client, history, registry=None, **kwargs):
+        raise LlmError("401 invalid x-api-key")
+        yield  # pragma: no cover -- makes this a generator
+
+    monkeypatch.setattr(serve_chat, "make_chat_client", lambda *a, **k: object())
+    monkeypatch.setattr(serve_chat, "run_turn", _immediate)
+    session = _new_session(chat_client)
+
+    frames = _frames(
+        chat_client.post(
+            f"/api/chat/sessions/{session['id']}/messages", json={"content": "hi"}
+        )
+    )
+    assert [f["type"] for f in frames] == ["error"]
+
+    messages = chat_client.get(f"/api/chat/sessions/{session['id']}").json()["messages"]
+    assert [(m["role"], m["content"]) for m in messages] == [
+        ("user", "hi"),
+        ("assistant", ""),
+    ]
+    assert messages[-1]["error"] == "401 invalid x-api-key"
+
+
+def test_client_disconnect_persists_a_stopped_marker(chat_client, monkeypatch) -> None:
+    """Abandoning the stream mid-turn records ``"Stopped."`` beside the partial.
+
+    Closing the frame iterator early is what the Stop button does to the
+    generator, so the ``GeneratorExit`` handler is exercised directly rather
+    than through TestClient (which always drains the body).
+    """
+    _stub_harness(
+        monkeypatch,
+        [TextDelta(text="partial"), TextDelta(text=" more"), TurnDone("stop")],
+    )
+    session = _new_session(chat_client)
+    chat_client.post(
+        f"/api/chat/sessions/{session['id']}/messages", json={"content": "hi"}
+    )
+    # Drop the assistant row the completed turn wrote; this test is about the
+    # abort path, which starts from a fresh turn.
+    session_id = session["id"]
+
+    frames = serve_chat._turn_frames(session_id, "openai", "gpt-4o")
+    next(frames)  # consume the first text_delta, then walk away
+    frames.close()
+
+    messages = chat_client.get(f"/api/chat/sessions/{session_id}").json()["messages"]
+    stopped = messages[-1]
+    assert stopped["role"] == "assistant"
+    assert stopped["content"] == "partial"
+    assert stopped["error"] == "Stopped."
+
+
+def test_happy_path_assistant_row_has_no_error(chat_client, monkeypatch) -> None:
+    """Regression guard: a successful turn leaves ``error`` NULL."""
+    _stub_harness(monkeypatch, [TextDelta(text="all good"), TurnDone("stop")])
+    session = _new_session(chat_client)
+    chat_client.post(
+        f"/api/chat/sessions/{session['id']}/messages", json={"content": "hi"}
+    )
+
+    messages = chat_client.get(f"/api/chat/sessions/{session['id']}").json()["messages"]
+    assert [m["error"] for m in messages] == [None, None]
 
 
 def test_unexpected_crash_is_also_an_in_band_error(chat_client, monkeypatch) -> None:
@@ -525,6 +604,9 @@ def test_unexpected_crash_is_also_an_in_band_error(chat_client, monkeypatch) -> 
     )
     assert frames[-1]["type"] == "error"
     assert "RuntimeError: bug" in frames[-1]["message"]
+
+    messages = chat_client.get(f"/api/chat/sessions/{session['id']}").json()["messages"]
+    assert messages[-1]["error"] == "RuntimeError: bug"
 
 
 # ---------------------------------------------------------------------------

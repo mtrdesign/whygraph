@@ -222,6 +222,62 @@ def test_chat_message_roundtrips_with_tool_calls_default(
         assert stored.input_tokens is None
 
 
+def _column_names(db_path: Path, table: str) -> set[str]:
+    conn = sqlite3.connect(db_path)
+    try:
+        return {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    finally:
+        conn.close()
+
+
+def test_chat_message_error_column_round_trips(
+    _isolate_config_and_engine: Path,
+) -> None:
+    """``error`` lands at head and downgrades cleanly off a seeded DB.
+
+    The column is nullable with no default rewrite, so an existing chat DB
+    picks it up on the next ``whygraph serve``.
+    """
+    from whygraph.db import get_session
+    from whygraph.db.models import ChatMessage as ChatMessageRow
+    from whygraph.db.models import ChatSession as ChatSessionRow
+
+    db_path = _isolate_config_and_engine
+    command.upgrade(alembic_config(), "head")
+    assert "error" in _column_names(db_path, "chat_message")
+
+    with get_session() as session:
+        row = ChatSessionRow(
+            title="New chat",
+            provider="anthropic",
+            model="claude-opus-5",
+            created_at="2026-07-30T00:00:00Z",
+            updated_at="2026-07-30T00:00:00Z",
+        )
+        session.add(row)
+        session.commit()
+        session.add(
+            ChatMessageRow(
+                session_id=row.id,
+                role="assistant",
+                content="",
+                error="401 unauthorized",
+                created_at="2026-07-30T00:00:01Z",
+            )
+        )
+        session.commit()
+
+    db_engine._reset_engine()
+    command.downgrade(alembic_config(), "-1")
+    assert "error" not in _column_names(db_path, "chat_message")
+    # The seeded rows survive the drop — only the column goes away.
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM chat_message").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
 def test_chat_message_rejects_unknown_session(_isolate_config_and_engine: Path) -> None:
     """``foreign_keys=ON`` (engine.py) makes an orphan message fail."""
     from sqlalchemy.exc import IntegrityError

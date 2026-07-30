@@ -197,6 +197,9 @@ export interface ChatMessage {
   // per row because the model can be switched mid-conversation.
   provider: string | null;
   model: string | null;
+  // Why this assistant turn failed, if it did — persisted so the banner
+  // survives a refresh instead of living only in the SSE stream.
+  error: string | null;
   created_at: string;
 }
 

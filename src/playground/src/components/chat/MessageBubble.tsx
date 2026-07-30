@@ -12,6 +12,13 @@ import { ToolCallCard, type ToolActivity } from "./ToolCallCard";
  */
 export interface AssistantTurn {
   kind: "assistant";
+  /**
+   * Id of the first persisted row this turn was built from — the React key, so
+   * a turn keeps its identity across the live→persisted swap at end of turn
+   * (index keys would hand one card's expansion state to another). Absent on
+   * live turns, which key off their position instead.
+   */
+  id?: number;
   /** Text segments in order, interleaved with `activities` of the same index. */
   segments: string[];
   activityGroups: ToolActivity[][];
@@ -20,11 +27,20 @@ export interface AssistantTurn {
   model?: string | null;
   error?: string;
   roundLimit?: number;
+  /**
+   * Transient: the model is working and has nothing on screen yet — the
+   * pre-first-token prologue, or the gap between a tool result and the next
+   * round. Live turns only; `turnsFromMessages` never sets it, so a replayed
+   * transcript can't show a stuck indicator.
+   */
+  thinking?: boolean;
 }
 
 export interface UserTurn {
   kind: "user";
   content: string;
+  /** See `AssistantTurn.id`. */
+  id?: number;
 }
 
 export type Turn = UserTurn | AssistantTurn;
@@ -58,7 +74,14 @@ function AssistantBubble({ turn }: { turn: AssistantTurn }) {
           </div>
         ))}
 
-        {isEmpty && <div className="text-sm text-muted">thinking…</div>}
+        {/* `isEmpty` covers a bubble with nothing in it at all; `thinking` also
+            covers the inter-round gap, where segments and cards are present but
+            the model hasn't spoken yet. */}
+        {(turn.thinking || isEmpty) && (
+          <div className="mt-1 flex items-center gap-1.5 text-xs text-muted">
+            <span className="animate-pulse">Thinking…</span>
+          </div>
+        )}
 
         {turn.roundLimit !== undefined && (
           <div className="mt-2 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-xs text-amber-300">

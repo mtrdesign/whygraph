@@ -9,8 +9,11 @@ import type { AssistantTurn, Turn } from "./MessageBubble";
 // assistant(…) → … → assistant. The display shape is one bubble whose text
 // segments and tool-card groups alternate.
 
+// `thinking` is set here rather than on the first frame: the gap it covers
+// starts at click time (the server builds the system prompt from live repo
+// facts before the first token), so anything stream-driven would be too late.
 export function emptyAssistantTurn(): AssistantTurn {
-  return { kind: "assistant", segments: [""], activityGroups: [[]] };
+  return { kind: "assistant", segments: [""], activityGroups: [[]], thinking: true };
 }
 
 /**
@@ -32,12 +35,14 @@ export function turnsFromMessages(messages: ChatMessage[]): Turn[] {
   for (const message of messages) {
     if (message.role === "user") {
       flush();
-      turns.push({ kind: "user", content: message.content });
+      turns.push({ kind: "user", content: message.content, id: message.id });
       continue;
     }
 
     if (message.role === "assistant") {
-      if (!current) current = emptyAssistantTurn();
+      // A persisted row is finished by definition — never show it thinking.
+      // The first row's id becomes the turn's stable React key.
+      if (!current) current = { ...emptyAssistantTurn(), thinking: false, id: message.id };
       // A new assistant row after tool activity opens the next segment.
       const lastGroup = current.activityGroups[current.activityGroups.length - 1];
       if (lastGroup && lastGroup.length > 0) {
@@ -63,6 +68,9 @@ export function turnsFromMessages(messages: ChatMessage[]): Turn[] {
       // Attribution is per row, so a transcript spanning a mid-session model
       // switch shows each turn's real model rather than the current selection.
       if (message.model) current.model = message.model;
+      // A failed turn carries why it failed on its row, so the rose banner
+      // survives a refresh instead of dying with the SSE stream.
+      if (message.error) current.error = message.error;
       continue;
     }
 
@@ -95,7 +103,8 @@ export function applyTextDelta(turn: AssistantTurn, text: string): AssistantTurn
   } else {
     segments[segments.length - 1] = (segments[segments.length - 1] ?? "") + text;
   }
-  return { ...turn, segments, activityGroups: groups };
+  // Tokens are on screen — the gap is over.
+  return { ...turn, thinking: false, segments, activityGroups: groups };
 }
 
 /** Add a running tool card to the turn's newest group. */
@@ -105,7 +114,8 @@ export function applyToolCall(
 ): AssistantTurn {
   const groups = turn.activityGroups.map((g) => [...g]);
   groups[groups.length - 1].push({ ...call, running: true });
-  return { ...turn, activityGroups: groups };
+  // The card's own running spinner takes over from the indicator.
+  return { ...turn, thinking: false, activityGroups: groups };
 }
 
 /** Resolve a running card with its result. */
@@ -117,13 +127,17 @@ export function applyToolResult(
   const groups = turn.activityGroups.map((group) =>
     group.map((a) => (a.id === id ? { ...a, result, running: false } : a)),
   );
-  return { ...turn, activityGroups: groups };
+  // Back to waiting on the model for the next round.
+  return { ...turn, thinking: true, activityGroups: groups };
 }
 
 /** Clear any still-running cards — used when a turn ends or is aborted. */
 export function settleActivities(turn: AssistantTurn): AssistantTurn {
   return {
     ...turn,
+    // Terminal in every path that calls this (done / error / abort / a stream
+    // that died without a frame), so the indicator can never stick.
+    thinking: false,
     activityGroups: turn.activityGroups.map((group) =>
       group.map((a) => (a.running ? { ...a, running: false } : a)),
     ),

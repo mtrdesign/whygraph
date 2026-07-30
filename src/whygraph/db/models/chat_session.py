@@ -1,10 +1,12 @@
 """SQLModel for the ``chat_session`` table.
 
-One row per conversation in the ``whygraph serve`` Chat view. The session
-owns the provider + model choice for its whole lifetime — a session is
-not re-pointed at a different model mid-conversation, because the
-transcript would then mix two models' tool-calling conventions. Starting
-a new chat is the way to switch.
+One row per conversation in the ``whygraph serve`` Chat view. The
+session's provider + model are the defaults for its **next** turn, not a
+lifetime commitment: ``PATCH /api/chat/sessions/{id}`` re-points them, and
+the dropdowns above the composer do exactly that. Each
+:class:`~whygraph.db.models.ChatMessage` records the provider / model that
+actually produced it, so a transcript spanning a switch attributes every
+turn truthfully instead of to whichever was selected last.
 
 Sessions live in the ordinary WhyGraph DB (not a separate store) so they
 survive a server restart with no extra wiring: ``create_app`` already
@@ -31,12 +33,13 @@ class ChatSession(WhygraphTable, table=True):
         and replaced by the first user message (truncated) unless the
         user has renamed it — an explicit rename always wins thereafter.
     provider : str
-        Chat provider tag: ``"anthropic"``, ``"openai"``, ``"deepseek"``,
-        or ``"openrouter"``.
+        Chat provider tag for the next turn: ``"anthropic"``, ``"openai"``,
+        ``"deepseek"``, or ``"openrouter"``. Mutable — see the module notes.
     model : str
-        The concrete model id used, resolved at session-creation time so
-        the transcript records what actually answered (not whatever the
-        config happens to say later).
+        The concrete model id for the next turn, resolved at creation time
+        rather than read from config per turn (so config drift can't
+        silently repoint an open conversation). Mutable — see the module
+        notes.
     created_at : str
         ISO-8601 UTC timestamp, stored as text (the convention every
         other WhyGraph timestamp column follows).

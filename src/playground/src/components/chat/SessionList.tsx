@@ -4,20 +4,23 @@ import { clsx } from "clsx";
 import { api } from "../../api";
 import { useExplorer } from "../../store";
 import { Button, EmptyState, IconButton, Input, Spinner } from "../../lib/ui";
-import { ProviderPicker } from "./ProviderPicker";
 
 /**
  * The session sidebar: new chat, select, rename, delete.
  *
  * Mirrors the Explorer's tree aside (same width, same panel surface) so the two
  * views feel like one app rather than two bolted together.
+ *
+ * "+ New chat" creates immediately — no provider step. The server already
+ * resolves every field from config, and the dropdowns above the composer let the
+ * choice be changed afterwards, so making the user answer first was friction
+ * with nothing behind it.
  */
 export function SessionList() {
   const queryClient = useQueryClient();
   const activeSessionId = useExplorer((s) => s.activeSessionId);
   const setActiveSession = useExplorer((s) => s.setActiveSession);
 
-  const [picking, setPicking] = useState(false);
   const [renamingId, setRenamingId] = useState<number | null>(null);
   const [draftTitle, setDraftTitle] = useState("");
 
@@ -26,14 +29,26 @@ export function SessionList() {
     queryFn: api.chatSessions,
   });
 
+  // Already in cache whenever a ModelSelect has rendered; used only to prefer a
+  // *configured* provider over the config default.
+  const providers = useQuery({
+    queryKey: ["chat", "providers"],
+    queryFn: api.chatProviders,
+  });
+
   const invalidate = () =>
     queryClient.invalidateQueries({ queryKey: ["chat", "sessions"] });
 
   const create = useMutation({
-    mutationFn: (vars: { provider: string; model: string }) =>
-      api.chatCreateSession(vars),
+    mutationFn: () => {
+      // No model: the server resolves [chat].model → [llm.<provider>].model.
+      // No provider either if the list hasn't arrived — the server falls back
+      // to [chat].provider rather than making the click wait on a fetch.
+      const first =
+        providers.data?.find((p) => p.configured) ?? providers.data?.[0];
+      return api.chatCreateSession(first ? { provider: first.provider } : {});
+    },
     onSuccess: (session) => {
-      setPicking(false);
       setActiveSession(session.id);
       invalidate();
     },
@@ -59,18 +74,14 @@ export function SessionList() {
   return (
     <div className="flex h-full flex-col">
       <div className="border-b border-border p-3">
-        <Button onClick={() => setPicking((v) => !v)} className="w-full">
-          {picking ? "Close" : "+ New chat"}
+        <Button
+          onClick={() => create.mutate()}
+          disabled={create.isPending}
+          className="w-full"
+        >
+          {create.isPending ? "Creating…" : "+ New chat"}
         </Button>
       </div>
-
-      {picking && (
-        <ProviderPicker
-          creating={create.isPending}
-          onCancel={() => setPicking(false)}
-          onCreate={(provider, model) => create.mutate({ provider, model })}
-        />
-      )}
 
       {create.isError && (
         <div className="px-3 py-2 text-xs text-rose-400">

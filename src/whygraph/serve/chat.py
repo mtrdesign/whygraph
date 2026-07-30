@@ -151,6 +151,7 @@ def _message_dict(row: ChatMessageRow) -> dict:
         "output_tokens": row.output_tokens,
         "provider": row.provider,
         "model": row.model,
+        "error": row.error,
         "created_at": row.created_at,
     }
 
@@ -469,12 +470,20 @@ def _persist_assistant_turn(
     done: TurnDone | None,
     provider: str,
     model: str,
+    error: str | None = None,
 ) -> int:
     """Write one completed assistant turn and return its row id.
 
     ``provider`` / ``model`` are recorded on the row rather than read back
     from the session later: the session's pair can change between turns, so
     only the value in force *at this turn* is a truthful attribution.
+
+    Parameters
+    ----------
+    error : str or None, optional
+        Why the turn failed, if it did. Stored alongside whatever text did
+        arrive, so a refresh replays the failure instead of showing a user
+        message with no reply.
     """
     now = _now_iso()
     with get_session() as session:
@@ -492,6 +501,7 @@ def _persist_assistant_turn(
             output_tokens=done.output_tokens if done else None,
             provider=provider,
             model=model,
+            error=error,
             created_at=now,
         )
         session.add(message)
@@ -531,7 +541,19 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
             if env_var
             else ""
         )
-        yield _frame({"type": "error", "message": f"{exc}{hint}"})
+        message = f"{exc}{hint}"
+        # Same contract as the mid-turn handlers below: the failure is a row,
+        # not just a frame, so a refresh still shows why nothing was answered.
+        _persist_assistant_turn(
+            session_id,
+            text="",
+            calls=[],
+            done=None,
+            provider=provider,
+            model=model,
+            error=message,
+        )
+        yield _frame({"type": "error", "message": message})
         return
 
     registry = ToolRegistry()
@@ -546,10 +568,15 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
     last_done: TurnDone | None = None
     final_message_id: int | None = None
 
-    def _flush_round() -> int | None:
-        """Persist the buffered round: assistant row, then its tool rows."""
+    def _flush_round(error: str | None = None) -> int | None:
+        """Persist the buffered round: assistant row, then its tool rows.
+
+        An ``error`` forces a row even with nothing buffered — a provider
+        failure before the first token would otherwise leave the user
+        message with no reply at all.
+        """
         nonlocal text_parts, round_calls, round_results
-        if not (text_parts or round_calls):
+        if not (text_parts or round_calls or error):
             return None
         message_id = _persist_assistant_turn(
             session_id,
@@ -558,6 +585,7 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
             done=last_done,
             provider=provider,
             model=model,
+            error=error,
         )
         for call, result in round_results:
             _persist_tool_result(session_id, call, result)
@@ -608,18 +636,19 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
     except LlmError as exc:
         _log.warning("chat turn failed for session %s: %s", session_id, exc)
         # Whatever arrived before the failure is worth keeping — the user can
-        # see how far the model got, and the retry re-sends cleanly.
-        _flush_round()
+        # see how far the model got, and the retry re-sends cleanly. The error
+        # rides the same row so a refresh replays it.
+        _flush_round(error=str(exc))
         yield _frame({"type": "error", "message": str(exc)})
         return
     except GeneratorExit:
         # Client disconnected (Stop button, closed tab). Persist what we have
         # and re-raise so the server tears the response down cleanly.
-        _flush_round()
+        _flush_round(error="Stopped.")
         raise
     except Exception as exc:  # noqa: BLE001 -- must not surface as a hung stream
         _log.exception("chat turn crashed for session %s", session_id)
-        _flush_round()
+        _flush_round(error=f"{type(exc).__name__}: {exc}")
         yield _frame({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
         return
 

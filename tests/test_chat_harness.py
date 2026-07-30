@@ -421,7 +421,7 @@ def test_specs_and_bounds_come_from_config_by_default(
 
 
 def test_registry_specs_are_offered_to_the_model() -> None:
-    """A real registry's 12 specs reach the request."""
+    """A real registry's 15 specs reach the request."""
     client = ScriptedClient([[TextDelta(text="hi"), TurnDone("stop")]])
     registry = ToolRegistry(max_rationale_generations=0)
     list(
@@ -432,7 +432,7 @@ def test_registry_specs_are_offered_to_the_model() -> None:
             max_tool_rounds=1,
         )
     )
-    assert len(client.requests[0].tools) == 12
+    assert len(client.requests[0].tools) == 15
 
 
 # ---------------------------------------------------------------------------

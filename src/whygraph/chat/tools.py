@@ -6,11 +6,16 @@ drift from the rest of WhyGraph, because there is one implementation per
 capability and both surfaces are adapters over it. No MCP protocol
 roundtrip is involved — these are plain in-process calls.
 
-The twelve tools span **three sources**, and the system prompt tells the
+The fifteen tools span **four sources**, and the system prompt tells the
 model which to reach for:
 
-* **CodeGraph** answers *what the code is* — structure, relationships.
-* **WhyGraph** answers *why it is that way* — rationale, evidence, history.
+* **CodeGraph** answers *what the code is* — structure, relationships, and
+  (via ``get_area_outline``) what a whole directory contains.
+* **WhyGraph** answers *why it is that way* and *what has happened* —
+  rationale, evidence, path history, and content search over the
+  diff-derived commit descriptions.
+* **The statistics tool** (see :mod:`.stats_sql`) answers *how much* —
+  aggregate-only SQL, fenced so it cannot become a record reader.
 * **The file tools** supply ground-truth source (see :mod:`.files`).
 
 Registry rules
@@ -32,14 +37,18 @@ import json
 import logging
 from collections.abc import Callable
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from whygraph.core import get_config
 from whygraph.mcp.area_history import whygraph_area_history
 from whygraph.mcp.errors import WhyGraphError
 from whygraph.mcp.evidence import collect_evidence, whygraph_evidence_for
+from whygraph.mcp.path_history import path_commit_counts
 from whygraph.mcp.rationale import _format_response, whygraph_rationale_brief
 from whygraph.mcp.rationale_cache import lookup_cached
 from whygraph.mcp.resources import (
     _commit_resource,
+    _find_changes_resource,
     _issue_resource,
     _pr_resource,
     _recent_activity_resource,
@@ -50,7 +59,7 @@ from whygraph.serve import graphdata
 from whygraph.services.codegraph import CodeGraph, CodeGraphError
 from whygraph.services.llm.chat import ToolSpec
 
-from . import files
+from . import files, stats_sql
 
 _log = logging.getLogger(__name__)
 
@@ -87,6 +96,23 @@ One constant rather than three copies because the copies drifted: all three
 used to say "Dotted symbol name", which is the one shape CodeGraph does not
 use for symbols. The model followed the description, every lookup missed,
 and it burned tool rounds guessing variants.
+"""
+
+_DESCRIPTION_AUTHORITY = (
+    " Each commit carries `llm_description`, generated from the DIFF ALONE — "
+    "the developer's commit message is never shown to that generator. Treat it "
+    "as the authoritative account of what changed. `subject` and `body` are "
+    "human-written and are often terse, stale, or simply wrong; cite them for "
+    "intent, not for fact."
+)
+"""Appended to every history tool's description.
+
+The generator's only input is a diff (``LlmDescriptor.describe(diff)``), so a
+nonsense commit message *cannot* contaminate the description — that is
+architectural, not incidental. Nothing used to tell the model this, so it read
+``subject`` and ``llm_description`` as equally authoritative and anchored on
+whichever arrived first. One constant rather than five copies, for the same
+reason :data:`_QUALIFIED_NAME_DESC` is one: the copies drift.
 """
 
 _SPECS: tuple[ToolSpec, ...] = (
@@ -133,6 +159,38 @@ _SPECS: tuple[ToolSpec, ...] = (
         },
     ),
     ToolSpec(
+        name="get_area_outline",
+        description=(
+            "Outline the symbols in a directory (or one file) — classes, "
+            "functions, methods, routes — grouped by file, with line ranges. "
+            "THE way to orient yourself in a subsystem: prefer it over "
+            "list_dir for code, because it returns structure rather than "
+            "filenames, and every qualified_name it returns is a valid input "
+            "to get_symbol, get_evidence, and get_rationale. Each file also "
+            "carries how many commits have touched it, so you can see where "
+            "the churn is. Signatures are omitted to keep this compact — call "
+            "get_symbol for one symbol's full signature and relationships. A "
+            "very large directory returns detail='files' (a per-file map of "
+            "symbol and commit counts) instead of every symbol; re-call on a "
+            "subdirectory to drill in. Note: only code is indexed "
+            "(.py/.ts/.tsx/.js) — for markdown, TOML, or any other file, use "
+            "list_dir and read_file."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Repo-relative directory, e.g. 'src/whygraph/chat'. "
+                        "A file path works too."
+                    ),
+                }
+            },
+            "required": ["path"],
+        },
+    ),
+    ToolSpec(
         name="get_rationale",
         description=(
             "Get the structured rationale card for a symbol — purpose, why, "
@@ -163,7 +221,7 @@ _SPECS: tuple[ToolSpec, ...] = (
             "commits that authored them (via blame), plus every linked pull "
             "request and issue. This is line-precise and HEAD-anchored. Use "
             "it to answer 'what changed here and why' without paying for "
-            "rationale generation."
+            "rationale generation." + _DESCRIPTION_AUTHORITY
         ),
         parameters={
             "type": "object",
@@ -188,6 +246,7 @@ _SPECS: tuple[ToolSpec, ...] = (
             "commits for code that has since been deleted, moved, or fully "
             "rewritten, which line-blame physically cannot. Use it for "
             "'what has been happening in this area lately' questions."
+            + _DESCRIPTION_AUTHORITY
         ),
         parameters={
             "type": "object",
@@ -209,11 +268,53 @@ _SPECS: tuple[ToolSpec, ...] = (
         },
     ),
     ToolSpec(
+        name="find_changes",
+        description=(
+            "Search the commit history by WHAT CHANGED — keywords and/or a "
+            "path — rather than by an identifier you already know. THE "
+            "debugging entry point: a defect is described in the vocabulary of "
+            "behaviour ('sessions vanish after a refresh', 'the dropdown "
+            "resets'), and the diff descriptions are the only text written in "
+            "that vocabulary. search_symbols cannot find these — it matches "
+            "symbol NAMES only, so a behaviour spread across three files, or a "
+            "property inside an object literal, is invisible to it. Keywords "
+            "are AND-ed, case-insensitive substrings, matched against each "
+            "commit's description / subject / body and against the TITLES of "
+            "its pull requests. `path` accepts a DIRECTORY as well as a file "
+            "(unlike get_area_history) and follows rename chains. Pass at "
+            "least one of the two." + _DESCRIPTION_AUTHORITY
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Space-separated keywords, all of which must appear. "
+                        "Prefer behavioural words over symbol names — this "
+                        "searches prose, not code."
+                    ),
+                },
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Repo-relative file OR directory to restrict to, e.g. "
+                        "'src/whygraph/chat'."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max commits, newest first. Default 15, max 50.",
+                },
+            },
+        },
+    ),
+    ToolSpec(
         name="get_commit",
         description=(
             "Get one commit by SHA — message, stats, author, and its linked "
             "pull requests. Use it to follow up on a SHA another tool "
-            "surfaced."
+            "surfaced." + _DESCRIPTION_AUTHORITY
         ),
         parameters={
             "type": "object",
@@ -254,8 +355,10 @@ _SPECS: tuple[ToolSpec, ...] = (
             "Get repository-wide totals: commit / PR / issue counts, the date "
             "range of scanned history, when the last scan ran, how much of "
             "the history has LLM descriptions, and the top contributors. "
-            "Counts and coverage only — for the actual recent work, use "
-            "list_recent_activity."
+            "These SIX FIXED NUMBERS and nothing else — it has no per-file, "
+            "per-month, or per-PR breakdown, so for hotspot files, churn, "
+            "velocity over time, or cycle time use run_project_stats. For the "
+            "actual recent work, use list_recent_activity."
         ),
         parameters={"type": "object", "properties": {}},
     ),
@@ -270,6 +373,7 @@ _SPECS: tuple[ToolSpec, ...] = (
             "number, an exact file path). Returns a compact index — subject "
             "or title, author, date, a truncated description — then use "
             "get_commit / get_pr / get_issue on the entries that matter."
+            + _DESCRIPTION_AUTHORITY
         ),
         parameters={
             "type": "object",
@@ -279,6 +383,23 @@ _SPECS: tuple[ToolSpec, ...] = (
                     "description": "Max entries per category. Default 10.",
                 }
             },
+        },
+    ),
+    ToolSpec(
+        name="run_project_stats",
+        description=stats_sql._SCHEMA_DOC,
+        parameters={
+            "type": "object",
+            "properties": {
+                "sql": {
+                    "type": "string",
+                    "description": (
+                        "One SELECT (or WITH ... SELECT) statement that "
+                        "aggregates. No trailing semicolon needed."
+                    ),
+                }
+            },
+            "required": ["sql"],
         },
     ),
     ToolSpec(
@@ -312,8 +433,12 @@ _SPECS: tuple[ToolSpec, ...] = (
         name="list_dir",
         description=(
             "List one directory's contents, non-recursively. Directories are "
-            "marked with a trailing '/'. Use it to orient yourself before "
-            "reading files."
+            "marked with a trailing '/'. Use it for FILENAMES — markdown, "
+            "TOML, config, or finding out what non-code files exist. To see "
+            "what a code directory CONTAINS or get an overview of a subsystem "
+            "or its modules, call get_area_outline instead: it returns the "
+            "actual classes and functions with line ranges, and filenames "
+            "alone rarely answer the question you asked."
         ),
         parameters={
             "type": "object",
@@ -374,6 +499,125 @@ def _get_symbol(qualified_name: str) -> dict:
         }
 
 
+_OUTLINE_SYMBOL_LIMIT = 150
+"""Above this many symbols the outline returns a file-level map instead.
+
+Calibrated against **serialized** cost, which is ~130 chars per symbol on this
+repo (worst observed 161, in ``tests/``) — the six short field names repeat per
+row and dominate the values they label. So 150 symbols lands near 19,500
+typical / 24,150 worst case, against a :data:`MAX_RESULT_CHARS` of 30,000.
+
+A values-only estimate suggests ~38 chars per symbol and a limit of 500; that
+is wrong by 3.4x because it omits the repeated keys. Measured: 500 symbols is
+~65,000 chars, and ``src/whygraph/services`` alone (241 symbols) serializes to
+31,011 — already over the cap. Any future change to the emitted field set must
+re-measure this, not scale it.
+"""
+
+_OUTLINE_MAP_HINT = (
+    "Too large for a symbol outline — re-call on a subdirectory to drill in."
+)
+"""Load-bearing: a truncated list hides what was missed, whereas a map plus
+this sentence is a complete answer at coarser resolution *and* tells the model
+where to look next."""
+
+
+_OUTLINE_DROPPED_FIELDS = ("id", "signature", "file_path")
+"""Fields of :func:`graphdata._symbol_dict` an outline row omits.
+
+``signature`` is ~75% of an outline's payload and :func:`_get_symbol` already
+supplies it on demand. ``id`` is a CodeGraph node id the model never needs.
+``file_path`` is the key of the ``files`` map the row already sits under, so
+repeating it per symbol costs ~27% of the payload to say nothing new.
+"""
+
+
+def _outline_symbol_dict(symbol) -> dict:  # noqa: ANN001 -- codegraph Symbol
+    """One outline row — :func:`graphdata._symbol_dict` minus the redundant fields.
+
+    See :data:`_OUTLINE_DROPPED_FIELDS`. Between them they are what lets a whole
+    package fit in one tool result.
+    """
+    row = graphdata._symbol_dict(symbol)
+    for field in _OUTLINE_DROPPED_FIELDS:
+        row.pop(field, None)
+    return row
+
+
+def _commit_counts(path: str) -> dict[str, int] | None:
+    """Per-file commit counts, or ``None`` when WhyGraph history is unreachable.
+
+    ``None`` and ``{}`` mean different things and the caller renders them
+    differently: an empty mapping is "scanned, and these files have no commits"
+    (each file reports ``0``), whereas ``None`` is "no WhyGraph DB" and the
+    ``commit_count`` key is omitted entirely. The structural outline is useful
+    on its own, so a missing DB must degrade rather than fail the call.
+    """
+    try:
+        return path_commit_counts(path)
+    except (WhyGraphError, SQLAlchemyError) as exc:
+        _log.debug("area outline: commit counts unavailable for %r: %s", path, exc)
+        return None
+
+
+def _get_area_outline(path: str) -> dict:
+    """Handler for ``get_area_outline``."""
+    if not path or not path.strip():
+        return {"error": "path is required"}
+    with _open_graph() as graph:
+        symbols = graph.area(path)
+    if not symbols:
+        return {
+            "path": path,
+            "detail": "symbols",
+            "symbol_count": 0,
+            "files": {},
+            "note": (
+                "Nothing indexed under this path. CodeGraph indexes code only "
+                "(.py/.ts/.tsx/.js) — use list_dir for anything else."
+            ),
+        }
+
+    counts = _commit_counts(path)
+
+    def _file_entry(file_path: str) -> dict:
+        """The per-file preamble both shapes share, counts-first."""
+        if counts is None:
+            return {}
+        return {"commit_count": counts.get(file_path, 0)}
+
+    if len(symbols) > _OUTLINE_SYMBOL_LIMIT:
+        per_file: dict[str, int] = {}
+        for symbol in symbols:
+            per_file[symbol.file_path] = per_file.get(symbol.file_path, 0) + 1
+        return {
+            "path": path,
+            "detail": "files",
+            "symbol_count": len(symbols),
+            "hint": _OUTLINE_MAP_HINT,
+            "files": {
+                file_path: {"symbol_count": count, **_file_entry(file_path)}
+                for file_path, count in per_file.items()
+            },
+        }
+
+    files: dict[str, dict] = {}
+    # ``area()`` orders by (file_path, start_line), so grouping is one pass and
+    # each file's symbols come out in source order.
+    for symbol in symbols:
+        entry = files.get(symbol.file_path)
+        if entry is None:
+            entry = {**_file_entry(symbol.file_path), "symbols": []}
+            files[symbol.file_path] = entry
+        entry["symbols"].append(_outline_symbol_dict(symbol))
+    return {
+        "path": path,
+        "detail": "symbols",
+        "symbol_count": len(symbols),
+        "files": files,
+    }
+
+
 # ---------------------------------------------------------------------------
 # WhyGraph-backed handlers
 # ---------------------------------------------------------------------------
@@ -391,6 +635,13 @@ def _get_area_history(path: str, limit: int = 10, include_renames: bool = True) 
     return whygraph_area_history(
         path=path, limit=max(1, limit), include_renames=include_renames
     )
+
+
+def _find_changes(
+    query: str | None = None, path: str | None = None, limit: int = 15
+) -> dict:
+    """Handler for ``find_changes``."""
+    return _find_changes_resource(query=query, path=path, limit=limit)
 
 
 def _get_commit(sha: str) -> dict:
@@ -418,6 +669,13 @@ def _get_repo_overview() -> dict:
 def _list_recent_activity(limit: int = 10) -> dict:
     """Handler for ``list_recent_activity``."""
     return _recent_activity_resource(limit=int(limit))
+
+
+def _run_project_stats(sql: str) -> dict:
+    """Handler for ``run_project_stats``."""
+    if not sql or not sql.strip():
+        return {"error": "sql is required", "layer": "shape"}
+    return stats_sql.run_stats_query(sql)
 
 
 class ToolRegistry:
@@ -452,14 +710,17 @@ class ToolRegistry:
         self._handlers: dict[str, Callable[..., dict]] = {
             "search_symbols": _search_symbols,
             "get_symbol": _get_symbol,
+            "get_area_outline": _get_area_outline,
             "get_rationale": self._get_rationale,
             "get_evidence": _get_evidence,
             "get_area_history": _get_area_history,
+            "find_changes": _find_changes,
             "get_commit": _get_commit,
             "get_pr": _get_pr,
             "get_issue": _get_issue,
             "get_repo_overview": _get_repo_overview,
             "list_recent_activity": _list_recent_activity,
+            "run_project_stats": _run_project_stats,
             "read_file": files.read_file,
             "list_dir": files.list_dir,
         }

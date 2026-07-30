@@ -1,11 +1,14 @@
 """Path-history queries against the ``commit_file_change`` index.
 
-Two pieces live here:
+Three pieces live here:
 
 * :func:`resolve_path_aliases` — given a current path, walk
   ``renamed_from`` edges backwards (recursive CTE) and return every
   historical name that path has ever gone by. Used to make blame-less
   area-history queries rename-aware.
+* :func:`path_commit_counts` — one grouped query giving the per-file
+  commit count under a directory prefix, so an area outline can show
+  where the churn is without a query per file.
 * :func:`area_history_commits` — given a path (and optionally a
   pre-resolved alias set), return the :class:`CommitEvidence` bundles
   for every scanned commit that touched any alias, newest first.
@@ -19,9 +22,11 @@ the JSON serialisers stay unchanged.
 
 from __future__ import annotations
 
+from sqlalchemy import func
 from sqlmodel import Session, col, select
 
 from whygraph.analyze import CommitEvidence
+from whygraph.core.utils import LIKE_ESCAPE_CHAR, like_escape
 from whygraph.db import get_session
 from whygraph.db.models import Commit, CommitFileChange
 
@@ -63,6 +68,58 @@ def resolve_path_aliases(session: Session, path: str) -> set[str]:
         aliases.update(next_layer)
         frontier = next_layer
     return aliases
+
+
+def path_commit_counts(path_prefix: str) -> dict[str, int]:
+    """Default-branch commit count per file under ``path_prefix``.
+
+    One grouped query for a whole subsystem, rather than a lookup per file:
+    the caller is building an area outline and wants to know where the churn
+    is, which is a per-file number over the same ``commit_file_change`` index
+    :func:`area_history_commits` reads.
+
+    Parameters
+    ----------
+    path_prefix : str
+        A repo-relative directory or a single file path. A leading ``"./"``
+        and a trailing ``"/"`` are tolerated, matching
+        :meth:`whygraph.services.codegraph.CodeGraph.area`.
+
+    Returns
+    -------
+    dict[str, int]
+        ``path -> distinct commit count``. Paths with no scanned commit are
+        absent rather than present-and-zero, so the caller decides how to
+        render "never touched".
+
+    Notes
+    -----
+    ``commit_file_change.path`` is the path *at that commit*, so a file moved
+    mid-history is counted under each name it has had. Following the rename
+    chain would need :func:`resolve_path_aliases` per file, which is a query
+    per file — the wrong trade for a churn hint. :func:`area_history_commits`
+    remains the rename-aware read.
+    """
+    prefix = path_prefix.strip().removeprefix("./").rstrip("/")
+    if not prefix:
+        return {}
+    with get_session() as session:
+        rows = session.exec(
+            select(
+                CommitFileChange.path,
+                func.count(func.distinct(col(CommitFileChange.commit_sha))),
+            )
+            .join(Commit, col(Commit.sha) == col(CommitFileChange.commit_sha))
+            .where(col(Commit.on_default_branch) == 1)
+            .where(
+                (col(CommitFileChange.path) == prefix)
+                | col(CommitFileChange.path).like(
+                    f"{like_escape(prefix)}/%", escape=LIKE_ESCAPE_CHAR
+                )
+            )
+            .group_by(col(CommitFileChange.path))
+        ).all()
+    return {path: count for path, count in rows}
 
 
 def area_history_commits(

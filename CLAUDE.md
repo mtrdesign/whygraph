@@ -29,15 +29,15 @@ A root `Makefile` wraps these plus dev-only tooling — `make` lists targets; `m
 
 ## Before pushing
 
-CI (`ci-code-checks`) gates every PR on two parallel jobs: **lint** (`uv run ruff check src/ tests/` *and* `uv run ruff format --check src/ tests/` — both, not just the first) and **tests** (`uv run pytest`). Run all three locally before pushing or opening a PR:
+CI (`ci-code-checks`) gates every PR on two parallel jobs: **lint** (`uv run ruff check src/ tests/ scripts/` *and* `uv run ruff format --check src/ tests/ scripts/` — both, not just the first) and **tests** (`uv run pytest`). `scripts/` is linted but **not** collected by pytest (`testpaths` is `tests/`) — it holds live-provider tooling that must never gate CI. Run all three locally before pushing or opening a PR:
 
 ```bash
-uv run ruff check src/ tests/
-uv run ruff format --check src/ tests/   # `ruff check` passing does NOT imply this passes
+uv run ruff check src/ tests/ scripts/
+uv run ruff format --check src/ tests/ scripts/   # `ruff check` passing does NOT imply this passes
 uv run pytest
 ```
 
-If `ruff format --check` fails, run `uv run ruff format src/ tests/` to fix it in place, then re-run the check before pushing.
+If `ruff format --check` fails, run `uv run ruff format src/ tests/ scripts/` to fix it in place, then re-run the check before pushing.
 
 ## Architecture
 
@@ -48,7 +48,7 @@ Top-level packages under `src/whygraph/`:
 - `core/` — cross-cutting helpers: `config` (env / project config), `logger` (logging setup), `shell` / `shell_command` (subprocess helpers), `utils`.
 - `db/` — SQLite plumbing. `engine.py` + `bootstrap.py` set up the DB, `base.py` is the declarative base, `models/` holds the SQLModel classes, `migrations/` holds Alembic versions.
 - `serve/` — the `whygraph serve` playground backend. `app.py` is the FastAPI factory (mounts `routes.py` at `/api` and `chat.py` at `/api/chat`, then the SPA from `static/`); `graphdata.py` shapes CodeGraph reads for the UI; `coverage.py` computes rationale coverage. **Every handler is a sync `def`** — FastAPI runs them in the threadpool, one `get_session()` and one `CodeGraph` handle per request. The React source lives in `src/playground/` and builds into `serve/static/`.
-- `chat/` — the serve Chat view's agentic harness (a third adapter over the same core as `mcp/` and `serve/`). `tools.py` holds the 12 tool specs + `ToolRegistry` (instantiated **once per user turn** — it carries the rationale-generation budget); `files.py` is the clamped read-only file access; `harness.py` is `run_turn` (the tool loop) and `build_window` (token-budgeted context trimming); `prompts/system.md` is the packaged system prompt. The harness is **persistence-free** — `serve/chat.py` owns every row.
+- `chat/` — the serve Chat view's agentic harness (a third adapter over the same core as `mcp/` and `serve/`). `tools.py` holds the 15 tool specs + `ToolRegistry` (instantiated **once per user turn** — it carries the rationale-generation budget); `files.py` is the clamped read-only file access; `stats_sql.py` is the statistics surface — read-only, **aggregate-only** SQL behind a SQLite authorizer, with a table allowlist that denies `chat_*` and `rationale_cache` (see its module docstring for the four layers); `harness.py` is `run_turn` (the tool loop) and `build_window` (token-budgeted context trimming); `prompts/system.md` is the packaged system prompt. The harness is **persistence-free** — `serve/chat.py` owns every row.
 - `services/` — external integrations: `git/`, `github/`, `codegraph/` (reads CodeGraph's SQLite by `node_id`), `llm/` (Anthropic / OpenAI / OpenRouter / DeepSeek / Ollama / claude-cli). Two **parallel ports** live here: `client.py`'s `LlmClient` (sync `complete()`, used by analyze/rationale) and `chat.py`'s `ChatClient` (streaming + tool-calling, used by `chat/`). They are deliberately separate — see `chat.py`'s docstring.
 - `scan/` — crawler orchestration. `crawler.py` drives `git_crawler.py`, `github_crawler.py`, and `analyze_crawler.py` per-source phases.
 - `analyze/` — LLM-backed analysis. `description.py` / `llm_descriptor.py` produce per-commit diff descriptions; `rationale.py` / `rationale_generator.py` produce the 5-section rationale cards; `backfill.py` runs the lazy on-read backfill. Prompt templates live under `analyze/prompts/`.

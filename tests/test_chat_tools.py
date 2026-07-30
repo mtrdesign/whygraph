@@ -125,21 +125,24 @@ def _result(registry: ToolRegistry, name: str, **arguments) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_twelve_tools_with_unique_names_and_object_schemas() -> None:
+def test_fifteen_tools_with_unique_names_and_object_schemas() -> None:
     names = [spec.name for spec in TOOL_SPECS]
-    assert len(names) == 12
-    assert len(set(names)) == 12
+    assert len(names) == 15
+    assert len(set(names)) == 15
     assert set(names) == {
         "search_symbols",
         "get_symbol",
+        "get_area_outline",
         "get_rationale",
         "get_evidence",
         "get_area_history",
+        "find_changes",
         "get_commit",
         "get_pr",
         "get_issue",
         "get_repo_overview",
         "list_recent_activity",
+        "run_project_stats",
         "read_file",
         "list_dir",
     }
@@ -165,6 +168,47 @@ def test_symbol_tools_document_the_real_qualified_name_shapes() -> None:
             f"{name} must warn that a dotted path does not resolve"
         )
         assert "dotted symbol name" not in description.lower()
+
+
+def test_history_tools_state_which_description_field_is_authoritative() -> None:
+    """Regression guard on the field-authority fix (§4.2).
+
+    ``llm_description`` is generated from the diff alone, so a nonsense commit
+    message cannot contaminate it — but nothing used to tell the model that, so
+    it read ``subject`` as equally authoritative and anchored on whichever
+    field arrived first.
+    """
+    from whygraph.chat.tools import _DESCRIPTION_AUTHORITY
+
+    history = [
+        "get_evidence",
+        "get_area_history",
+        "find_changes",
+        "get_commit",
+        "list_recent_activity",
+    ]
+    for name in history:
+        spec = next(s for s in TOOL_SPECS if s.name == name)
+        assert _DESCRIPTION_AUTHORITY in spec.description, (
+            f"{name} must state that llm_description is the reliable field"
+        )
+    assert "DIFF ALONE" in _DESCRIPTION_AUTHORITY
+    assert "terse, stale, or simply wrong" in _DESCRIPTION_AUTHORITY
+
+
+def test_the_stats_spec_ships_the_annotated_schema() -> None:
+    """The shipped description *is* the schema doc — not a paraphrase of it.
+
+    Detailed content assertions live in ``test_chat_stats_sql.py``; this guards
+    the wiring, which is the part that could silently regress to a short
+    summary "to save tokens".
+    """
+    from whygraph.chat.stats_sql import _SCHEMA_DOC
+
+    spec = next(s for s in TOOL_SPECS if s.name == "run_project_stats")
+    assert spec.description == _SCHEMA_DOC
+    assert "FOUR REQUIRED RULES" in spec.description
+    assert "=== TABLES ===" in spec.description
 
 
 def test_every_spec_has_a_handler() -> None:
@@ -243,6 +287,265 @@ def test_missing_codegraph_degrades_to_an_error_result(
     finally:
         db_engine._reset_engine()
         core._reset_config()
+
+
+# ---------------------------------------------------------------------------
+# get_area_outline (the package-shaped query CodeGraph has no node kind for)
+# ---------------------------------------------------------------------------
+
+
+def _node(
+    node_id: str,
+    kind: str,
+    name: str,
+    file_path: str,
+    start_line: int = 1,
+    *,
+    qualified_name: str | None = None,
+) -> dict:
+    """One ``nodes`` row for the outline fixtures."""
+    return {
+        "id": node_id,
+        "kind": kind,
+        "name": name,
+        "qualified_name": qualified_name or name,
+        "file_path": file_path,
+        "language": "python",
+        "start_line": start_line,
+        "end_line": start_line + 5,
+        "docstring": None,
+        "signature": f"def {name}()",
+    }
+
+
+# Two sibling directories whose names differ only where a LIKE wildcard would
+# match: `pkg_a` vs `pkgXa`. `_` is a single-character wildcard, so an
+# unescaped prefix query for `pkg_a` returns both.
+_OUTLINE_NODES = [
+    _node(
+        "o_file",
+        "file",
+        "one.py",
+        "src/pkg_a/one.py",
+        1,
+        qualified_name="src/pkg_a/one.py",
+    ),
+    # Deliberately out of line order in the fixture — `area()` must sort.
+    _node("o_beta", "function", "beta", "src/pkg_a/one.py", 30),
+    _node("o_alpha", "function", "alpha", "src/pkg_a/one.py", 10),
+    _node("o_cls", "class", "Widget", "src/pkg_a/two.py", 4),
+    _node("o_meth", "method", "Widget::run", "src/pkg_a/two.py", 8),
+    # Noise kinds the outline must drop.
+    _node("o_imp", "import", "json", "src/pkg_a/one.py", 2),
+    _node("o_var", "variable", "COUNTER", "src/pkg_a/one.py", 3),
+    # The wildcard trap.
+    _node("o_other", "function", "intruder", "src/pkgXa/three.py", 1),
+]
+
+
+@pytest.fixture
+def outline_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, codegraph_db_factory):
+    """A repo whose CodeGraph index has two look-alike sibling packages."""
+    root = tmp_path / "outline"
+    (root / ".git").mkdir(parents=True)
+    cg_path = codegraph_db_factory(nodes=_OUTLINE_NODES, edges=[])
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(
+        core,
+        "_config",
+        Config(whygraph_db=root / ".whygraph" / "wg.db", codegraph_db=cg_path),
+    )
+    db_engine._reset_engine()
+    try:
+        yield root
+    finally:
+        db_engine._reset_engine()
+        core._reset_config()
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["src/pkg_a", "src/pkg_a/", "./src/pkg_a", "./src/pkg_a/"],
+)
+def test_outline_accepts_every_spelling_of_a_directory(
+    outline_repo: Path, path: str
+) -> None:
+    """§2.1's failure was six directory lookups; all four spellings must work."""
+    registry = ToolRegistry(max_rationale_generations=0)
+    result = _result(registry, "get_area_outline", path=path)
+    assert result["detail"] == "symbols"
+    assert set(result["files"]) == {"src/pkg_a/one.py", "src/pkg_a/two.py"}
+
+
+def test_outline_of_an_exact_file_path_returns_just_that_file(
+    outline_repo: Path,
+) -> None:
+    registry = ToolRegistry(max_rationale_generations=0)
+    result = _result(registry, "get_area_outline", path="src/pkg_a/two.py")
+    assert set(result["files"]) == {"src/pkg_a/two.py"}
+    assert [s["name"] for s in result["files"]["src/pkg_a/two.py"]["symbols"]] == [
+        "Widget",
+        "Widget::run",
+    ]
+
+
+def test_outline_escapes_like_wildcards_in_the_prefix(outline_repo: Path) -> None:
+    """Risk 3: `_` is a single-char wildcard and this repo's paths are full of it."""
+    registry = ToolRegistry(max_rationale_generations=0)
+    result = _result(registry, "get_area_outline", path="src/pkg_a")
+    assert "src/pkgXa/three.py" not in result["files"]
+    assert "intruder" not in json.dumps(result)
+
+
+def test_outline_drops_noise_kinds_and_orders_by_line(outline_repo: Path) -> None:
+    registry = ToolRegistry(max_rationale_generations=0)
+    entry = _result(registry, "get_area_outline", path="src/pkg_a")["files"][
+        "src/pkg_a/one.py"
+    ]
+    # `import` and `variable` are excluded; the file node itself is kept.
+    assert [s["name"] for s in entry["symbols"]] == ["one.py", "alpha", "beta"]
+    assert [s["start_line"] for s in entry["symbols"]] == [1, 10, 30]
+
+
+def test_outline_omits_signature_and_id(outline_repo: Path) -> None:
+    """Decision §0.1 #1 — signatures are 75% of payload cost; get_symbol has them."""
+    registry = ToolRegistry(max_rationale_generations=0)
+    result = _result(registry, "get_area_outline", path="src/pkg_a")
+    for entry in result["files"].values():
+        for symbol in entry["symbols"]:
+            assert "signature" not in symbol
+            assert "id" not in symbol
+            # `file_path` is the key of the map this row sits under.
+            assert "file_path" not in symbol
+            assert set(symbol) == {
+                "qualified_name",
+                "name",
+                "kind",
+                "start_line",
+                "end_line",
+            }
+
+
+def test_outline_degrades_to_a_file_map_past_the_symbol_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, codegraph_db_factory
+) -> None:
+    """AC 2: a truncated list hides what was missed; a map redirects the next call."""
+    from whygraph.chat.tools import _OUTLINE_SYMBOL_LIMIT
+
+    nodes = [
+        _node(f"big_{n}", "function", f"fn{n}", f"src/big/mod{n % 7}.py", n + 1)
+        for n in range(_OUTLINE_SYMBOL_LIMIT + 1)
+    ]
+    root = tmp_path / "big"
+    (root / ".git").mkdir(parents=True)
+    cg_path = codegraph_db_factory(nodes=nodes, edges=[])
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(
+        core, "_config", Config(whygraph_db=root / "wg.db", codegraph_db=cg_path)
+    )
+    db_engine._reset_engine()
+    try:
+        registry = ToolRegistry(max_rationale_generations=0)
+        result = _result(registry, "get_area_outline", path="src/big")
+        assert result["detail"] == "files"
+        assert result["symbol_count"] == _OUTLINE_SYMBOL_LIMIT + 1
+        assert "re-call on a subdirectory" in result["hint"]
+        assert len(result["files"]) == 7
+        for entry in result["files"].values():
+            assert "symbols" not in entry  # a map, not a truncated listing
+            assert entry["symbol_count"] > 0
+        assert len(registry.dispatch("get_area_outline", {"path": "src/big"})) < 8_000
+    finally:
+        db_engine._reset_engine()
+        core._reset_config()
+
+
+def test_outline_unknown_path_explains_the_index_coverage_gap(
+    outline_repo: Path,
+) -> None:
+    """Markdown and TOML are not indexed at all — say so instead of returning {}."""
+    registry = ToolRegistry(max_rationale_generations=0)
+    result = _result(registry, "get_area_outline", path="docs")
+    assert result["symbol_count"] == 0
+    assert result["files"] == {}
+    assert "list_dir" in result["note"]
+
+
+def test_outline_requires_a_path(outline_repo: Path) -> None:
+    registry = ToolRegistry(max_rationale_generations=0)
+    assert (
+        "path is required" in _result(registry, "get_area_outline", path="  ")["error"]
+    )
+
+
+def test_outline_omits_commit_counts_when_whygraph_is_unscanned(
+    outline_repo: Path,
+) -> None:
+    """AC 4: the structural answer is useful alone, so a missing DB degrades."""
+    registry = ToolRegistry(max_rationale_generations=0)
+    result = _result(registry, "get_area_outline", path="src/pkg_a")
+    assert result["detail"] == "symbols"
+    for entry in result["files"].values():
+        assert "commit_count" not in entry
+
+
+def test_outline_carries_per_file_commit_counts(
+    outline_repo: Path,
+) -> None:
+    """AC 4: CodeGraph results travel with their WhyGraph handles (§4.1c)."""
+    from alembic import command
+
+    from whygraph.db import get_session
+    from whygraph.db.bootstrap import alembic_config
+    from whygraph.db.models import Commit, CommitFileChange
+
+    command.upgrade(alembic_config(), "head")
+    with get_session() as session:
+        for n, (sha, on_main) in enumerate([("s1", 1), ("s2", 1), ("s3", 0)]):
+            session.add(
+                Commit(
+                    sha=sha,
+                    parent_shas="",
+                    author_name="dev",
+                    author_email="dev@example.com",
+                    authored_at=f"2026-07-0{n + 1}T00:00:00+00:00",
+                    committed_at=f"2026-07-0{n + 1}T00:00:00+00:00",
+                    subject=f"subject {sha}",
+                    body="",
+                    files_changed=1,
+                    insertions=1,
+                    deletions=0,
+                    scanned_at="2026-07-30T00:00:00+00:00",
+                    on_default_branch=on_main,
+                )
+            )
+            session.add(
+                CommitFileChange(
+                    commit_sha=sha,
+                    path="src/pkg_a/one.py",
+                    change_type="M",
+                    lines_added=1,
+                    lines_deleted=0,
+                )
+            )
+        # A commit on the look-alike sibling must not leak into pkg_a's counts.
+        session.add(
+            CommitFileChange(
+                commit_sha="s1",
+                path="src/pkgXa/three.py",
+                change_type="M",
+                lines_added=1,
+                lines_deleted=0,
+            )
+        )
+        session.commit()
+
+    registry = ToolRegistry(max_rationale_generations=0)
+    files = _result(registry, "get_area_outline", path="src/pkg_a")["files"]
+    # s3 is off the default branch, so it is not counted (same rule as area-history).
+    assert files["src/pkg_a/one.py"]["commit_count"] == 2
+    # Scanned but untouched reports 0 — distinguishable from "no DB", which omits.
+    assert files["src/pkg_a/two.py"]["commit_count"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -748,4 +1051,310 @@ def test_recent_activity_on_an_unscanned_db_is_a_result_not_an_exception(
     registry = ToolRegistry(max_rationale_generations=0)
     result = _result(registry, "list_recent_activity")
     assert "error" in result
+    assert "scan" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# find_changes (content search over diff descriptions — the debugging entry)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def searchable_history(chat_repo: Path):
+    """History shaped to exercise every ``find_changes`` filter.
+
+    The interesting rows are the two that are *only* reachable through the new
+    haystacks: ``squash`` says nothing useful in its own text and is findable
+    only via its PR title, and ``old`` lives under a pre-rename path.
+    """
+    from alembic import command
+
+    from whygraph.db import get_session
+    from whygraph.db.bootstrap import alembic_config
+    from whygraph.db.models import Commit, CommitFileChange, PullRequest
+
+    command.upgrade(alembic_config(), "head")
+
+    def _commit(sha, day, *, description, subject="a change", on_main=1, body=""):
+        return Commit(
+            sha=sha,
+            parent_shas="",
+            author_name="dev",
+            author_email="dev@example.com",
+            authored_at=f"2026-07-{day}T00:00:00+00:00",
+            committed_at=f"2026-07-{day}T00:00:00+00:00",
+            subject=subject,
+            body=body,
+            files_changed=1,
+            insertions=1,
+            deletions=0,
+            scanned_at="2026-07-30T00:00:00+00:00",
+            llm_description=description,
+            on_default_branch=on_main,
+        )
+
+    with get_session() as session:
+        session.add_all(
+            [
+                _commit(
+                    "hit",
+                    "05",
+                    description="Fixed the DROPDOWN so the session survives a refresh.",
+                ),
+                _commit("miss", "04", description="Renamed a private helper."),
+                # Its own text is useless — only the PR title describes it.
+                _commit("squash", "06", description="Bulk edit.", subject="squash!"),
+                # Off the main walk: matches the keyword but must not be returned.
+                _commit(
+                    "offmain",
+                    "07",
+                    description="Another dropdown tweak.",
+                    on_main=0,
+                ),
+                # The keyword lives in an underscore-bearing token.
+                _commit("under", "03", description="Touched pkg_a during the sweep."),
+                _commit("old", "01", description="Created the original module."),
+                _commit("renamer", "02", description="Moved the module."),
+            ]
+        )
+        for sha, path in [
+            ("hit", "src/playground/src/api.ts"),
+            ("miss", "src/whygraph/core/config.py"),
+            ("squash", "src/playground/src/api.ts"),
+            ("under", "src/pkg_a/one.py"),
+            ("old", "src/whygraph/legacy.py"),
+        ]:
+            session.add(
+                CommitFileChange(
+                    commit_sha=sha,
+                    path=path,
+                    change_type="M",
+                    lines_added=1,
+                    lines_deleted=0,
+                )
+            )
+        # The rename edge `resolve_path_aliases` walks backwards.
+        session.add(
+            CommitFileChange(
+                commit_sha="renamer",
+                path="src/whygraph/current.py",
+                change_type="R",
+                renamed_from="src/whygraph/legacy.py",
+                similarity=98,
+                lines_added=0,
+                lines_deleted=0,
+            )
+        )
+        session.add(
+            PullRequest(
+                number=38,
+                title="fix(serve): stop the provider dropdown resetting mid-session",
+                body="A long discussion mentioning quicksort and other irrelevancies.",
+                state="closed",
+                created_at="2026-07-05T00:00:00+00:00",
+                updated_at="2026-07-06T00:00:00+00:00",
+                merged_at="2026-07-06T00:00:00+00:00",
+                merge_commit_sha="squash",
+                head_sha="squash",
+                base_ref="main",
+                author="dev",
+                html_url="https://example.invalid/pr/38",
+                labels="[]",
+                commit_titles="[]",
+                comments="[]",
+                fetched_at="2026-07-30T00:00:00+00:00",
+            )
+        )
+        session.commit()
+    return chat_repo
+
+
+def _shas(registry: ToolRegistry, **kwargs) -> list[str]:
+    return [c["sha"] for c in _result(registry, "find_changes", **kwargs)["commits"]]
+
+
+def test_find_changes_matches_description_content_case_insensitively(
+    searchable_history: Path,
+) -> None:
+    """AC 5: the case search_symbols cannot answer at all."""
+    registry = ToolRegistry(max_rationale_generations=0)
+    assert "hit" in _shas(registry, query="dropdown")
+    assert "hit" in _shas(registry, query="DROPDOWN")
+
+
+def test_find_changes_ands_every_term(searchable_history: Path) -> None:
+    registry = ToolRegistry(max_rationale_generations=0)
+    assert _shas(registry, query="dropdown refresh") == ["hit"]
+    # Both terms must appear in the same commit.
+    assert _shas(registry, query="dropdown quicksort") == []
+
+
+def test_find_changes_requires_a_filter(searchable_history: Path) -> None:
+    """Without one this would dump the whole history."""
+    registry = ToolRegistry(max_rationale_generations=0)
+    assert "query" in _result(registry, "find_changes")["error"]
+
+
+def test_find_changes_matches_on_a_linked_pr_title_alone(
+    searchable_history: Path,
+) -> None:
+    """AC 6: for a squash merge the PR title is often the only real summary."""
+    registry = ToolRegistry(max_rationale_generations=0)
+    result = _result(registry, "find_changes", query="resetting")
+    assert [c["sha"] for c in result["commits"]] == ["squash"]
+    # And the PR that explains the match travels with the row.
+    assert result["commits"][0]["linked_prs"] == [
+        {
+            "number": 38,
+            "title": "fix(serve): stop the provider dropdown resetting mid-session",
+        }
+    ]
+
+
+def test_find_changes_ignores_pr_bodies(searchable_history: Path) -> None:
+    """Decision §0.1 #3: titles are 1,967 chars across the repo, bodies 77,420."""
+    registry = ToolRegistry(max_rationale_generations=0)
+    assert _shas(registry, query="quicksort") == []
+
+
+def test_find_changes_excludes_off_default_branch_commits(
+    searchable_history: Path,
+) -> None:
+    """Squash-recovered PR-origin commits would double-count the same work."""
+    registry = ToolRegistry(max_rationale_generations=0)
+    assert "offmain" not in _shas(registry, query="dropdown")
+
+
+def test_find_changes_accepts_a_directory_where_area_history_cannot(
+    searchable_history: Path,
+) -> None:
+    """AC 7: get_area_history returns 0 for the same input, on purpose."""
+    registry = ToolRegistry(max_rationale_generations=0)
+    assert _shas(registry, path="src/playground/src") == ["squash", "hit"]
+    unchanged = _result(registry, "get_area_history", path="src/playground/src")
+    assert unchanged["evidence"] == []
+
+
+def test_find_changes_follows_a_rename_chain(searchable_history: Path) -> None:
+    """AC 8: a bare `WHERE path = ?` silently loses pre-rename history."""
+    registry = ToolRegistry(max_rationale_generations=0)
+    shas = _shas(registry, path="src/whygraph/current.py")
+    assert "old" in shas, "the pre-rename commit must be reachable"
+    assert "renamer" in shas
+
+
+def test_find_changes_reports_which_paths_matched(searchable_history: Path) -> None:
+    registry = ToolRegistry(max_rationale_generations=0)
+    rows = _result(registry, "find_changes", path="src/whygraph/current.py")["commits"]
+    by_sha = {r["sha"]: r for r in rows}
+    # The alias, not the queried name — that is the evidence the rename worked.
+    assert by_sha["old"]["matched_paths"] == ["src/whygraph/legacy.py"]
+    # No path filter → no matched_paths key at all.
+    assert (
+        "matched_paths"
+        not in _result(registry, "find_changes", query="dropdown")["commits"][0]
+    )
+
+
+def test_find_changes_escapes_like_wildcards_in_a_term(
+    searchable_history: Path,
+) -> None:
+    """Risk 3: `pkg_a` must not match `pkgXa` via the `_` wildcard."""
+    registry = ToolRegistry(max_rationale_generations=0)
+    assert _shas(registry, query="pkg_a") == ["under"]
+    assert _shas(registry, query="pkgXa") == []
+
+
+def test_find_changes_omits_the_heavy_blobs(searchable_history: Path) -> None:
+    """AC 9: pr.body / pr.comments / commit.body are 73% of what truncates today."""
+    registry = ToolRegistry(max_rationale_generations=0)
+    result = _result(registry, "find_changes", query="resetting")
+    blob = json.dumps(result)
+    assert "quicksort" not in blob  # the PR body is nowhere in the payload
+    row = result["commits"][0]
+    for key in ("body", "comments", "commit_titles"):
+        assert key not in row
+    assert set(row["linked_prs"][0]) == {"number", "title"}
+
+
+def test_find_changes_emits_the_description_in_full(searchable_history: Path) -> None:
+    """Clipping the description defeats the entire purpose of the tool."""
+    from whygraph.mcp.resources import _RECENT_DESCRIPTION_CHARS
+
+    from whygraph.db import get_session
+    from whygraph.db.models import Commit
+
+    long_text = "Sessions vanish. " + "detail " * 200
+    assert len(long_text) > _RECENT_DESCRIPTION_CHARS
+    with get_session() as session:
+        commit = session.get(Commit, "hit")
+        commit.llm_description = long_text
+        session.add(commit)
+        session.commit()
+
+    registry = ToolRegistry(max_rationale_generations=0)
+    row = _result(registry, "find_changes", query="vanish")["commits"][0]
+    assert row["llm_description"] == long_text
+
+
+def test_find_changes_clamps_the_limit(searchable_history: Path) -> None:
+    from whygraph.mcp.resources import _FIND_CHANGES_MAX_LIMIT
+
+    registry = ToolRegistry(max_rationale_generations=0)
+    assert len(_shas(registry, path="src", limit=1)) == 1
+    # A model asking for 500 gets the cap, not a payload truncated mid-JSON.
+    assert _result(registry, "find_changes", path="src", limit=500)["count"] <= (
+        _FIND_CHANGES_MAX_LIMIT
+    )
+    assert len(_shas(registry, path="src", limit=0)) == 1
+
+
+def test_find_changes_stays_parseable_at_its_own_max_limit(
+    searchable_history: Path,
+) -> None:
+    """Regression: a row-count cap does NOT bound the payload.
+
+    Shipped wrong once. Descriptions are emitted in full and average ~1,280
+    chars, so ``limit=30`` produced 30,014 chars against a 30,000-char registry
+    cap — truncated mid-string, and therefore **invalid JSON the model could not
+    read at all**. Exactly the failure this tool exists to avoid.
+    """
+    from sqlmodel import select
+
+    from whygraph.db import get_session
+    from whygraph.db.models import Commit
+
+    # Give every commit a description far longer than any real one.
+    with get_session() as session:
+        for commit in session.exec(select(Commit)).all():
+            commit.llm_description = "Sessions vanish. " + ("detail " * 900)
+            session.add(commit)
+        session.commit()
+
+    registry = ToolRegistry(max_rationale_generations=0)
+    raw = registry.dispatch("find_changes", {"query": "vanish", "limit": 50})
+    assert not raw.endswith(TRUNCATION_MARKER), "must never truncate mid-JSON"
+    result = json.loads(raw)  # the assertion that actually matters
+    assert len(raw) < MAX_RESULT_CHARS
+    # At least one row survives, and the shortfall is stated rather than implied.
+    assert result["count"] >= 1
+    assert result["omitted"] >= 1
+    assert "get_commit" in result["note"]
+
+
+def test_find_changes_omits_nothing_when_everything_fits(
+    searchable_history: Path,
+) -> None:
+    """The counterpart: no spurious `omitted` key on a small result."""
+    registry = ToolRegistry(max_rationale_generations=0)
+    result = _result(registry, "find_changes", query="dropdown")
+    assert "omitted" not in result
+    assert "note" not in result
+
+
+def test_find_changes_on_an_unscanned_db_is_a_result_not_an_exception(
+    chat_repo: Path,
+) -> None:
+    registry = ToolRegistry(max_rationale_generations=0)
+    result = _result(registry, "find_changes", query="anything")
     assert "scan" in result["error"]

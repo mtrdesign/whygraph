@@ -8,11 +8,14 @@ developer can converse with the repo's accumulated knowledge.
 
 Layout
 ------
-* :mod:`.tools` — the twelve :class:`~whygraph.services.llm.chat.ToolSpec`
+* :mod:`.tools` — the fifteen :class:`~whygraph.services.llm.chat.ToolSpec`
   definitions plus :class:`~whygraph.chat.tools.ToolRegistry`, which
   dispatches to the same plain functions the MCP tools call.
 * :mod:`.files` — clamped read-only file access, the one genuinely new
   attack surface the assistant adds.
+* :mod:`.stats_sql` — the statistics surface: read-only, aggregate-only SQL
+  behind a SQLite authorizer, so "statistics only" holds by construction
+  rather than by prompt wording.
 * :mod:`.harness` — :func:`~whygraph.chat.harness.run_turn`, the agentic
   loop, and :func:`~whygraph.chat.harness.build_window`, the context
   trimmer.

@@ -16,6 +16,8 @@ import sqlite3
 from collections import deque
 from pathlib import Path
 
+from whygraph.core.utils import LIKE_ESCAPE_CHAR, like_escape
+
 from .context import SymbolContext
 from .exceptions import CodeGraphError
 from .paths import CODEGRAPH_DB_RELPATH
@@ -40,6 +42,20 @@ _CONTAINS = "contains"
 _FILE = "file"
 # Node kinds a rationale card can be generated for — used by coverage counting.
 _DEFINABLE_KINDS = ("function", "method", "class")
+# Kinds worth showing in an area outline. Excludes ``import`` (1111 nodes on
+# this repo — pure noise) and ``variable`` (238, mostly module-level
+# assignments), both of which crowd out the definitions the caller asked for.
+_OUTLINE_KINDS = (
+    "file",
+    "class",
+    "function",
+    "method",
+    "interface",
+    "route",
+    "constant",
+    "type_alias",
+    "component",
+)
 
 
 class CodeGraph:
@@ -333,6 +349,49 @@ class CodeGraph:
             (_FILE,),
         ).fetchall()
         return [Symbol.from_row(r) for r in rows]
+
+    def area(self, path_prefix: str) -> list[Symbol]:
+        """Every outline-worthy symbol under a directory prefix, or in one file.
+
+        Fills the gap that has no node kind: CodeGraph indexes *files*, not
+        packages, so "what is in this subsystem" had no structural answer and
+        callers fell back to listing directories and reading files. The answer
+        is derivable from ``nodes.file_path``, which already exists — no
+        re-indexing and no schema change.
+
+        Parameters
+        ----------
+        path_prefix : str
+            A repo-relative directory (``"src/whygraph/chat"``) or a single
+            file path. A leading ``"./"`` and a trailing ``"/"`` are both
+            tolerated, so the three spellings of a directory agree.
+
+        Returns
+        -------
+        list[Symbol]
+            Symbols of :data:`_OUTLINE_KINDS`, ordered by ``file_path`` then
+            ``start_line`` so a caller can group by file in a single pass.
+            Empty when nothing is indexed under the prefix — including for
+            paths CodeGraph never indexes at all, such as markdown.
+
+        Notes
+        -----
+        ``_`` is a single-character ``LIKE`` wildcard and this repo's paths
+        are full of it, so the prefix is escaped and the query declares
+        ``ESCAPE``. Without that, ``"src/whygraph/chat"`` would also match a
+        sibling ``chatX/`` directory.
+        """
+        prefix = path_prefix.strip().removeprefix("./").rstrip("/")
+        if not prefix:
+            return []
+        placeholders = ", ".join("?" for _ in _OUTLINE_KINDS)
+        rows = self._conn.execute(
+            f"{_NODE_SELECT} WHERE kind IN ({placeholders}) "
+            f"  AND (file_path = ? OR file_path LIKE ? ESCAPE '{LIKE_ESCAPE_CHAR}') "
+            "ORDER BY file_path, start_line",
+            (*_OUTLINE_KINDS, prefix, f"{like_escape(prefix)}/%"),
+        ).fetchall()
+        return [Symbol.from_row(row) for row in rows]
 
     def file_edges(self, kinds: tuple[str, ...]) -> list[tuple[str, str, str]]:
         """Every edge of the given kinds, projected onto endpoint file paths.

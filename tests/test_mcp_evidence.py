@@ -15,7 +15,7 @@ from sqlmodel import select
 from whygraph.db import get_session
 from whygraph.db.models import Commit, CommitFileChange, Issue, PRIssueLink, PullRequest
 from whygraph.mcp.errors import WhyGraphError
-from whygraph.mcp.evidence import _pr_dict, whygraph_evidence_for
+from whygraph.mcp.evidence import _commit_dict, _pr_dict, whygraph_evidence_for
 from whygraph.scan.refactor_score import BORING_THRESHOLD
 from whygraph.services.git import Repository
 
@@ -51,6 +51,30 @@ def _db_commit(
         scanned_at="2026-05-01T00:00:00+00:00",
         llm_description=llm_description,
     )
+
+
+def test_commit_dict_leads_with_the_diff_derived_description() -> None:
+    """AC 10: key *order* changed to fix anchoring; the key set must not.
+
+    ``whygraph_evidence_for`` and ``whygraph_area_history`` are registered MCP
+    tools the planner subagents consume, so adding or removing a key here would
+    be a contract change. Reordering is not.
+    """
+    payload = _commit_dict(_db_commit("abc", committed_at="2026-01-01T00:00:00+00:00"))
+    assert list(payload) == [
+        "sha",
+        "llm_description",
+        "subject",
+        "body",
+        "author_name",
+        "author_email",
+        "committed_at",
+    ]
+    # The model anchors on what it reads first, and the diff-derived field is
+    # the one a nonsense commit message cannot corrupt.
+    assert list(payload).index("llm_description") < list(payload).index("subject")
+    assert payload["llm_description"] == "Mechanical diff summary."
+    assert payload["subject"] == "a change"
 
 
 def _db_pr(*, number: int, merge_commit_sha: str) -> PullRequest:

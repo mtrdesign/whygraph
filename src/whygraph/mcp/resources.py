@@ -38,6 +38,7 @@ from the existing tool modules:
 
 from __future__ import annotations
 
+import json
 import logging
 
 from mcp.server.fastmcp import FastMCP
@@ -45,11 +46,19 @@ from sqlalchemy import func
 from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, col, select
 
+from whygraph.core.utils import LIKE_ESCAPE_CHAR, like_escape
 from whygraph.db import get_session
-from whygraph.db.models import Commit, Issue, PRIssueLink, PullRequest
+from whygraph.db.models import (
+    Commit,
+    CommitFileChange,
+    Issue,
+    PRIssueLink,
+    PullRequest,
+)
 
 from .errors import WhyGraphError
 from .evidence import _json_list, _linked_prs
+from .path_history import resolve_path_aliases
 
 _log = logging.getLogger(__name__)
 
@@ -70,12 +79,17 @@ def _hydrate_commit(commit: Commit) -> dict:
     stores parents space-delimited (see ``evidence.py``'s
     ``_first_parent_of`` which calls ``.split()``). Callers that want a
     list should ``.split()`` themselves.
+
+    ``llm_description`` leads for the same reason it does in
+    :func:`whygraph.mcp.evidence._commit_dict`: it is diff-derived and
+    therefore the reliable account of what changed, and an agent anchors on
+    whichever field it reads first. Key order only — the key set is unchanged.
     """
     return {
         "sha": commit.sha,
+        "llm_description": commit.llm_description,
         "subject": commit.subject,
         "body": commit.body,
-        "llm_description": commit.llm_description,
         "author_name": commit.author_name,
         "author_email": commit.author_email,
         "authored_at": commit.authored_at,
@@ -352,6 +366,262 @@ def _truncate(text: str | None) -> str | None:
     if len(text) <= _RECENT_DESCRIPTION_CHARS:
         return text
     return text[:_RECENT_DESCRIPTION_CHARS] + "…"
+
+
+_FIND_CHANGES_MAX_LIMIT = 50
+"""Hard cap on the number of ``find_changes`` rows a caller may ask for.
+
+A row-count cap alone does **not** bound the payload, because descriptions are
+emitted in full and vary from a sentence to several paragraphs — that is what
+:data:`_FIND_CHANGES_PAYLOAD_BUDGET` is for.
+"""
+
+_FIND_CHANGES_PAYLOAD_BUDGET = 26_000
+"""Char budget for the ``commits`` array, the real bound on result size.
+
+Sits under the chat registry's 30,000-char result cap
+(:data:`whygraph.chat.tools.MAX_RESULT_CHARS`) with room for the envelope.
+Duplicated as a literal rather than imported because ``mcp`` must not depend on
+``chat`` — ``chat`` is an adapter over this layer, not the reverse.
+
+**Measured, after getting this wrong once:** descriptions average ~1,280 chars,
+so ``limit=30`` on this repo produced 30,014 chars — over the cap, truncated
+mid-string, and therefore **invalid JSON the model could not parse at all**.
+Exactly the failure §2.5 of the plan documents and this tool exists to avoid.
+Row assembly stops at this budget and says how many rows it dropped, because a
+short honest answer beats a long broken one.
+"""
+
+_FIND_CHANGES_MATCHED_PATHS = 5
+"""How many matching paths to echo back per commit, when a path filter is used."""
+
+
+def _pr_commit_shas(pr: PullRequest) -> set[str]:
+    """Every commit SHA a pull request contains.
+
+    The inverse of :func:`whygraph.mcp.evidence._linked_prs`: that function
+    asks "which PRs contain this commit", this one asks "which commits does
+    this PR contain". Same three sources — the merge commit, the head commit,
+    and the ``commit_titles`` blob — and the same discipline of comparing
+    ``oid`` exactly rather than scanning the JSON as text.
+    """
+    shas = {pr.merge_commit_sha, pr.head_sha}
+    shas.update(
+        entry["oid"]
+        for entry in _json_list(pr.commit_titles)
+        if isinstance(entry, dict) and entry.get("oid")
+    )
+    shas.discard(None)
+    return shas
+
+
+def _find_changes_resource(
+    query: str | None = None,
+    path: str | None = None,
+    limit: int = 15,
+) -> dict:
+    """Commits found by *what they changed* — keyword and/or path.
+
+    The one content-keyed history read. Every other one needs an identifier the
+    caller must already know: :func:`whygraph.mcp.evidence.whygraph_evidence_for`
+    needs a symbol, :func:`area_history_commits` needs an exact file path,
+    :func:`_recent_activity_resource` knows only recency. That left defect
+    investigation with no entry point, because a defect is reported in the
+    vocabulary of *behaviour* ("sessions vanish after a refresh") and the only
+    text written in that vocabulary is the diff descriptions.
+
+    Parameters
+    ----------
+    query : str, optional
+        Whitespace-separated terms, **AND**-ed. Each is matched
+        case-insensitively as a substring of the commit's own text
+        (``llm_description`` / ``subject`` / ``body``) or of a linked pull
+        request's **title**. PR *bodies* are deliberately not searched — they
+        are 39x the size of the titles and are the unreliable prose this tool
+        exists to route around.
+    path : str, optional
+        A repo-relative file or directory prefix, expanded through
+        :func:`resolve_path_aliases` so a renamed file's earlier history is
+        included rather than silently dropped.
+    limit : int, optional
+        Maximum commits, newest first. Default 15, clamped to
+        ``[1, _FIND_CHANGES_MAX_LIMIT]``.
+
+    Returns
+    -------
+    dict
+        ``{"query", "path", "count", "commits"}``. Each commit carries its
+        **full** ``llm_description`` — that is the payload, so it is never
+        clipped — plus stats and ``linked_prs`` as number + title. PR bodies,
+        comments, commit titles, and the commit ``body`` are omitted: together
+        they are 73% of the area-history payload that truncates today.
+
+    Raises
+    ------
+    WhyGraphError
+        The DB is missing or unscanned.
+
+    Notes
+    -----
+    Not registered in :func:`register` — the chat tool is its only caller, and
+    WhyGraph's MCP surface deliberately stays narrow. It is a **sibling** of
+    ``whygraph_area_history`` rather than a fix to it: that tool's uncapped
+    blobs are documented and deliberate, and the planner subagents consume it.
+    """
+    _log.debug("find changes: query=%r path=%r limit=%r", query, path, limit)
+    terms = (query or "").split()
+    path = (path or "").strip().removeprefix("./").rstrip("/")
+    if not terms and not path:
+        return {
+            "error": (
+                "pass `query` (keywords matched against commit diff "
+                "descriptions and PR titles) and/or `path` (a file or "
+                "directory prefix). Without a filter this would return the "
+                "whole history."
+            )
+        }
+    limit = max(1, min(int(limit), _FIND_CHANGES_MAX_LIMIT))
+
+    try:
+        with get_session() as session:
+            aliases = resolve_path_aliases(session, path) if path else set()
+            shas = _find_changes_shas(session, terms, path, aliases)
+            if not shas:
+                return {"query": query, "path": path or None, "count": 0, "commits": []}
+
+            commits = session.exec(
+                select(Commit)
+                .where(col(Commit.sha).in_(shas))
+                .where(col(Commit.on_default_branch) == 1)
+                .order_by(col(Commit.authored_at).desc())
+                .limit(limit)
+            ).all()
+            # Assemble under a char budget, not just a row count: descriptions
+            # are emitted in full and vary wildly, so N rows is not a bound on
+            # payload size. Stopping early keeps the JSON valid and parseable.
+            rows: list[dict] = []
+            spent = 0
+            for commit in commits:
+                row = _find_changes_row(session, commit, path, aliases)
+                cost = len(json.dumps(row, default=str))
+                if rows and spent + cost > _FIND_CHANGES_PAYLOAD_BUDGET:
+                    break
+                rows.append(row)
+                spent += cost
+            dropped = len(commits) - len(rows)
+    except OperationalError as exc:
+        raise WhyGraphError(_DB_UNSCANNED_MESSAGE) from exc
+
+    result = {
+        "query": query,
+        "path": path or None,
+        "count": len(rows),
+        "commits": rows,
+    }
+    if dropped:
+        # Say what was withheld and how to get it. Silence here would read as
+        # "these are all the matches", which is the one wrong answer that
+        # cannot be spotted downstream.
+        result["omitted"] = dropped
+        result["note"] = (
+            f"{dropped} more matching commit(s) were withheld to keep this "
+            "result parseable — the descriptions are long. Narrow the query, "
+            "add a `path`, or fetch specific SHAs with get_commit."
+        )
+    return result
+
+
+def _find_changes_shas(
+    session: Session, terms: list[str], path: str, aliases: set[str]
+) -> set[str]:
+    """The candidate SHA set for :func:`_find_changes_resource`.
+
+    Keyword matching runs in two passes because the two haystacks live in
+    different tables. The commit's own text is one ``LIKE`` per term, AND-ed in
+    SQL. A linked PR's **title** is resolved separately — matching PR titles
+    first, then expanding each to the commits it contains via
+    :func:`_pr_commit_shas` — because the commit-to-PR linkage needs the exact
+    ``oid`` comparison that a SQL join over the JSON blob cannot express.
+    """
+    if terms:
+        stmt = select(Commit.sha)
+        for term in terms:
+            pattern = f"%{like_escape(term)}%"
+            stmt = stmt.where(
+                func.coalesce(col(Commit.llm_description), "").like(
+                    pattern, escape=LIKE_ESCAPE_CHAR
+                )
+                | func.coalesce(col(Commit.subject), "").like(
+                    pattern, escape=LIKE_ESCAPE_CHAR
+                )
+                | func.coalesce(col(Commit.body), "").like(
+                    pattern, escape=LIKE_ESCAPE_CHAR
+                )
+            )
+        shas = set(session.exec(stmt).all())
+
+        # Second haystack: PR titles. A commit whose own text says nothing
+        # useful — the common case for a squash merge — is still findable
+        # through the title of the PR that carried it.
+        pr_stmt = select(PullRequest)
+        for term in terms:
+            pr_stmt = pr_stmt.where(
+                col(PullRequest.title).like(
+                    f"%{like_escape(term)}%", escape=LIKE_ESCAPE_CHAR
+                )
+            )
+        for pr in session.exec(pr_stmt).all():
+            shas.update(_pr_commit_shas(pr))
+    else:
+        shas = None  # path-only search: every commit touching the path
+
+    if not path:
+        return shas or set()
+
+    path_stmt = select(CommitFileChange.commit_sha).where(
+        col(CommitFileChange.path).in_(aliases)
+        | col(CommitFileChange.path).like(
+            f"{like_escape(path)}/%", escape=LIKE_ESCAPE_CHAR
+        )
+    )
+    touching = set(session.exec(path_stmt).all())
+    return touching if shas is None else shas & touching
+
+
+def _find_changes_row(
+    session: Session, commit: Commit, path: str, aliases: set[str]
+) -> dict:
+    """One :func:`_find_changes_resource` result row — description first."""
+    row = {
+        "sha": commit.sha,
+        # Never clipped: this is the payload, not a preview of it.
+        "llm_description": commit.llm_description,
+        "subject": _truncate(commit.subject),
+        "authored_at": commit.authored_at,
+        "author_name": commit.author_name,
+        "files_changed": commit.files_changed,
+        "insertions": commit.insertions,
+        "deletions": commit.deletions,
+    }
+    if path:
+        # Which of the commit's files the filter actually hit — so a directory
+        # search shows *where*, and an alias hit shows the pre-rename name.
+        touched = session.exec(
+            select(CommitFileChange.path).where(
+                col(CommitFileChange.commit_sha) == commit.sha
+            )
+        ).all()
+        matched = sorted(
+            {p for p in touched if p in aliases or p.startswith(f"{path}/")}
+        )
+        row["matched_paths"] = matched[:_FIND_CHANGES_MATCHED_PATHS]
+    row["linked_prs"] = [
+        # Number plus title only. The title is in the search haystack, so the
+        # model can see *why* a PR-title-only match came back.
+        {"number": pr.number, "title": pr.title}
+        for pr in _linked_prs(session, commit.sha)
+    ]
+    return row
 
 
 def _repo_overview_resource() -> dict:

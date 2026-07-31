@@ -1,10 +1,12 @@
-"""Tests for ``whygraph scan``'s three-phase orchestration and output.
+"""Tests for ``whygraph scan``'s phased orchestration and output.
 
 Pins the phase *sequencing* — Phase 1 (git + GitHub, concurrent) → Phase 2
-(pr-origins) → Phase 3 (analyze, the LLM long pole, last and alone) — plus
-the numbered phase headers and the closing results panel. The crawlers are
-stubbed with recording stand-ins so no git / GitHub / LLM / CodeGraph work
-actually runs; only the orchestrator's ordering and rendering is exercised.
+(pr-origins) → Phase 3 (authors, which needs Phase 2's rows) → Phase 4
+(analyze, the LLM long pole, last and alone) — plus the numbered phase
+headers across every flag combination and the closing results panel. The
+crawlers are stubbed with recording stand-ins so no git / GitHub / LLM /
+CodeGraph work actually runs; only the orchestrator's ordering and
+rendering is exercised.
 """
 
 from __future__ import annotations
@@ -111,11 +113,12 @@ def _patch_crawlers(
     """Replace every crawler class the CLI touches with a recording stub."""
     stubs = {
         n: _stub(n, order)
-        for n in ("git", "github", "pr-origins", "analyze", "codegraph")
+        for n in ("git", "github", "pr-origins", "authors", "analyze", "codegraph")
     }
     monkeypatch.setattr(scan_mod, "GitCrawler", stubs["git"])
     monkeypatch.setattr(scan_mod, "GitHubCrawler", stubs["github"])
     monkeypatch.setattr(scan_mod, "PROriginEnricher", stubs["pr-origins"])
+    monkeypatch.setattr(scan_mod, "AuthorResolver", stubs["authors"])
     monkeypatch.setattr(scan_mod, "CodeGraphCrawler", stubs["codegraph"])
     # AnalyzeCrawler is imported lazily inside scan_cmd — patch its source.
     monkeypatch.setattr("whygraph.scan.AnalyzeCrawler", stubs["analyze"])
@@ -126,7 +129,7 @@ def _idx(order: list[tuple[str, str]], event: tuple[str, str]) -> int:
     return order.index(event)
 
 
-def test_three_phases_run_in_order_with_llm_last(
+def test_four_phases_run_in_order_with_llm_last(
     isolated_db: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     order: list[tuple[str, str]] = []
@@ -139,14 +142,15 @@ def test_three_phases_run_in_order_with_llm_last(
     result = CliRunner().invoke(whygraph_main, ["scan"])
 
     assert result.exit_code == 0, result.output
-    # All five crawlers constructed exactly once.
-    for name in ("git", "github", "pr-origins", "analyze", "codegraph"):
+    # All six crawlers constructed exactly once.
+    for name in ("git", "github", "pr-origins", "authors", "analyze", "codegraph"):
         assert stubs[name].constructed == 1, name
 
-    # Numbered headers for all three phases.
-    assert "Phase 1/3 · Structural crawl" in result.output
-    assert "Phase 2/3 · PR-origin recovery" in result.output
-    assert "Phase 3/3 · LLM descriptions" in result.output
+    # Numbered headers for all four phases.
+    assert "Phase 1/4 · Structural crawl" in result.output
+    assert "Phase 2/4 · PR-origin recovery" in result.output
+    assert "Phase 3/4 · Author identity" in result.output
+    assert "Phase 4/4 · LLM descriptions" in result.output
 
     # CodeGraph is a background task: started first, joined last.
     assert order[0] == ("start", "codegraph")
@@ -158,48 +162,95 @@ def test_three_phases_run_in_order_with_llm_last(
     # Phase 1 both joined before Phase 2 starts.
     assert _idx(order, ("join", "git")) < _idx(order, ("start", "pr-origins"))
     assert _idx(order, ("join", "github")) < _idx(order, ("start", "pr-origins"))
-    # LLM is strictly last and alone: analyze starts only after pr-origins joins.
-    assert _idx(order, ("join", "pr-origins")) < _idx(order, ("start", "analyze"))
+    # Author resolution runs after PR-origin recovery: an address can appear
+    # only in the on_default_branch=0 rows Phase 2 writes.
+    assert _idx(order, ("join", "pr-origins")) < _idx(order, ("start", "authors"))
+    # LLM is strictly last and alone.
+    assert _idx(order, ("join", "authors")) < _idx(order, ("start", "analyze"))
 
     # Closing results panel is present.
     assert "done in" in result.output
 
 
-def test_skip_analyze_drops_the_llm_phase(
-    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("flags", "remote", "expected", "absent"),
+    [
+        pytest.param(
+            [],
+            True,
+            [
+                "Phase 1/4 · Structural crawl",
+                "Phase 2/4 · PR-origin recovery",
+                "Phase 3/4 · Author identity",
+                "Phase 4/4 · LLM descriptions",
+            ],
+            [],
+            id="default",
+        ),
+        pytest.param(
+            ["--skip-analyze"],
+            True,
+            [
+                "Phase 1/3 · Structural crawl",
+                "Phase 2/3 · PR-origin recovery",
+                "Phase 3/3 · Author identity",
+            ],
+            ["· LLM descriptions"],
+            id="skip-analyze",
+        ),
+        pytest.param(
+            ["--no-remote"],
+            False,
+            [
+                "Phase 1/3 · Structural crawl",
+                "Phase 2/3 · Author identity",
+                "Phase 3/3 · LLM descriptions",
+            ],
+            ["· PR-origin recovery"],
+            id="no-remote",
+        ),
+        pytest.param(
+            ["--no-remote", "--skip-analyze"],
+            False,
+            [
+                "Phase 1/2 · Structural crawl",
+                "Phase 2/2 · Author identity",
+            ],
+            ["· PR-origin recovery", "· LLM descriptions"],
+            id="no-remote-skip-analyze",  # the git-hook path
+        ),
+    ],
+)
+def test_phase_numbering_across_flag_combinations(
+    isolated_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    flags: list[str],
+    remote: bool,
+    expected: list[str],
+    absent: list[str],
 ) -> None:
+    """``phase_total`` is computed, so every combination is pinned — a stale
+    count mislabels every header (e.g. two "Phase 3/3" rules)."""
     order: list[tuple[str, str]] = []
     stubs = _patch_crawlers(monkeypatch, order)
-    monkeypatch.setattr(
-        scan_mod, "_select_github_client", lambda *a, **k: _DummyClient()
-    )
+    if remote:
+        monkeypatch.setattr(
+            scan_mod, "_select_github_client", lambda *a, **k: _DummyClient()
+        )
+    monkeypatch.setattr("whygraph.analyze.LlmDescriptor", _DummyDescriptor)
 
-    result = CliRunner().invoke(whygraph_main, ["scan", "--skip-analyze"])
-
-    assert result.exit_code == 0, result.output
-    # Two phases: structural + pr-origin recovery; no LLM phase.
-    assert "Phase 1/2 · Structural crawl" in result.output
-    assert "Phase 2/2 · PR-origin recovery" in result.output
-    assert "· LLM descriptions" not in result.output
-    assert stubs["analyze"].constructed == 0
-
-
-def test_single_phase_when_remote_and_llm_disabled(
-    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    order: list[tuple[str, str]] = []
-    stubs = _patch_crawlers(monkeypatch, order)
-
-    result = CliRunner().invoke(
-        whygraph_main, ["scan", "--no-remote", "--skip-analyze"]
-    )
+    result = CliRunner().invoke(whygraph_main, ["scan", *flags])
 
     assert result.exit_code == 0, result.output
-    assert "Phase 1/1 · Structural crawl" in result.output
-    assert "Phase 2" not in result.output
-    assert stubs["github"].constructed == 0
-    assert stubs["pr-origins"].constructed == 0
-    assert stubs["analyze"].constructed == 0
+    for header in expected:
+        assert header in result.output
+    for header in absent:
+        assert header not in result.output
+    # Author resolution is local-only, so it runs under every combination.
+    assert stubs["authors"].constructed == 1
+    # `n` never exceeds `phase_total`.
+    total = len(expected)
+    assert f"Phase {total + 1}/" not in result.output
 
 
 class _Fake:
@@ -230,7 +281,7 @@ def test_results_panel_is_defensive_and_total(
         _Fake("git", summary="5 commits (5 new)"),
         _Fake("github", summary="2 PRs · 1 issues"),
         _Fake("analyze", error=RuntimeError("boom")),  # failed → ✗
-        # pr-origins absent from `ran` → "— skipped" row
+        # pr-origins and authors absent from `ran` → "— skipped" rows
     ]
     codegraph = _Fake("codegraph", warning="CodeGraph refresh skipped — no binary")
 
@@ -246,6 +297,7 @@ def test_results_panel_is_defensive_and_total(
     out = buf.getvalue()
     assert "✗" in out  # failed analyze
     assert "⚠" in out  # codegraph warning
+    assert "Author identity" in out  # the row exists even when absent from `ran`
     assert "skipped" in out  # absent pr-origins
     assert "Scan log" in out  # R11: path row retained
     assert "done in" in out  # total elapsed in the title

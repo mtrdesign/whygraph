@@ -5,19 +5,24 @@ crawlers — :class:`GitCrawler` for local git history,
 :class:`GitHubCrawler` for GitHub pull requests and issues,
 :class:`CodeGraphCrawler` which refreshes the CodeGraph index,
 :class:`AnalyzeCrawler` which describes each commit's diff with an LLM,
-and :class:`PROriginEnricher` which recovers a squash-merged PR's original
-commits.
+:class:`PROriginEnricher` which recovers a squash-merged PR's original
+commits, and :class:`AuthorResolver` which collapses raw identities into
+one row per human.
 
-The CLI drives them in three ordered phases against the shared SQLite
-database: **Phase 1** runs :class:`GitCrawler` and :class:`GitHubCrawler`
+The CLI drives them in ordered phases against the shared SQLite database:
+**Phase 1** runs :class:`GitCrawler` and :class:`GitHubCrawler`
 concurrently; **Phase 2** runs :class:`PROriginEnricher` (which needs the
-git + PR rows Phase 1 persisted); **Phase 3** runs :class:`AnalyzeCrawler`
-last and alone (the slow, token-heavy LLM pass). :class:`CodeGraphCrawler`
-is a best-effort background task started before Phase 1 and joined after
-Phase 3 — it has no data dependency on the DB, so it spans the whole scan.
+git + PR rows Phase 1 persisted); **Phase 3** runs :class:`AuthorResolver`
+(which needs Phase 2's rows — an address can appear *only* in the
+``on_default_branch=0`` commits that phase writes); **Phase 4** runs
+:class:`AnalyzeCrawler` last and alone (the slow, token-heavy LLM pass).
+:class:`CodeGraphCrawler` is a best-effort background task started before
+Phase 1 and joined after the last phase — it has no data dependency on
+the DB, so it spans the whole scan.
 """
 
 from whygraph.scan.analyze_crawler import AnalyzeCrawler
+from whygraph.scan.authors import AuthorResolver
 from whygraph.scan.codegraph_crawler import CodeGraphCrawler
 from whygraph.scan.crawler import Crawler
 from whygraph.scan.git_crawler import GitCrawler
@@ -26,6 +31,7 @@ from whygraph.scan.pr_origin_enricher import PROriginEnricher
 
 __all__ = [
     "AnalyzeCrawler",
+    "AuthorResolver",
     "CodeGraphCrawler",
     "Crawler",
     "GitCrawler",

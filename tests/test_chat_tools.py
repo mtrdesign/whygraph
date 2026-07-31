@@ -125,10 +125,10 @@ def _result(registry: ToolRegistry, name: str, **arguments) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_fifteen_tools_with_unique_names_and_object_schemas() -> None:
+def test_seventeen_tools_with_unique_names_and_object_schemas() -> None:
     names = [spec.name for spec in TOOL_SPECS]
-    assert len(names) == 15
-    assert len(set(names)) == 15
+    assert len(names) == 17
+    assert len(set(names)) == 17
     assert set(names) == {
         "search_symbols",
         "get_symbol",
@@ -143,6 +143,8 @@ def test_fifteen_tools_with_unique_names_and_object_schemas() -> None:
         "get_repo_overview",
         "list_recent_activity",
         "run_project_stats",
+        "run_graph_stats",
+        "render_chart",
         "read_file",
         "list_dir",
     }
@@ -1358,3 +1360,259 @@ def test_find_changes_on_an_unscanned_db_is_a_result_not_an_exception(
     registry = ToolRegistry(max_rationale_generations=0)
     result = _result(registry, "find_changes", query="anything")
     assert "scan" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Charting — ref minting, and the payload discipline the split design buys
+# ---------------------------------------------------------------------------
+
+
+_CHART_RESULT = {
+    "sql": "SELECT strftime('%Y-%m', authored_at) AS month, count(*) AS commits …",
+    "columns": ["month", "commits"],
+    "rows": [["2026-03", 41], ["2026-04", 38], ["2026-05", 52]],
+    "row_count": 3,
+    "truncated": False,
+}
+
+
+def _minted(**overrides) -> tuple[ToolRegistry, dict]:
+    """Run one synthetic aggregate result through the minting policy."""
+    registry = ToolRegistry(max_rationale_generations=0)
+    result = {**_CHART_RESULT, **overrides}
+    return registry, registry._mint_chart_ref(result)
+
+
+def test_a_chartable_result_carries_an_opaque_ref_and_an_invitation() -> None:
+    """`columns` and `chart_ref` arrive together — the defense against
+    hallucinated column names, since the names are on screen in the message
+    immediately before the render_chart call."""
+    _, result = _minted()
+    assert result["chart_ref"].startswith("cr_")
+    assert result["columns"] == ["month", "commits"]
+    assert "render_chart" in result["chartable"]
+
+
+@pytest.mark.parametrize(
+    ("label", "overrides"),
+    [
+        ("errored", {"error": "nope", "layer": "shape"}),
+        ("truncated", {"truncated": True}),
+        ("one row", {"rows": [["2026-03", 41]], "row_count": 1}),
+        ("no rows", {"rows": [], "row_count": 0}),
+    ],
+)
+def test_no_ref_is_minted_for_a_result_not_worth_charting(
+    label: str, overrides: dict
+) -> None:
+    """Withholding the affordance beats refusing later.
+
+    A truncated result is the important one: the tool cannot know the true total,
+    so a chart drawn from it would be a confident lie.
+    """
+    _, result = _minted(**overrides)
+    assert "chart_ref" not in result, label
+    assert "chartable" not in result, label
+
+
+def test_two_rows_are_chartable_because_a_two_bar_chart_is_legitimate() -> None:
+    """The minting floor is the cheapest kind's minimum, not a flat 3.
+
+    A higher floor would make `bar` unreachable on a two-row result — "which of
+    these two developers has been busier" is a real question.
+    """
+    _, result = _minted(rows=[["alice", 12], ["bob", 9]], row_count=2)
+    assert "chart_ref" in result
+
+
+def test_refs_are_unique_unguessable_and_not_sequential() -> None:
+    """Risk 18: a ref must not address anything the model did not just compute."""
+    registry = ToolRegistry(max_rationale_generations=0)
+    refs = [
+        registry._mint_chart_ref(dict(_CHART_RESULT))["chart_ref"] for _ in range(8)
+    ]
+    assert len(set(refs)) == 8
+    for index, ref in enumerate(refs):
+        assert len(ref) == len("cr_") + 8  # token_hex(4)
+        assert all(char in "0123456789abcdef" for char in ref[3:])
+        # A counter would be guessable, and would let the model address a result
+        # from a turn it never saw.
+        assert ref != f"cr_{index:08x}"
+
+
+def test_render_chart_returns_the_directive_but_never_the_rows() -> None:
+    """§5.4's payload discipline, and the answer to risk 1.
+
+    The frontend already has the rows from the producer's result and correlates
+    on `chart_ref`, so echoing them would double a 200-row payload for nothing —
+    and truncation mid-array is what makes an oversized payload unparseable.
+    """
+    registry, produced = _minted()
+    result = _result(
+        registry,
+        "render_chart",
+        chart_ref=produced["chart_ref"],
+        kind="line",
+        title="Commits per month",
+        x="month",
+        y="commits",
+    )
+    assert result["chart"]["x_index"] == 0
+    assert result["chart"]["y_index"] == 1
+    assert result["columns"] == ["month", "commits"]
+    assert result["row_count"] == 3
+    assert "rows" not in result
+
+
+def test_an_unknown_ref_is_a_readable_error_not_an_exception() -> None:
+    registry = ToolRegistry(max_rationale_generations=0)
+    result = _result(
+        registry,
+        "render_chart",
+        chart_ref="cr_deadbeef",
+        kind="bar",
+        title="t",
+        x="month",
+        y="commits",
+    )
+    assert result["layer"] == "ref"
+    assert "Re-run the query" in result["error"]
+
+
+def test_a_ref_from_another_registry_is_rejected() -> None:
+    """Refs die with the turn, which is what makes `build_window`'s eliding of
+    older tool results irrelevant to charting rather than something to work
+    around."""
+    _, produced = _minted()
+    other = ToolRegistry(max_rationale_generations=0)
+    result = _result(
+        other,
+        "render_chart",
+        chart_ref=produced["chart_ref"],
+        kind="bar",
+        title="t",
+        x="month",
+        y="commits",
+    )
+    assert result["layer"] == "ref"
+
+
+def test_a_bad_column_is_a_chart_error_naming_the_available_ones() -> None:
+    registry, produced = _minted()
+    result = _result(
+        registry,
+        "render_chart",
+        chart_ref=produced["chart_ref"],
+        kind="bar",
+        title="t",
+        x="week",
+        y="commits",
+    )
+    assert result["layer"] == "chart"
+    assert "'month'" in result["error"] and "'commits'" in result["error"]
+
+
+def test_a_stacked_directive_round_trips_through_dispatch() -> None:
+    """The whole stacked path, as the model actually reaches it."""
+    registry = ToolRegistry(max_rationale_generations=0)
+    produced = registry._mint_chart_ref(
+        {
+            "columns": ["month", "kind", "n"],
+            "rows": [
+                ["2026-03", "M", 40],
+                ["2026-03", "A", 12],
+                ["2026-04", "M", 30],
+            ],
+            "row_count": 3,
+            "truncated": False,
+        }
+    )
+    result = _result(
+        registry,
+        "render_chart",
+        chart_ref=produced["chart_ref"],
+        kind="bar_stacked",
+        title="Changes per month by type",
+        x="month",
+        y="n",
+        series="kind",
+    )
+    chart = result["chart"]
+    assert chart["series_values"] == ["M", "A"]
+    assert chart["cells"]["2026-04"]["A"] == 0  # densified, and counted:
+    assert chart["filled_cells"] == 1
+
+
+def test_run_project_stats_has_no_chart_parameter() -> None:
+    """There is exactly one way to draw a chart.
+
+    An earlier design put `chart` on the producer; it was removed so charting is
+    a capability rather than a parameter that every future producer must grow.
+    """
+    for name in ("run_project_stats", "run_graph_stats"):
+        spec = next(s for s in TOOL_SPECS if s.name == name)
+        assert set(spec.parameters["properties"]) == {"sql"}
+
+
+def test_the_render_chart_spec_tells_the_model_to_name_columns() -> None:
+    """A wording guard, mirroring `_DESCRIPTION_AUTHORITY`.
+
+    "Name columns, never values" is the one instruction that keeps a chart
+    traceable to the query that produced it.
+    """
+    spec = next(s for s in TOOL_SPECS if s.name == "render_chart")
+    assert "COLUMNS OF THAT RESULT" in spec.description
+    assert "never retype the values" in spec.description
+    # One measure, and the breakdown routed to `series` rather than a second y.
+    assert "two MEASURES means two charts" in spec.description
+    assert "a breakdown is `series`, not a second y" in spec.description
+    # The kind enum is the registered set, not a prose list that could drift.
+    assert set(spec.parameters["properties"]["kind"]["enum"]) == set(
+        chat_tools.charts.CHART_KINDS
+    )
+    assert set(spec.parameters["required"]) == {"chart_ref", "kind", "title", "x", "y"}
+
+
+def test_the_graph_stats_spec_ships_its_own_schema_doc() -> None:
+    """The two stats tools must not share a description — the whole risk is that
+    the model confuses one database for the other."""
+    from whygraph.chat.graph_stats_sql import _GRAPH_SCHEMA_DOC
+    from whygraph.chat.stats_sql import _SCHEMA_DOC
+
+    spec = next(s for s in TOOL_SPECS if s.name == "run_graph_stats")
+    assert spec.description == _GRAPH_SCHEMA_DOC
+    assert spec.description != _SCHEMA_DOC
+    assert "DIFFERENT DATABASE from run_project_stats" in spec.description
+
+
+def test_a_charted_result_stays_parseable_at_the_row_cap() -> None:
+    """Risk 1, measured rather than estimated.
+
+    Length alone is not the assertion — `_encode` slices mid-array and appends a
+    marker, so the defect is unparseable JSON, not size. This is the shape that
+    once shipped broken on `find_changes`.
+    """
+    long_path = "src/whygraph/playground/src/components/chat/ToolCallCard.tsx"
+    registry = ToolRegistry(max_rationale_generations=0)
+    produced = registry._mint_chart_ref(
+        {
+            "columns": ["path", "changes"],
+            "rows": [[f"{long_path}#{n}", n] for n in range(200)],
+            "row_count": 200,
+            "truncated": False,
+        }
+    )
+    raw = registry.dispatch(
+        "render_chart",
+        {
+            "chart_ref": produced["chart_ref"],
+            "kind": "bar_h",
+            "title": "Files changed most often",
+            "x": "path",
+            "y": "changes",
+        },
+    )
+    assert not raw.endswith(TRUNCATION_MARKER)
+    assert len(raw) < MAX_RESULT_CHARS
+    result = json.loads(raw)  # the assertion that actually matters
+    assert result["row_count"] == 200

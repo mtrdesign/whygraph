@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from whygraph.chat import stats_sql
+from whygraph.chat import sql_guard, stats_sql
 from whygraph.chat.stats_sql import _ALLOWED_TABLES, _MAX_ROWS, run_stats_query
 from whygraph.db import get_session
 from whygraph.db.models import Commit, CommitFileChange, PullRequest
@@ -320,8 +320,11 @@ def test_a_runaway_query_is_aborted_and_returns_an_error_result(
     statement — no worker thread, no ``interrupt()`` call, and no signal handler
     (which would be wrong inside FastAPI's threadpool).
     """
-    monkeypatch.setattr(stats_sql, "_TIMEOUT_SEC", 0.05)
-    monkeypatch.setattr(stats_sql, "_PROGRESS_INTERVAL", 100)
+    # Layer 4 lives in `sql_guard` (shared with the CodeGraph surface), so that
+    # is where the deadline is read from — patching a re-export here would not
+    # reach the code under test.
+    monkeypatch.setattr(sql_guard, "_TIMEOUT_SEC", 0.05)
+    monkeypatch.setattr(sql_guard, "_PROGRESS_INTERVAL", 100)
     # Enough rows that a 6-way cartesian product cannot finish in 50ms.
     with get_session() as session:
         for n in range(60):

@@ -369,7 +369,7 @@ Do NOT use this to look up individual commits, PRs, or a file's history —
 get_commit / get_pr / get_area_history / find_changes handle those, and they
 follow rename chains and git blame, which raw SQL here does NOT.
 
-=== FOUR REQUIRED RULES (each of these silently corrupts results) ===
+=== FIVE REQUIRED RULES (each of these silently corrupts results) ===
 
 1. ALWAYS filter `on_default_branch = 1` on the commit table. Rows with 0 are
    PR-origin commits recovered from squash merges; counting them double-counts
@@ -389,6 +389,44 @@ follow rename chains and git blame, which raw SQL here does NOT.
 
 4. A merged PR has state = 'closed', NOT 'merged'. Count merges with
    `merged_at IS NOT NULL`. `state` is only 'open' or 'closed'.
+
+5. NEVER GROUP DEVELOPERS BY `commit.author_name` OR `author_email`. Those
+   are raw git identities and one human routinely has several — a work
+   email, a GitHub noreply address, a second machine. Grouping by either
+   reports one person as two or three, and the number looks authoritative.
+   The `author` table has already resolved this, one row per human.
+
+   For an ALL-TIME ranking, do not join at all — the counts are already
+   columns. This tool still requires an aggregate, so wrap them in SUM() and
+   group by the author's id (one row per group, so SUM is an identity):
+
+     SELECT COALESCE(primary_login, primary_name, primary_email) AS developer,
+            SUM(commit_count) AS commits, SUM(pr_count) AS prs
+     FROM author GROUP BY id ORDER BY commits DESC
+
+   (commit_count is already default-branch-only — do NOT also apply rule 1.)
+   Selecting commit_count bare, without SUM and GROUP BY, is REFUSED as a
+   non-aggregate query.
+
+   For anything TIME-SLICED ("lately", per month, since a date), join
+   commit to author on the emails array with instr():
+
+     SELECT COALESCE(a.primary_login, a.primary_name, a.primary_email)
+              AS developer,
+            COUNT(*) AS commits
+     FROM "commit" c
+     JOIN author a ON instr(a.emails, '"' || c.author_email || '"') > 0
+     WHERE c.on_default_branch = 1
+       AND c.authored_at >= date('now', '-90 days')
+     GROUP BY a.id ORDER BY commits DESC
+
+   Use instr() exactly as written. Do NOT use json_each (not permitted here)
+   and do NOT use LIKE for this match: '_' is a LIKE wildcard and appears in
+   ordinary addresses, so a LIKE join can attribute one person's commits to
+   a different person. The surrounding double quotes matter — they stop a
+   short address matching a longer one.
+
+   Never present a commit count as a measure of productivity.
 
 === TABLES ===
 
@@ -431,9 +469,18 @@ issue
 
 pr_issue_link — pr_number, issue_number, link_kind ('closes')
 
-author — resolved contributor identities. POPULATED BY A SEPARATE SCAN STEP
-  THAT OFTEN HAS NOT RUN (0 rows here). Prefer commit.author_name /
-  commit.author_email for contributor stats; treat this table as optional.
+author — resolved contributor identities, ONE ROW PER HUMAN. Built by the
+  scan's author phase from evidence only (git mailmap, GitHub's own
+  login/name/email triples, noreply parsing, byte-equal emails) — never from
+  a display name, so two people who share a name are never merged.
+  id INTEGER PK · primary_login TEXT NULL (GitHub login; NULL if they never
+    appeared in a PR/issue) · primary_name, primary_email TEXT
+  emails, logins, names TEXT -- JSON ARRAYS of every known value, sorted
+  commit_count INTEGER -- default-branch commits only (rule 1 already applied)
+  pr_count, issue_count INTEGER · first_seen, last_seen TEXT
+  Rebuilt from scratch each scan, so it is current or absent, never stale.
+  If it is EMPTY the author phase has not run — fall back to
+  commit.author_email and say the identities are unresolved.
 
 If a table returns nothing, that source has not been scanned — say so rather
 than reporting zero as a finding.\
@@ -446,9 +493,15 @@ plausible number arrives with no way to tell it apart from a right one. So every
 field whose meaning or value domain is non-obvious carries a note, and every
 value domain quoted was **measured on this repository** rather than assumed.
 
-The four rules exist because each one is a silent-corruption trap that was hit
+The five rules exist because each one is a silent-corruption trap that was hit
 in practice while probing the schema. They are guarded by a test — they must not
-be paraphrased or trimmed to save tokens.
+be paraphrased or trimmed to save tokens. Rule 5's ``instr`` join is quoted
+verbatim on purpose: the two obvious alternatives are both wrong here.
+``json_each`` is denied by the authorizer (a table-valued function registers as a
+table read, and it is not in :data:`_ALLOWED_TABLES`), and a ``LIKE`` match
+against the JSON array treats ``_`` as a single-character wildcard — so one
+person's commits can be attributed to a different person whose address differs
+only at that position. That false merge is undetectable from the output.
 """
 
 

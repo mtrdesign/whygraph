@@ -207,7 +207,7 @@ def test_the_stats_spec_ships_the_annotated_schema() -> None:
 
     spec = next(s for s in TOOL_SPECS if s.name == "run_project_stats")
     assert spec.description == _SCHEMA_DOC
-    assert "FOUR REQUIRED RULES" in spec.description
+    assert "FIVE REQUIRED RULES" in spec.description
     assert "=== TABLES ===" in spec.description
 
 

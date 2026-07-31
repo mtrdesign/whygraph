@@ -7,7 +7,23 @@ back to ``read_file`` / ``list_dir``. No unit test can check that: tool
 selection is the model's judgement, given the descriptions.
 
 So this drives live providers through the real HTTP surface, records the ordered
-``tool_call`` names from the SSE stream, and prints a matrix.
+``tool_call`` names **and arguments** from the SSE stream, and prints a matrix.
+
+Two stats tools over two databases moved the baseline, and added a failure mode
+no single-tool eval could have: the model reaching the *wrong database*. So there
+are now two kinds of check here, reported separately because they need different
+fixes:
+
+* **Selection** — which tool it opened with, and whether a structural question
+  leaked into the history DB or vice versa.
+* **Obedience** — whether the tool *description* was followed, read off the
+  emitted arguments. Did the identity query resolve through the ``author`` table
+  rather than grouping a raw git identity (and without ``json_each``, which the
+  authorizer denies, or a ``LIKE`` against the emails array, which silently
+  misattributes commits)? Did ``render_chart`` follow its producer and name
+  columns rather than retyping values? Did a breakdown become one stacked chart
+  rather than two? A miss here means the wording needs work, not that the
+  feature is broken.
 
 **Tool choice is per-model behaviour**, so a result from one model is evidence
 about that model and nothing else. That is why targets are plural: run every
@@ -117,11 +133,53 @@ CASES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "What's the average time from PR open to merge?",
         ("run_project_stats",),
     ),
+    # The two-database boundary — the failure mode a second stats tool creates.
+    # A structural question must not reach the history DB and vice versa, and no
+    # amount of SQL cleverness in either can cover for the other.
+    (
+        "graph-stats",
+        "Which modules have the most functions?",
+        ("run_graph_stats",),
+    ),
+    (
+        "graph-stats",
+        "What is the distribution of symbol kinds in this codebase?",
+        ("run_graph_stats",),
+    ),
+    # Identity: the one case that checks a _SCHEMA_DOC rule was OBEYED rather
+    # than merely present. Possible only because rule 5 is mechanical.
+    (
+        "identity",
+        "Which developer has been working the most lately?",
+        ("run_project_stats",),
+    ),
+    (
+        "identity",
+        "Who are the top contributors?",
+        ("run_project_stats",),
+    ),
+    # Charting: two rounds, in order, within the round limit.
+    (
+        "chart",
+        "How has commit volume changed month over month? Show me a chart.",
+        ("run_project_stats",),
+    ),
+    (
+        "chart",
+        "Break file changes down by change type per month, as a chart.",
+        ("run_project_stats",),
+    ),
 )
 
 _STATS_TOOL = "run_project_stats"
+_GRAPH_STATS_TOOL = "run_graph_stats"
+_CHART_TOOL = "render_chart"
 _CODEGRAPH_TOOLS = ("get_area_outline", "search_symbols", "get_symbol")
 _FILE_TOOLS = ("read_file", "list_dir")
+
+# Classes whose questions are about history, so `run_graph_stats` reaching them
+# is the two-database confusion rather than a harmless extra call.
+_HISTORY_CLASSES = frozenset({"statistics", "identity", "chart", "debugging"})
 
 
 def _first_index(names: list[str], wanted: tuple[str, ...]) -> float:
@@ -147,8 +205,16 @@ def _post(url: str, payload: dict | None) -> object:
         return json.loads(response.read())
 
 
-def _stream_tool_calls(base: str, session_id: int, question: str) -> tuple[list, str]:
-    """Send one turn and return its ordered tool names plus any error frame."""
+def _stream_tool_calls(
+    base: str, session_id: int, question: str
+) -> tuple[list, list, str]:
+    """Send one turn and return its tool names, the full calls, and any error.
+
+    The **arguments** matter as much as the names now: a chart case has to check
+    that `render_chart` named columns rather than retyping values, and the
+    identity case has to check the emitted SQL resolved identity through the
+    `author` table. Neither is visible in a list of tool names.
+    """
     body = json.dumps({"content": question}).encode()
     request = urllib.request.Request(
         f"{base}/api/chat/sessions/{session_id}/messages",
@@ -156,6 +222,7 @@ def _stream_tool_calls(base: str, session_id: int, question: str) -> tuple[list,
         headers={"Content-Type": "application/json"},
     )
     names: list[str] = []
+    calls: list[dict] = []
     error = ""
     with urllib.request.urlopen(request) as response:  # noqa: S310 -- localhost only
         for raw in response:
@@ -165,9 +232,77 @@ def _stream_tool_calls(base: str, session_id: int, question: str) -> tuple[list,
             frame = json.loads(line[5:].strip())
             if frame.get("type") == "tool_call":
                 names.append(frame["name"])
+                calls.append(
+                    {"name": frame["name"], "arguments": frame.get("arguments") or {}}
+                )
             elif frame.get("type") == "error":
                 error = frame.get("message", "unknown error")
-    return names, error
+    return names, calls, error
+
+
+def _obedience_notes(klass: str, calls: list[dict]) -> list[str]:
+    """Per-class checks that a *name* cannot express.
+
+    These are the ones that measure whether a tool *description* was obeyed, not
+    just which tool was picked. A miss here means the wording needs work — it does
+    not mean the feature is broken, which is why they are reported separately from
+    the first-tool verdict.
+    """
+    notes: list[str] = []
+    sql = " ".join(
+        str(call["arguments"].get("sql", ""))
+        for call in calls
+        if call["name"] in (_STATS_TOOL, _GRAPH_STATS_TOOL)
+    ).lower()
+    charts = [call for call in calls if call["name"] == _CHART_TOOL]
+
+    if klass == "identity" and sql:
+        # Rule 5: identity comes from the `author` table, never from a raw git
+        # identity — one human routinely has several.
+        if "author " not in sql and "author\n" not in sql and " author" not in sql:
+            notes.append("SQL never mentions the author table")
+        if "group by" in sql and (
+            "group by c.author_name" in sql
+            or "group by author_name" in sql
+            or "group by c.author_email" in sql
+            or "group by author_email" in sql
+        ):
+            notes.append("grouped by a RAW git identity (rule 5 disobeyed)")
+        # The two forms the rule explicitly forbids: one is denied by the
+        # authorizer, the other silently misattributes commits.
+        if "json_each" in sql:
+            notes.append("used json_each (denied by the authorizer)")
+        if "like" in sql and "a.emails" in sql:
+            notes.append("LIKE against author.emails (false-merges on '_')")
+
+    if klass == "chart":
+        if not charts:
+            notes.append("no render_chart call")
+        else:
+            spec = charts[0]["arguments"]
+            # The whole contract: columns, never values.
+            for key in ("x", "y"):
+                if not isinstance(spec.get(key), str):
+                    notes.append(f"{key} is not a column name")
+            if isinstance(spec.get("y"), list):
+                notes.append("y is a list (two measures, not a breakdown)")
+            # `render_chart` must follow its producer, not precede it.
+            order = [call["name"] for call in calls]
+            if order.index(_CHART_TOOL) == 0:
+                notes.append("render_chart called before any stats query")
+        # The stacked case: one chart with a `series`, not two charts.
+        if (
+            charts
+            and "change type"
+            in " ".join(str(v) for v in charts[0]["arguments"].values()).lower()
+        ):
+            spec = charts[0]["arguments"]
+            if spec.get("kind") not in ("bar_stacked", "bar_h_stacked"):
+                notes.append("breakdown asked for, but kind is not stacked")
+            elif not spec.get("series"):
+                notes.append("stacked kind without a series column")
+
+    return notes
 
 
 def _run_target(base: str, provider: str | None, model: str | None) -> list[tuple]:
@@ -181,13 +316,18 @@ def _run_target(base: str, provider: str | None, model: str | None) -> list[tupl
     rows: list[tuple] = []
     for klass, question, expected in CASES:
         session = _post(f"{base}/api/chat/sessions", session_body or None)
-        names, error = _stream_tool_calls(base, session["id"], question)
+        names, calls, error = _stream_tool_calls(base, session["id"], question)
         first = names[0] if names else "(none)"
-        # `run_project_stats` must appear on statistical questions and on NO
-        # others — a general SQL tool cannibalising the specialized ones is
-        # risk 1 of the plan, and this is what measures it.
-        leaked = klass != "statistics" and _STATS_TOOL in names
-        rows.append((klass, question, first, names, first in expected, leaked, error))
+        # A general SQL tool cannibalising the specialized ones is the original
+        # risk; a *structural* SQL tool answering a temporal question is the new
+        # one. Both are "the wrong database reached", so both count as a leak.
+        leaked = (
+            klass not in _HISTORY_CLASSES | {"graph-stats"} and _STATS_TOOL in names
+        ) or (klass in _HISTORY_CLASSES and _GRAPH_STATS_TOOL in names)
+        notes = _obedience_notes(klass, calls)
+        rows.append(
+            (klass, question, first, names, first in expected, leaked, error, notes)
+        )
     return rows
 
 
@@ -216,13 +356,33 @@ def _clauses(rows: list[tuple]) -> list[tuple[str, bool]]:
             ),
         ),
         (
-            f"statistics: {_STATS_TOOL} appears there and nowhere else",
-            all(not leaked for *_, leaked, _ in rows)
+            f"statistics: {_STATS_TOOL} appears there, and the wrong DB nowhere",
+            all(not row[5] for row in rows)
             and all(
                 _STATS_TOOL in names
                 for klass, _, _, names, *_ in rows
                 if klass == "statistics"
             ),
+        ),
+        (
+            f"structure: {_GRAPH_STATS_TOOL} answers the code-shape questions",
+            all(
+                _GRAPH_STATS_TOOL in names
+                for klass, _, _, names, *_ in rows
+                if klass == "graph-stats"
+            ),
+        ),
+        (
+            f"charts: {_CHART_TOOL} follows a stats call, naming columns",
+            all(not row[7] for row in rows if row[0] == "chart"),
+        ),
+        (
+            "identity: resolved through the author table, not a raw git identity",
+            all(not row[7] for row in rows if row[0] == "identity"),
+        ),
+        (
+            "round limit: no charted question hit it",
+            all(len(row[3]) <= 6 for row in rows if row[0] == "chart"),
         ),
     ]
 
@@ -233,20 +393,24 @@ def _report(label: str, rows: list[tuple]) -> tuple[int, int]:
     print(f"\n=== {label} ===")
     print(f"{'class':11} {'question':{width}} {'first tool':22} verdict")
     print("-" * (11 + width + 34))
-    for klass, question, first, names, passed, leaked, error in rows:
+    for klass, question, first, names, passed, leaked, error, notes in rows:
         verdict = "PASS" if passed else "MISS"
         if leaked:
-            verdict += " +STATS-LEAK"
+            verdict += " +WRONG-DB"
         if error:
             verdict += f" [error: {error[:40]}]"
         print(f"{klass:11} {question:{width}} {first:22} {verdict}")
         if len(names) > 1:
             print(f"{'':11} {'':{width}} \u21b3 then: {', '.join(names[1:])}")
+        for note in notes:
+            print(f"{'':11} {'':{width}} \u2718 {note}")
 
     passes = sum(1 for row in rows if row[4])
     leaks = sum(1 for row in rows if row[5])
     print(f"\nfirst-tool correct: {passes}/{len(rows)}")
-    print(f"{_STATS_TOOL} leaked onto a non-statistical question: {leaks}")
+    print(f"a stats tool reached the WRONG database: {leaks}")
+    disobeyed = sum(1 for row in rows if row[7])
+    print(f"cases where a tool description was not obeyed: {disobeyed}")
     for clause, ok in _clauses(rows):
         print(f"  [{'PASS' if ok else 'FAIL'}] {clause}")
     return passes, leaks

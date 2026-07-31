@@ -277,6 +277,38 @@ class GitFetchRefsCmd(ShellCommand[None]):
         return None
 
 
+class GitCheckMailmapCmd(ShellCommand[tuple[str, ...]]):
+    """``git check-mailmap <contact...>`` — canonicalize contacts via the mailmap.
+
+    Each contact is a ``Name <email>`` string; git emits **one line per
+    contact, in input order**, so a whole repository's identity set costs
+    a single subprocess. The ``--stdin`` form is deliberately unused:
+    :meth:`whygraph.core.Shell.run` has no stdin support, and argv
+    batching sidesteps that entirely.
+
+    Contacts are passed as separate argv tokens — no shell is involved,
+    so a hostile display name cannot inject.
+
+    An unmapped contact is echoed back unchanged, so the worst case is a
+    no-op rather than a wrong mapping. Note that git canonicalizes the
+    *name* as well as the email when the mailmap supplies one.
+
+    Parameters
+    ----------
+    contacts : tuple[str, ...]
+        One or more ``Name <email>`` strings.
+    """
+
+    def __init__(self, *contacts: str) -> None:
+        self.contacts = contacts
+
+    def argv(self) -> list[str]:
+        return ["git", "check-mailmap", *self.contacts]
+
+    def parse(self, result: CompletedProcess[str]) -> tuple[str, ...]:
+        return tuple(result.stdout.splitlines())
+
+
 class GitLogCommitCmd(ShellCommand[Commit]):
     """``git log -1 --shortstat --pretty=format:Commit.LOG_FORMAT <ref>``.
 

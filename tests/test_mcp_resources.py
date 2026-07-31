@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from whygraph.db import get_session
-from whygraph.db.models import Commit, Issue, PRIssueLink, PullRequest
+from whygraph.db.models import Author, Commit, Issue, PRIssueLink, PullRequest
 from whygraph.mcp.errors import WhyGraphError
 from whygraph.mcp.resources import (
     _commit_resource,
@@ -369,6 +369,57 @@ def test_repo_overview_populated(whygraph_db_initialized: Path) -> None:
             "author_email": "bob@example.com",
             "commit_count": 1,
         },
+    ]
+
+
+def test_top_contributors_ignores_a_populated_author_table(
+    whygraph_db_initialized: Path,
+) -> None:
+    """``top_contributors`` stays ``Commit``-based even once author identity
+    resolution has run, so this resource's output does not change under a
+    scan that populates ``author``."""
+    with get_session() as session:
+        session.add(
+            _db_commit(
+                "a" * 40,
+                authored_at="2026-01-01T00:00:00+00:00",
+                author_name="Alice",
+                author_email="alice@example.com",
+            )
+        )
+        session.add(
+            _db_commit(
+                "b" * 40,
+                authored_at="2026-02-01T00:00:00+00:00",
+                author_name="Bob",
+                author_email="bob@example.com",
+            )
+        )
+        # A resolved identity that (wrongly, for this fixture) claims both
+        # addresses — if the resource ever consulted `author`, one row would
+        # collapse the two contributors and this assertion would fail.
+        session.add(
+            Author(
+                id=1,
+                primary_login="alice",
+                primary_name="Alice",
+                primary_email="alice@example.com",
+                emails=json.dumps(["alice@example.com", "bob@example.com"]),
+                logins=json.dumps(["alice"]),
+                names=json.dumps(["Alice", "Bob"]),
+                commit_count=2,
+            )
+        )
+
+    result = _repo_overview_resource()
+
+    assert result["top_contributors"] == [
+        {
+            "author_name": "Alice",
+            "author_email": "alice@example.com",
+            "commit_count": 1,
+        },
+        {"author_name": "Bob", "author_email": "bob@example.com", "commit_count": 1},
     ]
 
 

@@ -21,6 +21,7 @@ from rich.table import Table
 from rich.text import Text
 
 from whygraph.scan import (
+    AuthorResolver,
     CodeGraphCrawler,
     Crawler,
     GitCrawler,
@@ -43,6 +44,7 @@ _T = TypeVar("_T")
 # Kept in one place so the whole set is trivially swappable (plan §10.5).
 _ICON_STRUCTURAL = "🔎"
 _ICON_PR_ORIGINS = "🔗"
+_ICON_AUTHORS = "👥"
 _ICON_LLM = "🧠"
 _ICON_CODEGRAPH = "🕸"
 
@@ -164,7 +166,9 @@ def scan_cmd(
     # headers can be numbered against the count of phases that actually run.
     run_pr_origins = enrich_pr_origins and github_client is not None
     run_analyze = descriptor is not None
-    phase_total = 1 + int(run_pr_origins) + int(run_analyze)  # Phase 1 always runs
+    # Author resolution always runs: local-only, no network, no token, so it
+    # is valid under --no-remote and inside the auto-rescan git hooks.
+    phase_total = 1 + int(run_pr_origins) + 1 + int(run_analyze)  # Phase 1 always runs
 
     scan_log_path = db_path.parent / "scan.log"
     phase_timings: dict[str, float] = {}
@@ -247,7 +251,26 @@ def scan_cmd(
                 ok=enricher.error is None,
             )
 
-        # ── Phase 3 · LLM descriptions — the slow, token-heavy long pole,
+        # ── Phase 3 · Author identity — needs Phase 1's commits AND Phase 2's
+        # PR-origin rows: an address can appear ONLY in on_default_branch=0
+        # commits, so running before Phase 2 would miss that identity. ──
+        n += 1
+        console.rule(
+            f"{_ICON_AUTHORS} Phase {n}/{phase_total} · Author identity", style="cyan"
+        )
+        t0 = time.monotonic()
+        resolver = AuthorResolver(progress, repository=repository)
+        ran.append(resolver)
+        resolver.start()
+        resolver.join()
+        phase_timings["Author identity"] = time.monotonic() - t0
+        _print_phase_done(
+            "Author identity",
+            phase_timings["Author identity"],
+            ok=resolver.error is None,
+        )
+
+        # ── Phase 4 · LLM descriptions — the slow, token-heavy long pole,
         # run strictly last and alone. Only ever describes main-walk
         # commits, so the recovered on_default_branch=0 rows stay lazy. ──
         if run_analyze:
@@ -364,6 +387,7 @@ def _render_results_panel(
     git = by_name.get("git")
     github = by_name.get("github")
     enricher = by_name.get("pr-origins")
+    resolver = by_name.get("authors")
     analyzer = by_name.get("analyze")
 
     def _timing(title: str) -> str:
@@ -391,6 +415,14 @@ def _render_results_panel(
         _ICON_PR_ORIGINS,
         "PR-origin recovery",
         *_optional_phase_cells(enricher, _timing("PR-origin recovery")),
+    )
+    # Author resolution always runs, so this row never renders "— skipped"
+    # in practice; it still goes through _optional_phase_cells so the panel
+    # keeps its promise of never crashing on an unexpected `ran` list.
+    grid.add_row(
+        _ICON_AUTHORS,
+        "Author identity",
+        *_optional_phase_cells(resolver, _timing("Author identity")),
     )
     grid.add_row(
         _ICON_LLM,

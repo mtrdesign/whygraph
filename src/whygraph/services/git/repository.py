@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from functools import cached_property
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from whygraph.core import Shell, ShellError
 from .blame import BlameHunk
 from .commands import (
     GitBlameCmd,
+    GitCheckMailmapCmd,
     GitCurrentBranchCmd,
     GitDiffCmd,
     GitDiffTreeFileChangesCmd,
@@ -32,6 +34,11 @@ _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 # it via the ``blame.ignoreRevsFile`` config setting, but WhyGraph wires it
 # explicitly so behaviour does not depend on the user's local git config.
 _BLAME_IGNORE_REVS_FILE = ".git-blame-ignore-revs"
+
+# Contacts per ``git check-mailmap`` invocation. Keeps argv well under
+# ARG_MAX on every platform even for a repository with thousands of
+# distinct identities; the results are concatenated in input order.
+_MAILMAP_CHUNK = 500
 
 
 class Repository:
@@ -363,6 +370,55 @@ class Repository:
             raise GitError(
                 f"failed to fetch {len(refspecs)} refspec(s) from {target!r}"
             ) from exc
+
+    def check_mailmap(self, contacts: Sequence[str]) -> tuple[str, ...]:
+        """Canonicalize ``Name <email>`` contacts through the repo's mailmap.
+
+        Shelling out to ``git check-mailmap`` rather than parsing a file
+        is deliberate: git honours ``./.mailmap``, ``mailmap.file`` and
+        ``mailmap.blob`` alike, so a mailmap deliberately kept *outside*
+        a public repository (the usual arrangement when a contributor
+        wants their address private) is still applied. A ``./.mailmap``
+        parser would silently see nothing.
+
+        Batched via argv — one subprocess per :data:`_MAILMAP_CHUNK`
+        contacts — because ``git check-mailmap A B C`` emits one line per
+        contact **in input order**. Callers therefore zip the result back
+        onto their inputs positionally, and should treat a ragged result
+        as a no-op.
+
+        Parameters
+        ----------
+        contacts : Sequence[str]
+            ``Name <email>`` strings. An empty sequence is a no-op — no
+            ``git`` is invoked.
+
+        Returns
+        -------
+        tuple[str, ...]
+            One canonicalized ``Name <email>`` line per input contact, in
+            input order. A contact the mailmap does not mention is echoed
+            back unchanged — no mailmap at all is therefore *not* a
+            failure, just an identity mapping.
+
+        Raises
+        ------
+        GitError
+            If ``git`` itself fails — the binary is missing, ``root`` is
+            not a work tree, or the mailmap is malformed.
+        """
+        if not contacts:
+            return ()
+        lines: list[str] = []
+        for start in range(0, len(contacts), _MAILMAP_CHUNK):
+            chunk = tuple(contacts[start : start + _MAILMAP_CHUNK])
+            try:
+                lines.extend(self._shell.run(GitCheckMailmapCmd(*chunk), cwd=self.root))
+            except ShellError as exc:
+                raise GitError(
+                    f"failed to check-mailmap {len(chunk)} contact(s) at {self.root}"
+                ) from exc
+        return tuple(lines)
 
     def commit_metadata(self, ref: str) -> Commit:
         """Full :class:`Commit` value object for a single commit-ish.

@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from whygraph.chat import stats_sql
+from whygraph.chat import sql_guard, stats_sql
 from whygraph.chat.stats_sql import _ALLOWED_TABLES, _MAX_ROWS, run_stats_query
 from whygraph.db import get_session
 from whygraph.db.models import Commit, CommitFileChange, PullRequest
@@ -320,8 +320,11 @@ def test_a_runaway_query_is_aborted_and_returns_an_error_result(
     statement — no worker thread, no ``interrupt()`` call, and no signal handler
     (which would be wrong inside FastAPI's threadpool).
     """
-    monkeypatch.setattr(stats_sql, "_TIMEOUT_SEC", 0.05)
-    monkeypatch.setattr(stats_sql, "_PROGRESS_INTERVAL", 100)
+    # Layer 4 lives in `sql_guard` (shared with the CodeGraph surface), so that
+    # is where the deadline is read from — patching a re-export here would not
+    # reach the code under test.
+    monkeypatch.setattr(sql_guard, "_TIMEOUT_SEC", 0.05)
+    monkeypatch.setattr(sql_guard, "_PROGRESS_INTERVAL", 100)
     # Enough rows that a 6-way cartesian product cannot finish in 50ms.
     with get_session() as session:
         for n in range(60):
@@ -395,7 +398,7 @@ def test_a_missing_database_is_an_error_result(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_schema_doc_carries_all_four_silent_corruption_rules() -> None:
+def test_schema_doc_carries_all_five_silent_corruption_rules() -> None:
     """The rules cannot be paraphrased or trimmed to save tokens.
 
     Each guards a trap that produces a *plausible* wrong number, which no other
@@ -413,6 +416,9 @@ def test_schema_doc_carries_all_four_silent_corruption_rules() -> None:
     # Rule 4 — a merged PR is 'closed'.
     assert "merged_at IS NOT NULL" in doc
     assert "NOT 'merged'" in doc
+    # Rule 5 — raw git identities split one human across several rows.
+    assert "NEVER GROUP DEVELOPERS BY" in doc
+    assert "one row per human" in doc
     # The aggregate-only contract and the redirection away from record lookups.
     assert "Aggregates only" in doc
     for tool in ("get_commit", "get_area_history", "find_changes"):
@@ -432,7 +438,35 @@ def test_schema_doc_documents_the_non_obvious_value_domains() -> None:
     assert "NOT words" in doc
     # refactor_score is a heuristic, not a quality score.
     assert "Not a quality measure" in doc
-    # The author table is usually empty.
-    assert "OFTEN HAS NOT RUN" in doc
+    # The author table resolves identity, and its list columns are JSON.
+    assert "ONE ROW PER HUMAN" in doc
+    assert "JSON ARRAYS" in doc
     # llm_description's provenance, which is why it beats subject/body.
     assert "DIFF ALONE" in doc
+
+
+def test_schema_doc_routes_developer_grouping_through_the_author_table() -> None:
+    """Rule 5, and the two join forms it must never teach.
+
+    Both alternatives look right and are not: ``json_each`` is refused by the
+    authorizer, and a ``LIKE`` match against ``author.emails`` treats ``_`` as a
+    wildcard, so it can attribute one person's commits to another. That is the
+    one failure mode invisible in the output, so the wording is a contract — the
+    eval greps the emitted SQL for this exact form.
+    """
+    doc = stats_sql._SCHEMA_DOC
+    assert "author" in doc
+    # The all-time form must aggregate: reading `commit_count` bare is refused
+    # by `_check_shape`, so the rule ships the SUM/GROUP BY wrapper.
+    assert "SUM(commit_count) AS commits" in doc
+    assert "FROM author GROUP BY id" in doc
+    # The time-sliced form, verbatim.
+    assert "instr(a.emails, '\"' || c.author_email || '\"') > 0" in doc
+    # Neither wrong form may appear as advice.
+    assert "lower(author_name)" not in doc
+    assert "json_each" in doc and "Do NOT use json_each" in doc
+    assert "do NOT use LIKE for this match" in doc
+    # `author.commit_count` already excludes on_default_branch = 0.
+    assert "do NOT also apply rule 1" in doc
+    # Rule 1 is not a caveat on this path, and the count is not a scoreboard.
+    assert "Never present a commit count as a measure of productivity" in doc

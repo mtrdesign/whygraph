@@ -6,7 +6,7 @@ drift from the rest of WhyGraph, because there is one implementation per
 capability and both surfaces are adapters over it. No MCP protocol
 roundtrip is involved — these are plain in-process calls.
 
-The fifteen tools span **four sources**, and the system prompt tells the
+The seventeen tools span **five sources**, and the system prompt tells the
 model which to reach for:
 
 * **CodeGraph** answers *what the code is* — structure, relationships, and
@@ -14,8 +14,13 @@ model which to reach for:
 * **WhyGraph** answers *why it is that way* and *what has happened* —
   rationale, evidence, path history, and content search over the
   diff-derived commit descriptions.
-* **The statistics tool** (see :mod:`.stats_sql`) answers *how much* —
-  aggregate-only SQL, fenced so it cannot become a record reader.
+* **The statistics tools** answer *how much* — aggregate-only SQL, fenced so
+  neither can become a record reader. There are **two**, because there are two
+  databases: :mod:`.stats_sql` over commit history and :mod:`.graph_stats_sql`
+  over CodeGraph's index. No SQL in the first can reach the second.
+* **``render_chart``** (see :mod:`.charts`) draws any aggregate either statistics
+  tool computed. The model passes the ``chart_ref`` that result carried and names
+  **columns of it** — it never retypes a value into a chart.
 * **The file tools** supply ground-truth source (see :mod:`.files`).
 
 Registry rules
@@ -27,14 +32,15 @@ Registry rules
   and argument-validation failures come back as ``{"error": "..."}``
   results, which the model can read and route around.
 * A :class:`ToolRegistry` is instantiated **once per user turn** because it
-  carries the turn-scoped rationale-generation budget. The specs
-  themselves are module-level constants — they never change.
+  carries the turn-scoped rationale-generation budget **and the chart-ref
+  map**. The specs themselves are module-level constants — they never change.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import secrets
 from collections.abc import Callable
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -59,7 +65,7 @@ from whygraph.serve import graphdata
 from whygraph.services.codegraph import CodeGraph, CodeGraphError
 from whygraph.services.llm.chat import ToolSpec
 
-from . import files, stats_sql
+from . import charts, files, graph_stats_sql, stats_sql
 
 _log = logging.getLogger(__name__)
 
@@ -403,6 +409,86 @@ _SPECS: tuple[ToolSpec, ...] = (
         },
     ),
     ToolSpec(
+        name="run_graph_stats",
+        description=graph_stats_sql._GRAPH_SCHEMA_DOC,
+        parameters={
+            "type": "object",
+            "properties": {
+                "sql": {
+                    "type": "string",
+                    "description": (
+                        "One SELECT (or WITH ... SELECT) statement that "
+                        "aggregates. No trailing semicolon needed."
+                    ),
+                }
+            },
+            "required": ["sql"],
+        },
+    ),
+    ToolSpec(
+        name="render_chart",
+        description=(
+            "Draw a chart from an aggregate you have ALREADY computed. Pass the "
+            "`chart_ref` that run_project_stats or run_graph_stats returned, and "
+            "name COLUMNS OF THAT RESULT — never retype the values. "
+            "`line` for ordered buckets over time; `bar` for ranked categories "
+            "with short labels; `bar_h` when labels are long (file paths, "
+            "emails). Use `bar_stacked` (or `bar_h_stacked` for long labels) to "
+            "break each bar down by a category — 'commits per month BY author', "
+            "'changes per month BY change type': pass that category column as "
+            "`series` and GROUP BY both columns in your SQL. Max 6 series. "
+            "ONE y column always: two MEASURES means two charts, and a "
+            "breakdown is `series`, not a second y. Chart only a series worth "
+            "seeing — 3+ ordered or ranked rows. A single number needs no "
+            "chart; just say it."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "chart_ref": {
+                    "type": "string",
+                    "description": (
+                        "The `chart_ref` from a stats result in this turn. Refs "
+                        "expire with the turn — re-run the query for a fresh one."
+                    ),
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": sorted(charts.CHART_KINDS),
+                },
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "Shown above the chart. Required: an unstacked chart has "
+                        "no legend, so this is its only label."
+                    ),
+                },
+                "x": {
+                    "type": "string",
+                    "description": "Column name for the category/time axis.",
+                },
+                "y": {
+                    "type": "string",
+                    "description": "Column name for the measure. One only.",
+                },
+                "series": {
+                    "type": "string",
+                    "description": (
+                        "Stacked kinds ONLY, and required for them: the column "
+                        "whose values become the stack segments. Max 6 distinct "
+                        "values — fold the tail into an 'other' bucket in your "
+                        "SQL if there are more."
+                    ),
+                },
+                "y_label": {
+                    "type": "string",
+                    "description": "Optional axis caption, e.g. 'commits'.",
+                },
+            },
+            "required": ["chart_ref", "kind", "title", "x", "y"],
+        },
+    ),
+    ToolSpec(
         name="read_file",
         description=(
             "Read source from the repository, with line numbers. Returns at "
@@ -672,10 +758,23 @@ def _list_recent_activity(limit: int = 10) -> dict:
 
 
 def _run_project_stats(sql: str) -> dict:
-    """Handler for ``run_project_stats``."""
+    """Handler body for ``run_project_stats`` — no ref minting.
+
+    Kept a plain function because charting is not this tool's concern: the
+    registry mints the ``chart_ref`` (see
+    :meth:`ToolRegistry._chartable_project_stats`), so a producer stays a
+    producer and a fourth one is a one-line addition.
+    """
     if not sql or not sql.strip():
         return {"error": "sql is required", "layer": "shape"}
     return stats_sql.run_stats_query(sql)
+
+
+def _run_graph_stats(sql: str) -> dict:
+    """Handler body for ``run_graph_stats``. See :func:`_run_project_stats`."""
+    if not sql or not sql.strip():
+        return {"error": "sql is required", "layer": "shape"}
+    return graph_stats_sql.run_graph_query(sql)
 
 
 class ToolRegistry:
@@ -707,6 +806,7 @@ class ToolRegistry:
             max_rationale_generations = get_config().chat.max_rationale_generations
         self._generation_budget = max_rationale_generations
         self.generations_used = 0
+        self._chartable: dict[str, dict] = {}
         self._handlers: dict[str, Callable[..., dict]] = {
             "search_symbols": _search_symbols,
             "get_symbol": _get_symbol,
@@ -720,7 +820,9 @@ class ToolRegistry:
             "get_issue": _get_issue,
             "get_repo_overview": _get_repo_overview,
             "list_recent_activity": _list_recent_activity,
-            "run_project_stats": _run_project_stats,
+            "run_project_stats": self._chartable_project_stats,
+            "run_graph_stats": self._chartable_graph_stats,
+            "render_chart": self._render_chart,
             "read_file": files.read_file,
             "list_dir": files.list_dir,
         }
@@ -729,6 +831,107 @@ class ToolRegistry:
     def specs(self) -> tuple[ToolSpec, ...]:
         """The tool specs to send with each :class:`ChatRequest`."""
         return TOOL_SPECS
+
+    # -- charting -----------------------------------------------------------
+    #
+    # Any producer of an aggregate joins by returning `{columns, rows}` and
+    # calling `_mint_chart_ref`. `render_chart`, `charts.py`, and the frontend
+    # need no change for a new one — that is what makes charting a capability
+    # rather than a parameter on one tool.
+
+    def _mint_chart_ref(self, result: dict) -> dict:
+        """Attach an opaque per-turn ref to a chartable aggregate result.
+
+        Returns the same dict, mutated, so a producer is one line.
+
+        Notes
+        -----
+        **No ref is minted** for a result that errored, was ``truncated``, or has
+        fewer than :data:`charts.MIN_CHART_ROWS` rows. Withholding it beats
+        refusing later: the model never sees an affordance it would be wrong to
+        use, and a chart drawn from a capped result would be a confident lie —
+        the tool cannot know the true total.
+
+        The ref is ``secrets.token_hex``, not a counter and not the
+        ``tool_call_id``: opaque per MCP's handle guidance, and unguessable, so
+        it cannot address anything the model did not just compute.
+        """
+        if (
+            "error" in result
+            or result.get("truncated")
+            or len(result.get("rows") or ()) < charts.MIN_CHART_ROWS
+        ):
+            return result
+        ref = f"cr_{secrets.token_hex(4)}"
+        self._chartable[ref] = {
+            "columns": result["columns"],
+            "rows": result["rows"],
+        }
+        result["chart_ref"] = ref
+        result["chartable"] = "Pass chart_ref to render_chart to draw this."
+        return result
+
+    def _chartable_project_stats(self, sql: str) -> dict:
+        """Handler for ``run_project_stats`` — the aggregate, plus a ref."""
+        return self._mint_chart_ref(_run_project_stats(sql))
+
+    def _chartable_graph_stats(self, sql: str) -> dict:
+        """Handler for ``run_graph_stats`` — the aggregate, plus a ref."""
+        return self._mint_chart_ref(_run_graph_stats(sql))
+
+    def _render_chart(
+        self,
+        chart_ref: str,
+        kind: str,
+        title: str,
+        x: str,
+        y: str,
+        series: str | None = None,
+        y_label: str | None = None,
+    ) -> dict:
+        """Handler for ``render_chart`` — validate a directive against its rows.
+
+        Returns
+        -------
+        dict
+            ``{"chart_ref", "chart", "columns", "row_count"}`` on success.
+            **The rows are not echoed**: the frontend already has them from the
+            producer's result and correlates on ``chart_ref``, so this payload is
+            a couple of hundred bytes rather than a second copy of 200 rows.
+
+            On failure, ``{"error", "layer"}`` — ``layer="ref"`` for a stale or
+            invented ref, ``layer="chart"`` for a directive the rows do not
+            support. Either way the producer's numbers are already on screen and
+            unaffected, so a bad chart degrades to correct numbers.
+        """
+        source = self._chartable.get(chart_ref)
+        if source is None:
+            return {
+                "error": (
+                    f"unknown chart_ref {chart_ref!r} — refs are valid only "
+                    "within the turn that produced them. Re-run the query to get "
+                    "a fresh one."
+                ),
+                "layer": "ref",
+            }
+        try:
+            chart = charts.validate_chart(
+                kind=kind,
+                title=title,
+                x=x,
+                y=y,
+                series=series,
+                y_label=y_label,
+                **source,
+            )
+        except charts.ChartNotAllowed as exc:
+            return {"error": str(exc), "layer": "chart"}
+        return {
+            "chart_ref": chart_ref,
+            "chart": chart,
+            "columns": source["columns"],
+            "row_count": len(source["rows"]),
+        }
 
     def _get_rationale(self, qualified_name: str) -> dict:
         """Handler for ``get_rationale`` — cached read, budgeted generation.

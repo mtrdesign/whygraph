@@ -1,5 +1,16 @@
+import { Suspense, lazy } from "react";
+import { parseChart } from "./chartSpec";
 import { Markdown } from "./Markdown";
 import { ToolCallCard, type ToolActivity } from "./ToolCallCard";
+
+// ECharts is ~196 KB gzipped even fully tree-shaken — measured, against a vendor
+// claim of ~100 KB — and a transcript with no chart in it should not pay for that.
+// Charts are conditional UI, so the whole renderer loads on first use and the
+// initial bundle grows by ~1 KB instead of ~575 KB. `chartSpec.ts` stays eager: it
+// decides *whether* there is a chart, and it imports nothing heavy.
+const ChartBlock = lazy(() =>
+  import("./ChartBlock").then((module) => ({ default: module.ChartBlock })),
+);
 
 /**
  * One conversational turn: the user's question, or the assistant's reply with
@@ -57,6 +68,13 @@ function UserBubble({ content }: { content: string }) {
 
 function AssistantBubble({ turn }: { turn: AssistantTurn }) {
   const rows = Math.max(turn.segments.length, turn.activityGroups.length);
+  // Flattened across groups on purpose. `render_chart` and the stats call that
+  // minted its `chart_ref` are separate tool *rounds*, and a new round opens a new
+  // group — always on replay, and live too whenever the model says something
+  // between them. Searching only the chart's own group would find the producer
+  // exactly when the two happened to share a round, which is the case that does
+  // not survive a reload.
+  const turnActivities = turn.activityGroups.flat();
   const isEmpty =
     !turn.error &&
     turn.segments.every((s) => !s) &&
@@ -68,9 +86,31 @@ function AssistantBubble({ turn }: { turn: AssistantTurn }) {
         {Array.from({ length: rows }, (_, i) => (
           <div key={i} className="min-w-0">
             {turn.segments[i] ? <Markdown>{turn.segments[i]}</Markdown> : null}
-            {(turn.activityGroups[i] ?? []).map((activity) => (
-              <ToolCallCard key={activity.id} activity={activity} />
-            ))}
+            {(turn.activityGroups[i] ?? []).map((activity) => {
+              // A `render_chart` card renders its chart as a sibling, so the
+              // "see exactly what the assistant looked at" guarantee survives.
+              // The whole turn is passed because the rows live on the producing
+              // stats activity, matched by `chart_ref`.
+              const chart = parseChart(activity, turnActivities);
+              return (
+                // The key stays on the wrapper: dropping it hands one card's
+                // expansion state to another as the transcript re-renders.
+                <div key={activity.id}>
+                  <ToolCallCard activity={activity} />
+                  {chart && (
+                    <Suspense
+                      fallback={
+                        <div className="my-1.5 rounded-md border border-border bg-panel2/60 px-2.5 py-4 text-xs text-muted">
+                          Loading chart…
+                        </div>
+                      }
+                    >
+                      <ChartBlock payload={chart} />
+                    </Suspense>
+                  )}
+                </div>
+              );
+            })}
           </div>
         ))}
 

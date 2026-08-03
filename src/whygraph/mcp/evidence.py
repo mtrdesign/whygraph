@@ -425,18 +425,21 @@ def _rename_events_for(path: str) -> list[tuple[str, str]]:
     """Return ``(rename_commit_sha, predecessor_path)`` for every rename in path's lineage."""
     # Lazy import: path_history reuses _linked_prs / _linked_issues from
     # this module, so eager imports would create a cycle.
-    from .path_history import resolve_path_aliases
+    from .path_history import branch_scope, current_branch_scope, resolve_path_aliases
 
+    current_branch = current_branch_scope()
     out: list[tuple[str, str]] = []
     with get_session() as session:
-        aliases = resolve_path_aliases(session, path)
+        aliases = resolve_path_aliases(session, path, current_branch=current_branch)
         if not aliases:
             return []
         rows = session.exec(
             select(CommitFileChange.commit_sha, CommitFileChange.renamed_from)
+            .join(Commit, col(Commit.sha) == col(CommitFileChange.commit_sha))
             .where(col(CommitFileChange.path).in_(aliases))
             .where(col(CommitFileChange.change_type).in_(("R", "C")))
             .where(col(CommitFileChange.renamed_from).is_not(None))
+            .where(branch_scope(current_branch))
         ).all()
     for row in rows:
         sha = row[0]

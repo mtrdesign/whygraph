@@ -159,3 +159,28 @@ def test_render_claude_cli_tag_parses(tmp_path: Path) -> None:
     cfg = Config.from_toml(path)
     assert cfg.analyze.provider == "claude-cli"
     assert cfg.rationale.provider == "claude-cli"
+
+
+def test_hooks_choice_round_trips(tmp_path: Path) -> None:
+    """Case 22a (audit A1) — the written config reproduces the choice.
+
+    Load-bearing, not cosmetic: `whygraph init` writes the file that the
+    *next* `whygraph init` reads back to decide whether to install. A
+    hard-coded `hooks = true` in the template would silently resurrect a
+    rejection the user just made.
+    """
+    for value in (False, True, ("post-commit", "post-merge")):
+        answers = InitAnswers(scan_hooks=value, reconfigure_toml=True)
+        rendered = render_config(answers, include_tokens=False)
+        path = tmp_path / f"{value}.toml"
+        path.write_text(rendered)
+
+        assert Config.from_toml(path).scan_hooks == value
+
+    # And the literal TOML shapes, so a future renderer change is visible.
+    assert "hooks = false" in render_config(
+        InitAnswers(scan_hooks=False), include_tokens=False
+    )
+    assert 'hooks = ["post-commit"]' in render_config(
+        InitAnswers(scan_hooks=("post-commit",)), include_tokens=False
+    )

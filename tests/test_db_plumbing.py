@@ -268,7 +268,10 @@ def test_chat_message_error_column_round_trips(
         session.commit()
 
     db_engine._reset_engine()
-    command.downgrade(alembic_config(), "-1")
+    # Downgrade to the parent of the revision that adds `error`, not a bare
+    # "-1" — that would only be the right target for as long as this stays
+    # the head revision, which it no longer is.
+    command.downgrade(alembic_config(), "f3582dfcc817")
     assert "error" not in _column_names(db_path, "chat_message")
     # The seeded rows survive the drop — only the column goes away.
     conn = sqlite3.connect(db_path)

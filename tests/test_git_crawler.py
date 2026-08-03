@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
@@ -318,3 +320,234 @@ def test_persisted_fields_match_in_memory_commit(repo_root: Path) -> None:
         assert row["insertions"] == dc.stats.insertions
         assert row["deletions"] == dc.stats.deletions
         assert row["scanned_at"]  # set to a non-empty ISO string
+
+
+# --------------------------------------------------------------------------
+# Branch membership (plan §4.2) and the reconcile pass (§4.3).
+# --------------------------------------------------------------------------
+
+
+def _git_out(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+def _commit_file(root: Path, name: str, body: str = "x\n") -> str:
+    (root / name).write_text(body)
+    _git(root, "add", name)
+    _git(root, "commit", "-q", "-m", name)
+    return _git_out(root, "rev-parse", "HEAD").strip()
+
+
+def _configure(root: Path) -> Path:
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "user.name", "Test User")
+    _git(root, "config", "commit.gpgsign", "false")
+    return root
+
+
+@pytest.fixture
+def cloned(tmp_path: Path) -> Path:
+    """A clone of a two-commit ``main`` upstream — ``origin/main`` resolves."""
+    upstream = _make_repo(tmp_path / "upstream")
+    work = tmp_path / "work"
+    subprocess.run(
+        ["git", "clone", "-q", str(upstream), str(work)],
+        check=True,
+        capture_output=True,
+    )
+    return _configure(work)
+
+
+def _rows() -> dict[str, tuple[int, str | None]]:
+    """``{sha: (on_default_branch, first_seen_ref)}`` for every commit row."""
+    with get_session() as session:
+        return {
+            r.sha: (r.on_default_branch, r.first_seen_ref)
+            for r in session.exec(select(CommitRow)).all()
+        }
+
+
+def test_feature_branch_commit_is_off_default_branch(cloned: Path) -> None:
+    """Case 8 — unmerged work is flagged 0 and records the ref it came from."""
+    _git(cloned, "switch", "-q", "-c", "feature/x")
+    sha = _commit_file(cloned, "feature.txt")
+
+    GitCrawler(Progress(), repository=Repository(cloned)).run()
+
+    assert _rows()[sha] == (0, "feature/x")
+
+
+def test_default_branch_commit_is_flagged_one(cloned: Path) -> None:
+    """Case 9 — a commit reachable from origin/main is 1 with a NULL ref."""
+    head = _git_out(cloned, "rev-parse", "HEAD").strip()
+
+    GitCrawler(Progress(), repository=Repository(cloned)).run()
+
+    assert _rows()[head] == (1, None)
+
+
+def test_merge_promotes_feature_commits(cloned: Path) -> None:
+    """Case 10 + 16 — a true merge promotes the rows on the next scan."""
+    _git(cloned, "switch", "-q", "-c", "feature/x")
+    sha = _commit_file(cloned, "feature.txt")
+    GitCrawler(Progress(), repository=Repository(cloned)).run()
+    assert _rows()[sha][0] == 0
+
+    _git(cloned, "switch", "-q", "main")
+    _git(cloned, "merge", "-q", "--no-ff", "-m", "merge feature/x", "feature/x")
+
+    crawler = GitCrawler(Progress(), repository=Repository(cloned))
+    crawler.run()
+
+    # Promoted, but first_seen_ref is provenance and is never rewritten.
+    assert _rows()[sha] == (1, "feature/x")
+    assert "1 promoted" in crawler.summary
+    assert "demoted" not in crawler.summary
+    assert crawler.warning is None
+
+
+def test_squash_merge_leaves_originals_off_branch(cloned: Path) -> None:
+    """Case 11 — a squash creates a *new* commit; the originals stay 0."""
+    _git(cloned, "switch", "-q", "-c", "feature/x")
+    sha = _commit_file(cloned, "feature.txt")
+    GitCrawler(Progress(), repository=Repository(cloned)).run()
+
+    _git(cloned, "switch", "-q", "main")
+    _git(cloned, "merge", "-q", "--squash", "feature/x")
+    _git(cloned, "commit", "-q", "-m", "squashed feature/x")
+
+    GitCrawler(Progress(), repository=Repository(cloned)).run()
+
+    # Exactly what PROriginEnricher would have produced — offline and free.
+    assert _rows()[sha] == (0, "feature/x")
+
+
+def test_rewritten_history_demotes_and_warns(cloned: Path) -> None:
+    """Cases 12, 16, 17 — a demotion is counted, warned about, and applied."""
+    sha = _commit_file(cloned, "local.txt")
+    GitCrawler(Progress(), repository=Repository(cloned)).run()
+    assert _rows()[sha][0] == 1
+
+    _git(cloned, "reset", "-q", "--hard", "HEAD~1")
+
+    crawler = GitCrawler(Progress(), repository=Repository(cloned))
+    crawler.run()
+
+    # The row is retained as evidence, just excluded from default-branch queries.
+    assert _rows()[sha] == (0, None)
+    assert "1 demoted" in crawler.summary
+    assert crawler.warning is not None
+    assert "1 commits are no longer reachable from origin/main, main" in crawler.warning
+
+
+@contextmanager
+def _capture(logger_name: str) -> Iterator[list[str]]:
+    """Capture a single logger's INFO records, independently of the root.
+
+    Deliberately not ``caplog``: several CLI tests earlier in the session
+    invoke the ``whygraph`` group, whose callback runs ``configure_logging``
+    and replaces the root logger's handlers — taking pytest's capture handler
+    with it. Attaching to the module logger asserts exactly what D9 promises
+    (this logger emits the SHAs at INFO; ``scan_log_redirect`` does the rest)
+    without depending on global logging state.
+    """
+    messages: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    logger = logging.getLogger(logger_name)
+    handler = _Collect(level=logging.INFO)
+    previous = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    try:
+        yield messages
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
+
+
+def test_demoted_shas_are_logged(cloned: Path) -> None:
+    """Case 47d (D9) — the SHAs land in the scan log, not the panel."""
+    sha = _commit_file(cloned, "local.txt")
+    GitCrawler(Progress(), repository=Repository(cloned)).run()
+    _git(cloned, "reset", "-q", "--hard", "HEAD~1")
+
+    with _capture("whygraph.scan.git_crawler") as messages:
+        crawler = GitCrawler(Progress(), repository=Repository(cloned))
+        crawler.run()
+
+    assert any(sha in m for m in messages)
+    # The console line stays a count — the SHA belongs in the log only.
+    assert crawler.warning is not None
+    assert sha not in crawler.warning
+
+
+def test_shallow_clone_skips_reconcile(tmp_path: Path) -> None:
+    """Case 13 — a truncated view must never mass-demote."""
+    upstream = _make_repo(tmp_path / "upstream")
+    shallow = tmp_path / "shallow"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth=1", upstream.as_uri(), str(shallow)],
+        check=True,
+        capture_output=True,
+    )
+    _configure(shallow)
+    assert Repository(shallow).is_shallow is True
+
+    # A pre-existing row for a commit the shallow clone cannot see. Without
+    # the guard the reconcile would demote it.
+    with get_session() as session:
+        session.add(
+            CommitRow(
+                sha="0" * 40,
+                parent_shas="",
+                author_name="A",
+                author_email="a@example.com",
+                authored_at="2026-01-01T00:00:00Z",
+                committed_at="2026-01-01T00:00:00Z",
+                subject="older than the graft point",
+                body="",
+                files_changed=0,
+                insertions=0,
+                deletions=0,
+                scanned_at="2026-01-01T00:00:00Z",
+            )
+        )
+
+    crawler = GitCrawler(Progress(), repository=Repository(shallow))
+    crawler.run()
+
+    assert _rows()["0" * 40] == (1, None)
+    assert "demoted" not in crawler.summary
+    assert crawler.warning is None
+
+
+def test_unresolvable_default_branch_flags_everything_one(repo_root: Path) -> None:
+    """Case 14 — no remote, no main/master override: today's behaviour exactly."""
+    repo = Repository(repo_root)
+    assert repo.default_branch_refs == ()
+
+    GitCrawler(Progress(), repository=repo).run()
+
+    assert all(row == (1, None) for row in _rows().values())
+
+
+def test_detached_head_records_the_literal_head(cloned: Path) -> None:
+    """Case 15 — a detached HEAD is stored verbatim; no special case."""
+    _git(cloned, "switch", "-q", "-c", "feature/x")
+    sha = _commit_file(cloned, "feature.txt")
+    _git(cloned, "checkout", "-q", sha)
+
+    repo = Repository(cloned)
+    assert repo.current_branch == "HEAD"
+    GitCrawler(Progress(), repository=repo).run()
+
+    assert _rows()[sha] == (0, "HEAD")

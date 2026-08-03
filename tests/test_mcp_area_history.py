@@ -201,3 +201,100 @@ def test_area_history_tool_rejects_invalid_inputs() -> None:
         whygraph_area_history("")
     with pytest.raises(WhyGraphError, match="limit must be >= 1"):
         whygraph_area_history("foo.py", limit=0)
+
+
+# --- D8: alias scope (default branch OR current branch) ----------------------
+
+
+def _seed_unmerged_rename(session) -> None:
+    """A rename made on an unmerged feature branch.
+
+    ``old.py`` exists on the default branch; the rename to ``new.py`` was
+    made on ``feature/x`` and has not landed, so its commit is flag 0.
+    """
+    session.add(_commit("c_main", subject="add old.py", committed_at="2026-06-01"))
+    session.add(_change(commit_sha="c_main", path="old.py", change_type="A"))
+    branch_commit = _commit(
+        "c_branch", subject="rename old.py -> new.py", committed_at="2026-06-02"
+    )
+    branch_commit.on_default_branch = 0
+    branch_commit.first_seen_ref = "feature/x"
+    session.add(branch_commit)
+    session.add(
+        _change(
+            commit_sha="c_branch",
+            path="new.py",
+            change_type="R",
+            renamed_from="old.py",
+            similarity=100,
+        )
+    )
+    session.commit()
+
+
+def test_alias_scope_includes_the_current_branch(whygraph_db_initialized: Path) -> None:
+    """Case 47a(i) — the in-flight rename is visible while you are on it."""
+    with get_session() as session:
+        _seed_unmerged_rename(session)
+        aliases = resolve_path_aliases(session, "new.py", current_branch="feature/x")
+
+    assert aliases == {"new.py", "old.py"}
+
+
+def test_alias_scope_excludes_another_branch(whygraph_db_initialized: Path) -> None:
+    """Case 47a(ii) — switching away drops the old branch's aliases at once."""
+    with get_session() as session:
+        _seed_unmerged_rename(session)
+        aliases = resolve_path_aliases(session, "new.py", current_branch="feature/y")
+
+    assert aliases == {"new.py"}
+
+
+def test_alias_scope_excludes_on_detached_head(whygraph_db_initialized: Path) -> None:
+    """Case 47a(iii) — ``None`` (detached HEAD / GitError) is the safe direction."""
+    with get_session() as session:
+        _seed_unmerged_rename(session)
+        aliases = resolve_path_aliases(session, "new.py", current_branch=None)
+
+    assert aliases == {"new.py"}
+
+
+def test_alias_scope_after_merge_is_branch_independent(
+    whygraph_db_initialized: Path,
+) -> None:
+    """Case 47a — merging promotes the row, so the alias stands on its own."""
+    with get_session() as session:
+        _seed_unmerged_rename(session)
+        # What the reconcile pass does once the branch lands.
+        merged = session.get(Commit, "c_branch")
+        merged.on_default_branch = 1
+        session.add(merged)
+        session.commit()
+
+        assert resolve_path_aliases(session, "new.py", current_branch=None) == {
+            "new.py",
+            "old.py",
+        }
+        assert resolve_path_aliases(session, "new.py", current_branch="unrelated") == {
+            "new.py",
+            "old.py",
+        }
+
+
+def test_area_history_commit_set_stays_default_branch_only(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Case 47c — the alias set widens, the commit set does not."""
+    with get_session() as session:
+        _seed_unmerged_rename(session)
+
+    monkeypatch.setattr(
+        "whygraph.mcp.path_history.current_branch_scope", lambda: "feature/x"
+    )
+    result = whygraph_area_history(path="new.py")
+
+    shas = {item["commit"]["sha"] for item in result["evidence"]}
+    # c_main is reached only *through* the branch-local rename alias...
+    assert "c_main" in shas
+    # ...but the unmerged commit itself never enters a default-branch view.
+    assert "c_branch" not in shas

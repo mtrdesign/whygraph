@@ -140,13 +140,25 @@ def _select_candidates(
     return candidates
 
 
-def _to_origin_row(dc: CommitDC, *, scanned_at: str) -> CommitRow:
+def _to_origin_row(dc: CommitDC, *, scanned_at: str, number: int) -> CommitRow:
     """Build an ``on_default_branch=0`` commit row from a git value object.
 
     Mirrors ``git_crawler._to_row`` but flags the row as a recovered
     PR-origin commit and leaves ``refactor_score`` at its default — origin
     commits carry no ``commit_file_change`` rows, so the refactor-walk
     never reaches them regardless.
+
+    Parameters
+    ----------
+    dc : Commit
+        The git value object read back from the pinned PR ref.
+    scanned_at : str
+        ISO timestamp stamped on every row this run inserts.
+    number : int
+        The PR this commit was recovered from. Recorded in
+        ``first_seen_ref`` as ``refs/pull/<N>/head``, which is what
+        distinguishes a recovery from unmerged local work — both of which
+        are ``on_default_branch=0``.
     """
     return CommitRow(
         sha=dc.sha,
@@ -162,6 +174,7 @@ def _to_origin_row(dc: CommitDC, *, scanned_at: str) -> CommitRow:
         deletions=dc.stats.deletions,
         scanned_at=scanned_at,
         on_default_branch=0,
+        first_seen_ref=f"refs/pull/{number}/head",
     )
 
 
@@ -245,7 +258,9 @@ class PROriginEnricher(Crawler):
                     except GitError as exc:
                         _log.warning("skipping origin commit %s: %s", oid[:9], exc)
                         continue
-                    session.add(_to_origin_row(dc, scanned_at=scanned_at))
+                    session.add(
+                        _to_origin_row(dc, scanned_at=scanned_at, number=cand.number)
+                    )
                     inserted.add(oid)
                 self.advance(1)
 

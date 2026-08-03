@@ -19,6 +19,17 @@ ${scan_token_line}
                               # token — handy when one shared container scans repos
                               # across different orgs. whygraph.toml is gitignored, so a
                               # token here is never committed.
+# Auto-rescan git hooks, installed by `whygraph init`:
+#   true   — all four: post-commit, post-merge, post-rewrite, post-checkout
+#   false  — none (init removes any already installed)
+#   [list] — only these, e.g. ["post-commit", "post-merge"]
+# They run a fast offline scan in the background so WhyGraph and CodeGraph
+# track your commits. `whygraph init` makes .git/hooks match this value
+# exactly — edit and re-run it to add or drop hooks.
+hooks = ${scan_hooks}
+# default_branch = "main"     # override the branch WhyGraph treats as "shipped history".
+                              # Default: resolved from origin/HEAD, else origin/main,
+                              # else origin/master. Set for repos on develop / trunk.
 
 [analyze]
 # LLM that writes a per-commit "git diff" description during `whygraph scan`.

@@ -79,7 +79,7 @@ def test_rationale_defaults_to_analyze(tmp_path: Path) -> None:
         selects=["claude", "openai", DEFAULT, "off"],
         # analyze_model(default), rationale_model(default)
         texts=[DEFAULT, DEFAULT],
-        confirms=[True],  # final "Write these files?"
+        confirms=[True, True],  # install hooks? Yes ; Write these files? Yes
     )
     answers = prompt_for_init(tmp_path, preset_agent=None, prompter=prompter)
 
@@ -98,7 +98,7 @@ def test_api_key_prompted_once_when_shared(tmp_path: Path) -> None:
         selects=["claude", "openai", DEFAULT, "off"],
         texts=[DEFAULT, DEFAULT],
         passwords=["sk-shared"],
-        confirms=[True],
+        confirms=[True, True],
     )
     answers = prompt_for_init(tmp_path, preset_agent=None, prompter=prompter)
 
@@ -111,7 +111,7 @@ def test_api_key_prompted_twice_when_providers_differ(tmp_path: Path) -> None:
         selects=["claude", "openai", "deepseek", "off"],
         texts=[DEFAULT, DEFAULT],
         passwords=["sk-openai", "sk-deepseek"],
-        confirms=[True],
+        confirms=[True, True],
     )
     answers = prompt_for_init(tmp_path, preset_agent=None, prompter=prompter)
 
@@ -124,7 +124,7 @@ def test_no_key_prompt_for_non_key_bearing_providers(tmp_path: Path) -> None:
     prompter = ScriptedPrompter(
         selects=["claude", "claude-cli", DEFAULT, "off"],
         texts=[DEFAULT, DEFAULT],
-        confirms=[True],
+        confirms=[True, True],
     )
     answers = prompt_for_init(tmp_path, preset_agent=None, prompter=prompter)
 
@@ -139,7 +139,7 @@ def test_token_not_prompted_when_scan_off(tmp_path: Path) -> None:
     prompter = ScriptedPrompter(
         selects=["claude", "claude-cli", DEFAULT, "off"],
         texts=[DEFAULT, DEFAULT],
-        confirms=[True],
+        confirms=[True, True],
     )
     answers = prompt_for_init(tmp_path, preset_agent=None, prompter=prompter)
 
@@ -152,7 +152,7 @@ def test_token_prompted_for_github(tmp_path: Path) -> None:
         selects=["claude", "claude-cli", DEFAULT, "github"],
         texts=[DEFAULT, DEFAULT],
         passwords=["ghp_real"],
-        confirms=[True],
+        confirms=[True, True],
     )
     answers = prompt_for_init(tmp_path, preset_agent=None, prompter=prompter)
 
@@ -183,7 +183,7 @@ def test_overwrite_gate_yes_runs_full_flow(tmp_path: Path) -> None:
     prompter = ScriptedPrompter(
         selects=["claude", "openai", DEFAULT, "off"],
         texts=[DEFAULT, DEFAULT],
-        confirms=[True, True],  # overwrite? Yes ; Write? Yes
+        confirms=[True, True, True],  # overwrite? Yes ; hooks? Yes ; Write? Yes
     )
     answers = prompt_for_init(tmp_path, preset_agent=None, prompter=prompter)
 
@@ -195,7 +195,7 @@ def test_preset_agent_skips_agent_prompt(tmp_path: Path) -> None:
     prompter = ScriptedPrompter(
         selects=["openai", DEFAULT, "off"],  # no agent select
         texts=[DEFAULT, DEFAULT],
-        confirms=[True],
+        confirms=[True, True],
     )
     answers = prompt_for_init(tmp_path, preset_agent="cursor", prompter=prompter)
 
@@ -216,7 +216,7 @@ def test_abort_on_declined_final_confirm(tmp_path: Path) -> None:
     prompter = ScriptedPrompter(
         selects=["claude", "openai", DEFAULT, "off"],
         texts=[DEFAULT, DEFAULT],
-        confirms=[False],  # decline "Write these files?"
+        confirms=[True, False],  # hooks? Yes ; decline "Write these files?"
     )
     with pytest.raises(InitAborted):
         prompt_for_init(tmp_path, preset_agent=None, prompter=prompter)
@@ -275,7 +275,7 @@ def test_summary_hook_receives_text(tmp_path: Path) -> None:
         selects=["claude", "anthropic", DEFAULT, "off"],
         texts=[DEFAULT, DEFAULT],
         passwords=[""],  # blank anthropic key → env fallback
-        confirms=[True],
+        confirms=[True, True],
     )
     prompt_for_init(
         tmp_path,
@@ -286,3 +286,62 @@ def test_summary_hook_receives_text(tmp_path: Path) -> None:
     assert len(seen) == 1
     assert "Review" not in seen[0]  # the body only; the panel title is the command's
     assert "Analyze:" in seen[0]
+
+
+# ---------- 9. git hooks (plan §4.6, properties 2 and 3) ---------------------
+
+
+def test_hooks_prompt_defaults_to_yes(tmp_path: Path) -> None:
+    prompter = ScriptedPrompter(
+        selects=["claude", "claude-cli", DEFAULT, "off"],
+        texts=[DEFAULT, DEFAULT],
+        confirms=[DEFAULT, True],  # accept the hooks default ; Write? Yes
+    )
+    answers = prompt_for_init(tmp_path, preset_agent=None, prompter=prompter)
+
+    assert answers.scan_hooks is True
+
+
+def test_declining_hooks_is_recorded(tmp_path: Path) -> None:
+    """Case 40 — a No must reach the answers, not just the prompt."""
+    prompter = ScriptedPrompter(
+        selects=["claude", "claude-cli", DEFAULT, "off"],
+        texts=[DEFAULT, DEFAULT],
+        confirms=[False, True],  # hooks? No ; Write? Yes
+    )
+    answers = prompt_for_init(tmp_path, preset_agent=None, prompter=prompter)
+
+    assert answers.scan_hooks is False
+
+
+def test_hooks_prompt_seeds_from_existing_opt_out(tmp_path: Path) -> None:
+    """Property 2 — a prior `false` becomes the prompt's default, so a bare
+    Enter cannot resurrect it."""
+    (tmp_path / "whygraph.toml").write_text("[scan]\nhooks = false\n")
+    prompter = ScriptedPrompter(
+        selects=["claude", "claude-cli", DEFAULT, "off"],
+        texts=[DEFAULT, DEFAULT],
+        # overwrite? Yes ; hooks? (accept default) ; Write? Yes
+        confirms=[True, DEFAULT, True],
+    )
+    answers = prompt_for_init(tmp_path, preset_agent=None, prompter=prompter)
+
+    assert answers.scan_hooks is False
+
+
+def test_configured_list_skips_the_prompt_and_is_preserved(tmp_path: Path) -> None:
+    """Case 39 / property 3 — a Yes/No answer must never widen a list.
+
+    The list is an advanced, config-file-only shape, so the prompt is
+    skipped entirely rather than asked and ignored.
+    """
+    (tmp_path / "whygraph.toml").write_text('[scan]\nhooks = ["post-commit"]\n')
+    prompter = ScriptedPrompter(
+        selects=["claude", "claude-cli", DEFAULT, "off"],
+        texts=[DEFAULT, DEFAULT],
+        confirms=[True, True],  # overwrite? Yes ; Write? Yes — no hooks prompt
+    )
+    answers = prompt_for_init(tmp_path, preset_agent=None, prompter=prompter)
+
+    assert answers.scan_hooks == ("post-commit",)
+    assert not any("git hooks" in msg for msg in _kinds(prompter, "confirm"))

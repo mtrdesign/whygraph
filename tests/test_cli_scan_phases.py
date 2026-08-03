@@ -301,3 +301,57 @@ def test_results_panel_is_defensive_and_total(
     assert "skipped" in out  # absent pr-origins
     assert "Scan log" in out  # R11: path row retained
     assert "done in" in out  # total elapsed in the title
+
+
+def test_results_panel_surfaces_a_git_demotion_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Case 47 — a bulk demotion gets its own ⚠, not just a summary count."""
+    buf = io.StringIO()
+    monkeypatch.setattr(scan_mod, "console", Console(file=buf, width=120))
+
+    git = _Fake(
+        "git",
+        summary="412 commits (3 new, 2 demoted)",
+        warning="2 commits are no longer reachable from origin/main, main"
+        " — demoted to off-default-branch",
+    )
+
+    scan_mod._render_results_panel(
+        ran=[git],
+        codegraph_crawler=None,
+        db_path=Path("/repo/.whygraph/whygraph.db"),
+        scan_log_path=Path("/repo/.whygraph/scan.log"),
+        phase_timings={"Structural crawl": 1.0},
+        total_elapsed=1.0,
+    )
+
+    out = buf.getvalue()
+    assert "⚠" in out
+    assert "no longer reachable" in out
+    assert "2 demoted" in out
+
+
+def test_default_branch_row_reports_an_unresolved_repo(tmp_path: Path) -> None:
+    """Case 47 / D6 — the empty case is named, not silently degraded."""
+
+    class _NoDefaultBranch:
+        default_branch_refs: tuple[str, ...] = ()
+
+    class _Exploding:
+        @property
+        def default_branch_refs(self) -> tuple[str, ...]:
+            raise RuntimeError("git is broken")
+
+    unresolved = scan_mod._default_branch_label(_NoDefaultBranch())
+    assert "set [scan].default_branch" in str(unresolved)
+
+    # A git failure degrades this one row rather than aborting the command.
+    assert "unavailable" in str(scan_mod._default_branch_label(_Exploding()))
+
+
+def test_default_branch_row_lists_the_resolved_refs() -> None:
+    class _Resolved:
+        default_branch_refs = ("origin/main", "main")
+
+    assert scan_mod._default_branch_label(_Resolved()) == "origin/main, main"

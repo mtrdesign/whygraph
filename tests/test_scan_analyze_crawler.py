@@ -320,3 +320,33 @@ def test_one_failing_commit_does_not_block_the_rest(
     failed = [sha for sha, v in descs.items() if v[0] is None]
     assert len(described) == 2  # the other two still completed and committed
     assert len(failed) == 1
+
+
+def test_feature_branch_commits_are_still_described(
+    isolated_db: Path, repo_path: Path
+) -> None:
+    """Case 47b (audit B4) — reachability, not the flag (plan §3 row 19).
+
+    Once ``GitCrawler`` flags unmerged work ``on_default_branch=0``, the
+    naive reading of ``test_origin_commits_stay_lazy`` would be that such
+    work also stops getting described. It doesn't: ``AnalyzeCrawler``
+    bounds its work by reachability from the current branch, and a
+    feature-branch commit *is* reachable. No LLM cost or coverage change.
+    """
+    commits = _commits(repo_path)
+    _insert(commits)
+    # Flag them all off the default branch, exactly as a scan on an
+    # unmerged feature branch would.
+    with get_session() as session:
+        for row in session.exec(select(CommitRow)).all():
+            row.on_default_branch = 0
+            row.first_seen_ref = "feature/x"
+            session.add(row)
+    db_engine._reset_engine()
+
+    crawler = _run(repo_path, _StubDescriptor())
+
+    assert crawler.error is None
+    descs = _descriptions()
+    for c in commits:
+        assert descs[c.sha][0] == "DESCRIPTION"

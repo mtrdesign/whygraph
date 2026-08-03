@@ -60,3 +60,10 @@ def test_mcp_server_registers_prompts() -> None:
         "whygraph_why_was_this_written",
         "whygraph_triage_commit",
     }
+
+
+def test_cli_no_longer_registers_hooks_command() -> None:
+    """Case 46 — the group was removed; `[scan].hooks` + `init` replaced it."""
+    from whygraph.cli import main
+
+    assert "hooks" not in main.commands

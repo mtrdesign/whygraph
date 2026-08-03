@@ -121,25 +121,31 @@ def _build_squash_repo(root: Path) -> dict[str, str]:
     return {"squash": squash, "feat1": feat1, "feat2": feat2}
 
 
-def _seed_squash_pr(shas: dict[str, str]) -> None:
+def _seed_squash_pr(shas: dict[str, str], *, first_seen_ref: str | None = None) -> None:
+    """Seed the squash commit, its two originals, and the merged PR.
+
+    ``first_seen_ref`` selects which population the flag-0 rows represent:
+    ``None`` (the default) leaves them as `PROriginEnricher` would write
+    them, and a branch name makes them locally-scanned feature commits —
+    the widening D4 deliberately accepts.
+    """
     with get_session() as session:
         session.add(
             _squash_row(shas["squash"], committed_at="2026-04-01T00:00:00+00:00")
         )
-        session.add(
-            _origin_row(
-                shas["feat1"],
-                subject="feat: first two lines",
-                committed_at="2026-03-01T00:00:00+00:00",
-            )
+        first = _origin_row(
+            shas["feat1"],
+            subject="feat: first two lines",
+            committed_at="2026-03-01T00:00:00+00:00",
         )
-        session.add(
-            _origin_row(
-                shas["feat2"],
-                subject="feat: third line",
-                committed_at="2026-03-02T00:00:00+00:00",
-            )
+        second = _origin_row(
+            shas["feat2"],
+            subject="feat: third line",
+            committed_at="2026-03-02T00:00:00+00:00",
         )
+        for row in (first, second):
+            row.first_seen_ref = first_seen_ref
+            session.add(row)
         session.add(
             PullRequest(
                 number=1,
@@ -289,3 +295,35 @@ def test_pr_origin_beats_area_but_loses_to_blame() -> None:
     assert _should_replace(_ev("s", "blame"), "pr-origin") is False
     # And pr-origin is not displaced by the weaker labels.
     assert _should_replace(_ev("s", "pr-origin"), "area") is False
+
+
+def test_gate_also_fires_for_locally_scanned_feature_commits(
+    tmp_path: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Case 44 (D4) — the gate stays wide, and that is the decision.
+
+    Once ``GitCrawler`` flags unmerged work ``on_default_branch=0``, the
+    ``_enriched_squash_prs_for`` predicate ("at least one flag-0 oid
+    exists") matches locally-authored branches too. That widening is
+    deliberate: it buys squash-origin attribution on every branch this
+    machine developed, including on repos where the enricher never runs
+    (`provider = off`, or the `--no-remote` hook scans). Its cost is an
+    occasional wasted ``git blame``, which
+    ``test_attribute_squash_origins_degrades_on_bad_head_sha`` pins as
+    swallowed per-PR.
+    """
+    shas = _build_squash_repo(tmp_path / "repo")
+    # Same rows, but provenance says "scanned locally off feature/x", not
+    # "fetched from refs/pull/<N>/head".
+    _seed_squash_pr(shas, first_seen_ref="feature/x")
+
+    monkeypatch.chdir(tmp_path / "repo")
+    result = whygraph_evidence_for(path="sample.py", line_start=1, line_end=3)
+
+    by_source: dict[str, set[str]] = {}
+    for item in result["evidence"]:
+        by_source.setdefault(item["source"], set()).add(item["commit"]["sha"])
+
+    assert by_source.get("pr-origin") == {shas["feat1"], shas["feat2"]}

@@ -405,7 +405,7 @@ def test_schema_doc_carries_all_five_silent_corruption_rules() -> None:
     test can catch because the tool did exactly what it was asked.
     """
     doc = stats_sql._SCHEMA_DOC
-    # Rule 1 — double-counted squash-recovered commits.
+    # Rule 1 — commits that are not on the default branch.
     assert "on_default_branch = 1" in doc
     # Rule 2 — mixed ISO-8601 forms; substr() does not normalise, strftime does.
     assert "strftime" in doc
@@ -470,3 +470,27 @@ def test_schema_doc_routes_developer_grouping_through_the_author_table() -> None
     assert "do NOT also apply rule 1" in doc
     # Rule 1 is not a caveat on this path, and the count is not a scoreboard.
     assert "Never present a commit count as a measure of productivity" in doc
+
+
+def test_schema_doc_describes_flag_zero_as_both_populations() -> None:
+    """Case 47e (audit A5) — rule 1's *reason* must match reality.
+
+    Flag-0 used to mean only "PR-origin recovery, already on the main walk".
+    It now also means unmerged local work, which is emphatically *not* on the
+    main walk — a model reasoning from the old premise could decide to union
+    flag-0 rows back in when asked for "all work including squashed PRs".
+
+    Asserts on the rule's substance, not its wording, so a future rewording
+    does not break the test.
+    """
+    doc = stats_sql._SCHEMA_DOC
+    rule_one = doc.split("2. For dates")[0].split("1. ALWAYS")[1]
+
+    # The instruction is unchanged and must stay.
+    assert "on_default_branch = 1" in rule_one
+    # Both populations named; the false "already on the main walk" claim gone.
+    assert "unmerged" in rule_one.lower()
+    assert "squash" in rule_one.lower()
+    assert "already on the main walk" not in rule_one.lower()
+    # The discriminator is documented in the commit schema block.
+    assert "first_seen_ref" in doc

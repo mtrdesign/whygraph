@@ -110,3 +110,82 @@ def test_empty_token_normalizes_to_none(tmp_path: Path, value: str) -> None:
     )
 
     assert cfg.scan_token is None
+
+
+# --- [scan].hooks and [scan].default_branch (plan §6) ------------------------
+
+
+@pytest.mark.parametrize("value, expected", [("true", True), ("false", False)])
+def test_hooks_bool_parses_verbatim(tmp_path: Path, value: str, expected: bool) -> None:
+    """Case 18."""
+    cfg = Config.from_toml(
+        _write(tmp_path / "whygraph.toml", f"[scan]\nhooks = {value}\n")
+    )
+
+    assert cfg.scan_hooks is expected
+
+
+def test_hooks_list_parses_to_tuple(tmp_path: Path) -> None:
+    """Case 19 — a list becomes a tuple; an empty list collapses to False."""
+    cfg = Config.from_toml(
+        _write(tmp_path / "whygraph.toml", '[scan]\nhooks = ["post-commit"]\n')
+    )
+    assert cfg.scan_hooks == ("post-commit",)
+
+    empty = Config.from_toml(_write(tmp_path / "empty.toml", "[scan]\nhooks = []\n"))
+    assert empty.scan_hooks is False
+
+
+@pytest.mark.parametrize("body", ["hooks = 5", 'hooks = ["post-commit", 7]'])
+def test_hooks_wrong_shape_raises(tmp_path: Path, body: str) -> None:
+    """Case 20 — a shape error is a hard failure, like an invalid provider."""
+    with pytest.raises(ConfigError, match=r"\[scan\].hooks"):
+        Config.from_toml(_write(tmp_path / "whygraph.toml", f"[scan]\n{body}\n"))
+
+
+def test_hooks_names_are_not_validated_here(tmp_path: Path) -> None:
+    """A typo'd name parses fine — `whygraph.hooks` owns name validation, so
+    `core` keeps no dependency on it (§6)."""
+    cfg = Config.from_toml(
+        _write(tmp_path / "whygraph.toml", '[scan]\nhooks = ["post-comit"]\n')
+    )
+
+    assert cfg.scan_hooks == ("post-comit",)
+
+
+def test_hooks_and_default_branch_defaults(tmp_path: Path) -> None:
+    """Case 21."""
+    cfg = Config.from_toml(_write(tmp_path / "whygraph.toml", ""))
+
+    assert cfg.scan_hooks is True
+    assert cfg.scan_default_branch is None
+
+
+def test_default_branch_parses(tmp_path: Path) -> None:
+    cfg = Config.from_toml(
+        _write(tmp_path / "whygraph.toml", '[scan]\ndefault_branch = "develop"\n')
+    )
+
+    assert cfg.scan_default_branch == "develop"
+
+
+@pytest.mark.parametrize("value", ['""', '"   "'])
+def test_empty_default_branch_normalizes_to_none(tmp_path: Path, value: str) -> None:
+    cfg = Config.from_toml(
+        _write(tmp_path / "whygraph.toml", f"[scan]\ndefault_branch = {value}\n")
+    )
+
+    assert cfg.scan_default_branch is None
+
+
+def test_unknown_scan_key_still_only_warns(tmp_path: Path) -> None:
+    """Case 22 — the new `scan.pop("hooks")` must not break the warn loop."""
+    cfg = Config.from_toml(
+        _write(
+            tmp_path / "whygraph.toml",
+            '[scan]\nhooks = false\ndefault_branch = "main"\nnonsense = 1\n',
+        )
+    )
+
+    assert cfg.scan_hooks is False
+    assert cfg.scan_default_branch == "main"

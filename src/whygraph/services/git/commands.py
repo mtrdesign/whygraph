@@ -8,7 +8,7 @@ run?" — the per-class docstring documents the underlying ``git`` syntax.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from subprocess import CompletedProcess
 
@@ -30,6 +30,19 @@ GitCurrentBranchCmd = ShellCommand(
     parse=lambda r: r.stdout.strip(),
 )
 """``git rev-parse --abbrev-ref HEAD`` — the current branch name, or ``"HEAD"`` if detached."""
+
+
+GitIsShallowCmd = ShellCommand(
+    argv=["git", "rev-parse", "--is-shallow-repository"],
+    parse=lambda r: r.stdout.strip() == "true",
+)
+"""``git rev-parse --is-shallow-repository`` — ``True`` for a shallow clone.
+
+A shallow clone's reachability is truncated, so ``git rev-list`` over the
+default branch returns only the grafted tip. Callers that judge branch
+membership must skip that judgement entirely rather than act on a
+partial answer.
+"""
 
 
 def _parse_remote_url(result: CompletedProcess[str]) -> str | None:
@@ -85,6 +98,85 @@ class GitRevListCountCmd(ShellCommand[int]):
 
     def parse(self, result: CompletedProcess[str]) -> int:
         return int(result.stdout.strip() or "0")
+
+
+class GitSymbolicRefCmd(ShellCommand[str | None]):
+    """``git symbolic-ref --quiet <ref>`` — the ref it points at, or ``None``.
+
+    Must be run with ``check=False``: an unset
+    ``refs/remotes/<remote>/HEAD`` is a normal state — a plain
+    ``git fetch`` does not create it — not an error. Follows the same
+    "non-zero exit collapses to ``None``" idiom as
+    :class:`GitRemoteUrlCmd`.
+
+    Parameters
+    ----------
+    ref : str
+        The symbolic ref to resolve, e.g.
+        ``"refs/remotes/origin/HEAD"``.
+    """
+
+    def __init__(self, ref: str) -> None:
+        self.ref = ref
+
+    def argv(self) -> list[str]:
+        return ["git", "symbolic-ref", "--quiet", self.ref]
+
+    def parse(self, result: CompletedProcess[str]) -> str | None:
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
+
+
+class GitRefExistsCmd(ShellCommand[bool]):
+    """``git rev-parse --verify --quiet <ref>^{commit}`` — does ``ref`` resolve?
+
+    Must be run with ``check=False``: a ref that does not exist is the
+    question being asked, so its non-zero exit is a value (``False``),
+    not a failure. The ``^{commit}`` peel keeps a tag or a tree from
+    answering ``True`` for a query that means "is there a commit here?".
+
+    Parameters
+    ----------
+    ref : str
+        The ref to probe, e.g. ``"origin/main"``.
+    """
+
+    def __init__(self, ref: str) -> None:
+        self.ref = ref
+
+    def argv(self) -> list[str]:
+        return ["git", "rev-parse", "--verify", "--quiet", f"{self.ref}^{{commit}}"]
+
+    def parse(self, result: CompletedProcess[str]) -> bool:
+        return result.returncode == 0
+
+
+class GitRevListShasCmd(ShellCommand[frozenset[str]]):
+    """``git rev-list <ref>...`` — every SHA reachable from the given refs.
+
+    Multiple refs are **unioned**, which is exactly the semantics branch
+    membership needs: a commit on either the local or the
+    remote-tracking default branch counts as on the default branch.
+    Deliberately not ``--first-parent`` — a commit merged in via a merge
+    commit *is* reachable and must be included.
+
+    Parameters
+    ----------
+    refs : Sequence[str]
+        One or more commit-ishes. An empty sequence must not be passed:
+        bare ``git rev-list`` is an error, and callers with no refs to
+        offer have nothing to ask.
+    """
+
+    def __init__(self, refs: Sequence[str]) -> None:
+        self.refs = tuple(refs)
+
+    def argv(self) -> list[str]:
+        return ["git", "rev-list", *self.refs]
+
+    def parse(self, result: CompletedProcess[str]) -> frozenset[str]:
+        return frozenset(result.stdout.split())
 
 
 class GitDiffCmd(ShellCommand[str]):

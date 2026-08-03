@@ -7,7 +7,6 @@ own install. There are six commands.
 $ whygraph --help
 Commands:
   analyze  Describe a commit's diff with the configured LLM.
-  hooks    Manage opt-in git hooks that auto-rescan on new commits.
   init     Initialize the WhyGraph database under .whygraph/whygraph.db.
   scan     Run the source crawlers, then describe each commit with the LLM.
   serve    Serve the WhyGraph Explorer panel for this repository.
@@ -34,6 +33,12 @@ summary that masks every secret, asks *"Write these files?"*, then writes both `
 (secret-free) and a ready-to-run `whygraph.toml` (with the secrets you entered). Every prompt is
 defaulted. `--yes` (and any non-TTY invocation) skips the prompts, uses defaults, and never clobbers
 an existing `whygraph.toml`.
+
+`init` also installs the auto-rescan git hooks and **reconciles them to `[scan].hooks` in both
+directions** - installing what the config lists and stripping the managed block from what it
+doesn't. Editing `[scan].hooks` and re-running `whygraph init` is the supported way to change hook
+coverage; see [Keep it fresh](../guide/scanning.md#keep-it-fresh). A hooks directory that can't be
+written is a warning, never a failed init.
 
 `init` does **not** index CodeGraph. That happens on [`scan`](#whygraph-scan).
 
@@ -104,21 +109,3 @@ whygraph analyze <TARGET> [BASELINE]
     Every commit named on the command line must already exist in the WhyGraph database. Run
     `whygraph scan` before `whygraph analyze`.
 
-## `whygraph hooks`
-
-Manage opt-in git hooks that auto-rescan on new commits. There's no daemon - the hooks run a fast,
-background, offline scan as you commit.
-
-| Subcommand | Description |
-|---|---|
-| `install` | Install the auto-rescan hooks into the current repository. Idempotent and non-clobbering - it appends to a foreign hook behind a sentinel guard. |
-| `status` | Report whether the auto-rescan hooks are installed. |
-| `uninstall` | Remove the auto-rescan hooks, leaving any foreign hook content intact. |
-
-```bash
-whygraph hooks install
-```
-
-The hooks wire `post-commit`, `post-merge`, and `post-rewrite` to run
-`whygraph scan --no-remote --skip-analyze` in the background. See
-[Keep it fresh](../guide/scanning.md#keep-it-fresh) for the details.

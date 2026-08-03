@@ -58,7 +58,7 @@ from whygraph.db.models import (
 
 from .errors import WhyGraphError
 from .evidence import _json_list, _linked_prs
-from .path_history import resolve_path_aliases
+from .path_history import current_branch_scope, resolve_path_aliases
 
 _log = logging.getLogger(__name__)
 
@@ -484,7 +484,13 @@ def _find_changes_resource(
 
     try:
         with get_session() as session:
-            aliases = resolve_path_aliases(session, path) if path else set()
+            aliases = (
+                resolve_path_aliases(
+                    session, path, current_branch=current_branch_scope()
+                )
+                if path
+                else set()
+            )
             shas = _find_changes_shas(session, terms, path, aliases)
             if not shas:
                 return {"query": query, "path": path or None, "count": 0, "commits": []}

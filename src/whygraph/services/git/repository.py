@@ -16,8 +16,12 @@ from .commands import (
     GitDiffCmd,
     GitDiffTreeFileChangesCmd,
     GitFetchRefsCmd,
+    GitIsShallowCmd,
     GitLogCommitCmd,
+    GitRefExistsCmd,
     GitRemoteUrlCmd,
+    GitRevListShasCmd,
+    GitSymbolicRefCmd,
 )
 from .commit import Commit
 from .commits import Commits
@@ -39,6 +43,11 @@ _BLAME_IGNORE_REVS_FILE = ".git-blame-ignore-revs"
 # ARG_MAX on every platform even for a repository with thousands of
 # distinct identities; the results are concatenated in input order.
 _MAILMAP_CHUNK = 500
+
+# Short branch names probed, in order, when ``refs/remotes/<remote>/HEAD``
+# is unset — which is the common case, since a plain ``git clone`` sets it
+# but a plain ``git fetch`` into an existing repo does not.
+_DEFAULT_BRANCH_CANDIDATES = ("main", "master")
 
 
 class Repository:
@@ -67,6 +76,12 @@ class Repository:
         Name of the git remote :attr:`origin_url` reads. Default
         ``"origin"``; override to inspect a differently-named remote
         (e.g. ``"upstream"``).
+    default_branch : str or None, optional
+        Short name of the branch to treat as the default (e.g.
+        ``"develop"``), overriding :attr:`default_branch_refs`'
+        auto-resolution outright. ``None`` (default) auto-resolves, which
+        is right for the overwhelming majority of repositories — see
+        that property for the chain.
 
     Attributes
     ----------
@@ -74,9 +89,16 @@ class Repository:
         The repository working tree (as supplied at construction).
     """
 
-    def __init__(self, root: Path, *, origin_remote: str = "origin") -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        origin_remote: str = "origin",
+        default_branch: str | None = None,
+    ) -> None:
         self.root = root
         self._origin_remote = origin_remote
+        self._default_branch = default_branch
         self._shell = Shell()
 
     def __repr__(self) -> str:
@@ -151,6 +173,135 @@ class Repository:
             )
         except ShellError as exc:
             raise GitError(f"failed to resolve origin URL at {self.root}") from exc
+
+    @cached_property
+    def default_branch_refs(self) -> tuple[str, ...]:
+        """Refs whose union defines "on the default branch".
+
+        Resolution order — the first step that yields a short branch
+        name wins:
+
+        1. ``default_branch`` from construction, when supplied. It
+           **replaces** the probing below outright, for repos on
+           ``develop`` / ``trunk``.
+        2. ``git symbolic-ref refs/remotes/<remote>/HEAD``, which a
+           plain ``git clone`` sets to the forge's real default branch.
+        3. ``<remote>/main``, then ``<remote>/master``.
+
+        The resulting short name is then expanded into **both** the
+        remote-tracking ref and the same-named *local* branch, when each
+        exists — so the answer is typically ``("origin/main", "main")``.
+        The union matters in both directions: unpushed commits on local
+        ``main`` are absent from ``origin/main``, and a colleague's
+        fetched-but-unmerged work is absent from local ``main``. Judging
+        against only one of the two would misclassify one of those
+        populations.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Refs to pass to ``git rev-list``, or an empty tuple when
+            nothing resolves — an unborn HEAD, no remote, or exotic
+            branch naming with no configured override. Callers must read
+            the empty tuple as "cannot judge" and leave flags alone
+            rather than treating every commit as off-branch.
+
+        Notes
+        -----
+        Never raises: any ``git`` failure degrades to the empty tuple,
+        because a wrong answer here would mass-reflag the database while
+        no answer merely preserves the status quo.
+        """
+        short = self._resolve_default_branch_name()
+        if short is None:
+            return ()
+        refs = []
+        remote_ref = f"{self._origin_remote}/{short}"
+        if self._ref_exists(remote_ref):
+            refs.append(remote_ref)
+        if self._ref_exists(short):
+            refs.append(short)
+        return tuple(refs)
+
+    @cached_property
+    def default_branch_shas(self) -> frozenset[str]:
+        """Every SHA reachable from :attr:`default_branch_refs`.
+
+        One ``git rev-list`` over the whole ref union, so membership
+        testing is O(1) per commit afterwards. Full reachability, **not**
+        ``--first-parent``: a commit merged into the default branch via a
+        merge commit is on that branch and must be counted.
+
+        Returns
+        -------
+        frozenset[str]
+            The reachable SHAs, or an empty set when
+            :attr:`default_branch_refs` is empty or ``git`` fails.
+        """
+        refs = self.default_branch_refs
+        if not refs:
+            return frozenset()
+        try:
+            return self._shell.run(GitRevListShasCmd(refs), cwd=self.root)
+        except ShellError:
+            return frozenset()
+
+    @cached_property
+    def is_shallow(self) -> bool:
+        """``True`` for a shallow clone, whose reachability is truncated.
+
+        In a ``--depth=1`` clone (the GitHub Actions default)
+        ``git rev-list origin/main`` returns a single SHA, so any caller
+        that judges branch membership from it would conclude that the
+        entire history is off-branch. Such callers must skip the
+        judgement when this is ``True``.
+
+        Returns
+        -------
+        bool
+            Whether the repository is shallow. A ``git`` failure returns
+            ``True`` — an unreadable answer is treated as truncated,
+            since skipping a reconcile is recoverable and a mass-reflag
+            is not.
+        """
+        try:
+            return self._shell.run(GitIsShallowCmd, cwd=self.root)
+        except ShellError:
+            return True
+
+    def _resolve_default_branch_name(self) -> str | None:
+        """Short name of the default branch, or ``None`` if unresolvable.
+
+        Implements steps 1-3 of :attr:`default_branch_refs`' chain. The
+        configured override is returned verbatim without probing — an
+        unresolvable value then falls out as an empty ref tuple, which
+        the scan panel reports.
+        """
+        if self._default_branch:
+            return self._default_branch
+        pointee = self._symbolic_ref(f"refs/remotes/{self._origin_remote}/HEAD")
+        if pointee:
+            prefix = f"refs/remotes/{self._origin_remote}/"
+            if pointee.startswith(prefix):
+                return pointee[len(prefix) :]
+        for candidate in _DEFAULT_BRANCH_CANDIDATES:
+            if self._ref_exists(f"{self._origin_remote}/{candidate}"):
+                return candidate
+        return None
+
+    def _symbolic_ref(self, ref: str) -> str | None:
+        """Resolve a symbolic ref, or ``None`` if unset or unreadable."""
+        try:
+            return self._shell.run(GitSymbolicRefCmd(ref), cwd=self.root, check=False)
+        except ShellError:
+            return None
+
+    def _ref_exists(self, ref: str) -> bool:
+        """Whether ``ref`` resolves to a commit; ``False`` if git fails."""
+        try:
+            return self._shell.run(GitRefExistsCmd(ref), cwd=self.root, check=False)
+        except ShellError:
+            return False
 
     def diff(self, commit: Commit, *, pathspec: str | None = None) -> str:
         """Raw unified-diff text for ``commit`` against its first parent.

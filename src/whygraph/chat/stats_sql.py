@@ -114,8 +114,10 @@ follow rename chains and git blame, which raw SQL here does NOT.
 === FIVE REQUIRED RULES (each of these silently corrupts results) ===
 
 1. ALWAYS filter `on_default_branch = 1` on the commit table. Rows with 0 are
-   PR-origin commits recovered from squash merges; counting them double-counts
-   work that is already on the main walk.
+   NOT on the default branch — either unmerged local work scanned off a feature
+   branch, or a PR-origin commit recovered from a squash merge. Neither belongs
+   in a count of shipped work, and including them double-counts squashed PRs.
+   `first_seen_ref` tells the two apart if you ever need to.
 
 2. For dates ALWAYS use SQLite's date functions — strftime(), date(),
    julianday() — and NEVER substr() on a timestamp. Timestamps are TEXT in
@@ -187,6 +189,10 @@ commit  — one row per scanned commit (first-parent walk of the default branch)
                        -- formatter sweep. Observed: 201 commits 0-24,
                        -- 13 at 25-49, 5 at 50-74. Not a quality measure.
   on_default_branch INTEGER 0/1 -- see rule 1
+  first_seen_ref TEXT NULL -- NULL = was on the default branch when scanned.
+                       -- Otherwise the ref a flag-0 row came from: a branch
+                       -- name (unmerged local work) or refs/pull/<N>/head
+                       -- (a squash-merge recovery).
   scanned_at TEXT
 
 commit_file_change — one row per (commit, path AT THAT COMMIT)

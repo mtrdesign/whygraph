@@ -9,7 +9,7 @@ against the running code, so it stays in step with what `whygraph` actually does
 
     ---
 
-    Every command and flag, straight from `--help`: `init`, `scan`, `analyze`, `hooks`, `version`.
+    Every command and flag, straight from `--help`: `init`, `scan`, `analyze`, `serve`, `version`.
 
     [:octicons-arrow-right-24: CLI reference](cli.md)
 

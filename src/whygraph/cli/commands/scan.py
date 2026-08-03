@@ -94,7 +94,7 @@ _ICON_CODEGRAPH = "🕸"
         "Crawl the source-control remote (GitHub PRs / issues) per "
         "`[scan].provider`. `--no-remote` skips it for a fast, offline, "
         "token-free scan — git history + CodeGraph only. Used by the "
-        "auto-rescan git hooks (`whygraph hooks install`). Default: on."
+        "auto-rescan git hooks installed by `whygraph init`. Default: on."
     ),
 )
 @click.option(
@@ -130,7 +130,11 @@ def scan_cmd(
 
     db_path = ensure_initialized()
     config = get_config()
-    repository = Repository(Path.cwd(), origin_remote=config.scan_remote)
+    repository = Repository(
+        Path.cwd(),
+        origin_remote=config.scan_remote,
+        default_branch=config.scan_default_branch,
+    )
     if remote:
         _apply_github_token(config)
         github_client = _select_github_client(config.scan_provider, repository)
@@ -271,8 +275,10 @@ def scan_cmd(
         )
 
         # ── Phase 4 · LLM descriptions — the slow, token-heavy long pole,
-        # run strictly last and alone. Only ever describes main-walk
-        # commits, so the recovered on_default_branch=0 rows stay lazy. ──
+        # run strictly last and alone. It describes commits reachable from
+        # the current branch — reachability, not on_default_branch — so
+        # PR-origin rows stay lazy because their objects are unreachable,
+        # while feature-branch commits are described like any other. ──
         if run_analyze:
             n += 1
             console.rule(
@@ -404,10 +410,18 @@ def _render_results_panel(
     # Structural row — git + GitHub combined into one phase row.
     structural = [c for c in (git, github) if c is not None]
     structural_summary = " · ".join(c.summary for c in structural if c.summary) or "—"
+    # A bulk demotion is the one way rows can *leave* the default-branch
+    # queries, so it gets the same ⚠ treatment as a CodeGraph skip rather
+    # than hiding inside the summary counts.
+    git_warning = getattr(git, "warning", None)
+    if git_warning:
+        structural_summary = f"{structural_summary}\n⚠ {git_warning}"
     grid.add_row(
         _ICON_STRUCTURAL,
         "Structural crawl",
-        _status_glyph(ok=all(c.error is None for c in structural)),
+        _status_glyph(
+            ok=all(c.error is None for c in structural), warn=bool(git_warning)
+        ),
         structural_summary,
         _timing("Structural crawl"),
     )
@@ -561,6 +575,7 @@ def _render_scan_panel(
     rows: list[tuple[str, object]] = [
         ("Repository", repo_label),
         ("Branch", str(branch) if branch is not None else "unknown"),
+        ("Default branch", _default_branch_label(repository)),
         ("Database", str(db_path)),
         (
             "CodeGraph",
@@ -638,6 +653,26 @@ def _github_skip_reason(config: "Config", remote_enabled: bool = True) -> str:
     if provider == "auto":
         return f"skipped — {config.scan_remote!r} remote is not a recognized remote"
     return f"skipped — {config.scan_remote!r} remote is not a GitHub remote"
+
+
+def _default_branch_label(repository: "Repository") -> object:
+    """Render the pre-scan panel's **Default branch** row.
+
+    Reports the refs branch membership will be judged against, or — when
+    nothing resolves — says so in yellow and names the config key that
+    fixes it. Silent degradation is the failure mode that wastes an
+    afternoon: with no default branch resolved, every commit is flagged
+    as on it, and nothing else in the output would hint why.
+    """
+    refs = _best_effort(lambda: repository.default_branch_refs)
+    if refs is None:
+        return Text("unavailable", style="yellow")
+    if not refs:
+        return Text(
+            "unresolved — branch flagging disabled; set [scan].default_branch",
+            style="yellow",
+        )
+    return ", ".join(refs)
 
 
 def _best_effort(fn: "Callable[[], _T]") -> "_T | None":

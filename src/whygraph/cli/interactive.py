@@ -40,6 +40,7 @@ from whygraph.core.config import (
     OllamaConfig,
     OpenAIConfig,
     OpenRouterConfig,
+    read_hooks_pref,
 )
 
 # Provider tags (hyphen form — matches the LLM factory tag).
@@ -328,6 +329,31 @@ def _prompt_scan(prompter: Prompter) -> tuple[str, str | None]:
     return scan_provider, scan_token
 
 
+def _prompt_hooks(
+    prompter: Prompter, existing: bool | tuple[str, ...]
+) -> bool | tuple[str, ...]:
+    """Prompt for the auto-rescan git hooks, seeded from the existing config.
+
+    A configured **list** skips the prompt entirely and is returned
+    verbatim: the list is an advanced, config-file-only shape, and a
+    Yes/No answer must never silently widen ``["post-commit"]`` back to
+    all four. The prompt runs only when the existing value is a bool or
+    absent, and defaults to that value — so a prior ``hooks = false`` is
+    not resurrected by a stray Enter.
+    """
+    if not isinstance(existing, bool):
+        return existing
+    return bool(
+        _require(
+            prompter.confirm(
+                "Install git hooks that re-scan in the background after "
+                "commits, pulls and branch switches?",
+                default=existing,
+            )
+        )
+    )
+
+
 def prompt_for_init(
     project_root: Path,
     *,
@@ -389,13 +415,18 @@ def prompt_for_init(
     # does not touch whygraph.toml).
     agent = _prompt_agent(prompter, preset_agent)
 
-    # Steps 2-7 — only when (re)configuring whygraph.toml.
+    # Hook coverage is seeded from any existing config, so a prior opt-out
+    # or a deliberately narrowed list survives a re-run.
+    existing_hooks = read_hooks_pref(project_root)
+
+    # Steps 2-8 — only when (re)configuring whygraph.toml.
     if reconfigure:
         analyze_provider, analyze_model, rationale_provider, rationale_model = (
             _prompt_llm(prompter)
         )
         api_keys = _prompt_api_keys(prompter, analyze_provider, rationale_provider)
         scan_provider, scan_token = _prompt_scan(prompter)
+        scan_hooks = _prompt_hooks(prompter, existing_hooks)
         answers = InitAnswers(
             agent=agent,
             analyze_provider=analyze_provider,
@@ -405,12 +436,15 @@ def prompt_for_init(
             api_keys=api_keys,
             scan_provider=scan_provider,
             scan_token=scan_token,
+            scan_hooks=scan_hooks,
             reconfigure_toml=True,
         )
     else:
-        # Keep the existing whygraph.toml; still refresh the example and
-        # wire the agent.
-        answers = InitAnswers(agent=agent, reconfigure_toml=False)
+        # Keep the existing whygraph.toml; still refresh the example, wire
+        # the agent, and reconcile hooks to what that config already says.
+        answers = InitAnswers(
+            agent=agent, scan_hooks=existing_hooks, reconfigure_toml=False
+        )
 
     # Step 8 — review & confirm (the single gate before any write).
     will_write_user = (not user_path.exists()) or answers.reconfigure_toml

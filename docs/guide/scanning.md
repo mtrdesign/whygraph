@@ -47,29 +47,80 @@ whygraph scan --no-remote --skip-analyze
 
 ## Keep it fresh
 
-Don't want to re-scan by hand? Install git hooks once, and new commits refresh WhyGraph and CodeGraph
-on the fly:
+You don't have to re-scan by hand. `whygraph init` installs git hooks that refresh WhyGraph and
+CodeGraph in the background as you work - there's no daemon and no separate command to run.
 
-```bash
-whygraph hooks install
-```
+Four hooks are wired, covering every git event that can change the tree or add commits:
 
-This wires `post-commit`, `post-merge`, and `post-rewrite` to run
-`whygraph scan --no-remote --skip-analyze` **in the background**. Git history and a CodeGraph
-`sync` only - no LLM, no remote calls - so commits stay instant and the scan is offline and
-token-free.
+| Hook | Fires on |
+|---|---|
+| `post-commit` | `git commit`, `git commit --amend` |
+| `post-merge` | `git pull`, `git merge` |
+| `post-rewrite` | `git rebase`, including `git pull --rebase` |
+| `post-checkout` | `git switch` / `git checkout` to another branch |
+
+Each runs `whygraph scan --no-remote --skip-analyze` **in the background**. Git history and a
+CodeGraph `sync` only - no LLM, no remote calls - so commits stay instant and the scan is offline
+and token-free.
 
 The hooks are detached and single-flight: rapid commits coalesce instead of stacking, and the latest
 `HEAD` always wins. An existing hook of your own is appended to behind a sentinel guard, never
-overwritten.
+overwritten. `post-checkout` skips the two cases that can't have changed anything - a file checkout
+(`git checkout -- somefile`) and `git switch -c` at the current commit.
 
-Check or remove them any time:
+### Choosing which hooks to install
 
-```bash
-whygraph hooks status
-whygraph hooks uninstall
+`[scan].hooks` in `whygraph.toml` governs the set, and **`whygraph init` makes `.git/hooks` match
+it exactly**. Edit the value, then re-run `whygraph init` - nothing changes until you do.
+
+```toml
+[scan]
+hooks = true                              # all four (the default)
+# hooks = false                           # none
+# hooks = ["post-commit", "post-merge"]   # only these two
 ```
+
+The reconcile works in **both directions**. Shrinking the list *removes* the hooks you dropped -
+you don't have to undo them by hand - and growing it adds them back. Setting `false` strips all
+four and deletes the shared helper, leaving any foreign hook content of your own intact.
+
+Because the setting lives in the committed config, it survives re-runs and applies to everyone who
+clones the repo.
 
 !!! note "Hooks stay fast on purpose"
     The hooks deliberately skip the remote and LLM phases so they never slow a commit. For PRs,
     issues, and fresh descriptions, run a full `whygraph scan` now and then.
+
+## How WhyGraph sees branches
+
+WhyGraph records every commit it walks, but it distinguishes **shipped history** from work in
+progress. Each commit row carries `on_default_branch`: `1` when the commit is reachable from the
+default branch, `0` when it isn't.
+
+The default branch is resolved from `origin/HEAD`, falling back to `origin/main` then
+`origin/master`, and is judged as the union of that remote-tracking ref *and* your local branch of
+the same name - so commits you've made on `main` but haven't pushed still count as shipped. For a
+repo on `develop` or `trunk` where `origin/HEAD` isn't set, name it explicitly:
+
+```toml
+[scan]
+default_branch = "develop"
+```
+
+The pre-scan panel shows what it resolved. If it says `unresolved`, branch flagging is off and every
+commit is treated as on the default branch - the same behaviour as before this existed.
+
+**What this means in practice:** unmerged work on a feature branch is excluded by design from
+velocity numbers, area history, and the chat statistics surface. It is still recorded, still
+searchable, and still evidence - it just isn't counted as shipped.
+
+Membership is recomputed on **every** scan, so the database self-heals:
+
+- Merge a branch and the next scan promotes its commits to the default branch.
+- Squash-merge it and the originals stay off-branch, correctly - a squash creates a *new* commit.
+- Force-push a commit away and the next scan demotes it, with a warning naming the count. The row is
+  kept: a commit that no longer exists on any branch is still valid evidence for why the code looks
+  the way it does.
+
+Shallow clones (`git clone --depth=1`) skip the recompute entirely - a truncated view of history
+would otherwise demote nearly everything.

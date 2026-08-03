@@ -29,9 +29,71 @@ from whygraph.analyze import CommitEvidence
 from whygraph.core.utils import LIKE_ESCAPE_CHAR, like_escape
 from whygraph.db import get_session
 from whygraph.db.models import Commit, CommitFileChange
+from whygraph.services.git import GitError, Repository
+
+from .targets import repo_root
 
 
-def resolve_path_aliases(session: Session, path: str) -> set[str]:
+def branch_scope(current_branch: str | None):
+    """SQL predicate for the commits an alias walk may see.
+
+    The default branch, **plus** the branch you are standing on. Neither
+    extreme is right: filtering to the default branch alone blinds
+    WhyGraph to the rename you are making *right now* — close to the most
+    valuable moment for a rationale lookup — while no filter at all lets
+    an abandoned branch's renames pollute every path query forever.
+
+    Self-cleaning, so no expiry is needed: merging promotes the rows to
+    ``on_default_branch = 1`` and they stay visible on their own merit,
+    and switching away drops the old branch's aliases immediately.
+
+    Parameters
+    ----------
+    current_branch : str or None
+        The checked-out branch, or ``None`` to scope to the default
+        branch only — the safe direction, used for a detached HEAD and
+        whenever git cannot be reached.
+
+    Returns
+    -------
+    ColumnElement[bool]
+        A predicate over the ``commit`` table; the caller must have
+        joined it.
+    """
+    on_default = col(Commit.on_default_branch) == 1
+    if current_branch is None:
+        return on_default
+    return on_default | (col(Commit.first_seen_ref) == current_branch)
+
+
+def current_branch_scope() -> str | None:
+    """The checked-out branch, or ``None`` when it should not widen the scope.
+
+    Returns ``None`` on a detached HEAD — :attr:`Repository.current_branch`
+    yields the literal ``"HEAD"`` there, which as a ``first_seen_ref``
+    value would union in every commit ever scanned from a detached head —
+    and on any :class:`GitError`. Both degrade to default-branch-only.
+
+    Deliberately **uncached**: the MCP server is long-lived and outlives
+    branch switches, so a cached value would serve exactly the stale
+    aliases this scoping exists to prevent. One
+    ``git rev-parse --abbrev-ref HEAD`` per tool call (~5 ms).
+
+    Returns
+    -------
+    str or None
+        The branch name, or ``None``.
+    """
+    try:
+        branch = Repository(repo_root()).current_branch
+    except GitError:
+        return None
+    return None if branch == "HEAD" else branch
+
+
+def resolve_path_aliases(
+    session: Session, path: str, *, current_branch: str | None = None
+) -> set[str]:
     """Every historical name ``path`` has ever gone by, plus ``path`` itself.
 
     Walks ``commit_file_change.renamed_from`` edges one BFS layer at a
@@ -46,6 +108,11 @@ def resolve_path_aliases(session: Session, path: str) -> set[str]:
     path : str
         The path to start from — typically the current HEAD path of the
         file the caller cares about. Returned in the result set.
+    current_branch : str or None, optional
+        Widen the walk to renames first seen on this branch, on top of
+        the default branch — see :func:`branch_scope`. Defaults to
+        ``None`` (default branch only), so a caller that does not thread
+        it gets the conservative behaviour rather than an error.
 
     Returns
     -------
@@ -59,8 +126,10 @@ def resolve_path_aliases(session: Session, path: str) -> set[str]:
     while frontier:
         rows = session.exec(
             select(CommitFileChange.renamed_from)
+            .join(Commit, col(Commit.sha) == col(CommitFileChange.commit_sha))
             .where(col(CommitFileChange.path).in_(frontier))
             .where(col(CommitFileChange.renamed_from).is_not(None))
+            .where(branch_scope(current_branch))
         ).all()
         next_layer = {row for row in rows if row and row not in aliases}
         if not next_layer:
@@ -164,7 +233,9 @@ def area_history_commits(
 
     with get_session() as session:
         if include_renames:
-            aliases = resolve_path_aliases(session, path)
+            aliases = resolve_path_aliases(
+                session, path, current_branch=current_branch_scope()
+            )
         else:
             aliases = {path}
         if not aliases:
@@ -176,10 +247,12 @@ def area_history_commits(
                 col(CommitFileChange.commit_sha) == col(Commit.sha),
             )
             .where(col(CommitFileChange.path).in_(aliases))
-            # Area-history is a main-walk-only view. Recovered PR-origin
-            # commits (on_default_branch=0) carry no commit_file_change
-            # rows so the join already excludes them; this makes the
-            # invariant explicit for a future broad consumer.
+            # Area-history is a default-branch-only view, and this filter
+            # is what enforces it. Flag-0 rows are no longer only PR-origin
+            # recoveries (which carry no commit_file_change rows): they now
+            # also include unmerged local work scanned off a feature
+            # branch, which *does* carry them. The alias set above may
+            # widen to the current branch; the commit set never does.
             .where(col(Commit.on_default_branch) == 1)
         )
         if exclude_shas:

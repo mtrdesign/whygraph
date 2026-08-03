@@ -407,6 +407,37 @@ _LLM_SECTIONS: tuple[tuple[str, str, type], ...] = (
 )
 
 
+def _parse_hooks(value: object) -> bool | tuple[str, ...]:
+    """Normalize the *shape* of ``[scan].hooks``.
+
+    Accepts a bool verbatim, or a list of strings as a tuple (so the
+    frozen :class:`Config` stays hashable). An empty list collapses to
+    ``False`` — "install none" has one representation downstream.
+
+    Hook **names** are deliberately not validated here: that would mean
+    importing :mod:`whygraph.hooks` from ``core``, inverting the
+    dependency direction of the cross-cutting leaf package.
+    :func:`whygraph.hooks.resolve_hook_names` validates at the point of
+    use, and ``whygraph init`` — the only command that acts on the value
+    — surfaces a typo as a warning.
+
+    Raises
+    ------
+    ConfigError
+        If the value is neither a bool nor a list of strings.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, list):
+        if not all(isinstance(item, str) for item in value):
+            raise ConfigError("[scan].hooks list entries must all be strings")
+        return tuple(value) or False
+    raise ConfigError(
+        f"[scan].hooks must be a bool or a list of hook names, "
+        f"got {type(value).__name__}"
+    )
+
+
 def _build_llm_config(raw: dict) -> LlmConfig:
     """Parse a raw ``[llm]`` dict into a typed :class:`LlmConfig`."""
     sections: dict[str, object] = {}
@@ -504,6 +535,22 @@ class Config:
         ambient ``GH_TOKEN`` / ``GITHUB_TOKEN`` environment variables (or
         an existing ``gh auth login`` session). Kept per-project so one
         shared scanning container can serve repos across different orgs.
+    scan_hooks : bool or tuple[str, ...]
+        Which auto-rescan git hooks ``whygraph init`` keeps installed.
+        ``True`` (default) → all of
+        :data:`whygraph.hooks.HOOK_NAMES`; ``False`` or an empty list →
+        none; a list of names → exactly those, with the rest removed.
+        Loaded from ``[scan].hooks``. Only the *shape* is validated here;
+        the names are checked by
+        :func:`whygraph.hooks.resolve_hook_names` at the point of use, so
+        ``core`` keeps no dependency on the hooks module.
+    scan_default_branch : str or None
+        Override the branch WhyGraph treats as shipped history, e.g.
+        ``"develop"``. Loaded from ``[scan].default_branch``; an empty
+        value is treated as ``None``, which auto-resolves from
+        ``origin/HEAD`` then ``origin/main`` / ``origin/master``. An
+        unresolvable value is not an error — it degrades to "cannot
+        judge" and is reported in the scan panel.
     whygraph_db : Path or None
         Override path to the WhyGraph SQLite DB. If ``None``, callers
         use the project-relative default ``.whygraph/whygraph.db``.
@@ -538,6 +585,8 @@ class Config:
     scan_provider: str = "off"
     scan_remote: str = "origin"
     scan_token: str | None = None
+    scan_hooks: bool | tuple[str, ...] = True
+    scan_default_branch: str | None = None
     whygraph_db: Path | None = None
     codegraph_db: Path | None = None
     llm: LlmConfig = field(default_factory=LlmConfig)
@@ -669,6 +718,11 @@ class Config:
         if "token" in scan:
             token = (scan.pop("token") or "").strip()
             raw["scan_token"] = token or None
+        if "hooks" in scan:
+            raw["scan_hooks"] = _parse_hooks(scan.pop("hooks"))
+        if "default_branch" in scan:
+            branch = (scan.pop("default_branch") or "").strip()
+            raw["scan_default_branch"] = branch or None
         for unknown in scan:
             _log.warning("ignoring unknown key in [scan]: %r", unknown)
 
@@ -754,6 +808,11 @@ class InitAnswers:
     scan_token : str or None
         Value for ``[scan].token``; rendered active **only** into
         ``whygraph.toml`` when present.
+    scan_hooks : bool or tuple[str, ...]
+        Value for ``[scan].hooks`` — which auto-rescan git hooks ``init``
+        keeps installed. Rendered into **both** TOMLs, because the
+        written value is what the *next* ``init`` reads back: a hard-coded
+        literal here would resurrect a rejection the user just made.
     reconfigure_toml : bool
         ``True`` when the command should (over)write ``whygraph.toml``.
         ``False`` (default, and always in non-interactive runs) preserves
@@ -768,6 +827,7 @@ class InitAnswers:
     api_keys: dict[str, str] = field(default_factory=dict)
     scan_provider: str = "off"
     scan_token: str | None = None
+    scan_hooks: bool | tuple[str, ...] = True
     reconfigure_toml: bool = False
 
 
@@ -837,6 +897,20 @@ def _key_line(provider: str, answers: InitAnswers, include_tokens: bool) -> str:
     return _LLM_KEY_HINTS[provider]
 
 
+def _render_hooks_value(value: bool | tuple[str, ...]) -> str:
+    """Render a ``[scan].hooks`` value as TOML: ``true``, ``false``, or an array.
+
+    This must round-trip: ``whygraph init`` writes the file that the
+    *next* ``whygraph init`` reads back to decide whether to install. A
+    hard-coded ``hooks = true`` in the template would mean a user who
+    declined hooks gets a config claiming they wanted them, and the next
+    run silently reinstalls.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return "[" + ", ".join(f'"{name}"' for name in value) + "]"
+
+
 def render_config(answers: InitAnswers, *, include_tokens: bool) -> str:
     """Render ``whygraph.toml`` text from ``answers``.
 
@@ -869,6 +943,7 @@ def render_config(answers: InitAnswers, *, include_tokens: bool) -> str:
     """
     subs = {
         "scan_provider": answers.scan_provider,
+        "scan_hooks": _render_hooks_value(answers.scan_hooks),
         "analyze_provider": answers.analyze_provider,
         "rationale_provider": answers.rationale_provider,
         # Chat is not prompted for by `whygraph init` — the [chat] block
@@ -912,6 +987,41 @@ def default_config_text() -> str:
         The full template, including comments and a trailing newline.
     """
     return render_config(DEFAULT_ANSWERS, include_tokens=False)
+
+
+def read_hooks_pref(
+    project_root: Path, *, default: bool | tuple[str, ...] = True
+) -> bool | tuple[str, ...]:
+    """Read ``[scan].hooks`` from an existing ``whygraph.toml``.
+
+    Seeds ``whygraph init``'s hook reconcile so a prior opt-out is never
+    resurrected and a deliberately narrowed list is never widened — both
+    paths (interactive prompt and ``--yes``) start from the same value.
+
+    Best-effort by design: a missing, unreadable, or invalid config
+    yields ``default`` rather than raising. ``init`` must not fail
+    because of a config it is about to rewrite.
+
+    Parameters
+    ----------
+    project_root : Path
+        Directory holding ``whygraph.toml``.
+    default : bool or tuple[str, ...], optional
+        Value to return when no usable preference is found. Default
+        ``True`` (install every hook).
+
+    Returns
+    -------
+    bool or tuple[str, ...]
+        The configured preference, or ``default``.
+    """
+    path = project_root / CONFIG_FILENAME
+    if not path.exists():
+        return default
+    try:
+        return Config.from_toml(path).scan_hooks
+    except (OSError, ConfigError, tomllib.TOMLDecodeError):
+        return default
 
 
 def write_example_config(

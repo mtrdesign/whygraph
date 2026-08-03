@@ -126,6 +126,7 @@ def init_cmd(
     _scaffold_example_config(project_root, answers)
     _maybe_write_user_config(project_root, answers, write_user=interactive or yes)
     _ensure_gitignore(project_root)
+    _sync_hooks(project_root, answers)
 
     resolved_agent = answers.agent or agent_name
     if resolved_agent is None:
@@ -175,10 +176,16 @@ def _gather_answers(project_root: Path, agent_name: str | None, *, interactive: 
 
     Lazy-imports the interactive module so lightweight surfaces stay fast.
     """
-    from whygraph.core.config import DEFAULT_ANSWERS, InitAnswers
+    from whygraph.core.config import DEFAULT_ANSWERS, InitAnswers, read_hooks_pref
 
     if not interactive:
-        return InitAnswers(agent=agent_name, reconfigure_toml=False)
+        # Seed hooks from any existing config so a non-interactive re-run
+        # never resurrects a rejection or widens a deliberate list.
+        return InitAnswers(
+            agent=agent_name,
+            reconfigure_toml=False,
+            scan_hooks=read_hooks_pref(project_root),
+        )
 
     from whygraph.cli.interactive import InitAborted, prompt_for_init
 
@@ -255,6 +262,40 @@ def _ensure_gitignore(project_root: Path) -> None:
         click.echo(f"Updated .gitignore (added: {', '.join(added)})")
     else:
         click.echo(".gitignore already covers WhyGraph entries")
+
+
+def _sync_hooks(project_root: Path, answers) -> None:
+    """Reconcile the auto-rescan git hooks to ``[scan].hooks``.
+
+    Makes ``.git/hooks`` match the configured value exactly, in both
+    directions — installing what is listed and stripping the managed
+    block from what is not, so shrinking the list drops the hooks it
+    dropped.
+
+    Best-effort: a hooks directory we cannot resolve or write — or an
+    unknown hook name in the configured list — is a warning, never a
+    failed init. The DB, config, and agent wiring are already done and
+    remain valid. Mirrors the CodeGraph refresh contract in
+    ``scan/codegraph_crawler.py``.
+    """
+    from whygraph import hooks
+
+    try:
+        names = hooks.resolve_hook_names(answers.scan_hooks)
+        result = hooks.sync_hooks(project_root, names)
+    except hooks.HooksError as exc:
+        click.echo(f"Skipped git hooks — {exc}", err=True)
+        return
+
+    if result.installed:
+        click.echo(
+            f"Installed auto-rescan git hooks: {', '.join(result.installed)}"
+            " — new commits refresh WhyGraph + CodeGraph in the background"
+        )
+    if result.removed:
+        click.echo(f"Removed git hooks: {', '.join(result.removed)}")
+    if not result.installed and not result.removed:
+        click.echo("No git hooks installed ([scan].hooks is off)")
 
 
 def _ensure_db_initialized() -> Path:

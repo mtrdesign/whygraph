@@ -224,6 +224,34 @@ def test_work_inserts_origin_rows_and_fetches_only_candidates(
     assert squash_flag == 1  # the squash commit stays on the main walk
 
 
+def test_origin_rows_record_their_own_pull_ref(whygraph_db_initialized: Path) -> None:
+    """Case 47f — ``first_seen_ref`` names the PR each row came from.
+
+    Two candidates in one run: the number is threaded per-candidate, so a
+    shared ``scanned_at`` must not become a shared ref.
+    """
+    with get_session() as session:
+        session.add(_commit("squash10", files_changed=40))
+        session.add(_commit("squash11", files_changed=40))
+        session.add(_pr(10, oids=["a10"], merge_commit_sha="squash10"))
+        session.add(_pr(11, oids=["a11"], merge_commit_sha="squash11"))
+        session.commit()
+
+    repo = _StubRepo({"a10": _dc("a10"), "a11": _dc("a11")})
+    enricher = PROriginEnricher(
+        Progress(), repository=repo, min_commits=5, large_commit_file_count=30
+    )
+    enricher.run()
+
+    assert enricher.error is None
+    with get_session() as session:
+        refs = {sha: session.get(Commit, sha).first_seen_ref for sha in ("a10", "a11")}
+        # A commit on the main walk was never off it — no provenance to record.
+        assert session.get(Commit, "squash10").first_seen_ref is None
+
+    assert refs == {"a10": "refs/pull/10/head", "a11": "refs/pull/11/head"}
+
+
 def test_work_no_candidates_makes_no_fetch(whygraph_db_initialized: Path) -> None:
     """When nothing is gated, the enricher never touches the network."""
     with get_session() as session:

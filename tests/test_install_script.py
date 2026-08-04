@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -52,19 +53,43 @@ def _default_version() -> str:
     return match.group(1)
 
 
-def _write_stub_docker(bin_dir: Path, body: str) -> Path:
-    """Install a stub ``docker`` in ``bin_dir`` and return the argv log path.
+_NEEDED_TOOLS = ("sh", "mktemp", "rm", "mkdir", "cat", "chmod")
+"""Externals the script (and the installer it generates) shell out to.
 
-    ``body`` is POSIX ``sh`` run with ``$1`` as the docker subcommand; every
-    invocation's argv is appended to the returned log first, so callers can
-    assert on the image reference the script chose.
+These are symlinked into the stub directory so ``PATH`` can be **only** that
+directory — see :func:`_build_path_dir`.
+"""
+
+
+def _build_path_dir(tmp_path: Path, docker_body: str | None) -> tuple[Path, Path]:
+    """Build a hermetic ``PATH`` directory; return it and the docker argv log.
+
+    Holds symlinks to :data:`_NEEDED_TOOLS` plus — when ``docker_body`` is not
+    ``None`` — a stub ``docker`` that appends its argv to the returned log
+    before running ``docker_body`` (POSIX ``sh``, with ``$1`` as the docker
+    subcommand), so callers can assert on the image reference the script chose.
+
+    This directory is the **entire** ``PATH`` for the run. Prepending a stub to
+    the real ``PATH`` is not enough: the no-docker case has to *delete* the
+    stub, and then a real ``/usr/bin/docker`` (present on CI runners, absent on
+    a macOS Docker Desktop host) gets found instead — the test passes locally
+    and hits the live registry on CI.
     """
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    log = bin_dir / "argv.log"
-    stub = bin_dir / "docker"
-    stub.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\n{body}\n')
-    stub.chmod(0o755)
-    return log
+    path_dir = tmp_path / "path"
+    path_dir.mkdir(parents=True, exist_ok=True)
+    for tool in _NEEDED_TOOLS:
+        found = shutil.which(tool)
+        assert found, f"{tool} must exist on the host PATH to run these tests"
+        link = path_dir / tool
+        if not link.exists():  # a test may call _run twice on one tmp_path
+            link.symlink_to(found)
+
+    log = path_dir / "argv.log"
+    if docker_body is not None:
+        stub = path_dir / "docker"
+        stub.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\n{docker_body}\n')
+        stub.chmod(0o755)
+    return path_dir, log
 
 
 def _run(
@@ -74,21 +99,12 @@ def _run(
     env: dict[str, str] | None = None,
     with_docker: bool = True,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
-    """Run the script with a stubbed ``PATH``; return (result, argv log, bin dir).
-
-    ``PATH`` is replaced wholesale (not prepended) so the real ``docker`` can
-    never be reached and ``with_docker=False`` genuinely has none — only the
-    stub dir plus the standard system paths the script's own tools
-    (``mktemp``, ``sh``) need.
-    """
-    stub_dir = tmp_path / "stub"
-    log = _write_stub_docker(stub_dir, docker_body)
-    if not with_docker:
-        (stub_dir / "docker").unlink()
+    """Run the script hermetically; return (result, docker argv log, bin dir)."""
+    path_dir, log = _build_path_dir(tmp_path, docker_body if with_docker else None)
 
     bin_dir = tmp_path / "bin"
     full_env = {
-        "PATH": f"{stub_dir}:/usr/bin:/bin",
+        "PATH": str(path_dir),
         "HOME": str(tmp_path / "home"),
         "WHYGRAPH_BIN_DIR": str(bin_dir),
         **(env or {}),
@@ -208,7 +224,7 @@ def test_warns_about_the_git_hook_path_when_bin_dir_is_reachable(
         tmp_path,
         "1.2.3",
         docker_body=body,
-        env={"PATH": f"{tmp_path / 'stub'}:{bin_dir}:/usr/bin:/bin"},
+        env={"PATH": f"{tmp_path / 'path'}:{bin_dir}"},
     )
     assert on_path.returncode == 0, on_path.stderr
     assert "git hooks launched by GUI clients" in on_path.stderr

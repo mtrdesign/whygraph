@@ -75,7 +75,7 @@ Pick the path that fits where you are.
     uv tool install "git+https://github.com/mtrdesign/whygraph.git@feature/some-branch"
 
     # A specific tag (once tagged):
-    uv tool install "git+https://github.com/mtrdesign/whygraph.git@v1.0.0"
+    uv tool install "git+https://github.com/mtrdesign/whygraph.git@v1.1.0"
     ```
 
     Re-running upgrades in place. To switch refs, add `--force`. `pipx` accepts the same URLs.

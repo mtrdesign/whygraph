@@ -53,23 +53,28 @@ jobs:
             type=semver,pattern={{major}}
             type=raw,value=latest
 
-      # The front door is a tag-pinned raw URL
-      # (raw.githubusercontent.com/.../v1.2.3/scripts/install.sh), so the
-      # script's DEFAULT_VERSION and the README URL must both name the release
-      # being published. Gated here — before the push — so a forgotten bump is
-      # a red release rather than a silently wrong pin.
-      - name: Verify the installer pin matches the release
+      # Three hand-maintained copies of the release version must name the
+      # release being published: the installer's DEFAULT_VERSION and the README
+      # URL (because the front door is a tag-pinned raw URL), and pyproject's
+      # version (because `whygraph version` reports it from the built wheel's
+      # metadata). Gated here — before the push — so a forgotten bump is a red
+      # release rather than a silently wrong pin. pyproject is in this list
+      # because it sat at 0.1.0 through v1.0.0 while nothing checked it.
+      - name: Verify the version pins match the release
         run: |
           want='${{ steps.meta.outputs.version }}'
+          fail() { echo "::error::$1 — bump it and re-run."; exit 1; }
+
           got=$(awk -F'"' '/^DEFAULT_VERSION=/ {print $2; exit}' scripts/install.sh)
-          if [ "$got" != "$want" ]; then
-            echo "::error::scripts/install.sh has DEFAULT_VERSION=$got but this release is $want — bump it and re-run."
-            exit 1
-          fi
-          if ! grep -q "whygraph/v$want/scripts/install.sh" README.md; then
-            echo "::error::README.md install URL is not pinned to v$want — bump it and re-run."
-            exit 1
-          fi
+          [ "$got" = "$want" ] \
+            || fail "scripts/install.sh has DEFAULT_VERSION=$got but this release is $want"
+
+          got=$(awk -F'"' '/^version[[:space:]]*=/ {print $2; exit}' pyproject.toml)
+          [ "$got" = "$want" ] \
+            || fail "pyproject.toml has version=$got but this release is $want"
+
+          grep -q "whygraph/v$want/scripts/install.sh" README.md \
+            || fail "README.md install URL is not pinned to v$want"
 
       - name: Build and push
         uses: docker/build-push-action@v6

@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -322,4 +323,16 @@ def test_readme_install_url_matches_the_default_version() -> None:
     assert tags == {_default_version()}, (
         f"README.md install URL tag(s) {sorted(tags)} != "
         f"DEFAULT_VERSION {_default_version()}"
+    )
+
+
+def test_package_version_matches_the_default_version() -> None:
+    # `whygraph version` reports pyproject's version via importlib.metadata, so
+    # a stale one makes the installed tool misreport itself — it sat at 0.1.0
+    # through the v1.0.0 release because nothing checked it. Now something does.
+    with (REPO_ROOT / "pyproject.toml").open("rb") as fh:
+        packaged = tomllib.load(fh)["project"]["version"]
+    assert packaged == _default_version(), (
+        f"pyproject.toml version {packaged} != "
+        f"DEFAULT_VERSION {_default_version()} in scripts/install.sh"
     )

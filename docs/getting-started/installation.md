@@ -12,10 +12,10 @@ Pick the path that fits where you are.
     published image and installs the shims from inside it:
 
     ```bash
-    curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.0/scripts/install.sh | sh
+    curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.1/scripts/install.sh | sh
     ```
 
-    **The tag in that URL is the version.** `v1.1.0` installs 1.1.0 - no second flag to keep in
+    **The tag in that URL is the version.** `v1.1.1` installs 1.1.1 - no second flag to keep in
     sync. This drops `whygraph` and `whygraph-mcp` shims on your `PATH`; each wraps a
     `docker run --rm -v "$PWD:/workspace" … ghcr.io/mtrdesign/whygraph` against the current repo,
     and the container is ephemeral per command. See [Run with Docker](../deploy/docker.md) for the
@@ -25,11 +25,11 @@ Pick the path that fits where you are.
     *which installer* runs:
 
     ```bash
-    curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.0/scripts/install.sh | sh -s 1.1.0
-    curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.0/scripts/install.sh | sh -s latest
+    curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.1/scripts/install.sh | sh -s 1.1.1
+    curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.1/scripts/install.sh | sh -s latest
     ```
 
-    `WHYGRAPH_VERSION=1.1.0` does the same and wins over the argument. `WHYGRAPH_BIN_DIR` picks the
+    `WHYGRAPH_VERSION=1.1.1` does the same and wins over the argument. `WHYGRAPH_BIN_DIR` picks the
     install directory (default `~/.local/bin`), and `WHYGRAPH_IMAGE_REPO` points at a private mirror.
 
     !!! tip "If the installer itself misbehaves"
@@ -43,7 +43,7 @@ Pick the path that fits where you are.
         you want a visible failure (or want to read the script first), download it separately:
 
         ```bash
-        curl -fsSL -o install.sh https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.0/scripts/install.sh
+        curl -fsSL -o install.sh https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.1/scripts/install.sh
         sh install.sh
         ```
 
@@ -51,7 +51,7 @@ Pick the path that fits where you are.
     above delegates to, and dropping the pipe prints exactly what would be written:
 
     ```bash
-    docker run --rm ghcr.io/mtrdesign/whygraph:1.1.0 whygraph install | sh
+    docker run --rm ghcr.io/mtrdesign/whygraph:1.1.1 whygraph install | sh
     ```
 
 === "PyPI"
@@ -75,7 +75,7 @@ Pick the path that fits where you are.
     uv tool install "git+https://github.com/mtrdesign/whygraph.git@feature/some-branch"
 
     # A specific tag (once tagged):
-    uv tool install "git+https://github.com/mtrdesign/whygraph.git@v1.1.0"
+    uv tool install "git+https://github.com/mtrdesign/whygraph.git@v1.1.1"
     ```
 
     Re-running upgrades in place. To switch refs, add `--force`. `pipx` accepts the same URLs.

@@ -4,7 +4,7 @@ name = "whygraph"
 # by tests/test_install_script.py and the release workflow. Kept static rather
 # than derived from git: the image build copies pyproject/src but not .git, so a
 # VCS version source would fail at `pip install .` inside Docker.
-version = "1.1.0"
+version = "1.1.1"
 description = "Rationale layer over CodeGraph — explains why code exists, not just what it does."
 requires-python = ">=3.11"
 dependencies = [

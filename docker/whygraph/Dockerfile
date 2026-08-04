@@ -20,8 +20,12 @@
 # --- Playground build stage -----------------------------------------------
 # Builds the Explorer SPA (src/playground/) into a static bundle that the final
 # stage copies into the wheel. `--platform=$BUILDPLATFORM` pins this to the
-# native builder: JS output is arch-independent, so we avoid QEMU emulating
-# the npm build once per target arch (the multi-arch gotcha).
+# native builder: JS output is arch-independent, so there is never a reason to
+# emulate the npm build for a foreign arch. CI no longer depends on that — it
+# builds each arch on its own native runner, so BUILDPLATFORM already equals
+# TARGETPLATFORM there. The pin is retained for local multi-arch builds
+# (`docker buildx build --platform=linux/amd64,linux/arm64`), where it still
+# saves a QEMU-emulated npm run per target arch.
 FROM --platform=$BUILDPLATFORM node:22-slim AS playground-build
 WORKDIR /playground
 COPY src/playground/package.json src/playground/package-lock.json ./

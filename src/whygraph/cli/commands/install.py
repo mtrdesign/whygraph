@@ -11,7 +11,7 @@ This is **in-image plumbing, not the user-facing install step**. The front door
 is the host-side bootstrapper ``scripts/install.sh``, fetched from a tag-pinned
 raw URL::
 
-    curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.0/scripts/install.sh | sh
+    curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.1/scripts/install.sh | sh
 
 That script probes Docker, pulls the pinned image, and then delegates here —
 ``docker run --rm IMAGE whygraph install`` — checking the output is non-empty

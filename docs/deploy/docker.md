@@ -5,14 +5,14 @@ image. Your host needs **only Docker**. One command installs the shims from insi
 it's the same `init` and `scan` as a native install.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.0/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.1/scripts/install.sh | sh
 
 cd your-repo
 whygraph init      # bootstrap the WhyGraph DB + write config
 whygraph scan      # crawl history + refresh CodeGraph + LLM descriptions
 ```
 
-**The tag in the URL picks the version** - `v1.1.0` installs 1.1.0. To install a different release
+**The tag in the URL picks the version** - `v1.1.1` installs 1.1.1. To install a different release
 with that same installer, pass it through the pipe: `… | sh -s latest`. Full override list and the
 no-`curl` alternative are in [Installation](../getting-started/installation.md).
 

@@ -73,7 +73,7 @@ There is no Claude Code marketplace install; `whygraph init --agent claude` is t
 WhyGraph ships as a self-contained image so a developer needs **only Docker** on the host — no Python / Node / gh / codegraph install. The image is the only thing that gets installed; the **front door is a tag-pinned `curl … | sh`** (`scripts/install.sh` fetched from `raw.githubusercontent.com`). The whole UX is three steps:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.0/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.1/scripts/install.sh | sh
 whygraph init     # in a repo
 whygraph scan
 ```

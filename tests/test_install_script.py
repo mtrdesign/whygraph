@@ -30,6 +30,20 @@ from whygraph.cli.commands.install import IMAGE_REPO, render_installer
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "install.sh"
 
+_STOP_AFTER_PULL = """
+case "$1" in
+    pull) exit 1 ;;
+    image) exit 1 ;;   # not local either, so the pull failure is fatal
+esac
+exit 0
+"""
+"""Stub body that halts the script right after the pull.
+
+Both ``pull`` and ``image inspect`` must fail: a pull failure alone is
+recoverable from a local image, so stubbing only ``pull`` would let the run
+continue.
+"""
+
 
 def _default_version() -> str:
     """The ``DEFAULT_VERSION`` baked into the script — the front-door pin."""
@@ -129,10 +143,9 @@ def test_carries_no_shim_bodies() -> None:
 def test_version_precedence(
     tmp_path: Path, args: tuple[str, ...], env: dict[str, str], expected: str | None
 ) -> None:
-    # Fail after the pull so the run stops early but the argv log is written.
-    result, log, _ = _run(
-        tmp_path, *args, docker_body='[ "$1" = pull ] && exit 1; exit 0', env=env
-    )
+    # Halt right after the pull so the run stops early but the argv log is
+    # written — the pulled ref is what encodes the resolved version.
+    result, log, _ = _run(tmp_path, *args, docker_body=_STOP_AFTER_PULL, env=env)
     assert result.returncode != 0  # the deliberate pull failure
     want = expected or _default_version()
     assert f"pull {IMAGE_REPO}:{want}" in log.read_text()
@@ -142,7 +155,7 @@ def test_image_repo_override(tmp_path: Path) -> None:
     result, log, _ = _run(
         tmp_path,
         "test",
-        docker_body='[ "$1" = pull ] && exit 1; exit 0',
+        docker_body=_STOP_AFTER_PULL,
         env={"WHYGRAPH_IMAGE_REPO": "registry.internal/wg"},
     )
     assert result.returncode != 0
@@ -177,6 +190,33 @@ exit 0
         assert os.access(shim, os.X_OK), name
         assert subprocess.run(["sh", "-n", str(shim)]).returncode == 0, name
         assert f"{IMAGE_REPO}:1.2.3" in shim.read_text()
+
+
+def test_warns_about_the_git_hook_path_when_bin_dir_is_reachable(
+    tmp_path: Path,
+) -> None:
+    # The host-only diagnostic: git hooks exit quietly when `whygraph` isn't on
+    # the PATH of whatever ran git, which GUI clients routinely aren't. It fires
+    # only when bin_dir IS on the interactive PATH — otherwise the generated
+    # installer's own "add it to your PATH" warning is the bigger problem.
+    generated = tmp_path / "generated.sh"
+    generated.write_text(render_installer(f"{IMAGE_REPO}:1.2.3"))
+    body = f'[ "$1" = run ] && cat "{generated}"; exit 0'
+    bin_dir = tmp_path / "bin"
+
+    on_path, _, _ = _run(
+        tmp_path,
+        "1.2.3",
+        docker_body=body,
+        env={"PATH": f"{tmp_path / 'stub'}:{bin_dir}:/usr/bin:/bin"},
+    )
+    assert on_path.returncode == 0, on_path.stderr
+    assert "git hooks launched by GUI clients" in on_path.stderr
+    assert "ln -sf" in on_path.stderr
+
+    off_path, _, _ = _run(tmp_path, "1.2.3", docker_body=body)
+    assert off_path.returncode == 0, off_path.stderr
+    assert "git hooks launched by GUI clients" not in off_path.stderr
 
 
 def test_falls_back_to_the_requested_version_when_unresolvable(
@@ -226,12 +266,31 @@ def test_unreachable_daemon_fails_loudly(tmp_path: Path) -> None:
 
 
 def test_bad_tag_fails_loudly(tmp_path: Path) -> None:
-    result, _, _ = _run(
-        tmp_path, "9.9.9", docker_body='[ "$1" = pull ] && exit 1; exit 0'
-    )
+    # Unpullable *and* not present locally — the only combination that is fatal.
+    result, _, _ = _run(tmp_path, "9.9.9", docker_body=_STOP_AFTER_PULL)
     assert result.returncode != 0
     assert "could not pull" in result.stderr
     assert "releases" in result.stderr
+
+
+def test_unpullable_but_local_image_still_installs(tmp_path: Path) -> None:
+    # A locally built or `docker load`ed image has no registry to pull from, so
+    # a pull failure alone must not be fatal — air-gapped hosts and this repo's
+    # own integration checks depend on it.
+    generated = tmp_path / "generated.sh"
+    generated.write_text(render_installer("wg:test"))
+    body = f"""
+case "$1" in
+    pull) exit 1 ;;
+    run) cat "{generated}" ;;
+esac
+exit 0
+"""
+    result, _, bin_dir = _run(
+        tmp_path, "test", docker_body=body, env={"WHYGRAPH_IMAGE_REPO": "wg"}
+    )
+    assert result.returncode == 0, result.stderr
+    assert (bin_dir / "whygraph").exists()
 
 
 # --- 9: the pin is internally consistent ----------------------------------

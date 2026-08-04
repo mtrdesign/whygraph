@@ -72,16 +72,22 @@ main() {
 
     require_docker
     info "Pulling $image …"
-    docker pull "$image" >&2 || die \
-        "could not pull $image. Check the version exists: $RELEASES_URL"
+    # A pull failure is only fatal if the image isn't already local — that is
+    # what lets a locally built or `docker load`ed image (air-gapped hosts, and
+    # this repo's own integration checks) install without a registry. A bad tag
+    # has neither, so it still dies loudly.
+    docker pull "$image" >&2 || docker image inspect "$image" >/dev/null 2>&1 || die \
+        "could not pull $image, and no local image by that name. Check the
+version exists: $RELEASES_URL"
     # NB: resolved_version exits 0 even when it finds nothing, so default on
     # the *empty string*, not on exit status.
     resolved=$(resolved_version "$image")
     info "Installing WhyGraph ${resolved:-$VERSION}"
+    # The generated installer prints its own "installed …" lines and the
+    # closing "done. Try: …" hint, so nothing is echoed after this but the
+    # host-only advice it cannot know about.
     install_shims "$image"
     path_advice
-    info ""
-    info "done. Try:  cd <your-repo> && whygraph init && whygraph scan"
 }
 
 main "$@"

@@ -8,6 +8,7 @@ $ whygraph --help
 Commands:
   analyze  Describe a commit's diff with the configured LLM.
   init     Initialize the WhyGraph database under .whygraph/whygraph.db.
+  install  Emit the host shim installer (called by scripts/install.sh).
   scan     Run the source crawlers, then describe each commit with the LLM.
   serve    Serve the WhyGraph Explorer panel for this repository.
   version  Print installed whygraph version.
@@ -109,3 +110,25 @@ whygraph analyze <TARGET> [BASELINE]
     Every commit named on the command line must already exist in the WhyGraph database. Run
     `whygraph scan` before `whygraph analyze`.
 
+## `whygraph install`
+
+!!! info "Plumbing, not a step you run"
+    This command exists **inside the image** so the installer can call it. Installing WhyGraph is
+    the `curl … | sh` line in [Installation](../getting-started/installation.md) - you don't run
+    `whygraph install` yourself.
+
+Prints the POSIX `sh` script that writes the `whygraph` and `whygraph-mcp` shims onto your `PATH`,
+pinned to the image's baked version. `scripts/install.sh` runs it via
+`docker run --rm IMAGE whygraph install` and executes the output; keeping the shim bodies here (in
+tested Python) rather than in the fetched shell is what stops the two from drifting.
+
+```bash
+whygraph install
+```
+
+No options. Two reasons you might still invoke it directly:
+
+| Command | Why |
+|---|---|
+| `docker run --rm ghcr.io/mtrdesign/whygraph:1.1.0 whygraph install` | Read exactly what would be written to your `PATH`, without writing it. |
+| `docker run --rm ghcr.io/mtrdesign/whygraph:1.1.0 whygraph install \| sh` | Install with no `curl` - air-gapped hosts, CI images. |

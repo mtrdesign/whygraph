@@ -68,6 +68,12 @@ The hooks are detached and single-flight: rapid commits coalesce instead of stac
 overwritten. `post-checkout` skips the two cases that can't have changed anything - a file checkout
 (`git checkout -- somefile`) and `git switch -c` at the current commit.
 
+!!! warning "Hooks need `whygraph` on the PATH of whatever runs git"
+    Each hook exits quietly when it can't find `whygraph`, so nothing breaks - but nothing rescans
+    either. That bites GUI clients (Sourcetree, Tower, JetBrains, VS Code), which often launch with
+    a minimal environment that excludes `~/.local/bin`. If you commit from one, symlink the shim
+    into a system path: `sudo ln -sf ~/.local/bin/whygraph /usr/local/bin/whygraph`.
+
 ### Choosing which hooks to install
 
 `[scan].hooks` in `whygraph.toml` governs the set, and **`whygraph init` makes `.git/hooks` match

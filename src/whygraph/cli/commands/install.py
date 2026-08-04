@@ -1,15 +1,26 @@
 """The ``whygraph install`` subcommand — emit the host shim installer.
 
 WhyGraph ships as a single Docker image. This command prints a POSIX ``sh``
-installer to **stdout** so the whole install is one Docker-native line::
+installer to **stdout**; running it writes two shims — ``whygraph`` and
+``whygraph-mcp`` — onto ``PATH``. Each shim runs the image ephemerally against
+the current directory (``docker run --rm -v "$PWD:/workspace" …``), so every
+command is a fresh process reading that repo's own ``whygraph.toml`` /
+``.whygraph`` / ``.codegraph``.
 
-    docker run --rm ghcr.io/mtrdesign/whygraph install | sh
+This is **in-image plumbing, not the user-facing install step**. The front door
+is the host-side bootstrapper ``scripts/install.sh``, fetched from a tag-pinned
+raw URL::
 
-The image auto-pulls on first use, this command emits the installer, and the
-host ``sh`` writes two shims — ``whygraph`` and ``whygraph-mcp`` — onto
-``PATH``. Each shim runs the image ephemerally against the current directory
-(``docker run --rm -v "$PWD:/workspace" …``), so every command is a fresh
-process reading that repo's own ``whygraph.toml`` / ``.whygraph`` / ``.codegraph``.
+    curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.0/scripts/install.sh | sh
+
+That script probes Docker, pulls the pinned image, and then delegates here —
+``docker run --rm IMAGE whygraph install`` — checking the output is non-empty
+before executing it. Keeping generation in Python (rather than in the fetched
+shell) means the shim bodies stay covered by ``tests/test_install_cmd.py`` and
+cannot drift from the bootstrapper. Running that delegation by hand
+(``docker run --rm IMAGE whygraph install | sh``) remains supported for
+no-curl / air-gapped hosts, and printing it without the pipe is the way to
+inspect exactly what would be written.
 
 The image reference baked into the shims is ``ghcr.io/mtrdesign/whygraph`` at
 the version baked into the image at build time (``WHYGRAPH_VERSION`` env, set by
@@ -172,7 +183,7 @@ def render_installer(image: str) -> str:
 
 @click.command(name="install")
 def install_cmd() -> None:
-    """Emit the host shim installer (`docker run … install | sh`).
+    """Emit the host shim installer (called by ``scripts/install.sh``).
 
     Prints a POSIX ``sh`` script that installs the ``whygraph`` and
     ``whygraph-mcp`` shims onto ``PATH``. The shims are pinned to

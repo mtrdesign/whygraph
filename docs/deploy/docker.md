@@ -5,20 +5,27 @@ image. Your host needs **only Docker**. One command installs the shims from insi
 it's the same `init` and `scan` as a native install.
 
 ```bash
-docker run --rm ghcr.io/mtrdesign/whygraph install | sh
+curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.0/scripts/install.sh | sh
 
 cd your-repo
 whygraph init      # bootstrap the WhyGraph DB + write config
 whygraph scan      # crawl history + refresh CodeGraph + LLM descriptions
 ```
 
-Pick a version with the image tag - `docker run --rm ghcr.io/mtrdesign/whygraph:1.2.3 install | sh`
-pins that release; `:latest` (the default) installs the newest.
+**The tag in the URL picks the version** - `v1.1.0` installs 1.1.0. To install a different release
+with that same installer, pass it through the pipe: `… | sh -s latest`. Full override list and the
+no-`curl` alternative are in [Installation](../getting-started/installation.md).
 
 ## How the shim works
 
-`docker run … install` prints a short installer to stdout; piping it to `sh` drops `whygraph` and
-`whygraph-mcp` shims on your `PATH`. Each one runs the published image against the current directory:
+The fetched script is a thin bootstrapper: it checks Docker is present and running, pulls the pinned
+image, then asks the image to generate the shims - `docker run --rm IMAGE whygraph install` prints
+them to stdout and the script executes that. Shim bodies therefore live in WhyGraph's own tested
+code, not in the shell script, and every failure (no Docker, dead daemon, unknown version) exits
+non-zero with a message instead of quietly installing nothing.
+
+The result is `whygraph` and `whygraph-mcp` on your `PATH`. Each one runs the published image
+against the current directory:
 
 ```bash
 docker run --rm -v "$PWD:/workspace" -w /workspace ghcr.io/mtrdesign/whygraph whygraph "$@"

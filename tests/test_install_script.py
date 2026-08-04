@@ -1,0 +1,250 @@
+"""Tests for ``scripts/install.sh`` — the host-side install bootstrapper.
+
+The script is what ``curl -fsSL …/v<tag>/scripts/install.sh | sh`` runs: it
+probes Docker, pulls the pinned image, then delegates shim generation to the
+image's own ``whygraph install`` (see
+:mod:`whygraph.cli.commands.install`). These tests run it offline by putting a
+**stub ``docker``** first on ``PATH``, mirroring the isolated-filesystem
+approach in ``tests/test_install_cmd.py``.
+
+Two properties matter most:
+
+* The script carries **no shim bodies** — :func:`render_installer` stays the
+  single source of truth (:func:`test_carries_no_shim_bodies`).
+* **Every** failure path exits non-zero. The command this replaced exited 0
+  when it installed nothing, because ``docker run``'s error went to stderr and
+  ``sh`` read an empty stdin (:func:`test_empty_generator_output_fails_loudly`).
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from whygraph.cli.commands.install import IMAGE_REPO, render_installer
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = REPO_ROOT / "scripts" / "install.sh"
+
+
+def _default_version() -> str:
+    """The ``DEFAULT_VERSION`` baked into the script — the front-door pin."""
+    match = re.search(r'^DEFAULT_VERSION="([^"]+)"', SCRIPT.read_text(), re.M)
+    assert match, "scripts/install.sh must define DEFAULT_VERSION"
+    return match.group(1)
+
+
+def _write_stub_docker(bin_dir: Path, body: str) -> Path:
+    """Install a stub ``docker`` in ``bin_dir`` and return the argv log path.
+
+    ``body`` is POSIX ``sh`` run with ``$1`` as the docker subcommand; every
+    invocation's argv is appended to the returned log first, so callers can
+    assert on the image reference the script chose.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    log = bin_dir / "argv.log"
+    stub = bin_dir / "docker"
+    stub.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\n{body}\n')
+    stub.chmod(0o755)
+    return log
+
+
+def _run(
+    tmp_path: Path,
+    *args: str,
+    docker_body: str = "exit 0",
+    env: dict[str, str] | None = None,
+    with_docker: bool = True,
+) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    """Run the script with a stubbed ``PATH``; return (result, argv log, bin dir).
+
+    ``PATH`` is replaced wholesale (not prepended) so the real ``docker`` can
+    never be reached and ``with_docker=False`` genuinely has none — only the
+    stub dir plus the standard system paths the script's own tools
+    (``mktemp``, ``sh``) need.
+    """
+    stub_dir = tmp_path / "stub"
+    log = _write_stub_docker(stub_dir, docker_body)
+    if not with_docker:
+        (stub_dir / "docker").unlink()
+
+    bin_dir = tmp_path / "bin"
+    full_env = {
+        "PATH": f"{stub_dir}:/usr/bin:/bin",
+        "HOME": str(tmp_path / "home"),
+        "WHYGRAPH_BIN_DIR": str(bin_dir),
+        **(env or {}),
+    }
+    result = subprocess.run(
+        ["sh", str(SCRIPT), *args],
+        env=full_env,
+        capture_output=True,
+        text=True,
+    )
+    return result, log, bin_dir
+
+
+# --- 1-2: shape ------------------------------------------------------------
+
+
+def test_script_parses() -> None:
+    assert subprocess.run(["sh", "-n", str(SCRIPT)]).returncode == 0
+
+
+def test_is_truncation_safe() -> None:
+    # Every statement lives in a function and `main "$@"` is last, so a
+    # truncated download defines functions and never executes anything.
+    lines = [
+        line
+        for line in SCRIPT.read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert lines[-1] == 'main "$@"'
+
+
+def test_carries_no_shim_bodies() -> None:
+    # The regression guard for the one invariant this script must not break:
+    # shim generation stays in `render_installer`, never duplicated in shell.
+    text = SCRIPT.read_text()
+    assert 'cat > "$BIN_DIR' not in text
+    assert "WHYGRAPH_IMAGE:-" not in text
+
+
+# --- 3: version resolution -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("args", "env", "expected"),
+    [
+        ((), {}, None),  # None → DEFAULT_VERSION, resolved in the test body
+        (("1.1.0",), {}, "1.1.0"),
+        ((), {"WHYGRAPH_VERSION": "2.0.0"}, "2.0.0"),
+        (("1.1.0",), {"WHYGRAPH_VERSION": "2.0.0"}, "2.0.0"),  # env wins
+    ],
+)
+def test_version_precedence(
+    tmp_path: Path, args: tuple[str, ...], env: dict[str, str], expected: str | None
+) -> None:
+    # Fail after the pull so the run stops early but the argv log is written.
+    result, log, _ = _run(
+        tmp_path, *args, docker_body='[ "$1" = pull ] && exit 1; exit 0', env=env
+    )
+    assert result.returncode != 0  # the deliberate pull failure
+    want = expected or _default_version()
+    assert f"pull {IMAGE_REPO}:{want}" in log.read_text()
+
+
+def test_image_repo_override(tmp_path: Path) -> None:
+    result, log, _ = _run(
+        tmp_path,
+        "test",
+        docker_body='[ "$1" = pull ] && exit 1; exit 0',
+        env={"WHYGRAPH_IMAGE_REPO": "registry.internal/wg"},
+    )
+    assert result.returncode != 0
+    assert "pull registry.internal/wg:test" in log.read_text()
+
+
+# --- 4: end to end with the real generator ---------------------------------
+
+
+def test_installs_both_shims_via_the_real_generator(tmp_path: Path) -> None:
+    # The stub's `docker run … whygraph install` emits exactly what the real
+    # image would — the output of render_installer — so this exercises the
+    # delegation contract rather than a hand-written approximation.
+    generated = tmp_path / "generated.sh"
+    generated.write_text(render_installer(f"{IMAGE_REPO}:1.2.3"))
+    body = f"""
+case "$1" in
+    run) cat "{generated}" ;;
+    image) echo "WHYGRAPH_VERSION=9.9.9" ;;
+esac
+exit 0
+"""
+    result, _, bin_dir = _run(tmp_path, "1.2.3", docker_body=body)
+    assert result.returncode == 0, result.stderr
+
+    # The resolved version comes from the image env, not the requested tag.
+    assert "Installing WhyGraph 9.9.9" in result.stderr
+
+    for name in ("whygraph", "whygraph-mcp"):
+        shim = bin_dir / name
+        assert shim.exists(), name
+        assert os.access(shim, os.X_OK), name
+        assert subprocess.run(["sh", "-n", str(shim)]).returncode == 0, name
+        assert f"{IMAGE_REPO}:1.2.3" in shim.read_text()
+
+
+def test_falls_back_to_the_requested_version_when_unresolvable(
+    tmp_path: Path,
+) -> None:
+    # `docker image inspect` finding nothing is cosmetic — it must never fail
+    # the install, and the requested version is echoed instead.
+    generated = tmp_path / "generated.sh"
+    generated.write_text(render_installer(f"{IMAGE_REPO}:1.2.3"))
+    body = f'[ "$1" = run ] && cat "{generated}"; exit 0'
+    result, _, bin_dir = _run(tmp_path, "1.2.3", docker_body=body)
+    assert result.returncode == 0, result.stderr
+    assert "Installing WhyGraph 1.2.3" in result.stderr
+    assert (bin_dir / "whygraph").exists()
+
+
+# --- 5-8: failure paths all exit non-zero ----------------------------------
+
+
+def test_empty_generator_output_fails_loudly(tmp_path: Path) -> None:
+    # The defect this whole change exists to fix: the old front door piped an
+    # empty stdout into `sh`, which exits 0 — a silent no-op that looked like
+    # a successful install.
+    result, _, bin_dir = _run(tmp_path, docker_body="exit 0")
+    assert result.returncode != 0
+    assert "empty installer" in result.stderr
+    assert "uv tool install whygraph==" in result.stderr  # the escape hatch
+    assert not bin_dir.exists()
+
+
+def test_failed_generator_run_fails_loudly(tmp_path: Path) -> None:
+    result, _, _ = _run(tmp_path, docker_body='[ "$1" = run ] && exit 125; exit 0')
+    assert result.returncode != 0
+    assert "could not emit the installer" in result.stderr
+
+
+def test_missing_docker_fails_loudly(tmp_path: Path) -> None:
+    result, _, _ = _run(tmp_path, with_docker=False)
+    assert result.returncode != 0
+    assert "docker not found on PATH" in result.stderr
+
+
+def test_unreachable_daemon_fails_loudly(tmp_path: Path) -> None:
+    result, _, _ = _run(tmp_path, docker_body='[ "$1" = info ] && exit 1; exit 0')
+    assert result.returncode != 0
+    assert "daemon is not reachable" in result.stderr
+
+
+def test_bad_tag_fails_loudly(tmp_path: Path) -> None:
+    result, _, _ = _run(
+        tmp_path, "9.9.9", docker_body='[ "$1" = pull ] && exit 1; exit 0'
+    )
+    assert result.returncode != 0
+    assert "could not pull" in result.stderr
+    assert "releases" in result.stderr
+
+
+# --- 9: the pin is internally consistent ----------------------------------
+
+
+def test_readme_install_url_matches_the_default_version() -> None:
+    # The front-door URL carries the version, so DEFAULT_VERSION and the tag
+    # in the advertised URL must agree. The release workflow enforces both
+    # against the release tag; this catches the internal mismatch on every PR.
+    readme = (REPO_ROOT / "README.md").read_text()
+    tags = set(re.findall(r"whygraph/v([^/]+)/scripts/install\.sh", readme))
+    assert tags, "README.md must advertise a tag-pinned install URL"
+    assert tags == {_default_version()}, (
+        f"README.md install URL tag(s) {sorted(tags)} != "
+        f"DEFAULT_VERSION {_default_version()}"
+    )

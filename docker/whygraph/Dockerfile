@@ -88,16 +88,6 @@ COPY src ./src
 COPY --from=playground-build /playground/dist ./src/whygraph/serve/static
 RUN pip install --no-cache-dir .
 
-# Image-only shortcut so `docker run IMAGE install | sh` works without an
-# ENTRYPOINT — an entrypoint of `whygraph` would break `docker run IMAGE
-# codegraph …` (services/codegraph/bootstrap.py) and the whygraph-mcp shim.
-# Deliberately NOT a pyproject [project.scripts] entry, so a native
-# `uv tool install` never drops a bare `install` on a user's PATH (it would
-# shadow coreutils `install`). Added last so no earlier build step depends on
-# coreutils `install`.
-RUN printf '#!/bin/sh\nexec whygraph install "$@"\n' > /usr/local/bin/install \
-    && chmod +x /usr/local/bin/install
-
 # The host shim bind-mounts the current repo here and sets the command
 # (e.g. `whygraph scan`). A bare `docker run IMAGE` prints CLI help.
 WORKDIR /workspace

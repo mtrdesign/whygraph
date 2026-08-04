@@ -12,14 +12,47 @@ Pick the path that fits where you are.
     published image and installs the shims from inside it:
 
     ```bash
-    docker run --rm ghcr.io/mtrdesign/whygraph install | sh
+    curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.0/scripts/install.sh | sh
     ```
 
-    Pin a specific version with the image tag - `docker run --rm ghcr.io/mtrdesign/whygraph:1.2.3
-    install | sh`; `:latest` (the default) installs the newest release. This drops `whygraph` and
-    `whygraph-mcp` shims on your `PATH`. Each wraps a
-    `docker run --rm -v "$PWD:/workspace" … ghcr.io/mtrdesign/whygraph` against the current repo. The
-    container is ephemeral per command. See [Run with Docker](../deploy/docker.md) for the full story.
+    **The tag in that URL is the version.** `v1.1.0` installs 1.1.0 - no second flag to keep in
+    sync. This drops `whygraph` and `whygraph-mcp` shims on your `PATH`; each wraps a
+    `docker run --rm -v "$PWD:/workspace" … ghcr.io/mtrdesign/whygraph` against the current repo,
+    and the container is ephemeral per command. See [Run with Docker](../deploy/docker.md) for the
+    full story.
+
+    **Install a different version** by passing it through the pipe - the URL then only decides
+    *which installer* runs:
+
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.0/scripts/install.sh | sh -s 1.1.0
+    curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.0/scripts/install.sh | sh -s latest
+    ```
+
+    `WHYGRAPH_VERSION=1.1.0` does the same and wins over the argument. `WHYGRAPH_BIN_DIR` picks the
+    install directory (default `~/.local/bin`), and `WHYGRAPH_IMAGE_REPO` points at a private mirror.
+
+    !!! tip "If the installer itself misbehaves"
+        Swap the tag for `main` - `…/whygraph/main/scripts/install.sh` - to get the newest
+        installer while still installing the last published release. A per-tag script is frozen at
+        that tag, so this is the escape hatch for an installer bug.
+
+    !!! warning "A mistyped tag fails silently"
+        `curl -f` prints nothing on a 404, so `curl … | sh` reads an empty script and **exits 0
+        without installing anything** - the failure mode every `curl | sh` installer shares. When
+        you want a visible failure (or want to read the script first), download it separately:
+
+        ```bash
+        curl -fsSL -o install.sh https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.0/scripts/install.sh
+        sh install.sh
+        ```
+
+    **No `curl`, air-gapped, or CI?** Run the in-image generator directly - it is what the script
+    above delegates to, and dropping the pipe prints exactly what would be written:
+
+    ```bash
+    docker run --rm ghcr.io/mtrdesign/whygraph:1.1.0 whygraph install | sh
+    ```
 
 === "PyPI"
 

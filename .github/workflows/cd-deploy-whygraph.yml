@@ -75,11 +75,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Derived explicitly rather than via docker/metadata-action. That action's
+      # `version` output depends on its `tags:` rules: with semver patterns it
+      # normalises `v1.1.1` -> `1.1.1`, but with no `tags:` it falls back to
+      # `type=ref,event=tag` and yields the RAW ref `v1.1.1` (and on a branch,
+      # the branch name). That mismatch broke the v1.1.1 release: the gate
+      # compared `v1.1.1` against pins reading `1.1.1`, and the same value would
+      # have been baked as WHYGRAPH_VERSION, pinning shims to a tag `merge`
+      # never publishes. This job is the gate every push depends on, so it must
+      # not inherit a third-party action's tag-rule side effects.
       - name: Resolve the release version
         id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY_IMAGE }}
+        run: |
+          set -eu
+          if [ "${{ github.event_name }}" = 'release' ]; then
+            v='${{ github.event.release.tag_name }}'
+            v="${v#v}"                     # v1.1.1 -> 1.1.1, matching {{version}}
+            [ -n "$v" ] || { echo "::error::release tag_name is empty"; exit 1; }
+          else
+            v='ci-test'                    # dispatch: throwaway, never a semver tag
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "resolved version: $v"
 
       - name: Verify the version pins match the release
         if: github.event_name == 'release'
@@ -117,11 +134,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Labels only — this job's tags come from `outputs:` below, and the
+      # version label is pinned to `verify`'s resolved value so it reads
+      # `1.1.1`, not the raw ref `v1.1.1` (metadata-action's default without
+      # `tags:`) or a branch name on a dispatch.
       - name: Compute image labels
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY_IMAGE }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.verify.outputs.version }}
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -133,9 +156,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # On workflow_dispatch metadata-action may yield an empty version; an
-      # empty WHYGRAPH_VERSION bakes "IMAGE:" into the generated shims —
-      # builds and pushes green, but broken. Never let it be empty.
+      # WHYGRAPH_VERSION is baked into the image and is what `whygraph install`
+      # pins the generated shims to, so it MUST equal a tag `merge` actually
+      # publishes — `1.1.1`, never `v1.1.1`. The `verify` job is the single
+      # source of that value and always returns a non-empty, v-stripped one.
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v6
@@ -146,7 +170,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             CODEGRAPH_VERSION=${{ env.CODEGRAPH_VERSION }}
-            WHYGRAPH_VERSION=${{ needs.verify.outputs.version || 'ci-test' }}
+            WHYGRAPH_VERSION=${{ needs.verify.outputs.version }}
           # No `tags:` and no `push:` — `outputs` owns both. Setting `tags`
           # here conflicts with push-by-digest.
           outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
@@ -243,7 +267,10 @@ jobs:
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
     env:
-      TAG: ${{ github.event_name == 'release' && needs.verify.outputs.version || 'ci-test' }}
+      # Single source of truth: `verify` already resolves this to the published
+      # tag — the v-stripped semver on a release, `ci-test` on a dispatch. Do
+      # not re-derive it here; two derivations is how they drift apart.
+      TAG: ${{ needs.verify.outputs.version }}
     steps:
       - name: Login to GHCR
         uses: docker/login-action@v3

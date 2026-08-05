@@ -20,6 +20,8 @@ The first is the **Explorer**. On the left, your code as a containment tree: dir
 
 ![The Explorer: a node selected in the graph, with its rationale card open - purpose, why it exists, constraints, tradeoffs.](assets/whygraph-playground-explorer-rationale.png)
 
+The screenshots in this post show WhyGraph running over the public axios repository.
+
 ![The same node's Evidence tab: the commits behind it, each described from the raw diff.](assets/whygraph-playground-explorer-evidence.png)
 
 The only thing in the Explorer that writes anything is the explicit **Generate rationale** button. Everything else reads.

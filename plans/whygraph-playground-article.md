@@ -18,8 +18,9 @@ So we built the part for the humans. It is one command: `whygraph serve`.
 
 The first is the **Explorer**. On the left, your code as a containment tree: directories, files, classes, methods. In the middle, a graph. On the right, a detail panel for whatever you select: what it calls and what calls it, its rationale card (purpose, why, constraints, tradeoffs, risks), the raw evidence behind it - the commits, the pull requests, the issues those PRs closed - and its full history. The landing view is a map of the whole repository where every directory is colored by how much of it you have already asked "why" about. Cards are generated lazily and cached, so the map starts mostly unexplored and fills in as you browse: a chart of your own curiosity, which turns out to be more motivating than it sounds. ⌘K finds any symbol from anywhere. One mechanical note for the skeptics: the layout is computed server-side, so the browser never runs a layout engine, which is why the graph stays fast instead of wobbling into place.
 
-<!-- Step 5b: screenshot 1 goes here -->
-![The Explorer overview: directories colored by how much of each has been analyzed.](whygraph-playground-explorer-overview.png)
+![The Explorer: a node selected in the graph, with its rationale card open - purpose, why it exists, constraints, tradeoffs.](assets/whygraph-playground-explorer-rationale.png)
+
+![The same node's Evidence tab: the commits behind it, each described from the raw diff.](assets/whygraph-playground-explorer-evidence.png)
 
 The only thing in the Explorer that writes anything is the explicit **Generate rationale** button. Everything else reads.
 
@@ -43,16 +44,19 @@ Four families of questions, taken from the ones we catch ourselves asking daily.
 
 **"What did the team ship in July?"** The summary question, and the one commit messages answer worst. The assistant pulls recent activity and runs aggregate statistics over commits, PRs, and issues: velocity by month, the files that keep churning, contributor breakdowns, how long PRs take to merge. Two details here earn their keep. Contributors are resolved to one row per human, from evidence - your mailmap, GitHub's own records, noreply addresses - never by fuzzy name-matching, so the summary does not credit the same person three times for three git identities. And the statistics surface flatly refuses to dress commit counts up as productivity; that rule is written into the tool itself, not into a hope.
 
+![Contributor profiles built from the record: areas of work, kinds of changes, and working style, each claim carrying commit and PR references.](assets/whygraph-playground-chat-contributors.png)
+
 **"Show me."** Any aggregate can become a chart in the thread: lines, bars, horizontal bars, stacked bars, each rendered with a data table alongside and a PNG export. The engineering detail we are proudest of: the model never retypes numbers into a chart. It names columns from a result it already produced, and the chart is drawn from that result directly, so the chart cannot disagree with the data. If you have ever watched a model transcribe a table and quietly lose a digit on the way, you know exactly why this rule exists.
 
-<!-- Step 5b: screenshot 2 goes here -->
-![A chart the assistant rendered from an aggregate query, with its data table alongside.](whygraph-playground-chat-chart.png)
+![A chart the assistant rendered from an aggregate query, with its data table alongside.](assets/whygraph-playground-chat-chart.png)
 
 **"When did sessions stop surviving a refresh?"** The opening scene, generalized. Defects get reported in the vocabulary of behaviour, and the diff-derived descriptions are the only record of your repository written in that same vocabulary. So the assistant's `find_changes` tool searches them, and finds the guilty change under whatever one-word message it was committed with. Then the evidence tools produce the receipts: the PR that merged it, the review discussion, the issue it closed.
 
 **"How long do payments changes usually take here?"** The assistant computes durations from your recorded timestamps: PR cycle time, the gap between a PR opening and merging, per-module history. Ask, and it will tell you that payments-module PRs have historically taken about a week from open to merge, with the numbers behind the claim. What it will not do is dress that up as a promise about the next one. It is inference over your own recorded history - which is the honest version of the answer, and often the only version your planning meeting actually needed.
 
 And then there is the fifth, unglamorous family that quietly gets the most use: plain codebase questions. What does this module do. Who calls this. Why does this exist at all. Answered with citations, which is rather the point.
+
+![A plain "why does this exist" question: the assistant's tool calls appear as activity cards, and the answer cites files, commits, and the cached rationale card.](assets/whygraph-playground-chat-xhr-rationale.png)
 
 *The answers were always in the repo - the missing piece was something that could read all of it at once and show its work.*
 

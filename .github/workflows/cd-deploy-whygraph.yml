@@ -5,62 +5,101 @@ name: Deploy WhyGraph Image
 # that bootstrapper pulls this image and delegates shim generation to the
 # in-image `whygraph install` command. Publishing is tied to releases: cutting
 # a GitHub release (tagged vX.Y.Z) builds the image, tags it to match that
-# version, and bakes WHYGRAPH_VERSION so the shims pin that release. The image
-# tag follows the release version 1:1 — and because the front-door URL is
-# tag-pinned, a pin-verification step gates the push.
+# version, and bakes WHYGRAPH_VERSION so the shims pin that release.
+#
+# Shape — one job per architecture, each on a NATIVE runner:
+#
+#   verify ──> build (linux/amd64 + linux/arm64, parallel, pushed by digest)
+#          └─> merge (assembles the manifest list, attaches the real tags)
+#              └─> verify-image (pulls + runs the published tag, per arch)
+#
+#   pr-build (independent) — PR-time amd64 build, never pushed.
+#
+# Why per-arch jobs rather than one buildx call for both platforms: QEMU
+# emulation of linux/arm64 cost ~9m40s of a 12m45s release (7.7x on the apt
+# layer, 14.5x on `pip install`). Native runners build both arches in
+# parallel instead, and native arm64 runners are free for public repos.
+#
+# The image tag follows the release version 1:1 — and because the front-door
+# URL is tag-pinned, a pin-verification step gates the push. That gate is its
+# own job precisely so it still runs BEFORE anything is pushed.
 
 on:
   release:
     types: [published]
+  # Permanent, not scaffolding: the only way to exercise the digest/merge
+  # machinery without cutting a release. Publishes to a throwaway :ci-test tag
+  # and skips the pin gate. Do not remove — the next edit to this workflow
+  # needs it too.
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'docker/whygraph/**'
+      - 'pyproject.toml'
+      - 'hatch_build.py'
+      - 'src/**'
+      - '.github/workflows/cd-deploy-whygraph.yml'
 
 permissions:
   contents: read
   packages: write
 
+# The buildcache-* tags and :ci-test are shared mutable state, so overlapping
+# runs can interleave writes. Cancel superseded PR builds; NEVER cancel a
+# release or a dispatch mid-push — a half-pushed manifest list is worse than
+# a slow queue.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REGISTRY_IMAGE: ghcr.io/mtrdesign/whygraph
+  CODEGRAPH_VERSION: '1.4.1'
+
 jobs:
-  build-and-push:
-    name: Build and Push Image
+  # --- 1. Pin gate — must pass before ANY push ------------------------------
+  # Three hand-maintained copies of the release version must name the release
+  # being published: the installer's DEFAULT_VERSION and the README URL
+  # (because the front door is a tag-pinned raw URL), and pyproject's version
+  # (because `whygraph version` reports it from the built wheel's metadata).
+  # Gated here — in a job every build depends on — so a forgotten bump is a
+  # red release rather than a silently wrong pin. pyproject is in this list
+  # because it sat at 0.1.0 through v1.0.0 while nothing checked it.
+  verify:
+    name: Verify version pins
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # The release tag drives the image tags. A release `v1.2.3` publishes
-      # :1.2.3, :1.2, :1 and :latest, so consumers can pin as loosely or as
-      # tightly as they like while the shim's default :latest tracks the
-      # newest release.
-      - name: Compute image tags
+      # Derived explicitly rather than via docker/metadata-action. That action's
+      # `version` output depends on its `tags:` rules: with semver patterns it
+      # normalises `v1.1.1` -> `1.1.1`, but with no `tags:` it falls back to
+      # `type=ref,event=tag` and yields the RAW ref `v1.1.1` (and on a branch,
+      # the branch name). That mismatch broke the v1.1.1 release: the gate
+      # compared `v1.1.1` against pins reading `1.1.1`, and the same value would
+      # have been baked as WHYGRAPH_VERSION, pinning shims to a tag `merge`
+      # never publishes. This job is the gate every push depends on, so it must
+      # not inherit a third-party action's tag-rule side effects.
+      - name: Resolve the release version
         id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/mtrdesign/whygraph
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest
+        run: |
+          set -eu
+          if [ "${{ github.event_name }}" = 'release' ]; then
+            v='${{ github.event.release.tag_name }}'
+            v="${v#v}"                     # v1.1.1 -> 1.1.1, matching {{version}}
+            [ -n "$v" ] || { echo "::error::release tag_name is empty"; exit 1; }
+          else
+            v='ci-test'                    # dispatch: throwaway, never a semver tag
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "resolved version: $v"
 
-      # Three hand-maintained copies of the release version must name the
-      # release being published: the installer's DEFAULT_VERSION and the README
-      # URL (because the front door is a tag-pinned raw URL), and pyproject's
-      # version (because `whygraph version` reports it from the built wheel's
-      # metadata). Gated here — before the push — so a forgotten bump is a red
-      # release rather than a silently wrong pin. pyproject is in this list
-      # because it sat at 0.1.0 through v1.0.0 while nothing checked it.
       - name: Verify the version pins match the release
+        if: github.event_name == 'release'
         run: |
           want='${{ steps.meta.outputs.version }}'
           fail() { echo "::error::$1 — bump it and re-run."; exit 1; }
@@ -76,17 +115,221 @@ jobs:
           grep -q "whygraph/v$want/scripts/install.sh" README.md \
             || fail "README.md install URL is not pinned to v$want"
 
-      - name: Build and push
+  # --- 2. One native runner per arch, pushed BY DIGEST (no tags yet) --------
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false          # report both arches' failures in one run
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm     # native — replaces QEMU emulation
+            arch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Labels only — this job's tags come from `outputs:` below, and the
+      # version label is pinned to `verify`'s resolved value so it reads
+      # `1.1.1`, not the raw ref `v1.1.1` (metadata-action's default without
+      # `tags:`) or a branch name on a dispatch.
+      - name: Compute image labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY_IMAGE }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.verify.outputs.version }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # WHYGRAPH_VERSION is baked into the image and is what `whygraph install`
+      # pins the generated shims to, so it MUST equal a tag `merge` actually
+      # publishes — `1.1.1`, never `v1.1.1`. The `verify` job is the single
+      # source of that value and always returns a non-empty, v-stripped one.
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/whygraph/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            CODEGRAPH_VERSION=1.4.1
-            WHYGRAPH_VERSION=${{ steps.meta.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            CODEGRAPH_VERSION=${{ env.CODEGRAPH_VERSION }}
+            WHYGRAPH_VERSION=${{ needs.verify.outputs.version }}
+          # No `tags:` and no `push:` — `outputs` owns both. Setting `tags`
+          # here conflicts with push-by-digest.
+          outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          # Registry cache, one ref per arch: not ref-scoped and not
+          # 7-day-evicted, so unlike the GitHub Actions cache it survives
+          # between releases (that one was write-only here — release runs
+          # wrote per-tag scopes no later release could ever read).
+          # image-manifest+oci-mediatypes are required for GHCR to accept it.
+          cache-from: type=registry,ref=${{ env.REGISTRY_IMAGE }}:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=${{ env.REGISTRY_IMAGE }}:buildcache-${{ matrix.arch }},mode=max,image-manifest=true,oci-mediatypes=true
+          provenance: false      # nothing in this repo consumes attestations
+          sbom: false
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest='${{ steps.build.outputs.digest }}'
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # --- 3. Assemble the manifest list and attach the real tags ---------------
+  # A release `v1.2.3` publishes :1.2.3, :1.2, :1 and :latest, so consumers
+  # can pin as loosely or as tightly as they like while the shim's default
+  # :latest tracks the newest release.
+  merge:
+    name: Merge manifest list
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4    # >= v4.1 for pattern/merge-multiple
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY_IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=ci-test,enable=${{ github.event_name == 'workflow_dispatch' }}
+          # `latest` is deliberately NOT listed: flavor.latest=auto already
+          # adds it for a semver release and correctly SKIPS it for a
+          # prerelease. Listing it explicitly would move :latest onto an rc.
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
+
+      - name: Inspect the published manifest list
+        run: docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}
+
+  # --- 4. Prove the published image actually RUNS, per arch -----------------
+  # Runs natively on each arch against the PUBLISHED tag — the only check that
+  # catches an arch-specific breakage (a bad console-script entry point, a
+  # missing SPA bundle, an arch-wrong wheel) or a manifest list that inspects
+  # fine but doesn't resolve. Lives in CI because a developer machine may not
+  # be able to pull from ghcr.io at all.
+  verify-image:
+    name: Verify image ${{ matrix.platform }}
+    needs: [verify, merge]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    env:
+      # Single source of truth: `verify` already resolves this to the published
+      # tag — the v-stripped semver on a release, `ci-test` on a dispatch. Do
+      # not re-derive it here; two derivations is how they drift apart.
+      TAG: ${{ needs.verify.outputs.version }}
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run whygraph version from the published image
+        env:
+          WANT: ${{ needs.verify.outputs.version }}
+        run: |
+          set -eu
+          image="${REGISTRY_IMAGE}:${TAG}"
+          # No --platform flag: the runner IS this arch, so a correct manifest
+          # list resolves on its own. Passing --platform would mask the very
+          # bug this job exists to catch.
+          got=$(docker run --rm "$image" whygraph version)
+          echo "reported: $got"
+          # Only a release has a semver version to assert against.
+          if [ "${{ github.event_name }}" = 'release' ]; then
+            printf '%s\n' "$got" | grep -q "$WANT" \
+              || { echo "::error::image reports '$got', expected to contain '$WANT'"; exit 1; }
+          fi
+
+      # Guards the deliberate absence of an ENTRYPOINT: an arbitrary command
+      # must still resolve inside the image. `command -v` rather than
+      # `codegraph --version` on purpose — it asserts PATH resolution without
+      # depending on a third-party CLI's flag surface, so a codegraph release
+      # that renames a flag cannot fail a WhyGraph release.
+      - name: Confirm codegraph resolves on PATH (no-ENTRYPOINT invariant)
+        run: docker run --rm "${REGISTRY_IMAGE}:${TAG}" sh -lc 'command -v codegraph'
+
+  # --- 5. PR-time smoke build: amd64, never pushed -------------------------
+  # Build-only: no `load: true`, no `docker run`. Proves the Dockerfile builds
+  # before a release depends on it; does not prove the image runs (that is
+  # verify-image's job, at release time). No login step — the package is
+  # public, so the cache read succeeds unauthenticated, including from forks.
+  pr-build:
+    name: PR image build (amd64, no push)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/whygraph/Dockerfile
+          platforms: linux/amd64
+          push: false
+          build-args: |
+            CODEGRAPH_VERSION=${{ env.CODEGRAPH_VERSION }}
+            WHYGRAPH_VERSION=pr-${{ github.event.pull_request.number }}
+          # Read-only: a PR must never mutate the release cache.
+          cache-from: type=registry,ref=${{ env.REGISTRY_IMAGE }}:buildcache-amd64
+          provenance: false

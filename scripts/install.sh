@@ -2,11 +2,11 @@
 # WhyGraph installer. Writes the `whygraph` and `whygraph-mcp` shims onto your
 # PATH; each runs the WhyGraph container ephemerally against the current repo.
 #
-#   curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.0/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.1/scripts/install.sh | sh
 #
 # The tag in that URL is the version: DEFAULT_VERSION below matches it, and CI
 # fails a release whose tag disagrees. Override with an argument or the env:
-#   … | sh -s 1.1.0        … | sh -s latest        WHYGRAPH_VERSION=1.1.0 … | sh
+#   … | sh -s 1.1.1        … | sh -s latest        WHYGRAPH_VERSION=1.1.1 … | sh
 #
 # Other env: WHYGRAPH_BIN_DIR (default ~/.local/bin, read by the generated
 # installer), WHYGRAPH_IMAGE_REPO (private mirrors).
@@ -15,7 +15,7 @@
 # download defines functions and never runs anything.
 set -eu
 
-DEFAULT_VERSION="1.1.0"        # the release that first ships this file; gated by CI.
+DEFAULT_VERSION="1.1.1"        # the release that first ships this file; gated by CI.
 IMAGE_REPO="${WHYGRAPH_IMAGE_REPO:-ghcr.io/mtrdesign/whygraph}"
 RELEASES_URL="https://github.com/mtrdesign/whygraph/releases"
 

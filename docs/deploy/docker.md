@@ -28,24 +28,36 @@ The result is `whygraph` and `whygraph-mcp` on your `PATH`. Each one runs the pu
 against the current directory:
 
 ```bash
-docker run --rm -v "$PWD:/workspace" -w /workspace ghcr.io/mtrdesign/whygraph whygraph "$@"
+exec docker run --rm -i $tty \
+    --user "$(id -u):$(id -g)" -e HOME=/tmp \
+    -v "$PWD:/workspace" -w /workspace \
+    -e GH_TOKEN -e GITHUB_TOKEN \
+    -e ANTHROPIC_API_KEY -e OPENAI_API_KEY -e DEEPSEEK_API_KEY \
+    -e OPENROUTER_API_KEY \
+    "$IMAGE" whygraph "$@"
 ```
 
-The container is **ephemeral per command** - no compose, no `docker exec`, nothing to start or stop.
-Each invocation is a fresh process against the repo you're standing in.
+The container is **ephemeral per command** - no compose and no `docker exec`. Each invocation is a
+fresh process against the repo you're standing in.
 
 - **Everything's in the image** - Python and WhyGraph, `git`, the GitHub CLI, and Node with the
   CodeGraph CLI. CodeGraph indexes from the in-image binary, so there's no docker-in-docker.
 - **Per-project config just works.** Each command reads the current repo's own `whygraph.toml`,
   `.whygraph/`, and `.codegraph/`.
-- **Files come back as yours.** The shim runs as your host user, so generated files aren't
+- **Files come back as yours.** `--user "$(id -u):$(id -g)"` is what does it: generated files aren't
   root-owned and git sees matching ownership.
+
+!!! note "`whygraph serve` is the one exception"
+    [`whygraph serve`](../guide/playground.md) needs a published port and a server that outlives the
+    command, so the shim gives it a **named, long-lived** `whygraph-serve` container instead, with
+    `--detach`, `--logs`, and `--stop` to manage it. Every other command is ephemeral.
 
 ## Credentials
 
 The shim passes your environment through. A GitHub token goes in `[scan].token` of the repo's
 `whygraph.toml` (gitignored), and the shim also forwards `GH_TOKEN` / `GITHUB_TOKEN` plus
-`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` from your environment.
+`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `OPENROUTER_API_KEY` from your
+environment.
 
 !!! warning "Never bake a token into the image"
     Pass credentials at run time, never at build time. The repo's gitignored `whygraph.toml` is the
@@ -75,4 +87,8 @@ WHYGRAPH_IMAGE=whygraph:latest whygraph scan
 ```
 
 `WHYGRAPH_IMAGE` overrides the image the shim runs, so you can test a local build without touching the
-install.
+install. The image also carries the built Explorer bundle, so a local build serves the playground too.
+
+!!! note "A local build reports itself as `latest`"
+    The release version is baked in at build time. Building yourself bakes `latest`, which is what
+    `whygraph version` and the installer read back - expected, not a bug.

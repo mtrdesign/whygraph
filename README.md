@@ -4,6 +4,8 @@ Rationale layer over [CodeGraph](https://github.com/colbymchenry/codegraph): exp
 
 For each chunk of code, WhyGraph collects evidence from git history and GitHub - commits, blame, PRs, the issues those PRs closed - then serves it to AI editors over MCP, plus an on-demand rationale card (purpose, why, constraints, tradeoffs, risks) with a persistent cache.
 
+`whygraph serve` puts the same data in a local web panel: an **Explorer** over the code graph, and a **Chat assistant** that answers questions about the repo by calling WhyGraph's own tools.
+
 > **📖 Full documentation → <https://mtrdesign.github.io/whygraph/>**
 >
 > Installation, configuration, the CLI and MCP reference, the Docker delivery, and the service model all live there. This README is just the elevator pitch.
@@ -17,7 +19,7 @@ whygraph init                 # bootstrap the WhyGraph DB + write config
 whygraph scan                 # crawl history + refresh CodeGraph + LLM descriptions
 whygraph init --agent claude  # wire the MCP server into your editor
 whygraph-mcp                  # sanity-check the server (Ctrl-C to exit)
-whygraph serve                # browse the graph, evidence + rationale in a local web panel
+whygraph serve                # open the Explorer + Chat panel at http://localhost:8765
 ```
 
 The only-Docker install needs nothing but Docker on the host — one command pulls the image and

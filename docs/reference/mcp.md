@@ -43,7 +43,9 @@ Returns `{ "path", "include_renames", "evidence": [...] }`, using the same evide
 
 Generate a structured rationale card explaining why a chunk of code exists. It gathers the evidence,
 optionally enriches it with CodeGraph symbol context, and asks the configured LLM to synthesize the
-card. Cards are cached, so a repeat call on unchanged code is a fast database read.
+card. Cards are cached, so a repeat call on unchanged code is a fast database read. The cache key is
+the target plus a fingerprint of its evidence **and** the provider and model that wrote the card, so
+switching `[rationale].provider` or `model` regenerates rather than returning the old one.
 
 | Parameter | Type | Description |
 |---|---|---|
@@ -99,11 +101,16 @@ Orchestration recipes that wire the tools into a workflow.
 
 ## Composition with CodeGraph
 
-WhyGraph exposes no graph-traversal tools on purpose. The split:
+**This MCP surface** exposes no graph-traversal tools on purpose. The split:
 
 | Layer | Owns |
 |---|---|
 | **CodeGraph** | "what is connected to what" - callers, callees, symbol resolution, type hierarchy. |
 | **WhyGraph** | "why does this exist and when did it change" - evidence, rationale, history. |
 
-For traversal mid-conversation, call CodeGraph's own tools directly.
+For traversal mid-conversation, call CodeGraph's own tools directly - install its MCP server
+alongside WhyGraph's.
+
+This is a boundary on the MCP surface, not on WhyGraph's access to the graph. The
+[Explorer](../guide/playground.md) and the [chat assistant](../guide/chat.md) both traverse it,
+because they read CodeGraph's database in-process rather than over MCP.

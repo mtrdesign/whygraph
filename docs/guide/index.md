@@ -23,7 +23,7 @@ Start with the concepts, then dig into whichever piece you need.
 
     ---
 
-    The scan phases, every flag, and the keep-fresh git hooks.
+    The four scan phases, every flag, branch membership, and the keep-fresh git hooks.
 
     [:octicons-arrow-right-24: Scanning](scanning.md)
 
@@ -43,12 +43,20 @@ Start with the concepts, then dig into whichever piece you need.
 
     [:octicons-arrow-right-24: MCP usage](mcp-usage.md)
 
--   :material-graph-outline:{ .lg .middle } __Explorer playground__
+-   :material-graph-outline:{ .lg .middle } __The Explorer__
 
     ---
 
-    A local, read-only web panel over the graph, evidence, and rationale.
+    A local web panel over the graph, evidence, and rationale.
 
-    [:octicons-arrow-right-24: Playground](playground.md)
+    [:octicons-arrow-right-24: Explorer](playground.md)
+
+-   :material-chat-processing-outline:{ .lg .middle } __The Chat assistant__
+
+    ---
+
+    Ask questions in English; it calls WhyGraph's tools and charts the answers.
+
+    [:octicons-arrow-right-24: Chat](chat.md)
 
 </div>

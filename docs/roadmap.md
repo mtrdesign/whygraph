@@ -1,7 +1,20 @@
 # Roadmap
 
-WhyGraph works today for the core loop - scan a repo, serve evidence and rationale over MCP. Here's
-what's planned but not yet built. Treat everything below as direction, not a promise of dates.
+WhyGraph works today for the core loop - scan a repo, serve evidence and rationale over MCP - plus a
+local web panel with an Explorer and a chat assistant over the same data. Here's what shipped
+recently, and what's planned but not yet built. Treat the planned items as direction, not a promise
+of dates.
+
+## Recently shipped
+
+| Feature | What it gives you |
+|---|---|
+| [Explorer](guide/playground.md) | A local web panel over the graph, evidence, and rationale. |
+| [Chat assistant](guide/chat.md) | Ask questions in English; it calls WhyGraph's tools, runs aggregate SQL, and charts the results. |
+| [Author identity](guide/concepts.md#people) | One row per human, resolved from mailmap and GitHub rather than guessed. |
+| [Branch membership](guide/scanning.md#how-whygraph-sees-branches) | Shipped history is distinguished from work in progress, recomputed and self-healing every scan. |
+| [Auto-rescan git hooks](guide/scanning.md#keep-it-fresh) | The databases track your commits in the background, no daemon. |
+| [Curl install](getting-started/installation.md) | A tag-pinned one-liner; the tag in the URL is the version you get. |
 
 ## More source-control providers
 
@@ -26,8 +39,10 @@ Larger, net-new pieces that aren't built yet:
 - **Persistent / server mode** - a long-running endpoint with an HTTP MCP transport, so an app
   doesn't spawn a fresh stdio session per connection. This is what unlocks the full
   [service model](deploy/service.md).
-- **Per-branch databases** - separate CodeGraph and WhyGraph databases per branch, so a scan on one
-  branch doesn't clobber another's.
+- **Per-branch CodeGraph index** - the code index is still single-branch, so switching branches and
+  re-syncing rewrites it. WhyGraph's *own* database no longer needs this: it keeps one database and
+  [computes branch membership](guide/scanning.md#how-whygraph-sees-branches) per commit, recomputed
+  and self-healing on every scan.
 
 !!! info "Want to weigh in?"
     These are shaped by what people actually need. Open an issue on

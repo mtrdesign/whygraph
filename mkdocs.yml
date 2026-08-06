@@ -86,7 +86,8 @@ nav:
       - Scanning your repo: guide/scanning.md
       - Wiring your editor: guide/editors.md
       - Using WhyGraph (MCP): guide/mcp-usage.md
-      - Explorer playground: guide/playground.md
+      - The Explorer: guide/playground.md
+      - The Chat assistant: guide/chat.md
   - Docker & Self-Hosting:
       - deploy/index.md
       - Run with Docker: deploy/docker.md
@@ -96,5 +97,6 @@ nav:
       - CLI: reference/cli.md
       - MCP surface: reference/mcp.md
       - Configuration: reference/configuration.md
+      - LLM providers: reference/llm-providers.md
       - Source control providers: reference/providers.md
   - Roadmap: roadmap.md

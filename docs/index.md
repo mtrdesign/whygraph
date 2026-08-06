@@ -12,7 +12,7 @@ Explains <em>why</em> code exists, not just what it does.
 
 A rationale layer over [CodeGraph](https://github.com/colbymchenry/codegraph). It mines your git
 history and GitHub for the story behind each line - the commits, pull requests, and issues that put
-it there - and serves that story to any AI editor over MCP.
+it there - and serves that story to any AI editor over MCP, or to you in a local web panel.
 
 [Get started](getting-started/quickstart.md){ .md-button .md-button--primary }
 [View on GitHub](https://github.com/mtrdesign/whygraph){ .md-button }
@@ -56,6 +56,15 @@ it there - and serves that story to any AI editor over MCP.
     ephemeral per command. Install, init, scan - done.
 
     [:octicons-arrow-right-24: Run with Docker](deploy/docker.md)
+
+-   :material-monitor-dashboard:{ .lg .middle } __Browse it locally__
+
+    ---
+
+    `whygraph serve` opens a web panel: an Explorer over the code graph with rationale and evidence
+    side by side, plus a chat assistant that answers questions by calling the same tools.
+
+    [:octicons-arrow-right-24: The Explorer](guide/playground.md)
 
 -   :material-graph-outline:{ .lg .middle } __Composes with CodeGraph__
 

@@ -26,7 +26,7 @@ SCOPING:
 ## Tools
 
 - **CodeGraph MCP** — `codegraph_search`, `codegraph_callers`, `codegraph_callees`, `codegraph_node`, `codegraph_impact`, `codegraph_explore`. Source of *what is structurally affected*.
-- **WhyGraph MCP** — `whygraph_search`, `whygraph_evidence_for`, `whygraph_rationale_brief`, `whygraph_window`. Source of *why each affected symbol exists*.
+- **WhyGraph MCP** — `whygraph_rationale_brief`, `whygraph_evidence_for`, `whygraph_area_history`. Source of *why each affected symbol exists*.
 - File tools (read, grep, glob, shell) for grounding against actual source.
 - Subagent handoff — for delegating to `whygraph-researcher` and `whygraph-synthesizer` custom agents (deep mode only).
 
@@ -36,7 +36,7 @@ Do not attempt to plan without the graph.
 
 ## Phase 1 — Build the working set (both modes)
 
-**1a. Find seed symbols.** Parse the task for symbol-like terms (function/class/module names, file paths). Use `codegraph_search` to resolve them. Use `whygraph_search(<task keywords>)` as a secondary signal — past commits/PRs mentioning the same terms point at relevant code paths. If you can't resolve any seed at all, ask the user one targeted clarifying question (e.g. *"Which file or module does this touch?"*) and stop.
+**1a. Find seed symbols.** Parse the task for symbol-like terms (function/class/module names, file paths). Use `codegraph_search` to resolve them. When the task names a file rather than a symbol, `whygraph_area_history(path=...)` is a useful secondary signal — the commits and PRs that have ever touched that path point at the code that matters. If you can't resolve any seed at all, ask the user one targeted clarifying question (e.g. *"Which file or module does this touch?"*) and stop.
 
 **1b. Compute the impact set.** For each seed, call `codegraph_impact` (or `codegraph_callers` + `codegraph_callees` if `codegraph_impact` is unavailable). Cap at:
 - **15 nodes** in single-pass mode.
@@ -46,7 +46,7 @@ If impact returns more, rank by direct distance from seeds (1-hop > 2-hop > deep
 
 **1c. Warm the rationale cache.** For each working-set node, call `whygraph_rationale_brief(qualified_name=...)` once. The first call generates the card (slow); the cache (content-hash by bundle signature, prompt v3) makes every subsequent call on the same node sub-millisecond. Researchers will fetch on-demand later — warming the cache here means they hit cache instead of generating cards in parallel.
 
-For each card, record: `qualified_name`, `file_path:line_range`, `confidence`, `has_constraints`, `has_risks`, `is_empty` (rationale absent or `confidence < 0.4`).
+For each card, record: `qualified_name`, `file_path:line_range`, `evidence_count`, `has_constraints`, `has_risks`, `is_empty` (no rationale recorded, or `purpose` and `why` both blank).
 
 The **working set** is the table of these records — that's what you (single-pass) or the researchers (deep) build the plan from.
 
@@ -56,7 +56,7 @@ The **working set** is the table of these records — that's what you (single-pa
 
 **Auto-mode heuristic for single-pass:**
 - `MODE: shallow` always picks single-pass.
-- `MODE: auto` picks single-pass when **working-set size < 5** OR **>60% of cards are empty/low-confidence**. Either condition means fan-out would be ceremony — there isn't enough material for three researchers to find distinct angles.
+- `MODE: auto` picks single-pass when **working-set size < 5** OR **>60% of cards are empty or thinly evidenced**. Either condition means fan-out would be ceremony — there isn't enough material for three researchers to find distinct angles.
 - `MODE: deep` always skips this branch (goes to fan-out below).
 
 In single-pass: synthesise the plan yourself. Output format below. Sequence changes in dependency order (callees before callers, leaves before roots). Quote constraints and risks **verbatim** from rationale cards — never paraphrase. Flag any step that appears to violate a constraint as a *Blocker*. Include a verification step per change. Report honest confidence.
@@ -79,7 +79,7 @@ DIMENSION: <impact | constraints_risks | prior_art>
 WORKING SET:
 - qualified_name: <qn>
   file: <path>:<lines>
-  confidence: <float>
+  evidence: <N commits, M PRs>
   is_empty: <bool>
 - ...
 
@@ -102,7 +102,7 @@ WORKING SET SUMMARY: <N cards, M truncated>
 WORKING SET:
 - qualified_name: <qn>
   file: <path>:<lines>
-  confidence: <float>
+  evidence: <N commits, M PRs>
 - ...
 
 RESEARCHER REPORTS:
@@ -127,9 +127,9 @@ RESEARCHER REPORTS:
 ## Working set
 <N> symbols analyzed (<M> truncated from impact set, if any).
 
-| Symbol | Location | Rationale confidence |
+| Symbol | Location | Evidence |
 |---|---|---|
-| `qualified.name` | path/to/file.py:LN-LN | 0.7 |
+| `qualified.name` | path/to/file.py:LN-LN | 12 commits, 3 PRs |
 | ... | ... | ... |
 
 ## Blockers
@@ -162,6 +162,6 @@ RESEARCHER REPORTS:
 - **Don't make changes to any file.**
 - **Don't run interactive or destructive commands.** Use file reads for grounding only.
 - **Don't paraphrase rationale.** Quote constraints and risks verbatim.
-- **Don't pad confidence.** A plan grounded in 2 high-confidence cards and 6 missing ones is `low`, not `medium`.
+- **Don't pad confidence.** A plan grounded in 2 well-evidenced cards and 6 missing ones is `low`, not `medium`.
 - **In deep mode, don't synthesise yourself.** Hand off to the synthesizer. The only output you generate in deep mode is the synthesizer's verbatim text (with the optional auto-mode fallback notice prepended).
 - **Don't inline rationale-card content into researcher handoff prompts.** Researchers fetch on-demand to keep their prompts small and let them dig deeper than the static working set.

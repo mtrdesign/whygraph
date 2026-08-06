@@ -115,6 +115,17 @@ jobs:
           grep -q "whygraph/v$want/scripts/install.sh" README.md \
             || fail "README.md install URL is not pinned to v$want"
 
+          # The docs site advertises the same install commands. Nothing gated
+          # them until now, so they would silently point at the previous
+          # release. Any pinned form carrying a version other than $want fails.
+          stale=$(grep -rnoE \
+            "whygraph/v[^/[:space:]]+/scripts/install\.sh|ghcr\.io/mtrdesign/whygraph:[0-9][^[:space:]\`|]*|whygraph\.git@v[^[:space:]\"\`]+" \
+            docs/ | grep -v "/v$want/\|:$want\|@v$want" || true)
+          if [ -n "$stale" ]; then
+            echo "$stale" >&2
+            fail "docs/ pins a version other than $want (see the list above)"
+          fi
+
   # --- 2. One native runner per arch, pushed BY DIGEST (no tags yet) --------
   build:
     name: Build ${{ matrix.platform }}

@@ -18,8 +18,9 @@ Pick the path that fits where you are.
     **The tag in that URL is the version.** `v1.1.1` installs 1.1.1 - no second flag to keep in
     sync. This drops `whygraph` and `whygraph-mcp` shims on your `PATH`; each wraps a
     `docker run --rm -v "$PWD:/workspace" … ghcr.io/mtrdesign/whygraph` against the current repo,
-    and the container is ephemeral per command. See [Run with Docker](../deploy/docker.md) for the
-    full story.
+    and the container is ephemeral per command - the one exception being
+    [`whygraph serve`](../guide/playground.md), which manages a named background container so the
+    web panel can outlive the command. See [Run with Docker](../deploy/docker.md) for the full story.
 
     **Install a different version** by passing it through the pipe - the URL then only decides
     *which installer* runs:
@@ -31,6 +32,10 @@ Pick the path that fits where you are.
 
     `WHYGRAPH_VERSION=1.1.1` does the same and wins over the argument. `WHYGRAPH_BIN_DIR` picks the
     install directory (default `~/.local/bin`), and `WHYGRAPH_IMAGE_REPO` points at a private mirror.
+
+    Two more are read by the installed shims rather than the installer: `WHYGRAPH_IMAGE` overrides
+    the image a single command runs, and `WHYGRAPH_PORT` sets the port for
+    [`whygraph serve`](../guide/playground.md).
 
     !!! tip "If the installer itself misbehaves"
         Swap the tag for `main` - `…/whygraph/main/scripts/install.sh` - to get the newest
@@ -61,7 +66,8 @@ Pick the path that fits where you are.
     ```
 
     !!! warning "Not yet published"
-        WhyGraph isn't on PyPI yet. Use the GitHub or local-checkout paths until v1 ships.
+        There's no PyPI release job yet, so this won't resolve. Use the Docker, GitHub, or
+        local-checkout paths instead.
 
 === "GitHub"
 
@@ -99,6 +105,7 @@ which whygraph-mcp
 ```
 
 Both should resolve to your global tool install. With the Docker shim, `which whygraph-mcp` points at
-the shim script on your `PATH`.
+the shim script on your `PATH`, and `whygraph version` reports the version baked into the image the
+shim runs - which is the version you pinned, not something read from the host.
 
 Next: [scan a repo and wire your editor.](quickstart.md)

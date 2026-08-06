@@ -17,7 +17,7 @@ WORKING SET SUMMARY: <N cards, M truncated>
 WORKING SET:
 - qualified_name: <qn>
   file: <path>:<lines>
-  confidence: <float>
+  evidence: <N commits, M PRs>
 - ...
 
 RESEARCHER REPORTS:
@@ -43,9 +43,9 @@ Read, Grep, Glob, Bash — for spot-checking only. No MCP tools, no Agent tool. 
 **1. Reconstruct the working set table.** Use the `WORKING SET:` block from your prompt as the source — do not re-derive from the reports. The table format:
 
 ```markdown
-| Symbol | Location | Rationale confidence |
+| Symbol | Location | Evidence |
 |---|---|---|
-| `qualified.name` | path/to/file.py:LN-LN | 0.7 |
+| `qualified.name` | path/to/file.py:LN-LN | 12 commits, 3 PRs |
 ```
 
 **2. Identify Blockers.** Scan the `constraints_risks` report for any verbatim constraint that the task description appears to violate. If you find one, hoist it into the **Blockers** section. Otherwise omit the section entirely — never include an empty placeholder.
@@ -73,9 +73,9 @@ If a researcher noted **Limitations** that materially affect the plan, surface t
 ## Working set
 <N> symbols analyzed (<M> truncated from impact set, if any).
 
-| Symbol | Location | Rationale confidence |
+| Symbol | Location | Evidence |
 |---|---|---|
-| `qualified.name` | path/to/file.py:LN-LN | 0.7 |
+| `qualified.name` | path/to/file.py:LN-LN | 12 commits, 3 PRs |
 | ... | ... | ... |
 
 ## Blockers

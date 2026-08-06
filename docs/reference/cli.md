@@ -10,7 +10,7 @@ Commands:
   init     Initialize the WhyGraph database under .whygraph/whygraph.db.
   install  Emit the host shim installer (called by scripts/install.sh).
   scan     Run the source crawlers, then describe each commit with the LLM.
-  serve    Serve the WhyGraph Explorer panel for this repository.
+  serve    Serve the WhyGraph web panel (Explorer + Chat) for this repository.
   version  Print installed whygraph version.
 ```
 
@@ -29,11 +29,10 @@ Bootstrap the WhyGraph database under `.whygraph/whygraph.db`, write a committab
 idempotent - re-running on an initialized project just confirms both databases are present.
 
 On a terminal, `init` runs a guided, arrow-key setup: pick the agent, the analyze/rationale LLMs
-(with optional API keys), and the source-control provider (with an optional GitHub token). It shows a
-summary that masks every secret, asks *"Write these files?"*, then writes both `whygraph.example.toml`
-(secret-free) and a ready-to-run `whygraph.toml` (with the secrets you entered). Every prompt is
-defaulted. `--yes` (and any non-TTY invocation) skips the prompts, uses defaults, and never clobbers
-an existing `whygraph.toml`.
+(with optional API keys), the source-control provider (with an optional GitHub token), and whether to
+install the auto-rescan git hooks. It shows a summary that masks every secret, asks *"Write these
+files?"*, then writes both `whygraph.example.toml` (secret-free) and a ready-to-run `whygraph.toml`
+(with the secrets you entered). Every prompt is defaulted.
 
 `init` also installs the auto-rescan git hooks and **reconciles them to `[scan].hooks` in both
 directions** - installing what the config lists and stripping the managed block from what it
@@ -48,11 +47,18 @@ agents are project-scoped, so the config file is written inside the repo.
 
 | Option | Description |
 |---|---|
-| `--agent [claude\|codex\|copilot\|cursor\|vscode]` | Wire the MCP server into the named agent's config. On a terminal, skips the interactive agent prompt. Run `whygraph init --help` for the full list of supported agents. |
-| `--yes` / `-y` | Accept all defaults without prompting (also implied off a TTY). Writes a default `whygraph.toml` only if none exists. |
+| `--agent [claude\|codex\|copilot\|cursor\|vscode]` | Wire the MCP server into the named agent's config. Case-insensitive. On a terminal, skips the interactive agent prompt. Run `whygraph init --help` for the full list, with each agent's config format and asset destination. |
+| `--yes` / `-y` | Accept all defaults without prompting, and write a default `whygraph.toml` if none exists. |
 | `--force` | When installing assets, overwrite existing files in the agent's destination directory. |
 
-Preflight diagnostics and asset install both always run — the chosen agent's bundled assets are copied into the repo automatically (use `--force` to overwrite local edits).
+!!! note "`--yes` and a non-TTY run are not the same thing"
+    Both skip the prompts, but only `--yes` writes `whygraph.toml`. A bare non-interactive `init` -
+    a pipe, CI, the git hooks - refreshes `whygraph.example.toml` and leaves `whygraph.toml`
+    untouched. Neither ever clobbers an existing one.
+
+Preflight diagnostics always run. Asset install runs whenever an agent is chosen: **every** supported
+agent ships a bundled asset tree, copied into its own destination (use `--force` to overwrite local
+edits). Without `--agent`, `init` skips the wiring and prints a tip instead.
 
 See [Wiring your editor](../guide/editors.md) for the per-agent paths.
 
@@ -74,9 +80,15 @@ See [Scanning your repo](../guide/scanning.md) for what each phase does.
 
 ## `whygraph serve`
 
-Serve the read-only **Explorer playground** for this repository - a local web panel over the code
-graph, evidence, and rationale. On the Docker install it runs as its own long-lived container, published
-to `127.0.0.1` only. Run `whygraph scan` first so there's an index and evidence to show.
+Serve the local web panel for this repository: the **Explorer** over the code graph, evidence, and
+rationale, and the **Chat assistant** over the same data. On the Docker install it runs as its own
+long-lived container, published to `127.0.0.1` only. Run `whygraph scan` first so there's an index
+and evidence to show.
+
+!!! warning "Serving starts the chat assistant too"
+    Chat calls an LLM under `[chat]` and writes sessions and messages to the WhyGraph database. If
+    you want a purely read-only panel, simply don't use the Chat view - but know that starting the
+    server makes it reachable.
 
 | Option | Default | Description |
 |---|---|---|
@@ -88,11 +100,18 @@ Python command, they're handled on the host before the container starts:
 
 | Command | What it does |
 |---|---|
-| `whygraph serve --detach` | Start in the background and return immediately. |
+| `whygraph serve --detach` / `-d` | Start in the background and return immediately. |
 | `whygraph serve --logs` | Tail the detached server's logs. |
 | `whygraph serve --stop` | Stop and remove the running server. |
+| `whygraph serve --help` | Show the in-container `serve --help`. |
 
-See [The Explorer playground](../guide/playground.md) for the panel itself.
+Any other argument is **rejected** with `unknown arg` and exit code 2 - so `whygraph serve --port 9000`
+fails on a Docker install rather than being silently ignored. Use `WHYGRAPH_PORT` instead. A stale
+`whygraph-serve` container is force-removed before each start, so a crashed server never blocks the
+next one.
+
+See [The Explorer](../guide/playground.md) and [The Chat assistant](../guide/chat.md) for the panel
+itself.
 
 ## `whygraph analyze`
 

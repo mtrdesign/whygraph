@@ -336,3 +336,57 @@ def test_package_version_matches_the_default_version() -> None:
         f"pyproject.toml version {packaged} != "
         f"DEFAULT_VERSION {_default_version()} in scripts/install.sh"
     )
+
+
+# Pinned forms the docs advertise. Each capture group is a version that must
+# equal DEFAULT_VERSION — a reader copies these verbatim, so a stale one hands
+# them the wrong release.
+_DOC_PIN_PATTERNS = (
+    r"whygraph/v([^/\s]+)/scripts/install\.sh",  # the curl front door
+    rf"{re.escape(IMAGE_REPO)}:(\d[^\s`\\|]*)",  # docker run … <repo>:<ver>
+    r"whygraph\.git@v([^\s\"`]+)",  # uv tool install from a tag
+)
+
+# Pages that are *only* about installing, where every semver literal in the
+# prose refers to the release being advertised. Scanning bare versions here
+# catches sentences like "`v1.1.1` installs 1.1.1", which carry no URL.
+_INSTALL_ONLY_PAGES = (
+    "docs/getting-started/installation.md",
+    "docs/deploy/docker.md",
+)
+
+
+def _docs_pages() -> list[Path]:
+    return sorted((REPO_ROOT / "docs").rglob("*.md"))
+
+
+def test_docs_pinned_urls_match_the_default_version() -> None:
+    # The docs site carries the same install commands as the README, and until
+    # now nothing checked them — nine literals that would silently point at the
+    # previous release the moment a version was cut.
+    stale: list[str] = []
+    for page in _docs_pages():
+        text = page.read_text()
+        for pattern in _DOC_PIN_PATTERNS:
+            for found in re.findall(pattern, text):
+                if found != _default_version():
+                    rel = page.relative_to(REPO_ROOT)
+                    stale.append(f"{rel}: {found}")
+    assert not stale, (
+        f"docs pin version(s) != DEFAULT_VERSION {_default_version()}: {stale}"
+    )
+
+
+def test_install_pages_have_no_stale_bare_versions() -> None:
+    # Prose on the install pages names the version outside any URL. `sh -s
+    # latest` is unaffected — this only looks at semver-shaped literals.
+    stale: list[str] = []
+    for relative in _INSTALL_ONLY_PAGES:
+        page = REPO_ROOT / relative
+        assert page.exists(), f"{relative} is gated for versions but does not exist"
+        for found in re.findall(r"\b\d+\.\d+\.\d+\b", page.read_text()):
+            if found != _default_version():
+                stale.append(f"{relative}: {found}")
+    assert not stale, (
+        f"install-page version(s) != DEFAULT_VERSION {_default_version()}: {stale}"
+    )

@@ -1,7 +1,7 @@
 # Docker & Self-Hosting
 
 WhyGraph ships as a self-contained image, so there are two ways to run it. Both use the same image;
-they differ in who's driving.
+they differ in who's driving - you at a terminal, or an application over MCP.
 
 <div class="grid cards" markdown>
 
@@ -9,8 +9,8 @@ they differ in who's driving.
 
     ---
 
-    Install the Docker shim, then `init` and `scan` your repos and wire your editor - no Python or
-    Node on the host. This is the default install.
+    Install the Docker shim, then `init` and `scan` your repos, wire your editor, and `serve` the
+    web panel - no Python or Node on the host. This is the default install.
 
     [:octicons-arrow-right-24: Run with Docker](docker.md)
 

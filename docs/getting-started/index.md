@@ -58,4 +58,12 @@ Ready to install?
 
     [:octicons-arrow-right-24: Quickstart](quickstart.md)
 
+-   :material-monitor-dashboard:{ .lg .middle } __Browse it locally__
+
+    ---
+
+    Once scanned, `whygraph serve` gives you the Explorer and a chat assistant over the same data.
+
+    [:octicons-arrow-right-24: The Explorer](../guide/playground.md)
+
 </div>

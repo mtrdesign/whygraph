@@ -72,8 +72,8 @@ What the app needs depends on what it asks for:
 - **Reading cached evidence and rationale needs no credentials.** It's all in the mounted databases.
 - **Generating a *new* rationale card needs an LLM key.** `whygraph_rationale_brief` calls the
   configured provider on a cache miss. Supply the key through the environment
-  (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`) or the repo's `whygraph.toml`
-  `[llm.*]` table.
+  (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`) or the repo's
+  `whygraph.toml` `[llm.*]` table. See [LLM providers](../reference/llm-providers.md).
 
 !!! info "Tokens never live in the image"
     Pass credentials at run time via env or the gitignored `whygraph.toml` - never bake them into a
@@ -81,9 +81,15 @@ What the app needs depends on what it asks for:
 
 ## Current scope
 
-Today the server speaks MCP over **stdio, one session per process**. There's no long-running HTTP
-endpoint yet - each connection is its own `docker run`. A persistent server mode with an HTTP MCP
-transport is on the [roadmap](../roadmap.md), not built.
+Today the server speaks MCP over **stdio, one session per process**. There's no HTTP **MCP transport**
+yet - each connection is its own `docker run`. A persistent server mode with one is on the
+[roadmap](../roadmap.md), not built.
 
 For now, model your integration as "spawn a session, run the tools you need, let it exit" - the same
 lifecycle an editor uses, driven by your app instead.
+
+!!! note "`whygraph serve` is not this"
+    WhyGraph *does* have a long-running HTTP server - [`whygraph serve`](../guide/playground.md),
+    which backs the Explorer and chat UIs. It is a single-user local dev tool: published to
+    `127.0.0.1` with no auth, and shaped for a browser rather than for programmatic consumption.
+    Don't build an integration against it; use the MCP surface above.

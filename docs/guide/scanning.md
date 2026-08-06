@@ -10,20 +10,39 @@ whygraph scan
 
 ## What a scan does
 
-A scan runs several phases:
+A scan runs up to four ordered phases. Each prints a header numbered against the phases that will
+actually run this time, so a `--no-remote --skip-analyze` pass shows `Phase 1/2` and `Phase 2/2`
+rather than gaps.
 
-1. **Git crawl** - walks first-parent history and records commits, authors, and blame.
-2. **Remote crawl** *(optional)* - pulls PRs and issues per `[scan].provider`, and links them to
-   commits. Off unless you enable a provider.
-3. **CodeGraph index refresh** - `codegraph init -i` on the first run, `codegraph sync` after. Runs
-   concurrently with the crawl. A failure here warns rather than aborting, since only the rationale
-   and evidence *tools* need CodeGraph.
-4. **LLM descriptions** - writes a short description of each commit's diff with the configured
-   provider.
+1. **Structural crawl** - the git crawler and, when a remote provider is enabled, the GitHub crawler,
+   running concurrently. Records commits and the files each one touched, links PRs and issues to
+   commits, and flags [branch membership](#how-whygraph-sees-branches). The history walk deliberately
+   is **not** first-parent, so work merged from feature branches is not skipped.
+2. **PR-origin recovery** *(optional)* - squash-merge recovery. When a PR was squash-merged, one
+   targeted `git fetch` of the PR's original head brings its feature-branch commits into the evidence
+   without polluting area history. Needs the network, so it is skipped under `--no-remote`.
+3. **Author identity** - resolves commit addresses into one row per human. Local-only, no network and
+   no token, so it runs on every scan including the offline git-hook path.
+4. **LLM descriptions** *(optional)* - writes a short description of each commit's diff with the
+   configured provider. The slow, token-heavy long pole, so it runs strictly last and alone.
 
-It also handles **squash-merge recovery**: when a PR was squash-merged, `--pr-origins` does one
-targeted `git fetch` of the PR's original head, so its feature-branch commits enrich the evidence
-without polluting area history.
+**CodeGraph is not a phase.** The index refresh - `codegraph init -i` on the first run, `codegraph
+sync -q` after - is a background task started before phase 1 and joined after the last one, so it
+overlaps the whole crawl. A failure warns rather than aborting, since only the rationale and evidence
+*tools* need CodeGraph.
+
+Blame is *not* recorded at scan time. It's computed on demand when an evidence lookup needs it, which
+is why a scan doesn't have to re-blame the repo every run.
+
+### The results panel
+
+A scan closes with a summary panel: one row per phase with a status glyph, a one-line summary, and its
+timing, plus the paths to the database and the scan log. A phase that warned - a failed CodeGraph
+refresh, a [bulk branch demotion](#how-whygraph-sees-branches) - shows `⚠` on its row, so a problem
+isn't something you have to catch scrolling past.
+
+Full detail for every run goes to **`.whygraph/scan.log`**, not the terminal. That's where to look
+when a phase reports something you want to dig into.
 
 ## Flags
 
@@ -68,6 +87,10 @@ The hooks are detached and single-flight: rapid commits coalesce instead of stac
 overwritten. `post-checkout` skips the two cases that can't have changed anything - a file checkout
 (`git checkout -- somefile`) and `git switch -c` at the current commit.
 
+Because the hooks run detached, their output isn't on your terminal. It goes to
+**`.whygraph/logs/hooks.log`** - the place to look when a background rescan seems not to be
+happening.
+
 !!! warning "Hooks need `whygraph` on the PATH of whatever runs git"
     Each hook exits quietly when it can't find `whygraph`, so nothing breaks - but nothing rescans
     either. That bites GUI clients (Sourcetree, Tower, JetBrains, VS Code), which often launch with
@@ -77,7 +100,8 @@ overwritten. `post-checkout` skips the two cases that can't have changed anythin
 ### Choosing which hooks to install
 
 `[scan].hooks` in `whygraph.toml` governs the set, and **`whygraph init` makes `.git/hooks` match
-it exactly**. Edit the value, then re-run `whygraph init` - nothing changes until you do.
+it exactly**. Interactive `init` asks whether to install them; edit the value directly and re-run
+`whygraph init` to apply a change without being asked.
 
 ```toml
 [scan]
@@ -91,7 +115,8 @@ you don't have to undo them by hand - and growing it adds them back. Setting `fa
 four and deletes the shared helper, leaving any foreign hook content of your own intact.
 
 Because the setting lives in the committed config, it survives re-runs and applies to everyone who
-clones the repo.
+clones the repo. A re-run seeds its prompt from the existing value, so declining hooks once isn't
+quietly undone the next time you run `init`.
 
 !!! note "Hooks stay fast on purpose"
     The hooks deliberately skip the remote and LLM phases so they never slow a commit. For PRs,
@@ -117,8 +142,16 @@ The pre-scan panel shows what it resolved. If it says `unresolved`, branch flagg
 commit is treated as on the default branch - the same behaviour as before this existed.
 
 **What this means in practice:** unmerged work on a feature branch is excluded by design from
-velocity numbers, area history, and the chat statistics surface. It is still recorded, still
-searchable, and still evidence - it just isn't counted as shipped.
+velocity numbers, area history, and the [chat assistant's](chat.md#statistics-are-aggregate-only)
+statistics. It is still recorded, still searchable, and still evidence - it just isn't counted as
+shipped.
+
+Alongside the flag, each commit records **`first_seen_ref`**: the branch it was first seen on, or
+`refs/pull/<N>/head` when it arrived through squash-merge recovery. `NULL` means it was already on
+the default branch. It's written once and never rewritten, so a later demotion doesn't erase where a
+commit came from. Rename tracking uses it to scope path history to the default branch *or* your
+current branch - which keeps an in-flight rename visible without letting an abandoned branch pollute
+history forever.
 
 Membership is recomputed on **every** scan, so the database self-heals:
 

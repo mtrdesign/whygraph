@@ -2,8 +2,9 @@
 
 WhyGraph reads an optional `whygraph.toml` at your repo root. Every field has a built-in default, so
 an unedited file behaves exactly as if none were present. On a terminal, `whygraph init` walks you
-through the common choices (agent, analyze/rationale LLMs + keys, source-control provider + token)
-and writes both a fully-commented `whygraph.example.toml` (secret-free, committable) and a ready-to-run
+through the common choices (agent, analyze/rationale LLMs + keys, source-control provider + token,
+and the auto-rescan git hooks) and writes both a fully-commented `whygraph.example.toml`
+(secret-free, committable) and a ready-to-run
 `whygraph.toml` (with any secrets you entered). You can always edit `whygraph.toml` by hand afterwards,
 or start from the example. `whygraph init --yes` skips the prompts and uses defaults.
 
@@ -28,6 +29,14 @@ provider = "off"              # source-control backend for the PR/issue crawl:
 remote = "origin"             # git remote whose URL is inspected for provider="auto"
 # token = "ghp_..."           # GitHub token for the gh CLI. Default: read GH_TOKEN /
                               # GITHUB_TOKEN from env (or an existing `gh auth login`).
+hooks = true                  # auto-rescan git hooks installed by `whygraph init`:
+                              #   true    - all four (post-commit, post-merge,
+                              #             post-rewrite, post-checkout)
+                              #   false   - none (init removes any already installed)
+                              #   [list]  - only these, e.g. ["post-commit", "post-merge"]
+# default_branch = "main"     # the branch treated as "shipped history". Default:
+                              # resolved from origin/HEAD, else origin/main, else
+                              # origin/master. Set for repos on develop / trunk.
 
 [analyze]
 provider = "anthropic"        # which [llm.*] adapter writes per-commit descriptions
@@ -44,6 +53,16 @@ provider = "anthropic"        # which [llm.*] adapter writes the rationale card
 # pr_roster_max_commits = 30      # squashed-commit headlines shown per PR in the prompt
 # pr_discussion_max_comments = 20 # PR comments shown per PR in the prompt
 # pr_comment_max_chars = 500      # each PR comment clipped to this length
+
+[chat]
+# The `whygraph serve` chat assistant. Provider/model are DEFAULTS for new
+# sessions only - each session stores the pair it was started with.
+provider = "anthropic"        # anthropic | openai | deepseek | openrouter
+# model = "claude-opus-4-7"   # default: the provider's own [llm.*] model
+# max_tool_rounds = 8         # hard bound on tool rounds per user turn
+# max_rationale_generations = 2  # uncached rationale cards one turn may generate
+                              # (0 = cache-only). Bounds nested LLM spend.
+# context_token_budget = 60000   # history sent to the model, ~chars/4 estimate
 
 # Override default DB locations (resolved relative to this file):
 # whygraph_db  = ".whygraph/whygraph.db"
@@ -72,6 +91,14 @@ model = "deepseek-chat"
 # api_key = "sk-..."            # default: read DEEPSEEK_API_KEY from env
 timeout_sec = 60
 
+[llm.openrouter]
+model = "openrouter/auto"
+# api_key = "sk-or-..."         # default: read OPENROUTER_API_KEY from env
+                                # Note: "openrouter/auto" routes automatically, but not
+                                # every routed model supports tool calling - pin a
+                                # tool-capable model when using OpenRouter for chat.
+timeout_sec = 60
+
 [llm.ollama]
 model = "llama3"
 # host = "http://localhost:11434"
@@ -89,12 +116,17 @@ timeout_sec = 120
 | Section | What it controls |
 |---|---|
 | top-level `log_level` | Console log verbosity. |
-| `[scan]` | The crawl: parallelism, which remote provider to use, the git remote name, and an optional pinned GitHub token. |
+| `[scan]` | The crawl: parallelism, which remote provider to use, the git remote name, an optional pinned GitHub token, which [auto-rescan hooks](../guide/scanning.md#keep-it-fresh) to install, and which branch counts as [shipped history](../guide/scanning.md#how-whygraph-sees-branches). |
 | `[analyze]` | The per-commit LLM diff descriptions written during `scan` - provider, model, and the truncation / per-file thresholds. |
 | `[rationale]` | The `whygraph_rationale_brief` card - provider, model, and how much of a squash-merged PR is rendered into the prompt. |
+| `[chat]` | The [chat assistant](../guide/chat.md) in `whygraph serve` - default provider and model for new sessions, plus the per-turn tool, generation, and context budgets. |
 | `whygraph_db` / `codegraph_db` | Override either database path. |
 | `[logging]` | An optional rotating file log, in addition to the always-on stderr log. |
-| `[llm.*]` | Per-provider client settings - model, key, timeout, and `base_url` / `host` where relevant. |
+| `[llm.*]` | Per-provider client settings - model, key, timeout, and `base_url` / `host` where relevant. Six adapters; only four can drive chat. See [LLM providers](llm-providers.md). |
+
+!!! note "An unknown key is a warning, not an error"
+    A typo'd or stale key is logged and ignored rather than aborting the command, so an old config
+    keeps working across upgrades. Check the log if a setting doesn't seem to take effect.
 
 ## Environment variables
 
@@ -106,8 +138,20 @@ instead.
 | `ANTHROPIC_API_KEY` | The `anthropic` LLM adapter. |
 | `OPENAI_API_KEY` | The `openai` LLM adapter. |
 | `DEEPSEEK_API_KEY` | The `deepseek` LLM adapter. |
+| `OPENROUTER_API_KEY` | The `openrouter` LLM adapter. |
 | `GH_TOKEN` / `GITHUB_TOKEN` | The `gh` CLI during the remote crawl, when `[scan].token` is unset. |
 
-!!! tip "Provider keys degrade gracefully"
+These three are read by the Docker shims rather than by WhyGraph itself:
+
+| Variable | Used for |
+|---|---|
+| `WHYGRAPH_IMAGE` | Override the image a single shim invocation runs. |
+| `WHYGRAPH_PORT` | The port for [`whygraph serve`](../guide/playground.md) (default `8765`). |
+| `WHYGRAPH_VERSION` | Pin the version at install time. See [Installation](../getting-started/installation.md). |
+
+!!! tip "Provider keys degrade gracefully - for scan and rationale"
     Missing a key for the analysis or rationale phase isn't fatal - that phase skips, and the rest of
     the scan still runs. Descriptions and cards backfill once a credential is available.
+
+    **Chat is the exception.** There's nothing useful to return without a model, so a turn with no
+    usable credential fails immediately with an error naming the variable it needs.

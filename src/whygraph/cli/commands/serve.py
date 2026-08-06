@@ -25,7 +25,7 @@ import click
     help="Bind address (the shim passes 0.0.0.0 for the container).",
 )
 def serve_cmd(port: int, host: str) -> None:
-    """Serve the WhyGraph Explorer panel for this repository."""
+    """Serve the WhyGraph web panel (Explorer + Chat) for this repository."""
     # Lazy-imported so `--help` stays fast and doesn't require the HTTP stack.
     import uvicorn
 

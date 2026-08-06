@@ -9,7 +9,8 @@ against the running code, so it stays in step with what `whygraph` actually does
 
     ---
 
-    Every command and flag, straight from `--help`: `init`, `scan`, `analyze`, `serve`, `version`.
+    Every command and flag, straight from `--help`: `init`, `scan`, `analyze`, `serve`, `install`,
+    `version`.
 
     [:octicons-arrow-right-24: CLI reference](cli.md)
 
@@ -29,7 +30,15 @@ against the running code, so it stays in step with what `whygraph` actually does
 
     [:octicons-arrow-right-24: Configuration](configuration.md)
 
--   :material-source-branch:{ .lg .middle } __Providers__
+-   :material-robot-outline:{ .lg .middle } __LLM providers__
+
+    ---
+
+    The six adapters, which roles each can fill, and which four can drive chat.
+
+    [:octicons-arrow-right-24: LLM providers](llm-providers.md)
+
+-   :material-source-branch:{ .lg .middle } __Source control providers__
 
     ---
 

@@ -83,7 +83,7 @@ The flip side, stated plainly. Descriptions are backfilled lazily, so a freshly 
 WhyGraph still needs nothing on the host but Docker. One line to install:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.0/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.1/scripts/install.sh | sh
 ```
 
 Then, from the repository you want to talk to:

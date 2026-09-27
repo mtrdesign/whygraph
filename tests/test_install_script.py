@@ -290,6 +290,68 @@ def test_bad_tag_fails_loudly(tmp_path: Path) -> None:
     assert "releases" in result.stderr
 
 
+_REGISTRY_BLOCKED = (
+    'Error response from daemon: failed to resolve reference "ghcr.io/mtrdesign/'
+    'whygraph:1.1.1": failed to authorize: failed to fetch oauth token: unexpected '
+    "status from GET request to https://ghcr.io/token?scope=repository%3Amtrdesign"
+    "%2Fwhygraph%3Apull&service=ghcr.io: 403 Forbidden"
+)
+"""The error a Docker Desktop registry allowlist actually produces for ghcr.io."""
+
+_TAG_MISSING = (
+    "Error response from daemon: manifest unknown: ghcr.io/mtrdesign/whygraph:9.9.9"
+)
+
+
+def _pull_fails_with(message: str) -> str:
+    """Stub body whose ``docker pull`` fails with ``message`` on stderr."""
+    return f"""
+case "$1" in
+    pull) echo '{message}' >&2; exit 1 ;;
+    image) exit 1 ;;
+esac
+exit 0
+"""
+
+
+def test_blocked_registry_is_not_reported_as_a_missing_version(
+    tmp_path: Path,
+) -> None:
+    # The real-world failure: the tag exists and is public, but the registry
+    # is blocked. "Check the version exists" sent users hunting a broken
+    # release; they need the workarounds instead.
+    result, _, _ = _run(
+        tmp_path, "1.1.1", docker_body=_pull_fails_with(_REGISTRY_BLOCKED)
+    )
+    assert result.returncode != 0
+    assert "403 Forbidden" in result.stderr  # docker's own error still shown
+    assert "refused access to ghcr.io" in result.stderr
+    assert "Check the version exists" not in result.stderr
+    assert "crane pull ghcr.io/mtrdesign/whygraph:1.1.1" in result.stderr
+    assert "WHYGRAPH_IMAGE_REPO=" in result.stderr
+    assert "whygraph.git@v1.1.1" in result.stderr
+
+
+def test_blocked_mirror_names_the_mirror_registry(tmp_path: Path) -> None:
+    result, _, _ = _run(
+        tmp_path,
+        "test",
+        docker_body=_pull_fails_with("denied: requested access to the resource"),
+        env={"WHYGRAPH_IMAGE_REPO": "registry.internal/wg"},
+    )
+    assert result.returncode != 0
+    assert "refused access to registry.internal" in result.stderr
+    assert "docker login registry.internal" in result.stderr
+
+
+def test_missing_tag_points_at_the_releases(tmp_path: Path) -> None:
+    result, _, _ = _run(tmp_path, "9.9.9", docker_body=_pull_fails_with(_TAG_MISSING))
+    assert result.returncode != 0
+    assert "does not exist in ghcr.io" in result.stderr
+    assert "releases" in result.stderr
+    assert "crane pull" not in result.stderr
+
+
 def test_unpullable_but_local_image_still_installs(tmp_path: Path) -> None:
     # A locally built or `docker load`ed image has no registry to pull from, so
     # a pull failure alone must not be fatal — air-gapped hosts and this repo's

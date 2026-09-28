@@ -109,6 +109,8 @@ timeout_sec = 120
 model = "claude-opus-4-7"
 # api_key = "sk-ant-..."        # default: subscription billing (strips the env var)
 timeout_sec = 120
+# config_dir = "~/.claude-work"  # Claude Code profile dir (sets CLAUDE_CONFIG_DIR);
+                                 # default: inherit the ambient one / ~/.claude
 ```
 
 ## Section by section

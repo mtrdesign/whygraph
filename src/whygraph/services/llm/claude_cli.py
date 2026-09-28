@@ -3,7 +3,8 @@
 Wraps the same subprocess invocation that lived in
 ``whygraph.llm_subprocess.invoke_claude`` before this iteration:
 lean flag set (no MCP, tools, slash commands, or session persistence),
-optional system-prompt routing, optional API-key injection, and the
+optional system-prompt routing, optional API-key injection, optional
+Claude Code profile selection (``CLAUDE_CONFIG_DIR``), and the
 four error shapes (missing CLI, timeout, non-zero exit, empty output).
 
 Useful when you have a Claude Code subscription and prefer to bill
@@ -15,6 +16,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from pathlib import Path
 from typing import Any
 
 from whygraph.core.config import ClaudeCliConfig
@@ -52,6 +54,12 @@ class ClaudeCliAdapter(LlmClient):
         (API billing).
     timeout_sec : int, optional
         Per-call timeout in seconds. Default ``120``.
+    config_dir : Path, optional
+        Claude Code profile directory, exported as ``CLAUDE_CONFIG_DIR``
+        so the call bills against that profile's login. ``None``
+        (default) inherits the ambient ``CLAUDE_CONFIG_DIR``. Must exist —
+        otherwise the CLI would silently create a fresh, logged-out
+        profile.
     """
 
     provider = "claude-cli"
@@ -62,10 +70,12 @@ class ClaudeCliAdapter(LlmClient):
         model: str = "claude-opus-4-7",
         api_key: str | None = None,
         timeout_sec: int = 120,
+        config_dir: Path | None = None,
     ) -> None:
         super().__init__(model=model)
         self._api_key = api_key
         self._default_timeout = timeout_sec
+        self._config_dir = config_dir
 
     @classmethod
     def from_config(
@@ -83,6 +93,7 @@ class ClaudeCliAdapter(LlmClient):
             model=config.model,
             api_key=config.api_key,
             timeout_sec=config.timeout_sec,
+            config_dir=config.config_dir,
             **overrides,
         )
 
@@ -103,6 +114,13 @@ class ClaudeCliAdapter(LlmClient):
         env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
         if self._api_key:
             env["ANTHROPIC_API_KEY"] = self._api_key
+        if self._config_dir is not None:
+            if not self._config_dir.is_dir():
+                raise LlmError(
+                    f"claude config_dir {self._config_dir} does not exist "
+                    "(check [llm.claude_cli].config_dir)"
+                )
+            env["CLAUDE_CONFIG_DIR"] = str(self._config_dir)
 
         cmd = ["claude", "--print", "--model", self.model, *_LEAN_FLAGS]
         if system_prompt is not None:

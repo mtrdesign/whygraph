@@ -82,6 +82,33 @@ Setting `api_key` in `[llm.claude_cli]` explicitly puts it back - that is the op
     Both `[llm.claude_cli]` and `[llm.claude-cli]` parse, so either spelling of the section works.
     The `provider` value is always `"claude-cli"`.
 
+#### Multiple Claude Code profiles
+
+Claude Code picks its profile - and so which login and subscription gets billed - from the
+`CLAUDE_CONFIG_DIR` environment variable, falling back to `~/.claude`. If you keep separate
+profiles on one machine (say `~/.claude` for personal and `~/.claude-work` for work), pin the one
+this project should use:
+
+```toml
+[llm.claude_cli]
+model = "claude-opus-4-7"
+config_dir = "~/.claude-work"
+```
+
+WhyGraph exports it as `CLAUDE_CONFIG_DIR` for every `claude --print` call, overriding whatever the
+calling shell has set. `~` and `$VARS` are expanded, and a relative path resolves against the
+directory holding `whygraph.toml`. Leave it unset to inherit the ambient `CLAUDE_CONFIG_DIR`.
+
+This matters most for the places that don't run inside your interactive shell - the auto-rescan
+git hooks, an MCP server launched by your editor, and `whygraph serve` - which would otherwise
+quietly fall back to `~/.claude`. The path is machine-specific, so set it in `whygraph.toml`
+(gitignored), not the committed `whygraph.example.toml`. If the directory does not exist the call
+fails with a clear error rather than letting the CLI create an empty, logged-out profile.
+
+!!! note
+    The Docker image does not ship the `claude` CLI, so `claude-cli` - and `config_dir` with it -
+    applies to native `uv` / `pipx` installs.
+
 ### `ollama`
 
 Local models, no credential. Point it at your daemon:

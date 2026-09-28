@@ -15,6 +15,7 @@ loaded from ``[llm.<provider>]`` tables in ``whygraph.toml``.
 from __future__ import annotations
 
 import logging
+import os
 import tomllib
 from dataclasses import dataclass, field, fields
 from importlib import resources
@@ -169,11 +170,18 @@ class ClaudeCliConfig:
         Passing a value exports it as ``ANTHROPIC_API_KEY`` (API billing).
     timeout_sec : int
         Per-invocation timeout in seconds. Default ``120``.
+    config_dir : Path or None
+        Claude Code profile directory, exported to the subprocess as
+        ``CLAUDE_CONFIG_DIR``. ``None`` (default) inherits the ambient
+        ``CLAUDE_CONFIG_DIR`` (or the CLI's own ``~/.claude``). ``~`` and
+        ``$VARS`` are expanded; a relative path resolves against the
+        directory holding ``whygraph.toml``.
     """
 
     model: str = "claude-opus-4-7"
     api_key: str | None = None
     timeout_sec: int = 120
+    config_dir: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -438,8 +446,12 @@ def _parse_hooks(value: object) -> bool | tuple[str, ...]:
     )
 
 
-def _build_llm_config(raw: dict) -> LlmConfig:
-    """Parse a raw ``[llm]`` dict into a typed :class:`LlmConfig`."""
+def _build_llm_config(raw: dict, base: Path) -> LlmConfig:
+    """Parse a raw ``[llm]`` dict into a typed :class:`LlmConfig`.
+
+    ``base`` is the directory containing the TOML file — a relative
+    ``[llm.claude_cli].config_dir`` resolves against it.
+    """
     sections: dict[str, object] = {}
     known_attrs = {f.name for f in fields(LlmConfig)}
     for toml_name, attr_name, cls in _LLM_SECTIONS:
@@ -453,9 +465,11 @@ def _build_llm_config(raw: dict) -> LlmConfig:
         known_fields = {f.name for f in fields(cls)}
         for unknown in set(block) - known_fields:
             _log.warning("ignoring unknown key in [llm.%s]: %r", toml_name, unknown)
-        sections[attr_name] = cls(
-            **{k: v for k, v in block.items() if k in known_fields}
-        )
+        accepted = {k: v for k, v in block.items() if k in known_fields}
+        if accepted.get("config_dir") is not None:
+            p = Path(os.path.expandvars(accepted["config_dir"])).expanduser()
+            accepted["config_dir"] = p if p.is_absolute() else (base / p).resolve()
+        sections[attr_name] = cls(**accepted)
     for unknown in set(raw) - {n for n, *_ in _LLM_SECTIONS}:
         _log.warning("ignoring unknown key in [llm]: %r", unknown)
     return LlmConfig(**{k: v for k, v in sections.items() if k in known_attrs})
@@ -728,7 +742,7 @@ class Config:
 
         llm_raw = raw.pop("llm", {}) or {}
         if llm_raw:
-            raw["llm"] = _build_llm_config(llm_raw)
+            raw["llm"] = _build_llm_config(llm_raw, base)
 
         analyze_raw = raw.pop("analyze", {}) or {}
         if analyze_raw:

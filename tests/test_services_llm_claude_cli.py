@@ -11,6 +11,7 @@ subprocess is launched.
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -174,8 +175,62 @@ def test_is_available_returns_bool() -> None:
 def test_from_config_maps_fields() -> None:
     from whygraph.core.config import ClaudeCliConfig
 
-    cfg = ClaudeCliConfig(model="claude-x", api_key="sk-cfg", timeout_sec=33)
+    cfg = ClaudeCliConfig(
+        model="claude-x",
+        api_key="sk-cfg",
+        timeout_sec=33,
+        config_dir=Path("/profiles/work"),
+    )
     client = ClaudeCliAdapter.from_config(cfg)
     assert client.model == "claude-x"
     assert client._api_key == "sk-cfg"
     assert client._default_timeout == 33
+    assert client._config_dir == Path("/profiles/work")
+
+
+# ---------- config_dir → CLAUDE_CONFIG_DIR ----------------------------------
+
+
+def test_complete_sets_claude_config_dir_when_provided(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit profile dir overrides the ambient CLAUDE_CONFIG_DIR."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/ambient/profile")
+    captured: dict = {}
+
+    def fake_run(cmd, *, env, **_):
+        captured["env"] = env
+        return _ok("ok")
+
+    with patch("whygraph.services.llm.claude_cli.subprocess.run", side_effect=fake_run):
+        ClaudeCliAdapter(model="m", config_dir=tmp_path).complete(
+            CompletionRequest.of("hi")
+        )
+
+    assert captured["env"]["CLAUDE_CONFIG_DIR"] == str(tmp_path)
+
+
+def test_complete_inherits_ambient_claude_config_dir_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/ambient/profile")
+    captured: dict = {}
+
+    def fake_run(cmd, *, env, **_):
+        captured["env"] = env
+        return _ok("ok")
+
+    with patch("whygraph.services.llm.claude_cli.subprocess.run", side_effect=fake_run):
+        ClaudeCliAdapter(model="m").complete(CompletionRequest.of("hi"))
+
+    assert captured["env"]["CLAUDE_CONFIG_DIR"] == "/ambient/profile"
+
+
+def test_complete_raises_llm_error_when_config_dir_missing(tmp_path: Path) -> None:
+    """A missing profile dir fails fast instead of spawning a logged-out CLI."""
+    with patch("whygraph.services.llm.claude_cli.subprocess.run") as run:
+        with pytest.raises(LlmError, match="config_dir"):
+            ClaudeCliAdapter(model="m", config_dir=tmp_path / "nope").complete(
+                CompletionRequest.of("hi")
+            )
+    run.assert_not_called()

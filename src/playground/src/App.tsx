@@ -6,6 +6,7 @@ import { Overview } from "./components/Overview";
 import { DetailPanel } from "./components/DetailPanel";
 import { CommandPalette } from "./components/CommandPalette";
 import { ChatView } from "./components/chat/ChatView";
+import { ThemeToggle } from "./components/ThemeToggle";
 import { useExplorer, type View } from "./store";
 
 const VIEWS: { key: View; label: string }[] = [
@@ -25,8 +26,8 @@ function ViewSwitch() {
           key={v.key}
           onClick={() => setView(v.key)}
           className={clsx(
-            "rounded px-3 py-1 text-xs font-medium transition-colors",
-            view === v.key ? "bg-accent text-white" : "text-muted hover:text-fg",
+            "rounded-sm px-3 py-1 text-xs font-medium transition-colors",
+            view === v.key ? "bg-primary text-white" : "text-muted-foreground hover:text-fg",
           )}
         >
           {v.label}
@@ -62,13 +63,16 @@ export default function App() {
           <span className="text-accent2">◆</span> WhyGraph
         </div>
         <ViewSwitch />
-        <button
-          onClick={() => setPaletteOpen(true)}
-          className="flex items-center gap-2 rounded-md border border-border bg-panel2 px-3 py-1 text-xs text-muted hover:text-fg"
-        >
-          Search
-          <kbd className="rounded border border-border px-1.5 py-0.5 text-[10px]">⌘K</kbd>
-        </button>
+        <div className="flex items-center gap-2">
+          <ThemeToggle />
+          <button
+            onClick={() => setPaletteOpen(true)}
+            className="flex items-center gap-2 rounded-md border border-border bg-panel2 px-3 py-1 text-xs text-muted-foreground hover:text-fg"
+          >
+            Search
+            <kbd className="rounded-sm border border-border px-1.5 py-0.5 text-[10px]">⌘K</kbd>
+          </button>
+        </div>
       </header>
 
       {/* Each view's state lives in the store (selectedQn, activeSessionId), so

@@ -14,7 +14,7 @@ function Row({ symbol }: { symbol: RelationSymbol | Symbol }) {
     >
       <KindBadge kind={symbol.kind} />
       <span className="truncate font-medium text-fg">{symbol.name}</span>
-      <span className="truncate text-xs text-muted">{symbol.file_path}</span>
+      <span className="truncate text-xs text-muted-foreground">{symbol.file_path}</span>
     </button>
   );
 }
@@ -23,7 +23,7 @@ function Section({ title, items }: { title: string; items: (RelationSymbol | Sym
   if (items.length === 0) return null;
   return (
     <div className="mb-3">
-      <div className="px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-muted">
+      <div className="px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
         {title} ({items.length})
       </div>
       {items.map((s, i) => (

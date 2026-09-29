@@ -11,7 +11,7 @@ function BulletList({ title, items }: { title: string; items?: string[] }) {
   if (!items || items.length === 0) return null;
   return (
     <div className="mt-3">
-      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
         {title}
       </div>
       <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-fg">
@@ -26,12 +26,12 @@ function BulletList({ title, items }: { title: string; items?: string[] }) {
 function Card({ card }: { card: RationaleCard }) {
   return (
     <div className="p-4">
-      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
         Purpose
       </div>
       <p className="mt-1 text-sm text-fg">{card.purpose}</p>
 
-      <div className="mt-3 text-[11px] font-semibold uppercase tracking-wide text-muted">
+      <div className="mt-3 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
         Why it exists
       </div>
       <p className="mt-1 text-sm text-fg">{card.why}</p>
@@ -40,7 +40,7 @@ function Card({ card }: { card: RationaleCard }) {
       <BulletList title="Tradeoffs" items={card.tradeoffs} />
       <BulletList title="Risks" items={card.risks} />
 
-      <div className="mt-4 border-t border-border pt-2 text-[11px] text-muted">
+      <div className="mt-4 border-t border-border pt-2 text-[11px] text-muted-foreground">
         {card.provider}
         {card.model ? ` · ${card.model}` : ""}
         {card.cached_at ? ` · generated ${card.cached_at}` : ""}
@@ -79,7 +79,7 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
         <Spinner label="Generating rationale (calling the model)…" />
       ) : (
         <>
-          <p className="text-sm text-muted">
+          <p className="text-sm text-muted-foreground">
             {noEvidence
               ? "No historical evidence maps to this symbol, so a rationale can't be generated. Run `whygraph scan` to populate history."
               : "No rationale has been generated for this symbol yet."}
@@ -92,7 +92,7 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
             Generate rationale
           </Button>
           {generate.isError && (
-            <p className="mt-2 text-sm text-rose-400">
+            <p className="mt-2 text-sm text-rose-600 dark:text-rose-400">
               {(generate.error as Error).message}
             </p>
           )}

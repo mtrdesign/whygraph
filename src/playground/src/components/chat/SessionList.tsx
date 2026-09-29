@@ -84,7 +84,7 @@ export function SessionList() {
       </div>
 
       {create.isError && (
-        <div className="px-3 py-2 text-xs text-rose-400">
+        <div className="px-3 py-2 text-xs text-rose-600 dark:text-rose-400">
           {(create.error as Error).message}
         </div>
       )}
@@ -96,7 +96,7 @@ export function SessionList() {
           </div>
         )}
         {sessions.isError && (
-          <div className="p-3 text-xs text-rose-400">
+          <div className="p-3 text-xs text-rose-600 dark:text-rose-400">
             {(sessions.error as Error).message}
           </div>
         )}
@@ -140,7 +140,7 @@ export function SessionList() {
                     <div
                       className={clsx(
                         "truncate text-sm",
-                        session.id === activeSessionId ? "text-fg" : "text-muted",
+                        session.id === activeSessionId ? "text-fg" : "text-muted-foreground",
                       )}
                     >
                       {session.title}
@@ -170,7 +170,7 @@ export function SessionList() {
                     </IconButton>
                   </div>
                 </div>
-                <div className="truncate text-[10px] text-muted">
+                <div className="truncate text-[10px] text-muted-foreground">
                   {session.provider} · {session.model}
                   {session.message_count ? ` · ${session.message_count} msgs` : ""}
                 </div>

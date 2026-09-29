@@ -13,6 +13,7 @@ import ELK from "elkjs/lib/elk.bundled.js";
 import { api } from "../api";
 import { OverviewNode, type OverviewNodeData } from "./OverviewNode";
 import { Spinner } from "../lib/ui";
+import { useTheme } from "../theme";
 
 // The Phase-2 LOD overview and landing view: directory super-nodes with weighted,
 // directional lifted edges and coverage coloring. Clicking a directory expands it
@@ -62,6 +63,7 @@ async function layout(
 }
 
 export function Overview() {
+  const { resolvedTheme } = useTheme();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [positions, setPositions] = useState<Record<string, { x: number; y: number }>>({});
 
@@ -104,8 +106,8 @@ export function Overview() {
           stroke: e.kind === "imports" ? "#fb7185" : "#818cf8",
           strokeWidth: Math.min(1 + e.weight / 3, 4),
         },
-        labelStyle: { fill: "#8b93a7", fontSize: 10 },
-        labelBgStyle: { fill: "#12151c" },
+        labelStyle: { fill: "var(--muted-foreground)", fontSize: 10 },
+        labelBgStyle: { fill: "var(--card)" },
         markerEnd: { type: MarkerType.ArrowClosed },
       })),
     [data],
@@ -129,8 +131,8 @@ export function Overview() {
     );
   if (isError)
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-muted">
-        <div className="text-sm text-rose-400">{(error as Error).message}</div>
+      <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-muted-foreground">
+        <div className="text-sm text-rose-600 dark:text-rose-400">{(error as Error).message}</div>
         <div className="text-xs">
           Run <code className="text-fg">whygraph scan</code> to build the index.
         </div>
@@ -139,7 +141,7 @@ export function Overview() {
 
   return (
     <div className="h-full">
-      <div className="absolute left-1/2 top-3 z-10 -translate-x-1/2 rounded-full border border-border bg-panel2/80 px-3 py-1 text-xs text-muted backdrop-blur">
+      <div className="absolute left-1/2 top-3 z-10 -translate-x-1/2 rounded-full border border-border bg-panel2/80 px-3 py-1 text-xs text-muted-foreground backdrop-blur-sm">
         Overview — click a directory to expand · coverage colored
       </div>
       <ReactFlow
@@ -152,10 +154,11 @@ export function Overview() {
         fitViewOptions={{ padding: 0.2 }}
         minZoom={0.1}
         maxZoom={2}
+        colorMode={resolvedTheme}
         proOptions={{ hideAttribution: true }}
       >
-        <Background color="#242a36" gap={20} />
-        <Controls className="!border-border !bg-panel2" showInteractive={false} />
+        <Background color="var(--border)" gap={20} />
+        <Controls className="border-border! bg-panel2!" showInteractive={false} />
       </ReactFlow>
     </div>
   );

@@ -27,7 +27,7 @@ function SymbolChip({ qualifiedName, label }: { qualifiedName: string; label: st
       type="button"
       onClick={() => openNode(qualifiedName)}
       title={`Open ${qualifiedName} in the Explorer`}
-      className="inline-flex items-center gap-1 rounded border border-accent/40 bg-accent/15 px-1.5 py-0.5 font-mono text-[11px] text-accent2 transition-colors hover:bg-accent/25"
+      className="inline-flex items-center gap-1 rounded-sm border border-primary/40 bg-primary/15 px-1.5 py-0.5 font-mono text-[11px] text-accent2 transition-colors hover:bg-primary/25"
     >
       <span aria-hidden>◆</span>
       {label}
@@ -55,13 +55,14 @@ export function Markdown({ children }: { children: string }) {
   return (
     <div
       className={
-        "prose prose-invert max-w-none text-sm " +
-        // Tighten the typography plugin's generous defaults and bind its colors
-        // to our tokens.
+        "prose max-w-none text-sm " +
+        // Tighten the typography plugin's generous defaults. Its colours come from
+        // the token-driven `--tw-prose-*` values in styles/theme.css, so there is
+        // no `prose-invert` - light and dark both follow the theme.
         "prose-p:my-2 prose-headings:mb-2 prose-headings:mt-3 prose-headings:text-fg " +
         "prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 " +
         "prose-a:text-accent2 prose-strong:text-fg " +
-        "prose-code:rounded prose-code:bg-panel2 prose-code:px-1 prose-code:py-0.5 " +
+        "prose-code:rounded-sm prose-code:bg-panel2 prose-code:px-1 prose-code:py-0.5 " +
         "prose-code:font-mono prose-code:text-[12px] prose-code:before:content-none " +
         "prose-code:after:content-none " +
         "prose-pre:my-2 prose-pre:overflow-x-auto prose-pre:rounded-md " +

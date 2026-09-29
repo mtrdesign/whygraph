@@ -47,14 +47,14 @@ export function CommandPalette() {
         value={query}
         onValueChange={setQuery}
         placeholder="Search symbols by name…"
-        className="w-full border-b border-border bg-transparent px-4 py-3 text-sm text-fg outline-none placeholder:text-muted"
+        className="w-full border-b border-border bg-transparent px-4 py-3 text-sm text-fg outline-hidden placeholder:text-muted-foreground"
       />
       <Command.List className="max-h-[320px] overflow-auto p-1">
         {debounced.trim().length === 0 && (
-          <div className="p-4 text-sm text-muted">Type to search symbols…</div>
+          <div className="p-4 text-sm text-muted-foreground">Type to search symbols…</div>
         )}
         {debounced.trim().length > 0 && !isFetching && results.length === 0 && (
-          <Command.Empty className="p-4 text-sm text-muted">
+          <Command.Empty className="p-4 text-sm text-muted-foreground">
             No symbols match “{debounced}”.
           </Command.Empty>
         )}
@@ -63,12 +63,12 @@ export function CommandPalette() {
             key={r.id}
             value={r.id}
             onSelect={() => openNode(r.qualified_name, r.file_path)}
-            className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm text-fg data-[selected=true]:bg-accent/20"
+            className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm text-fg data-[selected=true]:bg-primary/20"
           >
             <CoverageDot analyzed={r.analyzed} />
             <KindBadge kind={r.kind} />
             <span className="font-medium">{r.name}</span>
-            <span className="truncate text-xs text-muted">{r.file_path}</span>
+            <span className="truncate text-xs text-muted-foreground">{r.file_path}</span>
           </Command.Item>
         ))}
       </Command.List>

@@ -19,19 +19,19 @@ function SymbolNodeInner({ data }: NodeProps) {
   return (
     <div
       className={clsx(
-        "min-w-[150px] max-w-[220px] rounded-lg border px-3 py-2 shadow-sm transition-colors",
+        "min-w-[150px] max-w-[220px] rounded-lg border px-3 py-2 shadow-xs transition-colors",
         d.is_focus
-          ? "border-accent2 bg-accent/20 ring-2 ring-accent/40"
+          ? "border-accent2 bg-primary/20 ring-2 ring-primary/40"
           : "border-border bg-panel2 hover:border-accent2/60",
       )}
     >
-      <Handle type="target" position={Position.Top} className="!bg-border" />
+      <Handle type="target" position={Position.Top} className="bg-border!" />
       <div className="flex items-center justify-between gap-2">
         <span className="truncate text-sm font-medium text-fg">{d.name}</span>
         <KindBadge kind={d.kind} />
       </div>
-      <div className="mt-0.5 truncate text-[10px] text-muted">{d.file_path}</div>
-      <Handle type="source" position={Position.Bottom} className="!bg-border" />
+      <div className="mt-0.5 truncate text-[10px] text-muted-foreground">{d.file_path}</div>
+      <Handle type="source" position={Position.Bottom} className="bg-border!" />
     </div>
   );
 }

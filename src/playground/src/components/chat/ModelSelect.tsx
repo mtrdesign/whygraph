@@ -123,7 +123,7 @@ export function ModelSelect({
       </div>
 
       {models.data?.source === "fallback" && !compact && (
-        <div className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300">
+        <div className="rounded-sm border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-700 dark:text-amber-300">
           Couldn't list this provider's models, so only known defaults are shown.
           {models.data.error ? ` (${models.data.error})` : ""}
         </div>
@@ -131,7 +131,7 @@ export function ModelSelect({
       {models.data?.source === "fallback" && compact && (
         <span
           title={`Couldn't list models: ${models.data.error ?? "unknown error"}`}
-          className="shrink-0 text-[11px] text-amber-400"
+          className="shrink-0 text-[11px] text-amber-600 dark:text-amber-400"
           aria-label="Model list unavailable; showing defaults"
         >
           ⚠

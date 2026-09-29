@@ -54,15 +54,15 @@ export function ToolCallCard({ activity }: { activity: ToolActivity }) {
         <span
           className={clsx(
             "shrink-0",
-            running ? "animate-spin text-accent2" : failed ? "text-amber-400" : "text-emerald-400",
+            running ? "animate-spin text-accent2" : failed ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400",
           )}
           aria-hidden
         >
           {running ? "◍" : failed ? "!" : "✓"}
         </span>
         <span className="font-mono text-accent2">{name}</span>
-        <span className="min-w-0 flex-1 truncate text-muted">{summarize(args)}</span>
-        <span className="shrink-0 text-muted" aria-hidden>
+        <span className="min-w-0 flex-1 truncate text-muted-foreground">{summarize(args)}</span>
+        <span className="shrink-0 text-muted-foreground" aria-hidden>
           {open ? "▾" : "▸"}
         </span>
       </button>
@@ -70,23 +70,23 @@ export function ToolCallCard({ activity }: { activity: ToolActivity }) {
       {open && (
         <div className="space-y-2 border-t border-border px-2.5 py-2">
           <div>
-            <div className="mb-1 text-[10px] uppercase tracking-wide text-muted">
+            <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
               Arguments
             </div>
-            <pre className="overflow-x-auto rounded bg-bg p-2 font-mono text-[11px] text-fg">
+            <pre className="overflow-x-auto rounded-sm bg-bg p-2 font-mono text-[11px] text-fg">
               {JSON.stringify(args, null, 2)}
             </pre>
           </div>
           <div>
-            <div className="mb-1 text-[10px] uppercase tracking-wide text-muted">
+            <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
               Result
             </div>
             {running ? (
-              <div className="text-muted">running…</div>
+              <div className="text-muted-foreground">running…</div>
             ) : (
               // Plain text in a <pre>: tool results are repo content and never
               // get rendered as markup.
-              <pre className="max-h-72 overflow-auto rounded bg-bg p-2 font-mono text-[11px] text-fg">
+              <pre className="max-h-72 overflow-auto rounded-sm bg-bg p-2 font-mono text-[11px] text-fg">
                 {result ? formatResult(result) : "(no result)"}
               </pre>
             )}

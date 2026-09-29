@@ -6,7 +6,7 @@ import { EmptyState } from "../lib/ui";
 // escapes text by default and we never use dangerouslySetInnerHTML (§6).
 
 function ExternalLink({ href, children }: { href: string | null; children: string }) {
-  if (!href) return <span className="text-muted">{children}</span>;
+  if (!href) return <span className="text-muted-foreground">{children}</span>;
   return (
     <a
       href={href}
@@ -24,18 +24,18 @@ function EvidenceCard({ item }: { item: EvidenceItem }) {
   return (
     <div className="rounded-lg border border-border bg-panel2 p-3">
       <div className="flex items-center gap-2">
-        <span className="rounded bg-panel px-1.5 py-0.5 font-mono text-[10px] text-muted">
+        <span className="rounded-sm bg-panel px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
           {c.sha.slice(0, 8)}
         </span>
-        <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase text-muted">
+        <span className="rounded-sm border border-border px-1.5 py-0.5 text-[10px] uppercase text-muted-foreground">
           {item.source}
         </span>
       </div>
       <div className="mt-1.5 text-sm font-medium text-fg">{c.subject}</div>
       {c.llm_description && (
-        <div className="mt-1 text-xs text-muted">{c.llm_description}</div>
+        <div className="mt-1 text-xs text-muted-foreground">{c.llm_description}</div>
       )}
-      <div className="mt-1 text-[11px] text-muted">
+      <div className="mt-1 text-[11px] text-muted-foreground">
         {c.author_name} · {c.authored_at}
       </div>
       {(item.pull_requests.length > 0 || item.issues.length > 0) && (

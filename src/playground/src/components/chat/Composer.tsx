@@ -57,7 +57,7 @@ export function Composer({
           </Button>
         )}
       </div>
-      <div className="mt-1.5 text-[10px] text-muted">
+      <div className="mt-1.5 text-[10px] text-muted-foreground">
         Enter to send · Shift-Enter for a newline
       </div>
     </div>

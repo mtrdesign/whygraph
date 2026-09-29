@@ -11,6 +11,7 @@ import {
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import { useExplorer } from "../store";
+import { useTheme } from "../theme";
 import { SymbolNode, type SymbolNodeData } from "./SymbolNode";
 import { Spinner } from "../lib/ui";
 
@@ -27,6 +28,7 @@ const EDGE_COLOR: Record<string, string> = {
 };
 
 export function GraphCanvas() {
+  const { resolvedTheme } = useTheme();
   const selectedQn = useExplorer((s) => s.selectedQn);
   const openNode = useExplorer((s) => s.openNode);
 
@@ -56,8 +58,8 @@ export function GraphCanvas() {
         label: e.kind,
         animated: e.kind === "calls",
         style: { stroke: EDGE_COLOR[e.kind] ?? "#64748b" },
-        labelStyle: { fill: "#8b93a7", fontSize: 10 },
-        labelBgStyle: { fill: "#12151c" },
+        labelStyle: { fill: "var(--muted-foreground)", fontSize: 10 },
+        labelBgStyle: { fill: "var(--card)" },
         markerEnd: { type: MarkerType.ArrowClosed, color: EDGE_COLOR[e.kind] ?? "#64748b" },
       })),
     [data],
@@ -70,12 +72,12 @@ export function GraphCanvas() {
 
   if (!selectedQn)
     return (
-      <div className="flex h-full items-center justify-center text-center text-muted">
+      <div className="flex h-full items-center justify-center text-center text-muted-foreground">
         <div>
           <div className="text-lg font-medium text-fg">WhyGraph Explorer</div>
           <div className="mt-1 text-sm">
             Pick a symbol from the tree, or press{" "}
-            <kbd className="rounded border border-border bg-panel2 px-1.5 py-0.5 text-xs">
+            <kbd className="rounded-sm border border-border bg-panel2 px-1.5 py-0.5 text-xs">
               ⌘K
             </kbd>{" "}
             to search.
@@ -93,7 +95,7 @@ export function GraphCanvas() {
 
   if (isError)
     return (
-      <div className="flex h-full items-center justify-center text-sm text-rose-400">
+      <div className="flex h-full items-center justify-center text-sm text-rose-600 dark:text-rose-400">
         {(error as Error).message}
       </div>
     );
@@ -109,10 +111,11 @@ export function GraphCanvas() {
       fitViewOptions={{ padding: 0.3 }}
       minZoom={0.2}
       maxZoom={2}
+      colorMode={resolvedTheme}
       proOptions={{ hideAttribution: true }}
     >
-      <Background color="#242a36" gap={20} />
-      <Controls className="!border-border !bg-panel2" showInteractive={false} />
+      <Background color="var(--border)" gap={20} />
+      <Controls className="border-border! bg-panel2!" showInteractive={false} />
     </ReactFlow>
   );
 }

@@ -191,7 +191,7 @@ export function MessageThread({
       <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-auto p-4">
         {transcript.isLoading && <Spinner label="Loading transcript…" />}
         {transcript.isError && (
-          <div className="text-sm text-rose-400">
+          <div className="text-sm text-rose-600 dark:text-rose-400">
             {(transcript.error as Error).message}
           </div>
         )}
@@ -233,7 +233,7 @@ export function MessageThread({
             }
           />
           {update.isError && (
-            <div className="mt-1 text-xs text-rose-400">
+            <div className="mt-1 text-xs text-rose-600 dark:text-rose-400">
               {(update.error as Error).message}
             </div>
           )}

@@ -29,7 +29,7 @@ export function DetailPanel() {
 
   if (!selectedQn)
     return (
-      <div className="flex h-full items-center justify-center p-4 text-center text-sm text-muted">
+      <div className="flex h-full items-center justify-center p-4 text-center text-sm text-muted-foreground">
         Select a symbol to see its details.
       </div>
     );
@@ -39,7 +39,7 @@ export function DetailPanel() {
       {/* Sticky identity header */}
       <div className="border-b border-border px-4 py-3">
         {isLoading && <Spinner label="Loading…" />}
-        {isError && <div className="text-sm text-rose-400">{(error as Error).message}</div>}
+        {isError && <div className="text-sm text-rose-600 dark:text-rose-400">{(error as Error).message}</div>}
         {data && (
           <>
             <div className="flex items-center gap-2">
@@ -48,10 +48,10 @@ export function DetailPanel() {
                 {data.symbol.name}
               </span>
             </div>
-            <div className="mt-1 truncate font-mono text-xs text-muted">
+            <div className="mt-1 truncate font-mono text-xs text-muted-foreground">
               {data.symbol.qualified_name}
             </div>
-            <div className="truncate text-xs text-muted">
+            <div className="truncate text-xs text-muted-foreground">
               {data.symbol.file_path}:{data.symbol.start_line}
             </div>
           </>
@@ -68,7 +68,7 @@ export function DetailPanel() {
               "flex-1 border-b-2 px-2 py-2 text-xs font-medium transition-colors",
               tab === t.key
                 ? "border-accent2 text-fg"
-                : "border-transparent text-muted hover:text-fg",
+                : "border-transparent text-muted-foreground hover:text-fg",
             )}
           >
             {t.label}

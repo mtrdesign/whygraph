@@ -288,7 +288,7 @@ export function buildOption(payload: ChartPayload): Option {
       axisPointer: {
         // On bars the shadow makes the hit area the whole category band including
         // the 2px gap; on a line a crosshair reads better.
-        type: isLine ? "line" : "shadow",
+        type: isLine ? "line" : "shadow-sm",
         lineStyle: { color: BORDER, width: 1 },
       },
       backgroundColor: PANEL,
@@ -318,7 +318,7 @@ function StatTile({ payload }: { payload: ChartPayload }) {
   return (
     <div className="px-3 py-4">
       <div className="text-2xl text-fg">{formatValue(value)}</div>
-      <div className="mt-0.5 text-xs text-muted">
+      <div className="mt-0.5 text-xs text-muted-foreground">
         {payload.yLabel ?? payload.columns[payload.yIndex]}
       </div>
     </div>
@@ -342,7 +342,7 @@ function TableView({ payload }: { payload: ChartPayload }) {
             {payload.columns.map((column) => (
               <th
                 key={column}
-                className="border-b border-border px-2 py-1 text-left font-medium text-muted"
+                className="border-b border-border px-2 py-1 text-left font-medium text-muted-foreground"
               >
                 {column}
               </th>
@@ -429,7 +429,7 @@ export function ChartBlock({ payload }: { payload: ChartPayload }) {
         <div className="min-w-0 flex-1 truncate text-xs text-fg">{payload.title}</div>
         {!statTile && (
           <>
-            <div className="flex shrink-0 overflow-hidden rounded border border-border">
+            <div className="flex shrink-0 overflow-hidden rounded-sm border border-border">
               {(["chart", "table"] as const).map((option) => (
                 <button
                   key={option}
@@ -439,8 +439,8 @@ export function ChartBlock({ payload }: { payload: ChartPayload }) {
                   className={clsx(
                     "px-1.5 py-0.5 text-[10px] capitalize transition-colors",
                     view === option
-                      ? "bg-accent/20 text-fg"
-                      : "text-muted hover:bg-panel2",
+                      ? "bg-primary/20 text-fg"
+                      : "text-muted-foreground hover:bg-panel2",
                   )}
                 >
                   {option}
@@ -452,7 +452,7 @@ export function ChartBlock({ payload }: { payload: ChartPayload }) {
                 type="button"
                 onClick={download}
                 title="Save as PNG"
-                className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted transition-colors hover:bg-panel2 hover:text-fg"
+                className="shrink-0 rounded-sm border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-panel2 hover:text-fg"
               >
                 PNG
               </button>
@@ -484,7 +484,7 @@ export function ChartBlock({ payload }: { payload: ChartPayload }) {
       )}
 
       {captions.length > 0 && (
-        <div className="space-y-0.5 px-2.5 pb-1.5 text-[10px] text-muted">
+        <div className="space-y-0.5 px-2.5 pb-1.5 text-[10px] text-muted-foreground">
           {captions.map((caption) => (
             <div key={caption}>{caption}</div>
           ))}

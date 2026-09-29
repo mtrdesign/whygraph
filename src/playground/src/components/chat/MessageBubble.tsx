@@ -59,7 +59,7 @@ export type Turn = UserTurn | AssistantTurn;
 function UserBubble({ content }: { content: string }) {
   return (
     <div className="flex justify-end">
-      <div className="max-w-[80%] whitespace-pre-wrap rounded-lg bg-accent/20 px-3 py-2 text-sm text-fg">
+      <div className="max-w-[80%] whitespace-pre-wrap rounded-lg bg-primary/20 px-3 py-2 text-sm text-fg">
         {content}
       </div>
     </div>
@@ -100,7 +100,7 @@ function AssistantBubble({ turn }: { turn: AssistantTurn }) {
                   {chart && (
                     <Suspense
                       fallback={
-                        <div className="my-1.5 rounded-md border border-border bg-panel2/60 px-2.5 py-4 text-xs text-muted">
+                        <div className="my-1.5 rounded-md border border-border bg-panel2/60 px-2.5 py-4 text-xs text-muted-foreground">
                           Loading chart…
                         </div>
                       }
@@ -118,26 +118,26 @@ function AssistantBubble({ turn }: { turn: AssistantTurn }) {
             covers the inter-round gap, where segments and cards are present but
             the model hasn't spoken yet. */}
         {(turn.thinking || isEmpty) && (
-          <div className="mt-1 flex items-center gap-1.5 text-xs text-muted">
+          <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
             <span className="animate-pulse">Thinking…</span>
           </div>
         )}
 
         {turn.roundLimit !== undefined && (
-          <div className="mt-2 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-xs text-amber-300">
+          <div className="mt-2 rounded-sm border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-xs text-amber-700 dark:text-amber-300">
             Reached the {turn.roundLimit}-round tool limit — the assistant answered
             with what it had gathered. Ask a narrower question to go further.
           </div>
         )}
 
         {turn.error && (
-          <div className="mt-2 rounded border border-rose-500/30 bg-rose-500/10 px-2 py-1 text-xs text-rose-300">
+          <div className="mt-2 rounded-sm border border-rose-500/30 bg-rose-500/10 px-2 py-1 text-xs text-rose-700 dark:text-rose-300">
             {turn.error}
           </div>
         )}
 
         {(turn.model || (turn.usage && (turn.usage.input || turn.usage.output))) && (
-          <div className="mt-2 flex items-center gap-2 text-[10px] text-muted">
+          <div className="mt-2 flex items-center gap-2 text-[10px] text-muted-foreground">
             {turn.model && <span className="font-mono">{turn.model}</span>}
             {turn.usage && (turn.usage.input || turn.usage.output) && (
               <span>

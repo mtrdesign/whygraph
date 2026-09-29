@@ -1,24 +1,7 @@
-@import "@xyflow/react/dist/style.css";
+@import "@xyflow/react/dist/style.css" layer(base);
+@import "./styles/theme.css";
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-html,
-body,
-#root {
-  height: 100%;
-  margin: 0;
-}
-
-body {
-  background: theme("colors.bg");
-  color: theme("colors.fg");
-  font-family: theme("fontFamily.sans");
-  -webkit-font-smoothing: antialiased;
-}
-
-/* React Flow surface tuned to the dark platform palette. */
+/* React Flow surface: strokes and labels follow the theme tokens. */
 .react-flow__edge-path {
   stroke-width: 1.5;
 }
@@ -29,13 +12,13 @@ body {
 /* Thin, unobtrusive scrollbars everywhere. */
 * {
   scrollbar-width: thin;
-  scrollbar-color: theme("colors.border") transparent;
+  scrollbar-color: var(--border) transparent;
 }
 *::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 *::-webkit-scrollbar-thumb {
-  background: theme("colors.border");
+  background: var(--border);
   border-radius: 4px;
 }

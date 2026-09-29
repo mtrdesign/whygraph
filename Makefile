@@ -27,8 +27,8 @@ test:  ## Run the test suite
 scan:  ## Re-scan this repo so WhyGraph is tested against itself
 	uv run whygraph scan
 
-node-check:  # (internal) assert Node >= 18 for the playground toolchain
-	@node -e 'process.exit(+process.versions.node.split(".")[0]>=18?0:1)' 2>/dev/null || { echo "error: the playground needs Node >= 18 (have $$(node -v 2>/dev/null || echo none)) - try 'nvm use 22'"; exit 1; }
+node-check:  # (internal) assert Node >= 22.12 for the playground toolchain (Vite 8 / Vitest 5)
+	@node -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||(a===22&&b>=12)?0:1)' 2>/dev/null || { echo "error: the playground needs Node >= 22.12 (have $$(node -v 2>/dev/null || echo none)) - try 'nvm use 22'"; exit 1; }
 
 playground-deps: node-check  # (internal) install node_modules only if missing
 	@[ -d src/playground/node_modules ] || npm --prefix src/playground ci

@@ -12,21 +12,21 @@ import type {
 // idiom — enough for the panel without pulling the full shadcn generator.
 
 const KIND_COLORS: Record<string, string> = {
-  file: "bg-sky-500/15 text-sky-300 border-sky-500/30",
-  directory: "bg-slate-500/15 text-slate-300 border-slate-500/30",
-  class: "bg-violet-500/15 text-violet-300 border-violet-500/30",
-  method: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
-  function: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
-  variable: "bg-amber-500/15 text-amber-300 border-amber-500/30",
-  import: "bg-rose-500/15 text-rose-300 border-rose-500/30",
+  file: "bg-sky-500/15 text-sky-700 dark:text-sky-300 border-sky-500/30",
+  directory: "bg-slate-500/15 text-slate-700 dark:text-slate-300 border-slate-500/30",
+  class: "bg-violet-500/15 text-violet-700 dark:text-violet-300 border-violet-500/30",
+  method: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30",
+  function: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30",
+  variable: "bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30",
+  import: "bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/30",
 };
 
 export function KindBadge({ kind }: { kind: string }) {
-  const cls = KIND_COLORS[kind] ?? "bg-slate-500/15 text-slate-300 border-slate-500/30";
+  const cls = KIND_COLORS[kind] ?? "bg-slate-500/15 text-slate-700 dark:text-slate-300 border-slate-500/30";
   return (
     <span
       className={clsx(
-        "inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
+        "inline-flex items-center rounded-sm border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
         cls,
       )}
     >
@@ -59,8 +59,8 @@ export function Button({ variant = "primary", className, children, ...rest }: Bu
       className={clsx(
         "inline-flex items-center justify-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50",
         variant === "primary" &&
-          "bg-accent text-white hover:bg-accent2 disabled:hover:bg-accent",
-        variant === "ghost" && "text-muted hover:bg-panel2 hover:text-fg",
+          "bg-primary text-white hover:bg-accent2 disabled:hover:bg-primary",
+        variant === "ghost" && "text-muted-foreground hover:bg-panel2 hover:text-fg",
         className,
       )}
     >
@@ -71,7 +71,7 @@ export function Button({ variant = "primary", className, children, ...rest }: Bu
 
 export function Spinner({ label }: { label?: string }) {
   return (
-    <div className="flex items-center gap-2 text-sm text-muted">
+    <div className="flex items-center gap-2 text-sm text-muted-foreground">
       <span className="h-4 w-4 animate-spin rounded-full border-2 border-border border-t-accent2" />
       {label}
     </div>
@@ -79,7 +79,7 @@ export function Spinner({ label }: { label?: string }) {
 }
 
 export function EmptyState({ children }: { children: ReactNode }) {
-  return <div className="p-4 text-sm text-muted">{children}</div>;
+  return <div className="p-4 text-sm text-muted-foreground">{children}</div>;
 }
 
 // ---- form primitives (added for the Chat view) -----------------------------
@@ -89,7 +89,7 @@ export function EmptyState({ children }: { children: ReactNode }) {
 
 const FIELD_CLASS =
   "w-full rounded-md border border-border bg-panel2 px-3 py-2 text-sm text-fg " +
-  "placeholder:text-muted focus:border-accent2 focus:outline-none " +
+  "placeholder:text-muted-foreground focus:border-accent2 focus:outline-hidden " +
   "disabled:cursor-not-allowed disabled:opacity-50";
 
 // forwardRef so the Composer can refocus after sending.
@@ -136,7 +136,7 @@ export function IconButton({ label, className, children, ...rest }: IconButtonPr
       title={label}
       aria-label={label}
       className={clsx(
-        "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted " +
+        "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-sm text-muted-foreground " +
           "transition-colors hover:bg-panel2 hover:text-fg disabled:opacity-40",
         className,
       )}

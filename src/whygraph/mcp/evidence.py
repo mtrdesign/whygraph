@@ -522,7 +522,7 @@ def backfill_evidence_descriptions(
     from whygraph.services.llm import LlmError
 
     try:
-        descriptor = LlmDescriptor.from_config(get_config().analyze)
+        descriptor = LlmDescriptor.from_config(get_config())
     except LlmError as exc:
         _log.debug("skipping lazy LLM description backfill: %s", exc)
         return

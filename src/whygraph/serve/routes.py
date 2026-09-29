@@ -178,8 +178,8 @@ def rationale_read(qualified_name: str = Query(...)) -> dict:
     evidence = collect_evidence(target, limit=20)
     if not evidence:
         return {"status": "no_evidence", "target": target_dict(target)}
-    cfg = get_config().rationale
-    cached = lookup_cached(target, evidence, cfg.provider, cfg.model)
+    provider, pinned_model = get_config().cache_identity("rationale")
+    cached = lookup_cached(target, evidence, provider, pinned_model)
     if cached is None:
         return {"status": "not_generated", "target": target_dict(target)}
     rationale, cached_at = cached

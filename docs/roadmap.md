@@ -28,7 +28,7 @@ GitHub is the only supported remote today. These are on the way:
 | Forgejo | Upcoming |
 | Others | Under consideration |
 
-Until then, run against a GitHub remote or stay git-only with `[scan].provider = "off"`. See
+Until then, run against a GitHub remote or stay git-only with `[scan].forge = "off"`. See
 [Providers](reference/providers.md).
 
 ## Deferred capabilities

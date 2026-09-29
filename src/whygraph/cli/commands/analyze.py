@@ -68,7 +68,7 @@ def analyze_cmd(target: str, baseline: str | None) -> None:
             diff = repo.diff(target_commit)
         else:
             diff = repo.diff_range(baseline_commit.sha, target_commit.sha)
-        descriptor = LlmDescriptor.from_config(get_config().analyze)
+        descriptor = LlmDescriptor.from_config(get_config())
         description = descriptor.describe(diff)
     except (GitError, AnalyzeError, LlmError) as exc:
         fail(str(exc))

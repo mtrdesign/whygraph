@@ -38,8 +38,8 @@ it. That fills `.whygraph/whygraph.db` with the evidence WhyGraph serves, and cl
 summarizing each phase.
 
 !!! note "The remote crawl is off by default"
-    A fresh scan stays git-only and needs no token, because `[scan].provider` defaults to `"off"`. To
-    pull PRs and issues, set `provider = "github"` (or `"auto"`) in `whygraph.toml`.
+    A fresh scan stays git-only and needs no token, because `[scan].forge` defaults to `"off"`. To
+    pull PRs and issues, set `forge = "github"` (or `"auto"`) under `[scan]` in `whygraph.toml`.
 
 For a fast, offline pass - no remote calls, no LLM - skip both phases:
 

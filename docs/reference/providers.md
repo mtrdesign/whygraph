@@ -1,7 +1,8 @@
 # Source control providers
 
 WhyGraph's remote crawl enriches your scan with pull requests and issues. You choose the backend with
-`[scan].provider` in `whygraph.toml`. Today there's one supported provider - GitHub - with others on
+`[scan].forge` in `whygraph.toml` (1.x called it `[scan].provider`; that spelling still works, with
+a deprecation warning, until 3.0). Today there's one supported provider - GitHub - with others on
 the way.
 
 !!! note "Looking for the LLM providers?"
@@ -10,18 +11,18 @@ the way.
 
 ## GitHub - supported
 
-Set the provider to `github` to pull PRs and issues from the GitHub remote:
+Set the forge to `github` to pull PRs and issues from the GitHub remote:
 
 ```toml
 [scan]
-provider = "github"
+forge = "github"
 ```
 
 Or let WhyGraph detect it from your remote URL:
 
 ```toml
 [scan]
-provider = "auto"     # detect from the remote (github only, for now)
+forge = "auto"        # detect from the remote (github only, for now)
 remote = "origin"     # the git remote whose URL is inspected
 ```
 
@@ -33,7 +34,7 @@ in this order - the first one found wins and is exported as `GH_TOKEN` for that 
 3. An existing `gh auth login`.
 
 !!! note "Off by default"
-    `provider` defaults to `"off"`, so a fresh scan stays git-only and needs no token. Opt into the
+    `forge` defaults to `"off"`, so a fresh scan stays git-only and needs no token. Opt into the
     remote crawl by setting `github` or `auto`. You can also skip it per-run with
     `whygraph scan --no-remote`.
 
@@ -44,7 +45,7 @@ in this order - the first one found wins and is exported as `GH_TOKEN` for that 
 ## Upcoming
 
 Other hosts are planned, not yet built. Until they land, point WhyGraph at a GitHub remote or run
-git-only with `provider = "off"`.
+git-only with `forge = "off"`.
 
 | Provider | Status |
 |---|---|

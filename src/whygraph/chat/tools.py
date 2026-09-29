@@ -957,8 +957,8 @@ class ToolRegistry:
         if not evidence:
             return {"status": "no_evidence", "target": target_dict(target)}
 
-        config = get_config().rationale
-        cached = lookup_cached(target, evidence, config.provider, config.model)
+        provider, pinned_model = get_config().cache_identity("rationale")
+        cached = lookup_cached(target, evidence, provider, pinned_model)
         if cached is not None:
             rationale, cached_at = cached
             return {

@@ -73,7 +73,7 @@ picks up new commits and backfills what's missing.
 | `--skip-analyze` | off | Skip the per-commit LLM description phase. The git and GitHub crawlers still run; descriptions backfill lazily on demand and on a later full scan. |
 | `--codegraph / --no-codegraph` | on | Refresh the CodeGraph index concurrently with the crawl - `codegraph sync` when an index exists, `codegraph init -i` on first run. A failure here warns rather than aborting. |
 | `--codegraph-image TEXT` | pinned tag | Override the Docker image used for the CodeGraph refresh fallback. Ignored when a local `codegraph` binary is found. |
-| `--remote / --no-remote` | on | Crawl the source-control remote (GitHub PRs / issues) per `[scan].provider`. `--no-remote` skips it for a fast, offline, token-free scan. |
+| `--remote / --no-remote` | on | Crawl the source-control remote (GitHub PRs / issues) per `[scan].forge`. `--no-remote` skips it for a fast, offline, token-free scan. |
 | `--pr-origins / --no-pr-origins` | on | Recover a squash-merged PR's original feature-branch commits via one targeted `git fetch`. Needs the network, so it's skipped under `--no-remote`. |
 
 See [Scanning your repo](../guide/scanning.md) for what each phase does.

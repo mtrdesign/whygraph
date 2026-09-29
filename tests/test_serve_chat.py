@@ -173,6 +173,33 @@ def test_create_session_falls_back_to_the_provider_model(chat_client) -> None:
     assert created["model"] == "openrouter/auto"
 
 
+def test_create_session_defaults_from_llm_model(
+    chat_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Config v2: with no ``[chat]``, the session follows ``[llm].model``."""
+    monkeypatch.setattr(
+        core, "_config", Config(llm=LlmConfig(model="openai/gpt-4o-mini"))
+    )
+    created = _new_session(chat_client)
+    assert (created["provider"], created["model"]) == ("openai", "gpt-4o-mini")
+
+    by_provider = {
+        p["provider"]: p["default_model"]
+        for p in chat_client.get("/api/chat/providers").json()
+    }
+    assert by_provider["openai"] == "gpt-4o-mini"
+    assert by_provider["anthropic"] == "claude-opus-4-7"
+
+
+def test_create_session_rejects_a_configured_non_chat_provider(
+    chat_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(core, "_config", Config(chat=ChatConfig(provider="ollama")))
+    response = chat_client.post("/api/chat/sessions", json={})
+    assert response.status_code == 400
+    assert "not a chat provider" in response.json()["detail"]
+
+
 def test_create_session_rejects_a_non_chat_provider(chat_client) -> None:
     response = chat_client.post("/api/chat/sessions", json={"provider": "ollama"})
     assert response.status_code == 400

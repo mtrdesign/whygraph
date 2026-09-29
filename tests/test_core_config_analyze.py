@@ -25,7 +25,7 @@ def test_analyze_defaults_when_section_omitted(tmp_path: Path) -> None:
     cfg = Config.from_toml(config)
 
     assert cfg.analyze == AnalyzeConfig()
-    assert cfg.analyze.provider == "anthropic"
+    assert cfg.model_for("analyze")[0] == "anthropic"
     assert cfg.analyze.max_diff_chars == 50_000
     assert cfg.analyze.large_commit_file_count == 30
     assert cfg.analyze.pr_origin_min_commits == 5
@@ -53,7 +53,7 @@ def test_analyze_section_partial_overrides(tmp_path: Path) -> None:
     cfg = Config.from_toml(config)
 
     assert cfg.analyze.max_diff_chars == 10
-    assert cfg.analyze.provider == "anthropic"
+    assert cfg.model_for("analyze")[0] == "anthropic"
     assert cfg.analyze.timeout_sec is None
 
 
@@ -69,7 +69,7 @@ def test_analyze_unknown_key_warns_but_loads(
         cfg = Config.from_toml(config)
 
     assert any("bogus" in r.message for r in caplog.records)
-    assert cfg.analyze.provider == "anthropic"
+    assert cfg.model_for("analyze")[0] == "anthropic"
 
 
 def test_analyze_invalid_max_diff_chars_raises(tmp_path: Path) -> None:

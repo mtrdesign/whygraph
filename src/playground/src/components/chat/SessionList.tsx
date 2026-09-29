@@ -41,7 +41,7 @@ export function SessionList() {
 
   const create = useMutation({
     mutationFn: () => {
-      // No model: the server resolves [chat].model → [llm.<provider>].model.
+      // No model: the server resolves it (Config.model_for("chat")).
       // No provider either if the list hasn't arrived — the server falls back
       // to [chat].provider rather than making the click wait on a fetch.
       const first =

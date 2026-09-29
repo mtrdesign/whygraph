@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from whygraph.analyze import AnalyzeError, Description, LlmDescriptor, Prompt
-from whygraph.core.config import AnalyzeConfig
+from whygraph.core.config import AnalyzeConfig, Config
 from whygraph.services.llm import (
     CompletionRequest,
     CompletionResponse,
@@ -274,11 +274,13 @@ def test_constructor_rejects_zero_max_diff_chars() -> None:
 
 
 def test_from_config_resolves_provider_via_factory() -> None:
-    """An :class:`AnalyzeConfig` + a factory with the stub registered
-    yields a descriptor bound to that stub."""
+    """A :class:`Config` whose ``[analyze]`` names the stub + a factory with
+    the stub registered yields a descriptor bound to that stub."""
     factory = LlmClientFactory()
     factory.register("stub", _StubClient, config=object())  # config unused
-    config = AnalyzeConfig(provider="stub", max_diff_chars=123, timeout_sec=7)
+    config = Config(
+        analyze=AnalyzeConfig(provider="stub", max_diff_chars=123, timeout_sec=7)
+    )
 
     descriptor = LlmDescriptor.from_config(config, factory=factory)
     desc = descriptor.describe("non-empty diff")
@@ -290,7 +292,7 @@ def test_from_config_resolves_provider_via_factory() -> None:
 
 def test_from_config_propagates_unknown_provider_error() -> None:
     factory = LlmClientFactory()  # has no "stub" registered
-    config = AnalyzeConfig(provider="stub")
+    config = Config(analyze=AnalyzeConfig(provider="stub"))
 
     with pytest.raises(LlmError, match="unknown LLM provider"):
         LlmDescriptor.from_config(config, factory=factory)
@@ -307,7 +309,9 @@ def test_from_config_forwards_configured_model_to_factory() -> None:
             captured["model"] = model
             return _StubClient()
 
-    config = AnalyzeConfig(provider="anthropic", model="claude-haiku-4-5")
+    config = Config(
+        analyze=AnalyzeConfig(provider="anthropic", model="claude-haiku-4-5")
+    )
     LlmDescriptor.from_config(config, factory=_RecordingFactory())
 
     assert captured == {"provider": "anthropic", "model": "claude-haiku-4-5"}

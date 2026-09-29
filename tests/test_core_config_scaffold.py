@@ -34,9 +34,11 @@ def test_default_config_text_is_valid_and_matches_defaults(tmp_path: Path) -> No
 
     # An unedited copy behaves exactly as if no config were present.
     assert cfg.log_level == "INFO"
-    assert cfg.scan_max_workers == 2
-    assert cfg.analyze.provider == "anthropic"
-    assert cfg.rationale.provider == "anthropic"
+    assert cfg.analyze.max_workers == 2
+    assert cfg.model_for("analyze")[0] == "anthropic"
+    assert cfg.model_for("rationale")[0] == "anthropic"
+    for task in ("analyze", "rationale", "chat"):
+        assert cfg.model_for(task) == Config.defaults().model_for(task)
     # `[logging]` is commented out in the template, so file logging is off.
     assert cfg.logging.file is None
 
@@ -134,9 +136,9 @@ def test_write_user_config_round_trips(tmp_path: Path) -> None:
     cfg = Config.from_toml(path)
     assert cfg.analyze.provider == "openai"
     assert cfg.analyze.model == "gpt-4o"
-    assert cfg.rationale.provider == "anthropic"
+    assert cfg.model_for("rationale")[0] == "anthropic"
     assert cfg.rationale.model == "claude-opus-4-7"
-    assert cfg.scan_provider == "github"
+    assert cfg.scan_forge == "github"
     assert cfg.scan_token == "ghp_real"
     assert cfg.llm.openai.api_key == "sk-openai-real"
     assert cfg.llm.anthropic.api_key == "sk-ant-real"

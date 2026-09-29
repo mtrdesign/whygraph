@@ -51,7 +51,7 @@ when a phase reports something you want to dig into.
 | `--skip-analyze` | off | Skip the per-commit LLM phase. Git and GitHub crawlers still run; descriptions backfill lazily and on a later full scan. |
 | `--codegraph / --no-codegraph` | on | Refresh the CodeGraph index concurrently with the crawl. |
 | `--codegraph-image TEXT` | pinned tag | Override the Docker image for the CodeGraph fallback. Ignored when a local `codegraph` binary is found. |
-| `--remote / --no-remote` | on | Crawl the remote for PRs and issues per `[scan].provider`. `--no-remote` is a fast, offline, token-free scan. |
+| `--remote / --no-remote` | on | Crawl the remote for PRs and issues per `[scan].forge`. `--no-remote` is a fast, offline, token-free scan. |
 | `--pr-origins / --no-pr-origins` | on | Recover a squash-merged PR's original commits. Needs the network, so it's skipped under `--no-remote`. |
 
 A common fast pass while iterating:

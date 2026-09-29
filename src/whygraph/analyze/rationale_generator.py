@@ -23,7 +23,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from whygraph.core.config import RationaleConfig
+from whygraph.core.config import Config, RationaleConfig
 from whygraph.db.models import Commit, Issue, PullRequest
 from whygraph.services.codegraph import Relation, SymbolContext
 from whygraph.services.llm import (
@@ -416,7 +416,7 @@ class RationaleGenerator:
 
     Examples
     --------
-    >>> generator = RationaleGenerator.from_config(get_config().rationale)
+    >>> generator = RationaleGenerator.from_config(get_config())
     >>> rationale = generator.generate([CommitEvidence(commit)])
     >>> print(rationale.purpose)
     """
@@ -444,19 +444,23 @@ class RationaleGenerator:
     @classmethod
     def from_config(
         cls,
-        config: RationaleConfig,
+        config: Config,
         *,
         factory: LlmClientFactory | None = None,
     ) -> "RationaleGenerator":
-        """Build a generator from a :class:`RationaleConfig`.
+        """Build a generator from a :class:`Config`.
+
+        The provider and model come from ``config.model_for("rationale")``
+        and the timeout from ``config.timeout_for("rationale")``; the PR
+        rendering caps from ``config.rationale``.
 
         Parameters
         ----------
-        config : RationaleConfig
-            Typically ``get_config().rationale``.
+        config : Config
+            Typically ``get_config()``.
         factory : LlmClientFactory, optional
-            Override the factory used to resolve ``config.provider`` into an
-            :class:`LlmClient`. Defaults to a fresh
+            Override the factory used to resolve the rationale provider into
+            an :class:`LlmClient`. Defaults to a fresh
             :class:`LlmClientFactory` bound to the process-wide
             :class:`LlmConfig`. Inject a custom factory in tests to bind a
             stub adapter without touching global state.
@@ -469,15 +473,16 @@ class RationaleGenerator:
         Raises
         ------
         whygraph.services.llm.LlmError
-            If ``config.provider`` is not registered with the factory.
+            If the rationale provider is not registered with the factory.
             Propagated directly so the user sees the available providers.
         """
         factory = factory if factory is not None else LlmClientFactory()
-        client = factory.make(config.provider, model=config.model)
+        provider, model = config.model_for("rationale")
+        client = factory.make(provider, model=model)
         return cls(
             client,
-            timeout_sec=config.timeout_sec,
-            caps=_PrRenderCaps.from_config(config),
+            timeout_sec=config.timeout_for("rationale"),
+            caps=_PrRenderCaps.from_config(config.rationale),
         )
 
     def generate(

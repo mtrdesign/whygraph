@@ -92,7 +92,7 @@ _ICON_CODEGRAPH = "🕸"
     default=True,
     help=(
         "Crawl the source-control remote (GitHub PRs / issues) per "
-        "`[scan].provider`. `--no-remote` skips it for a fast, offline, "
+        "`[scan].forge`. `--no-remote` skips it for a fast, offline, "
         "token-free scan — git history + CodeGraph only. Used by the "
         "auto-rescan git hooks installed by `whygraph init`. Default: on."
     ),
@@ -137,7 +137,7 @@ def scan_cmd(
     )
     if remote:
         _apply_github_token(config)
-        github_client = _select_github_client(config.scan_provider, repository)
+        github_client = _select_github_client(config.scan_forge, repository)
     else:
         github_client = None
 
@@ -149,7 +149,7 @@ def scan_cmd(
         analyze_skip: str | None = "--skip-analyze"
     else:
         try:
-            descriptor = LlmDescriptor.from_config(config.analyze)
+            descriptor = LlmDescriptor.from_config(config)
             analyze_skip = None
         except LlmError as exc:
             descriptor = None
@@ -290,7 +290,7 @@ def scan_cmd(
                 progress,
                 repository=repository,
                 descriptor=descriptor,
-                max_workers=config.scan_max_workers,
+                max_workers=config.analyze.max_workers,
                 large_commit_file_count=config.analyze.large_commit_file_count,
             )
             ran.append(analyzer)
@@ -485,17 +485,17 @@ def _apply_github_token(config: "Config") -> None:
     all authenticate uniformly — ``gh`` reads ``GH_TOKEN`` natively and
     child processes inherit it.
 
-    A no-op when ``[scan].provider`` is ``"off"`` (no remote crawl). Each
+    A no-op when ``[scan].forge`` is ``"off"`` (no remote crawl). Each
     scan runs as a fresh process per project, so mutating the environment
     here cannot leak one project's token into another.
 
     Parameters
     ----------
     config : Config
-        The loaded configuration; ``scan_token`` and ``scan_provider`` are
+        The loaded configuration; ``scan_token`` and ``scan_forge`` are
         consulted.
     """
-    if config.scan_provider == "off":
+    if config.scan_forge == "off":
         return
     token = (
         config.scan_token
@@ -509,7 +509,7 @@ def _apply_github_token(config: "Config") -> None:
 def _select_github_client(
     provider: str, repository: "Repository"
 ) -> "GitHubClient | None":
-    """Resolve the GitHub client for the configured ``[scan].provider``.
+    """Resolve the GitHub client for the configured ``[scan].forge``.
 
     Returns ``None`` when ``provider`` is ``"off"`` (remote crawling
     disabled). For ``"github"`` and ``"auto"`` it delegates to
@@ -521,7 +521,7 @@ def _select_github_client(
     Parameters
     ----------
     provider : str
-        The validated ``[scan].provider`` value (``"off"`` / ``"github"``
+        The validated ``[scan].forge`` value (``"off"`` / ``"github"``
         / ``"auto"``).
     repository : Repository
         The repository whose remote URL is inspected.
@@ -608,7 +608,7 @@ def _render_scan_panel(
         rows.append(
             ("LLM descriptions", Text(f"skipped — {analyze_skip}", style="yellow"))
         )
-    rows.append(("Worker threads", str(config.scan_max_workers)))
+    rows.append(("Worker threads", str(config.analyze.max_workers)))
     rows.append(
         (
             "PR commit recovery",
@@ -641,16 +641,16 @@ def _github_skip_reason(config: "Config", remote_enabled: bool = True) -> str:
 
     Called only when no GitHub client was resolved. ``--no-remote`` takes
     precedence (the crawl was disabled for this run); otherwise the reason
-    comes from ``[scan].provider``: ``"off"`` means the user disabled
+    comes from ``[scan].forge``: ``"off"`` means the user disabled
     remote crawling, and ``"github"`` / ``"auto"`` mean the configured
     remote did not resolve to a GitHub URL.
     """
     if not remote_enabled:
         return "skipped — --no-remote"
-    provider = config.scan_provider
-    if provider == "off":
-        return "skipped — source control disabled ([scan].provider = off)"
-    if provider == "auto":
+    forge = config.scan_forge
+    if forge == "off":
+        return "skipped — source control disabled ([scan].forge = off)"
+    if forge == "auto":
         return f"skipped — {config.scan_remote!r} remote is not a recognized remote"
     return f"skipped — {config.scan_remote!r} remote is not a GitHub remote"
 
@@ -692,13 +692,8 @@ def _best_effort(fn: "Callable[[], _T]") -> "_T | None":
 def _analyze_model_label(config: "Config") -> str:
     """Return the ``provider · model`` the analyze crawler will use.
 
-    When ``[analyze].model`` is unset the descriptor defers to the
-    provider's own ``[llm.<provider>]`` model; this resolves that same
-    fallback so the panel reports the model that will actually run.
+    Reads the same :meth:`Config.model_for` pair the descriptor is built
+    from, so the panel reports the model that will actually run.
     """
-    provider = config.analyze.provider
-    model = config.analyze.model
-    if model is None:
-        section = getattr(config.llm, provider.replace("-", "_"), None)
-        model = getattr(section, "model", None)
+    provider, model = config.model_for("analyze")
     return f"{provider} · {model}" if model else provider

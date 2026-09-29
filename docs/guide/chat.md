@@ -65,9 +65,13 @@ existing conversation's history or re-answers it with a different model.
 
 ```toml
 [chat]
-provider = "anthropic"
-# model = "claude-opus-4-7"   # default: the provider's own [llm.*] model
+# provider = "anthropic"      # default: the provider of [llm].model, else anthropic
+# model = "claude-opus-4-7"   # default: [llm].model, then the provider's default
 ```
+
+Leave `[chat]` out and new sessions follow `[llm].model`, the default for every role. If that names a
+provider that cannot chat (`ollama`, `claude-cli`), chat falls back to `anthropic`; naming one of
+those in `[chat]` itself is refused.
 
 If OpenRouter is your provider, pin a tool-capable model rather than leaving `openrouter/auto` -
 automatic routing can land on a model that does not support tool calling.

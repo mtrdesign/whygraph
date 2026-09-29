@@ -28,7 +28,7 @@ from whygraph.analyze.rationale_generator import (
     _format_pr,
     _format_symbol_context,
 )
-from whygraph.core.config import RationaleConfig
+from whygraph.core.config import Config, RationaleConfig
 from whygraph.db.models import Commit, Issue, PullRequest
 from whygraph.services.codegraph import Relation, Symbol, SymbolContext
 from whygraph.services.llm import (
@@ -675,7 +675,7 @@ def test_generate_omits_graph_section_when_no_symbol_context() -> None:
 def test_from_config_resolves_provider_via_factory() -> None:
     factory = LlmClientFactory()
     factory.register("stub", _StubClient, config=object())  # config unused
-    config = RationaleConfig(provider="stub", timeout_sec=7)
+    config = Config(rationale=RationaleConfig(provider="stub", timeout_sec=7))
 
     generator = RationaleGenerator.from_config(config, factory=factory)
     rationale = generator.generate([CommitEvidence(_commit())])
@@ -686,7 +686,7 @@ def test_from_config_resolves_provider_via_factory() -> None:
 
 def test_from_config_propagates_unknown_provider_error() -> None:
     factory = LlmClientFactory()  # has no "stub" registered
-    config = RationaleConfig(provider="stub")
+    config = Config(rationale=RationaleConfig(provider="stub"))
 
     with pytest.raises(LlmError, match="unknown LLM provider"):
         RationaleGenerator.from_config(config, factory=factory)
@@ -703,7 +703,9 @@ def test_from_config_forwards_configured_model_to_factory() -> None:
             captured["model"] = model
             return _StubClient()
 
-    config = RationaleConfig(provider="anthropic", model="claude-haiku-4-5")
+    config = Config(
+        rationale=RationaleConfig(provider="anthropic", model="claude-haiku-4-5")
+    )
     RationaleGenerator.from_config(config, factory=_RecordingFactory())
 
     assert captured == {"provider": "anthropic", "model": "claude-haiku-4-5"}

@@ -103,8 +103,9 @@ def whygraph_rationale_brief(
             "scanned commit. Run `whygraph scan` to populate the database."
         )
 
-    config = get_config().rationale
-    cached = lookup_cached(target, evidence, config.provider, config.model)
+    config = get_config()
+    provider, pinned_model = config.cache_identity("rationale")
+    cached = lookup_cached(target, evidence, provider, pinned_model)
     if cached is not None:
         rationale, cached_at = cached
         return _format_response(target, rationale, evidence, cached_at)
@@ -123,7 +124,7 @@ def whygraph_rationale_brief(
     except (AnalyzeError, LlmError) as exc:
         raise WhyGraphError.wrap("rationale generation failed", exc)
 
-    cached_at = store_cached(target, evidence, rationale, config.provider, config.model)
+    cached_at = store_cached(target, evidence, rationale, provider, pinned_model)
     return _format_response(target, rationale, evidence, cached_at)
 
 

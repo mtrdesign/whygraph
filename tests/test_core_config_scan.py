@@ -1,8 +1,9 @@
-"""Tests for the ``[scan].provider`` and ``[scan].remote`` keys.
+"""Tests for the ``[scan].forge`` and ``[scan].remote`` keys.
 
 Exercises the defaults, TOML parsing / normalization via
-:meth:`Config.from_toml`, and the ``scan_provider`` validator on
-:meth:`Config.__post_init__`.
+:meth:`Config.from_toml`, and the ``scan_forge`` validator on
+:meth:`Config.__post_init__`. The 1.x ``[scan].provider`` alias is covered
+here and in ``test_core_config_v2.py``.
 """
 
 from __future__ import annotations
@@ -22,40 +23,40 @@ def _write(path: Path, body: str) -> Path:
 def test_provider_and_remote_default_when_section_omitted(tmp_path: Path) -> None:
     cfg = Config.from_toml(_write(tmp_path / "whygraph.toml", ""))
 
-    assert cfg.scan_provider == "off"
+    assert cfg.scan_forge == "off"
     assert cfg.scan_remote == "origin"
 
 
 @pytest.mark.parametrize("value", ["off", "github", "auto"])
 def test_provider_values_parse(tmp_path: Path, value: str) -> None:
     cfg = Config.from_toml(
-        _write(tmp_path / "whygraph.toml", f'[scan]\nprovider = "{value}"\n')
+        _write(tmp_path / "whygraph.toml", f'[scan]\nforge = "{value}"\n')
     )
 
-    assert cfg.scan_provider == value
+    assert cfg.scan_forge == value
 
 
 def test_provider_mixed_case_normalizes(tmp_path: Path) -> None:
     cfg = Config.from_toml(
-        _write(tmp_path / "whygraph.toml", '[scan]\nprovider = "GitHub"\n')
+        _write(tmp_path / "whygraph.toml", '[scan]\nforge = "GitHub"\n')
     )
 
-    assert cfg.scan_provider == "github"
+    assert cfg.scan_forge == "github"
 
 
 @pytest.mark.parametrize("value", ["", "   "])
 def test_empty_provider_normalizes_to_off(tmp_path: Path, value: str) -> None:
     cfg = Config.from_toml(
-        _write(tmp_path / "whygraph.toml", f'[scan]\nprovider = "{value}"\n')
+        _write(tmp_path / "whygraph.toml", f'[scan]\nforge = "{value}"\n')
     )
 
-    assert cfg.scan_provider == "off"
+    assert cfg.scan_forge == "off"
 
 
 def test_unknown_provider_raises(tmp_path: Path) -> None:
-    config = _write(tmp_path / "whygraph.toml", '[scan]\nprovider = "gitlab"\n')
+    config = _write(tmp_path / "whygraph.toml", '[scan]\nforge = "gitlab"\n')
 
-    with pytest.raises(ConfigError, match="scan.provider"):
+    with pytest.raises(ConfigError, match="scan.forge"):
         Config.from_toml(config)
 
 
@@ -77,6 +78,7 @@ def test_empty_remote_falls_back_to_origin(tmp_path: Path, value: str) -> None:
 
 
 def test_provider_and_remote_coexist_with_max_workers(tmp_path: Path) -> None:
+    """The 1.x `[scan]` spellings still land on their v2 homes."""
     cfg = Config.from_toml(
         _write(
             tmp_path / "whygraph.toml",
@@ -84,8 +86,8 @@ def test_provider_and_remote_coexist_with_max_workers(tmp_path: Path) -> None:
         )
     )
 
-    assert cfg.scan_max_workers == 4
-    assert cfg.scan_provider == "github"
+    assert cfg.analyze.max_workers == 4
+    assert cfg.scan_forge == "github"
     assert cfg.scan_remote == "upstream"
 
 

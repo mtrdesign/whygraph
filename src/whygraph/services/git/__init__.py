@@ -16,7 +16,13 @@ Public API
 from .blame import BlameHunk
 from .commit import Commit, CommitSummary, DiffStats
 from .commits import Commits
-from .exceptions import GitError
+from .credentials import (
+    git_env,
+    parse_github_url,
+    pass_through_env,
+    strip_userinfo,
+)
+from .exceptions import GitError, InvalidRepoUrlError
 from .file_change import FileChange
 from .repository import Repository
 
@@ -28,5 +34,10 @@ __all__ = [
     "DiffStats",
     "FileChange",
     "GitError",
+    "InvalidRepoUrlError",
     "Repository",
+    "git_env",
+    "parse_github_url",
+    "pass_through_env",
+    "strip_userinfo",
 ]

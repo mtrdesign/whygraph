@@ -16,6 +16,7 @@ from whygraph.core import ShellCommand
 
 from .blame import BlameHunk
 from .commit import Commit
+from .credentials import GITHUB_GIT_CONFIG
 from .file_change import FileChange
 
 GitRevParseCmd = ShellCommand(
@@ -367,6 +368,72 @@ class GitFetchRefsCmd(ShellCommand[None]):
 
     def parse(self, result: CompletedProcess[str]) -> None:
         return None
+
+
+class GitCloneCmd(ShellCommand[None]):
+    """``git clone -- <url> <dest>`` with https-only transport and a host-scoped helper.
+
+    The argv carries :data:`~.credentials.GITHUB_GIT_CONFIG`: every other
+    protocol is refused (``file://``, ``ext::``, ``ssh``), inherited
+    credential helpers are reset, and the one inline helper answers only
+    for ``github.com`` over https. The token is read from the child
+    environment, never argv. The command does not validate ``url`` -
+    :meth:`Repository.clone` does, before building it.
+
+    Parameters
+    ----------
+    url : str
+        The already-validated clone URL.
+    dest : Path
+        Directory to clone into (created by git).
+    """
+
+    def __init__(self, url: str, dest: Path) -> None:
+        self.url = url
+        self.dest = dest
+
+    def argv(self) -> list[str]:
+        return ["git", *GITHUB_GIT_CONFIG, "clone", "--", self.url, str(self.dest)]
+
+    def parse(self, result: CompletedProcess[str]) -> None:
+        return None
+
+
+class GitFetchDefaultCmd(ShellCommand[None]):
+    """``git fetch --no-tags <remote>`` with https-only transport and the host-scoped helper.
+
+    Fetches the remote's configured refspec, so every remote-tracking
+    branch (the default branch included) moves. Same credential and
+    protocol arguments as :class:`GitCloneCmd`.
+
+    Parameters
+    ----------
+    remote : str, optional
+        Remote to fetch. Default ``"origin"``.
+    """
+
+    def __init__(self, remote: str = "origin") -> None:
+        self.remote = remote
+
+    def argv(self) -> list[str]:
+        return ["git", *GITHUB_GIT_CONFIG, "fetch", "--no-tags", self.remote]
+
+    def parse(self, result: CompletedProcess[str]) -> None:
+        return None
+
+
+GitHeadShaCmd = ShellCommand(
+    argv=["git", "rev-parse", "HEAD"],
+    parse=lambda r: r.stdout.strip(),
+)
+"""``git rev-parse HEAD`` - the commit the working tree is on."""
+
+
+GitFastForwardCmd = ShellCommand(
+    argv=["git", "-c", "core.hooksPath=/dev/null", "merge", "--ff-only", "@{upstream}"],
+    parse=lambda r: None,
+)
+"""``git merge --ff-only @{upstream}`` with hooks disabled - purely local, no network."""
 
 
 class GitCheckMailmapCmd(ShellCommand[tuple[str, ...]]):

@@ -4,3 +4,11 @@ class GitError(RuntimeError):
     Wraps the underlying :class:`whygraph.core.ShellError` (available via
     ``__cause__``) with semantic context about which git operation failed.
     """
+
+
+class InvalidRepoUrlError(GitError):
+    """Raised when a clone URL is not a plain ``https://github.com/<owner>/<repo>``.
+
+    A distinct subclass so a caller (the portal's add-project endpoint) can
+    report a bad URL separately from a failed ``git`` run.
+    """

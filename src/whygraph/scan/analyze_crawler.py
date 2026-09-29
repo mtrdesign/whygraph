@@ -15,6 +15,7 @@ and a partially-completed run resumes cleanly.
 
 from __future__ import annotations
 
+import contextvars
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from rich.progress import Progress
@@ -59,10 +60,13 @@ class AnalyzeCrawler(Crawler):
     Notes
     -----
     Each worker opens its own :func:`whygraph.db.get_session` —
-    ``sqlmodel.Session`` is not thread-safe. Per-commit failures are
-    collected rather than aborting the run; once the pool drains, a
-    single aggregate :class:`~whygraph.analyze.AnalyzeError` is raised
-    (and captured into :attr:`Crawler.error`) if any commit failed.
+    ``sqlmodel.Session`` is not thread-safe. Each submitted commit runs in
+    its own copy of the crawler thread's :mod:`contextvars` context, so a
+    bound :func:`whygraph.core.context.use_project` project reaches the
+    workers. Per-commit failures are collected rather than aborting the
+    run; once the pool drains, a single aggregate
+    :class:`~whygraph.analyze.AnalyzeError` is raised (and captured into
+    :attr:`Crawler.error`) if any commit failed.
     Commits that succeeded are committed as they finish, so the failed
     ones are simply retried on the next scan.
     """
@@ -101,7 +105,15 @@ class AnalyzeCrawler(Crawler):
         failures: list[tuple[str, BaseException]] = []
         described = bulk = 0
         with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
-            futures = {pool.submit(self._describe_commit, c): c.sha for c in todo}
+            # A fresh context copy per submit: pool workers do not inherit
+            # ContextVars, and one shared Context cannot be entered by two
+            # threads at once (Context.run raises RuntimeError).
+            futures = {
+                pool.submit(
+                    contextvars.copy_context().run, self._describe_commit, c
+                ): c.sha
+                for c in todo
+            }
             for future in as_completed(futures):
                 self.advance(1)
                 exc = future.exception()

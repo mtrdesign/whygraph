@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import select
@@ -38,8 +40,12 @@ from test_portal_app import (  # noqa: F401 -- fixtures
 from whygraph.core.config import Config, ConfigError
 from whygraph.core.safe_paths import UnsafePathError, check_inside
 from whygraph.portal import db as portal_db
+from whygraph.portal import deps as portal_deps
+from whygraph.portal.deps import PortalState
 from whygraph.portal.migrate import ProjectMigrations
 from whygraph.portal.models import Project, Secret
+from whygraph.portal.runner import ScanRunner
+from whygraph.portal.security import Principal
 from whygraph.project_setup import PORTAL_ENV, PORTAL_JSON
 from whygraph.services.git import GitError, Repository
 from whygraph.services.git.commands import (
@@ -47,6 +53,7 @@ from whygraph.services.git.commands import (
     GitFetchRefsCmd,
     GitRemoteUrlCmd,
 )
+from whygraph.services.github import RepoAccess
 
 MCP_HEADERS = {"Accept": "application/json, text/event-stream"}
 MCP_LIST = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
@@ -360,3 +367,115 @@ def test_delete_never_unlinks_through_a_symlinked_whygraph_dir(
     assert any("symbolic link" in w for w in response.json()["warnings"])
     assert (alpha / PORTAL_JSON).is_file() and (alpha / PORTAL_ENV).is_file()
     assert helper.is_file()
+
+
+# ---------------------------------------------------------------------------
+# 4. Concurrent GitHub adds (MINOR)
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_github_adds_keep_the_winners_clone(
+    ready: TestClient, env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    both_cloning = threading.Barrier(2, timeout=1.0)
+    clones: list[Path] = []
+
+    def _access(owner, name, token, **kw):
+        return RepoAccess(
+            full_name=f"{owner}/{name}", private=False, default_branch="main"
+        )
+
+    def _clone(url, dest, *, env=None, timeout=None):
+        clones.append(dest)
+        try:
+            both_cloning.wait()  # before the fix both requests get here
+        except threading.BrokenBarrierError:
+            pass
+        if dest.exists():
+            raise GitError(f"destination path '{dest}' already exists")
+        make_repo(dest.parent, dest.name)
+        (dest / "WINNER").write_text("mine\n")
+
+    monkeypatch.setattr("whygraph.portal.routes.check_repo_access", _access)
+    monkeypatch.setattr("whygraph.portal.routes.Repository.clone", _clone)
+
+    results: list = []
+
+    def add() -> None:
+        results.append(
+            ready.post(
+                "/api/projects",
+                json={"source": "github", "url": "https://github.com/acme/widget"},
+            )
+        )
+
+    threads = [threading.Thread(target=add) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    codes = sorted(r.status_code for r in results)
+    assert codes == [201, 409], [r.text for r in results]
+    loser = next(r for r in results if r.status_code == 409)
+    assert loser.json()["code"] == "duplicate"
+    dest = env.data / "repos" / "widget"
+    assert (dest / "WINNER").read_text() == "mine\n"
+    # Only the final checkout is left under repos/.
+    assert sorted(p.name for p in (env.data / "repos").iterdir()) == ["widget"]
+
+
+def test_failed_clone_removes_only_its_own_directory(
+    ready: TestClient, env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _access(owner, name, token, **kw):
+        return RepoAccess(
+            full_name=f"{owner}/{name}", private=False, default_branch="main"
+        )
+
+    def _clone(url, dest, *, env=None, timeout=None):
+        dest.mkdir(parents=True)
+        (dest / "partial").write_text("x")
+        raise GitError("network down")
+
+    monkeypatch.setattr("whygraph.portal.routes.check_repo_access", _access)
+    monkeypatch.setattr("whygraph.portal.routes.Repository.clone", _clone)
+    response = ready.post(
+        "/api/projects", json={"source": "github", "url": "https://github.com/acme/w"}
+    )
+    assert response.status_code == 502 and response.json()["code"] == "clone_failed"
+    assert list((env.data / "repos").iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# 5. Principal cache race (MINOR)
+# ---------------------------------------------------------------------------
+
+
+def test_slow_principal_load_never_overwrites_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started, release = threading.Event(), threading.Event()
+
+    def slow_load():
+        started.set()
+        release.wait(5)
+        return None  # what the DB said before setup ran
+
+    monkeypatch.setattr(portal_deps, "_load_local_principal", slow_load)
+    state = PortalState(port=8765, data_dir=tmp_path, runner=ScanRunner())
+    tess = Principal(user_id=1, uid="u1", display_name="Tess", role="admin")
+    seen: list = []
+
+    async def main() -> None:
+        async def resolve() -> None:
+            seen.append(await state.resolve_principal({}))
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(resolve)
+            await anyio.to_thread.run_sync(started.wait)
+            state.set_principal(tess)  # POST /setup while the load is in flight
+            release.set()
+
+    anyio.run(main)
+    assert seen == [tess]
+    assert anyio.run(state.resolve_principal, {}) is tess

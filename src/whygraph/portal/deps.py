@@ -118,6 +118,11 @@ class PortalState:
         Set when the lifespan exits, so open streams end.
     session_manager : object or None
         This app's MCP ``StreamableHTTPSessionManager``.
+    setup_lock : threading.Lock
+        Serializes first-run setup.
+    github_add_lock : threading.Lock
+        Serializes GitHub adds (duplicate check, clone and insert), so a
+        double-submit never clones twice into one directory.
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -134,7 +139,10 @@ class PortalState:
         self.shutdown_event: anyio.Event | None = None
         self.session_manager: Any = None
         self.setup_lock = threading.Lock()
+        self.github_add_lock = threading.Lock()
         self._principal: Any = _UNSET
+        self._principal_lock = threading.Lock()
+        self._principal_generation = 0
 
     async def resolve_principal(self, scope: Scope) -> Principal | None:
         """Return who the request acts as: in local mode, the single user.
@@ -150,14 +158,26 @@ class PortalState:
         Principal or None
             ``None`` before first-run setup. Cached after the first read;
             :meth:`set_principal` updates it when setup creates the user.
+            A load that finishes after a :meth:`set_principal` is
+            discarded (a generation counter), so a slow first read can
+            never reset the principal setup just created.
         """
-        if self._principal is _UNSET:
-            self._principal = await anyio.to_thread.run_sync(_load_local_principal)
-        return self._principal
+        with self._principal_lock:
+            cached, generation = self._principal, self._principal_generation
+        if cached is not _UNSET:
+            return cached
+        loaded = await anyio.to_thread.run_sync(_load_local_principal)
+        with self._principal_lock:
+            if self._principal_generation == generation:
+                self._principal = loaded
+                return loaded
+            return self._principal
 
     def set_principal(self, principal: Principal | None) -> None:
-        """Replace the cached local-mode principal."""
-        self._principal = principal
+        """Replace the cached local-mode principal (wins over any load in flight)."""
+        with self._principal_lock:
+            self._principal = principal
+            self._principal_generation += 1
 
 
 def _load_local_principal() -> Principal | None:

@@ -26,6 +26,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import secrets as secrets_mod
 import shutil
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -743,6 +744,21 @@ def _add_github(
 
     canonical = f"https://github.com/{owner}/{repo}"
     name = (body.name or "").strip() or repo
+    # One GitHub add at a time: the duplicate check, the slug, the clone and
+    # the insert happen under the lock, so a double-submit of one URL gets
+    # "duplicate" instead of racing the other request's clone.
+    with state.github_add_lock:
+        return _clone_and_insert(state, canonical, name, token, principal)
+
+
+def _clone_and_insert(
+    state: PortalState,
+    canonical: str,
+    name: str,
+    token: str | None,
+    principal: Principal,
+) -> tuple[int, dict, ImportPreview]:
+    """Clone into a private temp dir, move it into place, insert the row."""
     with get_session() as session:
         for remote in session.exec(
             select(Project.remote_url).where(Project.source == "github")
@@ -756,14 +772,22 @@ def _add_github(
     repos_dir = state.data_dir / "repos"
     repos_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     dest = repos_dir / slug
-    if dest.exists():
+    if dest.exists() or dest.is_symlink():
         raise ApiError(409, f"{dest} already exists", code="duplicate")
+    # A dot-name is never a slug, so the temp dir cannot collide with a
+    # project; only this request knows it, so only this request removes it.
+    tmp = repos_dir / f".clone-{slug}-{secrets_mod.token_hex(6)}"
     try:
-        Repository.clone(canonical, dest, env=git_env(token))
+        Repository.clone(canonical, tmp, env=git_env(token))
     except GitError as exc:
-        _remove_clone(dest, state.data_dir)
+        _remove_clone(tmp, state.data_dir)
         message = str(exc).replace(token, "***") if token else str(exc)
         raise ApiError(502, message, code="clone_failed") from exc
+    try:
+        os.rename(tmp, dest)  # fails on a non-empty dest; never merges into it
+    except OSError as exc:
+        _remove_clone(tmp, state.data_dir)
+        raise ApiError(409, f"{dest} already exists", code="duplicate") from exc
 
     try:
         with get_session() as session:
@@ -782,7 +806,7 @@ def _add_github(
                     session, kind=GITHUB_TOKEN, value=token, project_id=project_id
                 )
     except IntegrityError as exc:
-        _remove_clone(dest, state.data_dir)
+        _remove_clone(dest, state.data_dir)  # the checkout this request moved in
         raise ApiError(
             409, "this repository is already registered", code="duplicate"
         ) from exc

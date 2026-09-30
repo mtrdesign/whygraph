@@ -8,7 +8,7 @@ version = "1.1.2"
 description = "Rationale layer over CodeGraph — explains why code exists, not just what it does."
 requires-python = ">=3.11"
 dependencies = [
-    "mcp[cli]>=1.2",
+    "mcp[cli]>=1.2,<2",
     "fastapi>=0.110",
     "uvicorn>=0.27",
     "click>=8.1",

@@ -145,7 +145,8 @@ portal_env_hint() {
         if [ -n "$val" ]; then names="${names:+$names, }$v"; fi
     done
     [ -n "$names" ] || return 0
-    echo "note: $names are set in your shell but do not reach the portal. Enter keys and tokens under Settings in the portal." >&2
+    case "$names" in *,*) verb="are" ;; *) verb="is" ;; esac
+    echo "note: $names $verb set in your shell but do not reach the portal. Enter keys and tokens under Settings in the portal." >&2
     : > "$CONF/env-hint-shown"
 }
 

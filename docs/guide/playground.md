@@ -105,18 +105,10 @@ of it has been analyzed - a quick map of where you've already asked "why?" and w
 
 ## Develop the UI
 
-The panel's source lives at `src/playground/` (Vite + React + TypeScript). For a hot-reloading dev
-loop - a dev portal on `:8765` and the Vite dev server on `:5173`, proxying `/api` and `/mcp` across:
-
-```bash
-make dev      # dev portal + Vite HMR together; Ctrl-C stops both; open :5173
-```
-
-`make dev` runs `whygraph portal` natively with its data directory outside the checkout
-(`$TMPDIR/whygraph-dev`) and the folder above the checkout shared, so you add this repo and its
-siblings from the UI. Other targets: `make playground` builds the production bundle into the wheel's
-static directory, and `make serve` builds it then serves it from the dev portal the way it ships. All
-need Node 22.12 or newer (`nvm use 22`).
+The panel's source lives at `src/playground/` (Vite + React + TypeScript). `make dev-local` runs a
+dev portal with the Vite dev server in front of it, so edits hot-reload at `http://localhost:5173`;
+`make playground` builds the production bundle into the wheel's static directory. See
+[Developing WhyGraph](developing.md) for every development mode.
 
 ## Not in scope
 

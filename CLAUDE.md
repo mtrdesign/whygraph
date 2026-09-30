@@ -25,13 +25,15 @@ uv sync                       # bootstrap .venv and install deps
 uv run pytest                 # all tests
 uv run pytest tests/test_smoke.py::test_imports   # single test
 uv run whygraph version       # CLI sanity check
-make dev                      # dev portal (:8765) + Vite HMR (:5173); open :5173; Ctrl-C stops both
-uv run whygraph portal        # the portal natively (dev-only); `make dev` is the wrapped form
+make dev-local                # develop natively: portal (:8777, auto-restart) + Vite HMR (:5173); open :5173
+make dev-docker               # the same inside the image via the real shim (checkout mounted over the package)
+make prod                     # the image built like the release, through the shim, no mount
+make check                    # lint + pytest + frontend + e2e + scripts/smoke.sh on a fresh image
 make docs                     # serve the documentation site locally with live reload
 make docs-build               # build it strictly (what CI runs)
 ```
 
-`whygraph-mcp` no longer launches a server: it is a stub that prints the removal message and exits 2 (the MCP server runs inside the portal at `/mcp/<slug>`; `make inspect SLUG=<slug>` points the MCP Inspector at it). A root `Makefile` wraps these plus dev-only tooling — `make` lists targets; `make db` / `make db-down` run a DBGate viewer for both databases (via `docker-compose.example.yml`), `make inspect` launches the MCP Inspector.
+`whygraph-mcp` no longer launches a server: it is a stub that prints the removal message and exits 2 (the MCP server runs inside the portal at `/mcp/<slug>`; `make inspect SLUG=<slug>` points the MCP Inspector at it). A root `Makefile` wraps these plus dev-only tooling — `make` lists targets; `make db` / `make db-down` run a DBGate viewer for a scratch repo's two databases (via `docker-compose.example.yml`), `make inspect` launches the MCP Inspector. Every dev mode is isolated from the user's own portal (own container name, data dir and HOME under `$TMPDIR/whygraph-dev`) and shares only the offline scratch repos in `$TMPDIR/whygraph-dev/repos`, never this checkout; the Docker modes use two dev-only shim knobs, `WHYGRAPH_DEV_SRC` and `WHYGRAPH_PORTAL_NAME` (see `docs/guide/developing.md`).
 
 ## Documentation site
 
@@ -162,7 +164,7 @@ When fixing a bug or adding a feature, change only the lines that the task requi
 
 Define a verifiable success criterion before changing code. Prefer small, independently-verifiable steps over a single large change.
 
-- "Wire up `whygraph_rationale_brief`" → step 1: register the tool with a stub return and confirm it appears in the MCP Inspector's tool list (`make inspect SLUG=<slug>` against `make dev`); step 2: thread a `GraphBackend` lookup through it with a fixture; step 3: add real rationale assembly. Each step has its own test.
+- "Wire up `whygraph_rationale_brief`" → step 1: register the tool with a stub return and confirm it appears in the MCP Inspector's tool list (`make inspect SLUG=<slug>` against `make dev-local`); step 2: thread a `GraphBackend` lookup through it with a fixture; step 3: add real rationale assembly. Each step has its own test.
 - For bug fixes, write the failing test first. If you can't reproduce the bug in a test, you don't yet understand it.
 
 ### Anti-patterns at a glance

@@ -122,7 +122,9 @@ fails with a clear error rather than letting the CLI create an empty, logged-out
 !!! note
     The Docker image does not ship the `claude` CLI, so `claude-cli` - and `config_dir` with it -
     applies to headless `whygraph scan` on native `uv` / `pipx` installs. It cannot run inside the
-    portal; use an API provider or Ollama there.
+    portal; use an API provider or Ollama there. A scan configured for it without the CLI skips the
+    LLM descriptions phase with one message ("the WhyGraph Docker image does not include the claude
+    CLI" inside the image, "claude CLI not found on PATH" natively) instead of failing every commit.
 
 ### `ollama`
 

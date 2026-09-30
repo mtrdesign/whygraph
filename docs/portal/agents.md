@@ -59,9 +59,13 @@ agent entries by what each agent supports:
 | Codex | Edit the port in `.codex/config.toml`. The portal rewrites it for you when the file is not tracked by git |
 
 A file tracked by git is **never rewritten automatically** on a port change - committed configs
-belong to the whole team. The portal reports what is left to do for each project - the exact line to
-change, per agent - in the `port_change` field of `GET /api/portal/state` and of
-`GET /api/projects/<slug>`. (The web UI does not show it yet.)
+belong to the whole team. After a port change the **Projects** page shows a notice listing what the
+portal changed, the exact line to change by hand in each tracked file (with a copy button), the
+environment hints for Claude Code and VS Code, and any project folders it could not reach (they still
+name the old port until the portal starts with the folder available). Each project's overview and
+settings show that project's part. Dismissing a notice hides it until the port changes again. The
+same report is in the `port_change` field of `GET /api/portal/state` and of
+`GET /api/projects/<slug>`.
 
 ## Agent-specific notes
 

@@ -10,6 +10,7 @@ import { useScanActions } from "../lib/scanActions";
 import { formatSeconds, runSeconds, triggerLabel } from "../lib/scanFormat";
 import { ConnectAgent } from "../components/portal/ConnectAgent";
 import { NotInitialized, ProblemAlert, ProjectUnavailable } from "../components/portal/EdgeStates";
+import { ProjectPortChangeNotice } from "../components/portal/PortChangeNotice";
 import { ProjectStatusBadge } from "../components/portal/ProjectStatusBadge";
 import { RunStatusBadge } from "../components/portal/RunStatusBadge";
 import { EstimateBody } from "../components/portal/ScanEstimateCard";
@@ -116,6 +117,7 @@ export function ProjectHome() {
       </div>
 
       {p.root_status !== "ok" && <ProjectUnavailable project={p} />}
+      <ProjectPortChangeNotice slug={slug} change={p.port_change} />
       {p.root_status === "ok" && !p.initialized && <NotInitialized slug={slug} />}
       {problem?.kind === "unsafe_path" && <ProblemAlert problem={problem} />}
 

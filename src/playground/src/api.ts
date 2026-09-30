@@ -241,8 +241,47 @@ export interface PortalState {
   shared_folders?: string[];
   // `null` only when the package metadata is missing.
   version?: string | null;
+  // What the portal did when it started on a new port (computed once at start).
+  port_change?: PortChange | null;
   error?: string;
 }
+
+// ---- port change (portal/port_change.py) ----------------------------------------
+
+export interface PortChangeAgent {
+  agent: string;
+  file: string;
+  // env: nothing rewritten, `hint` says what to do; manual: tracked or unparseable,
+  // `line` is the entry to set (plus `diff` / `snippet`); skipped: see `reason`.
+  action: "rewritten" | "up_to_date" | "env" | "manual" | "skipped";
+  hint?: string;
+  line?: string;
+  diff?: string | null;
+  snippet?: string | null;
+  reason?: string | null;
+}
+
+export interface PortChangeProject {
+  slug: string;
+  root: string;
+  previous_port: number;
+  markers: "rewritten" | "skipped";
+  reason?: string;
+  agents: PortChangeAgent[];
+}
+
+export interface PortChange {
+  port: number;
+  previous_port: number | null;
+  projects: PortChangeProject[];
+  // Initialized projects whose folder was not available at start.
+  unmounted: { slug: string; root: string }[];
+}
+
+/** `GET /api/projects/{slug}`'s `port_change`: this project's item, or unmounted. */
+export type ProjectPortChange =
+  | PortChangeProject
+  | { slug: string; root: string; unmounted: true; port: number };
 
 export interface ProjectSummary {
   slug: string;
@@ -269,6 +308,7 @@ export interface ProjectDetails extends ProjectSummary {
   // The repo's 1.x / agent-file state, recomputed on every read; `null` while
   // the project folder is unusable.
   detected?: Detected | null;
+  port_change?: ProjectPortChange | null;
   stats: {
     commits: number;
     described: number;

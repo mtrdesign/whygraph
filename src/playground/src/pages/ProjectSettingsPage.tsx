@@ -8,6 +8,7 @@ import { ConfigForm } from "../components/portal/ConfigForm";
 import { CopyButton } from "../components/portal/CopyButton";
 import { NotInitialized, ProjectUnavailable } from "../components/portal/EdgeStates";
 import { InitializeStep } from "../components/portal/InitializeStep";
+import { ProjectPortChangeNotice } from "../components/portal/PortChangeNotice";
 import { RemoveProjectDialog } from "../components/portal/RemoveProjectDialog";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -172,6 +173,7 @@ export function ProjectSettingsPage() {
       <div className="flex min-w-0 flex-1 flex-col gap-5">
         <h1 className="text-[22px] font-semibold tracking-tight">Settings</h1>
         {p && p.root_status !== "ok" && <ProjectUnavailable project={p} />}
+        {p && <ProjectPortChangeNotice slug={slug} change={p.port_change} />}
 
         <General slug={slug} />
 

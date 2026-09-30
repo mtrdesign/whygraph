@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
@@ -26,6 +26,10 @@ interface Fake {
   init: { needsConfirmation: boolean };
   events: string[];
   estimate: Json;
+  /** `port_change` of `GET /api/portal/state`. */
+  portChange: Json | null;
+  /** `import` of `GET .../config` (the whygraph.toml import report). */
+  importReport: Json | null;
   log: { method: string; path: string; body: Json | null }[];
 }
 
@@ -132,8 +136,9 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
       mode: "local",
       setup_complete: fake.setupComplete,
       user: fake.setupComplete ? { uid: "u1", display_name: "Ada", role: "owner" } : null,
-      port: 8765,
+      port: (fake.portChange?.port as number | undefined) ?? 8765,
       shared_folders: ["/repos"],
+      port_change: fake.portChange,
     });
   }
   if (path === "/api/portal/setup" && method === "POST") {
@@ -190,7 +195,14 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     if (rest === "/config" && method === "GET") {
       return reply({
         ...fake.config[slug],
-        import: { found: false, error: null, secrets_moved: [], dropped: [], custom_db_paths: [], warnings: [] },
+        import: fake.importReport ?? {
+          found: false,
+          error: null,
+          secrets_moved: [],
+          dropped: [],
+          custom_db_paths: [],
+          warnings: [],
+        },
       });
     }
     if (rest === "/config" && method === "PUT") {
@@ -260,6 +272,8 @@ beforeEach(() => {
     init: { needsConfirmation: false },
     events: [],
     estimate: {},
+    portChange: null,
+    importReport: null,
     log: [],
   };
   window.localStorage.clear();
@@ -508,6 +522,31 @@ describe("Configure (screen 5)", () => {
     expect(within(hooks).getByRole("checkbox", { name: /post-merge/ })).not.toBeChecked();
   });
 
+  it("lists the keys the whygraph.toml import dropped, with their hints (acceptance #17)", async () => {
+    fake.importReport = {
+      found: true,
+      error: null,
+      secrets_moved: ["llm.anthropic.api_key"],
+      dropped: [
+        { key: "llm.anthropic.base_url", hint: "endpoints are set in the portal, not the repo" },
+        { key: "whygraph_db", hint: "the database path is always .whygraph/whygraph.db" },
+        { key: "logging.file", hint: "the portal owns logging" },
+      ],
+      custom_db_paths: [],
+      warnings: [],
+    };
+    mount("/p/alpha/init?step=configure");
+    const report = (await screen.findByText("Imported from whygraph.toml")).closest("[role=alert]")!;
+    const r = within(report as HTMLElement);
+    expect(r.getByText("llm.anthropic.api_key")).toBeInTheDocument();
+    const items = r.getAllByRole("listitem").map((li) => li.textContent);
+    expect(items).toEqual([
+      "llm.anthropic.base_url - endpoints are set in the portal, not the repo",
+      "whygraph_db - the database path is always .whygraph/whygraph.db",
+      "logging.file - the portal owns logging",
+    ]);
+  });
+
   it("hides the hooks for a GitHub clone", async () => {
     fake.projects = [summary("alpha", { source: "github", initialized: false, initialized_at: null })];
     mount("/p/alpha/init?step=configure");
@@ -714,5 +753,113 @@ describe("First scan", () => {
     const failed = await screen.findByTestId("scan-failed");
     expect(failed).toHaveTextContent("codegraph crashed");
     expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+  });
+});
+
+// ---- port change (acceptance #27) ------------------------------------------------------------
+
+const PORT_CHANGE = {
+  port: 9001,
+  previous_port: 8765,
+  projects: [
+    {
+      slug: "alpha",
+      root: "/repos/alpha",
+      previous_port: 8765,
+      markers: "rewritten",
+      agents: [
+        { agent: "claude", file: ".mcp.json", action: "env", hint: "export WHYGRAPH_PORT=9001 for your editor" },
+        { agent: "cursor", file: ".cursor/mcp.json", action: "rewritten" },
+        {
+          agent: "codex",
+          file: ".codex/config.toml",
+          action: "manual",
+          line: 'url = "http://127.0.0.1:9001/mcp/alpha"',
+          reason: "tracked by git",
+          diff: '-url = "http://127.0.0.1:8765/mcp/alpha"\n+url = "http://127.0.0.1:9001/mcp/alpha"',
+        },
+      ],
+    },
+  ],
+  unmounted: [{ slug: "away", root: "/repos/away" }],
+};
+
+describe("port change", () => {
+  beforeEach(() => {
+    fake.projects = [summary("alpha"), summary("away", { root_status: "missing" })];
+    fake.portChange = PORT_CHANGE;
+  });
+
+  it("the Projects banner lists rewritten files, the manual line, env hints and unmounted roots", async () => {
+    mount("/");
+    const banner = await screen.findByTestId("port-change-banner");
+    const b = within(banner);
+    expect(b.getByText("The portal now runs on port 9001 (was 8765)")).toBeInTheDocument();
+    expect(b.getByText(/updated 2 files; 1 needs a manual edit/)).toBeInTheDocument();
+    expect(b.getByText("Portal markers updated (were port 8765).")).toBeInTheDocument();
+    expect(b.getByText(/export WHYGRAPH_PORT=9001 for your editor/)).toBeInTheDocument();
+    expect(b.getByText(".cursor/mcp.json").closest("li")).toHaveTextContent("updated to the new port");
+    const manual = b.getByTestId("port-manual-codex");
+    expect(within(manual).getByText('url = "http://127.0.0.1:9001/mcp/alpha"')).toBeInTheDocument();
+    expect(manual).toHaveTextContent("tracked by git");
+    expect(within(manual).getByRole("button", { name: "Copy" })).toBeInTheDocument();
+    const unmounted = b.getByTestId("port-change-unmounted");
+    expect(within(unmounted).getByText("/repos/away")).toBeInTheDocument();
+  });
+
+  it("is dismissed per port value, and comes back for the next port", async () => {
+    const user = userEvent.setup();
+    mount("/");
+    const banner = await screen.findByTestId("port-change-banner");
+    await user.click(within(banner).getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByTestId("port-change-banner")).toBeNull();
+    cleanup();
+
+    mount("/");
+    await screen.findByTestId("project-alpha");
+    expect(screen.queryByTestId("port-change-banner")).toBeNull();
+    cleanup();
+
+    fake.portChange = { ...PORT_CHANGE, port: 9002, previous_port: 9001 };
+    mount("/");
+    expect(await screen.findByTestId("port-change-banner")).toHaveTextContent("port 9002 (was 9001)");
+  });
+
+  it("still shows (and dismisses) when storage throws", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("blocked");
+    });
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("blocked");
+    });
+    mount("/");
+    const banner = await screen.findByTestId("port-change-banner");
+    await user.click(within(banner).getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByTestId("port-change-banner")).toBeNull();
+    vi.restoreAllMocks();
+  });
+
+  it("the project overview shows that project's slice, with its own dismissal", async () => {
+    const user = userEvent.setup();
+    fake.projects = [summary("alpha", { port_change: PORT_CHANGE.projects[0] })];
+    mount("/p/alpha");
+    const notice = await screen.findByTestId("project-port-change");
+    expect(within(notice).getByText("The portal moved to port 9001")).toBeInTheDocument();
+    expect(within(notice).getByTestId("port-manual-codex")).toHaveTextContent(
+      'url = "http://127.0.0.1:9001/mcp/alpha"',
+    );
+    await user.click(within(notice).getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByTestId("project-port-change")).toBeNull();
+    expect(window.localStorage.getItem("whygraph-port-change-dismissed:project:alpha")).toBe("9001");
+  });
+
+  it("an unmounted project says its folder still names the old port", async () => {
+    fake.projects = [
+      summary("away", { root_status: "missing", port_change: { slug: "away", root: "/repos/away", unmounted: true, port: 9001 } }),
+    ];
+    mount("/p/away/settings");
+    const notice = await screen.findByTestId("project-port-change");
+    expect(notice).toHaveTextContent("now runs on port 9001, but this folder was not available");
   });
 });

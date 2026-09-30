@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { FolderGit2Icon, GitBranchIcon, MoreHorizontalIcon, PlusIcon } from "lucide-react";
 import { portalApi, portalKey, projectApi, type ProjectSummary } from "../api";
 import { timeAgo } from "../lib/projectStatus";
+import { PortChangeBanner } from "../components/portal/PortChangeNotice";
 import { ProjectStatusBadge as StatusBadge } from "../components/portal/ProjectStatusBadge";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -145,6 +146,8 @@ export function ProjectsPage() {
           </Button>
         )}
       </div>
+
+      <PortChangeBanner />
 
       {projects.isLoading && (
         <div className="grid gap-3 sm:grid-cols-2">

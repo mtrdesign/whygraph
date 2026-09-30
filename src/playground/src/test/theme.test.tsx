@@ -199,9 +199,9 @@ describe("design tokens", () => {
     expect(literals.every((v) => v.startsWith("oklch("))).toBe(true);
   });
 
-  it("keeps the legacy alias layer mapped to semantic tokens", () => {
+  it("has no legacy alias layer left", () => {
     for (const legacy of ["bg", "panel", "panel2", "fg", "accent2"]) {
-      expect(css).toMatch(new RegExp(`--color-${legacy}:\\s*var\\(--`));
+      expect(css).not.toMatch(new RegExp(`--color-${legacy}:`));
     }
   });
 });

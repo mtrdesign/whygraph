@@ -1,8 +1,12 @@
 import { useState } from "react";
-import { clsx } from "clsx";
 import { useExplorerSearch } from "../lib/nav";
 import { useProjectQuery } from "../lib/project";
-import { KindBadge, Spinner, EmptyState } from "../lib/ui";
+import { KindBadge } from "./KindBadge";
+import { Loading } from "./Loading";
+import { Empty, EmptyDescription } from "./ui/empty";
+import { ScrollArea } from "./ui/scroll-area";
+import { Skeleton } from "./ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { RelationshipsTab } from "./RelationshipsTab";
 import { RationaleTab } from "./RationaleTab";
 import { EvidenceTab } from "./EvidenceTab";
@@ -28,67 +32,75 @@ export function DetailPanel() {
 
   if (!selectedQn)
     return (
-      <div className="flex h-full items-center justify-center p-4 text-center text-sm text-muted-foreground">
-        Select a symbol to see its details.
-      </div>
+      <Empty className="h-full">
+        <EmptyDescription>Select a symbol to see its details.</EmptyDescription>
+      </Empty>
     );
 
   return (
     <div className="flex h-full flex-col">
       {/* Sticky identity header */}
       <div className="border-b border-border px-4 py-3">
-        {isLoading && <Spinner label="Loading…" />}
-        {isError && <div className="text-sm text-rose-600 dark:text-rose-400">{(error as Error).message}</div>}
+        {isLoading && (
+          <div className="space-y-2">
+            <Skeleton className="h-5 w-40" />
+            <Skeleton className="h-3.5 w-56" />
+          </div>
+        )}
+        {isError && <div className="text-sm text-destructive">{(error as Error).message}</div>}
         {data && (
           <>
             <div className="flex items-center gap-2">
               <KindBadge kind={data.symbol.kind} />
-              <span className="truncate text-base font-semibold text-fg">
+              <span className="truncate text-base font-semibold text-foreground">
                 {data.symbol.name}
               </span>
             </div>
             <div className="mt-1 truncate font-mono text-xs text-muted-foreground">
               {data.symbol.qualified_name}
             </div>
-            <div className="truncate text-xs text-muted-foreground">
+            <div className="truncate font-mono text-xs text-muted-foreground">
               {data.symbol.file_path}:{data.symbol.start_line}
             </div>
           </>
         )}
       </div>
 
-      {/* Tabs */}
-      <div className="flex border-b border-border">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className={clsx(
-              "flex-1 border-b-2 px-2 py-2 text-xs font-medium transition-colors",
-              tab === t.key
-                ? "border-accent2 text-fg"
-                : "border-transparent text-muted-foreground hover:text-fg",
-            )}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+      <Tabs
+        value={tab}
+        onValueChange={(value) => setTab(value as TabKey)}
+        className="min-h-0 flex-1 gap-0"
+      >
+        <TabsList variant="line" className="h-9 w-full shrink-0 justify-start border-b border-border px-2">
+          {TABS.map((t) => (
+            <TabsTrigger key={t.key} value={t.key} className="text-xs">
+              {t.label}
+            </TabsTrigger>
+          ))}
+        </TabsList>
 
-      {/* Tab body */}
-      <div className="flex-1 overflow-auto">
-        {!data ? (
-          <EmptyState>…</EmptyState>
-        ) : tab === "relationships" ? (
-          <RelationshipsTab relations={data.relations} />
-        ) : tab === "rationale" ? (
-          <RationaleTab qualifiedName={selectedQn} />
-        ) : tab === "evidence" ? (
-          <EvidenceTab qualifiedName={selectedQn} />
-        ) : (
-          <HistoryTab path={data.symbol.file_path} />
-        )}
-      </div>
+        <ScrollArea className="min-h-0 flex-1">
+          {TABS.map((t) => (
+            <TabsContent key={t.key} value={t.key}>
+              {!data ? (
+                isError ? null : (
+                  <div className="p-4">
+                    <Loading />
+                  </div>
+                )
+              ) : t.key === "relationships" ? (
+                <RelationshipsTab relations={data.relations} />
+              ) : t.key === "rationale" ? (
+                <RationaleTab qualifiedName={selectedQn} />
+              ) : t.key === "evidence" ? (
+                <EvidenceTab qualifiedName={selectedQn} />
+              ) : (
+                <HistoryTab path={data.symbol.file_path} />
+              )}
+            </TabsContent>
+          ))}
+        </ScrollArea>
+      </Tabs>
     </div>
   );
 }

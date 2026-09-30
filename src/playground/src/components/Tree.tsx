@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
-import { clsx } from "clsx";
+import { ChevronRightIcon } from "lucide-react";
 import type { TreeEntry } from "../api";
 import { useExplorerSearch, useOpenNode } from "../lib/nav";
 import { useProjectQuery } from "../lib/project";
-import { KindBadge } from "../lib/ui";
+import { KindBadge } from "./KindBadge";
+import { ScrollArea } from "./ui/scroll-area";
+import { cn } from "@/lib/utils";
 
 // The left-hand containment tree: dir → file → class → method, lazy-loaded one
 // level per expand. Expansion state is lifted to the root so `openNode()` from
@@ -11,14 +13,10 @@ import { KindBadge } from "../lib/ui";
 
 function Chevron({ open }: { open: boolean }) {
   return (
-    <span
-      className={clsx(
-        "inline-block w-3 shrink-0 text-muted-foreground transition-transform",
-        open && "rotate-90",
-      )}
-    >
-      ▶
-    </span>
+    <ChevronRightIcon
+      aria-hidden
+      className={cn("size-3 shrink-0 text-muted-foreground transition-transform", open && "rotate-90")}
+    />
   );
 }
 
@@ -39,7 +37,7 @@ function TreeLevel({ dir, node, depth, expanded, onToggle }: LevelProps) {
     return <div style={{ paddingLeft: depth * 14 + 22 }} className="py-1 text-xs text-muted-foreground">…</div>;
   if (isError)
     return (
-      <div style={{ paddingLeft: depth * 14 + 22 }} className="py-1 text-xs text-rose-600 dark:text-rose-400">
+      <div style={{ paddingLeft: depth * 14 + 22 }} className="py-1 text-xs text-destructive">
         failed to load
       </div>
     );
@@ -98,9 +96,9 @@ function TreeRow({
       <div
         onClick={handleClick}
         style={{ paddingLeft: depth * 14 + 8 }}
-        className={clsx(
-          "flex cursor-pointer items-center gap-1.5 py-1 pr-2 text-sm hover:bg-panel2",
-          isSelected && "bg-primary/20 text-fg",
+        className={cn(
+          "flex cursor-pointer items-center gap-1.5 py-1 pr-2 text-sm hover:bg-accent",
+          isSelected && "bg-primary/20 text-foreground",
         )}
       >
         {entry.has_children ? (
@@ -157,9 +155,11 @@ export function Tree() {
       <div className="border-b border-border px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
         Explorer
       </div>
-      <div className="flex-1 overflow-auto py-1">
-        <TreeLevel depth={0} expanded={expanded} onToggle={onToggle} />
-      </div>
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="py-1">
+          <TreeLevel depth={0} expanded={expanded} onToggle={onToggle} />
+        </div>
+      </ScrollArea>
     </div>
   );
 }

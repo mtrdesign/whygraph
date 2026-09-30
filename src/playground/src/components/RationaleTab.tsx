@@ -1,7 +1,9 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { RationaleCard } from "../api";
 import { useProjectApi, useProjectKey, useProjectQuery } from "../lib/project";
-import { Button, Spinner, EmptyState } from "../lib/ui";
+import { Button } from "./ui/button";
+import { Empty, EmptyDescription } from "./ui/empty";
+import { Loading } from "./Loading";
 
 // The Rationale tab (the resolved Q3 design): on open it does a CACHE-ONLY read
 // (`GET`, never an LLM call). A cached card renders directly; otherwise a
@@ -15,7 +17,7 @@ function BulletList({ title, items }: { title: string; items?: string[] }) {
       <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
         {title}
       </div>
-      <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-fg">
+      <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-foreground">
         {items.map((item, i) => (
           <li key={i}>{item}</li>
         ))}
@@ -30,12 +32,12 @@ function Card({ card }: { card: RationaleCard }) {
       <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
         Purpose
       </div>
-      <p className="mt-1 text-sm text-fg">{card.purpose}</p>
+      <p className="mt-1 text-sm text-foreground">{card.purpose}</p>
 
       <div className="mt-3 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
         Why it exists
       </div>
-      <p className="mt-1 text-sm text-fg">{card.why}</p>
+      <p className="mt-1 text-sm text-foreground">{card.why}</p>
 
       <BulletList title="Constraints" items={card.constraints} />
       <BulletList title="Tradeoffs" items={card.tradeoffs} />
@@ -66,9 +68,13 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
     onSuccess: (card) => queryClient.setQueryData(queryKey, card),
   });
 
-  if (isLoading) return <div className="p-4"><Spinner label="Checking cache…" /></div>;
+  if (isLoading) return <div className="p-4"><Loading label="Checking cache…" /></div>;
   if (isError)
-    return <EmptyState>Failed to load rationale: {(error as Error).message}</EmptyState>;
+    return (
+      <Empty className="p-4">
+        <EmptyDescription>Failed to load rationale: {(error as Error).message}</EmptyDescription>
+      </Empty>
+    );
 
   if (data?.status === "cached") return <Card card={data} />;
 
@@ -77,7 +83,7 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
   return (
     <div className="p-4">
       {generate.isPending ? (
-        <Spinner label="Generating rationale (calling the model)…" />
+        <Loading label="Generating rationale (calling the model)…" />
       ) : (
         <>
           <p className="text-sm text-muted-foreground">
@@ -93,7 +99,7 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
             Generate rationale
           </Button>
           {generate.isError && (
-            <p className="mt-2 text-sm text-rose-600 dark:text-rose-400">
+            <p className="mt-2 text-sm text-destructive">
               {(generate.error as Error).message}
             </p>
           )}

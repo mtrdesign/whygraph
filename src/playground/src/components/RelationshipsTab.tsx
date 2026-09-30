@@ -1,6 +1,7 @@
 import type { NodeRelations, RelationSymbol, Symbol } from "../api";
 import { useOpenNode } from "../lib/nav";
-import { KindBadge, EmptyState } from "../lib/ui";
+import { KindBadge } from "./KindBadge";
+import { Empty, EmptyDescription } from "./ui/empty";
 
 // The Relationships tab: calls / called-by / imports / contained-by / children.
 // Every row is a navigation target — clicking it fires the canonical openNode().
@@ -10,10 +11,10 @@ function Row({ symbol }: { symbol: RelationSymbol | Symbol }) {
   return (
     <button
       onClick={() => openNode(symbol.qualified_name, symbol.file_path)}
-      className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-panel2"
+      className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent"
     >
       <KindBadge kind={symbol.kind} />
-      <span className="truncate font-medium text-fg">{symbol.name}</span>
+      <span className="truncate font-medium text-foreground">{symbol.name}</span>
       <span className="truncate text-xs text-muted-foreground">{symbol.file_path}</span>
     </button>
   );
@@ -41,7 +42,12 @@ export function RelationshipsTab({ relations }: { relations: NodeRelations }) {
     relations.children.length === 0 &&
     !relations.container;
 
-  if (empty) return <EmptyState>No relationships recorded for this symbol.</EmptyState>;
+  if (empty)
+    return (
+      <Empty className="p-4">
+        <EmptyDescription>No relationships recorded for this symbol.</EmptyDescription>
+      </Empty>
+    );
 
   return (
     <div className="p-2">

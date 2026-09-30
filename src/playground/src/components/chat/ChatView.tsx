@@ -2,6 +2,7 @@ import { useActiveSessionId } from "../../lib/nav";
 import { useProjectQuery, useSlug } from "../../lib/project";
 import { SessionList } from "./SessionList";
 import { MessageThread } from "./MessageThread";
+import { Empty, EmptyDescription } from "../ui/empty";
 
 /**
  * The Chat view: session sidebar plus thread column.
@@ -25,19 +26,19 @@ export function ChatView() {
 
   return (
     <div className="flex min-h-0 flex-1">
-      <aside className="w-72 shrink-0 border-r border-border bg-panel">
+      <aside className="w-72 shrink-0 border-r border-border bg-sidebar">
         <SessionList />
       </aside>
-      <main className="flex min-w-0 flex-1 flex-col bg-bg">
+      <main className="flex min-w-0 flex-1 flex-col bg-background">
         {activeSessionId === null ? (
-          <div className="flex h-full items-center justify-center p-8 text-center text-sm text-muted-foreground">
-            Select a chat, or start a new one.
-          </div>
+          <Empty className="h-full p-8">
+            <EmptyDescription>Select a chat, or start a new one.</EmptyDescription>
+          </Empty>
         ) : (
           <>
             {active && (
               <div className="flex items-center gap-3 border-b border-border px-4 py-2">
-                <span className="min-w-0 flex-1 truncate text-sm font-medium text-fg">
+                <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
                   {active.title}
                 </span>
               </div>

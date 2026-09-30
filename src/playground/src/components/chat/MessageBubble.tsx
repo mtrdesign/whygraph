@@ -1,5 +1,6 @@
 import { Suspense, lazy } from "react";
 import { parseChart } from "./chartSpec";
+import { Skeleton } from "../ui/skeleton";
 import { Markdown } from "./Markdown";
 import { ToolCallCard, type ToolActivity } from "./ToolCallCard";
 
@@ -59,7 +60,7 @@ export type Turn = UserTurn | AssistantTurn;
 function UserBubble({ content }: { content: string }) {
   return (
     <div className="flex justify-end">
-      <div className="max-w-[80%] whitespace-pre-wrap rounded-lg bg-primary/20 px-3 py-2 text-sm text-fg">
+      <div className="max-w-[80%] whitespace-pre-wrap rounded-lg bg-primary/20 px-3 py-2 text-sm text-foreground">
         {content}
       </div>
     </div>
@@ -82,7 +83,7 @@ function AssistantBubble({ turn }: { turn: AssistantTurn }) {
 
   return (
     <div className="flex justify-start">
-      <div className="min-w-0 max-w-[92%] rounded-lg bg-panel2 px-3 py-2">
+      <div className="min-w-0 max-w-[92%] rounded-lg bg-muted px-3 py-2">
         {Array.from({ length: rows }, (_, i) => (
           <div key={i} className="min-w-0">
             {turn.segments[i] ? <Markdown>{turn.segments[i]}</Markdown> : null}
@@ -100,9 +101,11 @@ function AssistantBubble({ turn }: { turn: AssistantTurn }) {
                   {chart && (
                     <Suspense
                       fallback={
-                        <div className="my-1.5 rounded-md border border-border bg-panel2/60 px-2.5 py-4 text-xs text-muted-foreground">
-                          Loading chart…
-                        </div>
+                        <Skeleton
+                          role="status"
+                          aria-label="Loading chart"
+                          className="my-1.5 h-24 w-full bg-foreground/10"
+                        />
                       }
                     >
                       <ChartBlock payload={chart} />
@@ -124,14 +127,14 @@ function AssistantBubble({ turn }: { turn: AssistantTurn }) {
         )}
 
         {turn.roundLimit !== undefined && (
-          <div className="mt-2 rounded-sm border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-xs text-amber-700 dark:text-amber-300">
+          <div className="mt-2 rounded-sm border border-warning/30 bg-warning/10 px-2 py-1 text-xs text-warning">
             Reached the {turn.roundLimit}-round tool limit — the assistant answered
             with what it had gathered. Ask a narrower question to go further.
           </div>
         )}
 
         {turn.error && (
-          <div className="mt-2 rounded-sm border border-rose-500/30 bg-rose-500/10 px-2 py-1 text-xs text-rose-700 dark:text-rose-300">
+          <div className="mt-2 rounded-sm border border-destructive/30 bg-destructive/10 px-2 py-1 text-xs text-destructive">
             {turn.error}
           </div>
         )}

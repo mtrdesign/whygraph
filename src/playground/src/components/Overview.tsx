@@ -11,7 +11,7 @@ import {
 import ELK from "elkjs/lib/elk.bundled.js";
 import { useProjectQuery } from "../lib/project";
 import { OverviewNode, type OverviewNodeData } from "./OverviewNode";
-import { Spinner } from "../lib/ui";
+import { Loading } from "./Loading";
 import { useTheme } from "../theme";
 
 // The Phase-2 LOD overview and landing view: directory super-nodes with weighted,
@@ -95,19 +95,19 @@ export function Overview() {
 
   const edges = useMemo<Edge[]>(
     () =>
-      (data?.edges ?? []).map((e) => ({
-        id: e.id,
-        source: e.source,
-        target: e.target,
-        label: e.weight > 1 ? String(e.weight) : undefined,
-        style: {
-          stroke: e.kind === "imports" ? "#fb7185" : "#818cf8",
-          strokeWidth: Math.min(1 + e.weight / 3, 4),
-        },
-        labelStyle: { fill: "var(--muted-foreground)", fontSize: 10 },
-        labelBgStyle: { fill: "var(--card)" },
-        markerEnd: { type: MarkerType.ArrowClosed },
-      })),
+      (data?.edges ?? []).map((e) => {
+        const stroke = e.kind === "imports" ? "var(--destructive)" : "var(--primary-text)";
+        return {
+          id: e.id,
+          source: e.source,
+          target: e.target,
+          label: e.weight > 1 ? String(e.weight) : undefined,
+          style: { stroke, strokeWidth: Math.min(1 + e.weight / 3, 4) },
+          labelStyle: { fill: "var(--muted-foreground)", fontSize: 10 },
+          labelBgStyle: { fill: "var(--card)" },
+          markerEnd: { type: MarkerType.ArrowClosed, color: stroke },
+        };
+      }),
     [data],
   );
 
@@ -121,25 +121,28 @@ export function Overview() {
     });
   };
 
-  if (isLoading)
+  // Hold the canvas until the first elk layout lands: <ReactFlow fitView> fits once,
+  // and doing it with every node still stacked at (0, 0) zooms to the maximum.
+  const laidOut = !data || data.nodes.length === 0 || Object.keys(positions).length > 0;
+  if (isLoading || !laidOut)
     return (
       <div className="flex h-full items-center justify-center">
-        <Spinner label="Loading overview…" />
+        <Loading label="Loading overview…" />
       </div>
     );
   if (isError)
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-muted-foreground">
-        <div className="text-sm text-rose-600 dark:text-rose-400">{(error as Error).message}</div>
+        <div className="text-sm text-destructive">{(error as Error).message}</div>
         <div className="text-xs">
-          Run <code className="text-fg">whygraph scan</code> to build the index.
+          Run <code className="text-foreground">whygraph scan</code> to build the index.
         </div>
       </div>
     );
 
   return (
     <div className="h-full">
-      <div className="absolute left-1/2 top-3 z-10 -translate-x-1/2 rounded-full border border-border bg-panel2/80 px-3 py-1 text-xs text-muted-foreground backdrop-blur-sm">
+      <div className="absolute left-1/2 top-3 z-10 -translate-x-1/2 whitespace-nowrap rounded-full border border-border bg-muted/80 px-3 py-1 text-xs text-muted-foreground backdrop-blur-sm">
         Overview — click a directory to expand · coverage colored
       </div>
       <ReactFlow
@@ -156,7 +159,7 @@ export function Overview() {
         proOptions={{ hideAttribution: true }}
       >
         <Background color="var(--border)" gap={20} />
-        <Controls className="border-border! bg-panel2!" showInteractive={false} />
+        <Controls showInteractive={false} />
       </ReactFlow>
     </div>
   );

@@ -12,7 +12,8 @@ import { useExplorerSearch, useOpenNode } from "../lib/nav";
 import { useProjectQuery } from "../lib/project";
 import { useTheme } from "../theme";
 import { SymbolNode, type SymbolNodeData } from "./SymbolNode";
-import { Spinner } from "../lib/ui";
+import { Loading } from "./Loading";
+import { Kbd } from "./ui/kbd";
 
 // The center canvas: the one-hop ego graph of the selected symbol. Coordinates
 // come from the server (§0 rendering strategy) — the client only pans/zooms and
@@ -20,11 +21,14 @@ import { Spinner } from "../lib/ui";
 
 const nodeTypes = { symbol: SymbolNode };
 
+// `var()` is only ever used on SVG strokes and fills (xyflow paints edges and
+// markers as SVG), so the edges follow the theme without a rebuild.
 const EDGE_COLOR: Record<string, string> = {
-  calls: "#818cf8",
-  imports: "#fb7185",
-  contains: "#64748b",
+  calls: "var(--primary-text)",
+  imports: "var(--destructive)",
+  contains: "var(--muted-foreground)",
 };
+const EDGE_FALLBACK = "var(--muted-foreground)";
 
 export function GraphCanvas() {
   const { resolvedTheme } = useTheme();
@@ -56,10 +60,10 @@ export function GraphCanvas() {
         target: e.target,
         label: e.kind,
         animated: e.kind === "calls",
-        style: { stroke: EDGE_COLOR[e.kind] ?? "#64748b" },
+        style: { stroke: EDGE_COLOR[e.kind] ?? EDGE_FALLBACK },
         labelStyle: { fill: "var(--muted-foreground)", fontSize: 10 },
         labelBgStyle: { fill: "var(--card)" },
-        markerEnd: { type: MarkerType.ArrowClosed, color: EDGE_COLOR[e.kind] ?? "#64748b" },
+        markerEnd: { type: MarkerType.ArrowClosed, color: EDGE_COLOR[e.kind] ?? EDGE_FALLBACK },
       })),
     [data],
   );
@@ -73,12 +77,10 @@ export function GraphCanvas() {
     return (
       <div className="flex h-full items-center justify-center text-center text-muted-foreground">
         <div>
-          <div className="text-lg font-medium text-fg">WhyGraph Explorer</div>
+          <div className="text-lg font-medium text-foreground">WhyGraph Explorer</div>
           <div className="mt-1 text-sm">
             Pick a symbol from the tree, or press{" "}
-            <kbd className="rounded-sm border border-border bg-panel2 px-1.5 py-0.5 text-xs">
-              ⌘K
-            </kbd>{" "}
+            <Kbd>⌘K</Kbd>{" "}
             to search.
           </div>
         </div>
@@ -88,13 +90,13 @@ export function GraphCanvas() {
   if (isLoading)
     return (
       <div className="flex h-full items-center justify-center">
-        <Spinner label="Loading graph…" />
+        <Loading label="Loading graph…" />
       </div>
     );
 
   if (isError)
     return (
-      <div className="flex h-full items-center justify-center text-sm text-rose-600 dark:text-rose-400">
+      <div className="flex h-full items-center justify-center text-sm text-destructive">
         {(error as Error).message}
       </div>
     );
@@ -114,7 +116,7 @@ export function GraphCanvas() {
       proOptions={{ hideAttribution: true }}
     >
       <Background color="var(--border)" gap={20} />
-      <Controls className="border-border! bg-panel2!" showInteractive={false} />
+      <Controls showInteractive={false} />
     </ReactFlow>
   );
 }

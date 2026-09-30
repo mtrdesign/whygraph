@@ -156,20 +156,6 @@
   --font-mono: "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-/* TEMPORARY legacy alias layer (removed in step 11c). Maps the pre-token palette
-   names (`bg`, `panel`, `panel2`, `fg`, `accent2`) onto the semantic tokens so
-   the ~190 legacy class uses keep rendering in both themes while the views are
-   ported. `muted` and `accent` are NOT aliased: their legacy meanings (grey text,
-   brand indigo) collide with shadcn's `muted` / `accent` surfaces, so those class
-   uses were renamed to `text-muted-foreground` / `*-primary` instead. */
-@theme inline {
-  --color-bg: var(--background);
-  --color-panel: var(--sidebar);
-  --color-panel2: var(--muted);
-  --color-fg: var(--foreground);
-  --color-accent2: var(--primary-text);
-}
-
 /* The typography plugin's `prose` palette bound to the tokens, so markdown
    follows the theme instead of needing `prose-invert`. Unlayered on purpose: it
    must win over the plugin's own defaults. */

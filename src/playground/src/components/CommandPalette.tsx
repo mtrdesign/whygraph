@@ -6,7 +6,7 @@ import { useOpenNode } from "../lib/nav";
 import { useProjectQuery } from "../lib/project";
 import { useUi } from "../store";
 import { useTheme, type Theme } from "../theme";
-import { KindBadge, CoverageDot } from "../lib/ui";
+import { KindBadge, CoverageDot } from "./KindBadge";
 import {
   Command,
   CommandDialog,

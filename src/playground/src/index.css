@@ -1,7 +1,21 @@
 @import "@xyflow/react/dist/style.css" layer(base);
 @import "./styles/theme.css";
 
-/* React Flow surface: strokes and labels follow the theme tokens. */
+/* React Flow surface: its own stylesheet is in `layer(base)`, so these unlayered
+   variables win in both colour modes and the canvas follows the theme tokens.
+   `colorMode` on <ReactFlow> still sets the .dark / .light class xyflow keys
+   its remaining defaults off. */
+.react-flow {
+  --xy-background-color: var(--background);
+  --xy-controls-button-background-color: var(--card);
+  --xy-controls-button-background-color-hover: var(--accent);
+  --xy-controls-button-color: var(--muted-foreground);
+  --xy-controls-button-color-hover: var(--foreground);
+  --xy-controls-button-border-color: var(--border);
+  --xy-controls-box-shadow: none;
+  --xy-edge-label-color: var(--muted-foreground);
+  --xy-edge-label-background-color: var(--card);
+}
 .react-flow__edge-path {
   stroke-width: 1.5;
 }

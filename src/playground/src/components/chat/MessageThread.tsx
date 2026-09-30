@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { ChatSession } from "../../api";
 import { useProjectApi, useProjectKey, useProjectQuery } from "../../lib/project";
-import { EmptyState, Spinner } from "../../lib/ui";
+import { Loading } from "../Loading";
+import { Empty, EmptyDescription } from "../ui/empty";
 import { MessageBubble, type AssistantTurn, type Turn } from "./MessageBubble";
 import { Composer } from "./Composer";
 import { ModelSelect } from "./ModelSelect";
@@ -191,18 +192,20 @@ export function MessageThread({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-auto p-4">
-        {transcript.isLoading && <Spinner label="Loading transcript…" />}
+        {transcript.isLoading && <Loading label="Loading transcript…" />}
         {transcript.isError && (
-          <div className="text-sm text-rose-600 dark:text-rose-400">
+          <div className="text-sm text-destructive">
             {(transcript.error as Error).message}
           </div>
         )}
         {!transcript.isLoading && turns.length === 0 && (
-          <EmptyState>
-            Ask why a module is shaped the way it is, what changed around an area
-            recently, or for a walk through a symbol's callers. The assistant reads
-            CodeGraph, the WhyGraph history, and the source to answer.
-          </EmptyState>
+          <Empty className="p-4">
+            <EmptyDescription>
+              Ask why a module is shaped the way it is, what changed around an area
+              recently, or for a walk through a symbol's callers. The assistant reads
+              CodeGraph, the WhyGraph history, and the source to answer.
+            </EmptyDescription>
+          </Empty>
         )}
         {/* Persisted turns key on their first row's id; the two live turns key
             on their kind (there is only ever one of each). Index keys would
@@ -235,7 +238,7 @@ export function MessageThread({
             }
           />
           {update.isError && (
-            <div className="mt-1 text-xs text-rose-600 dark:text-rose-400">
+            <div className="mt-1 text-xs text-destructive">
               {(update.error as Error).message}
             </div>
           )}

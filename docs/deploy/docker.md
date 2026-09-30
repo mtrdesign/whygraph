@@ -1,18 +1,19 @@
 # Run with Docker
 
 Don't want Python, Node, `gh`, and CodeGraph on your machine? WhyGraph ships as a self-contained
-image. Your host needs **only Docker**. One command installs the shims from inside the image, then
-it's the same `init` and `scan` as a native install.
+image. Your host needs **only Docker**. One command installs the `whygraph` shim from inside the image;
+`whygraph up` then starts the [portal](../portal/index.md) in it.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.2/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v2.0.0/scripts/install.sh | sh
 
-cd your-repo
-whygraph init      # bootstrap the WhyGraph DB + write config
-whygraph scan      # crawl history + refresh CodeGraph + LLM descriptions
+whygraph up          # start the portal (one background container, loopback only)
 ```
 
-**The tag in the URL picks the version** - `v1.1.2` installs 1.1.2. To install a different release
+Then open <http://localhost:8765>, share the folder that holds your repos, and add them from the
+Projects page. See the [Quickstart](../getting-started/quickstart.md).
+
+**The tag in the URL picks the version** - `v2.0.0` installs 2.0.0. To install a different release
 with that same installer, pass it through the pipe: `… | sh -s latest`. Full override list and the
 no-`curl` alternative are in [Installation](../getting-started/installation.md).
 
@@ -24,8 +25,12 @@ them to stdout and the script executes that. Shim bodies therefore live in WhyGr
 code, not in the shell script, and every failure (no Docker, dead daemon, unknown version) exits
 non-zero with a message instead of quietly installing nothing.
 
-The result is `whygraph` and `whygraph-mcp` on your `PATH`. Each one runs the published image
-against the current directory:
+The result is a `whygraph` shim on your `PATH`, plus a `whygraph-mcp` stub that only prints a message
+that the stdio server was removed. The shim does two different things:
+
+- **The portal verbs** - `up`, `down`, `status`, `logs` and `folders` - manage one **named,
+  long-lived** container, `whygraph-portal`. This is the one exception to "ephemeral per command".
+- **Every other command** runs the image against the current directory and exits:
 
 ```bash
 exec docker run --rm -i $tty \
@@ -37,45 +42,41 @@ exec docker run --rm -i $tty \
     "$IMAGE" whygraph "$@"
 ```
 
-The container is **ephemeral per command** - no compose and no `docker exec`. Each invocation is a
-fresh process against the repo you're standing in.
-
 - **Everything's in the image** - Python and WhyGraph, `git`, the GitHub CLI, and Node with the
   CodeGraph CLI. CodeGraph indexes from the in-image binary, so there's no docker-in-docker.
-- **Per-project config just works.** Each command reads the current repo's own `whygraph.toml`,
-  `.whygraph/`, and `.codegraph/`.
 - **Files come back as yours.** `--user "$(id -u):$(id -g)"` is what does it: generated files aren't
   root-owned and git sees matching ownership.
+- **Only the repo you stand in is visible** to an ephemeral command. The portal sees only the
+  [folders you share](../portal/shared-folders.md).
 
-!!! note "`whygraph serve` is the one exception"
-    [`whygraph serve`](../guide/playground.md) needs a published port and a server that outlives the
-    command, so the shim gives it a **named, long-lived** `whygraph-serve` container instead, with
-    `--detach`, `--logs`, and `--stop` to manage it. Every other command is ephemeral.
+## The portal container
+
+`whygraph up` starts `whygraph-portal` detached, with `--restart unless-stopped`, published to
+the loopback interface only and attached to its own Docker network. Your shared folders are mounted at the same
+path they have on the host, and the data directory (`~/.local/share/whygraph`) is mounted at `/data`.
+The container runs as your user, so files it writes come back owned by you.
+
+It is recreated automatically when the shared folders, the port or the image change, and stopped
+cleanly by `whygraph down` (it gives a running scan time to be recorded as interrupted). The host
+commands are in [Start the portal](../portal/start.md).
 
 ## Credentials
 
-The shim passes your environment through. A GitHub token goes in `[scan].token` of the repo's
-`whygraph.toml` (gitignored), and the shim also forwards `GH_TOKEN` / `GITHUB_TOKEN` plus
-`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `OPENROUTER_API_KEY` from your
-environment.
+The portal container is started with **none of your environment**. Keys and tokens are entered in the
+portal's Settings and stored encrypted in its database - see the
+[security model](../portal/security.md#keys-and-tokens).
+
+The ephemeral shim path still forwards `GH_TOKEN` / `GITHUB_TOKEN` and the four provider API keys, for
+headless `whygraph scan` in a repository the portal does not manage (a CI job, say).
 
 !!! warning "Never bake a token into the image"
-    Pass credentials at run time, never at build time. The repo's gitignored `whygraph.toml` is the
-    right home for a pinned token.
+    Pass credentials at run time, never at build time.
 
-## Wire your editor, still only Docker
+## Agents
 
-The MCP server is containerized too. The installer drops a `whygraph-mcp` shim alongside `whygraph`, so
-there's nothing extra to install. Wire your editor from inside the repo:
-
-```bash
-whygraph init --agent claude     # writes .mcp.json (also: --agent cursor / vscode / codex)
-```
-
-The generated config launches `whygraph-mcp` by bare command name. Your editor resolves it to the
-shim, which starts a per-session container speaking MCP over stdio. It reads the repo's `.whygraph/`
-and `.codegraph/` over the same `/workspace` mount the scan writes to - so the editor and the scan
-share one source of truth on disk.
+Agents do not launch anything in Docker any more. They connect over HTTP to the portal's per-project
+endpoint, which the portal writes into each agent's config when you initialize the project. See
+[Connecting agents](../portal/agents.md).
 
 ## Build the image yourself
 
@@ -83,11 +84,11 @@ Building locally instead of pulling - say, while developing:
 
 ```bash
 docker build -f docker/whygraph/Dockerfile -t whygraph:latest .
-WHYGRAPH_IMAGE=whygraph:latest whygraph scan
+WHYGRAPH_IMAGE=whygraph:latest whygraph up
 ```
 
 `WHYGRAPH_IMAGE` overrides the image the shim runs, so you can test a local build without touching the
-install. The image also carries the built Explorer bundle, so a local build serves the playground too.
+install. The image also carries the built Explorer bundle, so a local build serves the portal UI too.
 
 !!! note "A local build reports itself as `latest`"
     The release version is baked in at build time. Building yourself bakes `latest`, which is what

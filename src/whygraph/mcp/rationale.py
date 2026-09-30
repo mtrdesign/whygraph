@@ -29,7 +29,8 @@ _TOOL_DESCRIPTION = (
     "enriches it with CodeGraph symbol context, and asks the configured LLM "
     "to synthesize the card. Pass either (path, line_start, line_end) or a "
     "qualified_name. Calls the configured LLM provider — may take several "
-    "seconds. Run `whygraph scan` first to populate the WhyGraph database."
+    "seconds. Scan from the WhyGraph portal (or run `whygraph scan` outside it) "
+    "first to populate the WhyGraph database."
 )
 
 
@@ -100,11 +101,13 @@ def whygraph_rationale_brief(
     if not evidence:
         raise WhyGraphError(
             "no historical evidence for this target — the lines map to no "
-            "scanned commit. Run `whygraph scan` to populate the database."
+            "scanned commit. Scan from the WhyGraph portal (or run `whygraph scan` "
+            "outside it) to populate the database."
         )
 
-    config = get_config().rationale
-    cached = lookup_cached(target, evidence, config.provider, config.model)
+    config = get_config()
+    provider, pinned_model = config.cache_identity("rationale")
+    cached = lookup_cached(target, evidence, provider, pinned_model)
     if cached is not None:
         rationale, cached_at = cached
         return _format_response(target, rationale, evidence, cached_at)
@@ -123,7 +126,7 @@ def whygraph_rationale_brief(
     except (AnalyzeError, LlmError) as exc:
         raise WhyGraphError.wrap("rationale generation failed", exc)
 
-    cached_at = store_cached(target, evidence, rationale, config.provider, config.model)
+    cached_at = store_cached(target, evidence, rationale, provider, pinned_model)
     return _format_response(target, rationale, evidence, cached_at)
 
 

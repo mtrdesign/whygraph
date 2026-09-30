@@ -223,132 +223,534 @@ export type ChatEvent =
     }
   | { type: "error"; message: string };
 
-class ApiError extends Error {
+// ---- portal (portal/routes.py) --------------------------------------------
+
+export interface PortalUser {
+  uid: string;
+  display_name: string;
+  role: string;
+}
+
+// `GET /api/portal/state` is public. In degraded mode (the portal DB failed to
+// migrate) the body is just `{ error }`.
+export interface PortalState {
+  mode?: string;
+  setup_complete?: boolean;
+  user?: PortalUser | null;
+  port?: number;
+  shared_folders?: string[];
+  // `null` only when the package metadata is missing.
+  version?: string | null;
+  // What the portal did when it started on a new port (computed once at start).
+  port_change?: PortChange | null;
+  error?: string;
+}
+
+// ---- port change (portal/port_change.py) ----------------------------------------
+
+export interface PortChangeAgent {
+  agent: string;
+  file: string;
+  // env: nothing rewritten, `hint` says what to do; manual: tracked or unparseable,
+  // `line` is the entry to set (plus `diff` / `snippet`); skipped: see `reason`.
+  action: "rewritten" | "up_to_date" | "env" | "manual" | "skipped";
+  hint?: string;
+  line?: string;
+  diff?: string | null;
+  snippet?: string | null;
+  reason?: string | null;
+}
+
+export interface PortChangeProject {
+  slug: string;
+  root: string;
+  previous_port: number;
+  markers: "rewritten" | "skipped";
+  reason?: string;
+  agents: PortChangeAgent[];
+}
+
+export interface PortChange {
+  port: number;
+  previous_port: number | null;
+  projects: PortChangeProject[];
+  // Initialized projects whose folder was not available at start.
+  unmounted: { slug: string; root: string }[];
+}
+
+/** `GET /api/projects/{slug}`'s `port_change`: this project's item, or unmounted. */
+export type ProjectPortChange =
+  | PortChangeProject
+  | { slug: string; root: string; unmounted: true; port: number };
+
+export interface ProjectSummary {
+  slug: string;
+  name: string;
+  source: "local" | "github";
+  root: string;
+  remote_url: string | null;
+  initialized: boolean;
+  initialized_at: string | null;
+  last_scan_at: string | null;
+  created_at: string;
+  root_status: "ok" | "missing" | "not_git";
+  running_scan: { id: number; status: string; trigger: string } | null;
+  // Status of the newest *ended* run, or `null` when none has ended yet.
+  last_scan_status?: "ok" | "failed" | "interrupted" | "cancelled" | null;
+  // `null` = up to date / never scanned; `commits_behind` is null after a history rewrite.
+  stale: { commits_behind: number | null } | null;
+}
+
+export interface ProjectDetails extends ProjectSummary {
+  agents: string[];
+  missing_key: string | null;
+  mcp_url: string;
+  // The repo's 1.x / agent-file state, recomputed on every read; `null` while
+  // the project folder is unusable.
+  detected?: Detected | null;
+  port_change?: ProjectPortChange | null;
+  stats: {
+    commits: number;
+    described: number;
+    described_pct: number;
+    pull_requests: number;
+    issues: number;
+    rationale_cards: number;
+  } | null;
+}
+
+// ---- portal setup / add wizard ------------------------------------------------
+
+export interface RepoEntry {
+  path: string;
+  name: string;
+  registered: boolean;
+}
+
+export interface CheckPathResult {
+  path: string;
+  shared: boolean;
+  is_git: boolean;
+  protected: boolean;
+  folder_suggestion: string | null;
+  command: string | null;
+  github: { slug: string; remote_url: string } | null;
+}
+
+export interface DetectedAgent {
+  agent: string;
+  file: string;
+  key: string;
+  shape: "stdio" | "http" | "unknown";
+  stale: boolean;
+  tracked: boolean;
+}
+
+export interface CustomDbPath {
+  key: string;
+  path: string;
+  exists: boolean;
+  message: string;
+}
+
+// The 1.x state a repo already carries; returned once, by `POST /api/projects`.
+export interface Detected {
+  existing_db: boolean;
+  managed_hooks: string[];
+  detected_agents: DetectedAgent[];
+  custom_db_paths: CustomDbPath[];
+}
+
+export interface ImportReport {
+  found: boolean;
+  error: string | null;
+  secrets_moved: string[];
+  dropped: { key: string; hint: string }[];
+  custom_db_paths: CustomDbPath[];
+  warnings: string[];
+}
+
+export interface AddProjectResult {
+  project: ProjectDetails;
+  detected: Detected;
+  import: ImportReport;
+}
+
+export type AddProjectBody =
+  | { source: "local"; path: string; name?: string; token?: string }
+  | { source: "github"; url: string; token: string; name?: string };
+
+/** A v2 config layer (`[llm]`, `[analyze]`, ... as nested tables). */
+export type ConfigDict = Record<string, unknown>;
+
+export interface SecretStatus {
+  set: boolean;
+  hint: string | null;
+  unreadable?: boolean;
+}
+
+export interface SecretsView {
+  llm: Record<string, SecretStatus>;
+  github_token: SecretStatus;
+}
+
+/** Write-only: a string sets, `null` deletes, an absent key leaves it alone. */
+export interface SecretsPatch {
+  llm?: Record<string, string | null>;
+  github_token?: string | null;
+}
+
+export interface ConfigPut {
+  config?: ConfigDict;
+  secrets?: SecretsPatch;
+}
+
+export interface ProjectConfigView {
+  config: ConfigDict;
+  secrets: SecretsView;
+  import: ImportReport;
+  // Present on a PUT response only.
+  hooks?: unknown;
+  hooks_error?: string | null;
+}
+
+export interface DefaultsView {
+  config: ConfigDict;
+  secrets: SecretsView;
+  no_provider_key: boolean;
+  // Present on a PUT response only: projects whose own key for a provider was
+  // cleared because the global endpoint they inherit changed.
+  cleared_project_keys?: { slug: string; provider: string }[];
+}
+
+export type FileStatus = "write" | "overwrite" | "skip" | "refused" | "needs_confirmation";
+
+export interface FileOutcome {
+  file: string;
+  status: FileStatus;
+  agent: string | null;
+  reason: string | null;
+  snippet: string | null;
+  diff: string | null;
+}
+
+export interface InitBody {
+  agents: string[];
+  force?: boolean;
+  dry_run?: boolean;
+  confirm_tracked?: string[];
+  agent_actions?: Record<string, "migrate" | "remove">;
+}
+
+export interface InitResult {
+  dry_run: boolean;
+  gitignore_added: string[];
+  hooks: { installed: string[]; removed: string[]; actions: Record<string, string> } | null;
+  hooks_error: string | null;
+  agent_files: FileOutcome[];
+  asset_files: FileOutcome[];
+  configured_agents: string[];
+  needs_confirmation: string[];
+  refused: string[];
+  marker_written: boolean;
+  initialized: boolean;
+  custom_db_paths: CustomDbPath[];
+}
+
+export interface ScanEstimate {
+  commits: number;
+  upper_bound: boolean;
+  large_commits: number;
+  model: { provider: string | null; model: string | null };
+  tokens: {
+    input: number;
+    output: number;
+    input_range: { low: number; high: number };
+    output_range: { low: number; high: number };
+  };
+  cost: {
+    usd: number;
+    low: number;
+    high: number;
+    currency: string;
+    prices_as_of: string;
+  } | null;
+  missing_key: string | null;
+}
+
+export type ScanRunStatus =
+  | "queued"
+  | "running"
+  | "ok"
+  | "failed"
+  | "interrupted"
+  | "cancelled";
+
+/** The fields of a run's `summary` the UI reads (the backend may add more). */
+export interface ScanRunSummary {
+  status?: string;
+  elapsed_sec?: number;
+  phase_timings?: Record<string, number>;
+  crawlers?: { name: string; status: string; summary?: string; error?: string; warning?: string }[];
+  analyze_skipped?: string | null;
+  exit_code?: number;
+  moved?: boolean;
+  error?: string;
+  merged_into?: number;
+  [k: string]: unknown;
+}
+
+/** `GET .../scans/{id}/log`: the tail (at most 64 KiB) of a run's log. */
+export interface ScanLog {
+  run_id: number;
+  text: string;
+  size: number;
+  truncated: boolean;
+}
+
+export interface DeleteProjectBody {
+  strip_agent_entries?: boolean;
+  confirm_tracked?: string[];
+  confirm_name?: string;
+}
+
+export interface DeleteProjectResult {
+  removed: string;
+  hooks: unknown;
+  agent_files: FileOutcome[];
+  checkout_deleted: boolean;
+  warnings: string[];
+}
+
+export interface ScanRunRow {
+  id: number;
+  kind: "scan" | "sync";
+  trigger: string;
+  analyze: boolean;
+  status: ScanRunStatus;
+  requested_by: number | null;
+  started_at: string | null;
+  finished_at: string | null;
+  summary: ScanRunSummary | null;
+}
+
+// The scan events stream (`portal/runner.py`): the child's JSONL events plus the
+// runner's own `sync` / `error` / `end` / `shutdown` frames.
+export type ScanEvent =
+  | { type: "start"; phase_total: number }
+  | { type: "phase"; phase: number; title: string }
+  | {
+      type: "task";
+      name: string;
+      completed?: number;
+      total?: number | null;
+      description?: string;
+    }
+  | {
+      type: "result";
+      status: "ok" | "failed";
+      elapsed_sec?: number;
+      crawlers?: { name: string; status: string; summary?: string; error?: string }[];
+      [k: string]: unknown;
+    }
+  | { type: "sync"; status: "fetching" | "ok" | "failed"; moved?: boolean; error?: string }
+  | { type: "error"; message: string }
+  | { type: "end"; run_id: number; status: ScanRunStatus; summary: ScanRunSummary | null }
+  | { type: "shutdown"; run_id: number };
+
+// ---- transport --------------------------------------------------------------
+
+export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    // The portal's machine-readable `code` (`setup_required`, `not_found`, ...).
+    public code?: string,
+    // Extra top-level fields of the error body (`command`, `folder_suggestion`, `keys`, ...).
+    public extra: Record<string, unknown> = {},
   ) {
     super(message);
   }
 }
 
-async function get<T>(path: string): Promise<T> {
-  return parse<T>(await fetch(`/api${path}`));
+// Every request - GETs included - carries this header. The portal refuses a
+// request without it (403): a cross-origin page cannot add a custom header
+// without a CORS preflight, which is the CSRF guard (`portal/security.py`).
+const CLIENT_HEADERS = { "X-WhyGraph-Client": "1" } as const;
+
+function init(method: string, body?: unknown, signal?: AbortSignal): RequestInit {
+  const headers: Record<string, string> = { ...CLIENT_HEADERS };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  return {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal,
+  };
 }
 
-async function post<T>(path: string): Promise<T> {
-  return parse<T>(await fetch(`/api${path}`, { method: "POST" }));
-}
-
-// Body-carrying variants. The Explorer endpoints take everything in the query
-// string; the chat endpoints take JSON bodies.
-async function send<T>(method: string, path: string, body?: unknown): Promise<T> {
-  return parse<T>(
-    await fetch(`/api${path}`, {
-      method,
-      headers: body === undefined ? undefined : { "Content-Type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    }),
-  );
+async function failure(res: Response): Promise<ApiError> {
+  const body = await res.json().catch(() => ({}));
+  const { detail, error, code, ...extra } = body;
+  return new ApiError(res.status, detail ?? error ?? res.statusText, code, extra);
 }
 
 // Turn a Response into JSON, with clear errors. A non-JSON body on a 200 (e.g. an
-// unmatched /api route falling through to the SPA's index.html) becomes a plain
+// unmatched route falling through to the SPA's index.html) becomes a plain
 // ApiError instead of a cryptic "did not match the expected pattern" JSON crash.
 async function parse<T>(res: Response): Promise<T> {
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new ApiError(res.status, body.detail ?? body.error ?? res.statusText);
-  }
+  if (!res.ok) throw await failure(res);
   if (!res.headers.get("content-type")?.includes("application/json")) {
     throw new ApiError(res.status, "unexpected non-JSON response from the API");
   }
   return res.json() as Promise<T>;
 }
 
+// The Explorer endpoints take everything in the query string; the chat and
+// portal endpoints take JSON bodies.
+async function send<T>(method: string, path: string, body?: unknown): Promise<T> {
+  return parse<T>(await fetch(`/api${path}`, init(method, body)));
+}
+
+const get = <T>(path: string) => send<T>("GET", path);
+
 const q = (qn: string) => encodeURIComponent(qn);
 
-export const api = {
-  search: (query: string, limit = 20) =>
-    get<{ query: string; results: SearchResult[] }>(
-      `/search?q=${encodeURIComponent(query)}&limit=${limit}`,
-    ),
-  tree: (opts: { dir?: string; node?: string } = {}) => {
-    const params = new URLSearchParams();
-    if (opts.dir) params.set("dir", opts.dir);
-    if (opts.node) params.set("node", opts.node);
-    const qs = params.toString();
-    return get<{ entries: TreeEntry[] }>(`/tree${qs ? `?${qs}` : ""}`);
-  },
-  overview: (expanded = "") =>
-    get<OverviewGraph>(`/graph/overview?expanded=${encodeURIComponent(expanded)}`),
-  ego: (qualified_name: string) =>
-    get<EgoGraph>(`/graph/ego?qualified_name=${q(qualified_name)}`),
-  // qualified_name goes in the query string (a file node's qn is a path with
-  // slashes; a path segment would break routing — see serve/routes.py).
-  node: (qualified_name: string) => get<NodeDetail>(`/node?qualified_name=${q(qualified_name)}`),
-  rationaleRead: (qualified_name: string) =>
-    get<RationaleCard>(`/node/rationale?qualified_name=${q(qualified_name)}`),
-  rationaleGenerate: (qualified_name: string) =>
-    post<RationaleCard>(`/node/rationale?qualified_name=${q(qualified_name)}`),
-  evidence: (qualified_name: string, limit = 20) =>
-    get<EvidenceResponse>(`/node/evidence?qualified_name=${q(qualified_name)}&limit=${limit}`),
-  history: (path: string, limit = 20) =>
-    get<HistoryResponse>(`/history?path=${encodeURIComponent(path)}&limit=${limit}`),
+// ---- portal-level calls -----------------------------------------------------
 
-  // ---- chat -----------------------------------------------------------------
-  chatProviders: () => get<ChatProvider[]>("/chat/providers"),
-  chatModels: (provider: string) =>
-    get<ChatModels>(`/chat/models?provider=${encodeURIComponent(provider)}`),
-  chatSessions: () => get<ChatSession[]>("/chat/sessions"),
-  chatCreateSession: (body: { provider?: string; model?: string; title?: string }) =>
-    send<ChatSession>("POST", "/chat/sessions", body),
-  chatTranscript: (id: number) => get<ChatTranscript>(`/chat/sessions/${id}`),
-  chatUpdateSession: (
-    id: number,
-    body: { title?: string; provider?: string; model?: string },
-  ) => send<ChatSession>("PATCH", `/chat/sessions/${id}`, body),
-  chatDeleteSession: async (id: number): Promise<void> => {
-    const res = await fetch(`/api/chat/sessions/${id}`, { method: "DELETE" });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new ApiError(res.status, body.detail ?? body.error ?? res.statusText);
-    }
-  },
+export const portalApi = {
+  state: () => get<PortalState>("/portal/state"),
+  projects: () => get<{ projects: ProjectSummary[] }>("/projects"),
+  project: (slug: string) => get<ProjectDetails>(`/projects/${encodeURIComponent(slug)}`),
+  setup: (display_name: string) =>
+    send<{ setup_complete: boolean; user: PortalUser }>("POST", "/portal/setup", { display_name }),
+  repos: (query = "") =>
+    get<{ repos: RepoEntry[]; truncated: boolean }>(`/portal/repos?q=${encodeURIComponent(query)}`),
+  checkPath: (path: string) => send<CheckPathResult>("POST", "/portal/check-path", { path }),
+  defaults: () => get<DefaultsView>("/portal/defaults"),
+  putDefaults: (body: ConfigPut) => send<DefaultsView>("PUT", "/portal/defaults", body),
+  addProject: (body: AddProjectBody) => send<AddProjectResult>("POST", "/projects", body),
 };
+
+// ---- project-scoped calls ---------------------------------------------------
+
+/**
+ * The project-scoped API. Every data call lives under `/api/projects/<slug>`, so
+ * a component holds a *slug*, not a base URL that could go stale on a switch.
+ * Pair every use with a query key from {@link projectKey}.
+ */
+export function projectApi(slug: string) {
+  const base = `/projects/${encodeURIComponent(slug)}`;
+  return {
+    slug,
+    // ---- management (portal/routes.py) --------------------------------------
+    config: () => get<ProjectConfigView>(`${base}/config`),
+    putConfig: (body: ConfigPut) => send<ProjectConfigView>("PUT", `${base}/config`, body),
+    init: (body: InitBody) => send<InitResult>("POST", `${base}/init`, body),
+    requestScan: (body: { trigger?: "manual" | "hook" | "describe"; analyze?: boolean } = {}) =>
+      send<{ run_id: number }>("POST", `${base}/scans`, body),
+    sync: () => send<{ run_id: number }>("POST", `${base}/sync`),
+    scans: () => get<{ runs: ScanRunRow[] }>(`${base}/scans`),
+    scanLog: (runId: number) => get<ScanLog>(`${base}/scans/${runId}/log`),
+    rename: (name: string) => send<ProjectDetails>("PATCH", base, { name }),
+    remove: (body: DeleteProjectBody = {}) => send<DeleteProjectResult>("DELETE", base, body),
+    scanEstimate: () => get<ScanEstimate>(`${base}/scan-estimate`),
+    streamScanEvents: (
+      runId: number,
+      onEvent: (event: ScanEvent, id: string | null) => void,
+      opts: { signal?: AbortSignal; lastEventId?: string | null } = {},
+    ) => streamScanEvents(`${base}/scans/${runId}/events`, onEvent, opts),
+
+    search: (query: string, limit = 20) =>
+      get<{ query: string; results: SearchResult[] }>(
+        `${base}/search?q=${encodeURIComponent(query)}&limit=${limit}`,
+      ),
+    tree: (opts: { dir?: string; node?: string } = {}) => {
+      const params = new URLSearchParams();
+      if (opts.dir) params.set("dir", opts.dir);
+      if (opts.node) params.set("node", opts.node);
+      const qs = params.toString();
+      return get<{ entries: TreeEntry[] }>(`${base}/tree${qs ? `?${qs}` : ""}`);
+    },
+    overview: (expanded = "") =>
+      get<OverviewGraph>(`${base}/graph/overview?expanded=${encodeURIComponent(expanded)}`),
+    ego: (qualified_name: string) =>
+      get<EgoGraph>(`${base}/graph/ego?qualified_name=${q(qualified_name)}`),
+    // qualified_name goes in the query string (a file node's qn is a path with
+    // slashes; a path segment would break routing - see serve/routes.py).
+    node: (qualified_name: string) =>
+      get<NodeDetail>(`${base}/node?qualified_name=${q(qualified_name)}`),
+    rationaleRead: (qualified_name: string) =>
+      get<RationaleCard>(`${base}/node/rationale?qualified_name=${q(qualified_name)}`),
+    rationaleGenerate: (qualified_name: string) =>
+      send<RationaleCard>("POST", `${base}/node/rationale?qualified_name=${q(qualified_name)}`),
+    evidence: (qualified_name: string, limit = 20) =>
+      get<EvidenceResponse>(
+        `${base}/node/evidence?qualified_name=${q(qualified_name)}&limit=${limit}`,
+      ),
+    history: (path: string, limit = 20) =>
+      get<HistoryResponse>(`${base}/history?path=${encodeURIComponent(path)}&limit=${limit}`),
+
+    // ---- chat ---------------------------------------------------------------
+    chatProviders: () => get<ChatProvider[]>(`${base}/chat/providers`),
+    chatModels: (provider: string) =>
+      get<ChatModels>(`${base}/chat/models?provider=${encodeURIComponent(provider)}`),
+    chatSessions: () => get<ChatSession[]>(`${base}/chat/sessions`),
+    chatCreateSession: (body: { provider?: string; model?: string; title?: string }) =>
+      send<ChatSession>("POST", `${base}/chat/sessions`, body),
+    chatTranscript: (id: number) => get<ChatTranscript>(`${base}/chat/sessions/${id}`),
+    chatUpdateSession: (
+      id: number,
+      body: { title?: string; provider?: string; model?: string },
+    ) => send<ChatSession>("PATCH", `${base}/chat/sessions/${id}`, body),
+    chatDeleteSession: async (id: number): Promise<void> => {
+      const res = await fetch(`/api${base}/chat/sessions/${id}`, init("DELETE"));
+      if (!res.ok) throw await failure(res);
+    },
+    streamChat: (
+      sessionId: number,
+      content: string,
+      onEvent: (event: ChatEvent) => void,
+      signal?: AbortSignal,
+    ) => streamChat(`${base}/chat/sessions/${sessionId}/messages`, content, onEvent, signal),
+  };
+}
+
+export type ProjectApi = ReturnType<typeof projectApi>;
+
+/**
+ * Query keys are prefixed with the project slug, so two projects can never share
+ * a cache entry - isolation by construction, with no `queryClient.clear()` (which
+ * races in-flight responses). Portal-level keys use the `@portal` prefix, which no
+ * slug can equal (slugs match `[a-z0-9][a-z0-9-]*`).
+ */
+export const projectKey = (slug: string, ...parts: unknown[]) => [slug, ...parts] as const;
+export const portalKey = (...parts: unknown[]) => ["@portal", ...parts] as const;
 
 /**
  * POST a chat message and consume the SSE response, calling `onEvent` per frame.
  *
  * Hand-rolled rather than `EventSource`, which is GET-only and so cannot carry
- * the message body — and adding a dependency for ~20 lines of framing isn't
+ * the message body - and adding a dependency for ~20 lines of framing isn't
  * worth it. Must be called from a user action, never an effect: StrictMode
  * double-invokes effects in dev, which would send the turn twice.
  *
  * `signal` powers the Stop button. Aborting mid-stream leaves the server's
- * generator to persist whatever it has (GeneratorExit) — the transcript stays
+ * generator to persist whatever it has (GeneratorExit) - the transcript stays
  * consistent, so the caller can simply refetch it.
  *
  * Resolves when the stream ends. Rejects on a *transport* failure; a provider
  * failure arrives as an in-band `{type: "error"}` frame instead, because the
  * HTTP status was already committed before the first token.
  */
-export async function streamChat(
-  sessionId: number,
+async function streamChat(
+  path: string,
   content: string,
   onEvent: (event: ChatEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const res = await fetch(`/api/chat/sessions/${sessionId}/messages`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content }),
-    signal,
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new ApiError(res.status, body.detail ?? body.error ?? res.statusText);
-  }
+  const res = await fetch(`/api${path}`, init("POST", { content }, signal));
+  if (!res.ok) throw await failure(res);
   if (!res.body) throw new ApiError(res.status, "streaming is unsupported here");
 
   const reader = res.body.getReader();
@@ -372,10 +774,63 @@ export async function streamChat(
         onEvent(JSON.parse(line.slice(5).trim()) as ChatEvent);
       } catch {
         // A truncated final frame (server killed mid-write) is not worth
-        // failing the whole turn over — the UI already has everything before it.
+        // failing the whole turn over - the UI already has everything before it.
       }
     }
   }
 }
 
-export { ApiError };
+/**
+ * Consume a scan run's SSE stream with `fetch` (never `EventSource`: the portal
+ * requires the `X-WhyGraph-Client` header on every request, and `EventSource`
+ * cannot send one). Mirrors {@link streamChat}'s framing, plus what a long-lived
+ * GET needs: `id:` tracking and a `Last-Event-ID` resume header.
+ *
+ * `onEvent` receives each data frame, including the terminal `end` and the
+ * `shutdown` frame (both carry their kind in the payload's `type`); `: heartbeat`
+ * comments are ignored. Resolves when the stream closes, returning the last frame
+ * id seen so the caller can reconnect with it. Rejects on a transport failure or a
+ * non-2xx status.
+ */
+async function streamScanEvents(
+  path: string,
+  onEvent: (event: ScanEvent, id: string | null) => void,
+  opts: { signal?: AbortSignal; lastEventId?: string | null } = {},
+): Promise<string | null> {
+  const headers: Record<string, string> = { ...CLIENT_HEADERS, Accept: "text/event-stream" };
+  if (opts.lastEventId) headers["Last-Event-ID"] = opts.lastEventId;
+  const res = await fetch(`/api${path}`, { method: "GET", headers, signal: opts.signal });
+  if (!res.ok) throw await failure(res);
+  if (!res.body) throw new ApiError(res.status, "streaming is unsupported here");
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let lastId = opts.lastEventId ?? null;
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let boundary: number;
+    while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      let id: string | null = null;
+      let data: string | null = null;
+      for (const line of block.split("\n")) {
+        if (line.startsWith("id:")) id = line.slice(3).trim();
+        else if (line.startsWith("data:")) data = line.slice(5).trim();
+      }
+      if (id !== null) lastId = id;
+      if (data === null) continue; // a `: heartbeat` comment frame
+      try {
+        onEvent(JSON.parse(data) as ScanEvent, id);
+      } catch {
+        // A truncated final frame is not worth failing the view over.
+      }
+    }
+  }
+  return lastId;
+}

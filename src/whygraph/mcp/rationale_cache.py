@@ -9,15 +9,18 @@ forces a regeneration on the next call; the stale row is overwritten by
 
 Notes
 -----
-:attr:`whygraph.core.config.RationaleConfig.model` can be ``None``
-(meaning *use whatever model the provider's adapter defaults to*). The
-cache PK still needs a deterministic ``model`` token at lookup time —
-*before* the LLM call returns and reports its actual model identity — so
-``None`` is translated to the literal string ``"default"`` via
-:func:`_model_key`. The LLM-reported identity is persisted separately in
-:attr:`RationaleCache.actual_model` so rows keyed under ``"default"``
-keep their provenance. Pinning ``rationale.model`` in ``whygraph.toml``
-gives the cleanest per-model cache semantics.
+Callers key on :meth:`whygraph.core.config.Config.cache_identity`
+(``"rationale"``), whose model is ``None`` unless one is *pinned* by
+``[rationale].model`` or ``[llm].model`` (meaning *use whatever model the
+provider defaults to*). The cache PK still needs a deterministic
+``model`` token at lookup time — *before* the LLM call returns and
+reports its actual model identity — so ``None`` is translated to the
+literal string ``"default"`` via :func:`_model_key`. That is also the
+1.x token, so a 1.x config (including one that pins only a deprecated
+``[llm.<provider>].model``) keeps hitting its old rows, while changing
+``[llm].model`` changes the key. The LLM-reported identity is persisted
+separately in :attr:`RationaleCache.actual_model` so rows keyed under
+``"default"`` keep their provenance.
 
 The fingerprint is computed only over commit SHAs — PR/issue updates
 that don't change the underlying commit set do not invalidate the cache.
@@ -89,9 +92,9 @@ def lookup_cached(
         :func:`whygraph.mcp.evidence.collect_evidence` — its commit SHAs
         drive the fingerprint check.
     provider
-        LLM provider tag from :attr:`RationaleConfig.provider`.
+        LLM provider tag from ``Config.cache_identity("rationale")``.
     config_model
-        Configured model name (or ``None`` for the provider default);
+        Pinned model name (or ``None`` for the provider default);
         translated to the cache-key token via :func:`_model_key`.
 
     Returns

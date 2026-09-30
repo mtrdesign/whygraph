@@ -30,8 +30,9 @@ Examples
 ...         print(pr.number, pr.title)
 """
 
+from .access import RepoAccess, check_repo_access, github_env
 from .client import GitHubClient
-from .exceptions import GitHubError
+from .exceptions import GitHubError, RepoAccessError
 from .issue import Issue
 from .issues import Issues
 from .pull_request import Comment, PullRequest
@@ -45,4 +46,8 @@ __all__ = [
     "Issues",
     "PullRequest",
     "PullRequests",
+    "RepoAccess",
+    "RepoAccessError",
+    "check_repo_access",
+    "github_env",
 ]

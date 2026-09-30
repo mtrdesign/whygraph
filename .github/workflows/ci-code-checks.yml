@@ -1,7 +1,8 @@
 name: CI Code Checks
 
-# Runs on every pull request: lints with ruff (lint + format check) and runs
-# the pytest suite. Both jobs run in parallel and gate the PR.
+# Runs on every pull request: lints with ruff (lint + format check), runs the
+# pytest suite, and typechecks / tests / builds the playground frontend. The
+# three jobs run in parallel and gate the PR.
 
 on:
   pull_request:
@@ -48,3 +49,32 @@ jobs:
 
       - name: Run pytest
         run: uv run pytest
+
+  frontend:
+    name: Frontend (typecheck, Vitest, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/playground
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: src/playground/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Vitest
+        run: npm test
+
+      - name: Build
+        run: npm run build

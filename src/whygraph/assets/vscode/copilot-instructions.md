@@ -46,7 +46,7 @@ This project ships a CodeGraph index (`.codegraph/`) and the `codegraph_*` MCP t
 - **Don't pull large `codegraph_explore` / `codegraph_context` output into your working context** for simple questions — those return whole source sections and bloat the conversation. Use the lightweight tools above for targeted lookups, and reserve the bulk-source tools for genuine deep dives.
 - **Index lag**: the watcher debounces ~500ms behind writes; don't re-query immediately after editing a file in the same turn.
 
-If `.codegraph/` doesn't exist, the MCP server reports "not initialized" — ask the user whether to run `whygraph scan` (which builds / refreshes the index) before relying on these tools.
+If `.codegraph/` doesn't exist, the MCP server reports "not initialized" — ask the user whether to scan from the WhyGraph portal (or run `whygraph scan` outside it), which builds / refreshes the index, before relying on these tools.
 
 ## What NOT to do
 

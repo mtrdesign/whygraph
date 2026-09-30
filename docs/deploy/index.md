@@ -1,7 +1,7 @@
 # Docker & Self-Hosting
 
-WhyGraph ships as a self-contained image, so there are two ways to run it. Both use the same image;
-they differ in who's driving - you at a terminal, or an application over MCP.
+WhyGraph ships as one self-contained image, and the **portal** runs from it. The same image serves two
+kinds of driver - you at a browser and an editor, or an application over MCP.
 
 <div class="grid cards" markdown>
 
@@ -9,8 +9,8 @@ they differ in who's driving - you at a terminal, or an application over MCP.
 
     ---
 
-    Install the Docker shim, then `init` and `scan` your repos, wire your editor, and `serve` the
-    web panel - no Python or Node on the host. This is the default install.
+    Install the Docker shim, start the portal with `whygraph up`, and add your repos from the browser -
+    no Python or Node on the host. This is the default install.
 
     [:octicons-arrow-right-24: Run with Docker](docker.md)
 
@@ -18,8 +18,8 @@ they differ in who's driving - you at a terminal, or an application over MCP.
 
     ---
 
-    A containerized `whygraph-mcp` endpoint that real applications - not just editors - connect to
-    for git-based analysis of a target repo.
+    The portal container is a long-lived service with an HTTP MCP endpoint per project that real
+    applications - not just editors - connect to for git-based analysis of a repo.
 
     [:octicons-arrow-right-24: WhyGraph as a service](service.md)
 

@@ -1,9 +1,12 @@
 """SQLAlchemy engine and session factory for WhyGraph's SQLModel layer.
 
-Module-level lazy engine bound to the WhyGraph SQLite database
+Module-level lazy engines bound to the WhyGraph SQLite database
 (``.whygraph/whygraph.db`` by default, overridable via
 ``whygraph.toml``'s ``whygraph_db`` key — see
-:class:`whygraph.core.Config`).
+:class:`whygraph.core.Config`). One engine is cached per resolved DB
+path, so a process serving several projects through
+:func:`whygraph.core.context.use_project` gets one engine per project;
+a CLI process only ever resolves one path and so still has one engine.
 
 The engine sits alongside the hand-rolled :mod:`whygraph.scan.db` layer
 in the same SQLite file; the two layers coexist without interfering
@@ -23,6 +26,7 @@ across threads.
 
 from __future__ import annotations
 
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -31,7 +35,7 @@ from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, create_engine
 
-from whygraph.core import get_config
+from whygraph.core import _resolve_root, get_config
 
 # Path constants duplicated locally to honor the "leave scan/db.py
 # alone" constraint of the initial DB-layer plumbing PR. If the
@@ -41,21 +45,8 @@ from whygraph.core import get_config
 _DB_DIR_NAME = ".whygraph"
 _DB_FILE_NAME = "whygraph.db"
 
-_engine: Engine | None = None
-
-
-def _project_root() -> Path:
-    """Git repo root containing ``cwd``, falling back to ``cwd`` itself.
-
-    Walks up to the nearest ``.git`` marker. Mirrors the resolution used
-    by :func:`whygraph.core.get_config` so the default DB path tracks the
-    same notion of "project root" as the rest of the package.
-    """
-    start = Path.cwd().resolve()
-    for candidate in [start, *start.parents]:
-        if (candidate / ".git").exists():
-            return candidate
-    return Path.cwd()
+_engines: dict[Path, Engine] = {}
+_engines_lock = threading.Lock()
 
 
 def _resolved_db_path() -> Path:
@@ -63,7 +54,7 @@ def _resolved_db_path() -> Path:
     override = get_config().whygraph_db
     if override is not None:
         return override
-    return _project_root() / _DB_DIR_NAME / _DB_FILE_NAME
+    return _resolve_root() / _DB_DIR_NAME / _DB_FILE_NAME
 
 
 def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:  # noqa: ANN001
@@ -99,31 +90,69 @@ def _build_engine(path: Path) -> Engine:
 
 
 def get_engine() -> Engine:
-    """Return the process-wide SQLAlchemy :class:`Engine`, building it lazily.
+    """Return the SQLAlchemy :class:`Engine` for the current project's DB.
 
-    The engine is bound to the path returned by
+    The engine is bound to the path derived from
     :func:`whygraph.core.get_config` (``whygraph_db`` override, else the
-    project-relative default ``.whygraph/whygraph.db``). The PRAGMA
+    project-relative default ``.whygraph/whygraph.db``). Both lookups
+    honour a bound :func:`whygraph.core.context.use_project` context, so
+    the path is the bound project's DB when there is one. The PRAGMA
     listener (WAL + foreign keys) is registered before the engine is
     returned, so the very first checkout already has them applied.
 
     Returns
     -------
     Engine
-        The shared engine. Repeated calls return the same instance.
+        The cached engine for the resolved DB path. Repeated calls for
+        the same path return the same instance.
+
+    Raises
+    ------
+    whygraph.core.context.ProjectContextError
+        If strict mode is on and no project context is bound.
     """
-    global _engine
-    if _engine is None:
-        _engine = _build_engine(_resolved_db_path())
-    return _engine
+    path = _resolved_db_path()
+    key = path.resolve()
+    engine = _engines.get(key)
+    if engine is None:
+        with _engines_lock:
+            engine = _engines.get(key)
+            if engine is None:
+                engine = _engines[key] = _build_engine(path)
+    return engine
+
+
+def dispose_engine(path: Path) -> bool:
+    """Dispose and forget the cached engine for one DB file, if there is one.
+
+    Used when a project is unregistered, so no pooled connection outlives
+    the registration (a re-add then opens a fresh engine).
+
+    Parameters
+    ----------
+    path : Path
+        The DB file path (resolved before lookup, like :func:`get_engine`).
+
+    Returns
+    -------
+    bool
+        Whether an engine was cached for that path.
+    """
+    with _engines_lock:
+        engine = _engines.pop(Path(path).resolve(), None)
+    if engine is None:
+        return False
+    engine.dispose()
+    return True
 
 
 def _reset_engine() -> None:
-    """Drop the cached engine. Test-only — not part of the public API."""
-    global _engine
-    if _engine is not None:
-        _engine.dispose()
-    _engine = None
+    """Dispose and drop every cached engine. Test-only — not public API."""
+    with _engines_lock:
+        engines = list(_engines.values())
+        _engines.clear()
+    for engine in engines:
+        engine.dispose()
 
 
 @contextmanager
@@ -154,4 +183,4 @@ def get_session() -> Iterator[Session]:
         session.close()
 
 
-__all__ = ["get_engine", "get_session"]
+__all__ = ["dispose_engine", "get_engine", "get_session"]

@@ -26,7 +26,7 @@ def test_rationale_defaults_when_section_omitted(tmp_path: Path) -> None:
     cfg = Config.from_toml(config)
 
     assert cfg.rationale == RationaleConfig()
-    assert cfg.rationale.provider == "anthropic"
+    assert cfg.model_for("rationale")[0] == "anthropic"
     assert cfg.rationale.model is None
     assert cfg.rationale.timeout_sec is None
 
@@ -68,7 +68,7 @@ def test_rationale_unknown_key_warns_but_loads(
         cfg = Config.from_toml(config)
 
     assert any("bogus" in r.message for r in caplog.records)
-    assert cfg.rationale.provider == "anthropic"
+    assert cfg.model_for("rationale")[0] == "anthropic"
 
 
 def test_rationale_pr_render_cap_defaults(tmp_path: Path) -> None:

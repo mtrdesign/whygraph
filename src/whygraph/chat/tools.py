@@ -74,7 +74,10 @@ MAX_RESULT_CHARS = 30_000
 
 TRUNCATION_MARKER = "...[truncated]"
 
-_NO_CODEGRAPH = "CodeGraph index unavailable — run `whygraph scan`"
+_NO_CODEGRAPH = (
+    "CodeGraph index unavailable — scan from the WhyGraph portal "
+    "(or run `whygraph scan` outside it)"
+)
 """Mirrors the Explorer's 503 message (``serve/routes.py``), but as tool
 content: the WhyGraph and file tools still work without an index, so a
 missing index degrades the conversation rather than ending it."""
@@ -957,8 +960,8 @@ class ToolRegistry:
         if not evidence:
             return {"status": "no_evidence", "target": target_dict(target)}
 
-        config = get_config().rationale
-        cached = lookup_cached(target, evidence, config.provider, config.model)
+        provider, pinned_model = get_config().cache_identity("rationale")
+        cached = lookup_cached(target, evidence, provider, pinned_model)
         if cached is not None:
             rationale, cached_at = cached
             return {

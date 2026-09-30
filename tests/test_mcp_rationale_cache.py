@@ -194,3 +194,52 @@ def test_fingerprint_independent_of_evidence_order() -> None:
     ]
     e2 = list(reversed(e1))
     assert _fingerprint(e1) == _fingerprint(e2)
+
+
+def test_cache_key_follows_config_v2_model_resolution(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row cached under a 1.x config (key ``"default"``) keeps hitting for
+    an old file that pins only a deprecated ``[llm.<provider>].model``, while
+    setting or changing ``[llm].model`` changes the key."""
+    from sqlmodel import select
+
+    from whygraph import core
+    from whygraph.core.config import Config
+
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    _CountingGenerator.reset()
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _CountingGenerator)
+
+    def _use(raw: dict) -> None:
+        raw = {**raw, "whygraph_db": str(whygraph_db_initialized)}
+        monkeypatch.setattr(core, "_config", Config.from_dict(raw, temp_git_repo))
+
+    def _brief() -> dict:
+        return whygraph_rationale_brief(path="sample.py", line_start=1, line_end=3)
+
+    _use({})  # 1.x defaults: nothing pinned
+    _brief()
+    with get_session() as session:
+        keys = {(r.provider, r.model) for r in session.exec(select(RationaleCache))}
+    assert keys == {("anthropic", "default")}
+    assert _CountingGenerator.calls == 1
+
+    _use({"llm": {"anthropic": {"model": "claude-sonnet-4-5"}}})  # deprecated pin
+    _brief()
+    assert _CountingGenerator.calls == 1  # old row still hits
+
+    _use({"llm": {"model": "anthropic/claude-sonnet-4-5"}})  # v2 pin
+    _brief()
+    assert _CountingGenerator.calls == 2  # new key, regenerated
+
+    _use({"llm": {"model": "anthropic/claude-opus-4-7"}})  # changed pin
+    _brief()
+    assert _CountingGenerator.calls == 3
+
+    _use({})  # back to unpinned: the original row is still there
+    _brief()
+    assert _CountingGenerator.calls == 3

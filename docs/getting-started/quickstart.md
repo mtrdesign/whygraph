@@ -1,81 +1,56 @@
 # Quickstart
 
-You've [installed WhyGraph](installation.md). Now point it at a repo. This is the happy path: init,
-scan, wire an editor, sanity-check.
+You've [installed WhyGraph](installation.md). The happy path is three moves: **install, `whygraph up`,
+browser**. There is no per-repo command to run first.
 
-## 1. Initialize
-
-From the repo you want to analyze:
+## 1. Start the portal
 
 ```bash
-whygraph init
+whygraph up --add-folder ~/Work    # the folder that holds your repos
 ```
 
-On a terminal this runs a short guided setup - pick your agent, the analyze/rationale LLMs (with
-optional API keys), the source-control provider (with an optional GitHub token), and whether to
-install the [auto-rescan git hooks](../guide/scanning.md#keep-it-fresh) - then review a summary that
-masks every secret and confirm. It creates `.whygraph/whygraph.db`, writes a commented
-`whygraph.example.toml` (never any secrets) and a ready-to-run `whygraph.toml` (with the secrets you
-entered), adds the right `.gitignore` entries, and reconciles `.git/hooks`. Every prompt is defaulted,
-so a bare Enter accepts it. It's idempotent - run it again any time; an existing `whygraph.toml` is
-only touched if you ask. It does *not* index CodeGraph yet; that's the next step.
+This starts the WhyGraph portal in one background container, `127.0.0.1` only, and shares that folder
+with it. Drop `--add-folder` to start without sharing anything yet; you can share later. See
+[Start the portal](../portal/start.md) and [Shared folders](../portal/shared-folders.md).
 
-Prefer no prompts? `whygraph init --yes` accepts every default without asking and writes a default
-`whygraph.toml` if none exists. Off a TTY - pipes, CI, the git hooks - `init` also runs without
-prompting, but there it refreshes only `whygraph.example.toml` and leaves `whygraph.toml` alone;
-pass `--yes` when you want the non-interactive run to write it.
+## 2. Open it in the browser
 
-## 2. Scan
+Open <http://127.0.0.1:8765>. The first time, enter your name on the Welcome screen. You land on an
+empty **Projects** page.
 
-```bash
-whygraph scan
-```
+## 3. Add a project
 
-`scan` walks your git history and, optionally, crawls the remote for PRs and issues; recovers the
-original commits behind squash-merged PRs; resolves commit addresses into one row per person; and
-writes a per-commit LLM description. The CodeGraph index refreshes in the background alongside all of
-it. That fills `.whygraph/whygraph.db` with the evidence WhyGraph serves, and closes with a panel
-summarizing each phase.
+Choose **New project**, pick a repository from your shared folders (or paste a GitHub URL), and follow
+the four steps:
 
-!!! note "The remote crawl is off by default"
-    A fresh scan stays git-only and needs no token, because `[scan].provider` defaults to `"off"`. To
-    pull PRs and issues, set `provider = "github"` (or `"auto"`) in `whygraph.toml`.
+1. **Source** - the repository.
+2. **Configure** - models and provider keys. Set keys once under **Settings** and every project
+   inherits them.
+3. **Initialize** - review the preview, choose which agents to connect, confirm.
+4. **First scan** - reads git history and refreshes the CodeGraph index, with live progress. It never
+   calls an LLM, so it is free and fast.
 
-For a fast, offline pass - no remote calls, no LLM - skip both phases:
+!!! warning "Enter your keys in the portal"
+    `ANTHROPIC_API_KEY`, `GH_TOKEN` and the other credentials in your shell environment do **not**
+    reach WhyGraph. Enter them under Settings. See [Upgrading from 1.x](../portal/upgrading.md#credentials-from-your-shell-environment).
 
-```bash
-whygraph scan --no-remote --skip-analyze
-```
+[Adding projects](../portal/projects.md) covers each step in detail.
 
-Descriptions backfill lazily later, so this is a fine way to get started quickly. See
-[Scanning your repo](../guide/scanning.md) for what each phase does.
+## 4. Browse, then ask your editor
 
-!!! tip "Prefer a visual view?"
-    Once you've scanned, `whygraph serve` opens a local web panel with two views: the
-    [Explorer](../guide/playground.md) over the graph, evidence, and rationale, and a
-    [chat assistant](../guide/chat.md) that answers questions about the repo by calling WhyGraph's
-    tools. Browse it instead of - or alongside - your editor.
+The project opens in the [Explorer](../guide/playground.md): the code graph with rationale and
+evidence side by side, and a [Chat assistant](../guide/chat.md) that answers questions by calling
+WhyGraph's tools.
 
-## 3. Wire your editor
+Your agent connected during Initialize. Approve the `whygraph` server when it asks (Claude Code) or trust
+the project (Codex), then ask why a function exists and WhyGraph answers from history. See
+[Connecting agents](../portal/agents.md).
 
-Register the MCP server with your agent. For Claude Code:
+## Descriptions when you want them
 
-```bash
-whygraph init --agent claude
-```
-
-That writes `.mcp.json` at the repo root and copies the bundled assets into `.claude/`. Other agents
-work the same way, each with its own config path and asset destination - `--agent cursor`,
-`--agent vscode`, `--agent codex`. See [Wiring your editor](../guide/editors.md).
-
-## 4. Sanity-check the server
-
-```bash
-whygraph-mcp   # Ctrl-C to exit
-```
-
-If it launches without error, your editor can launch it too. That's it - ask your assistant why a
-function exists, and WhyGraph answers from history.
+After the first scan, the project offers **Describe now**, with the commit count, the model and a cost
+estimate, to write the LLM description for each commit. Skip it and descriptions backfill on demand.
+See [Scanning your repo](../guide/scanning.md).
 
 ## Where to next
 
@@ -97,12 +72,12 @@ function exists, and WhyGraph answers from history.
 
     [:octicons-arrow-right-24: MCP usage](../guide/mcp-usage.md)
 
--   :material-graph-outline:{ .lg .middle } __Explorer playground__
+-   :material-shield-lock-outline:{ .lg .middle } __Security model__
 
     ---
 
-    Browse the graph, evidence, and rationale in a local web panel.
+    What the portal exposes, and what it never does.
 
-    [:octicons-arrow-right-24: Playground](../guide/playground.md)
+    [:octicons-arrow-right-24: Security](../portal/security.md)
 
 </div>

@@ -27,6 +27,7 @@ from whygraph.scan.codegraph_crawler import CodeGraphCrawler
 from whygraph.scan.crawler import Crawler
 from whygraph.scan.git_crawler import GitCrawler
 from whygraph.scan.github_crawler import GitHubCrawler
+from whygraph.scan.json_progress import JsonProgress
 from whygraph.scan.pr_origin_enricher import PROriginEnricher
 
 __all__ = [
@@ -36,5 +37,6 @@ __all__ = [
     "Crawler",
     "GitCrawler",
     "GitHubCrawler",
+    "JsonProgress",
     "PROriginEnricher",
 ]

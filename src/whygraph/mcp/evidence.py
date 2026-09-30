@@ -54,8 +54,9 @@ _TOOL_DESCRIPTION = (
     "own its lines (via git blame), plus the pull requests containing those "
     "commits and the issues those PRs close. Pass either (path, line_start, "
     "line_end) or a qualified_name (resolved to a file/line range via "
-    "CodeGraph). Returns {target, evidence}. Run `whygraph scan` first to "
-    "populate the WhyGraph database."
+    "CodeGraph). Returns {target, evidence}. Scan from the WhyGraph portal "
+    "(or run `whygraph scan` outside it) first to populate the WhyGraph "
+    "database."
 )
 
 
@@ -180,7 +181,8 @@ def collect_evidence(target: Target, *, limit: int = 20) -> list[CommitEvidence]
         return _collect_evidence_against_db(repo, target, initial, limit)
     except OperationalError as exc:
         raise WhyGraphError(
-            "WhyGraph DB is missing or unscanned — run `whygraph scan` first"
+            "WhyGraph DB is missing or unscanned — scan from the WhyGraph portal "
+            "(or run `whygraph scan` outside it) first"
         ) from exc
 
 
@@ -522,7 +524,7 @@ def backfill_evidence_descriptions(
     from whygraph.services.llm import LlmError
 
     try:
-        descriptor = LlmDescriptor.from_config(get_config().analyze)
+        descriptor = LlmDescriptor.from_config(get_config())
     except LlmError as exc:
         _log.debug("skipping lazy LLM description backfill: %s", exc)
         return

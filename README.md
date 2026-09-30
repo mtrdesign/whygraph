@@ -4,7 +4,7 @@ Rationale layer over [CodeGraph](https://github.com/colbymchenry/codegraph): exp
 
 For each chunk of code, WhyGraph collects evidence from git history and GitHub - commits, blame, PRs, the issues those PRs closed - then serves it to AI editors over MCP, plus an on-demand rationale card (purpose, why, constraints, tradeoffs, risks) with a persistent cache.
 
-`whygraph serve` puts the same data in a local web panel: an **Explorer** over the code graph, and a **Chat assistant** that answers questions about the repo by calling WhyGraph's own tools.
+The **WhyGraph portal** puts the same data in a local web panel: one server for all your projects, with an **Explorer** over the code graph and a **Chat assistant** that answers questions about the repo by calling WhyGraph's own tools. Each project also gets an HTTP MCP endpoint for your editor.
 
 > **📖 Full documentation → <https://mtrdesign.github.io/whygraph/>**
 >
@@ -12,21 +12,22 @@ For each chunk of code, WhyGraph collects evidence from git history and GitHub -
 
 ## Quickstart
 
-Install WhyGraph once, then from the repo you want to analyze:
+Install WhyGraph once, start the portal, and add your repos from the browser:
 
 ```bash
-whygraph init                 # bootstrap the WhyGraph DB + write config
-whygraph scan                 # crawl history + refresh CodeGraph + LLM descriptions
-whygraph init --agent claude  # wire the MCP server into your editor
-whygraph-mcp                  # sanity-check the server (Ctrl-C to exit)
-whygraph serve                # open the Explorer + Chat panel at http://localhost:8765
+whygraph up --add-folder ~/Work   # start the portal, sharing the folder that holds your repos
+# open http://127.0.0.1:8765, then add a project: configure, initialize, first scan
 ```
 
-The only-Docker install needs nothing but Docker on the host — one command pulls the image and
+The portal initializes each repo, connects your agents over HTTP MCP, runs every scan, and keeps
+projects fresh from git hooks. Enter API keys and tokens under Settings - variables in your shell do not
+reach it.
+
+The only-Docker install needs nothing but Docker on the host - one command pulls the image and
 installs the shims from inside it. The tag in the URL is the version you get:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.2/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v2.0.0/scripts/install.sh | sh
 ```
 
 See the [Getting Started guide](https://mtrdesign.github.io/whygraph/getting-started/) for every install path and the [Quickstart](https://mtrdesign.github.io/whygraph/getting-started/quickstart/) for the walkthrough.
@@ -37,7 +38,7 @@ See the [Getting Started guide](https://mtrdesign.github.io/whygraph/getting-sta
 uv sync                       # bootstrap .venv and install deps
 uv run pytest                 # full test suite
 uv run whygraph version       # CLI sanity check
-uv run whygraph-mcp           # launch MCP server on stdio
+make dev                      # dev portal (:8765) + Vite HMR (:5173); open :5173
 make docs                     # serve the documentation site locally
 ```
 

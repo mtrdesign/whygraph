@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, streamChat, type ChatSession } from "../../api";
-import { EmptyState, Spinner } from "../../lib/ui";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import type { ChatSession } from "../../api";
+import { useProjectApi, useProjectKey, useProjectQuery } from "../../lib/project";
+import { Loading } from "../Loading";
+import { Empty, EmptyDescription } from "../ui/empty";
 import { MessageBubble, type AssistantTurn, type Turn } from "./MessageBubble";
 import { Composer } from "./Composer";
 import { ModelSelect } from "./ModelSelect";
@@ -36,21 +38,22 @@ export function MessageThread({
   session?: ChatSession;
 }) {
   const queryClient = useQueryClient();
+  const api = useProjectApi();
+  const key = useProjectKey();
   const [liveTurns, setLiveTurns] = useState<Turn[]>([]);
   const [streaming, setStreaming] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const transcript = useQuery({
-    queryKey: ["chat", "transcript", sessionId],
-    queryFn: () => api.chatTranscript(sessionId),
-  });
+  const transcript = useProjectQuery(["chat", "transcript", sessionId], (api) =>
+    api.chatTranscript(sessionId),
+  );
 
   const update = useMutation({
     mutationFn: (vars: { provider?: string; model?: string }) =>
       api.chatUpdateSession(sessionId, vars),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["chat", "sessions"] });
+      queryClient.invalidateQueries({ queryKey: key("chat", "sessions") });
     },
   });
 
@@ -101,7 +104,7 @@ export function MessageThread({
       ]);
 
       try {
-        await streamChat(
+        await api.streamChat(
           sessionId,
           content,
           (event) => {
@@ -158,7 +161,7 @@ export function MessageThread({
         // persisted as it went, including on abort, so this is authoritative.
         const fresh = await queryClient
           .fetchQuery({
-            queryKey: ["chat", "transcript", sessionId],
+            queryKey: key("chat", "transcript", sessionId),
             queryFn: () => api.chatTranscript(sessionId),
             // The turn just wrote rows. Without this the app-wide 30s
             // staleTime makes fetchQuery resolve from cache with the *pre-send*
@@ -180,27 +183,29 @@ export function MessageThread({
           }));
         }
         // The sidebar shows titles and message counts, both of which just moved.
-        queryClient.invalidateQueries({ queryKey: ["chat", "sessions"] });
+        queryClient.invalidateQueries({ queryKey: key("chat", "sessions") });
       }
     },
-    [queryClient, sessionId, updateLive],
+    [api, key, queryClient, sessionId, updateLive],
   );
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-auto p-4">
-        {transcript.isLoading && <Spinner label="Loading transcript…" />}
+        {transcript.isLoading && <Loading label="Loading transcript…" />}
         {transcript.isError && (
-          <div className="text-sm text-rose-400">
+          <div className="text-sm text-destructive">
             {(transcript.error as Error).message}
           </div>
         )}
         {!transcript.isLoading && turns.length === 0 && (
-          <EmptyState>
-            Ask why a module is shaped the way it is, what changed around an area
-            recently, or for a walk through a symbol's callers. The assistant reads
-            CodeGraph, the WhyGraph history, and the source to answer.
-          </EmptyState>
+          <Empty className="p-4">
+            <EmptyDescription>
+              Ask why a module is shaped the way it is, what changed around an area
+              recently, or for a walk through a symbol's callers. The assistant reads
+              CodeGraph, the WhyGraph history, and the source to answer.
+            </EmptyDescription>
+          </Empty>
         )}
         {/* Persisted turns key on their first row's id; the two live turns key
             on their kind (there is only ever one of each). Index keys would
@@ -233,7 +238,7 @@ export function MessageThread({
             }
           />
           {update.isError && (
-            <div className="mt-1 text-xs text-rose-400">
+            <div className="mt-1 text-xs text-destructive">
               {(update.error as Error).message}
             </div>
           )}

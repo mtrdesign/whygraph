@@ -1,9 +1,30 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
     <title>WhyGraph Explorer</title>
+    <script>
+      // Pre-paint theme: set the `dark` class before the first frame so a dark
+      // system (or a pinned theme) never flashes light. Mirrors src/theme.tsx:
+      // same storage key, same "system" default, and it must never throw.
+      (function () {
+        var theme = "system";
+        try {
+          var stored = localStorage.getItem("whygraph-theme");
+          if (stored === "light" || stored === "dark" || stored === "system") theme = stored;
+        } catch (e) {}
+        var dark =
+          theme === "dark" ||
+          (theme === "system" &&
+            typeof matchMedia === "function" &&
+            matchMedia("(prefers-color-scheme: dark)").matches);
+        var root = document.documentElement;
+        root.classList.toggle("dark", dark);
+        root.style.colorScheme = dark ? "dark" : "light";
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

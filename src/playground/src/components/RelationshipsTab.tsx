@@ -1,20 +1,21 @@
 import type { NodeRelations, RelationSymbol, Symbol } from "../api";
-import { useExplorer } from "../store";
-import { KindBadge, EmptyState } from "../lib/ui";
+import { useOpenNode } from "../lib/nav";
+import { KindBadge } from "./KindBadge";
+import { Empty, EmptyDescription } from "./ui/empty";
 
 // The Relationships tab: calls / called-by / imports / contained-by / children.
 // Every row is a navigation target — clicking it fires the canonical openNode().
 
 function Row({ symbol }: { symbol: RelationSymbol | Symbol }) {
-  const openNode = useExplorer((s) => s.openNode);
+  const openNode = useOpenNode();
   return (
     <button
       onClick={() => openNode(symbol.qualified_name, symbol.file_path)}
-      className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-panel2"
+      className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent"
     >
       <KindBadge kind={symbol.kind} />
-      <span className="truncate font-medium text-fg">{symbol.name}</span>
-      <span className="truncate text-xs text-muted">{symbol.file_path}</span>
+      <span className="truncate font-medium text-foreground">{symbol.name}</span>
+      <span className="truncate text-xs text-muted-foreground">{symbol.file_path}</span>
     </button>
   );
 }
@@ -23,7 +24,7 @@ function Section({ title, items }: { title: string; items: (RelationSymbol | Sym
   if (items.length === 0) return null;
   return (
     <div className="mb-3">
-      <div className="px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-muted">
+      <div className="px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
         {title} ({items.length})
       </div>
       {items.map((s, i) => (
@@ -41,7 +42,12 @@ export function RelationshipsTab({ relations }: { relations: NodeRelations }) {
     relations.children.length === 0 &&
     !relations.container;
 
-  if (empty) return <EmptyState>No relationships recorded for this symbol.</EmptyState>;
+  if (empty)
+    return (
+      <Empty className="p-4">
+        <EmptyDescription>No relationships recorded for this symbol.</EmptyDescription>
+      </Empty>
+    );
 
   return (
     <div className="p-2">

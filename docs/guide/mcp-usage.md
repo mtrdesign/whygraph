@@ -1,6 +1,6 @@
 # Using WhyGraph (MCP)
 
-Once your editor is wired, WhyGraph works through MCP - your assistant calls its tools mid-task, the
+Once your editor is connected to the portal, WhyGraph works through MCP - your assistant calls its tools mid-task, the
 way it would any other tool. This page shows what's available and when to reach for each. For exact
 signatures, see the [MCP reference](../reference/mcp.md).
 

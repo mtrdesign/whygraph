@@ -3,7 +3,8 @@
 Wraps the SQLModel-via-Alembic schema management behind one idempotent
 ``ensure_initialized()`` entry point.
 
-Used by the ``whygraph init`` CLI command and reusable from tests that
+Used by ``whygraph scan`` and the portal (which bootstraps a project DB
+on Initialize, under the project context), and reusable from tests that
 need a fully-materialized DB on disk.
 """
 

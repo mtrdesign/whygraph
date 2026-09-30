@@ -1,4 +1,4 @@
-"""Tests for ``[scan].provider`` gating in the scan command.
+"""Tests for ``[scan].forge`` gating in the scan command.
 
 Pins :func:`whygraph.cli.commands.scan._select_github_client` — the small
 resolver that maps the configured provider to a GitHub client (or
@@ -23,7 +23,7 @@ from whygraph.cli.commands.scan import (
 
 def _cfg(provider: str, token: str | None) -> SimpleNamespace:
     """Minimal stand-in exposing the two attrs ``_apply_github_token`` reads."""
-    return SimpleNamespace(scan_provider=provider, scan_token=token)
+    return SimpleNamespace(scan_forge=provider, scan_token=token)
 
 
 def test_provider_off_returns_none_without_calling_for_repository(
@@ -110,4 +110,4 @@ def test_skip_reason_no_remote_takes_precedence() -> None:
 
 
 def test_skip_reason_falls_back_to_provider_when_remote_enabled() -> None:
-    assert "provider = off" in _github_skip_reason(_cfg("off", None), True)
+    assert "forge = off" in _github_skip_reason(_cfg("off", None), True)

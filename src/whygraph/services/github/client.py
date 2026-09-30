@@ -14,6 +14,7 @@ plumbing required.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import cached_property
 
@@ -94,8 +95,16 @@ class GitHubClient:
         return None
 
     @staticmethod
-    def check_auth() -> None:
+    def check_auth(env: Mapping[str, str] | None = None) -> None:
         """Verify that ``gh`` is installed and authenticated.
+
+        Parameters
+        ----------
+        env : Mapping[str, str], optional
+            Complete environment for the ``gh`` call, so a candidate token
+            can be validated (build it with
+            :func:`~whygraph.services.github.access.github_env`). ``None``
+            (default) inherits the current process environment.
 
         Raises
         ------
@@ -104,7 +113,7 @@ class GitHubClient:
             unauthenticated session.
         """
         try:
-            result = Shell().run(["gh", "auth", "status"], check=False)
+            result = Shell().run(["gh", "auth", "status"], check=False, env=env)
         except FileNotFoundError as exc:
             raise GitHubError(
                 "gh CLI is not installed. Install from https://cli.github.com/"

@@ -61,7 +61,8 @@ _SURFACE = SqlSurface(
     allowed_tables=_ALLOWED_TABLES,
     db_path=lambda: Path(get_engine().url.database or ""),
     missing_db_message=(
-        "WhyGraph DB is missing or unreadable at {db_path} — run `whygraph scan` first"
+        "WhyGraph DB is missing or unreadable at {db_path} — scan from the "
+        "WhyGraph portal (or run `whygraph scan` outside it) first"
     ),
 )
 """This module's binding of the shared guard. ``db_path`` is deferred so it

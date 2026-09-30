@@ -10,17 +10,29 @@ LLM provider settings are kept as typed sub-dataclasses
 :class:`LlmConfig`. Each adapter in :mod:`whygraph.services.llm`
 consumes its own typed section via ``from_config``; the values are
 loaded from ``[llm.<provider>]`` tables in ``whygraph.toml``.
+
+Config v2 is **dict-first**: :meth:`Config.from_dict` builds a
+:class:`Config` from a plain mapping (a portal DB row, a JSON env var, a
+parsed TOML file), and :meth:`Config.from_toml` is a thin wrapper over it.
+Every input layer goes through :func:`normalize_v2` first, which maps the
+1.x spellings onto the v2 keys and reports each deprecated key once per
+process; :func:`merge_v2` deep-merges already normalized layers. Which
+``(provider, model)`` a task runs on is answered in one place,
+:meth:`Config.model_for`.
 """
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
+import re
+import threading
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
-from importlib import resources
 from pathlib import Path
-from string import Template
+from typing import NamedTuple
 
 from whygraph.core.logger import LogLevel
 
@@ -28,13 +40,6 @@ _log = logging.getLogger(__name__)
 
 CONFIG_FILENAME = "whygraph.toml"
 """Name of the project-root config file loaded by :func:`whygraph.core.get_config`."""
-
-EXAMPLE_CONFIG_FILENAME = "whygraph.example.toml"
-"""Name of the committable example config scaffolded by ``whygraph init``.
-
-Users copy it to :data:`CONFIG_FILENAME` and edit; the real ``whygraph.toml``
-is gitignored (it may hold API keys), while the example tracks the package
-defaults and is safe to commit."""
 
 
 class ConfigError(RuntimeError):
@@ -44,6 +49,101 @@ class ConfigError(RuntimeError):
     runtime errors so callers can surface a clean message instead of a
     stack trace.
     """
+
+
+KNOWN_PROVIDERS: tuple[str, ...] = (
+    "anthropic",
+    "openai",
+    "deepseek",
+    "openrouter",
+    "ollama",
+    "claude-cli",
+)
+"""Provider tags of the built-in LLM adapters.
+
+Mirrors :attr:`whygraph.services.llm.LlmClientFactory.BUILTIN_PROVIDERS`
+(a test pins the two together) - duplicated because ``core`` must not
+import from ``services``. Used to decide whether a ``[<task>].model``
+prefix names a provider."""
+
+CHAT_PROVIDERS: tuple[str, ...] = ("anthropic", "openai", "deepseek", "openrouter")
+"""Provider tags that can drive the tool-calling chat.
+
+Mirrors :data:`whygraph.services.llm.CHAT_PROVIDERS` (pinned by a test)."""
+
+TASKS: tuple[str, ...] = ("analyze", "rationale", "chat")
+"""The tasks :meth:`Config.model_for` resolves a ``(provider, model)`` for."""
+
+_LEGACY_DEFAULT_PROVIDER = "anthropic"
+"""The 1.x task-level ``provider`` default, applied **last** in v2."""
+
+# provider tag -> LlmConfig attribute. `claude_cli` is accepted as a
+# spelling of the `claude-cli` tag (the TOML section's idiom).
+_PROVIDER_ATTRS: dict[str, str] = {
+    "anthropic": "anthropic",
+    "openai": "openai",
+    "deepseek": "deepseek",
+    "openrouter": "openrouter",
+    "ollama": "ollama",
+    "claude-cli": "claude_cli",
+}
+
+
+def _canonical_provider(tag: str) -> str:
+    """Map the ``claude_cli`` spelling onto the ``claude-cli`` adapter tag."""
+    return "claude-cli" if tag == "claude_cli" else tag
+
+
+def _split_provider_model(value: str) -> tuple[str, str] | None:
+    """Split ``"provider/model"`` on the first ``/``; ``None`` if not that shape."""
+    head, sep, tail = value.partition("/")
+    if not sep or not head or not tail:
+        return None
+    return _canonical_provider(head), tail
+
+
+class ModelChoice(NamedTuple):
+    """The resolved ``(provider, model)`` pair a task runs on.
+
+    Returned by :meth:`Config.model_for`. A tuple, so callers may unpack
+    it as ``provider, model = cfg.model_for("analyze")``.
+
+    Attributes
+    ----------
+    provider : str
+        Adapter tag, e.g. ``"anthropic"`` or ``"claude-cli"``.
+    model : str or None
+        Model identifier. ``None`` only for a provider that is not built
+        in (a third-party adapter registered on the factory), whose own
+        config then supplies the model.
+    """
+
+    provider: str
+    model: str | None
+
+
+# ---------------------------------------------------------------------------
+# Deprecations: warn once per process
+# ---------------------------------------------------------------------------
+
+_warned: set[str] = set()
+_warned_lock = threading.Lock()
+
+
+def _warn_deprecated(messages: list[str]) -> None:
+    """Log each deprecation message at WARNING, at most once per process."""
+    for message in messages:
+        with _warned_lock:
+            if message in _warned:
+                continue
+            _warned.add(message)
+        _log.warning("%s", message)
+
+
+def _reset_deprecation_warnings() -> None:
+    """Forget which deprecations were logged. Test isolation only."""
+    with _warned_lock:
+        _warned.clear()
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +162,7 @@ class AnthropicConfig:
     """
 
     model: str = "claude-opus-4-7"
-    api_key: str | None = None
+    api_key: str | None = field(default=None, repr=False)
     timeout_sec: int = 60
 
 
@@ -85,7 +185,7 @@ class OpenAIConfig:
     """
 
     model: str = "gpt-4o"
-    api_key: str | None = None
+    api_key: str | None = field(default=None, repr=False)
     base_url: str | None = None
     timeout_sec: int = 60
 
@@ -107,7 +207,7 @@ class DeepSeekConfig:
     """
 
     model: str = "deepseek-chat"
-    api_key: str | None = None
+    api_key: str | None = field(default=None, repr=False)
     timeout_sec: int = 60
 
 
@@ -131,7 +231,7 @@ class OpenRouterConfig:
     """
 
     model: str = "openrouter/auto"
-    api_key: str | None = None
+    api_key: str | None = field(default=None, repr=False)
     timeout_sec: int = 60
 
 
@@ -179,7 +279,7 @@ class ClaudeCliConfig:
     """
 
     model: str = "claude-opus-4-7"
-    api_key: str | None = None
+    api_key: str | None = field(default=None, repr=False)
     timeout_sec: int = 120
     config_dir: Path | None = None
 
@@ -249,18 +349,21 @@ class AnalyzeConfig:
 
     Attributes
     ----------
-    provider : str
+    provider : str or None
         Tag of the :class:`whygraph.services.llm.LlmClient` adapter to
-        use. Must match one of :attr:`LlmClientFactory.providers` at
-        construction time; unknown providers surface as
-        :class:`whygraph.services.llm.LlmError` from
+        use. ``None`` (default) inherits the provider of ``[llm].model``,
+        else ``"anthropic"`` - resolve the effective pair with
+        :meth:`Config.model_for`. Must match one of
+        :attr:`LlmClientFactory.providers` at construction time; unknown
+        providers surface as :class:`whygraph.services.llm.LlmError` from
         :meth:`~whygraph.analyze.LlmDescriptor.from_config`, not here —
         ``core/config`` deliberately does not import from
         ``services/llm`` to keep the dependency direction clean.
     model : str or None
-        Model identifier the analyzer should use. ``None`` (default)
-        defers to the provider's own ``[llm.<provider>]`` model;
-        otherwise it overrides that model for commit descriptions only.
+        Model override for commit descriptions only. ``None`` (default)
+        defers to ``[llm].model`` (then the provider's default). A
+        ``"provider/model"`` value in a table with no ``provider`` key is
+        split, see :meth:`Config.model_for`.
     max_diff_chars : int
         Cap on diff length before prompting. Diffs longer than this are
         truncated with an explicit marker so the model knows the input
@@ -274,22 +377,29 @@ class AnalyzeConfig:
         cost a repo-wide LLM pass nor anchor every symbol to one vague
         summary. Must be ``>= 1``.
     timeout_sec : int or None
-        Per-call timeout forwarded into :class:`CompletionRequest`.
-        ``None`` (default) defers to the bound adapter's default.
+        **Deprecated** (warns; removed in 3.0) - set
+        ``[llm.<provider>].timeout_sec`` instead. Per-call timeout
+        forwarded into :class:`CompletionRequest`; ``None`` (default)
+        defers to the provider's.
     pr_origin_min_commits : int
         Commit-rich half of the squash-merge enrichment gate
         (:mod:`whygraph.scan.pr_origin_enricher`). A squash-merged PR has
         its original feature-branch commits recovered when it collapsed at
         least this many commits (the file-bulk half reuses
         ``large_commit_file_count``). Must be ``>= 1``.
+    max_workers : int
+        Thread-pool size for the LLM-description phase of a scan. Must be
+        ``>= 1``. Default ``2``. Replaces the 1.x ``[scan].max_workers``,
+        which still parses (with a deprecation warning).
     """
 
-    provider: str = "anthropic"
+    provider: str | None = None
     model: str | None = None
     max_diff_chars: int = 50_000
     large_commit_file_count: int = 30
     timeout_sec: int | None = None
     pr_origin_min_commits: int = 5
+    max_workers: int = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,8 +412,11 @@ class RationaleConfig:
 
     Attributes
     ----------
-    provider : str
+    provider : str or None
         Tag of the :class:`whygraph.services.llm.LlmClient` adapter to use.
+        ``None`` (default) inherits the provider of ``[llm].model``, else
+        ``"anthropic"`` - resolve the effective pair with
+        :meth:`Config.model_for`.
         Must match one of :attr:`LlmClientFactory.providers` at construction
         time; unknown providers surface as
         :class:`whygraph.services.llm.LlmError` from
@@ -311,12 +424,13 @@ class RationaleConfig:
         ``core/config`` deliberately does not import from ``services/llm``
         to keep the dependency direction clean.
     model : str or None
-        Model identifier the generator should use. ``None`` (default)
-        defers to the provider's own ``[llm.<provider>]`` model; otherwise
-        it overrides that model for rationale generation only.
+        Model override for rationale generation only. ``None`` (default)
+        defers to ``[llm].model`` (then the provider's default).
     timeout_sec : int or None
-        Per-call timeout forwarded into :class:`CompletionRequest`.
-        ``None`` (default) defers to the bound adapter's default.
+        **Deprecated** (warns; removed in 3.0) - set
+        ``[llm.<provider>].timeout_sec`` instead. Per-call timeout
+        forwarded into :class:`CompletionRequest`; ``None`` (default)
+        defers to the provider's.
     pr_roster_max_commits : int
         Cap on how many squashed-commit headlines are rendered into a
         single PR block in the rationale prompt. Bounds the prompt size
@@ -329,7 +443,7 @@ class RationaleConfig:
         the rationale prompt. Must be ``>= 1``.
     """
 
-    provider: str = "anthropic"
+    provider: str | None = None
     model: str | None = None
     timeout_sec: int | None = None
     pr_roster_max_commits: int = 30
@@ -339,7 +453,7 @@ class RationaleConfig:
 
 @dataclass(frozen=True, slots=True)
 class ChatConfig:
-    """Configuration for the ``whygraph serve`` chat assistant.
+    """Configuration for the portal's Chat assistant.
 
     Loaded from the ``[chat]`` table in ``whygraph.toml``. Provider and
     model here are only **defaults for new sessions** — each session
@@ -348,16 +462,15 @@ class ChatConfig:
 
     Attributes
     ----------
-    provider : str
-        Default chat provider for new sessions. Must be one of
-        ``anthropic`` / ``openai`` / ``deepseek`` / ``openrouter``;
-        unknown or non-chat tags surface as
-        :class:`whygraph.services.llm.LlmError` from
-        :func:`whygraph.services.llm.make_chat_client`, not here —
-        ``core/config`` deliberately does not import from ``services/llm``.
-    model : str
-        Default model. Empty (default) defers to the provider's own
-        ``[llm.<provider>].model``.
+    provider : str or None
+        Default chat provider for new sessions. ``None`` (default)
+        inherits the provider of ``[llm].model``, else ``"anthropic"``.
+        Must be one of :data:`CHAT_PROVIDERS`; a non-chat tag set here is
+        refused by :meth:`Config.model_for` (an inherited one falls back
+        to ``"anthropic"``).
+    model : str or None
+        Default model. ``None`` (default; an empty string normalizes to
+        it) defers to ``[llm].model``, then the provider's default.
     max_tool_rounds : int
         Hard bound on tool *rounds* — model round-trips, not individual
         tool calls, of which one round may contain many. Must be ``>= 1``.
@@ -375,8 +488,8 @@ class ChatConfig:
         in the DB and the UI — only the model's view is windowed.
     """
 
-    provider: str = "anthropic"
-    model: str = ""
+    provider: str | None = None
+    model: str | None = None
     max_tool_rounds: int = 8
     max_rationale_generations: int = 2
     context_token_budget: int = 60_000
@@ -386,9 +499,22 @@ class ChatConfig:
 class LlmConfig:
     """Aggregate of every per-provider :class:`LlmClient` configuration.
 
-    Populated from ``[llm.<provider>]`` tables in ``whygraph.toml``.
-    Each adapter in :mod:`whygraph.services.llm` is constructed from
-    its matching sub-attribute via ``Adapter.from_config(cfg.<provider>)``.
+    Populated from the ``[llm]`` table and its ``[llm.<provider>]``
+    sub-tables. Each adapter in :mod:`whygraph.services.llm` is
+    constructed from its matching sub-attribute via
+    ``Adapter.from_config(cfg.<provider>)``.
+
+    Attributes
+    ----------
+    model : str or None
+        The v2 default model for every task, as ``"provider/model"``
+        (split on the first ``/``, so ``"openrouter/openrouter/auto"`` is
+        OpenRouter's ``openrouter/auto``). ``None`` (default) leaves the
+        choice to the tasks and the provider defaults.
+    anthropic, openai, deepseek, openrouter, ollama, claude_cli
+        Per-provider connection settings (key, endpoint, ``timeout_sec``).
+        Their ``model`` field is the adapter default; setting it in
+        ``[llm.<provider>]`` is deprecated in favour of ``model`` above.
     """
 
     anthropic: AnthropicConfig = field(default_factory=AnthropicConfig)
@@ -397,6 +523,77 @@ class LlmConfig:
     openrouter: OpenRouterConfig = field(default_factory=OpenRouterConfig)
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     claude_cli: ClaudeCliConfig = field(default_factory=ClaudeCliConfig)
+    model: str | None = None
+
+    def __post_init__(self) -> None:
+        """Validate the ``[llm].model`` shape.
+
+        Raises
+        ------
+        ConfigError
+            If ``model`` is set but is not ``"provider/model"``.
+        """
+        if self.model is not None and _split_provider_model(self.model) is None:
+            raise ConfigError(
+                f'invalid llm.model: {self.model!r}, must be "provider/model" '
+                '(e.g. "anthropic/claude-opus-4-7")'
+            )
+
+    @property
+    def default_provider(self) -> str | None:
+        """The provider half of :attr:`model`, or ``None`` when unset."""
+        if self.model is None:
+            return None
+        split = _split_provider_model(self.model)
+        return split[0] if split else None
+
+    def section(self, provider: str) -> object | None:
+        """Return the typed ``[llm.<provider>]`` section, or ``None``.
+
+        Parameters
+        ----------
+        provider : str
+            A provider tag (``"claude-cli"`` and ``"claude_cli"`` both work).
+
+        Returns
+        -------
+        object or None
+            The provider's sub-config, or ``None`` for a tag that is not
+            built in.
+        """
+        attr = _PROVIDER_ATTRS.get(_canonical_provider(provider))
+        return getattr(self, attr) if attr is not None else None
+
+    def default_model(self, provider: str) -> str | None:
+        """The model ``provider`` runs when no task pins one.
+
+        ``[llm].model`` when it names this provider, else the provider
+        section's own model (a deprecated ``[llm.<provider>].model``, or
+        the adapter default). The shared tail of
+        :meth:`Config.model_for`, exposed for callers that hold only an
+        :class:`LlmConfig` (the client factories).
+
+        Parameters
+        ----------
+        provider : str
+            A provider tag.
+
+        Returns
+        -------
+        str or None
+            The model, or ``None`` for a provider that is not built in.
+        """
+        return self._default_model(provider)[0]
+
+    def _default_model(self, provider: str) -> tuple[str | None, bool]:
+        """``(model, pinned)`` for ``provider``; pinned means from ``[llm].model``."""
+        provider = _canonical_provider(provider)
+        if self.model is not None:
+            split = _split_provider_model(self.model)
+            if split is not None and split[0] == provider:
+                return split[1], True
+        section = self.section(provider)
+        return (getattr(section, "model", None) if section else None), False
 
 
 # TOML section name → (Config attribute name, sub-dataclass) so the
@@ -415,6 +612,65 @@ _LLM_SECTIONS: tuple[tuple[str, str, type], ...] = (
 )
 
 
+REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+"""What ``[scan].remote`` may be: a plain remote name, never a git option."""
+
+
+def check_scan_remote(value: str) -> str:
+    """Return ``value`` if it is a safe git remote name.
+
+    ``[scan].remote`` is passed to ``git fetch`` / ``git remote get-url``;
+    a value such as ``--upload-pack=<cmd>`` would be parsed as an option
+    and run a command. Only :data:`REMOTE_NAME_RE` is accepted.
+
+    Parameters
+    ----------
+    value : str
+        The stripped, non-empty ``[scan].remote``.
+
+    Returns
+    -------
+    str
+        ``value`` unchanged.
+
+    Raises
+    ------
+    ConfigError
+        If ``value`` does not match :data:`REMOTE_NAME_RE`.
+    """
+    if not isinstance(value, str) or not REMOTE_NAME_RE.match(value):
+        raise ConfigError(
+            f"[scan].remote must be a git remote name "
+            f"(letters, digits, '.', '_', '/', '-'), got {value!r}"
+        )
+    return value
+
+
+def check_default_branch(value: str) -> str:
+    """Return ``value`` unless it could be read as a git option.
+
+    Parameters
+    ----------
+    value : str
+        The stripped, non-empty ``[scan].default_branch``.
+
+    Returns
+    -------
+    str
+        ``value`` unchanged.
+
+    Raises
+    ------
+    ConfigError
+        If ``value`` starts with ``-`` (or is not a string).
+    """
+    if not isinstance(value, str) or value.startswith("-"):
+        raise ConfigError(
+            f"[scan].default_branch must not start with '-', got {value!r}"
+        )
+    return value
+
+
 def _parse_hooks(value: object) -> bool | tuple[str, ...]:
     """Normalize the *shape* of ``[scan].hooks``.
 
@@ -426,8 +682,9 @@ def _parse_hooks(value: object) -> bool | tuple[str, ...]:
     importing :mod:`whygraph.hooks` from ``core``, inverting the
     dependency direction of the cross-cutting leaf package.
     :func:`whygraph.hooks.resolve_hook_names` validates at the point of
-    use, and ``whygraph init`` — the only command that acts on the value
-    — surfaces a typo as a warning.
+    use, and the portal - the only caller that acts on the value (on
+    Initialize and on a ``[scan].hooks`` change) - surfaces a typo as a
+    warning.
 
     Raises
     ------
@@ -470,7 +727,9 @@ def _build_llm_config(raw: dict, base: Path) -> LlmConfig:
             p = Path(os.path.expandvars(accepted["config_dir"])).expanduser()
             accepted["config_dir"] = p if p.is_absolute() else (base / p).resolve()
         sections[attr_name] = cls(**accepted)
-    for unknown in set(raw) - {n for n, *_ in _LLM_SECTIONS}:
+    if raw.get("model") is not None:
+        sections["model"] = raw["model"]
+    for unknown in set(raw) - {n for n, *_ in _LLM_SECTIONS} - {"model"}:
         _log.warning("ignoring unknown key in [llm]: %r", unknown)
     return LlmConfig(**{k: v for k, v in sections.items() if k in known_attrs})
 
@@ -515,33 +774,228 @@ def _build_chat_config(raw: dict) -> ChatConfig:
     return ChatConfig(**{k: v for k, v in raw.items() if k in known})
 
 
+def _resolve_path(value: object, base: Path, *, expand: bool = False) -> object:
+    """Resolve a relative path string against ``base``; leave anything else as-is."""
+    if not isinstance(value, (str, os.PathLike)):
+        return value
+    p = Path(value)
+    if expand:
+        p = Path(os.path.expandvars(str(p))).expanduser()
+    return str(p if p.is_absolute() else (base / p).resolve())
+
+
+def _move_alias(
+    src: dict,
+    old: str,
+    dst: dict,
+    new: str,
+    old_label: str,
+    new_label: str,
+    warnings: list[str],
+) -> None:
+    """Move ``src[old]`` to ``dst[new]`` unless ``dst`` already has ``new``."""
+    if old not in src:
+        return
+    value = src.pop(old)
+    if new in dst:
+        warnings.append(
+            f"{old_label} is deprecated and ignored because {new_label} is also "
+            f"set; remove {old_label} (support ends in 3.0)"
+        )
+        return
+    dst[new] = value
+    warnings.append(
+        f"{old_label} is deprecated; use {new_label} instead (support ends in 3.0)"
+    )
+
+
+def _blank_model_to_none(table: dict) -> None:
+    """Normalize an empty-string ``model`` to ``None`` in place."""
+    if isinstance(table.get("model"), str) and not table["model"].strip():
+        table["model"] = None
+
+
+def normalize_v2(raw: Mapping, base: Path) -> tuple[dict, list[str]]:
+    """Translate one config layer to the v2 shape.
+
+    Applied to **each** layer (a parsed ``whygraph.toml``, a portal
+    defaults row, a project row) *before* :func:`merge_v2`, so a 1.x
+    alias on one layer and its v2 key on another never both survive into
+    the merged dict with undefined precedence. Pure: the input is
+    deep-copied and never mutated, and warnings are returned rather than
+    logged (:meth:`Config.from_dict` logs them once per process).
+
+    Translation, in order:
+
+    * ``[scan].provider`` -> ``[scan].forge``, ``[scan].max_workers`` ->
+      ``[analyze].max_workers``. When a layer sets both spellings, the
+      v2 key wins and the alias is dropped (with a warning).
+    * ``[llm.claude-cli]`` -> ``[llm.claude_cli]`` (the 1.x loader let the
+      dashed table replace the underscored one; so does this).
+    * A ``model`` in an ``[llm.<provider>]`` table and a task-level
+      ``timeout_sec`` stay where they are - they still work - but warn.
+    * An empty-string ``model`` becomes ``None``.
+    * ``whygraph_db``, ``codegraph_db``, ``[logging].file`` and
+      ``[llm.claude_cli].config_dir`` become absolute path strings
+      (relative ones resolve against ``base``), so a merged dict carried
+      to another process (``WHYGRAPH_CONFIG_JSON``) means the same thing.
+
+    ``None`` values are kept: in a merge a ``None`` resets the key to its
+    default (:func:`merge_v2`), and :meth:`Config.from_dict` treats a
+    ``None`` as absent. Values are otherwise not validated here; that is
+    :meth:`Config.from_dict`'s job.
+
+    Parameters
+    ----------
+    raw : Mapping
+        One layer, e.g. the result of :func:`tomllib.load`.
+    base : Path
+        Directory relative paths resolve against - the project root.
+
+    Returns
+    -------
+    tuple of (dict, list of str)
+        The normalized layer, and one human-readable message per
+        deprecated key it used.
+    """
+    data = copy.deepcopy(dict(raw))
+    warnings: list[str] = []
+
+    scan = data.get("scan")
+    if isinstance(scan, dict):
+        _move_alias(
+            scan, "provider", scan, "forge", "[scan].provider", "[scan].forge", warnings
+        )
+        if "max_workers" in scan:
+            analyze = data.get("analyze")
+            if analyze is None:
+                analyze = data["analyze"] = {}
+            if isinstance(analyze, dict):
+                _move_alias(
+                    scan,
+                    "max_workers",
+                    analyze,
+                    "max_workers",
+                    "[scan].max_workers",
+                    "[analyze].max_workers",
+                    warnings,
+                )
+
+    llm = data.get("llm")
+    if isinstance(llm, dict):
+        if "claude-cli" in llm:
+            llm["claude_cli"] = llm.pop("claude-cli")
+        _blank_model_to_none(llm)
+        for attr in _PROVIDER_ATTRS.values():
+            block = llm.get(attr)
+            if not isinstance(block, dict):
+                continue
+            _blank_model_to_none(block)
+            if block.get("model") is not None:
+                tag = _canonical_provider(attr)
+                warnings.append(
+                    f"[llm.{attr}].model is deprecated; set [llm].model = "
+                    f'"{tag}/<model>" or [<task>].model instead '
+                    "(support ends in 3.0)"
+                )
+            if block.get("config_dir") is not None:
+                block["config_dir"] = _resolve_path(
+                    block["config_dir"], base, expand=True
+                )
+
+    for task in TASKS:
+        table = data.get(task)
+        if not isinstance(table, dict):
+            continue
+        _blank_model_to_none(table)
+        if table.get("timeout_sec") is not None:
+            warnings.append(
+                f"[{task}].timeout_sec is deprecated; set timeout_sec in the "
+                "provider's [llm.<provider>] table instead (support ends in 3.0)"
+            )
+
+    for key in ("whygraph_db", "codegraph_db"):
+        if data.get(key) is not None:
+            data[key] = _resolve_path(data[key], base)
+    logging_table = data.get("logging")
+    if isinstance(logging_table, dict) and logging_table.get("file") is not None:
+        logging_table["file"] = _resolve_path(logging_table["file"], base)
+
+    return data, warnings
+
+
+def merge_v2(*layers: Mapping) -> dict:
+    """Deep-merge normalized config layers, lowest precedence first.
+
+    Merge rules: a key absent from a higher layer inherits the lower
+    value; two tables merge key by key; lists and scalars replace; a
+    ``None`` (JSON ``null``) replaces too, which resets the key to its
+    default once :meth:`Config.from_dict` builds the result.
+
+    Parameters
+    ----------
+    *layers : Mapping
+        Layers already passed through :func:`normalize_v2`, e.g.
+        ``merge_v2(global_defaults, project_row)``.
+
+    Returns
+    -------
+    dict
+        A new dict; the inputs are not mutated.
+    """
+    merged: dict = {}
+    for layer in layers:
+        merged = _merge_two(merged, layer)
+    return merged
+
+
+def _merge_two(lower: Mapping, upper: Mapping) -> dict:
+    """Merge ``upper`` over ``lower`` per :func:`merge_v2`'s rules."""
+    out = copy.deepcopy(dict(lower))
+    for key, value in upper.items():
+        if isinstance(value, Mapping) and isinstance(out.get(key), Mapping):
+            out[key] = _merge_two(out[key], value)
+        else:
+            out[key] = copy.deepcopy(value)
+    return out
+
+
+def _drop_nones(value: object) -> object:
+    """Recursively drop ``None`` values from dicts (``None`` means "default")."""
+    if isinstance(value, dict):
+        return {k: _drop_nones(v) for k, v in value.items() if v is not None}
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     """Immutable runtime configuration for the WhyGraph package.
 
-    Constructed from ``whygraph.toml`` via :meth:`from_toml` or with
-    default values via :meth:`defaults`. Validated at construction time
-    by :meth:`__post_init__`.
+    Constructed from a config mapping via :meth:`from_dict`, from
+    ``whygraph.toml`` via :meth:`from_toml`, or with default values via
+    :meth:`defaults`. Validated at construction time by
+    :meth:`__post_init__`. Ask :meth:`model_for` which
+    ``(provider, model)`` a task runs on rather than reading the
+    ``provider`` / ``model`` fields directly.
 
     Attributes
     ----------
     log_level : str
         Logging verbosity; must match a :class:`LogLevel` member name
         (case-insensitive). Default ``"INFO"``.
-    scan_max_workers : int
-        Thread-pool size for the scan phase. Must be ``>= 1``.
-        Default ``2``.
-    scan_provider : str
-        Source-control backend the scan crawls for PRs / issues. One of
+    scan_forge : str
+        Source-control forge the scan crawls for PRs / issues. One of
         ``"off"`` (default — pull nothing), ``"github"`` (pull from the
-        GitHub remote), or ``"auto"`` (detect the backend from the remote
-        URL; GitHub-only today). Loaded from ``[scan].provider``; an empty
-        value is treated as ``"off"``.
+        GitHub remote), or ``"auto"`` (detect the forge from the remote
+        URL; GitHub-only today). Loaded from ``[scan].forge`` (the 1.x
+        ``[scan].provider`` is a deprecated alias); an empty value is
+        treated as ``"off"``.
     scan_remote : str
         Name of the git remote whose URL is inspected to resolve the
-        provider for ``"github"`` / ``"auto"``. Default ``"origin"``.
+        forge for ``"github"`` / ``"auto"``. Default ``"origin"``.
         Loaded from ``[scan].remote``; an empty value falls back to
-        ``"origin"``.
+        ``"origin"``. Must match :data:`REMOTE_NAME_RE` (see
+        :func:`check_scan_remote`) - it reaches ``git`` argv.
     scan_token : str or None
         GitHub token used to authenticate the ``gh`` CLI during the
         remote crawl. Loaded from ``[scan].token``; an empty value is
@@ -550,7 +1004,7 @@ class Config:
         an existing ``gh auth login`` session). Kept per-project so one
         shared scanning container can serve repos across different orgs.
     scan_hooks : bool or tuple[str, ...]
-        Which auto-rescan git hooks ``whygraph init`` keeps installed.
+        Which auto-rescan git hooks the portal keeps installed.
         ``True`` (default) → all of
         :data:`whygraph.hooks.HOOK_NAMES`; ``False`` or an empty list →
         none; a list of names → exactly those, with the rest removed.
@@ -564,7 +1018,8 @@ class Config:
         value is treated as ``None``, which auto-resolves from
         ``origin/HEAD`` then ``origin/main`` / ``origin/master``. An
         unresolvable value is not an error — it degrades to "cannot
-        judge" and is reported in the scan panel.
+        judge" and is reported in the scan panel. A value starting with
+        ``-`` is (:func:`check_default_branch`).
     whygraph_db : Path or None
         Override path to the WhyGraph SQLite DB. If ``None``, callers
         use the project-relative default ``.whygraph/whygraph.db``.
@@ -589,16 +1044,15 @@ class Config:
         ``[rationale]`` table; consumed by
         :meth:`whygraph.analyze.RationaleGenerator.from_config`.
     chat : ChatConfig
-        Settings for the ``whygraph serve`` chat assistant. Loaded from the
+        Settings for the portal's Chat assistant. Loaded from the
         ``[chat]`` table; consumed by :mod:`whygraph.chat` and
         :mod:`whygraph.serve.chat`.
     """
 
     log_level: str = "INFO"
-    scan_max_workers: int = 2
-    scan_provider: str = "off"
+    scan_forge: str = "off"
     scan_remote: str = "origin"
-    scan_token: str | None = None
+    scan_token: str | None = field(default=None, repr=False)
     scan_hooks: bool | tuple[str, ...] = True
     scan_default_branch: str | None = None
     whygraph_db: Path | None = None
@@ -616,7 +1070,7 @@ class Config:
         ------
         ConfigError
             If ``log_level`` is not a known :class:`LogLevel` name, if
-            ``scan_max_workers`` is less than ``1``, if ``scan_provider``
+            ``analyze.max_workers`` is less than ``1``, if ``scan_forge``
             is not one of ``"off"`` / ``"github"`` / ``"auto"``, if
             ``analyze.max_diff_chars``, ``analyze.large_commit_file_count``
             or ``analyze.pr_origin_min_commits`` is less than ``1``, or if
@@ -628,13 +1082,13 @@ class Config:
             LogLevel[self.log_level.upper()]
         except KeyError as exc:
             raise ConfigError(f"invalid log_level: {self.log_level!r}") from exc
-        if self.scan_max_workers < 1:
+        if self.analyze.max_workers < 1:
             raise ConfigError(
-                f"scan_max_workers must be >= 1, got {self.scan_max_workers}"
+                f"analyze.max_workers must be >= 1, got {self.analyze.max_workers}"
             )
-        if self.scan_provider not in {"off", "github", "auto"}:
+        if self.scan_forge not in {"off", "github", "auto"}:
             raise ConfigError(
-                f"invalid scan.provider: {self.scan_provider!r}, "
+                f"invalid scan.forge: {self.scan_forge!r}, "
                 'must be one of "off", "github", "auto"'
             )
         if self.analyze.max_diff_chars < 1:
@@ -683,17 +1137,103 @@ class Config:
             )
 
     @classmethod
+    def from_dict(cls, raw: Mapping, base: Path) -> Config:
+        """Build and validate a configuration from a plain mapping.
+
+        The v2 entry point: the portal builds a project's :class:`Config`
+        from DB rows, a child scan from ``WHYGRAPH_CONFIG_JSON``, and
+        :meth:`from_toml` from a parsed file - all through here. The input
+        is passed through :func:`normalize_v2` (so 1.x keys still work;
+        each deprecated key is logged once per process) and is never
+        mutated. A ``None`` value means "use the default".
+
+        Unknown top-level, ``[scan]`` and section keys produce a warning
+        on the ``whygraph.core.config`` logger and are otherwise ignored,
+        to preserve forward compatibility with future fields.
+
+        Parameters
+        ----------
+        raw : Mapping
+            The config tree, shaped like ``whygraph.toml``.
+        base : Path
+            Directory relative paths (``whygraph_db``, ``codegraph_db``,
+            ``[logging].file``, ``[llm.claude_cli].config_dir``) resolve
+            against - the project root.
+
+        Returns
+        -------
+        Config
+            A validated, immutable configuration.
+
+        Raises
+        ------
+        ConfigError
+            If any field fails validation in :meth:`__post_init__`.
+        """
+        normalized, warnings = normalize_v2(raw, base)
+        _warn_deprecated(warnings)
+        data = _drop_nones(normalized)
+
+        scan = data.pop("scan", {}) or {}
+        if "forge" in scan:
+            forge = (scan.pop("forge") or "").strip().lower()
+            data["scan_forge"] = forge or "off"
+        if "remote" in scan:
+            remote = (scan.pop("remote") or "").strip()
+            data["scan_remote"] = check_scan_remote(remote) if remote else "origin"
+        if "token" in scan:
+            token = (scan.pop("token") or "").strip()
+            data["scan_token"] = token or None
+        if "hooks" in scan:
+            data["scan_hooks"] = _parse_hooks(scan.pop("hooks"))
+        if "default_branch" in scan:
+            branch = (scan.pop("default_branch") or "").strip()
+            data["scan_default_branch"] = (
+                check_default_branch(branch) if branch else None
+            )
+        for unknown in scan:
+            _log.warning("ignoring unknown key in [scan]: %r", unknown)
+
+        llm_raw = data.pop("llm", {}) or {}
+        if llm_raw:
+            data["llm"] = _build_llm_config(llm_raw, base)
+
+        analyze_raw = data.pop("analyze", {}) or {}
+        if analyze_raw:
+            data["analyze"] = _build_analyze_config(analyze_raw)
+
+        rationale_raw = data.pop("rationale", {}) or {}
+        if rationale_raw:
+            data["rationale"] = _build_rationale_config(rationale_raw)
+
+        chat_raw = data.pop("chat", {}) or {}
+        if chat_raw:
+            data["chat"] = _build_chat_config(chat_raw)
+
+        logging_raw = data.pop("logging", {}) or {}
+        if logging_raw:
+            data["logging"] = _build_logging_config(logging_raw, base)
+
+        for key in ("whygraph_db", "codegraph_db"):
+            if key in data:
+                p = Path(data[key])
+                data[key] = p if p.is_absolute() else (base / p).resolve()
+
+        known = {f.name for f in fields(cls)}
+        for unknown in set(data) - known:
+            _log.warning("ignoring unknown key in whygraph.toml: %r", unknown)
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+    @classmethod
     def from_toml(cls, path: Path) -> Config:
         """Load and validate configuration from a TOML file.
 
-        Relative ``whygraph_db`` / ``codegraph_db`` paths are resolved
-        against the *directory containing the config file*, not the
-        current working directory — so paths in the TOML remain
-        meaningful regardless of where the process is launched.
-
-        Unknown top-level and ``[scan]`` keys produce a warning on the
-        ``whygraph.core.config`` logger and are otherwise ignored, to
-        preserve forward compatibility with future fields.
+        A thin wrapper: :func:`tomllib.load` then :meth:`from_dict` with
+        the file's directory as ``base``. Relative ``whygraph_db`` /
+        ``codegraph_db`` paths are therefore resolved against the
+        *directory containing the config file*, not the current working
+        directory - so paths in the TOML remain meaningful regardless of
+        where the process is launched.
 
         Parameters
         ----------
@@ -717,58 +1257,146 @@ class Config:
         """
         with path.open("rb") as f:
             raw = tomllib.load(f)
+        return cls.from_dict(raw, path.parent)
 
-        base = path.parent
+    def _task_table(self, task: str) -> AnalyzeConfig | RationaleConfig | ChatConfig:
+        """Return the typed table for ``task``; ``ValueError`` if unknown."""
+        if task not in TASKS:
+            raise ValueError(f"unknown task {task!r}; expected one of {TASKS}")
+        return getattr(self, task)
 
-        scan = raw.pop("scan", {}) or {}
-        if "max_workers" in scan:
-            raw["scan_max_workers"] = scan.pop("max_workers")
-        if "provider" in scan:
-            provider = (scan.pop("provider") or "").strip().lower()
-            raw["scan_provider"] = provider or "off"
-        if "remote" in scan:
-            remote = (scan.pop("remote") or "").strip()
-            raw["scan_remote"] = remote or "origin"
-        if "token" in scan:
-            token = (scan.pop("token") or "").strip()
-            raw["scan_token"] = token or None
-        if "hooks" in scan:
-            raw["scan_hooks"] = _parse_hooks(scan.pop("hooks"))
-        if "default_branch" in scan:
-            branch = (scan.pop("default_branch") or "").strip()
-            raw["scan_default_branch"] = branch or None
-        for unknown in scan:
-            _log.warning("ignoring unknown key in [scan]: %r", unknown)
+    def _resolve_model(
+        self, task: str, provider: str | None
+    ) -> tuple[str, str | None, bool]:
+        """``(provider, model, pinned)`` for ``task``; see :meth:`model_for`."""
+        table = self._task_table(task)
+        own_provider = _canonical_provider(table.provider) if table.provider else None
+        own_model = table.model or None
+        if own_model is not None and own_provider is None:
+            # Split only when the table names no provider and the prefix is
+            # a known tag, so a 1.x `provider = "openrouter"` +
+            # `model = "openai/gpt-4o"` stays one OpenRouter model.
+            split = _split_provider_model(own_model)
+            if split is not None and split[0] in KNOWN_PROVIDERS:
+                own_provider, own_model = split
 
-        llm_raw = raw.pop("llm", {}) or {}
-        if llm_raw:
-            raw["llm"] = _build_llm_config(llm_raw, base)
+        task_provider = (
+            own_provider or self.llm.default_provider or _LEGACY_DEFAULT_PROVIDER
+        )
+        if task == "chat" and provider is None and task_provider not in CHAT_PROVIDERS:
+            if own_provider is not None:
+                raise ConfigError(
+                    f"[chat] names {task_provider!r}, which is not a chat provider; "
+                    f"use one of {CHAT_PROVIDERS} (ollama and claude-cli support "
+                    "analyze/rationale but not tool-calling chat)"
+                )
+            # Inherited from [llm].model: fall back to the legacy default.
+            task_provider = CHAT_PROVIDERS[0]
 
-        analyze_raw = raw.pop("analyze", {}) or {}
-        if analyze_raw:
-            raw["analyze"] = _build_analyze_config(analyze_raw)
+        resolved = _canonical_provider(provider) if provider else task_provider
+        if task == "chat" and resolved not in CHAT_PROVIDERS:
+            raise ConfigError(
+                f"{resolved!r} is not a chat provider; available: {CHAT_PROVIDERS}"
+            )
+        if own_model is not None and resolved == task_provider:
+            return resolved, own_model, True
+        model, pinned = self.llm._default_model(resolved)
+        return resolved, model, pinned
 
-        rationale_raw = raw.pop("rationale", {}) or {}
-        if rationale_raw:
-            raw["rationale"] = _build_rationale_config(rationale_raw)
+    def model_for(self, task: str, *, provider: str | None = None) -> ModelChoice:
+        """Resolve the ``(provider, model)`` pair ``task`` runs on.
 
-        chat_raw = raw.pop("chat", {}) or {}
-        if chat_raw:
-            raw["chat"] = _build_chat_config(chat_raw)
+        The single answer to "which model?" - every LLM call site reads
+        it from here. Precedence, highest first:
 
-        logging_raw = raw.pop("logging", {}) or {}
-        if logging_raw:
-            raw["logging"] = _build_logging_config(logging_raw, base)
+        1. ``[<task>].model``. Split on the first ``/`` only when that
+           table has **no** ``provider`` key and the prefix is a known
+           provider tag.
+        2. ``[llm].model`` (``"provider/model"``), when its provider is
+           the one being resolved.
+        3. ``[llm.<provider>].model`` - deprecated, warns at load.
+        4. The adapter default.
 
-        for key in ("whygraph_db", "codegraph_db"):
-            if key in raw:
-                p = Path(raw[key])
-                raw[key] = p if p.is_absolute() else (base / p).resolve()
+        The provider is ``[<task>].provider``, else the prefix split off
+        ``[<task>].model``, else the provider of ``[llm].model``, else the
+        1.x default ``"anthropic"`` - applied last.
 
-        known = {f.name for f in fields(cls)}
-        for unknown in set(raw) - known:
-            _log.warning("ignoring unknown key in whygraph.toml: %r", unknown)
-        return cls(**{k: v for k, v in raw.items() if k in known})
+        Parameters
+        ----------
+        task : str
+            One of :data:`TASKS`.
+        provider : str, optional
+            Resolve for this provider instead of the task's own - e.g. the
+            default model shown for each provider in the chat picker. The
+            task's own ``model`` applies only when it belongs to the same
+            provider.
+
+        Returns
+        -------
+        ModelChoice
+            The resolved pair.
+
+        Raises
+        ------
+        ValueError
+            If ``task`` is not one of :data:`TASKS`.
+        ConfigError
+            For ``task="chat"``, if ``provider`` or ``[chat]`` names a
+            provider outside :data:`CHAT_PROVIDERS`. A non-chat provider
+            *inherited* from ``[llm].model`` falls back to ``"anthropic"``
+            instead.
+        """
+        resolved, model, _ = self._resolve_model(task, provider)
+        return ModelChoice(resolved, model)
+
+    def timeout_for(self, task: str) -> int | None:
+        """Per-call timeout, in seconds, for ``task``.
+
+        The deprecated task-level ``timeout_sec`` when set (1.x
+        behaviour), else the resolved provider's
+        ``[llm.<provider>].timeout_sec``.
+
+        Parameters
+        ----------
+        task : str
+            One of :data:`TASKS`.
+
+        Returns
+        -------
+        int or None
+            The timeout, or ``None`` for a provider that is not built in.
+        """
+        table = self._task_table(task)
+        own = getattr(table, "timeout_sec", None)
+        if own is not None:
+            return own
+        section = self.llm.section(self.model_for(task).provider)
+        return getattr(section, "timeout_sec", None) if section else None
+
+    def cache_identity(self, task: str) -> tuple[str, str | None]:
+        """The ``(provider, pinned model)`` a result cache keys ``task`` on.
+
+        The model is the resolved one when it was **pinned** - by
+        ``[<task>].model`` or ``[llm].model`` - and ``None`` otherwise
+        (the rationale cache stores ``None`` as the literal
+        ``"default"``). So changing ``[llm].model`` changes the key and a
+        stale card is not served, while a 1.x file - whose only model
+        source is a task's own ``model`` or a deprecated
+        ``[llm.<provider>].model`` - derives exactly the key 1.x did and
+        keeps hitting its old rows.
+
+        Parameters
+        ----------
+        task : str
+            One of :data:`TASKS`.
+
+        Returns
+        -------
+        tuple of (str, str or None)
+            The provider tag and the pinned model, if any.
+        """
+        resolved, model, pinned = self._resolve_model(task, None)
+        return resolved, (model if pinned else None)
 
     @classmethod
     def defaults(cls) -> Config:
@@ -782,312 +1410,3 @@ class Config:
             A configuration object with every field set to its default.
         """
         return cls()
-
-
-@dataclass(frozen=True)
-class InitAnswers:
-    """User choices collected by ``whygraph init`` (interactive or defaulted).
-
-    A plain data holder passed to :func:`render_config` to produce both
-    the committable ``whygraph.example.toml`` (secrets omitted) and the
-    ready-to-run ``whygraph.toml`` (secrets included). It lives in
-    ``core`` rather than the CLI so ``core/config`` never imports upward
-    into ``cli`` — the interactive prompt layer imports *this*.
-
-    Attributes
-    ----------
-    agent : str or None
-        Canonical agent name to wire (``"claude"``, …), or ``None`` to
-        skip MCP wiring. Not written into either TOML — used only by the
-        command to drive agent wiring.
-    analyze_provider : str
-        Provider tag for ``[analyze].provider``. **Hyphen form** for the
-        CLI adapter (``"claude-cli"``), matching the factory tag.
-    analyze_model : str
-        Model for ``[analyze].model``. Empty string means "no override"
-        — the rendered line stays the commented hint so the provider's
-        own ``[llm.<provider>].model`` applies.
-    rationale_provider : str
-        Provider tag for ``[rationale].provider`` (hyphen form).
-    rationale_model : str
-        Model for ``[rationale].model``; empty means "no override".
-    api_keys : dict[str, str]
-        ``{provider: key}`` for key-bearing providers the user supplied a
-        key for (``anthropic`` / ``openai`` / ``deepseek`` /
-        ``openrouter``). Rendered as
-        an active ``api_key`` line **only** into ``whygraph.toml``.
-    scan_provider : str
-        Value for ``[scan].provider`` — ``"off"`` / ``"github"`` /
-        ``"auto"``.
-    scan_token : str or None
-        Value for ``[scan].token``; rendered active **only** into
-        ``whygraph.toml`` when present.
-    scan_hooks : bool or tuple[str, ...]
-        Value for ``[scan].hooks`` — which auto-rescan git hooks ``init``
-        keeps installed. Rendered into **both** TOMLs, because the
-        written value is what the *next* ``init`` reads back: a hard-coded
-        literal here would resurrect a rejection the user just made.
-    reconfigure_toml : bool
-        ``True`` when the command should (over)write ``whygraph.toml``.
-        ``False`` (default, and always in non-interactive runs) preserves
-        an existing ``whygraph.toml``.
-    """
-
-    agent: str | None = None
-    analyze_provider: str = "anthropic"
-    analyze_model: str = ""
-    rationale_provider: str = "anthropic"
-    rationale_model: str = ""
-    api_keys: dict[str, str] = field(default_factory=dict)
-    scan_provider: str = "off"
-    scan_token: str | None = None
-    scan_hooks: bool | tuple[str, ...] = True
-    reconfigure_toml: bool = False
-
-
-DEFAULT_ANSWERS = InitAnswers()
-"""Non-interactive baseline: every provider ``anthropic``, no overrides, no
-secrets, scan ``off``. :func:`render_config` with these + ``include_tokens=
-False`` reproduces the bundled template byte-for-byte (golden test)."""
-
-
-# Verbatim commented-hint lines from the template. Kept here (not in the
-# ``.tmpl``) because each is a *whole-line* placeholder that flips between
-# this hint (secret omitted) and an active assignment (secret written). The
-# golden fixture test guards these against drift.
-_SCAN_TOKEN_HINT = (
-    '# token = "ghp_..."           '
-    "# GitHub token for the gh CLI during the remote crawl."
-)
-_ANALYZE_MODEL_HINT = (
-    '# model = "claude-haiku-4-5"  # override the provider\'s model for analysis only'
-)
-_RATIONALE_MODEL_HINT = (
-    '# model = "claude-haiku-4-5"  # override the provider\'s model for rationale only'
-)
-_LLM_KEY_HINTS: dict[str, str] = {
-    "anthropic": '# api_key = "sk-ant-..."      # default: read ANTHROPIC_API_KEY from env',
-    "openai": '# api_key = "sk-..."          # default: read OPENAI_API_KEY from env',
-    "deepseek": '# api_key = "sk-..."          # default: read DEEPSEEK_API_KEY from env',
-    "openrouter": '# api_key = "sk-or-..."       # default: read OPENROUTER_API_KEY from env',
-    "claude_cli": '# api_key = "sk-ant-..."      # default: subscription billing (strips env var)',
-}
-
-
-def _template_text() -> str:
-    """Return the raw ``default_config.toml.tmpl`` resource text."""
-    return (resources.files("whygraph.core") / "default_config.toml.tmpl").read_text(
-        encoding="utf-8"
-    )
-
-
-def _model_line(model: str, hint: str, purpose: str) -> str:
-    """Render an ``[analyze]/[rationale]`` model line.
-
-    ``model`` empty → the commented ``hint`` verbatim (byte-exact
-    default). Otherwise an active override line whose trailing comment
-    (``for <purpose> only``) stays accurate.
-    """
-    if model:
-        return f'model = "{model}"  # override the provider\'s model for {purpose} only'
-    return hint
-
-
-def _scan_token_line(answers: InitAnswers, include_tokens: bool) -> str:
-    """Active ``token = "…"`` only when writing secrets and one was given."""
-    if include_tokens and answers.scan_token:
-        return f'token = "{answers.scan_token}"'
-    return _SCAN_TOKEN_HINT
-
-
-def _key_line(provider: str, answers: InitAnswers, include_tokens: bool) -> str:
-    """Active ``api_key = "…"`` only when writing secrets and one was given.
-
-    ``claude_cli`` never carries a key (subscription billing), so it
-    always renders its hint.
-    """
-    if include_tokens and answers.api_keys.get(provider):
-        return f'api_key = "{answers.api_keys[provider]}"'
-    return _LLM_KEY_HINTS[provider]
-
-
-def _render_hooks_value(value: bool | tuple[str, ...]) -> str:
-    """Render a ``[scan].hooks`` value as TOML: ``true``, ``false``, or an array.
-
-    This must round-trip: ``whygraph init`` writes the file that the
-    *next* ``whygraph init`` reads back to decide whether to install. A
-    hard-coded ``hooks = true`` in the template would mean a user who
-    declined hooks gets a config claiming they wanted them, and the next
-    run silently reinstalls.
-    """
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    return "[" + ", ".join(f'"{name}"' for name in value) + "]"
-
-
-def render_config(answers: InitAnswers, *, include_tokens: bool) -> str:
-    """Render ``whygraph.toml`` text from ``answers``.
-
-    A single renderer feeds both outputs: the committable example
-    (``include_tokens=False`` — every secret line stays a commented hint)
-    and the real config (``include_tokens=True`` — a secret is written as
-    an active line only when the user supplied one). The full commented
-    reference is always preserved; non-chosen ``[llm.*]`` sections keep
-    their default model so the file stays a complete reference.
-
-    Parameters
-    ----------
-    answers : InitAnswers
-        The collected choices.
-    include_tokens : bool
-        When ``True``, active ``api_key`` / ``token`` lines are emitted
-        for any secret present in ``answers``; when ``False``, all secret
-        lines stay commented (used for the committable example).
-
-    Returns
-    -------
-    str
-        The full rendered config, including comments and trailing newline.
-
-    Notes
-    -----
-    ``render_config(DEFAULT_ANSWERS, include_tokens=False)`` reproduces the
-    bundled ``default_config.toml.tmpl`` in its unfilled form byte-for-byte
-    (pinned by the golden fixture test).
-    """
-    subs = {
-        "scan_provider": answers.scan_provider,
-        "scan_hooks": _render_hooks_value(answers.scan_hooks),
-        "analyze_provider": answers.analyze_provider,
-        "rationale_provider": answers.rationale_provider,
-        # Chat is not prompted for by `whygraph init` — the [chat] block
-        # renders its built-in default so the file stays a complete
-        # reference and the shown value tracks ChatConfig.
-        "chat_provider": ChatConfig().provider,
-        "llm_anthropic_model": AnthropicConfig().model,
-        "llm_openai_model": OpenAIConfig().model,
-        "llm_deepseek_model": DeepSeekConfig().model,
-        "llm_openrouter_model": OpenRouterConfig().model,
-        "llm_ollama_model": OllamaConfig().model,
-        "llm_claude_cli_model": ClaudeCliConfig().model,
-        "scan_token_line": _scan_token_line(answers, include_tokens),
-        "analyze_model_line": _model_line(
-            answers.analyze_model, _ANALYZE_MODEL_HINT, "analysis"
-        ),
-        "rationale_model_line": _model_line(
-            answers.rationale_model, _RATIONALE_MODEL_HINT, "rationale"
-        ),
-        "llm_anthropic_key_line": _key_line("anthropic", answers, include_tokens),
-        "llm_openai_key_line": _key_line("openai", answers, include_tokens),
-        "llm_deepseek_key_line": _key_line("deepseek", answers, include_tokens),
-        "llm_openrouter_key_line": _key_line("openrouter", answers, include_tokens),
-        # claude_cli is never key-prompted — always its hint.
-        "llm_claude_cli_key_line": _LLM_KEY_HINTS["claude_cli"],
-    }
-    return Template(_template_text()).substitute(subs)
-
-
-def default_config_text() -> str:
-    """Return the bundled commented default config as text.
-
-    Rendered from ``whygraph/core/default_config.toml.tmpl`` with the
-    non-interactive baseline (:data:`DEFAULT_ANSWERS`) and no secrets, so
-    the shown values match the :class:`Config` defaults and an unedited
-    copy behaves exactly as if no config were present.
-
-    Returns
-    -------
-    str
-        The full template, including comments and a trailing newline.
-    """
-    return render_config(DEFAULT_ANSWERS, include_tokens=False)
-
-
-def read_hooks_pref(
-    project_root: Path, *, default: bool | tuple[str, ...] = True
-) -> bool | tuple[str, ...]:
-    """Read ``[scan].hooks`` from an existing ``whygraph.toml``.
-
-    Seeds ``whygraph init``'s hook reconcile so a prior opt-out is never
-    resurrected and a deliberately narrowed list is never widened — both
-    paths (interactive prompt and ``--yes``) start from the same value.
-
-    Best-effort by design: a missing, unreadable, or invalid config
-    yields ``default`` rather than raising. ``init`` must not fail
-    because of a config it is about to rewrite.
-
-    Parameters
-    ----------
-    project_root : Path
-        Directory holding ``whygraph.toml``.
-    default : bool or tuple[str, ...], optional
-        Value to return when no usable preference is found. Default
-        ``True`` (install every hook).
-
-    Returns
-    -------
-    bool or tuple[str, ...]
-        The configured preference, or ``default``.
-    """
-    path = project_root / CONFIG_FILENAME
-    if not path.exists():
-        return default
-    try:
-        return Config.from_toml(path).scan_hooks
-    except (OSError, ConfigError, tomllib.TOMLDecodeError):
-        return default
-
-
-def write_example_config(
-    project_root: Path, answers: InitAnswers = DEFAULT_ANSWERS
-) -> Path:
-    """Scaffold :data:`EXAMPLE_CONFIG_FILENAME` into ``project_root``.
-
-    The example is a committable, package-owned reference (like
-    ``.env.example``): users copy it to :data:`CONFIG_FILENAME` and edit.
-    Secrets are **never** written here — key/token lines stay commented
-    hints regardless of ``answers``. It is **always (re)written** so a
-    re-run of ``whygraph init`` keeps it in sync with the chosen (or
-    default) non-secret values.
-
-    Parameters
-    ----------
-    project_root : Path
-        Directory to write the example into (usually the repo root).
-    answers : InitAnswers
-        Non-secret choices to bake in (provider/model/scan). Defaults to
-        :data:`DEFAULT_ANSWERS`, reproducing the shipped template.
-
-    Returns
-    -------
-    Path
-        The path of the written example config.
-    """
-    path = project_root / EXAMPLE_CONFIG_FILENAME
-    path.write_text(render_config(answers, include_tokens=False), encoding="utf-8")
-    return path
-
-
-def write_user_config(project_root: Path, answers: InitAnswers) -> Path:
-    """Write the ready-to-run :data:`CONFIG_FILENAME` into ``project_root``.
-
-    Unlike :func:`write_example_config`, this emits active ``api_key`` /
-    ``token`` lines for any secret the user supplied in ``answers``. The
-    file is gitignored by ``whygraph init`` before it is written, so a
-    secret here is never committed.
-
-    Parameters
-    ----------
-    project_root : Path
-        Directory to write ``whygraph.toml`` into (usually the repo root).
-    answers : InitAnswers
-        The collected choices, including any secrets.
-
-    Returns
-    -------
-    Path
-        The path of the written config.
-    """
-    path = project_root / CONFIG_FILENAME
-    path.write_text(render_config(answers, include_tokens=True), encoding="utf-8")
-    return path

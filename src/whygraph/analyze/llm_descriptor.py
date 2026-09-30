@@ -20,7 +20,7 @@ string, assert on the returned :class:`Description`.
 
 from __future__ import annotations
 
-from whygraph.core.config import AnalyzeConfig
+from whygraph.core.config import Config
 from whygraph.services.llm import (
     CompletionRequest,
     LlmClient,
@@ -101,7 +101,7 @@ class LlmDescriptor:
 
     Examples
     --------
-    >>> descriptor = LlmDescriptor.from_config(get_config().analyze)
+    >>> descriptor = LlmDescriptor.from_config(get_config())
     >>> repo = Repository(Path.cwd())
     >>> commit = next(iter(repo.commits))
     >>> desc = descriptor.describe(repo.diff(commit))
@@ -142,18 +142,22 @@ class LlmDescriptor:
     @classmethod
     def from_config(
         cls,
-        config: AnalyzeConfig,
+        config: Config,
         *,
         factory: LlmClientFactory | None = None,
     ) -> "LlmDescriptor":
-        """Build a descriptor from an :class:`AnalyzeConfig`.
+        """Build a descriptor from a :class:`Config`.
+
+        The provider and model come from ``config.model_for("analyze")``
+        and the timeout from ``config.timeout_for("analyze")``; the
+        tuning knobs from ``config.analyze``.
 
         Parameters
         ----------
-        config : AnalyzeConfig
-            Typically ``get_config().analyze``.
+        config : Config
+            Typically ``get_config()``.
         factory : LlmClientFactory, optional
-            Override the factory used to resolve ``config.provider``
+            Override the factory used to resolve the analyze provider
             into an :class:`LlmClient`. Defaults to a fresh
             :class:`LlmClientFactory` bound to the process-wide
             :class:`LlmConfig`. Inject a custom factory in tests to
@@ -167,15 +171,16 @@ class LlmDescriptor:
         Raises
         ------
         whygraph.services.llm.LlmError
-            If ``config.provider`` is not registered with the factory.
+            If the analyze provider is not registered with the factory.
             Propagated directly so the user sees the available providers.
         """
         factory = factory if factory is not None else LlmClientFactory()
-        client = factory.make(config.provider, model=config.model)
+        provider, model = config.model_for("analyze")
+        client = factory.make(provider, model=model)
         return cls(
             client,
-            max_diff_chars=config.max_diff_chars,
-            timeout_sec=config.timeout_sec,
+            max_diff_chars=config.analyze.max_diff_chars,
+            timeout_sec=config.timeout_for("analyze"),
         )
 
     def describe(self, diff: str) -> Description:

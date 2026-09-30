@@ -1,9 +1,48 @@
 import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { clsx } from "clsx";
-import { api } from "../../api";
-import { useExplorer } from "../../store";
-import { Button, EmptyState, IconButton, Input, Spinner } from "../../lib/ui";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { PencilIcon, PlusIcon, Trash2Icon } from "lucide-react";
+import { useActiveSessionId, useSetActiveSession } from "../../lib/nav";
+import { useProjectApi, useProjectKey, useProjectQuery } from "../../lib/project";
+import { Loading } from "../Loading";
+import { Button } from "../ui/button";
+import { Empty, EmptyDescription } from "../ui/empty";
+import { Input } from "../ui/input";
+import { ScrollArea } from "../ui/scroll-area";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+import { cn } from "@/lib/utils";
+
+/** A ghost icon button with a tooltip - the row actions in the session list. */
+function RowAction({
+  label,
+  disabled,
+  onClick,
+  children,
+}: {
+  label: string;
+  disabled?: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            aria-label={label}
+            disabled={disabled}
+            onClick={onClick}
+            className="text-muted-foreground"
+          />
+        }
+      >
+        {children}
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  );
+}
 
 /**
  * The session sidebar: new chat, select, rename, delete.
@@ -18,30 +57,26 @@ import { Button, EmptyState, IconButton, Input, Spinner } from "../../lib/ui";
  */
 export function SessionList() {
   const queryClient = useQueryClient();
-  const activeSessionId = useExplorer((s) => s.activeSessionId);
-  const setActiveSession = useExplorer((s) => s.setActiveSession);
+  const api = useProjectApi();
+  const key = useProjectKey();
+  const activeSessionId = useActiveSessionId();
+  const setActiveSession = useSetActiveSession();
 
   const [renamingId, setRenamingId] = useState<number | null>(null);
   const [draftTitle, setDraftTitle] = useState("");
 
-  const sessions = useQuery({
-    queryKey: ["chat", "sessions"],
-    queryFn: api.chatSessions,
-  });
+  const sessions = useProjectQuery(["chat", "sessions"], (api) => api.chatSessions());
 
   // Already in cache whenever a ModelSelect has rendered; used only to prefer a
   // *configured* provider over the config default.
-  const providers = useQuery({
-    queryKey: ["chat", "providers"],
-    queryFn: api.chatProviders,
-  });
+  const providers = useProjectQuery(["chat", "providers"], (api) => api.chatProviders());
 
   const invalidate = () =>
-    queryClient.invalidateQueries({ queryKey: ["chat", "sessions"] });
+    queryClient.invalidateQueries({ queryKey: key("chat", "sessions") });
 
   const create = useMutation({
     mutationFn: () => {
-      // No model: the server resolves [chat].model → [llm.<provider>].model.
+      // No model: the server resolves it (Config.model_for("chat")).
       // No provider either if the list hasn't arrived — the server falls back
       // to [chat].provider rather than making the click wait on a fetch.
       const first =
@@ -79,37 +114,40 @@ export function SessionList() {
           disabled={create.isPending}
           className="w-full"
         >
-          {create.isPending ? "Creating…" : "+ New chat"}
+          <PlusIcon data-icon="inline-start" />
+          {create.isPending ? "Creating…" : "New chat"}
         </Button>
       </div>
 
       {create.isError && (
-        <div className="px-3 py-2 text-xs text-rose-400">
+        <div className="px-3 py-2 text-xs text-destructive">
           {(create.error as Error).message}
         </div>
       )}
 
-      <div className="min-h-0 flex-1 overflow-auto">
+      <ScrollArea className="min-h-0 flex-1">
         {sessions.isLoading && (
           <div className="p-3">
-            <Spinner label="Loading sessions…" />
+            <Loading label="Loading sessions…" />
           </div>
         )}
         {sessions.isError && (
-          <div className="p-3 text-xs text-rose-400">
+          <div className="p-3 text-xs text-destructive">
             {(sessions.error as Error).message}
           </div>
         )}
         {sessions.data?.length === 0 && (
-          <EmptyState>No chats yet. Start one above.</EmptyState>
+          <Empty className="p-4">
+            <EmptyDescription>No chats yet. Start one above.</EmptyDescription>
+          </Empty>
         )}
 
         {sessions.data?.map((session) => (
           <div
             key={session.id}
-            className={clsx(
+            className={cn(
               "group border-b border-border/60 px-3 py-2",
-              session.id === activeSessionId ? "bg-panel2" : "hover:bg-panel2/50",
+              session.id === activeSessionId ? "bg-accent" : "hover:bg-accent/50",
             )}
           >
             {renamingId === session.id ? (
@@ -126,7 +164,7 @@ export function SessionList() {
                   value={draftTitle}
                   onChange={(e) => setDraftTitle(e.target.value)}
                   onBlur={() => setRenamingId(null)}
-                  className="px-2 py-1 text-xs"
+                  className="h-7 px-2 text-xs"
                 />
               </form>
             ) : (
@@ -138,26 +176,26 @@ export function SessionList() {
                     className="min-w-0 flex-1 text-left"
                   >
                     <div
-                      className={clsx(
+                      className={cn(
                         "truncate text-sm",
-                        session.id === activeSessionId ? "text-fg" : "text-muted",
+                        session.id === activeSessionId ? "text-foreground" : "text-muted-foreground",
                       )}
                     >
                       {session.title}
                     </div>
                   </button>
                   {/* Actions stay hidden until hover so the list reads as titles. */}
-                  <div className="flex opacity-0 transition-opacity group-hover:opacity-100">
-                    <IconButton
+                  <div className="flex opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+                    <RowAction
                       label="Rename"
                       onClick={() => {
                         setRenamingId(session.id);
                         setDraftTitle(session.title);
                       }}
                     >
-                      ✎
-                    </IconButton>
-                    <IconButton
+                      <PencilIcon />
+                    </RowAction>
+                    <RowAction
                       label="Delete"
                       disabled={remove.isPending}
                       onClick={() => {
@@ -166,11 +204,11 @@ export function SessionList() {
                         }
                       }}
                     >
-                      ✕
-                    </IconButton>
+                      <Trash2Icon />
+                    </RowAction>
                   </div>
                 </div>
-                <div className="truncate text-[10px] text-muted">
+                <div className="truncate text-[10px] text-muted-foreground">
                   {session.provider} · {session.model}
                   {session.message_count ? ` · ${session.message_count} msgs` : ""}
                 </div>
@@ -178,7 +216,7 @@ export function SessionList() {
             )}
           </div>
         ))}
-      </div>
+      </ScrollArea>
     </div>
   );
 }

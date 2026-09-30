@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { clsx } from "clsx";
-import { api } from "../../api";
-import { Input, Select } from "../../lib/ui";
+import { useProjectQuery } from "../../lib/project";
+import { Input } from "../ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
+import { cn } from "@/lib/utils";
 
 // Provider + model, as two dropdowns. Used in both places a model gets chosen:
 // the New-chat panel and the thread header.
@@ -36,14 +36,9 @@ export function ModelSelect({
 }) {
   const [filter, setFilter] = useState("");
 
-  const providers = useQuery({
-    queryKey: ["chat", "providers"],
-    queryFn: api.chatProviders,
-  });
+  const providers = useProjectQuery(["chat", "providers"], (api) => api.chatProviders());
 
-  const models = useQuery({
-    queryKey: ["chat", "models", provider],
-    queryFn: () => api.chatModels(provider),
+  const models = useProjectQuery(["chat", "models", provider], (api) => api.chatModels(provider), {
     enabled: !!provider,
     // Model catalogues barely move within a session, and OpenRouter's is a
     // ~370-entry payload — no need to refetch on every mount.
@@ -63,67 +58,94 @@ export function ModelSelect({
   }, [options, filter]);
 
   // The session's current model may not be in the fetched list (a filter is
-  // active, or it's a hand-typed id). Keep it selectable so the <select> never
+  // active, or it's a hand-typed id). Keep it selectable so the select never
   // silently reports a different model than the session is actually using.
-  const missingCurrent = model && !visible.some((m) => m.id === model);
+  const missingCurrent = !!model && !visible.some((m) => m.id === model);
 
-  const fieldClass = compact ? "px-2 py-1 text-xs" : "";
+  const providerItems = (providers.data ?? []).map((p) => ({
+    value: p.provider,
+    label: p.configured ? p.provider : `${p.provider} — set ${p.env_var}`,
+    disabled: !p.configured,
+  }));
+  const modelItems = [
+    ...(models.isLoading && model ? [{ value: model, label: "loading models…" }] : []),
+    ...(missingCurrent && !models.isLoading ? [{ value: model, label: model }] : []),
+    ...visible.map((m) => ({ value: m.id, label: m.display_name })),
+  ];
+
+  const triggerClass = compact ? "w-auto" : "w-full";
 
   return (
-    <div className={clsx(compact ? "flex items-center gap-2" : "space-y-2")}>
+    <div className={cn(compact ? "flex items-center gap-2" : "space-y-2")}>
       <Select
-        aria-label="Provider"
-        value={provider}
+        items={providerItems}
+        value={provider || null}
         disabled={disabled || providers.isLoading}
-        className={clsx(fieldClass, compact && "w-auto")}
-        onChange={(e) => {
+        onValueChange={(next) => {
+          if (!next) return;
           setFilter("");
           // Model is left empty: the old id is meaningless on a new provider,
           // and the server resolves that provider's default.
-          onChange({ provider: e.target.value, model: "" });
+          onChange({ provider: next, model: "" });
         }}
       >
-        {(providers.data ?? []).map((p) => (
-          <option key={p.provider} value={p.provider} disabled={!p.configured}>
-            {p.provider}
-            {p.configured ? "" : ` — set ${p.env_var}`}
-          </option>
-        ))}
+        <SelectTrigger aria-label="Provider" size={compact ? "sm" : "default"} className={triggerClass}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent alignItemWithTrigger={false} className="w-auto">
+          {providerItems.map((p) => (
+            <SelectItem key={p.value} value={p.value} disabled={p.disabled}>
+              {p.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
       </Select>
 
-      <div className={clsx(compact ? "flex items-center gap-2" : "space-y-2")}>
+      <div className={cn(compact ? "flex items-center gap-2" : "space-y-2")}>
         {showFilter && (
           <Input
             aria-label="Filter models"
             value={filter}
             placeholder={`Filter ${options.length} models…`}
-            className={clsx(fieldClass, compact && "w-40")}
+            className={cn(compact && "h-7 w-40 px-2 text-xs")}
             onChange={(e) => setFilter(e.target.value)}
           />
         )}
 
         <Select
-          aria-label="Model"
-          value={model}
+          items={modelItems}
+          value={model || null}
           disabled={disabled || models.isLoading}
-          className={clsx(fieldClass, compact && "w-auto max-w-[16rem]")}
-          onChange={(e) => onChange({ provider, model: e.target.value })}
+          onValueChange={(next) => {
+            if (next) onChange({ provider, model: next });
+          }}
         >
-          {models.isLoading && <option value={model}>loading models…</option>}
-          {missingCurrent && <option value={model}>{model}</option>}
-          {visible.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.display_name}
-            </option>
-          ))}
-          {!models.isLoading && visible.length === 0 && !missingCurrent && (
-            <option value="">no matches</option>
-          )}
+          <SelectTrigger
+            aria-label="Model"
+            size={compact ? "sm" : "default"}
+            className={cn(triggerClass, compact && "max-w-[16rem]")}
+          >
+            <SelectValue
+              placeholder={
+                models.isLoading ? "loading models…" : modelItems.length === 0 ? "no matches" : "select a model"
+              }
+            />
+          </SelectTrigger>
+          <SelectContent alignItemWithTrigger={false} className="w-auto max-w-[28rem]">
+            {modelItems.length === 0 && (
+              <div className="px-2 py-1.5 text-sm text-muted-foreground">no matches</div>
+            )}
+            {modelItems.map((m) => (
+              <SelectItem key={m.value} value={m.value}>
+                {m.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
         </Select>
       </div>
 
       {models.data?.source === "fallback" && !compact && (
-        <div className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300">
+        <div className="rounded-sm border border-warning/30 bg-warning/10 px-2 py-1 text-[11px] text-warning">
           Couldn't list this provider's models, so only known defaults are shown.
           {models.data.error ? ` (${models.data.error})` : ""}
         </div>
@@ -131,7 +153,7 @@ export function ModelSelect({
       {models.data?.source === "fallback" && compact && (
         <span
           title={`Couldn't list models: ${models.data.error ?? "unknown error"}`}
-          className="shrink-0 text-[11px] text-amber-400"
+          className="shrink-0 text-[11px] text-warning"
           aria-label="Model list unavailable; showing defaults"
         >
           ⚠

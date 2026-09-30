@@ -1,6 +1,7 @@
 import { memo } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
-import { clsx } from "clsx";
+import { FileIcon, FolderIcon } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 // A LOD super-node: a directory or file, colored by rationale coverage.
 export interface OverviewNodeData {
@@ -12,11 +13,11 @@ export interface OverviewNodeData {
 }
 
 function coverageColor(fraction: number, total: number): string {
-  if (total === 0) return "bg-slate-700";
-  if (fraction === 0) return "bg-slate-600";
-  if (fraction < 0.5) return "bg-amber-500";
-  if (fraction < 1) return "bg-lime-500";
-  return "bg-emerald-500";
+  if (total === 0) return "bg-muted-foreground/30";
+  if (fraction === 0) return "bg-muted-foreground/40";
+  if (fraction < 0.5) return "bg-warning";
+  if (fraction < 1) return "bg-success/60";
+  return "bg-success";
 }
 
 function OverviewNodeInner({ data }: NodeProps) {
@@ -25,33 +26,37 @@ function OverviewNodeInner({ data }: NodeProps) {
   const isDir = d.kind === "directory";
   return (
     <div
-      className={clsx(
-        "min-w-[160px] max-w-[220px] rounded-lg border px-3 py-2 shadow-sm",
+      className={cn(
+        "min-w-[160px] max-w-[220px] rounded-lg border px-3 py-2 shadow-xs",
         isDir
-          ? "border-border bg-panel2 hover:border-accent2/60 cursor-pointer"
-          : "border-border/60 bg-panel",
+          ? "border-border bg-muted hover:border-primary/60 cursor-pointer"
+          : "border-border/60 bg-sidebar",
       )}
     >
-      <Handle type="target" position={Position.Top} className="!bg-border" />
+      <Handle type="target" position={Position.Top} className="bg-border!" />
       <div className="flex items-center gap-2">
-        <span className="text-xs">{isDir ? "📁" : "📄"}</span>
-        <span className="truncate text-sm font-medium text-fg">{d.label}</span>
+        {isDir ? (
+          <FolderIcon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
+        ) : (
+          <FileIcon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
+        )}
+        <span className="truncate text-sm font-medium text-foreground">{d.label}</span>
       </div>
       <div className="mt-2 flex items-center gap-2">
-        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-panel">
+        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-border">
           <div
-            className={clsx("h-full", coverageColor(fraction, total))}
+            className={cn("h-full", coverageColor(fraction, total))}
             style={{ width: `${total ? Math.max(fraction * 100, 3) : 0}%` }}
           />
         </div>
-        <span className="text-[10px] text-muted">
+        <span className="text-[10px] text-muted-foreground">
           {analyzed}/{total}
         </span>
       </div>
       {d.internal_edges > 0 && (
-        <div className="mt-1 text-[10px] text-muted">{d.internal_edges} internal</div>
+        <div className="mt-1 text-[10px] text-muted-foreground">{d.internal_edges} internal</div>
       )}
-      <Handle type="source" position={Position.Bottom} className="!bg-border" />
+      <Handle type="source" position={Position.Bottom} className="bg-border!" />
     </div>
   );
 }

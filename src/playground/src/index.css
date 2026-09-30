@@ -1,24 +1,21 @@
-@import "@xyflow/react/dist/style.css";
+@import "@xyflow/react/dist/style.css" layer(base);
+@import "./styles/theme.css";
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-html,
-body,
-#root {
-  height: 100%;
-  margin: 0;
+/* React Flow surface: its own stylesheet is in `layer(base)`, so these unlayered
+   variables win in both colour modes and the canvas follows the theme tokens.
+   `colorMode` on <ReactFlow> still sets the .dark / .light class xyflow keys
+   its remaining defaults off. */
+.react-flow {
+  --xy-background-color: var(--background);
+  --xy-controls-button-background-color: var(--card);
+  --xy-controls-button-background-color-hover: var(--accent);
+  --xy-controls-button-color: var(--muted-foreground);
+  --xy-controls-button-color-hover: var(--foreground);
+  --xy-controls-button-border-color: var(--border);
+  --xy-controls-box-shadow: none;
+  --xy-edge-label-color: var(--muted-foreground);
+  --xy-edge-label-background-color: var(--card);
 }
-
-body {
-  background: theme("colors.bg");
-  color: theme("colors.fg");
-  font-family: theme("fontFamily.sans");
-  -webkit-font-smoothing: antialiased;
-}
-
-/* React Flow surface tuned to the dark platform palette. */
 .react-flow__edge-path {
   stroke-width: 1.5;
 }
@@ -29,13 +26,13 @@ body {
 /* Thin, unobtrusive scrollbars everywhere. */
 * {
   scrollbar-width: thin;
-  scrollbar-color: theme("colors.border") transparent;
+  scrollbar-color: var(--border) transparent;
 }
 *::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 *::-webkit-scrollbar-thumb {
-  background: theme("colors.border");
+  background: var(--border);
   border-radius: 4px;
 }

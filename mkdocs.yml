@@ -1,5 +1,5 @@
 site_name: WhyGraph
-site_description: Rationale layer over CodeGraph — explains why code exists, not just what it does.
+site_description: Rationale layer over CodeGraph - explains why code exists, not just what it does.
 site_url: https://mtrdesign.github.io/whygraph/   # project-pages subpath (also drives social cards)
 repo_url: https://github.com/mtrdesign/whygraph
 repo_name: mtrdesign/whygraph
@@ -80,6 +80,14 @@ nav:
       - getting-started/index.md
       - Installation: getting-started/installation.md
       - Quickstart: getting-started/quickstart.md
+  - Portal:
+      - portal/index.md
+      - Start the portal: portal/start.md
+      - Shared folders: portal/shared-folders.md
+      - Adding projects: portal/projects.md
+      - Connecting agents: portal/agents.md
+      - Security model: portal/security.md
+      - Upgrading from 1.x: portal/upgrading.md
   - User Guide:
       - guide/index.md
       - Concepts: guide/concepts.md
@@ -99,4 +107,6 @@ nav:
       - Configuration: reference/configuration.md
       - LLM providers: reference/llm-providers.md
       - Source control providers: reference/providers.md
+  - Releases:
+      - WhyGraph 2.0.0: releases/2.0.0.md
   - Roadmap: roadmap.md

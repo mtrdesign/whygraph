@@ -1,10 +1,14 @@
 # Installation
 
-WhyGraph follows a one-global-install, use-anywhere model - like `npx`, but for Python. You install
-the package once; that puts `whygraph` and `whygraph-mcp` on your `PATH`. Then
-`whygraph init --agent <name>` wires each project so its editor can launch the MCP server.
+You install WhyGraph once. The **Docker install** gives you the `whygraph` command and, through it,
+the [portal](../portal/index.md): one long-running server that holds all your projects. Start it with
+`whygraph up` and add your repositories from the browser.
 
 Pick the path that fits where you are.
+
+!!! note "Only the Docker install runs the portal"
+    A `pip` / `uv` install provides **headless `whygraph scan`** only - useful in CI or a plain
+    checkout - not the portal, the Explorer or the Chat assistant. For those, use the Docker install.
 
 === "Docker (recommended)"
 
@@ -12,30 +16,31 @@ Pick the path that fits where you are.
     published image and installs the shims from inside it:
 
     ```bash
-    curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.2/scripts/install.sh | sh
+    curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v2.0.0/scripts/install.sh | sh
     ```
 
-    **The tag in that URL is the version.** `v1.1.2` installs 1.1.2 - no second flag to keep in
-    sync. This drops `whygraph` and `whygraph-mcp` shims on your `PATH`; each wraps a
-    `docker run --rm -v "$PWD:/workspace" … ghcr.io/mtrdesign/whygraph` against the current repo,
-    and the container is ephemeral per command - the one exception being
-    [`whygraph serve`](../guide/playground.md), which manages a named background container so the
-    web panel can outlive the command. See [Run with Docker](../deploy/docker.md) for the full story.
+    **The tag in that URL is the version.** `v2.0.0` installs 2.0.0 - no second flag to keep in
+    sync. This drops a `whygraph` shim on your `PATH` (plus a `whygraph-mcp` stub that only prints a
+    removal message). Most commands wrap a `docker run --rm -v "$PWD:/workspace" … ghcr.io/mtrdesign/whygraph`
+    against the current repo and are ephemeral. The exception is the portal:
+    [`whygraph up`](../portal/start.md) manages one named, long-lived container so the web panel and
+    the MCP endpoints can outlive the command. See [Run with Docker](../deploy/docker.md) for the full
+    story.
 
     **Install a different version** by passing it through the pipe - the URL then only decides
     *which installer* runs:
 
     ```bash
-    curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.2/scripts/install.sh | sh -s 1.1.2
-    curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.2/scripts/install.sh | sh -s latest
+    curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v2.0.0/scripts/install.sh | sh -s 2.0.0
+    curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v2.0.0/scripts/install.sh | sh -s latest
     ```
 
-    `WHYGRAPH_VERSION=1.1.2` does the same and wins over the argument. `WHYGRAPH_BIN_DIR` picks the
+    `WHYGRAPH_VERSION=2.0.0` does the same and wins over the argument. `WHYGRAPH_BIN_DIR` picks the
     install directory (default `~/.local/bin`), and `WHYGRAPH_IMAGE_REPO` points at a private mirror.
 
-    Two more are read by the installed shims rather than the installer: `WHYGRAPH_IMAGE` overrides
-    the image a single command runs, and `WHYGRAPH_PORT` sets the port for
-    [`whygraph serve`](../guide/playground.md).
+    Two more are read by the installed shim rather than the installer: `WHYGRAPH_IMAGE` overrides
+    the image a command runs, and `WHYGRAPH_PORT` sets the portal's port when you have not chosen one
+    with `whygraph up --port`.
 
     !!! tip "If the installer itself misbehaves"
         Swap the tag for `main` - `…/whygraph/main/scripts/install.sh` - to get the newest
@@ -48,7 +53,7 @@ Pick the path that fits where you are.
         you want a visible failure (or want to read the script first), download it separately:
 
         ```bash
-        curl -fsSL -o install.sh https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.2/scripts/install.sh
+        curl -fsSL -o install.sh https://raw.githubusercontent.com/mtrdesign/whygraph/v2.0.0/scripts/install.sh
         sh install.sh
         ```
 
@@ -56,10 +61,12 @@ Pick the path that fits where you are.
     above delegates to, and dropping the pipe prints exactly what would be written:
 
     ```bash
-    docker run --rm ghcr.io/mtrdesign/whygraph:1.1.2 whygraph install | sh
+    docker run --rm ghcr.io/mtrdesign/whygraph:2.0.0 whygraph install | sh
     ```
 
 === "PyPI"
+
+    Headless `scan` only - no portal.
 
     ```bash
     uv tool install whygraph        # or: pipx install whygraph
@@ -71,7 +78,8 @@ Pick the path that fits where you are.
 
 === "GitHub"
 
-    Install straight from the repo - latest `main`, a feature branch, or a tag:
+    Headless `scan` only - no portal. Install straight from the repo - latest `main`, a feature branch,
+    or a tag:
 
     ```bash
     # Latest from main:
@@ -81,14 +89,16 @@ Pick the path that fits where you are.
     uv tool install "git+https://github.com/mtrdesign/whygraph.git@feature/some-branch"
 
     # A specific tag (once tagged):
-    uv tool install "git+https://github.com/mtrdesign/whygraph.git@v1.1.2"
+    uv tool install "git+https://github.com/mtrdesign/whygraph.git@v2.0.0"
     ```
 
     Re-running upgrades in place. To switch refs, add `--force`. `pipx` accepts the same URLs.
 
 === "Local checkout"
 
-    For contributors who want their edits to show up immediately:
+    For contributors who want their edits to show up immediately. This gives the `whygraph` command
+    for development; run the portal from a checkout with `make dev` (see
+    [Develop the UI](../guide/playground.md#develop-the-ui)).
 
     ```bash
     git clone https://github.com/mtrdesign/whygraph.git
@@ -101,11 +111,9 @@ Pick the path that fits where you are.
 
 ```bash
 whygraph version
-which whygraph-mcp
 ```
 
-Both should resolve to your global tool install. With the Docker shim, `which whygraph-mcp` points at
-the shim script on your `PATH`, and `whygraph version` reports the version baked into the image the
-shim runs - which is the version you pinned, not something read from the host.
+With the Docker shim, this reports the version baked into the image the shim runs - the version you
+pinned, not something read from the host.
 
-Next: [scan a repo and wire your editor.](quickstart.md)
+Next: [start the portal and add a repo.](quickstart.md)

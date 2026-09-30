@@ -8,6 +8,7 @@ run?" — the per-class docstring documents the underlying ``git`` syntax.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -16,6 +17,7 @@ from whygraph.core import ShellCommand
 
 from .blame import BlameHunk
 from .commit import Commit
+from .credentials import GITHUB_GIT_CONFIG, TOKEN_ENV_VAR
 from .file_change import FileChange
 
 GitRevParseCmd = ShellCommand(
@@ -59,7 +61,7 @@ def _parse_remote_url(result: CompletedProcess[str]) -> str | None:
 
 
 class GitRemoteUrlCmd(ShellCommand[str | None]):
-    """``git remote get-url <remote>`` — the remote's URL, or ``None`` if unset.
+    """``git remote get-url -- <remote>`` — the remote's URL, or ``None`` if unset.
 
     Must be run with ``check=False`` so the "no such remote" exit
     collapses to ``None`` rather than raising
@@ -75,7 +77,8 @@ class GitRemoteUrlCmd(ShellCommand[str | None]):
         self.remote = remote
 
     def argv(self) -> list[str]:
-        return ["git", "remote", "get-url", self.remote]
+        # `--` ends options: a remote read from config is never a flag.
+        return ["git", "remote", "get-url", "--", self.remote]
 
     def parse(self, result: CompletedProcess[str]) -> str | None:
         return _parse_remote_url(result)
@@ -340,13 +343,20 @@ class GitDiffTreeFileChangesCmd(ShellCommand[tuple[FileChange, ...]]):
 
 
 class GitFetchRefsCmd(ShellCommand[None]):
-    """``git fetch <remote> <refspec...>`` — fetch one or more refspecs in one call.
+    """``git fetch --no-tags -- <remote> <refspec...>`` — fetch refspecs in one call.
 
     Carries every refspec in a single ``git fetch`` invocation so the
     squash-origin enricher pins all its candidate PR refs with one network
     round-trip rather than one fetch per PR. The parser returns ``None`` —
     the command is run for its effect (objects + refs land in the local
     object store), not its stdout.
+
+    When :data:`~.credentials.TOKEN_ENV_VAR` is set in this process (a
+    portal scan of a GitHub clone), the argv carries
+    :data:`~.credentials.GITHUB_GIT_CONFIG` like :class:`GitFetchDefaultCmd`,
+    so a private clone's PR refs are fetched with the token (read from the
+    environment by the helper, never argv). Without it, a local repo's
+    remote keeps its own transport and credentials.
 
     Parameters
     ----------
@@ -363,10 +373,87 @@ class GitFetchRefsCmd(ShellCommand[None]):
         self.remote = remote
 
     def argv(self) -> list[str]:
-        return ["git", "fetch", "--no-tags", self.remote, *self.refspecs]
+        # `--` ends options: a remote read from config is never a flag
+        # (`--upload-pack=<cmd>` would run a command).
+        config = GITHUB_GIT_CONFIG if os.environ.get(TOKEN_ENV_VAR) else ()
+        return [
+            "git",
+            *config,
+            "fetch",
+            "--no-tags",
+            "--",
+            self.remote,
+            *self.refspecs,
+        ]
 
     def parse(self, result: CompletedProcess[str]) -> None:
         return None
+
+
+class GitCloneCmd(ShellCommand[None]):
+    """``git clone -- <url> <dest>`` with https-only transport and a host-scoped helper.
+
+    The argv carries :data:`~.credentials.GITHUB_GIT_CONFIG`: every other
+    protocol is refused (``file://``, ``ext::``, ``ssh``), inherited
+    credential helpers are reset, and the one inline helper answers only
+    for ``github.com`` over https. The token is read from the child
+    environment, never argv. The command does not validate ``url`` -
+    :meth:`Repository.clone` does, before building it.
+
+    Parameters
+    ----------
+    url : str
+        The already-validated clone URL.
+    dest : Path
+        Directory to clone into (created by git).
+    """
+
+    def __init__(self, url: str, dest: Path) -> None:
+        self.url = url
+        self.dest = dest
+
+    def argv(self) -> list[str]:
+        return ["git", *GITHUB_GIT_CONFIG, "clone", "--", self.url, str(self.dest)]
+
+    def parse(self, result: CompletedProcess[str]) -> None:
+        return None
+
+
+class GitFetchDefaultCmd(ShellCommand[None]):
+    """``git fetch --no-tags -- <remote>`` with https-only transport and the host-scoped helper.
+
+    Fetches the remote's configured refspec, so every remote-tracking
+    branch (the default branch included) moves. Same credential and
+    protocol arguments as :class:`GitCloneCmd`.
+
+    Parameters
+    ----------
+    remote : str, optional
+        Remote to fetch. Default ``"origin"``.
+    """
+
+    def __init__(self, remote: str = "origin") -> None:
+        self.remote = remote
+
+    def argv(self) -> list[str]:
+        return ["git", *GITHUB_GIT_CONFIG, "fetch", "--no-tags", "--", self.remote]
+
+    def parse(self, result: CompletedProcess[str]) -> None:
+        return None
+
+
+GitHeadShaCmd = ShellCommand(
+    argv=["git", "rev-parse", "HEAD"],
+    parse=lambda r: r.stdout.strip(),
+)
+"""``git rev-parse HEAD`` - the commit the working tree is on."""
+
+
+GitFastForwardCmd = ShellCommand(
+    argv=["git", "-c", "core.hooksPath=/dev/null", "merge", "--ff-only", "@{upstream}"],
+    parse=lambda r: None,
+)
+"""``git merge --ff-only @{upstream}`` with hooks disabled - purely local, no network."""
 
 
 class GitCheckMailmapCmd(ShellCommand[tuple[str, ...]]):

@@ -33,8 +33,8 @@ _TOOL_DESCRIPTION = (
     "is line-blame-driven and HEAD-anchored): area_history reaches commits "
     "for code that has since been deleted, moved, or whose lines were all "
     "rewritten by a later refactor. Returns commits with their linked PRs "
-    "and issues, newest first. Run `whygraph scan` first to populate the "
-    "WhyGraph database."
+    "and issues, newest first. Scan from the WhyGraph portal (or run "
+    "`whygraph scan` outside it) first to populate the WhyGraph database."
 )
 
 

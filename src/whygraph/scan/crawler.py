@@ -12,6 +12,7 @@ failing crawler does not crash a multi-crawler scan; callers inspect
 from __future__ import annotations
 
 import abc
+import contextvars
 import threading
 
 from rich.progress import Progress, TaskID
@@ -32,6 +33,15 @@ class Crawler(threading.Thread, abc.ABC):
     ``ABCMeta`` is a subclass of ``type``, Python selects ``ABCMeta`` as
     the resolved metaclass automatically — no explicit ``metaclass=`` is
     required.
+
+    A :class:`contextvars.ContextVar` does not propagate into a new
+    thread, so the constructor snapshots the creating thread's context
+    (:func:`contextvars.copy_context`) and :meth:`run` executes
+    :meth:`work` inside it. A crawler built under
+    :func:`whygraph.core.context.use_project` therefore reads that
+    project's config and DB, never the one around ``cwd``. Only this
+    crawler's own thread enters the snapshot, and only once per
+    :meth:`run`, so one captured context is safe.
 
     Parameters
     ----------
@@ -70,6 +80,7 @@ class Crawler(threading.Thread, abc.ABC):
         self._task_id: TaskID = progress.add_task(name, total=total)
         self.error: BaseException | None = None
         self.summary: str | None = None
+        self._context = contextvars.copy_context()
 
     # --- subclass hooks ------------------------------------------------
 
@@ -125,10 +136,11 @@ class Crawler(threading.Thread, abc.ABC):
         Captures any exception (including :class:`KeyboardInterrupt` /
         :class:`SystemExit`, which can propagate inside a worker thread)
         into :attr:`error` and marks the progress task complete so its
-        bar stops animating regardless of outcome.
+        bar stops animating regardless of outcome. :meth:`work` runs
+        inside the context captured at construction.
         """
         try:
-            self.work()
+            self._context.run(self.work)
         except BaseException as exc:  # noqa: BLE001 — captured for caller
             self.error = exc
         finally:

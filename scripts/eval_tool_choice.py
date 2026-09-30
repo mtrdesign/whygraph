@@ -37,11 +37,14 @@ the tool surface grows.
 
 Usage
 -----
-Start the playground in one shell::
+Start a dev portal in one shell (data dir outside the checkout), then add,
+initialize and scan this repository from its Projects page::
 
-    uv run whygraph serve --port 8321
+    WHYGRAPH_SHARED_FOLDERS=$(cd .. && pwd) \\
+      uv run whygraph portal --data "${TMPDIR:-/tmp}/whygraph-dev" --port 8321
 
-Then, from the repository root::
+Then, from the repository root (``--slug`` is the project's slug in the
+portal; it defaults to this checkout's directory name)::
 
     # every provider the server reports as configured
     SSL_CERT_FILE=/etc/ssl/cert.pem \\
@@ -69,6 +72,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -177,6 +181,9 @@ _CHART_TOOL = "render_chart"
 _CODEGRAPH_TOOLS = ("get_area_outline", "search_symbols", "get_symbol")
 _FILE_TOOLS = ("read_file", "list_dir")
 
+# Every portal /api request must carry the custom header (the CSRF guard).
+_HEADERS = {"Content-Type": "application/json", "X-WhyGraph-Client": "1"}
+
 # Classes whose questions are about history, so `run_graph_stats` reaching them
 # is the two-database confusion rather than a harmless extra call.
 _HISTORY_CLASSES = frozenset({"statistics", "identity", "chart", "debugging"})
@@ -198,9 +205,7 @@ def _first_index(names: list[str], wanted: tuple[str, ...]) -> float:
 def _post(url: str, payload: dict | None) -> object:
     """POST JSON and decode the JSON response."""
     body = json.dumps(payload).encode() if payload is not None else b"{}"
-    request = urllib.request.Request(
-        url, data=body, headers={"Content-Type": "application/json"}
-    )
+    request = urllib.request.Request(url, data=body, headers=_HEADERS)
     with urllib.request.urlopen(request) as response:  # noqa: S310 -- localhost only
         return json.loads(response.read())
 
@@ -217,9 +222,9 @@ def _stream_tool_calls(
     """
     body = json.dumps({"content": question}).encode()
     request = urllib.request.Request(
-        f"{base}/api/chat/sessions/{session_id}/messages",
+        f"{base}/chat/sessions/{session_id}/messages",
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers=_HEADERS,
     )
     names: list[str] = []
     calls: list[dict] = []
@@ -315,7 +320,7 @@ def _run_target(base: str, provider: str | None, model: str | None) -> list[tupl
 
     rows: list[tuple] = []
     for klass, question, expected in CASES:
-        session = _post(f"{base}/api/chat/sessions", session_body or None)
+        session = _post(f"{base}/chat/sessions", session_body or None)
         names, calls, error = _stream_tool_calls(base, session["id"], question)
         first = names[0] if names else "(none)"
         # A general SQL tool cannibalising the specialized ones is the original
@@ -432,7 +437,7 @@ def _all_failed(rows: list[tuple]) -> str:
 def _parse_targets(args) -> list[tuple[str | None, str | None]]:
     """Resolve CLI options into ``(provider, model)`` pairs."""
     if args.all_configured:
-        providers = _post_get(f"{args.base}/api/chat/providers")
+        providers = _post_get(f"{_project_api(args)}/chat/providers")
         configured = [p["provider"] for p in providers if p.get("configured")]
         if not configured:
             print("! no provider reports a key", file=sys.stderr)
@@ -449,13 +454,29 @@ def _parse_targets(args) -> list[tuple[str | None, str | None]]:
 
 def _post_get(url: str) -> list:
     """GET JSON (the providers listing)."""
-    with urllib.request.urlopen(url) as response:  # noqa: S310 -- localhost only
+    request = urllib.request.Request(url, headers=_HEADERS)
+    with urllib.request.urlopen(request) as response:  # noqa: S310 -- localhost only
         return json.loads(response.read())
+
+
+def _project_api(args) -> str:
+    """The portal's scoped API prefix for the project under test."""
+    return f"{args.base.rstrip('/')}/api/projects/{args.slug}"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base", default="http://127.0.0.1:8321")
+    parser.add_argument(
+        "--base",
+        default="http://127.0.0.1:8321",
+        help="Portal URL. Keep the 127.0.0.1 host: the portal's Host guard "
+        "rejects anything else.",
+    )
+    parser.add_argument(
+        "--slug",
+        default=os.path.basename(os.getcwd()),
+        help="The project's slug in the portal (default: this directory's name).",
+    )
     parser.add_argument(
         "--target",
         action="append",
@@ -474,14 +495,17 @@ def main() -> int:
         targets = _parse_targets(args)
     except (urllib.error.URLError, OSError) as exc:
         print(f"! cannot reach {args.base}: {exc}", file=sys.stderr)
-        print("  start the server first: uv run whygraph serve --port 8321")
+        print(
+            "  start a dev portal first: uv run whygraph portal --data "
+            '"${TMPDIR:-/tmp}/whygraph-dev" --port 8321'
+        )
         return 2
 
     summary: list[tuple[str, str, int, int, list[tuple[str, bool]]]] = []
     for provider, model in targets:
         label = f"{provider or '(config default)'}{':' + model if model else ''}"
         try:
-            rows = _run_target(args.base, provider, model)
+            rows = _run_target(_project_api(args), provider, model)
         except (urllib.error.URLError, OSError) as exc:
             print(f"! cannot reach {args.base}: {exc}", file=sys.stderr)
             return 2

@@ -30,7 +30,7 @@ SCOPING:
 - Subagent handoff — for delegating to `whygraph-researcher` and `whygraph-synthesizer` (deep mode only) via `/agent whygraph-researcher` and `/agent whygraph-synthesizer`.
 
 If the CodeGraph MCP tools are unavailable in this session, stop immediately and respond:
-*"WhyGraph planner needs CodeGraph installed in this project. Initialize it first (e.g. `whygraph init` or `codegraph init -i`), then re-run the planning workflow."*
+*"WhyGraph planner needs CodeGraph installed in this project. Add this project in the WhyGraph portal and run a scan (or `codegraph init -i`), then re-run the planning workflow."*
 Do not attempt to plan without the graph.
 
 ## Phase 1 — Build the working set (both modes)

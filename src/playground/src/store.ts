@@ -1,45 +1,19 @@
 import { create } from "zustand";
 
-// The single source of truth for "what symbol is open". Cmd-K, graph-node
-// clicks, and relationship-list rows all call `openNode()` — the one canonical
-// navigation entry point (§7.2). Everything else derives from `selectedQn`.
-//
-// Top-level view switching is a store field rather than a router: no routing
-// library is in play, and both views are single screens whose state should
-// survive switching away and back. `openNode()` also switches to the Explorer,
-// so a Cmd-K search or a chat deep-link from the Chat view lands somewhere that
-// can actually show the result.
-export type View = "explorer" | "chat";
-
-interface ExplorerState {
-  view: View;
-  selectedQn: string | null;
-  // File path of the selected symbol when the caller knows it — lets the tree
-  // auto-reveal the containing directory path without an extra lookup.
-  selectedFilePath: string | null;
+// UI state only. Which project, page, symbol (`?node=&file=`), chat session or
+// scan run is open belongs to the router (see router.tsx and lib/nav.ts), so it
+// can never survive a project switch by accident.
+interface UiState {
   paletteOpen: boolean;
-  // Which chat session the Chat view has open; null shows the empty state.
-  activeSessionId: number | null;
-  setView: (view: View) => void;
-  openNode: (qualifiedName: string, filePath?: string) => void;
+  // The sidebar is a sheet below 768 px; this is its open flag.
+  navOpen: boolean;
   setPaletteOpen: (open: boolean) => void;
-  setActiveSession: (id: number | null) => void;
+  setNavOpen: (open: boolean) => void;
 }
 
-export const useExplorer = create<ExplorerState>((set) => ({
-  view: "explorer",
-  selectedQn: null,
-  selectedFilePath: null,
+export const useUi = create<UiState>((set) => ({
   paletteOpen: false,
-  activeSessionId: null,
-  setView: (view) => set({ view }),
-  openNode: (qualifiedName, filePath) =>
-    set({
-      view: "explorer",
-      selectedQn: qualifiedName,
-      selectedFilePath: filePath ?? null,
-      paletteOpen: false,
-    }),
+  navOpen: false,
   setPaletteOpen: (open) => set({ paletteOpen: open }),
-  setActiveSession: (id) => set({ activeSessionId: id }),
+  setNavOpen: (open) => set({ navOpen: open }),
 }));

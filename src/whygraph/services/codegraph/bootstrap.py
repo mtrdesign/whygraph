@@ -16,7 +16,7 @@ WhyGraph is run:
   image already carries the right Node version and the pinned upstream
   package, so the host only needs Docker.
 
-:func:`ensure_codegraph_db` is idempotent (used by ``whygraph init``);
+:func:`ensure_codegraph_db` is idempotent (the 1.x init step used it);
 :func:`refresh_codegraph_index` re-syncs an existing index (used by
 ``whygraph scan``). Both are usable standalone (e.g. from tests).
 """
@@ -40,6 +40,9 @@ fallback runs ``codegraph`` inside it. ``whygraph scan`` exposes
 also pass an explicit ``image=`` to the functions here. Ignored when a
 local ``codegraph`` binary is used instead.
 """
+
+_CREDENTIAL_ENV: frozenset[str] = frozenset({"GH_TOKEN", "WHYGRAPH_GIT_TOKEN"})
+"""Exact env names withheld from the ``codegraph`` subprocess (besides ``*_API_KEY``)."""
 
 
 def ensure_codegraph_db(
@@ -204,7 +207,14 @@ def _run_codegraph(
         )
 
     try:
-        subprocess.run(cmd, check=True, cwd=cwd, capture_output=capture, text=capture)
+        subprocess.run(
+            cmd,
+            check=True,
+            cwd=cwd,
+            capture_output=capture,
+            text=capture,
+            env=_codegraph_env(),
+        )
     except subprocess.CalledProcessError as exc:
         if capture:
             tail = (exc.stderr or exc.stdout or "").strip()
@@ -215,6 +225,21 @@ def _run_codegraph(
         raise CodeGraphBootstrapError(
             f"`codegraph {label}` failed (exit {exc.returncode}) — see output above"
         ) from exc
+
+
+def _codegraph_env() -> dict[str, str]:
+    """Return ``os.environ`` minus the credentials the indexer never needs.
+
+    CodeGraph only parses source, so every ``*_API_KEY``, ``GH_TOKEN`` and
+    ``WHYGRAPH_GIT_TOKEN`` is withheld from it (and from the ``docker``
+    client of the fallback path); the scan itself may hold them for its
+    own LLM / GitHub calls.
+    """
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if not k.endswith("_API_KEY") and k not in _CREDENTIAL_ENV
+    }
 
 
 def _user_arg() -> list[str]:

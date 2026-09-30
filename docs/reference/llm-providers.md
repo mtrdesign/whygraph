@@ -1,17 +1,21 @@
 # LLM providers
 
-WhyGraph calls an LLM in three places, and each picks its provider independently:
+WhyGraph calls an LLM in three places. All three default to `[llm].model`, and each can override it:
 
 | Role | Config | What it does |
 |---|---|---|
-| Analysis | `[analyze] provider` | Writes a per-commit description of the diff during `whygraph scan`. |
-| Rationale | `[rationale] provider` | Writes the five-section rationale card, for MCP, the Explorer, and chat. |
-| Chat | `[chat] provider` | Drives the [chat assistant](../guide/chat.md) in `whygraph serve`. |
+| Analysis | `[analyze]` | Writes a per-commit description of the diff during `whygraph scan`. |
+| Rationale | `[rationale]` | Writes the five-section rationale card, for MCP, the Explorer, and chat. |
+| Chat | `[chat]` | Drives the [chat assistant](../guide/chat.md). |
 
 Six adapters ship. All six can fill the analysis and rationale roles; only four can drive chat,
 because chat needs streaming tool calls.
 
-| Provider | Config section | Credential | Analysis / rationale | Chat |
+In the portal you choose models and enter keys in the UI (Settings for every project, or per project);
+the config sections and environment variables below are the headless form of the same settings. See
+[Configuration](configuration.md#in-the-portal).
+
+| Provider | Config section | Credential (headless env var) | Analysis / rationale | Chat |
 |---|---|---|---|---|
 | `anthropic` | `[llm.anthropic]` | `ANTHROPIC_API_KEY` | Yes | Yes |
 | `openai` | `[llm.openai]` | `OPENAI_API_KEY` | Yes | Yes |
@@ -25,26 +29,37 @@ depend on. `claude-cli` disables tools outright.
 
 ## How a provider is configured
 
-Two tables, and they do different jobs. The **role** table says *which* adapter to use; the
-`[llm.*]` table says *how* to reach it.
+Two kinds of table, and they do different jobs. `[llm].model` and the **role** tables say *which*
+provider and model to use; each `[llm.<provider>]` table says *how* to reach that provider.
 
 ```toml
-[rationale]
-provider = "anthropic"        # which adapter
-# model = "claude-haiku-4-5"  # override this role's model only
+[llm]
+model = "anthropic/claude-opus-4-7"   # "provider/model" - the default for every role
 
-[llm.anthropic]               # how to reach that adapter
-model = "claude-opus-4-7"     # the provider's default model for every role
-# api_key = "sk-ant-..."      # default: read ANTHROPIC_API_KEY from env
+[analyze]
+model = "claude-haiku-4-5"            # override this role's model only
+
+[llm.anthropic]                       # how to reach that provider - no model here
+# api_key = "sk-ant-..."              # default: read ANTHROPIC_API_KEY from env
 timeout_sec = 60
 ```
 
-Leave a role's `model` unset and it uses the provider's own `[llm.*]` model. Set it to give that one
-role a cheaper or stronger model than the rest - a common setup is a fast model for per-commit
-analysis and a stronger one for rationale.
+Leave a role's `model` unset and it uses `[llm].model`, or the provider's built-in default when that
+is unset too. Set it to give that one role a cheaper or stronger model than the rest - a common setup
+is a fast model for per-commit analysis and a stronger one for rationale. A role can also switch
+provider, with `provider = "..."` or a `"provider/model"` value. The full precedence is in
+[Configuration](configuration.md#choosing-models).
 
-Omit `api_key` and the adapter reads the conventional environment variable. That is the recommended
-setup: `whygraph.toml` is gitignored, but keys in the environment cannot leak into a commit at all.
+!!! note "`model` in `[llm.<provider>]` is deprecated"
+    1.x set each provider's default model inside its `[llm.<provider>]` table. That still works
+    through 2.x, with a deprecation warning, and is removed in 3.0 - move it to `[llm].model` (or a
+    role's `model`). The same goes for a role-level `timeout_sec`: timeouts now live only in
+    `[llm.<provider>]`.
+
+In the portal, keys are entered under Settings and stored encrypted; they are write-only in the UI and
+never written into your repository. For headless `whygraph scan`, omit `api_key` and the adapter reads
+the conventional environment variable - the recommended setup there, since keys in the environment
+cannot leak into a commit at all. **Variables in your shell do not reach the portal.**
 
 See [Configuration](configuration.md) for every key.
 
@@ -52,13 +67,14 @@ See [Configuration](configuration.md) for every key.
 
 ### `openrouter`
 
-`model` defaults to `openrouter/auto`, which routes your request automatically. That is fine for
+The model defaults to `openrouter/auto`, which routes your request automatically. That is fine for
 analysis and rationale, but **not every routed model supports tool calling** - pin a specific
-tool-capable model when using OpenRouter for chat:
+tool-capable model when using OpenRouter for chat. OpenRouter model ids contain a `/` themselves;
+`[llm].model` splits only on the first one:
 
 ```toml
-[llm.openrouter]
-model = "anthropic/claude-sonnet-4"
+[llm]
+model = "openrouter/anthropic/claude-sonnet-4"   # provider "openrouter", model "anthropic/claude-sonnet-4"
 ```
 
 ### `claude-cli`
@@ -72,15 +88,15 @@ Setting `api_key` in `[llm.claude_cli]` explicitly puts it back - that is the op
     The provider tag is hyphenated but the config section is not:
 
     ```toml
-    [rationale]
-    provider = "claude-cli"   # hyphen
+    [llm]
+    model = "claude-cli/claude-opus-4-7"   # hyphen
 
-    [llm.claude_cli]          # underscore
-    model = "claude-opus-4-7"
+    [llm.claude_cli]                       # underscore
+    timeout_sec = 120
     ```
 
     Both `[llm.claude_cli]` and `[llm.claude-cli]` parse, so either spelling of the section works.
-    The `provider` value is always `"claude-cli"`.
+    The provider value is always `"claude-cli"`, in a role's `provider` and in `[llm].model`.
 
 #### Multiple Claude Code profiles
 
@@ -91,7 +107,6 @@ this project should use:
 
 ```toml
 [llm.claude_cli]
-model = "claude-opus-4-7"
 config_dir = "~/.claude-work"
 ```
 
@@ -99,26 +114,36 @@ WhyGraph exports it as `CLAUDE_CONFIG_DIR` for every `claude --print` call, over
 calling shell has set. `~` and `$VARS` are expanded, and a relative path resolves against the
 directory holding `whygraph.toml`. Leave it unset to inherit the ambient `CLAUDE_CONFIG_DIR`.
 
-This matters most for the places that don't run inside your interactive shell - the auto-rescan
-git hooks, an MCP server launched by your editor, and `whygraph serve` - which would otherwise
-quietly fall back to `~/.claude`. The path is machine-specific, so set it in `whygraph.toml`
-(gitignored), not the committed `whygraph.example.toml`. If the directory does not exist the call
+This matters most for the places that don't run inside your interactive shell, which would otherwise
+quietly fall back to `~/.claude`. The path is machine-specific, so set it in a gitignored
+`whygraph.toml`, never a committed file. If the directory does not exist the call
 fails with a clear error rather than letting the CLI create an empty, logged-out profile.
 
 !!! note
     The Docker image does not ship the `claude` CLI, so `claude-cli` - and `config_dir` with it -
-    applies to native `uv` / `pipx` installs.
+    applies to headless `whygraph scan` on native `uv` / `pipx` installs. It cannot run inside the
+    portal; use an API provider or Ollama there.
 
 ### `ollama`
 
 Local models, no credential. Point it at your daemon:
 
 ```toml
+[llm]
+model = "ollama/llama3"
+
 [llm.ollama]
-model = "llama3"
 # host = "http://localhost:11434"
 timeout_sec = 120
 ```
+
+Chat cannot use `ollama`; with `[llm].model` on Ollama, chat falls back to `anthropic`.
+
+**From the portal**, `localhost` is the container, so set the Ollama host to
+`http://host.docker.internal:11434` (under Endpoints in Settings) to reach a daemon on your machine. The
+same name reaches any OpenAI-compatible gateway on the host: set the OpenAI base URL to
+`http://host.docker.internal:<port>/v1`. Changing the OpenAI base URL clears the key stored for the old
+one.
 
 Timeouts default higher than the hosted providers because local inference is slower.
 

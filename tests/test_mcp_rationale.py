@@ -235,21 +235,22 @@ def test_rationale_brief_skips_backfill_on_cache_hit(
         ]
     )
     # Seed the cache with a row that matches the target + provider/model the
-    # rationale tool will look up. Provider/model come from get_config().rationale —
-    # in tests with no whygraph.toml present, both default to the literals below.
+    # rationale tool will look up. Provider/model come from
+    # get_config().cache_identity("rationale") — in tests with no
+    # whygraph.toml present, that is ("anthropic", None) -> "default".
     import json
 
     from whygraph.core import get_config
 
-    cfg = get_config().rationale
-    model_key = cfg.model if cfg.model else "default"
+    provider, pinned_model = get_config().cache_identity("rationale")
+    model_key = pinned_model if pinned_model else "default"
     with get_session() as session:
         session.add(
             RationaleCache(
                 path="sample.py",
                 line_start=1,
                 line_end=3,
-                provider=cfg.provider,
+                provider=provider,
                 model=model_key,
                 evidence_fingerprint=fp,
                 cached_at="2026-03-01T00:00:00+00:00",
@@ -260,7 +261,7 @@ def test_rationale_brief_skips_backfill_on_cache_hit(
                 risks=json.dumps(["r1"]),
                 input_tokens=10,
                 output_tokens=20,
-                actual_provider=cfg.provider,
+                actual_provider=provider,
                 actual_model="cached-model",
             )
         )

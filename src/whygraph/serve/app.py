@@ -1,12 +1,11 @@
-"""FastAPI application factory for the Explorer panel.
+"""Serving the built React bundle (the SPA) from ``static/``.
 
-:func:`create_app` wires the ``/api`` router (:mod:`whygraph.serve.routes`) and the
-``/api/chat`` router (:mod:`whygraph.serve.chat`) onto a FastAPI instance,
-translates the shared :class:`WhyGraphError` into HTTP responses, and serves the
-built React bundle from ``static/`` with an SPA fallback.
+The 1.x single-project ``create_app`` factory was replaced by the portal's
+:func:`whygraph.portal.app.create_portal_app`, which mounts the data and chat
+routers per project and calls :func:`_mount_static` last for the SPA.
 
 The bundle is gitignored and produced only at build time (Docker ``COPY --from`` or
-the hatch build hook), so a **source checkout** may have no ``static/``. The factory
+the hatch build hook), so a **source checkout** may have no ``static/``. The app
 must not crash in that case: it serves ``/api`` normally and returns a short
 "UI not built" message at ``/`` (see :func:`_mount_static`).
 """
@@ -15,16 +14,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi import FastAPI
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-
-from whygraph.core.config import Config
-from whygraph.db import ensure_initialized
-from whygraph.mcp.errors import WhyGraphError
-
-from .chat import router as chat_router
-from .routes import router
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _NOT_BUILT_MESSAGE = (
@@ -34,37 +26,6 @@ _NOT_BUILT_MESSAGE = (
     "    # or: npm --prefix src/playground ci && npm --prefix src/playground run build\n\n"
     "The /api endpoints are available and working."
 )
-
-
-def create_app(config: Config) -> FastAPI:
-    """Build the Explorer FastAPI app for the current repository.
-
-    Parameters
-    ----------
-    config : Config
-        The resolved WhyGraph config (currently unused by the routes, which pull
-        config lazily per request, but threaded through so the factory owns the
-        config binding and future settings have a home).
-
-    Returns
-    -------
-    FastAPI
-        The configured application, ready for ``uvicorn.run``.
-    """
-    ensure_initialized()
-    app = FastAPI(title="WhyGraph Explorer", docs_url=None, redoc_url=None)
-
-    @app.exception_handler(WhyGraphError)
-    def _whygraph_error_handler(_: Request, exc: WhyGraphError) -> JSONResponse:
-        # A "not found" rejection maps to 404; every other WhyGraphError is a
-        # bad-request-shaped failure (invalid target, unscanned DB message, …).
-        status = 404 if "not found" in str(exc).lower() else 400
-        return JSONResponse(status_code=status, content={"error": str(exc)})
-
-    app.include_router(router, prefix="/api")
-    app.include_router(chat_router, prefix="/api/chat")
-    _mount_static(app)
-    return app
 
 
 def _mount_static(app: FastAPI) -> None:

@@ -1,11 +1,12 @@
 # User Guide
 
-You've scanned a repo and wired an editor. This guide explains how the pieces fit together - and how
-to get the most out of each.
+You've added a repo to the portal and connected an editor. This guide explains how the pieces fit
+together - and how to get the most out of each.
 
-The flow is simple. You **scan** a repo to build the evidence database and refresh the CodeGraph
-index. Your editor launches the **MCP server**, which reads that database. As you work, the server's
-**tools, resources, and prompts** answer "why does this code exist?" from history.
+The flow is simple. The portal **scans** a repo to build the evidence database and refresh the CodeGraph
+index. Your editor connects to the project's **MCP endpoint** on the portal, which reads that database.
+As you work, the endpoint's **tools, resources, and prompts** answer "why does this code exist?" from
+history.
 
 Start with the concepts, then dig into whichever piece you need.
 
@@ -31,7 +32,7 @@ Start with the concepts, then dig into whichever piece you need.
 
     ---
 
-    Per-agent setup for Claude Code, Cursor, VS Code, and Codex.
+    The agents the portal connects: Claude Code, Cursor, VS Code, and Codex.
 
     [:octicons-arrow-right-24: Editors](editors.md)
 
@@ -47,7 +48,7 @@ Start with the concepts, then dig into whichever piece you need.
 
     ---
 
-    A local web panel over the graph, evidence, and rationale.
+    The portal's web view of the graph, evidence, and rationale.
 
     [:octicons-arrow-right-24: Explorer](playground.md)
 

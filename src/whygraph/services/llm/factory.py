@@ -97,9 +97,12 @@ class LlmClientFactory:
             :meth:`register` are also accepted.
         model : str, optional
             Override the model bound by the provider's config. ``None``
-            (default) uses the model from the registered config section.
-            Every provider config is a dataclass with a ``model`` field,
-            so the override is applied via :func:`dataclasses.replace`.
+            (default) uses :meth:`LlmConfig.default_model` for a built-in
+            provider (``[llm].model`` when it names this provider, else
+            the section's own model) and the registered config's model
+            for anything else. Every provider config is a dataclass with
+            a ``model`` field, so the override is applied via
+            :func:`dataclasses.replace`.
         **overrides
             Forwarded to the adapter's ``from_config`` (e.g. ``client=``
             to inject a stub SDK in tests).
@@ -120,6 +123,13 @@ class LlmClientFactory:
                 f"unknown LLM provider: {provider!r}; available: {self.providers}"
             )
         cls, config_obj = entry
+        builtin = _BUILTIN_DEFAULTS.get(provider)
+        if (
+            model is None
+            and builtin is not None
+            and config_obj is getattr(self._config, builtin[1])
+        ):
+            model = self._config.default_model(provider)
         if model is not None:
             config_obj = dataclasses.replace(config_obj, model=model)
         return cls.from_config(config_obj, **overrides)

@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
-import { Button, Textarea } from "../../lib/ui";
+import { Button } from "../ui/button";
+import { Textarea } from "../ui/textarea";
 
 /**
  * The message input.
@@ -29,11 +30,12 @@ export function Composer({
   };
 
   return (
-    <div className="border-t border-border bg-panel p-3">
+    <div className="border-t border-border bg-sidebar p-3">
       <div className="flex items-end gap-2">
         <Textarea
           ref={ref}
           rows={2}
+          className="max-h-40 min-h-0 resize-none"
           value={value}
           disabled={streaming}
           placeholder={
@@ -48,7 +50,7 @@ export function Composer({
           }}
         />
         {streaming ? (
-          <Button variant="ghost" onClick={onStop} className="shrink-0">
+          <Button variant="outline" onClick={onStop} className="shrink-0">
             Stop
           </Button>
         ) : (
@@ -57,7 +59,7 @@ export function Composer({
           </Button>
         )}
       </div>
-      <div className="mt-1.5 text-[10px] text-muted">
+      <div className="mt-1.5 text-[10px] text-muted-foreground">
         Enter to send · Shift-Enter for a newline
       </div>
     </div>

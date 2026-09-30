@@ -52,7 +52,10 @@ Denied by default, because the authorizer refuses what it does not recognize:
 ``project_metadata``, ``schema_versions``, ``unresolved_refs``.
 """
 
-_NO_CODEGRAPH = "CodeGraph index unavailable — run `whygraph scan`"
+_NO_CODEGRAPH = (
+    "CodeGraph index unavailable — scan from the WhyGraph portal "
+    "(or run `whygraph scan` outside it)"
+)
 """Refusal text when the index is absent.
 
 Deliberately the same sentence the other CodeGraph-backed tools use

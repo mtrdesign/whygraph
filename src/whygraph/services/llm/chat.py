@@ -433,9 +433,10 @@ def make_chat_client(
     provider : str
         One of :data:`CHAT_PROVIDERS`.
     model : str, optional
-        Override the model from the provider's ``[llm.<provider>]``
-        section. An empty string is treated as ``None`` (no override), so
-        a blank UI field falls through to the configured default.
+        The model to use. ``None`` or an empty string (so a blank UI field
+        falls through) takes the configured default,
+        :meth:`LlmConfig.default_model` - ``[llm].model`` when it names
+        this provider, else the provider section's model.
     config : LlmConfig, optional
         The LLM configuration to read keys / models from. ``None``
         (default) pulls the process-wide config.
@@ -471,7 +472,7 @@ def make_chat_client(
 
     llm_config = config if config is not None else get_config().llm
     section = getattr(llm_config, wiring.config_attr)
-    resolved_model = model or section.model
+    resolved_model = model or llm_config.default_model(provider)
 
     if provider == "anthropic":
         return AnthropicChatAdapter(

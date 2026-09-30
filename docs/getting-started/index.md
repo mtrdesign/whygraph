@@ -8,8 +8,8 @@ For each chunk of code, it collects evidence from git and GitHub - commits, blam
 issues those PRs closed - and links it together. Then it exposes that evidence to your AI editor over
 MCP, plus an on-demand rationale card (purpose, why, constraints, tradeoffs, risks) that it caches.
 
-You install WhyGraph once, then wire it into each repo you want it to analyze. It speaks MCP, so any
-editor that does too can use it.
+You install WhyGraph once, start its portal with `whygraph up`, and add the repos you want it to analyze
+from the browser. It speaks MCP, so any editor that does too can use it.
 
 ## CodeGraph vs WhyGraph
 
@@ -28,15 +28,15 @@ its own history on top.
 You don't need all of these - most are optional, and the phases that depend on them skip cleanly when
 they're missing.
 
-- **[uv](https://docs.astral.sh/uv/)** *or* **Docker** - uv for a native install, or Docker alone for
-  the [container install](installation.md). With Docker, you need nothing else on your host.
+- **Docker** - the [container install](installation.md) is the way to run the portal, and needs nothing
+  else on your host: no Python, Node, `gh` or CodeGraph.
 - **git** - your repo history is the primary evidence source.
-- **Docker** *(native installs only)* - when no `codegraph` binary is on `PATH`, `whygraph scan` runs
-  CodeGraph inside the WhyGraph image to index the repo.
-- **[`gh` CLI](https://cli.github.com/)**, authenticated - only for GitHub repos, and only if you
-  enable the remote crawl. Without it, the GitHub phase is skipped.
-- **`claude` CLI** *or* an LLM API key - for per-commit descriptions and rationale cards. Both phases
-  skip cleanly if neither is available.
+- **A GitHub token** - only for GitHub repos, and only if you enable the remote crawl. Enter it in the
+  portal. Without it, the GitHub phase is skipped.
+- **An LLM API key** (or a local Ollama) - for per-commit descriptions, rationale cards and chat.
+  Enter it in the portal. Both phases skip cleanly without one.
+- **[uv](https://docs.astral.sh/uv/)** *(optional)* - only for a native install, which provides
+  headless `whygraph scan` and no portal.
 
 Ready to install?
 
@@ -54,16 +54,17 @@ Ready to install?
 
     ---
 
-    Init, scan, wire an editor - the happy path in four commands.
+    Install, `whygraph up`, open the browser - the happy path.
 
     [:octicons-arrow-right-24: Quickstart](quickstart.md)
 
--   :material-monitor-dashboard:{ .lg .middle } __Browse it locally__
+-   :material-monitor-dashboard:{ .lg .middle } __The portal__
 
     ---
 
-    Once scanned, `whygraph serve` gives you the Explorer and a chat assistant over the same data.
+    One local server for all your projects: the Explorer, a chat assistant, and an MCP endpoint per
+    project.
 
-    [:octicons-arrow-right-24: The Explorer](../guide/playground.md)
+    [:octicons-arrow-right-24: The portal](../portal/index.md)
 
 </div>

@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { clsx } from "clsx";
+import { CheckIcon, ChevronRightIcon, CircleAlertIcon, Loader2Icon } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 /**
  * One tool invocation, rendered inline in the thread between text segments.
@@ -45,48 +46,56 @@ export function ToolCallCard({ activity }: { activity: ToolActivity }) {
   const failed = !running && !!result && /^\s*\{\s*"error"\s*:/.test(result);
 
   return (
-    <div className="my-1.5 overflow-hidden rounded-md border border-border bg-panel2/60 text-xs">
+    <div className="my-1.5 overflow-hidden rounded-md border border-border bg-muted/60 text-xs">
       <button
         type="button"
+        aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition-colors hover:bg-panel2"
+        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition-colors hover:bg-accent"
       >
         <span
-          className={clsx(
+          className={cn(
             "shrink-0",
-            running ? "animate-spin text-accent2" : failed ? "text-amber-400" : "text-emerald-400",
+            running ? "text-primary-text" : failed ? "text-warning" : "text-success",
           )}
           aria-hidden
         >
-          {running ? "◍" : failed ? "!" : "✓"}
+          {running ? (
+            <Loader2Icon className="size-3.5 animate-spin" />
+          ) : failed ? (
+            <CircleAlertIcon className="size-3.5" />
+          ) : (
+            <CheckIcon className="size-3.5" />
+          )}
         </span>
-        <span className="font-mono text-accent2">{name}</span>
-        <span className="min-w-0 flex-1 truncate text-muted">{summarize(args)}</span>
-        <span className="shrink-0 text-muted" aria-hidden>
-          {open ? "▾" : "▸"}
-        </span>
+        <span className="font-mono text-primary-text">{name}</span>
+        <span className="min-w-0 flex-1 truncate text-muted-foreground">{summarize(args)}</span>
+        <ChevronRightIcon
+          aria-hidden
+          className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", open && "rotate-90")}
+        />
       </button>
 
       {open && (
         <div className="space-y-2 border-t border-border px-2.5 py-2">
           <div>
-            <div className="mb-1 text-[10px] uppercase tracking-wide text-muted">
+            <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
               Arguments
             </div>
-            <pre className="overflow-x-auto rounded bg-bg p-2 font-mono text-[11px] text-fg">
+            <pre className="overflow-x-auto rounded-sm bg-background p-2 font-mono text-[11px] text-foreground">
               {JSON.stringify(args, null, 2)}
             </pre>
           </div>
           <div>
-            <div className="mb-1 text-[10px] uppercase tracking-wide text-muted">
+            <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
               Result
             </div>
             {running ? (
-              <div className="text-muted">running…</div>
+              <div className="text-muted-foreground">running…</div>
             ) : (
               // Plain text in a <pre>: tool results are repo content and never
               // get rendered as markup.
-              <pre className="max-h-72 overflow-auto rounded bg-bg p-2 font-mono text-[11px] text-fg">
+              <pre className="max-h-72 overflow-auto rounded-sm bg-background p-2 font-mono text-[11px] text-foreground">
                 {result ? formatResult(result) : "(no result)"}
               </pre>
             )}

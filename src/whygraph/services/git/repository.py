@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import subprocess
+from collections.abc import Mapping, Sequence
 from functools import cached_property
 from pathlib import Path
 
@@ -12,10 +13,14 @@ from .blame import BlameHunk
 from .commands import (
     GitBlameCmd,
     GitCheckMailmapCmd,
+    GitCloneCmd,
     GitCurrentBranchCmd,
     GitDiffCmd,
     GitDiffTreeFileChangesCmd,
+    GitFastForwardCmd,
+    GitFetchDefaultCmd,
     GitFetchRefsCmd,
+    GitHeadShaCmd,
     GitIsShallowCmd,
     GitLogCommitCmd,
     GitRefExistsCmd,
@@ -25,6 +30,7 @@ from .commands import (
 )
 from .commit import Commit
 from .commits import Commits
+from .credentials import TOKEN_ENV_VAR, git_env, parse_github_url
 from .exceptions import GitError
 from .file_change import FileChange
 
@@ -48,6 +54,10 @@ _MAILMAP_CHUNK = 500
 # is unset — which is the common case, since a plain ``git clone`` sets it
 # but a plain ``git fetch`` into an existing repo does not.
 _DEFAULT_BRANCH_CANDIDATES = ("main", "master")
+
+# Wall-clock cap for a clone or fetch. ``Shell.timeout`` defaults to 30 s,
+# which kills a real clone of anything non-trivial.
+_NETWORK_TIMEOUT = 900
 
 
 class Repository:
@@ -522,6 +532,115 @@ class Repository:
                 f"failed to fetch {len(refspecs)} refspec(s) from {target!r}"
             ) from exc
 
+    @classmethod
+    def clone(
+        cls,
+        url: str,
+        dest: Path,
+        *,
+        env: Mapping[str, str] | None = None,
+        timeout: int = _NETWORK_TIMEOUT,
+    ) -> Repository:
+        """Clone a GitHub repository into ``dest`` without persisting any credential.
+
+        ``url`` must be a plain ``https://github.com/<owner>/<repo>`` URL
+        (see :func:`~.credentials.parse_github_url`); it is stored as
+        ``origin`` exactly as given, so no token can end up in
+        ``.git/config``. Credentials come only from ``env`` (build it with
+        :func:`~.credentials.git_env`) via a host-scoped inline helper.
+
+        Parameters
+        ----------
+        url : str
+            The GitHub clone URL.
+        dest : Path
+            Directory to clone into. Git creates it and refuses a non-empty one.
+        env : Mapping[str, str], optional
+            The complete child environment. ``None`` (default) means an
+            anonymous, allowlisted one (:func:`~.credentials.git_env`).
+        timeout : int, optional
+            Seconds before the clone is killed. Default ``900``.
+
+        Returns
+        -------
+        Repository
+            A view of the fresh clone rooted at ``dest``.
+
+        Raises
+        ------
+        InvalidRepoUrlError
+            If ``url`` is not a plain GitHub https URL (nothing is run).
+        GitError
+            If git fails, is missing, or the clone exceeds ``timeout``.
+        """
+        parse_github_url(url)
+        _run_network(
+            Shell(),
+            GitCloneCmd(url, dest),
+            cwd=None,
+            env=env,
+            timeout=timeout,
+            what=f"clone of {url}",
+        )
+        return cls(dest)
+
+    def fetch_default(
+        self,
+        *,
+        env: Mapping[str, str] | None = None,
+        timeout: int = _NETWORK_TIMEOUT,
+    ) -> None:
+        """Fetch the origin remote under the same protocol and credential rules as :meth:`clone`.
+
+        Updates remote-tracking refs only; the working tree does not move
+        (see :meth:`fast_forward`).
+
+        Parameters
+        ----------
+        env : Mapping[str, str], optional
+            The complete child environment. ``None`` (default) means an
+            anonymous, allowlisted one.
+        timeout : int, optional
+            Seconds before the fetch is killed. Default ``900``.
+
+        Raises
+        ------
+        GitError
+            If git fails, is missing, or the fetch exceeds ``timeout``.
+        """
+        _run_network(
+            self._shell,
+            GitFetchDefaultCmd(self._origin_remote),
+            cwd=self.root,
+            env=env,
+            timeout=timeout,
+            what=f"fetch in {self.root}",
+        )
+
+    def fast_forward(self) -> bool:
+        """Fast-forward the checked-out branch to its upstream, with git hooks disabled.
+
+        Purely local (run it after :meth:`fetch_default`). A diverged
+        branch is refused rather than merged.
+
+        Returns
+        -------
+        bool
+            ``True`` when ``HEAD`` moved.
+
+        Raises
+        ------
+        GitError
+            If the branch cannot fast-forward (diverged, detached, no upstream).
+        """
+        try:
+            before = self._shell.run(GitHeadShaCmd, cwd=self.root)
+            self._shell.run(GitFastForwardCmd, cwd=self.root)
+            after = self._shell.run(GitHeadShaCmd, cwd=self.root)
+        except ShellError as exc:
+            raise GitError(f"failed to fast-forward {self.root}") from exc
+        return before != after
+
     def check_mailmap(self, contacts: Sequence[str]) -> tuple[str, ...]:
         """Canonicalize ``Name <email>`` contacts through the repo's mailmap.
 
@@ -600,3 +719,33 @@ class Repository:
             return self._shell.run(GitLogCommitCmd(ref), cwd=self.root)
         except ShellError as exc:
             raise GitError(f"failed to read commit metadata for {ref[:7]}") from exc
+
+
+def _run_network(
+    shell: Shell,
+    cmd: GitCloneCmd | GitFetchDefaultCmd,
+    *,
+    cwd: Path | None,
+    env: Mapping[str, str] | None,
+    timeout: int,
+    what: str,
+) -> None:
+    """Run a network git command, mapping failures to :class:`GitError`.
+
+    The message carries git's last stderr line with the token (if any)
+    scrubbed, never the argv or the environment.
+    """
+    effective_env = git_env() if env is None else env
+    try:
+        shell.run(cmd, cwd=cwd, env=effective_env, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise GitError(f"{what} timed out after {timeout}s") from exc
+    except FileNotFoundError as exc:
+        raise GitError(f"{what} failed: git is not installed") from exc
+    except ShellError as exc:
+        lines = (exc.stderr or exc.stdout).strip().splitlines()
+        detail = lines[-1] if lines else f"exit {exc.returncode}"
+        token = effective_env.get(TOKEN_ENV_VAR)
+        if token:
+            detail = detail.replace(token, "***")
+        raise GitError(f"{what} failed: {detail}") from exc

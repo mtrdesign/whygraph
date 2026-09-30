@@ -42,7 +42,7 @@ from whygraph.chat.harness import (
     run_turn,
 )
 from whygraph.chat.tools import ToolRegistry
-from whygraph.core import get_config
+from whygraph.core import ConfigError, get_config
 from whygraph.db import get_session
 from whygraph.db.models import ChatMessage as ChatMessageRow
 from whygraph.db.models import ChatSession as ChatSessionRow
@@ -184,12 +184,12 @@ def providers() -> list[dict]:
     name* rather than hiding them — "openrouter needs OPENROUTER_API_KEY"
     is actionable, a missing entry is a mystery.
     """
-    llm = get_config().llm
+    config = get_config()
     return [
         {
             "provider": provider,
             "configured": _is_configured(provider),
-            "default_model": getattr(llm, provider).model,
+            "default_model": config.model_for("chat", provider=provider).model,
             "env_var": chat_provider_env_var(provider),
         }
         for provider in CHAT_PROVIDERS
@@ -216,7 +216,7 @@ def models(provider: str = Query(...)) -> dict:
             detail=f"{provider!r} is not a chat provider; available: {CHAT_PROVIDERS}",
         )
 
-    configured_model = getattr(get_config().llm, provider).model
+    configured_model = get_config().model_for("chat", provider=provider).model
     try:
         client = make_chat_client(provider)
         listed = client.list_models()
@@ -268,23 +268,27 @@ def list_sessions() -> list[dict]:
 
 @router.post("/sessions", status_code=201)
 def create_session(body: CreateSessionBody | None = None) -> dict:
-    """Create a session, defaulting provider / model from ``[chat]``.
+    """Create a session, defaulting provider / model from ``model_for("chat")``.
 
     The resolved model is stored on the row rather than looked up per turn,
     so the transcript records what actually answered even if config changes
     later.
     """
     body = body or CreateSessionBody()
-    chat_config = get_config().chat
-    provider = body.provider or chat_config.provider
-    if provider not in CHAT_PROVIDERS:
+    if body.provider and body.provider not in CHAT_PROVIDERS:
         raise HTTPException(
             status_code=400,
-            detail=f"{provider!r} is not a chat provider; available: {CHAT_PROVIDERS}",
+            detail=(
+                f"{body.provider!r} is not a chat provider; available: {CHAT_PROVIDERS}"
+            ),
         )
-    model = body.model or chat_config.model
-    if not model:
-        model = getattr(get_config().llm, provider).model
+    try:
+        provider, default_model = get_config().model_for(
+            "chat", provider=body.provider or None
+        )
+    except ConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    model = body.model or default_model
 
     now = _now_iso()
     row = ChatSessionRow(
@@ -356,7 +360,7 @@ def update_session(session_id: int, body: UpdateSessionBody) -> dict:
             # Switching provider invalidates the old model id, so resolve a
             # default for the new one unless this same request names a model.
             if body.model is None:
-                row.model = getattr(get_config().llm, body.provider).model
+                row.model = get_config().model_for("chat", provider=body.provider).model
 
         if body.model is not None:
             model = body.model.strip()

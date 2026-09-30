@@ -51,7 +51,7 @@ End-to-end pairing with the git service::
 
     repo = Repository(Path.cwd())
     commit = next(iter(repo.commits))
-    descriptor = LlmDescriptor.from_config(get_config().analyze)
+    descriptor = LlmDescriptor.from_config(get_config())
     print(descriptor.describe(repo.diff(commit)).text)
 
 Persistence (writing to ``commit.llm_description``) and concurrency

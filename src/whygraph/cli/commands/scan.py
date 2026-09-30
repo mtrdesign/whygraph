@@ -26,6 +26,7 @@ from whygraph.scan import (
     Crawler,
     GitCrawler,
     GitHubCrawler,
+    JsonProgress,
     PROriginEnricher,
 )
 
@@ -92,9 +93,9 @@ _ICON_CODEGRAPH = "🕸"
     default=True,
     help=(
         "Crawl the source-control remote (GitHub PRs / issues) per "
-        "`[scan].provider`. `--no-remote` skips it for a fast, offline, "
-        "token-free scan — git history + CodeGraph only. Used by the "
-        "auto-rescan git hooks installed by `whygraph init`. Default: on."
+        "`[scan].forge`. `--no-remote` skips it for a fast, offline, "
+        "token-free scan — git history + CodeGraph only. The portal uses it "
+        "for scans triggered by its auto-rescan git hooks. Default: on."
     ),
 )
 @click.option(
@@ -110,14 +111,33 @@ _ICON_CODEGRAPH = "🕸"
         "under `--no-remote`. Default: on."
     ),
 )
+@click.option(
+    "--progress",
+    "progress_mode",
+    type=click.Choice(["json"]),
+    default=None,
+    help=(
+        "Replace the Rich bars and panels with machine-readable JSON lines "
+        "on stdout: a first `start` event carrying `phase_total`, `phase` "
+        "and throttled `task` events, and a final `result` event. Logs and "
+        "errors stay on stderr. Used by the portal's scan runner."
+    ),
+)
+@click.option("--managed-by-portal", "managed_by_portal", is_flag=True, hidden=True)
 def scan_cmd(
     skip_analyze: bool,
     refresh_codegraph: bool,
     codegraph_image: str | None,
     remote: bool,
     enrich_pr_origins: bool,
+    progress_mode: str | None,
+    managed_by_portal: bool,
 ) -> None:
     """Run the source crawlers, then describe each commit with the LLM."""
+    if not managed_by_portal:
+        # Before any config or DB access: a portal-managed repo is scanned by
+        # the portal only (its own child scans pass --managed-by-portal).
+        _refuse_if_portal_managed()
     # Lazy-imported so that --help and other lightweight CLI surfaces
     # don't fail when the DB or git layers are mid-rewrite.
     from whygraph.analyze import LlmDescriptor
@@ -128,6 +148,16 @@ def scan_cmd(
     from whygraph.services.git import Repository
     from whygraph.services.llm import LlmError
 
+    json_mode = progress_mode == "json"
+    if json_mode:
+        # stdout carries the JSON lines; silence every Rich panel / rule /
+        # status on the shared stderr console for this invocation.
+        previous_quiet = console.quiet
+        console.quiet = True
+        click.get_current_context().call_on_close(
+            lambda: setattr(console, "quiet", previous_quiet)
+        )
+
     db_path = ensure_initialized()
     config = get_config()
     repository = Repository(
@@ -137,7 +167,7 @@ def scan_cmd(
     )
     if remote:
         _apply_github_token(config)
-        github_client = _select_github_client(config.scan_provider, repository)
+        github_client = _select_github_client(config.scan_forge, repository)
     else:
         github_client = None
 
@@ -149,7 +179,7 @@ def scan_cmd(
         analyze_skip: str | None = "--skip-analyze"
     else:
         try:
-            descriptor = LlmDescriptor.from_config(config.analyze)
+            descriptor = LlmDescriptor.from_config(config)
             analyze_skip = None
         except LlmError as exc:
             descriptor = None
@@ -181,17 +211,25 @@ def scan_cmd(
     # Share the stderr `console` with Progress so the phase headers render
     # above the live bars on one stream, and add an M-of-N + elapsed column
     # so the slow LLM phase reports "12/45 · 0:00:31".
-    with (
-        scan_log_redirect(scan_log_path),
-        Progress(
+    progress_ctx = (
+        JsonProgress()
+        if json_mode
+        else Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             MofNCompleteColumn(),
             TimeElapsedColumn(),
             console=console,
-        ) as progress,
+        )
+    )
+    with (
+        scan_log_redirect(scan_log_path),
+        progress_ctx as progress,
     ):
+        if isinstance(progress, JsonProgress):
+            progress.start_event(phase_total)
+
         # CodeGraph refresh — a background crawler. It writes .codegraph/
         # and has no data dependency on the WhyGraph DB, so it overlaps the
         # entire crawl (started before Phase 1, joined last). Best-effort:
@@ -210,6 +248,7 @@ def scan_cmd(
 
         # ── Phase 1 · Structural crawl — git + GitHub, concurrent. ──
         n += 1
+        _emit_phase(progress, n, "Structural crawl")
         console.rule(
             f"{_ICON_STRUCTURAL} Phase {n}/{phase_total} · Structural crawl",
             style="cyan",
@@ -234,6 +273,7 @@ def scan_cmd(
         # Gated on a resolved client, which is None under --no-remote. ──
         if run_pr_origins:
             n += 1
+            _emit_phase(progress, n, "PR-origin recovery")
             console.rule(
                 f"{_ICON_PR_ORIGINS} Phase {n}/{phase_total} · PR-origin recovery",
                 style="cyan",
@@ -259,6 +299,7 @@ def scan_cmd(
         # PR-origin rows: an address can appear ONLY in on_default_branch=0
         # commits, so running before Phase 2 would miss that identity. ──
         n += 1
+        _emit_phase(progress, n, "Author identity")
         console.rule(
             f"{_ICON_AUTHORS} Phase {n}/{phase_total} · Author identity", style="cyan"
         )
@@ -281,6 +322,7 @@ def scan_cmd(
         # while feature-branch commits are described like any other. ──
         if run_analyze:
             n += 1
+            _emit_phase(progress, n, "LLM descriptions")
             console.rule(
                 f"{_ICON_LLM} Phase {n}/{phase_total} · LLM descriptions",
                 style="cyan",
@@ -290,7 +332,7 @@ def scan_cmd(
                 progress,
                 repository=repository,
                 descriptor=descriptor,
-                max_workers=config.scan_max_workers,
+                max_workers=config.analyze.max_workers,
                 large_commit_file_count=config.analyze.large_commit_file_count,
             )
             ran.append(analyzer)
@@ -320,10 +362,61 @@ def scan_cmd(
     if codegraph_crawler is not None:
         crawlers.append(codegraph_crawler)
     failed = [c for c in crawlers if c.error is not None]
+    if isinstance(progress, JsonProgress):
+        progress.flush()
+        progress.emit(
+            _result_event(
+                crawlers=crawlers,
+                phase_timings=phase_timings,
+                total_elapsed=total_elapsed,
+                analyze_skip=analyze_skip,
+            )
+        )
     for c in failed:
         click.echo(f"crawler {c.name!r} failed: {c.error}", err=True)
     if failed:
         raise click.exceptions.Exit(1)
+
+
+def _emit_phase(progress: object, phase: int, title: str) -> None:
+    """Emit a ``phase`` event when ``progress`` is a :class:`JsonProgress`."""
+    if isinstance(progress, JsonProgress):
+        progress.phase(phase, title)
+
+
+def _result_event(
+    *,
+    crawlers: "list[Crawler]",
+    phase_timings: "dict[str, float]",
+    total_elapsed: float,
+    analyze_skip: str | None,
+) -> dict:
+    """Build the closing ``result`` event of ``--progress json``.
+
+    Mirrors the results panel: overall status, elapsed time, per-phase
+    timings and one entry per crawler (status, summary, error / warning).
+    """
+    entries = []
+    for c in crawlers:
+        entry: dict = {
+            "name": c.name,
+            "status": "failed" if c.error is not None else "ok",
+            "summary": c.summary,
+        }
+        if c.error is not None:
+            entry["error"] = str(c.error)
+        warning = getattr(c, "warning", None)
+        if warning:
+            entry["warning"] = warning
+        entries.append(entry)
+    return {
+        "type": "result",
+        "status": "failed" if any(c.error is not None for c in crawlers) else "ok",
+        "elapsed_sec": round(total_elapsed, 3),
+        "phase_timings": {k: round(v, 3) for k, v in phase_timings.items()},
+        "crawlers": entries,
+        "analyze_skipped": analyze_skip,
+    }
 
 
 def _fmt_elapsed(seconds: float) -> str:
@@ -475,6 +568,31 @@ def _render_results_panel(
     console.print()
 
 
+def _refuse_if_portal_managed() -> None:
+    """Exit ``2`` when the repo root carries a valid portal marker.
+
+    The message is built only from the marker's validated slug and port.
+    An ignored marker (tracked by git, a symlink, malformed) is a warning
+    on stderr and the scan goes ahead.
+    """
+    from whygraph.core import _resolve_root
+    from whygraph.project_setup import read_portal_marker
+
+    marker, warning = read_portal_marker(_resolve_root())
+    if warning is not None:
+        click.echo(f"warning: {warning}", err=True)
+    if marker is None:
+        return
+    click.echo(
+        "This project is managed by the WhyGraph portal "
+        f"(http://127.0.0.1:{marker.port}/p/{marker.slug}). Run scans from the "
+        "portal. To use this repo without the portal, remove it from the "
+        "Projects page, or delete .whygraph/portal.json.",
+        err=True,
+    )
+    raise SystemExit(2)
+
+
 def _apply_github_token(config: "Config") -> None:
     """Export the configured GitHub token so every ``gh`` subprocess sees it.
 
@@ -485,17 +603,17 @@ def _apply_github_token(config: "Config") -> None:
     all authenticate uniformly — ``gh`` reads ``GH_TOKEN`` natively and
     child processes inherit it.
 
-    A no-op when ``[scan].provider`` is ``"off"`` (no remote crawl). Each
+    A no-op when ``[scan].forge`` is ``"off"`` (no remote crawl). Each
     scan runs as a fresh process per project, so mutating the environment
     here cannot leak one project's token into another.
 
     Parameters
     ----------
     config : Config
-        The loaded configuration; ``scan_token`` and ``scan_provider`` are
+        The loaded configuration; ``scan_token`` and ``scan_forge`` are
         consulted.
     """
-    if config.scan_provider == "off":
+    if config.scan_forge == "off":
         return
     token = (
         config.scan_token
@@ -509,7 +627,7 @@ def _apply_github_token(config: "Config") -> None:
 def _select_github_client(
     provider: str, repository: "Repository"
 ) -> "GitHubClient | None":
-    """Resolve the GitHub client for the configured ``[scan].provider``.
+    """Resolve the GitHub client for the configured ``[scan].forge``.
 
     Returns ``None`` when ``provider`` is ``"off"`` (remote crawling
     disabled). For ``"github"`` and ``"auto"`` it delegates to
@@ -521,7 +639,7 @@ def _select_github_client(
     Parameters
     ----------
     provider : str
-        The validated ``[scan].provider`` value (``"off"`` / ``"github"``
+        The validated ``[scan].forge`` value (``"off"`` / ``"github"``
         / ``"auto"``).
     repository : Repository
         The repository whose remote URL is inspected.
@@ -608,7 +726,7 @@ def _render_scan_panel(
         rows.append(
             ("LLM descriptions", Text(f"skipped — {analyze_skip}", style="yellow"))
         )
-    rows.append(("Worker threads", str(config.scan_max_workers)))
+    rows.append(("Worker threads", str(config.analyze.max_workers)))
     rows.append(
         (
             "PR commit recovery",
@@ -641,16 +759,16 @@ def _github_skip_reason(config: "Config", remote_enabled: bool = True) -> str:
 
     Called only when no GitHub client was resolved. ``--no-remote`` takes
     precedence (the crawl was disabled for this run); otherwise the reason
-    comes from ``[scan].provider``: ``"off"`` means the user disabled
+    comes from ``[scan].forge``: ``"off"`` means the user disabled
     remote crawling, and ``"github"`` / ``"auto"`` mean the configured
     remote did not resolve to a GitHub URL.
     """
     if not remote_enabled:
         return "skipped — --no-remote"
-    provider = config.scan_provider
-    if provider == "off":
-        return "skipped — source control disabled ([scan].provider = off)"
-    if provider == "auto":
+    forge = config.scan_forge
+    if forge == "off":
+        return "skipped — source control disabled ([scan].forge = off)"
+    if forge == "auto":
         return f"skipped — {config.scan_remote!r} remote is not a recognized remote"
     return f"skipped — {config.scan_remote!r} remote is not a GitHub remote"
 
@@ -692,13 +810,8 @@ def _best_effort(fn: "Callable[[], _T]") -> "_T | None":
 def _analyze_model_label(config: "Config") -> str:
     """Return the ``provider · model`` the analyze crawler will use.
 
-    When ``[analyze].model`` is unset the descriptor defers to the
-    provider's own ``[llm.<provider>]`` model; this resolves that same
-    fallback so the panel reports the model that will actually run.
+    Reads the same :meth:`Config.model_for` pair the descriptor is built
+    from, so the panel reports the model that will actually run.
     """
-    provider = config.analyze.provider
-    model = config.analyze.model
-    if model is None:
-        section = getattr(config.llm, provider.replace("-", "_"), None)
-        model = getattr(section, "model", None)
+    provider, model = config.model_for("analyze")
     return f"{provider} · {model}" if model else provider

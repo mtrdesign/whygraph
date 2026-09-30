@@ -1,14 +1,12 @@
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../api";
+import { useProjectQuery } from "../lib/project";
 import { Spinner, EmptyState } from "../lib/ui";
 import { EvidenceList } from "./EvidenceList";
 
 // The Evidence tab — always available and LLM-free (line-blame + linked PRs/issues).
 export function EvidenceTab({ qualifiedName }: { qualifiedName: string }) {
-  const { data, isLoading, isError, error } = useQuery({
-    queryKey: ["evidence", qualifiedName],
-    queryFn: () => api.evidence(qualifiedName),
-  });
+  const { data, isLoading, isError, error } = useProjectQuery(["evidence", qualifiedName], (api) =>
+    api.evidence(qualifiedName),
+  );
 
   if (isLoading) return <div className="p-3"><Spinner label="Loading evidence…" /></div>;
   if (isError)

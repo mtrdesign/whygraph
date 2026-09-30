@@ -1,6 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../../api";
-import { useExplorer } from "../../store";
+import { useActiveSessionId } from "../../lib/nav";
+import { useProjectQuery, useSlug } from "../../lib/project";
 import { SessionList } from "./SessionList";
 import { MessageThread } from "./MessageThread";
 
@@ -16,14 +15,12 @@ import { MessageThread } from "./MessageThread";
  * (switching mid-stream would change the session row under the in-flight turn).
  */
 export function ChatView() {
-  const activeSessionId = useExplorer((s) => s.activeSessionId);
+  const slug = useSlug();
+  const activeSessionId = useActiveSessionId();
 
   // Header context for the open session, and the reason a deleted-elsewhere
   // session degrades gracefully rather than 404-looping.
-  const sessions = useQuery({
-    queryKey: ["chat", "sessions"],
-    queryFn: api.chatSessions,
-  });
+  const sessions = useProjectQuery(["chat", "sessions"], (api) => api.chatSessions());
   const active = sessions.data?.find((s) => s.id === activeSessionId);
 
   return (
@@ -47,7 +44,7 @@ export function ChatView() {
             )}
             <div className="min-h-0 flex-1">
               <MessageThread
-                key={activeSessionId}
+                key={`${slug}:${activeSessionId}`}
                 sessionId={activeSessionId}
                 session={active}
               />

@@ -1,12 +1,12 @@
 import type { NodeRelations, RelationSymbol, Symbol } from "../api";
-import { useExplorer } from "../store";
+import { useOpenNode } from "../lib/nav";
 import { KindBadge, EmptyState } from "../lib/ui";
 
 // The Relationships tab: calls / called-by / imports / contained-by / children.
 // Every row is a navigation target — clicking it fires the canonical openNode().
 
 function Row({ symbol }: { symbol: RelationSymbol | Symbol }) {
-  const openNode = useExplorer((s) => s.openNode);
+  const openNode = useOpenNode();
   return (
     <button
       onClick={() => openNode(symbol.qualified_name, symbol.file_path)}

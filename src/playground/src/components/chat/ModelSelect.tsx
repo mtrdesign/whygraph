@@ -1,7 +1,6 @@
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
 import { clsx } from "clsx";
-import { api } from "../../api";
+import { useProjectQuery } from "../../lib/project";
 import { Input, Select } from "../../lib/ui";
 
 // Provider + model, as two dropdowns. Used in both places a model gets chosen:
@@ -36,14 +35,9 @@ export function ModelSelect({
 }) {
   const [filter, setFilter] = useState("");
 
-  const providers = useQuery({
-    queryKey: ["chat", "providers"],
-    queryFn: api.chatProviders,
-  });
+  const providers = useProjectQuery(["chat", "providers"], (api) => api.chatProviders());
 
-  const models = useQuery({
-    queryKey: ["chat", "models", provider],
-    queryFn: () => api.chatModels(provider),
+  const models = useProjectQuery(["chat", "models", provider], (api) => api.chatModels(provider), {
     enabled: !!provider,
     // Model catalogues barely move within a session, and OpenRouter's is a
     // ~370-entry payload — no need to refetch on every mount.

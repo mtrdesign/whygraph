@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
 import { clsx } from "clsx";
-import { api, type TreeEntry } from "../api";
-import { useExplorer } from "../store";
+import type { TreeEntry } from "../api";
+import { useExplorerSearch, useOpenNode } from "../lib/nav";
+import { useProjectQuery } from "../lib/project";
 import { KindBadge } from "../lib/ui";
 
 // The left-hand containment tree: dir → file → class → method, lazy-loaded one
@@ -31,10 +31,9 @@ interface LevelProps {
 }
 
 function TreeLevel({ dir, node, depth, expanded, onToggle }: LevelProps) {
-  const { data, isLoading, isError } = useQuery({
-    queryKey: ["tree", { dir, node }],
-    queryFn: () => api.tree({ dir, node }),
-  });
+  const { data, isLoading, isError } = useProjectQuery(["tree", { dir, node }], (api) =>
+    api.tree({ dir, node }),
+  );
 
   if (isLoading)
     return <div style={{ paddingLeft: depth * 14 + 22 }} className="py-1 text-xs text-muted-foreground">…</div>;
@@ -79,8 +78,8 @@ function TreeRow({
   expanded: Set<string>;
   onToggle: (id: string) => void;
 }) {
-  const selectedQn = useExplorer((s) => s.selectedQn);
-  const openNode = useExplorer((s) => s.openNode);
+  const selectedQn = useExplorerSearch().node;
+  const openNode = useOpenNode();
   const isOpen = expanded.has(entry.id);
   const isSelected = entry.qualified_name != null && entry.qualified_name === selectedQn;
   const isDir = entry.kind === "directory";
@@ -129,7 +128,7 @@ function TreeRow({
 
 export function Tree() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const selectedFilePath = useExplorer((s) => s.selectedFilePath);
+  const selectedFilePath = useExplorerSearch().file;
 
   const onToggle = (id: string) =>
     setExpanded((prev) => {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, streamChat, type ChatSession } from "../../api";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import type { ChatSession } from "../../api";
+import { useProjectApi, useProjectKey, useProjectQuery } from "../../lib/project";
 import { EmptyState, Spinner } from "../../lib/ui";
 import { MessageBubble, type AssistantTurn, type Turn } from "./MessageBubble";
 import { Composer } from "./Composer";
@@ -36,21 +37,22 @@ export function MessageThread({
   session?: ChatSession;
 }) {
   const queryClient = useQueryClient();
+  const api = useProjectApi();
+  const key = useProjectKey();
   const [liveTurns, setLiveTurns] = useState<Turn[]>([]);
   const [streaming, setStreaming] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const transcript = useQuery({
-    queryKey: ["chat", "transcript", sessionId],
-    queryFn: () => api.chatTranscript(sessionId),
-  });
+  const transcript = useProjectQuery(["chat", "transcript", sessionId], (api) =>
+    api.chatTranscript(sessionId),
+  );
 
   const update = useMutation({
     mutationFn: (vars: { provider?: string; model?: string }) =>
       api.chatUpdateSession(sessionId, vars),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["chat", "sessions"] });
+      queryClient.invalidateQueries({ queryKey: key("chat", "sessions") });
     },
   });
 
@@ -101,7 +103,7 @@ export function MessageThread({
       ]);
 
       try {
-        await streamChat(
+        await api.streamChat(
           sessionId,
           content,
           (event) => {
@@ -158,7 +160,7 @@ export function MessageThread({
         // persisted as it went, including on abort, so this is authoritative.
         const fresh = await queryClient
           .fetchQuery({
-            queryKey: ["chat", "transcript", sessionId],
+            queryKey: key("chat", "transcript", sessionId),
             queryFn: () => api.chatTranscript(sessionId),
             // The turn just wrote rows. Without this the app-wide 30s
             // staleTime makes fetchQuery resolve from cache with the *pre-send*
@@ -180,10 +182,10 @@ export function MessageThread({
           }));
         }
         // The sidebar shows titles and message counts, both of which just moved.
-        queryClient.invalidateQueries({ queryKey: ["chat", "sessions"] });
+        queryClient.invalidateQueries({ queryKey: key("chat", "sessions") });
       }
     },
-    [queryClient, sessionId, updateLive],
+    [api, key, queryClient, sessionId, updateLive],
   );
 
   return (

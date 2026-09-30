@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { clsx } from "clsx";
-import { api } from "../../api";
-import { useExplorer } from "../../store";
+import { useActiveSessionId, useSetActiveSession } from "../../lib/nav";
+import { useProjectApi, useProjectKey, useProjectQuery } from "../../lib/project";
 import { Button, EmptyState, IconButton, Input, Spinner } from "../../lib/ui";
 
 /**
@@ -18,26 +18,22 @@ import { Button, EmptyState, IconButton, Input, Spinner } from "../../lib/ui";
  */
 export function SessionList() {
   const queryClient = useQueryClient();
-  const activeSessionId = useExplorer((s) => s.activeSessionId);
-  const setActiveSession = useExplorer((s) => s.setActiveSession);
+  const api = useProjectApi();
+  const key = useProjectKey();
+  const activeSessionId = useActiveSessionId();
+  const setActiveSession = useSetActiveSession();
 
   const [renamingId, setRenamingId] = useState<number | null>(null);
   const [draftTitle, setDraftTitle] = useState("");
 
-  const sessions = useQuery({
-    queryKey: ["chat", "sessions"],
-    queryFn: api.chatSessions,
-  });
+  const sessions = useProjectQuery(["chat", "sessions"], (api) => api.chatSessions());
 
   // Already in cache whenever a ModelSelect has rendered; used only to prefer a
   // *configured* provider over the config default.
-  const providers = useQuery({
-    queryKey: ["chat", "providers"],
-    queryFn: api.chatProviders,
-  });
+  const providers = useProjectQuery(["chat", "providers"], (api) => api.chatProviders());
 
   const invalidate = () =>
-    queryClient.invalidateQueries({ queryKey: ["chat", "sessions"] });
+    queryClient.invalidateQueries({ queryKey: key("chat", "sessions") });
 
   const create = useMutation({
     mutationFn: () => {

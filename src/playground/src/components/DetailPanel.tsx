@@ -1,8 +1,7 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
 import { clsx } from "clsx";
-import { api } from "../api";
-import { useExplorer } from "../store";
+import { useExplorerSearch } from "../lib/nav";
+import { useProjectQuery } from "../lib/project";
 import { KindBadge, Spinner, EmptyState } from "../lib/ui";
 import { RelationshipsTab } from "./RelationshipsTab";
 import { RationaleTab } from "./RationaleTab";
@@ -18,14 +17,14 @@ const TABS: { key: TabKey; label: string }[] = [
 ];
 
 export function DetailPanel() {
-  const selectedQn = useExplorer((s) => s.selectedQn);
+  const selectedQn = useExplorerSearch().node;
   const [tab, setTab] = useState<TabKey>("relationships");
 
-  const { data, isLoading, isError, error } = useQuery({
-    queryKey: ["node", selectedQn],
-    queryFn: () => api.node(selectedQn!),
-    enabled: !!selectedQn,
-  });
+  const { data, isLoading, isError, error } = useProjectQuery(
+    ["node", selectedQn],
+    (api) => api.node(selectedQn!),
+    { enabled: !!selectedQn },
+  );
 
   if (!selectedQn)
     return (

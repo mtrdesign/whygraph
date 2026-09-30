@@ -8,9 +8,8 @@ import {
   type Edge,
   type NodeMouseHandler,
 } from "@xyflow/react";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../api";
-import { useExplorer } from "../store";
+import { useExplorerSearch, useOpenNode } from "../lib/nav";
+import { useProjectQuery } from "../lib/project";
 import { useTheme } from "../theme";
 import { SymbolNode, type SymbolNodeData } from "./SymbolNode";
 import { Spinner } from "../lib/ui";
@@ -29,14 +28,14 @@ const EDGE_COLOR: Record<string, string> = {
 
 export function GraphCanvas() {
   const { resolvedTheme } = useTheme();
-  const selectedQn = useExplorer((s) => s.selectedQn);
-  const openNode = useExplorer((s) => s.openNode);
+  const selectedQn = useExplorerSearch().node;
+  const openNode = useOpenNode();
 
-  const { data, isLoading, isError, error } = useQuery({
-    queryKey: ["ego", selectedQn],
-    queryFn: () => api.ego(selectedQn!),
-    enabled: !!selectedQn,
-  });
+  const { data, isLoading, isError, error } = useProjectQuery(
+    ["ego", selectedQn],
+    (api) => api.ego(selectedQn!),
+    { enabled: !!selectedQn },
+  );
 
   const nodes = useMemo<Node[]>(
     () =>

@@ -6,3 +6,12 @@ import { afterEach } from "vitest";
 afterEach(() => {
   cleanup();
 });
+
+// jsdom lacks these; cmdk (the command menu) and Base UI popups use them.
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+globalThis.ResizeObserver ??= ResizeObserverStub;
+Element.prototype.scrollIntoView ??= () => {};

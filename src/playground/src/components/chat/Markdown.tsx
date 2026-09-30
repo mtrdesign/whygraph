@@ -1,7 +1,7 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { AnchorHTMLAttributes } from "react";
-import { useExplorer } from "../../store";
+import { useOpenNode } from "../../lib/nav";
 
 // Renders assistant markdown. react-markdown builds React elements rather than
 // injecting HTML, so there is no `dangerouslySetInnerHTML` anywhere on the LLM
@@ -21,7 +21,7 @@ const SYMBOL_SCHEME = "whygraph://symbol/";
  * straight into the Explorer's graph view instead of making them re-search.
  */
 function SymbolChip({ qualifiedName, label }: { qualifiedName: string; label: string }) {
-  const openNode = useExplorer((s) => s.openNode);
+  const openNode = useOpenNode();
   return (
     <button
       type="button"

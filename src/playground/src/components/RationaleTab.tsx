@@ -1,5 +1,6 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type RationaleCard } from "../api";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import type { RationaleCard } from "../api";
+import { useProjectApi, useProjectKey, useProjectQuery } from "../lib/project";
 import { Button, Spinner, EmptyState } from "../lib/ui";
 
 // The Rationale tab (the resolved Q3 design): on open it does a CACHE-ONLY read
@@ -53,12 +54,12 @@ function Card({ card }: { card: RationaleCard }) {
 
 export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
   const queryClient = useQueryClient();
-  const queryKey = ["rationale", qualifiedName];
+  const api = useProjectApi();
+  const queryKey = useProjectKey()("rationale", qualifiedName);
 
-  const { data, isLoading, isError, error } = useQuery({
-    queryKey,
-    queryFn: () => api.rationaleRead(qualifiedName),
-  });
+  const { data, isLoading, isError, error } = useProjectQuery(["rationale", qualifiedName], (api) =>
+    api.rationaleRead(qualifiedName),
+  );
 
   const generate = useMutation({
     mutationFn: () => api.rationaleGenerate(qualifiedName),

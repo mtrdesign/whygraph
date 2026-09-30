@@ -8,9 +8,8 @@ import {
   type Edge,
   type NodeMouseHandler,
 } from "@xyflow/react";
-import { useQuery } from "@tanstack/react-query";
 import ELK from "elkjs/lib/elk.bundled.js";
-import { api } from "../api";
+import { useProjectQuery } from "../lib/project";
 import { OverviewNode, type OverviewNodeData } from "./OverviewNode";
 import { Spinner } from "../lib/ui";
 import { useTheme } from "../theme";
@@ -68,10 +67,9 @@ export function Overview() {
   const [positions, setPositions] = useState<Record<string, { x: number; y: number }>>({});
 
   const expandedParam = useMemo(() => [...expanded].sort().join(","), [expanded]);
-  const { data, isLoading, isError, error } = useQuery({
-    queryKey: ["overview", expandedParam],
-    queryFn: () => api.overview(expandedParam),
-  });
+  const { data, isLoading, isError, error } = useProjectQuery(["overview", expandedParam], (api) =>
+    api.overview(expandedParam),
+  );
 
   useEffect(() => {
     if (!data) return;

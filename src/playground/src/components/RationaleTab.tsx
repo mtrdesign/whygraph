@@ -88,7 +88,7 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
         <>
           <p className="text-sm text-muted-foreground">
             {noEvidence
-              ? "No historical evidence maps to this symbol, so a rationale can't be generated. Run `whygraph scan` to populate history."
+              ? "No historical evidence maps to this symbol, so a rationale can't be generated. Scan from the WhyGraph portal (or run `whygraph scan` outside it) to populate history."
               : "No rationale has been generated for this symbol yet."}
           </p>
           <Button

@@ -135,7 +135,9 @@ export function Overview() {
       <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-muted-foreground">
         <div className="text-sm text-destructive">{(error as Error).message}</div>
         <div className="text-xs">
-          Run <code className="text-foreground">whygraph scan</code> to build the index.
+          Scan from the WhyGraph portal (or run{" "}
+          <code className="text-foreground">whygraph scan</code> outside it) to build the
+          index.
         </div>
       </div>
     );

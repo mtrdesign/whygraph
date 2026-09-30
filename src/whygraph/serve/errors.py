@@ -3,8 +3,8 @@
 The Explorer routes (:mod:`whygraph.serve.routes`) raise the same
 ``WhyGraphError`` the MCP tools do. FastAPI only knows how to turn it
 into a response through an **app-level** exception handler, so every app
-that mounts those routers - ``whygraph serve`` (:mod:`whygraph.serve.app`)
-and the portal (:mod:`whygraph.portal.app`) - registers
+that mounts those routers - the portal
+(:func:`whygraph.portal.app.create_portal_app`) - registers
 :func:`whygraph_error_handler`. Without it, "not found" would surface as
 a 500.
 """

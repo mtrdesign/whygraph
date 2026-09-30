@@ -17,7 +17,9 @@ whose ``GET /api/portal/state`` reports ``{"error"}`` and whose other
 ``/api`` routes answer ``503``), writes the ``settings`` row at first
 start and refuses to start when ``WHYGRAPH_MODE`` contradicts it, builds
 the :class:`~whygraph.portal.security.PortalOrigins`, marks runs left
-``running`` by a previous process ``interrupted``, starts the runner and
+``running`` by a previous process ``interrupted``, follows a port change
+into the managed repos (:mod:`whygraph.portal.port_change`), starts the
+runner and
 this app's own MCP session manager, and turns strict project-context mode
 on. On exit it sets the shutdown event (open streams end), stops the
 runner and turns strict mode off again.
@@ -54,6 +56,7 @@ from .deps import ApiError, PortalState, current_user, project_db
 from .mcp_mount import McpDispatcher, build_session_manager
 from .migrate import MIGRATION_LOCK
 from .models import ScanRun, Setting
+from .port_change import reconcile_port
 from .repos import SHARED_FOLDERS_ENV, parse_shared_folders
 from .routes import portal_router, projects_router, public_router
 from .runner import ScanRunner
@@ -164,6 +167,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     origins = build_origins(state.port, os.environ.get(DEV_ORIGINS_ENV))
     state.shutdown_event = anyio.Event()
+    if not state.degraded:
+        state.port_change = await anyio.to_thread.run_sync(
+            _reconcile_port, state, origins.agent_host
+        )
     manager = build_session_manager(origins)
     async with manager.run():
         state.session_manager = manager
@@ -220,6 +227,15 @@ def _startup(state: PortalState) -> None:
         ).all():
             run.status = "interrupted"
             session.add(run)
+
+
+def _reconcile_port(state: PortalState, agent_host: str) -> dict | None:
+    """Follow a port change into the managed repos; never fatal (section 4.13)."""
+    try:
+        return reconcile_port(state.data_dir, state.port, agent_host)
+    except Exception:  # noqa: BLE001 -- a repo problem must not stop the portal
+        _log.exception("could not follow the portal port into the managed repos")
+        return None
 
 
 # ---------------------------------------------------------------------------

@@ -6,5 +6,6 @@ The server is assembled in :mod:`whygraph.mcp.server`: a single
 module exposes a ``register(mcp)`` function that attaches its tools — so
 new features land as new modules without growing a monolith.
 
-The ``whygraph-mcp`` console script runs :func:`whygraph.mcp.server.main`.
+The WhyGraph portal serves it over HTTP, one endpoint per project
+(``/mcp/<slug>``, :mod:`whygraph.portal.mcp_mount`).
 """

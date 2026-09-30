@@ -38,8 +38,8 @@ router = APIRouter()
 def _open_graph() -> Iterator[CodeGraph]:
     """Open a per-request read-only CodeGraph handle, or 503 if there is none.
 
-    A missing/unopenable ``.codegraph/`` DB is a setup failure (the user must run
-    ``whygraph scan``), surfaced as HTTP 503 so the UI can show a clear banner
+    A missing/unopenable ``.codegraph/`` DB is a setup failure (the user must scan
+    from the WhyGraph portal, or run ``whygraph scan`` outside it), surfaced as HTTP 503 so the UI can show a clear banner
     rather than a 500.
     """
     try:
@@ -49,7 +49,10 @@ def _open_graph() -> Iterator[CodeGraph]:
     except CodeGraphError as exc:
         raise HTTPException(
             status_code=503,
-            detail=f"CodeGraph index unavailable — run `whygraph scan`: {exc}",
+            detail=(
+                "CodeGraph index unavailable — scan from the WhyGraph portal "
+                f"(or run `whygraph scan` outside it): {exc}"
+            ),
         ) from exc
     try:
         yield graph

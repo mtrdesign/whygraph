@@ -1,9 +1,10 @@
-"""The WhyGraph MCP server — assembly point and ``whygraph-mcp`` entry.
+"""The WhyGraph MCP server — assembly point.
 
-Owns the single ``FastMCP("whygraph")`` instance, attaches every feature
+Owns the single ``FastMCP("whygraph")`` instance and attaches every feature
 module's tools to it at import time (so ``mcp.list_tools()`` works without
-running the server), and exposes :func:`main` for the ``whygraph-mcp``
-console script.
+running the server). The portal serves it over HTTP at ``/mcp/<slug>``
+(:mod:`whygraph.portal.mcp_mount`); the 1.x stdio entry point was removed
+in 2.0.0.
 
 Adding a feature: create a ``whygraph/mcp/<feature>.py`` with a
 ``register(mcp)`` function, then import it and call ``register`` below.
@@ -26,8 +27,6 @@ from typing import Any, Callable
 import anyio.to_thread
 from anyio import CapacityLimiter
 from mcp.server.fastmcp import FastMCP
-
-from whygraph.core import configure_logging, get_config
 
 from . import area_history, evidence, prompts, rationale, resources
 
@@ -116,14 +115,3 @@ rationale.register(_registrar)
 area_history.register(_registrar)
 resources.register(_registrar)
 prompts.register(_registrar)
-
-
-def main() -> None:
-    """Run the WhyGraph MCP server on stdio. Entry point for ``whygraph-mcp``."""
-    cfg = get_config()
-    configure_logging(cfg.log_level, file_config=cfg.logging)
-    mcp.run(transport="stdio")
-
-
-if __name__ == "__main__":
-    main()

@@ -1,6 +1,6 @@
 """Who migrates a project's ``whygraph.db`` inside the portal, and when.
 
-``whygraph serve`` migrated its one DB at startup; the portal serves many
+The 1.x single-project server migrated its one DB at startup; the portal serves many
 projects and may meet a 1.x database at any revision. So the first
 request that needs a project's data (a data route, ``/mcp/<slug>``, a
 scan) runs :meth:`ProjectMigrations.ensure` once for that project:

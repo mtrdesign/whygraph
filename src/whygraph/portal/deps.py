@@ -123,6 +123,9 @@ class PortalState:
     github_add_lock : threading.Lock
         Serializes GitHub adds (duplicate check, clone and insert), so a
         double-submit never clones twice into one directory.
+    port_change : dict or None
+        What the start-up port reconcile did
+        (:func:`whygraph.portal.port_change.reconcile_port`), or ``None``.
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -140,6 +143,7 @@ class PortalState:
         self.session_manager: Any = None
         self.setup_lock = threading.Lock()
         self.github_add_lock = threading.Lock()
+        self.port_change: dict | None = None
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0

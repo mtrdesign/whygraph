@@ -94,8 +94,8 @@ _ICON_CODEGRAPH = "🕸"
     help=(
         "Crawl the source-control remote (GitHub PRs / issues) per "
         "`[scan].forge`. `--no-remote` skips it for a fast, offline, "
-        "token-free scan — git history + CodeGraph only. Used by the "
-        "auto-rescan git hooks installed by `whygraph init`. Default: on."
+        "token-free scan — git history + CodeGraph only. The portal uses it "
+        "for scans triggered by its auto-rescan git hooks. Default: on."
     ),
 )
 @click.option(
@@ -134,6 +134,10 @@ def scan_cmd(
     managed_by_portal: bool,
 ) -> None:
     """Run the source crawlers, then describe each commit with the LLM."""
+    if not managed_by_portal:
+        # Before any config or DB access: a portal-managed repo is scanned by
+        # the portal only (its own child scans pass --managed-by-portal).
+        _refuse_if_portal_managed()
     # Lazy-imported so that --help and other lightweight CLI surfaces
     # don't fail when the DB or git layers are mid-rewrite.
     from whygraph.analyze import LlmDescriptor
@@ -562,6 +566,31 @@ def _render_results_panel(
         )
     )
     console.print()
+
+
+def _refuse_if_portal_managed() -> None:
+    """Exit ``2`` when the repo root carries a valid portal marker.
+
+    The message is built only from the marker's validated slug and port.
+    An ignored marker (tracked by git, a symlink, malformed) is a warning
+    on stderr and the scan goes ahead.
+    """
+    from whygraph.core import _resolve_root
+    from whygraph.project_setup import read_portal_marker
+
+    marker, warning = read_portal_marker(_resolve_root())
+    if warning is not None:
+        click.echo(f"warning: {warning}", err=True)
+    if marker is None:
+        return
+    click.echo(
+        "This project is managed by the WhyGraph portal "
+        f"(http://127.0.0.1:{marker.port}/p/{marker.slug}). Run scans from the "
+        "portal. To use this repo without the portal, remove it from the "
+        "Projects page, or delete .whygraph/portal.json.",
+        err=True,
+    )
+    raise SystemExit(2)
 
 
 def _apply_github_token(config: "Config") -> None:

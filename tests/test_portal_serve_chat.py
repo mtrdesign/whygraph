@@ -1,50 +1,45 @@
-"""Integration tests for the ``/api/chat/*`` router (plan §7, §14).
+"""Integration tests for the project-scoped ``/api/projects/<slug>/chat/*`` router.
 
-Mirrors the ``test_serve_api.py`` fixture shape — including the
-``_STATIC_DIR`` neutralization (so the tests don't depend on whether
-``make playground`` has been run) and the ``_reset_engine`` bracketing.
+Ported from the 1.x ``test_serve_chat.py`` (``whygraph serve`` is gone): the
+same router runs under the portal (plan section 4.5.1), so each test drives
+:func:`whygraph.portal.app.create_portal_app` with one initialized project
+through :class:`~test_portal_serve_api.ScopedClient`, which rewrites
+``/api/chat/...`` to ``/api/projects/demo/chat/...``. The project has a
+migrated WhyGraph DB and deliberately no CodeGraph index.
+
+Config overrides go through the project's bound context
+(:func:`~test_portal_serve_api.use_project_config`), which keeps the
+project's own DB paths, so every test is hermetic.
 
 The harness is monkeypatched **on the ``serve.chat`` module namespace**,
 which is the house convention and the reason ``run_turn`` is imported at
-module level there. That lets the streaming lifecycle — frame sequence,
-which rows land, disconnect behaviour — be tested without a provider.
+module level there. That lets the streaming lifecycle - frame sequence,
+which rows land, disconnect behaviour - be tested without a provider.
 """
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from types import SimpleNamespace
+from typing import Iterator
 
 import pytest
-from fastapi.testclient import TestClient
 
-from whygraph import core
+from test_portal_app import env  # noqa: F401 -- `env` is a fixture
+from test_portal_serve_api import ScopedClient, portal_with_project, use_project_config
 from whygraph.chat.harness import RoundLimit, ToolCallStarted, ToolResultReady
 from whygraph.core.config import ChatConfig, Config, LlmConfig, OpenAIConfig
-from whygraph.db import engine as db_engine
+from whygraph.core.context import use_project
 from whygraph.serve import chat as serve_chat
-from whygraph.serve.app import create_app
 from whygraph.services.llm.chat import ModelInfo, TextDelta, ToolCall, TurnDone
 from whygraph.services.llm.exceptions import LlmError
 
 
 @pytest.fixture
-def chat_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """A TestClient over ``create_app`` with an isolated, migrated DB."""
-    wdb = tmp_path / "whygraph.db"
-    monkeypatch.setattr(
-        core,
-        "_config",
-        Config(whygraph_db=wdb, codegraph_db=tmp_path / "nope.db"),
-    )
-    monkeypatch.setattr("whygraph.serve.app._STATIC_DIR", tmp_path / "nostatic")
-    db_engine._reset_engine()
-    try:
-        with TestClient(create_app(core._config)) as client:
-            yield client
-    finally:
-        db_engine._reset_engine()
-        core._reset_config()
+def chat_client(env: SimpleNamespace) -> Iterator[ScopedClient]:  # noqa: F811
+    """The portal, scoped to ``demo``, with an isolated, migrated DB."""
+    with portal_with_project(env, codegraph=False) as client:
+        yield client
 
 
 def _new_session(client, **body) -> dict:
@@ -109,9 +104,9 @@ def test_provider_is_configured_from_config_or_env(
         "OPENROUTER_API_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setattr(
-        core,
-        "_config",
+    use_project_config(
+        chat_client,
+        monkeypatch,
         Config(llm=LlmConfig(openai=OpenAIConfig(api_key="sk-in-config"))),
     )
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-in-env")
@@ -158,13 +153,10 @@ def test_session_crud_round_trip(chat_client) -> None:
 def test_create_session_defaults_from_chat_config(
     chat_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        core,
-        "_config",
-        Config(
-            whygraph_db=core._config.whygraph_db,
-            chat=ChatConfig(provider="deepseek", model="deepseek-reasoner"),
-        ),
+    use_project_config(
+        chat_client,
+        monkeypatch,
+        Config(chat=ChatConfig(provider="deepseek", model="deepseek-reasoner")),
     )
     created = _new_session(chat_client)
     assert (created["provider"], created["model"]) == ("deepseek", "deepseek-reasoner")
@@ -180,13 +172,8 @@ def test_create_session_defaults_from_llm_model(
     chat_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Config v2: with no ``[chat]``, the session follows ``[llm].model``."""
-    monkeypatch.setattr(
-        core,
-        "_config",
-        Config(
-            whygraph_db=core._config.whygraph_db,
-            llm=LlmConfig(model="openai/gpt-4o-mini"),
-        ),
+    use_project_config(
+        chat_client, monkeypatch, Config(llm=LlmConfig(model="openai/gpt-4o-mini"))
     )
     created = _new_session(chat_client)
     assert (created["provider"], created["model"]) == ("openai", "gpt-4o-mini")
@@ -202,7 +189,9 @@ def test_create_session_defaults_from_llm_model(
 def test_create_session_rejects_a_configured_non_chat_provider(
     chat_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(core, "_config", Config(chat=ChatConfig(provider="ollama")))
+    use_project_config(
+        chat_client, monkeypatch, Config(chat=ChatConfig(provider="ollama"))
+    )
     response = chat_client.post("/api/chat/sessions", json={})
     assert response.status_code == 400
     assert "not a chat provider" in response.json()["detail"]
@@ -600,9 +589,11 @@ def test_client_disconnect_persists_a_stopped_marker(chat_client, monkeypatch) -
     # abort path, which starts from a fresh turn.
     session_id = session["id"]
 
-    frames = serve_chat._turn_frames(session_id, "openai", "gpt-4o")
-    next(frames)  # consume the first text_delta, then walk away
-    frames.close()
+    # Outside a request nothing binds the project; bind it like the route does.
+    with use_project(chat_client.context()):
+        frames = serve_chat._turn_frames(session_id, "openai", "gpt-4o")
+        next(frames)  # consume the first text_delta, then walk away
+        frames.close()
 
     messages = chat_client.get(f"/api/chat/sessions/{session_id}").json()["messages"]
     stopped = messages[-1]
@@ -650,7 +641,7 @@ def test_unexpected_crash_is_also_an_in_band_error(chat_client, monkeypatch) -> 
 
 
 def test_chat_router_does_not_shadow_explorer_routes(chat_client) -> None:
-    """``/api/chat`` is mounted beside ``/api``, not over it."""
+    """``.../chat`` is mounted beside the project's data routes, not over it."""
     # An Explorer route with no CodeGraph index still 503s (its own contract),
     # rather than 404-ing because the chat prefix swallowed it.
     assert chat_client.get("/api/tree").status_code == 503
@@ -710,9 +701,9 @@ def test_models_falls_back_when_listing_fails(chat_client, monkeypatch) -> None:
 def test_models_fallback_includes_a_configured_model_absent_from_the_static_list(
     chat_client, monkeypatch
 ) -> None:
-    monkeypatch.setattr(
-        core,
-        "_config",
+    use_project_config(
+        chat_client,
+        monkeypatch,
         Config(llm=LlmConfig(openai=OpenAIConfig(model="gpt-9-custom"))),
     )
     _stub_list_models(monkeypatch, error="network down")

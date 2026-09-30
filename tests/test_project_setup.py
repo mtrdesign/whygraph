@@ -15,15 +15,12 @@ import tomllib
 from pathlib import Path
 
 import pytest
-from click.testing import CliRunner
 
 from whygraph import agents, assets, project_setup
-from whygraph.cli.commands.init import init_cmd
 from whygraph.hooks import HOOK_NAMES, SENTINEL
 from whygraph.project_setup import (
     HttpMcp,
     PortalMarker,
-    StdioMcp,
     initialize_project,
 )
 
@@ -497,8 +494,10 @@ def _managed_hooks(repo: Path) -> set[str]:
     }
 
 
-def test_initialize_stdio_matches_what_init_writes(repo: Path) -> None:
-    result = initialize_project(repo, agents=["claude"], hooks=True, mcp=StdioMcp())
+def test_initialize_writes_gitignore_hooks_entry_and_assets(repo: Path) -> None:
+    result = initialize_project(
+        repo, agents=["claude"], hooks=True, mcp=HttpMcp(slug="demo"), marker=None
+    )
 
     assert result.gitignore_added == ("whygraph.toml", ".whygraph/", ".codegraph/")
     gitignore = (repo / ".gitignore").read_text().splitlines()
@@ -507,7 +506,12 @@ def test_initialize_stdio_matches_what_init_writes(repo: Path) -> None:
     assert _managed_hooks(repo) == set(HOOK_NAMES)
     assert result.hooks is not None and result.hooks_error is None
     assert json.loads((repo / ".mcp.json").read_text()) == {
-        "mcpServers": {"whygraph": {"command": "whygraph-mcp"}}
+        "mcpServers": {
+            "whygraph": {
+                "type": "http",
+                "url": "http://127.0.0.1:${WHYGRAPH_PORT:-8765}/mcp/demo",
+            }
+        }
     }
     assert (repo / ".claude" / "agents" / "planner.md").is_file()
     assert "<!-- BEGIN whygraph -->" in (repo / ".claude" / "CLAUDE.md").read_text()
@@ -519,20 +523,28 @@ def test_initialize_stdio_matches_what_init_writes(repo: Path) -> None:
 
 
 def test_initialize_without_agent_still_does_gitignore_and_hooks(repo: Path) -> None:
-    result = initialize_project(repo, hooks=True, mcp=StdioMcp())
+    result = initialize_project(
+        repo, hooks=True, mcp=HttpMcp(slug="demo"), agents=[], marker=None
+    )
     assert result.agent_files == () and result.asset_files == ()
     assert _managed_hooks(repo) == set(HOOK_NAMES)
 
 
 def test_initialize_hooks_selection_and_errors_are_best_effort(repo: Path) -> None:
-    result = initialize_project(repo, hooks=["post-commit"], mcp=StdioMcp())
+    result = initialize_project(
+        repo, hooks=["post-commit"], mcp=HttpMcp(slug="demo"), agents=[], marker=None
+    )
     assert _managed_hooks(repo) == {"post-commit"}
 
-    bad = initialize_project(repo, hooks=["post-comit"], mcp=StdioMcp())
+    bad = initialize_project(
+        repo, hooks=["post-comit"], mcp=HttpMcp(slug="demo"), agents=[], marker=None
+    )
     assert bad.hooks is None and "post-comit" in (bad.hooks_error or "")
     assert result.hooks_error is None
 
-    off = initialize_project(repo, hooks=[], mcp=StdioMcp())
+    off = initialize_project(
+        repo, hooks=[], mcp=HttpMcp(slug="demo"), agents=[], marker=None
+    )
     assert _managed_hooks(repo) == set()
     assert off.hooks is not None
 
@@ -540,14 +552,20 @@ def test_initialize_hooks_selection_and_errors_are_best_effort(repo: Path) -> No
 def test_initialize_outside_a_git_repo_reports_hooks_error(tmp_path: Path) -> None:
     plain = tmp_path / "plain"
     plain.mkdir()
-    result = initialize_project(plain, agents=["cursor"], mcp=StdioMcp())
+    result = initialize_project(
+        plain, agents=["cursor"], mcp=HttpMcp(slug="demo"), hooks=False, marker=None
+    )
     assert result.hooks_error and "not a git repository" in result.hooks_error
     assert (plain / ".cursor" / "mcp.json").exists()
 
 
 def test_initialize_resolves_aliases_and_collapses_duplicates(repo: Path) -> None:
     result = initialize_project(
-        repo, agents=["copilot", "vscode"], hooks=False, mcp=StdioMcp()
+        repo,
+        agents=["copilot", "vscode"],
+        hooks=False,
+        mcp=HttpMcp(slug="demo"),
+        marker=None,
     )
     assert result.configured_agents == ("vscode",)
     assert len([f for f in result.agent_files]) == 1
@@ -555,7 +573,11 @@ def test_initialize_resolves_aliases_and_collapses_duplicates(repo: Path) -> Non
 
 def test_initialize_two_agents_write_two_files(repo: Path) -> None:
     result = initialize_project(
-        repo, agents=["claude", "codex"], hooks=False, mcp=HttpMcp(slug="demo")
+        repo,
+        agents=["claude", "codex"],
+        hooks=False,
+        mcp=HttpMcp(slug="demo"),
+        marker=None,
     )
     assert {f.file for f in result.agent_files} == {".mcp.json", ".codex/config.toml"}
     assert (repo / ".mcp.json").is_file()
@@ -569,7 +591,11 @@ def test_initialize_http_writes_urls_and_refused_is_reported(repo: Path) -> None
     (repo / ".vscode" / "mcp.json").write_text('{\n // c\n "servers": {}\n}\n')
 
     result = initialize_project(
-        repo, agents=["claude", "vscode"], hooks=False, mcp=HttpMcp(slug="demo")
+        repo,
+        agents=["claude", "vscode"],
+        hooks=False,
+        mcp=HttpMcp(slug="demo"),
+        marker=None,
     )
 
     assert [f.file for f in result.refused] == [".vscode/mcp.json"]
@@ -595,18 +621,33 @@ def test_force_overwrites_a_1x_asset_and_dry_run_reports_overwrite(
 ) -> None:
     stale = _seed_1x_claude_asset(repo)
 
-    plain = initialize_project(repo, agents=["claude"], hooks=False, mcp=StdioMcp())
+    plain = initialize_project(
+        repo, agents=["claude"], hooks=False, mcp=HttpMcp(slug="demo"), marker=None
+    )
     assert stale.read_text() == "1.x CONTENT"
     assert _status(plain, ".claude/agents/planner.md") == "skip"
 
     preview = initialize_project(
-        repo, agents=["claude"], hooks=False, mcp=StdioMcp(), force=True, dry_run=True
+        repo,
+        agents=["claude"],
+        hooks=False,
+        mcp=HttpMcp(slug="demo"),
+        force=True,
+        dry_run=True,
+        marker=None,
     )
     assert preview.dry_run is True
     assert _status(preview, ".claude/agents/planner.md") == "overwrite"
     assert stale.read_text() == "1.x CONTENT"
 
-    initialize_project(repo, agents=["claude"], hooks=False, mcp=StdioMcp(), force=True)
+    initialize_project(
+        repo,
+        agents=["claude"],
+        hooks=False,
+        mcp=HttpMcp(slug="demo"),
+        force=True,
+        marker=None,
+    )
     assert stale.read_text() != "1.x CONTENT"
 
 
@@ -634,7 +675,13 @@ def test_dry_run_touches_nothing(repo: Path) -> None:
 
 def test_dry_run_agrees_with_the_real_run(repo: Path) -> None:
     _seed_1x_claude_asset(repo)
-    kwargs = dict(agents=["claude"], hooks=False, mcp=HttpMcp(slug="demo"), force=True)
+    kwargs = dict(
+        agents=["claude"],
+        hooks=False,
+        mcp=HttpMcp(slug="demo"),
+        marker=None,
+        force=True,
+    )
     preview = initialize_project(repo, dry_run=True, **kwargs)
     real = initialize_project(repo, **kwargs)
     assert preview.asset_files == real.asset_files
@@ -670,6 +717,7 @@ def test_agent_actions_remove_and_migrate(repo: Path) -> None:
         hooks=False,
         mcp=HttpMcp(slug="demo"),
         agent_actions={"cursor": "remove"},
+        marker=None,
     )
 
     assert json.loads(cursor.read_text()) == {"mcpServers": {"other": {"command": "o"}}}
@@ -686,6 +734,7 @@ def test_agent_actions_can_override_an_agent_to_remove(repo: Path) -> None:
         hooks=False,
         mcp=HttpMcp(slug="demo"),
         agent_actions={"claude": "remove"},
+        marker=None,
     )
     assert json.loads((repo / ".mcp.json").read_text()) == {"mcpServers": {}}
     assert result.configured_agents == ()
@@ -745,7 +794,9 @@ def test_marker_files_are_written_last_and_gitignored(repo: Path) -> None:
 
 def test_stale_scan_lock_is_kept_without_a_marker(repo: Path) -> None:
     (repo / ".whygraph" / "scan.lock").mkdir(parents=True)
-    initialize_project(repo, hooks=False, mcp=StdioMcp())
+    initialize_project(
+        repo, hooks=False, mcp=HttpMcp(slug="demo"), agents=[], marker=None
+    )
     assert (repo / ".whygraph" / "scan.lock").is_dir()
 
 
@@ -782,7 +833,11 @@ def test_a_hooks_failure_is_a_warning_and_the_marker_is_still_written(
     plain = tmp_path / "plain"
     plain.mkdir()
     result = initialize_project(
-        plain, hooks=True, mcp=HttpMcp(slug="demo"), marker=PortalMarker("demo", 8765)
+        plain,
+        hooks=True,
+        mcp=HttpMcp(slug="demo"),
+        marker=PortalMarker("demo", 8765),
+        agents=[],
     )
     assert result.hooks_error
     assert result.marker_written is True
@@ -804,33 +859,3 @@ def test_portal_marker_validates_what_the_hook_helper_will_parse(
 ) -> None:
     with pytest.raises(ValueError):
         PortalMarker(slug, port)
-
-
-# ---- CLI init stays marker-free ------------------------------------------
-
-
-def test_cli_init_writes_no_portal_markers(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def _fake_db() -> Path:
-        db = repo / ".whygraph" / "whygraph.db"
-        db.parent.mkdir(parents=True, exist_ok=True)
-        db.touch()
-        return db
-
-    monkeypatch.setattr("whygraph.cli.commands.init._ensure_db_initialized", _fake_db)
-    monkeypatch.setattr("whygraph.cli.commands.init._run_preflight", lambda: None)
-    monkeypatch.chdir(repo)
-
-    result = CliRunner().invoke(
-        init_cmd, ["--yes", "--agent", "claude"], catch_exceptions=False
-    )
-
-    assert result.exit_code == 0, result.output
-    assert "Wrote whygraph MCP entry" in result.output
-    assert not (repo / ".whygraph" / "portal.json").exists()
-    assert not (repo / ".whygraph" / "portal.env").exists()
-    # CLI init stays on the stdio shape until step 10.
-    assert json.loads((repo / ".mcp.json").read_text()) == {
-        "mcpServers": {"whygraph": {"command": "whygraph-mcp"}}
-    }

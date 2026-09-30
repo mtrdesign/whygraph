@@ -1,6 +1,6 @@
 """Idempotently add entries to a project's ``.gitignore``.
 
-Used by ``whygraph init`` to keep the user-owned config and the generated
+Used by the portal's Initialize step to keep the user-owned config and the generated
 caches out of git: ``whygraph.toml`` (may hold API keys), ``.whygraph/``
 and ``.codegraph/`` (regenerable SQLite). The committable
 ``whygraph.example.toml`` is intentionally *not* ignored.

@@ -54,7 +54,7 @@ Apply it like this:
 - **Empty `evidence_count`**: the chunk has no meaningful git history yet (e.g. brand-new code). The brief will be thin — proceed with your own judgment.
 
 If the tool returns `isError: true`, the cause is one of:
-- **No scan DB in this project** — surface the error verbatim; the user needs to run `whygraph scan` first.
+- **No scan DB in this project** — surface the error verbatim; the user needs to scan from the WhyGraph portal (or run `whygraph scan` outside it) first.
 - **No CodeGraph DB** when calling by `qualified_name` — fall back to calling by `path` + `line_start` + `line_end`.
 - **Symbol not found** when calling by `qualified_name` — likely a stale graph; try the path+lines form instead.
 

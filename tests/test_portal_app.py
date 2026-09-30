@@ -205,6 +205,7 @@ def test_setup_flow(client: TestClient, env: SimpleNamespace) -> None:
         "port": PORT,
         "shared_folders": [str(env.shared)],
         "version": package_version("whygraph"),  # what `whygraph version` prints
+        "port_change": None,
     }
     assert client.get("/api/projects").json() == {"error": "setup required"}
 

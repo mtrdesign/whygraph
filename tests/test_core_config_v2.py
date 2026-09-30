@@ -25,7 +25,6 @@ from whygraph.core.config import (
     ConfigError,
     LlmConfig,
     ModelChoice,
-    default_config_text,
     merge_v2,
     normalize_v2,
 )
@@ -490,12 +489,11 @@ def test_deprecations_warn_once_per_process(
     }
 
 
-def test_v2_file_and_bundled_template_emit_no_deprecation(
+def test_v2_file_emits_no_deprecation(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     with caplog.at_level(logging.WARNING, logger="whygraph.core.config"):
         _from(_V2, tmp_path)
-        _from(default_config_text(), tmp_path)
 
     assert _deprecations(caplog) == []
 
@@ -530,3 +528,27 @@ def test_scan_panel_label_reads_model_for(tmp_path: Path) -> None:
     assert _analyze_model_label(Config.defaults()) == "anthropic · claude-opus-4-7"
     cfg = _from('[llm]\nmodel = "deepseek/deepseek-reasoner"\n', tmp_path)
     assert _analyze_model_label(cfg) == "deepseek · deepseek-reasoner"
+
+
+def test_from_toml_equals_from_dict_of_the_same_table(tmp_path: Path) -> None:
+    # Kept from the retired scaffolding tests: a whygraph.toml and the dict
+    # the portal would store for it build the same Config, and a round trip
+    # keeps the defaults, a CLI provider tag and the hook list.
+    text = (
+        'log_level = "DEBUG"\n'
+        "[analyze]\n"
+        'provider = "claude-cli"\n'
+        "[scan]\n"
+        'hooks = ["post-commit", "post-merge"]\n'
+    )
+    path = tmp_path / "whygraph.toml"
+    path.write_text(text)
+
+    from_file = Config.from_toml(path)
+    from_mapping = Config.from_dict(tomllib.loads(text), tmp_path)
+
+    assert from_file == from_mapping
+    assert from_file.log_level == "DEBUG"
+    assert from_file.analyze.provider == "claude-cli"
+    assert from_file.scan_hooks == ("post-commit", "post-merge")
+    assert Config.from_dict({}, tmp_path).scan_hooks is True

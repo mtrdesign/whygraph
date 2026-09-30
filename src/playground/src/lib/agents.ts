@@ -1,4 +1,4 @@
-// The four agents `whygraph init` can wire (`agents.py`), with what the Initialize
+// The four agents the portal can wire (`agents.py`), with what the Initialize
 // step tells the user about each one (plan section 4.4.1).
 
 export interface AgentInfo {

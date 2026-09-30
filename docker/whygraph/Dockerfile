@@ -83,8 +83,8 @@ ENV WHYGRAPH_VERSION=${WHYGRAPH_VERSION}
 # install.sh honours that one on the host too.
 ENV WHYGRAPH_IN_IMAGE=1
 
-# Install WhyGraph itself so the `whygraph` and `whygraph-mcp` console
-# scripts land on PATH. Copy the build inputs hatchling needs and install.
+# Install WhyGraph itself so the `whygraph` console script (and the
+# `whygraph-mcp` removal stub) land on PATH. Copy the build inputs hatchling needs and install.
 WORKDIR /opt/whygraph
 COPY pyproject.toml ./
 COPY hatch_build.py ./

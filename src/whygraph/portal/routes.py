@@ -419,10 +419,23 @@ def _details(state: PortalState, project: BoundProject) -> dict:
     body["missing_key"] = _missing_key(project.ctx.config)
     body["mcp_url"] = f"{_origins(state).base_url}/mcp/{project.slug}"
     body["detected"] = _detected(project) if body["root_status"] == "ok" else None
+    body["port_change"] = _port_change_for(state, project.slug)
     body["stats"] = (
         _project_stats(state, project) if body["root_status"] == "ok" else None
     )
     return body
+
+
+def _port_change_for(state: PortalState, slug: str) -> dict | None:
+    """This project's entry of the start-up port reconcile, or ``None``."""
+    report = state.port_change or {}
+    for item in report.get("projects", ()):
+        if item["slug"] == slug:
+            return item
+    for item in report.get("unmounted", ()):
+        if item["slug"] == slug:
+            return {**item, "unmounted": True, "port": report["port"]}
+    return None
 
 
 def _detected(project: BoundProject) -> dict:
@@ -518,6 +531,8 @@ def get_state(request: Request) -> dict:
         "port": state.port,
         "shared_folders": [str(f) for f in state.shared_folders],
         "version": _package_version(),
+        # What the start-up port reconcile did (markers / agent files), or null.
+        "port_change": state.port_change,
     }
 
 

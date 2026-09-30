@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
-# WhyGraph installer. Writes the `whygraph` and `whygraph-mcp` shims onto your
-# PATH; each runs the WhyGraph container ephemerally against the current repo.
+# WhyGraph installer. Writes the `whygraph` shim onto your PATH (it runs the
+# WhyGraph container: the portal via `whygraph up`, other commands ephemerally
+# against the current repo), plus the `whygraph-mcp` removal stub.
 #
 #   curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.2/scripts/install.sh | sh
 #

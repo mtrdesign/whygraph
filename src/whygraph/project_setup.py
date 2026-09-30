@@ -1,32 +1,26 @@
 """Project initialization as a library.
 
-:func:`initialize_project` is what ``whygraph init`` does to a repository
-once its choices are made - ``.gitignore`` entries, the auto-rescan git
-hooks, the agent MCP config entries and the bundled agent assets - lifted
-out of the Click command so the WhyGraph portal can call the same code.
+:func:`initialize_project` is what the portal's Initialize step does to a
+repository once its choices are made - ``.gitignore`` entries, the
+auto-rescan git hooks, the agent MCP config entries and the bundled agent
+assets. (It was lifted out of the 1.x CLI init command, removed in 2.0.0;
+the portal is its only caller.)
 
 It is Click-free and prints nothing: it returns an
-:class:`InitializeResult` describing what happened, and callers (the CLI,
-the portal's HTTP layer) decide how to present it. DB bootstrap and the
-``whygraph.toml`` scaffolding are deliberately **not** part of it: the
-CLI does those itself, and in the portal the DB is bootstrapped under the
-project context and the config lives in the portal DB.
+:class:`InitializeResult` describing what happened, and the portal's HTTP
+layer decides how to present it. DB bootstrap is deliberately **not**
+part of it: the portal bootstraps the DB under the project context, and
+the config lives in the portal DB.
 
-Two MCP shapes are supported, chosen by the ``mcp`` argument:
-
-* :class:`StdioMcp` - the 1.x ``whygraph-mcp`` command entry, written by
-  the untouched :func:`whygraph.agents.write_snippet`. Used by the CLI.
-* :class:`~whygraph.agents.HttpMcp` - the portal's ``/mcp/<slug>``
-  endpoint, written with the file-safety rules of
-  :func:`whygraph.agents.apply_http_entry`.
+Every agent gets the HTTP entry for the portal's ``/mcp/<slug>`` endpoint
+(:class:`~whygraph.agents.HttpMcp`), written with the file-safety rules of
+:func:`whygraph.agents.apply_http_entry`.
 
 Notes
 -----
 The portal markers (``.whygraph/portal.json`` and ``.whygraph/portal.env``)
 are written only when ``marker`` is given, only as the last step, and only
-when every earlier step succeeded, so a failed initialize leaves no marker
-and CLI ``init`` (which passes ``marker=None``) never marks a repo
-portal-managed.
+when every earlier step succeeded, so a failed initialize leaves no marker.
 """
 
 from __future__ import annotations
@@ -44,12 +38,11 @@ from . import assets as assets_mod
 from . import hooks as _hooks
 from .agents import (
     AgentAction,
-    AgentTarget,
     FileOutcome,
     HttpMcp,
 )
 from .core.gitignore import ensure_gitignore_entries
-from .core.safe_paths import check_inside
+from .core.safe_paths import UnsafePathError, check_inside
 from .hooks import HooksResult
 
 GITIGNORE_ENTRIES = ("whygraph.toml", ".whygraph/", ".codegraph/")
@@ -58,15 +51,10 @@ GITIGNORE_ENTRIES = ("whygraph.toml", ".whygraph/", ".codegraph/")
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 
 PORTAL_JSON = Path(".whygraph") / "portal.json"
-"""Marker read by ``whygraph scan`` (relative to the repo root)."""
+"""Marker that makes ``whygraph scan`` refuse (relative to the repo root)."""
 
 PORTAL_ENV = Path(".whygraph") / "portal.env"
 """Marker parsed - never sourced - by the git hook helper."""
-
-
-@dataclass(frozen=True, slots=True)
-class StdioMcp:
-    """The 1.x stdio MCP shape: ``{"command": "whygraph-mcp"}``."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,10 +140,10 @@ class InitializeResult:
 def initialize_project(
     root: Path,
     *,
-    agents: Sequence[str] = (),
-    hooks: bool | Sequence[str] = True,
-    mcp: StdioMcp | HttpMcp,
-    marker: PortalMarker | None = None,
+    agents: Sequence[str],
+    hooks: bool | Sequence[str],
+    mcp: HttpMcp,
+    marker: PortalMarker | None,
     force: bool = False,
     confirm_tracked: Iterable[str | Path] = (),
     agent_actions: Mapping[str, AgentAction] | None = None,
@@ -179,11 +167,11 @@ def initialize_project(
         The ``[scan].hooks`` value: ``True`` all hooks, ``False`` / empty
         none, or explicit hook names. An unknown name is reported in
         :attr:`InitializeResult.hooks_error`, never raised.
-    mcp : StdioMcp or HttpMcp
-        The MCP shape to register.
+    mcp : HttpMcp
+        The portal endpoint to register.
     marker : PortalMarker or None
-        When set, the portal markers are written as the last step. The
-        CLI passes ``None``.
+        When set, the portal markers are written as the last step
+        (``None`` writes none).
     force : bool
         Overwrite existing asset files (a 1.x ``.claude/`` refresh).
     confirm_tracked : Iterable[str or Path]
@@ -207,7 +195,7 @@ def initialize_project(
         agent config file and ``.whygraph/backups/``, each bundled asset
         destination, the markers and their temp files - goes through
         :func:`whygraph.core.safe_paths.check_inside`. The portal passes
-        ``True`` (repo content is untrusted there); the CLI does not.
+        ``True`` (repo content is untrusted there).
 
     Returns
     -------
@@ -259,12 +247,8 @@ def initialize_project(
             agent_files.append(outcome)
             continue
 
-        outcome = _write_entry(
-            target,
-            root,
-            mcp,
-            confirm_tracked=confirm_tracked,
-            dry_run=dry_run,
+        outcome = agents_mod.apply_http_entry(
+            target, root, mcp, confirm_tracked=confirm_tracked, dry_run=dry_run
         )
         agent_files.append(outcome)
         if outcome.status in ("write", "overwrite", "skip"):
@@ -289,7 +273,7 @@ def initialize_project(
 
     if marker is not None and not dry_run and not result.needs_confirmation:
         _remove_stale_scan_lock(root)
-        _write_marker(root, marker)
+        write_portal_marker(root, marker)
         return replace(result, marker_written=True)
     return result
 
@@ -329,38 +313,6 @@ def _asset_destinations(src, dest: Path) -> list[Path]:
     return out
 
 
-def _write_entry(
-    target: AgentTarget,
-    root: Path,
-    mcp: StdioMcp | HttpMcp,
-    *,
-    confirm_tracked: Iterable[str | Path],
-    dry_run: bool,
-) -> FileOutcome:
-    """Write one agent's MCP entry in the requested shape."""
-    if isinstance(mcp, HttpMcp):
-        return agents_mod.apply_http_entry(
-            target, root, mcp, confirm_tracked=confirm_tracked, dry_run=dry_run
-        )
-
-    # Stdio: today's writer, untouched (it merges, and replaces what it
-    # cannot parse - the HTTP path is the one that refuses).
-    rel = "/".join(target.relative_path)
-    if not agents_mod.is_write_supported(target):
-        return FileOutcome(
-            rel,
-            "refused",
-            target.name,
-            reason="user-scoped agent; paste the snippet by hand",
-            snippet=agents_mod.render_snippet(target),
-        )
-    path = agents_mod.config_path_for(target, root)
-    status = "overwrite" if path.exists() else "write"
-    if not dry_run:
-        agents_mod.write_snippet(target, root)
-    return FileOutcome(rel, status, target.name)
-
-
 def _asset_outcomes(
     root: Path, agent: str, result: assets_mod.InstallResult
 ) -> list[FileOutcome]:
@@ -380,21 +332,72 @@ def _asset_outcomes(
 def _remove_stale_scan_lock(root: Path) -> None:
     """Delete a leftover 1.x ``.whygraph/scan.lock/`` (nothing reads it in 2.0).
 
-    Only done for a portal-managed project: the CLI's own helper still
-    uses the lock until the portal takes over.
+    Done when the markers are written: from then on the hook helper asks
+    the portal to scan and never takes the lock.
     """
     lock = root / ".whygraph" / "scan.lock"
     if lock.is_dir():
         shutil.rmtree(lock, ignore_errors=True)
 
 
-def _write_marker(root: Path, marker: PortalMarker) -> None:
-    """Write ``portal.env`` then ``portal.json``, each atomically."""
+def write_portal_marker(root: Path, marker: PortalMarker) -> None:
+    """Write ``portal.env`` then ``portal.json``, each atomically.
+
+    Parameters
+    ----------
+    root : Path
+        Repository root. The caller has checked the marker paths.
+    marker : PortalMarker
+        The validated slug and port.
+    """
     _atomic_write(root / PORTAL_ENV, f"slug={marker.slug}\nport={marker.port}\n")
     _atomic_write(
         root / PORTAL_JSON,
         json.dumps({"slug": marker.slug, "port": marker.port}) + "\n",
     )
+
+
+def read_portal_marker(root: Path) -> tuple[PortalMarker | None, str | None]:
+    """Read ``.whygraph/portal.json`` the way ``whygraph scan`` trusts it.
+
+    Only the validated ``slug`` and ``port`` are returned (never free
+    text), so a message built from them cannot carry anything else from
+    the file. A marker that is a symlink, tracked by git (someone
+    committed it) or malformed is ignored, with a warning.
+
+    Parameters
+    ----------
+    root : Path
+        Repository root.
+
+    Returns
+    -------
+    tuple of (PortalMarker or None, str or None)
+        The marker when the file exists and is valid, and a warning when
+        a file exists but is ignored. ``(None, None)`` when there is no
+        marker at all.
+    """
+    path = root / PORTAL_JSON
+    if not os.path.lexists(path):
+        return None, None
+    rel = PORTAL_JSON.as_posix()
+    try:
+        check_inside(root, path)
+    except UnsafePathError:
+        return None, f"ignoring {rel}: it is a symbolic link"
+    if agents_mod.is_git_tracked(root, rel):
+        return (
+            None,
+            f"ignoring {rel}: it is tracked by git (it must never be committed)",
+        )
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        slug, port = data["slug"], data["port"]
+        if not isinstance(slug, str) or isinstance(port, bool):
+            raise TypeError
+        return PortalMarker(slug=slug, port=port), None
+    except (OSError, UnicodeDecodeError, ValueError, TypeError, KeyError):
+        return None, f"ignoring {rel}: it is not a valid portal marker"
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -411,6 +414,7 @@ __all__ = [
     "PORTAL_ENV",
     "PORTAL_JSON",
     "PortalMarker",
-    "StdioMcp",
     "initialize_project",
+    "read_portal_marker",
+    "write_portal_marker",
 ]

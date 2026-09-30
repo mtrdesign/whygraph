@@ -63,7 +63,7 @@ class PlaygroundBuildHook(BuildHookInterface):
         if not (playground / "package.json").is_file():
             self.app.display_warning(
                 "src/playground/ not found — packaging without the Explorer SPA bundle; "
-                "`whygraph serve` will report the UI is not built at /."
+                "the portal will report the UI is not built at /."
             )
             return
 
@@ -79,7 +79,7 @@ class PlaygroundBuildHook(BuildHookInterface):
             have = "unknown" if node is None else ".".join(map(str, node))
             self.app.display_warning(
                 f"Node >= {'.'.join(map(str, MIN_NODE))} is required to build the Explorer SPA "
-                f"(have {have}) - packaging without the bundle; `whygraph serve` will report "
+                f"(have {have}) - packaging without the bundle; the portal will report "
                 "the UI is not built at /. Upgrade Node (e.g. `nvm use 22`) and rebuild, "
                 "or run `make playground`."
             )

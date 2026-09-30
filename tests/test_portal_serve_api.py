@@ -1,25 +1,165 @@
-"""Integration tests for the Explorer HTTP API — :mod:`whygraph.serve`.
+"""Integration tests for the Explorer HTTP API on the portal app.
 
-Each test drives a FastAPI ``TestClient`` over :func:`create_app`, backed by a fake
-CodeGraph DB (a ``file → class → method`` tree plus a caller) and an initialised,
-empty WhyGraph DB. The rationale-split tests monkeypatch the service functions so
-they can assert the LLM path is taken **only** on ``POST`` — never on a passive
-``GET`` — which is the whole point of the resolved Q3 design.
+Ported from the 1.x ``test_serve_api.py`` (``whygraph serve`` is gone): each
+test drives the portal (:func:`whygraph.portal.app.create_portal_app`) with
+one initialized local project, ``demo``, whose ``.codegraph/codegraph.db`` is
+a fake ``file -> class -> method`` tree plus a caller, and an initialised,
+empty WhyGraph DB. :class:`ScopedClient` rewrites ``/api/<x>`` to the
+project-scoped ``/api/projects/demo/<x>`` so the test bodies read as before.
+The rationale-split tests monkeypatch the service functions so they can
+assert the LLM path is taken **only** on ``POST`` - never on a passive
+``GET`` - which is the whole point of the resolved Q3 design.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Iterator
 from unittest import mock
 
 import pytest
 from fastapi.testclient import TestClient
 
-from whygraph import core
+from conftest import build_fake_codegraph_db
+from test_portal_app import (  # noqa: F401 -- `env` is a fixture
+    add_local,
+    env,
+    init_project,
+    make_repo,
+    portal_client,
+)
 from whygraph.core.config import Config
+from whygraph.core.context import ProjectContext
 from whygraph.db import engine as db_engine
 from whygraph.serve import routes
-from whygraph.serve.app import create_app
+
+SLUG = "demo"
+
+
+class ScopedClient:
+    """A portal ``TestClient`` whose ``/api/<x>`` calls go to one project.
+
+    ``/api/tree`` becomes ``/api/projects/<slug>/tree``; every other path
+    (``/``, ``/p/...``, ``/api/projects/...``) is sent unchanged.
+
+    Attributes
+    ----------
+    client : TestClient
+        The underlying client (``X-WhyGraph-Client: 1``, loopback Host).
+    slug : str
+        The project slug.
+    root : Path
+        The project's repository root.
+    """
+
+    def __init__(self, client: TestClient, slug: str, root: Path) -> None:
+        self.client = client
+        self.slug = slug
+        self.root = root
+
+    @property
+    def app(self):
+        return self.client.app
+
+    def _url(self, url: str) -> str:
+        if url.startswith("/api/") and not url.startswith("/api/projects/"):
+            return f"/api/projects/{self.slug}/{url.removeprefix('/api/')}"
+        return url
+
+    def request(self, method: str, url: str, **kwargs):
+        return self.client.request(method, self._url(url), **kwargs)
+
+    def get(self, url: str, **kwargs):
+        return self.client.get(self._url(url), **kwargs)
+
+    def post(self, url: str, **kwargs):
+        return self.client.post(self._url(url), **kwargs)
+
+    def put(self, url: str, **kwargs):
+        return self.client.put(self._url(url), **kwargs)
+
+    def patch(self, url: str, **kwargs):
+        return self.client.patch(self._url(url), **kwargs)
+
+    def delete(self, url: str, **kwargs):
+        return self.client.delete(self._url(url), **kwargs)
+
+    def context(self) -> ProjectContext:
+        """The project's current (cached) context."""
+        state = self.app.state.portal
+        return state.contexts.get(self._project_id())
+
+    def _project_id(self) -> int:
+        from sqlmodel import select
+
+        from whygraph.portal import db as portal_db
+        from whygraph.portal.models import Project
+
+        with portal_db.get_session() as session:
+            return session.exec(
+                select(Project.id).where(Project.slug == self.slug)
+            ).one()
+
+
+def use_project_config(
+    client: ScopedClient, monkeypatch: pytest.MonkeyPatch, config: Config
+) -> ProjectContext:
+    """Make the project's bound context carry ``config`` (keeping its DB paths).
+
+    The 1.x tests swapped ``core._config``; in the portal the config comes
+    from the project context, so the portal's context cache is patched
+    instead. The project's own ``whygraph_db`` / ``codegraph_db`` are always
+    kept, so the test stays hermetic.
+    """
+    real = client.context()
+    ctx = ProjectContext(
+        slug=real.slug,
+        root=real.root,
+        config=replace(
+            config,
+            whygraph_db=real.config.whygraph_db,
+            codegraph_db=real.config.codegraph_db,
+        ),
+    )
+    contexts = client.app.state.portal.contexts
+
+    async def _aget(project_id: int) -> ProjectContext:
+        return ctx
+
+    monkeypatch.setattr(contexts, "get", lambda project_id: ctx)
+    monkeypatch.setattr(contexts, "aget", _aget)
+    return ctx
+
+
+@contextmanager
+def portal_with_project(
+    env: SimpleNamespace,  # noqa: F811
+    *,
+    nodes: list[dict] | None = None,
+    edges: list | None = None,
+    codegraph: bool = True,
+) -> Iterator[ScopedClient]:
+    """A portal past setup with the initialized local project ``demo``."""
+    db_engine._reset_engine()
+    try:
+        with portal_client() as client:
+            setup = client.post("/api/portal/setup", json={"display_name": "Tess"})
+            assert setup.status_code == 201, setup.text
+            root = make_repo(env.shared, SLUG)
+            if codegraph:
+                (root / ".codegraph").mkdir()
+                build_fake_codegraph_db(
+                    root / ".codegraph" / "codegraph.db", nodes=nodes, edges=edges
+                )
+            assert add_local(client, root)["project"]["slug"] == SLUG
+            assert init_project(client, SLUG)["initialized"] is True
+            yield ScopedClient(client, SLUG, root)
+    finally:
+        db_engine._reset_engine()
+
 
 # A small graph: file a.py contains class A contains method m; b.py's `caller`
 # calls m and imports A.
@@ -94,23 +234,14 @@ _EDGES = [
 
 
 @pytest.fixture
-def serve_client(tmp_path, monkeypatch, codegraph_db_factory):
-    """A TestClient over ``create_app``, with a fake CodeGraph + empty WhyGraph DB.
+def serve_client(env: SimpleNamespace) -> Iterator[ScopedClient]:  # noqa: F811
+    """The portal, scoped to ``demo``, with a fake CodeGraph + empty WhyGraph DB.
 
-    Points the app's static dir at an empty path so the API tests are independent
-    of whether ``make playground`` has been run (the built bundle is gitignored).
+    The ``env`` fixture points the static dir at an empty path, so the API
+    tests are independent of whether ``make playground`` has been run.
     """
-    cg_path = codegraph_db_factory(nodes=_NODES, edges=_EDGES)
-    wdb = tmp_path / "whygraph.db"
-    monkeypatch.setattr(core, "_config", Config(whygraph_db=wdb, codegraph_db=cg_path))
-    monkeypatch.setattr("whygraph.serve.app._STATIC_DIR", tmp_path / "nostatic")
-    db_engine._reset_engine()
-    try:
-        with TestClient(create_app(core._config)) as client:
-            yield client
-    finally:
-        db_engine._reset_engine()
-        core._reset_config()
+    with portal_with_project(env, nodes=_NODES, edges=_EDGES) as client:
+        yield client
 
 
 # ---- tree ----------------------------------------------------------------
@@ -308,7 +439,7 @@ def test_rationale_post_calls_brief_verbatim(serve_client, monkeypatch) -> None:
 
 
 def test_root_reports_ui_not_built(serve_client) -> None:
-    # No static bundle in a source checkout — the API must still serve, and `/`
+    # No static bundle in a source checkout - the API must still serve, and `/`
     # returns the guidance message rather than 500.
     r = serve_client.get("/")
     assert r.status_code == 200
@@ -316,23 +447,17 @@ def test_root_reports_ui_not_built(serve_client) -> None:
     assert "make playground" in r.text
 
 
-def test_serves_spa_when_built(tmp_path, monkeypatch, codegraph_db_factory) -> None:
+def test_serves_spa_when_built(
+    env: SimpleNamespace,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # With a built bundle, `/` serves index.html, unknown client routes fall back
-    # to it (SPA routing), and /api still wins over the catch-all.
-    static = tmp_path / "static"
+    # to it (SPA routing), and the scoped /api still wins over the catch-all.
+    static = env.tmp / "static"
     static.mkdir()
     (static / "index.html").write_text("<!doctype html><title>WG-BUILT</title>")
     monkeypatch.setattr("whygraph.serve.app._STATIC_DIR", static)
-    cg_path = codegraph_db_factory(nodes=_NODES, edges=_EDGES)
-    monkeypatch.setattr(
-        core, "_config", Config(whygraph_db=tmp_path / "w.db", codegraph_db=cg_path)
-    )
-    db_engine._reset_engine()
-    try:
-        with TestClient(create_app(core._config)) as client:
-            assert "WG-BUILT" in client.get("/").text
-            assert "WG-BUILT" in client.get("/some/client/route").text
-            assert client.get("/api/tree").status_code == 200
-    finally:
-        db_engine._reset_engine()
-        core._reset_config()
+    with portal_with_project(env, nodes=_NODES, edges=_EDGES) as client:
+        assert "WG-BUILT" in client.get("/").text
+        assert "WG-BUILT" in client.get("/some/client/route").text
+        assert client.get("/api/tree").status_code == 200

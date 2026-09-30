@@ -16,7 +16,7 @@ WhyGraph is run:
   image already carries the right Node version and the pinned upstream
   package, so the host only needs Docker.
 
-:func:`ensure_codegraph_db` is idempotent (used by ``whygraph init``);
+:func:`ensure_codegraph_db` is idempotent (the 1.x init step used it);
 :func:`refresh_codegraph_index` re-syncs an existing index (used by
 ``whygraph scan``). Both are usable standalone (e.g. from tests).
 """

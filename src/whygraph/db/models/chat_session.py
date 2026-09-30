@@ -1,6 +1,6 @@
 """SQLModel for the ``chat_session`` table.
 
-One row per conversation in the ``whygraph serve`` Chat view. The
+One row per conversation in the portal's Chat view. The
 session's provider + model are the defaults for its **next** turn, not a
 lifetime commitment: ``PATCH /api/chat/sessions/{id}`` re-points them, and
 the dropdowns above the composer do exactly that. Each

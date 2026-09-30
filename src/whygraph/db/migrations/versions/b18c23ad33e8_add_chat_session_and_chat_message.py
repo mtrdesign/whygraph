@@ -4,7 +4,7 @@ Revision ID: b18c23ad33e8
 Revises: 4e231ec6f0e1
 Create Date: 2026-07-29 10:49:47.492596
 
-Adds the two tables backing the ``whygraph serve`` Chat view: one row per
+Adds the two tables backing the Chat view: one row per
 conversation (``chat_session``, carrying the provider + model it was
 started with) and one row per message (``chat_message``, including tool
 rows so a reloaded transcript replays the tool activity the user saw

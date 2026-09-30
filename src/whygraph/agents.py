@@ -1,20 +1,16 @@
-"""Agent registration: where to wire ``whygraph-mcp`` for each LLM agent.
+"""Agent registration: where to wire the WhyGraph MCP server for each LLM agent.
 
-WhyGraph's MCP server is a standalone console script (``whygraph-mcp``,
-declared in ``pyproject.toml``). To consume it, an LLM agent (Claude
-Code, Cursor, VS Code / Copilot, Codex) needs an entry in its own MCP
-configuration file. The location and format of that file vary by agent,
-so this module centralises:
+The WhyGraph portal serves each project's MCP endpoint over HTTP
+(``/mcp/<slug>``). To consume it, an LLM agent (Claude Code, Cursor,
+VS Code / Copilot, Codex) needs an entry in its own MCP configuration
+file. The location and format of that file vary by agent, so this module
+centralises:
 
 * the registry of supported agents and their config-file conventions
-  (:data:`AGENTS`, :func:`resolve_agent`),
-* the snippet an agent expects (:func:`render_snippet`), and
-* a safe merge-write for project-scoped configs
-  (:func:`write_snippet`), and
-* the HTTP variant of all of the above for the WhyGraph portal
-  (:class:`HttpMcp`, :func:`render_http_snippet`,
+  (:data:`AGENTS`, :func:`resolve_agent`), and
+* the HTTP entry itself (:class:`HttpMcp`, :func:`render_http_snippet`,
   :func:`apply_http_entry`, :func:`remove_entry`,
-  :func:`detect_entries`), which is stricter about existing files: it
+  :func:`detect_entries`), which is careful with existing files: it
   refuses what it cannot parse, backs up before rewriting, and asks
   before touching a git-tracked file.
 
@@ -24,10 +20,9 @@ without a project-level config (e.g. Claude Desktop) are not supported.
 
 Notes
 -----
-The launch command embedded in every snippet is just ``whygraph-mcp``
-— no ``uv run``, no path resolution. This assumes the user installed
-WhyGraph with ``uv tool install whygraph`` / ``pipx install whygraph``
-so that the console script is on PATH.
+The 1.x stdio entry (``{"command": ...}``) is no longer written (removed
+in 2.0.0); :func:`detect_entries` still reports one, as ``stdio``, so the
+portal can offer to migrate or remove it.
 """
 
 from __future__ import annotations
@@ -46,7 +41,6 @@ from typing import Literal
 import tomli_w
 
 MCP_SERVER_NAME = "whygraph"
-MCP_COMMAND = "whygraph-mcp"
 
 Scope = Literal["project", "user"]
 Format = Literal["json", "toml"]
@@ -77,9 +71,9 @@ class AgentTarget:
         user's home directory.
     format : {"json", "toml"}
         Serialization format of the target file. Determines which
-        renderer :func:`render_snippet` uses.
+        renderer :func:`render_http_snippet` uses.
     description : str
-        Short one-line description shown in ``whygraph init --help``.
+        Short one-line description of the agent and its config file.
     assets_subdir : str or None
         Name of the source directory under ``src/whygraph/assets/`` that
         holds this agent's bundled asset tree, or ``None`` if the agent
@@ -90,10 +84,9 @@ class AgentTarget:
         at the repo root". ``None`` mirrors :attr:`assets_subdir` —
         agent has no bundled assets.
     servers_key : str
-        Top-level key holding the server table in the config file, used
-        by the HTTP writer only (the stdio writer predates it and always
-        uses ``mcpServers`` / ``[mcp_servers]``). VS Code's
-        ``.vscode/mcp.json`` uses ``servers`` and rejects ``mcpServers``.
+        Top-level key holding the server table in the config file.
+        VS Code's ``.vscode/mcp.json`` uses ``servers`` and rejects
+        ``mcpServers``.
     assets_merge_files : tuple[str, ...]
         Paths (relative to :attr:`assets_dest`) of files that should be
         **append-merged** rather than skip-or-overwritten. The installer
@@ -243,150 +236,8 @@ def config_path_for(target: AgentTarget, project_root: Path) -> Path:
     return anchor.joinpath(*target.relative_path)
 
 
-def render_snippet(target: AgentTarget) -> str:
-    """Render the registration snippet for ``target`` as a string.
-
-    JSON snippets are pretty-printed with two-space indentation and a
-    trailing newline. The TOML snippet is hand-rendered — it's small,
-    fixed, and writing it by hand avoids pulling in a TOML writer
-    dependency for the print-only path.
-
-    Parameters
-    ----------
-    target : AgentTarget
-        The agent whose snippet format to render.
-
-    Returns
-    -------
-    str
-        The snippet, ready to print or write.
-    """
-    if target.format == "json":
-        payload = {
-            "mcpServers": {
-                MCP_SERVER_NAME: {"command": MCP_COMMAND},
-            }
-        }
-        return json.dumps(payload, indent=2) + "\n"
-    return f'[mcp_servers.{MCP_SERVER_NAME}]\ncommand = "{MCP_COMMAND}"\n'
-
-
-def write_snippet(target: AgentTarget, project_root: Path) -> Path:
-    """Merge the WhyGraph MCP entry into ``target``'s config file.
-
-    Only valid for project-scoped targets — user-scoped paths are out
-    of scope (see the module docstring). Supports both JSON and TOML
-    formats; the branch is chosen by ``target.format``.
-
-    Behavior (identical across formats):
-
-    * If the file does not exist, write a minimal config containing
-      only the WhyGraph entry.
-    * If the file exists and parses, the WhyGraph entry is added/
-      replaced under ``mcpServers`` (JSON) or ``[mcp_servers]`` (TOML);
-      other servers and top-level keys are preserved.
-    * If the file exists but is unparseable, a fresh minimal config
-      replaces it. This is a conscious trade-off: we surface the new
-      config rather than refuse to proceed. Users who'd rather merge by
-      hand can render the snippet with ``render_snippet()`` instead.
-
-    Parameters
-    ----------
-    target : AgentTarget
-        The agent to wire.
-    project_root : Path
-        Repository root used to anchor project-scoped paths.
-
-    Returns
-    -------
-    Path
-        The absolute path that was written.
-
-    Raises
-    ------
-    ValueError
-        If ``target`` is user-scoped.
-
-    Notes
-    -----
-    Comments and incidental formatting in the existing config file are
-    not preserved across the read-modify-write cycle (``tomllib`` strips
-    comments on parse; ``json.load`` collapses whitespace). Users who
-    care about preserving their hand-formatted config should render the
-    snippet with ``render_snippet()`` and merge it manually.
-    """
-    if target.scope != "project":
-        raise ValueError(
-            f"agent {target.name!r} is user-scoped; use render_snippet() instead"
-        )
-
-    path = config_path_for(target, project_root)
-    if target.format == "json":
-        return _write_json_snippet(path)
-    return _write_toml_snippet(path)
-
-
-def _write_json_snippet(path: Path) -> Path:
-    """JSON-formatted ``mcpServers`` merge for ``.mcp.json`` / ``.cursor/mcp.json`` / ``.vscode/mcp.json``."""
-    existing: dict = {}
-    if path.exists():
-        try:
-            with path.open("r", encoding="utf-8") as f:
-                loaded = json.load(f)
-            if isinstance(loaded, dict):
-                existing = loaded
-        except (json.JSONDecodeError, OSError):
-            existing = {}
-
-    servers = existing.get("mcpServers")
-    if not isinstance(servers, dict):
-        servers = {}
-    servers[MCP_SERVER_NAME] = {"command": MCP_COMMAND}
-    existing["mcpServers"] = servers
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(existing, f, indent=2)
-        f.write("\n")
-    return path
-
-
-def _write_toml_snippet(path: Path) -> Path:
-    """TOML-formatted ``[mcp_servers.*]`` merge for ``.codex/config.toml``."""
-    existing: dict = {}
-    if path.exists():
-        try:
-            with path.open("rb") as f:
-                loaded = tomllib.load(f)
-            if isinstance(loaded, dict):
-                existing = loaded
-        except (tomllib.TOMLDecodeError, OSError):
-            existing = {}
-
-    servers = existing.get("mcp_servers")
-    if not isinstance(servers, dict):
-        servers = {}
-    servers[MCP_SERVER_NAME] = {"command": MCP_COMMAND}
-    existing["mcp_servers"] = servers
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("wb") as f:
-        tomli_w.dump(existing, f)
-    return path
-
-
-def is_write_supported(target: AgentTarget) -> bool:
-    """Return ``True`` if :func:`write_snippet` accepts ``target``.
-
-    Convenience for callers that need to branch on print-vs-write
-    without catching :class:`ValueError`. All project-scoped targets
-    (JSON or TOML) are writeable.
-    """
-    return target.scope == "project"
-
-
 # ---------------------------------------------------------------------------
-# HTTP variant (the WhyGraph portal)
+# The HTTP entry (the WhyGraph portal)
 # ---------------------------------------------------------------------------
 
 DEFAULT_PORTAL_PORT = 8765
@@ -762,9 +613,8 @@ def apply_http_entry(
 ) -> FileOutcome:
     """Merge the HTTP ``whygraph`` entry into ``target``'s config file.
 
-    Unlike :func:`write_snippet`, a file that cannot be parsed (JSON with
-    comments included, TOML containing any comment) is **refused**, never
-    replaced; the outcome carries the snippet to paste by hand. Other
+    A file that cannot be parsed (JSON with comments included, TOML
+    containing any comment) is **refused**, never replaced; the outcome carries the snippet to paste by hand. Other
     servers and keys are preserved. For VS Code the entry goes under
     ``servers``, its port ``inputs`` entry is added, and a stale 1.x
     ``mcpServers.whygraph`` is dropped.
@@ -942,18 +792,14 @@ __all__ = [
     "FileOutcome",
     "FileStatus",
     "HttpMcp",
-    "MCP_COMMAND",
     "MCP_SERVER_NAME",
     "UnknownAgentError",
     "apply_http_entry",
     "config_path_for",
     "detect_entries",
     "is_git_tracked",
-    "is_write_supported",
     "known_agent_names",
     "remove_entry",
     "render_http_snippet",
-    "render_snippet",
     "resolve_agent",
-    "write_snippet",
 ]

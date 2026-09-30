@@ -27,7 +27,7 @@ The user is asking about the *intent* behind existing code. WhyGraph has a struc
 - The user is adding *new* code with no predecessor — no rationale exists yet.
 - The user is about to *edit* the symbol — the WhyGraph Pre-Edit Brief instructions already cover that path; you'll fetch the brief there.
 - The question is conceptual or domain-level rather than per-symbol ("how does authentication work?" — broader than one symbol).
-- WhyGraph hasn't been scanned in this project. Surface the tool's error verbatim and suggest running `whygraph scan` first.
+- WhyGraph hasn't been scanned in this project. Surface the tool's error verbatim and suggest scanning from the WhyGraph portal (or running `whygraph scan` outside it) first.
 
 ## What you should NOT do
 

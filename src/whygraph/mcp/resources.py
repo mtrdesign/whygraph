@@ -63,7 +63,8 @@ from .path_history import current_branch_scope, resolve_path_aliases
 _log = logging.getLogger(__name__)
 
 _DB_UNSCANNED_MESSAGE = (
-    "WhyGraph DB is missing or unscanned — run `whygraph scan` first"
+    "WhyGraph DB is missing or unscanned — scan from the WhyGraph portal "
+    "(or run `whygraph scan` outside it) first"
 )
 _TOP_CONTRIBUTORS_LIMIT = 10
 

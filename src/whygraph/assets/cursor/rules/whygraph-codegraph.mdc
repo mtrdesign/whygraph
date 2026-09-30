@@ -24,4 +24,4 @@ This project ships a CodeGraph index (`.codegraph/`) and the `codegraph_*` MCP t
 
 ## If `.codegraph/` does not exist
 
-The MCP server reports "not initialized." Ask the user whether to run `whygraph scan` (which builds / refreshes the CodeGraph index) before relying on these tools.
+The MCP server reports "not initialized." Ask the user whether to scan from the WhyGraph portal (or run `whygraph scan` outside it), which builds / refreshes the CodeGraph index, before relying on these tools.

@@ -14,15 +14,15 @@ Agents without bundled assets leave both fields ``None`` — see
 :attr:`whygraph.agents.AgentTarget.has_assets`.
 
 This module exposes a small installer that copies the per-agent tree
-into the matching destination directory. It is invoked from
-``whygraph init --agent <name>``.
+into the matching destination directory. It is invoked by the portal's
+Initialize step (:func:`whygraph.project_setup.initialize_project`).
 
 Notes
 -----
 The default policy is **skip-if-exists**: a target file that already
 exists is left alone. Pass ``force=True`` to overwrite. This matches
 the "user edits are sacred" default of most scaffolding tools and
-mirrors the spirit of :func:`whygraph.agents.write_snippet`, which
+mirrors the spirit of :func:`whygraph.agents.apply_http_entry`, which
 merges into an existing config rather than clobbering it.
 
 Files listed in :attr:`whygraph.agents.AgentTarget.assets_merge_files`

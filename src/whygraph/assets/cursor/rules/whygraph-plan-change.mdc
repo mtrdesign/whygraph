@@ -24,7 +24,7 @@ The user is gesturing at a multi-file change, feature addition, migration, or de
 
 - **Trivial change** (1–3 lines, single file). Just do it.
 - **The user already has a plan** and is asking you to execute. `/whygraph-plan` plans; it doesn't implement.
-- **CodeGraph isn't initialised** — the planner will abort. Suggest `whygraph init` (or `codegraph init -i`) first.
+- **CodeGraph isn't initialised** — the planner will abort. Suggest adding this project in the WhyGraph portal and running a scan (or `codegraph init -i`) first.
 - **Conceptual "how would I approach X" question** with no intent to actually change code. Answer directly.
 - **Brand-new feature with no existing code to ground against** — there's nothing for the planner to read rationale from.
 - **The user is asking you to *review* an existing plan** rather than draft a new one — answer directly.

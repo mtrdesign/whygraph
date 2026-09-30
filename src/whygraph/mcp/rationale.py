@@ -29,7 +29,8 @@ _TOOL_DESCRIPTION = (
     "enriches it with CodeGraph symbol context, and asks the configured LLM "
     "to synthesize the card. Pass either (path, line_start, line_end) or a "
     "qualified_name. Calls the configured LLM provider — may take several "
-    "seconds. Run `whygraph scan` first to populate the WhyGraph database."
+    "seconds. Scan from the WhyGraph portal (or run `whygraph scan` outside it) "
+    "first to populate the WhyGraph database."
 )
 
 
@@ -100,7 +101,8 @@ def whygraph_rationale_brief(
     if not evidence:
         raise WhyGraphError(
             "no historical evidence for this target — the lines map to no "
-            "scanned commit. Run `whygraph scan` to populate the database."
+            "scanned commit. Scan from the WhyGraph portal (or run `whygraph scan` "
+            "outside it) to populate the database."
         )
 
     config = get_config()

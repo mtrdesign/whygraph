@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 
 from whygraph.cli.commands.install import IMAGE_REPO, render_installer
+from whygraph.cli.stubs import MCP_REMOVED
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "install.sh"
@@ -206,7 +207,17 @@ exit 0
         assert shim.exists(), name
         assert os.access(shim, os.X_OK), name
         assert subprocess.run(["sh", "-n", str(shim)]).returncode == 0, name
-        assert f"{IMAGE_REPO}:1.2.3" in shim.read_text()
+    assert f"{IMAGE_REPO}:1.2.3" in (bin_dir / "whygraph").read_text()
+    # whygraph-mcp is the 2.0 host stub: the removal message on stderr, exit 2,
+    # and no docker call (it would fail on a host without docker on PATH).
+    stub = bin_dir / "whygraph-mcp"
+    assert "docker run" not in stub.read_text()
+    ran = subprocess.run(
+        [str(stub)], capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"}
+    )
+    assert ran.returncode == 2
+    assert ran.stdout == ""
+    assert ran.stderr.strip() == MCP_REMOVED
 
 
 def test_warns_about_the_git_hook_path_when_bin_dir_is_reachable(

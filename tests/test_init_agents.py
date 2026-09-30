@@ -1,12 +1,12 @@
-"""Tests for multi-agent ``whygraph init`` wiring.
+"""Tests for multi-agent wiring: :mod:`whygraph.agents` + ``initialize_project``.
 
 Two layers of coverage:
 
-* Direct unit tests on :mod:`whygraph.agents` — these stand alone and
-  do not exercise the CLI or any DB code, so they're robust to the
-  current mid-rewrite state of unrelated modules.
-* CLI-flow tests via :class:`click.testing.CliRunner` that patch
-  ``ensure_initialized`` so we don't depend on the DB layer here either.
+* Direct unit tests on the agent registry in :mod:`whygraph.agents`.
+* Per-agent wiring through :func:`whygraph.project_setup.initialize_project`
+  (what the portal's Initialize runs): the HTTP MCP entry each agent
+  gets, and the bundled asset tree it installs. The 1.x ``whygraph
+  init`` command these used to drive was removed in 2.0.0.
 """
 
 from __future__ import annotations
@@ -16,10 +16,11 @@ import tomllib
 from pathlib import Path
 
 import pytest
-from click.testing import CliRunner
 
 from whygraph import agents
-from whygraph.cli import main as whygraph_main
+from whygraph.project_setup import HttpMcp, InitializeResult, initialize_project
+
+MCP = HttpMcp(slug="demo")
 
 
 # ---------- agents.py direct tests ------------------------------------------
@@ -52,20 +53,6 @@ def test_resolve_agent_unknown_raises() -> None:
         agents.resolve_agent("emacs")
 
 
-def test_render_snippet_json_shape() -> None:
-    target = agents.resolve_agent("claude")
-    snippet = agents.render_snippet(target)
-    payload = json.loads(snippet)
-    assert payload == {"mcpServers": {"whygraph": {"command": "whygraph-mcp"}}}
-
-
-def test_render_snippet_toml_shape() -> None:
-    target = agents.resolve_agent("codex")
-    snippet = agents.render_snippet(target)
-    assert "[mcp_servers.whygraph]" in snippet
-    assert 'command = "whygraph-mcp"' in snippet
-
-
 def test_config_path_for_project_anchored_at_root(tmp_path: Path) -> None:
     target = agents.resolve_agent("cursor")
     path = agents.config_path_for(target, tmp_path)
@@ -94,567 +81,203 @@ def test_config_path_for_user_anchored_at_home(
     assert agents.config_path_for(user_scoped, tmp_path) == expected
 
 
-def test_is_write_supported_project_scoped() -> None:
-    """All registered (project-scoped) agents are writeable — JSON or TOML."""
-    assert agents.is_write_supported(agents.resolve_agent("claude"))
-    assert agents.is_write_supported(agents.resolve_agent("cursor"))
-    assert agents.is_write_supported(agents.resolve_agent("vscode"))
-    assert agents.is_write_supported(agents.resolve_agent("codex"))
+# ---------- per-agent wiring through initialize_project ---------------------
 
 
-def test_write_snippet_creates_file(tmp_path: Path) -> None:
-    target = agents.resolve_agent("claude")
-    path = agents.write_snippet(target, tmp_path)
-    assert path == tmp_path / ".mcp.json"
-    data = json.loads(path.read_text())
-    assert data == {"mcpServers": {"whygraph": {"command": "whygraph-mcp"}}}
-
-
-def test_write_snippet_creates_nested_directory(tmp_path: Path) -> None:
-    target = agents.resolve_agent("cursor")
-    path = agents.write_snippet(target, tmp_path)
-    assert path == tmp_path / ".cursor" / "mcp.json"
-    assert path.exists()
-
-
-def test_write_snippet_merges_with_existing_servers(tmp_path: Path) -> None:
-    target = agents.resolve_agent("claude")
-    existing = tmp_path / ".mcp.json"
-    existing.write_text(
-        json.dumps(
-            {
-                "mcpServers": {"other": {"command": "other-cmd"}},
-                "unrelatedTopLevel": "keepme",
-            }
-        )
+def _init(root: Path, *names: str, force: bool = False) -> InitializeResult:
+    """Wire ``names`` into ``root`` the way the portal's Initialize does."""
+    return initialize_project(
+        root, agents=list(names), hooks=False, mcp=MCP, marker=None, force=force
     )
-    agents.write_snippet(target, tmp_path)
-    data = json.loads(existing.read_text())
-    assert data["mcpServers"]["other"] == {"command": "other-cmd"}
-    assert data["mcpServers"]["whygraph"] == {"command": "whygraph-mcp"}
-    assert data["unrelatedTopLevel"] == "keepme"
 
 
-def test_write_snippet_replaces_old_whygraph_entry(tmp_path: Path) -> None:
-    target = agents.resolve_agent("claude")
-    existing = tmp_path / ".mcp.json"
-    existing.write_text(
-        json.dumps({"mcpServers": {"whygraph": {"command": "old-cmd"}}})
-    )
-    agents.write_snippet(target, tmp_path)
-    data = json.loads(existing.read_text())
-    assert data["mcpServers"]["whygraph"]["command"] == "whygraph-mcp"
+def test_no_agent_writes_no_agent_config(tmp_path: Path) -> None:
+    result = _init(tmp_path)
+    assert result.agent_files == ()
+    assert not (tmp_path / ".mcp.json").exists()
+    assert not (tmp_path / ".cursor").exists()
+    assert not (tmp_path / ".vscode").exists()
 
 
-def test_write_snippet_overwrites_malformed_json(tmp_path: Path) -> None:
-    target = agents.resolve_agent("claude")
-    existing = tmp_path / ".mcp.json"
-    existing.write_text("{not valid json")
-    agents.write_snippet(target, tmp_path)
-    data = json.loads(existing.read_text())
-    assert data == {"mcpServers": {"whygraph": {"command": "whygraph-mcp"}}}
-
-
-def test_write_snippet_rejects_user_scope(tmp_path: Path) -> None:
-    """The defensive guard still trips for synthetic user-scoped targets."""
-    user_scoped = agents.AgentTarget(
-        name="synthetic-user",
-        aliases=(),
-        relative_path=(".synthetic", "config.json"),
-        scope="user",
-        format="json",
-        description="synthetic user-scoped target",
-    )
-    with pytest.raises(ValueError, match="user-scoped"):
-        agents.write_snippet(user_scoped, tmp_path)
-
-
-# ---------- TOML write_snippet tests (Codex path) ---------------------------
-
-
-def test_write_snippet_toml_creates_file(tmp_path: Path) -> None:
-    target = agents.resolve_agent("codex")
-    path = agents.write_snippet(target, tmp_path)
-    assert path == tmp_path / ".codex" / "config.toml"
-    with path.open("rb") as f:
-        data = tomllib.load(f)
-    assert data == {"mcp_servers": {"whygraph": {"command": "whygraph-mcp"}}}
-
-
-def test_write_snippet_toml_merges_with_existing_servers(tmp_path: Path) -> None:
-    target = agents.resolve_agent("codex")
-    existing = tmp_path / ".codex" / "config.toml"
-    existing.parent.mkdir(parents=True)
-    # Top-level scalar must come before any table header — TOML scopes
-    # subsequent keys to the most recently opened table.
-    existing.write_text(
-        'unrelated_top_level = "keepme"\n\n'
-        '[mcp_servers.other]\ncommand = "other-cmd"\n',
-        encoding="utf-8",
-    )
-    agents.write_snippet(target, tmp_path)
-    with existing.open("rb") as f:
-        data = tomllib.load(f)
-    assert data["mcp_servers"]["other"] == {"command": "other-cmd"}
-    assert data["mcp_servers"]["whygraph"] == {"command": "whygraph-mcp"}
-    assert data["unrelated_top_level"] == "keepme"
-
-
-def test_write_snippet_toml_replaces_old_whygraph_entry(tmp_path: Path) -> None:
-    target = agents.resolve_agent("codex")
-    existing = tmp_path / ".codex" / "config.toml"
-    existing.parent.mkdir(parents=True)
-    existing.write_text(
-        '[mcp_servers.whygraph]\ncommand = "old-cmd"\n',
-        encoding="utf-8",
-    )
-    agents.write_snippet(target, tmp_path)
-    with existing.open("rb") as f:
-        data = tomllib.load(f)
-    assert data["mcp_servers"]["whygraph"]["command"] == "whygraph-mcp"
-
-
-def test_write_snippet_toml_overwrites_malformed(tmp_path: Path) -> None:
-    target = agents.resolve_agent("codex")
-    existing = tmp_path / ".codex" / "config.toml"
-    existing.parent.mkdir(parents=True)
-    existing.write_text("not = valid = toml", encoding="utf-8")
-    agents.write_snippet(target, tmp_path)
-    with existing.open("rb") as f:
-        data = tomllib.load(f)
-    assert data == {"mcp_servers": {"whygraph": {"command": "whygraph-mcp"}}}
-
-
-# ---------- CLI flow tests --------------------------------------------------
-
-
-@pytest.fixture
-def stub_init(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """Neutralise the heavy init steps so CLI tests exercise just agent wiring.
-
-    Stubs out:
-
-    * ``_ensure_db_initialized`` — the DB layer is mid-rewrite and the
-      tests don't care about it.
-    * ``_run_preflight`` — preflight probes the host (git/gh/LLM) and
-      would fail or noisily warn in CI; tests focus on agent wiring.
-
-    CodeGraph is not touched by ``init`` (it's indexed by ``whygraph
-    scan``), so there is nothing else to stub here.
-    """
-    fake_db = tmp_path / ".whygraph" / "whygraph.db"
-
-    def _fake_db() -> Path:
-        fake_db.parent.mkdir(parents=True, exist_ok=True)
-        fake_db.touch()
-        return fake_db
-
-    monkeypatch.setattr("whygraph.cli.commands.init._ensure_db_initialized", _fake_db)
-    monkeypatch.setattr(
-        "whygraph.cli.commands.init._run_preflight",
-        lambda: None,
-    )
-    return fake_db
-
-
-def _invoke_in(cwd: Path, *args: str):
-    runner = CliRunner()
-    with runner.isolated_filesystem(temp_dir=cwd):
-        return runner.invoke(whygraph_main, list(args)), Path.cwd()
-
-
-def test_init_help_lists_agents_without_touching_db(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``init --help`` lists the supported agents and never bootstraps the DB.
-
-    The supported-agents block moved from the removed ``--list-agents``
-    command into the ``--help`` epilog. ``--help`` short-circuits in
-    Click before the command body, so the DB is never touched.
-    """
-    called = {"n": 0}
-
-    def _fake() -> Path:
-        called["n"] += 1
-        return Path("x.db")
-
-    monkeypatch.setattr("whygraph.cli.commands.init._ensure_db_initialized", _fake)
-    runner = CliRunner()
-    result = runner.invoke(whygraph_main, ["init", "--help"])
-    assert result.exit_code == 0, result.output
-    assert called["n"] == 0
-    assert "Supported agents" in result.output
-    assert "claude" in result.output
-    assert "cursor" in result.output
-    assert "codex" in result.output
-    assert "vscode" in result.output
-
-
-def test_init_no_flag_writes_no_agent_config(stub_init, tmp_path: Path) -> None:
-    result, cwd = _invoke_in(tmp_path, "init")
-    assert result.exit_code == 0, result.output
-    assert not (cwd / ".mcp.json").exists()
-    assert not (cwd / ".cursor").exists()
-    assert not (cwd / ".vscode").exists()
-    assert "Initialized WhyGraph database" in result.output
-
-
-def test_init_writes_example_config_not_real_config(stub_init, tmp_path: Path) -> None:
-    """A bare ``whygraph init`` drops a valid example, never whygraph.toml."""
-    result, cwd = _invoke_in(tmp_path, "init")
-    assert result.exit_code == 0, result.output
-    example = cwd / "whygraph.example.toml"
-    assert example.exists()
-    assert "Wrote example config" in result.output
-    # The real config is the user's copy to make — init must not create it.
-    assert not (cwd / "whygraph.toml").exists()
-    # The example parses and behaves as if no config were present.
-    with example.open("rb") as f:
-        data = tomllib.load(f)
-    assert data["log_level"] == "INFO"
-    assert data["analyze"]["provider"] == "anthropic"
-
-
-def test_init_adds_gitignore_entries(stub_init, tmp_path: Path) -> None:
-    """init keeps the user config + generated caches out of git."""
-    result, cwd = _invoke_in(tmp_path, "init")
-    assert result.exit_code == 0, result.output
-    assert "Updated .gitignore" in result.output
-    lines = (cwd / ".gitignore").read_text(encoding="utf-8").splitlines()
+def test_gitignore_entries_are_added(tmp_path: Path) -> None:
+    """Initialize keeps the user config + generated caches out of git."""
+    result = _init(tmp_path)
+    assert set(result.gitignore_added) == {"whygraph.toml", ".whygraph/", ".codegraph/"}
+    lines = (tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines()
     for entry in ("whygraph.toml", ".whygraph/", ".codegraph/"):
         assert entry in lines
     # The committable example stays trackable.
     assert "whygraph.example.toml" not in lines
 
 
-def test_init_gitignore_idempotent(stub_init, tmp_path: Path) -> None:
+def test_gitignore_is_idempotent(tmp_path: Path) -> None:
     """Pre-existing entries are not duplicated and re-runs are no-ops."""
-    runner = CliRunner()
-    with runner.isolated_filesystem(temp_dir=tmp_path):
-        cwd = Path.cwd()
-        (cwd / ".gitignore").write_text("node_modules/\n.whygraph/\n", encoding="utf-8")
-        result = runner.invoke(whygraph_main, ["init"])
-        assert result.exit_code == 0, result.output
-        body = (cwd / ".gitignore").read_text(encoding="utf-8")
-        # User content preserved; already-present entry not duplicated.
-        assert "node_modules/" in body
-        assert body.count(".whygraph/") == 1
-        # The remaining entries were appended.
-        assert "whygraph.toml" in body.splitlines()
-        assert ".codegraph/" in body.splitlines()
+    (tmp_path / ".gitignore").write_text(
+        "node_modules/\n.whygraph/\n", encoding="utf-8"
+    )
+    _init(tmp_path)
+    again = _init(tmp_path)
+    assert again.gitignore_added == ()
+    body = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    # User content preserved; already-present entry not duplicated.
+    assert "node_modules/" in body
+    assert body.count(".whygraph/") == 1
+    # The remaining entries were appended.
+    assert "whygraph.toml" in body.splitlines()
+    assert ".codegraph/" in body.splitlines()
 
 
-def test_init_agent_claude_writes_mcp_json_and_installs_assets(
-    stub_init, tmp_path: Path
-) -> None:
-    result, cwd = _invoke_in(tmp_path, "init", "--agent", "claude")
-    assert result.exit_code == 0, result.output
-    mcp_path = cwd / ".mcp.json"
-    assert mcp_path.exists()
-    data = json.loads(mcp_path.read_text())
-    assert data["mcpServers"]["whygraph"]["command"] == "whygraph-mcp"
-    assert "Wrote whygraph MCP entry" in result.output
+def test_claude_writes_mcp_json_and_installs_assets(tmp_path: Path) -> None:
+    result = _init(tmp_path, "claude")
+    data = json.loads((tmp_path / ".mcp.json").read_text())
+    assert data["mcpServers"]["whygraph"] == {
+        "type": "http",
+        "url": "http://127.0.0.1:${WHYGRAPH_PORT:-8765}/mcp/demo",
+    }
+    assert result.configured_agents == ("claude",)
     # Bundled assets land in .claude/.
-    assert (cwd / ".claude" / "agents" / "planner.md").is_file()
-    assert (cwd / ".claude" / "skills" / "rationale" / "SKILL.md").is_file()
-    assert (cwd / ".claude" / "skills" / "pre-edit" / "SKILL.md").is_file()
+    assert (tmp_path / ".claude" / "agents" / "planner.md").is_file()
+    assert (tmp_path / ".claude" / "skills" / "rationale" / "SKILL.md").is_file()
+    assert (tmp_path / ".claude" / "skills" / "pre-edit" / "SKILL.md").is_file()
     # CodeGraph guidance is merged into .claude/CLAUDE.md (forcing block).
-    claude_md = (cwd / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+    claude_md = (tmp_path / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
     assert "<!-- BEGIN whygraph -->" in claude_md
     assert "## CodeGraph" in claude_md
-    assert "Installed assets for claude" in result.output
+    assert result.assets["claude"].written
 
 
-def test_init_agent_claude_force_overwrites_existing(stub_init, tmp_path: Path) -> None:
-    # Pre-seed a user edit at the install destination.
-    runner = CliRunner()
-    with runner.isolated_filesystem(temp_dir=tmp_path):
-        cwd = Path.cwd()
-        (cwd / ".claude" / "agents").mkdir(parents=True)
-        (cwd / ".claude" / "agents" / "planner.md").write_text("USER EDIT")
-        result = runner.invoke(whygraph_main, ["init", "--agent", "claude", "--force"])
-        assert result.exit_code == 0, result.output
-        text = (cwd / ".claude" / "agents" / "planner.md").read_text()
-        assert text != "USER EDIT"
+def test_claude_force_overwrites_existing(tmp_path: Path) -> None:
+    (tmp_path / ".claude" / "agents").mkdir(parents=True)
+    (tmp_path / ".claude" / "agents" / "planner.md").write_text("USER EDIT")
+    _init(tmp_path, "claude", force=True)
+    text = (tmp_path / ".claude" / "agents" / "planner.md").read_text()
+    assert text != "USER EDIT"
 
 
-def test_init_agent_claude_default_skips_existing(stub_init, tmp_path: Path) -> None:
-    """Without ``--force``, an existing .claude file is left alone."""
-    runner = CliRunner()
-    with runner.isolated_filesystem(temp_dir=tmp_path):
-        cwd = Path.cwd()
-        (cwd / ".claude" / "agents").mkdir(parents=True)
-        (cwd / ".claude" / "agents" / "planner.md").write_text("USER EDIT")
-        result = runner.invoke(whygraph_main, ["init", "--agent", "claude"])
-        assert result.exit_code == 0, result.output
-        text = (cwd / ".claude" / "agents" / "planner.md").read_text()
-        assert text == "USER EDIT"
+def test_claude_default_skips_existing(tmp_path: Path) -> None:
+    """Without ``force``, an existing .claude file is left alone."""
+    (tmp_path / ".claude" / "agents").mkdir(parents=True)
+    (tmp_path / ".claude" / "agents" / "planner.md").write_text("USER EDIT")
+    _init(tmp_path, "claude")
+    text = (tmp_path / ".claude" / "agents" / "planner.md").read_text()
+    assert text == "USER EDIT"
 
 
-def test_init_agent_claude_merges_existing_claude_md(stub_init, tmp_path: Path) -> None:
-    """User-authored .claude/CLAUDE.md is preserved; the WhyGraph block appends."""
-    runner = CliRunner()
-    with runner.isolated_filesystem(temp_dir=tmp_path):
-        cwd = Path.cwd()
-        (cwd / ".claude").mkdir()
-        (cwd / ".claude" / "CLAUDE.md").write_text(
-            "# Our team rules\n\nWrite tests for everything.\n",
-            encoding="utf-8",
-        )
-        result = runner.invoke(whygraph_main, ["init", "--agent", "claude"])
-        assert result.exit_code == 0, result.output
-        merged = (cwd / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
-        # User content preserved verbatim.
-        assert "# Our team rules" in merged
-        assert "Write tests for everything." in merged
-        # WhyGraph block (CodeGraph guidance) appended after user content.
-        assert "<!-- BEGIN whygraph -->" in merged
-        assert "<!-- END whygraph -->" in merged
-        assert "## CodeGraph" in merged
-        assert merged.find("Our team rules") < merged.find("<!-- BEGIN whygraph -->")
+def _assert_merged(path: Path) -> None:
+    merged = path.read_text(encoding="utf-8")
+    # User content preserved verbatim.
+    assert "# Our team rules" in merged
+    assert "Write tests for everything." in merged
+    # WhyGraph block appended after user content.
+    assert "<!-- BEGIN whygraph -->" in merged
+    assert "<!-- END whygraph -->" in merged
+    assert merged.find("Our team rules") < merged.find("<!-- BEGIN whygraph -->")
 
 
-def test_init_agent_cursor_writes_mcp_json_and_installs_rules(
-    stub_init, tmp_path: Path
-) -> None:
-    """Cursor gets ``.cursor/mcp.json`` plus the bundled MDC rule tree.
-
-    Confirms the generalized asset installer fires for any agent whose
-    ``has_assets`` is True — Claude-Code-specific assets do not bleed
-    into the Cursor target.
-    """
-    result, cwd = _invoke_in(tmp_path, "init", "--agent", "cursor")
-    assert result.exit_code == 0, result.output
-    cursor_path = cwd / ".cursor" / "mcp.json"
-    assert cursor_path.exists()
-    data = json.loads(cursor_path.read_text())
-    assert data["mcpServers"]["whygraph"]["command"] == "whygraph-mcp"
-    # Bundled MDC rules land in .cursor/rules/.
-    assert (cwd / ".cursor" / "rules" / "whygraph-pre-edit.mdc").is_file()
-    assert (cwd / ".cursor" / "rules" / "whygraph-ask-why.mdc").is_file()
-    # The CodeGraph forcing rule lands and is always-applied.
-    codegraph_rule = (cwd / ".cursor" / "rules" / "whygraph-codegraph.mdc").read_text(
-        encoding="utf-8"
+def _seed_rules(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# Our team rules\n\nWrite tests for everything.\n", encoding="utf-8"
     )
+
+
+def test_claude_merges_existing_claude_md(tmp_path: Path) -> None:
+    """User-authored .claude/CLAUDE.md is preserved; the WhyGraph block appends."""
+    _seed_rules(tmp_path / ".claude" / "CLAUDE.md")
+    _init(tmp_path, "claude")
+    _assert_merged(tmp_path / ".claude" / "CLAUDE.md")
+    assert "## CodeGraph" in (tmp_path / ".claude" / "CLAUDE.md").read_text()
+
+
+def test_cursor_writes_mcp_json_and_installs_rules(tmp_path: Path) -> None:
+    """Cursor gets ``.cursor/mcp.json`` (literal port) plus the MDC rule tree.
+
+    Claude-Code-specific assets do not bleed into the Cursor target.
+    """
+    _init(tmp_path, "cursor")
+    data = json.loads((tmp_path / ".cursor" / "mcp.json").read_text())
+    assert data["mcpServers"]["whygraph"] == {"url": "http://127.0.0.1:8765/mcp/demo"}
+    # Bundled MDC rules land in .cursor/rules/.
+    assert (tmp_path / ".cursor" / "rules" / "whygraph-pre-edit.mdc").is_file()
+    assert (tmp_path / ".cursor" / "rules" / "whygraph-ask-why.mdc").is_file()
+    # The CodeGraph forcing rule lands and is always-applied.
+    codegraph_rule = (
+        tmp_path / ".cursor" / "rules" / "whygraph-codegraph.mdc"
+    ).read_text(encoding="utf-8")
     assert "alwaysApply: true" in codegraph_rule
     # Slash commands and subagents land in their respective subdirs.
-    assert (cwd / ".cursor" / "commands" / "whygraph-plan.md").is_file()
-    assert (cwd / ".cursor" / "agents" / "planner.md").is_file()
-    assert "Installed assets for cursor" in result.output
-    # No Claude-Code assets bleed into the Cursor target.
-    assert not (cwd / ".claude").exists()
+    assert (tmp_path / ".cursor" / "commands" / "whygraph-plan.md").is_file()
+    assert (tmp_path / ".cursor" / "agents" / "planner.md").is_file()
+    assert not (tmp_path / ".claude").exists()
 
 
-def test_init_agent_vscode_writes_mcp_and_installs_full_tree(
-    stub_init, tmp_path: Path
-) -> None:
-    """VS Code gets ``.vscode/mcp.json`` plus the bundled ``.github/`` asset tree.
-
-    Confirms the generalized asset installer fires for any agent whose
-    ``has_assets`` is True — and that the ``.github/`` destination is
-    correctly anchored under the project root.
-    """
-    result, cwd = _invoke_in(tmp_path, "init", "--agent", "vscode")
-    assert result.exit_code == 0, result.output
-    # MCP wiring lands in .vscode/mcp.json (writeable).
-    mcp_path = cwd / ".vscode" / "mcp.json"
-    assert mcp_path.exists()
-    data = json.loads(mcp_path.read_text())
-    assert data["mcpServers"]["whygraph"]["command"] == "whygraph-mcp"
+def test_vscode_writes_mcp_and_installs_full_tree(tmp_path: Path) -> None:
+    """VS Code gets ``.vscode/mcp.json`` (``servers`` + port input) and ``.github/``."""
+    _init(tmp_path, "vscode")
+    data = json.loads((tmp_path / ".vscode" / "mcp.json").read_text())
+    assert data["servers"]["whygraph"] == {
+        "type": "http",
+        "url": "http://127.0.0.1:${input:whygraph-port}/mcp/demo",
+    }
+    assert "mcpServers" not in data
+    assert data["inputs"][0]["id"] == "whygraph-port"
     # Bundled assets land under .github/.
-    assert (cwd / ".github" / "copilot-instructions.md").is_file()
-    assert (cwd / ".github" / "instructions" / "pre-edit.instructions.md").is_file()
-    assert (cwd / ".github" / "prompts" / "whygraph-plan.prompt.md").is_file()
-    assert (cwd / ".github" / "agents" / "planner.agent.md").is_file()
-    assert "Installed assets for vscode" in result.output
+    assert (tmp_path / ".github" / "copilot-instructions.md").is_file()
+    assert (
+        tmp_path / ".github" / "instructions" / "pre-edit.instructions.md"
+    ).is_file()
+    assert (tmp_path / ".github" / "prompts" / "whygraph-plan.prompt.md").is_file()
+    assert (tmp_path / ".github" / "agents" / "planner.agent.md").is_file()
     # No other agents' assets bleed in.
-    assert not (cwd / ".claude").exists()
-    assert not (cwd / ".cursor").exists()
+    assert not (tmp_path / ".claude").exists()
+    assert not (tmp_path / ".cursor").exists()
 
 
-def test_init_agent_copilot_aliases_to_vscode(stub_init, tmp_path: Path) -> None:
+def test_copilot_aliases_to_vscode(tmp_path: Path) -> None:
     """The ``copilot`` alias resolves to ``vscode`` and installs the same tree."""
-    result, cwd = _invoke_in(tmp_path, "init", "--agent", "copilot")
-    assert result.exit_code == 0, result.output
-    assert (cwd / ".vscode" / "mcp.json").exists()
-    # Alias still routes to the vscode asset tree.
-    assert (cwd / ".github" / "copilot-instructions.md").is_file()
-    assert not (cwd / ".claude").exists()
+    result = _init(tmp_path, "copilot")
+    assert result.configured_agents == ("vscode",)
+    assert (tmp_path / ".vscode" / "mcp.json").exists()
+    assert (tmp_path / ".github" / "copilot-instructions.md").is_file()
+    assert not (tmp_path / ".claude").exists()
 
 
-def test_init_agent_vscode_merges_existing_copilot_instructions(
-    stub_init, tmp_path: Path
-) -> None:
+def test_vscode_merges_existing_copilot_instructions(tmp_path: Path) -> None:
     """User-authored copilot-instructions.md is preserved; WhyGraph block appends."""
-    runner = CliRunner()
-    with runner.isolated_filesystem(temp_dir=tmp_path):
-        cwd = Path.cwd()
-        (cwd / ".github").mkdir()
-        (cwd / ".github" / "copilot-instructions.md").write_text(
-            "# Our team rules\n\nWrite tests for everything.\n",
-            encoding="utf-8",
-        )
-        result = runner.invoke(whygraph_main, ["init", "--agent", "vscode"])
-        assert result.exit_code == 0, result.output
-        merged = (cwd / ".github" / "copilot-instructions.md").read_text(
-            encoding="utf-8"
-        )
-        # User content preserved verbatim.
-        assert "# Our team rules" in merged
-        assert "Write tests for everything." in merged
-        # WhyGraph block appended after user content.
-        assert "<!-- BEGIN whygraph -->" in merged
-        assert "<!-- END whygraph -->" in merged
-        # User content comes first.
-        assert merged.find("Our team rules") < merged.find("<!-- BEGIN whygraph -->")
+    _seed_rules(tmp_path / ".github" / "copilot-instructions.md")
+    _init(tmp_path, "vscode")
+    _assert_merged(tmp_path / ".github" / "copilot-instructions.md")
 
 
-def test_init_agent_codex_writes_and_installs_full_tree(
-    stub_init, tmp_path: Path
-) -> None:
+def test_codex_writes_and_installs_full_tree(tmp_path: Path) -> None:
     """Codex gets project-scoped ``.codex/config.toml`` plus the bundled tree.
 
-    The TOML MCP config writes the ``[mcp_servers.whygraph]`` table at
-    ``.codex/config.toml``. The asset tree lands at the repo root —
-    ``AGENTS.md`` (append-merged) plus the ``.codex/agents/*.toml``
-    subagents. No user-global writes occur (the project-only rule).
+    The ``[mcp_servers.whygraph]`` table carries a literal URL. The asset
+    tree lands at the repo root - ``AGENTS.md`` (append-merged) plus the
+    ``.codex/agents/*.toml`` subagents. No user-global writes occur.
     """
-    result, cwd = _invoke_in(tmp_path, "init", "--agent", "codex")
-    assert result.exit_code == 0, result.output
-    # MCP config lands at project-scoped .codex/config.toml.
-    config_path = cwd / ".codex" / "config.toml"
-    assert config_path.exists()
-    with config_path.open("rb") as f:
+    _init(tmp_path, "codex")
+    with (tmp_path / ".codex" / "config.toml").open("rb") as f:
         config_data = tomllib.load(f)
-    assert config_data["mcp_servers"]["whygraph"]["command"] == "whygraph-mcp"
-    # AGENTS.md at the repo root has the WhyGraph block (append-merged).
-    agents_md = cwd / "AGENTS.md"
-    assert agents_md.is_file()
-    body = agents_md.read_text(encoding="utf-8")
+    assert config_data["mcp_servers"]["whygraph"] == {
+        "url": "http://127.0.0.1:8765/mcp/demo"
+    }
+    body = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert "<!-- BEGIN whygraph -->" in body
     assert "<!-- END whygraph -->" in body
-    # Subagents land under .codex/agents/.
-    assert (cwd / ".codex" / "agents" / "planner.toml").is_file()
-    assert "Installed assets for codex" in result.output
-    # No other agents' assets bleed in.
-    assert not (cwd / ".claude").exists()
-    assert not (cwd / ".cursor").exists()
+    assert (tmp_path / ".codex" / "agents" / "planner.toml").is_file()
+    assert not (tmp_path / ".claude").exists()
+    assert not (tmp_path / ".cursor").exists()
 
 
-def test_init_agent_codex_merges_existing_agents_md(stub_init, tmp_path: Path) -> None:
+def test_codex_merges_existing_agents_md(tmp_path: Path) -> None:
     """User-authored AGENTS.md is preserved; the WhyGraph block appends."""
-    runner = CliRunner()
-    with runner.isolated_filesystem(temp_dir=tmp_path):
-        cwd = Path.cwd()
-        (cwd / "AGENTS.md").write_text(
-            "# Our team rules\n\nWrite tests for everything.\n",
-            encoding="utf-8",
-        )
-        result = runner.invoke(whygraph_main, ["init", "--agent", "codex"])
-        assert result.exit_code == 0, result.output
-        merged = (cwd / "AGENTS.md").read_text(encoding="utf-8")
-        # User content preserved verbatim.
-        assert "# Our team rules" in merged
-        assert "Write tests for everything." in merged
-        # WhyGraph block appended after user content.
-        assert "<!-- BEGIN whygraph -->" in merged
-        assert "<!-- END whygraph -->" in merged
-        assert merged.find("Our team rules") < merged.find("<!-- BEGIN whygraph -->")
+    _seed_rules(tmp_path / "AGENTS.md")
+    _init(tmp_path, "codex")
+    _assert_merged(tmp_path / "AGENTS.md")
 
 
-def test_init_unknown_agent_errors(stub_init, tmp_path: Path) -> None:
-    result, _ = _invoke_in(tmp_path, "init", "--agent", "emacs")
-    assert result.exit_code != 0
-    # Click's Choice produces a usage error mentioning the bad value.
-    assert "emacs" in result.output or "Invalid value" in result.output
-
-
-# ---------- --yes / non-interactive config writing --------------------------
-
-
-def test_init_yes_writes_both_files_with_defaults(stub_init, tmp_path: Path) -> None:
-    """``init --yes`` (non-TTY) writes both files with defaults, no prompts."""
-    result, cwd = _invoke_in(tmp_path, "init", "--yes")
-    assert result.exit_code == 0, result.output
-
-    example = cwd / "whygraph.example.toml"
-    user = cwd / "whygraph.toml"
-    assert example.exists()
-    assert user.exists()
-    with user.open("rb") as f:
-        data = tomllib.load(f)
-    assert data["analyze"]["provider"] == "anthropic"
-    # No secrets in the default whygraph.toml.
-    text = user.read_text(encoding="utf-8")
-    for placeholder in ("sk-ant-...", "sk-or-...", "sk-..."):
-        text = text.replace(placeholder, "")
-    assert "sk-" not in text
-
-
-def test_init_yes_preserves_existing_whygraph_toml(stub_init, tmp_path: Path) -> None:
-    """``--yes`` never clobbers an existing whygraph.toml."""
-    runner = CliRunner()
-    with runner.isolated_filesystem(temp_dir=tmp_path):
-        cwd = Path.cwd()
-        (cwd / "whygraph.toml").write_text('log_level = "DEBUG"\n', encoding="utf-8")
-        result = runner.invoke(whygraph_main, ["init", "--yes"])
-        assert result.exit_code == 0, result.output
-        # Untouched.
-        assert (cwd / "whygraph.toml").read_text(encoding="utf-8") == (
-            'log_level = "DEBUG"\n'
-        )
-        assert "Kept existing" in result.output
-
-
-def test_bare_init_non_tty_writes_no_whygraph_toml(stub_init, tmp_path: Path) -> None:
-    """A bare (no --yes) non-TTY init keeps the scaffold-only behaviour."""
-    result, cwd = _invoke_in(tmp_path, "init")
-    assert result.exit_code == 0, result.output
-    assert (cwd / "whygraph.example.toml").exists()
-    assert not (cwd / "whygraph.toml").exists()
-
-
-def test_init_agent_claude_yes_wires_and_writes_config(
-    stub_init, tmp_path: Path
-) -> None:
-    """``init --agent claude --yes`` wires MCP + assets and writes both files."""
-    result, cwd = _invoke_in(tmp_path, "init", "--agent", "claude", "--yes")
-    assert result.exit_code == 0, result.output
-    assert (cwd / ".mcp.json").exists()
-    assert (cwd / "whygraph.toml").exists()
-    assert (cwd / ".claude" / "agents" / "planner.md").is_file()
-
-
-def test_init_interactive_abort_writes_nothing(
-    stub_init, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """A Ctrl-C / declined confirm exits non-zero and touches no files or DB."""
-    import types
-
-    from whygraph.cli.interactive import InitAborted
-
-    # Force the interactive branch (CliRunner swaps the real sys.stdin, so we
-    # replace the module's `sys` reference — init only reads sys.stdin.isatty).
-    fake_sys = types.SimpleNamespace(stdin=types.SimpleNamespace(isatty=lambda: True))
-    monkeypatch.setattr("whygraph.cli.commands.init.sys", fake_sys)
-    called = {"db": 0}
-    monkeypatch.setattr(
-        "whygraph.cli.commands.init._ensure_db_initialized",
-        lambda: called.__setitem__("db", called["db"] + 1) or (tmp_path / "x.db"),
-    )
-
-    def _abort(*_a, **_k):
-        raise InitAborted("boom")
-
-    monkeypatch.setattr("whygraph.cli.interactive.prompt_for_init", _abort)
-
-    runner = CliRunner()
-    with runner.isolated_filesystem(temp_dir=tmp_path):
-        cwd = Path.cwd()
-        result = runner.invoke(whygraph_main, ["init"])
-        assert result.exit_code != 0
-        assert "Aborted" in result.output
-        # No files written, and the DB was never bootstrapped.
-        assert not (cwd / "whygraph.toml").exists()
-        assert not (cwd / "whygraph.example.toml").exists()
-        assert called["db"] == 0
+def test_unknown_agent_raises(tmp_path: Path) -> None:
+    with pytest.raises(agents.UnknownAgentError):
+        _init(tmp_path, "emacs")
+    assert not (tmp_path / ".gitignore").exists()  # nothing was written

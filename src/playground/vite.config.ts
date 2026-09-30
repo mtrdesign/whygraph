@@ -19,9 +19,13 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
-    // `npm run dev` proxies API calls to a running `whygraph serve` (§9.3 dev flow).
+    // `npm run dev` proxies API and MCP calls to the dev portal (`make dev`).
+    // changeOrigin rewrites Host to the portal's own (else its guard answers
+    // 421); the forwarded Origin (http://localhost:5173) is allowed by the
+    // WHYGRAPH_DEV_ORIGINS that `make dev` sets (else 403).
     proxy: {
-      "/api": "http://localhost:8765",
+      "/api": { target: "http://127.0.0.1:8765", changeOrigin: true },
+      "/mcp": { target: "http://127.0.0.1:8765", changeOrigin: true },
     },
   },
   test: {

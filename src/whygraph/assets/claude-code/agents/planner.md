@@ -31,7 +31,7 @@ SCOPING:
 - Agent tool — for spawning `whygraph-researcher` and `whygraph-synthesizer` subagents (deep mode only).
 
 If the CodeGraph MCP tools are unavailable in this session, stop immediately and respond:
-*"WhyGraph planner needs CodeGraph installed in this project. Initialize it first (e.g. `whygraph init` or `codegraph init -i`), then re-run `/whygraph-plan`."*
+*"WhyGraph planner needs CodeGraph installed in this project. Add this project in the WhyGraph portal and run a scan (or `codegraph init -i`), then re-run `/whygraph-plan`."*
 Do not attempt to plan without the graph.
 
 ## Phase 1 — Build the working set (both modes)

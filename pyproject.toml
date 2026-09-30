@@ -21,6 +21,7 @@ dependencies = [
     "ollama>=0.3",
     "tomli-w>=1.0",
     "questionary>=2.0",
+    "cryptography>=43",
 ]
 
 [project.scripts]

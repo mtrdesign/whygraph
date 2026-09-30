@@ -170,7 +170,7 @@ class AnthropicConfig:
     """
 
     model: str = "claude-opus-4-7"
-    api_key: str | None = None
+    api_key: str | None = field(default=None, repr=False)
     timeout_sec: int = 60
 
 
@@ -193,7 +193,7 @@ class OpenAIConfig:
     """
 
     model: str = "gpt-4o"
-    api_key: str | None = None
+    api_key: str | None = field(default=None, repr=False)
     base_url: str | None = None
     timeout_sec: int = 60
 
@@ -215,7 +215,7 @@ class DeepSeekConfig:
     """
 
     model: str = "deepseek-chat"
-    api_key: str | None = None
+    api_key: str | None = field(default=None, repr=False)
     timeout_sec: int = 60
 
 
@@ -239,7 +239,7 @@ class OpenRouterConfig:
     """
 
     model: str = "openrouter/auto"
-    api_key: str | None = None
+    api_key: str | None = field(default=None, repr=False)
     timeout_sec: int = 60
 
 
@@ -287,7 +287,7 @@ class ClaudeCliConfig:
     """
 
     model: str = "claude-opus-4-7"
-    api_key: str | None = None
+    api_key: str | None = field(default=None, repr=False)
     timeout_sec: int = 120
     config_dir: Path | None = None
 
@@ -998,7 +998,7 @@ class Config:
     log_level: str = "INFO"
     scan_forge: str = "off"
     scan_remote: str = "origin"
-    scan_token: str | None = None
+    scan_token: str | None = field(default=None, repr=False)
     scan_hooks: bool | tuple[str, ...] = True
     scan_default_branch: str | None = None
     whygraph_db: Path | None = None

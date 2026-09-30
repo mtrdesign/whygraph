@@ -17,6 +17,7 @@ One section per finding:
 from __future__ import annotations
 
 import os
+import subprocess
 import sqlite3
 import threading
 from pathlib import Path
@@ -54,6 +55,7 @@ from whygraph.services.git.commands import (
     GitFetchRefsCmd,
     GitRemoteUrlCmd,
 )
+from whygraph.services.git.credentials import GITHUB_GIT_CONFIG, TOKEN_ENV_VAR
 from whygraph.services.github import RepoAccess
 
 MCP_HEADERS = {"Accept": "application/json, text/event-stream"}
@@ -224,6 +226,51 @@ def test_git_commands_end_options_before_the_remote() -> None:
     assert GitFetchRefsCmd("a:b", remote="up").argv()[-3:] == ["--", "up", "a:b"]
     assert GitFetchDefaultCmd("up").argv()[-2:] == ["--", "up"]
     assert GitRemoteUrlCmd("up").argv()[-2:] == ["--", "up"]
+
+
+def test_pr_ref_fetch_uses_the_token_helper_only_with_a_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix pass 2: a private clone's PR refs were fetched without credentials."""
+    token = "ghp_fetchrefs_secret_1234"
+    monkeypatch.delenv(TOKEN_ENV_VAR, raising=False)
+    plain = GitFetchRefsCmd("refs/pull/1/head:refs/whygraph/pull/1").argv()
+    assert plain == [
+        "git",
+        "fetch",
+        "--no-tags",
+        "--",
+        "origin",
+        "refs/pull/1/head:refs/whygraph/pull/1",
+    ]
+
+    monkeypatch.setenv(TOKEN_ENV_VAR, token)
+    argv = GitFetchRefsCmd("refs/pull/1/head:refs/whygraph/pull/1").argv()
+    assert argv[: 1 + len(GITHUB_GIT_CONFIG)] == ["git", *GITHUB_GIT_CONFIG]
+    assert argv[-3:] == ["--", "origin", "refs/pull/1/head:refs/whygraph/pull/1"]
+    assert all(token not in a for a in argv)
+
+    # The argv's helper answers github.com over https with the env token...
+    config = list(GITHUB_GIT_CONFIG)
+    fill = subprocess.run(
+        ["git", *config, "credential", "fill"],
+        input="protocol=https\nhost=github.com\npath=acme/private\n\n",
+        capture_output=True,
+        text=True,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        cwd=tmp_path,
+    )
+    assert f"password={token}" in fill.stdout
+    # ...and a real (refused, non-https) fetch never persists it.
+    root = make_repo(tmp_path, "repo")
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(tmp_path / "elsewhere")],
+        cwd=root,
+        check=True,
+    )
+    with pytest.raises(GitError):  # file transport: refused by protocol.allow
+        Repository(root).fetch_refs(["refs/heads/main:refs/whygraph/x"])
+    assert token not in (root / ".git" / "config").read_text()
 
 
 def test_option_like_remote_never_executes(tmp_path: Path) -> None:

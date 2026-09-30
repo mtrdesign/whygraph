@@ -8,6 +8,7 @@ run?" — the per-class docstring documents the underlying ``git`` syntax.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -16,7 +17,7 @@ from whygraph.core import ShellCommand
 
 from .blame import BlameHunk
 from .commit import Commit
-from .credentials import GITHUB_GIT_CONFIG
+from .credentials import GITHUB_GIT_CONFIG, TOKEN_ENV_VAR
 from .file_change import FileChange
 
 GitRevParseCmd = ShellCommand(
@@ -350,6 +351,13 @@ class GitFetchRefsCmd(ShellCommand[None]):
     the command is run for its effect (objects + refs land in the local
     object store), not its stdout.
 
+    When :data:`~.credentials.TOKEN_ENV_VAR` is set in this process (a
+    portal scan of a GitHub clone), the argv carries
+    :data:`~.credentials.GITHUB_GIT_CONFIG` like :class:`GitFetchDefaultCmd`,
+    so a private clone's PR refs are fetched with the token (read from the
+    environment by the helper, never argv). Without it, a local repo's
+    remote keeps its own transport and credentials.
+
     Parameters
     ----------
     refspecs : tuple[str, ...]
@@ -367,7 +375,16 @@ class GitFetchRefsCmd(ShellCommand[None]):
     def argv(self) -> list[str]:
         # `--` ends options: a remote read from config is never a flag
         # (`--upload-pack=<cmd>` would run a command).
-        return ["git", "fetch", "--no-tags", "--", self.remote, *self.refspecs]
+        config = GITHUB_GIT_CONFIG if os.environ.get(TOKEN_ENV_VAR) else ()
+        return [
+            "git",
+            *config,
+            "fetch",
+            "--no-tags",
+            "--",
+            self.remote,
+            *self.refspecs,
+        ]
 
     def parse(self, result: CompletedProcess[str]) -> None:
         return None

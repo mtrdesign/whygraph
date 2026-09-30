@@ -9,8 +9,10 @@ import pytest
 
 from whygraph import core
 from whygraph.core.config import Config
+from whygraph.core.context import set_strict
 from whygraph.db import ensure_initialized
 from whygraph.db import engine as db_engine
+from whygraph.portal import db as portal_db
 
 _CODEGRAPH_SCHEMA = """\
 CREATE TABLE nodes (
@@ -37,6 +39,21 @@ CREATE TABLE files (
     language TEXT
 );
 """
+
+
+@pytest.fixture(autouse=True)
+def _reset_process_globals() -> Iterator[None]:
+    """Reset the process-wide state a portal app (or a test) may leave behind.
+
+    Strict project-context mode is a process-global flag the portal lifespan
+    turns on; the engine dicts and their pooled connections are per process.
+    Resetting them after every test keeps a portal test from leaking into a
+    later CLI test.
+    """
+    yield
+    set_strict(False)
+    db_engine._reset_engine()
+    portal_db._reset_engine()
 
 
 # An edge fixture row: (source, target, kind), or (source, target, kind, line)

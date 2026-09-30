@@ -242,6 +242,39 @@ def sync_hooks(project_root: Path, names: Sequence[str]) -> HooksResult:
     return HooksResult(helper=helper, actions=actions)
 
 
+def managed_hook_names(project_root: Path) -> tuple[str, ...]:
+    """Return the hooks that currently carry the whygraph managed block.
+
+    Read-only; used to report existing 1.x auto-rescan hooks when a repo
+    is added to the portal.
+
+    Parameters
+    ----------
+    project_root : Path
+        Repository root.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Names from :data:`HOOK_NAMES`, in that order. Empty when the
+        directory is not a git work tree or no hook is managed.
+    """
+    try:
+        hooks_dir = _git_hooks_dir(project_root)
+    except HooksError:
+        return ()
+    found = []
+    for name in HOOK_NAMES:
+        path = hooks_dir / name
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if SENTINEL in text:
+            found.append(name)
+    return tuple(found)
+
+
 def _git_hooks_dir(project_root: Path) -> Path:
     """Resolve the repository's hooks directory (worktree-aware).
 
@@ -317,6 +350,7 @@ __all__ = [
     "SENTINEL_END",
     "HooksError",
     "HooksResult",
+    "managed_hook_names",
     "resolve_hook_names",
     "sync_hooks",
 ]

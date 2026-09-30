@@ -122,6 +122,30 @@ def get_engine() -> Engine:
     return engine
 
 
+def dispose_engine(path: Path) -> bool:
+    """Dispose and forget the cached engine for one DB file, if there is one.
+
+    Used when a project is unregistered, so no pooled connection outlives
+    the registration (a re-add then opens a fresh engine).
+
+    Parameters
+    ----------
+    path : Path
+        The DB file path (resolved before lookup, like :func:`get_engine`).
+
+    Returns
+    -------
+    bool
+        Whether an engine was cached for that path.
+    """
+    with _engines_lock:
+        engine = _engines.pop(Path(path).resolve(), None)
+    if engine is None:
+        return False
+    engine.dispose()
+    return True
+
+
 def _reset_engine() -> None:
     """Dispose and drop every cached engine. Test-only — not public API."""
     with _engines_lock:
@@ -159,4 +183,4 @@ def get_session() -> Iterator[Session]:
         session.close()
 
 
-__all__ = ["get_engine", "get_session"]
+__all__ = ["dispose_engine", "get_engine", "get_session"]

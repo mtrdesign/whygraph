@@ -161,7 +161,10 @@ def test_create_session_defaults_from_chat_config(
     monkeypatch.setattr(
         core,
         "_config",
-        Config(chat=ChatConfig(provider="deepseek", model="deepseek-reasoner")),
+        Config(
+            whygraph_db=core._config.whygraph_db,
+            chat=ChatConfig(provider="deepseek", model="deepseek-reasoner"),
+        ),
     )
     created = _new_session(chat_client)
     assert (created["provider"], created["model"]) == ("deepseek", "deepseek-reasoner")
@@ -178,7 +181,12 @@ def test_create_session_defaults_from_llm_model(
 ) -> None:
     """Config v2: with no ``[chat]``, the session follows ``[llm].model``."""
     monkeypatch.setattr(
-        core, "_config", Config(llm=LlmConfig(model="openai/gpt-4o-mini"))
+        core,
+        "_config",
+        Config(
+            whygraph_db=core._config.whygraph_db,
+            llm=LlmConfig(model="openai/gpt-4o-mini"),
+        ),
     )
     created = _new_session(chat_client)
     assert (created["provider"], created["model"]) == ("openai", "gpt-4o-mini")

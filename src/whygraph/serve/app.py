@@ -15,8 +15,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi import FastAPI
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from whygraph.core.config import Config
@@ -24,6 +24,7 @@ from whygraph.db import ensure_initialized
 from whygraph.mcp.errors import WhyGraphError
 
 from .chat import router as chat_router
+from .errors import whygraph_error_handler
 from .routes import router
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -54,13 +55,7 @@ def create_app(config: Config) -> FastAPI:
     ensure_initialized()
     app = FastAPI(title="WhyGraph Explorer", docs_url=None, redoc_url=None)
 
-    @app.exception_handler(WhyGraphError)
-    def _whygraph_error_handler(_: Request, exc: WhyGraphError) -> JSONResponse:
-        # A "not found" rejection maps to 404; every other WhyGraphError is a
-        # bad-request-shaped failure (invalid target, unscanned DB message, …).
-        status = 404 if "not found" in str(exc).lower() else 400
-        return JSONResponse(status_code=status, content={"error": str(exc)})
-
+    app.add_exception_handler(WhyGraphError, whygraph_error_handler)
     app.include_router(router, prefix="/api")
     app.include_router(chat_router, prefix="/api/chat")
     _mount_static(app)

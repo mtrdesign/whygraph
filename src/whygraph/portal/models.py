@@ -343,7 +343,9 @@ class ScanRun(PortalBase, table=True):
     events_path, log_path : str or None
         Relative to the data dir (``runs/42.jsonl``).
     summary : str or None
-        JSON-encoded result summary.
+        JSON-encoded result summary. While a ``sync`` row is queued it holds
+        ``{"scan_requested": true}`` when a scan was merged into it, so a
+        restart does not drop that scan.
     """
 
     __tablename__ = "scan_runs"

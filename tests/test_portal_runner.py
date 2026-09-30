@@ -62,6 +62,10 @@ from whygraph.portal.runner import (
     LOG_TAIL_BYTES,
     TRIGGER_PRECEDENCE,
     ScanRunner,
+    _insert_run,
+    _Pending,
+    _recover_queued,
+    _update_queued,
     child_env,
     merge_trigger,
     redactor,
@@ -664,6 +668,70 @@ def test_restart_interrupts_running_and_requeues_queued(
         with portal_db.get_session() as session:
             assert session.get(ScanRun, ids[2]).status == "cancelled"
     assert [runner_flags(c)[3:] for c in scanner.calls()] == [[]]
+
+
+def test_restart_keeps_a_scan_merged_into_a_first_sync(
+    env: SimpleNamespace, scanner: SimpleNamespace, plain_fetch: SimpleNamespace
+) -> None:
+    """Fix pass 2: a never-scanned clone's queued sync (trigger ``initial``)
+    that a scan was merged into still scans after a restart, HEAD unmoved."""
+    plain_fetch.hold = env.tmp / "fetch-hold"
+    plain_fetch.hold.touch()
+    with client_for() as client:
+        client.post("/api/portal/setup", json={"display_name": "Tess"})
+        github_project(client, env, "gh")
+        running = client.post("/api/projects/gh/sync").json()["run_id"]
+        wait_for(lambda: plain_fetch.calls == 1)
+        queued = client.post("/api/projects/gh/sync").json()["run_id"]
+        assert scan(client, "gh") == queued  # the scan merges into the sync
+        row = run_by_id(client, "gh", queued)
+        assert (row["kind"], row["trigger"], row["status"]) == (
+            "sync",
+            "initial",
+            "queued",
+        )
+    plain_fetch.hold.unlink()  # let the abandoned first sync thread finish
+
+    def _first_sync_ended() -> bool:
+        with portal_db.get_session() as session:
+            return session.get(ScanRun, running).status != "running"
+
+    wait_for(_first_sync_ended)
+    assert scanner.calls() == []
+
+    with client_for() as client:
+        run = wait_run(client, "gh", queued)
+        assert run["status"] == "ok"
+        assert run["summary"]["moved"] is False
+        assert len(scanner.calls()) == 1  # the merged scan ran
+
+
+def test_recover_queued_reads_the_persisted_scan_flag(
+    env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    with client_for() as client:
+        client.post("/api/portal/setup", json={"display_name": "Tess"})
+        local_project(client, env, "demo")
+    with portal_db.get_session() as session:
+        demo_id = session.exec(select(Project).where(Project.slug == "demo")).one().id
+    run_id = _insert_run(demo_id, "sync", "initial", False, None)
+    _update_queued(
+        _Pending(
+            run_id=run_id,
+            project_id=demo_id,
+            kind="sync",
+            trigger="initial",
+            analyze=False,
+            requested_by=None,
+            scan_requested=True,
+        )
+    )
+    (spec,) = _recover_queued()
+    assert spec.scan_requested is True
+    with portal_db.get_session() as session:
+        assert json.loads(session.get(ScanRun, run_id).summary) == {
+            "scan_requested": True
+        }
 
 
 def test_sync_holds_the_slot_while_a_scan_waits(

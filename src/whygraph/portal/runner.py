@@ -1016,6 +1016,30 @@ def _insert_run(
         return run.id
 
 
+def _queued_summary(pending: _Pending) -> str | None:
+    """The ``summary`` a queued row carries: whether a sync must also scan.
+
+    A scan merged into a pending ``sync`` is not visible from ``kind`` /
+    ``trigger`` (a never-scanned project's trigger is ``initial``), so it is
+    persisted for :func:`_recover_queued`. ``_finish_run`` overwrites it.
+    """
+    if pending.kind == "sync" and pending.scan_requested:
+        return json.dumps({"scan_requested": True})
+    return None
+
+
+def _queued_scan_requested(run: ScanRun) -> bool:
+    """Whether a queued row asked for a scan: the persisted flag, else inferred."""
+    try:
+        summary = json.loads(run.summary) if run.summary else None
+    except ValueError:
+        summary = None
+    if isinstance(summary, dict) and "scan_requested" in summary:
+        return bool(summary["scan_requested"])
+    # Rows queued before the flag was persisted.
+    return run.kind == "scan" or run.trigger in ("manual", "describe", "hook")
+
+
 def _update_queued(pending: _Pending) -> None:
     with get_session() as session:
         run = session.get(ScanRun, pending.run_id)
@@ -1025,6 +1049,7 @@ def _update_queued(pending: _Pending) -> None:
         run.trigger = pending.trigger
         run.analyze = pending.analyze
         run.requested_by = pending.requested_by
+        run.summary = _queued_summary(pending)
         session.add(run)
 
 
@@ -1083,7 +1108,7 @@ def _recover_queued() -> list[_Pending]:
                         trigger=run.trigger,
                         analyze=run.analyze,
                         requested_by=run.requested_by,
-                        scan_requested=run.kind == "scan",
+                        scan_requested=_queued_scan_requested(run),
                     )
                     run.summary = json.dumps({"merged_into": existing.run_id})
                 session.add(run)
@@ -1095,8 +1120,7 @@ def _recover_queued() -> list[_Pending]:
                 trigger=run.trigger,
                 analyze=run.analyze,
                 requested_by=run.requested_by,
-                scan_requested=run.kind == "scan"
-                or run.trigger in ("manual", "describe", "hook"),
+                scan_requested=_queued_scan_requested(run),
             )
             kept[run.project_id] = run
         # Fold merged rows into the kept one, in this same session (a second
@@ -1105,6 +1129,7 @@ def _recover_queued() -> list[_Pending]:
             row = kept[project_id]
             row.kind, row.trigger = spec.kind, spec.trigger
             row.analyze, row.requested_by = spec.analyze, spec.requested_by
+            row.summary = _queued_summary(spec)
             session.add(row)
     return list(specs.values())
 

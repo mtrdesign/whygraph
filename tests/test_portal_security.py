@@ -39,6 +39,7 @@ from test_portal_app import (  # noqa: F401 -- fixtures
 )
 from whygraph.core.config import Config, ConfigError
 from whygraph.core.safe_paths import UnsafePathError, check_inside
+from whygraph.hooks import helper_path
 from whygraph.portal import db as portal_db
 from whygraph.portal import deps as portal_deps
 from whygraph.portal.deps import PortalState
@@ -357,7 +358,7 @@ def test_delete_never_unlinks_through_a_symlinked_whygraph_dir(
 ) -> None:
     alpha = initialized_repo(ready, env, "alpha")
     assert (alpha / PORTAL_JSON).is_file()
-    helper = alpha / ".whygraph" / "hooks" / "whygraph-scan"
+    helper = helper_path(alpha)
     assert helper.is_file()
     beta = make_repo(env.shared, "beta")
     (beta / ".whygraph").symlink_to(alpha / ".whygraph")

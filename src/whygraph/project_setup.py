@@ -282,7 +282,7 @@ def _touched_paths(
     root: Path, actions: Mapping[str, AgentAction], marker: PortalMarker | None
 ) -> list[Path]:
     """Every work-tree path :func:`initialize_project` may read or write."""
-    paths = [root / ".gitignore", root / _hooks.HELPER_RELPATH]
+    paths = [root / ".gitignore", root / _hooks.LEGACY_HELPER_RELPATH]
     paths.append(root / ".whygraph" / "backups")  # agent-file backups
     for name, action in actions.items():
         target = agents_mod.AGENTS[name]

@@ -76,9 +76,12 @@ read by git as an option is dropped.
 
 ### Hooks
 
-The git hook helper reads `.whygraph/portal.env` with `sed` and validates the two values it takes (a
-slug and a port); it never `source`s the file. It ignores the file if git tracks it. It only ever
-sends a request to `127.0.0.1` and never runs a scan itself.
+The git hook helper lives in the git directory (`.git/whygraph/whygraph-scan`), not in the working
+tree, so a commit pulled from a remote cannot replace it: git never checks files out into `.git/`. It
+reads `.whygraph/portal.env` with `sed` and validates the two values it takes (a slug and a port); it
+never `source`s the file. It ignores the file if git tracks it or it is a symbolic link, and it never
+writes its log or pending flag through a symbolic link. It only ever sends a request to `127.0.0.1`
+and never runs a scan itself.
 
 ### Clones
 

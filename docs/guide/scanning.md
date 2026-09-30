@@ -99,8 +99,12 @@ Each hook **never scans locally**. It POSTs a request to the running portal
 runs an incremental scan - git history and a CodeGraph `sync` only, no LLM and no remote calls - so it
 is offline and token-free. Rapid commits coalesce into one follow-up scan, and the latest `HEAD` wins.
 
-The helper finds the portal through `.whygraph/portal.env`, a two-line file (`slug`, `port`) it **parses
-and never sources**, and ignores if git tracks it. An existing hook of your own is appended to behind a
+The hooks run a shared helper that lives in the git directory, at `.git/whygraph/whygraph-scan` (in a
+linked worktree, the main repository's git directory), never in the working tree - a checkout or pull
+cannot replace it. Repositories set up by an earlier build had it at `.whygraph/hooks/whygraph-scan`;
+the next Initialize or hooks change moves it. The helper finds the portal through
+`.whygraph/portal.env`, a two-line file (`slug`, `port`) it **parses and never sources**, and ignores
+if git tracks it or it is a symbolic link. It never writes through a symbolic link either. An existing hook of your own is appended to behind a
 sentinel guard, never overwritten. `post-checkout` skips the two cases that can't have changed
 anything - a file checkout (`git checkout -- somefile`) and `git switch -c` at the current commit.
 

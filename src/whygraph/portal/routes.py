@@ -54,7 +54,7 @@ from whygraph.db import get_session as project_session
 from whygraph.db.engine import dispose_engine
 from whygraph.db.models import RationaleCache
 from whygraph.hooks import (
-    HELPER_RELPATH,
+    LEGACY_HELPER_RELPATH,
     HooksError,
     HooksResult,
     resolve_hook_names,
@@ -986,7 +986,7 @@ def delete_project(
 
     hooks = None
     if root_ok:
-        unsafe = _unsafe_reason(project.root, project.root / HELPER_RELPATH)
+        unsafe = _unsafe_reason(project.root, project.root / LEGACY_HELPER_RELPATH)
         if unsafe:
             warnings.append(f"left the git hooks: {unsafe}")
         else:
@@ -1085,7 +1085,7 @@ def put_project_config(
         and project.source == "local"
         and project.root.is_dir()
     ):
-        unsafe = _unsafe_reason(project.root, project.root / HELPER_RELPATH)
+        unsafe = _unsafe_reason(project.root, project.root / LEGACY_HELPER_RELPATH)
         try:
             if unsafe:
                 raise HooksError(f"hooks not changed: {unsafe}")

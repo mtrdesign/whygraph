@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from whygraph.hooks import HELPER_RELPATH, HOOK_NAMES, SENTINEL
+from whygraph.hooks import HOOK_NAMES, SENTINEL, helper_path
 from whygraph.project_setup import HttpMcp, InitializeResult, initialize_project
 
 
@@ -47,7 +47,7 @@ def test_default_installs_all_four_hooks(repo: Path) -> None:
     result = _init(repo, True)
 
     assert _managed(repo) == set(HOOK_NAMES)
-    assert (repo / HELPER_RELPATH).exists()
+    assert helper_path(repo).exists()
     assert result.hooks is not None
     assert set(result.hooks.installed) == set(HOOK_NAMES)
 
@@ -57,7 +57,7 @@ def test_opt_out_installs_nothing(repo: Path) -> None:
     _init(repo, False)
 
     assert _managed(repo) == set()
-    assert not (repo / HELPER_RELPATH).exists()
+    assert not helper_path(repo).exists()
 
 
 def test_flipping_to_false_removes_hooks_and_helper(repo: Path) -> None:
@@ -68,7 +68,7 @@ def test_flipping_to_false_removes_hooks_and_helper(repo: Path) -> None:
     result = _init(repo, False)
 
     assert _managed(repo) == set()
-    assert not (repo / HELPER_RELPATH).exists()
+    assert not helper_path(repo).exists()
     assert result.hooks is not None
     assert set(result.hooks.removed) == set(HOOK_NAMES)
 
@@ -81,7 +81,7 @@ def test_shrinking_the_list_drops_the_others(repo: Path) -> None:
 
     assert _managed(repo) == {"post-commit"}
     # The helper stays - post-commit still dispatches to it.
-    assert (repo / HELPER_RELPATH).exists()
+    assert helper_path(repo).exists()
 
 
 def test_typo_in_hook_name_warns_and_installs_nothing(repo: Path) -> None:

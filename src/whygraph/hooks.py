@@ -14,9 +14,17 @@ missing, tracked by git or invalid, it appends one line to
 ``.whygraph/logs/hooks.log`` and exits ``0``; the portal's catch-up scan
 picks the commits up when it next starts.
 
-The hooks are thin dispatchers that exec a shared helper
-(``.whygraph/hooks/whygraph-scan``); the POST runs detached, so commits
-return instantly. ``post-checkout`` is the one hook git invokes with
+The hooks are thin dispatchers that exec a shared helper kept in the git
+directory (``<git-common-dir>/whygraph/whygraph-scan``, resolved by the
+dispatcher at run time so linked worktrees share it); the POST runs
+detached, so commits return instantly. The helper deliberately lives
+**outside the work tree**: ``.whygraph/`` is gitignored, and git silently
+overwrites an ignored file when a checkout or merge brings in a tracked
+file at the same path, so a helper under ``.whygraph/`` could be replaced
+by a hostile upstream commit and then run by ``post-merge``. Checkout never
+writes into the git directory. The helper also never writes through a
+symbolic link (``scan.pending``, ``hooks.log``, ``.whygraph`` or
+``.whygraph/logs``) and ignores a ``portal.env`` reached through one. ``post-checkout`` is the one hook git invokes with
 arguments, so the dispatcher forwards ``"$@"`` and the helper filters out
 the two cases that cannot have changed the tree - before it touches
 anything under ``.whygraph/``.
@@ -41,8 +49,11 @@ from pathlib import Path
 SENTINEL = "# >>> whygraph managed >>>"
 SENTINEL_END = "# <<< whygraph managed <<<"
 
-HELPER_RELPATH = Path(".whygraph") / "hooks" / "whygraph-scan"
-"""Location of the shared helper, relative to the repo root."""
+HELPER_GIT_RELPATH = Path("whygraph") / "whygraph-scan"
+"""Location of the shared helper, relative to ``git rev-parse --git-common-dir``."""
+
+LEGACY_HELPER_RELPATH = Path(".whygraph") / "hooks" / "whygraph-scan"
+"""Where earlier builds wrote the helper (in the work tree); removed by :func:`sync_hooks`."""
 
 HOOK_NAMES = ("post-commit", "post-merge", "post-rewrite", "post-checkout")
 """Every hook WhyGraph manages — the reconcile set.
@@ -69,13 +80,20 @@ if [ "$#" -eq 3 ]; then
   [ "$3" = "1" ] || exit 0    # file checkout (`git checkout -- path`) - nothing changed
   [ "$1" != "$2" ] || exit 0  # `git switch -c` at the same commit - identical tree
 fi
-log="$root/.whygraph/logs/hooks.log"
+wg="$root/.whygraph"
+log="$wg/logs/hooks.log"
+# Nothing is ever written or read through a symbolic link: a committed one
+# could point anywhere.
 note() {
-  mkdir -p "$root/.whygraph/logs" 2>/dev/null
-  printf '%s whygraph hook: %s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >> "$log" 2>/dev/null
+  if [ ! -L "$wg" ] && [ ! -L "$wg/logs" ] && [ ! -L "$log" ]; then
+    mkdir -p "$wg/logs" 2>/dev/null &&
+      printf '%s whygraph hook: %s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >> "$log" 2>/dev/null
+  fi
   exit 0
 }
-env_file="$root/.whygraph/portal.env"
+[ -L "$wg" ] && exit 0
+env_file="$wg/portal.env"
+[ -L "$env_file" ] && note ".whygraph/portal.env is a symbolic link; ignored"
 [ -f "$env_file" ] || note "no .whygraph/portal.env; initialize this repo in the WhyGraph portal"
 if git -C "$root" ls-files --error-unmatch .whygraph/portal.env >/dev/null 2>&1; then
   note ".whygraph/portal.env is tracked by git; ignored"
@@ -89,7 +107,7 @@ esac
 case "$port" in
   ""|*[!0123456789]*) note "invalid port in .whygraph/portal.env" ;;
 esac
-: > "$root/.whygraph/scan.pending"
+[ -L "$wg/scan.pending" ] || : > "$wg/scan.pending"
 (
   command -v curl >/dev/null 2>&1 || note "curl not found; scan not requested"
   # --noproxy: a loopback request must never go through an HTTP(S)_PROXY.
@@ -103,13 +121,16 @@ exit 0
 
 _HOOK_BLOCK = (
     f"{SENTINEL}\n"
-    'helper="$(git rev-parse --show-toplevel 2>/dev/null)/.whygraph/hooks/whygraph-scan"\n'
+    'helper="$(git rev-parse --git-common-dir 2>/dev/null)/whygraph/whygraph-scan"\n'
     '[ -x "$helper" ] && "$helper" "$@"\n'
     f"{SENTINEL_END}\n"
 )
 """The dispatcher block written into each git hook file.
 
-Forwards ``"$@"`` because ``post-checkout`` carries
+Resolves the helper under the git common dir at run time (git runs a
+hook from the work-tree root, so a relative ``.git`` resolves correctly;
+a linked worktree gets the main repo's common dir). Forwards ``"$@"``
+because ``post-checkout`` carries
 ``<prev-head> <new-head> <is-branch-checkout>``; the other three hooks
 pass zero or one argument and the helper's arg gate ignores those.
 """
@@ -199,9 +220,13 @@ def sync_hooks(project_root: Path, names: Sequence[str]) -> HooksResult:
     Installs or refreshes the managed block in each named hook, and
     **strips it from every hook in** :data:`HOOK_NAMES` **that is not
     named** — so shrinking the configured list removes the dropped hooks
-    rather than orphaning them. Writes the shared helper when ``names``
-    is non-empty and deletes it when empty; ``sync_hooks(root, ())`` is
-    therefore the uninstall. Foreign hook content is never touched.
+    rather than orphaning them. Writes the shared helper (into the git
+    common dir, see :func:`helper_path`) when ``names`` is non-empty and
+    deletes it when empty; ``sync_hooks(root, ())`` is therefore the
+    uninstall. Either way it removes a helper an earlier build left in the
+    work tree (:data:`LEGACY_HELPER_RELPATH`), unless ``.whygraph`` or
+    ``.whygraph/hooks`` is a symbolic link. Foreign hook content is never
+    touched.
 
     Both directions live in one function deliberately: the removal half
     is the part that is easy to forget on one branch of an
@@ -227,16 +252,22 @@ def sync_hooks(project_root: Path, names: Sequence[str]) -> HooksResult:
         If the hooks directory cannot be resolved or written.
     """
     hooks_dir = _git_hooks_dir(project_root)
+    target = helper_path(project_root)
     wanted = set(names)
 
     helper: Path | None = None
     try:
+        _remove_legacy_helper(project_root)
         if wanted:
             hooks_dir.mkdir(parents=True, exist_ok=True)
-            helper = project_root / HELPER_RELPATH
-            helper.parent.mkdir(parents=True, exist_ok=True)
-            helper.write_text(_HELPER_SCRIPT)
-            helper.chmod(0o755)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # Written beside, then renamed over: never through a symlink.
+            tmp = target.with_name(target.name + ".tmp")
+            tmp.unlink(missing_ok=True)
+            tmp.write_text(_HELPER_SCRIPT)
+            tmp.chmod(0o755)
+            tmp.replace(target)
+            helper = target
 
         actions: dict[str, str] = {}
         for name in HOOK_NAMES:
@@ -247,13 +278,39 @@ def sync_hooks(project_root: Path, names: Sequence[str]) -> HooksResult:
                 actions[name] = "removed" if _uninstall_hook(path) else "absent"
 
         if not wanted:
-            stale = project_root / HELPER_RELPATH
-            if stale.exists():
-                stale.unlink()
+            target.unlink(missing_ok=True)
+            try:
+                target.parent.rmdir()
+            except OSError:
+                pass  # not empty, or already gone
     except OSError as exc:
         raise HooksError(f"cannot write git hooks under {hooks_dir}: {exc}") from exc
 
     return HooksResult(helper=helper, actions=actions)
+
+
+def helper_path(project_root: Path) -> Path:
+    """Return where the shared helper lives for this repository.
+
+    ``<git-common-dir>/whygraph/whygraph-scan`` - inside the git directory,
+    which checkout and merge never write to, and shared by linked worktrees.
+
+    Parameters
+    ----------
+    project_root : Path
+        The repository working tree.
+
+    Returns
+    -------
+    Path
+        Absolute path of the helper (it may not exist).
+
+    Raises
+    ------
+    HooksError
+        If ``git`` reports the directory is not a work tree.
+    """
+    return _git_path(project_root, "--git-common-dir") / HELPER_GIT_RELPATH
 
 
 def managed_hook_names(project_root: Path) -> tuple[str, ...]:
@@ -300,9 +357,14 @@ def _git_hooks_dir(project_root: Path) -> Path:
     HooksError
         If ``git`` reports the directory is not a work tree.
     """
+    return _git_path(project_root, "--git-path", "hooks")
+
+
+def _git_path(project_root: Path, *args: str) -> Path:
+    """Run ``git rev-parse <args>`` in ``project_root``; return the path, made absolute."""
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--git-path", "hooks"],
+            ["git", "rev-parse", *args],
             cwd=project_root,
             capture_output=True,
             text=True,
@@ -314,6 +376,19 @@ def _git_hooks_dir(project_root: Path) -> Path:
         ) from exc
     p = Path(result.stdout.strip())
     return p if p.is_absolute() else (project_root / p)
+
+
+def _remove_legacy_helper(project_root: Path) -> None:
+    """Delete the work-tree helper of earlier builds, never through a symlinked dir."""
+    wg = project_root / ".whygraph"
+    hooks = project_root / LEGACY_HELPER_RELPATH.parent
+    if wg.is_symlink() or hooks.is_symlink() or not hooks.is_dir():
+        return
+    (project_root / LEGACY_HELPER_RELPATH).unlink(missing_ok=True)
+    try:
+        hooks.rmdir()
+    except OSError:
+        pass  # something else lives there; leave it
 
 
 def _install_hook(hook_path: Path) -> str:
@@ -358,12 +433,14 @@ def _uninstall_hook(hook_path: Path) -> bool:
 
 
 __all__ = [
-    "HELPER_RELPATH",
+    "HELPER_GIT_RELPATH",
     "HOOK_NAMES",
+    "LEGACY_HELPER_RELPATH",
     "SENTINEL",
     "SENTINEL_END",
     "HooksError",
     "HooksResult",
+    "helper_path",
     "managed_hook_names",
     "resolve_hook_names",
     "sync_hooks",

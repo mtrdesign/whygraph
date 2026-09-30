@@ -21,10 +21,11 @@ from types import SimpleNamespace
 import pytest
 
 from whygraph.hooks import (
-    HELPER_RELPATH,
     HOOK_NAMES,
+    LEGACY_HELPER_RELPATH,
     SENTINEL,
     HooksError,
+    helper_path,
     resolve_hook_names,
     sync_hooks,
 )
@@ -94,7 +95,7 @@ def _install_all(repo: Path):
 def test_install_creates_helper_and_hooks(repo: Path) -> None:
     result = _install_all(repo)
 
-    helper = repo / HELPER_RELPATH
+    helper = helper_path(repo)
     assert result.helper == helper
     assert helper.exists()
     assert os.access(helper, os.X_OK)
@@ -138,7 +139,7 @@ def test_uninstall_removes_ours_keeps_foreign(repo: Path) -> None:
     assert SENTINEL not in text
     # Hooks WhyGraph created outright are removed, as is the helper.
     assert not _hook(repo, "post-merge").exists()
-    assert not (repo / HELPER_RELPATH).exists()
+    assert not helper_path(repo).exists()
     assert result.helper is None
     assert set(result.removed) == set(HOOK_NAMES)
 
@@ -164,7 +165,7 @@ def test_generated_shell_is_valid(repo: Path) -> None:
     _install_all(repo)
 
     for path in [
-        repo / HELPER_RELPATH,
+        helper_path(repo),
         *(_hook(repo, n) for n in HOOK_NAMES),
     ]:
         check = subprocess.run(["sh", "-n", str(path)], capture_output=True, text=True)
@@ -193,7 +194,7 @@ def test_shrinking_the_list_removes_dropped_hooks(repo: Path) -> None:
     assert not _hook(repo, "post-rewrite").exists()
     assert not _hook(repo, "post-checkout").exists()
     # The helper stays — two hooks still dispatch to it.
-    assert (repo / HELPER_RELPATH).exists()
+    assert helper_path(repo).exists()
     assert set(result.removed) == {"post-rewrite", "post-checkout"}
 
 
@@ -250,7 +251,7 @@ def test_dispatcher_forwards_arguments(repo: Path) -> None:
 def _run_helper(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     """Run the helper with git's post-checkout argument shape."""
     return subprocess.run(
-        ["sh", str(repo / HELPER_RELPATH), *args],
+        ["sh", str(helper_path(repo)), *args],
         cwd=repo,
         capture_output=True,
         text=True,
@@ -385,8 +386,8 @@ def test_no_local_scan_and_no_lock_ever(repo: Path, fake_curl: SimpleNamespace) 
 
     assert not ran.exists()
     assert not (repo / ".whygraph" / "scan.lock").exists()
-    assert "whygraph scan" not in (repo / HELPER_RELPATH).read_text()
-    assert "scan.lock" not in (repo / HELPER_RELPATH).read_text()
+    assert "whygraph scan" not in helper_path(repo).read_text()
+    assert "scan.lock" not in helper_path(repo).read_text()
 
 
 def test_portal_down_logs_one_line_and_exits_zero(
@@ -511,3 +512,160 @@ def test_a_real_commit_fires_the_request(
     calls = _wait(lambda: _curl_calls(fake_curl))
     assert len(calls) == 1
     assert calls[0][-1] == f"http://127.0.0.1:{PORT}/api/projects/demo/scans"
+
+
+# --- fix pass 2: the helper lives in the git dir, not the work tree ----------
+
+
+def _git(cwd: Path, *args: str) -> str:
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@x",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@x",
+    }
+    return subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    ).stdout
+
+
+def test_a_pulled_helper_from_upstream_never_runs(tmp_path: Path) -> None:
+    """A hostile upstream commit at the old helper path must not be executed.
+
+    ``.whygraph/`` is gitignored and git overwrites ignored files when a
+    merge brings in a tracked file at that path; with the helper in the work
+    tree, ``post-merge`` then ran the attacker's script.
+    """
+    up = tmp_path / "upstream"
+    up.mkdir()
+    _git(up, "init", "-q", "-b", "main")
+    (up / "README").write_text("x")
+    (up / ".gitignore").write_text(".whygraph/\n")
+    _git(up, "add", ".")
+    _git(up, "commit", "-qm", "init")
+    victim = tmp_path / "victim"
+    _git(tmp_path, "clone", "-q", str(up), str(victim))
+    sync_hooks(victim, HOOK_NAMES)
+    (victim / ".whygraph").mkdir(exist_ok=True)
+    (victim / ".whygraph" / "portal.env").write_text(f"slug=victim\nport={PORT}\n")
+
+    pwned = tmp_path / "PWNED"
+    evil = up / ".whygraph" / "hooks" / "whygraph-scan"
+    evil.parent.mkdir(parents=True)
+    evil.write_text(f"#!/bin/sh\ntouch {pwned}\n")
+    evil.chmod(0o755)
+    _git(up, "add", "-f", ".whygraph/hooks/whygraph-scan")
+    _git(up, "commit", "-qm", "innocent")
+
+    _git(victim, "pull", "-q", "--no-rebase")
+    _settle()
+
+    assert not pwned.exists()
+    assert helper_path(victim).is_file()  # the real helper is untouched
+
+
+def test_helper_is_written_to_the_git_common_dir(repo: Path) -> None:
+    result = _install_all(repo)
+
+    assert result.helper == repo / ".git" / "whygraph" / "whygraph-scan"
+    assert helper_path(repo) == result.helper
+    assert not (repo / LEGACY_HELPER_RELPATH).exists()
+    assert "--git-common-dir" in _hook(repo, "post-commit").read_text()
+
+
+def test_sync_removes_the_legacy_work_tree_helper(repo: Path) -> None:
+    legacy = repo / LEGACY_HELPER_RELPATH
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("#!/bin/sh\n")
+
+    _install_all(repo)
+
+    assert not legacy.exists()
+    assert not legacy.parent.exists()  # the emptied hooks/ dir goes too
+    assert helper_path(repo).is_file()
+
+
+def test_legacy_cleanup_never_follows_a_symlinked_hooks_dir(
+    repo: Path, tmp_path: Path
+) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    keep = elsewhere / "whygraph-scan"
+    keep.write_text("not ours\n")
+    (repo / ".whygraph" / "hooks").symlink_to(elsewhere)
+
+    sync_hooks(repo, ())
+
+    assert keep.read_text() == "not ours\n"
+
+
+def test_linked_worktree_commit_uses_the_common_helper(
+    repo: Path, fake_curl: SimpleNamespace, tmp_path: Path
+) -> None:
+    (repo / "f.txt").write_text("x\n")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-qm", "c")
+    _install_all(repo)
+    wt = tmp_path / "wt"
+    _git(repo, "worktree", "add", "-q", "-b", "side", str(wt))
+    _settle()  # post-checkout of the new worktree: no portal.env there yet
+    (wt / ".whygraph").mkdir(exist_ok=True)
+    (wt / ".whygraph" / "portal.env").write_text(f"slug=demo\nport={PORT}\n")
+    before = len(_curl_calls(fake_curl))
+
+    (wt / "g.txt").write_text("y\n")
+    _git(wt, "add", "g.txt")
+    _git(wt, "commit", "-qm", "d")
+
+    assert _wait(lambda: len(_curl_calls(fake_curl)) > before)
+
+
+@pytest.mark.parametrize("link", ["scan.pending", "logs", "logs/hooks.log"])
+def test_the_helper_never_writes_through_a_symlink(
+    repo: Path, fake_curl: SimpleNamespace, tmp_path: Path, link: str
+) -> None:
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    target = victim / "data"
+    target.write_text("IMPORTANT\n")
+    if link == "logs":
+        (repo / ".whygraph" / "logs").symlink_to(victim)
+        target = victim / "hooks.log"
+    else:
+        path = repo / ".whygraph" / link
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(target)
+    (repo / ".whygraph" / "portal.env").unlink()  # forces a hooks.log note
+    if link == "scan.pending":
+        (repo / ".whygraph" / "portal.env").write_text(f"slug=demo\nport={PORT}\n")
+    _install_all(repo)
+
+    assert _run_helper(repo).returncode == 0
+    _settle()
+
+    if link == "logs":
+        assert not target.exists()
+    else:
+        assert target.read_text() == "IMPORTANT\n"
+
+
+def test_a_symlinked_whygraph_dir_is_ignored(
+    repo: Path, fake_curl: SimpleNamespace, tmp_path: Path
+) -> None:
+    real = tmp_path / "real-whygraph"
+    (repo / ".whygraph").rename(real)
+    (repo / ".whygraph").symlink_to(real)
+    _install_all(repo)
+
+    assert _run_helper(repo).returncode == 0
+    _settle()
+
+    assert _curl_calls(fake_curl) == []
+    assert not (real / "scan.pending").exists()
+    assert not (real / "logs").exists()

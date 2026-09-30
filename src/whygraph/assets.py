@@ -121,6 +121,7 @@ def install_assets(
     *,
     force: bool = False,
     source: Traversable | Path | None = None,
+    dry_run: bool = False,
 ) -> InstallResult:
     """Copy ``target``'s bundled asset tree into the project.
 
@@ -154,6 +155,10 @@ def install_assets(
         Asset tree to copy from. ``None`` (default) uses the packaged
         tree returned by :func:`packaged_assets_for`. Tests inject a
         ``tmp_path`` here.
+    dry_run : bool, default False
+        If ``True``, classify every file exactly as a real call would
+        (written / skipped / overwritten) but touch nothing on disk.
+        Used by the "Update agent files" preview.
 
     Returns
     -------
@@ -177,7 +182,13 @@ def install_assets(
     merge_set = frozenset(target.assets_merge_files)
     result = InstallResult()
     _copy_tree(
-        src, dest_root, rel_prefix=(), merge_set=merge_set, force=force, result=result
+        src,
+        dest_root,
+        rel_prefix=(),
+        merge_set=merge_set,
+        force=force,
+        result=result,
+        dry_run=dry_run,
     )
     return result
 
@@ -190,6 +201,7 @@ def _copy_tree(
     merge_set: frozenset[str],
     force: bool,
     result: InstallResult,
+    dry_run: bool = False,
 ) -> None:
     """Recursively copy ``src`` into ``dest``, recording each file's fate.
 
@@ -213,20 +225,22 @@ def _copy_tree(
                 merge_set=merge_set,
                 force=force,
                 result=result,
+                dry_run=dry_run,
             )
             continue
         if not entry.is_file():
             continue
         rel_str = "/".join(rel_components)
         if rel_str in merge_set:
-            _merge_block(entry, target, result=result)
+            _merge_block(entry, target, result=result, dry_run=dry_run)
             continue
         already_exists = target.exists()
         if already_exists and not force:
             result.skipped.append(target)
             continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(entry.read_text(encoding="utf-8"), encoding="utf-8")
+        if not dry_run:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(entry.read_text(encoding="utf-8"), encoding="utf-8")
         if already_exists:
             result.overwritten.append(target)
         else:
@@ -238,6 +252,7 @@ def _merge_block(
     dest_path: Path,
     *,
     result: InstallResult,
+    dry_run: bool = False,
 ) -> None:
     """Append-merge ``src_entry``'s body into ``dest_path``.
 
@@ -259,8 +274,9 @@ def _merge_block(
     block = f"{BEGIN_MARKER}\n{bundled}\n{END_MARKER}\n"
 
     if not dest_path.exists():
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        dest_path.write_text(block, encoding="utf-8")
+        if not dry_run:
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            dest_path.write_text(block, encoding="utf-8")
         result.written.append(dest_path)
         return
 
@@ -277,7 +293,8 @@ def _merge_block(
         if end_of_block < len(existing) and existing[end_of_block] == "\n":
             end_of_block += 1
         new_content = existing[:begin] + block + existing[end_of_block:]
-        dest_path.write_text(new_content, encoding="utf-8")
+        if not dry_run:
+            dest_path.write_text(new_content, encoding="utf-8")
         result.overwritten.append(dest_path)
         return
 
@@ -288,7 +305,8 @@ def _merge_block(
         if existing.endswith("\n\n")
         else ("\n" if existing.endswith("\n") else "\n\n")
     )
-    dest_path.write_text(existing + separator + block, encoding="utf-8")
+    if not dry_run:
+        dest_path.write_text(existing + separator + block, encoding="utf-8")
     result.overwritten.append(dest_path)
 
 

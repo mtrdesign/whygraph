@@ -125,10 +125,19 @@ def init_cmd(
 
     _scaffold_example_config(project_root, answers)
     _maybe_write_user_config(project_root, answers, write_user=interactive or yes)
-    _ensure_gitignore(project_root)
-    _sync_hooks(project_root, answers)
+    from whygraph.project_setup import StdioMcp, initialize_project
 
     resolved_agent = answers.agent or agent_name
+    setup = initialize_project(
+        project_root,
+        agents=[resolved_agent] if resolved_agent else [],
+        hooks=answers.scan_hooks,
+        mcp=StdioMcp(),
+        force=force,
+    )
+    _echo_gitignore(setup)
+    _echo_hooks(setup)
+
     if resolved_agent is None:
         click.echo(
             "Tip: run `whygraph init --help` to see supported agents,"
@@ -137,17 +146,16 @@ def init_cmd(
         return
 
     target = agents.resolve_agent(resolved_agent)
-    snippet = agents.render_snippet(target)
-
-    if not agents.is_write_supported(target):
-        _print_snippet(target, project_root, snippet)
-    else:
-        path = agents.write_snippet(target, project_root)
-        click.echo(f"Wrote whygraph MCP entry to {path}")
+    for outcome in setup.agent_files:
+        if outcome.status == "refused":
+            _print_snippet(target, project_root, outcome.snippet or "")
+        else:
+            click.echo(f"Wrote whygraph MCP entry to {project_root / outcome.file}")
 
     if target.has_assets:
-        result = assets.install_assets(target, project_root, force=force)
-        _print_install_summary(target, project_root, result, force=force)
+        _print_install_summary(
+            target, project_root, setup.assets[target.name], force=force
+        )
 
 
 def _run_preflight() -> None:
@@ -246,31 +254,16 @@ def _maybe_write_user_config(project_root: Path, answers, *, write_user: bool) -
         click.echo(f"Kept existing {user_path}")
 
 
-def _ensure_gitignore(project_root: Path) -> None:
-    """Keep the user config and generated caches out of git.
-
-    Idempotently adds ``whygraph.toml``, ``.whygraph/`` and ``.codegraph/``
-    to the project's ``.gitignore`` (creating it if absent). Lazy-imports
-    the helper to keep lightweight CLI surfaces fast.
-    """
-    from whygraph.core.gitignore import ensure_gitignore_entries
-
-    added = ensure_gitignore_entries(
-        project_root, ["whygraph.toml", ".whygraph/", ".codegraph/"]
-    )
-    if added:
-        click.echo(f"Updated .gitignore (added: {', '.join(added)})")
+def _echo_gitignore(setup) -> None:
+    """Report what ``initialize_project`` did to ``.gitignore``."""
+    if setup.gitignore_added:
+        click.echo(f"Updated .gitignore (added: {', '.join(setup.gitignore_added)})")
     else:
         click.echo(".gitignore already covers WhyGraph entries")
 
 
-def _sync_hooks(project_root: Path, answers) -> None:
-    """Reconcile the auto-rescan git hooks to ``[scan].hooks``.
-
-    Makes ``.git/hooks`` match the configured value exactly, in both
-    directions — installing what is listed and stripping the managed
-    block from what is not, so shrinking the list drops the hooks it
-    dropped.
+def _echo_hooks(setup) -> None:
+    """Report the auto-rescan git-hook reconcile ``initialize_project`` ran.
 
     Best-effort: a hooks directory we cannot resolve or write — or an
     unknown hook name in the configured list — is a warning, never a
@@ -278,15 +271,11 @@ def _sync_hooks(project_root: Path, answers) -> None:
     remain valid. Mirrors the CodeGraph refresh contract in
     ``scan/codegraph_crawler.py``.
     """
-    from whygraph import hooks
-
-    try:
-        names = hooks.resolve_hook_names(answers.scan_hooks)
-        result = hooks.sync_hooks(project_root, names)
-    except hooks.HooksError as exc:
-        click.echo(f"Skipped git hooks — {exc}", err=True)
+    if setup.hooks_error is not None:
+        click.echo(f"Skipped git hooks — {setup.hooks_error}", err=True)
         return
 
+    result = setup.hooks
     if result.installed:
         click.echo(
             f"Installed auto-rescan git hooks: {', '.join(result.installed)}"

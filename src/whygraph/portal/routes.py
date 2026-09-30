@@ -113,7 +113,7 @@ from .repos import (
     root_status,
 )
 from .estimate import scan_estimate as _scan_estimate
-from .runner import RunNotFound, RunnerUnavailable, log_tail, stale_info
+from .runner import ProjectBusy, RunNotFound, RunnerUnavailable, log_tail, stale_info
 from .secrets import (
     GITHUB_TOKEN,
     LLM_API_KEY,
@@ -919,7 +919,10 @@ def delete_project(
 ) -> dict:
     """Unregister a project (plan section 4.5.5).
 
-    Refused while a scan or sync is queued or running. Strips the managed
+    Refused while a scan or sync is queued, running or being requested
+    (the runner's removal reservation makes the check atomic with a
+    request, and a scan / sync request during the removal gets ``409``).
+    Strips the managed
     hooks, optionally the ``whygraph`` agent entries (tracked files only
     with ``confirm_tracked``; all-or-nothing), and the portal markers;
     never deletes a local repo or the rest of its ``.whygraph/``. A GitHub
@@ -929,8 +932,17 @@ def delete_project(
     """
     state = portal_state(request)
     body = body or DeleteProjectBody()
-    if state.runner.is_busy(project.id):
-        raise ApiError(409, "a scan or sync is queued or running for this project")
+    try:
+        with state.runner.reserve_removal(project.id):
+            return _remove_project(state, project, body)
+    except ProjectBusy as exc:
+        raise ApiError(409, str(exc)) from exc
+
+
+def _remove_project(
+    state: PortalState, project: BoundProject, body: DeleteProjectBody
+) -> dict:
+    """The body of :func:`delete_project`, run under the runner's removal reservation."""
     if project.source == "github" and body.confirm_name != project.name:
         raise ApiError(
             409,
@@ -1233,6 +1245,8 @@ async def post_scan(
         )
     except RunnerUnavailable as exc:
         raise ApiError(501, str(exc)) from exc
+    except ProjectBusy as exc:
+        raise ApiError(409, str(exc)) from exc
     return {"run_id": run_id}
 
 
@@ -1276,7 +1290,8 @@ async def scan_events(
     state = portal_state(request)
     assert state.shutdown_event is not None
     last = request.headers.get("last-event-id", "").strip()
-    offset = int(last) if last.isdigit() else 0
+    # isascii: str.isdigit() also accepts "²", which int() rejects.
+    offset = int(last) if last.isascii() and last.isdigit() else 0
     try:
         return await state.runner.events(
             project, run_id, shutdown=state.shutdown_event, offset=offset
@@ -1316,6 +1331,8 @@ async def post_sync(
         )
     except RunnerUnavailable as exc:
         raise ApiError(501, str(exc)) from exc
+    except ProjectBusy as exc:
+        raise ApiError(409, str(exc)) from exc
     return {"run_id": run_id}
 
 

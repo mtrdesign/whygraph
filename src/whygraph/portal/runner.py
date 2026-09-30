@@ -63,7 +63,8 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -134,6 +135,14 @@ LOG_TAIL_BYTES = 64 * 1024
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 _READ_CHUNK = 256 * 1024
 
+MAX_EVENT_LINE = _READ_CHUNK - 1
+"""Longest events-file line (bytes, newline excluded) the runner writes and the stream sends.
+
+A longer child JSON line is written as an ``oversized`` placeholder
+(:func:`_event_line`); a longer line already in a file is skipped by
+:func:`_read_frames` with the same placeholder, so the stream never stalls.
+"""
+
 
 class RunnerUnavailable(RuntimeError):
     """The runner cannot take requests (not started, or shutting down) - HTTP 501."""
@@ -141,6 +150,10 @@ class RunnerUnavailable(RuntimeError):
 
 class RunNotFound(LookupError):
     """No such run for this project - HTTP 404."""
+
+
+class ProjectBusy(RuntimeError):
+    """A project removal and a scan / sync request collided - HTTP 409."""
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +474,10 @@ class ScanRunner:
         self._running: dict[int, _Job] = {}
         self._live: set[int] = set()
         self._stopping = False
+        # Removal vs request claims (threading: removal runs in a worker thread).
+        self._claims = threading.Lock()
+        self._removing: set[int] = set()
+        self._requesting: dict[int, int] = {}
 
     # ---- lifecycle ------------------------------------------------------
 
@@ -546,6 +563,61 @@ class ScanRunner:
             ).first()
         return row is not None
 
+    @contextmanager
+    def reserve_removal(self, project_id: int) -> Iterator[None]:
+        """Hold off scan / sync requests for a project while it is removed.
+
+        Atomic with :meth:`_request`: a request already in flight, or a
+        queued / running run, makes the reservation fail; while it is held,
+        every new request for the project raises :class:`ProjectBusy`.
+
+        Parameters
+        ----------
+        project_id : int
+            ``projects.id``.
+
+        Yields
+        ------
+        None
+            The reservation is released when the block exits.
+
+        Raises
+        ------
+        ProjectBusy
+            If a scan or sync is queued, running or being requested, or
+            another removal holds the reservation.
+        """
+        with self._claims:
+            if project_id in self._removing or self._requesting.get(project_id):
+                raise ProjectBusy(
+                    "a scan or sync is queued or running for this project"
+                )
+            self._removing.add(project_id)
+        try:
+            if self.is_busy(project_id):
+                raise ProjectBusy(
+                    "a scan or sync is queued or running for this project"
+                )
+            yield
+        finally:
+            with self._claims:
+                self._removing.discard(project_id)
+
+    @contextmanager
+    def _claim_request(self, project_id: int) -> Iterator[None]:
+        """Mark a request in flight for the project, or refuse it during a removal."""
+        with self._claims:
+            if project_id in self._removing:
+                raise ProjectBusy("the project is being removed")
+            self._requesting[project_id] = self._requesting.get(project_id, 0) + 1
+        try:
+            yield
+        finally:
+            with self._claims:
+                left = self._requesting.pop(project_id) - 1
+                if left:
+                    self._requesting[project_id] = left
+
     # ---- requests -------------------------------------------------------
 
     async def request_scan(
@@ -612,6 +684,27 @@ class ScanRunner:
     ) -> int:
         if self._tg is None or self._lock is None or self._stopping:
             raise RunnerUnavailable("the scan runner is not running")
+        with self._claim_request(project_id):
+            return await self._request_claimed(
+                project_id,
+                kind=kind,
+                trigger=trigger,
+                analyze=analyze,
+                requested_by=requested_by,
+                scan_requested=scan_requested,
+            )
+
+    async def _request_claimed(
+        self,
+        project_id: int,
+        *,
+        kind: str,
+        trigger: str,
+        analyze: bool,
+        requested_by: int | None,
+        scan_requested: bool,
+    ) -> int:
+        assert self._lock is not None
         async with self._lock:
             if not await anyio.to_thread.run_sync(_has_ok_scan, project_id):
                 trigger, analyze = "initial", False
@@ -650,14 +743,17 @@ class ScanRunner:
         projects = await anyio.to_thread.run_sync(_initialized_projects)
         for p in projects:
             if p["source"] == "github" and p["root_ok"]:
-                await self._request(
-                    p["id"],
-                    kind="sync",
-                    trigger="poll",
-                    analyze=False,
-                    requested_by=None,
-                    scan_requested=False,
-                )
+                try:
+                    await self._request(
+                        p["id"],
+                        kind="sync",
+                        trigger="poll",
+                        analyze=False,
+                        requested_by=None,
+                        scan_requested=False,
+                    )
+                except ProjectBusy:
+                    continue  # being removed
         await self.catch_up(projects)
 
     async def catch_up(self, projects: list[dict] | None = None) -> None:
@@ -675,14 +771,17 @@ class ScanRunner:
                 continue
             head = await anyio.to_thread.run_sync(git_head, p["root"])
             if head is not None and head != p["last_scanned_head"]:
-                await self._request(
-                    p["id"],
-                    kind="scan",
-                    trigger="hook",
-                    analyze=False,
-                    requested_by=None,
-                    scan_requested=True,
-                )
+                try:
+                    await self._request(
+                        p["id"],
+                        kind="scan",
+                        trigger="hook",
+                        analyze=False,
+                        requested_by=None,
+                        scan_requested=True,
+                    )
+                except ProjectBusy:
+                    continue  # being removed
 
     async def _poll_loop(self) -> None:
         while True:
@@ -854,7 +953,7 @@ class ScanRunner:
                         obj = None
                     if isinstance(obj, dict):
                         with job.write_lock:
-                            events_fh.write((text + "\n").encode("utf-8"))
+                            events_fh.write(_event_line(text, obj))
                             events_fh.flush()
                         if obj.get("type") == "result":
                             job.result = obj
@@ -1224,15 +1323,47 @@ def _run_status(run_id: int) -> tuple[str | None, Any]:
         return run.status, summary
 
 
+def _oversized(size: int, original_type: Any = None) -> dict:
+    return {"type": "oversized", "original_type": original_type, "bytes": size}
+
+
+def _event_line(text: str, obj: dict) -> bytes:
+    """Encode one child JSON line for the events file, placeholder when too long."""
+    data = text.encode("utf-8")
+    if len(data) > MAX_EVENT_LINE:
+        kind = obj.get("type")
+        data = json.dumps(
+            _oversized(len(data), kind if isinstance(kind, str) else None)
+        ).encode("utf-8")
+    return data + b"\n"
+
+
 def _read_frames(path: Path, pos: int) -> tuple[list[str], int]:
-    """Read the complete lines after byte ``pos`` as SSE frames (``id:`` = end offset)."""
+    """Read the complete lines after byte ``pos`` as SSE frames (``id:`` = end offset).
+
+    A complete line longer than a read chunk becomes one ``oversized``
+    placeholder frame and is skipped; an incomplete one (no newline yet)
+    waits for the next call.
+    """
     try:
         with open(path, "rb") as fh:
             fh.seek(pos)
             data = fh.read(_READ_CHUNK)
+            end = data.rfind(b"\n")
+            if end < 0 and len(data) == _READ_CHUNK:
+                # One line fills the chunk: find where it ends, without keeping it.
+                scanned = len(data)
+                while chunk := fh.read(_READ_CHUNK):
+                    newline = chunk.find(b"\n")
+                    if newline >= 0:
+                        size = scanned + newline
+                        pos += size + 1
+                        frame = json.dumps(_oversized(size))
+                        return [f"id: {pos}\ndata: {frame}\n\n"], pos
+                    scanned += len(chunk)
+                return [], pos
     except FileNotFoundError:
         return [], pos
-    end = data.rfind(b"\n")
     if end < 0:
         return [], pos
     frames = []
@@ -1247,10 +1378,12 @@ __all__ = [
     "EXPLICIT_TRIGGERS",
     "LOG_TAIL_BYTES",
     "MAX_CONCURRENT",
+    "MAX_EVENT_LINE",
     "POLL_INTERVAL_SEC",
     "PROVIDER_KEY_ENV",
     "SCAN_CMD_ENV",
     "TRIGGER_PRECEDENCE",
+    "ProjectBusy",
     "RunNotFound",
     "RunnerUnavailable",
     "ScanRunner",

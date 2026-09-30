@@ -57,13 +57,18 @@ from whygraph.portal.estimate import (
     estimate_tokens,
     render_estimate,
 )
+from whygraph.portal import routes as routes_mod
+from whygraph.portal import runner as runner_mod
 from whygraph.portal.models import Project, ScanRun
 from whygraph.portal.runner import (
     LOG_TAIL_BYTES,
+    MAX_EVENT_LINE,
     TRIGGER_PRECEDENCE,
     ScanRunner,
+    _event_line,
     _insert_run,
     _Pending,
+    _read_frames,
     _recover_queued,
     _update_queued,
     child_env,
@@ -408,6 +413,45 @@ def test_estimate_arithmetic() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_read_frames_skips_a_line_longer_than_a_chunk(tmp_path: Path) -> None:
+    """Fix pass 2: a > 256 KiB line used to stall the stream forever."""
+    path = tmp_path / "run.jsonl"
+    big = json.dumps(
+        {"type": "result", "crawlers": [{"name": "git", "error": "x" * 300_000}]}
+    )
+    start = json.dumps({"type": "start", "phase_total": 2})
+    phase = json.dumps({"type": "phase", "phase": 2})
+    path.write_text(f"{start}\n{big}\n{phase}\n")
+
+    seen: list[dict] = []
+    pos = 0
+    for _ in range(4):
+        frames, pos = _read_frames(path, pos)
+        seen += [json.loads(f.split("data: ", 1)[1]) for f in frames]
+    assert [f["type"] for f in seen] == ["start", "oversized", "phase"]
+    assert seen[1]["bytes"] == len(big)
+    assert pos == path.stat().st_size
+
+
+def test_read_frames_waits_for_an_incomplete_long_line(tmp_path: Path) -> None:
+    path = tmp_path / "run.jsonl"
+    path.write_bytes(b"x" * 300_000)  # still being written: no newline yet
+    assert _read_frames(path, 0) == ([], 0)
+
+
+def test_oversized_child_lines_are_written_as_a_placeholder() -> None:
+    text = json.dumps({"type": "result", "error": "x" * MAX_EVENT_LINE})
+    line = _event_line(text, json.loads(text))
+    assert len(line) < 200 and line.endswith(b"\n")
+    assert json.loads(line) == {
+        "type": "oversized",
+        "original_type": "result",
+        "bytes": len(text),
+    }
+    small = json.dumps({"type": "phase", "phase": 1})
+    assert _event_line(small, json.loads(small)) == small.encode() + b"\n"
+
+
 def test_first_scan_is_initial_and_argv_per_trigger(
     portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
 ) -> None:
@@ -614,6 +658,72 @@ def test_events_sse_replays_then_follows(
     assert portal.get("/api/projects/demo/scans/999/events").status_code == 404
 
 
+async def _raw_get(app: Any, path: str, headers: list[tuple[bytes, bytes]]) -> dict:
+    """One GET straight through the ASGI app, with header bytes as given.
+
+    The TestClient re-encodes header values as UTF-8, so a raw latin-1
+    byte (what a real client can send) only arrives this way.
+    """
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"host", b"127.0.0.1:8765"), (b"x-whygraph-client", b"1")]
+        + headers,
+        "client": ("127.0.0.1", 50000),
+        "server": ("127.0.0.1", 8765),
+    }
+    sent: list[dict] = []
+    requested = False
+
+    async def receive() -> dict:
+        nonlocal requested
+        if requested:  # the stream's disconnect listener: never disconnects
+            await anyio.sleep_forever()
+        requested = True
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    await app(scope, receive, send)
+    body = b"".join(
+        m.get("body", b"") for m in sent if m["type"] == "http.response.body"
+    )
+    return {"status": sent[0]["status"], "text": body.decode()}
+
+
+@pytest.mark.parametrize("last_event_id", [b"\xb2", b"1\xb9", b"-5", b"abc"])
+def test_a_malformed_last_event_id_replays_from_the_start(
+    portal: TestClient,
+    env: SimpleNamespace,
+    scanner: SimpleNamespace,
+    last_event_id: bytes,
+) -> None:
+    """Fix pass 2: ``"²".isdigit()`` is true and ``int("²")`` raised a 500."""
+    local_project(portal, env, "demo")
+    run_id = scan(portal, "demo")
+    wait_run(portal, "demo", run_id)
+    assert portal.portal is not None
+    response = portal.portal.call(
+        _raw_get,
+        portal.app,
+        f"/api/projects/demo/scans/{run_id}/events",
+        [(b"last-event-id", last_event_id)],
+    )
+    assert response["status"] == 200
+    types = [
+        json.loads(f["data"])["type"] for f in _frames(response["text"]) if "id" in f
+    ]
+    assert types[0] == "start" and types[-1] == "end"
+
+
 def _frames(text: str) -> list[dict]:
     frames = []
     for block in text.split("\n\n"):
@@ -732,6 +842,71 @@ def test_recover_queued_reads_the_persisted_scan_flag(
         assert json.loads(session.get(ScanRun, run_id).summary) == {
             "scan_requested": True
         }
+
+
+def test_delete_refuses_while_a_scan_request_is_in_flight(
+    portal: TestClient,
+    env: SimpleNamespace,
+    scanner: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fix pass 2: ``is_busy`` alone raced a request that had no row yet."""
+    local_project(portal, env, "demo")
+    entered, release = threading.Event(), threading.Event()
+    real = runner_mod._has_ok_scan
+
+    def _slow_has_ok_scan(project_id: int) -> bool:
+        entered.set()
+        release.wait(10)
+        return real(project_id)
+
+    monkeypatch.setattr(runner_mod, "_has_ok_scan", _slow_has_ok_scan)
+    posted: list[httpx.Response] = []
+    poster = threading.Thread(
+        target=lambda: posted.append(portal.post("/api/projects/demo/scans"))
+    )
+    poster.start()
+    assert entered.wait(5)
+    refused = portal.delete("/api/projects/demo")
+    release.set()
+    poster.join(10)
+    assert refused.status_code == 409, refused.text
+    assert posted[0].status_code == 202
+    wait_idle(portal, "demo")
+    assert portal.get("/api/projects/demo").status_code == 200
+
+
+def test_scan_request_refused_while_a_removal_runs(
+    portal: TestClient,
+    env: SimpleNamespace,
+    scanner: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_project(portal, env, "demo")
+    entered, release = threading.Event(), threading.Event()
+    real = routes_mod.sync_hooks
+
+    def _slow_sync_hooks(root: Path, names):  # noqa: ANN001
+        entered.set()
+        release.wait(10)
+        return real(root, names)
+
+    monkeypatch.setattr(routes_mod, "sync_hooks", _slow_sync_hooks)
+    deleted: list[httpx.Response] = []
+    deleter = threading.Thread(
+        target=lambda: deleted.append(portal.delete("/api/projects/demo"))
+    )
+    deleter.start()
+    assert entered.wait(5)
+    refused = portal.post("/api/projects/demo/scans")
+    release.set()
+    deleter.join(10)
+    assert refused.status_code == 409, refused.text
+    assert "being removed" in refused.json()["error"]
+    assert deleted[0].status_code == 200, deleted[0].text
+    assert scanner.calls() == []
+    with portal_db.get_session() as session:
+        assert session.exec(select(ScanRun)).all() == []
 
 
 def test_sync_holds_the_slot_while_a_scan_waits(

@@ -49,6 +49,7 @@ from .agents import (
     HttpMcp,
 )
 from .core.gitignore import ensure_gitignore_entries
+from .core.safe_paths import check_inside
 from .hooks import HooksResult
 
 GITIGNORE_ENTRIES = ("whygraph.toml", ".whygraph/", ".codegraph/")
@@ -159,6 +160,7 @@ def initialize_project(
     confirm_tracked: Iterable[str | Path] = (),
     agent_actions: Mapping[str, AgentAction] | None = None,
     dry_run: bool = False,
+    contained: bool = False,
 ) -> InitializeResult:
     """Wire a repository for WhyGraph: gitignore, hooks, agent configs, assets.
 
@@ -198,6 +200,14 @@ def initialize_project(
     dry_run : bool
         Compute and return the per-file outcomes without writing,
         backing up or creating anything.
+    contained : bool
+        Refuse to follow a symlink out of the repository: before any
+        step runs (dry run included), every path the call could read or
+        write in the work tree - ``.gitignore``, the hook helper, each
+        agent config file and ``.whygraph/backups/``, each bundled asset
+        destination, the markers and their temp files - goes through
+        :func:`whygraph.core.safe_paths.check_inside`. The portal passes
+        ``True`` (repo content is untrusted there); the CLI does not.
 
     Returns
     -------
@@ -208,6 +218,9 @@ def initialize_project(
     ------
     whygraph.agents.UnknownAgentError
         For an unknown agent name.
+    whygraph.core.safe_paths.UnsafePathError
+        With ``contained``, when any of those paths is a symlink or
+        resolves outside ``root``. Nothing has been written.
     OSError
         If a step fails to write. Nothing after the failing step runs,
         so no marker is written.
@@ -218,6 +231,9 @@ def initialize_project(
         actions.setdefault(agents_mod.resolve_agent(name).name, "migrate")
     for name, action in (agent_actions or {}).items():
         actions[agents_mod.resolve_agent(name).name] = action
+    if contained:
+        for path in _touched_paths(root, actions, marker):
+            check_inside(root, path)
 
     gitignore_added: tuple[str, ...] = ()
     hooks_result: HooksResult | None = None
@@ -276,6 +292,41 @@ def initialize_project(
         _write_marker(root, marker)
         return replace(result, marker_written=True)
     return result
+
+
+def _touched_paths(
+    root: Path, actions: Mapping[str, AgentAction], marker: PortalMarker | None
+) -> list[Path]:
+    """Every work-tree path :func:`initialize_project` may read or write."""
+    paths = [root / ".gitignore", root / _hooks.HELPER_RELPATH]
+    paths.append(root / ".whygraph" / "backups")  # agent-file backups
+    for name, action in actions.items():
+        target = agents_mod.AGENTS[name]
+        if target.scope == "project":
+            paths.append(agents_mod.config_path_for(target, root))
+        if action == "migrate" and target.has_assets:
+            assert target.assets_dest is not None
+            dest = root.joinpath(*target.assets_dest)
+            paths.append(dest)
+            paths.extend(
+                _asset_destinations(assets_mod.packaged_assets_for(target), dest)
+            )
+    if marker is not None:
+        for rel in (PORTAL_ENV, PORTAL_JSON):
+            paths += [root / rel, root / rel.with_name(rel.name + ".tmp")]
+    return paths
+
+
+def _asset_destinations(src, dest: Path) -> list[Path]:
+    """Mirror a bundled asset tree onto ``dest`` without touching ``dest``."""
+    out: list[Path] = []
+    for entry in src.iterdir():
+        if entry.is_dir():
+            out.append(dest / entry.name)
+            out.extend(_asset_destinations(entry, dest / entry.name))
+        elif entry.is_file():
+            out.append(dest / entry.name)
+    return out
 
 
 def _write_entry(

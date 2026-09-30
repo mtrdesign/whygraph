@@ -10,7 +10,8 @@ portal database:
 2. The DB paths are **forced** to ``<root>/.whygraph/whygraph.db`` and
    ``<root>/.codegraph/codegraph.db``, whatever the rows say (plan rule
    4.2.1 #2): a config pointing at another project's database, or at the
-   portal's own, is never opened.
+   portal's own, is never opened. A *symlink* at those paths is refused
+   where the DB is opened (:mod:`whygraph.portal.paths`).
 3. Decrypted secrets are injected **in memory only**: the project's key
    for a provider, else the global one - except that a global key is
    never injected into a project that overrides that provider's endpoint
@@ -42,6 +43,7 @@ from whygraph.core.context import ProjectContext
 from .config_layers import endpoint_of, load_layer
 from .db import data_dir, get_session
 from .models import Project, Secret
+from .paths import db_paths
 from .secrets import GITHUB_TOKEN, LLM_API_KEY, LLM_KEY_PROVIDERS, decrypt
 
 _log = logging.getLogger(__name__)
@@ -131,8 +133,11 @@ def _merged_layer(session: Session, project: Project, root: Path) -> tuple[dict,
     merged = merge_v2(global_layer, project_layer)
 
     # Rule 4.2.1 #2: DB paths are the root's defaults, never a row's value.
-    merged["whygraph_db"] = str(root / ".whygraph" / "whygraph.db")
-    merged["codegraph_db"] = str(root / ".codegraph" / "codegraph.db")
+    # They are the paths .paths.check_project_paths examines before a DB
+    # is opened (the initialized gate, migrations, the runner).
+    whygraph_db, codegraph_db = db_paths(root)
+    merged["whygraph_db"] = str(whygraph_db)
+    merged["codegraph_db"] = str(codegraph_db)
     return project_layer, merged
 
 

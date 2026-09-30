@@ -12,7 +12,9 @@ generators that depend on :func:`current_user`:
   is set **and** the DB file exists, so nothing creates an empty
   ``.whygraph/whygraph.db`` in the user's repo) plus the memoized
   migration (:mod:`whygraph.portal.migrate`). The data routers, the
-  scan endpoints and the MCP dispatcher use it.
+  scan endpoints and the MCP dispatcher use it. A DB path that is a
+  symlink (or leaves the root) is a ``409 {"code": "unsafe_path"}``
+  (:func:`checked_db_paths`).
 
 Why ``async def``: a sync dependency runs in the threadpool, and a
 ``ContextVar`` set there never reaches the endpoint. Set in the request
@@ -36,11 +38,13 @@ from starlette.types import Scope
 
 from whygraph.core.config import ConfigError
 from whygraph.core.context import ProjectContext, use_project
+from whygraph.core.safe_paths import UnsafePathError
 
 from .context import ContextCache, ProjectNotFound, resolve_root
 from .db import get_session
 from .migrate import ProjectMigrations
 from .models import Project, User
+from .paths import check_project_paths
 from .projects import is_valid_slug
 from .repos import DiscoveryCache
 from .runner import ScanRunner
@@ -289,6 +293,32 @@ def bound_from(project: Project, ctx: ProjectContext) -> BoundProject:
     )
 
 
+def unsafe_path_error(exc: UnsafePathError) -> ApiError:
+    """The ``409 {"code": "unsafe_path"}`` for a refused repository path."""
+    return ApiError(
+        409,
+        f"refusing to use {exc}: WhyGraph never follows a symbolic link out of "
+        "the repository",
+        code="unsafe_path",
+        path=str(exc.path),
+    )
+
+
+def checked_db_paths(project: BoundProject) -> None:
+    """Refuse (``409 unsafe_path``) a project whose DB paths are symlinked.
+
+    Raises
+    ------
+    ApiError
+        ``409 {"code": "unsafe_path"}`` - see
+        :func:`whygraph.portal.paths.check_project_paths`.
+    """
+    try:
+        check_project_paths(project.root)
+    except UnsafePathError as exc:
+        raise unsafe_path_error(exc) from exc
+
+
 async def require_initialized(state: PortalState, project: BoundProject) -> None:
     """Gate on Initialize, then migrate the project DB once (``409`` otherwise).
 
@@ -303,11 +333,17 @@ async def require_initialized(state: PortalState, project: BoundProject) -> None
     ------
     ApiError
         ``409 {"error": "not initialized"}`` when ``initialized_at`` is
-        unset or the DB file is missing - the DB is then never created.
+        unset or the DB file is missing - the DB is then never created;
+        ``409 {"code": "unsafe_path"}`` when a DB path is a symlink
+        (checked first, before anything follows it).
     """
+    checked_db_paths(project)
     if project.initialized_at is None or not project.db_path.is_file():
         raise ApiError(409, "not initialized")
-    await anyio.to_thread.run_sync(state.migrations.ensure, project.ctx)
+    try:
+        await anyio.to_thread.run_sync(state.migrations.ensure, project.ctx)
+    except UnsafePathError as exc:
+        raise unsafe_path_error(exc) from exc
 
 
 async def project_context(
@@ -347,10 +383,12 @@ __all__ = [
     "PortalState",
     "bind_project",
     "bound_from",
+    "checked_db_paths",
     "current_user",
     "portal_state",
     "principal_of",
     "project_context",
     "project_db",
     "require_initialized",
+    "unsafe_path_error",
 ]

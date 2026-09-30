@@ -38,13 +38,25 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, func, select
 
 from whygraph.agents import AGENTS as AGENT_TARGETS
-from whygraph.agents import UnknownAgentError, remove_entry, resolve_agent
+from whygraph.agents import (
+    UnknownAgentError,
+    config_path_for,
+    remove_entry,
+    resolve_agent,
+)
 from whygraph.core.config import Config, ConfigError, normalize_v2
 from whygraph.core.context import use_project
+from whygraph.core.safe_paths import UnsafePathError, check_inside
 from whygraph.db import get_session as project_session
 from whygraph.db.engine import dispose_engine
 from whygraph.db.models import RationaleCache
-from whygraph.hooks import HooksError, HooksResult, resolve_hook_names, sync_hooks
+from whygraph.hooks import (
+    HELPER_RELPATH,
+    HooksError,
+    HooksResult,
+    resolve_hook_names,
+    sync_hooks,
+)
 from whygraph.mcp.errors import WhyGraphError
 from whygraph.mcp.resources import _repo_overview_resource
 from whygraph.project_setup import (
@@ -73,13 +85,16 @@ from .deps import (
     BoundProject,
     PortalState,
     bound_from,
+    checked_db_paths,
     current_user,
     portal_state,
     principal_of,
     project_context,
     project_db,
+    unsafe_path_error,
 )
 from .models import Project, ProjectAgent, ScanRun, Secret, User
+from .paths import BACKUPS_DIR, check_project_paths
 from .policy import (
     DEFAULTS_ALLOWLIST,
     PUT_ALLOWLIST,
@@ -302,10 +317,21 @@ def _missing_key(
 
 
 def _project_stats(state: PortalState, project: BoundProject) -> dict | None:
-    """Counts for the project home, or ``None`` until initialized (blocking)."""
+    """Counts for the project home, or ``None`` until initialized (blocking).
+
+    Also ``None`` when a DB path is a symlink (nothing is opened); the data
+    routes answer ``409 unsafe_path`` for such a project.
+    """
+    try:
+        check_project_paths(project.root)
+    except UnsafePathError:
+        return None
     if project.initialized_at is None or not project.db_path.is_file():
         return None
-    state.migrations.ensure(project.ctx)
+    try:
+        state.migrations.ensure(project.ctx)
+    except UnsafePathError:
+        return None
     try:
         overview = _repo_overview_resource()
         with project_session() as session:
@@ -403,6 +429,18 @@ def _init_dict(result: InitializeResult) -> dict:
         "refused": [f.file for f in result.refused],
         "marker_written": result.marker_written,
     }
+
+
+def _unsafe_reason(root: Path, *paths: Path) -> str | None:
+    """Why one of ``paths`` must not be touched (a symlink out of ``root``), or ``None``."""
+    for path in paths:
+        try:
+            check_inside(root, path)
+        except UnsafePathError as exc:
+            return (
+                f"{exc} (WhyGraph never follows a symbolic link out of the repository)"
+            )
+    return None
 
 
 def _clone_dir_is_safe(root: Path, data_dir: Path) -> bool:
@@ -824,9 +862,20 @@ def delete_project(
             ).all()
         ]
     root_ok = project.root.is_dir()
+    warnings: list[str] = []
     agent_files: list[dict] = []
     if body.strip_agent_entries and root_ok:
-        targets = [AGENT_TARGETS[a] for a in agents if a in AGENT_TARGETS]
+        targets = []
+        for target in (AGENT_TARGETS[a] for a in agents if a in AGENT_TARGETS):
+            unsafe = _unsafe_reason(
+                project.root,
+                config_path_for(target, project.root),
+                project.root / BACKUPS_DIR,
+            )
+            if unsafe:
+                warnings.append(f"left the {target.name} entry: {unsafe}")
+            else:
+                targets.append(target)
         preview = [
             remove_entry(
                 t, project.root, confirm_tracked=body.confirm_tracked, dry_run=True
@@ -850,15 +899,22 @@ def delete_project(
     state.migrations.forget(project.db_path)
     state.contexts.invalidate(project.id)
 
-    warnings: list[str] = []
     hooks = None
     if root_ok:
-        try:
-            hooks = _hooks_dict(sync_hooks(project.root, []))
-        except HooksError as exc:
-            warnings.append(str(exc))
+        unsafe = _unsafe_reason(project.root, project.root / HELPER_RELPATH)
+        if unsafe:
+            warnings.append(f"left the git hooks: {unsafe}")
+        else:
+            try:
+                hooks = _hooks_dict(sync_hooks(project.root, []))
+            except HooksError as exc:
+                warnings.append(str(exc))
         for marker in (PORTAL_JSON, PORTAL_ENV):
-            (project.root / marker).unlink(missing_ok=True)
+            unsafe = _unsafe_reason(project.root, project.root / marker)
+            if unsafe:
+                warnings.append(f"left {marker}: {unsafe}")
+            else:
+                (project.root / marker).unlink(missing_ok=True)
     else:
         warnings.append(f"{project.root} is not mounted; hooks and markers were left")
 
@@ -944,7 +1000,10 @@ def put_project_config(
         and project.source == "local"
         and project.root.is_dir()
     ):
+        unsafe = _unsafe_reason(project.root, project.root / HELPER_RELPATH)
         try:
+            if unsafe:
+                raise HooksError(f"hooks not changed: {unsafe}")
             hooks = _hooks_dict(sync_hooks(project.root, resolve_hook_names(new_hooks)))
         except HooksError as exc:
             hooks_error = str(exc)
@@ -1005,6 +1064,7 @@ def init_project(
     hooks: bool | tuple[str, ...] = (
         False if project.source == "github" else project.ctx.config.scan_hooks
     )
+    checked_db_paths(project)
 
     try:
         if not body.dry_run:
@@ -1019,7 +1079,10 @@ def init_project(
             confirm_tracked=body.confirm_tracked,
             agent_actions=actions,
             dry_run=body.dry_run,
+            contained=True,
         )
+    except UnsafePathError as exc:
+        raise unsafe_path_error(exc) from exc
     except OSError as exc:
         raise ApiError(500, f"initialize failed: {exc}") from exc
 

@@ -31,6 +31,11 @@ process:
   one ``<PROVIDER>_API_KEY`` the analyze model needs (analyzing runs
   only), the git credential-helper token for GitHub clones and
   ``GIT_TERMINAL_PROMPT=0``. Never a portal-env API key or token.
+* **Path check.** Before a sync and before spawning the child scan, the
+  project's DB paths go through
+  :func:`~whygraph.portal.paths.check_project_paths`; a symlinked
+  ``.whygraph/`` / ``.codegraph/`` / DB file fails the run with an
+  ``error`` event instead of scanning.
 * **Events.** The events file is the single source of the SSE stream
   (:meth:`ScanRunner.events`): replay from a byte offset, then follow,
   ``id:`` byte offsets for resume, heartbeats, a terminal ``end`` frame.
@@ -68,12 +73,14 @@ from fastapi.responses import StreamingResponse
 from sqlmodel import col, select
 
 from whygraph.core.config import Config, ConfigError
+from whygraph.core.safe_paths import UnsafePathError
 from whygraph.services.git import GitError, Repository
 from whygraph.services.git.credentials import TOKEN_ENV_VAR, git_env, pass_through_env
 
 from .context import resolve_root, resolved_layer
 from .db import data_dir, get_session
 from .models import Project, ScanRun
+from .paths import check_project_paths
 from .repos import root_status
 from .secrets import hint_for
 
@@ -771,10 +778,24 @@ class ScanRunner:
                     log_fh.write((redact(text) + "\n").encode("utf-8"))
                     log_fh.flush()
 
-            if root_status(root) != "ok":
-                message = f"project root {root} is missing or not a git repository"
+            def refused() -> str | None:
+                """Why the job must not touch ``root`` (logged + evented), or ``None``."""
+                if root_status(root) != "ok":
+                    message = f"project root {root} is missing or not a git repository"
+                else:
+                    try:
+                        check_project_paths(root)
+                        return None
+                    except UnsafePathError as exc:
+                        message = (
+                            f"refusing to scan: {exc} (WhyGraph never follows a "
+                            "symbolic link out of the repository)"
+                        )
                 log(message)
                 event({"type": "error", "message": message})
+                return message
+
+            if (message := refused()) is not None:
                 return "failed", {"error": message}, redact
 
             summary: dict[str, Any] = {}
@@ -795,6 +816,10 @@ class ScanRunner:
                     return "ok", summary, redact
             if job.interrupted:
                 return "interrupted", summary, redact
+            if spec.kind == "sync" and (message := refused()) is not None:
+                # The fast-forward may have brought the symlink in.
+                summary["error"] = message
+                return "failed", summary, redact
 
             job.head = git_head(root)
             argv = scan_argv(spec.trigger, spec.analyze)

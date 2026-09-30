@@ -14,7 +14,10 @@ scan) runs :meth:`ProjectMigrations.ensure` once for that project:
   place can be restored;
 * memoized per DB path; :meth:`ProjectMigrations.forget` makes the next
   request check again (after a scan child exits, or when a project is
-  removed).
+  removed);
+* never through a symlink: :func:`whygraph.portal.paths.check_project_paths`
+  runs first on every call, so a committed ``.whygraph/whygraph.db`` link
+  can neither migrate nor back up another project's DB or ``portal.db``.
 """
 
 from __future__ import annotations
@@ -27,7 +30,10 @@ from pathlib import Path
 from alembic.script import ScriptDirectory
 
 from whygraph.core.context import ProjectContext, use_project
+from whygraph.core.safe_paths import check_inside
 from whygraph.db import bootstrap
+
+from .paths import check_project_paths
 
 MIGRATION_LOCK = threading.Lock()
 """Serializes every Alembic run in the process (project and portal chains)."""
@@ -83,8 +89,17 @@ class ProjectMigrations:
         Path or None
             The backup written before a migration, or ``None`` when the
             DB was already at head (or already checked).
+
+        Raises
+        ------
+        whygraph.core.safe_paths.UnsafePathError
+            When the DB path (or ``.whygraph/``, ``.whygraph/backups/``,
+            ``.codegraph/``) is a symlink or resolves outside the root.
+            Checked on every call, memoized or not.
         """
         db_path = Path(ctx.config.whygraph_db or ctx.root / ".whygraph/whygraph.db")
+        check_project_paths(ctx.root)
+        check_inside(ctx.root, db_path)
         key = db_path.resolve()
         with self._lock:
             if key in self._done:

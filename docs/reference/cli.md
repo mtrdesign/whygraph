@@ -155,6 +155,14 @@ The portal is a single process and holds an exclusive lock on its data directory
 are rejected. `WHYGRAPH_DEV_ORIGINS` (comma-separated origins, e.g. `http://localhost:5173`) adds
 origins for a local frontend dev server.
 
+The portal never follows a symbolic link out of a project's folder, since a repository's content
+(especially a GitHub clone's) is not trusted. When `.whygraph/`, `.codegraph/`, either database,
+`.gitignore`, `whygraph.toml`, a portal marker, an agent config file or a bundled agent folder
+(such as `.claude/`) is a symlink, the portal refuses it with an `unsafe_path` error: Initialize,
+the Explorer, Chat, the MCP endpoint and scans all stop for that project, a `whygraph.toml` link is
+not imported, and removing the project leaves the linked files alone. Replace the link with a real
+file or folder to continue.
+
 ### Scans in the portal
 
 The portal runs every scan itself, as a `whygraph scan --progress json` child process in the

@@ -42,6 +42,8 @@ from whygraph.core.config import (
     normalize_v2,
 )
 
+from whygraph.core.safe_paths import UnsafePathError, check_inside
+
 from .secrets import LLM_KEY_PROVIDERS
 
 Spec = Mapping[str, Any]
@@ -199,7 +201,9 @@ class ImportPreview:
 def preview_import(root: Path) -> ImportPreview:
     """Compute what importing ``<root>/whygraph.toml`` would store (rule 1a).
 
-    Reads the file only; nothing is written anywhere.
+    Reads the file only; nothing is written anywhere. A ``whygraph.toml``
+    that is a symlink (e.g. to a sibling repo's gitignored file holding
+    keys) is never read: the preview carries an ``error`` instead.
 
     Parameters
     ----------
@@ -211,7 +215,10 @@ def preview_import(root: Path) -> ImportPreview:
     ImportPreview
         An empty preview when there is no file.
     """
-    path = root / CONFIG_FILENAME
+    try:
+        path = check_inside(root, CONFIG_FILENAME)
+    except UnsafePathError as exc:
+        return ImportPreview(found=True, error=f"{CONFIG_FILENAME} not imported: {exc}")
     if not path.is_file():
         return ImportPreview()
     try:

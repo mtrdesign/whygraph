@@ -949,3 +949,84 @@ def test_real_scan_child_with_hook_trigger(
     assert events[-1]["status"] == "ok"
     assert run["summary"]["analyze_skipped"] == "--skip-analyze"
     assert portal.get("/api/projects/demo").json()["stats"]["commits"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Security fix pass 1: symlinked DB paths are refused before a job runs
+# ---------------------------------------------------------------------------
+
+
+def _queue_behind_a_held_scan(
+    client: TestClient, scanner: SimpleNamespace, slug: str
+) -> int:
+    """Start a scan that holds, and return its id once the child is running."""
+    before = len(scanner.calls())
+    scanner.hold.touch()
+    running = scan(client, slug, trigger="manual")
+    wait_for(lambda: len(scanner.calls()) == before + 1)
+    return running
+
+
+def _wait_row(run_id: int) -> ScanRun:
+    def finished() -> ScanRun | None:
+        with portal_db.get_session() as session:
+            run = session.get(ScanRun, run_id)
+            if run is not None and run.status in TERMINAL:
+                session.expunge(run)
+                return run
+        return None
+
+    return wait_for(finished)
+
+
+def _swap_for_symlink(path: Path, target: Path) -> None:
+    path.rename(target)
+    path.symlink_to(target)
+
+
+def test_runner_refuses_a_symlinked_db_instead_of_scanning(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    root = local_project(portal, env, "demo")
+    first_scan(portal, "demo")
+    running = _queue_behind_a_held_scan(portal, scanner, "demo")
+    queued = scan(portal, "demo", trigger="manual")
+    # The link lands after the request passed the HTTP gate.
+    _swap_for_symlink(root / ".whygraph" / "whygraph.db", env.tmp / "elsewhere.db")
+    scanner.hold.unlink()
+
+    # The scans endpoints now answer 409 unsafe_path too; read the rows.
+    assert _wait_row(running).status == "ok"
+    run = _wait_row(queued)
+    assert run.status == "failed"
+    assert "symbolic link" in json.loads(run.summary)["error"]
+    assert len(scanner.calls()) == 2  # no child for the refused run
+    events = [
+        json.loads(line)
+        for line in (env.data / "runs" / f"{queued}.jsonl").read_text().splitlines()
+    ]
+    assert [e["type"] for e in events] == ["error"]
+    log = (env.data / "runs" / f"{queued}.log").read_text()
+    assert "refusing to scan" in log
+
+
+def test_runner_refuses_a_symlinked_db_instead_of_syncing(
+    portal: TestClient,
+    env: SimpleNamespace,
+    scanner: SimpleNamespace,
+    plain_fetch: SimpleNamespace,
+) -> None:
+    _, clone = github_project(portal, env, "gh")
+    first_scan(portal, "gh")
+    running = _queue_behind_a_held_scan(portal, scanner, "gh")
+    sync_id = portal.post("/api/projects/gh/sync").json()["run_id"]
+    assert sync_id != running
+    _swap_for_symlink(clone / ".codegraph" / "codegraph.db", env.tmp / "cg.db")
+    scanner.hold.unlink()
+
+    run = _wait_row(sync_id)
+    assert (run.kind, run.status) == ("sync", "failed")
+    assert "symbolic link" in json.loads(run.summary)["error"]
+    assert portal.get("/api/projects/gh/scans").json()["code"] == "unsafe_path"
+    assert plain_fetch.calls == 0
+    assert len(scanner.calls()) == 2

@@ -392,10 +392,12 @@ class Repository:
             project-level ``.git-blame-ignore-revs`` file (when present)
             still applies on top.
         rev : str or None, optional
-            Revision to blame against. ``None`` (default) blames HEAD.
-            Pass a commit SHA to blame the working tree as of that
-            commit — used by the predecessor-blame bridge to reach
-            commits that touched a file at its pre-rename name.
+            Revision to blame against. ``None`` (default) blames the
+            **working tree**, uncommitted edits included (they come back
+            as git's all-zero "Not Committed Yet" SHA). Pass a commit SHA
+            to blame the file as of that commit — used by the
+            predecessor-blame bridge to reach commits that touched a file
+            at its pre-rename name.
 
         Returns
         -------

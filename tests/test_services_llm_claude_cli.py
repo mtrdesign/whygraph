@@ -234,3 +234,66 @@ def test_complete_raises_llm_error_when_config_dir_missing(tmp_path: Path) -> No
                 CompletionRequest.of("hi")
             )
     run.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# preflight() - fail the phase once, not every commit
+# ---------------------------------------------------------------------------
+
+
+def test_preflight_passes_when_cli_present(tmp_path: Path) -> None:
+    adapter = ClaudeCliAdapter(config_dir=tmp_path)
+    with patch("shutil.which", return_value="/usr/local/bin/claude"):
+        adapter.preflight()
+
+
+def test_preflight_raises_natively_when_cli_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("WHYGRAPH_IN_IMAGE", raising=False)
+    with patch("shutil.which", return_value=None):
+        with pytest.raises(LlmError, match="claude CLI not found on PATH"):
+            ClaudeCliAdapter().preflight()
+
+
+def test_preflight_names_the_docker_image_when_cli_missing_inside_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WHYGRAPH_IN_IMAGE", "1")
+    with patch("shutil.which", return_value=None):
+        with pytest.raises(LlmError, match="Docker image does not include the claude"):
+            ClaudeCliAdapter().preflight()
+
+
+def test_preflight_raises_when_config_dir_missing(tmp_path: Path) -> None:
+    missing = tmp_path / "nope"
+    with patch("shutil.which", return_value="/usr/local/bin/claude"):
+        with pytest.raises(LlmError, match="config_dir .* does not exist"):
+            ClaudeCliAdapter(config_dir=missing).preflight()
+
+
+def test_preflight_hints_at_container_home_for_a_tmp_config_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", "/tmp")
+    missing = Path("/tmp/.claude-work-does-not-exist-whygraph-test")
+    with patch("shutil.which", return_value="/usr/local/bin/claude"):
+        with pytest.raises(LlmError, match="HOME is /tmp inside the container"):
+            ClaudeCliAdapter(config_dir=missing).preflight()
+
+
+def test_descriptor_and_generator_run_preflight(tmp_path: Path) -> None:
+    """Both LLM factories refuse a claude-cli config without the binary."""
+    from whygraph.analyze import LlmDescriptor, RationaleGenerator
+    from whygraph.core.config import Config
+    from whygraph.services.llm import LlmClientFactory
+
+    config = Config.from_dict(
+        {"llm": {"model": "claude-cli/claude-opus-4-7"}}, tmp_path
+    )
+    factory = LlmClientFactory(config.llm)
+    with patch("shutil.which", return_value=None):
+        with pytest.raises(LlmError, match="claude CLI"):
+            LlmDescriptor.from_config(config, factory=factory)
+        with pytest.raises(LlmError, match="claude CLI"):
+            RationaleGenerator.from_config(config, factory=factory)

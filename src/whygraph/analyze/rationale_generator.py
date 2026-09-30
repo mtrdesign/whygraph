@@ -473,12 +473,15 @@ class RationaleGenerator:
         Raises
         ------
         whygraph.services.llm.LlmError
-            If the rationale provider is not registered with the factory.
-            Propagated directly so the user sees the available providers.
+            If the rationale provider is not registered with the factory
+            (propagated directly so the user sees the available
+            providers), or its :meth:`~whygraph.services.llm.LlmClient.preflight`
+            check fails.
         """
         factory = factory if factory is not None else LlmClientFactory()
         provider, model = config.model_for("rationale")
         client = factory.make(provider, model=model)
+        client.preflight()
         return cls(
             client,
             timeout_sec=config.timeout_for("rationale"),

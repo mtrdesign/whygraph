@@ -102,6 +102,37 @@ class ClaudeCliAdapter(LlmClient):
         """``True`` iff the ``claude`` CLI is on the current ``PATH``."""
         return shutil.which("claude") is not None
 
+    def preflight(self) -> None:
+        """Fail once, with an actionable message, when ``claude`` cannot run.
+
+        Checks the two prerequisites every call needs - the ``claude``
+        binary on ``PATH`` and, when set, the ``config_dir`` profile - so
+        a scan skips the analyze phase with one message rather than
+        failing every commit.
+
+        Raises
+        ------
+        LlmError
+            If the binary is missing (worded for the Docker image when
+            running inside it) or ``config_dir`` does not exist.
+        """
+        if not self.is_available():
+            if os.environ.get("WHYGRAPH_IN_IMAGE") == "1":
+                raise LlmError(
+                    "the WhyGraph Docker image does not include the claude CLI - "
+                    "use a native install or another provider ([llm].model)"
+                )
+            raise LlmError("claude CLI not found on PATH (provider claude-cli)")
+        if self._config_dir is not None and not self._config_dir.is_dir():
+            hint = ""
+            home = os.environ.get("HOME", "")
+            if home == "/tmp" and self._config_dir.is_relative_to("/tmp"):
+                hint = " (~ expanded to /tmp: HOME is /tmp inside the container)"
+            raise LlmError(
+                f"claude config_dir {self._config_dir} does not exist "
+                f"(check [llm.claude_cli].config_dir){hint}"
+            )
+
     def complete(self, request: CompletionRequest) -> CompletionResponse:
         system_parts = [m.content for m in request.messages if m.role == "system"]
         user_parts = [m.content for m in request.messages if m.role == "user"]

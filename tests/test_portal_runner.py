@@ -1070,3 +1070,95 @@ def test_scan_log_tail_is_bounded_redacted_and_scoped(
 
     assert portal.get(f"/api/projects/other/scans/{big['id']}/log").status_code == 404
     assert portal.get("/api/projects/demo/scans/9999/log").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Step 10b: the hook helper calls a live portal (plan section 11.3 item 5)
+# ---------------------------------------------------------------------------
+
+
+def test_commits_during_a_running_scan_yield_one_hook_follow_up(
+    env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    # The real helper, real git hooks and the real `curl` against a real
+    # uvicorn portal: two commits while a scan runs coalesce into ONE queued
+    # `trigger=hook` run; with the portal stopped a commit scans nothing and
+    # leaves one line in hooks.log.
+    port = _free_port()
+    server = uvicorn.Server(
+        uvicorn.Config(
+            create_portal_app(port=port),
+            host="127.0.0.1",
+            port=port,
+            log_config=None,
+            lifespan="on",
+            timeout_graceful_shutdown=1,
+        )
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    wait_for(lambda: server.started or not thread.is_alive())
+    http = httpx.Client(
+        base_url=f"http://127.0.0.1:{port}",
+        headers=CLIENT_HEADER,
+        trust_env=False,
+        timeout=30,
+    )
+    root = make_repo(env.shared, "demo")
+
+    def commit(name: str) -> None:
+        (root / name).write_text(name)
+        _git(root, "add", name)
+        _git(root, "commit", "-q", "-m", name)
+
+    try:
+        assert http.post("/api/portal/setup", json={"display_name": "T"}).is_success
+        seed_codegraph(root)
+        assert http.post(
+            "/api/projects", json={"source": "local", "path": str(root)}
+        ).is_success
+        init = http.post("/api/projects/demo/init", json={"agents": []}).json()
+        assert init["initialized"] and "post-commit" in init["hooks"]["installed"]
+        with portal_db.get_session() as session:  # past the first (initial) scan
+            project = session.exec(select(Project)).one()
+            project.last_scan_at = "2026-01-01T00:00:00+00:00"
+            session.add(project)
+
+        scanner.hold.touch()
+        running = http.post("/api/projects/demo/scans", json={"trigger": "manual"})
+        running_id = running.json()["run_id"]
+        wait_for(lambda: len(scanner.calls()) == 1)
+
+        commit("one.txt")
+        commit("two.txt")
+
+        def pending() -> list[dict]:
+            rows = http.get("/api/projects/demo/scans").json()["runs"]
+            return [r for r in rows if r["id"] != running_id]
+
+        queued = wait_for(pending)
+        time.sleep(1.0)  # let the second hook's request land too
+        (follow_up,) = pending()
+        assert (follow_up["trigger"], follow_up["status"]) == ("hook", "queued")
+        assert follow_up["requested_by"] is None
+        assert queued[0]["id"] == follow_up["id"]
+
+        scanner.hold.unlink()
+        wait_for(lambda: len(scanner.calls()) == 2)
+        assert "--skip-analyze" in runner_flags(scanner.calls()[1])
+        assert "--no-remote" in runner_flags(scanner.calls()[1])
+    finally:
+        http.close()
+        server.should_exit = True
+        thread.join(20)
+
+    log = root / ".whygraph" / "logs" / "hooks.log"
+    assert not log.exists()  # every request above reached the portal
+    before = len(scanner.calls())
+    commit("three.txt")  # the portal is down
+    wait_for(lambda: log.exists() and log.read_text().strip())
+    time.sleep(0.5)
+    assert len(log.read_text().splitlines()) == 1
+    assert f"portal not reachable on port {port}" in log.read_text()
+    assert len(scanner.calls()) == before
+    assert not (root / ".whygraph" / "scan.lock").exists()

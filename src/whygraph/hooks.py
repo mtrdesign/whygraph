@@ -1,28 +1,33 @@
-"""Auto-rescan git hooks, installed by ``whygraph init``.
+"""Auto-rescan git hooks, installed by the WhyGraph portal.
 
 Installs ``post-commit`` / ``post-merge`` / ``post-rewrite`` /
-``post-checkout`` hooks that run an incremental, offline ``whygraph scan``
-(git history + CodeGraph, no LLM, no remote) in the background whenever
-the developer commits, pulls, rebases, or switches branch — so the
-WhyGraph and CodeGraph databases stay current without a manual scan or a
-long-running daemon.
+``post-checkout`` hooks that ask the running portal to queue an
+incremental, offline rescan (git history + CodeGraph, no LLM, no remote)
+whenever the developer commits, pulls, rebases, or switches branch - so
+the WhyGraph and CodeGraph databases stay current without a manual scan.
+The helper **never scans locally**: it reads the slug and port from
+``.whygraph/portal.env`` (parsed, never sourced), POSTs
+``{"trigger": "hook"}`` to ``/api/projects/<slug>/scans`` with ``curl``,
+and exits. Coalescing is the portal runner's job, so there is no lock.
+When the portal is down, ``curl`` is missing, or ``portal.env`` is
+missing, tracked by git or invalid, it appends one line to
+``.whygraph/logs/hooks.log`` and exits ``0``; the portal's catch-up scan
+picks the commits up when it next starts.
 
 The hooks are thin dispatchers that exec a shared helper
-(``.whygraph/hooks/whygraph-scan``); the helper detaches the scan so
-commits return instantly, and uses a portable ``mkdir`` lock plus a
-``pending`` flag so overlapping git events neither stack nor drop the
-latest ``HEAD``. ``post-checkout`` is the one hook git invokes with
+(``.whygraph/hooks/whygraph-scan``); the POST runs detached, so commits
+return instantly. ``post-checkout`` is the one hook git invokes with
 arguments, so the dispatcher forwards ``"$@"`` and the helper filters out
-the two cases that cannot have changed the tree.
+the two cases that cannot have changed the tree - before it touches
+anything under ``.whygraph/``.
 
-Hook coverage is governed by ``[scan].hooks`` and reconciled by
-``whygraph init`` — see :func:`sync_hooks`. Managed content lives between
-sentinel comments, so a pre-existing foreign hook is appended to, not
-overwritten.
+Hook coverage is governed by ``[scan].hooks`` and reconciled by the
+portal (Initialize, a ``[scan].hooks`` change, project removal) - see
+:func:`sync_hooks`. Managed content lives between sentinel comments, so a
+pre-existing foreign hook is appended to, not overwritten.
 
 This is a top-level module (like ``agents.py`` and ``assets.py``) rather
-than a CLI command: it is an installed-by-``init`` concern, and it must
-not depend on Click.
+than part of the portal package: it is Click- and FastAPI-free.
 """
 
 from __future__ import annotations
@@ -51,38 +56,47 @@ four cover every git event that can change the worktree or add commits:
 
 _HELPER_SCRIPT = """\
 #!/bin/sh
-# whygraph auto-rescan helper (managed by `whygraph init`).
-# After a commit/merge/rebase/checkout, runs an incremental, offline scan —
-# git history + CodeGraph, no LLM, no remote — detached so the git command
-# returns immediately. Single-flight + coalescing so rapid commits don't
-# stack and the latest HEAD is never missed. Re-created on every
-# `whygraph init`; edits are lost.
-command -v whygraph >/dev/null 2>&1 || exit 0
+# whygraph auto-rescan helper (managed by the WhyGraph portal).
+# After a commit/merge/rebase/checkout, asks the running portal to queue an
+# offline rescan (git history + CodeGraph, no LLM, no remote). It never scans
+# locally and takes no lock: the portal coalesces. Portal down, curl missing or
+# .whygraph/portal.env missing / tracked / invalid -> one line in
+# .whygraph/logs/hooks.log, exit 0. Re-created whenever the portal initializes
+# this repo; edits are lost.
 root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 # post-checkout is the only hook invoked with 3 args: <prev> <new> <is-branch>.
 if [ "$#" -eq 3 ]; then
-  [ "$3" = "1" ] || exit 0    # file checkout (`git checkout -- path`) — nothing changed
-  [ "$1" != "$2" ] || exit 0  # `git switch -c` at the same commit — identical tree
+  [ "$3" = "1" ] || exit 0    # file checkout (`git checkout -- path`) - nothing changed
+  [ "$1" != "$2" ] || exit 0  # `git switch -c` at the same commit - identical tree
 fi
-mkdir -p "$root/.whygraph/logs"
-lock="$root/.whygraph/scan.lock"
-pending="$root/.whygraph/scan.pending"
 log="$root/.whygraph/logs/hooks.log"
-: > "$pending"
+note() {
+  mkdir -p "$root/.whygraph/logs" 2>/dev/null
+  printf '%s whygraph hook: %s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >> "$log" 2>/dev/null
+  exit 0
+}
+env_file="$root/.whygraph/portal.env"
+[ -f "$env_file" ] || note "no .whygraph/portal.env; initialize this repo in the WhyGraph portal"
+if git -C "$root" ls-files --error-unmatch .whygraph/portal.env >/dev/null 2>&1; then
+  note ".whygraph/portal.env is tracked by git; ignored"
+fi
+# Parsed, never sourced: only these two values are read, then validated.
+slug=$(sed -n 's/^slug=//p' "$env_file" | head -n 1)
+port=$(sed -n 's/^port=//p' "$env_file" | head -n 1)
+case "$slug" in
+  ""|*[!abcdefghijklmnopqrstuvwxyz0123456789-]*) note "invalid slug in .whygraph/portal.env" ;;
+esac
+case "$port" in
+  ""|*[!0123456789]*) note "invalid port in .whygraph/portal.env" ;;
+esac
+: > "$root/.whygraph/scan.pending"
 (
-  cd "$root" || exit 0
-  while [ -e "$pending" ]; do
-    if mkdir "$lock" 2>/dev/null; then
-      trap 'rmdir "$lock" 2>/dev/null' EXIT INT TERM
-      rm -f "$pending"
-      whygraph scan --skip-analyze --no-remote >> "$log" 2>&1
-      rmdir "$lock" 2>/dev/null
-      trap - EXIT INT TERM
-    else
-      # Another run holds the lock; it will see the re-armed pending flag.
-      break
-    fi
-  done
+  command -v curl >/dev/null 2>&1 || note "curl not found; scan not requested"
+  # --noproxy: a loopback request must never go through an HTTP(S)_PROXY.
+  curl -fsS -m 2 --noproxy '*' -X POST -H 'X-WhyGraph-Client: 1' \\
+    -H 'Content-Type: application/json' -d '{"trigger":"hook"}' \\
+    "http://127.0.0.1:$port/api/projects/$slug/scans" >/dev/null 2>&1 \\
+    || note "portal not reachable on port $port; it scans this commit when it starts"
 ) </dev/null >/dev/null 2>&1 &
 exit 0
 """

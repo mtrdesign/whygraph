@@ -93,15 +93,18 @@ install' command (added in 1.0.0). Install natively instead:
 }
 
 path_advice() {
-    bin_dir="${WHYGRAPH_BIN_DIR:-$HOME/.local/bin}"
-    # The generated installer already warns when bin_dir is off the interactive
-    # PATH. This adds the git-hook case, which only the host side can see.
-    case ":${PATH:-}:" in *":$bin_dir:"*) ;; *) return 0 ;; esac
+    # A host-only note: the auto-rescan git hooks no longer run `whygraph`; they
+    # POST to the running portal with curl. So what the process that runs git
+    # (GUI clients included) needs on its PATH is `curl`, not this shim.
     info ""
-    info "note: git hooks launched by GUI clients (Sourcetree, Tower, JetBrains,"
-    info "      VS Code) often do not inherit $bin_dir, so WhyGraph's auto-rescan"
-    info "      hooks will silently skip. If you use one, symlink the shim into a"
-    info "      system path:  sudo ln -sf \"$bin_dir/whygraph\" /usr/local/bin/whygraph"
+    info "note: WhyGraph's auto-rescan git hooks ask the running portal to scan"
+    info "      (curl to 127.0.0.1); they do not need 'whygraph' on PATH, so GUI"
+    info "      git clients work too. They need curl and a started portal"
+    info "      ('whygraph up'); otherwise a commit is logged to"
+    info "      .whygraph/logs/hooks.log and scanned when the portal next starts."
+    if ! command -v curl >/dev/null 2>&1; then
+        info "warning: curl was not found on this PATH; install it for the hooks."
+    fi
 }
 
 main() {

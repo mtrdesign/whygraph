@@ -220,31 +220,24 @@ exit 0
     assert ran.stderr.strip() == MCP_REMOVED
 
 
-def test_warns_about_the_git_hook_path_when_bin_dir_is_reachable(
+def test_notes_that_git_hooks_need_curl_and_a_running_portal(
     tmp_path: Path,
 ) -> None:
-    # The host-only diagnostic: git hooks exit quietly when `whygraph` isn't on
-    # the PATH of whatever ran git, which GUI clients routinely aren't. It fires
-    # only when bin_dir IS on the interactive PATH — otherwise the generated
-    # installer's own "add it to your PATH" warning is the bigger problem.
+    # The host-only note: in 2.0 the hooks POST to the portal with curl, so a GUI
+    # git client no longer needs the shim on its PATH - it needs curl and a
+    # started portal. The 1.x "symlink the shim" advice is gone.
     generated = tmp_path / "generated.sh"
     generated.write_text(render_installer(f"{IMAGE_REPO}:1.2.3"))
     body = f'[ "$1" = run ] && cat "{generated}"; exit 0'
     bin_dir = tmp_path / "bin"
 
-    on_path, _, _ = _run(
-        tmp_path,
-        "1.2.3",
-        docker_body=body,
-        env={"PATH": f"{tmp_path / 'path'}:{bin_dir}"},
-    )
-    assert on_path.returncode == 0, on_path.stderr
-    assert "git hooks launched by GUI clients" in on_path.stderr
-    assert "ln -sf" in on_path.stderr
-
-    off_path, _, _ = _run(tmp_path, "1.2.3", docker_body=body)
-    assert off_path.returncode == 0, off_path.stderr
-    assert "git hooks launched by GUI clients" not in off_path.stderr
+    for env in ({"PATH": f"{tmp_path / 'path'}:{bin_dir}"}, None):
+        result, _, _ = _run(tmp_path, "1.2.3", docker_body=body, env=env)
+        assert result.returncode == 0, result.stderr
+        assert "auto-rescan git hooks ask the running portal" in result.stderr
+        assert "curl" in result.stderr and "'whygraph up'" in result.stderr
+        assert "ln -sf" not in result.stderr
+        assert "silently skip" not in result.stderr
 
 
 def test_falls_back_to_the_requested_version_when_unresolvable(

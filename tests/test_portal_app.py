@@ -1032,6 +1032,42 @@ def _fake_github(monkeypatch: pytest.MonkeyPatch, *, error: str | None = None) -
     return calls
 
 
+def test_github_init_passes_no_hooks_and_a_hooks_change_installs_none(
+    ready: TestClient, env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Plan section 4.4 / criterion 29: POST init on a GitHub clone passes
+    # hooks=[] (Sync's fast-forward would fire post-merge in the container),
+    # and a later [scan].hooks change does not install them either.
+    from whygraph.portal import routes as portal_routes
+
+    _fake_github(monkeypatch)
+    added = ready.post(
+        "/api/projects",
+        json={"source": "github", "url": "https://github.com/acme/widget"},
+    )
+    assert added.status_code == 201, added.text
+    dest = Path(added.json()["project"]["root"])
+    seen: list = []
+    real = portal_routes.initialize_project
+
+    def _spy(root, **kwargs):
+        seen.append(kwargs["hooks"])
+        return real(root, **kwargs)
+
+    monkeypatch.setattr(portal_routes, "initialize_project", _spy)
+    assert init_project(ready, "widget")["initialized"] is True
+    assert len(seen) == 1 and list(seen[0]) == []
+
+    changed = ready.put(
+        "/api/projects/widget/config",
+        json={"config": {"scan": {"hooks": ["post-commit"]}}},
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["hooks"] is None
+    assert managed_hook_names(dest) == ()
+    assert not (dest / ".whygraph" / "hooks").exists()
+
+
 def test_add_github_clones_under_the_data_dir(
     ready: TestClient, env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:

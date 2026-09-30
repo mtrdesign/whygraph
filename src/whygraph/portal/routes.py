@@ -1146,8 +1146,10 @@ def init_project(
         actions = _agent_actions(body.agent_actions)
     except UnknownAgentError as exc:
         raise ApiError(422, str(exc)) from exc
+    # GitHub clones never get hooks: Sync's fast-forward would fire post-merge
+    # inside the container (section 4.4).
     hooks: bool | tuple[str, ...] = (
-        False if project.source == "github" else project.ctx.config.scan_hooks
+        () if project.source == "github" else project.ctx.config.scan_hooks
     )
     checked_db_paths(project)
 

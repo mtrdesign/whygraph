@@ -15,7 +15,7 @@ This is **in-image plumbing, not the user-facing install step**. The front door
 is the host-side bootstrapper ``scripts/install.sh``, fetched from a tag-pinned
 raw URL::
 
-    curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.2/scripts/install.sh | sh
+    curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v2.0.0/scripts/install.sh | sh
 
 That script probes Docker, pulls the pinned image, and then delegates here —
 ``docker run --rm IMAGE whygraph install`` — checking the output is non-empty
@@ -145,8 +145,8 @@ portal_env_hint() {
         if [ -n "$val" ]; then names="${names:+$names, }$v"; fi
     done
     [ -n "$names" ] || return 0
-    case "$names" in *,*) verb="are" ;; *) verb="is" ;; esac
-    echo "note: $names $verb set in your shell but do not reach the portal. Enter keys and tokens under Settings in the portal." >&2
+    case "$names" in *,*) verb="are"; reach="do" ;; *) verb="is"; reach="does" ;; esac
+    echo "note: $names $verb set in your shell but $reach not reach the portal. Enter keys and tokens under Settings in the portal." >&2
     : > "$CONF/env-hint-shown"
 }
 

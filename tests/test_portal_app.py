@@ -811,6 +811,7 @@ def test_uninitialized_project_gates_data_routes_and_creates_no_db(
     done = init_project(ready, "demo", agents=["claude"])
     assert done["initialized"] is True and done["marker_written"] is True
     assert (root / ".whygraph" / "whygraph.db").is_file()
+    assert not (root / "whygraph.toml").exists()  # acceptance #4: config is portal-side
     assert json.loads((root / ".whygraph" / "portal.json").read_text()) == {
         "slug": "demo",
         "port": PORT,

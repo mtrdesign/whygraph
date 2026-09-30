@@ -1474,3 +1474,114 @@ def test_commits_during_a_running_scan_yield_one_hook_follow_up(
     assert f"portal not reachable on port {port}" in log.read_text()
     assert len(scanner.calls()) == before
     assert not (root / ".whygraph" / "scan.lock").exists()
+
+
+# ---------------------------------------------------------------------------
+# Acceptance #18: a 1.x repo through the normal wizard (fix pass 2)
+# ---------------------------------------------------------------------------
+
+_V1_HOOK = (
+    "#!/bin/sh\n"
+    "# >>> whygraph managed >>>\n"
+    'helper="$(git rev-parse --show-toplevel 2>/dev/null)/.whygraph/hooks/whygraph-scan"\n'
+    '[ -x "$helper" ] && "$helper" "$@"\n'
+    "# <<< whygraph managed <<<\n"
+)
+_V1_HELPER = "#!/bin/sh\nwhygraph scan --skip-analyze --no-remote --lock\n"
+_STDIO = {"command": "whygraph-mcp"}
+
+
+def test_a_1x_repo_migrates_through_the_wizard_and_keeps_its_commits(
+    portal: TestClient, env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+
+    from alembic import command
+
+    from whygraph.db import bootstrap
+    from whygraph.db import engine as db_engine
+    from whygraph.hooks import LEGACY_HELPER_RELPATH, helper_path
+
+    root = make_repo(env.shared, "legacy")
+    seed_codegraph(root)
+    first, second = _git(root, "rev-list", "--reverse", "HEAD").split()
+
+    # A 1.x `.whygraph/whygraph.db` at an older revision, holding the first
+    # commit (with a description a rescan must not throw away).
+    old_revision = "4e231ec6f0e1"
+    with use_project(manual_ctx(root)):
+        (root / ".whygraph").mkdir()
+        command.upgrade(bootstrap.alembic_config(), old_revision)
+    db_engine._reset_engine()
+    db = root / ".whygraph" / "whygraph.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            'INSERT INTO "commit" (sha, parent_shas, author_name, author_email,'
+            " authored_at, committed_at, subject, body, files_changed, insertions,"
+            " deletions, scanned_at, llm_description)"
+            " VALUES (?, '[]', 'Test User', 'tester@example.com',"
+            " '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00',"
+            " 'first commit', '', 1, 2, 0, '2026-01-01T00:00:00+00:00', ?)",
+            (first, "described by 1.x"),
+        )
+    # A managed 1.x hook + its work-tree helper, and two 1.x agent entries.
+    hook = root / ".git" / "hooks" / "post-commit"
+    hook.write_text(_V1_HOOK)
+    hook.chmod(0o755)
+    legacy = root / LEGACY_HELPER_RELPATH
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(_V1_HELPER)
+    legacy.chmod(0o755)
+    (root / ".mcp.json").write_text(json.dumps({"mcpServers": {"whygraph": _STDIO}}))
+    (root / ".vscode").mkdir()
+    (root / ".vscode" / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"whygraph": _STDIO}})
+    )
+
+    # Add: everything is detected, nothing is touched.
+    detected = add_local(portal, root)["detected"]
+    assert detected["existing_db"] is True
+    assert detected["managed_hooks"] == ["post-commit"]
+    agents = {d["agent"]: d for d in detected["detected_agents"]}
+    assert set(agents) == {"claude", "vscode"}
+    assert agents["vscode"]["stale"] is True
+    assert hook.read_text() == _V1_HOOK  # the 1.x helper rescans until Initialize
+    assert legacy.read_text() == _V1_HELPER
+
+    # Initialize, migrating both agent files.
+    done = init_project(
+        portal,
+        "legacy",
+        agents=["claude", "vscode"],
+        agent_actions={"claude": "migrate", "vscode": "migrate"},
+    )
+    assert done["initialized"] is True, done
+    assert not (root / "whygraph.toml").exists()  # acceptance #4
+    assert (root / ".whygraph" / "backups" / f"whygraph-{old_revision}.db").is_file()
+    with sqlite3.connect(db) as conn:
+        head = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+    assert head != old_revision
+    text = hook.read_text()
+    assert "--git-common-dir" in text and ".whygraph/hooks" not in text
+    assert not legacy.exists() and helper_path(root).is_file()
+    url = "http://127.0.0.1:${WHYGRAPH_PORT:-8765}/mcp/legacy"
+    claude = json.loads((root / ".mcp.json").read_text())
+    assert claude["mcpServers"]["whygraph"] == {"type": "http", "url": url}
+    vscode = json.loads((root / ".vscode" / "mcp.json").read_text())
+    assert "whygraph" not in vscode.get("mcpServers", {})
+    entry = vscode["servers"]["whygraph"]  # VS Code's own form (an input for the port)
+    assert entry["type"] == "http" and entry["url"].endswith("/mcp/legacy")
+
+    # The first scan (the real child) adds only the new commit.
+    monkeypatch.setenv(
+        "WHYGRAPH_SCAN_CMD",
+        f"{shlex.quote(sys.executable)} -m whygraph scan --no-codegraph",
+    )
+    run = wait_run(portal, "legacy", scan(portal, "legacy"), timeout=120)
+    assert (run["status"], run["trigger"]) == ("ok", "initial"), run
+    with sqlite3.connect(db) as conn:
+        rows = dict(
+            conn.execute('SELECT sha, llm_description FROM "commit"').fetchall()
+        )
+    assert set(rows) == {first, second}
+    assert rows[first] == "described by 1.x"

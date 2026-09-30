@@ -95,7 +95,7 @@ There is no Claude Code marketplace install. The bundled assets are version-cont
 WhyGraph ships as a self-contained image so a developer needs **only Docker** on the host — no Python / Node / gh / codegraph install. The image is the only thing that gets installed; the **front door is a tag-pinned `curl … | sh`** (`scripts/install.sh` fetched from `raw.githubusercontent.com`). The whole UX is three steps - **install → `whygraph up` → browser**:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.2/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v2.0.0/scripts/install.sh | sh
 whygraph up       # start the portal (one long-lived container, 127.0.0.1 only)
 # open http://127.0.0.1:8765 and add a repo from the Projects page
 ```

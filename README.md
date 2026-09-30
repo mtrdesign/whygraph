@@ -27,7 +27,7 @@ The only-Docker install needs nothing but Docker on the host - one command pulls
 installs the shims from inside it. The tag in the URL is the version you get:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v1.1.2/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v2.0.0/scripts/install.sh | sh
 ```
 
 See the [Getting Started guide](https://mtrdesign.github.io/whygraph/getting-started/) for every install path and the [Quickstart](https://mtrdesign.github.io/whygraph/getting-started/quickstart/) for the walkthrough.

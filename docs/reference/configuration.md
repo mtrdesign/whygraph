@@ -192,6 +192,12 @@ instead.
 | `OPENROUTER_API_KEY` | The `openrouter` LLM adapter. |
 | `GH_TOKEN` / `GITHUB_TOKEN` | The `gh` CLI during the remote crawl, when `[scan].token` is unset. |
 
+One variable replaces the file entirely, for tools that launch `whygraph scan` as a child process:
+
+| Variable | Used for |
+|---|---|
+| `WHYGRAPH_CONFIG_JSON` | A whole config tree, as a JSON object shaped like `whygraph.toml`. When set and non-empty it is read **instead of** the repo's `whygraph.toml` (which is then ignored, even if present), and relative paths resolve against the repo root. Invalid JSON or a non-object aborts with a config error. The portal uses it to hand a scan its config without writing a file into the checkout. |
+
 These three are read by the Docker shims rather than by WhyGraph itself:
 
 | Variable | Used for |

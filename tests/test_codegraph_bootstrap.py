@@ -51,10 +51,12 @@ def _capturing_run(
         cwd: Path | None = None,
         capture_output: bool = False,
         text: bool = False,
+        env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess:
         captured["cmd"] = cmd
         captured["cwd"] = cwd
         captured["capture_output"] = capture_output
+        captured["env"] = env
         if create_db_at is not None:
             _make_existing_db(create_db_at)
         return subprocess.CompletedProcess(args=cmd, returncode=0)
@@ -200,6 +202,7 @@ def test_raises_when_command_exits_nonzero(
         cwd: Path | None = None,
         capture_output: bool = False,
         text: bool = False,
+        env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess:
         raise subprocess.CalledProcessError(returncode=7, cmd=cmd)
 
@@ -317,6 +320,7 @@ def test_capture_true_folds_stderr_into_error(
         cwd: Path | None = None,
         capture_output: bool = False,
         text: bool = False,
+        env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess:
         raise subprocess.CalledProcessError(
             returncode=3, cmd=cmd, stderr="boom: index corrupt"
@@ -326,3 +330,61 @@ def test_capture_true_folds_stderr_into_error(
 
     with pytest.raises(CodeGraphBootstrapError, match="boom: index corrupt"):
         refresh_codegraph_index(tmp_path, capture=True)
+
+
+# --------------------------------------------------------------------------- #
+# credential stripping - the codegraph subprocess never sees secrets
+# --------------------------------------------------------------------------- #
+
+
+_SECRETS = {
+    "ANTHROPIC_API_KEY": "sk-ant-secret",
+    "OPENAI_API_KEY": "sk-openai-secret",
+    "OPENROUTER_API_KEY": "sk-or-secret",
+    "DEEPSEEK_API_KEY": "sk-ds-secret",
+    "GH_TOKEN": "ghp_secret",
+    "WHYGRAPH_GIT_TOKEN": "gitsecret",
+}
+
+
+@pytest.mark.parametrize("db_exists", [True, False])
+def test_codegraph_subprocess_env_has_no_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, db_exists: bool
+) -> None:
+    for name, value in _SECRETS.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("GITHUB_TOKEN", "unrelated-but-kept")
+    monkeypatch.setattr(bootstrap.shutil, "which", _which("codegraph"))
+    captured: dict[str, object] = {}
+    if db_exists:
+        _make_existing_db(tmp_path)
+        fake = _capturing_run(captured)
+    else:
+        fake = _capturing_run(captured, create_db_at=tmp_path)
+    monkeypatch.setattr(bootstrap.subprocess, "run", fake)
+
+    refresh_codegraph_index(tmp_path)
+
+    env = captured["env"]
+    assert isinstance(env, dict)
+    for name in _SECRETS:
+        assert name not in env
+    assert "PATH" in env
+    assert env["GITHUB_TOKEN"] == "unrelated-but-kept"
+
+
+def test_codegraph_docker_fallback_env_has_no_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _make_existing_db(tmp_path)
+    for name, value in _SECRETS.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(bootstrap.shutil, "which", _which("docker"))
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(bootstrap.subprocess, "run", _capturing_run(captured))
+
+    refresh_codegraph_index(tmp_path)
+
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert not set(_SECRETS) & set(env)

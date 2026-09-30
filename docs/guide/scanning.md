@@ -53,6 +53,7 @@ when a phase reports something you want to dig into.
 | `--codegraph-image TEXT` | pinned tag | Override the Docker image for the CodeGraph fallback. Ignored when a local `codegraph` binary is found. |
 | `--remote / --no-remote` | on | Crawl the remote for PRs and issues per `[scan].forge`. `--no-remote` is a fast, offline, token-free scan. |
 | `--pr-origins / --no-pr-origins` | on | Recover a squash-merged PR's original commits. Needs the network, so it's skipped under `--no-remote`. |
+| `--progress json` | off | Emit JSON lines on stdout instead of the terminal display, for tools that drive a scan. See the [event reference](../reference/cli.md#json-progress). |
 
 A common fast pass while iterating:
 

@@ -26,6 +26,7 @@ from whygraph.scan import (
     Crawler,
     GitCrawler,
     GitHubCrawler,
+    JsonProgress,
     PROriginEnricher,
 )
 
@@ -110,12 +111,27 @@ _ICON_CODEGRAPH = "🕸"
         "under `--no-remote`. Default: on."
     ),
 )
+@click.option(
+    "--progress",
+    "progress_mode",
+    type=click.Choice(["json"]),
+    default=None,
+    help=(
+        "Replace the Rich bars and panels with machine-readable JSON lines "
+        "on stdout: a first `start` event carrying `phase_total`, `phase` "
+        "and throttled `task` events, and a final `result` event. Logs and "
+        "errors stay on stderr. Used by the portal's scan runner."
+    ),
+)
+@click.option("--managed-by-portal", "managed_by_portal", is_flag=True, hidden=True)
 def scan_cmd(
     skip_analyze: bool,
     refresh_codegraph: bool,
     codegraph_image: str | None,
     remote: bool,
     enrich_pr_origins: bool,
+    progress_mode: str | None,
+    managed_by_portal: bool,
 ) -> None:
     """Run the source crawlers, then describe each commit with the LLM."""
     # Lazy-imported so that --help and other lightweight CLI surfaces
@@ -127,6 +143,16 @@ def scan_cmd(
     from whygraph.scan import AnalyzeCrawler
     from whygraph.services.git import Repository
     from whygraph.services.llm import LlmError
+
+    json_mode = progress_mode == "json"
+    if json_mode:
+        # stdout carries the JSON lines; silence every Rich panel / rule /
+        # status on the shared stderr console for this invocation.
+        previous_quiet = console.quiet
+        console.quiet = True
+        click.get_current_context().call_on_close(
+            lambda: setattr(console, "quiet", previous_quiet)
+        )
 
     db_path = ensure_initialized()
     config = get_config()
@@ -181,17 +207,25 @@ def scan_cmd(
     # Share the stderr `console` with Progress so the phase headers render
     # above the live bars on one stream, and add an M-of-N + elapsed column
     # so the slow LLM phase reports "12/45 · 0:00:31".
-    with (
-        scan_log_redirect(scan_log_path),
-        Progress(
+    progress_ctx = (
+        JsonProgress()
+        if json_mode
+        else Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             MofNCompleteColumn(),
             TimeElapsedColumn(),
             console=console,
-        ) as progress,
+        )
+    )
+    with (
+        scan_log_redirect(scan_log_path),
+        progress_ctx as progress,
     ):
+        if isinstance(progress, JsonProgress):
+            progress.start_event(phase_total)
+
         # CodeGraph refresh — a background crawler. It writes .codegraph/
         # and has no data dependency on the WhyGraph DB, so it overlaps the
         # entire crawl (started before Phase 1, joined last). Best-effort:
@@ -210,6 +244,7 @@ def scan_cmd(
 
         # ── Phase 1 · Structural crawl — git + GitHub, concurrent. ──
         n += 1
+        _emit_phase(progress, n, "Structural crawl")
         console.rule(
             f"{_ICON_STRUCTURAL} Phase {n}/{phase_total} · Structural crawl",
             style="cyan",
@@ -234,6 +269,7 @@ def scan_cmd(
         # Gated on a resolved client, which is None under --no-remote. ──
         if run_pr_origins:
             n += 1
+            _emit_phase(progress, n, "PR-origin recovery")
             console.rule(
                 f"{_ICON_PR_ORIGINS} Phase {n}/{phase_total} · PR-origin recovery",
                 style="cyan",
@@ -259,6 +295,7 @@ def scan_cmd(
         # PR-origin rows: an address can appear ONLY in on_default_branch=0
         # commits, so running before Phase 2 would miss that identity. ──
         n += 1
+        _emit_phase(progress, n, "Author identity")
         console.rule(
             f"{_ICON_AUTHORS} Phase {n}/{phase_total} · Author identity", style="cyan"
         )
@@ -281,6 +318,7 @@ def scan_cmd(
         # while feature-branch commits are described like any other. ──
         if run_analyze:
             n += 1
+            _emit_phase(progress, n, "LLM descriptions")
             console.rule(
                 f"{_ICON_LLM} Phase {n}/{phase_total} · LLM descriptions",
                 style="cyan",
@@ -320,10 +358,61 @@ def scan_cmd(
     if codegraph_crawler is not None:
         crawlers.append(codegraph_crawler)
     failed = [c for c in crawlers if c.error is not None]
+    if isinstance(progress, JsonProgress):
+        progress.flush()
+        progress.emit(
+            _result_event(
+                crawlers=crawlers,
+                phase_timings=phase_timings,
+                total_elapsed=total_elapsed,
+                analyze_skip=analyze_skip,
+            )
+        )
     for c in failed:
         click.echo(f"crawler {c.name!r} failed: {c.error}", err=True)
     if failed:
         raise click.exceptions.Exit(1)
+
+
+def _emit_phase(progress: object, phase: int, title: str) -> None:
+    """Emit a ``phase`` event when ``progress`` is a :class:`JsonProgress`."""
+    if isinstance(progress, JsonProgress):
+        progress.phase(phase, title)
+
+
+def _result_event(
+    *,
+    crawlers: "list[Crawler]",
+    phase_timings: "dict[str, float]",
+    total_elapsed: float,
+    analyze_skip: str | None,
+) -> dict:
+    """Build the closing ``result`` event of ``--progress json``.
+
+    Mirrors the results panel: overall status, elapsed time, per-phase
+    timings and one entry per crawler (status, summary, error / warning).
+    """
+    entries = []
+    for c in crawlers:
+        entry: dict = {
+            "name": c.name,
+            "status": "failed" if c.error is not None else "ok",
+            "summary": c.summary,
+        }
+        if c.error is not None:
+            entry["error"] = str(c.error)
+        warning = getattr(c, "warning", None)
+        if warning:
+            entry["warning"] = warning
+        entries.append(entry)
+    return {
+        "type": "result",
+        "status": "failed" if any(c.error is not None for c in crawlers) else "ok",
+        "elapsed_sec": round(total_elapsed, 3),
+        "phase_timings": {k: round(v, 3) for k, v in phase_timings.items()},
+        "crawlers": entries,
+        "analyze_skipped": analyze_skip,
+    }
 
 
 def _fmt_elapsed(seconds: float) -> str:

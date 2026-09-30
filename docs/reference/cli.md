@@ -75,8 +75,24 @@ picks up new commits and backfills what's missing.
 | `--codegraph-image TEXT` | pinned tag | Override the Docker image used for the CodeGraph refresh fallback. Ignored when a local `codegraph` binary is found. |
 | `--remote / --no-remote` | on | Crawl the source-control remote (GitHub PRs / issues) per `[scan].forge`. `--no-remote` skips it for a fast, offline, token-free scan. |
 | `--pr-origins / --no-pr-origins` | on | Recover a squash-merged PR's original feature-branch commits via one targeted `git fetch`. Needs the network, so it's skipped under `--no-remote`. |
+| `--progress json` | off | Print machine-readable JSON lines on stdout instead of the Rich bars and panels; see [JSON progress](#json-progress). Logs and errors stay on stderr. |
 
 See [Scanning your repo](../guide/scanning.md) for what each phase does.
+
+### JSON progress
+
+`--progress json` is for programs that drive a scan (the portal's scan runner, CI wrappers). Stdout
+carries one JSON object per line, each written whole, so a reader can parse line by line. The
+`type` key says what a line is:
+
+| `type` | When | Fields |
+|---|---|---|
+| `start` | Always first | `phase_total` - the number of phases this run executes (2 to 4, depending on `--skip-analyze`, `--no-remote`, `--pr-origins` and whether an LLM is configured) |
+| `phase` | Each phase begins | `phase` (1-based), `title` |
+| `task` | A crawler registers, and as it progresses (throttled; a finished task is always sent) | `name` (stable crawler label), `completed`, `total` (`null` while unknown), `description` (current status text) |
+| `result` | Always last | `status` (`ok` or `failed`), `elapsed_sec`, `phase_timings`, `crawlers` (per crawler: `name`, `status`, `summary`, and `error` / `warning` when set), `analyze_skipped` (why the LLM phase was skipped, else `null`) |
+
+The exit code is `1` when any crawler failed, exactly as without the flag.
 
 ## `whygraph serve`
 

@@ -28,6 +28,7 @@ import logging
 import os
 import shutil
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 from .exceptions import CodeGraphBootstrapError
@@ -106,6 +107,9 @@ def refresh_codegraph_index(
     *,
     image: str | None = None,
     capture: bool = False,
+    allow_rebuild: bool = True,
+    timeout: float | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> Path:
     """Bring ``<project_root>/.codegraph/codegraph.db`` up to date.
 
@@ -129,6 +133,17 @@ def refresh_codegraph_index(
         it (see :func:`ensure_codegraph_db`). ``whygraph scan`` passes this
         so the refresh can run concurrently under a live progress display.
         Default ``False``.
+    allow_rebuild : bool, optional
+        When ``False``, never run the full ``codegraph index`` for a
+        foreign extraction version (and skip the ``status`` check): the
+        MCP read path passes this so a tool call only ever does a quick
+        ``sync``. Default ``True`` (what ``whygraph scan`` wants).
+    timeout : float, optional
+        Seconds before a ``codegraph`` subprocess is killed and a
+        :class:`CodeGraphBootstrapError` raised. Default ``None`` (no limit).
+    env : Mapping[str, str], optional
+        The environment to derive the subprocess's from (credentials are
+        still withheld). Default :data:`os.environ`.
 
     Returns
     -------
@@ -146,14 +161,23 @@ def refresh_codegraph_index(
     if not db_path.exists():
         return ensure_codegraph_db(project_root, image=image, capture=capture)
 
-    if _extraction_version_changed(project_root, image=image):
-        _run_codegraph(project_root, ["index", "-q"], image=image, capture=capture)
+    run = {"image": image, "capture": capture, "timeout": timeout, "env": env}
+    if allow_rebuild and _extraction_version_changed(
+        project_root, image=image, timeout=timeout, env=env
+    ):
+        _run_codegraph(project_root, ["index", "-q"], **run)
     else:
-        _run_codegraph(project_root, ["sync", "-q"], image=image, capture=capture)
+        _run_codegraph(project_root, ["sync", "-q"], **run)
     return db_path
 
 
-def _extraction_version_changed(project_root: Path, *, image: str | None) -> bool:
+def _extraction_version_changed(
+    project_root: Path,
+    *,
+    image: str | None,
+    timeout: float | None = None,
+    env: Mapping[str, str] | None = None,
+) -> bool:
     """Whether the index predates (or postdates) the binary's extractor.
 
     Reads ``codegraph status --json``'s ``index`` block. Anything
@@ -164,7 +188,12 @@ def _extraction_version_changed(project_root: Path, *, image: str | None) -> boo
     """
     try:
         out = _run_codegraph(
-            project_root, ["status", "--json"], image=image, capture=True
+            project_root,
+            ["status", "--json"],
+            image=image,
+            capture=True,
+            timeout=timeout,
+            env=env,
         )
         info = json.loads(out[out.index("{") :])["index"]
         built = info["builtWithExtractionVersion"]
@@ -188,6 +217,8 @@ def _run_codegraph(
     *,
     image: str | None,
     capture: bool = False,
+    timeout: float | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> str:
     """Run a ``codegraph`` subcommand against ``project_root``.
 
@@ -209,6 +240,10 @@ def _run_codegraph(
         When ``True``, capture stdout/stderr rather than streaming them to
         the terminal, and fold the captured tail into the error message on
         failure. Default ``False`` (stream live).
+    timeout : float, optional
+        Kill the subprocess after this many seconds. Default no limit.
+    env : Mapping[str, str], optional
+        Base environment (see :func:`_codegraph_env`). Default ``os.environ``.
 
     Returns
     -------
@@ -257,8 +292,13 @@ def _run_codegraph(
             cwd=cwd,
             capture_output=capture,
             text=capture,
-            env=_codegraph_env(),
+            env=_codegraph_env(env),
+            timeout=timeout,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise CodeGraphBootstrapError(
+            f"`codegraph {label}` did not finish within {timeout:g} s"
+        ) from exc
     except subprocess.CalledProcessError as exc:
         if capture:
             tail = (exc.stderr or exc.stdout or "").strip()
@@ -272,17 +312,18 @@ def _run_codegraph(
     return (result.stdout or "") if capture else ""
 
 
-def _codegraph_env() -> dict[str, str]:
-    """Return ``os.environ`` minus the credentials the indexer never needs.
+def _codegraph_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Return ``base`` (default ``os.environ``) minus credentials the indexer never needs.
 
     CodeGraph only parses source, so every ``*_API_KEY``, ``GH_TOKEN`` and
     ``WHYGRAPH_GIT_TOKEN`` is withheld from it (and from the ``docker``
     client of the fallback path); the scan itself may hold them for its
     own LLM / GitHub calls.
     """
+    source = os.environ if base is None else base
     return {
         k: v
-        for k, v in os.environ.items()
+        for k, v in source.items()
         if not k.endswith("_API_KEY") and k not in _CREDENTIAL_ENV
     }
 

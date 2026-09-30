@@ -64,6 +64,7 @@ from whygraph.portal.runner import (
     LOG_TAIL_BYTES,
     MAX_EVENT_LINE,
     TRIGGER_PRECEDENCE,
+    RunnerUnavailable,
     ScanRunner,
     _event_line,
     _insert_run,
@@ -1682,3 +1683,40 @@ def test_cancel_refuses_finished_unknown_and_foreign_runs(
     assert cancel(portal, "demo", 9999).status_code == 404
     assert cancel(portal, "other", done).status_code == 404  # another project's run
     assert run_by_id(portal, "demo", done)["status"] == "ok"
+
+
+def test_cancel_during_a_sync_fetch_leaves_head_where_it_was(
+    env: SimpleNamespace, scanner: SimpleNamespace, plain_fetch: SimpleNamespace
+) -> None:
+    """A fast-forward after the cancel would move HEAD with no scan, and a
+    GitHub clone is never caught up (catch-up is for local projects)."""
+    plain_fetch.hold = env.tmp / "fetch-hold"
+    with client_for() as client:
+        client.post("/api/portal/setup", json={"display_name": "Tess"})
+        upstream, dest = github_project(client, env, "gh")
+        first_scan(client, "gh")
+        before = _git(dest, "rev-parse", "HEAD").strip()
+        commit(upstream, "print('new upstream work')\n")
+        plain_fetch.hold.touch()
+        running = client.post("/api/projects/gh/sync").json()["run_id"]
+        wait_for(lambda: plain_fetch.calls == 1)
+
+        assert cancel(client, "gh", running).status_code == 202
+        plain_fetch.hold.unlink()
+        run = wait_run(client, "gh", running)
+
+        assert (run["status"], run["summary"]["cancelled_by"]) == ("cancelled", "user")
+        assert _git(dest, "rev-parse", "HEAD").strip() == before
+        assert len(scanner.calls()) == 1  # only the first scan ever ran
+
+
+def test_cancel_after_the_runner_stopped_is_unavailable(
+    env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    runner = ScanRunner()
+    with client_for(runner) as client:
+        client.post("/api/portal/setup", json={"display_name": "Tess"})
+        local_project(client, env, "demo")
+        done = first_scan(client, "demo")["id"]
+    with pytest.raises(RunnerUnavailable):
+        anyio.run(runner.cancel, 1, done)

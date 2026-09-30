@@ -45,7 +45,20 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(
         targets, "get_config", lambda: SimpleNamespace(codegraph_db=None)
     )
+    _has_codegraph(monkeypatch, True)
     return root
+
+
+def _has_codegraph(monkeypatch: pytest.MonkeyPatch, present: bool) -> None:
+    """Pretend the ``codegraph`` binary is (or is not) on PATH, as in CI."""
+    real = shutil.which
+
+    def which(cmd: str, *a: object, **k: object) -> str | None:
+        if cmd == "codegraph":
+            return "/usr/bin/codegraph" if present else None
+        return real(cmd, *a, **k)
+
+    monkeypatch.setattr(targets.shutil, "which", which)
 
 
 def _resolve() -> targets.Target:
@@ -57,8 +70,12 @@ def _resolve() -> targets.Target:
 def _fake_sync(root: Path, *, start: int, end: int, calls: list[Path]):
     """A stand-in for ``codegraph sync``: re-index a.py at a new range."""
 
-    def _refresh(project_root: Path, **_kw: object) -> Path:
+    def _refresh(project_root: Path, **kw: object) -> Path:
         calls.append(project_root)
+        # The read path: an incremental sync only, bounded, allowlisted env.
+        assert kw["allow_rebuild"] is False
+        assert kw["timeout"] == targets.RESYNC_TIMEOUT_SEC
+        assert "GH_TOKEN" not in kw["env"]
         db = root / ".codegraph" / "codegraph.db"
         text = (root / "src" / "pkg" / "a.py").read_text()
         with sqlite3.connect(db) as conn:
@@ -219,3 +236,66 @@ def test_real_codegraph_follows_a_shifted_function(
     assert before.line_start == 1
     assert after.line_start == before.line_start + 4
     assert after.index_stale is False
+
+
+def test_no_local_codegraph_means_no_resync(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never the Docker fallback from a tool call (a `docker run` per request)."""
+    _has_codegraph(monkeypatch, False)
+    (repo / "src" / "pkg" / "a.py").write_text("# moved\n" + A_SOURCE)
+    calls: list[object] = []
+    monkeypatch.setattr(
+        targets, "refresh_codegraph_index", lambda *a, **k: calls.append(a)
+    )
+
+    assert _resolve().index_stale is True
+    assert calls == []
+
+
+def test_symlinked_codegraph_dir_is_never_resynced(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sync would write through it (e.g. into another project's index)."""
+    (repo / "src" / "pkg" / "a.py").write_text("# moved\n" + A_SOURCE)
+    elsewhere = tmp_path / "elsewhere"
+    (repo / ".codegraph").rename(elsewhere)
+    (repo / ".codegraph").symlink_to(elsewhere)
+    calls: list[object] = []
+    monkeypatch.setattr(
+        targets, "refresh_codegraph_index", lambda *a, **k: calls.append(a)
+    )
+
+    assert _resolve().index_stale is True
+    assert calls == []
+
+
+def test_a_sync_that_leaves_the_file_stale_still_flags_it(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (repo / "src" / "pkg" / "a.py").write_text("# moved\n" + A_SOURCE)
+
+    def _noop_sync(project_root: Path, **_kw: object) -> Path:
+        return project_root / ".codegraph" / "codegraph.db"  # "Already up to date"
+
+    monkeypatch.setattr(targets, "refresh_codegraph_index", _noop_sync)
+
+    assert _resolve().index_stale is True
+
+
+def test_a_busy_resync_of_the_same_repo_is_not_waited_on_forever(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (repo / "src" / "pkg" / "a.py").write_text("# moved\n" + A_SOURCE)
+    monkeypatch.setattr(targets, "RESYNC_LOCK_WAIT_SEC", 0.05)
+    calls: list[object] = []
+    monkeypatch.setattr(
+        targets, "refresh_codegraph_index", lambda *a, **k: calls.append(a)
+    )
+    lock = targets._resync_lock(repo)
+    lock.acquire()
+    try:
+        assert _resolve().index_stale is True
+    finally:
+        lock.release()
+    assert calls == []

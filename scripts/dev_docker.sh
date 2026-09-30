@@ -28,8 +28,11 @@ else
 fi
 mkdir -p "$HOME" "$WHYGRAPH_BIN_DIR"
 
-# The shim comes out of the image itself, as for a user.
-docker run --rm "$image" whygraph install | sh >/dev/null
+# The shim comes out of the image itself, as for a user. Checked non-empty
+# first (as install.sh does): a stale shim from an earlier run must not be used.
+installer=$(docker run --rm "$image" whygraph install)
+[ -n "$installer" ] || { echo "error: '$image' produced no installer" >&2; exit 1; }
+printf '%s\n' "$installer" | sh >/dev/null
 wg="$WHYGRAPH_BIN_DIR/whygraph"
 
 stopped="" logs_pid=""

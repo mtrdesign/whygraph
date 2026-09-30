@@ -54,6 +54,7 @@ def _capturing_run(
         capture_output: bool = False,
         text: bool = False,
         env: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> subprocess.CompletedProcess:
         captured["cmd"] = cmd
         captured["cwd"] = cwd
@@ -205,6 +206,7 @@ def test_raises_when_command_exits_nonzero(
         capture_output: bool = False,
         text: bool = False,
         env: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> subprocess.CompletedProcess:
         raise subprocess.CalledProcessError(returncode=7, cmd=cmd)
 
@@ -412,6 +414,7 @@ def test_capture_true_folds_stderr_into_error(
         capture_output: bool = False,
         text: bool = False,
         env: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> subprocess.CompletedProcess:
         raise subprocess.CalledProcessError(
             returncode=3, cmd=cmd, stderr="boom: index corrupt"
@@ -479,3 +482,55 @@ def test_codegraph_docker_fallback_env_has_no_credentials(
     env = captured["env"]
     assert isinstance(env, dict)
     assert not set(_SECRETS) & set(env)
+
+
+def test_refresh_without_rebuild_skips_status_and_only_syncs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The MCP read path never runs a full `codegraph index` (it can take minutes)."""
+    _make_existing_db(tmp_path)
+    monkeypatch.setattr(bootstrap.shutil, "which", _which("codegraph"))
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        bootstrap.subprocess, "run", _status_run(calls, status=_status_json(23, 24))
+    )
+
+    refresh_codegraph_index(tmp_path, capture=True, allow_rebuild=False)
+
+    assert calls == [["codegraph", "sync", "-q"]]
+
+
+def test_refresh_timeout_becomes_a_bootstrap_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _make_existing_db(tmp_path)
+    monkeypatch.setattr(bootstrap.shutil, "which", _which("codegraph"))
+    seen: dict[str, object] = {}
+
+    def slow(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        seen.update(kwargs)
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", slow)
+
+    with pytest.raises(CodeGraphBootstrapError, match="did not finish within 2 s"):
+        refresh_codegraph_index(tmp_path, capture=True, allow_rebuild=False, timeout=2)
+    assert seen["timeout"] == 2
+
+
+def test_refresh_env_is_the_given_base_minus_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _make_existing_db(tmp_path)
+    monkeypatch.setattr(bootstrap.shutil, "which", _which("codegraph"))
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(bootstrap.subprocess, "run", _capturing_run(captured))
+    monkeypatch.setenv("AMBIENT_ONLY", "1")
+
+    refresh_codegraph_index(
+        tmp_path,
+        allow_rebuild=False,
+        env={"PATH": "/bin", "GH_TOKEN": "t", "OPENAI_API_KEY": "k"},
+    )
+
+    assert captured["env"] == {"PATH": "/bin"}

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import shutil
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,15 +33,23 @@ from pathlib import Path
 from whygraph.core import _resolve_root, get_config
 from whygraph.core.safe_paths import UnsafePathError, check_inside
 from whygraph.services.codegraph import (
+    CODEGRAPH_DB_RELPATH,
     CodeGraph,
     CodeGraphError,
     Symbol,
     refresh_codegraph_index,
 )
+from whygraph.services.git.credentials import pass_through_env
 
 from .errors import WhyGraphError
 
 _log = logging.getLogger(__name__)
+
+RESYNC_TIMEOUT_SEC = 30.0
+"""Kill a read-path ``codegraph sync`` after this long (the tool answers stale)."""
+
+RESYNC_LOCK_WAIT_SEC = 5.0
+"""How long a tool call waits for another call's re-sync of the same repo."""
 
 _RESYNC_LOCKS: dict[Path, threading.Lock] = {}
 _RESYNC_LOCKS_GUARD = threading.Lock()
@@ -137,10 +146,11 @@ def resolve_target(
     -----
     A ``qualified_name`` lookup first checks that the symbol's file still
     has the content CodeGraph indexed (sha256 vs ``files.content_hash``).
-    If it changed, the index is re-synced (``codegraph sync``) and the
-    symbol looked up again, so an edit that shifted its lines does not
-    make blame read the wrong ones. A failed re-sync keeps the old range
-    and marks the target :attr:`Target.index_stale`.
+    If it changed, the index is re-synced (``codegraph sync``, bounded -
+    see :func:`_resync_and_lookup`) and the symbol looked up again, so an
+    edit that shifted its lines does not make blame read the wrong ones.
+    When the re-sync cannot run, fails, or leaves the file stale, the
+    target is marked :attr:`Target.index_stale`.
     """
     if qualified_name:
         if path or line_start or line_end:
@@ -161,11 +171,10 @@ def resolve_target(
             )
         index_stale = False
         if stale:
-            fresh = _resync_and_lookup(root, codegraph_db, qualified_name)
-            if fresh is None:
-                index_stale = True
-            else:
-                symbol = fresh
+            resynced, fresh = _resync_and_lookup(root, codegraph_db, qualified_name)
+            if resynced is not None:
+                symbol = resynced
+            index_stale = not fresh
         return Target(
             path=symbol.file_path,
             line_start=symbol.start_line,
@@ -216,27 +225,54 @@ def _resync_lock(root: Path) -> threading.Lock:
 
 def _resync_and_lookup(
     root: Path, codegraph_db: Path | None, qualified_name: str
-) -> Symbol | None:
+) -> tuple[Symbol | None, bool]:
     """Re-sync CodeGraph for ``root`` and look ``qualified_name`` up again.
 
-    One re-sync per repository at a time; a caller that waited re-checks
-    first, so concurrent tool calls after one edit share a single sync.
-    Returns ``None`` (the caller keeps its stale range) when the sync
-    fails or the symbol is gone - this must never fail the tool call.
+    Bounded, because it runs inside a tool call: only with a local
+    ``codegraph`` binary (never the Docker fallback), only an incremental
+    ``sync`` (never a full rebuild), under :data:`RESYNC_TIMEOUT_SEC`, with
+    the child-env allowlist, and never through a symlinked ``.codegraph/``.
+    One re-sync per repository at a time; a caller that waited (at most
+    :data:`RESYNC_LOCK_WAIT_SEC`) re-checks first, so concurrent tool calls
+    after one edit share a single sync. It never fails the tool call.
+
+    Returns
+    -------
+    tuple[Symbol or None, bool]
+        The symbol as the index now has it (``None``: keep the old one), and
+        whether its file now matches the index (``False``: still stale).
     """
-    with _resync_lock(root):
-        try:
-            with CodeGraph.for_repository(root, codegraph_db=codegraph_db) as graph:
-                symbol = graph.symbol(qualified_name)
-                if symbol is not None and not _is_stale(graph, root, symbol):
-                    return symbol
-            refresh_codegraph_index(root, capture=True)
-            with CodeGraph.for_repository(root, codegraph_db=codegraph_db) as graph:
-                return graph.symbol(qualified_name)
-        except CodeGraphError as exc:  # includes CodeGraphBootstrapError
-            _log.warning(
-                "CodeGraph re-sync for %s failed; using the indexed range: %s",
-                qualified_name,
-                exc,
-            )
-            return None
+    if shutil.which("codegraph") is None:
+        return None, False
+    try:
+        check_inside(root, CODEGRAPH_DB_RELPATH)
+    except UnsafePathError:
+        return None, False
+    lock = _resync_lock(root)
+    if not lock.acquire(timeout=RESYNC_LOCK_WAIT_SEC):
+        return None, False
+    try:
+        with CodeGraph.for_repository(root, codegraph_db=codegraph_db) as graph:
+            symbol = graph.symbol(qualified_name)
+            if symbol is not None and not _is_stale(graph, root, symbol):
+                return symbol, True
+        refresh_codegraph_index(
+            root,
+            capture=True,
+            allow_rebuild=False,
+            timeout=RESYNC_TIMEOUT_SEC,
+            env=pass_through_env(),
+        )
+        with CodeGraph.for_repository(root, codegraph_db=codegraph_db) as graph:
+            symbol = graph.symbol(qualified_name)
+            # A sync that exits 0 without re-indexing the file leaves it stale.
+            return symbol, symbol is not None and not _is_stale(graph, root, symbol)
+    except CodeGraphError as exc:  # includes CodeGraphBootstrapError
+        _log.warning(
+            "CodeGraph re-sync for %s failed; using the indexed range: %s",
+            qualified_name,
+            exc,
+        )
+        return None, False
+    finally:
+        lock.release()

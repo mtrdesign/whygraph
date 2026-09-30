@@ -21,12 +21,18 @@ export WHYGRAPH_PORTAL_NAME=whygraph-portal-smoke
 unset WHYGRAPH_DEV_SRC WHYGRAPH_DATA 2>/dev/null || true
 export PATH="$S/bin:$PATH"
 mkdir -p "$HOME" "$S/bin" "$S/share"
+# Always this run's own shim, never one found on PATH: a user's installed
+# 2.0 shim ignores WHYGRAPH_PORTAL_NAME and would stop their real portal.
+wg="$S/bin/whygraph"
+whygraph() {
+    if [ -x "$wg" ]; then "$wg" "$@"; else echo "smoke: no shim installed" >&2; return 1; fi
+}
 
 step=""
 passed=0
 cleanup() {
     code=$?
-    whygraph down >/dev/null 2>&1 || true
+    [ ! -x "$wg" ] || "$wg" down >/dev/null 2>&1 || true
     rm -rf "$S"
     if [ "$code" -ne 0 ]; then
         echo "SMOKE FAILED at: $step" >&2
@@ -74,10 +80,13 @@ wait_run() {  # wait_run <trigger>: until a run with that trigger finishes; prin
 commit() { git -C "$R" -c user.name=t -c user.email=t@x -c commit.gpgsign=false commit -q "$@"; }
 
 echo "== install"
-docker run --rm "$IMAGE" whygraph install | sh >/dev/null
+step="install from $IMAGE"
+installer=$(docker run --rm "$IMAGE" whygraph install) || exit 1
+[ -n "$installer" ] || { echo "empty installer output from $IMAGE" >&2; exit 1; }
+printf '%s\n' "$installer" | sh >/dev/null
 check "install writes the whygraph shim" test -x "$S/bin/whygraph"
 check "install writes the whygraph-mcp stub" test -x "$S/bin/whygraph-mcp"
-mcp_rc=0; whygraph-mcp >/dev/null 2>&1 || mcp_rc=$?
+mcp_rc=0; "$S/bin/whygraph-mcp" >/dev/null 2>&1 || mcp_rc=$?
 check "whygraph-mcp is a removal stub (exit 2)" test "$mcp_rc" -eq 2
 want_version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$(dirname -- "$0")/../pyproject.toml" | head -1)
 check "image reports the pyproject version ($want_version)" \

@@ -130,13 +130,13 @@ PROVIDER_KEY_ENV: dict[str, str] = {
 """The only provider keys a child can receive (``claude-cli`` / ``ollama`` are key-less)."""
 
 LOG_TAIL_BYTES = 64 * 1024
+"""How much of a run's log :func:`log_tail` returns (the end of the file)."""
 
 CANCEL_GRACE_SEC = 10.0
 """Seconds between a cancel's SIGTERM and the SIGKILL that follows."""
 
 CANCELLED_BY_USER: dict[str, str] = {"cancelled_by": "user"}
 """The ``summary`` of a run the user cancelled (vs. a merged or orphaned one)."""
-"""How much of a run's log :func:`log_tail` returns (the end of the file)."""
 
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 _READ_CHUNK = 256 * 1024
@@ -787,14 +787,18 @@ class ScanRunner:
         RunFinished
             If the run already ended.
         """
-        if self._tg is None or self._lock is None:
+        if self._tg is None or self._lock is None or self._stopping:
             raise RunnerUnavailable("the scan runner is not running")
         async with self._lock:
+            if self._tg is None or self._stopping:  # shut down while we waited
+                raise RunnerUnavailable("the scan runner is not running")
             pending = self._pending.get(project_id)
             if pending is not None and pending.run_id == run_id:
                 del self._pending[project_id]
-                self._live.discard(run_id)
+                # The row first: a stream that sees the run leave `_live`
+                # reads its final status next, which must not be "queued".
                 await anyio.to_thread.run_sync(_mark_cancelled, run_id)
+                self._live.discard(run_id)
                 return "queued"
             job = self._running.get(project_id)
             if job is not None and job.spec.run_id == run_id:
@@ -910,7 +914,9 @@ class ScanRunner:
         except Exception as exc:  # noqa: BLE001 -- recorded as a failed run
             _log.exception("scan runner: run %s failed", job.spec.run_id)
             status, summary = "failed", {"error": redact(str(exc))}
-        if job.cancelled:
+        # A run that finished cleanly before the cancel reached it stays ok:
+        # its writes all landed, and recording it cancelled would re-scan.
+        if job.cancelled and status != "ok":
             status, summary = "cancelled", {**summary, **CANCELLED_BY_USER}
         elif job.interrupted and status != "cancelled":
             status = "interrupted"
@@ -987,6 +993,10 @@ class ScanRunner:
                 repo = Repository(root, origin_remote=config.scan_remote)
                 try:
                     repo.fetch_default(env=git_env(config.scan_token))
+                    if job.cancelled:
+                        # Not after the fetch either: a moved HEAD with no scan
+                        # would never be caught up (catch-up is local-only).
+                        return "cancelled", summary, redact
                     moved = repo.fast_forward()
                 except GitError as exc:
                     message = _error_chain(exc)

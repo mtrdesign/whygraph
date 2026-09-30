@@ -81,8 +81,10 @@ def _say(msg: str) -> None:
 
 
 def _start(cmd: list[str], env: dict[str, str] | None = None) -> subprocess.Popen:
-    # Own process group, so a stop reaches the child's children (uvicorn's
-    # scan subprocesses, Vite's esbuild) and Ctrl-C reaches only this wrapper.
+    # Own process group, so a stop reaches the child's own children (Vite's
+    # esbuild) and Ctrl-C reaches only this wrapper. Scan children run in
+    # their own sessions: the portal's shutdown stops them, which is why the
+    # grace below is longer than the portal's.
     return subprocess.Popen(cmd, env=env, start_new_session=True)
 
 

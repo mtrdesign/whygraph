@@ -37,6 +37,8 @@ export interface ConfigFormValues {
   hooks: Record<HookName, boolean>;
   /** Write-only; blank leaves the stored token alone. */
   githubToken: string;
+  /** A new `claude setup-token` subscription token (blank = leave as stored). */
+  claudeToken: string;
   /** Write-only per provider; blank leaves the stored key alone. */
   keys: Record<string, string>;
 }
@@ -90,6 +92,7 @@ export function layerToValues(layer: ConfigDict): ConfigFormValues {
     forge: forgeOn(layer),
     hooks: hooksFromLayer(layer),
     githubToken: "",
+    claudeToken: "",
     keys: Object.fromEntries(KEYED_PROVIDERS.map((p) => [p, ""])),
   };
 }
@@ -159,6 +162,9 @@ export function valuesToLayer(
   return layer;
 }
 
+/** The staged-removal id of the Claude subscription token (the other ids are provider tags / `github`). */
+export const CLAUDE_TOKEN = "claude-token";
+
 /** The secrets part of a save: typed values set, staged removals delete, blanks are untouched. */
 export function secretsPatch(
   v: ConfigFormValues,
@@ -173,6 +179,9 @@ export function secretsPatch(
   }
   const patch: SecretsPatch = {};
   if (Object.keys(llm).length) patch.llm = llm;
+  const claude = v.claudeToken.trim();
+  if (claude) patch.claude_oauth_token = claude;
+  else if (removed.includes(CLAUDE_TOKEN)) patch.claude_oauth_token = null;
   if (opts.github) {
     const token = v.githubToken.trim();
     if (token) patch.github_token = token;
@@ -217,5 +226,6 @@ export const configFormSchema = z.object({
     "post-checkout": z.boolean(),
   }),
   githubToken: z.string(),
+  claudeToken: z.string(),
   keys: z.record(z.string(), z.string()),
 });

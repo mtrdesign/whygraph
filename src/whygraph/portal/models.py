@@ -54,7 +54,7 @@ AGENTS: tuple[str, ...] = ("claude", "cursor", "vscode", "codex")
 """Agents ``project_agents.agent`` accepts (the four ``whygraph.agents`` keys)."""
 
 PROJECT_SOURCES: tuple[str, ...] = ("local", "github")
-SECRET_KINDS: tuple[str, ...] = ("llm_api_key", "github_token")
+SECRET_KINDS: tuple[str, ...] = ("llm_api_key", "github_token", "claude_oauth_token")
 SCAN_KINDS: tuple[str, ...] = ("scan", "sync")
 SCAN_TRIGGERS: tuple[str, ...] = (
     "initial",

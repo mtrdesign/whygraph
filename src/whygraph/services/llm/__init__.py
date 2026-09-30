@@ -64,7 +64,7 @@ from .chat import (
 from .claude_cli import ClaudeCliAdapter
 from .client import LlmClient
 from .deepseek import DeepSeekAdapter
-from .exceptions import LlmError
+from .exceptions import LlmAuthError, LlmError
 from .factory import LlmClientFactory
 from .ollama import OllamaAdapter
 from .openai import OpenAIAdapter
@@ -88,6 +88,7 @@ __all__ = [
     "DeepSeekAdapter",
     "LlmClient",
     "LlmClientFactory",
+    "LlmAuthError",
     "LlmError",
     "Message",
     "ModelInfo",

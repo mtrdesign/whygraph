@@ -27,6 +27,7 @@ SLUG ?= whygraph
 IMAGE ?= whygraph:dev
 VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
 CODEGRAPH_VERSION := $(shell sed -n "s/^ *CODEGRAPH_VERSION: *'\([^']*\)'.*/\1/p" .github/workflows/cd-deploy-whygraph.yml | head -1)
+CLAUDE_CODE_VERSION := $(shell sed -n "s/^ *CLAUDE_CODE_VERSION: *'\([^']*\)'.*/\1/p" .github/workflows/cd-deploy-whygraph.yml | head -1)
 # What the image is built from besides src/: a change here means `dev-docker` rebuilds.
 DEPS_HASH = $(shell cat pyproject.toml uv.lock hatch_build.py docker/whygraph/Dockerfile src/playground/package-lock.json | git hash-object --stdin | cut -c1-16)
 
@@ -79,6 +80,7 @@ e2e: playground  ## Playwright suite vs a throwaway portal + fake scanner (extra
 image:  ## Build the image like the release does (pinned CodeGraph, real version); IMAGE=... to retag
 	docker build -f docker/whygraph/Dockerfile \
 		--build-arg CODEGRAPH_VERSION=$(CODEGRAPH_VERSION) \
+		--build-arg CLAUDE_CODE_VERSION=$(CLAUDE_CODE_VERSION) \
 		--build-arg WHYGRAPH_VERSION=$(VERSION) \
 		--label whygraph.deps=$(DEPS_HASH) \
 		-t $(IMAGE) .

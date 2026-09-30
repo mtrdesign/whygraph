@@ -43,6 +43,8 @@ LLM_KEY_PROVIDERS: tuple[str, ...] = (
 
 LLM_API_KEY = "llm_api_key"
 GITHUB_TOKEN = "github_token"
+CLAUDE_OAUTH_TOKEN = "claude_oauth_token"
+"""A ``claude setup-token`` subscription token for the ``claude-cli`` provider."""
 
 
 # ---------------------------------------------------------------------------
@@ -152,9 +154,9 @@ def _check_scope(kind: str, provider: str | None) -> None:
                 f"unknown LLM key provider {provider!r}; expected one of "
                 f"{LLM_KEY_PROVIDERS}"
             )
-    elif kind == GITHUB_TOKEN:
+    elif kind in (GITHUB_TOKEN, CLAUDE_OAUTH_TOKEN):
         if provider is not None:
-            raise ValueError("a github_token has no provider")
+            raise ValueError(f"a {kind} has no provider")
     else:
         raise ValueError(f"unknown secret kind {kind!r}")
 
@@ -292,6 +294,7 @@ def secret_status(
 
 
 __all__ = [
+    "CLAUDE_OAUTH_TOKEN",
     "GITHUB_TOKEN",
     "InvalidToken",
     "KEY_FILE_NAME",

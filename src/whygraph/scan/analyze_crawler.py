@@ -26,6 +26,7 @@ from whygraph.db import get_session
 from whygraph.db.models.commit import Commit as CommitRow
 from whygraph.services.git import Repository
 from whygraph.services.git.commit import Commit as CommitDC
+from whygraph.services.llm import LlmAuthError
 
 from .crawler import Crawler
 
@@ -104,6 +105,7 @@ class AnalyzeCrawler(Crawler):
 
         failures: list[tuple[str, BaseException]] = []
         described = bulk = 0
+        auth: BaseException | None = None
         with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
             # A fresh context copy per submit: pool workers do not inherit
             # ContextVars, and one shared Context cannot be entered by two
@@ -115,10 +117,18 @@ class AnalyzeCrawler(Crawler):
                 for c in todo
             }
             for future in as_completed(futures):
+                if future.cancelled():
+                    continue
                 self.advance(1)
                 exc = future.exception()
                 if exc is not None:
                     failures.append((futures[future], exc))
+                    if auth is None and _auth_failure(exc):
+                        # Rejected credentials fail every call the same way:
+                        # stop here rather than spend one call per commit.
+                        auth = exc
+                        for pending in futures:
+                            pending.cancel()
                 elif future.result() == "bulk":
                     bulk += 1
                 elif future.result() == "described":
@@ -129,6 +139,12 @@ class AnalyzeCrawler(Crawler):
             parts.append(f"{bulk} bulk-stubbed")
         self.summary = " · ".join(parts)
 
+        if auth is not None:
+            skipped = len(todo) - described - bulk - len(failures)
+            raise AnalyzeError(
+                f"stopped after the provider rejected the credentials "
+                f"({skipped} commits not attempted): {_auth_failure(auth)}"
+            )
         if failures:
             sha, exc = failures[0]
             raise AnalyzeError(
@@ -176,3 +192,13 @@ class AnalyzeCrawler(Crawler):
                     f"{description.provider}:{description.model}"
                 )
         return "described"
+
+
+def _auth_failure(exc: BaseException) -> LlmAuthError | None:
+    """The :class:`LlmAuthError` behind ``exc`` (it arrives wrapped), if any."""
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, LlmAuthError):
+            return current
+        current = current.__cause__
+    return None

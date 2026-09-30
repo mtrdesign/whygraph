@@ -68,9 +68,13 @@ Ollama daemon or an OpenAI-compatible gateway running on your machine, use **`ho
 The portal container is started with that name mapped to your host, on Linux as well as macOS and
 Windows.
 
-!!! note "`claude-cli` is not available in the portal"
-    The Docker image does not ship the `claude` CLI, so the `claude-cli` provider cannot run inside the
-    portal. Use an API provider, or Ollama.
+!!! note "`claude-cli` in the portal: your Claude subscription"
+    The image ships the `claude` CLI, but not your login (on macOS it lives in the Keychain). To bill
+    your Claude subscription, run `claude setup-token` once in a terminal on your machine, then paste
+    the token it prints under **Settings > Provider keys > Claude subscription token** (globally, or
+    for one project). The portal stores it encrypted and hands it only to `claude` itself. Until one
+    is set, a project whose model is `claude-cli` shows "no key for claude-cli", and a scan skips the
+    commit descriptions with that message.
 
 ### A `whygraph.toml` in the repository
 

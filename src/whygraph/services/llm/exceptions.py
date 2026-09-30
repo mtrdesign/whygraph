@@ -7,3 +7,12 @@ class LlmError(RuntimeError):
     is the only stable contract — providers may produce wildly
     different error shapes underneath.
     """
+
+
+class LlmAuthError(LlmError):
+    """The provider rejected the credentials (an invalid or expired key or token).
+
+    Distinct from a one-off failure: every further call would fail the
+    same way, so a batch (the analyze phase) stops at the first one
+    instead of failing every commit.
+    """

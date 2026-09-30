@@ -530,7 +530,12 @@ def test_refresh_env_is_the_given_base_minus_credentials(
     refresh_codegraph_index(
         tmp_path,
         allow_rebuild=False,
-        env={"PATH": "/bin", "GH_TOKEN": "t", "OPENAI_API_KEY": "k"},
+        env={
+            "PATH": "/bin",
+            "GH_TOKEN": "t",
+            "OPENAI_API_KEY": "k",
+            "CLAUDE_CODE_OAUTH_TOKEN": "c",
+        },
     )
 
     assert captured["env"] == {"PATH": "/bin"}

@@ -119,12 +119,29 @@ quietly fall back to `~/.claude`. The path is machine-specific, so set it in a g
 `whygraph.toml`, never a committed file. If the directory does not exist the call
 fails with a clear error rather than letting the CLI create an empty, logged-out profile.
 
-!!! note
-    The Docker image does not ship the `claude` CLI, so `claude-cli` - and `config_dir` with it -
-    applies to headless `whygraph scan` on native `uv` / `pipx` installs. It cannot run inside the
-    portal; use an API provider or Ollama there. A scan configured for it without the CLI skips the
-    LLM descriptions phase with one message ("the WhyGraph Docker image does not include the claude
-    CLI" inside the image, "claude CLI not found on PATH" natively) instead of failing every commit.
+#### In the portal: a subscription token
+
+The Docker image ships a pinned `claude` CLI, but not your login - and a folder mount cannot bring
+it in, because on macOS Claude Code keeps it in the Keychain. Use a long-lived **subscription
+token** instead:
+
+1. On your machine, run `claude setup-token`. It opens a browser to sign in and prints a token.
+2. In the portal, paste it under **Settings > Provider keys > Claude subscription token** - in the
+   global settings for every project, or in a project's settings for that one.
+
+The token is stored encrypted like an API key, shown again only as its last four characters, and
+handed only to the `claude` CLI (as `CLAUDE_CODE_OAUTH_TOKEN`): to a scan's child process when
+`claude-cli` describes its commits, and to the portal itself for rationale cards. It never reaches
+CodeGraph, git, logs or your repository. Each call runs `claude` with a private, throw-away profile
+directory, and the CLI's auto-updater is off.
+
+Outside the portal the same token works for headless `whygraph scan` - set
+`CLAUDE_CODE_OAUTH_TOKEN` in the environment (a CI secret), or `oauth_token` in a gitignored
+`[llm.claude_cli]`. `config_dir` does not apply in the portal.
+
+A scan configured for `claude-cli` that cannot run it skips the LLM descriptions phase with one
+message instead of failing every commit: "claude-cli needs your Claude subscription token" in the
+portal without a token, "claude CLI not found on PATH" natively without the CLI.
 
 ### `ollama`
 

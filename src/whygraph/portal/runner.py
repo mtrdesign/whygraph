@@ -127,7 +127,14 @@ PROVIDER_KEY_ENV: dict[str, str] = {
     "openrouter": "OPENROUTER_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
 }
-"""The only provider keys a child can receive (``claude-cli`` / ``ollama`` are key-less)."""
+"""The only provider keys a child can receive (``claude-cli`` / ``ollama`` are key-less).
+
+A ``claude-cli`` child can receive the Claude subscription token instead
+(:data:`CLAUDE_TOKEN_ENV`), and only when that is the analyze provider.
+"""
+
+CLAUDE_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+"""How a ``claude-cli`` scan child gets the subscription token."""
 
 LOG_TAIL_BYTES = 64 * 1024
 """How much of a run's log :func:`log_tail` returns (the end of the file)."""
@@ -304,6 +311,12 @@ def child_env(
             if key:
                 env[var] = key
                 secrets.append(key)
+        claude = config.llm.claude_cli.oauth_token
+        if provider == "claude-cli" and claude:
+            # The child's config comes from WHYGRAPH_CONFIG_JSON, which never
+            # holds a secret; the adapter picks the token up from its env.
+            env[CLAUDE_TOKEN_ENV] = claude
+            secrets.append(claude)
     return env, secrets
 
 

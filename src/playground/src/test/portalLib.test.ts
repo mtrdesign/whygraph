@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ApiError, projectApi, type ProjectSummary } from "../api";
 import { addProjectError } from "../lib/errors";
 import {
+  CLAUDE_TOKEN,
   hooksToValue,
   layerToValues,
   secretsPatch,
@@ -126,6 +127,15 @@ describe("config form mapping", () => {
     });
     expect(secretsPatch(layerToValues({}), ["github"], { github: true })).toEqual({ github_token: null });
     expect(secretsPatch(layerToValues({}), ["github"], { github: false })).toBeUndefined();
+  });
+
+  it("the Claude subscription token is its own write-only secret, in either scope", () => {
+    const v = layerToValues({});
+    v.claudeToken = " sk-ant-oat01-new ";
+    expect(secretsPatch(v, [], { github: false })).toEqual({ claude_oauth_token: "sk-ant-oat01-new" });
+    expect(secretsPatch(layerToValues({}), [CLAUDE_TOKEN], { github: false })).toEqual({
+      claude_oauth_token: null,
+    });
   });
 
   it("validates: provider and model together, chat providers, urls", () => {

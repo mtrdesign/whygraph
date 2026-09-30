@@ -753,4 +753,24 @@ describe("Global settings (screen 11)", () => {
     expect(within(cleared).getByRole("link", { name: "alpha" })).toHaveAttribute("href", "/p/alpha/settings");
     expect(calls("PUT", "/api/portal/defaults")).toHaveLength(1);
   });
+
+  it("saves a Claude subscription token write-only and shows only its hint", async () => {
+    handlers["GET /api/portal/defaults"] = () => ({ config: {}, secrets: emptySecrets(), no_provider_key: false });
+    handlers["PUT /api/portal/defaults"] = () => ({
+      config: {},
+      secrets: { ...emptySecrets(), claude_oauth_token: { set: true, hint: "…ab12" } },
+      no_provider_key: false,
+    });
+    const user = userEvent.setup();
+    mount("/settings");
+    const row = await screen.findByTestId("key-claude-token");
+    expect(row).toHaveTextContent("not set");
+    expect(screen.getByText(/claude setup-token/)).toBeInTheDocument();
+    await user.type(within(row).getByPlaceholderText("Claude subscription token"), "sk-ant-oat01-xyzab12");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("PUT", "/api/portal/defaults")).toHaveLength(1));
+    expect(calls("PUT", "/api/portal/defaults")[0].body).toEqual({
+      secrets: { claude_oauth_token: "sk-ant-oat01-xyzab12" },
+    });
+  });
 });

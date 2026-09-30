@@ -46,7 +46,9 @@ local ``codegraph`` binary is used instead.
 
 _log = logging.getLogger(__name__)
 
-_CREDENTIAL_ENV: frozenset[str] = frozenset({"GH_TOKEN", "WHYGRAPH_GIT_TOKEN"})
+_CREDENTIAL_ENV: frozenset[str] = frozenset(
+    {"GH_TOKEN", "WHYGRAPH_GIT_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"}
+)
 """Exact env names withheld from the ``codegraph`` subprocess (besides ``*_API_KEY``)."""
 
 
@@ -315,8 +317,8 @@ def _run_codegraph(
 def _codegraph_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     """Return ``base`` (default ``os.environ``) minus credentials the indexer never needs.
 
-    CodeGraph only parses source, so every ``*_API_KEY``, ``GH_TOKEN`` and
-    ``WHYGRAPH_GIT_TOKEN`` is withheld from it (and from the ``docker``
+    CodeGraph only parses source, so every ``*_API_KEY``, ``GH_TOKEN``,
+    ``WHYGRAPH_GIT_TOKEN`` and ``CLAUDE_CODE_OAUTH_TOKEN`` is withheld from it (and from the ``docker``
     client of the fallback path); the scan itself may hold them for its
     own LLM / GitHub calls.
     """

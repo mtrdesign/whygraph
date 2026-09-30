@@ -11,7 +11,11 @@ WhyGraph calls an LLM in three places. All three default to `[llm].model`, and e
 Six adapters ship. All six can fill the analysis and rationale roles; only four can drive chat,
 because chat needs streaming tool calls.
 
-| Provider | Config section | Credential | Analysis / rationale | Chat |
+In the portal you choose models and enter keys in the UI (Settings for every project, or per project);
+the config sections and environment variables below are the headless form of the same settings. See
+[Configuration](configuration.md#in-the-portal).
+
+| Provider | Config section | Credential (headless env var) | Analysis / rationale | Chat |
 |---|---|---|---|---|
 | `anthropic` | `[llm.anthropic]` | `ANTHROPIC_API_KEY` | Yes | Yes |
 | `openai` | `[llm.openai]` | `OPENAI_API_KEY` | Yes | Yes |
@@ -52,8 +56,10 @@ provider, with `provider = "..."` or a `"provider/model"` value. The full preced
     role's `model`). The same goes for a role-level `timeout_sec`: timeouts now live only in
     `[llm.<provider>]`.
 
-Omit `api_key` and the adapter reads the conventional environment variable. That is the recommended
-setup: `whygraph.toml` is gitignored, but keys in the environment cannot leak into a commit at all.
+In the portal, keys are entered under Settings and stored encrypted; they are write-only in the UI and
+never written into your repository. For headless `whygraph scan`, omit `api_key` and the adapter reads
+the conventional environment variable - the recommended setup there, since keys in the environment
+cannot leak into a commit at all. **Variables in your shell do not reach the portal.**
 
 See [Configuration](configuration.md) for every key.
 
@@ -108,15 +114,15 @@ WhyGraph exports it as `CLAUDE_CONFIG_DIR` for every `claude --print` call, over
 calling shell has set. `~` and `$VARS` are expanded, and a relative path resolves against the
 directory holding `whygraph.toml`. Leave it unset to inherit the ambient `CLAUDE_CONFIG_DIR`.
 
-This matters most for the places that don't run inside your interactive shell - the auto-rescan
-git hooks, an MCP server launched by your editor, and `whygraph serve` - which would otherwise
-quietly fall back to `~/.claude`. The path is machine-specific, so set it in `whygraph.toml`
-(gitignored), not the committed `whygraph.example.toml`. If the directory does not exist the call
+This matters most for the places that don't run inside your interactive shell, which would otherwise
+quietly fall back to `~/.claude`. The path is machine-specific, so set it in a gitignored
+`whygraph.toml`, never a committed file. If the directory does not exist the call
 fails with a clear error rather than letting the CLI create an empty, logged-out profile.
 
 !!! note
     The Docker image does not ship the `claude` CLI, so `claude-cli` - and `config_dir` with it -
-    applies to native `uv` / `pipx` installs.
+    applies to headless `whygraph scan` on native `uv` / `pipx` installs. It cannot run inside the
+    portal; use an API provider or Ollama there.
 
 ### `ollama`
 
@@ -132,6 +138,12 @@ timeout_sec = 120
 ```
 
 Chat cannot use `ollama`; with `[llm].model` on Ollama, chat falls back to `anthropic`.
+
+**From the portal**, `localhost` is the container, so set the Ollama host to
+`http://host.docker.internal:11434` (under Endpoints in Settings) to reach a daemon on your machine. The
+same name reaches any OpenAI-compatible gateway on the host: set the OpenAI base URL to
+`http://host.docker.internal:<port>/v1`. Changing the OpenAI base URL clears the key stored for the old
+one.
 
 Timeouts default higher than the hosted providers because local inference is slower.
 

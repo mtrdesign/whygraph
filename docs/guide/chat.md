@@ -1,7 +1,7 @@
 # The Chat assistant
 
-The second view in [`whygraph serve`](playground.md) is a chat assistant that answers questions about
-your repo by calling WhyGraph's own tools. Ask *"why does the rationale cache key on qualified name
+The second view of a project in the [portal](../portal/index.md) is a chat assistant that answers
+questions about your repo by calling WhyGraph's own tools. Ask *"why does the rationale cache key on qualified name
 instead of node id?"* or *"who has touched the scan crawler in the last year?"* and it goes and looks
 - reading rationale cards, walking evidence, querying the graph, running aggregate SQL, and drawing
 charts from the results.
@@ -11,17 +11,14 @@ There is no second implementation and no MCP roundtrip, so the assistant cannot 
 editor sees.
 
 !!! warning "It costs money and it writes to your database"
-    Unlike the Explorer, the assistant is not read-only. Every turn calls an LLM under your `[chat]`
-    provider, and every message, tool call, and session is stored in the WhyGraph database. It is
-    still loopback-only with no auth (see [Localhost only](playground.md#lifecycle)).
+    Unlike the Explorer, the assistant is not read-only. Every turn calls an LLM under your chat
+    provider, and every message, tool call, and session is stored in the project's WhyGraph database.
+    The portal is loopback-only with no login (see [Localhost only](playground.md#open-it)).
 
 ## Getting started
 
-Run the server and switch to **Chat** in the header:
-
-```bash
-whygraph serve
-```
+Start the portal (`whygraph up`), open a project, and switch to **Chat** in the sidebar. You need a
+key for at least one of the providers below, entered under **Settings** in the portal.
 
 Pick a provider and model in the composer, type a question, and send. The first thing to know is that
 answers are grounded: when the assistant makes a claim it shows the tool calls behind it, and you can
@@ -35,12 +32,12 @@ and clicking one jumps to that symbol in the Explorer - graph recentered, detail
 Chat needs **streaming tool calls**, which not every adapter supports. Four of WhyGraph's six LLM
 providers can drive it:
 
-| Provider | Chat | Env var |
+| Provider | Chat | Key |
 |---|---|---|
-| `anthropic` | Yes | `ANTHROPIC_API_KEY` |
-| `openai` | Yes | `OPENAI_API_KEY` |
-| `deepseek` | Yes | `DEEPSEEK_API_KEY` |
-| `openrouter` | Yes | `OPENROUTER_API_KEY` |
+| `anthropic` | Yes | Anthropic API key |
+| `openai` | Yes | OpenAI API key |
+| `deepseek` | Yes | DeepSeek API key |
+| `openrouter` | Yes | OpenRouter API key |
 | `ollama` | No | - |
 | `claude-cli` | No | - |
 
@@ -48,8 +45,9 @@ providers can drive it:
 `claude-cli` disables tools outright. Both still work for `[analyze]` and `[rationale]`. See
 [LLM providers](../reference/llm-providers.md).
 
-Providers you haven't configured still appear in the picker, greyed out, labelled with the env var
-they need - so a missing key looks like a missing key rather than a missing feature.
+Providers you haven't configured still appear in the picker, greyed out, labelled with what they
+need - so a missing key looks like a missing key rather than a missing feature. Keys come from the
+portal's Settings; variables in your shell do not reach the portal.
 
 !!! note "The model list may fall back"
     The picker asks your provider for its live model list. If your API key is scoped narrowly it can
@@ -58,10 +56,11 @@ they need - so a missing key looks like a missing key rather than a missing feat
 
 ### Choosing a default
 
-`whygraph init` doesn't ask about chat - you pick a provider and model per session in the composer.
-`[chat] provider` and `model` in `whygraph.toml` set the **defaults for new sessions**, and nothing
-more: each session records the pair it was started with, so changing your config never rewrites an
-existing conversation's history or re-answers it with a different model.
+Adding a project doesn't ask about chat - you pick a provider and model per session in the composer.
+The `[chat]` provider and model (the **chat** override in the project's Models settings) set the
+**defaults for new sessions**, and nothing more: each session records the pair it was started with, so
+changing your config never rewrites an existing conversation's history or re-answers it with a different
+model.
 
 ```toml
 [chat]
@@ -82,7 +81,7 @@ The left pane is your session list. Sessions are stored in the WhyGraph database
 evidence, so they survive restarts and are per-repo, not global.
 
 - A new session is **auto-titled** from your first message.
-- Sessions are deep-linkable at `/chat/<id>` - copy the URL to come back to a conversation.
+- Sessions are deep-linkable at `/p/<slug>/chat/<id>` - copy the URL to come back to a conversation.
 - Rename and delete are in the session list.
 
 ## What it can look at
@@ -138,8 +137,8 @@ rather than by reading the cache table.
 ### Reading files
 
 `read_file` returns at most **400 lines or 100 KB** per call, `list_dir` at most **200 entries**, and
-both refuse anything under `.git/`, `.whygraph/`, or `.codegraph/`, plus `whygraph.toml` itself - your
-live config holds real API keys. WhyGraph's own storage is reachable only through the knowledge tools,
+both refuse anything under `.git/`, `.whygraph/`, or `.codegraph/`, plus `whygraph.toml` itself - a
+headless config may hold real API keys. WhyGraph's own storage is reachable only through the knowledge tools,
 which present it in a curated shape instead of as raw database rows.
 
 ## Charts
@@ -160,7 +159,7 @@ Every chart ships with a **Table** toggle showing the underlying rows, and a PNG
 
 ## Bounds on a turn
 
-Tuned under `[chat]` in `whygraph.toml`:
+Tuned under `[chat]` - imported from a repository's `whygraph.toml` when you add the project, or set in a headless one:
 
 | Key | Default | What it bounds |
 |---|---|---|
@@ -182,6 +181,6 @@ whole turns from the top - never splitting a tool call from its result.
 
 ## Limits
 
-- One repo per server, the one you ran `whygraph serve` in.
-- No auth and no multi-user support; it is a local dev tool.
+- One project per conversation - the project whose Chat you opened.
+- No login and no multi-user support; the portal is for a single user on their own machine.
 - The assistant cannot edit your code. It reads, queries, and charts.

@@ -1,25 +1,47 @@
 # Configuration
 
-`whygraph.toml` at your repo root is WhyGraph's **headless configuration** - what `whygraph scan`
-reads in a CI job or a plain checkout. It is also the shape of a project's configuration everywhere
-else: the WhyGraph portal stores the same tree per project, and imports an existing `whygraph.toml`
-when you add the repo. Every field has a built-in default, so an unedited file behaves exactly as if
-none were present.
+WhyGraph has one configuration **shape**, used in two places:
 
-On a terminal, `whygraph init` walks you through the common choices (agent, analyze/rationale LLMs +
-keys, source-control forge + token, and the auto-rescan git hooks) and writes both a fully-commented
-`whygraph.example.toml` (secret-free, committable) and a ready-to-run `whygraph.toml` (with any
-secrets you entered). You can always edit `whygraph.toml` by hand afterwards, or start from the
-example. `whygraph init --yes` skips the prompts and uses defaults.
+- In the **[portal](../portal/index.md)** - the normal way - configuration is stored per project in the
+  portal's database and edited in the UI: the **Settings** page holds defaults for every project, and a
+  project's own settings override them. API keys and GitHub tokens are stored encrypted there.
+- **`whygraph.toml`** at a repo root is the **headless** configuration: what `whygraph scan` reads in a CI
+  job or a plain checkout, and what the portal offers to import when you add the repo. Every field has a
+  built-in default, so an unedited file behaves exactly as if none were present.
+
+Nothing writes `whygraph.toml` for you any more (`whygraph init` was removed). Create one by hand when
+you need headless configuration, from the tree below.
 
 !!! warning "`whygraph.toml` is gitignored - never commit a token"
-    `init` adds `whygraph.toml` to `.gitignore` precisely because it can hold API keys. Keep it that
-    way. Use `whygraph.example.toml` (committed) for documentation, `whygraph.toml` (ignored) for
-    secrets.
+    A `whygraph.toml` can hold API keys, so keep it out of git. The portal adds it to `.gitignore` when it
+    initializes a project, and moves any keys in it into its encrypted store when it imports the file.
+
+## In the portal
+
+For each project the portal builds its configuration from two layers, the **project** layer winning:
+
+1. the global defaults from **Settings** (models, provider endpoints; provider keys are inherited too);
+2. the project's own settings.
+
+Two things differ from a `whygraph.toml`:
+
+- **Keys and tokens are entered in the UI, not read from your environment.** The portal and its scans
+  are started with none of your shell's variables - `ANTHROPIC_API_KEY`, `GH_TOKEN` and the rest do not
+  reach them. A project's own key for a provider wins over the global one, and a global key is never
+  sent to a project that overrides that provider's endpoint.
+- **Only some keys can be set.** Database paths are always `<repo>/.whygraph/whygraph.db` and
+  `<repo>/.codegraph/codegraph.db`. Importing a repository's `whygraph.toml` takes models, the
+  `[analyze]` / `[rationale]` / `[chat]` tuning keys, and `[scan].forge`, `remote`, `default_branch` and
+  `hooks`. It never takes endpoints, database paths, the log file or a Claude CLI profile directory,
+  and reports what it dropped. Endpoints are set in the UI.
+
+To reach an Ollama daemon or a gateway on your machine from the portal's container, use
+`host.docker.internal` - see [Adding projects](../portal/projects.md#ollama-and-gateways-on-your-machine).
 
 ## The full tree
 
-The values shown are the defaults.
+The values shown are the defaults. This is the tree a `whygraph.toml` uses; the portal stores the same
+tree per layer.
 
 ```toml
 log_level = "INFO"            # DEBUG | INFO | WARN | ERROR | CRITICAL
@@ -33,10 +55,10 @@ remote = "origin"             # git remote whose URL is inspected for forge gith
                               # (a plain name: letters, digits, ".", "_", "/", "-")
 # token = "ghp_..."           # GitHub token for the gh CLI. Default: read GH_TOKEN /
                               # GITHUB_TOKEN from env (or an existing `gh auth login`).
-hooks = true                  # auto-rescan git hooks installed by `whygraph init`:
+hooks = true                  # auto-rescan git hooks installed by the portal:
                               #   true    - all four (post-commit, post-merge,
                               #             post-rewrite, post-checkout)
-                              #   false   - none (init removes any already installed)
+                              #   false   - none (the portal removes any already installed)
                               #   [list]  - only these, e.g. ["post-commit", "post-merge"]
 # default_branch = "main"     # the branch treated as "shipped history". Default:
                               # resolved from origin/HEAD, else origin/main, else
@@ -118,7 +140,7 @@ timeout_sec = 120
 | Section | What it controls |
 |---|---|
 | top-level `log_level` | Console log verbosity. |
-| `[scan]` | The crawl: which source-control forge to pull PRs and issues from, the git remote name, an optional pinned GitHub token, which [auto-rescan hooks](../guide/scanning.md#keep-it-fresh) to install, and which branch counts as [shipped history](../guide/scanning.md#how-whygraph-sees-branches). |
+| `[scan]` | The crawl: which source-control forge to pull PRs and issues from, the git remote name, an optional pinned GitHub token (headless only), which [auto-rescan hooks](../guide/scanning.md#keep-it-fresh) to install, and which branch counts as [shipped history](../guide/scanning.md#how-whygraph-sees-branches). |
 | `[llm]` | `model` - the default `"provider/model"` for every role. See [Choosing models](#choosing-models). |
 | `[analyze]` | The per-commit LLM diff descriptions written during `scan` - provider, model, parallelism (`max_workers`), and the truncation / per-file thresholds. |
 | `[rationale]` | The `whygraph_rationale_brief` card - provider, model, and how much of a squash-merged PR is rendered into the prompt. |
@@ -183,7 +205,10 @@ A 1.x file resolves to exactly the same providers, models, and timeouts it did b
 
 ## Environment variables
 
-Omit an `api_key` from an `[llm.*]` table and WhyGraph reads the standard environment variable
+These apply to **headless** `whygraph scan`. The portal does not read them: its container is started
+with none of your environment, so credentials are entered under Settings instead.
+
+Omit an `api_key` from an `[llm.*]` table and headless WhyGraph reads the standard environment variable
 instead.
 
 | Variable | Used for |
@@ -200,12 +225,13 @@ One variable replaces the file entirely, for tools that launch `whygraph scan` a
 |---|---|
 | `WHYGRAPH_CONFIG_JSON` | A whole config tree, as a JSON object shaped like `whygraph.toml`. When set and non-empty it is read **instead of** the repo's `whygraph.toml` (which is then ignored, even if present), and relative paths resolve against the repo root. Invalid JSON or a non-object aborts with a config error. The portal uses it to hand a scan its config without writing a file into the checkout. |
 
-These three are read by the Docker shims rather than by WhyGraph itself:
+These are read by the Docker shim and the portal rather than by a scan:
 
 | Variable | Used for |
 |---|---|
-| `WHYGRAPH_IMAGE` | Override the image a single shim invocation runs. |
-| `WHYGRAPH_PORT` | The port for [`whygraph serve`](../guide/playground.md) (default `8765`). |
+| `WHYGRAPH_IMAGE` | Override the image a single shim invocation runs, including `whygraph up`. |
+| `WHYGRAPH_PORT` | The portal's port (default `8765`) when `whygraph up --port` has not set one. It is also what Claude Code's agent entry reads, `${WHYGRAPH_PORT:-8765}` - see [Connecting agents](../portal/agents.md#a-non-default-port). |
+| `WHYGRAPH_DATA` | The portal's data directory (default `~/.local/share/whygraph`). |
 | `WHYGRAPH_VERSION` | Pin the version at install time. See [Installation](../getting-started/installation.md). |
 
 !!! tip "Provider keys degrade gracefully - for scan and rationale"

@@ -12,7 +12,7 @@ Explains <em>why</em> code exists, not just what it does.
 
 A rationale layer over [CodeGraph](https://github.com/colbymchenry/codegraph). It mines your git
 history and GitHub for the story behind each line - the commits, pull requests, and issues that put
-it there - and serves that story to any AI editor over MCP, or to you in a local web panel.
+it there - and serves that story to any AI editor over MCP, or to you in the WhyGraph portal.
 
 [Get started](getting-started/quickstart.md){ .md-button .md-button--primary }
 [View on GitHub](https://github.com/mtrdesign/whygraph){ .md-button }
@@ -43,8 +43,8 @@ it there - and serves that story to any AI editor over MCP, or to you in a local
 
     ---
 
-    `whygraph-mcp` is a standard MCP server over stdio. Claude Code, Cursor, VS Code, Codex - any
-    editor that speaks MCP can call it. One command wires each project.
+    Every project gets a standard HTTP MCP endpoint on the portal. Claude Code, Cursor, VS Code, Codex -
+    any editor that speaks MCP can call it, and the portal wires each one for you.
 
     [:octicons-arrow-right-24: Wire your editor](guide/editors.md)
 
@@ -52,19 +52,20 @@ it there - and serves that story to any AI editor over MCP, or to you in a local
 
     ---
 
-    No Python, Node, `gh`, or CodeGraph on your host. A tiny shim runs everything inside one image,
-    ephemeral per command. Install, init, scan - done.
+    No Python, Node, `gh`, or CodeGraph on your host. A tiny shim runs everything inside one image.
+    Install, `whygraph up`, open the browser - done.
 
     [:octicons-arrow-right-24: Run with Docker](deploy/docker.md)
 
--   :material-monitor-dashboard:{ .lg .middle } __Browse it locally__
+-   :material-monitor-dashboard:{ .lg .middle } __The portal__
 
     ---
 
-    `whygraph serve` opens a web panel: an Explorer over the code graph with rationale and evidence
-    side by side, plus a chat assistant that answers questions by calling the same tools.
+    `whygraph up` starts one local server for all your projects: an Explorer over the code graph with
+    rationale and evidence side by side, plus a chat assistant that answers questions by calling the
+    same tools.
 
-    [:octicons-arrow-right-24: The Explorer](guide/playground.md)
+    [:octicons-arrow-right-24: The portal](portal/index.md)
 
 -   :material-graph-outline:{ .lg .middle } __Composes with CodeGraph__
 
@@ -79,8 +80,8 @@ it there - and serves that story to any AI editor over MCP, or to you in a local
 
     ---
 
-    The MCP server isn't just for editors. Real applications can connect to it for git-based
-    analysis of a target repo, reading the same cached data your scan writes.
+    The MCP endpoints aren't just for editors. Real applications can connect to them for git-based
+    analysis of a target repo, reading the same cached data your scans write.
 
     [:octicons-arrow-right-24: WhyGraph as a service](deploy/service.md)
 

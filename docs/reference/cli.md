@@ -1,19 +1,36 @@
 # CLI reference
 
 Every WhyGraph command and its flags. Run `whygraph <command> --help` to see the same text from your
-own install. There are seven commands.
+own install. There are four commands in the image, plus the host verbs the Docker shim adds and the
+stubs that stand in for removed ones.
 
 ```console
 $ whygraph --help
 Commands:
-  analyze  Describe a commit's diff with the configured LLM.
-  init     Initialize the WhyGraph database under .whygraph/whygraph.db.
   install  Emit the host shim installer (called by scripts/install.sh).
   portal   Run the WhyGraph portal (use `whygraph up` to start it in Docker).
   scan     Run the source crawlers, then describe each commit with the LLM.
-  serve    Serve the WhyGraph web panel (Explorer + Chat) for this repository.
   version  Print installed whygraph version.
 ```
+
+## Host commands
+
+On the Docker install the `whygraph` shim handles these **on the host**, before any container of its own
+runs. They manage the portal's long-lived container; they are not Python subcommands. The full
+walkthrough is [Start the portal](../portal/start.md).
+
+| Command | What it does |
+|---|---|
+| `whygraph up [--port N] [--add-folder DIR]` | Start the portal container, or recreate it when the shared folders, port or image changed. `--port` is remembered in `~/.config/whygraph/port`; `--add-folder` (repeatable) shares a folder. No-op when already running unchanged. |
+| `whygraph down` | Stop and remove the container, waiting up to 30 seconds (`WHYGRAPH_STOP_GRACE` overrides) so a running scan is recorded as interrupted. |
+| `whygraph status` | Running, restarting or not created, plus the URL, image and shared folders. Exits non-zero unless running. |
+| `whygraph logs` | Follow the container's logs. |
+| `whygraph folders [--remove DIR]` | List the shared folders, or remove one and recreate the container. |
+
+Any other argument to these verbs is rejected with exit code 2. Port precedence for `up` is the
+remembered `--port`, then `WHYGRAPH_PORT`, then `8765`. `up` never passes your environment into the
+container, and on the first run that sees a credential variable set it prints its name once, as a
+reminder to enter the key under Settings.
 
 ## `whygraph version`
 
@@ -23,51 +40,31 @@ Print the installed package version. No options.
 whygraph version
 ```
 
-## `whygraph init`
-
-Bootstrap the WhyGraph database under `.whygraph/whygraph.db`, write a committable
-`whygraph.example.toml` documenting every tunable, and add the right `.gitignore` entries. It's
-idempotent - re-running on an initialized project just confirms both databases are present.
-
-On a terminal, `init` runs a guided, arrow-key setup: pick the agent, the analyze/rationale LLMs
-(with optional API keys), the source-control provider (with an optional GitHub token), and whether to
-install the auto-rescan git hooks. It shows a summary that masks every secret, asks *"Write these
-files?"*, then writes both `whygraph.example.toml` (secret-free) and a ready-to-run `whygraph.toml`
-(with the secrets you entered). Every prompt is defaulted.
-
-`init` also installs the auto-rescan git hooks and **reconciles them to `[scan].hooks` in both
-directions** - installing what the config lists and stripping the managed block from what it
-doesn't. Editing `[scan].hooks` and re-running `whygraph init` is the supported way to change hook
-coverage; see [Keep it fresh](../guide/scanning.md#keep-it-fresh). A hooks directory that can't be
-written is a warning, never a failed init.
-
-`init` does **not** index CodeGraph. That happens on [`scan`](#whygraph-scan).
-
-With `--agent X`, it also wires the WhyGraph MCP server into that agent's config. All supported
-agents are project-scoped, so the config file is written inside the repo.
-
-| Option | Description |
-|---|---|
-| `--agent [claude\|codex\|copilot\|cursor\|vscode]` | Wire the MCP server into the named agent's config. Case-insensitive. On a terminal, skips the interactive agent prompt. Run `whygraph init --help` for the full list, with each agent's config format and asset destination. |
-| `--yes` / `-y` | Accept all defaults without prompting, and write a default `whygraph.toml` if none exists. |
-| `--force` | When installing assets, overwrite existing files in the agent's destination directory. |
-
-!!! note "`--yes` and a non-TTY run are not the same thing"
-    Both skip the prompts, but only `--yes` writes `whygraph.toml`. A bare non-interactive `init` -
-    a pipe, CI, the git hooks - refreshes `whygraph.example.toml` and leaves `whygraph.toml`
-    untouched. Neither ever clobbers an existing one.
-
-Preflight diagnostics always run. Asset install runs whenever an agent is chosen: **every** supported
-agent ships a bundled asset tree, copied into its own destination (use `--force` to overwrite local
-edits). Without `--agent`, `init` skips the wiring and prints a tip instead.
-
-See [Wiring your editor](../guide/editors.md) for the per-agent paths.
-
 ## `whygraph scan`
 
 Run the source crawlers, then describe each commit with the configured LLM. This is the command that
 populates `.whygraph/whygraph.db` and refreshes the CodeGraph index. It's idempotent - re-running
 picks up new commits and backfills what's missing.
+
+In the portal you don't run it yourself: the portal runs `whygraph scan --progress json` as a child
+process for every scan (see [Scans in the portal](#scans-in-the-portal)). Run it directly for **headless**
+use - a CI job or a checkout the portal does not manage. It reads the repo's `whygraph.toml` (or
+`WHYGRAPH_CONFIG_JSON`) and the standard provider environment variables, and creates
+`.whygraph/whygraph.db` on first run.
+
+!!! warning "It refuses in a portal-managed repository"
+    When the repo root has a valid, untracked `.whygraph/portal.json` marker - written when the portal
+    initializes a project - `whygraph scan` exits with status `2` before touching any config or
+    database, and prints:
+
+    ```text
+    This project is managed by the WhyGraph portal (http://127.0.0.1:<port>/p/<slug>). Run scans from
+    the portal. To use this repo without the portal, remove it from the Projects page, or delete
+    .whygraph/portal.json.
+    ```
+
+    A marker that git tracks, that is a symbolic link, or that is malformed is ignored with a warning,
+    and the scan goes ahead.
 
 | Option | Default | Description |
 |---|---|---|
@@ -94,41 +91,6 @@ carries one JSON object per line, each written whole, so a reader can parse line
 | `result` | Always last | `status` (`ok` or `failed`), `elapsed_sec`, `phase_timings`, `crawlers` (per crawler: `name`, `status`, `summary`, and `error` / `warning` when set), `analyze_skipped` (why the LLM phase was skipped, else `null`) |
 
 The exit code is `1` when any crawler failed, exactly as without the flag.
-
-## `whygraph serve`
-
-Serve the local web panel for this repository: the **Explorer** over the code graph, evidence, and
-rationale, and the **Chat assistant** over the same data. On the Docker install it runs as its own
-long-lived container, published to `127.0.0.1` only. Run `whygraph scan` first so there's an index
-and evidence to show.
-
-!!! warning "Serving starts the chat assistant too"
-    Chat calls an LLM under `[chat]` and writes sessions and messages to the WhyGraph database. If
-    you want a purely read-only panel, simply don't use the Chat view - but know that starting the
-    server makes it reachable.
-
-| Option | Default | Description |
-|---|---|---|
-| `--port` | `8765` | Port to bind. On the Docker install, set the port via the `WHYGRAPH_PORT` environment variable instead (the shim controls both the published and in-container port). |
-| `--host` | `127.0.0.1` | Bind address. The Docker shim passes `0.0.0.0` for the container so the loopback port-forward can reach it; you rarely set this by hand. |
-
-On the Docker install the shim also adds container-lifecycle verbs - these are **not** flags of the
-Python command, they're handled on the host before the container starts:
-
-| Command | What it does |
-|---|---|
-| `whygraph serve --detach` / `-d` | Start in the background and return immediately. |
-| `whygraph serve --logs` | Tail the detached server's logs. |
-| `whygraph serve --stop` | Stop and remove the running server. |
-| `whygraph serve --help` | Show the in-container `serve --help`. |
-
-Any other argument is **rejected** with `unknown arg` and exit code 2 - so `whygraph serve --port 9000`
-fails on a Docker install rather than being silently ignored. Use `WHYGRAPH_PORT` instead. A stale
-`whygraph-serve` container is force-removed before each start, so a crashed server never blocks the
-next one.
-
-See [The Explorer](../guide/playground.md) and [The Chat assistant](../guide/chat.md) for the panel
-itself.
 
 ## `whygraph portal`
 
@@ -202,21 +164,25 @@ The portal's HTTP API exposes the same run data the web UI shows:
 Every `/api` call needs the `X-WhyGraph-Client: 1` header, and the scans endpoints answer `409`
 until the project is initialized.
 
-## `whygraph analyze`
+## Removed commands
 
-Describe a single commit's diff with the configured LLM and **print** the result. Unlike `scan`, it
-doesn't persist anything.
+2.0.0 removed four entry points. The portal replaces them, and an old habit or a stale script gets a
+message rather than "no such command".
 
-```bash
-whygraph analyze <TARGET> [BASELINE]
-```
+| Removed | Was | Now |
+|---|---|---|
+| `whygraph init` | Bootstrap the database, write config, wire an agent | Add the repo on the portal's Projects page; it initializes it |
+| `whygraph serve` | The single-repo web panel | The [portal](../portal/index.md), for all your projects |
+| `whygraph-mcp` | The stdio MCP server | The portal's HTTP endpoint at `/mcp/<slug>` |
+| `whygraph analyze` | Describe one commit and print it | Gone; descriptions come from `scan` and **Describe now** |
 
-`TARGET` is the commit being analyzed. With no `BASELINE`, it's compared to its parent; with a
-`BASELINE`, the diff analyzed is `git diff BASELINE..TARGET`.
+`whygraph init`, `whygraph serve` and `whygraph-mcp` still exist as **stubs**: each prints a pointer to
+`whygraph up` on **stderr** and exits with status `2`. The `whygraph-mcp` stub writes nothing to
+stdout, so an agent that still launches it over stdio reads nothing it could misparse, and it is a
+plain script that never starts Docker. `whygraph serve --stop` is the one remaining use of the old
+verb: it removes a leftover 1.x `whygraph-serve` container. `whygraph analyze` has no stub.
 
-!!! note "Scan first"
-    Every commit named on the command line must already exist in the WhyGraph database. Run
-    `whygraph scan` before `whygraph analyze`.
+See [Upgrading from 1.x](../portal/upgrading.md).
 
 ## `whygraph install`
 
@@ -225,8 +191,8 @@ whygraph analyze <TARGET> [BASELINE]
     the `curl … | sh` line in [Installation](../getting-started/installation.md) - you don't run
     `whygraph install` yourself.
 
-Prints the POSIX `sh` script that writes the `whygraph` and `whygraph-mcp` shims onto your `PATH`,
-pinned to the image's baked version. `scripts/install.sh` runs it via
+Prints the POSIX `sh` script that writes the `whygraph` shim and the `whygraph-mcp` removal stub onto
+your `PATH`, pinned to the image's baked version. `scripts/install.sh` runs it via
 `docker run --rm IMAGE whygraph install` and executes the output; keeping the shim bodies here (in
 tested Python) rather than in the fetched shell is what stops the two from drifting.
 

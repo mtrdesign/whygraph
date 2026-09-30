@@ -9,8 +9,8 @@ against the running code, so it stays in step with what `whygraph` actually does
 
     ---
 
-    Every command and flag, straight from `--help`: `init`, `scan`, `analyze`, `serve`, `install`,
-    `version`.
+    Every command and flag, straight from `--help`: `scan`, `portal`, `install`, `version`, the host
+    verbs `up` / `down` / `status` / `logs` / `folders`, and the removed commands.
 
     [:octicons-arrow-right-24: CLI reference](cli.md)
 
@@ -18,7 +18,7 @@ against the running code, so it stays in step with what `whygraph` actually does
 
     ---
 
-    The three tools, four resources, and three prompts that `whygraph-mcp` registers.
+    The three tools, four resources, and three prompts each project's `/mcp/<slug>` endpoint serves.
 
     [:octicons-arrow-right-24: MCP reference](mcp.md)
 
@@ -26,7 +26,7 @@ against the running code, so it stays in step with what `whygraph` actually does
 
     ---
 
-    The full `whygraph.toml` tree and the environment variables WhyGraph reads.
+    The configuration tree, how the portal layers it, and the environment variables WhyGraph reads.
 
     [:octicons-arrow-right-24: Configuration](configuration.md)
 

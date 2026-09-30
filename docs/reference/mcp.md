@@ -1,11 +1,23 @@
 # MCP surface
 
-`whygraph-mcp` registers three tools, four resources, and three prompts. That's the whole surface -
-deliberately narrow. WhyGraph owns "why this exists and when it changed"; graph traversal
+Each project's MCP endpoint on the [portal](../portal/index.md) serves three tools, four resources, and
+three prompts. That's the whole surface - deliberately narrow. WhyGraph owns "why this exists and when it changed"; graph traversal
 ("what's connected to what") stays with CodeGraph.
 
 For a usage-first walkthrough of how an agent calls these mid-task, see
 [Using WhyGraph](../guide/mcp-usage.md).
+
+## Transport and endpoint
+
+The endpoint for a project is `http://127.0.0.1:<port>/mcp/<slug>` - stateless Streamable HTTP MCP, one
+endpoint per project, on the portal's port (`8765` by default). The same tools, resources and prompts
+back every project; the endpoint binds the project named in the URL for the duration of each call.
+
+- The project must be **initialized** in the portal, or the endpoint answers `409`.
+- In this release there is no authentication: the portal is loopback-only and local. The `Host` must be
+  the loopback address and port, and a request carrying a foreign `Origin` is rejected.
+- Agents are configured for you when you initialize a project - see
+  [Connecting agents](../portal/agents.md). The stdio `whygraph-mcp` server of 1.x no longer exists.
 
 ## Tools
 

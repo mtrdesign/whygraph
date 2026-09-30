@@ -1,70 +1,47 @@
 # Wiring your editor
 
-`whygraph-mcp` is a standalone MCP server, so any agent that speaks MCP can use it.
-`whygraph init --agent X` writes the right config to the right place for each one.
-
-Run it from the repo you want WhyGraph to analyze:
-
-```bash
-whygraph init --agent claude
-```
+WhyGraph reaches your editor over **HTTP MCP**. Each project has an endpoint on the
+[portal](../portal/index.md), `http://127.0.0.1:<port>/mcp/<slug>`, and any agent that speaks MCP over
+HTTP can use it. You don't write that config yourself: when you
+[initialize a project](../portal/projects.md#initialize), you pick the agents and the portal writes
+each one's entry, after showing you a preview.
 
 ## Supported agents
 
 Four agents are supported. **All of them are project-scoped** - the config file is written or merged
 inside the repo, so you can commit it and every teammate's editor picks it up.
 
-| `--agent` | Editor | Config file | Assets land in |
+| Agent | Editor | Config file | Assets land in |
 |---|---|---|---|
 | `claude` | Claude Code | `.mcp.json` (repo root) | `.claude/` |
 | `cursor` | Cursor | `.cursor/mcp.json` | `.cursor/` |
 | `vscode` (alias `copilot`) | VS Code / GitHub Copilot | `.vscode/mcp.json` | `.github/` |
 | `codex` | OpenAI Codex | `.codex/config.toml` | repo root + `.codex/agents/` |
 
-Agent names are case-insensitive. Run `whygraph init --help` for the list with each one's format and
-scope.
+You can select several agents for one project, and change the set later in the project's **Settings**.
 
-The generated config launches `whygraph-mcp` by bare command name, so the same checked-in file works
-for everyone who has WhyGraph installed - no absolute paths to scrub.
+## What to know
+
+The details live on [Connecting agents](../portal/agents.md):
+
+- the exact entry each agent gets, and why it is **safe to commit** on the default port;
+- what to do after a **non-default port** (export `WHYGRAPH_PORT` for Claude Code, edit the literal port
+  for Cursor and Codex, enter it in VS Code's prompt);
+- Claude Code's **approval prompt** for project-scoped servers, Codex's **trusted-project** rule, and VS
+  Code **listing the server twice** when `.mcp.json` is also written;
+- migrating a 1.x entry that still runs `whygraph-mcp`, which no longer exists.
 
 ## Bundled assets
 
 **Every agent gets an asset tree**, not just Claude Code - subagents, commands, and skills that teach
-your editor how to use WhyGraph's tools. Re-running leaves your existing files alone; pass `--force`
-to overwrite them.
-
-```bash
-whygraph init --agent cursor           # wire MCP + copy the .cursor/ assets
-whygraph init --agent cursor --force   # overwrite existing asset files
-```
+your editor how to use WhyGraph's tools. Re-initializing leaves your existing files alone; **Update
+agent files** in the project's Settings overwrites them.
 
 Each agent's install also **append-merges** a CodeGraph usage-guidance block into that agent's
 always-on instructions - `CLAUDE.md`, `AGENTS.md`, or `.github/copilot-instructions.md`, and an
 always-apply rule for Cursor. Your own content is preserved; the block is added below it.
 
-## What else `init` does
-
-Wiring an editor is one step of `whygraph init`, not the whole of it. The same run also:
-
-- Runs preflight diagnostics.
-- Prompts interactively for your LLM providers, source-control provider, and git hooks (unless
-  `--yes`, or stdin isn't a TTY).
-- Writes `whygraph.example.toml` and updates `.gitignore`.
-- **Reconciles the auto-rescan git hooks** in `.git/hooks` against `[scan].hooks` - see
-  [Keep it fresh](scanning.md#keep-it-fresh).
-
-| Flag | What it does |
-|---|---|
-| `--force` | Overwrite existing asset files in the destination directory. |
-| `--yes` / `-y` | Accept all defaults without prompting. |
-
 ## Verify
 
-After wiring, confirm the server launches:
-
-```bash
-whygraph-mcp   # Ctrl-C to exit
-```
-
-If it starts cleanly, your editor can start it too. Next, see how an agent
-[actually calls the tools](mcp-usage.md).
+Check the portal is running (`whygraph status`), then ask your agent to list its MCP servers - `whygraph`
+should be there. Next, see how an agent [actually calls the tools](mcp-usage.md).

@@ -1,29 +1,37 @@
 # WhyGraph as a service
 
-Editors aren't the only thing that can talk to WhyGraph. The MCP server is a plain stdio program, so
-any application that speaks MCP can connect to it for git-based analysis of a target repo. Think of a
-review bot, an onboarding assistant, or an internal dev portal that needs the *why* behind a chunk of
-code - not just the code.
+Editors aren't the only thing that can talk to WhyGraph. The [portal](../portal/index.md) is a
+long-running server, and each project on it has an **HTTP MCP endpoint**, so any application that
+speaks MCP can connect to it for git-based analysis of a target repo. Think of a review bot, an
+onboarding assistant, or an internal dev portal that needs the *why* behind a chunk of code - not just
+the code.
 
-This page covers that model: a containerized `whygraph-mcp` endpoint a third-party app drives over
-MCP, reading the same on-disk data your scan produces.
+This page covers that model: the `whygraph-portal` container as the service, and a third-party app
+driving a project's endpoint over MCP.
 
 ## The shape of it
 
-A consuming app launches the WhyGraph image, mounts the target repo at `/workspace`, and speaks MCP
-over stdio. The scan **writes** the databases; the MCP server **reads** them. One repo on disk is the
-single source of truth.
+The portal container is the long-lived service. It mounts your shared folders, runs the scans that
+**write** each project's databases, and serves the MCP endpoints that **read** them. A consuming app
+connects over HTTP.
 
 ```mermaid
 flowchart LR
     app["Consuming app<br/>(bot · portal · assistant)"]
-    mcp["whygraph-mcp<br/>(container)"]
-    repo[("/workspace mount<br/>.whygraph + .codegraph")]
+    subgraph svc["whygraph-portal (container)"]
+        mcp["/mcp/&lt;slug&gt;<br/>HTTP MCP"]
+        scan["Scan runner"]
+    end
+    repo[("Shared folder<br/>.whygraph + .codegraph")]
 
-    app -- "MCP over stdio" --> mcp
+    app -- "MCP over HTTP" --> mcp
     mcp -- "reads cached evidence + rationale" --> repo
-    scan["whygraph scan"] -- "writes" --> repo
+    scan -- "writes" --> repo
 ```
+
+The endpoint for a project is `http://127.0.0.1:<port>/mcp/<slug>` (port `8765` by default; the slug is
+shown in the **Connect your agent** panel on the project's home page). It is a stateless Streamable HTTP MCP endpoint: each request stands on its
+own, so there is no session to keep open or expire.
 
 The consuming app gets the full read surface over MCP:
 
@@ -35,61 +43,44 @@ The consuming app gets the full read surface over MCP:
 
 See the [MCP surface reference](../reference/mcp.md) for exact signatures.
 
-## Scan first
-
-The server reads cached data - it doesn't crawl on demand. So the target repo must be scanned before
-an app connects, or the tools have nothing to return.
+## Stand it up
 
 ```bash
-cd /path/to/target-repo
-whygraph scan
+whygraph up --add-folder /path/to/repos     # start the portal, share the repos
 ```
 
-!!! warning "An unscanned repo returns nothing"
-    `whygraph_rationale_brief` raises an error when a target maps to no scanned commit, and the
-    evidence tools come back empty. Run `whygraph scan` (and keep it fresh with
-    [git hooks](../guide/scanning.md#keep-it-fresh)) before pointing an app at the server.
+Then add the target repository in the portal and run its first scan
+([Adding projects](../portal/projects.md)). The container restarts with Docker, so the endpoint is
+there whenever the machine is.
 
-## Launch the endpoint
-
-The MCP server runs from the same image as everything else. Mount the target repo and run
-`whygraph-mcp`:
-
-```bash
-docker run --rm -i \
-  -v "/path/to/target-repo:/workspace" -w /workspace \
-  ghcr.io/mtrdesign/whygraph whygraph-mcp
-```
-
-The `-i` flag keeps stdin open for the MCP stdio transport. Your app spawns this command and talks
-JSON-RPC to it, exactly as an editor would. The [`whygraph-mcp` shim](docker.md) — dropped by the
-installer — wraps the same call as a bare `whygraph-mcp` on `PATH`.
+!!! warning "An uninitialized or unscanned project returns nothing useful"
+    The endpoint answers `409` until the project is initialized in the portal. On an initialized but
+    unscanned project, `whygraph_rationale_brief` raises an error when a target maps to no scanned
+    commit, and the evidence tools come back empty. Keep projects fresh with the
+    [git hooks](../guide/scanning.md#keep-it-fresh) and the portal's catch-up scans.
 
 ## Credentials
 
 What the app needs depends on what it asks for:
 
-- **Reading cached evidence and rationale needs no credentials.** It's all in the mounted databases.
-- **Generating a *new* rationale card needs an LLM key.** `whygraph_rationale_brief` calls the
-  configured provider on a cache miss. Supply the key through the environment
-  (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`) or the repo's
-  `whygraph.toml` `[llm.*]` table. See [LLM providers](../reference/llm-providers.md).
+- **Reading cached evidence and rationale needs no credentials from the app.** The endpoint has no
+  authentication of its own in this release (see below).
+- **Generating a *new* rationale card needs an LLM key** in the portal. `whygraph_rationale_brief` calls
+  the project's configured provider on a cache miss, using the key stored under the portal's Settings.
+  See [LLM providers](../reference/llm-providers.md).
 
-!!! info "Tokens never live in the image"
-    Pass credentials at run time via env or the gitignored `whygraph.toml` - never bake them into a
-    built image. This matches WhyGraph's own invariant for the Docker shim.
+!!! info "Keys live in the portal, not in the image or your shell"
+    Keys are entered in the portal and stored encrypted in its data directory. Nothing from the host
+    environment is passed into the container, and nothing is baked into the image.
 
 ## Current scope
 
-Today the server speaks MCP over **stdio, one session per process**. There's no HTTP **MCP transport**
-yet - each connection is its own `docker run`. A persistent server mode with one is on the
-[roadmap](../roadmap.md), not built.
+The portal is a **local-mode** service: published to `127.0.0.1` only, with no login. It accepts
+requests whose `Host` is the loopback address and port, and rejects browser cross-origin requests, so
+the consuming app has to run on the same machine. There is no bearer-token authentication and no
+remote exposure yet; both are on the [roadmap](../roadmap.md).
 
-For now, model your integration as "spawn a session, run the tools you need, let it exit" - the same
-lifecycle an editor uses, driven by your app instead.
-
-!!! note "`whygraph serve` is not this"
-    WhyGraph *does* have a long-running HTTP server - [`whygraph serve`](../guide/playground.md),
-    which backs the Explorer and chat UIs. It is a single-user local dev tool: published to
-    `127.0.0.1` with no auth, and shaped for a browser rather than for programmatic consumption.
-    Don't build an integration against it; use the MCP surface above.
+!!! note "Not for shared machines"
+    Every user of the machine can reach the loopback port. See the
+    [security model](../portal/security.md#shared-machines) before running the portal anywhere other
+    people log in.

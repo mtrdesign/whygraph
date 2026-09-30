@@ -1,12 +1,25 @@
 # Scanning your repo
 
-`whygraph scan` builds the evidence database. It's the command you run after `init`, and again
-whenever you want WhyGraph current. It's idempotent - each run picks up new commits and backfills
-what's missing.
+A scan builds the evidence database and refreshes the CodeGraph index. It's idempotent - each run
+picks up new commits and backfills what's missing.
+
+**In the portal you don't run it by hand.** The [portal](../portal/index.md) runs every scan itself, as
+a `whygraph scan` child process in the project's folder: the first scan during
+[project setup](../portal/projects.md#first-scan), then **Scan now**, **Sync now** (GitHub clones), the
+git hooks, and a periodic catch-up. Progress and the log of each run are on the project's **Scans**
+page. How runs are triggered, queued and coalesced is in the
+[CLI reference](../reference/cli.md#scans-in-the-portal).
+
+The command is still there for headless use - a CI job, or a checkout that is not in the portal:
 
 ```bash
 whygraph scan
 ```
+
+!!! note "`whygraph scan` refuses in a portal-managed repository"
+    Once the portal has initialized a repository it is scanned by the portal only. Running
+    `whygraph scan` there exits with status `2` and points at the project in the portal. To use the
+    repo headless again, remove it from the Projects page or delete `.whygraph/portal.json`.
 
 ## What a scan does
 
@@ -42,7 +55,8 @@ refresh, a [bulk branch demotion](#how-whygraph-sees-branches) - shows `⚠` on 
 isn't something you have to catch scrolling past.
 
 Full detail for every run goes to **`.whygraph/scan.log`**, not the terminal. That's where to look
-when a phase reports something you want to dig into.
+when a phase reports something you want to dig into. (In the portal, the same summary and the tail of
+the log are on the run's page.)
 
 ## Flags
 
@@ -67,8 +81,9 @@ whygraph scan --no-remote --skip-analyze
 
 ## Keep it fresh
 
-You don't have to re-scan by hand. `whygraph init` installs git hooks that refresh WhyGraph and
-CodeGraph in the background as you work - there's no daemon and no separate command to run.
+You don't have to re-scan by hand. When the portal initializes a local project it installs git hooks
+that ask it to refresh WhyGraph and CodeGraph in the background as you work - there's no daemon beyond
+the portal itself and no command to run.
 
 Four hooks are wired, covering every git event that can change the tree or add commits:
 
@@ -79,30 +94,31 @@ Four hooks are wired, covering every git event that can change the tree or add c
 | `post-rewrite` | `git rebase`, including `git pull --rebase` |
 | `post-checkout` | `git switch` / `git checkout` to another branch |
 
-Each runs `whygraph scan --no-remote --skip-analyze` **in the background**. Git history and a
-CodeGraph `sync` only - no LLM, no remote calls - so commits stay instant and the scan is offline
-and token-free.
+Each hook **never scans locally**. It POSTs a request to the running portal
+(`/api/projects/<slug>/scans`, with `curl`) and returns at once, so commits stay instant. The portal
+runs an incremental scan - git history and a CodeGraph `sync` only, no LLM and no remote calls - so it
+is offline and token-free. Rapid commits coalesce into one follow-up scan, and the latest `HEAD` wins.
 
-The hooks are detached and single-flight: rapid commits coalesce instead of stacking, and the latest
-`HEAD` always wins. An existing hook of your own is appended to behind a sentinel guard, never
-overwritten. `post-checkout` skips the two cases that can't have changed anything - a file checkout
-(`git checkout -- somefile`) and `git switch -c` at the current commit.
+The helper finds the portal through `.whygraph/portal.env`, a two-line file (`slug`, `port`) it **parses
+and never sources**, and ignores if git tracks it. An existing hook of your own is appended to behind a
+sentinel guard, never overwritten. `post-checkout` skips the two cases that can't have changed
+anything - a file checkout (`git checkout -- somefile`) and `git switch -c` at the current commit.
 
-Because the hooks run detached, their output isn't on your terminal. It goes to
-**`.whygraph/logs/hooks.log`** - the place to look when a background rescan seems not to be
-happening.
+**When the portal is down**, the request fails quietly and one line goes to
+**`.whygraph/logs/hooks.log`** - the place to look when a background rescan seems not to be happening.
+Nothing is lost: when the portal next starts, it **catches up**, queuing a scan for every local project
+whose checkout moved past its last scanned commit, and repeats that check every 15 minutes.
 
-!!! warning "Hooks need `whygraph` on the PATH of whatever runs git"
-    Each hook exits quietly when it can't find `whygraph`, so nothing breaks - but nothing rescans
-    either. That bites GUI clients (Sourcetree, Tower, JetBrains, VS Code), which often launch with
-    a minimal environment that excludes `~/.local/bin`. If you commit from one, symlink the shim
-    into a system path: `sudo ln -sf ~/.local/bin/whygraph /usr/local/bin/whygraph`.
+!!! warning "Hooks need `curl` on the PATH of whatever runs git"
+    The helper exits quietly when it can't find `curl`, so nothing breaks - but nothing rescans
+    until the portal's next catch-up. That bites GUI clients (Sourcetree, Tower, JetBrains, VS Code),
+    which often launch with a minimal environment. They do not need `whygraph` on the PATH - only `curl`.
 
 ### Choosing which hooks to install
 
-`[scan].hooks` in `whygraph.toml` governs the set, and **`whygraph init` makes `.git/hooks` match
-it exactly**. Interactive `init` asks whether to install them; edit the value directly and re-run
-`whygraph init` to apply a change without being asked.
+`[scan].hooks` governs the set. In the portal it is the four **Git hooks** checkboxes in a project's
+configuration, and saving a change reconciles `.git/hooks` to match. GitHub clones get no hooks (their
+**Sync** does the same job).
 
 ```toml
 [scan]
@@ -113,15 +129,12 @@ hooks = true                              # all four (the default)
 
 The reconcile works in **both directions**. Shrinking the list *removes* the hooks you dropped -
 you don't have to undo them by hand - and growing it adds them back. Setting `false` strips all
-four and deletes the shared helper, leaving any foreign hook content of your own intact.
-
-Because the setting lives in the committed config, it survives re-runs and applies to everyone who
-clones the repo. A re-run seeds its prompt from the existing value, so declining hooks once isn't
-quietly undone the next time you run `init`.
+four and deletes the shared helper, leaving any foreign hook content of your own intact. Removing the
+project from the portal strips them too.
 
 !!! note "Hooks stay fast on purpose"
     The hooks deliberately skip the remote and LLM phases so they never slow a commit. For PRs,
-    issues, and fresh descriptions, run a full `whygraph scan` now and then.
+    issues, and fresh descriptions, use **Scan now** in the portal now and then.
 
 ## How WhyGraph sees branches
 

@@ -1,7 +1,7 @@
 # The Explorer
 
-`whygraph serve` opens a local web panel onto everything WhyGraph and CodeGraph have built for the
-current repo. It has two views, switched from the header:
+The [portal](../portal/index.md) opens a web view onto everything WhyGraph and CodeGraph have built for
+each project. Open a project and you get two views, switched from the sidebar:
 
 - **Explorer** - browse the code graph, jump to any symbol, and read its rationale, evidence,
   relationships, and history side by side. This page.
@@ -11,55 +11,31 @@ current repo. It has two views, switched from the header:
 Both are backed by the same data the MCP tools serve - the web API is just a second transport over the
 exact same functions, so the panel can never drift from what your editor sees.
 
-It runs from the **same Docker image** as every other command, as its own long-lived container - no
-second image, no extra install.
+## Open it
 
-## Run it
-
-From a scanned repo:
+Start the portal, then open a project from the Projects page:
 
 ```bash
-whygraph serve
+whygraph up
 ```
 
-That starts the server in the foreground and prints a URL - open <http://localhost:8765>. `Ctrl-C`
-stops it.
+The portal is at <http://127.0.0.1:8765> by default. The Explorer for a project is at `/p/<slug>/explorer`.
+See [Start the portal](../portal/start.md) for the port, the other host commands and stopping it.
 
 !!! note "Scan first"
-    The panel reads the CodeGraph index and the WhyGraph evidence database. Run
-    [`whygraph scan`](scanning.md) at least once before serving - otherwise there's no graph to draw,
-    and every symbol's rationale shows *"no evidence"* (see [Rationale on demand](#rationale-on-demand)).
-
-### Lifecycle
-
-On the Docker install the shim manages the container for you:
-
-| Command | What it does |
-|---|---|
-| `whygraph serve` | Run in the foreground; `Ctrl-C` stops and removes the container. |
-| `whygraph serve --detach` (or `-d`) | Start in the background and return immediately. |
-| `whygraph serve --logs` | Tail the detached server's logs. |
-| `whygraph serve --stop` | Stop and remove the running server. |
-| `whygraph serve --help` | Show the in-container `serve` help. |
-
-The port is controlled by the `WHYGRAPH_PORT` environment variable (default `8765`):
-
-```bash
-WHYGRAPH_PORT=9000 whygraph serve --detach
-```
-
-!!! warning "The port is set by the environment, not a flag"
-    On the Docker install the shim owns the published port, so `whygraph serve --port 9000` is
-    **rejected with an error** rather than quietly ignored - use `WHYGRAPH_PORT`. Running WhyGraph
-    natively (`uv` / `pipx`), `--port` and `--host` work as normal flags.
+    The panel reads the CodeGraph index and the WhyGraph evidence database. A project's first scan
+    (the last step of [adding it](../portal/projects.md#first-scan)) fills them - until then there's no
+    graph to draw, and every symbol's rationale shows *"no evidence"* (see
+    [Rationale on demand](#rationale-on-demand)).
 
 !!! info "Localhost only"
-    The server is published to `127.0.0.1` only - it's a single-user local dev tool with **no auth**.
-    Nothing is exposed beyond your machine's loopback.
+    The portal is published to `127.0.0.1` only and has **no login** - it is a single-user tool for
+    your own machine. Nothing is exposed beyond its loopback. See the
+    [security model](../portal/security.md).
 
     The Explorer is read-only apart from the explicit **Generate rationale** button. The
     [Chat assistant](chat.md) is not: it calls an LLM and stores sessions and messages in the
-    WhyGraph database.
+    project's WhyGraph database.
 
 ## What you see in the Explorer
 
@@ -117,11 +93,10 @@ The button is **disabled** when the symbol has no historical evidence to reason 
 because the repo hasn't been scanned, or the code isn't committed yet. Run `whygraph scan` and the
 button lights up. The **Evidence** and **History** tabs never call an LLM, so they always work.
 
-Generation uses the rationale LLM you configured in `whygraph.toml` - `[rationale]` (or the
-`[llm].model` default) and the matching `[llm.<provider>]` connection table (with its `api_key`),
-the same provider and model the MCP tool uses. If you leave `api_key` unset, the provider's conventional env var (e.g.
-`ANTHROPIC_API_KEY`) is the fallback; the Docker container reads your repo's `whygraph.toml` directly.
-See [Configuration](../reference/configuration.md).
+Generation uses the rationale model configured for the project - the **rationale** override or the
+default model, with the provider key from Settings - the same provider and model the MCP tool uses.
+If that provider has no key yet, add one under Settings first. See
+[Configuration](../reference/configuration.md).
 
 ### Coverage heatmap
 
@@ -131,17 +106,20 @@ of it has been analyzed - a quick map of where you've already asked "why?" and w
 ## Develop the UI
 
 The panel's source lives at `src/playground/` (Vite + React + TypeScript). For a hot-reloading dev
-loop - the backend on `:8765` and the Vite dev server on `:5173`, proxying the API across:
+loop - a dev portal on `:8765` and the Vite dev server on `:5173`, proxying `/api` and `/mcp` across:
 
 ```bash
-make dev      # backend + Vite HMR together; Ctrl-C stops both; open :5173
+make dev      # dev portal + Vite HMR together; Ctrl-C stops both; open :5173
 ```
 
-Other targets: `make playground` builds the production bundle into the wheel's static directory, and
-`make serve` builds it then serves it the way it ships. All need Node ≥ 18 (`nvm use 22`).
+`make dev` runs `whygraph portal` natively with its data directory outside the checkout
+(`$TMPDIR/whygraph-dev`) and the folder above the checkout shared, so you add this repo and its
+siblings from the UI. Other targets: `make playground` builds the production bundle into the wheel's
+static directory, and `make serve` builds it then serves it from the dev portal the way it ships. All
+need Node 22.12 or newer (`nvm use 22`).
 
 ## Not in scope
 
-The panel is a local dev tool, and stays one: **no auth and no multi-user support**, **no remote
-hosting**, **one repo per server** (the one you ran it in), and **no editing** - it never writes to
-your source tree. See the [roadmap](../roadmap.md) for what's deferred.
+The panel is a local tool, and stays one: **no login and no multi-user support**, **no remote
+hosting**, and **no editing** - it never writes to your source tree. See the
+[roadmap](../roadmap.md) for what's deferred.

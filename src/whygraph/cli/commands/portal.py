@@ -9,7 +9,9 @@ and a non-loopback ``--host`` outside the image is refused unless
 
 It runs exactly one uvicorn process - the scan runner, migration lock and
 caches are in-process - with ``timeout_graceful_shutdown`` bounded below
-the ``whygraph down`` grace period, so open streams cannot hold up a stop.
+the ``whygraph down`` grace period, and through
+:class:`~whygraph.portal.app.PortalServer`, which ends open event streams
+as soon as shutdown begins, so they cannot hold up a stop.
 """
 
 from __future__ import annotations
@@ -76,7 +78,7 @@ def portal_cmd(host: str, port: int, data_dir: Path | None, dev_expose: bool) ->
     import uvicorn
 
     from whygraph.portal import db as portal_db
-    from whygraph.portal.app import create_portal_app
+    from whygraph.portal.app import PortalServer, create_portal_app
 
     from ..console import console
 
@@ -86,13 +88,17 @@ def portal_cmd(host: str, port: int, data_dir: Path | None, dev_expose: bool) ->
     try:
         app = create_portal_app(port=port)
         console.print(f"[bold]WhyGraph portal[/] → http://127.0.0.1:{port}")
-        uvicorn.run(
+        config = uvicorn.Config(
             app,
             host=host,
             port=port,
             log_config=None,
             timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SEC,
         )
+        # PortalServer ends open event streams at the start of shutdown,
+        # before uvicorn's graceful wait (which would otherwise sit out
+        # the whole timeout on every open stream).
+        PortalServer(config, app).run()
     finally:
         lock.close()
 

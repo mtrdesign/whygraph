@@ -1226,13 +1226,31 @@ def test_check_path_suggestion_is_never_root_or_home(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _record_server_runs(monkeypatch: pytest.MonkeyPatch, runs: list[dict]) -> None:
+    """Replace ``PortalServer.run`` with a recorder of the uvicorn config."""
+    from whygraph.portal.app import PortalServer
+
+    def _run(self: PortalServer) -> None:
+        c = self.config
+        runs.append(
+            {
+                "port": c.port,
+                "host": c.host,
+                "timeout_graceful_shutdown": c.timeout_graceful_shutdown,
+                "workers": c.workers,
+            }
+        )
+
+    monkeypatch.setattr(PortalServer, "run", _run)
+
+
 def test_portal_cli_refuses_a_public_bind_outside_the_image(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from whygraph.cli import main
 
     runs: list[dict] = []
-    monkeypatch.setattr("uvicorn.run", lambda app, **kw: runs.append(kw))
+    _record_server_runs(monkeypatch, runs)
     monkeypatch.delenv("WHYGRAPH_IN_IMAGE", raising=False)
     monkeypatch.setenv("WHYGRAPH_DATA", str(tmp_path / "data"))
     monkeypatch.chdir(tmp_path)
@@ -1252,7 +1270,7 @@ def test_portal_cli_refuses_a_public_bind_outside_the_image(
     assert len(runs) == 2
     for kw in runs:
         assert kw["timeout_graceful_shutdown"] == 10
-        assert "workers" not in kw
+        assert kw["workers"] == 1
     assert runs[1]["port"] == 9001
 
 
@@ -1264,7 +1282,7 @@ def test_portal_cli_refuses_a_data_dir_another_portal_holds(
     from whygraph.cli import main
 
     runs: list[dict] = []
-    monkeypatch.setattr("uvicorn.run", lambda app, **kw: runs.append(kw))
+    _record_server_runs(monkeypatch, runs)
     monkeypatch.chdir(tmp_path)
     data = tmp_path / "data"
     data.mkdir()

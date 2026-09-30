@@ -38,6 +38,7 @@ from typing import AsyncIterator
 
 import anyio
 import anyio.to_thread
+import uvicorn
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -75,6 +76,38 @@ _ALL_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
 
 class PortalStartupError(RuntimeError):
     """The portal refuses to start (e.g. a ``WHYGRAPH_MODE`` mismatch)."""
+
+
+class PortalServer(uvicorn.Server):
+    """uvicorn server that ends the portal's open streams as soon as shutdown begins.
+
+    uvicorn waits up to ``timeout_graceful_shutdown`` for open connections
+    **before** it runs the lifespan shutdown, and an events stream (SSE)
+    only ends when the lifespan's shutdown event is set - so without this,
+    every open stream held a stop for the whole timeout and was then cut
+    without its ``event: shutdown`` frame. :meth:`shutdown` sets the event
+    first (signal or ``should_exit`` alike), so streams send the frame and
+    close, and the graceful wait returns promptly.
+
+    Parameters
+    ----------
+    config : uvicorn.Config
+        The server config (its app is ``portal_app``).
+    portal_app : FastAPI
+        The app from :func:`create_portal_app`, whose
+        ``state.portal.shutdown_event`` is set.
+    """
+
+    def __init__(self, config: uvicorn.Config, portal_app: FastAPI) -> None:
+        super().__init__(config)
+        self._portal_app = portal_app
+
+    async def shutdown(self, sockets=None) -> None:  # noqa: ANN001 -- uvicorn's signature
+        """Set the portal's shutdown event, then run uvicorn's shutdown."""
+        state: PortalState | None = getattr(self._portal_app.state, "portal", None)
+        if state is not None and state.shutdown_event is not None:
+            state.shutdown_event.set()
+        await super().shutdown(sockets=sockets)
 
 
 def create_portal_app(
@@ -271,4 +304,4 @@ async def _mcp_not_found(request: Request) -> JSONResponse:
     )
 
 
-__all__ = ["PortalStartupError", "create_portal_app"]
+__all__ = ["PortalServer", "PortalStartupError", "create_portal_app"]

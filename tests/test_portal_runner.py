@@ -41,12 +41,13 @@ from test_portal_app import (  # noqa: F401 -- `env` is a fixture
     seed_codegraph,
 )
 from test_portal_mcp import _free_port
+from whygraph.cli.commands.portal import GRACEFUL_SHUTDOWN_SEC
 from whygraph.core.config import Config
 from whygraph.core.context import use_project
 from whygraph.db import get_session as project_session
 from whygraph.db.models import Commit
 from whygraph.portal import db as portal_db
-from whygraph.portal.app import create_portal_app
+from whygraph.portal.app import PortalServer, create_portal_app
 from whygraph.portal.estimate import (
     CHARS_PER_LINE,
     CHARS_PER_TOKEN,
@@ -920,6 +921,74 @@ def test_shutdown_with_open_stream_interrupts_the_run(
         ["pgrep", "-f", str(scanner.hold)], capture_output=True, text=True
     ).stdout.strip()
     assert pid_alive == ""  # the child (and its group) is gone
+
+
+def test_open_stream_gets_the_shutdown_frame_without_holding_the_stop(
+    env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    """Fix pass 2: the production graceful timeout (10 s) is not sat out.
+
+    uvicorn waits for open connections before the lifespan shutdown sets
+    ``shutdown_event``; a plain ``uvicorn.Server`` therefore held the stop
+    for the full timeout and cut the stream without ``event: shutdown``.
+    """
+    port = _free_port()
+    app = create_portal_app(port=port)
+    config = uvicorn.Config(
+        app,
+        host="127.0.0.1",
+        port=port,
+        log_config=None,
+        lifespan="on",
+        timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SEC,
+    )
+    server = PortalServer(config, app)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    wait_for(lambda: server.started or not thread.is_alive())
+    base = f"http://127.0.0.1:{port}"
+    http = httpx.Client(
+        base_url=base, headers=CLIENT_HEADER, trust_env=False, timeout=30
+    )
+    try:
+        http.post("/api/portal/setup", json={"display_name": "Tess"})
+        root = make_repo(env.shared, "demo")
+        seed_codegraph(root)
+        http.post("/api/projects", json={"source": "local", "path": str(root)})
+        http.post("/api/projects/demo/init", json={"agents": []})
+        scanner.hold.touch()
+        run_id = http.post("/api/projects/demo/scans").json()["run_id"]
+        wait_for(lambda: len(scanner.calls()) == 1)
+
+        received: list[str] = []
+
+        def follow() -> None:
+            with httpx.Client(
+                base_url=base, headers=CLIENT_HEADER, trust_env=False, timeout=30
+            ) as c:
+                try:
+                    with c.stream(
+                        "GET", f"/api/projects/demo/scans/{run_id}/events"
+                    ) as r:
+                        for chunk in r.iter_text():
+                            received.append(chunk)
+                except httpx.HTTPError:
+                    pass
+
+        reader = threading.Thread(target=follow, daemon=True)
+        reader.start()
+        wait_for(lambda: any('"start"' in c for c in received))
+        started = time.monotonic()
+        server.should_exit = True
+        thread.join(30)
+        elapsed = time.monotonic() - started
+        assert not thread.is_alive()
+        assert elapsed < GRACEFUL_SHUTDOWN_SEC / 2, elapsed
+        reader.join(5)
+        assert any("event: shutdown" in c for c in received), received[-2:]
+    finally:
+        http.close()
+        server.should_exit = True
 
 
 def test_real_scan_child_with_hook_trigger(

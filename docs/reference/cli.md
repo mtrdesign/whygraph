@@ -155,6 +155,33 @@ The portal is a single process and holds an exclusive lock on its data directory
 are rejected. `WHYGRAPH_DEV_ORIGINS` (comma-separated origins, e.g. `http://localhost:5173`) adds
 origins for a local frontend dev server.
 
+### Scans in the portal
+
+The portal runs every scan itself, as a `whygraph scan --progress json` child process in the
+project's folder. Each project scans one run at a time; a request that arrives while a run is going
+joins the single queued run instead of starting another, so a burst of commits costs one follow-up
+scan. At most two projects scan at once.
+
+| Trigger | Started by | LLM descriptions |
+|---|---|---|
+| `initial` | Any request while the project has no successful scan yet | No (structure only) |
+| `hook` | A git hook after a commit, merge, rebase or checkout, and the catch-up check | No, and offline (`--no-remote`) |
+| `sync`, `poll` | The **Sync** button, and a poll every 15 minutes, for projects cloned from GitHub | No |
+| `manual` | **Scan now** | Yes (unless turned off for that run) |
+| `describe` | **Describe now** on the first-scan estimate | Yes |
+
+The first scan never calls the LLM. Afterwards the project shows how many commits a full scan would
+describe, with which model and a token (and, for known models, cost) estimate, so you choose when
+to spend. A sync fetches the default branch, fast-forwards the checkout and rescans only when that
+moved it. When the portal starts, and on every poll, it also rescans a local project whose checkout
+moved past the last scanned commit while the portal was not running.
+
+Only an allowlist of the portal's environment reaches a scan (`PATH`, `HOME`, locale, `TZ`, the TLS
+bundle and proxy variables); API keys and GitHub tokens come only from the portal's own settings,
+and never appear in run files: each run's progress (`runs/<id>.jsonl`) and log (`runs/<id>.log`)
+under the data directory show a key as its last four characters. Stopping the portal stops running
+scans and records them as `interrupted`.
+
 ## `whygraph analyze`
 
 Describe a single commit's diff with the configured LLM and **print** the result. Unlike `scan`, it

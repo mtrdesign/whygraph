@@ -92,6 +92,40 @@ def build_project_context(session: Session, project: Project) -> ProjectContext:
         If the merged config fails validation.
     """
     root = resolve_root(project)
+    project_layer, merged = _merged_layer(session, project, root)
+    _inject_secrets(session, project.id, project_layer, merged)
+    return ProjectContext(
+        slug=project.slug, root=root, config=Config.from_dict(merged, root)
+    )
+
+
+def resolved_layer(session: Session, project: Project) -> dict:
+    """The project's merged config v2 dict with forced DB paths and **no** secrets.
+
+    This is what a child ``whygraph scan`` receives as
+    ``WHYGRAPH_CONFIG_JSON``; secrets reach it only as environment
+    variables (plan section 4.6).
+
+    Parameters
+    ----------
+    session : Session
+        A portal DB session.
+    project : Project
+        The project row.
+
+    Returns
+    -------
+    dict
+        The global layer deep-merged with the project layer (each
+        normalized), with ``whygraph_db`` / ``codegraph_db`` forced to the
+        root defaults.
+    """
+    _, merged = _merged_layer(session, project, resolve_root(project))
+    return merged
+
+
+def _merged_layer(session: Session, project: Project, root: Path) -> tuple[dict, dict]:
+    """Return ``(project_layer, merged)`` - normalized, merged, DB paths forced."""
     global_layer, _ = normalize_v2(load_layer(session, None), root)
     project_layer, _ = normalize_v2(load_layer(session, project.id), root)
     merged = merge_v2(global_layer, project_layer)
@@ -99,11 +133,7 @@ def build_project_context(session: Session, project: Project) -> ProjectContext:
     # Rule 4.2.1 #2: DB paths are the root's defaults, never a row's value.
     merged["whygraph_db"] = str(root / ".whygraph" / "whygraph.db")
     merged["codegraph_db"] = str(root / ".codegraph" / "codegraph.db")
-
-    _inject_secrets(session, project.id, project_layer, merged)
-    return ProjectContext(
-        slug=project.slug, root=root, config=Config.from_dict(merged, root)
-    )
+    return project_layer, merged
 
 
 def _inject_secrets(
@@ -226,4 +256,5 @@ __all__ = [
     "ProjectNotFound",
     "build_project_context",
     "resolve_root",
+    "resolved_layer",
 ]

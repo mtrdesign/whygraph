@@ -1101,16 +1101,11 @@ def test_remove_never_rmtrees_outside_the_repos_dir(
     assert (outside / "sample.py").is_file()
 
 
-def test_scan_endpoints_wait_for_the_runner(
-    ready: TestClient, env: SimpleNamespace
-) -> None:
+def test_scan_endpoints_without_runs(ready: TestClient, env: SimpleNamespace) -> None:
+    # Scanning itself is covered by tests/test_portal_runner.py.
     initialized_repo(ready, env, "demo")
-    assert (
-        ready.post("/api/projects/demo/scans", json={"trigger": "manual"}).status_code
-        == 501
-    )
     assert ready.get("/api/projects/demo/scans").json() == {"runs": []}
-    assert ready.get("/api/projects/demo/scans/1/events").status_code == 501
+    assert ready.get("/api/projects/demo/scans/1/events").status_code == 404
     assert ready.post("/api/projects/demo/sync").json()["code"] == "not_github"
 
 

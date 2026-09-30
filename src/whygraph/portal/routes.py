@@ -24,6 +24,7 @@ Conventions:
 from __future__ import annotations
 
 import copy
+import json
 import os
 import shutil
 from dataclasses import asdict
@@ -93,7 +94,8 @@ from .repos import (
     detect_existing,
     root_status,
 )
-from .runner import RunnerUnavailable
+from .estimate import scan_estimate as _scan_estimate
+from .runner import RunNotFound, RunnerUnavailable, stale_info
 from .secrets import (
     GITHUB_TOKEN,
     LLM_API_KEY,
@@ -282,9 +284,11 @@ def _checked_layer(raw: dict, spec, base: Path) -> dict:
     return kept
 
 
-def _missing_key(config: Config) -> str | None:
-    """The provider of the resolved analyze / chat model when it has no key."""
-    for task in ("analyze", "chat"):
+def _missing_key(
+    config: Config, tasks: tuple[str, ...] = ("analyze", "chat")
+) -> str | None:
+    """The provider of the resolved model of ``tasks`` when it has no key."""
+    for task in tasks:
         try:
             provider = config.model_for(task).provider
         except ConfigError:
@@ -332,6 +336,12 @@ def _active_run(session: Session, project_id: int) -> dict | None:
 
 
 def _summary(session: Session, project: Project, root: Path) -> dict:
+    status = root_status(root)
+    stale = (
+        stale_info(root, project.last_scanned_head)
+        if status == "ok" and project.initialized_at is not None
+        else None
+    )
     return {
         "slug": project.slug,
         "name": project.name,
@@ -342,10 +352,10 @@ def _summary(session: Session, project: Project, root: Path) -> dict:
         "initialized_at": project.initialized_at,
         "last_scan_at": project.last_scan_at,
         "created_at": project.created_at,
-        "root_status": root_status(root),
+        "root_status": status,
         "running_scan": _active_run(session, project.id),  # type: ignore[arg-type]
-        # Filled in by the step-8 catch-up check (HEAD vs last_scanned_head).
-        "stale": None,
+        # HEAD vs last_scanned_head (the runner's catch-up check, section 4.6).
+        "stale": stale,
     }
 
 
@@ -1055,7 +1065,7 @@ def init_project(
     return response
 
 
-# ---- scans (the runner lands in step 8) -----------------------------------
+# ---- scans (portal/runner.py) ---------------------------------------------
 
 
 @projects_router.post("/{slug}/scans", status_code=202)
@@ -1097,7 +1107,7 @@ def list_scans(project: BoundProject = Depends(project_db)) -> dict:
                     "requested_by": r.requested_by,
                     "started_at": r.started_at,
                     "finished_at": r.finished_at,
-                    "summary": r.summary,
+                    "summary": json.loads(r.summary) if r.summary else None,
                 }
                 for r in runs
             ]
@@ -1108,11 +1118,21 @@ def list_scans(project: BoundProject = Depends(project_db)) -> dict:
 async def scan_events(
     run_id: int, request: Request, project: BoundProject = Depends(project_db)
 ) -> Any:
-    """SSE: replay a run's events, then follow them (step 8)."""
+    """SSE: replay a run's events file, then follow it until the run ends.
+
+    Each frame's ``id:`` is the byte offset after it; a reconnect sends it
+    back as ``Last-Event-ID`` and the replay resumes there.
+    """
     state = portal_state(request)
     assert state.shutdown_event is not None
+    last = request.headers.get("last-event-id", "").strip()
+    offset = int(last) if last.isdigit() else 0
     try:
-        return await state.runner.events(project, run_id, shutdown=state.shutdown_event)
+        return await state.runner.events(
+            project, run_id, shutdown=state.shutdown_event, offset=offset
+        )
+    except RunNotFound as exc:
+        raise ApiError(404, f"run {run_id} not found") from exc
     except RunnerUnavailable as exc:
         raise ApiError(501, str(exc)) from exc
 
@@ -1123,7 +1143,7 @@ async def post_sync(
     project: BoundProject = Depends(project_db),
     principal: Principal = Depends(current_user),
 ) -> dict:
-    """GitHub clones: fetch + fast-forward, then rescan when HEAD moved (step 8)."""
+    """GitHub clones: fetch + fast-forward, then rescan when HEAD moved."""
     if project.source != "github":
         raise ApiError(400, "only GitHub clones can be synced", code="not_github")
     try:
@@ -1133,6 +1153,18 @@ async def post_sync(
     except RunnerUnavailable as exc:
         raise ApiError(501, str(exc)) from exc
     return {"run_id": run_id}
+
+
+@projects_router.get("/{slug}/scan-estimate")
+def get_scan_estimate(project: BoundProject = Depends(project_db)) -> dict:
+    """First-scan cost guard: what describing the waiting commits would cost.
+
+    ``commits`` is an upper bound; ``missing_key`` names the analyze
+    provider when it has no key (*Describe now* is then disabled).
+    """
+    body = _scan_estimate(project.ctx.config)
+    body["missing_key"] = _missing_key(project.ctx.config, ("analyze",))
+    return body
 
 
 __all__ = ["portal_router", "projects_router", "public_router"]

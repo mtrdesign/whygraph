@@ -168,7 +168,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with manager.run():
         state.session_manager = manager
         if not state.degraded:
-            await state.runner.start()
+            await state.runner.start(state)
         set_strict(True)
         state.origins = origins
         try:

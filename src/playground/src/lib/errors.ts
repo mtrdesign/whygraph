@@ -67,3 +67,42 @@ export function addProjectError(err: unknown, source: "local" | "github"): AddEr
       return { field: "form", message: err.message };
   }
 }
+
+/** A project-scoped failure the UI gives its own wording. */
+export interface ProjectProblem {
+  kind: "unsafe_path" | "root_missing" | "other";
+  title: string;
+  message: string;
+  /** The offending path, for `unsafe_path`. */
+  path?: string;
+}
+
+/**
+ * Classify a failed project call. `unsafe_path` (409) means the repo holds a
+ * symlink where the portal needs a real `.whygraph/`, `.codegraph/`, DB file or
+ * agent file, so the only fix is on disk; the backend message already says which
+ * path, this adds the instruction.
+ */
+export function projectProblem(err: unknown): ProjectProblem {
+  if (err instanceof ApiError && err.code === "unsafe_path") {
+    const path = typeof err.extra.path === "string" ? err.extra.path : undefined;
+    return {
+      kind: "unsafe_path",
+      title: "A symbolic link is in the way",
+      message: `${err.message.replace(/\.$/, "")}. Replace the link with a real file or folder, then reload.`,
+      path,
+    };
+  }
+  if (err instanceof ApiError && err.code === "root_missing") {
+    return {
+      kind: "root_missing",
+      title: "The project folder is not available",
+      message: err.message,
+    };
+  }
+  return {
+    kind: "other",
+    title: "Something went wrong",
+    message: err instanceof Error ? err.message : "The request failed.",
+  };
+}

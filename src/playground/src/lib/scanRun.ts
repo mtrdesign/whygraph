@@ -1,5 +1,5 @@
 import { useEffect, useReducer } from "react";
-import { projectApi, type ScanEvent, type ScanRunStatus } from "../api";
+import { ApiError, projectApi, type ScanEvent, type ScanRunStatus, type ScanRunSummary } from "../api";
 
 // Live state of one scan run, folded from the events stream. The first-scan step
 // renders a simple view of it; step 13's full scan-run screen reuses the same
@@ -12,10 +12,19 @@ export interface TaskState {
   description: string;
 }
 
+/** The events request itself was refused (a run that does not exist, an unsafe project). */
+export interface StreamFailure {
+  status: number;
+  message: string;
+  code?: string;
+}
+
 export interface ScanRunState {
   phaseTotal: number | null;
   phase: number | null;
   phaseTitle: string | null;
+  /** Every phase seen so far, in the order the stream announced them. */
+  phases: { phase: number; title: string }[];
   tasks: TaskState[];
   sync: { status: "fetching" | "ok" | "failed"; moved?: boolean; error?: string } | null;
   /** A runner-level failure (`{"type":"error"}`), e.g. the repo root is gone. */
@@ -24,31 +33,43 @@ export interface ScanRunState {
   result: Extract<ScanEvent, { type: "result" }> | null;
   /** Set by the terminal `end` frame - the run is finished. */
   finished: ScanRunStatus | null;
-  summary: Record<string, unknown> | null;
+  summary: ScanRunSummary | null;
+  /** Set when the stream was refused with a 4xx; the hook stops retrying. */
+  failure: StreamFailure | null;
 }
 
 export const initialScanRunState: ScanRunState = {
   phaseTotal: null,
   phase: null,
   phaseTitle: null,
+  phases: [],
   tasks: [],
   sync: null,
   error: null,
   result: null,
   finished: null,
   summary: null,
+  failure: null,
 };
 
-type Action = { type: "event"; event: ScanEvent } | { type: "reset" };
+type Action =
+  | { type: "event"; event: ScanEvent }
+  | { type: "failure"; failure: StreamFailure }
+  | { type: "reset" };
 
 export function reduceScanRun(state: ScanRunState, action: Action): ScanRunState {
   if (action.type === "reset") return initialScanRunState;
+  if (action.type === "failure") return { ...state, failure: action.failure };
   const e = action.event;
   switch (e.type) {
     case "start":
       return { ...state, phaseTotal: e.phase_total };
-    case "phase":
-      return { ...state, phase: e.phase, phaseTitle: e.title };
+    case "phase": {
+      const phases = state.phases.filter((p) => p.phase !== e.phase);
+      phases.push({ phase: e.phase, title: e.title });
+      phases.sort((a, b) => a.phase - b.phase);
+      return { ...state, phase: e.phase, phaseTitle: e.title, phases };
+    }
     case "task": {
       const next: TaskState = {
         name: e.name,
@@ -105,8 +126,16 @@ export function useScanRun(slug: string, runId: number | null): ScanRunState {
             },
             { signal: controller.signal, lastEventId: lastId },
           );
-        } catch {
+        } catch (err) {
           if (controller.signal.aborted) return;
+          // A refused request will be refused again; only transport errors and 5xx retry.
+          if (err instanceof ApiError && err.status >= 400 && err.status < 500) {
+            dispatch({
+              type: "failure",
+              failure: { status: err.status, message: err.message, code: err.code },
+            });
+            return;
+          }
         }
         if (done || controller.signal.aborted) return;
         await new Promise((resolve) => setTimeout(resolve, RECONNECT_MS));
@@ -124,4 +153,92 @@ export function phasePercent(state: ScanRunState): number | null {
   if (state.finished === "ok") return 100;
   if (state.phaseTotal === null || state.phase === null) return null;
   return Math.round(((state.phase - 1) / state.phaseTotal) * 100);
+}
+
+/** The crawler (task) names that belong to each phase, by the phase's title. */
+const PHASE_TASKS: Record<string, string[]> = {
+  "Structural crawl": ["git", "github"],
+  "PR-origin recovery": ["pr-origins"],
+  "Author identity": ["authors"],
+  "LLM descriptions": ["analyze"],
+};
+
+/** Friendly names for the crawler task labels the scan emits. */
+const CRAWLER_LABEL: Record<string, string> = {
+  git: "Git history",
+  github: "GitHub pull requests and issues",
+  "pr-origins": "PR-origin recovery",
+  authors: "Author identities",
+  analyze: "LLM descriptions",
+  codegraph: "CodeGraph index",
+};
+
+export const crawlerLabel = (name: string) => CRAWLER_LABEL[name] ?? name;
+
+export type PhaseStatus = "pending" | "running" | "done" | "failed" | "skipped";
+
+export interface PhaseRow {
+  phase: number;
+  title: string;
+  status: PhaseStatus;
+  /** Seconds, known once the scan's `result` event arrived. */
+  seconds: number | null;
+  tasks: TaskState[];
+  /** The phase's crawlers as the `result` event reported them (empty until then). */
+  crawlers: CrawlerResult[];
+}
+
+export interface CrawlerResult {
+  name: string;
+  status: string;
+  summary?: string;
+  error?: string;
+  warning?: string;
+}
+
+/**
+ * The phase timeline of a run. Titles come from the `phase` events; a phase the
+ * stream has not reached yet is listed as pending up to the announced
+ * `phase_total` (or skipped, once the run has ended without reaching it). A phase
+ * is done once a later one started or the run ended, and `failed` when a crawler
+ * of the phase reported failure in the `result` event.
+ */
+export function phaseRows(state: ScanRunState): PhaseRow[] {
+  const total = Math.max(state.phaseTotal ?? 0, state.phases.at(-1)?.phase ?? 0);
+  const source = state.result ?? state.summary;
+  const timings = (source?.phase_timings ?? {}) as Record<string, number>;
+  const crawlers: CrawlerResult[] = source?.crawlers ?? [];
+  const ended = state.finished !== null;
+  const rows: PhaseRow[] = [];
+  for (let n = 1; n <= total; n++) {
+    const seen = state.phases.find((p) => p.phase === n);
+    const title = seen?.title ?? `Step ${n}`;
+    const names = PHASE_TASKS[title] ?? [];
+    const failed = crawlers.some((c) => names.includes(c.name) && c.status === "failed");
+    let status: PhaseStatus;
+    if (!seen) status = ended ? "skipped" : "pending";
+    else if (failed) status = "failed";
+    // A run that ended without a `result` died in the phase it was in.
+    else if (ended && state.finished !== "ok" && !state.result && n === state.phase) status = "failed";
+    else if (ended || (state.phase ?? 0) > n) status = "done";
+    else status = "running";
+    rows.push({
+      phase: n,
+      title,
+      status,
+      seconds: typeof timings[title] === "number" ? timings[title] : null,
+      tasks: state.tasks.filter((t) => names.includes(t.name)),
+      crawlers: crawlers.filter((c) => names.includes(c.name)),
+    });
+  }
+  return rows;
+}
+
+/** The background CodeGraph crawler's task, which belongs to no phase. */
+export function codegraphRow(state: ScanRunState): { task: TaskState | null; result: CrawlerResult | null } {
+  const source = state.result ?? state.summary;
+  return {
+    task: state.tasks.find((t) => t.name === "codegraph") ?? null,
+    result: source?.crawlers?.find((c) => c.name === "codegraph") ?? null,
+  };
 }

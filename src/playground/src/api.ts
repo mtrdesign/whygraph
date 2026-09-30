@@ -239,8 +239,8 @@ export interface PortalState {
   user?: PortalUser | null;
   port?: number;
   shared_folders?: string[];
-  // Not sent by the backend yet; the sidebar footer shows it when present.
-  version?: string;
+  // `null` only when the package metadata is missing.
+  version?: string | null;
   error?: string;
 }
 
@@ -256,6 +256,8 @@ export interface ProjectSummary {
   created_at: string;
   root_status: "ok" | "missing" | "not_git";
   running_scan: { id: number; status: string; trigger: string } | null;
+  // Status of the newest *ended* run, or `null` when none has ended yet.
+  last_scan_status?: "ok" | "failed" | "interrupted" | "cancelled" | null;
   // `null` = up to date / never scanned; `commits_behind` is null after a history rewrite.
   stale: { commits_behind: number | null } | null;
 }
@@ -264,6 +266,9 @@ export interface ProjectDetails extends ProjectSummary {
   agents: string[];
   missing_key: string | null;
   mcp_url: string;
+  // The repo's 1.x / agent-file state, recomputed on every read; `null` while
+  // the project folder is unusable.
+  detected?: Detected | null;
   stats: {
     commits: number;
     described: number;
@@ -373,6 +378,9 @@ export interface DefaultsView {
   config: ConfigDict;
   secrets: SecretsView;
   no_provider_key: boolean;
+  // Present on a PUT response only: projects whose own key for a provider was
+  // cleared because the global endpoint they inherit changed.
+  cleared_project_keys?: { slug: string; provider: string }[];
 }
 
 export type FileStatus = "write" | "overwrite" | "skip" | "refused" | "needs_confirmation";
@@ -438,6 +446,42 @@ export type ScanRunStatus =
   | "interrupted"
   | "cancelled";
 
+/** The fields of a run's `summary` the UI reads (the backend may add more). */
+export interface ScanRunSummary {
+  status?: string;
+  elapsed_sec?: number;
+  phase_timings?: Record<string, number>;
+  crawlers?: { name: string; status: string; summary?: string; error?: string; warning?: string }[];
+  analyze_skipped?: string | null;
+  exit_code?: number;
+  moved?: boolean;
+  error?: string;
+  merged_into?: number;
+  [k: string]: unknown;
+}
+
+/** `GET .../scans/{id}/log`: the tail (at most 64 KiB) of a run's log. */
+export interface ScanLog {
+  run_id: number;
+  text: string;
+  size: number;
+  truncated: boolean;
+}
+
+export interface DeleteProjectBody {
+  strip_agent_entries?: boolean;
+  confirm_tracked?: string[];
+  confirm_name?: string;
+}
+
+export interface DeleteProjectResult {
+  removed: string;
+  hooks: unknown;
+  agent_files: FileOutcome[];
+  checkout_deleted: boolean;
+  warnings: string[];
+}
+
 export interface ScanRunRow {
   id: number;
   kind: "scan" | "sync";
@@ -447,7 +491,7 @@ export interface ScanRunRow {
   requested_by: number | null;
   started_at: string | null;
   finished_at: string | null;
-  summary: Record<string, unknown> | null;
+  summary: ScanRunSummary | null;
 }
 
 // The scan events stream (`portal/runner.py`): the child's JSONL events plus the
@@ -471,7 +515,7 @@ export type ScanEvent =
     }
   | { type: "sync"; status: "fetching" | "ok" | "failed"; moved?: boolean; error?: string }
   | { type: "error"; message: string }
-  | { type: "end"; run_id: number; status: ScanRunStatus; summary: Record<string, unknown> | null }
+  | { type: "end"; run_id: number; status: ScanRunStatus; summary: ScanRunSummary | null }
   | { type: "shutdown"; run_id: number };
 
 // ---- transport --------------------------------------------------------------
@@ -567,6 +611,9 @@ export function projectApi(slug: string) {
       send<{ run_id: number }>("POST", `${base}/scans`, body),
     sync: () => send<{ run_id: number }>("POST", `${base}/sync`),
     scans: () => get<{ runs: ScanRunRow[] }>(`${base}/scans`),
+    scanLog: (runId: number) => get<ScanLog>(`${base}/scans/${runId}/log`),
+    rename: (name: string) => send<ProjectDetails>("PATCH", base, { name }),
+    remove: (body: DeleteProjectBody = {}) => send<DeleteProjectResult>("DELETE", base, body),
     scanEstimate: () => get<ScanEstimate>(`${base}/scan-estimate`),
     streamScanEvents: (
       runId: number,

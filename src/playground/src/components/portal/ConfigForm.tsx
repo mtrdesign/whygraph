@@ -193,8 +193,8 @@ export function ConfigForm({
 }: {
   scope: ConfigScope;
   submitLabel?: string;
-  /** Called after a successful save, or immediately when nothing changed. */
-  onSaved?: () => void;
+  /** Called after a successful save (with the response), or immediately when nothing changed. */
+  onSaved?: (saved?: StoredConfig & { cleared_project_keys?: { slug: string; provider: string }[] }) => void;
   secondaryActions?: ReactNode;
 }) {
   const queryClient = useQueryClient();
@@ -238,16 +238,22 @@ export function ConfigForm({
   const save = useMutation({
     mutationFn: async (body: ConfigPut) =>
       slug ? projectApi(slug).putConfig(body) : portalApi.putDefaults(body),
-    onSuccess: async () => {
+    onSuccess: async (saved) => {
       setServerError(null);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: slug ? projectKey(slug, "config") : portalKey("defaults") }),
         queryClient.invalidateQueries({ queryKey: portalKey("defaults") }),
         slug && queryClient.invalidateQueries({ queryKey: projectKey(slug, "project") }),
+        // A global save changes what every project inherits (keys, missing-key badges).
+        !slug &&
+          queryClient.invalidateQueries({
+            predicate: (q) =>
+              q.queryKey[0] !== "@portal" && (q.queryKey[1] === "project" || q.queryKey[1] === "config"),
+          }),
         queryClient.invalidateQueries({ queryKey: portalKey("projects") }),
       ]);
       toast.success("Settings saved");
-      onSaved?.();
+      onSaved?.(saved);
     },
     onError: (err) => {
       if (err instanceof ApiError) {

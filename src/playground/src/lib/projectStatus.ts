@@ -3,7 +3,7 @@ import type { ProjectSummary } from "../api";
 export type StatusTone = "ready" | "busy" | "warn" | "error" | "idle";
 
 export interface ProjectStatus {
-  key: "unavailable" | "uninitialized" | "scanning" | "stale" | "unscanned" | "ready";
+  key: "unavailable" | "uninitialized" | "scanning" | "failed" | "stale" | "unscanned" | "ready";
   label: string;
   tone: StatusTone;
 }
@@ -11,8 +11,7 @@ export interface ProjectStatus {
 /**
  * The status badge of a project card (§4.9.1 screen 2), by precedence: an
  * unusable folder beats everything, then "not initialized", a running scan,
- * staleness, never-scanned, and finally ready. ("Scan failed" is not derivable
- * here: the list endpoint does not carry the last run's outcome.)
+ * a failed / interrupted last scan, staleness, never-scanned, and finally ready.
  */
 export function projectStatus(p: ProjectSummary): ProjectStatus {
   if (p.root_status !== "ok") {
@@ -29,6 +28,11 @@ export function projectStatus(p: ProjectSummary): ProjectStatus {
       label: p.running_scan.status === "queued" ? "Scan queued" : "Scanning",
       tone: "busy",
     };
+  }
+  // The newest ended run did not finish: say so before anything softer.
+  if (p.last_scan_status === "failed") return { key: "failed", label: "Scan failed", tone: "error" };
+  if (p.last_scan_status === "interrupted") {
+    return { key: "failed", label: "Scan interrupted", tone: "warn" };
   }
   if (p.stale) {
     const n = p.stale.commits_behind;

@@ -4,8 +4,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { FolderGit2Icon, GitBranchIcon, MoreHorizontalIcon, PlusIcon } from "lucide-react";
 import { portalApi, portalKey, projectApi, type ProjectSummary } from "../api";
-import { projectStatus, timeAgo, type StatusTone } from "../lib/projectStatus";
-import { cn } from "@/lib/utils";
+import { timeAgo } from "../lib/projectStatus";
+import { ProjectStatusBadge as StatusBadge } from "../components/portal/ProjectStatusBadge";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import {
@@ -17,24 +17,6 @@ import {
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../components/ui/empty";
 import { Input } from "../components/ui/input";
 import { Skeleton } from "../components/ui/skeleton";
-
-const TONE: Record<StatusTone, string> = {
-  ready: "bg-success",
-  busy: "bg-primary animate-pulse",
-  warn: "bg-warning",
-  error: "bg-destructive",
-  idle: "bg-muted-foreground/50",
-};
-
-function StatusBadge({ project }: { project: ProjectSummary }) {
-  const s = projectStatus(project);
-  return (
-    <span className="flex items-center gap-1.5 text-xs" data-status={s.key}>
-      <span className={cn("size-2 rounded-full", TONE[s.tone])} aria-hidden />
-      {s.label}
-    </span>
-  );
-}
 
 /** Where a card's main click goes: an unfinished project resumes the wizard. */
 function openTarget(p: ProjectSummary) {

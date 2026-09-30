@@ -11,7 +11,8 @@ import {
   type RouterHistory,
 } from "@tanstack/react-router";
 import { useQuery, type QueryClient } from "@tanstack/react-query";
-import { ApiError, portalApi, portalKey, projectKey, type PortalState } from "./api";
+import { ApiError, portalApi, portalKey, projectApi, projectKey, type PortalState } from "./api";
+import { projectProblem } from "./lib/errors";
 import { getLastProject, setLastProject } from "./lib/lastProject";
 import { ProjectProvider } from "./lib/project";
 import { AppShell } from "./components/shell/AppShell";
@@ -24,12 +25,16 @@ import { ProjectsPage } from "./pages/ProjectsPage";
 import { AddProjectPage } from "./pages/AddProjectPage";
 import { InitProjectPage, type InitStep } from "./pages/InitProjectPage";
 import { SetupPage } from "./pages/SetupPage";
+import { GlobalSettingsPage } from "./pages/GlobalSettingsPage";
+import { ProjectSettingsPage } from "./pages/ProjectSettingsPage";
+import { ScansPage } from "./pages/ScansPage";
 import {
-  GlobalSettingsPage,
+  DegradedPage,
   NotFoundPage,
-  ProjectSettingsPage,
-  ScansPage,
-} from "./pages/placeholders";
+  NotInitialized,
+  ProblemAlert,
+  ProjectUnavailable,
+} from "./components/portal/EdgeStates";
 
 // The route tree for §4.9, code-based (a generated `routeTree.gen.ts` would not
 // exist yet when `tsc --noEmit` runs ahead of `vite build`).
@@ -109,18 +114,6 @@ export async function resolveLastProject(queryClient: QueryClient): Promise<stri
 
 // ---- root -------------------------------------------------------------------
 
-function DegradedPage({ message }: { message: string }) {
-  return (
-    <div className="mx-auto max-w-xl p-8">
-      <h1 className="text-lg font-semibold">WhyGraph could not start</h1>
-      <p className="mt-2 text-sm text-muted-foreground">
-        The portal database failed to open or migrate.
-      </p>
-      <pre className="mt-3 overflow-auto rounded-md bg-muted p-3 text-xs">{message}</pre>
-    </div>
-  );
-}
-
 function RootError({ error, reset }: { error: Error; reset: () => void }) {
   return (
     <div className="mx-auto max-w-xl p-8">
@@ -198,16 +191,28 @@ const globalSettingsRoute = createRoute({
 
 // ---- project layout ---------------------------------------------------------
 
-// Pages that read project data; on an unusable project they are replaced by a
-// notice instead of firing requests that can only fail.
-const DATA_PAGES = new Set(["explorer", "chat"]);
+// Pages that read project data; on an unusable project they are replaced by an
+// edge-state notice (screen 12) instead of firing requests that can only fail.
+const DATA_PAGES = new Set(["explorer", "chat", "scans"]);
 
 function ProjectLayout() {
   const { slug } = useParams({ strict: false }) as { slug: string };
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const page = pathname.split("/")[3];
   const project = useQuery({
     queryKey: projectKey(slug, "project"),
     queryFn: () => portalApi.project(slug),
+    retry: false,
+  });
+  // `stats: null` on a usable project means the backend refused to open its data
+  // (a symlink in the way, `409 unsafe_path`). One cheap data call tells which
+  // problem it is, so Explorer and Chat show the instruction instead of a bare error.
+  const usable = !!project.data && project.data.initialized && project.data.root_status === "ok";
+  const probeWanted = usable && DATA_PAGES.has(page) && project.data?.stats === null;
+  const probe = useQuery({
+    queryKey: projectKey(slug, "scans"),
+    queryFn: () => projectApi(slug).scans(),
+    enabled: probeWanted,
     retry: false,
   });
 
@@ -225,21 +230,22 @@ function ProjectLayout() {
     );
   }
 
-  const page = pathname.split("/")[3];
+  const notice = (node: React.ReactNode) => <div className="mx-auto w-full max-w-3xl p-6">{node}</div>;
   let body: React.ReactNode = <Outlet />;
   if (project.isLoading) {
     body = <p className="p-6 text-sm text-muted-foreground">Loading…</p>;
   } else if (project.isError) {
     body = <p className="p-6 text-sm text-destructive">Failed to load project: {project.error.message}</p>;
   } else if (project.data && DATA_PAGES.has(page)) {
-    if (!project.data.initialized) {
-      body = <p className="p-6 text-sm text-muted-foreground">This project is not initialized yet.</p>;
+    if (project.data.root_status === "ok" && project.data.initialized && probeWanted && probe.isLoading) {
+      // Hold the page back until the probe says its data can be opened.
+      body = <p className="p-6 text-sm text-muted-foreground">Loading…</p>;
     } else if (project.data.root_status !== "ok") {
-      body = (
-        <p className="p-6 text-sm text-muted-foreground">
-          The project folder is not available ({project.data.root_status}).
-        </p>
-      );
+      body = notice(<ProjectUnavailable project={project.data} />);
+    } else if (!project.data.initialized) {
+      body = notice(<NotInitialized slug={slug} />);
+    } else if (probe.isError && projectProblem(probe.error).kind === "unsafe_path") {
+      body = notice(<ProblemAlert problem={projectProblem(probe.error)} />);
     }
   }
 

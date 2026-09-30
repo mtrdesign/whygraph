@@ -15,3 +15,5 @@ class ResizeObserverStub {
 }
 globalThis.ResizeObserver ??= ResizeObserverStub;
 Element.prototype.scrollIntoView ??= () => {};
+// Base UI's scroll area asks for running animations when it settles.
+Element.prototype.getAnimations ??= () => [];

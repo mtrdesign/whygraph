@@ -56,3 +56,42 @@ export function selectionNotes(selected: readonly string[]): string[] {
   }
   return notes;
 }
+
+/**
+ * The entry to paste into an agent's MCP config to connect to a project, derived
+ * from the project's MCP URL. It mirrors `agents.render_http_snippet` (the same
+ * per-agent port forms as the files Initialize writes): Claude Code and VS Code
+ * interpolate the port, Cursor and Codex get it literally.
+ */
+export function mcpSnippet(agent: AgentInfo["id"], mcpUrl: string): string {
+  let host = "127.0.0.1";
+  let port = "8765";
+  let path = "/mcp";
+  try {
+    const url = new URL(mcpUrl);
+    host = url.hostname;
+    port = url.port || (url.protocol === "https:" ? "443" : "80");
+    path = url.pathname;
+  } catch {
+    // Fall through with the defaults; the snippet is still well-formed.
+  }
+  const at = (p: string) => `http://${host}:${p}${path}`;
+  const json = (value: unknown) => JSON.stringify(value, null, 2) + "\n";
+  switch (agent) {
+    case "claude":
+      return json({
+        mcpServers: { whygraph: { type: "http", url: at(`\${WHYGRAPH_PORT:-${port}}`) } },
+      });
+    case "cursor":
+      return json({ mcpServers: { whygraph: { url: at(port) } } });
+    case "vscode":
+      return json({
+        inputs: [
+          { id: "whygraph-port", type: "promptString", description: "WhyGraph portal port", default: port },
+        ],
+        servers: { whygraph: { type: "http", url: at("${input:whygraph-port}") } },
+      });
+    case "codex":
+      return `[mcp_servers.whygraph]\nurl = ${JSON.stringify(at(port))}\n`;
+  }
+}

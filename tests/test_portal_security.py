@@ -35,11 +35,18 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     ready,
     seed_codegraph,
 )
+from whygraph.core.config import Config, ConfigError
 from whygraph.core.safe_paths import UnsafePathError, check_inside
 from whygraph.portal import db as portal_db
 from whygraph.portal.migrate import ProjectMigrations
 from whygraph.portal.models import Project, Secret
 from whygraph.project_setup import PORTAL_ENV, PORTAL_JSON
+from whygraph.services.git import GitError, Repository
+from whygraph.services.git.commands import (
+    GitFetchDefaultCmd,
+    GitFetchRefsCmd,
+    GitRemoteUrlCmd,
+)
 
 MCP_HEADERS = {"Accept": "application/json, text/event-stream"}
 MCP_LIST = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
@@ -171,6 +178,81 @@ def test_migrations_refuse_a_symlinked_db(tmp_path: Path) -> None:
         ProjectMigrations().ensure(manual_ctx(root))
     assert not (root / ".whygraph" / "backups").exists()
     assert _tables(victim) == set()
+
+
+# ---------------------------------------------------------------------------
+# 2. [scan].remote as a git option (MAJOR)
+# ---------------------------------------------------------------------------
+
+EVIL_REMOTE = "--upload-pack=touch pwned;"
+
+
+@pytest.mark.parametrize(
+    "scan",
+    [
+        {"remote": EVIL_REMOTE},
+        {"remote": "origin; rm -rf /"},
+        {"remote": "-o"},
+        {"default_branch": "--output=/tmp/y"},
+    ],
+)
+def test_config_rejects_option_like_remote_and_branch(
+    tmp_path: Path, scan: dict
+) -> None:
+    with pytest.raises(ConfigError):
+        Config.from_dict({"scan": scan}, tmp_path)
+
+
+def test_config_accepts_ordinary_remote_and_branch(tmp_path: Path) -> None:
+    config = Config.from_dict(
+        {"scan": {"remote": "up-stream_2/x.y", "default_branch": "release/1.x"}},
+        tmp_path,
+    )
+    assert config.scan_remote == "up-stream_2/x.y"
+    assert config.scan_default_branch == "release/1.x"
+
+
+def test_git_commands_end_options_before_the_remote() -> None:
+    assert GitFetchRefsCmd("a:b", remote="up").argv()[-3:] == ["--", "up", "a:b"]
+    assert GitFetchDefaultCmd("up").argv()[-2:] == ["--", "up"]
+    assert GitRemoteUrlCmd("up").argv()[-2:] == ["--", "up"]
+
+
+def test_option_like_remote_never_executes(tmp_path: Path) -> None:
+    root = make_repo(tmp_path, "repo")
+    marker = tmp_path / "pwned"
+    repo = Repository(root, origin_remote=f"--upload-pack=touch {marker};")
+    with pytest.raises(GitError):
+        repo.fetch_refs(["refs/heads/main:refs/whygraph/x"])
+    assert repo.origin_url is None
+    assert not marker.exists()
+
+
+def test_import_drops_option_like_remote(
+    ready: TestClient, env: SimpleNamespace
+) -> None:
+    root = make_repo(env.shared, "evil")
+    (root / "whygraph.toml").write_text(
+        f'[scan]\nremote = "{EVIL_REMOTE}"\ndefault_branch = "--output=/tmp/y"\n'
+        'forge = "off"\n'
+    )
+    body = add_local(ready, root)
+    dropped = {d["key"] for d in body["import"]["dropped"]}
+    assert {"scan.remote", "scan.default_branch"} <= dropped
+    config = ready.get("/api/projects/evil/config").json()["config"]
+    assert config == {"scan": {"forge": "off"}}
+    assert ready.get("/api/projects/evil").status_code == 200
+
+
+def test_put_config_rejects_option_like_remote(
+    ready: TestClient, env: SimpleNamespace
+) -> None:
+    add_local(ready, make_repo(env.shared, "demo"))
+    response = ready.put(
+        "/api/projects/demo/config", json={"config": {"scan": {"remote": "-x"}}}
+    )
+    assert response.status_code == 422
+    assert ready.get("/api/projects/demo/config").json()["config"] == {}
 
 
 # ---------------------------------------------------------------------------

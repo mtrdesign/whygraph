@@ -26,6 +26,7 @@ from __future__ import annotations
 import copy
 import logging
 import os
+import re
 import threading
 import tomllib
 from collections.abc import Mapping
@@ -620,6 +621,65 @@ _LLM_SECTIONS: tuple[tuple[str, str, type], ...] = (
 )
 
 
+REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+"""What ``[scan].remote`` may be: a plain remote name, never a git option."""
+
+
+def check_scan_remote(value: str) -> str:
+    """Return ``value`` if it is a safe git remote name.
+
+    ``[scan].remote`` is passed to ``git fetch`` / ``git remote get-url``;
+    a value such as ``--upload-pack=<cmd>`` would be parsed as an option
+    and run a command. Only :data:`REMOTE_NAME_RE` is accepted.
+
+    Parameters
+    ----------
+    value : str
+        The stripped, non-empty ``[scan].remote``.
+
+    Returns
+    -------
+    str
+        ``value`` unchanged.
+
+    Raises
+    ------
+    ConfigError
+        If ``value`` does not match :data:`REMOTE_NAME_RE`.
+    """
+    if not isinstance(value, str) or not REMOTE_NAME_RE.match(value):
+        raise ConfigError(
+            f"[scan].remote must be a git remote name "
+            f"(letters, digits, '.', '_', '/', '-'), got {value!r}"
+        )
+    return value
+
+
+def check_default_branch(value: str) -> str:
+    """Return ``value`` unless it could be read as a git option.
+
+    Parameters
+    ----------
+    value : str
+        The stripped, non-empty ``[scan].default_branch``.
+
+    Returns
+    -------
+    str
+        ``value`` unchanged.
+
+    Raises
+    ------
+    ConfigError
+        If ``value`` starts with ``-`` (or is not a string).
+    """
+    if not isinstance(value, str) or value.startswith("-"):
+        raise ConfigError(
+            f"[scan].default_branch must not start with '-', got {value!r}"
+        )
+    return value
+
+
 def _parse_hooks(value: object) -> bool | tuple[str, ...]:
     """Normalize the *shape* of ``[scan].hooks``.
 
@@ -942,7 +1002,8 @@ class Config:
         Name of the git remote whose URL is inspected to resolve the
         forge for ``"github"`` / ``"auto"``. Default ``"origin"``.
         Loaded from ``[scan].remote``; an empty value falls back to
-        ``"origin"``.
+        ``"origin"``. Must match :data:`REMOTE_NAME_RE` (see
+        :func:`check_scan_remote`) - it reaches ``git`` argv.
     scan_token : str or None
         GitHub token used to authenticate the ``gh`` CLI during the
         remote crawl. Loaded from ``[scan].token``; an empty value is
@@ -965,7 +1026,8 @@ class Config:
         value is treated as ``None``, which auto-resolves from
         ``origin/HEAD`` then ``origin/main`` / ``origin/master``. An
         unresolvable value is not an error — it degrades to "cannot
-        judge" and is reported in the scan panel.
+        judge" and is reported in the scan panel. A value starting with
+        ``-`` is (:func:`check_default_branch`).
     whygraph_db : Path or None
         Override path to the WhyGraph SQLite DB. If ``None``, callers
         use the project-relative default ``.whygraph/whygraph.db``.
@@ -1126,7 +1188,7 @@ class Config:
             data["scan_forge"] = forge or "off"
         if "remote" in scan:
             remote = (scan.pop("remote") or "").strip()
-            data["scan_remote"] = remote or "origin"
+            data["scan_remote"] = check_scan_remote(remote) if remote else "origin"
         if "token" in scan:
             token = (scan.pop("token") or "").strip()
             data["scan_token"] = token or None
@@ -1134,7 +1196,9 @@ class Config:
             data["scan_hooks"] = _parse_hooks(scan.pop("hooks"))
         if "default_branch" in scan:
             branch = (scan.pop("default_branch") or "").strip()
-            data["scan_default_branch"] = branch or None
+            data["scan_default_branch"] = (
+                check_default_branch(branch) if branch else None
+            )
         for unknown in scan:
             _log.warning("ignoring unknown key in [scan]: %r", unknown)
 

@@ -11,7 +11,9 @@ has an allowlist (plan section 4.2.1):
   ``[analyze]`` / ``[rationale]`` / ``[chat]`` tuning keys and
   ``[scan].forge`` / ``remote`` / ``default_branch`` / ``hooks``. Everything
   else in a repo file is dropped and reported; API keys and the scan token
-  are moved into the secret store instead (:func:`preview_import`).
+  are moved into the secret store instead (:func:`preview_import`). A
+  ``remote`` / ``default_branch`` that ``Config`` would reject (it could
+  reach git as an option) is dropped and reported too.
 * Rule 1b - :data:`PUT_ALLOWLIST`: 1a plus the connection-only keys
   ``[llm.<provider>].base_url`` / ``host`` / ``timeout_sec``. A value the
   user types in the UI is trusted; changing an endpoint clears that
@@ -37,8 +39,11 @@ from whygraph.core.config import (
     CONFIG_FILENAME,
     AnalyzeConfig,
     ChatConfig,
+    ConfigError,
     LlmConfig,
     RationaleConfig,
+    check_default_branch,
+    check_scan_remote,
     normalize_v2,
 )
 
@@ -274,16 +279,49 @@ def preview_import(root: Path) -> ImportPreview:
         )
 
     kept, dropped = filter_layer(layer, IMPORT_ALLOWLIST)
+    dropped += _drop_unsafe_git_names(kept)
     preview.layer = kept
-    for key in dropped:
+    for key in sorted(dropped):
         if key.startswith("llm.") and key.rsplit(".", 1)[-1] in ("base_url", "host"):
             hint = _ENDPOINT_HINT
         elif key in ("whygraph_db", "codegraph_db"):
             hint = _DB_PATH_HINT
+        elif key in _GIT_NAME_CHECKS:
+            hint = _GIT_NAME_HINT
         else:
             hint = _DEFAULT_HINT
         preview.dropped.append({"key": key, "hint": hint})
     return preview
+
+
+_GIT_NAME_CHECKS = {
+    "scan.remote": ("remote", check_scan_remote),
+    "scan.default_branch": ("default_branch", check_default_branch),
+}
+_GIT_NAME_HINT = "not a valid git name (it would reach git as an option)"
+
+
+def _drop_unsafe_git_names(layer: dict) -> list[str]:
+    """Pop ``[scan].remote`` / ``default_branch`` values ``Config`` would reject."""
+    scan = layer.get("scan")
+    if not isinstance(scan, dict):
+        return []
+    dropped: list[str] = []
+    for key, (name, check) in _GIT_NAME_CHECKS.items():
+        value = scan.get(name)
+        if value is None:
+            continue
+        stripped = value.strip() if isinstance(value, str) else value
+        if stripped == "":
+            continue  # empty means "the default"
+        try:
+            check(stripped)
+        except ConfigError:
+            del scan[name]
+            dropped.append(key)
+    if not scan:
+        del layer["scan"]
+    return dropped
 
 
 __all__ = [

@@ -60,7 +60,7 @@ def _parse_remote_url(result: CompletedProcess[str]) -> str | None:
 
 
 class GitRemoteUrlCmd(ShellCommand[str | None]):
-    """``git remote get-url <remote>`` — the remote's URL, or ``None`` if unset.
+    """``git remote get-url -- <remote>`` — the remote's URL, or ``None`` if unset.
 
     Must be run with ``check=False`` so the "no such remote" exit
     collapses to ``None`` rather than raising
@@ -76,7 +76,8 @@ class GitRemoteUrlCmd(ShellCommand[str | None]):
         self.remote = remote
 
     def argv(self) -> list[str]:
-        return ["git", "remote", "get-url", self.remote]
+        # `--` ends options: a remote read from config is never a flag.
+        return ["git", "remote", "get-url", "--", self.remote]
 
     def parse(self, result: CompletedProcess[str]) -> str | None:
         return _parse_remote_url(result)
@@ -341,7 +342,7 @@ class GitDiffTreeFileChangesCmd(ShellCommand[tuple[FileChange, ...]]):
 
 
 class GitFetchRefsCmd(ShellCommand[None]):
-    """``git fetch <remote> <refspec...>`` — fetch one or more refspecs in one call.
+    """``git fetch --no-tags -- <remote> <refspec...>`` — fetch refspecs in one call.
 
     Carries every refspec in a single ``git fetch`` invocation so the
     squash-origin enricher pins all its candidate PR refs with one network
@@ -364,7 +365,9 @@ class GitFetchRefsCmd(ShellCommand[None]):
         self.remote = remote
 
     def argv(self) -> list[str]:
-        return ["git", "fetch", "--no-tags", self.remote, *self.refspecs]
+        # `--` ends options: a remote read from config is never a flag
+        # (`--upload-pack=<cmd>` would run a command).
+        return ["git", "fetch", "--no-tags", "--", self.remote, *self.refspecs]
 
     def parse(self, result: CompletedProcess[str]) -> None:
         return None
@@ -400,7 +403,7 @@ class GitCloneCmd(ShellCommand[None]):
 
 
 class GitFetchDefaultCmd(ShellCommand[None]):
-    """``git fetch --no-tags <remote>`` with https-only transport and the host-scoped helper.
+    """``git fetch --no-tags -- <remote>`` with https-only transport and the host-scoped helper.
 
     Fetches the remote's configured refspec, so every remote-tracking
     branch (the default branch included) moves. Same credential and
@@ -416,7 +419,7 @@ class GitFetchDefaultCmd(ShellCommand[None]):
         self.remote = remote
 
     def argv(self) -> list[str]:
-        return ["git", *GITHUB_GIT_CONFIG, "fetch", "--no-tags", self.remote]
+        return ["git", *GITHUB_GIT_CONFIG, "fetch", "--no-tags", "--", self.remote]
 
     def parse(self, result: CompletedProcess[str]) -> None:
         return None

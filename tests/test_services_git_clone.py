@@ -254,7 +254,7 @@ def test_clone_argv_is_https_only_with_reset_then_inline_helper():
 def test_fetch_argv_carries_the_same_config():
     argv = GitFetchDefaultCmd().argv()
     assert list(GITHUB_GIT_CONFIG) == argv[1 : 1 + len(GITHUB_GIT_CONFIG)]
-    assert argv[-3:] == ["fetch", "--no-tags", "origin"]
+    assert argv[-4:] == ["fetch", "--no-tags", "--", "origin"]
 
 
 @pytest.mark.parametrize("scheme", ["file", "path"])

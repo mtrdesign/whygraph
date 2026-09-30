@@ -30,6 +30,7 @@ forge = "off"                 # source-control forge for the PR/issue crawl:
                               #   "github" - pull PRs/issues from the GitHub remote
                               #   "auto"   - detect from the remote URL (github only, for now)
 remote = "origin"             # git remote whose URL is inspected for forge github/auto
+                              # (a plain name: letters, digits, ".", "_", "/", "-")
 # token = "ghp_..."           # GitHub token for the gh CLI. Default: read GH_TOKEN /
                               # GITHUB_TOKEN from env (or an existing `gh auth login`).
 hooks = true                  # auto-rescan git hooks installed by `whygraph init`:
@@ -40,6 +41,7 @@ hooks = true                  # auto-rescan git hooks installed by `whygraph ini
 # default_branch = "main"     # the branch treated as "shipped history". Default:
                               # resolved from origin/HEAD, else origin/main, else
                               # origin/master. Set for repos on develop / trunk.
+                              # Must not start with "-".
 
 [llm]
 # model = "anthropic/claude-opus-4-7"  # default model for every role, "provider/model"

@@ -23,6 +23,8 @@ WhyGraph is run:
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import shutil
 import subprocess
@@ -40,6 +42,8 @@ fallback runs ``codegraph`` inside it. ``whygraph scan`` exposes
 also pass an explicit ``image=`` to the functions here. Ignored when a
 local ``codegraph`` binary is used instead.
 """
+
+_log = logging.getLogger(__name__)
 
 _CREDENTIAL_ENV: frozenset[str] = frozenset({"GH_TOKEN", "WHYGRAPH_GIT_TOKEN"})
 """Exact env names withheld from the ``codegraph`` subprocess (besides ``*_API_KEY``)."""
@@ -108,7 +112,10 @@ def refresh_codegraph_index(
     When the database is missing, behaves like :func:`ensure_codegraph_db`
     (full ``init -i``). When it already exists, runs ``codegraph sync -q``
     — an incremental update of just the changes since the last index,
-    which is what ``whygraph scan`` wants on each run.
+    which is what ``whygraph scan`` wants on each run — unless the index
+    was built by a CodeGraph with a different *extraction version* than
+    the binary about to run: ``sync`` keeps such an index as is ("Already
+    up to date"), so it is rebuilt with ``codegraph index -q`` instead.
 
     Parameters
     ----------
@@ -139,8 +146,40 @@ def refresh_codegraph_index(
     if not db_path.exists():
         return ensure_codegraph_db(project_root, image=image, capture=capture)
 
-    _run_codegraph(project_root, ["sync", "-q"], image=image, capture=capture)
+    if _extraction_version_changed(project_root, image=image):
+        _run_codegraph(project_root, ["index", "-q"], image=image, capture=capture)
+    else:
+        _run_codegraph(project_root, ["sync", "-q"], image=image, capture=capture)
     return db_path
+
+
+def _extraction_version_changed(project_root: Path, *, image: str | None) -> bool:
+    """Whether the index predates (or postdates) the binary's extractor.
+
+    Reads ``codegraph status --json``'s ``index`` block. Anything
+    unexpected - the command failing, output that is not JSON, a CodeGraph
+    without those fields - means "no", so a refresh never fails for it.
+    A differing CodeGraph *version* with the same extraction version does
+    not count: only the extractor decides what an index contains.
+    """
+    try:
+        out = _run_codegraph(
+            project_root, ["status", "--json"], image=image, capture=True
+        )
+        info = json.loads(out[out.index("{") :])["index"]
+        built = info["builtWithExtractionVersion"]
+        current = info["currentExtractionVersion"]
+    except (CodeGraphBootstrapError, ValueError, KeyError, TypeError):
+        return False
+    if not isinstance(built, int) or not isinstance(current, int) or built == current:
+        return False
+    _log.info(
+        "CodeGraph index was built with extraction version %s, this CodeGraph has %s"
+        " - rebuilding it (codegraph index)",
+        built,
+        current,
+    )
+    return True
 
 
 def _run_codegraph(
@@ -149,7 +188,7 @@ def _run_codegraph(
     *,
     image: str | None,
     capture: bool = False,
-) -> None:
+) -> str:
     """Run a ``codegraph`` subcommand against ``project_root``.
 
     Prefers a local ``codegraph`` binary (the container path — no Docker);
@@ -170,6 +209,11 @@ def _run_codegraph(
         When ``True``, capture stdout/stderr rather than streaming them to
         the terminal, and fold the captured tail into the error message on
         failure. Default ``False`` (stream live).
+
+    Returns
+    -------
+    str
+        The captured stdout when ``capture`` is set, else ``""``.
 
     Raises
     ------
@@ -207,7 +251,7 @@ def _run_codegraph(
         )
 
     try:
-        subprocess.run(
+        result = subprocess.run(
             cmd,
             check=True,
             cwd=cwd,
@@ -225,6 +269,7 @@ def _run_codegraph(
         raise CodeGraphBootstrapError(
             f"`codegraph {label}` failed (exit {exc.returncode}) — see output above"
         ) from exc
+    return (result.stdout or "") if capture else ""
 
 
 def _codegraph_env() -> dict[str, str]:

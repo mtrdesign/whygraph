@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createBrowserHistory } from "@tanstack/react-router";
 import { createAppRouter } from "./router";
 import { TooltipProvider } from "./components/ui/tooltip";
+import { Toaster } from "./components/ui/sonner";
 import { ThemeProvider } from "./theme";
 import "./index.css";
 
@@ -21,6 +22,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       <QueryClientProvider client={queryClient}>
         <TooltipProvider>
           <RouterProvider router={router} />
+          <Toaster />
         </TooltipProvider>
       </QueryClientProvider>
     </ThemeProvider>

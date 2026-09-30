@@ -1,8 +1,8 @@
 import type { ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 
-// Route components for screens that later steps build (12: setup / projects /
-// add wizard / init; 13: scans / settings / project overview / edge states). They
+// Route components for screens that step 13 builds (scans / settings / project
+// overview / edge states). They
 // exist now so the route tree, breadcrumbs and sidebar are complete and testable.
 
 function Placeholder({ title, children }: { title: string; children?: ReactNode }) {
@@ -14,11 +14,8 @@ function Placeholder({ title, children }: { title: string; children?: ReactNode 
   );
 }
 
-export const SetupPage = () => <Placeholder title="Welcome to WhyGraph">First-run setup.</Placeholder>;
-export const AddProjectPage = () => <Placeholder title="Add project" />;
 export const GlobalSettingsPage = () => <Placeholder title="Settings" />;
 export const ProjectSettingsPage = () => <Placeholder title="Project settings" />;
-export const InitProjectPage = () => <Placeholder title="Initialize project" />;
 export const ScansPage = ({ runId }: { runId?: string }) => (
   <Placeholder title={runId ? `Scan run #${runId}` : "Scans"} />
 );

@@ -21,14 +21,14 @@ import { ChatView } from "./components/chat/ChatView";
 import { ExplorerPage } from "./pages/ExplorerPage";
 import { ProjectHome } from "./pages/ProjectHome";
 import { ProjectsPage } from "./pages/ProjectsPage";
+import { AddProjectPage } from "./pages/AddProjectPage";
+import { InitProjectPage, type InitStep } from "./pages/InitProjectPage";
+import { SetupPage } from "./pages/SetupPage";
 import {
-  AddProjectPage,
   GlobalSettingsPage,
-  InitProjectPage,
   NotFoundPage,
   ProjectSettingsPage,
   ScansPage,
-  SetupPage,
 } from "./pages/placeholders";
 
 // The route tree for §4.9, code-based (a generated `routeTree.gen.ts` would not
@@ -287,9 +287,15 @@ const projectSettingsRoute = createRoute({
   path: "settings",
   component: ProjectSettingsPage,
 });
+const INIT_STEPS: readonly InitStep[] = ["configure", "initialize", "scan"];
+
 const initRoute = createRoute({
   getParentRoute: () => projectRoute,
   path: "init",
+  // `?step=` picks the wizard step; absent, the page chooses from the project's state.
+  validateSearch: (search: Record<string, unknown>): { step?: InitStep } => ({
+    step: INIT_STEPS.find((s) => s === search.step),
+  }),
   component: InitProjectPage,
 });
 

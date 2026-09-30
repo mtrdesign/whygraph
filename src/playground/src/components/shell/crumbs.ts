@@ -9,7 +9,7 @@ const PROJECT_PAGES: Record<string, string> = {
   chat: "Chat",
   scans: "Scans",
   settings: "Settings",
-  init: "Initialize",
+  init: "Set up",
 };
 
 /**

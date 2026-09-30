@@ -315,6 +315,47 @@ jobs:
       - name: Confirm codegraph resolves on PATH (no-ENTRYPOINT invariant)
         run: docker run --rm "${REGISTRY_IMAGE}:${TAG}" sh -lc 'command -v codegraph'
 
+      # Proves the portal actually boots from the published image: runs
+      # `whygraph portal` detached the way the `whygraph up` shim does (host
+      # user, loopback publish, in-image 0.0.0.0 bind) and reads its state
+      # endpoint. The request carries the CSRF header and a 127.0.0.1 Host, or
+      # the portal's guard would reject it. Post-push by design: a pre-push gate
+      # would need `load: true` plus a run step in `build`.
+      - name: Run the portal from the published image and probe /api/portal/state
+        run: |
+          set -eu
+          image="${REGISTRY_IMAGE}:${TAG}"
+          port=8765
+          data="${RUNNER_TEMP}/whygraph-portal-data"
+          mkdir -p "$data"
+          chmod 700 "$data"
+          docker run -d --init --name portal-smoke \
+            --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            --mount "type=bind,source=${data},target=/data" \
+            -e WHYGRAPH_DATA=/data -e WHYGRAPH_MODE=local -e WHYGRAPH_PORT="$port" \
+            -p "127.0.0.1:${port}:${port}" \
+            "$image" whygraph portal --host 0.0.0.0 --port "$port"
+          ok=""
+          for _ in $(seq 1 30); do
+            if curl -fsS -o state.json \
+                 -H 'X-WhyGraph-Client: 1' -H "Host: 127.0.0.1:${port}" \
+                 "http://127.0.0.1:${port}/api/portal/state"; then
+              ok=1
+              break
+            fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::the portal did not answer /api/portal/state"
+            docker logs portal-smoke || true
+            docker rm -f portal-smoke || true
+            exit 1
+          fi
+          cat state.json
+          grep -q '"setup_complete"' state.json \
+            || { echo "::error::unexpected /api/portal/state body"; docker rm -f portal-smoke || true; exit 1; }
+          docker rm -f portal-smoke
+
   # --- 5. PR-time smoke build: amd64, never pushed -------------------------
   # Build-only: no `load: true`, no `docker run`. Proves the Dockerfile builds
   # before a release depends on it; does not prove the image runs (that is

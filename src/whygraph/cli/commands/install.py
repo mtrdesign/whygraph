@@ -68,6 +68,265 @@ exec docker run --rm -i $tty \\
     "$IMAGE" __NAME__ "$@"
 """
 
+_PORTAL_VERBS = r"""
+# --- portal verbs: up / down / status / logs / folders ---------------------
+# `whygraph up` runs the portal in ONE named, long-lived container. Nothing from
+# the host environment reaches it (keys live in the portal DB), so no `-e` here
+# passes a credential variable. Config lives under ~/.config/whygraph, the
+# portal's data under ~/.local/share/whygraph (mounted at /data).
+portal_die() { echo "whygraph: $*" >&2; exit 2; }
+
+portal_state() {
+    docker inspect --type container -f '{{.State.Status}}' "$PORTAL" 2>/dev/null || true
+}
+
+portal_label() {
+    docker inspect --type container -f '{{index .Config.Labels "'"$1"'"}}' "$PORTAL" 2>/dev/null || true
+}
+
+portal_valid_port() {
+    case "$1" in ''|*[!0-9]*) portal_die "invalid port '$1'" ;; esac
+    if [ "$1" -lt 1 ] || [ "$1" -gt 65535 ]; then portal_die "invalid port '$1'"; fi
+}
+
+# Precedence: the persisted port (`up --port N` writes it), then the exported
+# WHYGRAPH_PORT, then 8765.
+portal_resolve_port() {
+    PORT=""
+    if [ -f "$CONF/port" ]; then read -r PORT < "$CONF/port" || true; fi
+    [ -n "$PORT" ] || PORT="${WHYGRAPH_PORT:-8765}"
+    portal_valid_port "$PORT"
+}
+
+# The data dir must exist, owned by the host user, before `docker run`: a
+# missing bind source is otherwise created root-owned on a Linux engine.
+portal_prepare() {
+    mkdir -p "$DATA" "$HOME/.config/whygraph" && chmod 700 "$DATA"
+    DATA=$(cd -- "$DATA" && pwd -P)
+    case "$DATA" in *,*|*\"*) portal_die "data directory '$DATA' must not contain ',' or a double quote" ;; esac
+    touch "$FOLDERS_FILE"
+}
+
+# True when $1 is the data dir, inside it, or contains it.
+portal_overlaps_data() {
+    case "$1/" in "$DATA"/*) return 0 ;; esac
+    case "$DATA/" in "$1"/*) return 0 ;; esac
+    return 1
+}
+
+# Validate and canonicalise a shared folder into $NORM (exits 2 on refusal).
+# ':' would break WHYGRAPH_SHARED_FOLDERS, ',' and '"' would break --mount.
+portal_norm_folder() {
+    case "$1" in
+        *:*|*,*|*\"*|*"$NL"*)
+            portal_die "shared folder '$1': ':' ',' double quotes and newlines are not allowed in the path" ;;
+    esac
+    [ -d "$1" ] || portal_die "shared folder '$1' is not a directory"
+    NORM=$(cd -- "$1" && pwd -P) || portal_die "cannot resolve shared folder '$1'"
+    case "$NORM" in
+        *:*|*,*|*\"*|*"$NL"*)
+            portal_die "shared folder '$NORM': ':' ',' double quotes and newlines are not allowed in the path" ;;
+    esac
+    [ "$NORM" != "/" ] || portal_die "refusing to share '/'"
+    if portal_overlaps_data "$NORM"; then
+        portal_die "shared folder '$NORM' overlaps the data directory '$DATA'"
+    fi
+}
+
+# Validate one --add-folder argument and queue it (deduped) for the folders file.
+portal_queue_folder() {
+    portal_norm_folder "$1"
+    if [ "$NORM" = "$(cd -- "$HOME" && pwd -P)" ]; then
+        echo "warning: sharing your home directory exposes every project under it; prefer a narrower folder" >&2
+    fi
+    if grep -Fxq -e "$NORM" "$FOLDERS_FILE"; then return 0; fi
+    case "$NL$pending$NL" in *"$NL$NORM$NL"*) return 0 ;; esac
+    pending="${pending:+$pending$NL}$NORM"
+}
+
+# Once only (sentinel): names of credential variables set on the host, never values.
+portal_env_hint() {
+    [ ! -e "$CONF/env-hint-shown" ] || return 0
+    names=""
+    for v in GH_TOKEN GITHUB_TOKEN ANTHROPIC_API_KEY OPENAI_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY; do
+        eval "val=\${$v:-}"
+        if [ -n "$val" ]; then names="${names:+$names, }$v"; fi
+    done
+    [ -n "$names" ] || return 0
+    echo "note: $names are set in your shell but do not reach the portal. Enter keys and tokens under Settings in the portal." >&2
+    : > "$CONF/env-hint-shown"
+}
+
+portal_up() {
+    new_port=""
+    port_given=""
+    pending=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --port) [ $# -ge 2 ] || portal_die "--port needs a value"; new_port="$2"; port_given=1; shift 2 ;;
+            --port=*) new_port="${1#--port=}"; port_given=1; shift ;;
+            --add-folder) [ $# -ge 2 ] || portal_die "--add-folder needs a directory"; portal_queue_folder "$2"; shift 2 ;;
+            --add-folder=*) portal_queue_folder "${1#--add-folder=}"; shift ;;
+            -h|--help) echo "usage: whygraph up [--port N] [--add-folder DIR]..."; exit 0 ;;
+            *) portal_die "whygraph up: unknown arg '$1'" ;;
+        esac
+    done
+    [ -z "$port_given" ] || portal_valid_port "$new_port"
+    [ -z "$pending" ] || printf '%s\n' "$pending" >> "$FOLDERS_FILE"
+    [ -z "$port_given" ] || printf '%s\n' "$new_port" > "$CONF/port"
+    portal_resolve_port
+
+    # Same-path bind mounts, built with `set --` so paths with spaces survive.
+    # `--mount` (unlike `-v`) errors on a missing source instead of creating it.
+    set -- --mount "type=bind,source=$DATA,target=/data"
+    FOLDERS_JOINED=""
+    while IFS= read -r f || [ -n "$f" ]; do
+        [ -n "$f" ] || continue
+        [ -d "$f" ] || portal_die "shared folder '$f' no longer exists (remove it: whygraph folders --remove '$f')"
+        if portal_overlaps_data "$f"; then portal_die "shared folder '$f' overlaps the data directory '$DATA'"; fi
+        set -- "$@" --mount "type=bind,source=$f,target=$f"
+        FOLDERS_JOINED="${FOLDERS_JOINED:+$FOLDERS_JOINED:}$f"
+    done < "$FOLDERS_FILE"
+
+    URL="http://127.0.0.1:$PORT"
+    if docker inspect --type container -f '{{.State.Status}}' whygraph-serve >/dev/null 2>&1; then
+        echo "warning: a 'whygraph-serve' container from the old playground still exists (it may hold port 8765). Remove it with: whygraph serve --stop" >&2
+    fi
+
+    state=$(portal_state)
+    if [ -n "$state" ]; then
+        case "$state" in
+            running|restarting)
+                changed=""
+                [ "$(portal_label whygraph.folders)" = "$FOLDERS_JOINED" ] || changed="$changed folders"
+                [ "$(portal_label whygraph.port)" = "$PORT" ] || changed="$changed port"
+                [ "$(portal_label whygraph.image)" = "$IMAGE" ] || changed="$changed image"
+                if [ -z "$changed" ]; then
+                    if [ "$state" = "restarting" ]; then
+                        echo "whygraph portal is restarting (see: whygraph logs)" >&2
+                    else
+                        echo "whygraph portal already running at $URL"
+                    fi
+                    portal_env_hint
+                    return 0
+                fi
+                echo "whygraph portal: recreating (changed:$changed)" >&2
+                docker stop -t "$GRACE" "$PORTAL" >/dev/null
+                docker rm "$PORTAL" >/dev/null ;;
+            *) docker rm -f "$PORTAL" >/dev/null ;;
+        esac
+    fi
+
+    docker network create whygraph-portal >/dev/null 2>&1 || true
+    docker run -d --init --name "$PORTAL" --restart unless-stopped \
+        --network whygraph-portal --add-host=host.docker.internal:host-gateway \
+        --label "whygraph.folders=$FOLDERS_JOINED" --label "whygraph.port=$PORT" \
+        --label "whygraph.image=$IMAGE" \
+        -p "127.0.0.1:$PORT:$PORT" \
+        --user "$(id -u):$(id -g)" -e HOME=/tmp \
+        "$@" \
+        -e WHYGRAPH_DATA=/data -e WHYGRAPH_SHARED_FOLDERS="$FOLDERS_JOINED" \
+        -e WHYGRAPH_MODE=local -e WHYGRAPH_PORT="$PORT" \
+        "$IMAGE" whygraph portal --host 0.0.0.0 --port "$PORT" >/dev/null
+    echo "whygraph portal running at $URL"
+    portal_env_hint
+}
+
+portal_down() {
+    [ $# -eq 0 ] || portal_die "whygraph down takes no arguments"
+    state=$(portal_state)
+    if [ -z "$state" ]; then echo "whygraph portal is not running" >&2; return 0; fi
+    docker stop -t "$GRACE" "$PORTAL" >/dev/null
+    docker rm "$PORTAL" >/dev/null
+    echo "whygraph portal stopped"
+}
+
+portal_status() {
+    [ $# -eq 0 ] || portal_die "whygraph status takes no arguments"
+    state=$(portal_state)
+    if [ -z "$state" ]; then echo "whygraph portal: not created (start it with: whygraph up)"; return 1; fi
+    echo "whygraph portal: $state"
+    echo "url: http://127.0.0.1:$(portal_label whygraph.port)"
+    echo "image: $(portal_label whygraph.image)"
+    folders=$(portal_label whygraph.folders)
+    if [ -z "$folders" ]; then
+        echo "folders: (none)"
+    else
+        echo "folders:"
+        rest="$folders"
+        while [ -n "$rest" ]; do
+            case "$rest" in
+                *:*) item="${rest%%:*}"; rest="${rest#*:}" ;;
+                *) item="$rest"; rest="" ;;
+            esac
+            echo "  $item"
+        done
+    fi
+    [ "$state" = "running" ]
+}
+
+portal_logs() {
+    [ $# -eq 0 ] || portal_die "whygraph logs takes no arguments"
+    exec docker logs -f "$PORTAL"
+}
+
+portal_folders() {
+    remove=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --remove) [ $# -ge 2 ] || portal_die "--remove needs a directory"; remove="$2"; shift 2 ;;
+            --remove=*) remove="${1#--remove=}"; shift ;;
+            *) portal_die "whygraph folders: unknown arg '$1'" ;;
+        esac
+    done
+    if [ -z "$remove" ]; then
+        if [ -s "$FOLDERS_FILE" ]; then cat "$FOLDERS_FILE"; else echo "no shared folders (add one: whygraph up --add-folder DIR)" >&2; fi
+        return 0
+    fi
+    target="$remove"
+    if [ -d "$remove" ]; then target=$(cd -- "$remove" && pwd -P); fi
+    found=""
+    : > "$FOLDERS_FILE.tmp"
+    while IFS= read -r f || [ -n "$f" ]; do
+        [ -n "$f" ] || continue
+        if [ "$f" = "$target" ]; then found=1; else printf '%s\n' "$f" >> "$FOLDERS_FILE.tmp"; fi
+    done < "$FOLDERS_FILE"
+    if [ -z "$found" ]; then
+        rm -f "$FOLDERS_FILE.tmp"
+        echo "whygraph: '$target' is not a shared folder (see: whygraph folders)" >&2
+        return 1
+    fi
+    mv "$FOLDERS_FILE.tmp" "$FOLDERS_FILE"
+    echo "removed shared folder $target"
+    # A running portal keeps its old mounts until it is recreated.
+    case "$(portal_state)" in
+        running|restarting) portal_prepare; portal_up ;;
+    esac
+}
+
+portal_main() {
+    verb="$1"; shift
+    PORTAL="whygraph-portal"
+    CONF="$HOME/.config/whygraph"
+    FOLDERS_FILE="$CONF/folders"
+    DATA="${WHYGRAPH_DATA:-$HOME/.local/share/whygraph}"
+    GRACE="${WHYGRAPH_STOP_GRACE:-30}"
+    NL="$(printf '\n_')"; NL="${NL%_}"
+    case "$verb" in
+        up) portal_prepare; portal_up "$@" ;;
+        down) portal_down "$@" ;;
+        status) portal_status "$@" ;;
+        logs) portal_logs "$@" ;;
+        folders) mkdir -p "$CONF"; touch "$FOLDERS_FILE"; portal_folders "$@" ;;
+    esac
+}
+
+case "${1:-}" in
+    up|down|status|logs|folders) portal_main "$@"; exit 0 ;;
+esac
+# --- end portal verbs ------------------------------------------------------
+"""
+
 # The `whygraph` shim carries a `serve` branch on top of the ephemeral path:
 # every command runs ephemerally EXCEPT `whygraph serve`, which publishes a
 # loopback port and manages a named, long-lived container. The shim (host shell)
@@ -77,11 +336,12 @@ exec docker run --rm -i $tty \\
 _WHYGRAPH_SHIM_TEMPLATE = """\
 #!/usr/bin/env sh
 # WhyGraph shim. Every command runs ephemerally in the container EXCEPT
-# `whygraph serve`, which publishes a port and manages the server container.
+# `whygraph up|down|status|logs|folders` (the portal container) and
+# `whygraph serve`, which publish a port and manage a long-lived container.
 # Generated by `whygraph install`; safe to re-generate.
 set -eu
 IMAGE="${WHYGRAPH_IMAGE:-__IMAGE__}"
-
+__PORTAL_VERBS__
 if [ "${1:-}" = "serve" ]; then
     NAME="whygraph-serve"
     PORT="${WHYGRAPH_PORT:-8765}"
@@ -154,11 +414,15 @@ def _shim(name: str, image: str) -> str:
     """Render one shim's body for ``name``, baking ``image`` as its default.
 
     ``whygraph`` renders from :data:`_WHYGRAPH_SHIM_TEMPLATE` (carries the
-    ``serve`` branch); ``whygraph-mcp`` renders from the simple shared
+    portal verbs ``up`` / ``down`` / ``status`` / ``logs`` / ``folders`` from
+    :data:`_PORTAL_VERBS`, and the ``serve`` branch); ``whygraph-mcp`` renders
+    from the simple shared
     :data:`_SHIM_TEMPLATE`.
     """
     if name == "whygraph":
-        return _WHYGRAPH_SHIM_TEMPLATE.replace("__IMAGE__", image)
+        return _WHYGRAPH_SHIM_TEMPLATE.replace(
+            "__PORTAL_VERBS__", _PORTAL_VERBS
+        ).replace("__IMAGE__", image)
     return _SHIM_TEMPLATE.replace("__NAME__", name).replace("__IMAGE__", image)
 
 

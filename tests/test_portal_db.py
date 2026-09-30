@@ -618,19 +618,25 @@ def test_changing_an_endpoint_clears_that_scopes_key_only(data: Path) -> None:
             },
         )
         assert pw_secrets.secret_status(s, kind="llm_api_key", provider="openai")["set"]
-        # global endpoint edit clears the *global* openai key only
-        save_layer(
+        # global endpoint edit clears the global openai key, and the openai
+        # key of every project that inherits the endpoint (security fix 1,
+        # finding 6) - never another provider's
+        cleared = save_layer(
             s, None, {"llm": {"openai": {"base_url": "https://evil.example/v1"}}}
         )
+        assert cleared == [(pid, "openai")]
         assert not pw_secrets.secret_status(s, kind="llm_api_key", provider="openai")[
             "set"
         ]
         assert pw_secrets.secret_status(s, kind="llm_api_key", provider="anthropic")[
             "set"
         ]
-        assert pw_secrets.secret_status(
+        assert not pw_secrets.secret_status(
             s, kind="llm_api_key", provider="openai", project_id=pid
         )["set"]
+        pw_secrets.put_secret(
+            s, kind="llm_api_key", provider="openai", value="sk-3333", project_id=pid
+        )
         # a project-scope endpoint edit clears that project's key
         save_layer(s, pid, {"llm": {"openai": {"base_url": "https://p.example/v1"}}})
         assert not pw_secrets.secret_status(

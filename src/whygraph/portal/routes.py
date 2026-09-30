@@ -560,22 +560,32 @@ def put_defaults(body: ConfigBody, request: Request) -> dict:
 
     Only ``[llm]`` (with connection keys), ``[analyze]``, ``[rationale]``
     and ``[chat]`` are accepted (rule 6); secrets inside ``config`` are a
-    ``422`` (rule 4). Invalidates every project's context.
+    ``422`` (rule 4). A changed provider endpoint clears the global key
+    and the project keys of every project that inherits the endpoint
+    (rule 3); ``cleared_project_keys`` lists them as ``{slug, provider}``.
+    Invalidates every project's context.
     """
     state = portal_state(request)
+    cleared: list[dict] = []
     with get_session() as session:
         if body.config is not None:
             kept = _checked_layer(body.config, DEFAULTS_ALLOWLIST, state.data_dir)
             try:
                 Config.from_dict(kept, state.data_dir)
-                save_layer(session, None, kept)
+                cleared_ids = save_layer(session, None, kept)
             except (ConfigError, ConfigPolicyError) as exc:
                 raise ApiError(422, str(exc)) from exc
+            for project_id, provider in cleared_ids:
+                row = session.get(Project, project_id)
+                if row is not None:
+                    cleared.append({"slug": row.slug, "provider": provider})
         if body.secrets is not None:
             _apply_secrets(session, body.secrets, None)
     state.contexts.invalidate(None)
     with get_session() as session:
-        return _defaults_view(session)
+        view = _defaults_view(session)
+    view["cleared_project_keys"] = cleared
+    return view
 
 
 # ---------------------------------------------------------------------------

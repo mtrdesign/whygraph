@@ -479,3 +479,63 @@ def test_slow_principal_load_never_overwrites_setup(
     anyio.run(main)
     assert seen == [tess]
     assert anyio.run(state.resolve_principal, {}) is tess
+
+
+# ---------------------------------------------------------------------------
+# 6. Project key and an inherited global endpoint change (MINOR)
+# ---------------------------------------------------------------------------
+
+
+def test_global_endpoint_change_clears_inheriting_project_keys(
+    ready: TestClient, env: SimpleNamespace
+) -> None:
+    add_local(ready, make_repo(env.shared, "inherits"))
+    add_local(ready, make_repo(env.shared, "overrides"))
+    assert (
+        ready.put(
+            "/api/projects/inherits/config",
+            json={"secrets": {"llm": {"openai": "sk-inherits-1234"}}},
+        ).status_code
+        == 200
+    )
+    assert (
+        ready.put(
+            "/api/projects/overrides/config",
+            json={
+                "config": {"llm": {"openai": {"base_url": "https://own.example/v1"}}},
+                "secrets": {"llm": {"openai": "sk-overrides-5678"}},
+            },
+        ).status_code
+        == 200
+    )
+
+    response = ready.put(
+        "/api/portal/defaults",
+        json={"config": {"llm": {"openai": {"base_url": "https://new.example/v1"}}}},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["cleared_project_keys"] == [
+        {"slug": "inherits", "provider": "openai"}
+    ]
+    inherits = ready.get("/api/projects/inherits/config").json()["secrets"]["llm"]
+    overrides = ready.get("/api/projects/overrides/config").json()["secrets"]["llm"]
+    assert inherits["openai"]["set"] is False
+    assert overrides["openai"]["set"] is True
+
+    # A save that leaves the endpoint alone clears nothing.
+    ready.put(
+        "/api/projects/inherits/config",
+        json={"secrets": {"llm": {"openai": "sk-inherits-9999"}}},
+    )
+    again = ready.put(
+        "/api/portal/defaults",
+        json={
+            "config": {
+                "llm": {"openai": {"base_url": "https://new.example/v1"}},
+                "chat": {"max_tool_rounds": 3},
+            }
+        },
+    )
+    assert again.json()["cleared_project_keys"] == []
+    inherits = ready.get("/api/projects/inherits/config").json()["secrets"]["llm"]
+    assert inherits["openai"]["set"] is True

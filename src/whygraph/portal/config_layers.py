@@ -13,9 +13,12 @@ Policy applied here (plan section 4.2.1)
   ``WHYGRAPH_CONFIG_JSON`` or the database in the clear.
 * Rule 3 (write half): changing or removing a provider's endpoint
   (``[llm.<provider>].base_url`` / ``host``) **clears that scope's key**
-  for the provider, so a saved key never follows an edited endpoint.
-  The context half (no global key into a project that overrides the
-  endpoint) is in :mod:`whygraph.portal.context`.
+  for the provider, so a saved key never follows an edited endpoint. A
+  change to the *global* endpoint also clears the project-scope key of
+  every project that inherits that endpoint (sets none of its own), since
+  that key would otherwise be sent to the new global endpoint. The
+  context half (no global key into a project that overrides the endpoint)
+  is in :mod:`whygraph.portal.context`.
 
 The allowlists (rules 1a, 1b, 6) belong to the HTTP endpoints, which know
 whether a dict came from an import or from the UI.
@@ -28,7 +31,7 @@ from typing import Any, Mapping
 
 from sqlmodel import Session, select
 
-from .models import ProjectConfig, _now
+from .models import ProjectConfig, Secret, _now
 from .secrets import LLM_API_KEY, LLM_KEY_PROVIDERS, delete_secret
 
 ENDPOINT_KEYS: tuple[str, ...] = ("base_url", "host")
@@ -123,7 +126,7 @@ def load_layer(session: Session, project_id: int | None) -> dict[str, Any]:
 
 def save_layer(
     session: Session, project_id: int | None, config: Mapping[str, Any]
-) -> None:
+) -> list[tuple[int, str]]:
     """Store a scope's config dict, replacing the previous one.
 
     Saving the global defaults twice leaves one row. The caller commits
@@ -140,6 +143,13 @@ def save_layer(
         The whole new dict (a JSON ``null`` inside it resets a key at
         merge time).
 
+    Returns
+    -------
+    list of (int, str)
+        ``(project_id, provider tag)`` of every project-scope key cleared
+        because a *global* endpoint changed and that project inherits it
+        (rule 3); always empty for a project save. Sorted.
+
     Raises
     ------
     ConfigPolicyError
@@ -155,12 +165,15 @@ def save_layer(
     row = get_layer_row(session, project_id)
     old = row.config if row is not None else {}
 
+    cleared: list[tuple[int, str]] = []
     for tag in LLM_KEY_PROVIDERS:
         attr = tag.replace("-", "_")
         if endpoint_of(old, attr) != endpoint_of(new, attr):
             delete_secret(
                 session, kind=LLM_API_KEY, provider=tag, project_id=project_id
             )
+            if project_id is None:
+                cleared += _clear_inheriting_keys(session, tag, attr)
 
     if row is None:
         session.add(ProjectConfig(project_id=project_id, config=new))
@@ -168,6 +181,28 @@ def save_layer(
         row.config = new
         row.updated_at = _now()
     session.flush()
+    return sorted(cleared)
+
+
+def _clear_inheriting_keys(
+    session: Session, tag: str, attr: str
+) -> list[tuple[int, str]]:
+    """Delete ``tag``'s project keys where the project sets no endpoint of its own."""
+    rows = session.exec(
+        select(Secret).where(
+            Secret.kind == LLM_API_KEY,
+            Secret.provider == tag,
+            Secret.project_id.is_not(None),  # type: ignore[union-attr]
+        )
+    ).all()
+    cleared: list[tuple[int, str]] = []
+    for secret in rows:
+        assert secret.project_id is not None
+        if endpoint_of(load_layer(session, secret.project_id), attr) is None:
+            session.delete(secret)
+            cleared.append((secret.project_id, tag))
+    session.flush()
+    return cleared
 
 
 __all__ = [

@@ -78,6 +78,10 @@ RUN set -eux; \
 # apt/node/codegraph layers above.
 ARG WHYGRAPH_VERSION=latest
 ENV WHYGRAPH_VERSION=${WHYGRAPH_VERSION}
+# Marks "running inside the image" for `whygraph portal`, which refuses a
+# non-loopback --host natively (local mode has no login). Not WHYGRAPH_VERSION:
+# install.sh honours that one on the host too.
+ENV WHYGRAPH_IN_IMAGE=1
 
 # Install WhyGraph itself so the `whygraph` and `whygraph-mcp` console
 # scripts land on PATH. Copy the build inputs hatchling needs and install.

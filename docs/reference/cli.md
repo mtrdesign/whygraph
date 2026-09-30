@@ -1,7 +1,7 @@
 # CLI reference
 
 Every WhyGraph command and its flags. Run `whygraph <command> --help` to see the same text from your
-own install. There are six commands.
+own install. There are seven commands.
 
 ```console
 $ whygraph --help
@@ -9,6 +9,7 @@ Commands:
   analyze  Describe a commit's diff with the configured LLM.
   init     Initialize the WhyGraph database under .whygraph/whygraph.db.
   install  Emit the host shim installer (called by scripts/install.sh).
+  portal   Run the WhyGraph portal (use `whygraph up` to start it in Docker).
   scan     Run the source crawlers, then describe each commit with the LLM.
   serve    Serve the WhyGraph web panel (Explorer + Chat) for this repository.
   version  Print installed whygraph version.
@@ -128,6 +129,31 @@ next one.
 
 See [The Explorer](../guide/playground.md) and [The Chat assistant](../guide/chat.md) for the panel
 itself.
+
+## `whygraph portal`
+
+Run the multi-project **portal**: one long-running server that holds many projects, with the
+Explorer and Chat per project and a per-project HTTP MCP endpoint at `/mcp/<slug>`. It is the
+command the Docker runtime runs inside the image.
+
+!!! warning "Development only when run natively"
+    In this release the supported way to run the portal is the Docker runtime, which publishes it on
+    `127.0.0.1` only. Run natively, `whygraph portal` is for development: shared folders come only
+    from `WHYGRAPH_SHARED_FOLDERS`, and a non-loopback `--host` is refused unless `--dev-expose` is
+    given, because local mode has no login.
+
+| Option | Default | Description |
+|---|---|---|
+| `--host` | `127.0.0.1` | Bind address. Outside the image, anything but a loopback address needs `--dev-expose`. |
+| `--port` | `$WHYGRAPH_PORT` or `8765` | Port to bind. It is also the port the browser and agents use, so the allowed `Host` / `Origin` values and the agent MCP URLs are built from it. |
+| `--data DIR` | `$WHYGRAPH_DATA` or `~/.local/share/whygraph` | Portal data directory: the portal database, the encryption key, cloned repositories. Keep it outside every project folder. |
+| `--dev-expose` | off | Allow a non-loopback `--host` outside the image. |
+
+The portal is a single process and holds an exclusive lock on its data directory, so a second
+`whygraph portal` on the same directory exits with code 2. Every `/api` request must carry the
+`X-WhyGraph-Client: 1` header and a loopback `Host`; cross-site requests and foreign `Origin` values
+are rejected. `WHYGRAPH_DEV_ORIGINS` (comma-separated origins, e.g. `http://localhost:5173`) adds
+origins for a local frontend dev server.
 
 ## `whygraph analyze`
 

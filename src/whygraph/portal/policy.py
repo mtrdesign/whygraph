@@ -1,0 +1,291 @@
+"""Portal config policy: what an import, a project ``PUT`` and a defaults ``PUT`` may set.
+
+``Config`` accepts keys that point somewhere - provider endpoints, DB
+paths, a log file, a Claude CLI profile dir. A committed ``whygraph.toml``
+with a ``base_url`` aimed at an attacker would receive the user's key on
+the first LLM call, and a ``whygraph_db`` aimed at another project's DB
+would be opened and migrated. So each way config reaches the portal DB
+has an allowlist (plan section 4.2.1):
+
+* Rule 1a - :data:`IMPORT_ALLOWLIST`: model selection, the
+  ``[analyze]`` / ``[rationale]`` / ``[chat]`` tuning keys and
+  ``[scan].forge`` / ``remote`` / ``default_branch`` / ``hooks``. Everything
+  else in a repo file is dropped and reported; API keys and the scan token
+  are moved into the secret store instead (:func:`preview_import`).
+* Rule 1b - :data:`PUT_ALLOWLIST`: 1a plus the connection-only keys
+  ``[llm.<provider>].base_url`` / ``host`` / ``timeout_sec``. A value the
+  user types in the UI is trusted; changing an endpoint clears that
+  scope's key (rule 3, :func:`whygraph.portal.config_layers.save_layer`).
+* Rule 6 - :data:`DEFAULTS_ALLOWLIST`: the global defaults hold only
+  ``[llm]`` (with the 1b connection keys), ``[analyze]``, ``[rationale]``
+  and ``[chat]``.
+
+Layers are passed through :func:`whygraph.core.config.normalize_v2`
+before filtering, so a 1.x alias (``[scan].provider``,
+``[scan].max_workers``, ``[llm.claude-cli]``) is judged by its v2 key.
+"""
+
+from __future__ import annotations
+
+import copy
+import tomllib
+from dataclasses import dataclass, field, fields, is_dataclass
+from pathlib import Path
+from typing import Any, Mapping
+
+from whygraph.core.config import (
+    CONFIG_FILENAME,
+    AnalyzeConfig,
+    ChatConfig,
+    LlmConfig,
+    RationaleConfig,
+    normalize_v2,
+)
+
+from .secrets import LLM_KEY_PROVIDERS
+
+Spec = Mapping[str, Any]
+"""An allowlist: ``True`` allows a key (and its whole value); a nested
+mapping allows only the keys it lists."""
+
+_LLM_DEFAULTS = LlmConfig()
+PROVIDER_TABLES: dict[str, type] = {
+    f.name: type(getattr(_LLM_DEFAULTS, f.name))
+    for f in fields(LlmConfig)
+    if is_dataclass(getattr(_LLM_DEFAULTS, f.name))
+}
+"""``[llm.<table>]`` name -> its config dataclass (``claude_cli`` spelled with ``_``)."""
+
+CONNECTION_KEYS: tuple[str, ...] = ("base_url", "host", "timeout_sec")
+"""Connection-only provider keys a ``PUT`` may set (rule 1b)."""
+
+
+def _all_fields(cls: type) -> dict[str, bool]:
+    return {f.name: True for f in fields(cls)}
+
+
+IMPORT_ALLOWLIST: Spec = {
+    "llm": {"model": True, **{name: {"model": True} for name in PROVIDER_TABLES}},
+    "analyze": _all_fields(AnalyzeConfig),
+    "rationale": _all_fields(RationaleConfig),
+    "chat": _all_fields(ChatConfig),
+    "scan": {"forge": True, "remote": True, "default_branch": True, "hooks": True},
+}
+"""Rule 1a: what a repo's ``whygraph.toml`` may contribute on import."""
+
+PUT_ALLOWLIST: Spec = {
+    **IMPORT_ALLOWLIST,
+    "llm": {
+        "model": True,
+        **{
+            name: {
+                "model": True,
+                **{
+                    key: True
+                    for key in CONNECTION_KEYS
+                    if key in {f.name for f in fields(cls)}
+                },
+            }
+            for name, cls in PROVIDER_TABLES.items()
+        },
+    },
+}
+"""Rule 1b: what ``PUT /api/projects/{slug}/config`` may store."""
+
+DEFAULTS_ALLOWLIST: Spec = {k: v for k, v in PUT_ALLOWLIST.items() if k != "scan"}
+"""Rule 6: what ``PUT /api/portal/defaults`` may store."""
+
+
+def filter_layer(layer: Mapping[str, Any], spec: Spec) -> tuple[dict, list[str]]:
+    """Split a config layer into its allowlisted part and the dropped keys.
+
+    Parameters
+    ----------
+    layer : Mapping
+        A (normalized) config layer.
+    spec : Mapping
+        One of the allowlists above.
+
+    Returns
+    -------
+    tuple of (dict, list of str)
+        A new dict with only the allowed keys (empty tables are left out),
+        and the dotted path of every dropped key, sorted. A value where
+        a table is expected is dropped as a whole.
+    """
+    kept: dict = {}
+    dropped: list[str] = []
+    _filter(layer, spec, "", kept, dropped)
+    return kept, sorted(dropped)
+
+
+def _filter(layer: Mapping, spec: Spec, prefix: str, kept: dict, dropped: list) -> None:
+    for key, value in layer.items():
+        path = f"{prefix}{key}"
+        rule = spec.get(key)
+        if rule is True:
+            kept[key] = copy.deepcopy(value)
+        elif isinstance(rule, Mapping) and isinstance(value, Mapping):
+            sub: dict = {}
+            _filter(value, rule, f"{path}.", sub, dropped)
+            if sub:
+                kept[key] = sub
+        elif isinstance(rule, Mapping) and value is None:
+            kept[key] = None  # a null table resets it, which is always safe
+        else:
+            dropped.append(path)
+
+
+# ---------------------------------------------------------------------------
+# Import of a repo's whygraph.toml
+# ---------------------------------------------------------------------------
+
+_ENDPOINT_HINT = "endpoint not imported from a repo file; re-enter it under Settings"
+_DB_PATH_HINT = "the portal always uses the repository's default database path"
+_DEFAULT_HINT = "not imported"
+
+
+@dataclass
+class ImportPreview:
+    """What importing a repository's ``whygraph.toml`` does.
+
+    Attributes
+    ----------
+    found : bool
+        Whether ``<root>/whygraph.toml`` exists.
+    error : str or None
+        Why the file could not be read or parsed (nothing is imported).
+    layer : dict
+        The allowlisted, normalized layer to store (no secrets).
+    llm_keys : dict[str, str]
+        Provider tag -> API key found in the file, to move into the
+        secret store. Never serialized to an API response.
+    github_token : str or None
+        ``[scan].token`` from the file, likewise moved.
+    secrets_moved : list[str]
+        Dotted keys of the moved secrets - the lines the user should
+        delete from the file.
+    dropped : list[dict]
+        ``{"key", "hint"}`` per key rule 1a dropped.
+    custom_db_paths : list[dict]
+        ``{"key", "path", "exists", "message"}`` per custom
+        ``whygraph_db`` / ``codegraph_db`` that the portal will not use.
+    warnings : list[str]
+        Deprecation messages from :func:`normalize_v2`.
+    """
+
+    found: bool = False
+    error: str | None = None
+    layer: dict = field(default_factory=dict)
+    llm_keys: dict[str, str] = field(default_factory=dict, repr=False)
+    github_token: str | None = field(default=None, repr=False)
+    secrets_moved: list[str] = field(default_factory=list)
+    dropped: list[dict] = field(default_factory=list)
+    custom_db_paths: list[dict] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    def report(self) -> dict:
+        """Return the API-safe view (no secret values)."""
+        return {
+            "found": self.found,
+            "error": self.error,
+            "secrets_moved": list(self.secrets_moved),
+            "dropped": [dict(d) for d in self.dropped],
+            "custom_db_paths": [dict(d) for d in self.custom_db_paths],
+            "warnings": list(self.warnings),
+        }
+
+
+def preview_import(root: Path) -> ImportPreview:
+    """Compute what importing ``<root>/whygraph.toml`` would store (rule 1a).
+
+    Reads the file only; nothing is written anywhere.
+
+    Parameters
+    ----------
+    root : Path
+        The repository root.
+
+    Returns
+    -------
+    ImportPreview
+        An empty preview when there is no file.
+    """
+    path = root / CONFIG_FILENAME
+    if not path.is_file():
+        return ImportPreview()
+    try:
+        with path.open("rb") as fh:
+            raw = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        return ImportPreview(found=True, error=f"{CONFIG_FILENAME} not imported: {exc}")
+
+    layer, warnings = normalize_v2(raw, root)
+    preview = ImportPreview(found=True, warnings=warnings)
+
+    llm = layer.get("llm")
+    if isinstance(llm, dict):
+        for name in PROVIDER_TABLES:
+            tag = name.replace("_", "-")
+            table = llm.get(name)
+            if (
+                tag in LLM_KEY_PROVIDERS
+                and isinstance(table, dict)
+                and "api_key" in table
+            ):
+                value = table.pop("api_key")
+                preview.secrets_moved.append(f"llm.{name}.api_key")
+                if isinstance(value, str) and value.strip():
+                    preview.llm_keys[tag] = value.strip()
+    scan = layer.get("scan")
+    if isinstance(scan, dict) and "token" in scan:
+        value = scan.pop("token")
+        preview.secrets_moved.append("scan.token")
+        if isinstance(value, str) and value.strip():
+            preview.github_token = value.strip()
+
+    for key, default in (
+        ("whygraph_db", root / ".whygraph" / "whygraph.db"),
+        ("codegraph_db", root / ".codegraph" / "codegraph.db"),
+    ):
+        value = layer.get(key)
+        if value is None or Path(value) == default:
+            continue
+        custom = Path(value)
+        preview.custom_db_paths.append(
+            {
+                "key": key,
+                "path": str(custom),
+                "exists": custom.exists(),
+                "message": (
+                    f"WhyGraph data at {custom} will not be used; the portal reads "
+                    f"{default.relative_to(root)}. Move the file there before "
+                    "initializing to keep its descriptions, rationale cache and "
+                    "chat history."
+                ),
+            }
+        )
+
+    kept, dropped = filter_layer(layer, IMPORT_ALLOWLIST)
+    preview.layer = kept
+    for key in dropped:
+        if key.startswith("llm.") and key.rsplit(".", 1)[-1] in ("base_url", "host"):
+            hint = _ENDPOINT_HINT
+        elif key in ("whygraph_db", "codegraph_db"):
+            hint = _DB_PATH_HINT
+        else:
+            hint = _DEFAULT_HINT
+        preview.dropped.append({"key": key, "hint": hint})
+    return preview
+
+
+__all__ = [
+    "CONNECTION_KEYS",
+    "DEFAULTS_ALLOWLIST",
+    "IMPORT_ALLOWLIST",
+    "ImportPreview",
+    "PROVIDER_TABLES",
+    "PUT_ALLOWLIST",
+    "filter_layer",
+    "preview_import",
+]

@@ -130,6 +130,12 @@ PROVIDER_KEY_ENV: dict[str, str] = {
 """The only provider keys a child can receive (``claude-cli`` / ``ollama`` are key-less)."""
 
 LOG_TAIL_BYTES = 64 * 1024
+
+CANCEL_GRACE_SEC = 10.0
+"""Seconds between a cancel's SIGTERM and the SIGKILL that follows."""
+
+CANCELLED_BY_USER: dict[str, str] = {"cancelled_by": "user"}
+"""The ``summary`` of a run the user cancelled (vs. a merged or orphaned one)."""
 """How much of a run's log :func:`log_tail` returns (the end of the file)."""
 
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
@@ -154,6 +160,10 @@ class RunNotFound(LookupError):
 
 class ProjectBusy(RuntimeError):
     """A project removal and a scan / sync request collided - HTTP 409."""
+
+
+class RunFinished(RuntimeError):
+    """The run already ended, so there is nothing to cancel - HTTP 409."""
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +416,7 @@ class _Job:
     spec: _Pending
     proc: subprocess.Popen | None = None
     interrupted: bool = False
+    cancelled: bool = False
     head: str | None = None
     scanned: bool = False
     result: dict | None = None
@@ -430,6 +441,16 @@ class _Job:
     def alive(self) -> bool:
         proc = self.proc
         return proc is not None and proc.poll() is None
+
+    def cancel(self) -> None:
+        """Mark the job cancelled by the user and SIGTERM its child.
+
+        Before the child exists (a sync still fetching), the flag makes
+        :meth:`ScanRunner._execute_inner` stop before it starts one.
+        """
+        with self.lock:
+            self.cancelled = True
+        self.signal(signal.SIGTERM)
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +757,62 @@ class ScanRunner:
             self._dispatch()
             return run_id
 
+    async def cancel(self, project_id: int, run_id: int) -> str:
+        """Cancel a queued or running run of a project.
+
+        A queued run is dropped from the queue and recorded ``cancelled``.
+        A running one gets SIGTERM (SIGKILL after :data:`CANCEL_GRACE_SEC`)
+        and is recorded ``cancelled`` when its child exits. Either way the
+        summary is :data:`CANCELLED_BY_USER`, and the next request for the
+        project queues a fresh run.
+
+        Parameters
+        ----------
+        project_id : int
+            ``projects.id`` - a run of another project is "not found".
+        run_id : int
+            ``scan_runs.id``.
+
+        Returns
+        -------
+        str
+            ``"queued"`` or ``"running"`` - what the run was.
+
+        Raises
+        ------
+        RunnerUnavailable
+            If the runner is not running.
+        RunNotFound
+            If there is no such run for the project.
+        RunFinished
+            If the run already ended.
+        """
+        if self._tg is None or self._lock is None:
+            raise RunnerUnavailable("the scan runner is not running")
+        async with self._lock:
+            pending = self._pending.get(project_id)
+            if pending is not None and pending.run_id == run_id:
+                del self._pending[project_id]
+                self._live.discard(run_id)
+                await anyio.to_thread.run_sync(_mark_cancelled, run_id)
+                return "queued"
+            job = self._running.get(project_id)
+            if job is not None and job.spec.run_id == run_id:
+                job.cancel()
+                self._tg.start_soon(self._kill_after_grace, job)
+                return "running"
+        status, _summary = await anyio.to_thread.run_sync(
+            _project_run_status, project_id, run_id
+        )
+        if status is None:
+            raise RunNotFound(run_id)
+        raise RunFinished(f"run {run_id} already ended ({status})")
+
+    async def _kill_after_grace(self, job: _Job) -> None:
+        await anyio.sleep(CANCEL_GRACE_SEC)
+        if job.alive():
+            job.signal(signal.SIGKILL)
+
     # ---- poll + catch-up -------------------------------------------------
 
     async def tick(self) -> None:
@@ -833,7 +910,9 @@ class ScanRunner:
         except Exception as exc:  # noqa: BLE001 -- recorded as a failed run
             _log.exception("scan runner: run %s failed", job.spec.run_id)
             status, summary = "failed", {"error": redact(str(exc))}
-        if job.interrupted and status != "cancelled":
+        if job.cancelled:
+            status, summary = "cancelled", {**summary, **CANCELLED_BY_USER}
+        elif job.interrupted and status != "cancelled":
             status = "interrupted"
         try:
             _finish_run(job, status, summary)
@@ -1169,6 +1248,26 @@ def _finish_run(job: _Job, status: str, summary: dict[str, Any]) -> None:
                 if job.head:
                     project.last_scanned_head = job.head
                 session.add(project)
+
+
+def _mark_cancelled(run_id: int) -> None:
+    """Record a still-queued run as cancelled by the user."""
+    with get_session() as session:
+        run = session.get(ScanRun, run_id)
+        if run is not None and run.status == "queued":
+            run.status = "cancelled"
+            run.finished_at = _now()
+            run.summary = json.dumps(CANCELLED_BY_USER)
+            session.add(run)
+
+
+def _project_run_status(project_id: int, run_id: int) -> tuple[str | None, Any]:
+    """``(status, summary)`` of a run of this project, ``(None, None)`` if none."""
+    with get_session() as session:
+        run = session.get(ScanRun, run_id)
+        if run is None or run.project_id != project_id:
+            return None, None
+        return run.status, run.summary
 
 
 def _mark_interrupted(run_ids: list[int]) -> None:

@@ -269,6 +269,57 @@ describe("Scan run (screen 7)", () => {
     await waitFor(() => expect(screen.getByTestId("run-waiting")).toHaveTextContent("Waiting for its turn"));
   });
 
+  it("Cancel on a running run asks first, then POSTs the cancel", async () => {
+    handlers["POST /api/projects/alpha/scans/6/cancel"] = () => ({
+      status: 202,
+      body: { run_id: 6, was: "running" },
+    });
+    const user = userEvent.setup();
+    mount("/p/alpha/scans/6");
+    await screen.findByTestId("phase-3");
+
+    await user.click(screen.getByTestId("cancel-run"));
+    const dialog = await screen.findByTestId("cancel-run-dialog");
+    expect(dialog).toHaveTextContent("Cancel scan #6?");
+    expect(dialog).toHaveTextContent("Commits it already described are kept");
+    await user.click(within(dialog).getByRole("button", { name: "Keep it" }));
+    await waitFor(() => expect(screen.queryByTestId("cancel-run-dialog")).not.toBeInTheDocument());
+    expect(calls("POST", "/api/projects/alpha/scans/6/cancel")).toHaveLength(0);
+
+    await user.click(screen.getByTestId("cancel-run"));
+    await user.click(
+      within(await screen.findByTestId("cancel-run-dialog")).getByRole("button", { name: "Cancel scan" }),
+    );
+    await waitFor(() => expect(calls("POST", "/api/projects/alpha/scans/6/cancel")).toHaveLength(1));
+  });
+
+  it("a queued run can be cancelled too; the dialog says it just leaves the queue", async () => {
+    handlers["GET /api/projects/alpha/scans"] = () => ({
+      runs: [run(6, { status: "queued", started_at: null, finished_at: null, summary: null })],
+    });
+    handlers["GET /api/projects/alpha/scans/6/events"] = () => sse([]);
+    const user = userEvent.setup();
+    mount("/p/alpha/scans/6");
+    await user.click(await screen.findByTestId("cancel-run"));
+    expect(await screen.findByTestId("cancel-run-dialog")).toHaveTextContent("removed from the queue");
+  });
+
+  it("a run the user cancelled says so, and offers no Cancel", async () => {
+    handlers["GET /api/projects/alpha/scans"] = () => ({
+      runs: [run(6, { status: "cancelled", summary: { cancelled_by: "user" } })],
+    });
+    handlers["GET /api/projects/alpha/scans/6/events"] = () =>
+      sse([
+        frame(1, { type: "start", phase_total: 2 }),
+        endFrame(2, "cancelled", { cancelled_by: "user" }),
+      ]);
+    mount("/p/alpha/scans/6");
+    const result = await screen.findByTestId("run-result");
+    expect(result).toHaveTextContent("Cancelled");
+    expect(result).toHaveTextContent("You cancelled this run");
+    expect(screen.queryByTestId("cancel-run")).not.toBeInTheDocument();
+  });
+
   it("an unknown run id is reported, not retried forever", async () => {
     handlers["GET /api/projects/alpha/scans/99/events"] = () => ({
       status: 404,

@@ -54,6 +54,7 @@ export function runOutcome(run: ScanRunRow): string | null {
   const s = run.summary;
   if (!s) return null;
   if (typeof s.merged_into === "number") return `Merged into run #${s.merged_into}`;
+  if (s.cancelled_by === "user") return "Cancelled by you";
   if (run.status === "failed" || run.status === "interrupted") {
     if (typeof s.error === "string") return s.error;
     const failed = s.crawlers?.find((c) => c.status === "failed");

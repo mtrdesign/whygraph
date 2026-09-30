@@ -35,7 +35,7 @@ from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, Body, Depends, Request
+from fastapi import APIRouter, Body, Depends, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, func, select
@@ -113,7 +113,14 @@ from .repos import (
     root_status,
 )
 from .estimate import scan_estimate as _scan_estimate
-from .runner import ProjectBusy, RunNotFound, RunnerUnavailable, log_tail, stale_info
+from .runner import (
+    ProjectBusy,
+    RunFinished,
+    RunNotFound,
+    RunnerUnavailable,
+    log_tail,
+    stale_info,
+)
 from .secrets import (
     GITHUB_TOKEN,
     LLM_API_KEY,
@@ -1300,6 +1307,32 @@ async def scan_events(
         raise ApiError(404, f"run {run_id} not found") from exc
     except RunnerUnavailable as exc:
         raise ApiError(501, str(exc)) from exc
+
+
+@projects_router.post("/{slug}/scans/{run_id}/cancel")
+async def cancel_scan(
+    run_id: int,
+    request: Request,
+    response: Response,
+    project: BoundProject = Depends(project_db),
+) -> dict:
+    """Cancel a queued (``200``) or running (``202``) scan / sync run.
+
+    A running run ends ``cancelled`` once its child exits (SIGTERM, then
+    SIGKILL after 10 s); its event stream closes with that status. ``404``
+    for an unknown run or another project's, ``409`` for a finished one.
+    """
+    try:
+        was = await portal_state(request).runner.cancel(project.id, run_id)
+    except RunNotFound as exc:
+        raise ApiError(404, f"run {run_id} not found") from exc
+    except RunFinished as exc:
+        raise ApiError(409, str(exc)) from exc
+    except RunnerUnavailable as exc:
+        raise ApiError(501, str(exc)) from exc
+    if was == "running":
+        response.status_code = 202
+    return {"run_id": run_id, "was": was}
 
 
 @projects_router.get("/{slug}/scans/{run_id}/log")

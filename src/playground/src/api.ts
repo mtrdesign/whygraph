@@ -497,6 +497,8 @@ export interface ScanRunSummary {
   moved?: boolean;
   error?: string;
   merged_into?: number;
+  /** `"user"` when someone cancelled the run (vs. a merged or orphaned one). */
+  cancelled_by?: string;
   [k: string]: unknown;
 }
 
@@ -652,6 +654,8 @@ export function projectApi(slug: string) {
     sync: () => send<{ run_id: number }>("POST", `${base}/sync`),
     scans: () => get<{ runs: ScanRunRow[] }>(`${base}/scans`),
     scanLog: (runId: number) => get<ScanLog>(`${base}/scans/${runId}/log`),
+    cancelScan: (runId: number) =>
+      send<{ run_id: number; was: "queued" | "running" }>("POST", `${base}/scans/${runId}/cancel`),
     rename: (name: string) => send<ProjectDetails>("PATCH", base, { name }),
     remove: (body: DeleteProjectBody = {}) => send<DeleteProjectResult>("DELETE", base, body),
     scanEstimate: () => get<ScanEstimate>(`${base}/scan-estimate`),

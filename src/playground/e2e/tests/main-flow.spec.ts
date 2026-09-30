@@ -1,0 +1,62 @@
+import fs from "node:fs";
+import path from "node:path";
+import { expect, test } from "@playwright/test";
+import { themeRepos } from "../lib/fixtures";
+import {
+  addLocalProject,
+  configureAndInitialize,
+  expectScheme,
+  firstScan,
+  openMainSymbol,
+  sidebarLink,
+  themeOf,
+} from "../lib/ui";
+
+// The main flow of a new project: add a local repo, configure, initialize, run
+// the first scan (the fake scanner), and open the Explorer on what it indexed.
+// Steps share one portal and build on each other, so they run in order.
+test.describe.configure({ mode: "serial" });
+
+test.describe("main flow", () => {
+  test("add a repo from the shared-folder list, configure and initialize it", async ({ page }, testInfo) => {
+    const theme = themeOf(testInfo);
+    const { notes } = themeRepos(theme);
+
+    await page.goto("/");
+    await expectScheme(page, theme);
+
+    await addLocalProject(page, notes, "list");
+    await expect(page.getByRole("heading", { name: `${notes.name}: Configure` })).toBeVisible();
+    await configureAndInitialize(page, notes);
+
+    // Initialize wrote the repo-side wiring: the marker, the MCP entry, hooks.
+    const marker = JSON.parse(fs.readFileSync(path.join(notes.path, ".whygraph", "portal.json"), "utf8"));
+    expect(marker.slug).toBe(notes.slug);
+    const mcp = JSON.parse(fs.readFileSync(path.join(notes.path, ".mcp.json"), "utf8"));
+    expect(mcp.mcpServers.whygraph.url).toContain(`/mcp/${notes.slug}`);
+    expect(fs.readFileSync(path.join(notes.path, ".git", "hooks", "post-commit"), "utf8")).toContain("whygraph managed");
+  });
+
+  test("the first scan shows live progress and ends on the cost card", async ({ page }, testInfo) => {
+    const { notes } = themeRepos(themeOf(testInfo));
+    await page.goto(`/p/${notes.slug}/init?step=scan`);
+    await firstScan(page, notes);
+
+    // The project overview knows it was scanned.
+    await expect(page.getByTestId("connect-agent")).toBeVisible();
+    await expect(page.getByTestId("mcp-url")).toContainText(`/mcp/${notes.slug}`);
+    await page.goto("/");
+    await expect(page.getByTestId(`project-${notes.slug}`)).toContainText("Scanned");
+  });
+
+  test("the Explorer loads the scanned project", async ({ page }, testInfo) => {
+    const { notes } = themeRepos(themeOf(testInfo));
+    await page.goto(`/p/${notes.slug}`);
+    await sidebarLink(page, "Explorer").click();
+    await expect(page).toHaveURL(new RegExp(`/p/${notes.slug}/explorer`));
+
+    // The containment tree reads what the scan indexed: src/ -> the file -> its functions.
+    await openMainSymbol(page, notes);
+    await expect(page.getByText(notes.helperSymbol).first()).toBeVisible();
+  });
+});

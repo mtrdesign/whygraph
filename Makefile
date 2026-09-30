@@ -20,7 +20,7 @@ IMAGE ?= whygraph:dev
 # Name of the long-running container started by `make image-debug`.
 DEBUG_NAME ?= whygraph-debug
 
-.PHONY: help sync test scan node-check playground-deps playground playground-dev dev serve docs docs-build db db-down inspect image image-test image-debug image-debug-down
+.PHONY: help sync test scan node-check playground-deps playground playground-dev dev serve e2e docs docs-build db db-down inspect image image-test image-debug image-debug-down
 
 help:  ## List available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN{FS=":.*?## "}{printf "  %-10s %s\n", $$1, $$2}'
@@ -58,6 +58,9 @@ dev: playground-deps  ## Dev loop: dev portal (:8765) + Vite HMR (:5173) togethe
 
 serve: playground  ## Production preview: build the SPA then serve it from the dev portal (:8765)
 	WHYGRAPH_SHARED_FOLDERS="$(SHARED_FOLDERS)" uv run whygraph portal --data "$(DEV_DATA)" --port $(PORTAL_PORT)
+
+e2e: playground  ## Playwright suite vs a throwaway portal + fake scanner (local only, both themes; extra args: make e2e ARGS="--project=light")
+	sh src/playground/e2e/run.sh $(ARGS)
 
 docs:  ## Serve the docs site locally with live reload (social cards skipped — no Cairo needed)
 	uv run mkdocs serve

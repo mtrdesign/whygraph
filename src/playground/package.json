@@ -11,6 +11,8 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "e2e": "sh e2e/run.sh",
+    "e2e:typecheck": "tsc -p e2e/tsconfig.json",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -40,6 +42,7 @@
     "zustand": "5.0.15"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "@tailwindcss/typography": "0.5.20",
     "@tailwindcss/vite": "4.3.3",
     "@testing-library/dom": "10.4.2",

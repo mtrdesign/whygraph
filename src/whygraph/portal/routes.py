@@ -30,6 +30,8 @@ import secrets as secrets_mod
 import shutil
 from dataclasses import asdict
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import Any, Literal
 
@@ -111,7 +113,7 @@ from .repos import (
     root_status,
 )
 from .estimate import scan_estimate as _scan_estimate
-from .runner import RunNotFound, RunnerUnavailable, stale_info
+from .runner import RunNotFound, RunnerUnavailable, log_tail, stale_info
 from .secrets import (
     GITHUB_TOKEN,
     LLM_API_KEY,
@@ -362,6 +364,19 @@ def _active_run(session: Session, project_id: int) -> dict | None:
     return {"id": run.id, "status": run.status, "trigger": run.trigger}
 
 
+FINISHED_STATUSES: tuple[str, ...] = ("ok", "failed", "interrupted", "cancelled")
+"""``scan_runs.status`` values of a run that has ended."""
+
+
+def _last_scan_status(session: Session, project_id: int) -> str | None:
+    return session.exec(
+        select(ScanRun.status)
+        .where(ScanRun.project_id == project_id)
+        .where(col(ScanRun.status).in_(FINISHED_STATUSES))
+        .order_by(col(ScanRun.id).desc())
+    ).first()
+
+
 def _summary(session: Session, project: Project, root: Path) -> dict:
     status = root_status(root)
     stale = (
@@ -381,6 +396,8 @@ def _summary(session: Session, project: Project, root: Path) -> dict:
         "created_at": project.created_at,
         "root_status": status,
         "running_scan": _active_run(session, project.id),  # type: ignore[arg-type]
+        # The newest ended run's status, for a "scan failed" badge.
+        "last_scan_status": _last_scan_status(session, project.id),  # type: ignore[arg-type]
         # HEAD vs last_scanned_head (the runner's catch-up check, section 4.6).
         "stale": stale,
     }
@@ -401,10 +418,20 @@ def _details(state: PortalState, project: BoundProject) -> dict:
         )
     body["missing_key"] = _missing_key(project.ctx.config)
     body["mcp_url"] = f"{_origins(state).base_url}/mcp/{project.slug}"
+    body["detected"] = _detected(project) if body["root_status"] == "ok" else None
     body["stats"] = (
         _project_stats(state, project) if body["root_status"] == "ok" else None
     )
     return body
+
+
+def _detected(project: BoundProject) -> dict:
+    """The add response's ``detected`` block, recomputed from the repo (blocking)."""
+    if project.source == "local":
+        return detect_existing(
+            project.root, preview_import(project.root).custom_db_paths
+        )
+    return detect_existing(project.root)
 
 
 def _hooks_dict(result: HooksResult | None) -> dict | None:
@@ -465,9 +492,17 @@ def _probe(owner: str, name: str, token: str | None) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _package_version() -> str | None:
+    """The installed ``whygraph`` version (what ``whygraph version`` prints)."""
+    try:
+        return _pkg_version("whygraph")
+    except PackageNotFoundError:
+        return None
+
+
 @public_router.get("/state")
 def get_state(request: Request) -> dict:
-    """Portal status for the first screen: mode, setup, port, shared folders.
+    """Portal status for the first screen: mode, setup, port, shared folders, version.
 
     In degraded mode (the portal DB failed to migrate) the body is just
     ``{"error": ...}``, so the UI can show the failure.
@@ -482,6 +517,7 @@ def get_state(request: Request) -> dict:
         "user": _user_dict(principal),
         "port": state.port,
         "shared_folders": [str(f) for f in state.shared_folders],
+        "version": _package_version(),
     }
 
 
@@ -1232,6 +1268,20 @@ async def scan_events(
         raise ApiError(404, f"run {run_id} not found") from exc
     except RunnerUnavailable as exc:
         raise ApiError(501, str(exc)) from exc
+
+
+@projects_router.get("/{slug}/scans/{run_id}/log")
+def scan_log(run_id: int, project: BoundProject = Depends(project_db)) -> dict:
+    """The tail of a run's log: ``{run_id, text, size, truncated}``.
+
+    At most the last 64 KiB (:data:`~whygraph.portal.runner.LOG_TAIL_BYTES`),
+    starting at a line boundary when cut; already redacted at write time.
+    ``404`` for an unknown run or another project's.
+    """
+    try:
+        return log_tail(project.id, run_id)
+    except RunNotFound as exc:
+        raise ApiError(404, f"run {run_id} not found") from exc
 
 
 @projects_router.post("/{slug}/sync", status_code=202)

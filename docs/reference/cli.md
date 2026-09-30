@@ -190,6 +190,18 @@ and never appear in run files: each run's progress (`runs/<id>.jsonl`) and log (
 under the data directory show a key as its last four characters. Stopping the portal stops running
 scans and records them as `interrupted`.
 
+The portal's HTTP API exposes the same run data the web UI shows:
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/projects/<slug>/scans` | The project's 50 most recent runs, newest first |
+| `GET /api/projects/<slug>/scans/<id>/events` | The run's progress as a server-sent event stream (resumable with `Last-Event-ID`) |
+| `GET /api/projects/<slug>/scans/<id>/log` | The end of the run's log, at most the last 64 KiB, starting at a line boundary: `{run_id, text, size, truncated}`. Keys are already masked. |
+| `GET /api/portal/state` | Portal status, including the installed `version` (what `whygraph version` prints) |
+
+Every `/api` call needs the `X-WhyGraph-Client: 1` header, and the scans endpoints answer `409`
+until the project is initialized.
+
 ## `whygraph analyze`
 
 Describe a single commit's diff with the configured LLM and **print** the result. Unlike `scan`, it

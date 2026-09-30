@@ -58,6 +58,7 @@ from whygraph.portal.estimate import (
 )
 from whygraph.portal.models import Project, ScanRun
 from whygraph.portal.runner import (
+    LOG_TAIL_BYTES,
     TRIGGER_PRECEDENCE,
     ScanRunner,
     child_env,
@@ -1030,3 +1031,42 @@ def test_runner_refuses_a_symlinked_db_instead_of_syncing(
     assert portal.get("/api/projects/gh/scans").json()["code"] == "unsafe_path"
     assert plain_fetch.calls == 0
     assert len(scanner.calls()) == 2
+
+
+# ---------------------------------------------------------------------------
+# The run log tail (screen 7's log excerpt)
+# ---------------------------------------------------------------------------
+
+
+def test_scan_log_tail_is_bounded_redacted_and_scoped(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    local_project(portal, env, "demo")
+    local_project(portal, env, "other")
+    llm_key = "sk-ant-SECRETkey000wxyz"
+    portal.put(
+        "/api/projects/demo/config",
+        json={
+            "config": {"llm": {"model": "anthropic/claude-opus-4-7"}},
+            "secrets": {"llm": {"anthropic": llm_key}},
+        },
+    )
+    first_scan(portal, "demo")
+    scanner.configure(echo_env="ANTHROPIC_API_KEY")
+    short = wait_run(portal, "demo", scan(portal, "demo", trigger="manual"))
+    body = portal.get(f"/api/projects/demo/scans/{short['id']}/log").json()
+    assert body["run_id"] == short["id"] and body["truncated"] is False
+    assert body["size"] == len(body["text"].encode("utf-8"))
+    assert llm_key not in body["text"] and f"value=…{llm_key[-4:]}" in body["text"]
+
+    scanner.configure(stderr_bytes=300_000)
+    big = wait_run(portal, "demo", scan(portal, "demo"))
+    body = portal.get(f"/api/projects/demo/scans/{big['id']}/log").json()
+    assert body["truncated"] is True and body["size"] > 300_000
+    assert len(body["text"].encode("utf-8")) <= LOG_TAIL_BYTES
+    full = (env.data / "runs" / f"{big['id']}.log").read_text()
+    assert full.endswith(body["text"])
+    assert full[: -len(body["text"])].endswith("\n")  # starts at a line boundary
+
+    assert portal.get(f"/api/projects/other/scans/{big['id']}/log").status_code == 404
+    assert portal.get("/api/projects/demo/scans/9999/log").status_code == 404

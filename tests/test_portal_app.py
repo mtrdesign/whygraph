@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 from contextlib import contextmanager
+from importlib.metadata import version as package_version
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Iterator
@@ -203,6 +204,7 @@ def test_setup_flow(client: TestClient, env: SimpleNamespace) -> None:
         "user": None,
         "port": PORT,
         "shared_folders": [str(env.shared)],
+        "version": package_version("whygraph"),  # what `whygraph version` prints
     }
     assert client.get("/api/projects").json() == {"error": "setup required"}
 
@@ -821,6 +823,38 @@ def test_uninitialized_project_gates_data_routes_and_creates_no_db(
     assert details["agents"] == ["claude"]
     assert details["stats"]["commits"] == 0
     assert ready.get("/api/projects/demo/chat/sessions").json() == []
+
+
+def test_project_details_recompute_detected_and_last_scan_status(
+    ready: TestClient, env: SimpleNamespace
+) -> None:
+    root = make_repo(env.shared, "demo")
+    (root / ".mcp.json").write_text(
+        '{"mcpServers": {"whygraph": {"command": "whygraph-mcp"}}}\n'
+    )
+    added = add_local(ready, root)
+    assert added["project"]["detected"] == added["detected"]
+    details = ready.get("/api/projects/demo").json()
+    assert details["detected"] == added["detected"]
+    assert details["detected"]["detected_agents"][0]["agent"] == "claude"
+    assert details["last_scan_status"] is None
+
+    # Recomputed on every read (a new tab's Initialize step sees the truth).
+    (root / ".mcp.json").unlink()
+    (root / ".whygraph").mkdir()
+    (root / ".whygraph" / "whygraph.db").touch()
+    detected = ready.get("/api/projects/demo").json()["detected"]
+    assert detected["detected_agents"] == [] and detected["existing_db"] is True
+
+    pid = _project_id("demo")
+    with portal_db.get_session() as session:
+        session.add(ScanRun(project_id=pid, trigger="manual", status="failed"))
+        session.add(ScanRun(project_id=pid, trigger="manual", status="queued"))
+    (listed,) = ready.get("/api/projects").json()["projects"]
+    assert listed["last_scan_status"] == "failed"  # a queued run has not ended
+    with portal_db.get_session() as session:
+        session.add(ScanRun(project_id=pid, trigger="hook", status="ok"))
+    assert ready.get("/api/projects/demo").json()["last_scan_status"] == "ok"
 
 
 def test_init_waits_for_tracked_agent_files(

@@ -36,6 +36,8 @@ process:
   :func:`~whygraph.portal.paths.check_project_paths`; a symlinked
   ``.whygraph/`` / ``.codegraph/`` / DB file fails the run with an
   ``error`` event instead of scanning.
+* **Log.** ``runs/<id>.log`` (redacted like the events) is served as a
+  bounded tail by :func:`log_tail` (``GET .../scans/<id>/log``).
 * **Events.** The events file is the single source of the SSE stream
   (:meth:`ScanRunner.events`): replay from a byte offset, then follow,
   ``id:`` byte offsets for resume, heartbeats, a terminal ``end`` frame.
@@ -125,6 +127,9 @@ PROVIDER_KEY_ENV: dict[str, str] = {
     "deepseek": "DEEPSEEK_API_KEY",
 }
 """The only provider keys a child can receive (``claude-cli`` / ``ollama`` are key-less)."""
+
+LOG_TAIL_BYTES = 64 * 1024
+"""How much of a run's log :func:`log_tail` returns (the end of the file)."""
 
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 _READ_CHUNK = 256 * 1024
@@ -1132,6 +1137,59 @@ def _run_events_path(project_id: int, run_id: int) -> str | None:
         return run.events_path or f"runs/{run_id}.jsonl"
 
 
+def log_tail(project_id: int, run_id: int, limit: int = LOG_TAIL_BYTES) -> dict:
+    """Return the last ``limit`` bytes of a run's ``runs/<id>.log`` (blocking).
+
+    The log is redacted when it is written (every line goes through the
+    run's :func:`redactor`), so the tail is served as is.
+
+    Parameters
+    ----------
+    project_id : int
+        The project the run must belong to.
+    run_id : int
+        ``scan_runs.id``.
+    limit : int
+        Maximum bytes returned; default :data:`LOG_TAIL_BYTES`.
+
+    Returns
+    -------
+    dict
+        ``{"run_id", "text", "size", "truncated"}``: ``size`` is the whole
+        file's size in bytes, ``truncated`` whether ``text`` starts after
+        the file's start (the cut-off first line is then dropped). A run
+        without a log yet (queued) has ``text == ""`` and ``size == 0``.
+
+    Raises
+    ------
+    RunNotFound
+        If the run does not exist or belongs to another project.
+    """
+    with get_session() as session:
+        run = session.get(ScanRun, run_id)
+        if run is None or run.project_id != project_id:
+            raise RunNotFound(run_id)
+        log_rel = run.log_path or f"runs/{run_id}.log"
+    try:
+        with open(data_dir() / log_rel, "rb") as fh:
+            size = fh.seek(0, os.SEEK_END)
+            start = max(0, size - limit)
+            fh.seek(start)
+            data = fh.read(limit)
+    except FileNotFoundError:
+        return {"run_id": run_id, "text": "", "size": 0, "truncated": False}
+    truncated = start > 0
+    if truncated:
+        newline = data.find(b"\n")
+        data = data[newline + 1 :] if newline >= 0 else b""
+    return {
+        "run_id": run_id,
+        "text": data.decode("utf-8", "replace"),
+        "size": size,
+        "truncated": truncated,
+    }
+
+
 def _run_status(run_id: int) -> tuple[str | None, Any]:
     with get_session() as session:
         run = session.get(ScanRun, run_id)
@@ -1162,6 +1220,7 @@ def _read_frames(path: Path, pos: int) -> tuple[list[str], int]:
 
 __all__ = [
     "EXPLICIT_TRIGGERS",
+    "LOG_TAIL_BYTES",
     "MAX_CONCURRENT",
     "POLL_INTERVAL_SEC",
     "PROVIDER_KEY_ENV",
@@ -1173,6 +1232,7 @@ __all__ = [
     "child_env",
     "commits_behind",
     "git_head",
+    "log_tail",
     "merge_trigger",
     "redactor",
     "resolve_analyze",

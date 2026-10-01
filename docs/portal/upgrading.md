@@ -30,9 +30,10 @@ The first `whygraph up` after installing 2.1:
 Nothing else is needed: your projects, settings and keys are where you left them.
 
 !!! warning "Keep `secret.key`"
-    The import needs the data directory's own `secret.key` to check the stored keys. If it is missing
-    or belongs to another data directory, the import stops, `portal.db` is left as it was, and the
-    portal shows why. Restore the right `secret.key` and run `whygraph up` again.
+    If your 2.0 portal stored any keys or tokens, the import needs the data directory's own
+    `secret.key` to check them. If it is missing or belongs to another data directory, the import
+    stops, `portal.db` is left as it was, and the portal shows why. Restore the right `secret.key`
+    and run `whygraph up` again. A portal that never stored a key has no `secret.key` and needs none.
 
 If the import fails for any other reason, it is rolled back: `portal.db` is untouched, the portal
 starts in a degraded state that names the reason (`whygraph status`, `whygraph logs`), and the next

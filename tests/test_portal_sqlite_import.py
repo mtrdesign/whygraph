@@ -221,6 +221,23 @@ def test_a_missing_secret_key_aborts_and_creates_none(data: Path, legacy: Path) 
     assert legacy.exists() and _pg_counts() == EMPTY
 
 
+def test_a_portal_without_secrets_imports_without_a_secret_key(
+    data: Path, legacy: Path
+) -> None:
+    # 2.0 writes secret.key lazily, on the first stored secret, so a portal
+    # that never stored one has no key file - and needs none to import.
+    conn = sqlite3.connect(legacy)
+    conn.execute("DELETE FROM secrets")
+    conn.commit()
+    conn.close()
+    (data / "secret.key").unlink()
+    report = import_legacy_sqlite(data)
+    assert report is not None and report.rows["secrets"] == 0
+    assert _pg_count("projects") == 2 and _pg_count("secrets") == 0
+    assert not (data / "secret.key").exists()  # still never a fresh key
+    assert not legacy.exists() and len(_migrated(data)) == 1
+
+
 def test_a_wrong_secret_key_aborts_with_postgres_empty(
     data: Path, legacy: Path
 ) -> None:

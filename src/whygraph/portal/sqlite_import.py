@@ -97,8 +97,8 @@ def import_legacy_sqlite(data_dir: Path) -> ImportReport | None:
     ------
     LegacyImportError
         When the file is a symlink, not a regular file or outside the data
-        dir, is not a 2.0 portal database, ``secret.key`` is missing or
-        does not match, or the copy failed (rolled back; the file is
+        dir, is not a 2.0 portal database, holds secrets while
+        ``secret.key`` is missing or does not match, or the copy failed (rolled back; the file is
         untouched and the next start retries).
     """
     path = data_dir / portal_db.LEGACY_DB_FILE_NAME
@@ -144,7 +144,9 @@ def import_legacy_sqlite(data_dir: Path) -> ImportReport | None:
                 f"2.0.x portal ({expected}) - start the matching 2.0 release once "
                 "to migrate it, or remove the file to start empty"
             )
-        keyring = _keyring(data_dir)
+        # 2.0 writes secret.key lazily, on the first stored secret, so only a
+        # file that holds secrets needs (and proves) the key.
+        keyring = _keyring(data_dir) if _has_secrets(path) else None
         rows = _copy(engine, path, keyring, digest, revision)
     finally:
         engine.dispose()
@@ -185,6 +187,15 @@ def _checkpoint(path: Path) -> str | None:
             "empty"
         ) from None
     return row[0] if row else None
+
+
+def _has_secrets(path: Path) -> bool:
+    """Whether the 2.0 file stores any secret (so ``secret.key`` must exist)."""
+    conn = sqlite3.connect(path)
+    try:
+        return conn.execute("SELECT 1 FROM secrets LIMIT 1").fetchone() is not None
+    finally:
+        conn.close()
 
 
 def _sha256(path: Path) -> str:
@@ -231,7 +242,11 @@ def _count(conn: Connection, table: str) -> int:
 
 
 def _copy(
-    engine: Engine, path: Path, keyring: MultiFernet, digest: str, revision: str
+    engine: Engine,
+    path: Path,
+    keyring: MultiFernet | None,
+    digest: str,
+    revision: str,
 ) -> dict[str, int]:
     """Copy every table, verify, write the marker, commit - or roll back."""
     rows: dict[str, int] = {}
@@ -281,7 +296,9 @@ def _copy(
     return rows
 
 
-def _verify(conn: Connection, rows: dict[str, int], keyring: MultiFernet) -> None:
+def _verify(
+    conn: Connection, rows: dict[str, int], keyring: MultiFernet | None
+) -> None:
     """Row counts match and the first secret decrypts; raising rolls back."""
     for name, expected in rows.items():
         got = _count(conn, name)
@@ -294,6 +311,10 @@ def _verify(conn: Connection, rows: dict[str, int], keyring: MultiFernet) -> Non
     ciphertext = first.scalar()
     if ciphertext is None:
         return
+    if keyring is None:  # the file had no secrets, yet one arrived
+        raise LegacyImportError(
+            "importing portal.db was rolled back: secrets appeared without a key"
+        )
     try:
         keyring.decrypt(ciphertext.encode("ascii"))
     except InvalidToken:

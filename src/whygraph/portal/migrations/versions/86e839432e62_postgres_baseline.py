@@ -1,9 +1,18 @@
-"""initial portal schema
+"""postgres baseline
 
-Revision ID: a3f1c0d29b41
+Revision ID: 86e839432e62
 Revises:
-Create Date: 2026-09-30 03:00:49.565592
+Create Date: 2026-10-01 17:38:26.293883
 
+The single Postgres baseline of the portal chain (2.1). It replaces the two
+SQLite revisions 2.0 shipped (``a3f1c0d29b41``, ``c5e8a1d2b3f4``), which no
+Postgres database ever ran; a 2.0 ``portal.db`` reaches Postgres through the
+one-time import, not through this chain.
+
+The two "one global row + one per project" rules are ``UNIQUE ... NULLS NOT
+DISTINCT`` constraints (``uq_project_config_scope``, ``uq_secrets_scope``),
+which replace the four SQLite partial indexes. This revision inserts no rows:
+``settings`` is written by the portal's startup, after the import.
 """
 
 from typing import Sequence, Union
@@ -13,7 +22,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = "a3f1c0d29b41"
+revision: str = "86e839432e62"
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -21,6 +30,17 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Upgrade schema."""
+    op.create_table(
+        "legacy_import",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("source_name", sa.Text(), nullable=False),
+        sa.Column("source_sha256", sa.Text(), nullable=False),
+        sa.Column("source_revision", sa.Text(), nullable=False),
+        sa.Column("rows", sa.JSON(), nullable=False),
+        sa.Column("imported_at", sa.Text(), nullable=False),
+        sa.CheckConstraint("id = 1", name="ck_legacy_import_singleton"),
+        sa.PrimaryKeyConstraint("id"),
+    )
     op.create_table(
         "settings",
         sa.Column("id", sa.Integer(), nullable=False),
@@ -97,26 +117,12 @@ def upgrade() -> None:
             ondelete="CASCADE",
         ),
         sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "project_id",
+            name="uq_project_config_scope",
+            postgresql_nulls_not_distinct=True,
+        ),
     )
-    with op.batch_alter_table("project_config", schema=None) as batch_op:
-        batch_op.create_index(
-            "uq_project_config_project",
-            ["project_id"],
-            unique=True,
-            sqlite_where=sa.text("project_id IS NOT NULL"),
-        )
-
-    # Expression-based partial indexes: Alembic cannot autogenerate or compare
-    # these on SQLite, so they are written by hand. `ON ((1)) WHERE project_id
-    # IS NULL` keeps a single global row (NULLs are distinct in a UNIQUE).
-    op.create_index(
-        "uq_project_config_global",
-        "project_config",
-        [sa.text("(1)")],
-        unique=True,
-        sqlite_where=sa.text("project_id IS NULL"),
-    )
-
     op.create_table(
         "scan_runs",
         sa.Column("id", sa.Integer(), nullable=False),
@@ -154,9 +160,9 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id"),
     )
-    with op.batch_alter_table("scan_runs", schema=None) as batch_op:
-        batch_op.create_index("ix_scan_runs_project_id", ["project_id"], unique=False)
-
+    op.create_index(
+        "ix_scan_runs_project_id", "scan_runs", ["project_id"], unique=False
+    )
     op.create_table(
         "secrets",
         sa.Column("id", sa.Integer(), nullable=False),
@@ -171,7 +177,8 @@ def upgrade() -> None:
             name="ck_secrets_provider",
         ),
         sa.CheckConstraint(
-            "kind IN ('llm_api_key', 'github_token')", name="ck_secrets_kind"
+            "kind IN ('llm_api_key', 'github_token', 'claude_oauth_token')",
+            name="ck_secrets_kind",
         ),
         sa.ForeignKeyConstraint(
             ["project_id"],
@@ -180,42 +187,24 @@ def upgrade() -> None:
             ondelete="CASCADE",
         ),
         sa.PrimaryKeyConstraint("id"),
-    )
-    # `provider` is NULL for a GitHub token, so the uniqueness runs over
-    # coalesce(provider, '') - one index per scope.
-    op.create_index(
-        "uq_secrets_project",
-        "secrets",
-        ["project_id", "kind", sa.text("coalesce(provider, '')")],
-        unique=True,
-        sqlite_where=sa.text("project_id IS NOT NULL"),
-    )
-    op.create_index(
-        "uq_secrets_global",
-        "secrets",
-        ["kind", sa.text("coalesce(provider, '')")],
-        unique=True,
-        sqlite_where=sa.text("project_id IS NULL"),
+        sa.UniqueConstraint(
+            "project_id",
+            "kind",
+            "provider",
+            name="uq_secrets_scope",
+            postgresql_nulls_not_distinct=True,
+        ),
     )
 
 
 def downgrade() -> None:
     """Downgrade schema."""
-    op.drop_index("uq_secrets_global", table_name="secrets")
-    op.drop_index("uq_secrets_project", table_name="secrets")
     op.drop_table("secrets")
-    with op.batch_alter_table("scan_runs", schema=None) as batch_op:
-        batch_op.drop_index("ix_scan_runs_project_id")
-
+    op.drop_index("ix_scan_runs_project_id", table_name="scan_runs")
     op.drop_table("scan_runs")
-    op.drop_index("uq_project_config_global", table_name="project_config")
-    with op.batch_alter_table("project_config", schema=None) as batch_op:
-        batch_op.drop_index(
-            "uq_project_config_project", sqlite_where=sa.text("project_id IS NOT NULL")
-        )
-
     op.drop_table("project_config")
     op.drop_table("project_agents")
     op.drop_table("projects")
     op.drop_table("users")
     op.drop_table("settings")
+    op.drop_table("legacy_import")

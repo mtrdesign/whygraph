@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+import atexit
+import os
+import shutil
 import sqlite3
 import subprocess
+import time
+import uuid
 from pathlib import Path
 from typing import Iterable, Iterator
 
 import pytest
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import URL, Engine, make_url
+from sqlalchemy.pool import NullPool
 
 from whygraph import core
+from whygraph.cli.commands.install import POSTGRES_IMAGE
 from whygraph.core.config import Config
 from whygraph.core.context import set_strict
 from whygraph.db import ensure_initialized
@@ -227,3 +236,325 @@ def whygraph_db_initialized(whygraph_db: Path) -> Path:
     """An isolated WhyGraph DB with the schema migrated to head."""
     ensure_initialized()
     return whygraph_db
+
+
+# ---------------------------------------------------------------------------
+# The portal database: a Postgres server per session, a database per test
+# ---------------------------------------------------------------------------
+
+TEST_DATABASE_URL_ENV = "WHYGRAPH_TEST_DATABASE_URL"
+TEST_POSTGRES_IMAGE_ENV = "WHYGRAPH_TEST_POSTGRES_IMAGE"
+_PG_LABEL = "whygraph.test-pg"
+_PG_PID_LABEL = "whygraph.test-pg.pid"
+_PG_READY_SEC = 30.0
+_NO_POSTGRES = (
+    "the portal tests need a Postgres: start Docker (pytest then runs a throwaway "
+    f"{POSTGRES_IMAGE} container), or set {TEST_DATABASE_URL_ENV} to an admin URL "
+    "(CREATEDB), e.g. postgresql+psycopg://postgres:test@127.0.0.1:5432/postgres"
+)
+
+
+def _pg_url(raw: str) -> URL:
+    """Parse a Postgres URL the way the portal does (``postgres://`` and psycopg)."""
+    if raw.startswith("postgres://"):
+        raw = "postgresql://" + raw[len("postgres://") :]
+    return make_url(raw).set(drivername="postgresql+psycopg")
+
+
+def _url_string(url: URL) -> str:
+    return url.render_as_string(hide_password=False)
+
+
+def _docker(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["docker", *args], capture_output=True, text=True, check=False
+    )
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _sweep_stale_pg_containers() -> None:
+    """Remove labelled test servers whose pytest process is gone (a Ctrl+C'd run)."""
+    listing = _docker(
+        "ps",
+        "-a",
+        "--filter",
+        f"label={_PG_LABEL}=1",
+        "--format",
+        f'{{{{.ID}}}} {{{{.Label "{_PG_PID_LABEL}"}}}}',
+    )
+    for line in listing.stdout.splitlines():
+        cid, _, pid = line.partition(" ")
+        if not pid.strip().isdigit() or not _pid_alive(int(pid)):
+            _docker("rm", "-f", cid)
+
+
+def _wait_until_ready(url: URL, container: str) -> None:
+    """Ready = a real TCP connect plus ``SELECT 1`` (not the init-time server)."""
+    import psycopg
+
+    deadline = time.monotonic() + _PG_READY_SEC
+    last: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            with psycopg.connect(
+                host=url.host,
+                port=url.port,
+                user=url.username,
+                password=url.password,
+                dbname=url.database,
+                connect_timeout=2,
+            ) as conn:
+                conn.execute("SELECT 1")
+            return
+        except psycopg.Error as exc:
+            last = exc
+            time.sleep(0.2)
+    logs = _docker("logs", "--tail", "20", container)
+    pytest.fail(
+        f"the throwaway Postgres ({container}) was not ready within "
+        f"{_PG_READY_SEC:.0f}s: {last}\n{logs.stdout}{logs.stderr}",
+        pytrace=False,
+    )
+
+
+@pytest.fixture(scope="session")
+def postgres_admin_url() -> Iterator[str]:
+    """An admin URL: ``$WHYGRAPH_TEST_DATABASE_URL``, else a throwaway container.
+
+    The container (``$WHYGRAPH_TEST_POSTGRES_IMAGE`` or the pinned
+    ``POSTGRES_IMAGE``) is labelled with this process's pid, so a later
+    session sweeps it if this one is killed; it is removed at teardown and,
+    as a second line, at interpreter exit. Without Docker or a URL the
+    requesting tests **fail** - a portal test is never skipped.
+    """
+    configured = os.environ.get(TEST_DATABASE_URL_ENV, "").strip()
+    if configured:
+        yield _url_string(_pg_url(configured))
+        return
+    if shutil.which("docker") is None:
+        pytest.fail(_NO_POSTGRES, pytrace=False)
+    _sweep_stale_pg_containers()
+    image = os.environ.get(TEST_POSTGRES_IMAGE_ENV, "").strip() or POSTGRES_IMAGE
+    name = f"whygraph-test-pg-{os.getpid()}"
+    started = _docker(
+        "run",
+        "-d",
+        "--rm",
+        "--name",
+        name,
+        "--label",
+        f"{_PG_LABEL}=1",
+        "--label",
+        f"{_PG_PID_LABEL}={os.getpid()}",
+        "-p",
+        "127.0.0.1::5432",
+        "-e",
+        "POSTGRES_PASSWORD=test",
+        "--tmpfs",
+        "/var/lib/postgresql",
+        image,
+        "-c",
+        "fsync=off",
+        "-c",
+        "synchronous_commit=off",
+        "-c",
+        "full_page_writes=off",
+    )
+    if started.returncode != 0:
+        pytest.fail(
+            f"{_NO_POSTGRES}\n(docker run {image} failed: {started.stderr.strip()})",
+            pytrace=False,
+        )
+    atexit.register(_docker, "rm", "-f", name)
+    try:
+        mapped = _docker("port", name, "5432/tcp").stdout.split()
+        if not mapped:
+            pytest.fail(f"docker port {name} reported no mapping", pytrace=False)
+        port = int(mapped[0].rsplit(":", 1)[1])
+        url = make_url(f"postgresql+psycopg://postgres:test@127.0.0.1:{port}/postgres")
+        _wait_until_ready(url, name)
+        yield _url_string(url)
+    finally:
+        _docker("rm", "-f", name)
+
+
+@pytest.fixture(scope="session")
+def _postgres_admin_engine(postgres_admin_url: str) -> Iterator[Engine]:
+    """An AUTOCOMMIT engine: ``CREATE`` / ``DROP DATABASE`` refuse a transaction."""
+    engine = create_engine(
+        postgres_admin_url, isolation_level="AUTOCOMMIT", poolclass=NullPool
+    )
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+def _database_url(admin_url: str, name: str) -> str:
+    return _url_string(make_url(admin_url).set(database=name))
+
+
+def _drop_database(admin: Engine, name: str) -> None:
+    with admin.connect() as conn:
+        conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+
+
+@pytest.fixture(scope="session")
+def portal_template_db(
+    postgres_admin_url: str, _postgres_admin_engine: Engine
+) -> Iterator[str]:
+    """A database migrated to head once per session, cloned by every test.
+
+    Named per process, so two sessions sharing one server never collide.
+    Every connection to it is closed before it is yielded.
+    """
+    name = f"whygraph_tpl_{os.getpid()}"
+    _drop_database(_postgres_admin_engine, name)
+    with _postgres_admin_engine.connect() as conn:
+        conn.execute(text(f'CREATE DATABASE "{name}"'))
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(portal_db.DATABASE_URL_ENV, _database_url(postgres_admin_url, name))
+        mp.delenv(portal_db.DATABASE_PASSWORD_FILE_ENV, raising=False)
+        portal_db.ensure_initialized()
+        portal_db._reset_engine()
+    try:
+        yield name
+    finally:
+        _drop_database(_postgres_admin_engine, name)
+
+
+def _clone_database(admin: Engine, template: str) -> str:
+    name = f"t_{uuid.uuid4().hex}"
+    with admin.connect() as conn:
+        # A stray connection to the template makes CREATE DATABASE fail or hang.
+        conn.execute(
+            text(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = :name AND pid <> pg_backend_pid()"
+            ),
+            {"name": template},
+        )
+        conn.execute(text(f'CREATE DATABASE "{name}" TEMPLATE "{template}"'))
+    return name
+
+
+def _use_database(
+    admin_url: str,
+    admin: Engine,
+    template: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[str]:
+    name = _clone_database(admin, template)
+    url = _database_url(admin_url, name)
+    monkeypatch.setenv(portal_db.DATABASE_URL_ENV, url)
+    monkeypatch.delenv(portal_db.DATABASE_PASSWORD_FILE_ENV, raising=False)
+    portal_db._reset_engine()
+    try:
+        yield url
+    finally:
+        portal_db._reset_engine()
+        _drop_database(admin, name)
+
+
+@pytest.fixture
+def portal_database(
+    postgres_admin_url: str,
+    _postgres_admin_engine: Engine,
+    portal_template_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[str]:
+    """A fresh, migrated portal database for this test; yields its URL.
+
+    Cloned from :func:`portal_template_db` (milliseconds, not a migration)
+    and bound through ``$WHYGRAPH_DATABASE_URL``; dropped at teardown.
+    """
+    yield from _use_database(
+        postgres_admin_url, _postgres_admin_engine, portal_template_db, monkeypatch
+    )
+
+
+@pytest.fixture
+def empty_portal_database(
+    postgres_admin_url: str,
+    _postgres_admin_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[str]:
+    """Like :func:`portal_database`, but unmigrated (cloned from ``template0``)."""
+    yield from _use_database(
+        postgres_admin_url, _postgres_admin_engine, "template0", monkeypatch
+    )
+
+
+# ---------------------------------------------------------------------------
+# The frozen 2.0 portal (SQLite) - what the 2.1 importer reads
+# ---------------------------------------------------------------------------
+
+FIXTURES = Path(__file__).parent / "fixtures"
+LEGACY_SCHEMA_SQL = FIXTURES / "portal_2_0_schema.sql"
+LEGACY_SEED_SQL = FIXTURES / "portal_2_0_seed.sql"
+LEGACY_SECRET_KEY = FIXTURES / "portal_2_0_secret.key"
+LEGACY_REVISION = "c5e8a1d2b3f4"
+"""The portal head 2.0.0 ships; the seed's ``alembic_version``."""
+
+LEGACY_SECRET_PLAINTEXTS: dict[int, str] = {
+    1: "sk-ant-global-a1b2",  # global llm_api_key / anthropic
+    2: "sk-ant-alpha-c3d4",  # project 1 llm_api_key / anthropic
+    3: "ghp_globaltoken-e5f6",  # global github_token (NULL provider)
+    5: "sk-ant-oat-beta-g7h8",  # project 2 claude_oauth_token (NULL provider)
+}
+"""``secrets.id`` -> plaintext of the seed's ciphertexts (encrypted with the key)."""
+
+LEGACY_ROW_COUNTS: dict[str, int] = {
+    "users": 1,
+    "settings": 1,
+    "projects": 2,
+    "project_agents": 2,
+    "project_config": 2,
+    "secrets": 4,
+    "scan_runs": 3,
+}
+
+
+def build_legacy_portal_db(path: Path, *, seed: bool = True) -> Path:
+    """Write a 2.0 ``portal.db`` from the frozen schema (and, by default, seed).
+
+    Parameters
+    ----------
+    path : Path
+        The SQLite file to create; must not exist yet.
+    seed : bool
+        ``False`` writes the schema only (no ``alembic_version`` row either).
+    """
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(LEGACY_SCHEMA_SQL.read_text())
+        if seed:
+            conn.executescript(LEGACY_SEED_SQL.read_text())
+        conn.commit()
+    finally:
+        conn.close()
+    return path
+
+
+def install_legacy_portal(data: Path) -> Path:
+    """Lay out a 2.0 data dir: the seeded ``portal.db`` plus its ``secret.key``.
+
+    Returns
+    -------
+    Path
+        The ``portal.db`` written into *data*.
+    """
+    data.mkdir(parents=True, exist_ok=True, mode=0o700)
+    key = data / "secret.key"
+    key.write_bytes(LEGACY_SECRET_KEY.read_bytes())
+    key.chmod(0o600)
+    return build_legacy_portal_db(data / "portal.db")

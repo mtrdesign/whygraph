@@ -22,7 +22,7 @@ portal database:
    ``repr``, so a traceback never prints a live key.
 
 :class:`ContextCache` keeps one built context per project; a cache miss
-does its SQLite and Fernet work on a worker thread
+does its database and Fernet work on a worker thread
 (:meth:`ContextCache.aget`), never on the event loop.
 """
 

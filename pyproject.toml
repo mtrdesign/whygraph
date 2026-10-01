@@ -21,6 +21,8 @@ dependencies = [
     "ollama>=0.3",
     "tomli-w>=1.0",
     "cryptography>=43",
+    "psycopg[binary]>=3.2,<4",
+    "sqlalchemy>=2.0.16",
 ]
 
 [project.scripts]

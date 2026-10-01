@@ -1,9 +1,11 @@
 """Tests for the portal DB, models, migrations, secrets and context builder.
 
 Covers plan step 3: a fresh migrate, the separate ``MetaData`` (both
-directions), the partial-unique / cascade constraints, the Fernet key file
-and keyring, the secret store's API shape, and building a
+directions), the ``NULLS NOT DISTINCT`` unique / cascade constraints, the
+Fernet key file and keyring, the secret store's API shape, and building a
 ``ProjectContext`` under the config policy (rules 2 and 3 of section 4.2.1).
+Also the Postgres connection plumbing (URL resolution, the pooled and
+migration engines, the wait, the instance lock) and the frozen 2.0 fixture.
 """
 
 from __future__ import annotations
@@ -23,9 +25,17 @@ import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import SQLModel, select
 
+from conftest import (
+    LEGACY_REVISION,
+    LEGACY_ROW_COUNTS,
+    LEGACY_SECRET_KEY,
+    LEGACY_SECRET_PLAINTEXTS,
+    build_legacy_portal_db,
+)
 from whygraph.core.config import Config
 from whygraph.core.context import ProjectContext
 from whygraph.portal import db as portal_db
@@ -66,16 +76,18 @@ PORTAL_TABLES = {
     "project_config",
     "secrets",
     "scan_runs",
+    "legacy_import",
 }
 
 
 @pytest.fixture
-def data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
-    """An isolated, migrated portal data dir."""
-    path = tmp_path / "data"
-    monkeypatch.setenv("WHYGRAPH_DATA", str(path))
+def data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, portal_database: str
+) -> Iterator[Path]:
+    """An isolated portal data dir over a fresh, migrated portal database."""
+    monkeypatch.setenv("WHYGRAPH_DATA", str(tmp_path / "data"))
+    path = portal_db.data_dir()
     portal_db._reset_engine()
-    portal_db.ensure_initialized()
     try:
         yield path
     finally:
@@ -101,14 +113,7 @@ def _project(session, slug: str = "demo", root: str | None = None, **kw) -> Proj
 
 
 def test_fresh_migrate_creates_portal_tables(data: Path) -> None:
-    conn = sqlite3.connect(data / "portal.db")
-    try:
-        names = {
-            r[0]
-            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        }
-    finally:
-        conn.close()
+    names = set(inspect(portal_db.get_engine()).get_table_names())
     assert names == PORTAL_TABLES | {"alembic_version"}
 
 
@@ -161,8 +166,9 @@ def test_autogenerate_never_crosses_the_chains() -> None:
     assert portal_tables == PORTAL_TABLES
 
 
-def test_migration_matches_models(data: Path) -> None:
-    """No drift between the migration and the models (expression indexes aside)."""
+def test_migration_matches_models(empty_portal_database: str) -> None:
+    """No drift between the baseline and the models (the in-suite ``alembic check``)."""
+    portal_db.ensure_initialized()
     with portal_db.get_engine().connect() as conn, warnings.catch_warnings():
         warnings.simplefilter("ignore")
         ctx = MigrationContext.configure(
@@ -170,6 +176,279 @@ def test_migration_matches_models(data: Path) -> None:
         )
         diff = compare_metadata(ctx, PortalBase.metadata)
     assert diff == []
+
+
+def test_baseline_constraints_are_nulls_not_distinct(
+    empty_portal_database: str,
+) -> None:
+    portal_db.ensure_initialized()
+    with portal_db.get_engine().connect() as conn:
+        defs = dict(
+            conn.execute(
+                text(
+                    "SELECT indexname, indexdef FROM pg_indexes "
+                    "WHERE indexname IN ('uq_project_config_scope', 'uq_secrets_scope')"
+                )
+            ).all()
+        )
+    assert set(defs) == {"uq_project_config_scope", "uq_secrets_scope"}
+    assert all("NULLS NOT DISTINCT" in d for d in defs.values()), defs
+
+
+def test_baseline_inserts_no_rows(empty_portal_database: str) -> None:
+    portal_db.ensure_initialized()
+    with portal_db.get_engine().connect() as conn:
+        counts = {
+            t: conn.execute(text(f'SELECT count(*) FROM "{t}"')).scalar_one()
+            for t in PORTAL_TABLES
+        }
+    assert counts == dict.fromkeys(PORTAL_TABLES, 0)
+
+
+def test_legacy_2_0_fixture_is_consistent(tmp_path: Path) -> None:
+    """The frozen 2.0 portal the importer reads: its head, its rows, its key."""
+    db = build_legacy_portal_db(tmp_path / "portal.db")
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [
+            (LEGACY_REVISION,)
+        ]
+        counts = {
+            t: conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
+            for t in LEGACY_ROW_COUNTS
+        }
+        ciphertexts = dict(conn.execute("SELECT id, ciphertext FROM secrets"))
+        run_ids = [r[0] for r in conn.execute("SELECT id FROM scan_runs ORDER BY id")]
+        analyze = {r[0] for r in conn.execute("SELECT analyze FROM scan_runs")}
+        null_creator = conn.execute(
+            "SELECT count(*) FROM projects WHERE created_by IS NULL"
+        ).fetchone()[0]
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        conn.close()
+    assert counts == LEGACY_ROW_COUNTS
+    assert run_ids == [1, 2, 4] and analyze == {0, 1} and null_creator == 1
+    keyring = pw_secrets.MultiFernet(
+        [pw_secrets.Fernet(LEGACY_SECRET_KEY.read_bytes().strip())]
+    )
+    assert {
+        i: keyring.decrypt(c.encode()).decode() for i, c in ciphertexts.items()
+    } == LEGACY_SECRET_PLAINTEXTS
+
+
+# ---------------------------------------------------------------------------
+# Connection plumbing: URL, engines, wait, instance lock
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def no_db_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
+    monkeypatch.delenv(portal_db.DATABASE_URL_ENV, raising=False)
+    monkeypatch.delenv(portal_db.DATABASE_PASSWORD_FILE_ENV, raising=False)
+    return monkeypatch
+
+
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_database_url_unset_is_not_configured(
+    no_db_env: pytest.MonkeyPatch, value: str | None
+) -> None:
+    if value is not None:
+        no_db_env.setenv(portal_db.DATABASE_URL_ENV, value)
+    with pytest.raises(portal_db.PortalDatabaseNotConfigured, match="is not set"):
+        portal_db.database_url()
+
+
+@pytest.mark.parametrize(
+    "value", ["sqlite:///portal.db", "mysql://u:p@h/db", "not a url"]
+)
+def test_database_url_must_be_postgres(
+    no_db_env: pytest.MonkeyPatch, value: str
+) -> None:
+    no_db_env.setenv(portal_db.DATABASE_URL_ENV, value)
+    with pytest.raises(portal_db.PortalDatabaseNotConfigured):
+        portal_db.database_url()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "postgres://u:pw@db:5433/whygraph",
+        "postgresql://u:pw@db:5433/whygraph",
+        "postgresql+psycopg2://u:pw@db:5433/whygraph",
+        "postgresql+psycopg://u:pw@db:5433/whygraph",
+    ],
+)
+def test_database_url_is_normalised_to_psycopg(
+    no_db_env: pytest.MonkeyPatch, value: str
+) -> None:
+    no_db_env.setenv(portal_db.DATABASE_URL_ENV, value)
+    url = portal_db.database_url()
+    assert url.drivername == "postgresql+psycopg"
+    assert (url.username, url.password, url.host, url.port, url.database) == (
+        "u",
+        "pw",
+        "db",
+        5433,
+        "whygraph",
+    )
+    assert portal_db.database_target(url) == "db:5433/whygraph"
+
+
+def test_password_file_wins_and_is_stripped(
+    no_db_env: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    secret = tmp_path / "postgres.password"
+    secret.write_text("  s3cr3t-pw\n\n")
+    no_db_env.setenv(portal_db.DATABASE_URL_ENV, "postgresql://u:url-pw@db/whygraph")
+    no_db_env.setenv(portal_db.DATABASE_PASSWORD_FILE_ENV, str(secret))
+    assert portal_db.database_url().password == "s3cr3t-pw"
+    no_db_env.setenv(portal_db.DATABASE_URL_ENV, "postgresql://u@db/whygraph")
+    assert portal_db.database_url().password == "s3cr3t-pw"
+
+
+def test_missing_or_unreadable_password_file_is_not_configured(
+    no_db_env: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    no_db_env.setenv(portal_db.DATABASE_URL_ENV, "postgresql://u@db/whygraph")
+    no_db_env.setenv(portal_db.DATABASE_PASSWORD_FILE_ENV, str(tmp_path / "missing"))
+    with pytest.raises(portal_db.PortalDatabaseNotConfigured, match="cannot read"):
+        portal_db.database_url()
+    locked = tmp_path / "locked"
+    locked.write_text("pw")
+    locked.chmod(0)
+    try:
+        if os.access(locked, os.R_OK):  # running as root: chmod cannot deny it
+            return
+        no_db_env.setenv(portal_db.DATABASE_PASSWORD_FILE_ENV, str(locked))
+        with pytest.raises(portal_db.PortalDatabaseNotConfigured, match="cannot read"):
+            portal_db.database_url()
+    finally:
+        locked.chmod(0o600)
+
+
+def test_alembic_config_has_no_placeholder_url() -> None:
+    assert portal_db.alembic_config().get_main_option("sqlalchemy.url") is None
+
+
+def test_ensure_initialized_returns_none_and_legacy_path(data: Path) -> None:
+    assert portal_db.ensure_initialized() is None
+    assert portal_db.legacy_db_path() == data / "portal.db"
+    assert not portal_db.legacy_db_path().exists()
+
+
+def test_postgres_scheme_and_password_file_authenticate(
+    portal_database: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    url = make_url(portal_database)
+    secret = tmp_path / "postgres.password"
+    secret.write_text(f"{url.password or ''}\n")
+    bare = url.set(drivername="postgres", password=None)
+    monkeypatch.setenv(
+        portal_db.DATABASE_URL_ENV, bare.render_as_string(hide_password=False)
+    )
+    monkeypatch.setenv(portal_db.DATABASE_PASSWORD_FILE_ENV, str(secret))
+    assert portal_db.database_url().password == (url.password or "")
+    with portal_db.get_engine().connect() as conn:
+        assert conn.execute(text("SELECT 1")).scalar_one() == 1
+
+
+def _show(conn, name: str) -> str:  # noqa: ANN001
+    return conn.execute(text(f"SHOW {name}")).scalar_one()
+
+
+def test_only_pooled_connections_carry_the_server_timeouts(
+    portal_database: str,
+) -> None:
+    with portal_db.get_engine().connect() as conn:
+        assert _show(conn, "statement_timeout") == "30s"
+        assert _show(conn, "idle_in_transaction_session_timeout") == "1min"
+    engine = portal_db.migration_engine()
+    try:
+        with engine.connect() as conn:
+            assert _show(conn, "statement_timeout") == "0"
+            assert _show(conn, "idle_in_transaction_session_timeout") == "0"
+    finally:
+        engine.dispose()
+    lock = portal_db.InstanceLock()
+    assert lock.acquire()
+    try:
+        conn = lock._conn
+        assert conn is not None
+        assert _show(conn, "statement_timeout") == "0"
+        assert _show(conn, "idle_in_transaction_session_timeout") == "0"
+    finally:
+        lock.release()
+
+
+def _closed_port() -> int:
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def test_wait_for_database_returns_when_reachable(portal_database: str) -> None:
+    portal_db.wait_for_database(timeout=5)
+
+
+def test_wait_for_database_times_out_within_its_budget(
+    no_db_env: pytest.MonkeyPatch,
+) -> None:
+    port = _closed_port()
+    no_db_env.setenv(
+        portal_db.DATABASE_URL_ENV, f"postgresql://u:hunter2@127.0.0.1:{port}/wg"
+    )
+    no_db_env.setenv("WHYGRAPH_DATABASE_WAIT_SEC", "1")
+    started = time.monotonic()
+    with pytest.raises(portal_db.PortalDatabaseUnreachable) as exc:
+        portal_db.wait_for_database()
+    assert time.monotonic() - started < 4
+    assert exc.value.target == f"127.0.0.1:{port}/wg"
+    assert "hunter2" not in str(exc.value)
+
+
+def test_instance_lock_is_exclusive_per_database(portal_database: str) -> None:
+    first, second = portal_db.InstanceLock(), portal_db.InstanceLock()
+    assert not first.is_held()
+    assert first.acquire() and first.is_held()
+    with pytest.raises(RuntimeError):
+        first.acquire()  # once per process: advisory locks are re-entrant
+    assert second.acquire() is False and not second.is_held()
+    first.release()
+    assert not first.is_held()
+    first.release()  # a no-op once released
+    assert second.acquire()
+    second.release()
+
+
+def test_instance_lock_is_lost_with_its_session(portal_database: str) -> None:
+    lock = portal_db.InstanceLock()
+    assert lock.acquire()
+    try:
+        with portal_db.get_engine().connect() as conn:
+            pids = (
+                conn.execute(
+                    text(
+                        "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND "
+                        "database = (SELECT oid FROM pg_database "
+                        "WHERE datname = current_database())"
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(pids) == 1
+            conn.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pids[0]})
+        deadline = time.monotonic() + 5
+        while lock.is_held() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not lock.is_held()
+        successor = portal_db.InstanceLock()
+        assert successor.acquire()  # free for the next portal
+        successor.release()
+    finally:
+        lock.release()
 
 
 # ---------------------------------------------------------------------------
@@ -452,11 +731,8 @@ def test_secrets_round_trip_and_ciphertext_differs_per_write(data: Path) -> None
             == "sk-ant-a1b2"
         )
     assert first != second
-    raw = sqlite3.connect(data / "portal.db")
-    try:
-        stored = raw.execute("SELECT ciphertext, hint FROM secrets").fetchone()
-    finally:
-        raw.close()
+    with portal_db.get_engine().connect() as raw:
+        stored = raw.execute(text("SELECT ciphertext, hint FROM secrets")).one()
     assert "sk-ant" not in stored[0] and "sk-ant" not in stored[1]
 
 

@@ -122,8 +122,10 @@ def seed_codegraph(root: Path) -> None:
 
 
 @pytest.fixture
-def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
-    """An isolated data dir, one shared folder, no ambient keys or modes."""
+def env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, portal_database: str
+) -> SimpleNamespace:
+    """An isolated data dir and portal DB, one shared folder, no ambient keys."""
     data = tmp_path / "data"
     shared = tmp_path / "shared"
     shared.mkdir()

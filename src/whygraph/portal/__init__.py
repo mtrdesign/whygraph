@@ -1,6 +1,6 @@
 """The WhyGraph portal: a long-running, multi-project host.
 
-This package owns the portal's *own* state - a SQLite database of
+This package owns the portal's *own* state - a Postgres database of
 projects, users, per-project config and encrypted secrets, kept apart
 from every project's ``whygraph.db`` (see :mod:`whygraph.portal.db`).
 

@@ -28,6 +28,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import select
 
+from conftest import build_legacy_portal_db
 from test_portal_app import (  # noqa: F401 -- fixtures
     add_local,
     client,
@@ -164,8 +165,11 @@ def test_symlinked_codegraph_db_is_refused(
 def test_symlinked_db_never_backs_up_or_migrates_portal_db(
     ready: TestClient, env: SimpleNamespace
 ) -> None:
-    portal_file = env.data / "portal.db"
+    # The portal's own DB is Postgres now; what a symlink can still reach is a
+    # 2.0 ``portal.db`` the one-time import has not picked up yet.
+    portal_file = build_legacy_portal_db(env.data / "portal.db")
     before = _tables(portal_file)
+    before_bytes = portal_file.read_bytes()
     root = make_repo(env.shared, "sneaky")
     (root / ".whygraph").mkdir()
     (root / ".whygraph" / "whygraph.db").symlink_to(
@@ -176,6 +180,7 @@ def test_symlinked_db_never_backs_up_or_migrates_portal_db(
     assert response.status_code == 409 and response.json()["code"] == "unsafe_path"
     assert not (root / ".whygraph" / "backups").exists()
     assert _tables(portal_file) == before
+    assert portal_file.read_bytes() == before_bytes
 
 
 def test_migrations_refuse_a_symlinked_db(tmp_path: Path) -> None:

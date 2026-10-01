@@ -5,9 +5,9 @@ installer to **stdout**; running it writes the ``whygraph`` shim onto ``PATH``.
 The shim runs the image ephemerally against the current directory (``docker run
 --rm -v "$PWD:/workspace" …``), so every command is a fresh process reading that
 repo's own ``whygraph.toml`` / ``.whygraph`` / ``.codegraph`` - except the portal
-verbs (``up`` / ``down`` / ``status`` / ``logs`` / ``folders``), which manage the
-long-lived portal container. It also writes a host ``whygraph-mcp`` **stub** in
-place of the 1.x shim: the stdio MCP server was removed in 2.0.0, and every 1.x
+verbs (``up`` / ``down`` / ``status`` / ``logs`` / ``folders`` / ``backup``), which
+manage the long-lived portal container and its database container. It also
+writes a host ``whygraph-mcp`` **stub** in place of the 1.x shim: the stdio MCP server was removed in 2.0.0, and every 1.x
 agent config still runs ``whygraph-mcp``, so the stub prints the removal message
 to stderr and exits ``2`` without calling ``docker``. It stays for the 2.x line.
 
@@ -50,6 +50,16 @@ from ..stubs import MCP_REMOVED, REMOVED_EXIT_CODE, SERVE_REMOVED
 IMAGE_REPO = "ghcr.io/mtrdesign/whygraph"
 """Canonical published image; the baked default for the generated shims."""
 
+POSTGRES_IMAGE = "postgres:18.6-trixie"
+"""Pinned image for the portal's database container.
+
+The minor is bumped with each release; the Debian variant never changes,
+because a base-OS switch changes collations under existing text indexes.
+"""
+
+POSTGRES_MAJOR = "18"
+"""Major of :data:`POSTGRES_IMAGE`; selects the per-major ``PGDATA`` directory."""
+
 _MCP_STUB_TEMPLATE = """\
 #!/usr/bin/env sh
 # WhyGraph whygraph-mcp stub. The stdio MCP server was removed in 2.0.0; agents
@@ -61,10 +71,11 @@ exit __EXIT__
 """
 
 _PORTAL_VERBS = r"""
-# --- portal verbs: up / down / status / logs / folders ---------------------
-# `whygraph up` runs the portal in ONE named, long-lived container. Nothing from
-# the host environment reaches it (keys live in the portal DB), so no `-e` here
-# passes a credential variable. Config lives under ~/.config/whygraph, the
+# --- portal verbs: up / down / status / logs / folders / backup ------------
+# `whygraph up` runs the portal in ONE named, long-lived container, plus its
+# Postgres in a second one ($PORTAL-postgres, no published port). Nothing from
+# the host environment reaches either (keys live in the portal DB), so no `-e`
+# here passes a credential variable. Config lives under ~/.config/whygraph, the
 # portal's data under ~/.local/share/whygraph (mounted at /data).
 portal_die() { echo "whygraph: $*" >&2; exit 2; }
 
@@ -74,6 +85,59 @@ portal_state() {
 
 portal_label() {
     docker inspect --type container -f '{{index .Config.Labels "'"$1"'"}}' "$PORTAL" 2>/dev/null || true
+}
+
+portal_pg_state() {
+    docker inspect --type container -f '{{.State.Status}}' "$PG" 2>/dev/null || true
+}
+
+portal_pg_label() {
+    docker inspect --type container -f '{{index .Config.Labels "whygraph.pg_image"}}' "$PG" 2>/dev/null || true
+}
+
+# Host-side checks and the password for the database container; starts nothing.
+# PGDATA is per major ($DATA/postgres/<major>/docker), so a data dir another
+# major created is refused rather than started on.
+portal_pg_prepare() {
+    { mkdir -p "$DATA/postgres" && chmod 700 "$DATA/postgres"; } || portal_die "cannot create $DATA/postgres"
+    for v in "$DATA"/postgres/*/docker/PG_VERSION; do
+        [ -f "$v" ] || continue
+        [ "$(cat "$v")" != "$PG_MAJOR" ] || continue
+        [ ! -f "$DATA/postgres/$PG_MAJOR/docker/PG_VERSION" ] || continue
+        portal_die "the portal database in $DATA/postgres was created by Postgres $(cat "$v"); this release needs $PG_MAJOR. See https://mtrdesign.github.io/whygraph/portal/upgrading/#postgres-major"
+    done
+    if [ ! -s "$DATA/postgres.password" ]; then
+        # The password only takes effect at initdb. A new one for an existing
+        # cluster would lock the portal out, so refuse instead of regenerating.
+        for v in "$DATA"/postgres/*/docker/PG_VERSION; do
+            if [ -f "$v" ]; then
+                portal_die "$DATA/postgres.password is missing but the database already exists - restore the file from your backup of this data dir"
+            fi
+        done
+        { ( umask 077 && od -An -N24 -tx1 /dev/urandom | tr -d ' \n' > "$DATA/postgres.password.tmp" ) \
+            && [ -s "$DATA/postgres.password.tmp" ] \
+            && mv "$DATA/postgres.password.tmp" "$DATA/postgres.password"; } \
+            || { rm -f "$DATA/postgres.password.tmp"; portal_die "cannot write the database password"; }
+    fi
+}
+
+# pg_dump of the running database into $DATA/backups (0700), newest 10 kept.
+# The dump goes to a .tmp first, so a failed one never leaves a truncated
+# .dump for retention to count. $BACKUP_HINT is appended to every refusal.
+portal_backup() {
+    [ "$(portal_pg_state)" = "running" ] || portal_die "the portal database is not running - start it with: whygraph up$BACKUP_HINT"
+    { mkdir -p "$DATA/backups" && chmod 700 "$DATA/backups"; } || portal_die "cannot create $DATA/backups$BACKUP_HINT"
+    pg_dump_file="$DATA/backups/portal-$(date -u +%Y%m%dT%H%M%SZ).dump"
+    if ! ( umask 077 && docker exec "$PG" pg_dump -U whygraph -d whygraph -Fc > "$pg_dump_file.tmp" ); then
+        rm -f "$pg_dump_file.tmp"
+        portal_die "the database backup failed (pg_dump in $PG)$BACKUP_HINT"
+    fi
+    mv "$pg_dump_file.tmp" "$pg_dump_file" || portal_die "cannot write $pg_dump_file$BACKUP_HINT"
+    # Only the shim's own timestamped dumps count, and only those are deleted.
+    ls -1 "$DATA/backups" | grep -x 'portal-[0-9]\{8\}T[0-9]\{6\}Z\.dump' | sort -r | tail -n +11 \
+        | while IFS= read -r pg_old; do rm -f "$DATA/backups/$pg_old"; done
+    echo "portal database backed up to $pg_dump_file"
+    echo "restore needs this data dir's secret.key too - back it up with the dump"
 }
 
 portal_valid_port() {
@@ -223,6 +287,28 @@ portal_up() {
         echo "warning: a 'whygraph-serve' container from the old playground still exists (it may hold port 8765). Remove it with: whygraph serve --stop" >&2
     fi
 
+    # Decide everything first, then act: the portal always stops before its
+    # database, so a running scan can still record itself as interrupted.
+    portal_pg_prepare
+    pg_state=$(portal_pg_state)
+    pg_changed=""
+    case "$pg_state" in
+        running|restarting) [ "$(portal_pg_label)" = "$PG_IMAGE" ] || pg_changed=1 ;;
+        *) pg_changed=1 ;;
+    esac
+    # Dump a running database before it is recreated - before either container
+    # is touched, so a failed dump leaves both exactly as they were.
+    if [ -n "$pg_changed" ] && [ "$pg_state" = "running" ]; then
+        if [ "${WHYGRAPH_SKIP_BACKUP:-}" = "1" ]; then
+            echo "whygraph: WHYGRAPH_SKIP_BACKUP=1 - recreating the portal database without a backup" >&2
+        else
+            echo "whygraph portal: backing up the database before recreating it" >&2
+            BACKUP_HINT=" - nothing was changed; to recreate it without a backup: WHYGRAPH_SKIP_BACKUP=1 whygraph up"
+            portal_backup
+            BACKUP_HINT=""
+        fi
+    fi
+
     state=$(portal_state)
     if [ -n "$state" ]; then
         case "$state" in
@@ -232,6 +318,7 @@ portal_up() {
                 [ "$(portal_label whygraph.port)" = "$PORT" ] || changed="$changed port"
                 [ "$(portal_label whygraph.image)" = "$IMAGE" ] || changed="$changed image"
                 [ "$(portal_label whygraph.dev_src)" = "$DEV_SRC" ] || changed="$changed dev_src"
+                [ -z "$pg_changed" ] || changed="$changed database"
                 if [ -z "$changed" ]; then
                     if [ "$state" = "restarting" ]; then
                         echo "whygraph portal is restarting (see: whygraph logs)" >&2
@@ -248,7 +335,42 @@ portal_up() {
         esac
     fi
 
+    # The network must exist before the database joins it.
     docker network create whygraph-portal >/dev/null 2>&1 || true
+    if [ -n "$pg_changed" ]; then
+        [ "$pg_state" != "running" ] || docker stop -t "$GRACE" "$PG" >/dev/null
+        [ -z "$pg_state" ] || docker rm -f "$PG" >/dev/null
+        # No -p: the database is reachable only on the whygraph-portal network.
+        # The health check uses TCP on purpose: the image's first-run temporary
+        # server listens on the socket only, so it cannot pass early.
+        docker run -d --name "$PG" --restart "$RESTART" --network whygraph-portal \
+            --label "whygraph.pg_image=$PG_IMAGE" \
+            --user "$(id -u):$(id -g)" \
+            --shm-size=128m \
+            --health-cmd "pg_isready -h 127.0.0.1 -U whygraph -d whygraph" \
+            --health-interval 2s --health-timeout 3s --health-retries 30 --health-start-period 5s \
+            --mount "type=bind,source=$DATA/postgres,target=/var/lib/postgresql" \
+            --mount "type=bind,source=$DATA/postgres.password,target=/run/secrets/whygraph-db-password,readonly" \
+            -e "PGDATA=/var/lib/postgresql/$PG_MAJOR/docker" \
+            -e POSTGRES_USER=whygraph -e POSTGRES_DB=whygraph \
+            -e POSTGRES_PASSWORD_FILE=/run/secrets/whygraph-db-password \
+            "$PG_IMAGE" >/dev/null
+    fi
+    # Always wait (60 s): this also covers a database Docker has just restarted.
+    # WHYGRAPH_DB_READY_TIMEOUT only exists to keep the test suite fast.
+    pg_budget="${WHYGRAPH_DB_READY_TIMEOUT:-60}"
+    case "$pg_budget" in ''|*[!0-9]*) pg_budget=60 ;; esac
+    pg_waited=0
+    while :; do
+        pg_health=$(docker inspect --type container -f '{{.State.Health.Status}}' "$PG" 2>/dev/null || true)
+        [ "$pg_health" != "healthy" ] || break
+        if [ "$pg_health" = "unhealthy" ] || [ "$pg_waited" -ge "$pg_budget" ]; then
+            portal_die "the portal database did not become ready - see: docker logs $PG"
+        fi
+        sleep 1
+        pg_waited=$((pg_waited + 1))
+    done
+
     docker run -d --init --name "$PORTAL" --restart "$RESTART" \
         --network whygraph-portal --add-host=host.docker.internal:host-gateway \
         --label "whygraph.folders=$FOLDERS_JOINED" --label "whygraph.port=$PORT" \
@@ -257,27 +379,46 @@ portal_up() {
         --user "$(id -u):$(id -g)" -e HOME=/tmp \
         -e WHYGRAPH_DATA=/data -e WHYGRAPH_SHARED_FOLDERS="$FOLDERS_JOINED" \
         -e WHYGRAPH_MODE=local -e WHYGRAPH_PORT="$PORT" \
+        -e "WHYGRAPH_DATABASE_URL=postgresql+psycopg://whygraph@$PG:5432/whygraph" \
+        -e WHYGRAPH_DATABASE_PASSWORD_FILE=/data/postgres.password \
         "$@" --host 0.0.0.0 --port "$PORT" >/dev/null
     echo "whygraph portal running at $URL"
     portal_env_hint
 }
 
+# Each container on its own, portal first; the data stays in $DATA/postgres.
 portal_down() {
     [ $# -eq 0 ] || portal_die "whygraph down takes no arguments"
-    state=$(portal_state)
-    if [ -z "$state" ]; then echo "whygraph portal is not running" >&2; return 0; fi
-    docker stop -t "$GRACE" "$PORTAL" >/dev/null
-    docker rm "$PORTAL" >/dev/null
-    echo "whygraph portal stopped"
+    pg_stopped=""
+    if [ -n "$(portal_state)" ]; then
+        docker stop -t "$GRACE" "$PORTAL" >/dev/null
+        docker rm "$PORTAL" >/dev/null
+        echo "whygraph portal stopped"
+        pg_stopped=1
+    fi
+    if [ -n "$(portal_pg_state)" ]; then
+        docker stop -t "$GRACE" "$PG" >/dev/null
+        docker rm "$PG" >/dev/null
+        echo "whygraph portal database stopped (its data stays in $DATA/postgres)"
+        pg_stopped=1
+    fi
+    [ -n "$pg_stopped" ] || echo "whygraph portal is not running" >&2
 }
 
 portal_status() {
     [ $# -eq 0 ] || portal_die "whygraph status takes no arguments"
     state=$(portal_state)
-    if [ -z "$state" ]; then echo "whygraph portal: not created (start it with: whygraph up)"; return 1; fi
+    pg_state=$(portal_pg_state)
+    if [ -n "$pg_state" ]; then pg_line="database: $pg_state ($(portal_pg_label))"; else pg_line="database: not created"; fi
+    if [ -z "$state" ]; then
+        echo "whygraph portal: not created (start it with: whygraph up)"
+        echo "$pg_line"
+        return 1
+    fi
     echo "whygraph portal: $state"
     echo "url: http://127.0.0.1:$(portal_label whygraph.port)"
     echo "image: $(portal_label whygraph.image)"
+    echo "$pg_line"
     folders=$(portal_label whygraph.folders)
     if [ -z "$folders" ]; then
         echo "folders: (none)"
@@ -292,7 +433,7 @@ portal_status() {
             echo "  $item"
         done
     fi
-    [ "$state" = "running" ]
+    [ "$state" = "running" ] && [ "$pg_state" = "running" ]
 }
 
 portal_logs() {
@@ -343,6 +484,10 @@ portal_main() {
         [A-Za-z0-9]*) case "$PORTAL" in *[!A-Za-z0-9_.-]*) portal_die "invalid WHYGRAPH_PORTAL_NAME '$PORTAL'" ;; esac ;;
         *) portal_die "invalid WHYGRAPH_PORTAL_NAME '$PORTAL'" ;;
     esac
+    PG="$PORTAL-postgres"
+    PG_IMAGE="${WHYGRAPH_POSTGRES_IMAGE:-__PG_IMAGE__}"
+    PG_MAJOR=__PG_MAJOR__
+    BACKUP_HINT=""
     CONF="$HOME/.config/whygraph"
     FOLDERS_FILE="$CONF/folders"
     DATA="${WHYGRAPH_DATA:-$HOME/.local/share/whygraph}"
@@ -354,11 +499,12 @@ portal_main() {
         status) portal_status "$@" ;;
         logs) portal_logs "$@" ;;
         folders) mkdir -p "$CONF"; touch "$FOLDERS_FILE"; portal_folders "$@" ;;
+        backup) [ $# -eq 0 ] || portal_die "whygraph backup takes no arguments"; portal_backup ;;
     esac
 }
 
 case "${1:-}" in
-    up|down|status|logs|folders) portal_main "$@"; exit 0 ;;
+    up|down|status|logs|folders|backup) portal_main "$@"; exit 0 ;;
 esac
 # --- end portal verbs ------------------------------------------------------
 """
@@ -370,8 +516,9 @@ esac
 _WHYGRAPH_SHIM_TEMPLATE = """\
 #!/usr/bin/env sh
 # WhyGraph shim. Every command runs ephemerally in the container EXCEPT
-# `whygraph up|down|status|logs|folders`, which manage the long-lived portal
-# container (and `whygraph serve`, removed in 2.0.0, which only says so).
+# `whygraph up|down|status|logs|folders|backup`, which manage the long-lived
+# portal container and its database container (and `whygraph serve`, removed
+# in 2.0.0, which only says so).
 # Generated by `whygraph install`; safe to re-generate.
 set -eu
 IMAGE="${WHYGRAPH_IMAGE:-__IMAGE__}"
@@ -432,10 +579,13 @@ def _shim(image: str) -> str:
     """Render the ``whygraph`` shim's body, baking ``image`` as its default.
 
     Renders :data:`_WHYGRAPH_SHIM_TEMPLATE` with the portal verbs from
-    :data:`_PORTAL_VERBS` and the ``serve`` removal branch.
+    :data:`_PORTAL_VERBS` (baking :data:`POSTGRES_IMAGE` / :data:`POSTGRES_MAJOR`
+    for the database container) and the ``serve`` removal branch.
     """
     return (
         _WHYGRAPH_SHIM_TEMPLATE.replace("__PORTAL_VERBS__", _PORTAL_VERBS)
+        .replace("__PG_IMAGE__", POSTGRES_IMAGE)
+        .replace("__PG_MAJOR__", POSTGRES_MAJOR)
         .replace("__SERVE_REMOVED__", _sh_single_quoted(SERVE_REMOVED))
         .replace("__EXIT__", str(REMOVED_EXIT_CODE))
         .replace("__IMAGE__", image)

@@ -6,14 +6,16 @@ speaks MCP can connect to it for git-based analysis of a target repo. Think of a
 onboarding assistant, or an internal dev portal that needs the *why* behind a chunk of code - not just
 the code.
 
-This page covers that model: the `whygraph-portal` container as the service, and a third-party app
-driving a project's endpoint over MCP.
+This page covers that model: the `whygraph-portal` container (with its database container,
+`whygraph-portal-postgres`) as the service, and a third-party app driving a project's endpoint over
+MCP.
 
 ## The shape of it
 
 The portal container is the long-lived service. It mounts your shared folders, runs the scans that
-**write** each project's databases, and serves the MCP endpoints that **read** them. A consuming app
-connects over HTTP.
+**write** each project's databases, and serves the MCP endpoints that **read** them. Its own data -
+the project list, settings, keys and scan history - is in Postgres, in a second container on a private
+Docker network. A consuming app connects over HTTP, to the portal only.
 
 ```mermaid
 flowchart LR
@@ -22,11 +24,13 @@ flowchart LR
         mcp["/mcp/&lt;slug&gt;<br/>HTTP MCP"]
         scan["Scan runner"]
     end
+    pg[("whygraph-portal-postgres<br/>(container, no published port)<br/>projects, settings, keys")]
     repo[("Shared folder<br/>.whygraph + .codegraph")]
 
     app -- "MCP over HTTP" --> mcp
     mcp -- "reads cached evidence + rationale" --> repo
     scan -- "writes" --> repo
+    svc -- "private Docker network" --> pg
 ```
 
 The endpoint for a project is `http://127.0.0.1:<port>/mcp/<slug>` (port `8765` by default; the slug is
@@ -49,9 +53,11 @@ See the [MCP surface reference](../reference/mcp.md) for exact signatures.
 whygraph up --add-folder /path/to/repos     # start the portal, share the repos
 ```
 
-Then add the target repository in the portal and run its first scan
-([Adding projects](../portal/projects.md)). The container restarts with Docker, so the endpoint is
-there whenever the machine is.
+That starts both containers, the database first; `up` waits for it to be ready before it starts the
+portal. Then add the target repository in the portal and run its first scan
+([Adding projects](../portal/projects.md)). Both containers restart with Docker, so the endpoint is
+there whenever the machine is. Back the portal's database up with `whygraph backup`
+([Backup and restore](../portal/backup.md)).
 
 !!! warning "An uninitialized or unscanned project returns nothing useful"
     The endpoint answers `409` until the project is initialized in the portal. On an initialized but
@@ -72,6 +78,14 @@ What the app needs depends on what it asks for:
 !!! info "Keys live in the portal, not in the image or your shell"
     Keys are entered in the portal and stored encrypted in its data directory. Nothing from the host
     environment is passed into the container, and nothing is baked into the image.
+
+## An external Postgres
+
+The portal reads its database from `WHYGRAPH_DATABASE_URL` (and an optional
+`WHYGRAPH_DATABASE_PASSWORD_FILE`), which the shim sets to its own database container. Pointing it at
+a Postgres you run yourself is possible - see [`whygraph portal`](../reference/cli.md#whygraph-portal)
+for what it requires, including no pooler or a session-mode one - but it is not a supported setup in
+this release; it will be documented in full with production mode.
 
 ## Current scope
 

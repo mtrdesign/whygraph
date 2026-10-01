@@ -4,8 +4,9 @@
 # project through setup -> add -> init -> first scan -> MCP -> hook -> catch-up.
 #
 # Isolated from the user's own portal: a scratch HOME / data / bin dir, the
-# container `whygraph-portal-smoke`, port 8797. Exits non-zero naming the first
-# failed step; always removes its container and scratch dir.
+# containers `whygraph-portal-smoke` and `whygraph-portal-smoke-postgres`, port
+# 8797. Exits non-zero naming the first failed step; always removes its
+# containers and scratch dir.
 set -eu
 
 IMAGE=${1:?usage: smoke.sh IMAGE}
@@ -148,6 +149,10 @@ check "portal down: the hook logs one line" test "$(wc -l < "$R/.whygraph/logs/h
 echo "== catch-up"
 whygraph up >/dev/null
 check "portal answers again" wait_portal
+# down + up removed and recreated both containers: the project must come back
+# from the portal database's files in the data dir, not from memory.
+listed() { api GET /api/projects | json '" ".join(p["slug"] for p in d["projects"])' | tr ' ' '\n' | grep -qx demo; }
+check "the project added earlier is still listed after down + up (portal database persisted)" listed
 hook_ok() { runs | tr ' ' '\n' | grep -c '^hook:ok' || true; }
 i=0
 while [ $i -lt 60 ] && [ "$(hook_ok)" -lt 2 ]; do i=$((i + 1)); sleep 1; done

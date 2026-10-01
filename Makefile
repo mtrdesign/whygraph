@@ -19,6 +19,12 @@ UV_RUN ?= uv run
 DEV ?= $(shell cd "$${TMPDIR:-/tmp}" && pwd -P)/whygraph-dev
 DEV_PORT ?= 8777
 
+# `make dev-db`: the dev portal's Postgres, laid out like the shim's
+# (`whygraph up`) but published on 127.0.0.1 with a dev-only password.
+PG_DEV_PORT ?= 55432
+PG_DEV_NAME := whygraph-dev-postgres
+DEV_DATABASE_URL = postgresql+psycopg://whygraph:whygraph-dev@127.0.0.1:$(PG_DEV_PORT)/whygraph
+
 # `make inspect SLUG=<slug>` points the MCP Inspector at one project's MCP
 # endpoint on the running dev portal.
 SLUG ?= whygraph
@@ -31,7 +37,7 @@ CLAUDE_CODE_VERSION := $(shell sed -n "s/^ *CLAUDE_CODE_VERSION: *'\([^']*\)'.*/
 # What the image is built from besides src/: a change here means `dev-docker` rebuilds.
 DEPS_HASH = $(shell cat pyproject.toml uv.lock hatch_build.py docker/whygraph/Dockerfile src/playground/package-lock.json | git hash-object --stdin | cut -c1-16)
 
-.PHONY: help dev dev-local dev-docker prod check test e2e docs docs-build db db-down inspect image sync playground node-check playground-deps dev-fixtures dev-image
+.PHONY: help dev dev-local dev-docker prod check test e2e docs docs-build db db-down dev-db dev-db-down inspect image sync playground node-check playground-deps dev-fixtures dev-image
 
 help:  ## List available targets
 	@echo "Run WhyGraph:"
@@ -44,7 +50,8 @@ help:  ## List available targets
 dev:
 	@echo "pick one: 'make dev-local' (native, fastest) or 'make dev-docker' (inside the image)"; exit 2
 
-dev-local: node-check dev-fixtures  ## Develop natively: portal :8777 (auto-restart) + Vite HMR :5173 - open :5173
+dev-local: node-check dev-fixtures dev-db  ## Develop natively: portal :8777 (auto-restart) + Vite HMR :5173 - open :5173
+	WHYGRAPH_DATABASE_URL="$(DEV_DATABASE_URL)" \
 	WHYGRAPH_SHARED_FOLDERS="$(DEV)/repos" WHYGRAPH_DEV_ORIGINS=http://localhost:5173,http://127.0.0.1:5173 \
 		$(UV_RUN) python scripts/dev_portal.py -- --data "$(DEV)/local/data" --port $(DEV_PORT)
 
@@ -99,14 +106,52 @@ inspect:  ## MCP Inspector vs a project's endpoint on the running dev portal (SL
 	@node -e 'process.exit(+process.versions.node.split(".")[0]>=20?0:1)' 2>/dev/null || { echo "error: MCP Inspector needs Node >= 20 (have $$(node -v 2>/dev/null || echo none)) - try 'nvm use 22'"; exit 1; }
 	npx @modelcontextprotocol/inspector --transport http --server-url http://127.0.0.1:$(DEV_PORT)/mcp/$(SLUG)
 
-db:  ## DBGate viewer for a scratch repo's two databases (http://localhost:8081; SLUG=<repo>)
+db:  ## DBGate viewer for a scratch repo's two databases and the dev portal DB (http://localhost:8081; SLUG=<repo>)
 	@test -f docker-compose.yml || { echo "error: docker-compose.yml missing - run: cp docker-compose.example.yml docker-compose.yml"; exit 1; }
 	@test -f "$(DEV)/repos/$(SLUG)/.whygraph/whygraph.db" || echo "warning: $(DEV)/repos/$(SLUG)/.whygraph/whygraph.db missing - add and scan the project in a dev portal"
 	DB_REPO="$(DEV)/repos/$(SLUG)" docker compose up -d
-	@echo "DBGate -> http://localhost:8081  (WhyGraph + CodeGraph in the sidebar)"
+	@echo "DBGate -> http://localhost:8081  (WhyGraph + CodeGraph, and Portal while make dev-db runs)"
 
 db-down:  ## Stop the DBGate database viewer
 	docker compose down
+
+# Same layout as the shim's database container: the host dir mounted at
+# /var/lib/postgresql (never .../data), a per-major PGDATA, the host user, and
+# the TCP health check (the image's first-run temporary server is socket-only).
+# The pin comes from the Python constant the shim bakes, so the two cannot drift.
+dev-db:  ## Start the dev portal's Postgres (whygraph-dev-postgres on 127.0.0.1, PG_DEV_PORT=55432) and wait until healthy
+	@state=$$(docker inspect -f '{{.State.Status}}' $(PG_DEV_NAME) 2>/dev/null || true); \
+	if [ "$$state" = running ]; then :; \
+	elif [ -n "$$state" ]; then docker start $(PG_DEV_NAME) >/dev/null; \
+	else \
+		set -- $$(uv run --no-sync python -c 'from whygraph.cli.commands.install import POSTGRES_IMAGE, POSTGRES_MAJOR; print(POSTGRES_IMAGE, POSTGRES_MAJOR)'); \
+		[ $$# -eq 2 ] || { echo "error: cannot read POSTGRES_IMAGE from the checkout - run 'uv sync'"; exit 1; }; \
+		mkdir -p "$(DEV)/local/postgres" && chmod 700 "$(DEV)/local/postgres" || exit 1; \
+		echo "starting $(PG_DEV_NAME) ($$1) on 127.0.0.1:$(PG_DEV_PORT)"; \
+		docker run -d --name $(PG_DEV_NAME) \
+			--user "$$(id -u):$$(id -g)" \
+			--shm-size=128m \
+			--health-cmd "pg_isready -h 127.0.0.1 -U whygraph -d whygraph" \
+			--health-interval 2s --health-timeout 3s --health-retries 30 --health-start-period 5s \
+			--mount "type=bind,source=$(DEV)/local/postgres,target=/var/lib/postgresql" \
+			-e "PGDATA=/var/lib/postgresql/$$2/docker" \
+			-e POSTGRES_USER=whygraph -e POSTGRES_DB=whygraph -e POSTGRES_PASSWORD=whygraph-dev \
+			-p "127.0.0.1:$(PG_DEV_PORT):5432" \
+			"$$1" >/dev/null || exit 1; \
+	fi; \
+	i=0; \
+	while :; do \
+		health=$$(docker inspect -f '{{.State.Health.Status}}' $(PG_DEV_NAME) 2>/dev/null || true); \
+		[ "$$health" != healthy ] || break; \
+		if [ "$$health" = unhealthy ] || [ $$i -ge 60 ]; then echo "error: $(PG_DEV_NAME) did not become ready - see: docker logs $(PG_DEV_NAME)"; exit 1; fi; \
+		i=$$((i + 1)); sleep 1; \
+	done; \
+	echo "$(PG_DEV_NAME) ready: $(DEV_DATABASE_URL)"
+
+dev-db-down:  ## Stop and remove the dev Postgres (its data stays under $TMPDIR/whygraph-dev/local)
+	@if docker inspect $(PG_DEV_NAME) >/dev/null 2>&1; then \
+		docker stop -t 30 $(PG_DEV_NAME) >/dev/null && docker rm $(PG_DEV_NAME) >/dev/null && echo "$(PG_DEV_NAME) stopped (data stays in $(DEV)/local/postgres)"; \
+	else echo "$(PG_DEV_NAME) is not running"; fi
 
 # --- internal --------------------------------------------------------------
 

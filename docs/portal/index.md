@@ -15,7 +15,9 @@ flowchart LR
     subgraph portal["whygraph-portal (Docker, 127.0.0.1 only)"]
         api["API + MCP<br/>/api, /mcp/&lt;slug&gt;"]
         runner["Scan runner"]
-        db[("Portal database<br/>settings + encrypted keys")]
+    end
+    subgraph pg["whygraph-portal-postgres (Docker, no published port)"]
+        db[("Portal database<br/>projects, settings,<br/>encrypted keys, scan history")]
     end
     repos[("Your repos<br/>(shared folders)")]
 
@@ -32,7 +34,8 @@ flowchart LR
 
 | Thing | Where |
 |---|---|
-| Portal settings, project list, API keys and GitHub tokens (encrypted) | The portal's data directory, `~/.local/share/whygraph` on your host |
+| Portal settings, project list, API keys and GitHub tokens (encrypted), scan history | The portal database: Postgres in the `whygraph-portal-postgres` container, its files in `postgres/` under the portal's data directory, `~/.local/share/whygraph` on your host |
+| The encryption key for those keys and tokens, and database backups | The data directory, as `secret.key` and `backups/` |
 | A project's evidence, descriptions, rationale cache and chat history | The repository itself, in `.whygraph/whygraph.db` |
 | A project's CodeGraph index | The repository itself, in `.codegraph/` |
 | Clones of GitHub repositories you added by URL | Under the data directory, in `repos/<slug>` |
@@ -40,7 +43,8 @@ flowchart LR
 
 Because each project's databases stay in its own repository, removing a project from the portal
 never deletes your history, and a 1.x repository keeps the data it already has. See
-[Upgrading from 1.x](upgrading.md).
+[Upgrading](upgrading.md). The portal's own database is the one thing to back up; see
+[Backup and restore](backup.md).
 
 ## Where to next
 
@@ -86,11 +90,19 @@ never deletes your history, and a 1.x repository keeps the data it already has. 
 
     [:octicons-arrow-right-24: Security model](security.md)
 
--   :material-update:{ .lg .middle } __Upgrading from 1.x__
+-   :material-database-arrow-down-outline:{ .lg .middle } __Backup and restore__
 
     ---
 
-    Add your existing repos like new ones; their data is reused.
+    `whygraph backup`, the automatic dump before an upgrade, and how to restore.
+
+    [:octicons-arrow-right-24: Backup and restore](backup.md)
+
+-   :material-update:{ .lg .middle } __Upgrading__
+
+    ---
+
+    From 2.0 the portal imports itself; from 1.x, add your repos like new ones.
 
     [:octicons-arrow-right-24: Upgrading](upgrading.md)
 

@@ -1,10 +1,114 @@
-# Upgrading from 1.x
+# Upgrading
+
+To upgrade, re-run the [installer](../getting-started/installation.md), then `whygraph up`. What else
+happens depends on where you come from:
+
+- **From 2.0**, the portal moves its own database from SQLite to Postgres on its first start, by
+  itself. See [From 2.0](#from-20).
+- **From 1.x**, you add your repositories to the portal; their data is reused. See
+  [From 1.x](#from-1x).
+- **A release that moves the pinned Postgres major version** needs a dump and a restore. See
+  [Postgres major versions](#postgres-major).
+
+## From 2.0 { #from-20 }
+
+2.0 kept the portal's own data - the project list, settings, encrypted keys and scan history - in one
+SQLite file, `portal.db`, in the data directory. 2.1 keeps it in Postgres, in a second container,
+`whygraph-portal-postgres`, whose files are in `postgres/` in the same data directory (see
+[Start the portal](start.md#where-your-data-goes)). Your repositories are not affected: each project's
+`.whygraph/whygraph.db` and `.codegraph/` stay SQLite, in the repository.
+
+The first `whygraph up` after installing 2.1:
+
+1. starts the database container (about 30 MiB of RAM when idle) and waits for it;
+2. recreates the portal container, which finds `portal.db` and **imports it once**, into the empty
+   database, in a single transaction that keeps every id and checks the row counts and that a stored
+   key still decrypts before it commits;
+3. renames the file to `portal.db.migrated-<UTC time>`, and records the import in the database, so it
+   never runs twice.
+
+Nothing else is needed: your projects, settings and keys are where you left them.
+
+!!! warning "Keep `secret.key`"
+    The import needs the data directory's own `secret.key` to check the stored keys. If it is missing
+    or belongs to another data directory, the import stops, `portal.db` is left as it was, and the
+    portal shows why. Restore the right `secret.key` and run `whygraph up` again.
+
+If the import fails for any other reason, it is rolled back: `portal.db` is untouched, the portal
+starts in a degraded state that names the reason (`whygraph status`, `whygraph logs`), and the next
+start tries again. A `portal.db` from a release older than 2.0 is refused with a message: start the
+matching 2.0 release once to bring it up to date, or remove the file to start empty.
+
+`portal.db.migrated-*` is **kept forever**, for going back. Delete it yourself once 2.1 has been
+working for you; and see [Backup and restore](backup.md) for backing up the new database.
+
+### Going back to 2.0
+
+1. `whygraph down`, which stops both containers.
+2. Install 2.0 again with its installer.
+3. Rename the newest `portal.db.migrated-<UTC time>` in the data directory back to `portal.db`.
+4. `whygraph up`.
+
+2.0 ignores `postgres/` and `postgres.password`. **Anything you changed after the upgrade is lost**
+on this path: 2.0 sees the data as it was at the import. To upgrade to 2.1 again later, move
+`postgres/` and `postgres.password` out of the data directory first, so the import runs again on a
+fresh database.
+
+## Postgres major versions { #postgres-major }
+
+Each Postgres major version (18, 19, ...) has its own on-disk format, so the database files keep one
+subdirectory per major, `postgres/<major>/`. When a release moves the pin to a new major and the data
+directory holds only an older one, `whygraph up` refuses and starts nothing:
+
+```text
+whygraph: the portal database in .../postgres was created by Postgres 18; this release needs 19.
+```
+
+Move the data across with a dump made by the old major and a restore into the new one. `OLD` and `NEW`
+below are the two majors, and `DATA` is the data directory:
+
+```bash
+DATA=~/.local/share/whygraph
+OLD=18
+NEW=19
+```
+
+1. **Dump with the old major.** If `whygraph status` shows `database: running`, the old container is
+   still up: run `whygraph backup`. Otherwise, start the old major by hand, wait until it accepts
+   connections, and back it up:
+
+    ```bash
+    docker run -d --name whygraph-portal-postgres --user "$(id -u):$(id -g)" \
+        --mount "type=bind,source=$DATA/postgres,target=/var/lib/postgresql" \
+        -e "PGDATA=/var/lib/postgresql/$OLD/docker" \
+        "postgres:$OLD-trixie"
+    until docker exec whygraph-portal-postgres pg_isready -q -h 127.0.0.1 -U whygraph -d whygraph; do sleep 1; done
+    whygraph backup
+    ```
+
+    `whygraph backup` runs `pg_dump` inside that container, so the dump is made by the old major.
+2. **Stop everything:** `whygraph down`.
+3. **Move the old cluster aside**, and keep it until the new one is confirmed working:
+
+    ```bash
+    mv "$DATA/postgres/$OLD" "$DATA/postgres-$OLD.old"
+    ```
+
+4. **Create the new, empty database:** `whygraph up`, then `whygraph down` again.
+5. **Restore the dump into it**, following steps 3 to 5 of [Restore](backup.md#restore) with the new
+   release's image and `NEW` as the major.
+6. **Start the portal:** `whygraph up`. Once everything is there, delete `$DATA/postgres-$OLD.old`.
+
+The restore runs in the new major's image on purpose: `pg_restore` must be at least as new as the
+`pg_dump` that wrote the archive.
+
+## From 1.x { #from-1x }
 
 2.0.0 replaces per-repo setup with the [portal](index.md). **Your data carries over**: each repository
 keeps its `.whygraph/whygraph.db` and `.codegraph/` index, and the portal reuses them. What changes is
 how you start WhyGraph, where configuration and keys live, and how your agents connect.
 
-## Breaking changes
+### Breaking changes
 
 | 1.x | 2.0.0 |
 |---|---|
@@ -20,7 +124,7 @@ how you start WhyGraph, where configuration and keys live, and how your agents c
 portal and exit with status `2`, so an old habit, a stale script or a 1.x agent config that runs
 `whygraph-mcp` fails with a message instead of a bare "not found". `whygraph analyze` is simply gone.
 
-## Upgrade steps
+### Upgrade steps
 
 1. **Install 2.x** with the [installer](../getting-started/installation.md), then stop any old
    playground: `whygraph serve --stop` removes a leftover `whygraph-serve` container that may hold port
@@ -46,7 +150,7 @@ portal and exit with status `2`, so an old habit, a stale script or a 1.x agent 
    approve the server; Codex needs the project marked as trusted. See
    [Connecting agents](agents.md).
 
-## Credentials from your shell environment
+### Credentials from your shell environment
 
 !!! warning "Enter keys under Settings"
     Credentials from your shell env no longer reach WhyGraph - enter them under Settings. The portal
@@ -57,20 +161,20 @@ portal and exit with status `2`, so an old habit, a stale script or a 1.x agent 
 Headless `whygraph scan` outside the portal (CI, a plain checkout) still reads the standard variables;
 see [Configuration](../reference/configuration.md#environment-variables).
 
-## Custom database paths
+### Custom database paths
 
 The portal always uses `<repo>/.whygraph/whygraph.db` and `<repo>/.codegraph/codegraph.db`. If a 1.x
 `whygraph.toml` set `whygraph_db` or `codegraph_db` to somewhere else, the portal will not use it and
 says so when you add the project. Move the file to the default location **before you initialize** to
 keep your descriptions, rationale cache and chat history.
 
-## Configuration keys
+### Configuration keys
 
 1.x keys still work through 2.x with a deprecation warning and are removed in 3.0; see
 [Deprecated keys](../reference/configuration.md#deprecated-keys). A 1.x `whygraph.toml` resolves to the
 same providers, models and timeouts it did before.
 
-## Going back
+### Going back to 1.x
 
 Your history stays in your repositories, and the project database is backed up before it is migrated.
 To use a repository without the portal again, remove it from the Projects page (or delete

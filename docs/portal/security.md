@@ -11,6 +11,21 @@ network so other containers on the default bridge cannot reach its listener eith
 image, `whygraph portal` refuses any non-loopback `--host` unless you pass `--dev-expose`, which
 exists for development.
 
+## The database is network-only
+
+The portal's own database runs in a second container, `whygraph-portal-postgres`, that **publishes no
+port**: it is reachable only from containers on the portal's `whygraph-portal` network, never from your
+host or your LAN.
+
+- Its password is generated on the first `whygraph up` into `postgres.password` in the data directory,
+  mode `0600`. It is mounted into both containers as a file, so it is never in an environment value, a
+  command line, `docker inspect`, a log line or the portal's API.
+- Every data directory gets its own password, so another WhyGraph portal on the same network (a
+  development one, say) cannot log in to yours.
+- Inside the database container, local connections need no password - that is how `whygraph backup`
+  runs `pg_dump`. Anyone who can `docker exec` into it is already your user, who owns the database's
+  files in the data directory anyway: the boundary is the same.
+
 ## Your browser cannot be used against it
 
 A local server with no login is a target for any web page you visit. The portal closes the usual
@@ -39,10 +54,11 @@ The Welcome screen says the same thing the first time you open the portal.
 
 - LLM API keys and GitHub tokens are stored in the portal database **encrypted** (Fernet), and the API
   is write-only for them: the UI shows `set ...a1b2`, never the key.
-- The encryption key is `secret.key` in the data directory, next to the database. This protects a
-  **copied or exported database file**. It does not protect against someone who can read your data
-  directory, which is why that directory is `0700` and the portal will not share a folder that contains
-  it.
+- The encryption key is `secret.key` in the data directory. This protects a **database dump** (a
+  `whygraph backup` file, say) or a copy of the database's files on their own. It does not protect
+  against someone who can read your data directory, which holds both, which is why that directory is
+  `0700` and the portal will not share a folder that contains it. A dump together with `secret.key` is
+  as sensitive as the live data directory; `backups/` is `0700` too.
 - **Nothing from your shell environment enters the container.** Keys you export in your shell are not
   passed to the portal.
 - A scan runs as a child process with an allowlisted environment (`PATH`, `HOME`, locale, `TZ`, TLS and

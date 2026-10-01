@@ -1210,15 +1210,26 @@ def test_verify_image_probes_the_portal_state_endpoint() -> None:
     probe = [s for s in steps if "portal" in s.get("name", "").lower()]
     assert len(probe) == 1, [s.get("name") for s in steps]
     script = probe[0]["run"]
-    assert "whygraph portal --host 0.0.0.0" in script
+    # The real shim, installed from the image under test (as smoke.sh does) -
+    # not a hand-mirrored `docker run` of the portal and its database.
+    assert 'docker run --rm "$image" whygraph install' in script
+    assert 'WHYGRAPH_BIN_DIR="$scratch/bin"' in script
+    assert 'WHYGRAPH_IMAGE="$image"' in script
+    assert '"$wg" up' in script
+    assert "whygraph portal" not in script
+    assert "--user" not in script
+    # Isolated from anything else on the runner: its own container names and
+    # a scratch HOME (so a scratch data dir), keeping the registry login.
+    assert "WHYGRAPH_PORTAL_NAME=whygraph-portal-probe" in script
+    assert 'export HOME="$scratch/home"' in script
+    assert script.index("DOCKER_CONFIG=") < script.index('HOME="$scratch/home"')
+    # The same probe of the state endpoint as before.
     assert "/api/portal/state" in script
     assert "X-WhyGraph-Client: 1" in script
     assert "Host: 127.0.0.1" in script
-    # Same runtime shape as the shim: host user, loopback publish only.
-    assert '--user "$(id -u):$(id -g)"' in script
-    assert '"127.0.0.1:${port}:${port}"' in script
-    # It cleans up after itself.
-    assert "docker rm -f portal-smoke" in script
+    assert '"setup_complete"' in script
+    # It cleans up after itself, both containers, on every exit.
+    assert "trap '\"$wg\" down || true' EXIT" in script
 
 
 # --- development knobs (make dev-docker / prod / smoke) ---------------------

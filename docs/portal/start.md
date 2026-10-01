@@ -7,15 +7,18 @@ image, and the `whygraph` shim on your `PATH` starts and stops it.
 whygraph up
 ```
 
-That starts one named container, `whygraph-portal`, in the background and prints its address:
+That starts two named containers in the background - `whygraph-portal`, the portal itself, and
+`whygraph-portal-postgres`, the Postgres database it keeps its own data in - waits until the database is
+ready, and prints the portal's address:
 
 ```console
 $ whygraph up
 whygraph portal running at http://127.0.0.1:8765
 ```
 
-Open <http://127.0.0.1:8765>. The container restarts with Docker (`--restart unless-stopped`), so you
-start it once, not per session.
+Open <http://127.0.0.1:8765>. Both containers restart with Docker (`--restart unless-stopped`), so you
+start them once, not per session. The database container has no published port: only the portal can
+reach it, over their private Docker network. Idle, it uses about 30 MiB of RAM.
 
 !!! note "Native installs cannot run the portal"
     `pip` / `uv` installs provide headless `whygraph scan` only. The portal needs the Docker install.
@@ -37,11 +40,12 @@ These run on your host, through the shim, not inside a container of their own.
 
 | Command | What it does |
 |---|---|
-| `whygraph up [--port N] [--add-folder DIR]` | Start the portal, or recreate it when the folders, port or image changed. Already running with nothing changed is a no-op. |
-| `whygraph down` | Stop and remove the container. It waits up to 30 seconds so a running scan is stopped cleanly and recorded as interrupted. |
-| `whygraph status` | Running, restarting or not created, plus the URL, image and shared folders. |
-| `whygraph logs` | Follow the container's logs. |
-| `whygraph folders [--remove DIR]` | List the shared folders, or remove one (which recreates the container). |
+| `whygraph up [--port N] [--add-folder DIR]` | Start the portal and its database, or recreate the portal when the folders, port or image changed. Already running with nothing changed is a no-op. |
+| `whygraph down` | Stop and remove both containers, the portal first. It waits up to 30 seconds so a running scan is stopped cleanly and recorded as interrupted. |
+| `whygraph status` | Each container's state (running, restarting or not created), plus the URL, image, database image and shared folders. |
+| `whygraph logs` | Follow the portal container's logs. The database has its own: `docker logs whygraph-portal-postgres`. |
+| `whygraph folders [--remove DIR]` | List the shared folders, or remove one (which recreates the portal container). |
+| `whygraph backup` | Dump the portal database into the data directory. See [Backup and restore](backup.md). |
 
 Stopping the portal never touches your repositories or the data directory. Start it again and
 everything is where you left it.
@@ -66,18 +70,49 @@ reports, per project, what is left. See [Connecting agents](agents.md#a-non-defa
 
 | Path on the host | Holds |
 |---|---|
-| `~/.local/share/whygraph` (override with `WHYGRAPH_DATA`) | The portal database, the encryption key for stored secrets, GitHub clones, scan run files |
+| `~/.local/share/whygraph` (override with `WHYGRAPH_DATA`) | Everything the portal keeps: see the next table |
 | `~/.config/whygraph/folders` | One shared folder per line |
 | `~/.config/whygraph/port` | The port chosen with `--port` |
 
-The data directory is created with mode `0700`, owned by you. Keep it out of every project folder: the
-portal refuses to share a folder that contains it or sits inside it.
+Inside the data directory:
+
+| Path | Holds |
+|---|---|
+| `postgres/` | The portal database's files (projects, settings, encrypted keys, scan history), one subdirectory per Postgres major version |
+| `postgres.password` | The database password, generated on the first `whygraph up` (mode `0600`) |
+| `secret.key` | The encryption key for the keys and tokens stored in the database |
+| `backups/` | Database dumps from `whygraph backup` and the automatic pre-upgrade dump |
+| `runs/` | Scan progress and log files |
+| `repos/` | GitHub clones |
+
+The data directory is created with mode `0700`, owned by you, and the database files in it are owned
+by you too. Keep it out of every project folder: the portal refuses to share a folder that contains it
+or sits inside it. A 2.0 data directory also holds `portal.db.migrated-<date>`, the old SQLite
+database, after its [one-time import](upgrading.md#from-20).
 
 ## Stopping and upgrading
 
-`whygraph down` stops the portal. Installing a newer version (re-running the installer) changes the
-image the shim uses; the next `whygraph up` notices the new image and recreates the container, with
-the same data.
+`whygraph down` stops the portal and its database; the data stays in the data directory. Installing a
+newer version (re-running the installer) changes the image the shim uses; the next `whygraph up`
+notices the new image and recreates the portal container, with the same data. When a release also
+moves the pinned Postgres image, `up` first dumps the running database into `backups/`, then recreates
+the database container too. See [Upgrading](upgrading.md).
+
+## Removing WhyGraph
+
+There is no uninstall command. To remove WhyGraph from a machine:
+
+1. Remove each project in the portal and let it strip what it wrote to the repository (the git hooks
+   and markers; see [Adding projects](projects.md)). Your repositories keep their `.whygraph/` and
+   `.codegraph/` data either way.
+2. `whygraph down`.
+3. Delete the data directory (`~/.local/share/whygraph`), `~/.config/whygraph`, and the `whygraph`
+   and `whygraph-mcp` scripts the installer put on your `PATH` (`~/.local/bin` by default).
+4. Optionally, remove the images (`docker image ls ghcr.io/mtrdesign/whygraph`, then
+   `docker image rm` the ones listed, and the same for `postgres`) and the network
+   (`docker network rm whygraph-portal`).
+
+Take a [backup](backup.md) first if you may want the portal's data back.
 
 ## Environment credentials do not reach the portal
 
@@ -93,4 +128,13 @@ their values).
 - **A leftover `whygraph-serve` container** from 1.x may hold port 8765. `whygraph up` warns about it;
   remove it with `whygraph serve --stop`.
 - **A crash-looping portal** shows as `restarting` in `whygraph status`; `whygraph logs` has the reason.
-- **A second portal on the same data directory** is refused: the portal holds an exclusive lock on it.
+  A portal that cannot reach its database within a minute exits, and Docker retries it; check the
+  `database:` line of `whygraph status` and `docker logs whygraph-portal-postgres`.
+- **`up` says the database did not become ready.** No portal is started; `docker logs
+  whygraph-portal-postgres` has the reason.
+- **`up` refuses a database another Postgres major version created**, after a release moved the pin.
+  Follow the [dump and restore recipe](upgrading.md#postgres-major).
+- **`up` says `postgres.password` is missing but the database exists.** Restore the file from your
+  backup of the data directory. A new password would not open the existing database.
+- **A second portal on the same data directory, or on the same database,** is refused: the portal
+  holds an exclusive lock on both.

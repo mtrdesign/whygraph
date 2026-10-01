@@ -317,26 +317,40 @@ jobs:
       - name: Confirm codegraph resolves on PATH (no-ENTRYPOINT invariant)
         run: docker run --rm "${REGISTRY_IMAGE}:${TAG}" sh -lc 'command -v codegraph'
 
-      # Proves the portal actually boots from the published image: runs
-      # `whygraph portal` detached the way the `whygraph up` shim does (host
-      # user, loopback publish, in-image 0.0.0.0 bind) and reads its state
-      # endpoint. The request carries the CSRF header and a 127.0.0.1 Host, or
-      # the portal's guard would reject it. Post-push by design: a pre-push gate
-      # would need `load: true` plus a run step in `build`.
-      - name: Run the portal from the published image and probe /api/portal/state
+      # Proves the portal actually boots from the published image, through the
+      # REAL shim: installs it from the image (`whygraph install`, as
+      # scripts/install.sh and scripts/smoke.sh do), runs `whygraph up` - the
+      # portal plus its Postgres container - and reads the state endpoint. A
+      # hand-mirrored `docker run` would have to copy two containers' flags and
+      # drift from the shim, which is what this probe exists to catch. Scratch
+      # HOME / data / bin dir and its own container names. The request carries
+      # the CSRF header and a 127.0.0.1 Host, or the portal's guard would reject
+      # it. Post-push by design: a pre-push gate would need `load: true` plus a
+      # run step in `build`.
+      - name: Run the portal from the published image through the shim and probe /api/portal/state
         run: |
           set -eu
           image="${REGISTRY_IMAGE}:${TAG}"
           port=8765
-          data="${RUNNER_TEMP}/whygraph-portal-data"
-          mkdir -p "$data"
-          chmod 700 "$data"
-          docker run -d --init --name portal-smoke \
-            --user "$(id -u):$(id -g)" -e HOME=/tmp \
-            --mount "type=bind,source=${data},target=/data" \
-            -e WHYGRAPH_DATA=/data -e WHYGRAPH_MODE=local -e WHYGRAPH_PORT="$port" \
-            -p "127.0.0.1:${port}:${port}" \
-            "$image" whygraph portal --host 0.0.0.0 --port "$port"
+          scratch="${RUNNER_TEMP}/whygraph-probe"
+          mkdir -p "$scratch/home" "$scratch/bin"
+          # Keep the registry login when HOME moves to the scratch dir.
+          export DOCKER_CONFIG="${DOCKER_CONFIG:-$HOME/.docker}"
+          export HOME="$scratch/home" WHYGRAPH_BIN_DIR="$scratch/bin"
+          export WHYGRAPH_IMAGE="$image" WHYGRAPH_PORT="$port"
+          export WHYGRAPH_PORTAL_NAME=whygraph-portal-probe
+          unset WHYGRAPH_DATA WHYGRAPH_DEV_SRC 2>/dev/null || true
+          installer=$(docker run --rm "$image" whygraph install)
+          [ -n "$installer" ] || { echo "::error::empty installer output from $image"; exit 1; }
+          printf '%s\n' "$installer" | sh
+          wg="$scratch/bin/whygraph"
+          [ -x "$wg" ] || { echo "::error::the installer wrote no whygraph shim"; exit 1; }
+          logs() {
+            docker logs "$WHYGRAPH_PORTAL_NAME" || true
+            docker logs "$WHYGRAPH_PORTAL_NAME-postgres" || true
+          }
+          trap '"$wg" down || true' EXIT
+          "$wg" up || { echo "::error::whygraph up failed"; logs; exit 1; }
           ok=""
           for _ in $(seq 1 30); do
             if curl -fsS -o state.json \
@@ -349,14 +363,13 @@ jobs:
           done
           if [ -z "$ok" ]; then
             echo "::error::the portal did not answer /api/portal/state"
-            docker logs portal-smoke || true
-            docker rm -f portal-smoke || true
+            "$wg" status || true
+            logs
             exit 1
           fi
           cat state.json
           grep -q '"setup_complete"' state.json \
-            || { echo "::error::unexpected /api/portal/state body"; docker rm -f portal-smoke || true; exit 1; }
-          docker rm -f portal-smoke
+            || { echo "::error::unexpected /api/portal/state body"; logs; exit 1; }
 
   # --- 5. PR-time smoke build: amd64, never pushed -------------------------
   # Build-only: no `load: true`, no `docker run`. Proves the Dockerfile builds

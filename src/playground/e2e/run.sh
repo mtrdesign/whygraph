@@ -1,10 +1,12 @@
 #!/bin/sh
 # `make e2e`: run the Playwright suite against a throwaway portal.
 #
-# Starts `whygraph portal` on a temp data dir OUTSIDE the checkout (a data dir
-# inside it would make the checkout un-addable), with the temp `shared/` folder
-# as its only shared folder and the fake scanner (tests/fixtures/e2e_scan.py)
-# standing in for `whygraph scan`; runs the suite; tears everything down.
+# Starts a throwaway Postgres container (tmpfs, the same flags as the pytest
+# fixture in tests/conftest.py) for the portal database, then `whygraph portal`
+# on a temp data dir OUTSIDE the checkout (a data dir inside it would make the
+# checkout un-addable), with the temp `shared/` folder as its only shared folder
+# and the fake scanner (tests/fixtures/e2e_scan.py) standing in for
+# `whygraph scan`; runs the suite; tears everything down. Needs Docker.
 #
 # Environment (all optional):
 #   E2E_PORTAL_CMD     how to launch whygraph (default: uv run --no-sync whygraph)
@@ -13,6 +15,8 @@
 #   E2E_CHANNEL        browser channel, e.g. `chrome` to use the locally installed
 #                      Chrome; unset = Playwright's own Chromium (installed on demand)
 #   E2E_KEEP=1         keep the temp dir (portal log, artifacts) after the run
+#   WHYGRAPH_TEST_POSTGRES_IMAGE  Postgres image (a mirror); default: the pinned
+#                      POSTGRES_IMAGE, read from the checkout
 # Any further arguments go to `playwright test` (e.g. --project=light, -g text).
 set -eu
 
@@ -29,11 +33,15 @@ root=$(cd "$root" && pwd -P)
 mkdir "$root/shared" "$root/data" "$root/control"
 
 portal_pid=
+pg_name=
 cleanup() {
   status=$?
   if [ -n "$portal_pid" ]; then
     kill "$portal_pid" 2>/dev/null || true
     wait "$portal_pid" 2>/dev/null || true
+  fi
+  if [ -n "$pg_name" ]; then
+    docker rm -f "$pg_name" >/dev/null 2>&1 || true
   fi
   if [ "$status" -ne 0 ] && [ -f "$root/portal.log" ]; then
     echo "--- portal log (tail) ---" >&2
@@ -52,11 +60,39 @@ if [ -z "${E2E_CHANNEL:-}" ]; then
   (cd "$playground" && npx playwright install chromium)
 fi
 
+# The portal database: a throwaway server, labelled like the pytest fixture's
+# so a later pytest session sweeps it if this run is killed.
+pg_image=${WHYGRAPH_TEST_POSTGRES_IMAGE:-$(cd "$repo" && uv run --no-sync python -c \
+  'from whygraph.cli.commands.install import POSTGRES_IMAGE; print(POSTGRES_IMAGE)')}
+[ -n "$pg_image" ] || { echo "error: cannot read POSTGRES_IMAGE from the checkout" >&2; exit 1; }
+pg_name="whygraph-e2e-pg-$$"
+docker run -d --rm --name "$pg_name" \
+  --label whygraph.test-pg=1 --label "whygraph.test-pg.pid=$$" \
+  -p 127.0.0.1::5432 -e POSTGRES_PASSWORD=test --tmpfs /var/lib/postgresql \
+  "$pg_image" -c fsync=off -c synchronous_commit=off -c full_page_writes=off >/dev/null
+# Ready = the real server answers over TCP (the image's first-run temporary
+# server listens on the socket only), then a real query succeeds.
+i=0
+until docker exec "$pg_name" pg_isready -q -h 127.0.0.1 -U postgres 2>/dev/null \
+    && docker exec "$pg_name" psql -h 127.0.0.1 -U postgres -tAc 'select 1' >/dev/null 2>&1; do
+  i=$((i + 1))
+  if [ "$i" -gt 60 ]; then
+    echo "error: the throwaway Postgres ($pg_name) did not become ready" >&2
+    docker logs --tail 20 "$pg_name" >&2 || true
+    exit 1
+  fi
+  sleep 0.5
+done
+pg_port=$(docker port "$pg_name" 5432/tcp | head -n 1)
+pg_port=${pg_port##*:}
+database_url="postgresql+psycopg://postgres:test@127.0.0.1:$pg_port/postgres"
+
 # Provider keys from the developer's shell must not leak into the run.
 (
   cd "$repo"
   unset ANTHROPIC_API_KEY OPENAI_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY GH_TOKEN GITHUB_TOKEN
-  unset WHYGRAPH_MODE WHYGRAPH_DEV_ORIGINS WHYGRAPH_CONFIG_JSON
+  unset WHYGRAPH_MODE WHYGRAPH_DEV_ORIGINS WHYGRAPH_CONFIG_JSON WHYGRAPH_DATABASE_PASSWORD_FILE
+  export WHYGRAPH_DATABASE_URL="$database_url"
   export WHYGRAPH_SHARED_FOLDERS="$root/shared"
   export WHYGRAPH_SCAN_CMD="$scan_python $repo/tests/fixtures/e2e_scan.py --control $root/control"
   # shellcheck disable=SC2086  # the command is deliberately word-split

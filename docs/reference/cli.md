@@ -16,19 +16,25 @@ Commands:
 ## Host commands
 
 On the Docker install the `whygraph` shim handles these **on the host**, before any container of its own
-runs. They manage the portal's long-lived container; they are not Python subcommands. The full
-walkthrough is [Start the portal](../portal/start.md).
+runs. They manage the portal's two long-lived containers, `whygraph-portal` and its database,
+`whygraph-portal-postgres`; they are not Python subcommands. The full walkthrough is
+[Start the portal](../portal/start.md).
 
 | Command | What it does |
 |---|---|
-| `whygraph up [--port N] [--add-folder DIR]` | Start the portal container, or recreate it when the shared folders, port or image changed. `--port` is remembered in `~/.config/whygraph/port`; `--add-folder` (repeatable) shares a folder. No-op when already running unchanged. |
-| `whygraph down` | Stop and remove the container, waiting up to 30 seconds (`WHYGRAPH_STOP_GRACE` overrides) so a running scan is recorded as interrupted. |
-| `whygraph status` | Running, restarting or not created, plus the URL, image and shared folders. Exits non-zero unless running. |
-| `whygraph logs` | Follow the container's logs. |
-| `whygraph folders [--remove DIR]` | List the shared folders, or remove one and recreate the container. |
+| `whygraph up [--port N] [--add-folder DIR]` | Start the database container, wait up to 60 seconds for it to be healthy, then start the portal container, or recreate the portal when the shared folders, port or image changed. The database is recreated only when it is missing, stopped, or on a different image than the pin, and a running one is dumped first (see `backup`). `--port` is remembered in `~/.config/whygraph/port`; `--add-folder` (repeatable) shares a folder. No-op when both are already running unchanged. |
+| `whygraph down` | Stop and remove both containers, the portal first, waiting up to 30 seconds each (`WHYGRAPH_STOP_GRACE` overrides) so a running scan is recorded as interrupted. The database's files stay in the data directory. |
+| `whygraph status` | Each container's state - running, restarting or not created - plus the URL, image, database image and shared folders. Exits non-zero unless **both** are running. |
+| `whygraph logs` | Follow the portal container's logs. For the database: `docker logs whygraph-portal-postgres`. |
+| `whygraph folders [--remove DIR]` | List the shared folders, or remove one and recreate the portal container. |
+| `whygraph backup` | Dump the running portal database (`pg_dump -Fc`, run inside the database container) to `backups/portal-<UTC time>.dump` in the data directory, keeping the newest 10 such dumps; other files there are never touched. Fails if the database is not running. Restore needs the data directory's `secret.key` too. See [Backup and restore](../portal/backup.md). |
 
-Any other argument to these verbs is rejected with exit code 2. Port precedence for `up` is the
-remembered `--port`, then `WHYGRAPH_PORT`, then `8765`. `up` never passes your environment into the
+Any other argument to these verbs is rejected with exit code 2, as is every refusal: a database
+that does not become ready, a failed pre-recreate dump (`WHYGRAPH_SKIP_BACKUP=1` skips it), a
+database created by another Postgres major version (see
+[the recipe](../portal/upgrading.md#postgres-major)), or a missing `postgres.password` when the
+database already exists. Port precedence for `up` is the remembered `--port`, then `WHYGRAPH_PORT`,
+then `8765`. `up` never passes your environment into the
 container, and on the first run that sees a credential variable set it prints its name once, as a
 reminder to enter the key under Settings.
 
@@ -108,11 +114,28 @@ command the Docker runtime runs inside the image.
 |---|---|---|
 | `--host` | `127.0.0.1` | Bind address. Outside the image, anything but a loopback address needs `--dev-expose`. |
 | `--port` | `$WHYGRAPH_PORT` or `8765` | Port to bind. It is also the port the browser and agents use, so the allowed `Host` / `Origin` values and the agent MCP URLs are built from it. |
-| `--data DIR` | `$WHYGRAPH_DATA` or `~/.local/share/whygraph` | Portal data directory: the portal database, the encryption key, cloned repositories. Keep it outside every project folder. |
+| `--data DIR` | `$WHYGRAPH_DATA` or `~/.local/share/whygraph` | Portal data directory: the encryption key, scan run files, cloned repositories (and, until it is imported, a 2.0 `portal.db`). Keep it outside every project folder. |
 | `--dev-expose` | off | Allow a non-loopback `--host` outside the image. |
 
-The portal is a single process and holds an exclusive lock on its data directory, so a second
-`whygraph portal` on the same directory exits with code 2. Every `/api` request must carry the
+The portal keeps its own data in Postgres, named by `WHYGRAPH_DATABASE_URL` (plus an optional
+`WHYGRAPH_DATABASE_PASSWORD_FILE`; see [Configuration](configuration.md#environment-variables)). The
+shim sets both for its database container. On start the portal waits up to a minute for the
+database, migrates it, and imports a 2.0 `portal.db` once if the data directory has one (see
+[Upgrading](../portal/upgrading.md#from-20)).
+
+| Exit code | When |
+|---|---|
+| `2` | `WHYGRAPH_DATABASE_URL` is unset or not a Postgres URL, or the password file cannot be read; another portal already holds the data directory; a refused `--host` |
+| `3` | The database stayed unreachable through the start-up wait. Under the shim, Docker's restart policy retries with back-off. |
+
+The portal is a single process. It holds an exclusive lock on its data directory, so a second
+`whygraph portal` on the same directory exits with code 2, and a Postgres advisory lock on its
+database for as long as it runs, so a second portal on the same database (with another data
+directory) starts **degraded** with `another WhyGraph portal is already using this database` and
+touches nothing. If the database connection that holds that lock drops, the portal shuts down so the
+restart policy can bring it back and take the lock again. An advisory lock is held by a database
+session, so an external database must be reached directly or through a **session-mode** pooler;
+a transaction-mode pooler such as PgBouncer's makes the lock meaningless. Every `/api` request must carry the
 `X-WhyGraph-Client: 1` header and a loopback `Host`; cross-site requests and foreign `Origin` values
 are rejected. `WHYGRAPH_DEV_ORIGINS` (comma-separated origins, e.g. `http://localhost:5173`) adds
 origins for a local frontend dev server.
@@ -182,7 +205,7 @@ stdout, so an agent that still launches it over stdio reads nothing it could mis
 plain script that never starts Docker. `whygraph serve --stop` is the one remaining use of the old
 verb: it removes a leftover 1.x `whygraph-serve` container. `whygraph analyze` has no stub.
 
-See [Upgrading from 1.x](../portal/upgrading.md).
+See [Upgrading from 1.x](../portal/upgrading.md#from-1x).
 
 ## `whygraph install`
 

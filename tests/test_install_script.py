@@ -27,7 +27,12 @@ from pathlib import Path
 
 import pytest
 
-from whygraph.cli.commands.install import IMAGE_REPO, render_installer
+from whygraph.cli.commands.install import (
+    IMAGE_REPO,
+    POSTGRES_IMAGE,
+    POSTGRES_MAJOR,
+    render_installer,
+)
 from whygraph.cli.stubs import MCP_REMOVED
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -456,3 +461,25 @@ def test_install_pages_have_no_stale_bare_versions() -> None:
     assert not stale, (
         f"install-page version(s) != DEFAULT_VERSION {_default_version()}: {stale}"
     )
+
+
+CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-code-checks.yml"
+
+
+def test_ci_postgres_service_matches_the_pinned_image() -> None:
+    # CI's Postgres service is a literal (a workflow cannot import Python), so
+    # it is gated against the shim's pin: the tests must run on the server
+    # users run. The variant suffix is asserted literally on purpose - a base
+    # OS switch changes collations under existing text indexes, so changing it
+    # needs a deliberate edit here, not just a new pin.
+    images = re.findall(r"^\s+image:\s*(\S+)\s*$", CI_WORKFLOW.read_text(), re.M)
+    assert images == [POSTGRES_IMAGE], (
+        f"ci-code-checks.yml service image(s) {images} != POSTGRES_IMAGE "
+        f"{POSTGRES_IMAGE}"
+    )
+    repo, _, tag = POSTGRES_IMAGE.partition(":")
+    assert repo == "postgres"
+    assert tag.split(".", 1)[0] == POSTGRES_MAJOR, (
+        f"POSTGRES_MAJOR {POSTGRES_MAJOR} is not the major of {POSTGRES_IMAGE}"
+    )
+    assert tag.endswith("-trixie"), f"{POSTGRES_IMAGE} left the trixie variant"

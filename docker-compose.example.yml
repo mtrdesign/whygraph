@@ -1,12 +1,15 @@
 # Dev-only — a DBGate web UI for the two SQLite databases WhyGraph touches when
-# run against its own repo. NOT part of the shipped package.
+# run against its own repo, plus the dev portal's Postgres. NOT part of the
+# shipped package.
 #
 # Usage: copy this template to docker-compose.yml (git-ignored), then `make db`:
 #   cp docker-compose.example.yml docker-compose.yml
 #
-#   http://localhost:8081 — both databases appear in the DBGate sidebar:
+#   http://localhost:8081 — all three appear in the DBGate sidebar:
 #     WhyGraph  — WhyGraph's own evidence/rationale DB  (read-write)
 #     CodeGraph — CodeGraph's symbol graph              (read-only)
+#     Portal    - the dev portal's own Postgres database (`make dev-db`, the
+#                 one `make dev-local` uses), via the host's 127.0.0.1:55432
 #
 # CodeGraph's DB is owned by CodeGraph upstream and rewritten on re-index, so
 # DBGate opens it read-only (READONLY_con2). Edit the WhyGraph DB freely —
@@ -35,12 +38,16 @@ services:
     container_name: whygraph-dbgate
     ports:
       - "8081:3000"
+    # The Portal connection reaches `make dev-db` on the host; Docker Desktop
+    # resolves host.docker.internal on its own, Linux needs this mapping.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ${DB_REPO:-.}/.whygraph:/data/whygraph
       - ${DB_REPO:-.}/.codegraph:/data/codegraph
       - dbgate-data:/root/.dbgate
     environment:
-      CONNECTIONS: con1,con2
+      CONNECTIONS: con1,con2,con3
 
       LABEL_con1: WhyGraph
       FILE_con1: /data/whygraph/whygraph.db
@@ -50,6 +57,15 @@ services:
       FILE_con2: /data/codegraph/codegraph.db
       ENGINE_con2: sqlite@dbgate-plugin-sqlite
       READONLY_con2: "1"
+
+      # Matches the Makefile's dev-db (PG_DEV_PORT, dev-only password).
+      LABEL_con3: Portal
+      SERVER_con3: host.docker.internal
+      PORT_con3: "55432"
+      USER_con3: whygraph
+      PASSWORD_con3: whygraph-dev
+      DATABASE_con3: whygraph
+      ENGINE_con3: postgres@dbgate-plugin-postgres
     restart: unless-stopped
 
 volumes:

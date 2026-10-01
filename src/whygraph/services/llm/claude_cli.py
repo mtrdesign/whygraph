@@ -53,6 +53,11 @@ _AUTH_FAILURES: tuple[str, ...] = (
 TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 """Where the CLI reads a ``claude setup-token`` subscription token."""
 
+_WITHHELD_ENV = frozenset(
+    {"ANTHROPIC_API_KEY", "WHYGRAPH_DATABASE_URL", "WHYGRAPH_DATABASE_PASSWORD_FILE"}
+)
+"""Ambient variables ``claude`` never inherits (the key is re-added only when given)."""
+
 
 class ClaudeCliAdapter(LlmClient):
     """``claude --print`` adapter.
@@ -185,7 +190,7 @@ class ClaudeCliAdapter(LlmClient):
         stdin_payload = "\n\n".join(user_parts)
         timeout = request.timeout_sec or self._default_timeout
 
-        env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+        env = {k: v for k, v in os.environ.items() if k not in _WITHHELD_ENV}
         env["DISABLE_AUTOUPDATER"] = "1"
         if self._api_key:
             env["ANTHROPIC_API_KEY"] = self._api_key

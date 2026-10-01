@@ -37,10 +37,12 @@ the tool surface grows.
 
 Usage
 -----
-Start a dev portal in one shell (data dir outside the checkout), then add,
+Start a dev portal in one shell (data dir outside the checkout; the portal
+keeps its data in Postgres, e.g. the ``make dev-db`` one), then add,
 initialize and scan this repository from its Projects page::
 
     WHYGRAPH_SHARED_FOLDERS=$(cd .. && pwd) \\
+    WHYGRAPH_DATABASE_URL=postgresql+psycopg://whygraph:whygraph-dev@127.0.0.1:55432/whygraph \\
       uv run whygraph portal --data "${TMPDIR:-/tmp}/whygraph-dev" --port 8321
 
 Then, from the repository root (``--slug`` is the project's slug in the

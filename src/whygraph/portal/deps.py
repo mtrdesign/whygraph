@@ -27,7 +27,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 import anyio
 import anyio.to_thread
@@ -41,7 +41,7 @@ from whygraph.core.context import ProjectContext, use_project
 from whygraph.core.safe_paths import UnsafePathError
 
 from .context import ContextCache, ProjectNotFound, resolve_root
-from .db import get_session
+from .db import InstanceLock, get_session
 from .migrate import ProjectMigrations
 from .models import Project, User
 from .paths import check_project_paths
@@ -85,6 +85,10 @@ class ApiError(Exception):
 _UNSET = object()
 
 
+LOCK_CHECK_INTERVAL_SEC = 15.0
+"""How often a running portal checks that it still holds the instance lock."""
+
+
 class PortalState:
     """Everything one portal app shares between requests.
 
@@ -126,6 +130,20 @@ class PortalState:
     port_change : dict or None
         What the start-up port reconcile did
         (:func:`whygraph.portal.port_change.reconcile_port`), or ``None``.
+    instance_lock : InstanceLock or None
+        The "one portal per database" advisory lock; ``None`` only for
+        test apps that deliberately share a database.
+    lock_check_interval : float
+        Seconds between liveness checks of ``instance_lock``.
+    server : object or None
+        The :class:`~whygraph.portal.app.PortalServer` serving this app
+        (``None`` under a ``TestClient``); a lost lock sets its
+        ``should_exit``.
+    on_lock_lost : callable or None
+        Called instead when there is no ``server`` (tests).
+    startup_error : BaseException or None
+        The exception that stopped the lifespan's start, for the CLI's
+        exit code.
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -144,6 +162,11 @@ class PortalState:
         self.setup_lock = threading.Lock()
         self.github_add_lock = threading.Lock()
         self.port_change: dict | None = None
+        self.instance_lock: InstanceLock | None = None
+        self.lock_check_interval = LOCK_CHECK_INTERVAL_SEC
+        self.server: Any = None
+        self.on_lock_lost: Callable[[], None] | None = None
+        self.startup_error: BaseException | None = None
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0

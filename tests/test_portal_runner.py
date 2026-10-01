@@ -12,6 +12,8 @@ invocation's argv / env / cwd to a JSONL file and can be held while a
 from __future__ import annotations
 
 import json
+import logging
+import os
 import shlex
 import subprocess
 import sys
@@ -27,6 +29,7 @@ import httpx
 import pytest
 import uvicorn
 from fastapi.testclient import TestClient
+from sqlalchemy.engine import make_url
 from sqlmodel import select
 
 from test_portal_app import (  # noqa: F401 -- `env` is a fixture
@@ -569,6 +572,11 @@ def test_child_env_passes_allowlist_not_portal_credentials(
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-portal-env")
     monkeypatch.setenv("GH_TOKEN", "ghp_portal_env")
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_portal_env2")
+    # The portal's own database settings (the URL is set by `env`); the
+    # password file must hold the real password, the portal reads it too.
+    password = env.tmp / "postgres.password"
+    password.write_text(make_url(os.environ["WHYGRAPH_DATABASE_URL"]).password or "")
+    monkeypatch.setenv("WHYGRAPH_DATABASE_PASSWORD_FILE", str(password))
     first_scan(portal, "demo")
     wait_run(portal, "demo", scan(portal, "demo", trigger="manual"))
     for call in scanner.calls():
@@ -579,6 +587,8 @@ def test_child_env_passes_allowlist_not_portal_credentials(
         assert "WHYGRAPH_CONFIG_JSON" in child
         assert not any(k.endswith("_API_KEY") for k in child)
         assert "GH_TOKEN" not in child and "GITHUB_TOKEN" not in child
+        assert "WHYGRAPH_DATABASE_URL" not in child
+        assert "WHYGRAPH_DATABASE_PASSWORD_FILE" not in child
         config = json.loads(child["WHYGRAPH_CONFIG_JSON"])
         assert config["whygraph_db"].endswith(".whygraph/whygraph.db")
 
@@ -1755,3 +1765,34 @@ def test_child_env_passes_the_claude_token_only_to_a_claude_cli_analyze_run(
     )
     env, _ = child_env(other, {}, source="local", analyze=True, environ={})
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+
+
+def test_a_failing_outcome_write_is_logged_and_the_job_still_ends(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """With the database gone at shutdown, recording a run must not hang or raise."""
+    spec = runner_mod._Pending(
+        run_id=7,
+        project_id=1,
+        kind="scan",
+        trigger="manual",
+        analyze=False,
+        requested_by=None,
+        scan_requested=False,
+    )
+    job = runner_mod._Job(spec=spec)
+    runner = ScanRunner()
+    monkeypatch.setattr(
+        runner, "_execute_inner", lambda job: ("ok", {}, runner_mod.redactor([]))
+    )
+
+    def _gone(*_: object) -> None:
+        raise RuntimeError("database connection lost")
+
+    monkeypatch.setattr(runner_mod, "_finish_run", _gone)
+    # A CLI test may have configured `whygraph` logging not to propagate.
+    monkeypatch.setattr(logging.getLogger("whygraph"), "propagate", True)
+    with caplog.at_level("ERROR", logger=runner_mod.__name__):
+        runner._execute(job)
+    assert job.done.is_set()
+    assert "could not record run 7" in caplog.text

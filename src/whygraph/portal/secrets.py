@@ -120,6 +120,33 @@ def load_keyring() -> MultiFernet:
     return MultiFernet([Fernet(ensure_key())])
 
 
+def load_existing_keyring(path: Path | None = None) -> MultiFernet:
+    """Load the keyring from an existing key file; never create one.
+
+    For reading data encrypted earlier (the one-time 2.0 import): a
+    missing key must stop the reader, because :func:`load_keyring` would
+    publish a fresh, wrong key in its place.
+
+    Parameters
+    ----------
+    path : Path, optional
+        The key file; defaults to :func:`key_path`.
+
+    Returns
+    -------
+    MultiFernet
+        A keyring over the key in that file.
+
+    Raises
+    ------
+    FileNotFoundError
+        When the key file does not exist.
+    ValueError
+        When it does not hold a valid Fernet key.
+    """
+    return MultiFernet([Fernet(_read_key(path if path is not None else key_path()))])
+
+
 def encrypt(plaintext: str) -> str:
     """Encrypt ``plaintext`` with the keyring; the token differs per call."""
     return load_keyring().encrypt(plaintext.encode("utf-8")).decode("ascii")
@@ -306,6 +333,7 @@ __all__ = [
     "ensure_key",
     "hint_for",
     "key_path",
+    "load_existing_keyring",
     "load_keyring",
     "put_secret",
     "read_secret",

@@ -715,6 +715,21 @@ def test_keyring_round_trips_and_ciphertext_differs_per_write(data: Path) -> Non
     assert len(pw_secrets.load_keyring()._fernets) == 1  # M1: one key, MultiFernet
 
 
+def test_existing_keyring_never_creates_a_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WHYGRAPH_DATA", str(tmp_path / "d"))
+    with pytest.raises(FileNotFoundError):
+        pw_secrets.load_existing_keyring()
+    assert not (tmp_path / "d" / "secret.key").exists()
+    token = pw_secrets.encrypt("sk-x")  # creates the key file
+    assert pw_secrets.load_existing_keyring().decrypt(token.encode()) == b"sk-x"
+    other = tmp_path / "other.key"
+    other.write_text("garbage")
+    with pytest.raises(ValueError):
+        pw_secrets.load_existing_keyring(other)
+
+
 def test_secrets_round_trip_and_ciphertext_differs_per_write(data: Path) -> None:
     with portal_db.get_session() as s:
         pw_secrets.put_secret(

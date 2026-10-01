@@ -7,6 +7,11 @@ publish). Run natively it is **dev-only** in this release: there is no
 and a non-loopback ``--host`` outside the image is refused unless
 ``--dev-expose`` is given, because local mode has no login.
 
+The portal's own data lives in Postgres since 2.1: ``WHYGRAPH_DATABASE_URL``
+(plus an optional ``WHYGRAPH_DATABASE_PASSWORD_FILE``) must name it - the
+shim sets both - or the command exits 2. A database that stays unreachable
+through the start-up wait exits 3, so ``--restart unless-stopped`` retries.
+
 It runs exactly one uvicorn process - the scan runner, migration lock and
 caches are in-process - with ``timeout_graceful_shutdown`` bounded below
 the ``whygraph down`` grace period, and through
@@ -27,6 +32,9 @@ IN_IMAGE_ENV = "WHYGRAPH_IN_IMAGE"
 
 GRACEFUL_SHUTDOWN_SEC = 10
 """uvicorn's graceful-shutdown bound; below ``whygraph down``'s 30 s grace."""
+
+EXIT_DATABASE_UNREACHABLE = 3
+"""Exit code when the portal database stays unreachable (the restart policy retries)."""
 
 _LOOPBACK = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 
@@ -82,6 +90,17 @@ def portal_cmd(host: str, port: int, data_dir: Path | None, dev_expose: bool) ->
 
     from ..console import console
 
+    try:
+        url = portal_db.database_url()
+    except portal_db.PortalDatabaseNotConfigured as exc:
+        click.echo(
+            f"error: {exc}. The portal stores its data in Postgres since 2.1; start "
+            "it with 'whygraph up' (which runs the database for you), or point "
+            f"{portal_db.DATABASE_URL_ENV} at a Postgres database.",
+            err=True,
+        )
+        sys.exit(2)
+
     if data_dir is not None:
         os.environ[portal_db.DATA_ENV_VAR] = str(data_dir.expanduser())
     lock = _lock_data_dir(portal_db.data_dir())
@@ -101,6 +120,16 @@ def portal_cmd(host: str, port: int, data_dir: Path | None, dev_expose: bool) ->
         PortalServer(config, app).run()
     finally:
         lock.close()
+    error = app.state.portal.startup_error
+    if isinstance(error, portal_db.PortalDatabaseUnreachable):
+        host = url.host or ""
+        hint = (
+            f"is the {host} container running? (whygraph status)"
+            if host.endswith("-postgres")
+            else "is the database running?"
+        )
+        click.echo(f"error: {error} - {hint}", err=True)
+        sys.exit(EXIT_DATABASE_UNREACHABLE)
 
 
 def _lock_data_dir(data: Path):  # noqa: ANN202 -- an open file object

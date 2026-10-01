@@ -571,7 +571,13 @@ class ScanRunner:
             await anyio.sleep(0.05)
         leftover = [j.spec.run_id for j in jobs if not j.done.is_set()]
         if leftover:
-            await anyio.to_thread.run_sync(_mark_interrupted, leftover)
+            try:
+                await anyio.to_thread.run_sync(_mark_interrupted, leftover)
+            except Exception:  # noqa: BLE001 -- e.g. the database is gone
+                # The rows stay "running"; the next start marks them interrupted.
+                _log.exception(
+                    "scan runner: could not mark runs %s interrupted", leftover
+                )
         tg, self._tg = self._tg, None
         tg.cancel_scope.cancel()
         await tg.__aexit__(None, None, None)
@@ -935,6 +941,11 @@ class ScanRunner:
             status = "interrupted"
         try:
             _finish_run(job, status, summary)
+        except Exception:  # noqa: BLE001 -- e.g. the database is gone
+            # The row stays "running"; the next start marks it interrupted.
+            _log.exception(
+                "scan runner: could not record run %s as %s", job.spec.run_id, status
+            )
         finally:
             job.done.set()
 

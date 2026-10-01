@@ -96,6 +96,7 @@ nav:
       - Using WhyGraph (MCP): guide/mcp-usage.md
       - The Explorer: guide/playground.md
       - The Chat assistant: guide/chat.md
+      - Developing WhyGraph: guide/developing.md
   - Docker & Self-Hosting:
       - deploy/index.md
       - Run with Docker: deploy/docker.md

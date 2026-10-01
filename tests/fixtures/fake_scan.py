@@ -9,12 +9,14 @@ land in the recorded argv. Options (all before the runner's own flags):
 ``--exit N``             exit code (default 0)
 ``--stderr-bytes N``     write N bytes of noise to stderr before exiting
 ``--echo-env VAR``       print VAR's value in a stdout event and on stderr
+``--ignore-term``        ignore SIGTERM (only SIGKILL stops it)
 """
 
 from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
 import time
 
@@ -40,6 +42,9 @@ def main() -> int:
     code = int(_take(args, "--exit") or 0)
     noise = int(_take(args, "--stderr-bytes") or 0)
     echo = _take(args, "--echo-env")
+    if "--ignore-term" in args:
+        args.remove("--ignore-term")
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
     if record:
         with open(record, "a", encoding="utf-8") as fh:
             fh.write(

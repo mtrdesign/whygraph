@@ -125,6 +125,23 @@ portal_norm_folder() {
     fi
 }
 
+# Development only (`make dev-docker`): WHYGRAPH_DEV_SRC names a WhyGraph
+# checkout to run instead of the installed package. Canonicalise it into
+# $DEV_SRC, refusing what would break --mount (exits 2).
+portal_dev_src() {
+    case "$1" in
+        /*) ;;
+        *) portal_die "WHYGRAPH_DEV_SRC '$1' must be an absolute path" ;;
+    esac
+    [ -f "$1/src/whygraph/__init__.py" ] && [ -f "$1/scripts/dev_portal.py" ] \
+        || portal_die "WHYGRAPH_DEV_SRC '$1' is not a WhyGraph checkout"
+    DEV_SRC=$(cd -- "$1" && pwd -P) || portal_die "cannot resolve WHYGRAPH_DEV_SRC '$1'"
+    case "$DEV_SRC" in
+        *:*|*,*|*\"*|*"$NL"*)
+            portal_die "WHYGRAPH_DEV_SRC '$DEV_SRC': ':' ',' double quotes and newlines are not allowed in the path" ;;
+    esac
+}
+
 # Validate one --add-folder argument and queue it (deduped) for the folders file.
 portal_queue_folder() {
     portal_norm_folder "$1"
@@ -181,6 +198,26 @@ portal_up() {
         FOLDERS_JOINED="${FOLDERS_JOINED:+$FOLDERS_JOINED:}$f"
     done < "$FOLDERS_FILE"
 
+    # Dev mode: the checkout read-only over the installed package, a Linux
+    # node_modules for Vite, the Vite port, and the dev wrapper as the command.
+    DEV_SRC=""
+    RESTART="unless-stopped"
+    if [ -n "${WHYGRAPH_DEV_SRC:-}" ]; then
+        portal_dev_src "$WHYGRAPH_DEV_SRC"
+        RESTART="no"
+        mkdir -p "$DATA/dev-node_modules" "$DEV_SRC/src/playground/node_modules"
+        set -- "$@" --mount "type=bind,source=$DEV_SRC,target=/opt/whygraph-dev,readonly" \
+            --mount "type=bind,source=$DATA/dev-node_modules,target=/opt/whygraph-dev/src/playground/node_modules" \
+            --label "whygraph.dev_src=$DEV_SRC" \
+            -p "127.0.0.1:5173:5173" \
+            -e PYTHONPATH=/opt/whygraph-dev/src \
+            -e "WHYGRAPH_SCAN_CMD=env PYTHONPATH=/opt/whygraph-dev/src python -m whygraph scan" \
+            -e WHYGRAPH_DEV_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+        set -- "$@" "$IMAGE" python /opt/whygraph-dev/scripts/dev_portal.py --vite-host 0.0.0.0 --
+    else
+        set -- "$@" "$IMAGE" whygraph portal
+    fi
+
     URL="http://127.0.0.1:$PORT"
     if docker inspect --type container -f '{{.State.Status}}' whygraph-serve >/dev/null 2>&1; then
         echo "warning: a 'whygraph-serve' container from the old playground still exists (it may hold port 8765). Remove it with: whygraph serve --stop" >&2
@@ -194,6 +231,7 @@ portal_up() {
                 [ "$(portal_label whygraph.folders)" = "$FOLDERS_JOINED" ] || changed="$changed folders"
                 [ "$(portal_label whygraph.port)" = "$PORT" ] || changed="$changed port"
                 [ "$(portal_label whygraph.image)" = "$IMAGE" ] || changed="$changed image"
+                [ "$(portal_label whygraph.dev_src)" = "$DEV_SRC" ] || changed="$changed dev_src"
                 if [ -z "$changed" ]; then
                     if [ "$state" = "restarting" ]; then
                         echo "whygraph portal is restarting (see: whygraph logs)" >&2
@@ -211,16 +249,15 @@ portal_up() {
     fi
 
     docker network create whygraph-portal >/dev/null 2>&1 || true
-    docker run -d --init --name "$PORTAL" --restart unless-stopped \
+    docker run -d --init --name "$PORTAL" --restart "$RESTART" \
         --network whygraph-portal --add-host=host.docker.internal:host-gateway \
         --label "whygraph.folders=$FOLDERS_JOINED" --label "whygraph.port=$PORT" \
         --label "whygraph.image=$IMAGE" \
         -p "127.0.0.1:$PORT:$PORT" \
         --user "$(id -u):$(id -g)" -e HOME=/tmp \
-        "$@" \
         -e WHYGRAPH_DATA=/data -e WHYGRAPH_SHARED_FOLDERS="$FOLDERS_JOINED" \
         -e WHYGRAPH_MODE=local -e WHYGRAPH_PORT="$PORT" \
-        "$IMAGE" whygraph portal --host 0.0.0.0 --port "$PORT" >/dev/null
+        "$@" --host 0.0.0.0 --port "$PORT" >/dev/null
     echo "whygraph portal running at $URL"
     portal_env_hint
 }
@@ -299,7 +336,13 @@ portal_folders() {
 
 portal_main() {
     verb="$1"; shift
-    PORTAL="whygraph-portal"
+    # WHYGRAPH_PORTAL_NAME is for development (`make dev-docker` / `prod` and
+    # the smoke test), so they never touch the user's own portal.
+    PORTAL="${WHYGRAPH_PORTAL_NAME:-whygraph-portal}"
+    case "$PORTAL" in
+        [A-Za-z0-9]*) case "$PORTAL" in *[!A-Za-z0-9_.-]*) portal_die "invalid WHYGRAPH_PORTAL_NAME '$PORTAL'" ;; esac ;;
+        *) portal_die "invalid WHYGRAPH_PORTAL_NAME '$PORTAL'" ;;
+    esac
     CONF="$HOME/.config/whygraph"
     FOLDERS_FILE="$CONF/folders"
     DATA="${WHYGRAPH_DATA:-$HOME/.local/share/whygraph}"

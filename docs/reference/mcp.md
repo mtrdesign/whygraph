@@ -36,6 +36,14 @@ anchored to HEAD.
 
 Returns `{ "target": {...}, "evidence": [ { "commit", "pull_requests", "issues", "source" }, ... ] }`.
 
+With `qualified_name`, the symbol's file is first checked against the CodeGraph index: if it changed
+since it was indexed (you edited it and have not scanned yet), the index is re-synced and the symbol
+looked up again, so the evidence follows the lines as they are now. The re-sync is kept short: an
+incremental `codegraph sync` only, with a time limit, and only where the `codegraph` binary is
+installed (always the case in the portal). If it cannot run, fails, or leaves the file stale, the tool
+still answers with the indexed range and adds `"index_stale": true` to `target`: the lines may have
+drifted, so treat the evidence with care or run a scan.
+
 ### `whygraph_area_history`
 
 Every commit that touched a file path - or any path it was renamed from. Where `evidence_for` is

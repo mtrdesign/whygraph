@@ -64,6 +64,7 @@ from whygraph.portal.runner import (
     LOG_TAIL_BYTES,
     MAX_EVENT_LINE,
     TRIGGER_PRECEDENCE,
+    RunnerUnavailable,
     ScanRunner,
     _event_line,
     _insert_run,
@@ -101,7 +102,8 @@ def scanner(
         parts = [sys.executable, str(FAKE_SCAN), "--record", str(record)]
         parts += ["--hold", str(hold)]
         for key, value in opts.items():
-            parts += [f"--{key.replace('_', '-')}", str(value)]
+            flag = f"--{key.replace('_', '-')}"
+            parts += [flag] if value is True else [flag, str(value)]
         monkeypatch.setenv("WHYGRAPH_SCAN_CMD", shlex.join(parts))
 
     def calls() -> list[dict]:
@@ -1585,3 +1587,171 @@ def test_a_1x_repo_migrates_through_the_wizard_and_keeps_its_commits(
         )
     assert set(rows) == {first, second}
     assert rows[first] == "described by 1.x"
+
+
+# ---------------------------------------------------------------------------
+# Cancel (POST /scans/{id}/cancel)
+# ---------------------------------------------------------------------------
+
+
+def cancel(client: TestClient, slug: str, run_id: int):  # noqa: ANN201 -- a Response
+    return client.post(f"/api/projects/{slug}/scans/{run_id}/cancel")
+
+
+def test_cancel_a_running_scan(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    local_project(portal, env, "demo")
+    first_scan(portal, "demo")
+    scanner.hold.touch()
+    running = scan(portal, "demo", trigger="hook")
+    wait_for(lambda: len(scanner.calls()) == 2)
+    with portal_db.get_session() as session:
+        before = session.exec(select(Project).where(Project.slug == "demo")).one()
+        scanned_at = before.last_scan_at
+
+    response = cancel(portal, "demo", running)
+
+    assert response.status_code == 202, response.text
+    assert response.json() == {"run_id": running, "was": "running"}
+    run = wait_run(portal, "demo", running)
+    assert run["status"] == "cancelled"  # never "interrupted"
+    assert run["summary"]["cancelled_by"] == "user"
+    with portal_db.get_session() as session:
+        after = session.exec(select(Project).where(Project.slug == "demo")).one()
+        assert after.last_scan_at == scanned_at  # a cancelled scan is not a scan
+    # The project takes a fresh request right away.
+    scanner.hold.unlink()
+    assert (
+        wait_run(portal, "demo", scan(portal, "demo", trigger="hook"))["status"] == "ok"
+    )
+
+
+def test_cancel_a_queued_scan_drops_it_from_the_queue(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    local_project(portal, env, "demo")
+    first_scan(portal, "demo")
+    scanner.hold.touch()
+    running = scan(portal, "demo", trigger="hook")
+    wait_for(lambda: len(scanner.calls()) == 2)
+    queued = scan(portal, "demo", trigger="manual")
+
+    response = cancel(portal, "demo", queued)
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"run_id": queued, "was": "queued"}
+    row = run_by_id(portal, "demo", queued)
+    assert (row["status"], row["summary"]) == ("cancelled", {"cancelled_by": "user"})
+    assert row["finished_at"]
+    scanner.hold.unlink()
+    assert wait_run(portal, "demo", running)["status"] == "ok"
+    wait_idle(portal, "demo")
+    assert len(scanner.calls()) == 2  # the cancelled run never started
+    # A later request gets a new run, not the cancelled one.
+    assert scan(portal, "demo", trigger="hook") not in (running, queued)
+
+
+def test_cancel_escalates_to_sigkill(
+    portal: TestClient,
+    env: SimpleNamespace,
+    scanner: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner_mod, "CANCEL_GRACE_SEC", 0.3)
+    local_project(portal, env, "demo")
+    first_scan(portal, "demo")
+    scanner.configure(ignore_term=True)
+    scanner.hold.touch()
+    running = scan(portal, "demo", trigger="hook")
+    wait_for(lambda: len(scanner.calls()) == 2)
+
+    assert cancel(portal, "demo", running).status_code == 202
+    assert wait_run(portal, "demo", running, timeout=10)["status"] == "cancelled"
+
+
+def test_cancel_refuses_finished_unknown_and_foreign_runs(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    local_project(portal, env, "demo")
+    local_project(portal, env, "other")
+    done = first_scan(portal, "demo")["id"]
+
+    finished = cancel(portal, "demo", done)
+    assert finished.status_code == 409
+    assert "already ended (ok)" in finished.json()["error"]
+    assert cancel(portal, "demo", 9999).status_code == 404
+    assert cancel(portal, "other", done).status_code == 404  # another project's run
+    assert run_by_id(portal, "demo", done)["status"] == "ok"
+
+
+def test_cancel_during_a_sync_fetch_leaves_head_where_it_was(
+    env: SimpleNamespace, scanner: SimpleNamespace, plain_fetch: SimpleNamespace
+) -> None:
+    """A fast-forward after the cancel would move HEAD with no scan, and a
+    GitHub clone is never caught up (catch-up is for local projects)."""
+    plain_fetch.hold = env.tmp / "fetch-hold"
+    with client_for() as client:
+        client.post("/api/portal/setup", json={"display_name": "Tess"})
+        upstream, dest = github_project(client, env, "gh")
+        first_scan(client, "gh")
+        before = _git(dest, "rev-parse", "HEAD").strip()
+        commit(upstream, "print('new upstream work')\n")
+        plain_fetch.hold.touch()
+        running = client.post("/api/projects/gh/sync").json()["run_id"]
+        wait_for(lambda: plain_fetch.calls == 1)
+
+        assert cancel(client, "gh", running).status_code == 202
+        plain_fetch.hold.unlink()
+        run = wait_run(client, "gh", running)
+
+        assert (run["status"], run["summary"]["cancelled_by"]) == ("cancelled", "user")
+        assert _git(dest, "rev-parse", "HEAD").strip() == before
+        assert len(scanner.calls()) == 1  # only the first scan ever ran
+
+
+def test_cancel_after_the_runner_stopped_is_unavailable(
+    env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    runner = ScanRunner()
+    with client_for(runner) as client:
+        client.post("/api/portal/setup", json={"display_name": "Tess"})
+        local_project(client, env, "demo")
+        done = first_scan(client, "demo")["id"]
+    with pytest.raises(RunnerUnavailable):
+        anyio.run(runner.cancel, 1, done)
+
+
+def test_child_env_passes_the_claude_token_only_to_a_claude_cli_analyze_run(
+    tmp_path: Path,
+) -> None:
+    config = Config.from_dict(
+        {
+            "llm": {
+                "model": "claude-cli/claude-opus-4-7",
+                "claude_cli": {"oauth_token": "sk-ant-oat-child1"},
+            }
+        },
+        tmp_path,
+    )
+    env, secrets = child_env(config, {}, source="local", analyze=True, environ={})
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-child1"
+    assert secrets == ["sk-ant-oat-child1"]  # redacted from logs and events
+    assert "sk-ant-oat-child1" not in env["WHYGRAPH_CONFIG_JSON"]
+
+    structure_only, secrets = child_env(
+        config, {}, source="local", analyze=False, environ={}
+    )
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in structure_only and secrets == []
+
+    other = Config.from_dict(
+        {
+            "llm": {
+                "model": "anthropic/claude-opus-4-7",
+                "claude_cli": {"oauth_token": "sk-ant-oat-child1"},
+            }
+        },
+        tmp_path,
+    )
+    env, _ = child_env(other, {}, source="local", analyze=True, environ={})
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env

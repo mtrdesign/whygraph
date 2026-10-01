@@ -35,7 +35,7 @@ from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, Body, Depends, Request
+from fastapi import APIRouter, Body, Depends, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, func, select
@@ -113,8 +113,16 @@ from .repos import (
     root_status,
 )
 from .estimate import scan_estimate as _scan_estimate
-from .runner import ProjectBusy, RunNotFound, RunnerUnavailable, log_tail, stale_info
+from .runner import (
+    ProjectBusy,
+    RunFinished,
+    RunNotFound,
+    RunnerUnavailable,
+    log_tail,
+    stale_info,
+)
 from .secrets import (
+    CLAUDE_OAUTH_TOKEN,
     GITHUB_TOKEN,
     LLM_API_KEY,
     LLM_KEY_PROVIDERS,
@@ -171,6 +179,7 @@ class SecretsBody(_Strict):
 
     llm: dict[str, str | None] = Field(default_factory=dict)
     github_token: str | None = None
+    claude_oauth_token: str | None = None
 
 
 class ConfigBody(_Strict):
@@ -254,6 +263,9 @@ def _secrets_view(session: Session, project_id: int | None) -> dict:
         "github_token": secret_status(
             session, kind=GITHUB_TOKEN, project_id=project_id
         ),
+        "claude_oauth_token": secret_status(
+            session, kind=CLAUDE_OAUTH_TOKEN, project_id=project_id
+        ),
     }
 
 
@@ -266,6 +278,10 @@ def _apply_secrets(
         _put_or_delete(session, LLM_API_KEY, provider, value, project_id)
     if "github_token" in secrets.model_fields_set:
         _put_or_delete(session, GITHUB_TOKEN, None, secrets.github_token, project_id)
+    if "claude_oauth_token" in secrets.model_fields_set:
+        _put_or_delete(
+            session, CLAUDE_OAUTH_TOKEN, None, secrets.claude_oauth_token, project_id
+        )
 
 
 def _put_or_delete(
@@ -310,6 +326,16 @@ def _missing_key(
         try:
             provider = config.model_for(task).provider
         except ConfigError:
+            continue
+        if provider == "claude-cli":
+            # Natively the CLI can use its own login; the image has none.
+            cli = config.llm.claude_cli
+            if (
+                os.environ.get("WHYGRAPH_IN_IMAGE") == "1"
+                and cli.config_dir is None
+                and not (cli.oauth_token or cli.api_key)
+            ):
+                return provider
             continue
         if provider not in KEYED_PROVIDERS:
             continue
@@ -782,6 +808,13 @@ def _add_local(
                     session,
                     kind=GITHUB_TOKEN,
                     value=github_token,
+                    project_id=project_id,
+                )
+            if preview.claude_oauth_token:
+                put_secret(
+                    session,
+                    kind=CLAUDE_OAUTH_TOKEN,
+                    value=preview.claude_oauth_token,
                     project_id=project_id,
                 )
     except IntegrityError as exc:
@@ -1300,6 +1333,32 @@ async def scan_events(
         raise ApiError(404, f"run {run_id} not found") from exc
     except RunnerUnavailable as exc:
         raise ApiError(501, str(exc)) from exc
+
+
+@projects_router.post("/{slug}/scans/{run_id}/cancel")
+async def cancel_scan(
+    run_id: int,
+    request: Request,
+    response: Response,
+    project: BoundProject = Depends(project_db),
+) -> dict:
+    """Cancel a queued (``200``) or running (``202``) scan / sync run.
+
+    A running run ends ``cancelled`` once its child exits (SIGTERM, then
+    SIGKILL after 10 s); its event stream closes with that status. ``404``
+    for an unknown run or another project's, ``409`` for a finished one.
+    """
+    try:
+        was = await portal_state(request).runner.cancel(project.id, run_id)
+    except RunNotFound as exc:
+        raise ApiError(404, f"run {run_id} not found") from exc
+    except RunFinished as exc:
+        raise ApiError(409, str(exc)) from exc
+    except RunnerUnavailable as exc:
+        raise ApiError(501, str(exc)) from exc
+    if was == "running":
+        response.status_code = 202
+    return {"run_id": run_id, "was": was}
 
 
 @projects_router.get("/{slug}/scans/{run_id}/log")

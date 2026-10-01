@@ -171,12 +171,15 @@ class LlmDescriptor:
         Raises
         ------
         whygraph.services.llm.LlmError
-            If the analyze provider is not registered with the factory.
-            Propagated directly so the user sees the available providers.
+            If the analyze provider is not registered with the factory
+            (propagated directly so the user sees the available
+            providers), or its :meth:`~whygraph.services.llm.LlmClient.preflight`
+            check fails.
         """
         factory = factory if factory is not None else LlmClientFactory()
         provider, model = config.model_for("analyze")
         client = factory.make(provider, model=model)
+        client.preflight()
         return cls(
             client,
             max_diff_chars=config.analyze.max_diff_chars,

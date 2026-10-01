@@ -888,3 +888,25 @@ def test_config_repr_hides_secrets() -> None:
     )
     assert "ghp_visible" not in repr(cfg) and "sk-visible" not in repr(cfg)
     assert cfg.scan_token == "ghp_visible" and cfg.llm.openai.api_key == "sk-visible"
+
+
+def test_claude_oauth_token_is_a_providerless_secret_project_over_global(
+    data: Path,
+) -> None:
+    with portal_db.get_session() as s:
+        pw_secrets.put_secret(s, kind="claude_oauth_token", value="sk-ant-oat-glob1")
+        a, b = _project(s, "a"), _project(s, "b")
+        pw_secrets.put_secret(
+            s, kind="claude_oauth_token", value="sk-ant-oat-proja", project_id=a.id
+        )
+        ca, cb = _build(s, a), _build(s, b)
+        with pytest.raises(ValueError, match="has no provider"):
+            pw_secrets.put_secret(
+                s, kind="claude_oauth_token", provider="claude-cli", value="x"
+            )
+        stored = [c.config for c in s.exec(select(ProjectConfig)).all()]
+    assert ca.config.llm.claude_cli.oauth_token == "sk-ant-oat-proja"
+    assert cb.config.llm.claude_cli.oauth_token == "sk-ant-oat-glob1"
+    assert stored == []  # a secret never lands in a config layer
+    for secret in ("sk-ant-oat-glob1", "sk-ant-oat-proja"):
+        assert secret not in repr(ca.config) and secret not in repr(cb)

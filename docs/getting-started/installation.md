@@ -97,8 +97,8 @@ Pick the path that fits where you are.
 === "Local checkout"
 
     For contributors who want their edits to show up immediately. This gives the `whygraph` command
-    for development; run the portal from a checkout with `make dev` (see
-    [Develop the UI](../guide/playground.md#develop-the-ui)).
+    for development; run the portal from a checkout with `make dev-local` or `make dev-docker` (see
+    [Developing WhyGraph](../guide/developing.md)).
 
     ```bash
     git clone https://github.com/mtrdesign/whygraph.git

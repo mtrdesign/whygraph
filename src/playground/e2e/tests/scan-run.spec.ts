@@ -83,3 +83,24 @@ test("a failing scan shows the error and the log, and the project card says so",
   await page.goto("/");
   await expect(page.getByTestId(`project-${notes.slug}`)).not.toContainText("Scan failed");
 });
+
+test("Cancel stops a running scan; the run and the history say it was cancelled", async ({ page }, testInfo) => {
+  const { notes } = themeRepos(themeOf(testInfo));
+  fs.writeFileSync(flag("delay"), "0.4");
+
+  await page.goto(`/p/${notes.slug}`);
+  await page.getByRole("button", { name: "Scan now" }).first().click();
+  await page.waitForURL(`**/p/${notes.slug}/scans/*`);
+  const running = Number(new URL(page.url()).pathname.split("/").pop());
+  await expect(page.getByTestId("phase-1")).toHaveAttribute("data-status", "running");
+
+  await page.getByTestId("cancel-run").click();
+  const dialog = page.getByTestId("cancel-run-dialog");
+  await expect(dialog).toContainText(`Cancel scan #${running}?`);
+  await dialog.getByRole("button", { name: "Cancel scan" }).click();
+
+  await expect(page.getByTestId("run-result")).toContainText("You cancelled this run", { timeout: 20_000 });
+  await expect(page.getByTestId("cancel-run")).toHaveCount(0);
+  await page.goto(`/p/${notes.slug}/scans`);
+  await expect(page.getByTestId(`run-${running}`)).toContainText("Cancelled by you");
+});

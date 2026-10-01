@@ -44,7 +44,13 @@ from .config_layers import endpoint_of, load_layer
 from .db import data_dir, get_session
 from .models import Project, Secret
 from .paths import db_paths
-from .secrets import GITHUB_TOKEN, LLM_API_KEY, LLM_KEY_PROVIDERS, decrypt
+from .secrets import (
+    CLAUDE_OAUTH_TOKEN,
+    GITHUB_TOKEN,
+    LLM_API_KEY,
+    LLM_KEY_PROVIDERS,
+    decrypt,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -144,7 +150,11 @@ def _merged_layer(session: Session, project: Project, root: Path) -> tuple[dict,
 def _inject_secrets(
     session: Session, project_id: int | None, project_layer: dict, merged: dict
 ) -> None:
-    """Write decrypted keys and the GitHub token into ``merged`` (in memory)."""
+    """Write decrypted keys and tokens into ``merged`` (in memory).
+
+    The Claude subscription token, like the GitHub token, is a project
+    secret when the project has one, else the global one.
+    """
     rows = session.exec(
         select(Secret).where(
             or_(Secret.project_id.is_(None), Secret.project_id == project_id)  # type: ignore[union-attr]
@@ -187,6 +197,13 @@ def _inject_secrets(
         token = value(True, GITHUB_TOKEN, None)
     if token is not None:
         merged.setdefault("scan", {})["token"] = token
+
+    if (False, CLAUDE_OAUTH_TOKEN, None) in by_scope:
+        claude = value(False, CLAUDE_OAUTH_TOKEN, None)
+    else:
+        claude = value(True, CLAUDE_OAUTH_TOKEN, None)
+    if claude is not None:
+        llm.setdefault("claude_cli", {})["oauth_token"] = claude
 
 
 class ContextCache:

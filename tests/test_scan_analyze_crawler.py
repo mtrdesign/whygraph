@@ -27,6 +27,7 @@ from whygraph.db.models.commit import Commit as CommitRow
 from whygraph.scan import AnalyzeCrawler
 from whygraph.services.git import Repository
 from whygraph.services.git.commits import Commits
+from whygraph.services.llm import LlmAuthError
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -350,3 +351,33 @@ def test_feature_branch_commits_are_still_described(
     descs = _descriptions()
     for c in commits:
         assert descs[c.sha][0] == "DESCRIPTION"
+
+
+class _RejectingDescriptor(_StubDescriptor):
+    """Every call fails the way a rejected token does (wrapped, like the real one)."""
+
+    def describe(self, diff: str) -> Description:
+        with self._lock:
+            self.seen.append(diff)
+        try:
+            raise LlmAuthError("claude could not authenticate: 401")
+        except LlmAuthError as exc:
+            raise AnalyzeError(f"LLM call failed: {exc}") from exc
+
+
+def test_rejected_credentials_stop_the_phase_at_the_first_failure(
+    isolated_db: Path, repo_path: Path
+) -> None:
+    commits = _commits(repo_path)
+    _insert(commits)
+    descriptor = _RejectingDescriptor()
+
+    crawler = _run(repo_path, descriptor, max_workers=1)
+
+    assert isinstance(crawler.error, AnalyzeError)
+    assert "rejected the credentials" in str(crawler.error)
+    assert "401" in str(crawler.error)
+    # Not one call per commit: the rest are cancelled (a worker may already
+    # have picked up the next one when the first failure lands).
+    assert len(descriptor.seen) < len(commits)
+    assert all(v[0] is None for v in _descriptions().values())

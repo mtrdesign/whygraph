@@ -41,7 +41,9 @@ rather than gaps.
 
 **CodeGraph is not a phase.** The index refresh - `codegraph init -i` on the first run, `codegraph
 sync -q` after - is a background task started before phase 1 and joined after the last one, so it
-overlaps the whole crawl. A failure warns rather than aborting, since only the rationale and evidence
+overlaps the whole crawl. An index built by a CodeGraph with a different *extraction version* (after
+a CodeGraph upgrade, or a `.codegraph/` left by WhyGraph 1.x) is rebuilt in full with `codegraph
+index` instead, since `sync` would keep it as it is. A failure warns rather than aborting, since only the rationale and evidence
 *tools* need CodeGraph.
 
 Blame is *not* recorded at scan time. It's computed on demand when an evidence lookup needs it, which

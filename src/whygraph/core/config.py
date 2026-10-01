@@ -276,12 +276,19 @@ class ClaudeCliConfig:
         ``CLAUDE_CONFIG_DIR`` (or the CLI's own ``~/.claude``). ``~`` and
         ``$VARS`` are expanded; a relative path resolves against the
         directory holding ``whygraph.toml``.
+    oauth_token : str or None
+        A long-lived Claude subscription token (``claude setup-token``),
+        exported as ``CLAUDE_CODE_OAUTH_TOKEN``: subscription billing
+        without a logged-in profile - how the portal's Docker image runs
+        the CLI. ``None`` (default) inherits an ambient
+        ``CLAUDE_CODE_OAUTH_TOKEN``, else the CLI's own login.
     """
 
     model: str = "claude-opus-4-7"
     api_key: str | None = field(default=None, repr=False)
     timeout_sec: int = 120
     config_dir: Path | None = None
+    oauth_token: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)

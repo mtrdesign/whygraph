@@ -183,3 +183,48 @@ def test_scan_without_flag_still_constructs_analyze_crawler(
 
     assert result.exit_code == 0, result.output
     assert stub_crawlers["analyze"].constructed == 1
+
+
+def test_scan_with_claude_cli_and_no_binary_skips_analyze_once(
+    repo: Path,
+    stub_crawlers: dict[str, type],
+    no_github: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing `claude` skips the LLM phase with one message, no calls.
+
+    Before the preflight, every commit ran `claude --print` and failed on
+    its own ("497 of 497 commits failed to analyze").
+    """
+    import shutil
+
+    real_which = shutil.which
+    db_path = repo / ".whygraph" / "whygraph.db"
+    config = Config.from_dict(
+        {"llm": {"model": "claude-cli/claude-opus-4-7"}, "whygraph_db": str(db_path)},
+        repo,
+    )
+    monkeypatch.setattr(core, "_config", config)
+    db_engine._reset_engine()
+    ensure_initialized()
+    monkeypatch.delenv("WHYGRAPH_IN_IMAGE", raising=False)
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda cmd, *a, **kw: None if cmd == "claude" else real_which(cmd, *a, **kw),
+    )
+    calls: list[object] = []
+    monkeypatch.setattr(
+        "whygraph.services.llm.ClaudeCliAdapter.complete",
+        lambda self, request: calls.append(request),
+    )
+    try:
+        result = CliRunner().invoke(whygraph_main, ["scan", "--no-codegraph"])
+    finally:
+        db_engine._reset_engine()
+        core._reset_config()
+
+    assert result.exit_code == 0, result.output
+    assert stub_crawlers["analyze"].constructed == 0
+    assert result.output.count("claude CLI not found on PATH") == 1
+    assert calls == []

@@ -68,9 +68,13 @@ Ollama daemon or an OpenAI-compatible gateway running on your machine, use **`ho
 The portal container is started with that name mapped to your host, on Linux as well as macOS and
 Windows.
 
-!!! note "`claude-cli` is not available in the portal"
-    The Docker image does not ship the `claude` CLI, so the `claude-cli` provider cannot run inside the
-    portal. Use an API provider, or Ollama.
+!!! note "`claude-cli` in the portal: your Claude subscription"
+    The image ships the `claude` CLI, but not your login (on macOS it lives in the Keychain). To bill
+    your Claude subscription, run `claude setup-token` once in a terminal on your machine, then paste
+    the token it prints under **Settings > Provider keys > Claude subscription token** (globally, or
+    for one project). The portal stores it encrypted and hands it only to `claude` itself. Until one
+    is set, a project whose model is `claude-cli` shows "no key for claude-cli", and a scan skips the
+    commit descriptions with that message.
 
 ### A `whygraph.toml` in the repository
 
@@ -114,8 +118,12 @@ descriptions, or **Later** to let them backfill on demand. See [Scanning](../gui
 |---|---|
 | **Explorer** | Browse the graph, evidence and rationale ([The Explorer](../guide/playground.md)) |
 | **Chat** | Ask questions ([The Chat assistant](../guide/chat.md)) |
-| **Scans** | See each run's progress and log; start **Scan now** |
+| **Scans** | See each run's progress and log; start **Scan now**, or **Cancel** a queued or running run |
 | **Settings** | Change configuration, reconfigure agents, or remove the project |
+
+**Cancel** asks first. A queued run just leaves the queue; a running one stops within about ten
+seconds and is recorded as *Cancelled by you*. Commits it had already described are kept, so the next
+scan picks up where it stopped.
 
 Removing a project offers to strip what the portal wrote: the git hooks, the markers, and the `whygraph`
 entries in agent config files it created. It never deletes your repository, its `.whygraph/` data, or

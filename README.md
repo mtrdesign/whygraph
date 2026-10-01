@@ -38,8 +38,10 @@ See the [Getting Started guide](https://mtrdesign.github.io/whygraph/getting-sta
 uv sync                       # bootstrap .venv and install deps
 uv run pytest                 # full test suite
 uv run whygraph version       # CLI sanity check
-make dev                      # dev portal (:8765) + Vite HMR (:5173); open :5173
-make docs                     # serve the documentation site locally
+make dev-local                # develop natively: portal (:8777) + Vite HMR (:5173); open :5173
+make dev-docker               # the same inside the image, through the real shim
+make prod                     # the image exactly as released, through the shim
+make check                    # everything CI runs, plus e2e and the release smoke test
 ```
 
-A `Makefile` wraps the common dev tasks; run `make` to list them. See [`CLAUDE.md`](CLAUDE.md) for the architecture and conventions.
+A `Makefile` wraps the common dev tasks; run `make` to list them, and see [Developing WhyGraph](https://mtrdesign.github.io/whygraph/guide/developing/). See [`CLAUDE.md`](CLAUDE.md) for the architecture and conventions.

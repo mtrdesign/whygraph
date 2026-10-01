@@ -28,6 +28,7 @@ import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Progress } from "../ui/progress";
 import { Spinner } from "../ui/spinner";
+import { CancelRunButton } from "./CancelRunButton";
 import { RunStatusBadge } from "./RunStatusBadge";
 
 /** Re-render every `ms` while `enabled` (a live elapsed-time readout). */
@@ -280,6 +281,12 @@ function Outcome({ slug, state, row }: { slug: string; state: ScanRunState; row:
   return (
     <Alert data-testid="run-result">
       <AlertTitle>Cancelled</AlertTitle>
+      {summary?.cancelled_by === "user" && (
+        <AlertDescription>
+          You cancelled this run. Commits it had already described are kept; run another scan to finish the
+          job.
+        </AlertDescription>
+      )}
     </Alert>
   );
 }
@@ -374,6 +381,9 @@ export function ScanRunView({ slug, runId }: { slug: string; runId: number }) {
           </p>
         </div>
         <div className="flex gap-2">
+          {(status === "queued" || status === "running") && (
+            <CancelRunButton slug={slug} runId={runId} status={status} kind={kind} />
+          )}
           {kind === "sync" && (
             <Button variant="outline" onClick={syncNow} disabled={syncPending}>
               Sync again

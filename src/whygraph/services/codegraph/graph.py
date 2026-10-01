@@ -168,6 +168,29 @@ class CodeGraph:
         ).fetchone()
         return Symbol.from_row(row) if row else None
 
+    def file_hash(self, path: str) -> str | None:
+        """The sha256 CodeGraph recorded for a file when it last indexed it.
+
+        Parameters
+        ----------
+        path : str
+            Repository-relative file path, as in :attr:`Symbol.file_path`.
+
+        Returns
+        -------
+        str or None
+            The hex digest from ``files.content_hash``, or ``None`` when
+            the file is not indexed or the database predates that column
+            (so freshness cannot be told).
+        """
+        try:
+            row = self._conn.execute(
+                "SELECT content_hash FROM files WHERE path = ?", (path,)
+            ).fetchone()
+        except sqlite3.OperationalError:  # an index without content_hash
+            return None
+        return row[0] if row and row[0] else None
+
     def symbol_by_id(self, node_id: str) -> Symbol | None:
         """Look a symbol up by its CodeGraph node id.
 

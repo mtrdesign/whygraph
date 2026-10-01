@@ -1298,3 +1298,57 @@ def test_portal_cli_refuses_a_data_dir_another_portal_holds(
     ok = CliRunner().invoke(main, ["portal", "--data", str(data)])
     assert ok.exit_code == 0, ok.output
     assert len(runs) == 1
+
+
+def test_claude_subscription_token_through_the_api(
+    ready: TestClient, env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In the image the CLI has no login of its own, so the token is the key."""
+    monkeypatch.setenv("WHYGRAPH_IN_IMAGE", "1")
+    add_local(ready, make_repo(env.shared, "demo"))
+    # Chat cannot use claude-cli (no tools), so it resolves to Anthropic.
+    ready.put(
+        "/api/portal/defaults", json={"secrets": {"llm": {"anthropic": "sk-a-0001"}}}
+    )
+    ready.put(
+        "/api/projects/demo/config",
+        json={"config": {"llm": {"model": "claude-cli/claude-opus-4-7"}}},
+    )
+    assert ready.get("/api/projects/demo").json()["missing_key"] == "claude-cli"
+
+    saved = ready.put(
+        "/api/portal/defaults",
+        json={"secrets": {"claude_oauth_token": "sk-ant-oat01-abcd1234"}},
+    )
+    assert saved.status_code == 200
+    assert saved.json()["secrets"]["claude_oauth_token"] == {
+        "set": True,
+        "hint": "…1234",
+    }
+    assert "sk-ant-oat01-abcd1234" not in saved.text
+    assert ready.get("/api/projects/demo").json()["missing_key"] is None
+    ctx = ready.app.state.portal.contexts.get(_project_id("demo"))
+    assert ctx.config.llm.claude_cli.oauth_token == "sk-ant-oat01-abcd1234"
+
+    ready.put("/api/portal/defaults", json={"secrets": {"claude_oauth_token": None}})
+    assert ready.get("/api/projects/demo").json()["missing_key"] == "claude-cli"
+    # Natively the CLI may use its own login: no token is not "missing".
+    monkeypatch.delenv("WHYGRAPH_IN_IMAGE")
+    assert ready.get("/api/projects/demo").json()["missing_key"] is None
+
+
+def test_import_moves_a_claude_oauth_token_into_the_store(
+    ready: TestClient, env: SimpleNamespace
+) -> None:
+    root = make_repo(env.shared, "demo")
+    (root / "whygraph.toml").write_text(
+        '[llm]\nmodel = "claude-cli/claude-opus-4-7"\n'
+        '[llm.claude_cli]\noauth_token = "sk-ant-oat01-imported77"\n'
+    )
+    response = ready.post("/api/projects", json={"source": "local", "path": str(root)})
+    assert response.status_code == 201
+    assert "sk-ant-oat01-imported77" not in response.text
+    assert response.json()["import"]["secrets_moved"] == ["llm.claude_cli.oauth_token"]
+    config = ready.get("/api/projects/demo/config").json()
+    assert config["secrets"]["claude_oauth_token"] == {"set": True, "hint": "…ed77"}
+    assert "claude_cli" not in config["config"].get("llm", {})

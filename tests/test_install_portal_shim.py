@@ -49,10 +49,11 @@ case "$cmd" in
       *whygraph.folders*) cat "$S/c/$name/folders" ;;
       *whygraph.port*) cat "$S/c/$name/port" ;;
       *whygraph.image*) cat "$S/c/$name/image" ;;
+      *whygraph.dev_src*) cat "$S/c/$name/dev_src" 2>/dev/null || true ;;
     esac
     ;;
   run)
-    name=""; folders=""; port=""; image=""
+    name=""; folders=""; port=""; image=""; dev_src=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --name) name="$2"; shift 2 ;;
@@ -61,6 +62,7 @@ case "$cmd" in
             whygraph.folders=*) folders="${2#whygraph.folders=}" ;;
             whygraph.port=*) port="${2#whygraph.port=}" ;;
             whygraph.image=*) image="${2#whygraph.image=}" ;;
+            whygraph.dev_src=*) dev_src="${2#whygraph.dev_src=}" ;;
           esac
           shift 2 ;;
         --mount)
@@ -77,6 +79,7 @@ case "$cmd" in
     printf '%s' "$folders" > "$S/c/$name/folders"
     printf '%s' "$port" > "$S/c/$name/port"
     printf '%s' "$image" > "$S/c/$name/image"
+    printf '%s' "$dev_src" > "$S/c/$name/dev_src"
     echo "fakecontainerid"
     ;;
   stop)
@@ -232,7 +235,8 @@ def test_portal_block_shape(shim: Shim) -> None:
         "--init",
         "--network whygraph-portal",
         "--add-host=host.docker.internal:host-gateway",
-        "--restart unless-stopped",
+        'RESTART="unless-stopped"',
+        '--restart "$RESTART"',
         '-p "127.0.0.1:$PORT:$PORT"',
         '--user "$(id -u):$(id -g)" -e HOME=/tmp',
         "--host 0.0.0.0",
@@ -753,3 +757,113 @@ def test_verify_image_probes_the_portal_state_endpoint() -> None:
     assert '"127.0.0.1:${port}:${port}"' in script
     # It cleans up after itself.
     assert "docker rm -f portal-smoke" in script
+
+
+# --- development knobs (make dev-docker / prod / smoke) ---------------------
+
+
+def _checkout(shim: Shim) -> Path:
+    """A minimal fake WhyGraph checkout for WHYGRAPH_DEV_SRC."""
+    root = _dir(shim, "checkout")
+    (root / "src" / "whygraph").mkdir(parents=True, exist_ok=True)
+    (root / "src" / "whygraph" / "__init__.py").write_text("")
+    (root / "scripts").mkdir(exist_ok=True)
+    (root / "scripts" / "dev_portal.py").write_text("")
+    return root
+
+
+def test_default_up_has_no_dev_mode(shim: Shim) -> None:
+    assert shim.run("up").returncode == 0
+    call = shim.run_call()
+    joined = " ".join(call)
+    assert "PYTHONPATH" not in joined
+    assert "/opt/whygraph-dev" not in joined
+    assert "127.0.0.1:5173:5173" not in call
+    assert "WHYGRAPH_SCAN_CMD" not in joined
+    assert not any(c.startswith("whygraph.dev_src=") for c in call)
+
+
+def test_portal_name_knob_renames_the_container(shim: Shim) -> None:
+    result = shim.run("up", WHYGRAPH_PORTAL_NAME="whygraph-portal-dev")
+    assert result.returncode == 0, result.stderr
+    call = shim.run_call()
+    assert call[call.index("--name") + 1] == "whygraph-portal-dev"
+    # The user's own portal is left alone by every verb.
+    assert not (shim.state / "c" / "whygraph-portal").exists()
+    shim.run("down", WHYGRAPH_PORTAL_NAME="whygraph-portal-dev")
+    assert not (shim.state / "c" / "whygraph-portal-dev").exists()
+
+
+@pytest.mark.parametrize("bad", ["-x", "a b", "a/b", "a;b", ".hidden"])
+def test_portal_name_knob_rejects_bad_names(shim: Shim, bad: str) -> None:
+    result = shim.run("up", WHYGRAPH_PORTAL_NAME=bad)
+    assert result.returncode == 2
+    assert "invalid WHYGRAPH_PORTAL_NAME" in result.stderr
+    assert "run" not in shim.verbs()
+
+
+def test_dev_src_runs_the_checkout_through_the_dev_wrapper(shim: Shim) -> None:
+    root = _checkout(shim)
+    result = shim.run("up", WHYGRAPH_DEV_SRC=str(root))
+    assert result.returncode == 0, result.stderr
+    call = shim.run_call()
+    assert f"type=bind,source={root},target=/opt/whygraph-dev,readonly" in call
+    modules = shim.data.resolve() / "dev-node_modules"
+    assert modules.is_dir()
+    assert (
+        f"type=bind,source={modules},target=/opt/whygraph-dev/src/playground/node_modules"
+        in call
+    )
+    assert "127.0.0.1:5173:5173" in call
+    assert "PYTHONPATH=/opt/whygraph-dev/src" in call
+    # Scan children get the checkout too, without widening the env allowlist.
+    assert (
+        "WHYGRAPH_SCAN_CMD=env PYTHONPATH=/opt/whygraph-dev/src python -m whygraph scan"
+        in call
+    )
+    assert "WHYGRAPH_DEV_ORIGINS=http://localhost:5173,http://127.0.0.1:5173" in call
+    assert f"whygraph.dev_src={root}" in call
+    assert call[call.index("--restart") + 1] == "no"
+    assert call[-10:] == [
+        IMAGE,
+        "python",
+        "/opt/whygraph-dev/scripts/dev_portal.py",
+        "--vite-host",
+        "0.0.0.0",
+        "--",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8765",
+    ]
+
+
+def test_toggling_dev_src_recreates_the_container(shim: Shim) -> None:
+    root = _checkout(shim)
+    assert shim.run("up", WHYGRAPH_DEV_SRC=str(root)).returncode == 0
+    shim.clear_log()
+    unchanged = shim.run("up", WHYGRAPH_DEV_SRC=str(root))
+    assert "already running" in unchanged.stdout
+    assert "run" not in shim.verbs()
+    back = shim.run("up")
+    assert back.returncode == 0, back.stderr
+    assert "changed: dev_src" in back.stderr
+    assert shim.verbs()[:2] == ["stop", "rm"]
+
+
+@pytest.mark.parametrize("kind", ["relative", "not-a-checkout", "comma"])
+def test_dev_src_is_validated(shim: Shim, kind: str) -> None:
+    if kind == "relative":
+        value = "checkout"
+        _checkout(shim)
+    elif kind == "not-a-checkout":
+        value = str(_dir(shim, "empty"))
+    else:
+        root = _checkout(shim)
+        bad = shim.tmp / "a,b"
+        root.rename(bad)
+        value = str(bad)
+    result = shim.run("up", WHYGRAPH_DEV_SRC=value)
+    assert result.returncode == 2, result.stdout
+    assert "WHYGRAPH_DEV_SRC" in result.stderr
+    assert "run" not in shim.verbs()

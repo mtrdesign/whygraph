@@ -10,6 +10,7 @@ subprocess is launched.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -234,3 +235,200 @@ def test_complete_raises_llm_error_when_config_dir_missing(tmp_path: Path) -> No
                 CompletionRequest.of("hi")
             )
     run.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# preflight() - fail the phase once, not every commit
+# ---------------------------------------------------------------------------
+
+
+def test_preflight_passes_when_cli_present(tmp_path: Path) -> None:
+    adapter = ClaudeCliAdapter(config_dir=tmp_path)
+    with patch("shutil.which", return_value="/usr/local/bin/claude"):
+        adapter.preflight()
+
+
+def test_preflight_raises_natively_when_cli_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("WHYGRAPH_IN_IMAGE", raising=False)
+    with patch("shutil.which", return_value=None):
+        with pytest.raises(LlmError, match="claude CLI not found on PATH"):
+            ClaudeCliAdapter().preflight()
+
+
+def test_preflight_names_the_docker_image_when_cli_missing_inside_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WHYGRAPH_IN_IMAGE", "1")
+    with patch("shutil.which", return_value=None):
+        with pytest.raises(LlmError, match="Docker image does not include the claude"):
+            ClaudeCliAdapter().preflight()
+
+
+def test_preflight_raises_when_config_dir_missing(tmp_path: Path) -> None:
+    missing = tmp_path / "nope"
+    with patch("shutil.which", return_value="/usr/local/bin/claude"):
+        with pytest.raises(LlmError, match="config_dir .* does not exist"):
+            ClaudeCliAdapter(config_dir=missing).preflight()
+
+
+def test_preflight_hints_at_container_home_for_a_tmp_config_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", "/tmp")
+    missing = Path("/tmp/.claude-work-does-not-exist-whygraph-test")
+    with patch("shutil.which", return_value="/usr/local/bin/claude"):
+        with pytest.raises(LlmError, match="HOME is /tmp inside the container"):
+            ClaudeCliAdapter(config_dir=missing).preflight()
+
+
+def test_descriptor_and_generator_run_preflight(tmp_path: Path) -> None:
+    """Both LLM factories refuse a claude-cli config without the binary."""
+    from whygraph.analyze import LlmDescriptor, RationaleGenerator
+    from whygraph.core.config import Config
+    from whygraph.services.llm import LlmClientFactory
+
+    config = Config.from_dict(
+        {"llm": {"model": "claude-cli/claude-opus-4-7"}}, tmp_path
+    )
+    factory = LlmClientFactory(config.llm)
+    with patch("shutil.which", return_value=None):
+        with pytest.raises(LlmError, match="claude CLI"):
+            LlmDescriptor.from_config(config, factory=factory)
+        with pytest.raises(LlmError, match="claude CLI"):
+            RationaleGenerator.from_config(config, factory=factory)
+
+
+# ---------------------------------------------------------------------------
+# Subscription token (claude setup-token) - how the portal's image runs it
+# ---------------------------------------------------------------------------
+
+
+def _capture_env(captured: dict):
+    def fake_run(cmd, *, env, **_):
+        captured["env"] = dict(env)
+        captured["dir_existed"] = os.path.isdir(env.get("CLAUDE_CONFIG_DIR", ""))
+        return _ok("ok")
+
+    return fake_run
+
+
+def test_token_is_exported_with_a_private_throwaway_config_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/ambient/profile")
+    captured: dict = {}
+    with patch(
+        "whygraph.services.llm.claude_cli.subprocess.run",
+        side_effect=_capture_env(captured),
+    ):
+        ClaudeCliAdapter(model="m", oauth_token="sk-ant-oat-secret").complete(
+            CompletionRequest.of("hi")
+        )
+
+    env = captured["env"]
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-secret"
+    assert env["DISABLE_AUTOUPDATER"] == "1"
+    assert "ANTHROPIC_API_KEY" not in env  # subscription billing
+    private = env["CLAUDE_CONFIG_DIR"]
+    assert private != "/ambient/profile" and "whygraph-claude-" in private
+    assert captured["dir_existed"] is True
+    assert not os.path.exists(private)  # removed after the call
+
+
+def test_ambient_token_also_gets_a_private_config_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The portal's scan child receives the token in its env, not its config."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-ambient")
+    captured: dict = {}
+    with patch(
+        "whygraph.services.llm.claude_cli.subprocess.run",
+        side_effect=_capture_env(captured),
+    ):
+        ClaudeCliAdapter(model="m").complete(CompletionRequest.of("hi"))
+
+    assert captured["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-ambient"
+    assert "whygraph-claude-" in captured["env"]["CLAUDE_CONFIG_DIR"]
+
+
+def test_explicit_config_dir_wins_over_the_private_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    captured: dict = {}
+    with patch(
+        "whygraph.services.llm.claude_cli.subprocess.run",
+        side_effect=_capture_env(captured),
+    ):
+        ClaudeCliAdapter(model="m", config_dir=tmp_path, oauth_token="t").complete(
+            CompletionRequest.of("hi")
+        )
+
+    assert captured["env"]["CLAUDE_CONFIG_DIR"] == str(tmp_path)
+    assert tmp_path.is_dir()  # never removed
+
+
+def test_private_dir_is_removed_even_when_claude_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    seen: dict = {}
+
+    def failing(cmd, *, env, **_):
+        seen["dir"] = env["CLAUDE_CONFIG_DIR"]
+        return _ok("", stderr="model overloaded", returncode=1)
+
+    with patch("whygraph.services.llm.claude_cli.subprocess.run", side_effect=failing):
+        with pytest.raises(LlmError, match="exited 1"):
+            ClaudeCliAdapter(model="m", oauth_token="t").complete(
+                CompletionRequest.of("hi")
+            )
+    assert not os.path.exists(seen["dir"])
+
+
+def test_preflight_in_the_image_asks_for_a_subscription_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WHYGRAPH_IN_IMAGE", "1")
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    with patch("shutil.which", return_value="/usr/local/bin/claude"):
+        with pytest.raises(LlmError, match="claude setup-token"):
+            ClaudeCliAdapter().preflight()
+        ClaudeCliAdapter(oauth_token="t").preflight()  # configured: fine
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "t")
+        ClaudeCliAdapter().preflight()  # ambient (the scan child): fine
+
+
+def test_from_config_carries_the_token(tmp_path: Path) -> None:
+    from whygraph.core.config import Config
+
+    config = Config.from_dict(
+        {"llm": {"claude_cli": {"model": "claude-x", "oauth_token": "sk-ant-oat-zz9"}}},
+        tmp_path,
+    )
+    adapter = ClaudeCliAdapter.from_config(config.llm.claude_cli)
+    assert adapter._oauth_token == "sk-ant-oat-zz9"
+    assert "sk-ant-oat-zz9" not in repr(
+        config.llm.claude_cli
+    )  # never in a repr / log line
+
+
+def test_rejected_token_raises_llm_auth_error_with_a_replace_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whygraph.services.llm import LlmAuthError
+
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    stderr = "Failed to authenticate. API Error: 401 OAuth access token is invalid."
+    with patch(
+        "whygraph.services.llm.claude_cli.subprocess.run",
+        return_value=_ok("", stderr=stderr, returncode=1),
+    ):
+        with pytest.raises(LlmAuthError, match="replace it under Settings"):
+            ClaudeCliAdapter(oauth_token="bad").complete(CompletionRequest.of("hi"))
+        with pytest.raises(LlmAuthError) as native:  # own login: no token hint
+            ClaudeCliAdapter().complete(CompletionRequest.of("hi"))
+    assert "setup-token" not in str(native.value)

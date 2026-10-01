@@ -10,6 +10,8 @@ operate on isolated files.
 
 from __future__ import annotations
 
+import json
+
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -52,6 +54,7 @@ def _capturing_run(
         capture_output: bool = False,
         text: bool = False,
         env: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> subprocess.CompletedProcess:
         captured["cmd"] = cmd
         captured["cwd"] = cwd
@@ -203,6 +206,7 @@ def test_raises_when_command_exits_nonzero(
         capture_output: bool = False,
         text: bool = False,
         env: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> subprocess.CompletedProcess:
         raise subprocess.CalledProcessError(returncode=7, cmd=cmd)
 
@@ -276,6 +280,95 @@ def test_refresh_sync_via_docker_fallback(
     assert DEFAULT_CODEGRAPH_IMAGE in cmd
 
 
+def _status_run(
+    calls: list[list[str]], *, status: str | None = None, status_fails: bool = False
+) -> Callable[..., subprocess.CompletedProcess]:
+    """Fake ``subprocess.run`` answering ``status --json`` with ``status``."""
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        calls.append(cmd)
+        if cmd[-2:] == ["status", "--json"]:
+            if status_fails:
+                raise subprocess.CalledProcessError(1, cmd, output="", stderr="boom")
+            return subprocess.CompletedProcess(cmd, 0, stdout=status, stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    return fake_run
+
+
+def _status_json(built: object, current: object) -> str:
+    # Real output can carry a banner before the JSON; the parser skips it.
+    return "note: whatever\n" + json.dumps(
+        {
+            "initialized": True,
+            "index": {
+                "builtWithVersion": "1.3.0",
+                "builtWithExtractionVersion": built,
+                "currentExtractionVersion": current,
+                "reindexRecommended": built != current,
+            },
+        }
+    )
+
+
+def test_refresh_rebuilds_an_index_from_another_extraction_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`codegraph sync` keeps such an index ("Already up to date") - verified
+    against CodeGraph 1.5.0 - so a full `codegraph index` runs instead."""
+    _make_existing_db(tmp_path)
+    monkeypatch.setattr(bootstrap.shutil, "which", _which("codegraph"))
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        bootstrap.subprocess, "run", _status_run(calls, status=_status_json(23, 24))
+    )
+
+    refresh_codegraph_index(tmp_path, capture=True)
+
+    assert calls == [
+        ["codegraph", "status", "--json"],
+        ["codegraph", "index", "-q"],
+    ]
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        _status_json(24, 24),  # same extractor, maybe a newer CodeGraph: sync
+        _status_json(None, 24),  # an older CodeGraph without the fields
+        '{"initialized": true}',
+        "not json at all",
+    ],
+)
+def test_refresh_syncs_when_the_extractor_matches_or_is_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    _make_existing_db(tmp_path)
+    monkeypatch.setattr(bootstrap.shutil, "which", _which("codegraph"))
+    calls: list[list[str]] = []
+    monkeypatch.setattr(bootstrap.subprocess, "run", _status_run(calls, status=status))
+
+    refresh_codegraph_index(tmp_path, capture=True)
+
+    assert calls[-1] == ["codegraph", "sync", "-q"]
+    assert ["codegraph", "index", "-q"] not in calls
+
+
+def test_refresh_syncs_when_status_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _make_existing_db(tmp_path)
+    monkeypatch.setattr(bootstrap.shutil, "which", _which("codegraph"))
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        bootstrap.subprocess, "run", _status_run(calls, status_fails=True)
+    )
+
+    refresh_codegraph_index(tmp_path, capture=True)
+
+    assert calls[-1] == ["codegraph", "sync", "-q"]
+
+
 # --------------------------------------------------------------------------- #
 # capture=True — used by the concurrent CodeGraphCrawler under rich.Progress
 # --------------------------------------------------------------------------- #
@@ -321,6 +414,7 @@ def test_capture_true_folds_stderr_into_error(
         capture_output: bool = False,
         text: bool = False,
         env: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> subprocess.CompletedProcess:
         raise subprocess.CalledProcessError(
             returncode=3, cmd=cmd, stderr="boom: index corrupt"
@@ -388,3 +482,60 @@ def test_codegraph_docker_fallback_env_has_no_credentials(
     env = captured["env"]
     assert isinstance(env, dict)
     assert not set(_SECRETS) & set(env)
+
+
+def test_refresh_without_rebuild_skips_status_and_only_syncs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The MCP read path never runs a full `codegraph index` (it can take minutes)."""
+    _make_existing_db(tmp_path)
+    monkeypatch.setattr(bootstrap.shutil, "which", _which("codegraph"))
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        bootstrap.subprocess, "run", _status_run(calls, status=_status_json(23, 24))
+    )
+
+    refresh_codegraph_index(tmp_path, capture=True, allow_rebuild=False)
+
+    assert calls == [["codegraph", "sync", "-q"]]
+
+
+def test_refresh_timeout_becomes_a_bootstrap_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _make_existing_db(tmp_path)
+    monkeypatch.setattr(bootstrap.shutil, "which", _which("codegraph"))
+    seen: dict[str, object] = {}
+
+    def slow(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        seen.update(kwargs)
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", slow)
+
+    with pytest.raises(CodeGraphBootstrapError, match="did not finish within 2 s"):
+        refresh_codegraph_index(tmp_path, capture=True, allow_rebuild=False, timeout=2)
+    assert seen["timeout"] == 2
+
+
+def test_refresh_env_is_the_given_base_minus_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _make_existing_db(tmp_path)
+    monkeypatch.setattr(bootstrap.shutil, "which", _which("codegraph"))
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(bootstrap.subprocess, "run", _capturing_run(captured))
+    monkeypatch.setenv("AMBIENT_ONLY", "1")
+
+    refresh_codegraph_index(
+        tmp_path,
+        allow_rebuild=False,
+        env={
+            "PATH": "/bin",
+            "GH_TOKEN": "t",
+            "OPENAI_API_KEY": "k",
+            "CLAUDE_CODE_OAUTH_TOKEN": "c",
+        },
+    )
+
+    assert captured["env"] == {"PATH": "/bin"}

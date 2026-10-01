@@ -169,6 +169,8 @@ class ImportPreview:
         secret store. Never serialized to an API response.
     github_token : str or None
         ``[scan].token`` from the file, likewise moved.
+    claude_oauth_token : str or None
+        ``[llm.claude_cli].oauth_token`` from the file, likewise moved.
     secrets_moved : list[str]
         Dotted keys of the moved secrets - the lines the user should
         delete from the file.
@@ -186,6 +188,7 @@ class ImportPreview:
     layer: dict = field(default_factory=dict)
     llm_keys: dict[str, str] = field(default_factory=dict, repr=False)
     github_token: str | None = field(default=None, repr=False)
+    claude_oauth_token: str | None = field(default=None, repr=False)
     secrets_moved: list[str] = field(default_factory=list)
     dropped: list[dict] = field(default_factory=list)
     custom_db_paths: list[dict] = field(default_factory=list)
@@ -249,6 +252,12 @@ def preview_import(root: Path) -> ImportPreview:
                 preview.secrets_moved.append(f"llm.{name}.api_key")
                 if isinstance(value, str) and value.strip():
                     preview.llm_keys[tag] = value.strip()
+        claude = llm.get("claude_cli")
+        if isinstance(claude, dict) and "oauth_token" in claude:
+            value = claude.pop("oauth_token")
+            preview.secrets_moved.append("llm.claude_cli.oauth_token")
+            if isinstance(value, str) and value.strip():
+                preview.claude_oauth_token = value.strip()
     scan = layer.get("scan")
     if isinstance(scan, dict) and "token" in scan:
         value = scan.pop("token")

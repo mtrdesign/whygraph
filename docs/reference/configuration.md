@@ -133,6 +133,9 @@ timeout_sec = 120
 timeout_sec = 120
 # config_dir = "~/.claude-work"  # Claude Code profile dir (sets CLAUDE_CONFIG_DIR);
                                  # default: inherit the ambient one / ~/.claude
+# oauth_token = "sk-ant-oat01-..." # a `claude setup-token` subscription token (sets
+                                 # CLAUDE_CODE_OAUTH_TOKEN); the portal keeps it in its
+                                 # encrypted store and moves it there on import
 ```
 
 ## Section by section

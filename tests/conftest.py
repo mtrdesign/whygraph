@@ -10,10 +10,12 @@ import uuid
 from pathlib import Path
 from typing import Iterable, Iterator
 
+import anyio.to_thread
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL, Engine, make_url
 from sqlalchemy.pool import NullPool
+from starlette.datastructures import Headers
 
 from whygraph import core
 from whygraph.cli.commands.install import POSTGRES_IMAGE
@@ -510,3 +512,34 @@ def builtin_org_id(session) -> int:  # noqa: ANN001
     org = ensure_builtin_org(session, setting)
     assert org.id is not None
     return org.id
+
+
+class HeaderIdentity:
+    """A test :class:`~whygraph.portal.deps.IdentityResolver` driven by headers.
+
+    ``x-test-user`` names the principal by ``users.uid`` (unknown or absent:
+    no principal) and ``x-test-org`` is the org slug, returned as is - the
+    membership is still checked by the real ``load_org_access``. Passed to
+    ``create_portal_app(identity=...)``, so production code never reads a
+    test header.
+    """
+
+    async def principal(self, scope):  # noqa: ANN001, ANN201
+        uid = Headers(scope=scope).get("x-test-user")
+        if uid is None:
+            return None
+        return await anyio.to_thread.run_sync(_principal_by_uid, uid)
+
+    async def org_slug(self, scope):  # noqa: ANN001, ANN201
+        return Headers(scope=scope).get("x-test-org")
+
+
+def _principal_by_uid(uid: str):  # noqa: ANN202
+    from sqlmodel import select
+
+    from whygraph.portal.deps import principal_of
+    from whygraph.portal.models import User
+
+    with portal_db.get_session() as session:
+        user = session.exec(select(User).where(User.uid == uid)).first()
+        return None if user is None else principal_of(user)

@@ -59,7 +59,7 @@ from whygraph.serve.errors import whygraph_error_handler
 from whygraph.serve.routes import router as data_router
 
 from . import db as portal_db
-from .deps import ApiError, PortalState, current_user, project_db
+from .deps import ApiError, IdentityResolver, PortalState, current_user, project_db
 from .mcp_mount import McpDispatcher, build_session_manager
 from .migrate import MIGRATION_LOCK
 from .models import ScanRun, Setting
@@ -126,6 +126,7 @@ def create_portal_app(
     port: int = DEFAULT_PORTAL_PORT,
     runner: ScanRunner | None = None,
     instance_lock: bool = True,
+    identity: IdentityResolver | None = None,
 ) -> FastAPI:
     """Build the portal application.
 
@@ -146,6 +147,11 @@ def create_portal_app(
         default, and what the CLI always uses). ``False`` is a test hook
         for apps that deliberately share one database; it is a factory
         parameter, not configuration, so no deployment can switch it off.
+    identity : IdentityResolver, optional
+        Who a request acts as and which organization it addresses; local
+        mode's :class:`~whygraph.portal.deps.LocalIdentity` by default (what
+        the CLI always uses). Like ``instance_lock``, a test hook: tests
+        pass a header-driven resolver to drive several users and orgs.
 
     Returns
     -------
@@ -159,6 +165,8 @@ def create_portal_app(
     )
     if instance_lock:
         state.instance_lock = portal_db.InstanceLock()
+    if identity is not None:
+        state.identity = identity
 
     app = FastAPI(
         title="WhyGraph Portal",

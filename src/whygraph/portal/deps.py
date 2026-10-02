@@ -16,6 +16,11 @@ generators that depend on :func:`current_user`:
   symlink (or leaves the root) is a ``409 {"code": "unsafe_path"}``
   (:func:`checked_db_paths`).
 
+Who the request acts as, and in which organization, comes from the
+guard (:class:`~whygraph.portal.security.PortalGuard`) through the
+state's :class:`IdentityResolver`; :func:`current_org` turns the org slug
+it stored into the caller's :class:`~whygraph.portal.authz.OrgAccess`.
+
 Why ``async def``: a sync dependency runs in the threadpool, and a
 ``ContextVar`` set there never reaches the endpoint. Set in the request
 task instead, the binding is copied into every sync endpoint and into the
@@ -27,7 +32,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Protocol
 
 import anyio
 import anyio.to_thread
@@ -40,10 +45,12 @@ from whygraph.core.config import ConfigError
 from whygraph.core.context import ProjectContext, use_project
 from whygraph.core.safe_paths import UnsafePathError
 
+from .authz import OrgAccess, Role
 from .context import ContextCache, ProjectNotFound, resolve_root
 from .db import InstanceLock, get_session
 from .migrate import ProjectMigrations
-from .models import Project, User
+from .models import Membership, Organization, Project, User
+from .orgs import is_valid_org_slug
 from .paths import check_project_paths
 from .projects import is_valid_slug
 from .repos import DiscoveryCache
@@ -87,6 +94,48 @@ _UNSET = object()
 
 LOCK_CHECK_INTERVAL_SEC = 15.0
 """How often a running portal checks that it still holds the instance lock."""
+
+
+class IdentityResolver(Protocol):
+    """Names who a request acts as and which organization it addresses.
+
+    The guard calls both methods once per request (never when the portal
+    is degraded) and stores the answers in ``scope["state"]``. Both must
+    be cheap: the org slug is only *named* here, and the membership is
+    checked later by :func:`current_org` (:func:`load_org_access`).
+    """
+
+    async def principal(self, scope: Scope) -> Principal | None:
+        """Return the request's principal, or ``None`` (no user yet)."""
+        ...
+
+    async def org_slug(self, scope: Scope) -> str | None:
+        """Return the slug of the organization the request addresses, if any."""
+        ...
+
+
+class LocalIdentity:
+    """Local mode's identity: the single user, in the built-in organization.
+
+    Parameters
+    ----------
+    state : PortalState
+        The portal state. :meth:`principal` delegates to its cached
+        :meth:`PortalState.resolve_principal` (so
+        :meth:`PortalState.set_principal` keeps working), and
+        :meth:`org_slug` answers its ``builtin_org_slug`` from memory.
+    """
+
+    def __init__(self, state: PortalState) -> None:
+        self.state = state
+
+    async def principal(self, scope: Scope) -> Principal | None:
+        """Return the local user (``None`` before first-run setup)."""
+        return await self.state.resolve_principal(scope)
+
+    async def org_slug(self, scope: Scope) -> str | None:
+        """Return the built-in organization's slug (``None`` in production)."""
+        return self.state.builtin_org_slug
 
 
 class PortalState:
@@ -148,6 +197,10 @@ class PortalState:
         Local mode's built-in organization, set by the lifespan
         (:func:`whygraph.portal.orgs.ensure_builtin_org`); ``None`` in
         production.
+    identity : IdentityResolver
+        What the guard asks for the principal and the org slug;
+        :class:`LocalIdentity` by default (tests inject their own through
+        :func:`whygraph.portal.app.create_portal_app`).
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -173,6 +226,7 @@ class PortalState:
         self.startup_error: BaseException | None = None
         self.builtin_org_id: int | None = None
         self.builtin_org_slug: str | None = None
+        self.identity: IdentityResolver = LocalIdentity(self)
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0
@@ -247,6 +301,72 @@ async def current_user(request: Request) -> Principal:
     if principal is None:
         raise ApiError(409, "setup required")
     return principal
+
+
+def load_org_access(user_id: int, org_slug: str) -> OrgAccess | None:
+    """Return ``user_id``'s access to the organization ``org_slug``.
+
+    One join of ``organizations`` and ``memberships``, run on every request
+    and never cached, so a membership change applies to the next request.
+
+    Parameters
+    ----------
+    user_id : int
+        ``users.id`` of the principal.
+    org_slug : str
+        The organization slug the request addresses.
+
+    Returns
+    -------
+    OrgAccess or None
+        ``None`` when the org does not exist (or the slug is malformed) or
+        the user is not a member of it - callers answer both the same way.
+    """
+    if not is_valid_org_slug(org_slug):
+        return None
+    with get_session() as session:
+        row = session.exec(
+            select(
+                Organization.id, Organization.slug, Organization.name, Membership.role
+            )
+            .join(Membership, Membership.org_id == Organization.id)
+            .where(Organization.slug == org_slug, Membership.user_id == user_id)
+        ).first()
+    if row is None:
+        return None
+    org_id, slug, name, role = row
+    return OrgAccess(org_id=org_id, org_slug=slug, org_name=name, role=Role(role))
+
+
+async def current_org(
+    request: Request, principal: Principal = Depends(current_user)
+) -> OrgAccess:
+    """The caller's access to the organization the guard named.
+
+    FastAPI resolves it once per request, after :func:`current_user` (so
+    ``409 setup required`` comes first).
+
+    Returns
+    -------
+    OrgAccess
+        The organization and the caller's role in it.
+
+    Raises
+    ------
+    ApiError
+        ``404 {"error": "not found"}`` when the request names no org, the
+        org does not exist or the caller is not a member - never saying
+        which.
+    """
+    org_slug = request.scope.get("state", {}).get("org_slug")
+    if org_slug is None:
+        raise ApiError(404, "not found")
+    access = await anyio.to_thread.run_sync(
+        load_org_access, principal.user_id, org_slug
+    )
+    if access is None:
+        raise ApiError(404, "not found")
+    return access
 
 
 @dataclass(frozen=True)
@@ -433,11 +553,15 @@ async def project_db(
 __all__ = [
     "ApiError",
     "BoundProject",
+    "IdentityResolver",
+    "LocalIdentity",
     "PortalState",
     "bind_project",
     "bound_from",
     "checked_db_paths",
+    "current_org",
     "current_user",
+    "load_org_access",
     "portal_state",
     "principal_of",
     "project_context",

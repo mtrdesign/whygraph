@@ -17,15 +17,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Iterator
 
+import anyio
 import pytest
 from alembic import command
 from click.testing import CliRunner
+from fastapi import Depends
 from fastapi.routing import iter_route_contexts
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlmodel import select
 
-from conftest import build_fake_codegraph_db, builtin_org_id
+from conftest import HeaderIdentity, build_fake_codegraph_db, builtin_org_id
 from whygraph.core.config import Config
 from whygraph.core.context import ProjectContext, is_strict, use_project
 from whygraph.db import bootstrap
@@ -34,8 +36,18 @@ from whygraph.hooks import managed_hook_names
 from whygraph.portal import db as portal_db
 from whygraph.portal import repos as portal_repos
 from whygraph.portal.app import PortalStartupError, create_portal_app
-from whygraph.portal.deps import current_user
-from whygraph.portal.models import Project, ScanRun
+from whygraph.portal.authz import OrgAccess, Role
+from whygraph.portal.deps import (
+    IdentityResolver,
+    PortalState,
+    current_org,
+    current_user,
+    load_org_access,
+)
+from whygraph.portal.models import Project, ScanRun, User
+from whygraph.portal.orgs import add_member, create_org
+from whygraph.portal.runner import ScanRunner
+from whygraph.portal.security import PortalGuard, build_origins
 from whygraph.serve import chat as serve_chat
 from whygraph.services.github import RepoAccess, RepoAccessError
 from whygraph.services.llm.chat import TextDelta, TurnDone
@@ -151,9 +163,12 @@ def env(
 
 @contextmanager
 def portal_client(
-    port: int = PORT, *, instance_lock: bool = True
+    port: int = PORT,
+    *,
+    instance_lock: bool = True,
+    identity: IdentityResolver | None = None,
 ) -> Iterator[TestClient]:
-    app = create_portal_app(port=port, instance_lock=instance_lock)
+    app = create_portal_app(port=port, instance_lock=instance_lock, identity=identity)
     with TestClient(
         app, base_url=f"http://127.0.0.1:{port}", headers=CLIENT_HEADER
     ) as client:
@@ -517,6 +532,154 @@ def test_no_cors_headers_are_ever_sent(ready: TestClient) -> None:
     )
     assert response.status_code == 403
     assert "access-control-allow-origin" not in response.headers
+
+
+# ---------------------------------------------------------------------------
+# Identity: the org slug the guard names, load_org_access, current_org
+# ---------------------------------------------------------------------------
+
+
+def _seed_two_orgs() -> SimpleNamespace:
+    """``local`` (alice admin), ``beta`` (bob owner) and erin with no membership."""
+    with portal_db.get_session() as session:
+        local = builtin_org_id(session)
+        beta = create_org(session, slug="beta", name="Beta")
+        alice, bob, erin = (
+            User(display_name=name) for name in ("Alice", "Bob", "Erin")
+        )
+        session.add_all([alice, bob, erin])
+        session.flush()
+        add_member(session, org_id=local, user_id=alice.id, role="admin")
+        add_member(session, org_id=beta.id, user_id=bob.id, role="owner")
+        return SimpleNamespace(
+            local=local,
+            beta=beta.id,
+            alice=alice.id,
+            bob=bob.id,
+            erin=erin.id,
+            uids={u.display_name.lower(): u.uid for u in (alice, bob, erin)},
+        )
+
+
+def _add_org_probe(client: TestClient) -> None:
+    """A test-only ``GET /api/test/org`` behind :func:`current_org`."""
+
+    async def probe(access: OrgAccess = Depends(current_org)) -> dict:
+        return {
+            "org_id": access.org_id,
+            "org_slug": access.org_slug,
+            "org_name": access.org_name,
+            "role": str(access.role),
+        }
+
+    routes = client.app.router.routes
+    client.app.add_api_route("/api/test/org", probe, methods=["GET"])
+    routes.insert(0, routes.pop())  # ahead of the /api 404 fallback
+
+
+def test_load_org_access(env: SimpleNamespace) -> None:
+    orgs = _seed_two_orgs()
+    assert load_org_access(orgs.alice, "local") == OrgAccess(
+        org_id=orgs.local, org_slug="local", org_name="Local", role=Role.ADMIN
+    )
+    bob = load_org_access(orgs.bob, "beta")
+    assert bob is not None and bob.role is Role.OWNER and bob.org_id == orgs.beta
+    assert load_org_access(orgs.alice, "beta") is None  # another org's member
+    assert load_org_access(orgs.bob, "local") is None
+    assert load_org_access(orgs.erin, "local") is None  # no membership at all
+    assert load_org_access(orgs.alice, "nope") is None  # unknown org
+    assert load_org_access(orgs.alice, "Not A Slug") is None  # malformed
+
+
+def test_current_org_answers_setup_required_before_not_found(
+    env: SimpleNamespace,
+) -> None:
+    with portal_client() as client:  # LocalIdentity, before setup
+        _add_org_probe(client)
+        assert client.get("/api/test/org").status_code == 409
+        assert client.get("/api/test/org").json() == {"error": "setup required"}
+    orgs = _seed_two_orgs()
+    with portal_client(identity=HeaderIdentity()) as client:
+        _add_org_probe(client)
+        for headers in (
+            {"x-test-org": "nope"},  # no principal, unknown org
+            {"x-test-org": "local"},  # no principal
+            {"x-test-user": "no-such-uid", "x-test-org": "local"},
+        ):
+            response = client.get("/api/test/org", headers=headers)
+            assert response.status_code == 409, headers
+            assert response.json() == {"error": "setup required"}
+        alice = {"x-test-user": orgs.uids["alice"]}
+        erin = {"x-test-user": orgs.uids["erin"]}
+        for headers in (
+            alice,  # the request names no org
+            {**alice, "x-test-org": "beta"},  # not a member
+            {**alice, "x-test-org": "nope"},  # no such org
+            {**erin, "x-test-org": "local"},  # no membership anywhere
+        ):
+            response = client.get("/api/test/org", headers=headers)
+            assert response.status_code == 404, headers
+            assert response.json() == {"error": "not found"}, headers
+        ok = client.get("/api/test/org", headers={**alice, "x-test-org": "local"})
+        assert ok.json() == {
+            "org_id": orgs.local,
+            "org_slug": "local",
+            "org_name": "Local",
+            "role": "admin",
+        }
+        bob = {"x-test-user": orgs.uids["bob"], "x-test-org": "beta"}
+        assert client.get("/api/test/org", headers=bob).json()["role"] == "owner"
+
+
+def test_local_identity_resolves_the_builtin_org_after_setup(
+    ready: TestClient,
+) -> None:
+    _add_org_probe(ready)
+    state = ready.app.state.portal
+    assert ready.get("/api/test/org").json() == {
+        "org_id": state.builtin_org_id,
+        "org_slug": "local",
+        "org_name": "Local",
+        "role": "owner",
+    }
+    # Test headers mean nothing to the default resolver.
+    other = ready.get("/api/test/org", headers={"x-test-org": "beta"})
+    assert other.json()["org_slug"] == "local"
+
+
+def test_the_guard_stores_the_org_slug_and_none_when_degraded(
+    tmp_path: Path,
+) -> None:
+    state = PortalState(port=PORT, data_dir=tmp_path, runner=ScanRunner())
+    state.origins = build_origins(PORT)
+    state.builtin_org_slug = "local"
+    state.set_principal(None)  # no DB read
+    seen: list[dict] = []
+
+    async def app(scope, receive, send) -> None:  # noqa: ANN001
+        seen.append(dict(scope["state"]))
+
+    guard = PortalGuard(app, state=state)
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/api/portal/state",
+        "headers": [
+            (b"host", f"127.0.0.1:{PORT}".encode()),
+            (b"x-whygraph-client", b"1"),
+        ],
+    }
+
+    async def call() -> None:
+        await guard({**scope, "state": {}}, None, None)
+
+    anyio.run(call)
+    state.degraded = "portal database unavailable"
+    anyio.run(call)
+    assert seen == [
+        {"principal": None, "org_slug": "local"},
+        {"principal": None, "org_slug": None},
+    ]
 
 
 # ---------------------------------------------------------------------------

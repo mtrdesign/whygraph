@@ -102,7 +102,7 @@ never deletes your history, and a 1.x repository keeps the data it already has. 
 
     ---
 
-    From 2.0 the portal imports itself; from 1.x, add your repos like new ones.
+    From 1.x, add your repos like new ones.
 
     [:octicons-arrow-right-24: Upgrading](upgrading.md)
 

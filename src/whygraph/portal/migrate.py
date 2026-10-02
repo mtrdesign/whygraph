@@ -17,7 +17,7 @@ scan) runs :meth:`ProjectMigrations.ensure` once for that project:
   removed);
 * never through a symlink: :func:`whygraph.portal.paths.check_project_paths`
   runs first on every call, so a committed ``.whygraph/whygraph.db`` link
-  can neither migrate nor back up another project's DB or ``portal.db``.
+  can neither migrate nor back up another project's DB or a file in the data directory.
 """
 
 from __future__ import annotations

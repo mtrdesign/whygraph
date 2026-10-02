@@ -15,9 +15,8 @@ Composition (plan section 4.5.1)::
 The lifespan waits for the portal database (an unreachable one raises
 :class:`~whygraph.portal.db.PortalDatabaseUnreachable`, and the CLI exits 3
 so the restart policy retries), takes the "one portal per database"
-advisory lock, migrates the portal DB, imports a 2.0 ``portal.db`` once
-(:mod:`whygraph.portal.sqlite_import`) - a held lock or a failure in those
-steps leaves a *degraded* app whose ``GET /api/portal/state`` reports
+advisory lock and migrates the portal DB - a held lock or a failure in
+those steps leaves a *degraded* app whose ``GET /api/portal/state`` reports
 ``{"error"}`` and whose other ``/api`` routes answer ``503`` - writes the
 ``settings`` row at first start and refuses to start when
 ``WHYGRAPH_MODE`` contradicts it, builds
@@ -64,7 +63,6 @@ from .deps import ApiError, PortalState, current_user, project_db
 from .mcp_mount import McpDispatcher, build_session_manager
 from .migrate import MIGRATION_LOCK
 from .models import ScanRun, Setting
-from .sqlite_import import LegacyImportError, import_legacy_sqlite
 from .port_change import reconcile_port
 from .repos import SHARED_FOLDERS_ENV, parse_shared_folders
 from .routes import portal_router, projects_router, public_router
@@ -289,7 +287,7 @@ async def _watch_instance_lock(state: PortalState) -> None:
 
 
 def _startup(state: PortalState) -> None:
-    """Wait, lock, migrate, import, check / store the mode, recover stale runs.
+    """Wait, lock, migrate, check / store the mode, recover stale runs.
 
     Raises
     ------
@@ -325,17 +323,6 @@ def _startup(state: PortalState) -> None:
     except Exception as exc:  # noqa: BLE001 -- any failure means degraded mode
         _log.exception("portal database migration failed")
         state.degraded = f"portal database migration failed: {exc}"
-        return
-
-    try:
-        import_legacy_sqlite(state.data_dir)
-    except LegacyImportError as exc:
-        _log.error("%s", exc)
-        state.degraded = str(exc)
-        return
-    except Exception as exc:  # noqa: BLE001 -- any failure means degraded mode
-        _log.exception("importing the 2.0 portal.db failed")
-        state.degraded = f"importing the 2.0 portal.db failed: {exc}"
         return
 
     requested = (os.environ.get(MODE_ENV) or "").strip().lower() or None

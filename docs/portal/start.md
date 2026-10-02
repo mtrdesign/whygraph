@@ -87,8 +87,7 @@ Inside the data directory:
 
 The data directory is created with mode `0700`, owned by you, and the database files in it are owned
 by you too. Keep it out of every project folder: the portal refuses to share a folder that contains it
-or sits inside it. A 2.0 data directory also holds `portal.db.migrated-<date>`, the old SQLite
-database, after its [one-time import](upgrading.md#from-20).
+or sits inside it.
 
 ## Stopping and upgrading
 

@@ -11,7 +11,6 @@ migration engines, the wait, the instance lock) and the frozen 2.0 fixture.
 from __future__ import annotations
 
 import os
-import sqlite3
 import stat
 import subprocess
 import sys
@@ -29,13 +28,6 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import SQLModel, select
 
-from conftest import (
-    LEGACY_REVISION,
-    LEGACY_ROW_COUNTS,
-    LEGACY_SECRET_KEY,
-    LEGACY_SECRET_PLAINTEXTS,
-    build_legacy_portal_db,
-)
 from whygraph.core.config import Config
 from whygraph.core.context import ProjectContext
 from whygraph.portal import db as portal_db
@@ -205,37 +197,6 @@ def test_baseline_inserts_no_rows(empty_portal_database: str) -> None:
     assert counts == dict.fromkeys(PORTAL_TABLES, 0)
 
 
-def test_legacy_2_0_fixture_is_consistent(tmp_path: Path) -> None:
-    """The frozen 2.0 portal the importer reads: its head, its rows, its key."""
-    db = build_legacy_portal_db(tmp_path / "portal.db")
-    conn = sqlite3.connect(db)
-    try:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [
-            (LEGACY_REVISION,)
-        ]
-        counts = {
-            t: conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
-            for t in LEGACY_ROW_COUNTS
-        }
-        ciphertexts = dict(conn.execute("SELECT id, ciphertext FROM secrets"))
-        run_ids = [r[0] for r in conn.execute("SELECT id FROM scan_runs ORDER BY id")]
-        analyze = {r[0] for r in conn.execute("SELECT analyze FROM scan_runs")}
-        null_creator = conn.execute(
-            "SELECT count(*) FROM projects WHERE created_by IS NULL"
-        ).fetchone()[0]
-        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-    finally:
-        conn.close()
-    assert counts == LEGACY_ROW_COUNTS
-    assert run_ids == [1, 2, 4] and analyze == {0, 1} and null_creator == 1
-    keyring = pw_secrets.MultiFernet(
-        [pw_secrets.Fernet(LEGACY_SECRET_KEY.read_bytes().strip())]
-    )
-    assert {
-        i: keyring.decrypt(c.encode()).decode() for i, c in ciphertexts.items()
-    } == LEGACY_SECRET_PLAINTEXTS
-
-
 # ---------------------------------------------------------------------------
 # Connection plumbing: URL, engines, wait, instance lock
 # ---------------------------------------------------------------------------
@@ -330,10 +291,8 @@ def test_alembic_config_has_no_placeholder_url() -> None:
     assert portal_db.alembic_config().get_main_option("sqlalchemy.url") is None
 
 
-def test_ensure_initialized_returns_none_and_legacy_path(data: Path) -> None:
+def test_ensure_initialized_returns_none(data: Path) -> None:
     assert portal_db.ensure_initialized() is None
-    assert portal_db.legacy_db_path() == data / "portal.db"
-    assert not portal_db.legacy_db_path().exists()
 
 
 def test_postgres_scheme_and_password_file_authenticate(
@@ -713,21 +672,6 @@ def test_keyring_round_trips_and_ciphertext_differs_per_write(data: Path) -> Non
     assert a != b and "sk-secret" not in a
     assert pw_secrets.decrypt(a) == pw_secrets.decrypt(b) == "sk-secret"
     assert len(pw_secrets.load_keyring()._fernets) == 1  # M1: one key, MultiFernet
-
-
-def test_existing_keyring_never_creates_a_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("WHYGRAPH_DATA", str(tmp_path / "d"))
-    with pytest.raises(FileNotFoundError):
-        pw_secrets.load_existing_keyring()
-    assert not (tmp_path / "d" / "secret.key").exists()
-    token = pw_secrets.encrypt("sk-x")  # creates the key file
-    assert pw_secrets.load_existing_keyring().decrypt(token.encode()) == b"sk-x"
-    other = tmp_path / "other.key"
-    other.write_text("garbage")
-    with pytest.raises(ValueError):
-        pw_secrets.load_existing_keyring(other)
 
 
 def test_secrets_round_trip_and_ciphertext_differs_per_write(data: Path) -> None:

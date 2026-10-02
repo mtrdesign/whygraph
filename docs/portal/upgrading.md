@@ -3,57 +3,10 @@
 To upgrade, re-run the [installer](../getting-started/installation.md), then `whygraph up`. What else
 happens depends on where you come from:
 
-- **From 2.0**, the portal moves its own database from SQLite to Postgres on its first start, by
-  itself. See [From 2.0](#from-20).
 - **From 1.x**, you add your repositories to the portal; their data is reused. See
   [From 1.x](#from-1x).
 - **A release that moves the pinned Postgres major version** needs a dump and a restore. See
   [Postgres major versions](#postgres-major).
-
-## From 2.0 { #from-20 }
-
-2.0 kept the portal's own data - the project list, settings, encrypted keys and scan history - in one
-SQLite file, `portal.db`, in the data directory. 2.1 keeps it in Postgres, in a second container,
-`whygraph-portal-postgres`, whose files are in `postgres/` in the same data directory (see
-[Start the portal](start.md#where-your-data-goes)). Your repositories are not affected: each project's
-`.whygraph/whygraph.db` and `.codegraph/` stay SQLite, in the repository.
-
-The first `whygraph up` after installing 2.1:
-
-1. starts the database container (about 30 MiB of RAM when idle) and waits for it;
-2. recreates the portal container, which finds `portal.db` and **imports it once**, into the empty
-   database, in a single transaction that keeps every id and checks the row counts and that a stored
-   key still decrypts before it commits;
-3. renames the file to `portal.db.migrated-<UTC time>`, and records the import in the database, so it
-   never runs twice.
-
-Nothing else is needed: your projects, settings and keys are where you left them.
-
-!!! warning "Keep `secret.key`"
-    If your 2.0 portal stored any keys or tokens, the import needs the data directory's own
-    `secret.key` to check them. If it is missing or belongs to another data directory, the import
-    stops, `portal.db` is left as it was, and the portal shows why. Restore the right `secret.key`
-    and run `whygraph up` again. A portal that never stored a key has no `secret.key` and needs none.
-
-If the import fails for any other reason, it is rolled back: `portal.db` is untouched, the portal
-starts in a degraded state that names the reason (`whygraph status`, `whygraph logs`), and the next
-start tries again. A `portal.db` from a release older than 2.0 is refused with a message: start the
-matching 2.0 release once to bring it up to date, or remove the file to start empty.
-
-`portal.db.migrated-*` is **kept forever**, for going back. Delete it yourself once 2.1 has been
-working for you; and see [Backup and restore](backup.md) for backing up the new database.
-
-### Going back to 2.0
-
-1. `whygraph down`, which stops both containers.
-2. Install 2.0 again with its installer.
-3. Rename the newest `portal.db.migrated-<UTC time>` in the data directory back to `portal.db`.
-4. `whygraph up`.
-
-2.0 ignores `postgres/` and `postgres.password`. **Anything you changed after the upgrade is lost**
-on this path: 2.0 sees the data as it was at the import. To upgrade to 2.1 again later, move
-`postgres/` and `postgres.password` out of the data directory first, so the import runs again on a
-fresh database.
 
 ## Postgres major versions { #postgres-major }
 

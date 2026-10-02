@@ -25,7 +25,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlmodel import select
 
-from conftest import build_fake_codegraph_db
+from conftest import build_fake_codegraph_db, builtin_org_id
 from whygraph.core.config import Config
 from whygraph.core.context import ProjectContext, is_strict, use_project
 from whygraph.db import bootstrap
@@ -236,6 +236,53 @@ def test_mode_is_stored_at_first_start_not_at_setup(env: SimpleNamespace) -> Non
         pass
     with portal_db.get_session() as session:
         assert session.get(Setting, 1).mode == "local"
+
+
+def test_the_builtin_org_is_seeded_at_start_and_setup_makes_its_owner(
+    env: SimpleNamespace,
+) -> None:
+    from whygraph.portal.models import Membership, Organization, Setting, User
+
+    with portal_client() as client:
+        state = client.app.state.portal
+        with portal_db.get_session() as session:
+            builtin = session.get(Setting, 1).builtin_org_id
+            (org,) = session.exec(select(Organization)).all()
+            org_id = org.id
+            assert (org.slug, org.name) == ("local", "Local")
+        assert builtin == org_id == state.builtin_org_id
+        assert state.builtin_org_slug == "local"
+        created = client.post("/api/portal/setup", json={"display_name": "Tess"})
+        assert created.status_code == 201
+        assert created.json()["user"]["role"] == "owner"
+    with portal_db.get_session() as session:
+        user_id = session.exec(select(User.id)).one()
+        assert [
+            (m.org_id, m.user_id, m.role) for m in session.exec(select(Membership))
+        ] == [(org_id, user_id, "owner")]
+    # A restart reuses the org: never a second built-in one.
+    with portal_client() as client:
+        assert client.app.state.portal.builtin_org_id == org_id
+    with portal_db.get_session() as session:
+        assert len(session.exec(select(Organization)).all()) == 1
+
+
+def test_setup_is_404_without_a_builtin_org(env: SimpleNamespace) -> None:
+    """A stored production row: no built-in org, so no unauthenticated setup."""
+    from whygraph.portal.models import Organization, Setting, User
+
+    portal_db.ensure_initialized()
+    with portal_db.get_session() as session:
+        session.add(Setting(id=1, mode="production"))
+    with portal_client() as client:
+        state = client.app.state.portal
+        assert state.mode == "production"
+        assert state.builtin_org_id is None and state.builtin_org_slug is None
+        response = client.post("/api/portal/setup", json={"display_name": "Eve"})
+        assert response.status_code == 404
+    with portal_db.get_session() as session:
+        assert session.exec(select(User)).all() == []
+        assert session.exec(select(Organization)).all() == []
 
 
 def test_a_mode_change_refuses_to_start(
@@ -1260,7 +1307,13 @@ def test_remove_never_rmtrees_outside_the_repos_dir(
     outside = make_repo(env.tmp / "precious", "keep")
     with portal_db.get_session() as session:
         session.add(
-            Project(slug="evil", name="evil", source="github", root=str(outside))
+            Project(
+                org_id=builtin_org_id(session),
+                slug="evil",
+                name="evil",
+                source="github",
+                root=str(outside),
+            )
         )
     response = ready.request(
         "DELETE", "/api/projects/evil", json={"confirm_name": "evil"}

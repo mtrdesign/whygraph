@@ -519,7 +519,7 @@ def test_slow_principal_load_never_overwrites_setup(
 
     monkeypatch.setattr(portal_deps, "_load_local_principal", slow_load)
     state = PortalState(port=8765, data_dir=tmp_path, runner=ScanRunner())
-    tess = Principal(user_id=1, uid="u1", display_name="Tess", role="admin")
+    tess = Principal(user_id=1, uid="u1", display_name="Tess")
     seen: list = []
 
     async def main() -> None:

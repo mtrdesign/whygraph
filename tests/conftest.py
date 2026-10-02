@@ -492,3 +492,21 @@ def empty_portal_database(
     yield from _use_database(
         postgres_admin_url, _postgres_admin_engine, "template0", monkeypatch
     )
+
+
+def builtin_org_id(session) -> int:  # noqa: ANN001
+    """The built-in org's id, created (with a local ``settings`` row) if missing.
+
+    Portal DB tests run on a migrated database with no lifespan, so nothing
+    has seeded the org yet; this does what the portal's start would.
+    """
+    from whygraph.portal.models import Setting
+    from whygraph.portal.orgs import ensure_builtin_org
+
+    setting = session.get(Setting, 1)
+    if setting is None:
+        setting = Setting(id=1, mode="local")
+        session.add(setting)
+    org = ensure_builtin_org(session, setting)
+    assert org.id is not None
+    return org.id

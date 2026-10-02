@@ -75,8 +75,10 @@ def reconcile_port(data_dir: Path, port: int, agent_host: str) -> dict | None:
     dict or None
         ``None`` when nothing changed and there is nothing to report,
         else ``{"port", "previous_port", "projects": [...], "unmounted":
-        [...]}``. Each project item is ``{"slug", "root", "previous_port",
-        "markers": "rewritten" | "skipped", "reason"?, "agents": [...]}``;
+        [...]}``. Each project item is ``{"project_id", "org_id", "slug",
+        "root", "previous_port", "markers": "rewritten" | "skipped",
+        "reason"?, "agents": [...]}`` and each unmounted item ``{"project_id",
+        "org_id", "slug", "root"}`` (a slug is unique only within an org);
         each agent item is ``{"agent", "file", "action", ...}`` with
         ``action`` one of ``rewritten``, ``up_to_date``, ``env`` (no
         rewrite needed; ``hint`` says what to do), ``manual`` (tracked or
@@ -98,17 +100,20 @@ def reconcile_port(data_dir: Path, port: int, agent_host: str) -> dict | None:
                     select(ProjectAgent).where(ProjectAgent.project_id == row.id)
                 ).all()
             ]
-            work.append((row.slug, resolve_root(row), sorted(agents)))
+            work.append(
+                (row.id, row.org_id, row.slug, resolve_root(row), sorted(agents))
+            )
 
-    for slug, root, agents in work:
+    for project_id, org_id, slug, root, agents in work:
+        ids = {"project_id": project_id, "org_id": org_id}
         if root_status(root) != "ok":
-            unmounted.append({"slug": slug, "root": str(root)})
+            unmounted.append({**ids, "slug": slug, "root": str(root)})
             continue
         marker, _warning = read_portal_marker(root)
         if marker is None or marker.port == port:
             continue
         projects.append(
-            _reconcile_project(slug, root, agents, marker, port, agent_host)
+            {**ids, **_reconcile_project(slug, root, agents, marker, port, agent_host)}
         )
 
     port_changed = previous is not None and previous != port

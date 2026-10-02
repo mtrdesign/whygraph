@@ -138,14 +138,15 @@ class Principal:
         The stable ``users.uid``.
     display_name : str
         Shown in the UI.
-    role : str
-        ``"owner"`` in M1.
+
+    Notes
+    -----
+    The role is per organization (``memberships``), not on the principal.
     """
 
     user_id: int
     uid: str
     display_name: str
-    role: str
 
 
 _principal: ContextVar[Principal | None] = ContextVar(

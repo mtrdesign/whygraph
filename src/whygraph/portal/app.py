@@ -19,7 +19,7 @@ advisory lock and migrates the portal DB - a held lock or a failure in
 those steps leaves a *degraded* app whose ``GET /api/portal/state`` reports
 ``{"error"}`` and whose other ``/api`` routes answer ``503`` - writes the
 ``settings`` row at first start and refuses to start when
-``WHYGRAPH_MODE`` contradicts it, builds
+``WHYGRAPH_MODE`` contradicts it, seeds local mode's built-in org, builds
 the :class:`~whygraph.portal.security.PortalOrigins`, marks runs left
 ``running`` by a previous process ``interrupted``, follows a port change
 into the managed repos (:mod:`whygraph.portal.port_change`), starts the
@@ -63,6 +63,7 @@ from .deps import ApiError, PortalState, current_user, project_db
 from .mcp_mount import McpDispatcher, build_session_manager
 from .migrate import MIGRATION_LOCK
 from .models import ScanRun, Setting
+from .orgs import ensure_builtin_org
 from .port_change import reconcile_port
 from .repos import SHARED_FOLDERS_ENV, parse_shared_folders
 from .routes import portal_router, projects_router, public_router
@@ -287,7 +288,7 @@ async def _watch_instance_lock(state: PortalState) -> None:
 
 
 def _startup(state: PortalState) -> None:
-    """Wait, lock, migrate, check / store the mode, recover stale runs.
+    """Wait, lock, migrate, check / store the mode, seed the org, recover stale runs.
 
     Raises
     ------
@@ -335,7 +336,8 @@ def _startup(state: PortalState) -> None:
                     f"{MODE_ENV}={mode!r} is not supported by this version; "
                     f"supported: {', '.join(SUPPORTED_MODES)}"
                 )
-            session.add(Setting(id=1, mode=mode))
+            setting = Setting(id=1, mode=mode)
+            session.add(setting)
         else:
             mode = setting.mode
             if requested is not None and requested != mode:
@@ -345,6 +347,12 @@ def _startup(state: PortalState) -> None:
                     "cannot be changed"
                 )
         state.mode = mode
+        if mode == "local":
+            # Idempotent: creates the built-in org at first start, and
+            # repairs a missing link on a later one.
+            org = ensure_builtin_org(session, setting)
+            state.builtin_org_id = org.id
+            state.builtin_org_slug = org.slug
 
         # A run still "running" belongs to a previous process that is gone.
         for run in session.exec(

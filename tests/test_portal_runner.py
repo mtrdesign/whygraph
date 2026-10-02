@@ -32,6 +32,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.engine import make_url
 from sqlmodel import select
 
+from conftest import builtin_org_id
 from test_portal_app import (  # noqa: F401 -- `env` is a fixture
     BASE_URL,
     CLIENT_HEADER,
@@ -211,6 +212,7 @@ def github_project(
     with portal_db.get_session() as session:
         session.add(
             Project(
+                org_id=builtin_org_id(session),
                 slug=name,
                 name=name,
                 source="github",

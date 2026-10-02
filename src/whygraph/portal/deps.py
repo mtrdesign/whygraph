@@ -144,6 +144,10 @@ class PortalState:
     startup_error : BaseException or None
         The exception that stopped the lifespan's start, for the CLI's
         exit code.
+    builtin_org_id, builtin_org_slug : int, str or None
+        Local mode's built-in organization, set by the lifespan
+        (:func:`whygraph.portal.orgs.ensure_builtin_org`); ``None`` in
+        production.
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -167,6 +171,8 @@ class PortalState:
         self.server: Any = None
         self.on_lock_lost: Callable[[], None] | None = None
         self.startup_error: BaseException | None = None
+        self.builtin_org_id: int | None = None
+        self.builtin_org_slug: str | None = None
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0
@@ -218,9 +224,7 @@ def _load_local_principal() -> Principal | None:
 def principal_of(user: User) -> Principal:
     """Build the :class:`Principal` of a ``users`` row."""
     assert user.id is not None
-    return Principal(
-        user_id=user.id, uid=user.uid, display_name=user.display_name, role=user.role
-    )
+    return Principal(user_id=user.id, uid=user.uid, display_name=user.display_name)
 
 
 def portal_state(request: Request) -> PortalState:
@@ -251,7 +255,7 @@ class BoundProject:
 
     Attributes
     ----------
-    id, slug, name, source, remote_url, initialized_at, last_scan_at, created_at
+    id, org_id, slug, name, source, remote_url, initialized_at, last_scan_at, created_at
         Copied from the ``projects`` row.
     stored_root : str
         ``projects.root`` as stored (relative for a GitHub clone).
@@ -262,6 +266,7 @@ class BoundProject:
     """
 
     id: int
+    org_id: int
     slug: str
     name: str
     source: str
@@ -327,6 +332,7 @@ def bound_from(project: Project, ctx: ProjectContext) -> BoundProject:
     assert project.id is not None
     return BoundProject(
         id=project.id,
+        org_id=project.org_id,
         slug=project.slug,
         name=project.name,
         source=project.source,

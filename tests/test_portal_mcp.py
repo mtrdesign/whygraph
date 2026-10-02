@@ -215,7 +215,8 @@ def test_two_portal_apps_in_one_process_both_serve_mcp(
     seed_codegraph(root)
     with portal_client(8765) as first:
         _setup_project(first, root)
-        with portal_client(8766) as second:
+        # A second app serving the same project's database: no instance lock.
+        with portal_client(8766, instance_lock=False) as second:
             for client in (first, second):
                 response = client.post(
                     "/mcp/demo", json=_rpc("tools/list"), headers=MCP_HEADERS

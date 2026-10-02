@@ -438,6 +438,8 @@ _SECRETS = {
     "DEEPSEEK_API_KEY": "sk-ds-secret",
     "GH_TOKEN": "ghp_secret",
     "WHYGRAPH_GIT_TOKEN": "gitsecret",
+    "WHYGRAPH_DATABASE_URL": "postgresql+psycopg://whygraph@db/whygraph",
+    "WHYGRAPH_DATABASE_PASSWORD_FILE": "/data/postgres.password",
 }
 
 

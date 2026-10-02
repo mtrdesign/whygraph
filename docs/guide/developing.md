@@ -4,13 +4,33 @@ Working on WhyGraph itself (not using it) takes four `make` targets from a check
 
 | Command | Mode | What it runs |
 |---|---|---|
-| `make dev-local` | Development, native | The portal from your checkout on `:8777`, restarted on every backend change, plus the Vite dev server with hot reload on `:5173`. Fastest; your IDE's debugger works. |
+| `make dev-local` | Development, native | The portal from your checkout on `:8777`, restarted on every backend change, plus the Vite dev server with hot reload on `:5173`, against the dev Postgres from `make dev-db` (started for you). Fastest; your IDE's debugger works. |
 | `make dev-docker` | Development, in Docker | The same, inside the WhyGraph image through the real `whygraph up` shim, with your checkout mounted read-only over the installed package. |
 | `make prod` | Production | The image built exactly like a release (pinned CodeGraph, the `pyproject.toml` version), run through the shim with no source mounted: what users get. |
 | `make check` | Before a pull request | Both `ruff` checks, `pytest`, the frontend typecheck / tests / build, the Playwright suite, then the release smoke test against a freshly built image. Stops at the first failure. |
 
 `dev-local` and `dev-docker` run in the foreground: open `http://localhost:5173`, and press
 Ctrl-C to stop everything. `prod` serves the built UI itself on `http://127.0.0.1:8777`.
+
+## The portal database in development
+
+The portal keeps its own data in Postgres, so every mode needs one:
+
+- **`make dev-local`** depends on **`make dev-db`**, which starts (or reuses) a container,
+  `whygraph-dev-postgres`, laid out like the shim's database container (the same pinned image, read
+  from `POSTGRES_IMAGE` in `cli/commands/install.py`, a per-major `PGDATA`, your user, the same health
+  check) but published on `127.0.0.1:55432` (`PG_DEV_PORT=...` to change it) with the dev-only
+  password `whygraph-dev`. Its files are in `$TMPDIR/whygraph-dev/local/postgres`, beside the dev data
+  directory. `make dev-db` waits until it is healthy; `make dev-local` then points the portal at it
+  with `WHYGRAPH_DATABASE_URL=postgresql+psycopg://whygraph:whygraph-dev@127.0.0.1:55432/whygraph`.
+  `make dev-db-down` stops and removes the container and keeps its files; delete the directory for a
+  fresh database.
+- **`make dev-docker`** and **`make prod`** go through the real shim, so they get their own database
+  container, `whygraph-portal-dev-postgres` / `whygraph-portal-prod-postgres`, which their Ctrl-C
+  `whygraph down` stops with the portal.
+- **`make e2e`** starts a throwaway Postgres (in memory) for its portal and removes it afterwards.
+
+`make dev-db` and `make dev-db-down` are listed by `make` like every other helper.
 
 ## Which one to use
 
@@ -47,14 +67,23 @@ The three run modes share port `8777`, so run one at a time. Override it with `D
 | `make test` | `pytest` only |
 | `make e2e` | The Playwright suite against a throwaway portal and a fake scanner, both themes (`ARGS="--project=light"` for one) |
 | `make inspect SLUG=<slug>` | The MCP Inspector against a project's `/mcp/<slug>` on the running dev portal |
-| `make db SLUG=<slug>` | A DBGate viewer for a scratch repo's two databases on `:8081` (copy `docker-compose.example.yml` to `docker-compose.yml` first) |
+| `make db SLUG=<slug>` | A DBGate viewer on `:8081` for a scratch repo's two databases, plus a **Portal** connection to the `make dev-db` Postgres (through `host.docker.internal:55432`). Copy `docker-compose.example.yml` to `docker-compose.yml` first; an older copy needs refreshing to get the Portal connection |
+| `make dev-db` / `make dev-db-down` | Start (and wait for) / stop the dev portal's Postgres; see above |
 | `make image` | Build the image like the release does (`IMAGE=...` to retag) |
 | `make docs` / `make docs-build` | Serve this site with live reload / build it strictly, as CI does |
 
 ## Requirements and gotchas
 
 - **Node 22.12 or newer** for the playground toolchain (`nvm use 22`).
-- **Docker** for `dev-docker`, `prod` and `make check`.
+- **Docker** for `dev-local` (its Postgres), `dev-docker`, `prod`, `make e2e` and `make check`.
+- **The tests need a Postgres.** The portal tests run against a real one: by default `pytest` starts a
+  throwaway container of the pinned image for the session (on a random loopback port, in memory) and
+  gives every test its own database, so plain `uv run pytest` needs Docker. Without Docker, set
+  `WHYGRAPH_TEST_DATABASE_URL` to an **admin** URL of a Postgres you run (the role needs `CREATEDB`),
+  for example `postgresql+psycopg://postgres:test@127.0.0.1:5432/postgres`; CI does exactly that with
+  a service container. `WHYGRAPH_TEST_POSTGRES_IMAGE` replaces the throwaway server's image, for a
+  registry mirror. With neither Docker nor the URL, the portal tests **fail** with a message saying
+  so - they are never skipped.
 - **`uv run` syncs first**, which fails behind a TLS-intercepting proxy. Run the targets with
   `UV_NO_SYNC=1 make ...` (or `UV_RUN="uv run --no-sync"`) there.
 - The Docker modes use two development-only shim settings, `WHYGRAPH_DEV_SRC` and

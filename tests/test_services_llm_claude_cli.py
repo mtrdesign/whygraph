@@ -105,6 +105,24 @@ def test_complete_strips_anthropic_api_key_by_default(
     assert "ANTHROPIC_API_KEY" not in captured["env"]
 
 
+def test_complete_withholds_the_portal_database_variables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WHYGRAPH_DATABASE_URL", "postgresql+psycopg://whygraph@db/wg")
+    monkeypatch.setenv("WHYGRAPH_DATABASE_PASSWORD_FILE", "/data/postgres.password")
+    captured: dict = {}
+
+    def fake_run(cmd, *, env, **_):
+        captured["env"] = env
+        return _ok("ok")
+
+    with patch("whygraph.services.llm.claude_cli.subprocess.run", side_effect=fake_run):
+        ClaudeCliAdapter(model="m").complete(CompletionRequest.of("hi"))
+
+    assert "WHYGRAPH_DATABASE_URL" not in captured["env"]
+    assert "WHYGRAPH_DATABASE_PASSWORD_FILE" not in captured["env"]
+
+
 def test_complete_sets_anthropic_api_key_when_provided(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

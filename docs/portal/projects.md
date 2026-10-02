@@ -13,7 +13,7 @@ and run the first scan.
 
     Adding a local repository **writes nothing into it**. It only registers the project, reads an
     existing `whygraph.toml` to offer its settings, and reports what 1.x left behind (see
-    [Upgrading from 1.x](upgrading.md)).
+    [Upgrading from 1.x](upgrading.md#from-1x)).
 
     If the origin is on GitHub you can paste a token here so the remote crawl (pull requests and
     issues) can work; it is checked against GitHub before anything is stored.

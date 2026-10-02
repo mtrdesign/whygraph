@@ -236,6 +236,19 @@ These are read by the Docker shim and the portal rather than by a scan:
 | `WHYGRAPH_PORT` | The portal's port (default `8765`) when `whygraph up --port` has not set one. It is also what Claude Code's agent entry reads, `${WHYGRAPH_PORT:-8765}` - see [Connecting agents](../portal/agents.md#a-non-default-port). |
 | `WHYGRAPH_DATA` | The portal's data directory (default `~/.local/share/whygraph`). |
 | `WHYGRAPH_VERSION` | Pin the version at install time. See [Installation](../getting-started/installation.md). |
+| `WHYGRAPH_POSTGRES_IMAGE` | Shim only. Override the pinned `postgres` image of the database container, for a registry mirror. It must be the same Postgres major version as the pin; a different image recreates the database container (after a dump). |
+| `WHYGRAPH_SKIP_BACKUP` | Shim only. Set to `1` to let `whygraph up` recreate a running database container without dumping it first, when that dump fails and you accept the risk. See [Backup and restore](../portal/backup.md). |
+
+The portal reads its database from two variables. The shim sets both for its own database container,
+so you only set them to run `whygraph portal` yourself:
+
+| Variable | Used for |
+|---|---|
+| `WHYGRAPH_DATABASE_URL` | **Required by `whygraph portal`**: the Postgres database the portal keeps its own data in, such as `postgresql+psycopg://whygraph@whygraph-portal-postgres:5432/whygraph`. `postgresql://` and `postgres://` are accepted too; any other database is refused. Without it, `whygraph portal` exits with status `2`. |
+| `WHYGRAPH_DATABASE_PASSWORD_FILE` | Optional. A file whose contents (surrounding whitespace and newlines stripped) are the database password; it wins over a password in the URL. The shim uses `/data/postgres.password`, so the password never appears in `docker inspect`, a process list or the environment of what the portal starts. |
+
+Neither is a `whygraph.toml` key: the portal database is host configuration, not project
+configuration.
 
 !!! tip "Provider keys degrade gracefully - for scan and rationale"
     Missing a key for the analysis or rationale phase isn't fatal - that phase skips, and the rest of

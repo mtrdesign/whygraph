@@ -12,17 +12,24 @@ Composition (plan section 4.5.1)::
     /api/*, /mcp/* not matched    404 {"error"} - never the SPA's index.html
     everything else               the SPA (serve.app._mount_static)
 
-The lifespan migrates the portal DB (a failure leaves a *degraded* app
-whose ``GET /api/portal/state`` reports ``{"error"}`` and whose other
-``/api`` routes answer ``503``), writes the ``settings`` row at first
-start and refuses to start when ``WHYGRAPH_MODE`` contradicts it, builds
+The lifespan waits for the portal database (an unreachable one raises
+:class:`~whygraph.portal.db.PortalDatabaseUnreachable`, and the CLI exits 3
+so the restart policy retries), takes the "one portal per database"
+advisory lock, migrates the portal DB, imports a 2.0 ``portal.db`` once
+(:mod:`whygraph.portal.sqlite_import`) - a held lock or a failure in those
+steps leaves a *degraded* app whose ``GET /api/portal/state`` reports
+``{"error"}`` and whose other ``/api`` routes answer ``503`` - writes the
+``settings`` row at first start and refuses to start when
+``WHYGRAPH_MODE`` contradicts it, builds
 the :class:`~whygraph.portal.security.PortalOrigins`, marks runs left
 ``running`` by a previous process ``interrupted``, follows a port change
 into the managed repos (:mod:`whygraph.portal.port_change`), starts the
 runner and
-this app's own MCP session manager, and turns strict project-context mode
-on. On exit it sets the shutdown event (open streams end), stops the
-runner and turns strict mode off again.
+this app's own MCP session manager and the lock's liveness check (a lost
+lock shuts the portal down), and turns strict project-context mode on. On
+exit it sets the shutdown event (open streams end), stops the runner, turns
+strict mode off again and releases the lock - on every path, including a
+failed start.
 
 The portal is **one process**: the runner, migration lock and caches are
 in-process, so it must never run with several workers.
@@ -57,6 +64,7 @@ from .deps import ApiError, PortalState, current_user, project_db
 from .mcp_mount import McpDispatcher, build_session_manager
 from .migrate import MIGRATION_LOCK
 from .models import ScanRun, Setting
+from .sqlite_import import LegacyImportError, import_legacy_sqlite
 from .port_change import reconcile_port
 from .repos import SHARED_FOLDERS_ENV, parse_shared_folders
 from .routes import portal_router, projects_router, public_router
@@ -101,6 +109,9 @@ class PortalServer(uvicorn.Server):
     def __init__(self, config: uvicorn.Config, portal_app: FastAPI) -> None:
         super().__init__(config)
         self._portal_app = portal_app
+        state: PortalState | None = getattr(portal_app.state, "portal", None)
+        if state is not None:
+            state.server = self  # a lost instance lock sets our should_exit
 
     async def shutdown(self, sockets=None) -> None:  # noqa: ANN001 -- uvicorn's signature
         """Set the portal's shutdown event, then run uvicorn's shutdown."""
@@ -115,6 +126,7 @@ def create_portal_app(
     *,
     port: int = DEFAULT_PORTAL_PORT,
     runner: ScanRunner | None = None,
+    instance_lock: bool = True,
 ) -> FastAPI:
     """Build the portal application.
 
@@ -130,6 +142,11 @@ def create_portal_app(
         ``Host`` / ``Origin`` values and the agent MCP URLs.
     runner : ScanRunner, optional
         The scan runner; a fresh :class:`ScanRunner` by default.
+    instance_lock : bool
+        Take the "one portal per database" advisory lock at start (the
+        default, and what the CLI always uses). ``False`` is a test hook
+        for apps that deliberately share one database; it is a factory
+        parameter, not configuration, so no deployment can switch it off.
 
     Returns
     -------
@@ -141,6 +158,8 @@ def create_portal_app(
     state = PortalState(
         port=port, data_dir=portal_db.data_dir(), runner=runner or ScanRunner()
     )
+    if instance_lock:
+        state.instance_lock = portal_db.InstanceLock()
 
     app = FastAPI(
         title="WhyGraph Portal",
@@ -194,7 +213,22 @@ def create_portal_app(
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     state: PortalState = app.state.portal
-    await anyio.to_thread.run_sync(_startup, state)
+    try:
+        try:
+            await anyio.to_thread.run_sync(_startup, state)
+        except BaseException as exc:
+            state.startup_error = exc  # the CLI maps it to an exit code
+            raise
+        async with _serving(state):
+            yield
+    finally:
+        # Also after a failed start: the lock may already be held.
+        if state.instance_lock is not None:
+            await anyio.to_thread.run_sync(state.instance_lock.release)
+
+
+@asynccontextmanager
+async def _serving(state: PortalState) -> AsyncIterator[None]:
     state.shared_folders = parse_shared_folders(
         os.environ.get(SHARED_FOLDERS_ENV), state.data_dir
     )
@@ -209,12 +243,18 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         state.session_manager = manager
         if not state.degraded:
             await state.runner.start(state)
+        watcher = anyio.create_task_group()
+        await watcher.__aenter__()
+        if not state.degraded and state.instance_lock is not None:
+            watcher.start_soon(_watch_instance_lock, state)
         set_strict(True)
         state.origins = origins
         try:
             yield
         finally:
             state.shutdown_event.set()
+            watcher.cancel_scope.cancel()
+            await watcher.__aexit__(None, None, None)
             try:
                 if not state.degraded:
                     await state.runner.shutdown(grace=5.0)
@@ -223,14 +263,79 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 state.session_manager = None
 
 
+async def _watch_instance_lock(state: PortalState) -> None:
+    """Shut the portal down when its instance lock is gone (section 4.5).
+
+    A dead or half-dead database session silently drops the advisory lock;
+    rather than run unguarded (or reconnect and re-check in place), the
+    portal exits and the restart policy brings it back to wait for the
+    database and take the lock again.
+    """
+    lock = state.instance_lock
+    assert lock is not None
+    while True:
+        await anyio.sleep(state.lock_check_interval)
+        if await anyio.to_thread.run_sync(lock.is_held):
+            continue
+        _log.error(
+            "portal database connection lost - shutting down so the restart "
+            "policy can re-acquire the instance lock"
+        )
+        if state.server is not None:
+            state.server.should_exit = True
+        elif state.on_lock_lost is not None:
+            state.on_lock_lost()
+        return
+
+
 def _startup(state: PortalState) -> None:
-    """Migrate the portal DB, check / store the mode, recover stale runs."""
+    """Wait, lock, migrate, import, check / store the mode, recover stale runs.
+
+    Raises
+    ------
+    PortalDatabaseUnreachable
+        When the database does not answer within the wait budget - a
+        transient problem, so the process exits and is restarted. Every
+        persistent problem (the lock held elsewhere, a failed migration or
+        import) sets ``state.degraded`` instead, so it shows its reason
+        rather than crash-looping.
+    PortalStartupError
+        On a ``WHYGRAPH_MODE`` mismatch.
+    """
+    portal_db.wait_for_database()
+
+    if state.instance_lock is not None:
+        try:
+            acquired = state.instance_lock.acquire()
+        except Exception as exc:  # noqa: BLE001 -- any failure means degraded mode
+            _log.exception("could not take the portal instance lock")
+            state.degraded = f"could not take the portal instance lock: {exc}"
+            return
+        if not acquired:
+            target = portal_db.database_target()
+            _log.error("another WhyGraph portal is already using %s", target)
+            state.degraded = (
+                f"another WhyGraph portal is already using this database ({target})"
+            )
+            return
+
     try:
         with MIGRATION_LOCK:
             portal_db.ensure_initialized()
     except Exception as exc:  # noqa: BLE001 -- any failure means degraded mode
         _log.exception("portal database migration failed")
         state.degraded = f"portal database migration failed: {exc}"
+        return
+
+    try:
+        import_legacy_sqlite(state.data_dir)
+    except LegacyImportError as exc:
+        _log.error("%s", exc)
+        state.degraded = str(exc)
+        return
+    except Exception as exc:  # noqa: BLE001 -- any failure means degraded mode
+        _log.exception("importing the 2.0 portal.db failed")
+        state.degraded = f"importing the 2.0 portal.db failed: {exc}"
         return
 
     requested = (os.environ.get(MODE_ENV) or "").strip().lower() or None

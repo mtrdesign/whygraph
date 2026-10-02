@@ -7,7 +7,7 @@ image. Your host needs **only Docker**. One command installs the `whygraph` shim
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v2.0.0/scripts/install.sh | sh
 
-whygraph up          # start the portal (one background container, loopback only)
+whygraph up          # start the portal and its database (two background containers, loopback only)
 ```
 
 Then open <http://localhost:8765>, share the folder that holds your repos, and add them from the
@@ -28,8 +28,9 @@ non-zero with a message instead of quietly installing nothing.
 The result is a `whygraph` shim on your `PATH`, plus a `whygraph-mcp` stub that only prints a message
 that the stdio server was removed. The shim does two different things:
 
-- **The portal verbs** - `up`, `down`, `status`, `logs` and `folders` - manage one **named,
-  long-lived** container, `whygraph-portal`. This is the one exception to "ephemeral per command".
+- **The portal verbs** - `up`, `down`, `status`, `logs`, `folders` and `backup` - manage two **named,
+  long-lived** containers, `whygraph-portal` and its database, `whygraph-portal-postgres`. They are
+  the one exception to "ephemeral per command".
 - **Every other command** runs the image against the current directory and exits:
 
 ```bash
@@ -59,6 +60,32 @@ The container runs as your user, so files it writes come back owned by you.
 It is recreated automatically when the shared folders, the port or the image change, and stopped
 cleanly by `whygraph down` (it gives a running scan time to be recorded as interrupted). The host
 commands are in [Start the portal](../portal/start.md).
+
+## The database container
+
+The portal keeps its own data - projects, settings, encrypted keys, scan history - in Postgres, in a
+second container, `whygraph-portal-postgres`, that `whygraph up` starts first:
+
+- **Network-only.** It publishes no port. It sits on the same `whygraph-portal` Docker network, so the
+  portal reaches it there and nothing on your host or LAN can.
+- **Its files are in the data directory**, in `postgres/` (bind-mounted at `/var/lib/postgresql`, one
+  subdirectory per Postgres major version), and it runs as your user, so they are yours too.
+- **Its password** is generated on the first `up` into `postgres.password` in the data directory
+  (mode `0600`) and handed to both containers as a file, never as an environment value.
+- **`up` waits for it.** The container has a `pg_isready` health check, and `up` waits up to 60 seconds
+  for it to report healthy before starting the portal; if it does not, `up` fails and starts no portal.
+- **Pinned image.** The shim pins an exact `postgres` image on the Debian trixie variant, baked into it
+  at install time. `WHYGRAPH_POSTGRES_IMAGE` overrides it, for a registry mirror; it must be the same
+  Postgres major version.
+- **When it is recreated.** Only when it is missing or stopped, or its image differs from the pin (a
+  new release, or a changed `WHYGRAPH_POSTGRES_IMAGE`). Before recreating a running one, `up` dumps it
+  into `backups/`, and a failed dump stops `up` with both containers untouched;
+  `WHYGRAPH_SKIP_BACKUP=1` skips the dump. Recreating it also recreates the portal, which is stopped
+  first.
+- **Idle footprint** is about 30 MiB of RAM.
+
+Its logs are `docker logs whygraph-portal-postgres`. Backups and restores are in
+[Backup and restore](../portal/backup.md).
 
 ## Credentials
 

@@ -23,8 +23,8 @@ Pick the path that fits where you are.
     sync. This drops a `whygraph` shim on your `PATH` (plus a `whygraph-mcp` stub that only prints a
     removal message). Most commands wrap a `docker run --rm -v "$PWD:/workspace" … ghcr.io/mtrdesign/whygraph`
     against the current repo and are ephemeral. The exception is the portal:
-    [`whygraph up`](../portal/start.md) manages one named, long-lived container so the web panel and
-    the MCP endpoints can outlive the command. See [Run with Docker](../deploy/docker.md) for the full
+    [`whygraph up`](../portal/start.md) manages two named, long-lived containers - the portal and its
+    database - so the web panel and the MCP endpoints can outlive the command. See [Run with Docker](../deploy/docker.md) for the full
     story.
 
     **Install a different version** by passing it through the pipe - the URL then only decides

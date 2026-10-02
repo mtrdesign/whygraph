@@ -22,6 +22,7 @@ from alembic import command
 from click.testing import CliRunner
 from fastapi.routing import iter_route_contexts
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlmodel import select
 
 from conftest import build_fake_codegraph_db
@@ -122,8 +123,10 @@ def seed_codegraph(root: Path) -> None:
 
 
 @pytest.fixture
-def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
-    """An isolated data dir, one shared folder, no ambient keys or modes."""
+def env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, portal_database: str
+) -> SimpleNamespace:
+    """An isolated data dir and portal DB, one shared folder, no ambient keys."""
     data = tmp_path / "data"
     shared = tmp_path / "shared"
     shared.mkdir()
@@ -147,8 +150,10 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
 
 @contextmanager
-def portal_client(port: int = PORT) -> Iterator[TestClient]:
-    app = create_portal_app(port=port)
+def portal_client(
+    port: int = PORT, *, instance_lock: bool = True
+) -> Iterator[TestClient]:
+    app = create_portal_app(port=port, instance_lock=instance_lock)
     with TestClient(
         app, base_url=f"http://127.0.0.1:{port}", headers=CLIENT_HEADER
     ) as client:
@@ -275,6 +280,96 @@ def test_a_failing_portal_migration_serves_a_degraded_app(
         )
 
 
+def test_the_instance_lock_keeps_a_second_portal_off_the_database(
+    env: SimpleNamespace,
+) -> None:
+    with portal_client() as first:
+        assert first.app.state.portal.instance_lock.is_held()
+        with portal_client(8766) as second:
+            state = second.app.state.portal
+            assert state.degraded is not None
+            assert (
+                "another WhyGraph portal is already using this database"
+                in (second.get("/api/portal/state").json()["error"])
+            )
+            assert second.get("/api/projects").status_code == 503
+            assert not state.instance_lock.is_held()
+        assert "error" not in first.get("/api/portal/state").json()
+    # Both released theirs: the next portal takes the lock and serves.
+    with portal_client() as third:
+        assert third.app.state.portal.degraded is None
+        assert third.app.state.portal.instance_lock.is_held()
+
+
+def test_a_failed_start_releases_the_instance_lock(
+    env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WHYGRAPH_MODE", "local")
+    with portal_client():
+        pass
+    monkeypatch.setenv("WHYGRAPH_MODE", "production")
+    with pytest.raises(PortalStartupError):  # raised after the lock was taken
+        with portal_client():
+            pass
+    monkeypatch.setenv("WHYGRAPH_MODE", "local")
+    with portal_client() as client:
+        assert client.app.state.portal.degraded is None
+
+
+def test_an_unreachable_database_fails_the_start(
+    env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    monkeypatch.setenv(
+        "WHYGRAPH_DATABASE_URL", f"postgresql://u:pw@127.0.0.1:{port}/whygraph"
+    )
+    monkeypatch.setenv("WHYGRAPH_DATABASE_WAIT_SEC", "0.5")
+    app = create_portal_app(port=PORT)
+    with pytest.raises(portal_db.PortalDatabaseUnreachable):
+        with TestClient(app, base_url=BASE_URL, headers=CLIENT_HEADER):
+            pass
+    error = app.state.portal.startup_error
+    assert isinstance(error, portal_db.PortalDatabaseUnreachable)
+    assert error.target == f"127.0.0.1:{port}/whygraph"
+
+
+def test_a_lost_instance_lock_shuts_the_portal_down(env: SimpleNamespace) -> None:
+    import threading
+
+    lost = threading.Event()
+    app = create_portal_app(port=PORT)
+    state = app.state.portal
+    state.lock_check_interval = 0.05
+    state.on_lock_lost = lost.set
+    with TestClient(app, base_url=BASE_URL, headers=CLIENT_HEADER):
+        assert not lost.wait(0.3)  # healthy: the check keeps passing
+        with portal_db.get_engine().connect() as conn:
+            conn.execute(
+                text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_locks "
+                    "WHERE locktype = 'advisory' AND database = (SELECT oid FROM "
+                    "pg_database WHERE datname = current_database())"
+                )
+            )
+        assert lost.wait(5)
+
+
+def test_the_portal_server_registers_itself_for_a_lock_loss(
+    env: SimpleNamespace,
+) -> None:
+    import uvicorn
+
+    from whygraph.portal.app import PortalServer
+
+    app = create_portal_app(port=PORT)
+    server = PortalServer(uvicorn.Config(app), app)
+    assert app.state.portal.server is server
+
+
 def test_stale_running_runs_are_marked_interrupted_at_start(
     ready: TestClient, env: SimpleNamespace
 ) -> None:
@@ -283,7 +378,8 @@ def test_stale_running_runs_are_marked_interrupted_at_start(
     with portal_db.get_session() as session:
         project = session.exec(select(Project)).one()
         session.add(ScanRun(project_id=project.id, trigger="manual", status="running"))
-    with portal_client():
+    # A second app on the same database while `ready` still runs: no lock.
+    with portal_client(instance_lock=False):
         pass
     with portal_db.get_session() as session:
         assert session.exec(select(ScanRun)).one().status == "interrupted"
@@ -448,7 +544,8 @@ def test_unscoped_api_paths_are_json_404s_not_the_spa(
     static.mkdir()
     (static / "index.html").write_text("<html>spa</html>")
     monkeypatch.setattr("whygraph.serve.app._STATIC_DIR", static)
-    with portal_client() as client:
+    # A second app on the same database while `ready` still runs: no lock.
+    with portal_client(instance_lock=False) as client:
         tree = client.get("/api/tree")
         assert tree.status_code == 404
         assert tree.headers["content-type"].startswith("application/json")
@@ -1245,6 +1342,10 @@ def _record_server_runs(monkeypatch: pytest.MonkeyPatch, runs: list[dict]) -> No
     monkeypatch.setattr(PortalServer, "run", _run)
 
 
+CLI_DATABASE_URL = "postgresql+psycopg://whygraph@whygraph-portal-postgres/whygraph"
+"""A well-formed URL for CLI tests whose server run is stubbed (never connected)."""
+
+
 def test_portal_cli_refuses_a_public_bind_outside_the_image(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1254,6 +1355,7 @@ def test_portal_cli_refuses_a_public_bind_outside_the_image(
     _record_server_runs(monkeypatch, runs)
     monkeypatch.delenv("WHYGRAPH_IN_IMAGE", raising=False)
     monkeypatch.setenv("WHYGRAPH_DATA", str(tmp_path / "data"))
+    monkeypatch.setenv("WHYGRAPH_DATABASE_URL", CLI_DATABASE_URL)
     monkeypatch.chdir(tmp_path)
 
     refused = CliRunner().invoke(main, ["portal", "--host", "0.0.0.0"])
@@ -1289,6 +1391,7 @@ def test_portal_cli_refuses_a_data_dir_another_portal_holds(
     data.mkdir()
     # `--data` exports WHYGRAPH_DATA; setenv first so teardown restores it.
     monkeypatch.setenv("WHYGRAPH_DATA", str(data))
+    monkeypatch.setenv("WHYGRAPH_DATABASE_URL", CLI_DATABASE_URL)
     with open(data / "portal.lock", "a") as held:
         fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
         refused = CliRunner().invoke(main, ["portal", "--data", str(data)])
@@ -1298,6 +1401,62 @@ def test_portal_cli_refuses_a_data_dir_another_portal_holds(
     ok = CliRunner().invoke(main, ["portal", "--data", str(data)])
     assert ok.exit_code == 0, ok.output
     assert len(runs) == 1
+
+
+def test_portal_cli_needs_a_database_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from whygraph.cli import main
+
+    runs: list[dict] = []
+    _record_server_runs(monkeypatch, runs)
+    monkeypatch.setenv("WHYGRAPH_DATA", str(tmp_path / "data"))
+    monkeypatch.delenv("WHYGRAPH_DATABASE_PASSWORD_FILE", raising=False)
+    monkeypatch.chdir(tmp_path)
+    for value in (None, "sqlite:///portal.db"):
+        if value is None:
+            monkeypatch.delenv("WHYGRAPH_DATABASE_URL", raising=False)
+        else:
+            monkeypatch.setenv("WHYGRAPH_DATABASE_URL", value)
+        refused = CliRunner().invoke(main, ["portal"])
+        assert refused.exit_code == 2, refused.output
+        assert "Postgres since 2.1" in refused.output
+        assert "whygraph up" in refused.output
+    assert (
+        "WHYGRAPH_DATABASE_URL is not set"
+        in CliRunner()
+        .invoke(main, ["portal"], env={"WHYGRAPH_DATABASE_URL": ""})
+        .output
+    )
+    monkeypatch.setenv("WHYGRAPH_DATABASE_URL", CLI_DATABASE_URL)
+    monkeypatch.setenv("WHYGRAPH_DATABASE_PASSWORD_FILE", str(tmp_path / "missing"))
+    refused = CliRunner().invoke(main, ["portal"])
+    assert refused.exit_code == 2 and "cannot read" in refused.output
+    assert runs == []
+    assert not (tmp_path / "data" / "portal.lock").exists()  # before the lock
+
+
+def test_portal_cli_exits_3_when_the_database_stays_unreachable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from whygraph.cli import main
+    from whygraph.portal.app import PortalServer
+
+    def _run(self: PortalServer) -> None:
+        self._portal_app.state.portal.startup_error = (
+            portal_db.PortalDatabaseUnreachable(
+                "whygraph-portal-postgres:5432/whygraph"
+            )
+        )
+
+    monkeypatch.setattr(PortalServer, "run", _run)
+    monkeypatch.setenv("WHYGRAPH_DATA", str(tmp_path / "data"))
+    monkeypatch.setenv("WHYGRAPH_DATABASE_URL", CLI_DATABASE_URL)
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(main, ["portal"])
+    assert result.exit_code == 3, result.output
+    assert "unreachable at whygraph-portal-postgres:5432/whygraph" in result.output
+    assert "is the whygraph-portal-postgres container running?" in result.output
 
 
 def test_claude_subscription_token_through_the_api(

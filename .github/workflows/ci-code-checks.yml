@@ -35,6 +35,21 @@ jobs:
   test:
     name: Unit Tests (pytest)
     runs-on: ubuntu-latest
+    # The portal tests need a Postgres. The image literal must equal
+    # POSTGRES_IMAGE in src/whygraph/cli/commands/install.py
+    # (tests/test_install_script.py gates it).
+    services:
+      postgres:
+        image: postgres:18.6-trixie
+        env:
+          POSTGRES_PASSWORD: test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -48,6 +63,9 @@ jobs:
         run: uv sync --dev
 
       - name: Run pytest
+        env:
+          # An admin URL: the fixtures create one database per test from it.
+          WHYGRAPH_TEST_DATABASE_URL: postgresql+psycopg://postgres:test@localhost:5432/postgres
         run: uv run pytest
 
   frontend:

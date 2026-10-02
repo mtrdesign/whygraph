@@ -543,8 +543,9 @@ def _package_version() -> str | None:
 def get_state(request: Request) -> dict:
     """Portal status for the first screen: mode, setup, port, shared folders, version.
 
-    In degraded mode (the portal DB failed to migrate) the body is just
-    ``{"error": ...}``, so the UI can show the failure.
+    In degraded mode (the portal DB failed to migrate or import, or another
+    portal holds it) the body is just ``{"error": ...}``, so the UI can show
+    the failure.
     """
     state = portal_state(request)
     if state.degraded:

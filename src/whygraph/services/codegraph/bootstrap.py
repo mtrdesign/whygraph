@@ -47,7 +47,14 @@ local ``codegraph`` binary is used instead.
 _log = logging.getLogger(__name__)
 
 _CREDENTIAL_ENV: frozenset[str] = frozenset(
-    {"GH_TOKEN", "WHYGRAPH_GIT_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"}
+    {
+        "GH_TOKEN",
+        "WHYGRAPH_GIT_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        # The portal database: never a secret value, but none of codegraph's business.
+        "WHYGRAPH_DATABASE_URL",
+        "WHYGRAPH_DATABASE_PASSWORD_FILE",
+    }
 )
 """Exact env names withheld from the ``codegraph`` subprocess (besides ``*_API_KEY``)."""
 
@@ -320,7 +327,8 @@ def _codegraph_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     CodeGraph only parses source, so every ``*_API_KEY``, ``GH_TOKEN``,
     ``WHYGRAPH_GIT_TOKEN`` and ``CLAUDE_CODE_OAUTH_TOKEN`` is withheld from it (and from the ``docker``
     client of the fallback path); the scan itself may hold them for its
-    own LLM / GitHub calls.
+    own LLM / GitHub calls. The portal database variables
+    (``WHYGRAPH_DATABASE_URL`` / ``_PASSWORD_FILE``) are withheld too.
     """
     source = os.environ if base is None else base
     return {

@@ -9,8 +9,8 @@ browser**. There is no per-repo command to run first.
 whygraph up --add-folder ~/Work    # the folder that holds your repos
 ```
 
-This starts the WhyGraph portal in one background container, `127.0.0.1` only, and shares that folder
-with it. Drop `--add-folder` to start without sharing anything yet; you can share later. See
+This starts the WhyGraph portal in the background, `127.0.0.1` only, with its database in a second
+container, and shares that folder with it. Drop `--add-folder` to start without sharing anything yet; you can share later. See
 [Start the portal](../portal/start.md) and [Shared folders](../portal/shared-folders.md).
 
 ## 2. Open it in the browser

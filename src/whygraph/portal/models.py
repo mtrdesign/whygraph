@@ -9,7 +9,7 @@ Alembic never sees a project table. A test pins both directions.
 
 Every model sets an explicit ``__tablename__`` (a model written like the
 project ones, on :class:`whygraph.db.base.WhygraphTable`, would land on
-the global metadata) and every constraint is named, so a batch migration
+the global metadata) and every constraint is named, so a migration
 can address it.
 
 Conventions match :mod:`whygraph.db.models`: text columns are ``TEXT``,
@@ -43,7 +43,6 @@ from sqlalchemy import (
     UniqueConstraint,
     event,
     inspect,
-    text,
 )
 from sqlalchemy.orm import registry
 from sqlmodel import Field, SQLModel
@@ -226,9 +225,10 @@ class ProjectConfig(PortalBase, table=True):
     """A config v2 layer: the global defaults (``project_id`` NULL) or one project's.
 
     ``config`` never holds a secret (:mod:`whygraph.portal.config_layers`
-    rejects ``api_key`` / ``token``). Uniqueness is by partial indexes -
-    a plain ``UNIQUE (project_id)`` would let repeated global saves
-    duplicate the row, because SQLite treats ``NULL`` values as distinct.
+    rejects ``api_key`` / ``token``). Uniqueness is one ``UNIQUE
+    (project_id) NULLS NOT DISTINCT`` constraint: one row per project and
+    exactly one global row - a plain ``UNIQUE`` would let repeated global
+    saves duplicate the row, because ``NULL`` values are distinct by default.
     """
 
     __tablename__ = "project_config"
@@ -239,17 +239,10 @@ class ProjectConfig(PortalBase, table=True):
             name="fk_project_config_project",
             ondelete="CASCADE",
         ),
-        Index(
-            "uq_project_config_project",
+        UniqueConstraint(
             "project_id",
-            unique=True,
-            sqlite_where=text("project_id IS NOT NULL"),
-        ),
-        Index(
-            "uq_project_config_global",
-            text("(1)"),
-            unique=True,
-            sqlite_where=text("project_id IS NULL"),
+            name="uq_project_config_scope",
+            postgresql_nulls_not_distinct=True,
         ),
     )
 
@@ -279,9 +272,10 @@ class Secret(PortalBase, table=True):
 
     Notes
     -----
-    Uniqueness is one partial index per scope over ``(kind,
-    coalesce(provider, ''))``: ``provider`` is NULL for a GitHub token,
-    and NULLs are distinct in a SQLite ``UNIQUE``.
+    Uniqueness is one ``UNIQUE (project_id, kind, provider) NULLS NOT
+    DISTINCT`` constraint: ``project_id`` is NULL for a global secret and
+    ``provider`` is NULL for a GitHub or Claude OAuth token, and each NULL
+    must count as one value, not as distinct ones.
     """
 
     __tablename__ = "secrets"
@@ -297,20 +291,12 @@ class Secret(PortalBase, table=True):
             name="fk_secrets_project",
             ondelete="CASCADE",
         ),
-        Index(
-            "uq_secrets_project",
+        UniqueConstraint(
             "project_id",
             "kind",
-            text("coalesce(provider, '')"),
-            unique=True,
-            sqlite_where=text("project_id IS NOT NULL"),
-        ),
-        Index(
-            "uq_secrets_global",
-            "kind",
-            text("coalesce(provider, '')"),
-            unique=True,
-            sqlite_where=text("project_id IS NULL"),
+            "provider",
+            name="uq_secrets_scope",
+            postgresql_nulls_not_distinct=True,
         ),
     )
 
@@ -382,6 +368,42 @@ class ScanRun(PortalBase, table=True):
     summary: str | None = Field(default=None, sa_type=Text)
 
 
+class LegacyImport(PortalBase, table=True):
+    """The marker of the one-time 2.0 ``portal.db`` import (``CHECK (id = 1)``).
+
+    Written in the same transaction as the copied rows, so "rows present"
+    and "marker present" never disagree, and a crash between the commit
+    and the file's rename is recoverable.
+
+    Attributes
+    ----------
+    id : int
+        Always ``1``: at most one import, ever.
+    source_name : str
+        The imported file's name (``portal.db``).
+    source_sha256 : str
+        Hex SHA-256 of the file after its WAL checkpoint.
+    source_revision : str
+        The file's portal Alembic revision.
+    rows : dict
+        Per-table row counts copied.
+    imported_at : str
+        ISO-8601 UTC timestamp.
+    """
+
+    __tablename__ = "legacy_import"
+    __table_args__ = (CheckConstraint("id = 1", name="ck_legacy_import_singleton"),)
+
+    id: int = Field(default=1, primary_key=True)
+    source_name: str = Field(sa_type=Text)
+    source_sha256: str = Field(sa_type=Text)
+    source_revision: str = Field(sa_type=Text)
+    rows: dict[str, int] = Field(
+        default_factory=dict, sa_column=Column(JSON, nullable=False)
+    )
+    imported_at: str = Field(default_factory=_now, sa_type=Text)
+
+
 @event.listens_for(Project, "before_insert")
 def _validate_slug_on_insert(mapper, connection, target: Project) -> None:  # noqa: ANN001
     """Reject a slug that breaks :data:`whygraph.portal.projects.SLUG_RE`."""
@@ -397,6 +419,7 @@ def _slug_is_immutable(mapper, connection, target: Project) -> None:  # noqa: AN
 
 __all__ = [
     "AGENTS",
+    "LegacyImport",
     "PortalBase",
     "Project",
     "ProjectAgent",

@@ -2,9 +2,11 @@
 
 The shim is POSIX ``sh``, so the behaviour is tested by running it against a
 **fake ``docker``** placed first (and alone) on ``PATH``. The fake keeps a tiny
-container store on disk, logs every call, and mimics the two real-docker
-behaviours the shim depends on: ``--mount`` errors on a missing source, and
-``docker rm`` refuses a running container without ``-f``.
+container store on disk, logs every call, and mimics the real-docker
+behaviours the shim depends on: ``--mount`` errors on a missing source,
+``docker rm`` refuses a running container without ``-f``, a health status per
+container (a file of states, one popped per poll), and ``docker exec`` printing
+a fixed payload (or failing) so ``backup`` is testable.
 
 The shim itself comes out of :func:`render_installer` exactly as a user would
 get it (installer run into a temp bin dir), so what is tested is what ships.
@@ -22,11 +24,37 @@ from pathlib import Path
 
 import pytest
 
-from whygraph.cli.commands.install import IMAGE_REPO, render_installer
+from whygraph.cli.commands.install import (
+    IMAGE_REPO,
+    POSTGRES_IMAGE,
+    POSTGRES_MAJOR,
+    render_installer,
+)
 
 IMAGE = f"{IMAGE_REPO}:1.2.3"
+PORTAL = "whygraph-portal"
+PG = "whygraph-portal-postgres"
+PG_IMAGE = POSTGRES_IMAGE
+DUMP_PAYLOAD = "PGDMP-fake-dump"
 
-_TOOLS = ("sh", "id", "mkdir", "chmod", "grep", "touch", "rm", "mv", "cat")
+_TOOLS = (
+    "sh",
+    "id",
+    "mkdir",
+    "chmod",
+    "grep",
+    "touch",
+    "rm",
+    "mv",
+    "cat",
+    "od",
+    "tr",
+    "sleep",
+    "date",
+    "ls",
+    "sort",
+    "tail",
+)
 """Externals the portal verbs use; ``PATH`` is only these plus the fake docker."""
 
 _FAKE_DOCKER = r"""#!/bin/sh
@@ -45,7 +73,16 @@ case "$cmd" in
     done
     [ -d "$S/c/$name" ] || exit 1
     case "$fmt" in
+      *State.Health.Status*)
+        # One state per line; each poll pops the first until one is left.
+        h="$S/c/$name/health"
+        [ -f "$h" ] || exit 0
+        first=""; read -r first < "$h" || true
+        rest=$(tail -n +2 "$h")
+        [ -z "$rest" ] || printf '%s\n' "$rest" > "$h"
+        printf '%s' "$first" ;;
       *State.Status*) cat "$S/c/$name/status" ;;
+      *whygraph.pg_image*) cat "$S/c/$name/pg_image" 2>/dev/null || true ;;
       *whygraph.folders*) cat "$S/c/$name/folders" ;;
       *whygraph.port*) cat "$S/c/$name/port" ;;
       *whygraph.image*) cat "$S/c/$name/image" ;;
@@ -53,7 +90,7 @@ case "$cmd" in
     esac
     ;;
   run)
-    name=""; folders=""; port=""; image=""; dev_src=""
+    name=""; folders=""; port=""; image=""; dev_src=""; pg_image=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --name) name="$2"; shift 2 ;;
@@ -63,11 +100,12 @@ case "$cmd" in
             whygraph.port=*) port="${2#whygraph.port=}" ;;
             whygraph.image=*) image="${2#whygraph.image=}" ;;
             whygraph.dev_src=*) dev_src="${2#whygraph.dev_src=}" ;;
+            whygraph.pg_image=*) pg_image="${2#whygraph.pg_image=}" ;;
           esac
           shift 2 ;;
         --mount)
           src="${2#*source=}"; src="${src%%,target=*}"
-          [ -d "$src" ] || { echo "invalid mount config: bind source path does not exist: $src" >&2; exit 125; }
+          [ -e "$src" ] || { echo "invalid mount config: bind source path does not exist: $src" >&2; exit 125; }
           shift 2 ;;
         *) shift ;;
       esac
@@ -80,7 +118,21 @@ case "$cmd" in
     printf '%s' "$port" > "$S/c/$name/port"
     printf '%s' "$image" > "$S/c/$name/image"
     printf '%s' "$dev_src" > "$S/c/$name/dev_src"
+    if [ -n "$pg_image" ]; then
+      printf '%s' "$pg_image" > "$S/c/$name/pg_image"
+      printf '%s\n' "${FAKE_RUN_HEALTH:-healthy}" > "$S/c/$name/health"
+    fi
     echo "fakecontainerid"
+    ;;
+  exec)
+    name="$1"
+    [ "$(cat "$S/c/$name/status" 2>/dev/null)" = "running" ] || { echo "container $name is not running" >&2; exit 1; }
+    if [ -n "${FAKE_EXEC_FAIL:-}" ]; then
+      printf 'partial'
+      echo "pg_dump: error: connection failed" >&2
+      exit 1
+    fi
+    printf '%s' "${FAKE_EXEC_PAYLOAD:-PGDMP-fake-dump}"
     ;;
   stop)
     while [ $# -gt 0 ]; do case "$1" in -t) shift 2 ;; *) name="$1"; shift ;; esac; done
@@ -151,10 +203,21 @@ class Shim:
     def clear_log(self) -> None:
         (self.state / "argv.log").unlink(missing_ok=True)
 
-    def run_call(self) -> list[str]:
-        runs = [c for c in self.calls() if c[0] == "run"]
+    def runs(self) -> list[list[str]]:
+        return [c for c in self.calls() if c[0] == "run"]
+
+    def run_call(self, name: str | None = PORTAL) -> list[str]:
+        """The one ``docker run`` for container ``name`` (``None``: an unnamed one)."""
+
+        def _name(call: list[str]) -> str | None:
+            return call[call.index("--name") + 1] if "--name" in call else None
+
+        runs = [c for c in self.runs() if _name(c) == name]
         assert len(runs) == 1, self.calls()
         return runs[0]
+
+    def run_names(self) -> list[str]:
+        return [c[c.index("--name") + 1] for c in self.runs() if "--name" in c]
 
     def make_container(self, name: str, status: str, **labels: str) -> None:
         d = self.state / "c" / name
@@ -162,6 +225,28 @@ class Shim:
         (d / "status").write_text(status)
         for key in ("folders", "port", "image"):
             (d / key).write_text(labels.get(key, ""))
+
+    def make_pg_container(
+        self,
+        status: str = "running",
+        health: str = "healthy",
+        image: str = PG_IMAGE,
+        name: str = PG,
+    ) -> None:
+        """Pre-create the database container, as an earlier ``up`` would have."""
+        self.make_container(name, status)
+        d = self.state / "c" / name
+        (d / "pg_image").write_text(image)
+        (d / "health").write_text(health + "\n")
+
+    def health_polls(self) -> int:
+        """How often the database's health was read (``sleep`` is a ksh builtin,
+        so the polls are counted on the docker side)."""
+        return sum(
+            1
+            for c in self.calls()
+            if c[0] == "inspect" and "{{.State.Health.Status}}" in c
+        )
 
 
 @pytest.fixture
@@ -417,6 +502,7 @@ def test_up_image_change_recreates(shim: Shim) -> None:
 @pytest.mark.parametrize("status", ["exited", "created", "dead"])
 def test_up_removes_a_non_running_container_first(shim: Shim, status: str) -> None:
     shim.make_container("whygraph-portal", status, port="8765", image=IMAGE)
+    shim.make_pg_container()
     result = shim.run("up")
     assert result.returncode == 0, result.stderr
     assert [c for c in shim.calls() if c[0] == "rm"] == [
@@ -428,6 +514,7 @@ def test_up_removes_a_non_running_container_first(shim: Shim, status: str) -> No
 
 def test_up_leaves_a_restarting_container_alone_and_says_so(shim: Shim) -> None:
     shim.make_container("whygraph-portal", "restarting", port="8765", image=IMAGE)
+    shim.make_pg_container()
     result = shim.run("up")
     assert result.returncode == 0
     assert "restarting" in result.stderr
@@ -452,6 +539,373 @@ def test_up_rejects_unknown_args(shim: Shim) -> None:
     result = shim.run("up", "--bogus")
     assert result.returncode == 2
     assert shim.verbs() == []
+
+
+# --- the database container --------------------------------------------------
+
+
+def _non_inspect(shim: Shim) -> list[list[str]]:
+    return [c for c in shim.calls() if c[0] != "inspect"]
+
+
+def _env_value(call: list[str], key: str) -> str:
+    values = [a.split("=", 1)[1] for a in call if a.startswith(f"{key}=")]
+    assert len(values) == 1, (key, call)
+    return values[0]
+
+
+def test_up_fresh_runs_the_database_first(shim: Shim) -> None:
+    result = shim.run("up")
+    assert result.returncode == 0, result.stderr
+    assert shim.verbs() == ["network", "run", "run"]
+    assert shim.run_names() == [PG, PORTAL]
+
+    pg = shim.run_call(PG)
+    data = shim.data.resolve()
+    assert pg[:2] == ["run", "-d"]
+    # Reachable only on the private network: nothing is published.
+    assert "-p" not in pg
+    assert not [a for a in pg if a.startswith("--publish")]
+    assert pg[pg.index("--network") + 1] == "whygraph-portal"
+    assert pg[pg.index("--restart") + 1] == "unless-stopped"
+    assert pg[pg.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
+    assert f"whygraph.pg_image={PG_IMAGE}" in pg
+    # The 18 image's VOLUME, never .../data; the password as a read-only file.
+    assert f"type=bind,source={data}/postgres,target=/var/lib/postgresql" in pg
+    assert (
+        f"type=bind,source={data}/postgres.password,"
+        "target=/run/secrets/whygraph-db-password,readonly"
+    ) in pg
+    assert _env_value(pg, "PGDATA") == f"/var/lib/postgresql/{POSTGRES_MAJOR}/docker"
+    assert "POSTGRES_USER=whygraph" in pg
+    assert "POSTGRES_DB=whygraph" in pg
+    assert "POSTGRES_PASSWORD_FILE=/run/secrets/whygraph-db-password" in pg
+    assert pg[-1] == PG_IMAGE
+
+    portal = shim.run_call(PORTAL)
+    url = _env_value(portal, "WHYGRAPH_DATABASE_URL")
+    assert url == f"postgresql+psycopg://whygraph@{PG}:5432/whygraph"
+    assert ":" not in url.split("://", 1)[1].split("@", 1)[0]  # no password
+    assert "WHYGRAPH_DATABASE_PASSWORD_FILE=/data/postgres.password" in portal
+
+
+def test_database_argv_has_shm_size_and_a_tcp_health_check(shim: Shim) -> None:
+    assert shim.run("up").returncode == 0
+    pg = shim.run_call(PG)
+    assert "--shm-size=128m" in pg
+    # TCP on purpose: the first-run temporary server listens on the socket only.
+    health = pg[pg.index("--health-cmd") + 1]
+    assert health == "pg_isready -h 127.0.0.1 -U whygraph -d whygraph"
+    for flag, value in (
+        ("--health-interval", "2s"),
+        ("--health-timeout", "3s"),
+        ("--health-retries", "30"),
+        ("--health-start-period", "5s"),
+    ):
+        assert pg[pg.index(flag) + 1] == value, flag
+
+
+def test_network_is_created_before_the_database_run(shim: Shim) -> None:
+    assert shim.run("up").returncode == 0
+    calls = shim.calls()
+    network = calls.index(["network", "create", "whygraph-portal"])
+    assert network < calls.index(shim.run_call(PG))
+
+
+def test_password_is_generated_once_private_and_reused(shim: Shim) -> None:
+    assert shim.run("up").returncode == 0
+    pw_file = shim.data / "postgres.password"
+    password = pw_file.read_text()
+    assert re.fullmatch(r"[0-9a-f]{48}", password), password
+    assert stat.S_IMODE(pw_file.stat().st_mode) == 0o600
+    assert stat.S_IMODE((shim.data / "postgres").stat().st_mode) == 0o700
+    assert not (shim.data / "postgres.password.tmp").exists()
+    # Never in an argv.
+    assert password not in (shim.state / "argv.log").read_text()
+
+    assert shim.run("down").returncode == 0
+    assert shim.run("up").returncode == 0
+    assert pw_file.read_text() == password
+
+
+def _pg_version(shim: Shim, major: str) -> None:
+    d = shim.data / "postgres" / major / "docker"
+    d.mkdir(parents=True)
+    (d / "PG_VERSION").write_text(f"{major}\n")
+
+
+def test_missing_password_with_existing_data_refuses(shim: Shim) -> None:
+    _pg_version(shim, POSTGRES_MAJOR)
+    result = shim.run("up")
+    assert result.returncode == 2
+    assert "postgres.password is missing" in result.stderr
+    assert "restore" in result.stderr
+    assert not (shim.data / "postgres.password").exists()
+    assert shim.verbs() == []
+
+
+@pytest.mark.parametrize(
+    ("majors", "ok"),
+    [
+        (["17"], False),
+        ([POSTGRES_MAJOR], True),
+        (["17", POSTGRES_MAJOR], True),
+    ],
+)
+def test_major_check(shim: Shim, majors: list[str], ok: bool) -> None:
+    for major in majors:
+        _pg_version(shim, major)
+    (shim.data / "postgres.password").write_text("existing")
+    result = shim.run("up")
+    if ok:
+        assert result.returncode == 0, result.stderr
+        assert shim.run_names() == [PG, PORTAL]
+        assert (shim.data / "postgres.password").read_text() == "existing"
+    else:
+        assert result.returncode == 2
+        assert "created by Postgres 17" in result.stderr
+        assert f"needs {POSTGRES_MAJOR}" in result.stderr
+        assert (
+            "https://mtrdesign.github.io/whygraph/portal/upgrading/#postgres-major"
+            in result.stderr
+        )
+        assert "run" not in shim.verbs()
+
+
+def test_pg_image_change_backs_up_then_recreates_both_portal_first(
+    shim: Shim,
+) -> None:
+    assert shim.run("up").returncode == 0
+    shim.clear_log()
+    new_image = "postgres:18.7-trixie"
+    result = shim.run("up", WHYGRAPH_POSTGRES_IMAGE=new_image)
+    assert result.returncode == 0, result.stderr
+    assert "changed: database" in result.stderr
+    assert shim.verbs() == ["exec", "stop", "rm", "network", "stop", "rm", "run", "run"]
+    acts = _non_inspect(shim)
+    # The dump comes before any stop / rm of either container...
+    assert acts[0][:3] == ["exec", PG, "pg_dump"]
+    # ...and the portal stops before its database is removed.
+    assert acts[1:3] == [["stop", "-t", "30", PORTAL], ["rm", PORTAL]]
+    assert acts[4:6] == [["stop", "-t", "30", PG], ["rm", "-f", PG]]
+    assert shim.run_names() == [PG, PORTAL]
+    assert f"whygraph.pg_image={new_image}" in shim.run_call(PG)
+    assert shim.run_call(PG)[-1] == new_image
+    dumps = list((shim.data / "backups").glob("portal-*.dump"))
+    assert len(dumps) == 1
+
+
+def test_a_portal_only_change_leaves_the_database_alone(shim: Shim) -> None:
+    assert shim.run("up").returncode == 0
+    shim.clear_log()
+    assert shim.run("up", "--port", "9001").returncode == 0
+    assert shim.verbs() == ["stop", "rm", "network", "run"]
+    assert not [c for c in _non_inspect(shim) if PG in c]
+    assert shim.run_names() == [PORTAL]
+
+
+def test_failing_pre_recreate_backup_touches_nothing(shim: Shim) -> None:
+    assert shim.run("up").returncode == 0
+    shim.clear_log()
+    result = shim.run(
+        "up", WHYGRAPH_POSTGRES_IMAGE="postgres:18.7-trixie", FAKE_EXEC_FAIL="1"
+    )
+    assert result.returncode == 2
+    assert "backup failed" in result.stderr
+    assert "WHYGRAPH_SKIP_BACKUP=1" in result.stderr
+    assert shim.verbs() == ["exec"]  # no stop / rm / run at all
+    for name in (PORTAL, PG):
+        assert (shim.state / "c" / name / "status").read_text() == "running"
+    assert (shim.state / "c" / PG / "pg_image").read_text() == PG_IMAGE
+    assert list((shim.data / "backups").iterdir()) == []
+
+
+def test_skip_backup_recreates_without_a_dump(shim: Shim) -> None:
+    assert shim.run("up").returncode == 0
+    shim.clear_log()
+    result = shim.run(
+        "up",
+        WHYGRAPH_POSTGRES_IMAGE="postgres:18.7-trixie",
+        WHYGRAPH_SKIP_BACKUP="1",
+        FAKE_EXEC_FAIL="1",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "without a backup" in result.stderr
+    assert "exec" not in shim.verbs()
+    assert shim.run_names() == [PG, PORTAL]
+
+
+def test_a_stopped_database_is_recreated_without_a_backup(shim: Shim) -> None:
+    shim.make_container(PORTAL, "running", port="8765", image=IMAGE)
+    shim.make_pg_container(status="exited")
+    result = shim.run("up")
+    assert result.returncode == 0, result.stderr
+    assert "exec" not in shim.verbs()
+    assert ["rm", "-f", PG] in shim.calls()
+    assert ["stop", "-t", "30", PG] not in shim.calls()  # nothing to stop
+    assert shim.run_names() == [PG, PORTAL]
+
+
+def test_health_wait_polls_until_healthy(shim: Shim) -> None:
+    result = shim.run("up", FAKE_RUN_HEALTH="starting\nstarting\nhealthy")
+    assert result.returncode == 0, result.stderr
+    assert shim.health_polls() == 3
+    assert shim.run_names() == [PG, PORTAL]
+    # The portal run comes only after the last (healthy) poll.
+    calls = shim.calls()
+    last_poll = max(i for i, c in enumerate(calls) if "{{.State.Health.Status}}" in c)
+    assert last_poll < calls.index(shim.run_call(PORTAL))
+
+
+def test_health_wait_budget_is_sixty_seconds(shim: Shim) -> None:
+    block = _portal_block(shim)
+    assert 'pg_budget="${WHYGRAPH_DB_READY_TIMEOUT:-60}"' in block
+    assert "sleep 1" in block
+
+
+@pytest.mark.parametrize("health", ["unhealthy", "starting"])
+def test_unready_database_starts_no_portal(shim: Shim, health: str) -> None:
+    result = shim.run("up", FAKE_RUN_HEALTH=health, WHYGRAPH_DB_READY_TIMEOUT="2")
+    assert result.returncode == 2
+    assert "did not become ready" in result.stderr
+    assert f"docker logs {PG}" in result.stderr
+    assert shim.run_names() == [PG]  # no portal run
+    # `unhealthy` fails at once; `starting` waits out the budget.
+    assert shim.health_polls() == (1 if health == "unhealthy" else 3)
+
+
+def test_up_waits_for_an_existing_database_too(shim: Shim) -> None:
+    shim.make_pg_container(health="unhealthy")
+    result = shim.run("up")
+    assert result.returncode == 2
+    assert "did not become ready" in result.stderr
+    assert shim.runs() == []
+
+
+def test_down_with_a_missing_database_container(shim: Shim) -> None:
+    shim.make_container(PORTAL, "running", port="8765", image=IMAGE)
+    result = shim.run("down")
+    assert result.returncode == 0, result.stderr
+    assert _non_inspect(shim) == [["stop", "-t", "30", PORTAL], ["rm", PORTAL]]
+
+
+def test_down_with_only_the_database_container(shim: Shim) -> None:
+    shim.make_pg_container()
+    result = shim.run("down")
+    assert result.returncode == 0, result.stderr
+    assert _non_inspect(shim) == [["stop", "-t", "30", PG], ["rm", PG]]
+    assert "data stays in" in result.stdout
+
+
+def test_status_shows_both_containers(shim: Shim) -> None:
+    assert shim.run("up").returncode == 0
+    result = shim.run("status")
+    assert result.returncode == 0
+    assert "whygraph portal: running" in result.stdout
+    assert f"database: running ({PG_IMAGE})" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("portal", "database", "line"),
+    [
+        ("running", None, "database: not created"),
+        ("running", "exited", f"database: exited ({PG_IMAGE})"),
+        (None, "running", f"database: running ({PG_IMAGE})"),
+    ],
+)
+def test_status_is_non_zero_when_either_container_is_down(
+    shim: Shim, portal: str | None, database: str | None, line: str
+) -> None:
+    if portal:
+        shim.make_container(PORTAL, portal, port="8765", image=IMAGE)
+    if database:
+        shim.make_pg_container(status=database)
+    result = shim.run("status")
+    assert result.returncode == 1
+    assert line in result.stdout
+
+
+def test_portal_name_knob_renames_the_database_container(shim: Shim) -> None:
+    name = "whygraph-portal-dev"
+    result = shim.run("up", WHYGRAPH_PORTAL_NAME=name)
+    assert result.returncode == 0, result.stderr
+    assert shim.run_names() == [f"{name}-postgres", name]
+    url = _env_value(shim.run_call(name), "WHYGRAPH_DATABASE_URL")
+    assert f"@{name}-postgres:5432/" in url
+    assert not (shim.state / "c" / PG).exists()
+    shim.run("down", WHYGRAPH_PORTAL_NAME=name)
+    assert not (shim.state / "c" / f"{name}-postgres").exists()
+
+
+def test_dev_mode_restarts_neither_container(shim: Shim) -> None:
+    root = _checkout(shim)
+    assert shim.run("up", WHYGRAPH_DEV_SRC=str(root)).returncode == 0
+    for name in (PG, PORTAL):
+        call = shim.run_call(name)
+        assert call[call.index("--restart") + 1] == "no", name
+
+
+# --- backup -------------------------------------------------------------------
+
+_DUMP_NAME = re.compile(r"portal-\d{8}T\d{6}Z\.dump")
+
+
+def test_backup_writes_a_dump_into_a_private_dir(shim: Shim) -> None:
+    assert shim.run("up").returncode == 0
+    shim.clear_log()
+    result = shim.run("backup")
+    assert result.returncode == 0, result.stderr
+    backups = shim.data / "backups"
+    assert stat.S_IMODE(backups.stat().st_mode) == 0o700
+    files = sorted(p.name for p in backups.iterdir())
+    assert len(files) == 1 and _DUMP_NAME.fullmatch(files[0]), files
+    assert (backups / files[0]).read_text() == DUMP_PAYLOAD
+    assert _non_inspect(shim) == [
+        ["exec", PG, "pg_dump", "-U", "whygraph", "-d", "whygraph", "-Fc"]
+    ]
+    assert files[0] in result.stdout
+    assert "secret.key" in result.stdout
+
+
+def test_failing_backup_leaves_no_file_and_fails(shim: Shim) -> None:
+    assert shim.run("up").returncode == 0
+    result = shim.run("backup", FAKE_EXEC_FAIL="1")
+    assert result.returncode != 0
+    assert "backup failed" in result.stderr
+    assert list((shim.data / "backups").iterdir()) == []
+
+
+def test_backup_retention_keeps_the_newest_ten_and_nothing_else(shim: Shim) -> None:
+    assert shim.run("up").returncode == 0
+    backups = shim.data / "backups"
+    backups.mkdir()
+    old = [f"portal-20200101T0000{i:02d}Z.dump" for i in range(11)]
+    others = ["notes.txt", "portal-before-upgrade.dump", "other.dump", "portal-x.sql"]
+    for name in old + others:
+        (backups / name).write_text("old")
+    result = shim.run("backup")
+    assert result.returncode == 0, result.stderr
+    names = {p.name for p in backups.iterdir()}
+    dumps = sorted(n for n in names if _DUMP_NAME.fullmatch(n))
+    assert len(dumps) == 10
+    # The two oldest went; the new dump and the nine newest old ones stay.
+    assert dumps[:9] == old[2:]
+    assert not set(old[:2]) & names
+    assert set(others) <= names
+
+
+@pytest.mark.parametrize("database", [None, "exited"])
+def test_backup_refuses_when_the_database_is_not_running(
+    shim: Shim, database: str | None
+) -> None:
+    if database:
+        shim.make_pg_container(status=database)
+    result = shim.run("backup")
+    assert result.returncode == 2
+    assert "not running" in result.stderr
+    assert "whygraph up" in result.stderr
+    assert "exec" not in shim.verbs()
+    assert not (shim.data / "backups").exists()
 
 
 # --- --add-folder validation -------------------------------------------------
@@ -612,9 +1066,15 @@ def test_down_stops_with_grace_then_removes(shim: Shim) -> None:
     shim.clear_log()
     result = shim.run("down")
     assert result.returncode == 0, result.stderr
-    assert shim.verbs() == ["stop", "rm"]
-    assert ["stop", "-t", "30", "whygraph-portal"] in shim.calls()
+    # Both containers, the portal first; each is stopped before it is removed.
+    assert [c for c in shim.calls() if c[0] != "inspect"] == [
+        ["stop", "-t", "30", PORTAL],
+        ["rm", PORTAL],
+        ["stop", "-t", "30", PG],
+        ["rm", PG],
+    ]
     assert not (shim.state / "c" / "whygraph-portal").exists()
+    assert not (shim.state / "c" / PG).exists()
 
 
 def test_down_when_nothing_runs_is_a_quiet_success(shim: Shim) -> None:
@@ -646,6 +1106,7 @@ def test_status_running_without_folders(shim: Shim) -> None:
 
 def test_status_reports_a_crash_looping_container_as_restarting(shim: Shim) -> None:
     shim.make_container("whygraph-portal", "restarting", port="8765", image=IMAGE)
+    shim.make_pg_container()
     result = shim.run("status")
     assert result.returncode == 1
     assert "whygraph portal: restarting" in result.stdout
@@ -656,6 +1117,7 @@ def test_status_stopped_and_missing(shim: Shim) -> None:
     assert result.returncode == 1
     assert "not created" in result.stdout
     shim.make_container("whygraph-portal", "exited", port="8765", image=IMAGE)
+    shim.make_pg_container()
     result = shim.run("status")
     assert result.returncode == 1
     assert "whygraph portal: exited" in result.stdout
@@ -668,7 +1130,7 @@ def test_logs_follows_the_portal_container(shim: Shim) -> None:
     assert ["logs", "-f", "whygraph-portal"] in shim.calls()
 
 
-@pytest.mark.parametrize("verb", ["down", "status", "logs"])
+@pytest.mark.parametrize("verb", ["down", "status", "logs", "backup"])
 def test_verbs_reject_stray_arguments(shim: Shim, verb: str) -> None:
     assert shim.run(verb, "extra").returncode == 2
     assert shim.verbs() == []
@@ -718,7 +1180,7 @@ def test_env_hint_also_shows_when_the_portal_is_already_running(shim: Shim) -> N
 def test_other_commands_still_run_ephemerally(shim: Shim) -> None:
     result = shim.run("scan", "--help")
     assert result.returncode == 0
-    call = shim.run_call()
+    call = shim.run_call(None)
     assert call[:3] == ["run", "--rm", "-i"]
     assert call[-4:] == [IMAGE, "whygraph", "scan", "--help"]
     assert f"{shim.tmp.resolve()}:/workspace" in call
@@ -748,15 +1210,26 @@ def test_verify_image_probes_the_portal_state_endpoint() -> None:
     probe = [s for s in steps if "portal" in s.get("name", "").lower()]
     assert len(probe) == 1, [s.get("name") for s in steps]
     script = probe[0]["run"]
-    assert "whygraph portal --host 0.0.0.0" in script
+    # The real shim, installed from the image under test (as smoke.sh does) -
+    # not a hand-mirrored `docker run` of the portal and its database.
+    assert 'docker run --rm "$image" whygraph install' in script
+    assert 'WHYGRAPH_BIN_DIR="$scratch/bin"' in script
+    assert 'WHYGRAPH_IMAGE="$image"' in script
+    assert '"$wg" up' in script
+    assert "whygraph portal" not in script
+    assert "--user" not in script
+    # Isolated from anything else on the runner: its own container names and
+    # a scratch HOME (so a scratch data dir), keeping the registry login.
+    assert "WHYGRAPH_PORTAL_NAME=whygraph-portal-probe" in script
+    assert 'export HOME="$scratch/home"' in script
+    assert script.index("DOCKER_CONFIG=") < script.index('HOME="$scratch/home"')
+    # The same probe of the state endpoint as before.
     assert "/api/portal/state" in script
     assert "X-WhyGraph-Client: 1" in script
     assert "Host: 127.0.0.1" in script
-    # Same runtime shape as the shim: host user, loopback publish only.
-    assert '--user "$(id -u):$(id -g)"' in script
-    assert '"127.0.0.1:${port}:${port}"' in script
-    # It cleans up after itself.
-    assert "docker rm -f portal-smoke" in script
+    assert '"setup_complete"' in script
+    # It cleans up after itself, both containers, on every exit.
+    assert "trap '\"$wg\" down || true' EXIT" in script
 
 
 # --- development knobs (make dev-docker / prod / smoke) ---------------------
@@ -786,7 +1259,7 @@ def test_default_up_has_no_dev_mode(shim: Shim) -> None:
 def test_portal_name_knob_renames_the_container(shim: Shim) -> None:
     result = shim.run("up", WHYGRAPH_PORTAL_NAME="whygraph-portal-dev")
     assert result.returncode == 0, result.stderr
-    call = shim.run_call()
+    call = shim.run_call("whygraph-portal-dev")
     assert call[call.index("--name") + 1] == "whygraph-portal-dev"
     # The user's own portal is left alone by every verb.
     assert not (shim.state / "c" / "whygraph-portal").exists()

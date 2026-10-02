@@ -97,4 +97,4 @@ in the **Connect your agent** panel on the project's home page.
 - **`409` from the endpoint.** The project is added but not initialized yet. Finish setup in the
   portal.
 - **A 1.x entry that runs `whygraph-mcp`.** That command was removed; it prints a message and exits. Add
-  the repo in the portal and migrate the entry. See [Upgrading from 1.x](upgrading.md).
+  the repo in the portal and migrate the entry. See [Upgrading from 1.x](upgrading.md#from-1x).

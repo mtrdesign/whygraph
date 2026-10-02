@@ -3,7 +3,7 @@
 Rule 4.2.1 #2 forces a project's DB paths to ``<root>/.whygraph/whygraph.db``
 and ``<root>/.codegraph/codegraph.db``. The repo's content is not trusted,
 though: either DB file, or ``.whygraph/`` / ``.codegraph/`` themselves, can
-be a committed symlink to another project's DB or to ``portal.db``.
+be a committed symlink to another project's DB or to a file in the data directory.
 :func:`check_project_paths` refuses that before anything opens, migrates
 or backs up a project DB - the initialized gate
 (:func:`whygraph.portal.deps.require_initialized`, so every data route and

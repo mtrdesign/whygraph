@@ -92,7 +92,11 @@ def test_a_port_change_rewrites_markers_and_literal_entries_only(
     assert details == item
 
     # The unmounted root is listed (it could not be updated).
-    assert report["unmounted"] == [{"slug": "beta", "root": str(beta)}]
+    (gone,) = report["unmounted"]
+    assert {k: gone[k] for k in ("slug", "root")} == {"slug": "beta", "root": str(beta)}
+    # Items carry their project and org ids: a slug is unique only per org.
+    assert isinstance(gone["project_id"], int) and isinstance(gone["org_id"], int)
+    assert item["org_id"] == gone["org_id"] and item["project_id"] != gone["project_id"]
     assert beta_details["unmounted"] is True and beta_details["port"] == 9100
 
     # A later start on the same port has nothing to report.

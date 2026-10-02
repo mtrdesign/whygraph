@@ -87,8 +87,8 @@ def slugify(name: str) -> str:
     return slug or "project"
 
 
-def unique_slug(session: Session, name: str) -> str:
-    """Return a slug for ``name`` that no project row uses yet.
+def unique_slug(session: Session, name: str, *, org_id: int) -> str:
+    """Return a slug for ``name`` that no project of ``org_id`` uses yet.
 
     On collision a numeric suffix is appended (``foo``, ``foo-2``,
     ``foo-3``), shortening the base so the result stays within 63 chars.
@@ -99,12 +99,14 @@ def unique_slug(session: Session, name: str) -> str:
         A portal DB session.
     name : str
         The name to derive the slug from (see :func:`slugify`).
+    org_id : int
+        The organization the project joins; slugs are unique per org.
 
     Returns
     -------
     str
         A valid, currently unused slug. Not reserved: two racing callers
-        can pick the same one, and the ``UNIQUE (slug)`` constraint then
+        can pick the same one, and the ``UNIQUE (org_id, slug)`` constraint then
         rejects the second insert.
     """
     from sqlmodel import select
@@ -112,7 +114,9 @@ def unique_slug(session: Session, name: str) -> str:
     from .models import Project
 
     base = slugify(name)
-    taken = set(session.exec(select(Project.slug)).all())
+    taken = set(
+        session.exec(select(Project.slug).where(Project.org_id == org_id)).all()
+    )
     candidate = base
     n = 1
     while candidate in taken:

@@ -114,14 +114,13 @@ command the Docker runtime runs inside the image.
 |---|---|---|
 | `--host` | `127.0.0.1` | Bind address. Outside the image, anything but a loopback address needs `--dev-expose`. |
 | `--port` | `$WHYGRAPH_PORT` or `8765` | Port to bind. It is also the port the browser and agents use, so the allowed `Host` / `Origin` values and the agent MCP URLs are built from it. |
-| `--data DIR` | `$WHYGRAPH_DATA` or `~/.local/share/whygraph` | Portal data directory: the encryption key, scan run files, cloned repositories (and, until it is imported, a 2.0 `portal.db`). Keep it outside every project folder. |
+| `--data DIR` | `$WHYGRAPH_DATA` or `~/.local/share/whygraph` | Portal data directory: the encryption key, scan run files, cloned repositories. Keep it outside every project folder. |
 | `--dev-expose` | off | Allow a non-loopback `--host` outside the image. |
 
 The portal keeps its own data in Postgres, named by `WHYGRAPH_DATABASE_URL` (plus an optional
 `WHYGRAPH_DATABASE_PASSWORD_FILE`; see [Configuration](configuration.md#environment-variables)). The
 shim sets both for its database container. On start the portal waits up to a minute for the
-database, migrates it, and imports a 2.0 `portal.db` once if the data directory has one (see
-[Upgrading](../portal/upgrading.md#from-20)).
+database, and migrates it.
 
 | Exit code | When |
 |---|---|

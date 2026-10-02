@@ -3,7 +3,7 @@
 The context a request (or MCP call) runs under is assembled from the
 portal database:
 
-1. Each config layer - the global defaults row, then the project's row -
+1. Each config layer - the project's org defaults row, then its own row -
    goes through :func:`whygraph.core.config.normalize_v2`, then the two
    are deep-merged with :func:`~whygraph.core.config.merge_v2` (the
    project wins).
@@ -13,10 +13,11 @@ portal database:
    portal's own, is never opened. A *symlink* at those paths is refused
    where the DB is opened (:mod:`whygraph.portal.paths`).
 3. Decrypted secrets are injected **in memory only**: the project's key
-   for a provider, else the global one - except that a global key is
-   never injected into a project that overrides that provider's endpoint
-   (rule 3), and a secret that no longer decrypts is skipped (never
-   falling back to a different scope's key).
+   for a provider, else its org's default (never another org's) - except
+   that an org-default key is never injected into a project that
+   overrides that provider's endpoint (rule 3), and a secret that no
+   longer decrypts is skipped (never falling back to a different scope's
+   key).
 4. :meth:`whygraph.core.config.Config.from_dict` builds the frozen
    ``Config``. Its ``api_key`` / ``scan_token`` fields are excluded from
    ``repr``, so a traceback never prints a live key.
@@ -101,7 +102,7 @@ def build_project_context(session: Session, project: Project) -> ProjectContext:
     """
     root = resolve_root(project)
     project_layer, merged = _merged_layer(session, project, root)
-    _inject_secrets(session, project.id, project_layer, merged)
+    _inject_secrets(session, project, project_layer, merged)
     return ProjectContext(
         slug=project.slug, root=root, config=Config.from_dict(merged, root)
     )
@@ -134,8 +135,11 @@ def resolved_layer(session: Session, project: Project) -> dict:
 
 def _merged_layer(session: Session, project: Project, root: Path) -> tuple[dict, dict]:
     """Return ``(project_layer, merged)`` - normalized, merged, DB paths forced."""
-    global_layer, _ = normalize_v2(load_layer(session, None), root)
-    project_layer, _ = normalize_v2(load_layer(session, project.id), root)
+    org_layer = load_layer(session, None, org_id=project.org_id)
+    global_layer, _ = normalize_v2(org_layer, root)
+    project_layer, _ = normalize_v2(
+        load_layer(session, project.id, org_id=project.org_id), root
+    )
     merged = merge_v2(global_layer, project_layer)
 
     # Rule 4.2.1 #2: DB paths are the root's defaults, never a row's value.
@@ -148,16 +152,19 @@ def _merged_layer(session: Session, project: Project, root: Path) -> tuple[dict,
 
 
 def _inject_secrets(
-    session: Session, project_id: int | None, project_layer: dict, merged: dict
+    session: Session, project: Project, project_layer: dict, merged: dict
 ) -> None:
     """Write decrypted keys and tokens into ``merged`` (in memory).
 
-    The Claude subscription token, like the GitHub token, is a project
-    secret when the project has one, else the global one.
+    Only the project's own org's secrets are read: its org defaults
+    (the "global" scope below) and the project's. The Claude subscription
+    token, like the GitHub token, is a project secret when the project
+    has one, else the org default.
     """
     rows = session.exec(
         select(Secret).where(
-            or_(Secret.project_id.is_(None), Secret.project_id == project_id)  # type: ignore[union-attr]
+            Secret.org_id == project.org_id,
+            or_(Secret.project_id.is_(None), Secret.project_id == project.id),  # type: ignore[union-attr]
         )
     ).all()
     by_scope: dict[tuple[bool, str, str | None], Secret] = {

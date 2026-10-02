@@ -20,7 +20,11 @@ mode, the single user, or ``None`` before first-run setup), stores it in
 ``scope["state"]["principal"]`` and in a :class:`~contextvars.ContextVar`,
 so FastAPI routes, the MCP dispatcher (not a FastAPI route) and the hook
 ``POST .../scans`` all see the same one. :func:`whygraph.portal.deps.current_user`
-only reads it.
+only reads it. Next to it, ``scope["state"]["org_slug"]`` names the
+organization the request addresses (in local mode, the built-in org). Both
+come from the state's :class:`~whygraph.portal.deps.IdentityResolver`; the
+guard never queries the org itself - the membership is checked by
+:func:`whygraph.portal.deps.current_org`.
 """
 
 from __future__ import annotations
@@ -138,14 +142,15 @@ class Principal:
         The stable ``users.uid``.
     display_name : str
         Shown in the UI.
-    role : str
-        ``"owner"`` in M1.
+
+    Notes
+    -----
+    The role is per organization (``memberships``), not on the principal.
     """
 
     user_id: int
     uid: str
     display_name: str
-    role: str
 
 
 _principal: ContextVar[Principal | None] = ContextVar(
@@ -175,7 +180,7 @@ class PortalGuard:
     state : PortalState
         The portal's shared state: its ``origins`` (``None`` until the
         lifespan built them - requests then get ``503``), ``degraded``
-        flag and principal resolver.
+        flag and ``identity`` resolver.
     """
 
     def __init__(self, app: ASGIApp, *, state: "PortalState") -> None:
@@ -193,9 +198,13 @@ class PortalGuard:
             return
 
         principal = None
+        org_slug = None
         if not self.state.degraded:
-            principal = await self.state.resolve_principal(scope)
-        scope.setdefault("state", {})["principal"] = principal
+            principal = await self.state.identity.principal(scope)
+            org_slug = await self.state.identity.org_slug(scope)
+        request_state = scope.setdefault("state", {})
+        request_state["principal"] = principal
+        request_state["org_slug"] = org_slug
         token = _principal.set(principal)
         try:
             await self.app(scope, receive, send)

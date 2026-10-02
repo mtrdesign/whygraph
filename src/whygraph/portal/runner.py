@@ -47,6 +47,17 @@ process:
   also run once at start: a local project whose HEAD differs from
   ``projects.last_scanned_head`` gets a ``trigger=hook`` scan.
 
+**System callers.** :meth:`ScanRunner.tick`, :meth:`ScanRunner.catch_up`,
+the queued-run recovery and the run finisher are internal: no request,
+no user and no org reach them. An internal caller starts from a project
+**id** read from the DB, never from a request's slug, and resolves config
+and secrets through ``ContextCache.get(project_id)``, which reads that
+project's own org - so a scan child only ever receives its own org's
+secrets. Such runs keep ``requested_by=None``, which is how "system" is
+recorded. Request-driven work enters through ``request_scan`` /
+``request_sync`` with a project the request already bound and authorized
+(:func:`~whygraph.portal.deps.bind_project`).
+
 The test seam :data:`SCAN_CMD_ENV` (``WHYGRAPH_SCAN_CMD``) replaces the
 ``whygraph scan`` prefix of the child argv (``shlex.split``, so it may
 carry extra flags).

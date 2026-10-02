@@ -1,0 +1,122 @@
+"""Unit tests for org slug rules and role authorization (pure modules)."""
+
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from whygraph.portal.authz import (
+    ROLE_ACTIONS,
+    ROLES,
+    Action,
+    OrgAccess,
+    Role,
+    allowed,
+    authorize,
+)
+from whygraph.portal.deps import ApiError
+from whygraph.portal.orgs import (
+    BUILTIN_ORG_SLUG,
+    ORG_SLUG_SQL_CHECK,
+    RESERVED_ORG_SLUGS,
+    is_valid_org_slug,
+    validate_org_slug,
+)
+
+
+@pytest.mark.parametrize(
+    "slug", ["a", "acme", "a-b", "a1", "local", "0", "a" * 40, "a-" + "b" * 37 + "c"]
+)
+def test_valid_org_slugs(slug):
+    assert is_valid_org_slug(slug)
+    validate_org_slug(slug)
+
+
+@pytest.mark.parametrize(
+    "slug",
+    ["", "a" * 41, "-a", "a-", "-", "Acme", "a_b", "a b", "acme\n", "a.b"],
+)
+def test_invalid_org_slugs(slug):
+    assert not is_valid_org_slug(slug)
+    with pytest.raises(ValueError, match="invalid"):
+        validate_org_slug(slug)
+
+
+@pytest.mark.parametrize("slug", ["www", "api", "mcp", "whygraph", "staging"])
+def test_reserved_org_slugs(slug):
+    assert not is_valid_org_slug(slug)
+    with pytest.raises(ValueError, match="reserved"):
+        validate_org_slug(slug)
+
+
+def test_builtin_slug_is_not_reserved():
+    assert BUILTIN_ORG_SLUG not in RESERVED_ORG_SLUGS
+    assert len(RESERVED_ORG_SLUGS) == 35
+
+
+def test_sql_check_mirrors_regex():
+    assert "{0,38}" in ORG_SLUG_SQL_CHECK
+    assert ORG_SLUG_SQL_CHECK.startswith("slug ~ ")
+
+
+def test_roles():
+    assert ROLES == ("owner", "admin", "member")
+
+
+def test_role_actions_match_table():
+    member = {"org.read", "project.read", "project.chat", "project.scan"}
+    admin = member | {
+        "org.add_project",
+        "org.configure",
+        "project.configure",
+        "project.setup",
+    }
+    owner = admin | {"org.own"}
+    assert {a.value for a in Action} == owner
+    assert {r: {a.value for a in s} for r, s in ROLE_ACTIONS.items()} == {
+        Role.MEMBER: member,
+        Role.ADMIN: admin,
+        Role.OWNER: owner,
+    }
+
+
+def test_allowed():
+    assert allowed(Role.MEMBER, Action.PROJECT_SCAN)
+    assert not allowed(Role.MEMBER, Action.PROJECT_CONFIGURE)
+    assert not allowed(Role.ADMIN, Action.ORG_OWN)
+    assert allowed(Role.OWNER, Action.ORG_OWN)
+
+
+def _access(role):
+    return OrgAccess(org_id=1, org_slug="acme", org_name="Acme", role=role)
+
+
+def test_authorize_member_forbidden():
+    with pytest.raises(ApiError) as exc:
+        authorize(_access(Role.MEMBER), Action.PROJECT_CONFIGURE)
+    err = exc.value
+    assert err.status == 403
+    assert err.code == "forbidden"
+    assert err.error == "your role (member) cannot project.configure"
+    body = json.loads(err.response().body)
+    assert body == {
+        "error": "your role (member) cannot project.configure",
+        "code": "forbidden",
+        "action": "project.configure",
+    }
+
+
+def test_authorize_admin_passes():
+    authorize(_access(Role.ADMIN), Action.PROJECT_CONFIGURE)
+    authorize(_access(Role.MEMBER), Action.PROJECT_READ)
+
+
+def test_authorize_org_mismatch_is_404():
+    other = SimpleNamespace(org_id=2)
+    with pytest.raises(ApiError) as exc:
+        authorize(_access(Role.OWNER), Action.PROJECT_READ, other)
+    assert exc.value.status == 404
+    assert exc.value.error == "not found"
+    authorize(_access(Role.MEMBER), Action.PROJECT_READ, SimpleNamespace(org_id=1))

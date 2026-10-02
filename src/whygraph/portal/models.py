@@ -47,6 +47,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import registry
 from sqlmodel import Field, SQLModel
 
+from .authz import ROLES
+from .orgs import ORG_SLUG_SQL_CHECK, validate_org_slug
 from .projects import validate_slug
 
 AGENTS: tuple[str, ...] = ("claude", "cursor", "vscode", "codex")
@@ -110,18 +112,99 @@ class Setting(PortalBase, table=True):
         ISO-8601 UTC timestamp.
     schema_version : str or None
         Free-form portal schema label.
+    builtin_org_id : int or None
+        The built-in organization of local mode
+        (:func:`whygraph.portal.orgs.ensure_builtin_org`); ``NULL`` in
+        production. A singleton row makes "at most one built-in org" hold
+        for free.
     """
 
     __tablename__ = "settings"
     __table_args__ = (
         CheckConstraint("id = 1", name="ck_settings_singleton"),
         CheckConstraint(_in("mode", ("local", "production")), name="ck_settings_mode"),
+        ForeignKeyConstraint(
+            ["builtin_org_id"],
+            ["organizations.id"],
+            name="fk_settings_builtin_org",
+            ondelete="RESTRICT",
+        ),
     )
 
     id: int = Field(default=1, primary_key=True)
     mode: str = Field(default="local", sa_type=Text)
     created_at: str = Field(default_factory=_now, sa_type=Text)
     schema_version: str | None = Field(default=None, sa_type=Text)
+    builtin_org_id: int | None = Field(default=None)
+
+
+class Organization(PortalBase, table=True):
+    """An organization: owns projects, config layers and secrets.
+
+    Attributes
+    ----------
+    uid : str
+        Stable UUID4 (what M2e connections reference).
+    slug : str
+        Immutable; a DNS label (:mod:`whygraph.portal.orgs`), checked on
+        insert and by ``ck_organizations_slug``.
+    name : str
+        Display name.
+    created_at : str
+        ISO-8601 UTC timestamp.
+    """
+
+    __tablename__ = "organizations"
+    __table_args__ = (
+        UniqueConstraint("uid", name="uq_organizations_uid"),
+        UniqueConstraint("slug", name="uq_organizations_slug"),
+        CheckConstraint(ORG_SLUG_SQL_CHECK, name="ck_organizations_slug"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    uid: str = Field(default_factory=_uid, sa_type=Text)
+    slug: str = Field(sa_type=Text)
+    name: str = Field(sa_type=Text)
+    created_at: str = Field(default_factory=_now, sa_type=Text)
+
+
+class Membership(PortalBase, table=True):
+    """A user's role in one organization.
+
+    Attributes
+    ----------
+    org_id, user_id : int
+        The organization and the user (the primary key).
+    role : str
+        ``"owner"``, ``"admin"`` or ``"member"``
+        (:class:`whygraph.portal.authz.Role`).
+    created_at : str
+        ISO-8601 UTC timestamp.
+    """
+
+    __tablename__ = "memberships"
+    __table_args__ = (
+        PrimaryKeyConstraint("org_id", "user_id", name="pk_memberships"),
+        CheckConstraint(_in("role", ROLES), name="ck_memberships_role"),
+        ForeignKeyConstraint(
+            ["org_id"],
+            ["organizations.id"],
+            name="fk_memberships_org",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            name="fk_memberships_user",
+            ondelete="CASCADE",
+        ),
+        Index("ix_memberships_user_id", "user_id"),
+    )
+
+    org_id: int = Field()
+    user_id: int = Field()
+    role: str = Field(sa_type=Text)
+    created_at: str = Field(default_factory=_now, sa_type=Text)
 
 
 class User(PortalBase, table=True):
@@ -136,8 +219,10 @@ class User(PortalBase, table=True):
         Shown in the UI.
     username, password_hash : str or None
         Unused in local mode (M2).
-    role : str
-        ``"owner"`` in M1.
+
+    Notes
+    -----
+    A user's role lives in :class:`Membership`, per organization.
     """
 
     __tablename__ = "users"
@@ -148,7 +233,6 @@ class User(PortalBase, table=True):
     display_name: str = Field(sa_type=Text)
     username: str | None = Field(default=None, sa_type=Text)
     password_hash: str | None = Field(default=None, sa_type=Text)
-    role: str = Field(default="owner", sa_type=Text)
     created_at: str = Field(default_factory=_now, sa_type=Text)
 
 
@@ -157,8 +241,11 @@ class Project(PortalBase, table=True):
 
     Attributes
     ----------
+    org_id : int
+        The owning organization; immutable (a project never moves).
     slug : str
-        Immutable identity (see :mod:`whygraph.portal.projects`).
+        Immutable identity, unique within its organization (see
+        :mod:`whygraph.portal.projects`).
     name : str
         Display name; the only renamable field.
     source : str
@@ -177,9 +264,17 @@ class Project(PortalBase, table=True):
 
     __tablename__ = "projects"
     __table_args__ = (
-        UniqueConstraint("slug", name="uq_projects_slug"),
+        UniqueConstraint("org_id", "slug", name="uq_projects_org_slug"),
+        # The target of the composite (org_id, project_id) foreign keys.
+        UniqueConstraint("org_id", "id", name="uq_projects_org_id"),
         UniqueConstraint("root", name="uq_projects_root"),
         CheckConstraint(_in("source", PROJECT_SOURCES), name="ck_projects_source"),
+        ForeignKeyConstraint(
+            ["org_id"],
+            ["organizations.id"],
+            name="fk_projects_org",
+            ondelete="RESTRICT",
+        ),
         ForeignKeyConstraint(
             ["created_by"],
             ["users.id"],
@@ -189,6 +284,7 @@ class Project(PortalBase, table=True):
     )
 
     id: int | None = Field(default=None, primary_key=True)
+    org_id: int = Field()
     slug: str = Field(sa_type=Text)
     name: str = Field(sa_type=Text)
     source: str = Field(sa_type=Text)
@@ -222,24 +318,33 @@ class ProjectAgent(PortalBase, table=True):
 
 
 class ProjectConfig(PortalBase, table=True):
-    """A config v2 layer: the global defaults (``project_id`` NULL) or one project's.
+    """A config v2 layer: an org's defaults (``project_id`` NULL) or one project's.
 
     ``config`` never holds a secret (:mod:`whygraph.portal.config_layers`
-    rejects ``api_key`` / ``token``). Uniqueness is one ``UNIQUE
-    (project_id) NULLS NOT DISTINCT`` constraint: one row per project and
-    exactly one global row - a plain ``UNIQUE`` would let repeated global
-    saves duplicate the row, because ``NULL`` values are distinct by default.
+    rejects ``api_key`` / ``token``). Uniqueness is one ``UNIQUE (org_id,
+    project_id) NULLS NOT DISTINCT`` constraint: one row per project and
+    exactly one org-defaults row per org - a plain ``UNIQUE`` would let
+    repeated saves of the defaults duplicate the row, because ``NULL``
+    values are distinct by default. The composite foreign key refuses a
+    project row filed under another org.
     """
 
     __tablename__ = "project_config"
     __table_args__ = (
         ForeignKeyConstraint(
-            ["project_id"],
-            ["projects.id"],
+            ["org_id"],
+            ["organizations.id"],
+            name="fk_project_config_org",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["org_id", "project_id"],
+            ["projects.org_id", "projects.id"],
             name="fk_project_config_project",
             ondelete="CASCADE",
         ),
         UniqueConstraint(
+            "org_id",
             "project_id",
             name="uq_project_config_scope",
             postgresql_nulls_not_distinct=True,
@@ -247,6 +352,7 @@ class ProjectConfig(PortalBase, table=True):
     )
 
     id: int | None = Field(default=None, primary_key=True)
+    org_id: int = Field()
     project_id: int | None = Field(default=None)
     config: dict[str, Any] = Field(
         default_factory=dict, sa_column=Column(JSON, nullable=False)
@@ -255,10 +361,12 @@ class ProjectConfig(PortalBase, table=True):
 
 
 class Secret(PortalBase, table=True):
-    """An encrypted secret, global (``project_id`` NULL) or per project.
+    """An encrypted secret, an org default (``project_id`` NULL) or per project.
 
     Attributes
     ----------
+    org_id : int
+        The owning organization.
     kind : str
         ``"llm_api_key"`` (``provider`` set) or ``"github_token"``
         (``provider`` NULL).
@@ -272,10 +380,11 @@ class Secret(PortalBase, table=True):
 
     Notes
     -----
-    Uniqueness is one ``UNIQUE (project_id, kind, provider) NULLS NOT
-    DISTINCT`` constraint: ``project_id`` is NULL for a global secret and
-    ``provider`` is NULL for a GitHub or Claude OAuth token, and each NULL
-    must count as one value, not as distinct ones.
+    Uniqueness is one ``UNIQUE (org_id, project_id, kind, provider) NULLS
+    NOT DISTINCT`` constraint: ``project_id`` is NULL for an org-default
+    secret and ``provider`` is NULL for a GitHub or Claude OAuth token, and
+    each NULL must count as one value, not as distinct ones. The composite
+    foreign key refuses a project secret filed under another org.
     """
 
     __tablename__ = "secrets"
@@ -286,12 +395,19 @@ class Secret(PortalBase, table=True):
             name="ck_secrets_provider",
         ),
         ForeignKeyConstraint(
-            ["project_id"],
-            ["projects.id"],
+            ["org_id"],
+            ["organizations.id"],
+            name="fk_secrets_org",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["org_id", "project_id"],
+            ["projects.org_id", "projects.id"],
             name="fk_secrets_project",
             ondelete="CASCADE",
         ),
         UniqueConstraint(
+            "org_id",
             "project_id",
             "kind",
             "provider",
@@ -301,6 +417,7 @@ class Secret(PortalBase, table=True):
     )
 
     id: int | None = Field(default=None, primary_key=True)
+    org_id: int = Field()
     project_id: int | None = Field(default=None)
     kind: str = Field(sa_type=Text)
     provider: str | None = Field(default=None, sa_type=Text)
@@ -368,42 +485,6 @@ class ScanRun(PortalBase, table=True):
     summary: str | None = Field(default=None, sa_type=Text)
 
 
-class LegacyImport(PortalBase, table=True):
-    """The marker of the one-time 2.0 ``portal.db`` import (``CHECK (id = 1)``).
-
-    Written in the same transaction as the copied rows, so "rows present"
-    and "marker present" never disagree, and a crash between the commit
-    and the file's rename is recoverable.
-
-    Attributes
-    ----------
-    id : int
-        Always ``1``: at most one import, ever.
-    source_name : str
-        The imported file's name (``portal.db``).
-    source_sha256 : str
-        Hex SHA-256 of the file after its WAL checkpoint.
-    source_revision : str
-        The file's portal Alembic revision.
-    rows : dict
-        Per-table row counts copied.
-    imported_at : str
-        ISO-8601 UTC timestamp.
-    """
-
-    __tablename__ = "legacy_import"
-    __table_args__ = (CheckConstraint("id = 1", name="ck_legacy_import_singleton"),)
-
-    id: int = Field(default=1, primary_key=True)
-    source_name: str = Field(sa_type=Text)
-    source_sha256: str = Field(sa_type=Text)
-    source_revision: str = Field(sa_type=Text)
-    rows: dict[str, int] = Field(
-        default_factory=dict, sa_column=Column(JSON, nullable=False)
-    )
-    imported_at: str = Field(default_factory=_now, sa_type=Text)
-
-
 @event.listens_for(Project, "before_insert")
 def _validate_slug_on_insert(mapper, connection, target: Project) -> None:  # noqa: ANN001
     """Reject a slug that breaks :data:`whygraph.portal.projects.SLUG_RE`."""
@@ -412,14 +493,31 @@ def _validate_slug_on_insert(mapper, connection, target: Project) -> None:  # no
 
 @event.listens_for(Project, "before_update")
 def _slug_is_immutable(mapper, connection, target: Project) -> None:  # noqa: ANN001
-    """Refuse to change a flushed project's slug (only ``name`` is renamable)."""
-    if inspect(target).attrs.slug.history.has_changes():
+    """Refuse to change a flushed project's slug or org (only ``name`` is renamable)."""
+    attrs = inspect(target).attrs
+    if attrs.slug.history.has_changes():
         raise ValueError("a project's slug is immutable; rename only its name")
+    if attrs.org_id.history.has_changes():
+        raise ValueError("a project's organization is immutable")
+
+
+@event.listens_for(Organization, "before_insert")
+def _validate_org_slug_on_insert(mapper, connection, target: Organization) -> None:  # noqa: ANN001
+    """Reject a slug that breaks the rules of :mod:`whygraph.portal.orgs`."""
+    validate_org_slug(target.slug)
+
+
+@event.listens_for(Organization, "before_update")
+def _org_slug_is_immutable(mapper, connection, target: Organization) -> None:  # noqa: ANN001
+    """Refuse to change a flushed organization's slug."""
+    if inspect(target).attrs.slug.history.has_changes():
+        raise ValueError("an organization's slug is immutable; rename only its name")
 
 
 __all__ = [
     "AGENTS",
-    "LegacyImport",
+    "Membership",
+    "Organization",
     "PortalBase",
     "Project",
     "ProjectAgent",

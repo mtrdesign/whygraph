@@ -1,7 +1,9 @@
 """The ``project_config`` rows: config v2 layers and the policy applied on write.
 
-Two kinds of layer exist: the **global defaults** (``project_id`` NULL,
-one row) and one row per project. Both hold a config v2 dict (see
+Two kinds of layer exist: each organization's **org defaults**
+(``project_id`` NULL, one row per org) and one row per project. Every row
+belongs to one org (``org_id``), and every function here takes it. Both
+hold a config v2 dict (see
 :func:`whygraph.core.config.normalize_v2`) with **no secrets**; secrets
 live in :mod:`whygraph.portal.secrets`. :mod:`whygraph.portal.context`
 merges the two layers when it builds a project's context.
@@ -14,10 +16,10 @@ Policy applied here (plan section 4.2.1)
 * Rule 3 (write half): changing or removing a provider's endpoint
   (``[llm.<provider>].base_url`` / ``host``) **clears that scope's key**
   for the provider, so a saved key never follows an edited endpoint. A
-  change to the *global* endpoint also clears the project-scope key of
-  every project that inherits that endpoint (sets none of its own), since
+  change to an org's *default* endpoint also clears the project-scope key
+  of every project of that org that inherits that endpoint (sets none of its own), since
   that key would otherwise be sent to the new global endpoint. The
-  context half (no global key into a project that overrides the endpoint)
+  context half (no org-default key into a project that overrides the endpoint)
   is in :mod:`whygraph.portal.context`.
 
 The allowlists (rules 1a, 1b, 6) belong to the HTTP endpoints, which know
@@ -94,9 +96,11 @@ def endpoint_of(config: Mapping[str, Any], provider_attr: str) -> str | None:
     return None
 
 
-def get_layer_row(session: Session, project_id: int | None) -> ProjectConfig | None:
-    """Return the ``project_config`` row of a scope, or ``None``."""
-    stmt = select(ProjectConfig)
+def get_layer_row(
+    session: Session, project_id: int | None, *, org_id: int
+) -> ProjectConfig | None:
+    """Return the ``project_config`` row of a scope in ``org_id``, or ``None``."""
+    stmt = select(ProjectConfig).where(ProjectConfig.org_id == org_id)
     stmt = stmt.where(
         ProjectConfig.project_id.is_(None)  # type: ignore[union-attr]
         if project_id is None
@@ -105,7 +109,9 @@ def get_layer_row(session: Session, project_id: int | None) -> ProjectConfig | N
     return session.exec(stmt).first()
 
 
-def load_layer(session: Session, project_id: int | None) -> dict[str, Any]:
+def load_layer(
+    session: Session, project_id: int | None, *, org_id: int
+) -> dict[str, Any]:
     """Return a scope's stored config dict (``{}`` when there is no row).
 
     Parameters
@@ -113,42 +119,51 @@ def load_layer(session: Session, project_id: int | None) -> dict[str, Any]:
     session : Session
         A portal DB session.
     project_id : int or None
-        ``None`` for the global defaults.
+        ``None`` for the org defaults.
+    org_id : int
+        The organization the scope belongs to.
 
     Returns
     -------
     dict
         A copy of the stored dict; mutating it changes nothing.
     """
-    row = get_layer_row(session, project_id)
+    row = get_layer_row(session, project_id, org_id=org_id)
     return {} if row is None else copy.deepcopy(row.config)
 
 
 def save_layer(
-    session: Session, project_id: int | None, config: Mapping[str, Any]
+    session: Session,
+    project_id: int | None,
+    config: Mapping[str, Any],
+    *,
+    org_id: int,
 ) -> list[tuple[int, str]]:
     """Store a scope's config dict, replacing the previous one.
 
-    Saving the global defaults twice leaves one row. The caller commits
+    Saving an org's defaults twice leaves one row. The caller commits
     and, if it holds a :class:`whygraph.portal.context.ContextCache`,
-    invalidates it (everything for the global scope, else that project).
+    invalidates it (everything for the org defaults, else that project).
 
     Parameters
     ----------
     session : Session
         A portal DB session.
     project_id : int or None
-        ``None`` for the global defaults.
+        ``None`` for the org defaults.
     config : Mapping
         The whole new dict (a JSON ``null`` inside it resets a key at
         merge time).
+    org_id : int
+        The organization the scope belongs to (a project's own org).
 
     Returns
     -------
     list of (int, str)
-        ``(project_id, provider tag)`` of every project-scope key cleared
-        because a *global* endpoint changed and that project inherits it
-        (rule 3); always empty for a project save. Sorted.
+        ``(project_id, provider tag)`` of every project-scope key of
+        ``org_id`` cleared because an org-default endpoint changed and
+        that project inherits it (rule 3); always empty for a project
+        save. Sorted.
 
     Raises
     ------
@@ -162,7 +177,7 @@ def save_layer(
             "secrets are stored separately, not in config: " + ", ".join(secrets_found)
         )
     new = copy.deepcopy(dict(config))
-    row = get_layer_row(session, project_id)
+    row = get_layer_row(session, project_id, org_id=org_id)
     old = row.config if row is not None else {}
 
     cleared: list[tuple[int, str]] = []
@@ -170,13 +185,17 @@ def save_layer(
         attr = tag.replace("-", "_")
         if endpoint_of(old, attr) != endpoint_of(new, attr):
             delete_secret(
-                session, kind=LLM_API_KEY, provider=tag, project_id=project_id
+                session,
+                kind=LLM_API_KEY,
+                provider=tag,
+                project_id=project_id,
+                org_id=org_id,
             )
             if project_id is None:
-                cleared += _clear_inheriting_keys(session, tag, attr)
+                cleared += _clear_inheriting_keys(session, org_id, tag, attr)
 
     if row is None:
-        session.add(ProjectConfig(project_id=project_id, config=new))
+        session.add(ProjectConfig(org_id=org_id, project_id=project_id, config=new))
     else:
         row.config = new
         row.updated_at = _now()
@@ -185,11 +204,12 @@ def save_layer(
 
 
 def _clear_inheriting_keys(
-    session: Session, tag: str, attr: str
+    session: Session, org_id: int, tag: str, attr: str
 ) -> list[tuple[int, str]]:
-    """Delete ``tag``'s project keys where the project sets no endpoint of its own."""
+    """Delete ``org_id``'s project keys of ``tag`` where the project sets no endpoint."""
     rows = session.exec(
         select(Secret).where(
+            Secret.org_id == org_id,
             Secret.kind == LLM_API_KEY,
             Secret.provider == tag,
             Secret.project_id.is_not(None),  # type: ignore[union-attr]
@@ -198,7 +218,8 @@ def _clear_inheriting_keys(
     cleared: list[tuple[int, str]] = []
     for secret in rows:
         assert secret.project_id is not None
-        if endpoint_of(load_layer(session, secret.project_id), attr) is None:
+        layer = load_layer(session, secret.project_id, org_id=org_id)
+        if endpoint_of(layer, attr) is None:
             session.delete(secret)
             cleared.append((secret.project_id, tag))
     session.flush()

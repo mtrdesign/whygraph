@@ -11,9 +11,7 @@ headless CLI without a portal.
 The data directory is ``$WHYGRAPH_DATA`` when set, else
 ``~/.local/share/whygraph``. It holds ``secret.key``
 (:mod:`whygraph.portal.secrets`), cloned repositories and scan run files,
-which is why the paths stored in the database are relative to it, and -
-until the one-time import has run - a 2.0 ``portal.db``
-(:func:`legacy_db_path`).
+which is why the paths stored in the database are relative to it.
 """
 
 from __future__ import annotations
@@ -44,9 +42,6 @@ DATABASE_PASSWORD_FILE_ENV = "WHYGRAPH_DATABASE_PASSWORD_FILE"
 
 DATABASE_WAIT_ENV = "WHYGRAPH_DATABASE_WAIT_SEC"
 """Test / support knob: the default budget of :func:`wait_for_database`."""
-
-LEGACY_DB_FILE_NAME = "portal.db"
-"""The 2.0 SQLite portal file; only the one-time importer reads it."""
 
 INSTANCE_LOCK_KEY = 0x7768796772617068
 """``b"whygraph"`` as a signed 64-bit int: the advisory lock of one portal."""
@@ -108,11 +103,6 @@ def data_dir() -> Path:
 
 def _default_data_dir() -> Path:
     return Path.home() / ".local" / "share" / "whygraph"
-
-
-def legacy_db_path() -> Path:
-    """Return the path of a 2.0 SQLite ``portal.db`` inside :func:`data_dir`."""
-    return data_dir() / LEGACY_DB_FILE_NAME
 
 
 def database_url() -> URL:
@@ -236,9 +226,8 @@ def get_engine() -> Engine:
 def migration_engine() -> Engine:
     """Return a new ``NullPool`` engine without the server timeouts.
 
-    For Alembic and the one-time import: a baseline on a slow disk, or a
-    large import transaction, must not hit ``statement_timeout`` /
-    ``idle_in_transaction_session_timeout``. Built per call; the caller
+    For Alembic: a baseline on a slow disk must not hit
+    ``statement_timeout`` / ``idle_in_transaction_session_timeout``. Built per call; the caller
     disposes it.
 
     Returns
@@ -487,7 +476,6 @@ __all__ = [
     "ensure_initialized",
     "get_engine",
     "get_session",
-    "legacy_db_path",
     "migration_engine",
     "wait_for_database",
 ]

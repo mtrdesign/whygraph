@@ -5,9 +5,10 @@ Composition (plan section 4.5.1)::
     PortalGuard (pure ASGI)       Host / Origin / Sec-Fetch-Site / X-WhyGraph-Client,
                                   and the principal, resolved once per request
     /api/portal/*                 management (portal/routes.py)
-    /api/projects/*               management; project_context or project_db
-    /api/projects/{slug}/...      serve.routes.router + serve.chat.router (/chat),
-                                  dependencies=[Depends(project_db)]
+    /api/projects/*               management; each route names its action through
+                                  org_access / project_access / project_db_access
+    /api/projects/{slug}/...      serve.routes.router (project.read) + serve.chat.router
+                                  (/chat, project.chat), via project_db_access
     /mcp/{slug}                   per-project MCP dispatcher (portal/mcp_mount.py)
     /api/*, /mcp/* not matched    404 {"error"} - never the SPA's index.html
     everything else               the SPA (serve.app._mount_static)
@@ -15,12 +16,11 @@ Composition (plan section 4.5.1)::
 The lifespan waits for the portal database (an unreachable one raises
 :class:`~whygraph.portal.db.PortalDatabaseUnreachable`, and the CLI exits 3
 so the restart policy retries), takes the "one portal per database"
-advisory lock, migrates the portal DB, imports a 2.0 ``portal.db`` once
-(:mod:`whygraph.portal.sqlite_import`) - a held lock or a failure in those
-steps leaves a *degraded* app whose ``GET /api/portal/state`` reports
+advisory lock and migrates the portal DB - a held lock or a failure in
+those steps leaves a *degraded* app whose ``GET /api/portal/state`` reports
 ``{"error"}`` and whose other ``/api`` routes answer ``503`` - writes the
 ``settings`` row at first start and refuses to start when
-``WHYGRAPH_MODE`` contradicts it, builds
+``WHYGRAPH_MODE`` contradicts it, seeds local mode's built-in org, builds
 the :class:`~whygraph.portal.security.PortalOrigins`, marks runs left
 ``running`` by a previous process ``interrupted``, follows a port change
 into the managed repos (:mod:`whygraph.portal.port_change`), starts the
@@ -60,11 +60,18 @@ from whygraph.serve.errors import whygraph_error_handler
 from whygraph.serve.routes import router as data_router
 
 from . import db as portal_db
-from .deps import ApiError, PortalState, current_user, project_db
+from .authz import Action
+from .deps import (
+    ApiError,
+    IdentityResolver,
+    PortalState,
+    current_user,
+    project_db_access,
+)
 from .mcp_mount import McpDispatcher, build_session_manager
 from .migrate import MIGRATION_LOCK
 from .models import ScanRun, Setting
-from .sqlite_import import LegacyImportError, import_legacy_sqlite
+from .orgs import ensure_builtin_org
 from .port_change import reconcile_port
 from .repos import SHARED_FOLDERS_ENV, parse_shared_folders
 from .routes import portal_router, projects_router, public_router
@@ -127,6 +134,7 @@ def create_portal_app(
     port: int = DEFAULT_PORTAL_PORT,
     runner: ScanRunner | None = None,
     instance_lock: bool = True,
+    identity: IdentityResolver | None = None,
 ) -> FastAPI:
     """Build the portal application.
 
@@ -147,6 +155,11 @@ def create_portal_app(
         default, and what the CLI always uses). ``False`` is a test hook
         for apps that deliberately share one database; it is a factory
         parameter, not configuration, so no deployment can switch it off.
+    identity : IdentityResolver, optional
+        Who a request acts as and which organization it addresses; local
+        mode's :class:`~whygraph.portal.deps.LocalIdentity` by default (what
+        the CLI always uses). Like ``instance_lock``, a test hook: tests
+        pass a header-driven resolver to drive several users and orgs.
 
     Returns
     -------
@@ -160,6 +173,8 @@ def create_portal_app(
     )
     if instance_lock:
         state.instance_lock = portal_db.InstanceLock()
+    if identity is not None:
+        state.identity = identity
 
     app = FastAPI(
         title="WhyGraph Portal",
@@ -179,12 +194,14 @@ def create_portal_app(
     app.include_router(portal_router)
     app.include_router(projects_router)
     app.include_router(
-        data_router, prefix="/api/projects/{slug}", dependencies=[Depends(project_db)]
+        data_router,
+        prefix="/api/projects/{slug}",
+        dependencies=[Depends(project_db_access(Action.PROJECT_READ))],
     )
     app.include_router(
         chat_router,
         prefix="/api/projects/{slug}/chat",
-        dependencies=[Depends(project_db)],
+        dependencies=[Depends(project_db_access(Action.PROJECT_CHAT))],
     )
     app.add_route("/mcp/{slug}", McpDispatcher(state), include_in_schema=False)
 
@@ -289,7 +306,7 @@ async def _watch_instance_lock(state: PortalState) -> None:
 
 
 def _startup(state: PortalState) -> None:
-    """Wait, lock, migrate, import, check / store the mode, recover stale runs.
+    """Wait, lock, migrate, check / store the mode, seed the org, recover stale runs.
 
     Raises
     ------
@@ -327,17 +344,6 @@ def _startup(state: PortalState) -> None:
         state.degraded = f"portal database migration failed: {exc}"
         return
 
-    try:
-        import_legacy_sqlite(state.data_dir)
-    except LegacyImportError as exc:
-        _log.error("%s", exc)
-        state.degraded = str(exc)
-        return
-    except Exception as exc:  # noqa: BLE001 -- any failure means degraded mode
-        _log.exception("importing the 2.0 portal.db failed")
-        state.degraded = f"importing the 2.0 portal.db failed: {exc}"
-        return
-
     requested = (os.environ.get(MODE_ENV) or "").strip().lower() or None
     with portal_db.get_session() as session:
         setting = session.get(Setting, 1)
@@ -348,7 +354,8 @@ def _startup(state: PortalState) -> None:
                     f"{MODE_ENV}={mode!r} is not supported by this version; "
                     f"supported: {', '.join(SUPPORTED_MODES)}"
                 )
-            session.add(Setting(id=1, mode=mode))
+            setting = Setting(id=1, mode=mode)
+            session.add(setting)
         else:
             mode = setting.mode
             if requested is not None and requested != mode:
@@ -358,6 +365,12 @@ def _startup(state: PortalState) -> None:
                     "cannot be changed"
                 )
         state.mode = mode
+        if mode == "local":
+            # Idempotent: creates the built-in org at first start, and
+            # repairs a missing link on a later one.
+            org = ensure_builtin_org(session, setting)
+            state.builtin_org_id = org.id
+            state.builtin_org_slug = org.slug
 
         # A run still "running" belongs to a previous process that is gone.
         for run in session.exec(

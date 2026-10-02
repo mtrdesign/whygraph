@@ -10,10 +10,12 @@ import uuid
 from pathlib import Path
 from typing import Iterable, Iterator
 
+import anyio.to_thread
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL, Engine, make_url
 from sqlalchemy.pool import NullPool
+from starlette.datastructures import Headers
 
 from whygraph import core
 from whygraph.cli.commands.install import POSTGRES_IMAGE
@@ -494,67 +496,50 @@ def empty_portal_database(
     )
 
 
-# ---------------------------------------------------------------------------
-# The frozen 2.0 portal (SQLite) - what the 2.1 importer reads
-# ---------------------------------------------------------------------------
+def builtin_org_id(session) -> int:  # noqa: ANN001
+    """The built-in org's id, created (with a local ``settings`` row) if missing.
 
-FIXTURES = Path(__file__).parent / "fixtures"
-LEGACY_SCHEMA_SQL = FIXTURES / "portal_2_0_schema.sql"
-LEGACY_SEED_SQL = FIXTURES / "portal_2_0_seed.sql"
-LEGACY_SECRET_KEY = FIXTURES / "portal_2_0_secret.key"
-LEGACY_REVISION = "c5e8a1d2b3f4"
-"""The portal head 2.0.0 ships; the seed's ``alembic_version``."""
-
-LEGACY_SECRET_PLAINTEXTS: dict[int, str] = {
-    1: "sk-ant-global-a1b2",  # global llm_api_key / anthropic
-    2: "sk-ant-alpha-c3d4",  # project 1 llm_api_key / anthropic
-    3: "ghp_globaltoken-e5f6",  # global github_token (NULL provider)
-    5: "sk-ant-oat-beta-g7h8",  # project 2 claude_oauth_token (NULL provider)
-}
-"""``secrets.id`` -> plaintext of the seed's ciphertexts (encrypted with the key)."""
-
-LEGACY_ROW_COUNTS: dict[str, int] = {
-    "users": 1,
-    "settings": 1,
-    "projects": 2,
-    "project_agents": 2,
-    "project_config": 2,
-    "secrets": 4,
-    "scan_runs": 3,
-}
-
-
-def build_legacy_portal_db(path: Path, *, seed: bool = True) -> Path:
-    """Write a 2.0 ``portal.db`` from the frozen schema (and, by default, seed).
-
-    Parameters
-    ----------
-    path : Path
-        The SQLite file to create; must not exist yet.
-    seed : bool
-        ``False`` writes the schema only (no ``alembic_version`` row either).
+    Portal DB tests run on a migrated database with no lifespan, so nothing
+    has seeded the org yet; this does what the portal's start would.
     """
-    conn = sqlite3.connect(path)
-    try:
-        conn.executescript(LEGACY_SCHEMA_SQL.read_text())
-        if seed:
-            conn.executescript(LEGACY_SEED_SQL.read_text())
-        conn.commit()
-    finally:
-        conn.close()
-    return path
+    from whygraph.portal.models import Setting
+    from whygraph.portal.orgs import ensure_builtin_org
+
+    setting = session.get(Setting, 1)
+    if setting is None:
+        setting = Setting(id=1, mode="local")
+        session.add(setting)
+    org = ensure_builtin_org(session, setting)
+    assert org.id is not None
+    return org.id
 
 
-def install_legacy_portal(data: Path) -> Path:
-    """Lay out a 2.0 data dir: the seeded ``portal.db`` plus its ``secret.key``.
+class HeaderIdentity:
+    """A test :class:`~whygraph.portal.deps.IdentityResolver` driven by headers.
 
-    Returns
-    -------
-    Path
-        The ``portal.db`` written into *data*.
+    ``x-test-user`` names the principal by ``users.uid`` (unknown or absent:
+    no principal) and ``x-test-org`` is the org slug, returned as is - the
+    membership is still checked by the real ``load_org_access``. Passed to
+    ``create_portal_app(identity=...)``, so production code never reads a
+    test header.
     """
-    data.mkdir(parents=True, exist_ok=True, mode=0o700)
-    key = data / "secret.key"
-    key.write_bytes(LEGACY_SECRET_KEY.read_bytes())
-    key.chmod(0o600)
-    return build_legacy_portal_db(data / "portal.db")
+
+    async def principal(self, scope):  # noqa: ANN001, ANN201
+        uid = Headers(scope=scope).get("x-test-user")
+        if uid is None:
+            return None
+        return await anyio.to_thread.run_sync(_principal_by_uid, uid)
+
+    async def org_slug(self, scope):  # noqa: ANN001, ANN201
+        return Headers(scope=scope).get("x-test-org")
+
+
+def _principal_by_uid(uid: str):  # noqa: ANN202
+    from sqlmodel import select
+
+    from whygraph.portal.deps import principal_of
+    from whygraph.portal.models import User
+
+    with portal_db.get_session() as session:
+        user = session.exec(select(User).where(User.uid == uid)).first()
+        return None if user is None else principal_of(user)

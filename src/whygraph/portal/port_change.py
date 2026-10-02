@@ -21,7 +21,15 @@ port, :func:`reconcile_port` runs once, before the portal serves requests:
   listed so the UI can say they still point at the old port.
 
 The result is kept on :attr:`PortalState.port_change` and shown by
-``GET /api/portal/state`` (and per project by ``GET /api/projects/{slug}``).
+``GET /api/portal/state`` - filtered to the request's org - and per project
+by ``GET /api/projects/{slug}`` (matched by project id).
+
+**A system caller.** The reconcile runs at start-up with no request, user
+or org: it starts from project **ids** read from the DB, never from a
+request's slug. It reads no config or secret; an internal caller that
+does resolves them through ``ContextCache.get(project_id)``, which reads
+that project's own org. Every report item carries ``project_id`` and
+``org_id`` so the read side can scope it.
 """
 
 from __future__ import annotations
@@ -75,8 +83,10 @@ def reconcile_port(data_dir: Path, port: int, agent_host: str) -> dict | None:
     dict or None
         ``None`` when nothing changed and there is nothing to report,
         else ``{"port", "previous_port", "projects": [...], "unmounted":
-        [...]}``. Each project item is ``{"slug", "root", "previous_port",
-        "markers": "rewritten" | "skipped", "reason"?, "agents": [...]}``;
+        [...]}``. Each project item is ``{"project_id", "org_id", "slug",
+        "root", "previous_port", "markers": "rewritten" | "skipped",
+        "reason"?, "agents": [...]}`` and each unmounted item ``{"project_id",
+        "org_id", "slug", "root"}`` (a slug is unique only within an org);
         each agent item is ``{"agent", "file", "action", ...}`` with
         ``action`` one of ``rewritten``, ``up_to_date``, ``env`` (no
         rewrite needed; ``hint`` says what to do), ``manual`` (tracked or
@@ -98,17 +108,20 @@ def reconcile_port(data_dir: Path, port: int, agent_host: str) -> dict | None:
                     select(ProjectAgent).where(ProjectAgent.project_id == row.id)
                 ).all()
             ]
-            work.append((row.slug, resolve_root(row), sorted(agents)))
+            work.append(
+                (row.id, row.org_id, row.slug, resolve_root(row), sorted(agents))
+            )
 
-    for slug, root, agents in work:
+    for project_id, org_id, slug, root, agents in work:
+        ids = {"project_id": project_id, "org_id": org_id}
         if root_status(root) != "ok":
-            unmounted.append({"slug": slug, "root": str(root)})
+            unmounted.append({**ids, "slug": slug, "root": str(root)})
             continue
         marker, _warning = read_portal_marker(root)
         if marker is None or marker.port == port:
             continue
         projects.append(
-            _reconcile_project(slug, root, agents, marker, port, agent_host)
+            {**ids, **_reconcile_project(slug, root, agents, marker, port, agent_host)}
         )
 
     port_changed = previous is not None and previous != port

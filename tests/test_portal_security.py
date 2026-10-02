@@ -28,7 +28,6 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import select
 
-from conftest import build_legacy_portal_db
 from test_portal_app import (  # noqa: F401 -- fixtures
     add_local,
     client,
@@ -162,12 +161,16 @@ def test_symlinked_codegraph_db_is_refused(
     assert ready.get("/api/projects/beta/tree").json()["code"] == "unsafe_path"
 
 
-def test_symlinked_db_never_backs_up_or_migrates_portal_db(
+def test_symlinked_db_never_backs_up_or_migrates_a_data_dir_file(
     ready: TestClient, env: SimpleNamespace
 ) -> None:
-    # The portal's own DB is Postgres now; what a symlink can still reach is a
-    # 2.0 ``portal.db`` the one-time import has not picked up yet.
-    portal_file = build_legacy_portal_db(env.data / "portal.db")
+    # The portal's own DB is Postgres; what a symlink can still reach is any
+    # SQLite file inside the data directory.
+    portal_file = env.data / "victim.db"
+    conn = sqlite3.connect(portal_file)
+    conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+    conn.commit()
+    conn.close()
     before = _tables(portal_file)
     before_bytes = portal_file.read_bytes()
     root = make_repo(env.shared, "sneaky")
@@ -516,7 +519,7 @@ def test_slow_principal_load_never_overwrites_setup(
 
     monkeypatch.setattr(portal_deps, "_load_local_principal", slow_load)
     state = PortalState(port=8765, data_dir=tmp_path, runner=ScanRunner())
-    tess = Principal(user_id=1, uid="u1", display_name="Tess", role="admin")
+    tess = Principal(user_id=1, uid="u1", display_name="Tess")
     seen: list = []
 
     async def main() -> None:

@@ -120,33 +120,6 @@ def load_keyring() -> MultiFernet:
     return MultiFernet([Fernet(ensure_key())])
 
 
-def load_existing_keyring(path: Path | None = None) -> MultiFernet:
-    """Load the keyring from an existing key file; never create one.
-
-    For reading data encrypted earlier (the one-time 2.0 import): a
-    missing key must stop the reader, because :func:`load_keyring` would
-    publish a fresh, wrong key in its place.
-
-    Parameters
-    ----------
-    path : Path, optional
-        The key file; defaults to :func:`key_path`.
-
-    Returns
-    -------
-    MultiFernet
-        A keyring over the key in that file.
-
-    Raises
-    ------
-    FileNotFoundError
-        When the key file does not exist.
-    ValueError
-        When it does not hold a valid Fernet key.
-    """
-    return MultiFernet([Fernet(_read_key(path if path is not None else key_path()))])
-
-
 def encrypt(plaintext: str) -> str:
     """Encrypt ``plaintext`` with the keyring; the token differs per call."""
     return load_keyring().encrypt(plaintext.encode("utf-8")).decode("ascii")
@@ -189,9 +162,13 @@ def _check_scope(kind: str, provider: str | None) -> None:
 
 
 def _find(
-    session: Session, kind: str, provider: str | None, project_id: int | None
+    session: Session,
+    kind: str,
+    provider: str | None,
+    project_id: int | None,
+    org_id: int,
 ) -> Secret | None:
-    stmt = select(Secret).where(Secret.kind == kind)
+    stmt = select(Secret).where(Secret.org_id == org_id, Secret.kind == kind)
     stmt = stmt.where(
         Secret.provider == provider if provider else Secret.provider.is_(None)
     )  # type: ignore[union-attr]
@@ -210,10 +187,11 @@ def put_secret(
     value: str,
     provider: str | None = None,
     project_id: int | None = None,
+    org_id: int,
 ) -> None:
     """Store (or replace) one secret, encrypted.
 
-    One row per ``(scope, kind, provider)``: saving twice replaces the
+    One row per ``(org, scope, kind, provider)``: saving twice replaces the
     value in place, never adds a row. The caller commits and, if it holds
     a :class:`whygraph.portal.context.ContextCache`, invalidates it.
 
@@ -229,7 +207,9 @@ def put_secret(
         Provider tag, required for ``llm_api_key`` (see
         :data:`LLM_KEY_PROVIDERS`), forbidden for ``github_token``.
     project_id : int, optional
-        ``None`` (default) stores the global default.
+        ``None`` (default) stores the org default.
+    org_id : int
+        The organization the secret belongs to (a project's own org).
 
     Raises
     ------
@@ -240,10 +220,15 @@ def put_secret(
     value = value.strip()
     if not value:
         raise ValueError("secret value must not be empty")
-    row = _find(session, kind, provider, project_id)
+    row = _find(session, kind, provider, project_id, org_id)
     if row is None:
         row = Secret(
-            project_id=project_id, kind=kind, provider=provider, ciphertext="", hint=""
+            org_id=org_id,
+            project_id=project_id,
+            kind=kind,
+            provider=provider,
+            ciphertext="",
+            hint="",
         )
         session.add(row)
     row.ciphertext = encrypt(value)
@@ -258,10 +243,11 @@ def delete_secret(
     kind: str,
     provider: str | None = None,
     project_id: int | None = None,
+    org_id: int,
 ) -> bool:
-    """Delete one secret; return whether a row existed."""
+    """Delete one secret of ``org_id``; return whether a row existed."""
     _check_scope(kind, provider)
-    row = _find(session, kind, provider, project_id)
+    row = _find(session, kind, provider, project_id, org_id)
     if row is None:
         return False
     session.delete(row)
@@ -275,8 +261,9 @@ def read_secret(
     kind: str,
     provider: str | None = None,
     project_id: int | None = None,
+    org_id: int,
 ) -> str | None:
-    """Return the decrypted secret, or ``None`` when none is stored.
+    """Return the decrypted secret of ``org_id``, or ``None`` when none is stored.
 
     In-process use only (context build, credential injection) - never
     hand the result to an API response.
@@ -287,7 +274,7 @@ def read_secret(
         If the stored token cannot be decrypted.
     """
     _check_scope(kind, provider)
-    row = _find(session, kind, provider, project_id)
+    row = _find(session, kind, provider, project_id, org_id)
     return None if row is None else decrypt(row.ciphertext)
 
 
@@ -297,8 +284,9 @@ def secret_status(
     kind: str,
     provider: str | None = None,
     project_id: int | None = None,
+    org_id: int,
 ) -> dict[str, Any]:
-    """Return the API-safe view of one secret.
+    """Return the API-safe view of one secret of ``org_id``.
 
     Returns
     -------
@@ -309,7 +297,7 @@ def secret_status(
         appears only then. Never contains the value or the ciphertext.
     """
     _check_scope(kind, provider)
-    row = _find(session, kind, provider, project_id)
+    row = _find(session, kind, provider, project_id, org_id)
     if row is None:
         return {"set": False, "hint": None}
     status: dict[str, Any] = {"set": True, "hint": row.hint}
@@ -333,7 +321,6 @@ __all__ = [
     "ensure_key",
     "hint_for",
     "key_path",
-    "load_existing_keyring",
     "load_keyring",
     "put_secret",
     "read_secret",

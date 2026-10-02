@@ -5,13 +5,13 @@ directions), the ``NULLS NOT DISTINCT`` unique / cascade constraints, the
 Fernet key file and keyring, the secret store's API shape, and building a
 ``ProjectContext`` under the config policy (rules 2 and 3 of section 4.2.1).
 Also the Postgres connection plumbing (URL resolution, the pooled and
-migration engines, the wait, the instance lock) and the frozen 2.0 fixture.
+migration engines, the wait, the instance lock), and M2b's tenancy revision
+(backfill, downgrade) and organization constraints.
 """
 
 from __future__ import annotations
 
 import os
-import sqlite3
 import stat
 import subprocess
 import sys
@@ -22,6 +22,7 @@ from typing import Iterator
 
 import anyio
 import pytest
+from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from sqlalchemy import create_engine, inspect, text
@@ -29,13 +30,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import SQLModel, select
 
-from conftest import (
-    LEGACY_REVISION,
-    LEGACY_ROW_COUNTS,
-    LEGACY_SECRET_KEY,
-    LEGACY_SECRET_PLAINTEXTS,
-    build_legacy_portal_db,
-)
+from conftest import builtin_org_id
 from whygraph.core.config import Config
 from whygraph.core.context import ProjectContext
 from whygraph.portal import db as portal_db
@@ -52,6 +47,8 @@ from whygraph.portal.context import (
     build_project_context,
 )
 from whygraph.portal.models import (
+    Membership,
+    Organization,
     PortalBase,
     Project,
     ProjectAgent,
@@ -61,6 +58,7 @@ from whygraph.portal.models import (
     Setting,
     User,
 )
+from whygraph.portal.orgs import add_member, create_org, ensure_builtin_org
 from whygraph.portal.projects import (
     is_valid_slug,
     slugify,
@@ -70,13 +68,14 @@ from whygraph.portal.projects import (
 
 PORTAL_TABLES = {
     "settings",
+    "organizations",
+    "memberships",
     "users",
     "projects",
     "project_agents",
     "project_config",
     "secrets",
     "scan_runs",
-    "legacy_import",
 }
 
 
@@ -94,8 +93,17 @@ def data(
         portal_db._reset_engine()
 
 
+@pytest.fixture
+def org(data: Path) -> int:
+    """The built-in org's id (created, as the portal's start would)."""
+    with portal_db.get_session() as s:
+        return builtin_org_id(s)
+
+
 def _project(session, slug: str = "demo", root: str | None = None, **kw) -> Project:
+    org_id = kw.pop("org_id", None)
     project = Project(
+        org_id=builtin_org_id(session) if org_id is None else org_id,
         slug=slug,
         name=slug,
         source=kw.pop("source", "local"),
@@ -196,6 +204,7 @@ def test_baseline_constraints_are_nulls_not_distinct(
 
 
 def test_baseline_inserts_no_rows(empty_portal_database: str) -> None:
+    """An empty database migrates to head with no rows - no org either."""
     portal_db.ensure_initialized()
     with portal_db.get_engine().connect() as conn:
         counts = {
@@ -205,35 +214,181 @@ def test_baseline_inserts_no_rows(empty_portal_database: str) -> None:
     assert counts == dict.fromkeys(PORTAL_TABLES, 0)
 
 
-def test_legacy_2_0_fixture_is_consistent(tmp_path: Path) -> None:
-    """The frozen 2.0 portal the importer reads: its head, its rows, its key."""
-    db = build_legacy_portal_db(tmp_path / "portal.db")
-    conn = sqlite3.connect(db)
-    try:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [
-            (LEGACY_REVISION,)
-        ]
-        counts = {
-            t: conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
-            for t in LEGACY_ROW_COUNTS
-        }
-        ciphertexts = dict(conn.execute("SELECT id, ciphertext FROM secrets"))
-        run_ids = [r[0] for r in conn.execute("SELECT id FROM scan_runs ORDER BY id")]
-        analyze = {r[0] for r in conn.execute("SELECT analyze FROM scan_runs")}
-        null_creator = conn.execute(
-            "SELECT count(*) FROM projects WHERE created_by IS NULL"
-        ).fetchone()[0]
-        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-    finally:
-        conn.close()
-    assert counts == LEGACY_ROW_COUNTS
-    assert run_ids == [1, 2, 4] and analyze == {0, 1} and null_creator == 1
-    keyring = pw_secrets.MultiFernet(
-        [pw_secrets.Fernet(LEGACY_SECRET_KEY.read_bytes().strip())]
+# ---------------------------------------------------------------------------
+# The tenancy revision (M2b): backfill, constraints, downgrade
+# ---------------------------------------------------------------------------
+
+BASELINE = "86e839432e62"
+TENANCY = "4ebfd8b89904"
+
+
+def _seed_m2a(conn) -> dict[str, int]:  # noqa: ANN001
+    """Rows with the M2a baseline's columns: what a dev install holds today."""
+    conn.execute(
+        text("INSERT INTO settings (id, mode, created_at) VALUES (1, 'local', 'now')")
     )
+    user = conn.execute(
+        text(
+            "INSERT INTO users (uid, display_name, role, created_at) "
+            "VALUES ('u-alice', 'Alice', 'owner', 'now') RETURNING id"
+        )
+    ).scalar_one()
+    project = conn.execute(
+        text(
+            "INSERT INTO projects (slug, name, source, root, created_by, created_at) "
+            "VALUES ('api', 'API', 'local', '/repos/api', :u, 'now') RETURNING id"
+        ),
+        {"u": user},
+    ).scalar_one()
+    conn.execute(
+        text(
+            "INSERT INTO project_config (project_id, config, updated_at) VALUES "
+            '(NULL, \'{"llm": {"model": "anthropic/a"}}\', \'now\'), '
+            "(:p, '{\"analyze\": {\"max_workers\": 2}}', 'now')"
+        ),
+        {"p": project},
+    )
+    conn.execute(
+        text(
+            "INSERT INTO secrets (project_id, kind, provider, ciphertext, hint, "
+            "created_at) VALUES "
+            "(NULL, 'llm_api_key', 'anthropic', 'c1', '…1111', 'now'), "
+            "(:p, 'github_token', NULL, 'c2', '…2222', 'now')"
+        ),
+        {"p": project},
+    )
+    return {"user": user, "project": project}
+
+
+def _columns(table: str) -> set[str]:
+    return {c["name"] for c in inspect(portal_db.get_engine()).get_columns(table)}
+
+
+def test_tenancy_upgrade_backfills_an_m2a_database(
+    empty_portal_database: str,
+) -> None:
+    command.upgrade(portal_db.alembic_config(), BASELINE)
+    with portal_db.get_engine().begin() as conn:
+        ids = _seed_m2a(conn)
+    portal_db._reset_engine()
+    command.upgrade(portal_db.alembic_config(), "head")
+
+    with portal_db.get_engine().connect() as conn:
+        orgs = conn.execute(text("SELECT id, slug, name, uid FROM organizations")).all()
+        assert [(o.slug, o.name) for o in orgs] == [("local", "Local")]
+        (org,) = orgs
+        assert len(org.uid) == 36
+        assert conn.execute(
+            text("SELECT builtin_org_id FROM settings")
+        ).scalar_one() == (org.id)
+        assert conn.execute(
+            text("SELECT org_id, user_id, role FROM memberships")
+        ).all() == [(org.id, ids["user"], "owner")]
+        for table in ("projects", "project_config", "secrets"):
+            assert set(
+                conn.execute(text(f"SELECT DISTINCT org_id FROM {table}")).scalars()
+            ) == {org.id}, table
+        assert conn.execute(text("SELECT count(*) FROM project_config")).scalar() == 2
+        assert conn.execute(text("SELECT count(*) FROM secrets")).scalar() == 2
+        constraints = set(
+            conn.execute(
+                text(
+                    "SELECT conname FROM pg_constraint c JOIN pg_namespace n "
+                    "ON n.oid = c.connamespace WHERE n.nspname = 'public'"
+                )
+            ).scalars()
+        )
     assert {
-        i: keyring.decrypt(c.encode()).decode() for i, c in ciphertexts.items()
-    } == LEGACY_SECRET_PLAINTEXTS
+        "uq_projects_org_slug",
+        "uq_projects_org_id",
+        "fk_projects_org",
+        "fk_project_config_org",
+        "fk_project_config_project",
+        "fk_secrets_org",
+        "fk_secrets_project",
+        "fk_settings_builtin_org",
+        "ck_organizations_slug",
+        "ck_memberships_role",
+    } <= constraints
+    assert "uq_projects_slug" not in constraints
+    assert "role" not in _columns("users")
+    assert "legacy_import" not in inspect(portal_db.get_engine()).get_table_names()
+
+    # The backfilled rows read back through the org-scoped helpers.
+    with portal_db.get_session() as s:
+        assert load_layer(s, None, org_id=org.id) == {"llm": {"model": "anthropic/a"}}
+        assert load_layer(s, ids["project"], org_id=org.id) == {
+            "analyze": {"max_workers": 2}
+        }
+
+
+def test_tenancy_scope_constraints_are_nulls_not_distinct(
+    empty_portal_database: str,
+) -> None:
+    portal_db.ensure_initialized()
+    with portal_db.get_engine().connect() as conn:
+        defs = dict(
+            conn.execute(
+                text(
+                    "SELECT indexname, indexdef FROM pg_indexes WHERE indexname IN "
+                    "('uq_project_config_scope', 'uq_secrets_scope')"
+                )
+            ).all()
+        )
+    assert "(org_id, project_id) NULLS NOT DISTINCT" in defs["uq_project_config_scope"]
+    assert (
+        "(org_id, project_id, kind, provider) NULLS NOT DISTINCT"
+        in defs["uq_secrets_scope"]
+    )
+
+
+def test_tenancy_downgrade_restores_the_m2a_rows(empty_portal_database: str) -> None:
+    command.upgrade(portal_db.alembic_config(), BASELINE)
+    with portal_db.get_engine().begin() as conn:
+        _seed_m2a(conn)
+    command.upgrade(portal_db.alembic_config(), "head")
+    portal_db._reset_engine()
+    command.downgrade(portal_db.alembic_config(), BASELINE)
+    portal_db._reset_engine()
+
+    tables = set(inspect(portal_db.get_engine()).get_table_names())
+    assert "legacy_import" in tables
+    assert not tables & {"organizations", "memberships"}
+    for table in ("projects", "project_config", "secrets", "settings"):
+        assert not _columns(table) & {"org_id", "builtin_org_id"}, table
+    with portal_db.get_engine().connect() as conn:
+        assert conn.execute(text("SELECT role FROM users")).scalars().all() == ["owner"]
+        assert conn.execute(text("SELECT slug FROM projects")).scalars().all() == [
+            "api"
+        ]
+        assert conn.execute(text("SELECT count(*) FROM project_config")).scalar() == 2
+        assert conn.execute(text("SELECT count(*) FROM secrets")).scalar() == 2
+        assert conn.execute(text("SELECT count(*) FROM legacy_import")).scalar() == 0
+        uniques = set(
+            conn.execute(
+                text("SELECT conname FROM pg_constraint WHERE contype = 'u'")
+            ).scalars()
+        )
+    assert "uq_projects_slug" in uniques
+    # And back up again: the round trip is clean.
+    portal_db._reset_engine()
+    command.upgrade(portal_db.alembic_config(), "head")
+
+
+def test_tenancy_downgrade_refuses_with_two_orgs(empty_portal_database: str) -> None:
+    portal_db.ensure_initialized()
+    with portal_db.get_session() as s:
+        builtin_org_id(s)
+        create_org(s, slug="beta", name="Beta")
+    portal_db._reset_engine()
+    with pytest.raises(RuntimeError, match="2 organizations"):
+        command.downgrade(portal_db.alembic_config(), BASELINE)
+    portal_db._reset_engine()
+    with portal_db.get_engine().connect() as conn:
+        assert conn.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar() == (TENANCY)
+        assert conn.execute(text("SELECT count(*) FROM organizations")).scalar() == 2
 
 
 # ---------------------------------------------------------------------------
@@ -330,10 +485,8 @@ def test_alembic_config_has_no_placeholder_url() -> None:
     assert portal_db.alembic_config().get_main_option("sqlalchemy.url") is None
 
 
-def test_ensure_initialized_returns_none_and_legacy_path(data: Path) -> None:
+def test_ensure_initialized_returns_none(data: Path) -> None:
     assert portal_db.ensure_initialized() is None
-    assert portal_db.legacy_db_path() == data / "portal.db"
-    assert not portal_db.legacy_db_path().exists()
 
 
 def test_postgres_scheme_and_password_file_authenticate(
@@ -456,99 +609,118 @@ def test_instance_lock_is_lost_with_its_session(portal_database: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_saving_global_config_twice_leaves_one_row(data: Path) -> None:
+def test_saving_global_config_twice_leaves_one_row(org: int) -> None:
     with portal_db.get_session() as s:
-        save_layer(s, None, {"llm": {"model": "anthropic/a"}})
+        save_layer(s, None, {"llm": {"model": "anthropic/a"}}, org_id=org)
     with portal_db.get_session() as s:
-        save_layer(s, None, {"llm": {"model": "anthropic/b"}})
+        save_layer(s, None, {"llm": {"model": "anthropic/b"}}, org_id=org)
     with portal_db.get_session() as s:
         rows = s.exec(
             select(ProjectConfig).where(ProjectConfig.project_id.is_(None))
         ).all()
         assert len(rows) == 1
         assert rows[0].config == {"llm": {"model": "anthropic/b"}}
-        assert load_layer(s, None) == {"llm": {"model": "anthropic/b"}}
+        assert load_layer(s, None, org_id=org) == {"llm": {"model": "anthropic/b"}}
 
 
-def test_saving_project_config_twice_leaves_one_row(data: Path) -> None:
+def test_saving_project_config_twice_leaves_one_row(org: int) -> None:
     with portal_db.get_session() as s:
         p = _project(s)
-        save_layer(s, p.id, {"analyze": {"max_workers": 2}})
-        save_layer(s, p.id, {"analyze": {"max_workers": 3}})
+        save_layer(s, p.id, {"analyze": {"max_workers": 2}}, org_id=org)
+        save_layer(s, p.id, {"analyze": {"max_workers": 3}}, org_id=org)
     with portal_db.get_session() as s:
         assert len(s.exec(select(ProjectConfig)).all()) == 1
 
 
-def test_duplicate_global_rows_are_rejected_by_the_index(data: Path) -> None:
-    with pytest.raises(IntegrityError):
+def test_duplicate_global_rows_are_rejected_by_the_index(org: int) -> None:
+    with pytest.raises(IntegrityError, match="uq_project_config_scope"):
         with portal_db.get_session() as s:
-            s.add(ProjectConfig(project_id=None, config={}))
+            s.add(ProjectConfig(org_id=org, project_id=None, config={}))
             s.flush()
-            s.add(ProjectConfig(project_id=None, config={"a": 1}))
+            s.add(ProjectConfig(org_id=org, project_id=None, config={"a": 1}))
             s.flush()
 
 
-def test_saving_a_global_secret_twice_leaves_one_row(data: Path) -> None:
+def test_saving_a_global_secret_twice_leaves_one_row(org: int) -> None:
     for value in ("sk-first-1111", "sk-second-2222"):
         with portal_db.get_session() as s:
             pw_secrets.put_secret(
-                s, kind="llm_api_key", provider="anthropic", value=value
+                s, kind="llm_api_key", provider="anthropic", value=value, org_id=org
             )
     with portal_db.get_session() as s:
         assert len(s.exec(select(Secret)).all()) == 1
         assert (
-            pw_secrets.read_secret(s, kind="llm_api_key", provider="anthropic")
+            pw_secrets.read_secret(
+                s, kind="llm_api_key", provider="anthropic", org_id=org
+            )
             == "sk-second-2222"
         )
 
 
-def test_github_token_uniqueness_holds_despite_null_provider(data: Path) -> None:
+def test_github_token_uniqueness_holds_despite_null_provider(org: int) -> None:
     """A NULL provider must not let duplicate GitHub tokens slip past UNIQUE."""
-    with pytest.raises(IntegrityError):
+    with pytest.raises(IntegrityError, match="uq_secrets_scope"):
         with portal_db.get_session() as s:
             for _ in range(2):
-                s.add(Secret(kind="github_token", ciphertext="x", hint="x"))
+                s.add(Secret(org_id=org, kind="github_token", ciphertext="x", hint="x"))
                 s.flush()
 
 
-def test_project_secret_uniqueness_holds_despite_null_provider(data: Path) -> None:
+def test_project_secret_uniqueness_holds_despite_null_provider(org: int) -> None:
     with portal_db.get_session() as s:
         p = _project(s)
         pid = p.id
-    with pytest.raises(IntegrityError):
+    with pytest.raises(IntegrityError, match="uq_secrets_scope"):
         with portal_db.get_session() as s:
             for _ in range(2):
                 s.add(
                     Secret(
-                        project_id=pid, kind="github_token", ciphertext="x", hint="x"
+                        org_id=org,
+                        project_id=pid,
+                        kind="github_token",
+                        ciphertext="x",
+                        hint="x",
                     )
                 )
                 s.flush()
 
 
-def test_secret_kind_and_provider_are_checked(data: Path) -> None:
-    for bad in (
-        Secret(kind="nonsense", ciphertext="x", hint="x"),
-        Secret(kind="llm_api_key", provider=None, ciphertext="x", hint="x"),
-        Secret(kind="github_token", provider="anthropic", ciphertext="x", hint="x"),
-    ):
-        with pytest.raises(IntegrityError):
-            with portal_db.get_session() as s:
-                s.add(bad)
-                s.flush()
+@pytest.mark.parametrize(
+    ("kind", "provider", "constraint"),
+    [
+        ("nonsense", None, "ck_secrets_kind"),
+        ("llm_api_key", None, "ck_secrets_provider"),
+        ("github_token", "anthropic", "ck_secrets_provider"),
+    ],
+)
+def test_secret_kind_and_provider_are_checked(
+    org: int, kind: str, provider: str | None, constraint: str
+) -> None:
+    bad = Secret(org_id=org, kind=kind, provider=provider, ciphertext="x", hint="x")
+    with pytest.raises(IntegrityError, match=constraint):
+        with portal_db.get_session() as s:
+            s.add(bad)
+            s.flush()
 
 
-def test_deleting_a_project_cascades(data: Path) -> None:
+def test_deleting_a_project_cascades(org: int) -> None:
     with portal_db.get_session() as s:
         p = _project(s)
         other = _project(s, "other")
         pid, oid = p.id, other.id
-        save_layer(s, pid, {"analyze": {"max_workers": 2}})
-        save_layer(s, oid, {"analyze": {"max_workers": 4}})
+        save_layer(s, pid, {"analyze": {"max_workers": 2}}, org_id=org)
+        save_layer(s, oid, {"analyze": {"max_workers": 4}}, org_id=org)
         pw_secrets.put_secret(
-            s, kind="llm_api_key", provider="openai", value="sk-abcd", project_id=pid
+            s,
+            kind="llm_api_key",
+            provider="openai",
+            value="sk-abcd",
+            project_id=pid,
+            org_id=org,
         )
-        pw_secrets.put_secret(s, kind="github_token", value="ghp_xxxx", project_id=oid)
+        pw_secrets.put_secret(
+            s, kind="github_token", value="ghp_xxxx", project_id=oid, org_id=org
+        )
         s.add(ProjectAgent(project_id=pid, agent="claude"))
         s.add(ScanRun(project_id=pid, trigger="manual"))
         s.add(ScanRun(project_id=oid, trigger="hook"))
@@ -583,7 +755,7 @@ def test_user_has_a_stable_uuid(data: Path) -> None:
         s.add(b)
         s.flush()
         assert len(a.uid) == 36 and a.uid != b.uid
-        assert a.role == "owner" and a.username is None and a.password_hash is None
+        assert a.username is None and a.password_hash is None
 
 
 def test_project_agents_rejects_unknown_agent_and_duplicates(data: Path) -> None:
@@ -620,10 +792,10 @@ def test_settings_is_a_singleton(data: Path) -> None:
 def test_project_slug_and_root_are_unique(data: Path) -> None:
     with portal_db.get_session() as s:
         _project(s, "a", root="/r/a")
-    with pytest.raises(IntegrityError):
+    with pytest.raises(IntegrityError, match="uq_projects_org_slug"):
         with portal_db.get_session() as s:
             _project(s, "a", root="/r/other")
-    with pytest.raises(IntegrityError):
+    with pytest.raises(IntegrityError, match="uq_projects_root"):
         with portal_db.get_session() as s:
             _project(s, "b", root="/r/a")
 
@@ -634,9 +806,186 @@ def test_m2_columns_exist(data: Path) -> None:
         t: {c["name"] for c in insp.get_columns(t)}
         for t in ("users", "projects", "scan_runs")
     }
-    assert {"uid", "username", "password_hash", "role"} <= cols["users"]
+    assert {"uid", "username", "password_hash"} <= cols["users"]
+    assert "role" not in cols["users"]  # per org, in memberships (M2b)
     assert {"created_by", "last_scanned_head", "initialized_at"} <= cols["projects"]
     assert {"requested_by", "analyze", "trigger", "kind"} <= cols["scan_runs"]
+
+
+# ---------------------------------------------------------------------------
+# Organizations: slugs, the built-in org, memberships, cross-org constraints
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("slug", ["Bad", "-x", "x-", "a b", "api", "www", "a" * 41])
+def test_org_slug_is_validated_on_insert(data: Path, slug: str) -> None:
+    with pytest.raises(ValueError):
+        with portal_db.get_session() as s:
+            s.add(Organization(slug=slug, name="x"))
+            s.flush()
+
+
+def test_org_slug_format_is_checked_in_the_database(data: Path) -> None:
+    with pytest.raises(IntegrityError, match="ck_organizations_slug"):
+        with portal_db.get_engine().begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO organizations (uid, slug, name, created_at) "
+                    "VALUES ('u1', 'Bad Slug', 'x', 'now')"
+                )
+            )
+
+
+def test_org_slug_is_immutable_and_the_builtin_org_is_kept(org: int) -> None:
+    with portal_db.get_session() as s:
+        s.get(Organization, org).name = "Renamed"  # the name is renamable
+    with pytest.raises(ValueError, match="immutable"):
+        with portal_db.get_session() as s:
+            s.get(Organization, org).slug = "changed"
+            s.flush()
+    with pytest.raises(IntegrityError, match="fk_settings_builtin_org"):
+        with portal_db.get_session() as s:
+            s.delete(s.get(Organization, org))
+            s.flush()
+    with portal_db.get_session() as s:
+        row = s.get(Organization, org)
+        assert (row.slug, row.name) == ("local", "Renamed")
+
+
+def test_project_org_is_immutable(org: int) -> None:
+    with portal_db.get_session() as s:
+        beta = create_org(s, slug="beta", name="Beta").id
+        pid = _project(s).id
+    with pytest.raises(ValueError, match="organization is immutable"):
+        with portal_db.get_session() as s:
+            s.get(Project, pid).org_id = beta
+            s.flush()
+    with portal_db.get_session() as s:
+        _project(s, "x", org_id=beta)
+    # Removing a project has effects outside the DB, so an org never cascades.
+    with pytest.raises(IntegrityError, match="fk_projects_org"):
+        with portal_db.get_session() as s:
+            s.delete(s.get(Organization, beta))
+            s.flush()
+
+
+def test_ensure_builtin_org_is_idempotent(data: Path) -> None:
+    with portal_db.get_session() as s:
+        setting = Setting(id=1, mode="local")
+        s.add(setting)  # only added, not flushed: what the portal's start passes
+        first = ensure_builtin_org(s, setting)
+        assert (first.slug, first.name) == ("local", "Local")
+        assert setting.builtin_org_id == first.id
+        first_id = first.id
+    with portal_db.get_session() as s:
+        assert ensure_builtin_org(s, s.get(Setting, 1)).id == first_id
+        s.get(Setting, 1).builtin_org_id = None  # a lost link is repaired
+    with portal_db.get_session() as s:
+        assert ensure_builtin_org(s, s.get(Setting, 1)).id == first_id
+    with portal_db.get_session() as s:
+        assert s.get(Setting, 1).builtin_org_id == first_id
+        assert len(s.exec(select(Organization)).all()) == 1
+
+
+def test_memberships_check_the_role_and_follow_the_user(org: int) -> None:
+    with portal_db.get_session() as s:
+        user = User(display_name="Ada")
+        s.add(user)
+        s.flush()
+        uid = user.id
+        member = add_member(s, org_id=org, user_id=uid, role="admin")
+        assert member.role == "admin"
+        with pytest.raises(ValueError):
+            add_member(s, org_id=org, user_id=uid, role="boss")
+    with pytest.raises(IntegrityError, match="ck_memberships_role"):
+        with portal_db.get_engine().begin() as conn:
+            conn.execute(text("UPDATE memberships SET role = 'boss'"))
+    with pytest.raises(IntegrityError, match="pk_memberships"):
+        with portal_db.get_session() as s:
+            add_member(s, org_id=org, user_id=uid, role="member")
+    with portal_db.get_session() as s:
+        s.delete(s.get(User, uid))
+    with portal_db.get_session() as s:
+        assert s.exec(select(Membership)).all() == []
+
+
+def test_project_rows_must_share_their_projects_org(org: int) -> None:
+    with portal_db.get_session() as s:
+        beta = create_org(s, slug="beta", name="Beta").id
+        pid = _project(s).id
+    with pytest.raises(IntegrityError, match="fk_secrets_project"):
+        with portal_db.get_session() as s:
+            s.add(
+                Secret(
+                    org_id=beta,
+                    project_id=pid,
+                    kind="github_token",
+                    ciphertext="x",
+                    hint="x",
+                )
+            )
+            s.flush()
+    with pytest.raises(IntegrityError, match="fk_project_config_project"):
+        with portal_db.get_session() as s:
+            s.add(ProjectConfig(org_id=beta, project_id=pid, config={}))
+            s.flush()
+
+
+def test_orgs_hold_the_same_slug_and_their_own_defaults(org: int) -> None:
+    with portal_db.get_session() as s:
+        beta = create_org(s, slug="beta", name="Beta").id
+        _project(s, "api", root="/r/a")
+        _project(s, "api", root="/r/b", org_id=beta)
+        save_layer(s, None, {"llm": {"model": "anthropic/a"}}, org_id=org)
+        save_layer(s, None, {"llm": {"model": "anthropic/b"}}, org_id=beta)
+        assert unique_slug(s, "api", org_id=beta) == "api-2"
+        assert unique_slug(s, "web", org_id=beta) == "web"
+    with portal_db.get_session() as s:
+        assert load_layer(s, None, org_id=org) == {"llm": {"model": "anthropic/a"}}
+        assert load_layer(s, None, org_id=beta) == {"llm": {"model": "anthropic/b"}}
+        assert len(s.exec(select(ProjectConfig)).all()) == 2
+
+
+def test_context_and_endpoint_clearing_stay_within_the_org(org: int) -> None:
+    with portal_db.get_session() as s:
+        beta = create_org(s, slug="beta", name="Beta").id
+        mine, theirs = _project(s, "a"), _project(s, "b", org_id=beta)
+        for org_id, value in ((org, "sk-local-1111"), (beta, "sk-beta-2222")):
+            save_layer(
+                s,
+                None,
+                {"llm": {"openai": {"base_url": "https://a/v1"}}},
+                org_id=org_id,
+            )
+            pw_secrets.put_secret(
+                s, kind="llm_api_key", provider="openai", value=value, org_id=org_id
+            )
+        pw_secrets.put_secret(
+            s,
+            kind="llm_api_key",
+            provider="openai",
+            value="sk-beta-proj",
+            project_id=theirs.id,
+            org_id=beta,
+        )
+        assert _build(s, mine).config.llm.openai.api_key == "sk-local-1111"
+        assert _build(s, theirs).config.llm.openai.api_key == "sk-beta-proj"
+        # local's endpoint change clears only local's keys (rule 3, per org)
+        cleared = save_layer(
+            s, None, {"llm": {"openai": {"base_url": "https://b/v1"}}}, org_id=org
+        )
+        assert cleared == []
+        assert pw_secrets.secret_status(
+            s, kind="llm_api_key", provider="openai", org_id=beta
+        )["set"]
+        assert pw_secrets.secret_status(
+            s,
+            kind="llm_api_key",
+            provider="openai",
+            project_id=theirs.id,
+            org_id=beta,
+        )["set"]
+        assert _build(s, mine).config.llm.openai.api_key is None
 
 
 # ---------------------------------------------------------------------------
@@ -665,16 +1014,16 @@ def test_slugify() -> None:
     assert is_valid_slug(slugify("x" * 200))
 
 
-def test_unique_slug_suffixes_on_collision(data: Path) -> None:
+def test_unique_slug_suffixes_on_collision(org: int) -> None:
     with portal_db.get_session() as s:
-        assert unique_slug(s, "Whygraph") == "whygraph"
+        assert unique_slug(s, "Whygraph", org_id=org) == "whygraph"
         _project(s, "whygraph")
-        assert unique_slug(s, "Whygraph") == "whygraph-2"
+        assert unique_slug(s, "Whygraph", org_id=org) == "whygraph-2"
         _project(s, "whygraph-2")
-        assert unique_slug(s, "whygraph") == "whygraph-3"
+        assert unique_slug(s, "whygraph", org_id=org) == "whygraph-3"
         long = "x" * 63
         _project(s, long)
-        assert is_valid_slug(unique_slug(s, long))
+        assert is_valid_slug(unique_slug(s, long, org_id=org))
 
 
 def test_slug_is_validated_on_insert_and_immutable(data: Path) -> None:
@@ -715,34 +1064,21 @@ def test_keyring_round_trips_and_ciphertext_differs_per_write(data: Path) -> Non
     assert len(pw_secrets.load_keyring()._fernets) == 1  # M1: one key, MultiFernet
 
 
-def test_existing_keyring_never_creates_a_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("WHYGRAPH_DATA", str(tmp_path / "d"))
-    with pytest.raises(FileNotFoundError):
-        pw_secrets.load_existing_keyring()
-    assert not (tmp_path / "d" / "secret.key").exists()
-    token = pw_secrets.encrypt("sk-x")  # creates the key file
-    assert pw_secrets.load_existing_keyring().decrypt(token.encode()) == b"sk-x"
-    other = tmp_path / "other.key"
-    other.write_text("garbage")
-    with pytest.raises(ValueError):
-        pw_secrets.load_existing_keyring(other)
-
-
-def test_secrets_round_trip_and_ciphertext_differs_per_write(data: Path) -> None:
+def test_secrets_round_trip_and_ciphertext_differs_per_write(org: int) -> None:
     with portal_db.get_session() as s:
         pw_secrets.put_secret(
-            s, kind="llm_api_key", provider="anthropic", value="sk-ant-a1b2"
+            s, kind="llm_api_key", provider="anthropic", value="sk-ant-a1b2", org_id=org
         )
         first = s.exec(select(Secret)).one().ciphertext
     with portal_db.get_session() as s:
         pw_secrets.put_secret(
-            s, kind="llm_api_key", provider="anthropic", value="sk-ant-a1b2"
+            s, kind="llm_api_key", provider="anthropic", value="sk-ant-a1b2", org_id=org
         )
         second = s.exec(select(Secret)).one().ciphertext
         assert (
-            pw_secrets.read_secret(s, kind="llm_api_key", provider="anthropic")
+            pw_secrets.read_secret(
+                s, kind="llm_api_key", provider="anthropic", org_id=org
+            )
             == "sk-ant-a1b2"
         )
     assert first != second
@@ -751,28 +1087,32 @@ def test_secrets_round_trip_and_ciphertext_differs_per_write(data: Path) -> None
     assert "sk-ant" not in stored[0] and "sk-ant" not in stored[1]
 
 
-def test_secret_status_exposes_only_set_and_hint(data: Path) -> None:
+def test_secret_status_exposes_only_set_and_hint(org: int) -> None:
     with portal_db.get_session() as s:
-        assert pw_secrets.secret_status(s, kind="github_token") == {
+        assert pw_secrets.secret_status(s, kind="github_token", org_id=org) == {
             "set": False,
             "hint": None,
         }
-        pw_secrets.put_secret(s, kind="github_token", value="ghp_abcdefa1b2")
-        status = pw_secrets.secret_status(s, kind="github_token")
+        pw_secrets.put_secret(
+            s, kind="github_token", value="ghp_abcdefa1b2", org_id=org
+        )
+        status = pw_secrets.secret_status(s, kind="github_token", org_id=org)
     assert status == {"set": True, "hint": "…a1b2"}
     assert "ghp_" not in repr(status)
 
 
-def test_unreadable_secret_is_flagged_not_fatal(data: Path) -> None:
+def test_unreadable_secret_is_flagged_not_fatal(org: int) -> None:
     with portal_db.get_session() as s:
-        pw_secrets.put_secret(s, kind="github_token", value="ghp_abcdefa1b2")
+        pw_secrets.put_secret(
+            s, kind="github_token", value="ghp_abcdefa1b2", org_id=org
+        )
         s.exec(select(Secret)).one().ciphertext = "not-a-fernet-token"
     with portal_db.get_session() as s:
-        status = pw_secrets.secret_status(s, kind="github_token")
+        status = pw_secrets.secret_status(s, kind="github_token", org_id=org)
     assert status == {"set": True, "hint": "…a1b2", "unreadable": True}
 
 
-def test_secret_store_validates_scope(data: Path) -> None:
+def test_secret_store_validates_scope(org: int) -> None:
     with portal_db.get_session() as s:
         for kw in (
             dict(kind="llm_api_key", provider="ollama", value="x"),
@@ -782,14 +1122,14 @@ def test_secret_store_validates_scope(data: Path) -> None:
             dict(kind="github_token", value="   "),
         ):
             with pytest.raises(ValueError):
-                pw_secrets.put_secret(s, **kw)
+                pw_secrets.put_secret(s, **kw, org_id=org)
 
 
-def test_delete_secret(data: Path) -> None:
+def test_delete_secret(org: int) -> None:
     with portal_db.get_session() as s:
-        pw_secrets.put_secret(s, kind="github_token", value="ghp_1234")
-        assert pw_secrets.delete_secret(s, kind="github_token") is True
-        assert pw_secrets.delete_secret(s, kind="github_token") is False
+        pw_secrets.put_secret(s, kind="github_token", value="ghp_1234", org_id=org)
+        assert pw_secrets.delete_secret(s, kind="github_token", org_id=org) is True
+        assert pw_secrets.delete_secret(s, kind="github_token", org_id=org) is False
 
 
 _RACER = """
@@ -869,21 +1209,26 @@ def test_corrupt_key_file_is_an_error_not_a_silent_regenerate(
 # ---------------------------------------------------------------------------
 
 
-def test_secrets_in_config_dict_are_rejected(data: Path) -> None:
+def test_secrets_in_config_dict_are_rejected(org: int) -> None:
     bad = {"llm": {"anthropic": {"api_key": "sk-x"}}, "scan": {"token": "ghp_x"}}
     assert find_secret_paths(bad) == ["llm.anthropic.api_key", "scan.token"]
     with portal_db.get_session() as s:
         with pytest.raises(ConfigPolicyError) as exc:
-            save_layer(s, None, bad)
+            save_layer(s, None, bad, org_id=org)
         assert "sk-x" not in str(exc.value) and "ghp_x" not in str(exc.value)
         assert s.exec(select(ProjectConfig)).all() == []
 
 
-def test_changing_an_endpoint_clears_that_scopes_key_only(data: Path) -> None:
+def test_changing_an_endpoint_clears_that_scopes_key_only(org: int) -> None:
     with portal_db.get_session() as s:
         pid = _project(s).id
-        save_layer(s, None, {"llm": {"openai": {"base_url": "https://a.example/v1"}}})
-        save_layer(s, pid, {})
+        save_layer(
+            s,
+            None,
+            {"llm": {"openai": {"base_url": "https://a.example/v1"}}},
+            org_id=org,
+        )
+        save_layer(s, pid, {}, org_id=org)
         for scope in (None, pid):
             pw_secrets.put_secret(
                 s,
@@ -891,6 +1236,7 @@ def test_changing_an_endpoint_clears_that_scopes_key_only(data: Path) -> None:
                 provider="openai",
                 value="sk-1111",
                 project_id=scope,
+                org_id=org,
             )
             pw_secrets.put_secret(
                 s,
@@ -898,6 +1244,7 @@ def test_changing_an_endpoint_clears_that_scopes_key_only(data: Path) -> None:
                 provider="anthropic",
                 value="sk-2222",
                 project_id=scope,
+                org_id=org,
             )
         # unrelated edit: keys survive
         save_layer(
@@ -907,46 +1254,66 @@ def test_changing_an_endpoint_clears_that_scopes_key_only(data: Path) -> None:
                 "llm": {"openai": {"base_url": "https://a.example/v1"}},
                 "analyze": {"max_workers": 2},
             },
+            org_id=org,
         )
-        assert pw_secrets.secret_status(s, kind="llm_api_key", provider="openai")["set"]
+        assert pw_secrets.secret_status(
+            s, kind="llm_api_key", provider="openai", org_id=org
+        )["set"]
         # global endpoint edit clears the global openai key, and the openai
         # key of every project that inherits the endpoint (security fix 1,
         # finding 6) - never another provider's
         cleared = save_layer(
-            s, None, {"llm": {"openai": {"base_url": "https://evil.example/v1"}}}
+            s,
+            None,
+            {"llm": {"openai": {"base_url": "https://evil.example/v1"}}},
+            org_id=org,
         )
         assert cleared == [(pid, "openai")]
-        assert not pw_secrets.secret_status(s, kind="llm_api_key", provider="openai")[
-            "set"
-        ]
-        assert pw_secrets.secret_status(s, kind="llm_api_key", provider="anthropic")[
-            "set"
-        ]
         assert not pw_secrets.secret_status(
-            s, kind="llm_api_key", provider="openai", project_id=pid
-        )["set"]
-        pw_secrets.put_secret(
-            s, kind="llm_api_key", provider="openai", value="sk-3333", project_id=pid
-        )
-        # a project-scope endpoint edit clears that project's key
-        save_layer(s, pid, {"llm": {"openai": {"base_url": "https://p.example/v1"}}})
-        assert not pw_secrets.secret_status(
-            s, kind="llm_api_key", provider="openai", project_id=pid
+            s, kind="llm_api_key", provider="openai", org_id=org
         )["set"]
         assert pw_secrets.secret_status(
-            s, kind="llm_api_key", provider="anthropic", project_id=pid
+            s, kind="llm_api_key", provider="anthropic", org_id=org
+        )["set"]
+        assert not pw_secrets.secret_status(
+            s, kind="llm_api_key", provider="openai", project_id=pid, org_id=org
+        )["set"]
+        pw_secrets.put_secret(
+            s,
+            kind="llm_api_key",
+            provider="openai",
+            value="sk-3333",
+            project_id=pid,
+            org_id=org,
+        )
+        # a project-scope endpoint edit clears that project's key
+        save_layer(
+            s,
+            pid,
+            {"llm": {"openai": {"base_url": "https://p.example/v1"}}},
+            org_id=org,
+        )
+        assert not pw_secrets.secret_status(
+            s, kind="llm_api_key", provider="openai", project_id=pid, org_id=org
+        )["set"]
+        assert pw_secrets.secret_status(
+            s, kind="llm_api_key", provider="anthropic", project_id=pid, org_id=org
         )["set"]
 
 
-def test_removing_an_endpoint_also_clears_the_key(data: Path) -> None:
+def test_removing_an_endpoint_also_clears_the_key(org: int) -> None:
     with portal_db.get_session() as s:
-        save_layer(s, None, {"llm": {"ollama": {"host": "http://h:1"}}})
-        save_layer(s, None, {"llm": {"openai": {"base_url": "https://a/v1"}}})
-        pw_secrets.put_secret(s, kind="llm_api_key", provider="openai", value="sk-1111")
-        save_layer(s, None, {})
-        assert not pw_secrets.secret_status(s, kind="llm_api_key", provider="openai")[
-            "set"
-        ]
+        save_layer(s, None, {"llm": {"ollama": {"host": "http://h:1"}}}, org_id=org)
+        save_layer(
+            s, None, {"llm": {"openai": {"base_url": "https://a/v1"}}}, org_id=org
+        )
+        pw_secrets.put_secret(
+            s, kind="llm_api_key", provider="openai", value="sk-1111", org_id=org
+        )
+        save_layer(s, None, {}, org_id=org)
+        assert not pw_secrets.secret_status(
+            s, kind="llm_api_key", provider="openai", org_id=org
+        )["set"]
 
 
 # ---------------------------------------------------------------------------
@@ -958,7 +1325,7 @@ def _build(session, project: Project) -> ProjectContext:
     return build_project_context(session, project)
 
 
-def test_context_merges_layers_project_wins(data: Path) -> None:
+def test_context_merges_layers_project_wins(org: int) -> None:
     with portal_db.get_session() as s:
         save_layer(
             s,
@@ -968,10 +1335,14 @@ def test_context_merges_layers_project_wins(data: Path) -> None:
                 "analyze": {"max_workers": 2},
                 "scan": {"max_workers": 9},  # 1.x alias, normalized per layer
             },
+            org_id=org,
         )
         p = _project(s)
         save_layer(
-            s, p.id, {"analyze": {"max_workers": 6}, "scan": {"forge": "github"}}
+            s,
+            p.id,
+            {"analyze": {"max_workers": 6}, "scan": {"forge": "github"}},
+            org_id=org,
         )
         ctx = _build(s, p)
     assert ctx.slug == "demo" and ctx.root == Path("/repos/demo")
@@ -980,21 +1351,24 @@ def test_context_merges_layers_project_wins(data: Path) -> None:
     assert ctx.config.scan_forge == "github"
 
 
-def test_context_null_resets_a_key(data: Path) -> None:
+def test_context_null_resets_a_key(org: int) -> None:
     with portal_db.get_session() as s:
-        save_layer(s, None, {"analyze": {"max_workers": 2}})
+        save_layer(s, None, {"analyze": {"max_workers": 2}}, org_id=org)
         p = _project(s)
-        save_layer(s, p.id, {"analyze": {"max_workers": None}})
+        save_layer(s, p.id, {"analyze": {"max_workers": None}}, org_id=org)
         assert _build(s, p).config.analyze.max_workers == Config().analyze.max_workers
 
 
-def test_db_paths_in_a_project_row_are_ignored(data: Path, tmp_path: Path) -> None:
+def test_db_paths_in_a_project_row_are_ignored(
+    data: Path, org: int, tmp_path: Path
+) -> None:
     root = tmp_path / "repo"
     with portal_db.get_session() as s:
         save_layer(
             s,
             None,
             {"whygraph_db": "/etc/global.db", "codegraph_db": str(data / "portal.db")},
+            org_id=org,
         )
         p = _project(s, root=str(root))
         save_layer(
@@ -1004,6 +1378,7 @@ def test_db_paths_in_a_project_row_are_ignored(data: Path, tmp_path: Path) -> No
                 "whygraph_db": str(tmp_path / "other" / "whygraph.db"),
                 "codegraph_db": "../x.db",
             },
+            org_id=org,
         )
         ctx = _build(s, p)
     assert ctx.config.whygraph_db == root / ".whygraph" / "whygraph.db"
@@ -1021,15 +1396,23 @@ def test_github_clone_root_resolves_under_the_data_dir(data: Path) -> None:
     )
 
 
-def test_context_injects_secrets_in_memory_only(data: Path) -> None:
+def test_context_injects_secrets_in_memory_only(org: int) -> None:
     with portal_db.get_session() as s:
         pw_secrets.put_secret(
-            s, kind="llm_api_key", provider="anthropic", value="sk-glob-1111"
+            s,
+            kind="llm_api_key",
+            provider="anthropic",
+            value="sk-glob-1111",
+            org_id=org,
         )
         pw_secrets.put_secret(
-            s, kind="llm_api_key", provider="claude-cli", value="sk-cli-2222"
+            s,
+            kind="llm_api_key",
+            provider="claude-cli",
+            value="sk-cli-2222",
+            org_id=org,
         )
-        pw_secrets.put_secret(s, kind="github_token", value="ghp_glob3333")
+        pw_secrets.put_secret(s, kind="github_token", value="ghp_glob3333", org_id=org)
         p = _project(s)
         ctx = _build(s, p)
         stored = [c.config for c in s.exec(select(ProjectConfig)).all()]
@@ -1041,12 +1424,16 @@ def test_context_injects_secrets_in_memory_only(data: Path) -> None:
         assert secret not in repr(ctx.config) and secret not in repr(ctx)
 
 
-def test_project_secret_overrides_global_for_that_project_only(data: Path) -> None:
+def test_project_secret_overrides_global_for_that_project_only(org: int) -> None:
     with portal_db.get_session() as s:
         pw_secrets.put_secret(
-            s, kind="llm_api_key", provider="anthropic", value="sk-glob-0000"
+            s,
+            kind="llm_api_key",
+            provider="anthropic",
+            value="sk-glob-0000",
+            org_id=org,
         )
-        pw_secrets.put_secret(s, kind="github_token", value="ghp_glob0000")
+        pw_secrets.put_secret(s, kind="github_token", value="ghp_glob0000", org_id=org)
         a, b = _project(s, "a"), _project(s, "b")
         pw_secrets.put_secret(
             s,
@@ -1054,9 +1441,10 @@ def test_project_secret_overrides_global_for_that_project_only(data: Path) -> No
             provider="anthropic",
             value="sk-proj-a111",
             project_id=a.id,
+            org_id=org,
         )
         pw_secrets.put_secret(
-            s, kind="github_token", value="ghp_proj-a11", project_id=a.id
+            s, kind="github_token", value="ghp_proj-a11", project_id=a.id, org_id=org
         )
         ca, cb = _build(s, a), _build(s, b)
     assert ca.config.llm.anthropic.api_key == "sk-proj-a111"
@@ -1065,19 +1453,24 @@ def test_project_secret_overrides_global_for_that_project_only(data: Path) -> No
     assert cb.config.scan_token == "ghp_glob0000"
 
 
-def test_project_overriding_base_url_gets_no_global_key(data: Path) -> None:
+def test_project_overriding_base_url_gets_no_global_key(org: int) -> None:
     with portal_db.get_session() as s:
         pw_secrets.put_secret(
-            s, kind="llm_api_key", provider="openai", value="sk-glob-1111"
+            s, kind="llm_api_key", provider="openai", value="sk-glob-1111", org_id=org
         )
         pw_secrets.put_secret(
-            s, kind="llm_api_key", provider="anthropic", value="sk-glob-2222"
+            s,
+            kind="llm_api_key",
+            provider="anthropic",
+            value="sk-glob-2222",
+            org_id=org,
         )
         plain, overriding = _project(s, "plain"), _project(s, "over")
         save_layer(
             s,
             overriding.id,
             {"llm": {"openai": {"base_url": "https://attacker.example/v1"}}},
+            org_id=org,
         )
         c_plain, c_over = _build(s, plain), _build(s, overriding)
     assert c_plain.config.llm.openai.api_key == "sk-glob-1111"
@@ -1088,34 +1481,44 @@ def test_project_overriding_base_url_gets_no_global_key(data: Path) -> None:
     )  # other providers unaffected
 
 
-def test_project_own_key_is_kept_with_its_own_endpoint(data: Path) -> None:
+def test_project_own_key_is_kept_with_its_own_endpoint(org: int) -> None:
     with portal_db.get_session() as s:
         p = _project(s)
-        save_layer(s, p.id, {"llm": {"openai": {"base_url": "https://gw.example/v1"}}})
+        save_layer(
+            s,
+            p.id,
+            {"llm": {"openai": {"base_url": "https://gw.example/v1"}}},
+            org_id=org,
+        )
         pw_secrets.put_secret(
             s,
             kind="llm_api_key",
             provider="openai",
             value="sk-mine-1111",
             project_id=p.id,
+            org_id=org,
         )
         assert _build(s, p).config.llm.openai.api_key == "sk-mine-1111"
 
 
-def test_null_endpoint_is_not_an_override(data: Path) -> None:
+def test_null_endpoint_is_not_an_override(org: int) -> None:
     with portal_db.get_session() as s:
         pw_secrets.put_secret(
-            s, kind="llm_api_key", provider="openai", value="sk-glob-1111"
+            s, kind="llm_api_key", provider="openai", value="sk-glob-1111", org_id=org
         )
         p = _project(s)
-        save_layer(s, p.id, {"llm": {"openai": {"base_url": None}}})
+        save_layer(s, p.id, {"llm": {"openai": {"base_url": None}}}, org_id=org)
         assert _build(s, p).config.llm.openai.api_key == "sk-glob-1111"
 
 
-def test_unreadable_secret_does_not_fail_the_build_or_fall_back(data: Path) -> None:
+def test_unreadable_secret_does_not_fail_the_build_or_fall_back(org: int) -> None:
     with portal_db.get_session() as s:
         pw_secrets.put_secret(
-            s, kind="llm_api_key", provider="anthropic", value="sk-glob-0000"
+            s,
+            kind="llm_api_key",
+            provider="anthropic",
+            value="sk-glob-0000",
+            org_id=org,
         )
         p = _project(s)
         pw_secrets.put_secret(
@@ -1124,6 +1527,7 @@ def test_unreadable_secret_does_not_fail_the_build_or_fall_back(data: Path) -> N
             provider="anthropic",
             value="sk-proj-1111",
             project_id=p.id,
+            org_id=org,
         )
         for row in s.exec(select(Secret).where(Secret.project_id == p.id)).all():
             row.ciphertext = "garbage"
@@ -1138,15 +1542,15 @@ def test_unreadable_secret_does_not_fail_the_build_or_fall_back(data: Path) -> N
 # ---------------------------------------------------------------------------
 
 
-def test_cache_builds_once_and_rebuilds_after_invalidate(data: Path) -> None:
+def test_cache_builds_once_and_rebuilds_after_invalidate(org: int) -> None:
     cache = ContextCache()
     with portal_db.get_session() as s:
         pid = _project(s).id
-        save_layer(s, pid, {"analyze": {"max_workers": 2}})
+        save_layer(s, pid, {"analyze": {"max_workers": 2}}, org_id=org)
     first = cache.get(pid)
     assert cache.get(pid) is first
     with portal_db.get_session() as s:
-        save_layer(s, pid, {"analyze": {"max_workers": 5}})
+        save_layer(s, pid, {"analyze": {"max_workers": 5}}, org_id=org)
     assert cache.get(pid) is first  # stale until invalidated, by design
     cache.invalidate(pid)
     assert cache.get(pid).config.analyze.max_workers == 5
@@ -1182,18 +1586,28 @@ def test_config_repr_hides_secrets() -> None:
 
 
 def test_claude_oauth_token_is_a_providerless_secret_project_over_global(
-    data: Path,
+    org: int,
 ) -> None:
     with portal_db.get_session() as s:
-        pw_secrets.put_secret(s, kind="claude_oauth_token", value="sk-ant-oat-glob1")
+        pw_secrets.put_secret(
+            s, kind="claude_oauth_token", value="sk-ant-oat-glob1", org_id=org
+        )
         a, b = _project(s, "a"), _project(s, "b")
         pw_secrets.put_secret(
-            s, kind="claude_oauth_token", value="sk-ant-oat-proja", project_id=a.id
+            s,
+            kind="claude_oauth_token",
+            value="sk-ant-oat-proja",
+            project_id=a.id,
+            org_id=org,
         )
         ca, cb = _build(s, a), _build(s, b)
         with pytest.raises(ValueError, match="has no provider"):
             pw_secrets.put_secret(
-                s, kind="claude_oauth_token", provider="claude-cli", value="x"
+                s,
+                kind="claude_oauth_token",
+                provider="claude-cli",
+                value="x",
+                org_id=org,
             )
         stored = [c.config for c in s.exec(select(ProjectConfig)).all()]
     assert ca.config.llm.claude_cli.oauth_token == "sk-ant-oat-proja"

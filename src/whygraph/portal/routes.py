@@ -13,10 +13,15 @@ Conventions:
   ``{"error": ..., "code"?: ...}``.
 * Every route here except ``GET /api/portal/state`` and
   ``POST /api/portal/setup`` depends on
-  :func:`~whygraph.portal.deps.current_user` (``409 setup required``).
+  :func:`~whygraph.portal.deps.current_user` (``409 setup required``)
+  and names its one action (plan section 4.5) through
+  :func:`~whygraph.portal.deps.org_access`,
+  :func:`~whygraph.portal.deps.project_access` or
+  :func:`~whygraph.portal.deps.project_db_access` - the route-inventory
+  test enforces it.
 * A handler that touches a project's DB or config runs under
-  :func:`~whygraph.portal.deps.project_context` or
-  :func:`~whygraph.portal.deps.project_db`.
+  :func:`~whygraph.portal.deps.project_access` or
+  :func:`~whygraph.portal.deps.project_db_access`.
 * Every write to a config layer or secret invalidates the context cache
   (``invalidate(project_id)``, or ``invalidate(None)`` for global writes).
 """
@@ -80,6 +85,7 @@ from whygraph.services.git import (
 )
 from whygraph.services.github import GitHubError, RepoAccessError, check_repo_access
 
+from .authz import Action, OrgAccess, Role
 from .config_layers import ConfigPolicyError, find_secret_paths, load_layer, save_layer
 from .context import build_project_context, resolve_root
 from .db import get_session
@@ -90,13 +96,16 @@ from .deps import (
     bound_from,
     checked_db_paths,
     current_user,
+    load_org_access,
+    org_access,
     portal_state,
     principal_of,
-    project_context,
-    project_db,
+    project_access,
+    project_db_access,
     unsafe_path_error,
 )
 from .models import Project, ProjectAgent, ScanRun, Secret, User
+from .orgs import add_member
 from .paths import BACKUPS_DIR, check_project_paths
 from .policy import (
     DEFAULTS_ALLOWLIST,
@@ -242,45 +251,83 @@ class ScanBody(_Strict):
 # ---------------------------------------------------------------------------
 
 
-def _user_dict(principal: Principal | None) -> dict | None:
+def _user_dict(principal: Principal | None, access: OrgAccess | None) -> dict | None:
+    """The user, with its role in the request's org (``null`` without access)."""
     if principal is None:
         return None
     return {
         "uid": principal.uid,
         "display_name": principal.display_name,
-        "role": principal.role,
+        "role": None if access is None else str(access.role),
     }
 
 
-def _secrets_view(session: Session, project_id: int | None) -> dict:
+def _org_dict(access: OrgAccess | None) -> dict | None:
+    if access is None:
+        return None
+    return {
+        "slug": access.org_slug,
+        "name": access.org_name,
+        "role": str(access.role),
+    }
+
+
+def _port_change_in(state: PortalState, access: OrgAccess | None) -> dict | None:
+    """The start-up port report, cut down to the request's org (``None`` without)."""
+    report = state.port_change
+    if report is None or access is None:
+        return None
+    return {
+        **report,
+        "projects": [
+            i for i in report.get("projects", ()) if i["org_id"] == access.org_id
+        ],
+        "unmounted": [
+            i for i in report.get("unmounted", ()) if i["org_id"] == access.org_id
+        ],
+    }
+
+
+def _secrets_view(session: Session, project_id: int | None, *, org_id: int) -> dict:
     return {
         "llm": {
             tag: secret_status(
-                session, kind=LLM_API_KEY, provider=tag, project_id=project_id
+                session,
+                kind=LLM_API_KEY,
+                provider=tag,
+                project_id=project_id,
+                org_id=org_id,
             )
             for tag in LLM_KEY_PROVIDERS
         },
         "github_token": secret_status(
-            session, kind=GITHUB_TOKEN, project_id=project_id
+            session, kind=GITHUB_TOKEN, project_id=project_id, org_id=org_id
         ),
         "claude_oauth_token": secret_status(
-            session, kind=CLAUDE_OAUTH_TOKEN, project_id=project_id
+            session, kind=CLAUDE_OAUTH_TOKEN, project_id=project_id, org_id=org_id
         ),
     }
 
 
 def _apply_secrets(
-    session: Session, secrets: SecretsBody, project_id: int | None
+    session: Session, secrets: SecretsBody, project_id: int | None, *, org_id: int
 ) -> None:
     for provider, value in secrets.llm.items():
         if provider not in LLM_KEY_PROVIDERS:
             raise ApiError(422, f"unknown key provider {provider!r}")
-        _put_or_delete(session, LLM_API_KEY, provider, value, project_id)
+        _put_or_delete(session, LLM_API_KEY, provider, value, project_id, org_id)
     if "github_token" in secrets.model_fields_set:
-        _put_or_delete(session, GITHUB_TOKEN, None, secrets.github_token, project_id)
+        _put_or_delete(
+            session, GITHUB_TOKEN, None, secrets.github_token, project_id, org_id
+        )
     if "claude_oauth_token" in secrets.model_fields_set:
         _put_or_delete(
-            session, CLAUDE_OAUTH_TOKEN, None, secrets.claude_oauth_token, project_id
+            session,
+            CLAUDE_OAUTH_TOKEN,
+            None,
+            secrets.claude_oauth_token,
+            project_id,
+            org_id,
         )
 
 
@@ -290,13 +337,21 @@ def _put_or_delete(
     provider: str | None,
     value: str | None,
     project_id: int | None,
+    org_id: int,
 ) -> None:
     if value is None:
-        delete_secret(session, kind=kind, provider=provider, project_id=project_id)
+        delete_secret(
+            session, kind=kind, provider=provider, project_id=project_id, org_id=org_id
+        )
         return
     try:
         put_secret(
-            session, kind=kind, value=value, provider=provider, project_id=project_id
+            session,
+            kind=kind,
+            value=value,
+            provider=provider,
+            project_id=project_id,
+            org_id=org_id,
         )
     except ValueError as exc:
         raise ApiError(422, str(exc)) from exc
@@ -445,21 +500,24 @@ def _details(state: PortalState, project: BoundProject) -> dict:
     body["missing_key"] = _missing_key(project.ctx.config)
     body["mcp_url"] = f"{_origins(state).base_url}/mcp/{project.slug}"
     body["detected"] = _detected(project) if body["root_status"] == "ok" else None
-    body["port_change"] = _port_change_for(state, project.slug)
+    body["port_change"] = _port_change_for(state, project)
     body["stats"] = (
         _project_stats(state, project) if body["root_status"] == "ok" else None
     )
     return body
 
 
-def _port_change_for(state: PortalState, slug: str) -> dict | None:
-    """This project's entry of the start-up port reconcile, or ``None``."""
+def _port_change_for(state: PortalState, project: BoundProject) -> dict | None:
+    """This project's entry of the start-up port reconcile, or ``None``.
+
+    Matched by project id, never by slug: two orgs can hold the same slug.
+    """
     report = state.port_change or {}
     for item in report.get("projects", ()):
-        if item["slug"] == slug:
+        if item["project_id"] == project.id:
             return item
     for item in report.get("unmounted", ()):
-        if item["slug"] == slug:
+        if item["project_id"] == project.id:
             return {**item, "unmounted": True, "port": report["port"]}
     return None
 
@@ -550,16 +608,28 @@ def get_state(request: Request) -> dict:
     state = portal_state(request)
     if state.degraded:
         return {"error": state.degraded}
-    principal = request.scope.get("state", {}).get("principal")
+    request_state = request.scope.get("state", {})
+    principal = request_state.get("principal")
+    org_slug = request_state.get("org_slug")
+    # A sync handler already runs in the threadpool, so the lookup does too.
+    access = (
+        load_org_access(principal.user_id, org_slug)
+        if principal is not None and org_slug is not None
+        else None
+    )
     return {
         "mode": state.mode,
         "setup_complete": principal is not None,
-        "user": _user_dict(principal),
+        "user": _user_dict(principal, access),
+        # The request's org and the caller's role in it; null before setup,
+        # without an org (production) or for a non-member.
+        "org": _org_dict(access),
         "port": state.port,
         "shared_folders": [str(f) for f in state.shared_folders],
         "version": _package_version(),
-        # What the start-up port reconcile did (markers / agent files), or null.
-        "port_change": state.port_change,
+        # What the start-up port reconcile did (markers / agent files) in
+        # this org, or null.
+        "port_change": _port_change_in(state, access),
     }
 
 
@@ -567,10 +637,16 @@ def get_state(request: Request) -> dict:
 def post_setup(body: SetupBody, request: Request) -> dict:
     """First run in local mode: create the single user (``409`` once done).
 
-    The ``settings`` row (the mode) was already written by the lifespan at
-    first start; setup only creates the user.
+    The ``settings`` row (the mode) and the built-in org were already
+    written by the lifespan at first start; setup creates the user and
+    makes it the built-in org's owner, in one transaction. ``404`` outside
+    local mode (no built-in org).
     """
     state = portal_state(request)
+    if state.builtin_org_id is None:
+        # Outside local mode the first user comes from M2c's bootstrap flow;
+        # an unauthenticated setup there would be a takeover.
+        raise ApiError(404, "not found")
     name = body.display_name.strip()
     if not name:
         raise ApiError(422, "display_name must not be blank")
@@ -581,19 +657,41 @@ def post_setup(body: SetupBody, request: Request) -> dict:
             user = User(display_name=name)
             session.add(user)
             session.flush()
+            assert user.id is not None
+            add_member(
+                session,
+                org_id=state.builtin_org_id,
+                user_id=user.id,
+                role=Role.OWNER,
+            )
             principal = principal_of(user)
         state.set_principal(principal)
-    return {"setup_complete": True, "user": _user_dict(principal)}
+    user = _user_dict(principal, None)
+    assert user is not None
+    user["role"] = Role.OWNER.value  # the membership just created
+    return {"setup_complete": True, "user": user}
 
 
 @portal_router.get("/repos")
-def get_repos(request: Request, q: str = "") -> dict:
-    """Git repositories discovered under the shared folders (cached 60 s)."""
+def get_repos(
+    request: Request,
+    q: str = "",
+    access: OrgAccess = Depends(org_access(Action.ORG_READ)),
+) -> dict:
+    """Git repositories discovered under the shared folders (cached 60 s).
+
+    ``registered`` reflects only the request's org.
+    """
     state = portal_state(request)
+    org_id = access.org_id
     found = state.discovery.get(state.shared_folders)
     with get_session() as session:
         registered = set(
-            session.exec(select(Project.root).where(Project.source == "local")).all()
+            session.exec(
+                select(Project.root).where(
+                    Project.org_id == org_id, Project.source == "local"
+                )
+            ).all()
         )
     needle = q.strip().lower()
     return {
@@ -606,7 +704,9 @@ def get_repos(request: Request, q: str = "") -> dict:
     }
 
 
-@portal_router.post("/check-path")
+@portal_router.post(
+    "/check-path", dependencies=[Depends(org_access(Action.ORG_ADD_PROJECT))]
+)
 def post_check_path(body: PathBody, request: Request) -> dict:
     """Whether a typed path can be added, and the fix command when it cannot."""
     state = portal_state(request)
@@ -616,24 +716,30 @@ def post_check_path(body: PathBody, request: Request) -> dict:
         raise ApiError(422, str(exc)) from exc
 
 
-def _defaults_view(session: Session) -> dict:
-    any_key = session.exec(select(Secret.id).where(Secret.kind == LLM_API_KEY)).first()
+def _defaults_view(session: Session, org_id: int) -> dict:
+    any_key = session.exec(
+        select(Secret.id).where(Secret.org_id == org_id, Secret.kind == LLM_API_KEY)
+    ).first()
     return {
-        "config": load_layer(session, None),
-        "secrets": _secrets_view(session, None),
+        "config": load_layer(session, None, org_id=org_id),
+        "secrets": _secrets_view(session, None, org_id=org_id),
         "no_provider_key": any_key is None,
     }
 
 
 @portal_router.get("/defaults")
-def get_defaults() -> dict:
-    """The global default config (rule 6) and the global secrets' status."""
+def get_defaults(access: OrgAccess = Depends(org_access(Action.ORG_READ))) -> dict:
+    """The org default config (rule 6) and the org secrets' status."""
     with get_session() as session:
-        return _defaults_view(session)
+        return _defaults_view(session, access.org_id)
 
 
 @portal_router.put("/defaults")
-def put_defaults(body: ConfigBody, request: Request) -> dict:
+def put_defaults(
+    body: ConfigBody,
+    request: Request,
+    access: OrgAccess = Depends(org_access(Action.ORG_CONFIGURE)),
+) -> dict:
     """Replace the global defaults and / or set global secrets.
 
     Only ``[llm]`` (with connection keys), ``[analyze]``, ``[rationale]``
@@ -644,13 +750,14 @@ def put_defaults(body: ConfigBody, request: Request) -> dict:
     Invalidates every project's context.
     """
     state = portal_state(request)
+    org_id = access.org_id
     cleared: list[dict] = []
     with get_session() as session:
         if body.config is not None:
             kept = _checked_layer(body.config, DEFAULTS_ALLOWLIST, state.data_dir)
             try:
                 Config.from_dict(kept, state.data_dir)
-                cleared_ids = save_layer(session, None, kept)
+                cleared_ids = save_layer(session, None, kept, org_id=org_id)
             except (ConfigError, ConfigPolicyError) as exc:
                 raise ApiError(422, str(exc)) from exc
             for project_id, provider in cleared_ids:
@@ -658,10 +765,10 @@ def put_defaults(body: ConfigBody, request: Request) -> dict:
                 if row is not None:
                     cleared.append({"slug": row.slug, "provider": provider})
         if body.secrets is not None:
-            _apply_secrets(session, body.secrets, None)
+            _apply_secrets(session, body.secrets, None, org_id=org_id)
     state.contexts.invalidate(None)
     with get_session() as session:
-        view = _defaults_view(session)
+        view = _defaults_view(session, org_id)
     view["cleared_project_keys"] = cleared
     return view
 
@@ -672,10 +779,14 @@ def put_defaults(body: ConfigBody, request: Request) -> dict:
 
 
 @projects_router.get("")
-def list_projects() -> dict:
-    """Every registered project with its status."""
+def list_projects(access: OrgAccess = Depends(org_access(Action.ORG_READ))) -> dict:
+    """Every project of the request's org, with its status."""
     with get_session() as session:
-        rows = session.exec(select(Project).order_by(Project.name)).all()
+        rows = session.exec(
+            select(Project)
+            .where(Project.org_id == access.org_id)
+            .order_by(Project.name)
+        ).all()
         return {"projects": [_summary(session, p, resolve_root(p)) for p in rows]}
 
 
@@ -684,6 +795,7 @@ def add_project(
     body: AddProjectBody,
     request: Request,
     principal: Principal = Depends(current_user),
+    access: OrgAccess = Depends(org_access(Action.ORG_ADD_PROJECT)),
 ) -> dict:
     """Register a local repo (under a shared folder) or clone a GitHub repo.
 
@@ -695,9 +807,13 @@ def add_project(
     """
     state = portal_state(request)
     if body.source == "local":
-        project_id, detected, preview = _add_local(state, body, principal)
+        project_id, detected, preview = _add_local(
+            state, body, principal, access.org_id
+        )
     else:
-        project_id, detected, preview = _add_github(state, body, principal)
+        project_id, detected, preview = _add_github(
+            state, body, principal, access.org_id
+        )
     ctx = state.contexts.get(project_id)
     with get_session() as session:
         row = session.get(Project, project_id)
@@ -712,6 +828,7 @@ def add_project(
 def _insert_project(
     session: Session,
     *,
+    org_id: int,
     slug: str,
     name: str,
     source: str,
@@ -720,6 +837,7 @@ def _insert_project(
     principal: Principal,
 ) -> int:
     project = Project(
+        org_id=org_id,
         slug=slug,
         name=name,
         source=source,
@@ -734,7 +852,7 @@ def _insert_project(
 
 
 def _add_local(
-    state: PortalState, body: AddProjectBody, principal: Principal
+    state: PortalState, body: AddProjectBody, principal: Principal, org_id: int
 ) -> tuple[int, dict, ImportPreview]:
     if not body.path:
         raise ApiError(422, "path is required for a local project")
@@ -786,7 +904,8 @@ def _add_local(
                 )
             project_id = _insert_project(
                 session,
-                slug=unique_slug(session, name),
+                org_id=org_id,
+                slug=unique_slug(session, name, org_id=org_id),
                 name=name,
                 source="local",
                 root=str(root),
@@ -794,7 +913,7 @@ def _add_local(
                 principal=principal,
             )
             if layer:
-                save_layer(session, project_id, layer)
+                save_layer(session, project_id, layer, org_id=org_id)
             for tag, key in preview.llm_keys.items():
                 put_secret(
                     session,
@@ -802,6 +921,7 @@ def _add_local(
                     value=key,
                     provider=tag,
                     project_id=project_id,
+                    org_id=org_id,
                 )
             github_token = token or preview.github_token
             if github_token:
@@ -810,6 +930,7 @@ def _add_local(
                     kind=GITHUB_TOKEN,
                     value=github_token,
                     project_id=project_id,
+                    org_id=org_id,
                 )
             if preview.claude_oauth_token:
                 put_secret(
@@ -817,6 +938,7 @@ def _add_local(
                     kind=CLAUDE_OAUTH_TOKEN,
                     value=preview.claude_oauth_token,
                     project_id=project_id,
+                    org_id=org_id,
                 )
     except IntegrityError as exc:
         raise ApiError(
@@ -827,7 +949,7 @@ def _add_local(
 
 
 def _add_github(
-    state: PortalState, body: AddProjectBody, principal: Principal
+    state: PortalState, body: AddProjectBody, principal: Principal, org_id: int
 ) -> tuple[int, dict, ImportPreview]:
     url = (body.url or "").strip()
     token = (body.token or "").strip() or None
@@ -843,7 +965,7 @@ def _add_github(
     # the insert happen under the lock, so a double-submit of one URL gets
     # "duplicate" instead of racing the other request's clone.
     with state.github_add_lock:
-        return _clone_and_insert(state, canonical, name, token, principal)
+        return _clone_and_insert(state, canonical, name, token, principal, org_id)
 
 
 def _clone_and_insert(
@@ -852,6 +974,7 @@ def _clone_and_insert(
     name: str,
     token: str | None,
     principal: Principal,
+    org_id: int,
 ) -> tuple[int, dict, ImportPreview]:
     """Clone into a private temp dir, move it into place, insert the row."""
     with get_session() as session:
@@ -862,7 +985,7 @@ def _clone_and_insert(
                 raise ApiError(
                     409, "this repository is already registered", code="duplicate"
                 )
-        slug = unique_slug(session, name)
+        slug = unique_slug(session, name, org_id=org_id)
 
     repos_dir = state.data_dir / "repos"
     repos_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -888,6 +1011,7 @@ def _clone_and_insert(
         with get_session() as session:
             project_id = _insert_project(
                 session,
+                org_id=org_id,
                 slug=slug,
                 name=name,
                 source="github",
@@ -895,10 +1019,14 @@ def _clone_and_insert(
                 remote_url=canonical,
                 principal=principal,
             )
-            save_layer(session, project_id, {"scan": {"forge": "auto"}})
+            save_layer(session, project_id, {"scan": {"forge": "auto"}}, org_id=org_id)
             if token:
                 put_secret(
-                    session, kind=GITHUB_TOKEN, value=token, project_id=project_id
+                    session,
+                    kind=GITHUB_TOKEN,
+                    value=token,
+                    project_id=project_id,
+                    org_id=org_id,
                 )
     except IntegrityError as exc:
         _remove_clone(dest, state.data_dir)  # the checkout this request moved in
@@ -920,7 +1048,8 @@ def _remove_clone(path: Path, data_dir: Path) -> bool:
 
 @projects_router.get("/{slug}")
 def get_project(
-    request: Request, project: BoundProject = Depends(project_context)
+    request: Request,
+    project: BoundProject = Depends(project_access(Action.PROJECT_READ)),
 ) -> dict:
     """Project details; ``stats`` is ``null`` until initialized."""
     return _details(portal_state(request), project)
@@ -930,7 +1059,7 @@ def get_project(
 def patch_project(
     body: PatchProjectBody,
     request: Request,
-    project: BoundProject = Depends(project_context),
+    project: BoundProject = Depends(project_access(Action.PROJECT_CONFIGURE)),
 ) -> dict:
     """Rename the project's display ``name`` (the slug is immutable)."""
     name = body.name.strip()
@@ -948,7 +1077,7 @@ def patch_project(
 @projects_router.delete("/{slug}")
 def delete_project(
     request: Request,
-    project: BoundProject = Depends(project_context),
+    project: BoundProject = Depends(project_access(Action.PROJECT_SETUP)),
     body: DeleteProjectBody | None = Body(default=None),
 ) -> dict:
     """Unregister a project (plan section 4.5.5).
@@ -1069,7 +1198,9 @@ def _remove_project(
 
 
 @projects_router.get("/{slug}/config")
-def get_project_config(project: BoundProject = Depends(project_context)) -> dict:
+def get_project_config(
+    project: BoundProject = Depends(project_access(Action.PROJECT_READ)),
+) -> dict:
     """The stored config layer, the secrets' status and the import report.
 
     The import report is recomputed from the repo's ``whygraph.toml``
@@ -1078,8 +1209,8 @@ def get_project_config(project: BoundProject = Depends(project_context)) -> dict
     """
     with get_session() as session:
         body = {
-            "config": load_layer(session, project.id),
-            "secrets": _secrets_view(session, project.id),
+            "config": load_layer(session, project.id, org_id=project.org_id),
+            "secrets": _secrets_view(session, project.id, org_id=project.org_id),
         }
     preview = (
         preview_import(project.root) if project.source == "local" else ImportPreview()
@@ -1092,7 +1223,7 @@ def get_project_config(project: BoundProject = Depends(project_context)) -> dict
 def put_project_config(
     body: ConfigBody,
     request: Request,
-    project: BoundProject = Depends(project_context),
+    project: BoundProject = Depends(project_access(Action.PROJECT_CONFIGURE)),
 ) -> dict:
     """Replace the project's config layer and / or set its secrets.
 
@@ -1111,11 +1242,11 @@ def put_project_config(
         if body.config is not None:
             kept = _checked_layer(body.config, PUT_ALLOWLIST, project.root)
             try:
-                save_layer(session, project.id, kept)
+                save_layer(session, project.id, kept, org_id=project.org_id)
             except ConfigPolicyError as exc:
                 raise ApiError(422, str(exc)) from exc
         if body.secrets is not None:
-            _apply_secrets(session, body.secrets, project.id)
+            _apply_secrets(session, body.secrets, project.id, org_id=project.org_id)
         try:
             new_ctx = build_project_context(session, row)
         except ConfigError as exc:
@@ -1141,8 +1272,8 @@ def put_project_config(
 
     with get_session() as session:
         view = {
-            "config": load_layer(session, project.id),
-            "secrets": _secrets_view(session, project.id),
+            "config": load_layer(session, project.id, org_id=project.org_id),
+            "secrets": _secrets_view(session, project.id, org_id=project.org_id),
         }
     view["hooks"] = hooks
     view["hooks_error"] = hooks_error
@@ -1169,7 +1300,7 @@ def _agent_actions(raw: dict[str, str]) -> dict[str, str]:
 def init_project(
     body: InitBody,
     request: Request,
-    project: BoundProject = Depends(project_context),
+    project: BoundProject = Depends(project_access(Action.PROJECT_SETUP)),
 ) -> dict:
     """Initialize the repo: gitignore, hooks, agent MCP entries + assets, markers.
 
@@ -1267,14 +1398,23 @@ def init_project(
 @projects_router.post("/{slug}/scans", status_code=202)
 async def post_scan(
     request: Request,
-    project: BoundProject = Depends(project_db),
+    project: BoundProject = Depends(project_db_access(Action.PROJECT_SCAN)),
     principal: Principal = Depends(current_user),
     body: ScanBody | None = Body(default=None),
 ) -> dict:
-    """Queue (or coalesce into) a scan; returns the pending run's id."""
+    """Queue (or coalesce into) a scan; returns the pending run's id.
+
+    A ``hook`` scan (the credential-less git-hook ``curl``) exists only in
+    local mode: elsewhere it is a ``403 {"code": "hook_local_only"}``.
+    """
     body = body or ScanBody()
+    state = portal_state(request)
+    if body.trigger == "hook" and state.mode != "local":
+        raise ApiError(
+            403, "hook scans exist only in local mode", code="hook_local_only"
+        )
     try:
-        run_id = await portal_state(request).runner.request_scan(
+        run_id = await state.runner.request_scan(
             project, trigger=body.trigger, analyze=body.analyze, principal=principal
         )
     except RunnerUnavailable as exc:
@@ -1285,7 +1425,9 @@ async def post_scan(
 
 
 @projects_router.get("/{slug}/scans")
-def list_scans(project: BoundProject = Depends(project_db)) -> dict:
+def list_scans(
+    project: BoundProject = Depends(project_db_access(Action.PROJECT_READ)),
+) -> dict:
     """The project's recent scan / sync runs, newest first."""
     with get_session() as session:
         runs = session.exec(
@@ -1314,7 +1456,9 @@ def list_scans(project: BoundProject = Depends(project_db)) -> dict:
 
 @projects_router.get("/{slug}/scans/{run_id}/events")
 async def scan_events(
-    run_id: int, request: Request, project: BoundProject = Depends(project_db)
+    run_id: int,
+    request: Request,
+    project: BoundProject = Depends(project_db_access(Action.PROJECT_READ)),
 ) -> Any:
     """SSE: replay a run's events file, then follow it until the run ends.
 
@@ -1341,7 +1485,7 @@ async def cancel_scan(
     run_id: int,
     request: Request,
     response: Response,
-    project: BoundProject = Depends(project_db),
+    project: BoundProject = Depends(project_db_access(Action.PROJECT_SCAN)),
 ) -> dict:
     """Cancel a queued (``200``) or running (``202``) scan / sync run.
 
@@ -1363,7 +1507,9 @@ async def cancel_scan(
 
 
 @projects_router.get("/{slug}/scans/{run_id}/log")
-def scan_log(run_id: int, project: BoundProject = Depends(project_db)) -> dict:
+def scan_log(
+    run_id: int, project: BoundProject = Depends(project_db_access(Action.PROJECT_READ))
+) -> dict:
     """The tail of a run's log: ``{run_id, text, size, truncated}``.
 
     At most the last 64 KiB (:data:`~whygraph.portal.runner.LOG_TAIL_BYTES`),
@@ -1379,7 +1525,7 @@ def scan_log(run_id: int, project: BoundProject = Depends(project_db)) -> dict:
 @projects_router.post("/{slug}/sync", status_code=202)
 async def post_sync(
     request: Request,
-    project: BoundProject = Depends(project_db),
+    project: BoundProject = Depends(project_db_access(Action.PROJECT_SCAN)),
     principal: Principal = Depends(current_user),
 ) -> dict:
     """GitHub clones: fetch + fast-forward, then rescan when HEAD moved."""
@@ -1397,7 +1543,9 @@ async def post_sync(
 
 
 @projects_router.get("/{slug}/scan-estimate")
-def get_scan_estimate(project: BoundProject = Depends(project_db)) -> dict:
+def get_scan_estimate(
+    project: BoundProject = Depends(project_db_access(Action.PROJECT_READ)),
+) -> dict:
     """First-scan cost guard: what describing the waiting commits would cost.
 
     ``commits`` is an upper bound; ``missing_key`` names the analyze

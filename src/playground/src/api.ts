@@ -228,7 +228,7 @@ export type ChatEvent =
 export interface PortalUser {
   uid: string;
   display_name: string;
-  role: string;
+  role: string | null;
 }
 
 // `GET /api/portal/state` is public. In degraded mode (the portal DB failed to
@@ -243,6 +243,8 @@ export interface PortalState {
   version?: string | null;
   // What the portal did when it started on a new port (computed once at start).
   port_change?: PortChange | null;
+  // The organization the request is in (M2b); null before setup.
+  org?: { slug: string; name: string; role: string } | null;
   error?: string;
 }
 

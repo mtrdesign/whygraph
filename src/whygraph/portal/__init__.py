@@ -19,7 +19,7 @@ Modules
 * :mod:`~whygraph.portal.security` - the Host / Origin / CSRF guard, the
   principal and :class:`~whygraph.portal.security.PortalOrigins`.
 * :mod:`~whygraph.portal.deps` - portal state and the
-  ``project_context`` / ``project_db`` dependencies.
+  ``org_access`` / ``project_access`` / ``project_db_access`` dependencies.
 * :mod:`~whygraph.portal.routes` - the management endpoints.
 * :mod:`~whygraph.portal.mcp_mount` - the per-project ``/mcp/<slug>`` endpoint.
 * :mod:`~whygraph.portal.policy` - the config allowlists and the

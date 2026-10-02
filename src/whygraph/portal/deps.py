@@ -1,20 +1,30 @@
 """Portal state and the request dependencies that bind a project.
 
-Two project dependencies exist (plan section 4.5.1), both ``async def``
-generators that depend on :func:`current_user`:
+Every ``/api`` route names the one action it performs through a
+dependency factory (plan section 4.5); the route-inventory test checks
+that each route declares exactly one. Each factory's inner function
+carries the action as ``whygraph_action``:
 
-* :func:`project_context` - resolve the slug (``404`` if unknown), build
-  the :class:`~whygraph.core.context.ProjectContext` and bind it for the
+* :func:`project_access` - resolve the slug **within the request's org**
+  (``404`` if unknown there), :func:`~whygraph.portal.authz.authorize`
+  the action (``403``) - before any context is built, so a refused
+  request never decrypts a secret - then build the
+  :class:`~whygraph.core.context.ProjectContext` and bind it for the
   request. **No** initialized gate: ``POST init``, ``GET/PUT config`` and
   the project details use it, so an uninitialized project can be set up.
-* :func:`project_db` - :func:`project_context` plus the initialized gate
+* :func:`project_db_access` - the same, plus the initialized gate
   (``409 {"error": "not initialized"}`` until ``projects.initialized_at``
   is set **and** the DB file exists, so nothing creates an empty
   ``.whygraph/whygraph.db`` in the user's repo) plus the memoized
-  migration (:mod:`whygraph.portal.migrate`). The data routers, the
-  scan endpoints and the MCP dispatcher use it. A DB path that is a
-  symlink (or leaves the root) is a ``409 {"code": "unsafe_path"}``
-  (:func:`checked_db_paths`).
+  migration (:mod:`whygraph.portal.migrate`). The data routers and the
+  scan endpoints use it; the MCP dispatcher calls the same steps. A DB
+  path that is a symlink (or leaves the root) is a
+  ``409 {"code": "unsafe_path"}`` (:func:`checked_db_paths`).
+* :func:`org_access` - portal-level routes: the caller's
+  :class:`~whygraph.portal.authz.OrgAccess`, authorized for the action.
+
+A route takes exactly **one** project dependency: two different closures
+are two callables to FastAPI, which would bind the project twice.
 
 Who the request acts as, and in which organization, comes from the
 guard (:class:`~whygraph.portal.security.PortalGuard`) through the
@@ -32,7 +42,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Protocol
+from typing import Any, AsyncIterator, Awaitable, Callable, Protocol
 
 import anyio
 import anyio.to_thread
@@ -45,7 +55,7 @@ from whygraph.core.config import ConfigError
 from whygraph.core.context import ProjectContext, use_project
 from whygraph.core.safe_paths import UnsafePathError
 
-from .authz import OrgAccess, Role
+from .authz import Action, OrgAccess, Role, authorize
 from .context import ContextCache, ProjectNotFound, resolve_root
 from .db import InstanceLock, get_session
 from .migrate import ProjectMigrations
@@ -404,25 +414,40 @@ class BoundProject:
         return Path(self.ctx.config.whygraph_db or self.root / ".whygraph/whygraph.db")
 
 
-def _lookup(slug: str) -> Project | None:
+def _lookup(org_id: int, slug: str) -> Project | None:
     if not is_valid_slug(slug):
         return None
     with get_session() as session:
-        project = session.exec(select(Project).where(Project.slug == slug)).first()
+        project = session.exec(
+            select(Project).where(Project.org_id == org_id, Project.slug == slug)
+        ).first()
         if project is not None:
             session.expunge(project)
         return project
 
 
-async def bind_project(state: PortalState, slug: str) -> BoundProject:
-    """Resolve ``slug`` and build its context (no binding, no gate).
+async def bind_project(
+    state: PortalState, access: OrgAccess, slug: str, action: Action
+) -> BoundProject:
+    """Resolve ``slug`` in the caller's org, authorize, build its context.
+
+    The order is load-bearing: the lookup is scoped to ``access.org_id``
+    (another org's project is simply not found), and
+    :func:`~whygraph.portal.authz.authorize` runs **before** the context
+    is built, so a refused request never reaches
+    :meth:`ContextCache.get` (which decrypts the project's secrets).
+    No binding and no initialized gate.
 
     Parameters
     ----------
     state : PortalState
         The portal state.
+    access : OrgAccess
+        The caller's access to the request's organization.
     slug : str
         The URL slug.
+    action : Action
+        What the request does with the project.
 
     Returns
     -------
@@ -432,12 +457,14 @@ async def bind_project(state: PortalState, slug: str) -> BoundProject:
     Raises
     ------
     ApiError
-        ``404`` for an unknown (or malformed) slug; ``400`` when the stored
-        config no longer validates.
+        ``404`` for a slug unknown (or malformed) in the org; ``403``
+        (``code="forbidden"``) when the role lacks ``action``; ``400``
+        when the stored config no longer validates.
     """
-    project = await anyio.to_thread.run_sync(_lookup, slug)
+    project = await anyio.to_thread.run_sync(_lookup, access.org_id, slug)
     if project is None or project.id is None:
         raise ApiError(404, f"project {slug!r} not found")
+    authorize(access, action, project)
     try:
         ctx = await state.contexts.aget(project.id)
     except ProjectNotFound as exc:
@@ -519,35 +546,94 @@ async def require_initialized(state: PortalState, project: BoundProject) -> None
         raise unsafe_path_error(exc) from exc
 
 
-async def project_context(
-    slug: str,
-    request: Request,
-    principal: Principal = Depends(current_user),
-) -> AsyncIterator[BoundProject]:
-    """Resolve the slug and bind its project context for the request.
+def project_access(
+    action: Action,
+) -> Callable[..., AsyncIterator[BoundProject]]:
+    """Build the dependency that binds ``{slug}`` for a route doing ``action``.
 
-    Yields
-    ------
-    BoundProject
-        The project; its context is bound until the request ends.
-    """
-    project = await bind_project(portal_state(request), slug)
-    with use_project(project.ctx):
-        yield project
-
-
-async def project_db(
-    request: Request, project: BoundProject = Depends(project_context)
-) -> BoundProject:
-    """:func:`project_context` plus the initialized gate and the migration.
+    Parameters
+    ----------
+    action : Action
+        The route's action (also stored as ``whygraph_action`` on the
+        returned function, for the route-inventory test).
 
     Returns
     -------
-    BoundProject
-        The (bound, initialized, migrated) project.
+    callable
+        An ``async`` generator dependency yielding the
+        :class:`BoundProject`, its context bound until the request ends.
+        ``404`` / ``403`` / ``400`` as :func:`bind_project`.
     """
-    await require_initialized(portal_state(request), project)
-    return project
+
+    async def dependency(
+        slug: str, request: Request, access: OrgAccess = Depends(current_org)
+    ) -> AsyncIterator[BoundProject]:
+        project = await bind_project(portal_state(request), access, slug, action)
+        with use_project(project.ctx):
+            yield project
+
+    dependency.whygraph_action = action  # type: ignore[attr-defined]
+    return dependency
+
+
+def project_db_access(
+    action: Action,
+) -> Callable[..., AsyncIterator[BoundProject]]:
+    """:func:`project_access` plus the initialized gate and the migration.
+
+    Its own closure rather than a ``Depends`` on :func:`project_access`,
+    so a route binds its project exactly once.
+
+    Parameters
+    ----------
+    action : Action
+        The route's action (also stored as ``whygraph_action``).
+
+    Returns
+    -------
+    callable
+        An ``async`` generator dependency yielding the (bound,
+        initialized, migrated) :class:`BoundProject`; ``409`` as
+        :func:`require_initialized`.
+    """
+
+    async def dependency(
+        slug: str, request: Request, access: OrgAccess = Depends(current_org)
+    ) -> AsyncIterator[BoundProject]:
+        state = portal_state(request)
+        project = await bind_project(state, access, slug, action)
+        with use_project(project.ctx):
+            await require_initialized(state, project)
+            yield project
+
+    dependency.whygraph_action = action  # type: ignore[attr-defined]
+    return dependency
+
+
+def org_access(action: Action) -> Callable[..., Awaitable[OrgAccess]]:
+    """Build the dependency of a portal-level route doing ``action``.
+
+    Parameters
+    ----------
+    action : Action
+        The route's action (also stored as ``whygraph_action``).
+
+    Returns
+    -------
+    callable
+        An ``async`` dependency returning the caller's
+        :class:`~whygraph.portal.authz.OrgAccess` once
+        :func:`~whygraph.portal.authz.authorize` passed: ``404`` outside
+        the org (:func:`current_org`), ``403`` for a role without
+        ``action``.
+    """
+
+    async def dependency(access: OrgAccess = Depends(current_org)) -> OrgAccess:
+        authorize(access, action)
+        return access
+
+    dependency.whygraph_action = action  # type: ignore[attr-defined]
+    return dependency
 
 
 __all__ = [
@@ -562,10 +648,11 @@ __all__ = [
     "current_org",
     "current_user",
     "load_org_access",
+    "org_access",
     "portal_state",
     "principal_of",
-    "project_context",
-    "project_db",
+    "project_access",
+    "project_db_access",
     "require_initialized",
     "unsafe_path_error",
 ]

@@ -9,10 +9,14 @@ the seam.
 * **Routing.** A Starlette ``Route("/mcp/{slug}")`` with a pure-ASGI
   endpoint, not ``Mount``: a mount compiles to ``/mcp/{slug}/{path:path}``
   and 307-redirects the bare URL, which agents do not follow on POST.
-* **Gate.** The same principal (resolved by the guard) and the same
+* **Gate.** The same principal (resolved by the guard), the same org
+  membership (:func:`~whygraph.portal.deps.load_org_access`, ``404``
+  outside the org), the same :func:`~whygraph.portal.deps.bind_project`
+  with ``project.read`` and the same
   :func:`~whygraph.portal.deps.require_initialized` gate as the data
   routes, so an uninitialized project answers ``409`` and no DB file is
-  created. M2's bearer-token auth belongs here too, not in FastMCP's
+  created. Not a FastAPI route, so no ``Depends`` runs here: every check
+  is called explicitly. M2's bearer-token auth belongs here too, not in FastMCP's
   ``auth=`` settings, which only ``FastMCP.streamable_http_app()`` wires.
 * **Session manager.** Each app builds a **fresh** stateless
   :class:`StreamableHTTPSessionManager` (:func:`build_session_manager`)
@@ -25,6 +29,7 @@ the seam.
 
 from __future__ import annotations
 
+import anyio.to_thread
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.types import Receive, Scope, Send
@@ -32,7 +37,14 @@ from starlette.types import Receive, Scope, Send
 from whygraph.core.context import use_project
 from whygraph.mcp.server import mcp
 
-from .deps import ApiError, PortalState, bind_project, require_initialized
+from .authz import Action
+from .deps import (
+    ApiError,
+    PortalState,
+    bind_project,
+    load_org_access,
+    require_initialized,
+)
 from .security import PortalOrigins
 
 
@@ -74,9 +86,21 @@ class McpDispatcher:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         try:
-            if scope.get("state", {}).get("principal") is None:
+            request_state = scope.get("state", {})
+            principal = request_state.get("principal")
+            if principal is None:
                 raise ApiError(409, "setup required")
-            project = await bind_project(self.state, scope["path_params"]["slug"])
+            org_slug = request_state.get("org_slug")
+            access = None
+            if org_slug is not None:
+                access = await anyio.to_thread.run_sync(
+                    load_org_access, principal.user_id, org_slug
+                )
+            if access is None:
+                raise ApiError(404, "not found")
+            project = await bind_project(
+                self.state, access, scope["path_params"]["slug"], Action.PROJECT_READ
+            )
             await require_initialized(self.state, project)
             if self.state.session_manager is None:
                 raise ApiError(503, "MCP is not running")

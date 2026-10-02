@@ -5,9 +5,10 @@ Composition (plan section 4.5.1)::
     PortalGuard (pure ASGI)       Host / Origin / Sec-Fetch-Site / X-WhyGraph-Client,
                                   and the principal, resolved once per request
     /api/portal/*                 management (portal/routes.py)
-    /api/projects/*               management; project_context or project_db
-    /api/projects/{slug}/...      serve.routes.router + serve.chat.router (/chat),
-                                  dependencies=[Depends(project_db)]
+    /api/projects/*               management; each route names its action through
+                                  org_access / project_access / project_db_access
+    /api/projects/{slug}/...      serve.routes.router (project.read) + serve.chat.router
+                                  (/chat, project.chat), via project_db_access
     /mcp/{slug}                   per-project MCP dispatcher (portal/mcp_mount.py)
     /api/*, /mcp/* not matched    404 {"error"} - never the SPA's index.html
     everything else               the SPA (serve.app._mount_static)
@@ -59,7 +60,14 @@ from whygraph.serve.errors import whygraph_error_handler
 from whygraph.serve.routes import router as data_router
 
 from . import db as portal_db
-from .deps import ApiError, IdentityResolver, PortalState, current_user, project_db
+from .authz import Action
+from .deps import (
+    ApiError,
+    IdentityResolver,
+    PortalState,
+    current_user,
+    project_db_access,
+)
 from .mcp_mount import McpDispatcher, build_session_manager
 from .migrate import MIGRATION_LOCK
 from .models import ScanRun, Setting
@@ -186,12 +194,14 @@ def create_portal_app(
     app.include_router(portal_router)
     app.include_router(projects_router)
     app.include_router(
-        data_router, prefix="/api/projects/{slug}", dependencies=[Depends(project_db)]
+        data_router,
+        prefix="/api/projects/{slug}",
+        dependencies=[Depends(project_db_access(Action.PROJECT_READ))],
     )
     app.include_router(
         chat_router,
         prefix="/api/projects/{slug}/chat",
-        dependencies=[Depends(project_db)],
+        dependencies=[Depends(project_db_access(Action.PROJECT_CHAT))],
     )
     app.add_route("/mcp/{slug}", McpDispatcher(state), include_in_schema=False)
 

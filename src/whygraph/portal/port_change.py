@@ -21,7 +21,15 @@ port, :func:`reconcile_port` runs once, before the portal serves requests:
   listed so the UI can say they still point at the old port.
 
 The result is kept on :attr:`PortalState.port_change` and shown by
-``GET /api/portal/state`` (and per project by ``GET /api/projects/{slug}``).
+``GET /api/portal/state`` - filtered to the request's org - and per project
+by ``GET /api/projects/{slug}`` (matched by project id).
+
+**A system caller.** The reconcile runs at start-up with no request, user
+or org: it starts from project **ids** read from the DB, never from a
+request's slug. It reads no config or secret; an internal caller that
+does resolves them through ``ContextCache.get(project_id)``, which reads
+that project's own org. Every report item carries ``project_id`` and
+``org_id`` so the read side can scope it.
 """
 
 from __future__ import annotations

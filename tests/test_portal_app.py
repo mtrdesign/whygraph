@@ -44,6 +44,7 @@ from whygraph.portal.deps import (
     current_user,
     load_org_access,
 )
+from whygraph.portal.mcp_mount import McpDispatcher
 from whygraph.portal.models import Project, ScanRun, User
 from whygraph.portal.orgs import add_member, create_org
 from whygraph.portal.runner import ScanRunner
@@ -222,6 +223,7 @@ def test_setup_flow(client: TestClient, env: SimpleNamespace) -> None:
         "mode": "local",
         "setup_complete": False,
         "user": None,
+        "org": None,
         "port": PORT,
         "shared_folders": [str(env.shared)],
         "version": package_version("whygraph"),  # what `whygraph version` prints
@@ -239,6 +241,8 @@ def test_setup_flow(client: TestClient, env: SimpleNamespace) -> None:
     state = client.get("/api/portal/state").json()
     assert state["setup_complete"] is True
     assert state["user"]["display_name"] == "Tess"
+    assert state["user"]["role"] == "owner"  # the built-in org's membership
+    assert state["org"] == {"slug": "local", "name": "Local", "role": "owner"}
     assert client.get("/api/projects").json() == {"projects": []}
     again = client.post("/api/portal/setup", json={"display_name": "Other"})
     assert again.status_code == 409
@@ -682,6 +686,59 @@ def test_the_guard_stores_the_org_slug_and_none_when_degraded(
     ]
 
 
+def test_state_names_the_org_and_scopes_the_port_report(
+    env: SimpleNamespace,
+) -> None:
+    with portal_client(identity=HeaderIdentity()) as client:
+        orgs = _seed_two_orgs()
+
+        def item(project_id: int, org_id: int) -> dict:
+            return {
+                "project_id": project_id,
+                "org_id": org_id,
+                "slug": "api",
+                "root": f"/repos/{project_id}",
+            }
+
+        client.app.state.portal.port_change = {
+            "port": PORT,
+            "previous_port": 9999,
+            "projects": [item(1, orgs.local), item(2, orgs.beta)],
+            "unmounted": [item(3, orgs.beta)],
+        }
+
+        def state(**headers: str) -> dict:
+            response = client.get("/api/portal/state", headers=headers)
+            assert response.status_code == 200, response.text
+            return response.json()
+
+        alice = state(**{"x-test-user": orgs.uids["alice"], "x-test-org": "local"})
+        assert alice["org"] == {"slug": "local", "name": "Local", "role": "admin"}
+        assert alice["user"]["role"] == "admin"
+        assert alice["port_change"] == {
+            "port": PORT,
+            "previous_port": 9999,
+            "projects": [item(1, orgs.local)],
+            "unmounted": [],
+        }
+        bob = state(**{"x-test-user": orgs.uids["bob"], "x-test-org": "beta"})
+        assert bob["org"] == {"slug": "beta", "name": "Beta", "role": "owner"}
+        assert bob["port_change"]["projects"] == [item(2, orgs.beta)]
+        assert bob["port_change"]["unmounted"] == [item(3, orgs.beta)]
+        for headers in (
+            {"x-test-user": orgs.uids["bob"], "x-test-org": "local"},  # not a member
+            {"x-test-user": orgs.uids["erin"], "x-test-org": "local"},  # no org
+            {"x-test-user": orgs.uids["alice"]},  # the request names no org
+        ):
+            body = state(**headers)
+            assert body["setup_complete"] is True, headers
+            assert body["user"]["role"] is None, headers
+            assert body["org"] is None and body["port_change"] is None, headers
+        nobody = state(**{"x-test-org": "local"})
+        assert nobody["user"] is None and nobody["org"] is None
+        assert nobody["port_change"] is None
+
+
 # ---------------------------------------------------------------------------
 # Routing: the current_user seam, 404s, unscoped paths
 # ---------------------------------------------------------------------------
@@ -717,6 +774,102 @@ def test_every_api_route_resolves_current_user_except_state_and_setup(
         else:
             assert uses_user, f"{rc.path} {rc.methods} does not resolve current_user"
     assert seen_exempt == exempt
+
+
+_READ, _CHAT, _SCAN = "project.read", "project.chat", "project.scan"
+_CONFIGURE, _SETUP = "project.configure", "project.setup"
+_P = "/api/projects/{slug}"
+
+ROUTE_ACTIONS: dict[tuple[str, str], str] = {
+    # Portal level: org_access(...)
+    ("/api/portal/repos", "GET"): "org.read",
+    ("/api/portal/check-path", "POST"): "org.add_project",
+    ("/api/portal/defaults", "GET"): "org.read",
+    ("/api/portal/defaults", "PUT"): "org.configure",
+    ("/api/projects", "GET"): "org.read",
+    ("/api/projects", "POST"): "org.add_project",
+    # Project management: project_access(...)
+    (_P, "GET"): _READ,
+    (f"{_P}/config", "GET"): _READ,
+    (_P, "PATCH"): _CONFIGURE,
+    (f"{_P}/config", "PUT"): _CONFIGURE,
+    (_P, "DELETE"): _SETUP,
+    (f"{_P}/init", "POST"): _SETUP,
+    # Scans: project_db_access(...)
+    (f"{_P}/scans", "POST"): _SCAN,
+    (f"{_P}/scans/{{run_id}}/cancel", "POST"): _SCAN,
+    (f"{_P}/sync", "POST"): _SCAN,
+    (f"{_P}/scans", "GET"): _READ,
+    (f"{_P}/scans/{{run_id}}/events", "GET"): _READ,
+    (f"{_P}/scans/{{run_id}}/log", "GET"): _READ,
+    (f"{_P}/scan-estimate", "GET"): _READ,
+    # The Explorer router: include_router(..., project_db_access(PROJECT_READ))
+    (f"{_P}/search", "GET"): _READ,
+    (f"{_P}/tree", "GET"): _READ,
+    (f"{_P}/graph/overview", "GET"): _READ,
+    (f"{_P}/graph/ego", "GET"): _READ,
+    (f"{_P}/node", "GET"): _READ,
+    (f"{_P}/node/rationale", "GET"): _READ,
+    (f"{_P}/node/rationale", "POST"): _READ,
+    (f"{_P}/node/evidence", "GET"): _READ,
+    (f"{_P}/history", "GET"): _READ,
+    (f"{_P}/commit/{{sha}}", "GET"): _READ,
+    (f"{_P}/pr/{{number}}", "GET"): _READ,
+    (f"{_P}/issue/{{number}}", "GET"): _READ,
+    # The Chat router: include_router(..., project_db_access(PROJECT_CHAT))
+    (f"{_P}/chat/providers", "GET"): _CHAT,
+    (f"{_P}/chat/models", "GET"): _CHAT,
+    (f"{_P}/chat/sessions", "GET"): _CHAT,
+    (f"{_P}/chat/sessions", "POST"): _CHAT,
+    (f"{_P}/chat/sessions/{{session_id}}", "GET"): _CHAT,
+    (f"{_P}/chat/sessions/{{session_id}}", "PATCH"): _CHAT,
+    (f"{_P}/chat/sessions/{{session_id}}", "DELETE"): _CHAT,
+    (f"{_P}/chat/sessions/{{session_id}}/messages", "POST"): _CHAT,
+}
+"""Plan section 4.5's route -> action table: a changed action is a visible diff."""
+
+PUBLIC_API_ROUTES = {
+    "/api/portal/state",
+    "/api/portal/setup",
+    "/api",
+    "/api/{rest:path}",
+}
+"""The only ``/api`` routes that declare no action (state, setup, 404 fallbacks)."""
+
+
+def test_every_api_route_declares_exactly_one_action(client: TestClient) -> None:
+    routes = _api_routes(client.app)
+    assert len(routes) > 30
+    found: dict[tuple[str, str], str] = {}
+    for rc in routes:
+        actions = {
+            str(action)
+            for call in _calls(rc.dependant)
+            if (action := getattr(call, "whygraph_action", None)) is not None
+        }
+        if rc.path in PUBLIC_API_ROUTES:
+            assert actions == set(), rc.path
+            continue
+        assert len(actions) == 1, f"{rc.path} {rc.methods} declares {actions or 'none'}"
+        (action,) = actions
+        for method in rc.methods:
+            assert (rc.path, method) not in found, (rc.path, method)
+            found[(rc.path, method)] = action
+    assert found == ROUTE_ACTIONS
+    seen_public = {rc.path for rc in routes if rc.path in PUBLIC_API_ROUTES}
+    assert seen_public == PUBLIC_API_ROUTES
+
+
+def test_only_the_mcp_routes_have_no_dependant(client: TestClient) -> None:
+    bare = [
+        rc
+        for rc in iter_route_contexts(client.app.routes)
+        if (rc.path or "").startswith(("/api", "/mcp"))
+        and getattr(rc, "dependant", None) is None
+    ]
+    assert sorted(rc.path for rc in bare) == ["/mcp", "/mcp/{rest:path}", "/mcp/{slug}"]
+    (dispatcher,) = (rc for rc in bare if rc.path == "/mcp/{slug}")
+    assert isinstance(dispatcher.endpoint, McpDispatcher)
 
 
 def test_every_api_route_answers_setup_required_before_setup(

@@ -497,6 +497,24 @@ def test_first_scan_is_initial_and_argv_per_trigger(
     assert all(Path(c["cwd"]) == root for c in calls)
 
 
+def test_hook_scans_are_refused_outside_local_mode(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    local_project(portal, env, "demo")
+    portal.app.state.portal.mode = "production"
+    response = portal.post("/api/projects/demo/scans", json={"trigger": "hook"})
+    assert response.status_code == 403
+    assert response.json() == {
+        "error": "hook scans exist only in local mode",
+        "code": "hook_local_only",
+    }
+    wait_run(portal, "demo", scan(portal, "demo", trigger="manual"))
+    assert len(scanner.calls()) == 1  # only the manual scan ran
+    portal.app.state.portal.mode = "local"
+    run = wait_run(portal, "demo", scan(portal, "demo", trigger="hook"))
+    assert run["trigger"] == "hook"
+
+
 def test_single_flight_and_union_coalescing(
     portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
 ) -> None:

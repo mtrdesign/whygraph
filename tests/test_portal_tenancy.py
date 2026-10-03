@@ -53,7 +53,6 @@ from test_portal_app import (  # noqa: F401 -- `env`, `production_env` are fixtu
     portal_client,
     prod_portal,
     production_env,
-    signed_in,
 )
 from test_portal_mcp import MCP_HEADERS, _rpc, _sse_json
 from whygraph.core.context import use_project
@@ -1183,16 +1182,17 @@ def test_system_scans_get_only_their_own_orgs_secrets(
             assert not leaked, (start, org.slug, leaked)
 
 
-def test_hook_scans_are_refused_in_production_and_nothing_answers_signed_out(
-    production_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+def test_nothing_answers_signed_out_in_production(
+    production_env: SimpleNamespace,
 ) -> None:
     """Section 5.4 item 3 on a real production portal (M2c sessions and hosts).
 
     Production refuses Initialize, so the project is inserted directly with
-    ``initialized_at`` set and its DB created as Initialize would.
+    ``initialized_at`` set and its DB created as Initialize would. The
+    hook-refusal half of this case lives in
+    ``test_portal_hosts_isolation.py`` (M2c plan section 7, step 5).
     """
     env = production_env
-    scanner = _fake_scanner(env, monkeypatch)
     root = _marked_repo(env, "narwhal")
     _seed_codegraph(root, "narwhal")
     with use_project(manual_ctx(root, slug="api")):
@@ -1218,7 +1218,6 @@ def test_hook_scans_are_refused_in_production_and_nothing_answers_signed_out(
                     created_by=bob.id,
                 )
             )
-            bob_id = bob.id
         bravo = at("bravo")
         # Signed out: every org route is a 401, MCP and setup do not exist.
         for method, path in API_ROUTES:
@@ -1235,22 +1234,3 @@ def test_hook_scans_are_refused_in_production_and_nothing_answers_signed_out(
         assert setup.status_code == 404
         body = _ok(client.get(bravo + "/api/portal/state"))
         assert body["user"] is None and body["org"] is None
-
-        signed_in(client, bob_id)
-        hook = client.post(bravo + "/api/projects/api/scans", json={"trigger": "hook"})
-        assert hook.status_code == 403
-        assert hook.json() == {
-            "error": "hook scans exist only in local mode",
-            "code": "hook_local_only",
-        }
-        manual = client.post(
-            bravo + "/api/projects/api/scans", json={"trigger": "manual"}
-        )
-        _ok(manual, 202)
-        wait_for(
-            lambda: (
-                (rs := _ok(client.get(bravo + "/api/projects/api/scans"))["runs"])
-                and all(r["status"] in TERMINAL for r in rs)
-            )
-        )
-        assert len(scanner.calls()) == 1  # only the manual scan ran

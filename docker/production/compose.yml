@@ -1,0 +1,85 @@
+# WhyGraph in production mode: portal + Postgres + Caddy (wildcard TLS via DNS-01).
+# Guide: docs/deploy/production.md. Copy .env.example to .env and fill it in first.
+#
+# The portal image tag is gated against scripts/install.sh DEFAULT_VERSION and the
+# postgres tag against POSTGRES_IMAGE in src/whygraph/cli/commands/install.py
+# (tests/test_install_script.py::test_production_compose_pins). Bump them per release.
+
+services:
+  postgres:
+    image: postgres:18.6-trixie
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: whygraph
+      POSTGRES_DB: whygraph
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      # Postgres 18 images keep a per-major PGDATA below this path.
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U whygraph -d whygraph"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks:
+      - internal
+
+  portal:
+    image: ghcr.io/mtrdesign/whygraph:2.0.0
+    command: whygraph portal --host 0.0.0.0 --port 8765
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      WHYGRAPH_MODE: production
+      WHYGRAPH_BASE_URL: ${WHYGRAPH_BASE_URL:?set WHYGRAPH_BASE_URL in .env, e.g. https://whygraph.example.com}
+      WHYGRAPH_DATA: /data
+      WHYGRAPH_DATABASE_URL: postgresql+psycopg://whygraph@postgres:5432/whygraph
+      WHYGRAPH_DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
+      # Caddy's fixed address: the only peer whose X-Forwarded-For the portal trusts.
+      WHYGRAPH_TRUSTED_PROXIES: 172.30.0.10
+    secrets:
+      - postgres_password
+    volumes:
+      # secret.key (the key to every stored secret) and portal.lock live here.
+      - portal-data:/data
+    networks:
+      - internal
+
+  caddy:
+    build: ./caddy
+    restart: unless-stopped
+    depends_on:
+      - portal
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:?set CLOUDFLARE_API_TOKEN in .env}
+      WHYGRAPH_HOST: ${WHYGRAPH_HOST:?set WHYGRAPH_HOST in .env, e.g. whygraph.example.com}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      internal:
+        ipv4_address: 172.30.0.10
+
+networks:
+  internal:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+volumes:
+  postgres-data:
+  portal-data:
+  caddy-data:
+  caddy-config:
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password

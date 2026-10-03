@@ -23,6 +23,16 @@ kinds of driver - you at a browser and an editor, or an application over MCP.
 
     [:octicons-arrow-right-24: WhyGraph as a service](service.md)
 
+-   :material-account-group:{ .lg .middle } __For a team, in production__
+
+    ---
+
+    Production mode adds accounts, sessions and one address per organization
+    (`<org>.<your host>`), behind a Caddy with a wildcard certificate. A compose bundle ships in the
+    repository. Unreleased.
+
+    [:octicons-arrow-right-24: Run in production](production.md)
+
 </div>
 
 Most people start with the local tool. Reach for the service model when you're building an

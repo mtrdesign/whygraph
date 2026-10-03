@@ -89,10 +89,12 @@ this release; it will be documented in full with production mode.
 
 ## Current scope
 
-The portal is a **local-mode** service: published to `127.0.0.1` only, with no login. It accepts
+The MCP endpoint is a **local-mode** service: published to `127.0.0.1` only, with no login. It accepts
 requests whose `Host` is the loopback address and port, and rejects browser cross-origin requests, so
 the consuming app has to run on the same machine. There is no bearer-token authentication and no
-remote exposure yet; both are on the [roadmap](../roadmap.md).
+remote exposure yet; both are on the [roadmap](../roadmap.md). The portal's
+[production mode](production.md) adds accounts and organizations for people, but serves no `/mcp`
+endpoint.
 
 !!! note "Not for shared machines"
     Every user of the machine can reach the loopback port. See the

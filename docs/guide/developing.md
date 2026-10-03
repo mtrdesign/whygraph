@@ -1,12 +1,13 @@
 # Developing WhyGraph
 
-Working on WhyGraph itself (not using it) takes four `make` targets from a checkout:
+Working on WhyGraph itself (not using it) takes five `make` targets from a checkout:
 
 | Command | Mode | What it runs |
 |---|---|---|
 | `make dev-local` | Development, native | The portal from your checkout on `:8777`, restarted on every backend change, plus the Vite dev server with hot reload on `:5173`, against the dev Postgres from `make dev-db` (started for you). Fastest; your IDE's debugger works. |
 | `make dev-docker` | Development, in Docker | The same, inside the WhyGraph image through the real `whygraph up` shim, with your checkout mounted read-only over the installed package. |
 | `make prod` | Production | The image built exactly like a release (pinned CodeGraph, the `pyproject.toml` version), run through the shim with no source mounted: what users get. |
+| `make dev-production` | Development, native, production mode | The portal's [production mode](../deploy/production.md) from your checkout on `:8778`, with Vite on `:5173` in front of it, on its own `whygraph_prod` database in the `make dev-db` Postgres. For work on sign-in, organizations and the host checks. See below. |
 | `make check` | Before a pull request | Both `ruff` checks, `pytest`, the frontend typecheck / tests / build, the Playwright suite, then the release smoke test against a freshly built image. Stops at the first failure. |
 
 `dev-local` and `dev-docker` run in the foreground: open `http://localhost:5173`, and press
@@ -32,6 +33,25 @@ The portal keeps its own data in Postgres, so every mode needs one:
 
 `make dev-db` and `make dev-db-down` are listed by `make` like every other helper.
 
+## Production mode in development
+
+`make dev-production` runs the same native stack as `dev-local` with `WHYGRAPH_MODE=production`. It
+differs from `make prod`, which is the *released image in local mode* (what a user installs), not
+production mode:
+
+- It uses a separate database, `whygraph_prod`, created on demand in the `make dev-db` container, and
+  its own data directory under `$TMPDIR/whygraph-dev/production`, so it never touches `dev-local`'s
+  state. No shared folders are given.
+- The base URL is `http://whygraph.localhost:5173` - the **Vite** address, so the browser, the session
+  cookie and the portal's host check all see one origin per host. Vite passes the `Host` header
+  through unchanged, which is what lets `<org>.whygraph.localhost:5173` reach the portal. Open
+  `http://whygraph.localhost:5173`, not `localhost`: that one gets `421`.
+- The first run prints a `Bootstrap secret:` line in the portal's log; enter it at
+  `http://whygraph.localhost:5173/setup`.
+- It cannot run beside `dev-local`: both keep Vite on `:5173`.
+- Use **Chromium or Firefox**: they resolve every `*.localhost` name to the loopback address, while
+  Safari's handling of `*.localhost` varies by version.
+
 ## Which one to use
 
 - **`dev-local`** for most work: the UI, routes, MCP tools, chat. A saved `.py` file under
@@ -42,6 +62,8 @@ The portal keeps its own data in Postgres, so every mode needs one:
   and the in-image `git` / `gh` / `codegraph`. It rebuilds the image only when its inputs change
   (`pyproject.toml`, `uv.lock`, the Dockerfile, `package-lock.json`); everyday edits reach the
   container through the mount.
+- **`dev-production`** for anything that only exists in production mode: accounts, sessions,
+  organization hosts, the admin page.
 - **`make check`** always, before pushing. Its smoke test catches what `dev-local` cannot see.
 
 ## What stays isolated
@@ -59,6 +81,7 @@ Your checkout itself is never added to a dev portal, so it never gets WhyGraph's
 and `whygraph scan` keeps working in it.
 
 The three run modes share port `8777`, so run one at a time. Override it with `DEV_PORT=...`.
+`dev-production` uses `:8778` for the portal and `:5173` for Vite, so it cannot run beside `dev-local`.
 
 ## Helpers
 

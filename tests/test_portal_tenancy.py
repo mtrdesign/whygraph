@@ -370,7 +370,7 @@ def _seed_orgs(client: TestClient) -> tuple[OrgWorld, OrgWorld, dict]:
     users = {"alice": {"x-test-user": _ok(setup, 201)["user"]["uid"]}}
     with portal_db.get_session() as session:
         local_id = session.get(Setting, 1).builtin_org_id
-        beta_id = create_org(session, slug="beta", name="Beta").id
+        beta_id = create_org(session, slug="bravo", name="Beta").id
         made = {
             n: User(display_name=n.title()) for n in ("bob", "carol", "dave", "erin")
         }
@@ -381,7 +381,7 @@ def _seed_orgs(client: TestClient) -> tuple[OrgWorld, OrgWorld, dict]:
         add_member(session, org_id=local_id, user_id=made["dave"].id, role="admin")
         users |= {n: {"x-test-user": u.uid} for n, u in made.items()}
     local = OrgWorld("local", "quokka", {**users["alice"], "x-test-org": "local"})
-    beta = OrgWorld("beta", "narwhal", {**users["bob"], "x-test-org": "beta"})
+    beta = OrgWorld("bravo", "narwhal", {**users["bob"], "x-test-org": "bravo"})
     local.org_id, beta.org_id = local_id, beta_id
     return local, beta, users
 
@@ -736,9 +736,9 @@ def test_every_org_scoped_route_is_isolated(
     # unknown org - one indistinguishable 404, before any body is read.
     for headers in (
         w.as_("bob", "local"),
-        w.as_("alice", "beta"),
+        w.as_("alice", "bravo"),
         w.as_("erin", "local"),
-        w.as_("erin", "beta"),
+        w.as_("erin", "bravo"),
         w.as_("alice", "nope"),
     ):
         response = w.client.request(method, _url(path, w.local), headers=headers)
@@ -844,7 +844,7 @@ def test_every_mcp_tool_answers_from_its_own_org(two_orgs: World) -> None:
         assert f"{other.mark} marker commit" not in foreign.text
     for headers in (
         w.as_("bob", "local"),
-        w.as_("alice", "beta"),
+        w.as_("alice", "bravo"),
         w.as_("erin", "local"),
         w.as_("alice", "nope"),
     ):
@@ -1175,12 +1175,12 @@ def test_hook_scans_are_refused_in_production_and_no_org_resolves_by_default(
     with portal_db.get_session() as session:
         session.add(Setting(id=1, mode="production"))
         session.flush()
-        beta_id = create_org(session, slug="beta", name="Beta").id
+        beta_id = create_org(session, slug="bravo", name="Beta").id
         bob = User(display_name="Bob")
         session.add(bob)
         session.flush()
         add_member(session, org_id=beta_id, user_id=bob.id, role="owner")
-        headers = {"x-test-user": bob.uid, "x-test-org": "beta"}
+        headers = {"x-test-user": bob.uid, "x-test-org": "bravo"}
     root = _marked_repo(env, "narwhal")
     _seed_codegraph(root, "narwhal")
     with portal_client(identity=HeaderIdentity()) as client:

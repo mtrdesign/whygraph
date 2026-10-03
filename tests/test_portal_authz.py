@@ -19,6 +19,7 @@ from whygraph.portal.authz import (
 from whygraph.portal.deps import ApiError
 from whygraph.portal.orgs import (
     BUILTIN_ORG_SLUG,
+    NEVER_ORG_HOSTS,
     ORG_SLUG_SQL_CHECK,
     RESERVED_ORG_SLUGS,
     is_valid_org_slug,
@@ -44,16 +45,29 @@ def test_invalid_org_slugs(slug):
         validate_org_slug(slug)
 
 
-@pytest.mark.parametrize("slug", ["www", "api", "mcp", "whygraph", "staging"])
-def test_reserved_org_slugs(slug):
-    assert not is_valid_org_slug(slug)
+@pytest.mark.parametrize("slug", ["www", "api", "mcp", "whygraph", "staging", "setup"])
+def test_reserved_org_slugs_refused_at_creation_only(slug):
+    # Lookups check the format only, so growing the list never strands an org.
+    assert is_valid_org_slug(slug)
     with pytest.raises(ValueError, match="reserved"):
         validate_org_slug(slug)
 
 
+def test_punycode_lookalike_refused_at_creation():
+    assert is_valid_org_slug("xn--abc")
+    with pytest.raises(ValueError, match="double dash"):
+        validate_org_slug("xn--abc")
+    validate_org_slug("a-b--c")  # only the 3rd-4th position is reserved
+
+
 def test_builtin_slug_is_not_reserved():
     assert BUILTIN_ORG_SLUG not in RESERVED_ORG_SLUGS
-    assert len(RESERVED_ORG_SLUGS) == 35
+    validate_org_slug(BUILTIN_ORG_SLUG)
+
+
+def test_never_org_hosts_are_reserved():
+    assert NEVER_ORG_HOSTS <= RESERVED_ORG_SLUGS
+    assert isinstance(NEVER_ORG_HOSTS, frozenset)
 
 
 def test_sql_check_mirrors_regex():

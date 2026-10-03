@@ -544,10 +544,10 @@ def test_no_cors_headers_are_ever_sent(ready: TestClient) -> None:
 
 
 def _seed_two_orgs() -> SimpleNamespace:
-    """``local`` (alice admin), ``beta`` (bob owner) and erin with no membership."""
+    """``local`` (alice admin), ``bravo`` (bob owner) and erin with no membership."""
     with portal_db.get_session() as session:
         local = builtin_org_id(session)
-        beta = create_org(session, slug="beta", name="Beta")
+        beta = create_org(session, slug="bravo", name="Bravo")
         alice, bob, erin = (
             User(display_name=name) for name in ("Alice", "Bob", "Erin")
         )
@@ -586,9 +586,9 @@ def test_load_org_access(env: SimpleNamespace) -> None:
     assert load_org_access(orgs.alice, "local") == OrgAccess(
         org_id=orgs.local, org_slug="local", org_name="Local", role=Role.ADMIN
     )
-    bob = load_org_access(orgs.bob, "beta")
+    bob = load_org_access(orgs.bob, "bravo")
     assert bob is not None and bob.role is Role.OWNER and bob.org_id == orgs.beta
-    assert load_org_access(orgs.alice, "beta") is None  # another org's member
+    assert load_org_access(orgs.alice, "bravo") is None  # another org's member
     assert load_org_access(orgs.bob, "local") is None
     assert load_org_access(orgs.erin, "local") is None  # no membership at all
     assert load_org_access(orgs.alice, "nope") is None  # unknown org
@@ -617,7 +617,7 @@ def test_current_org_answers_setup_required_before_not_found(
         erin = {"x-test-user": orgs.uids["erin"]}
         for headers in (
             alice,  # the request names no org
-            {**alice, "x-test-org": "beta"},  # not a member
+            {**alice, "x-test-org": "bravo"},  # not a member
             {**alice, "x-test-org": "nope"},  # no such org
             {**erin, "x-test-org": "local"},  # no membership anywhere
         ):
@@ -631,7 +631,7 @@ def test_current_org_answers_setup_required_before_not_found(
             "org_name": "Local",
             "role": "admin",
         }
-        bob = {"x-test-user": orgs.uids["bob"], "x-test-org": "beta"}
+        bob = {"x-test-user": orgs.uids["bob"], "x-test-org": "bravo"}
         assert client.get("/api/test/org", headers=bob).json()["role"] == "owner"
 
 
@@ -647,7 +647,7 @@ def test_local_identity_resolves_the_builtin_org_after_setup(
         "role": "owner",
     }
     # Test headers mean nothing to the default resolver.
-    other = ready.get("/api/test/org", headers={"x-test-org": "beta"})
+    other = ready.get("/api/test/org", headers={"x-test-org": "bravo"})
     assert other.json()["org_slug"] == "local"
 
 
@@ -721,8 +721,8 @@ def test_state_names_the_org_and_scopes_the_port_report(
             "projects": [item(1, orgs.local)],
             "unmounted": [],
         }
-        bob = state(**{"x-test-user": orgs.uids["bob"], "x-test-org": "beta"})
-        assert bob["org"] == {"slug": "beta", "name": "Beta", "role": "owner"}
+        bob = state(**{"x-test-user": orgs.uids["bob"], "x-test-org": "bravo"})
+        assert bob["org"] == {"slug": "bravo", "name": "Bravo", "role": "owner"}
         assert bob["port_change"]["projects"] == [item(2, orgs.beta)]
         assert bob["port_change"]["unmounted"] == [item(3, orgs.beta)]
         for headers in (

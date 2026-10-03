@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ApiError, projectApi, projectKey, type ScanRunRow, type ScanRunStatus } from "../../api";
+import { useReadOnly } from "../../lib/identity";
 import { projectProblem } from "../../lib/errors";
 import { useScanActions } from "../../lib/scanActions";
 import { formatSeconds, runSeconds, triggerLabel } from "../../lib/scanFormat";
@@ -318,6 +319,7 @@ export function ScanRunView({ slug, runId }: { slug: string; runId: number }) {
     id: runId,
     active,
   });
+  const readOnly = useReadOnly();
   const now = useNow(1000, status === "running");
 
   // The list row is stale the moment the stream ends: refresh it (and the project
@@ -380,19 +382,21 @@ export function ScanRunView({ slug, runId }: { slug: string; runId: number }) {
             {duration !== null ? ` · ${formatSeconds(duration)}` : ""}
           </p>
         </div>
-        <div className="flex gap-2">
-          {(status === "queued" || status === "running") && (
-            <CancelRunButton slug={slug} runId={runId} status={status} kind={kind} />
-          )}
-          {kind === "sync" && (
-            <Button variant="outline" onClick={syncNow} disabled={syncPending}>
-              Sync again
+        {!readOnly && (
+          <div className="flex gap-2">
+            {(status === "queued" || status === "running") && (
+              <CancelRunButton slug={slug} runId={runId} status={status} kind={kind} />
+            )}
+            {kind === "sync" && (
+              <Button variant="outline" onClick={syncNow} disabled={syncPending}>
+                Sync again
+              </Button>
+            )}
+            <Button variant={active ? "outline" : "default"} onClick={() => scanNow()} disabled={scanPending}>
+              {active ? "Scan now" : "Scan again"}
             </Button>
-          )}
-          <Button variant={active ? "outline" : "default"} onClick={() => scanNow()} disabled={scanPending}>
-            {active ? "Scan now" : "Scan again"}
-          </Button>
-        </div>
+          </div>
+        )}
       </div>
 
       {followUp !== null && followUp !== runId && (

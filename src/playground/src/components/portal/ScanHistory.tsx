@@ -2,6 +2,7 @@ import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { HistoryIcon } from "lucide-react";
 import { portalApi, projectApi, projectKey } from "../../api";
+import { useReadOnly } from "../../lib/identity";
 import { projectProblem } from "../../lib/errors";
 import { timeAgo } from "../../lib/projectStatus";
 import { useScanActions } from "../../lib/scanActions";
@@ -29,6 +30,7 @@ export function ScanHistory({ slug }: { slug: string }) {
     queryFn: () => portalApi.project(slug),
   });
   const { scanNow, syncNow, scanPending, syncPending } = useScanActions(slug);
+  const readOnly = useReadOnly();
   const list = runs.data?.runs ?? [];
   const usable = !!project.data?.initialized && project.data.root_status === "ok";
 
@@ -41,16 +43,18 @@ export function ScanHistory({ slug }: { slug: string }) {
             Every scan and sync for this project, newest first.
           </p>
         </div>
-        <div className="flex gap-2">
-          {project.data?.source === "github" && (
-            <Button variant="outline" onClick={syncNow} disabled={!usable || syncPending}>
-              Sync now
+        {!readOnly && (
+          <div className="flex gap-2">
+            {project.data?.source === "github" && (
+              <Button variant="outline" onClick={syncNow} disabled={!usable || syncPending}>
+                Sync now
+              </Button>
+            )}
+            <Button onClick={() => scanNow()} disabled={!usable || scanPending}>
+              Scan now
             </Button>
-          )}
-          <Button onClick={() => scanNow()} disabled={!usable || scanPending}>
-            Scan now
-          </Button>
-        </div>
+          </div>
+        )}
       </div>
 
       {runs.isLoading && <Skeleton className="h-40 rounded-xl" />}

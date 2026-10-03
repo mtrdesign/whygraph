@@ -217,8 +217,17 @@ class User(PortalBase, table=True):
         survives a re-import that changes ``id``.
     display_name : str
         Shown in the UI.
-    username, password_hash : str or None
-        Unused in local mode (M2).
+    email : str or None
+        The login name in production (M2c), stored normalized (trimmed,
+        lowercased; ``ck_users_email_lower`` enforces it). ``NULL`` for
+        local mode's email-less user. ``uq_users_email`` is a plain
+        unique, so many ``NULL`` values fit.
+    password_hash : str or None
+        The argon2 hash; ``NULL`` in local mode.
+    is_instance_admin : bool
+        May use the instance admin page and read every org (M2c).
+    password_changed_at : str or None
+        ISO-8601 UTC timestamp of the last password change.
 
     Notes
     -----
@@ -226,14 +235,100 @@ class User(PortalBase, table=True):
     """
 
     __tablename__ = "users"
-    __table_args__ = (UniqueConstraint("uid", name="uq_users_uid"),)
+    __table_args__ = (
+        UniqueConstraint("uid", name="uq_users_uid"),
+        UniqueConstraint("email", name="uq_users_email"),
+        CheckConstraint("email = lower(email)", name="ck_users_email_lower"),
+    )
 
     id: int | None = Field(default=None, primary_key=True)
     uid: str = Field(default_factory=_uid, sa_type=Text)
     display_name: str = Field(sa_type=Text)
-    username: str | None = Field(default=None, sa_type=Text)
+    email: str | None = Field(default=None, sa_type=Text)
     password_hash: str | None = Field(default=None, sa_type=Text)
+    is_instance_admin: bool = Field(default=False)
+    password_changed_at: str | None = Field(default=None, sa_type=Text)
     created_at: str = Field(default_factory=_now, sa_type=Text)
+
+
+class UserSession(PortalBase, table=True):
+    """A signed-in browser session (M2c); named to avoid SQLModel's ``Session``.
+
+    Attributes
+    ----------
+    token_hash : str
+        SHA-256 of the cookie token; the token itself is never stored.
+    user_id : int
+        The signed-in user; the row goes with the user.
+    created_at, last_seen_at, expires_at : str
+        ISO-8601 UTC timestamps (``expires_at`` is the absolute lifetime).
+    user_agent : str or None
+        The first 200 characters of the ``User-Agent`` header.
+    """
+
+    __tablename__ = "sessions"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_sessions_token_hash"),
+        ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            name="fk_sessions_user",
+            ondelete="CASCADE",
+        ),
+        Index("ix_sessions_user_id", "user_id"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    token_hash: str = Field(sa_type=Text)
+    user_id: int = Field()
+    created_at: str = Field(default_factory=_now, sa_type=Text)
+    last_seen_at: str = Field(default_factory=_now, sa_type=Text)
+    expires_at: str = Field(sa_type=Text)
+    user_agent: str | None = Field(default=None, sa_type=Text)
+
+
+class PasswordReset(PortalBase, table=True):
+    """A one-time password reset link an instance admin issued (M2c).
+
+    Attributes
+    ----------
+    token_hash : str
+        SHA-256 of the link's token.
+    user_id : int
+        The user the link resets; the row goes with the user.
+    created_by : int or None
+        The issuing admin's ``users.id``; ``NULL`` when that user is gone.
+    created_at, expires_at : str
+        ISO-8601 UTC timestamps.
+    used_at : str or None
+        When the link was used; ``NULL`` while unused.
+    """
+
+    __tablename__ = "password_resets"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_password_resets_token_hash"),
+        ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            name="fk_password_resets_user",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["created_by"],
+            ["users.id"],
+            name="fk_password_resets_created_by",
+            ondelete="SET NULL",
+        ),
+        Index("ix_password_resets_user_id", "user_id"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    token_hash: str = Field(sa_type=Text)
+    user_id: int = Field()
+    created_by: int | None = Field(default=None)
+    created_at: str = Field(default_factory=_now, sa_type=Text)
+    expires_at: str = Field(sa_type=Text)
+    used_at: str | None = Field(default=None, sa_type=Text)
 
 
 class Project(PortalBase, table=True):
@@ -518,6 +613,7 @@ __all__ = [
     "AGENTS",
     "Membership",
     "Organization",
+    "PasswordReset",
     "PortalBase",
     "Project",
     "ProjectAgent",
@@ -526,4 +622,5 @@ __all__ = [
     "Secret",
     "Setting",
     "User",
+    "UserSession",
 ]

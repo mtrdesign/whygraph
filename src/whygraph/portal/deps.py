@@ -22,6 +22,10 @@ carries the action as ``whygraph_action``:
   ``409 {"code": "unsafe_path"}`` (:func:`checked_db_paths`).
 * :func:`org_access` - portal-level routes: the caller's
   :class:`~whygraph.portal.authz.OrgAccess`, authorized for the action.
+* :func:`user_access` (``user.self``) and :func:`instance_access`
+  (``instance.admin``) - production's account, org-creation and admin
+  routes, which name no org: mode, then host (both ``404``), then
+  :func:`current_user`, then the action.
 
 A route takes exactly **one** project dependency: two different closures
 are two callables to FastAPI, which would bind the project twice.
@@ -41,23 +45,28 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable, Protocol
+from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Protocol
 
 import anyio
 import anyio.to_thread
 from fastapi import Depends, Request
 from fastapi.responses import JSONResponse
 from sqlmodel import select
+from starlette.datastructures import Headers
 from starlette.types import Scope
 
 from whygraph.core.config import ConfigError
 from whygraph.core.context import ProjectContext, use_project
 from whygraph.core.safe_paths import UnsafePathError
 
+from .audit import audit
 from .authz import Action, OrgAccess, Role, authorize
 from .context import ContextCache, ProjectNotFound, resolve_root
+from . import sessions
 from .db import InstanceLock, get_session
+from .hosts import BaseUrl, classify
 from .migrate import ProjectMigrations
 from .models import Membership, Organization, Project, User
 from .orgs import is_valid_org_slug
@@ -66,6 +75,7 @@ from .projects import is_valid_slug
 from .repos import DiscoveryCache
 from .runner import ScanRunner
 from .security import PortalOrigins, Principal
+from .throttle import Throttle
 
 
 class ApiError(Exception):
@@ -79,15 +89,26 @@ class ApiError(Exception):
         Human-readable message.
     code : str, optional
         Machine-readable code (e.g. ``bad_token``, ``not_shared``).
+    headers : dict, optional
+        Response headers (e.g. ``Retry-After`` on a ``429``).
     **extra
         More JSON fields for the body.
     """
 
-    def __init__(self, status: int, error: str, *, code: str | None = None, **extra):
+    def __init__(
+        self,
+        status: int,
+        error: str,
+        *,
+        code: str | None = None,
+        headers: dict[str, str] | None = None,
+        **extra,
+    ):
         super().__init__(error)
         self.status = status
         self.error = error
         self.code = code
+        self.headers = headers
         self.extra = extra
 
     def response(self) -> JSONResponse:
@@ -96,7 +117,7 @@ class ApiError(Exception):
         if self.code is not None:
             body["code"] = self.code
         body.update(self.extra)
-        return JSONResponse(body, status_code=self.status)
+        return JSONResponse(body, status_code=self.status, headers=self.headers)
 
 
 _UNSET = object()
@@ -146,6 +167,66 @@ class LocalIdentity:
     async def org_slug(self, scope: Scope) -> str | None:
         """Return the built-in organization's slug (``None`` in production)."""
         return self.state.builtin_org_slug
+
+
+class SessionIdentity:
+    """Production identity: the session cookie names the user, the Host names the org.
+
+    The guard calls it only on ``/api`` and ``/mcp``, so static assets and
+    SPA pages never query the database. The membership is still checked
+    per request by :func:`current_org`.
+
+    Parameters
+    ----------
+    state : PortalState
+        The portal state; its ``base_url`` must be set (the lifespan does
+        so before it installs this resolver).
+    """
+
+    def __init__(self, state: PortalState) -> None:
+        self.state = state
+
+    async def principal(self, scope: Scope) -> Principal | None:
+        """Return the session cookie's user, or ``None`` (signed out).
+
+        More than one ``whygraph_session`` cookie (another host under the
+        same parent domain tossed one in) counts as signed out, and sets
+        ``scope["state"]["clear_session_cookie"]`` so the guard clears both
+        cookie forms on the response. A live session last touched over
+        :data:`~whygraph.portal.sessions.TOUCH_EVERY` ago is touched.
+        """
+        tokens = sessions.session_cookies(Headers(scope=scope).getlist("cookie"))
+        if not tokens:
+            return None
+        if len(tokens) > 1:
+            scope.setdefault("state", {})["clear_session_cookie"] = True
+            return None
+        row = await anyio.to_thread.run_sync(_lookup_session, tokens[0])
+        if row is None:
+            return None
+        return Principal(
+            user_id=row.user_id,
+            uid=row.uid,
+            display_name=row.display_name,
+            email=row.email,
+            session_id=row.session_id,
+            is_instance_admin=row.is_instance_admin,
+        )
+
+    async def org_slug(self, scope: Scope) -> str | None:
+        """Return the org label of ``Host`` (``None`` on the base host)."""
+        base = self.state.base_url
+        if base is None:
+            return None
+        kind = classify(Headers(scope=scope).get("host"), base)
+        return None if kind is None else kind.slug
+
+
+def _lookup_session(token: str) -> sessions.SessionRow | None:
+    row = sessions.lookup(token)
+    if row is not None and sessions.is_stale(row):
+        sessions.touch(row.session_id)
+    return row
 
 
 class PortalState:
@@ -209,8 +290,26 @@ class PortalState:
         production.
     identity : IdentityResolver
         What the guard asks for the principal and the org slug;
-        :class:`LocalIdentity` by default (tests inject their own through
+        :class:`LocalIdentity` by default, :class:`SessionIdentity` in
+        production (tests inject their own through
         :func:`whygraph.portal.app.create_portal_app`).
+    identity_injected : bool
+        Whether ``identity`` was injected (then production keeps it).
+    base_url : BaseUrl or None
+        Production's validated ``WHYGRAPH_BASE_URL``; ``None`` in local mode.
+    bootstrap_secret : str or None
+        Production's one-time bootstrap secret, kept only in memory while
+        no instance admin exists.
+    base_check : list of str or None
+        What the base-URL DNS self-check found (production; ``None`` until
+        it ran, ``[]`` when healthy).
+    login_pair, login_email, login_ip : Throttle
+        Sign-in **failures** (also wrong current passwords): per
+        ``(email, ip_key)`` 5 / 15 min, per email 100 / hour, per
+        ``ip_key`` 20 / 15 min (plan section 0.2).
+    register_ip, bootstrap_ip, reset_ip : Throttle
+        Every attempt, per ``ip_key``: register 5 / hour, bootstrap and
+        reset 10 / 15 min.
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -237,6 +336,16 @@ class PortalState:
         self.builtin_org_id: int | None = None
         self.builtin_org_slug: str | None = None
         self.identity: IdentityResolver = LocalIdentity(self)
+        self.identity_injected = False
+        self.base_url: BaseUrl | None = None
+        self.bootstrap_secret: str | None = None
+        self.base_check: list[str] | None = None
+        self.login_pair = Throttle(5, 15 * 60)
+        self.login_email = Throttle(100, 60 * 60)
+        self.login_ip = Throttle(20, 15 * 60)
+        self.register_ip = Throttle(5, 60 * 60)
+        self.bootstrap_ip = Throttle(10, 15 * 60)
+        self.reset_ip = Throttle(10, 15 * 60)
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0
@@ -305,19 +414,25 @@ async def current_user(request: Request) -> Principal:
     Raises
     ------
     ApiError
-        ``409`` when no user exists yet.
+        ``409`` when no user exists yet (local mode);
+        ``401 {"code": "login_required"}`` without a session (production).
     """
     principal = request.scope.get("state", {}).get("principal")
     if principal is None:
+        if portal_state(request).mode == "production":
+            raise ApiError(401, "sign-in required", code="login_required")
         raise ApiError(409, "setup required")
     return principal
 
 
-def load_org_access(user_id: int, org_slug: str) -> OrgAccess | None:
+def load_org_access(
+    user_id: int, org_slug: str, *, instance_admin: bool = False
+) -> OrgAccess | None:
     """Return ``user_id``'s access to the organization ``org_slug``.
 
     One join of ``organizations`` and ``memberships``, run on every request
-    and never cached, so a membership change applies to the next request.
+    and never cached, so a membership change (or an admin's demotion)
+    applies to the next request.
 
     Parameters
     ----------
@@ -325,12 +440,18 @@ def load_org_access(user_id: int, org_slug: str) -> OrgAccess | None:
         ``users.id`` of the principal.
     org_slug : str
         The organization slug the request addresses.
+    instance_admin : bool, optional
+        Whether the principal is an instance admin: without a membership
+        they get :attr:`~whygraph.portal.authz.Role.READER`. Passed by
+        :func:`current_org` and ``GET /api/portal/state``, never by the MCP
+        dispatcher.
 
     Returns
     -------
     OrgAccess or None
         ``None`` when the org does not exist (or the slug is malformed) or
-        the user is not a member of it - callers answer both the same way.
+        the user is neither a member of it nor an instance admin - callers
+        answer both the same way. A real membership wins over ``READER``.
     """
     if not is_valid_org_slug(org_slug):
         return None
@@ -342,6 +463,14 @@ def load_org_access(user_id: int, org_slug: str) -> OrgAccess | None:
             .join(Membership, Membership.org_id == Organization.id)
             .where(Organization.slug == org_slug, Membership.user_id == user_id)
         ).first()
+        if row is None and instance_admin:
+            org = session.exec(
+                select(Organization.id, Organization.slug, Organization.name).where(
+                    Organization.slug == org_slug
+                )
+            ).first()
+            if org is not None:
+                row = (*org, Role.READER.value)
     if row is None:
         return None
     org_id, slug, name, role = row
@@ -354,7 +483,9 @@ async def current_org(
     """The caller's access to the organization the guard named.
 
     FastAPI resolves it once per request, after :func:`current_user` (so
-    ``409 setup required`` comes first).
+    ``409 setup required`` comes first). An instance admin without a
+    membership reads the org as ``reader``: only ``GET`` / ``HEAD``, and
+    each such request writes one security event record.
 
     Returns
     -------
@@ -366,16 +497,38 @@ async def current_org(
     ApiError
         ``404 {"error": "not found"}`` when the request names no org, the
         org does not exist or the caller is not a member - never saying
-        which.
+        which; ``403 {"code": "forbidden"}`` for a ``reader`` request with
+        another method.
     """
     org_slug = request.scope.get("state", {}).get("org_slug")
     if org_slug is None:
         raise ApiError(404, "not found")
     access = await anyio.to_thread.run_sync(
-        load_org_access, principal.user_id, org_slug
+        partial(
+            load_org_access,
+            principal.user_id,
+            org_slug,
+            instance_admin=principal.is_instance_admin,
+        )
     )
     if access is None:
         raise ApiError(404, "not found")
+    if access.role == Role.READER:
+        audit(
+            "reader_request",
+            request,
+            uid=principal.uid,
+            org=access.org_slug,
+            method=request.method,
+            path=request.url.path,
+        )
+        if request.method not in ("GET", "HEAD"):
+            raise ApiError(
+                403,
+                "instance admins can only read an organization they are not a "
+                "member of",
+                code="forbidden",
+            )
     return access
 
 
@@ -636,23 +789,140 @@ def org_access(action: Action) -> Callable[..., Awaitable[OrgAccess]]:
     return dependency
 
 
+def require_production(request: Request) -> None:
+    """Refuse (``404``) unless the portal runs in production mode.
+
+    Raises
+    ------
+    ApiError
+        ``404 {"error": "not found"}`` in local (or degraded) mode.
+    """
+    if portal_state(request).mode != "production":
+        raise ApiError(404, "not found")
+
+
+def require_base_host(request: Request) -> None:
+    """Refuse (``404``) unless the request addresses the base host.
+
+    Raises
+    ------
+    ApiError
+        ``404 {"error": "not found"}`` on an org host.
+    """
+    if request.scope.get("state", {}).get("host_kind") != "base":
+        raise ApiError(404, "not found")
+
+
+def require_mode_and_host(
+    host: Literal["any", "base"],
+) -> Callable[..., Awaitable[None]]:
+    """Build the gate of a production-only route.
+
+    Declared **before** :func:`current_user` in a dependency's parameters
+    (FastAPI solves them in order), so a wrong mode or host is a ``404``
+    rather than a ``401`` / ``403``.
+
+    Parameters
+    ----------
+    host : {"any", "base"}
+        Which hosts serve the route.
+
+    Returns
+    -------
+    callable
+        An ``async`` dependency: :func:`require_production`, then for
+        ``"base"`` :func:`require_base_host`.
+    """
+
+    async def gate(request: Request) -> None:
+        require_production(request)
+        if host == "base":
+            require_base_host(request)
+
+    return gate
+
+
+def user_access(
+    host: Literal["any", "base"] = "any",
+) -> Callable[..., Awaitable[Principal]]:
+    """Build the dependency of a route acting on the caller's own account.
+
+    Parameters
+    ----------
+    host : {"any", "base"}, optional
+        Which hosts serve the route (``"base"`` for org creation).
+
+    Returns
+    -------
+    callable
+        An ``async`` dependency returning the :class:`Principal`
+        (``whygraph_action`` = ``user.self``): ``404`` outside production
+        or on a wrong host, then ``401`` without a session.
+    """
+
+    async def dependency(
+        _gate: None = Depends(require_mode_and_host(host)),
+        principal: Principal = Depends(current_user),
+    ) -> Principal:
+        return principal
+
+    dependency.whygraph_action = Action.USER_SELF  # type: ignore[attr-defined]
+    return dependency
+
+
+def instance_access() -> Callable[..., Awaitable[Principal]]:
+    """Build the dependency of an instance-admin route (base host only).
+
+    Returns
+    -------
+    callable
+        An ``async`` dependency returning the :class:`Principal`
+        (``whygraph_action`` = ``instance.admin``): ``404`` outside
+        production or on an org host, ``401`` without a session, ``403
+        {"code": "forbidden"}`` unless this request's session belongs to an
+        instance admin.
+    """
+
+    async def dependency(
+        _gate: None = Depends(require_mode_and_host("base")),
+        principal: Principal = Depends(current_user),
+    ) -> Principal:
+        if not principal.is_instance_admin:
+            raise ApiError(
+                403,
+                f"only instance admins can {Action.INSTANCE_ADMIN}",
+                code="forbidden",
+                action=str(Action.INSTANCE_ADMIN),
+            )
+        return principal
+
+    dependency.whygraph_action = Action.INSTANCE_ADMIN  # type: ignore[attr-defined]
+    return dependency
+
+
 __all__ = [
     "ApiError",
     "BoundProject",
     "IdentityResolver",
     "LocalIdentity",
     "PortalState",
+    "SessionIdentity",
     "bind_project",
     "bound_from",
     "checked_db_paths",
     "current_org",
     "current_user",
+    "instance_access",
     "load_org_access",
     "org_access",
     "portal_state",
     "principal_of",
     "project_access",
     "project_db_access",
+    "require_base_host",
     "require_initialized",
+    "require_mode_and_host",
+    "require_production",
     "unsafe_path_error",
+    "user_access",
 ]

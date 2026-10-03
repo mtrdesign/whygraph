@@ -13,6 +13,8 @@ import {
   SlidersHorizontalIcon,
 } from "lucide-react";
 import { portalApi, portalKey } from "../../api";
+import { baseHostOf, isProduction, useSignOut } from "../../lib/identity";
+import { hardNavigate } from "../../lib/navigation";
 import { useUi } from "../../store";
 import { ThemeToggle } from "../ThemeToggle";
 import {
@@ -68,12 +70,14 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-function projectItems(slug: string): NavItem[] {
+function projectItems(slug: string, readOnly: boolean): NavItem[] {
   const params = { slug };
   return [
     { label: "Overview", icon: LayoutDashboardIcon, to: "/p/$slug", params, exact: true },
     { label: "Explorer", icon: NetworkIcon, to: "/p/$slug/explorer", params },
-    { label: "Chat", icon: MessageSquareIcon, to: "/p/$slug/chat/{-$id}", params },
+    ...(readOnly
+      ? []
+      : [{ label: "Chat", icon: MessageSquareIcon, to: "/p/$slug/chat/{-$id}", params } as NavItem]),
     { label: "Scans", icon: ActivityIcon, to: "/p/$slug/scans/{-$runId}", params },
     { label: "Settings", icon: SlidersHorizontalIcon, to: "/p/$slug/settings", params },
   ];
@@ -86,6 +90,7 @@ const PORTAL_ITEMS: NavItem[] = [
 
 function ProjectSwitcher({ slug, name }: { slug?: string; name?: string }) {
   const navigate = useNavigate();
+  const production = isProduction(useQuery({ queryKey: portalKey("state"), queryFn: portalApi.state }).data);
   const projects = useQuery({ queryKey: portalKey("projects"), queryFn: portalApi.projects });
   const label = slug ? (name ?? slug) : "All projects";
   return (
@@ -118,9 +123,11 @@ function ProjectSwitcher({ slug, name }: { slug?: string; name?: string }) {
         </DropdownMenuGroup>
         <DropdownMenuSeparator />
         <DropdownMenuItem onClick={() => navigate({ to: "/" })}>All projects</DropdownMenuItem>
-        <DropdownMenuItem onClick={() => navigate({ to: "/projects/new" })}>
-          Add project
-        </DropdownMenuItem>
+        {!production && (
+          <DropdownMenuItem onClick={() => navigate({ to: "/projects/new" })}>
+            Add project
+          </DropdownMenuItem>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -132,6 +139,10 @@ export function Sidebar({ slug, projectName }: { slug?: string; projectName?: st
   const state = useQuery({ queryKey: portalKey("state"), queryFn: portalApi.state });
   const user = state.data?.user;
   const version = state.data?.version;
+  const production = isProduction(state.data);
+  const readOnly = state.data?.org?.role === "reader";
+  const signOut = useSignOut();
+  const base = state.data?.base_url?.replace(/\/$/, "") ?? "";
 
   return (
     <nav
@@ -145,7 +156,7 @@ export function Sidebar({ slug, projectName }: { slug?: string; projectName?: st
           </div>
           <span className="font-semibold tracking-tight">WhyGraph</span>
           <span className="ml-auto rounded border border-border px-1.5 py-px text-[11px] text-muted-foreground">
-            {state.data?.mode ?? "local"}
+            {production ? (state.data?.org?.name ?? baseHostOf(state.data?.base_url)) : (state.data?.mode ?? "local")}
           </span>
         </div>
         <ProjectSwitcher slug={slug} name={projectName} />
@@ -155,7 +166,7 @@ export function Sidebar({ slug, projectName }: { slug?: string; projectName?: st
         {slug ? (
           <>
             <Section title="Project">
-              {projectItems(slug).map((item) => (
+              {projectItems(slug, readOnly).map((item) => (
                 <NavLink key={item.label} item={item} />
               ))}
             </Section>
@@ -187,15 +198,44 @@ export function Sidebar({ slug, projectName }: { slug?: string; projectName?: st
           </kbd>
         </button>
         <ThemeToggle />
-        <div className="flex items-center gap-2.5 px-2 pb-0.5 pt-2">
-          <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary text-[11px] font-semibold text-primary-foreground">
-            {(user?.display_name ?? "?").charAt(0).toUpperCase()}
-          </span>
-          <div className="flex min-w-0 flex-col leading-tight">
-            <span className="truncate text-[13px] font-medium">{user?.display_name ?? "Local user"}</span>
-            {version && <span className="font-mono text-[11px] text-muted-foreground">v{version}</span>}
+        {production ? (
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              aria-label="Account menu"
+              className="flex items-center gap-2.5 rounded-md px-2 pb-0.5 pt-2 text-left outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary text-[11px] font-semibold text-primary-foreground">
+                {(user?.display_name ?? "?").charAt(0).toUpperCase()}
+              </span>
+              <div className="flex min-w-0 flex-1 flex-col leading-tight">
+                <span className="truncate text-[13px] font-medium">{user?.display_name}</span>
+                {version && <span className="font-mono text-[11px] text-muted-foreground">v{version}</span>}
+              </div>
+              <ChevronsUpDownIcon className="size-3.5 shrink-0 text-muted-foreground" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="min-w-56">
+              <DropdownMenuItem onClick={() => void hardNavigate(`${base}/account`)}>Account</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => void hardNavigate(`${base}/orgs`)}>
+                Switch organization
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => void hardNavigate(`${base}/orgs/new`)}>
+                Create organization
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => void signOut()}>Sign out</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : (
+          <div className="flex items-center gap-2.5 px-2 pb-0.5 pt-2">
+            <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary text-[11px] font-semibold text-primary-foreground">
+              {(user?.display_name ?? "?").charAt(0).toUpperCase()}
+            </span>
+            <div className="flex min-w-0 flex-col leading-tight">
+              <span className="truncate text-[13px] font-medium">{user?.display_name ?? "Local user"}</span>
+              {version && <span className="font-mono text-[11px] text-muted-foreground">v{version}</span>}
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </nav>
   );

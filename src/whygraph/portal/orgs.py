@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from .authz import Role
+from .authz import ROLES, Role
 
 if TYPE_CHECKING:
     from sqlmodel import Session
@@ -64,16 +64,61 @@ RESERVED_ORG_SLUGS = frozenset(
         "dev",
         "staging",
         "prod",
+        *"""
+        mx ftp ns ns1 ns2 ns3 ns4 dns imap pop pop3 webmail email autodiscover
+        autoconfig mta-sts wpad isatap postmaster hostmaster webmaster abuse
+        security noc root vpn secure m mobile beta demo internal intranet git
+        files media img images download downloads public org orgs setup signin
+        signout reset system null undefined example ws cache proxy
+        """.split(),
     }
 )
-"""Slugs that would collide with platform hosts or routes."""
+"""Slugs that would collide with platform hosts or routes.
+
+Enforced only when an org is created (:func:`validate_org_slug`); lookups
+check the format only, so growing this set never makes an existing org
+unreachable. ``local`` is deliberately absent: it is the built-in org's slug.
+"""
+
+NEVER_ORG_HOSTS = frozenset(
+    {
+        "www",
+        "api",
+        "app",
+        "admin",
+        "auth",
+        "mail",
+        "smtp",
+        "mx",
+        "ns1",
+        "ns2",
+        "autodiscover",
+        "autoconfig",
+        "mta-sts",
+        "status",
+        "docs",
+        "static",
+        "assets",
+        "cdn",
+    }
+)
+"""Hosts under the base domain that are never an org, even if one exists.
+
+Never grow this: an org that already holds such a slug would become
+unreachable. Grow :data:`RESERVED_ORG_SLUGS` instead, which only blocks new
+orgs.
+"""
 
 BUILTIN_ORG_SLUG = "local"
 BUILTIN_ORG_NAME = "Local"
 
 
 def is_valid_org_slug(slug: str) -> bool:
-    """Return whether ``slug`` has a valid format and is not reserved.
+    """Return whether ``slug`` has a valid format.
+
+    Format only: reserved names are not checked, because this gates lookups
+    (an existing org must stay reachable when the reserved list grows). Use
+    :func:`validate_org_slug` before creating an org.
 
     Parameters
     ----------
@@ -83,13 +128,13 @@ def is_valid_org_slug(slug: str) -> bool:
     Returns
     -------
     bool
-        ``True`` if :func:`validate_org_slug` would accept it.
+        ``True`` if ``slug`` matches :data:`ORG_SLUG_RE`.
     """
-    return ORG_SLUG_RE.fullmatch(slug) is not None and slug not in RESERVED_ORG_SLUGS
+    return ORG_SLUG_RE.fullmatch(slug) is not None
 
 
 def validate_org_slug(slug: str) -> None:
-    """Raise if ``slug`` breaks the org slug rules.
+    """Raise if ``slug`` breaks the rules for a new org.
 
     Parameters
     ----------
@@ -99,8 +144,9 @@ def validate_org_slug(slug: str) -> None:
     Raises
     ------
     ValueError
-        If the format is invalid (a trailing newline included) or the
-        slug is reserved.
+        If the format is invalid (a trailing newline included), the slug
+        is reserved, or its 3rd and 4th characters are ``--`` (``xn--``
+        punycode lookalikes; RFC 5891 reserves the pattern).
     """
     if ORG_SLUG_RE.fullmatch(slug) is None:
         raise ValueError(
@@ -109,6 +155,11 @@ def validate_org_slug(slug: str) -> None:
         )
     if slug in RESERVED_ORG_SLUGS:
         raise ValueError(f"organization slug {slug!r} is reserved")
+    if slug[2:4] == "--":
+        raise ValueError(
+            f"invalid organization slug {slug!r}: a double dash in the third "
+            "and fourth positions is reserved"
+        )
 
 
 def create_org(session: Session, *, slug: str, name: str) -> Organization:
@@ -205,11 +256,15 @@ def add_member(
     Raises
     ------
     ValueError
-        On an unknown role.
+        On a role a membership may not store (an unknown one, or the
+        internal ``reader``).
     """
     from .models import Membership
 
-    membership = Membership(org_id=org_id, user_id=user_id, role=Role(role).value)
+    value = Role(role).value
+    if value not in ROLES:
+        raise ValueError(f"role {value!r} cannot be stored in a membership")
+    membership = Membership(org_id=org_id, user_id=user_id, role=value)
     session.add(membership)
     session.flush()
     return membership

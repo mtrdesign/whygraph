@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { isProduction, usePortalState } from "../lib/identity";
 import { useNavigate } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { portalApi, portalKey } from "../api";
@@ -76,6 +77,9 @@ export function CommandPalette({ slug }: { slug?: string }) {
   const setOpen = useUi((s) => s.setPaletteOpen);
   const navigate = useNavigate();
   const { setTheme } = useTheme();
+  const portalState = usePortalState().data;
+  const production = isProduction(portalState);
+  const readOnly = portalState?.org?.role === "reader";
   const [query, setQuery] = useState("");
   const debounced = useDebounced(query, 150);
   const term = query.trim().toLowerCase();
@@ -100,14 +104,14 @@ export function CommandPalette({ slug }: { slug?: string }) {
     ? [
         { label: "Overview", run: () => navigate({ to: "/p/$slug", params: { slug } }) },
         { label: "Explorer", run: () => navigate({ to: "/p/$slug/explorer", params: { slug } }) },
-        { label: "Chat", run: () => navigate({ to: "/p/$slug/chat/{-$id}", params: { slug } }) },
+        ...(readOnly ? [] : [{ label: "Chat", run: () => navigate({ to: "/p/$slug/chat/{-$id}", params: { slug } }) }]),
         { label: "Scans", run: () => navigate({ to: "/p/$slug/scans/{-$runId}", params: { slug } }) },
         { label: "Project settings", run: () => navigate({ to: "/p/$slug/settings", params: { slug } }) },
         { label: "All projects", run: () => navigate({ to: "/" }) },
       ]
     : [
         { label: "Projects", run: () => navigate({ to: "/" }) },
-        { label: "Add project", run: () => navigate({ to: "/projects/new" }) },
+        ...(production ? [] : [{ label: "Add project", run: () => navigate({ to: "/projects/new" }) }]),
         { label: "Settings", run: () => navigate({ to: "/settings" }) },
       ];
   const shownPages = pages.filter((p) => match(p.label));

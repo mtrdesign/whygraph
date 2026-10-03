@@ -850,7 +850,12 @@ class ScanRunner:
     # ---- poll + catch-up -------------------------------------------------
 
     async def tick(self) -> None:
-        """One poll tick: a ``poll`` sync per GitHub clone, then the catch-up check."""
+        """One poll tick: a ``poll`` sync per GitHub clone, then the catch-up check.
+
+        Local mode only: production skips both (M2c plan section 4.11).
+        """
+        if not self._local_mode():
+            return
         projects = await anyio.to_thread.run_sync(_initialized_projects)
         for p in projects:
             if p["source"] == "github" and p["root_ok"]:
@@ -873,8 +878,11 @@ class ScanRunner:
         Covers commits made while the portal was down (the hook POST was
         lost). Compares ``git rev-parse HEAD`` with
         ``projects.last_scanned_head``; a project never scanned (``NULL``)
-        is left to its first, explicit scan.
+        is left to its first, explicit scan. Local mode only (so also skipped
+        at a production start).
         """
+        if not self._local_mode():
+            return
         if projects is None:
             projects = await anyio.to_thread.run_sync(_initialized_projects)
         for p in projects:
@@ -893,6 +901,10 @@ class ScanRunner:
                     )
                 except ProjectBusy:
                     continue  # being removed
+
+    def _local_mode(self) -> bool:
+        """Whether the portal runs in local mode (system work is local-only)."""
+        return self._state is not None and self._state.mode == "local"
 
     async def _poll_loop(self) -> None:
         while True:

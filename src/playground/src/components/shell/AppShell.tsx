@@ -14,6 +14,7 @@ import {
 import { Sheet, SheetContent, SheetTitle } from "../ui/sheet";
 import { Sidebar } from "./Sidebar";
 import { buildCrumbs } from "./crumbs";
+import { ReaderBanner } from "./ReaderBanner";
 
 /**
  * The page header: breadcrumbs on the left, an optional actions slot on the right
@@ -96,6 +97,7 @@ export function AppShell({
         </SheetContent>
       </Sheet>
       <div className="flex min-w-0 flex-1 flex-col">
+        <ReaderBanner />
         <PageHeader projectName={projectName} />
         <main className="flex min-h-0 flex-1 flex-col overflow-auto">{children}</main>
       </div>

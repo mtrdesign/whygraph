@@ -13,7 +13,7 @@ editor sees.
 !!! warning "It costs money and it writes to your database"
     Unlike the Explorer, the assistant is not read-only. Every turn calls an LLM under your chat
     provider, and every message, tool call, and session is stored in the project's WhyGraph database.
-    The portal is loopback-only with no login (see [Localhost only](playground.md#open-it)).
+    The portal is loopback-only with no login in local mode (see [Localhost only](playground.md#open-it)).
 
 ## Getting started
 
@@ -182,5 +182,5 @@ whole turns from the top - never splitting a tool call from its result.
 ## Limits
 
 - One project per conversation - the project whose Chat you opened.
-- No login and no multi-user support; the portal is for a single user on their own machine.
+- No login and no multi-user support in local mode; the portal is for a single user on their own machine.
 - The assistant cannot edit your code. It reads, queries, and charts.

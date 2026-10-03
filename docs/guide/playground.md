@@ -29,7 +29,7 @@ See [Start the portal](../portal/start.md) for the port, the other host commands
     [Rationale on demand](#rationale-on-demand)).
 
 !!! info "Localhost only"
-    The portal is published to `127.0.0.1` only and has **no login** - it is a single-user tool for
+    The portal is published to `127.0.0.1` only and has **no login in local mode** - it is a single-user tool for
     your own machine. Nothing is exposed beyond its loopback. See the
     [security model](../portal/security.md).
 
@@ -112,6 +112,6 @@ dev portal with the Vite dev server in front of it, so edits hot-reload at `http
 
 ## Not in scope
 
-The panel is a local tool, and stays one: **no login and no multi-user support**, **no remote
+The panel is a local tool, and stays one: **no login and no multi-user support in local mode**, **no remote
 hosting**, and **no editing** - it never writes to your source tree. See the
 [roadmap](../roadmap.md) for what's deferred.

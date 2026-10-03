@@ -19,6 +19,7 @@ from whygraph.portal.authz import (
 from whygraph.portal.deps import ApiError
 from whygraph.portal.orgs import (
     BUILTIN_ORG_SLUG,
+    NEVER_ORG_HOSTS,
     ORG_SLUG_SQL_CHECK,
     RESERVED_ORG_SLUGS,
     is_valid_org_slug,
@@ -44,16 +45,29 @@ def test_invalid_org_slugs(slug):
         validate_org_slug(slug)
 
 
-@pytest.mark.parametrize("slug", ["www", "api", "mcp", "whygraph", "staging"])
-def test_reserved_org_slugs(slug):
-    assert not is_valid_org_slug(slug)
+@pytest.mark.parametrize("slug", ["www", "api", "mcp", "whygraph", "staging", "setup"])
+def test_reserved_org_slugs_refused_at_creation_only(slug):
+    # Lookups check the format only, so growing the list never strands an org.
+    assert is_valid_org_slug(slug)
     with pytest.raises(ValueError, match="reserved"):
         validate_org_slug(slug)
 
 
+def test_punycode_lookalike_refused_at_creation():
+    assert is_valid_org_slug("xn--abc")
+    with pytest.raises(ValueError, match="double dash"):
+        validate_org_slug("xn--abc")
+    validate_org_slug("a-b--c")  # only the 3rd-4th position is reserved
+
+
 def test_builtin_slug_is_not_reserved():
     assert BUILTIN_ORG_SLUG not in RESERVED_ORG_SLUGS
-    assert len(RESERVED_ORG_SLUGS) == 35
+    validate_org_slug(BUILTIN_ORG_SLUG)
+
+
+def test_never_org_hosts_are_reserved():
+    assert NEVER_ORG_HOSTS <= RESERVED_ORG_SLUGS
+    assert isinstance(NEVER_ORG_HOSTS, frozenset)
 
 
 def test_sql_check_mirrors_regex():
@@ -62,7 +76,19 @@ def test_sql_check_mirrors_regex():
 
 
 def test_roles():
+    # The membership roles, explicit: the internal reader is never storable.
     assert ROLES == ("owner", "admin", "member")
+    assert Role.READER.value not in ROLES
+    assert set(ROLES) == {r.value for r in Role} - {"reader"}
+
+
+def test_add_member_refuses_the_reader_role():
+    from whygraph.portal.orgs import add_member
+
+    with pytest.raises(ValueError, match="cannot be stored"):
+        add_member(None, org_id=1, user_id=1, role=Role.READER)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        add_member(None, org_id=1, user_id=1, role="superuser")  # type: ignore[arg-type]
 
 
 def test_role_actions_match_table():
@@ -74,11 +100,14 @@ def test_role_actions_match_table():
         "project.setup",
     }
     owner = admin | {"org.own"}
-    assert {a.value for a in Action} == owner
+    # Every org action is an owner action; user.self / instance.admin are in
+    # no role's set.
+    assert {a.value for a in Action} == owner | {"user.self", "instance.admin"}
     assert {r: {a.value for a in s} for r, s in ROLE_ACTIONS.items()} == {
         Role.MEMBER: member,
         Role.ADMIN: admin,
         Role.OWNER: owner,
+        Role.READER: {"org.read", "project.read"},
     }
 
 

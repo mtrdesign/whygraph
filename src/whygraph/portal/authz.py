@@ -17,10 +17,16 @@ class Role(StrEnum):
     OWNER = "owner"
     ADMIN = "admin"
     MEMBER = "member"
+    READER = "reader"
+    """Internal: an instance admin reading an org they are not a member of.
+
+    Never stored in ``memberships`` (not in :data:`ROLES`)."""
 
 
-ROLES = tuple(r.value for r in Role)
-"""Role values, for a CHECK constraint."""
+ROLES: tuple[str, ...] = ("owner", "admin", "member")
+"""The roles a membership may store (the CHECK constraint and
+:func:`~whygraph.portal.orgs.add_member`). Explicit, so adding an enum member
+such as :attr:`Role.READER` never widens what a membership may hold."""
 
 
 class Action(StrEnum):
@@ -35,6 +41,10 @@ class Action(StrEnum):
     PROJECT_SCAN = "project.scan"
     PROJECT_CONFIGURE = "project.configure"
     PROJECT_SETUP = "project.setup"
+    USER_SELF = "user.self"
+    """Any signed-in user acting on their own account (in no role's set)."""
+    INSTANCE_ADMIN = "instance.admin"
+    """Instance administration (in no role's set; ``users.is_instance_admin``)."""
 
 
 _MEMBER = frozenset(
@@ -51,6 +61,7 @@ ROLE_ACTIONS: dict[Role, frozenset[Action]] = {
     Role.MEMBER: _MEMBER,
     Role.ADMIN: _ADMIN,
     Role.OWNER: _ADMIN | {Action.ORG_OWN},
+    Role.READER: frozenset({Action.ORG_READ, Action.PROJECT_READ}),
 }
 """The actions each role may perform."""
 

@@ -76,6 +76,8 @@ PORTAL_TABLES = {
     "project_config",
     "secrets",
     "scan_runs",
+    "sessions",
+    "password_resets",
 }
 
 
@@ -220,6 +222,7 @@ def test_baseline_inserts_no_rows(empty_portal_database: str) -> None:
 
 BASELINE = "86e839432e62"
 TENANCY = "4ebfd8b89904"
+IDENTITY = "e3a055b4530a"
 
 
 def _seed_m2a(conn) -> dict[str, int]:  # noqa: ANN001
@@ -379,7 +382,7 @@ def test_tenancy_downgrade_refuses_with_two_orgs(empty_portal_database: str) -> 
     portal_db.ensure_initialized()
     with portal_db.get_session() as s:
         builtin_org_id(s)
-        create_org(s, slug="beta", name="Beta")
+        create_org(s, slug="bravo", name="Beta")
     portal_db._reset_engine()
     with pytest.raises(RuntimeError, match="2 organizations"):
         command.downgrade(portal_db.alembic_config(), BASELINE)
@@ -387,8 +390,108 @@ def test_tenancy_downgrade_refuses_with_two_orgs(empty_portal_database: str) -> 
     with portal_db.get_engine().connect() as conn:
         assert conn.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar() == (TENANCY)
+        ).scalar() == (IDENTITY)
         assert conn.execute(text("SELECT count(*) FROM organizations")).scalar() == 2
+
+
+# ---------------------------------------------------------------------------
+# The identity revision (M2c): users, sessions, password resets
+# ---------------------------------------------------------------------------
+
+
+def test_identity_upgrade_keeps_existing_users(empty_portal_database: str) -> None:
+    command.upgrade(portal_db.alembic_config(), TENANCY)
+    with portal_db.get_engine().begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO users (uid, display_name, username, password_hash, "
+                "created_at) VALUES ('u-1', 'Alice', 'alice', 'h', 'then')"
+            )
+        )
+    portal_db._reset_engine()
+    command.upgrade(portal_db.alembic_config(), "head")
+
+    assert not _columns("users") & {"username"}
+    assert {"email", "is_instance_admin", "password_changed_at"} <= _columns("users")
+    with portal_db.get_engine().connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT uid, display_name, password_hash, created_at, email, "
+                "is_instance_admin, password_changed_at FROM users"
+            )
+        ).one()
+    assert tuple(row) == ("u-1", "Alice", "h", "then", None, False, None)
+
+
+def test_identity_upgrade_on_an_empty_database(empty_portal_database: str) -> None:
+    command.upgrade(portal_db.alembic_config(), TENANCY)
+    portal_db._reset_engine()
+    command.upgrade(portal_db.alembic_config(), "head")
+    tables = set(inspect(portal_db.get_engine()).get_table_names())
+    assert {"sessions", "password_resets"} <= tables
+    with portal_db.get_engine().connect() as conn:
+        assert conn.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar() == (IDENTITY)
+
+
+def test_identity_downgrade_in_local_mode(empty_portal_database: str) -> None:
+    portal_db.ensure_initialized()
+    portal_db._reset_engine()
+    command.downgrade(portal_db.alembic_config(), TENANCY)
+    portal_db._reset_engine()
+
+    tables = set(inspect(portal_db.get_engine()).get_table_names())
+    assert not tables & {"sessions", "password_resets"}
+    cols = _columns("users")
+    assert "username" in cols
+    assert not cols & {"email", "is_instance_admin", "password_changed_at"}
+    with portal_db.get_engine().connect() as conn:
+        assert conn.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar() == (TENANCY)
+    # And back up again: the round trip is clean.
+    command.upgrade(portal_db.alembic_config(), "head")
+
+
+def test_identity_downgrade_refuses_in_production(empty_portal_database: str) -> None:
+    portal_db.ensure_initialized()
+    with portal_db.get_engine().begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO settings (id, mode, created_at) "
+                "VALUES (1, 'production', 'now') "
+                "ON CONFLICT (id) DO UPDATE SET mode = 'production'"
+            )
+        )
+    portal_db._reset_engine()
+    with pytest.raises(RuntimeError, match="production mode"):
+        command.downgrade(portal_db.alembic_config(), TENANCY)
+    portal_db._reset_engine()
+    with portal_db.get_engine().connect() as conn:
+        assert conn.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar() == (IDENTITY)
+    assert "email" in _columns("users")
+
+
+def test_identity_email_constraints(empty_portal_database: str) -> None:
+    portal_db.ensure_initialized()
+    insert = text(
+        "INSERT INTO users (uid, display_name, email, is_instance_admin, "
+        "created_at) VALUES (:uid, 'x', :email, false, 'now')"
+    )
+    with portal_db.get_engine().begin() as conn:
+        # Many email-less users fit: the unique constraint treats NULLs as distinct.
+        conn.execute(insert, {"uid": "a", "email": None})
+        conn.execute(insert, {"uid": "b", "email": None})
+        conn.execute(insert, {"uid": "c", "email": "x@example.com"})
+    with pytest.raises(IntegrityError, match="uq_users_email"):
+        with portal_db.get_engine().begin() as conn:
+            conn.execute(insert, {"uid": "d", "email": "x@example.com"})
+    with pytest.raises(IntegrityError, match="ck_users_email_lower"):
+        with portal_db.get_engine().begin() as conn:
+            conn.execute(insert, {"uid": "e", "email": "Y@Example.com"})
 
 
 # ---------------------------------------------------------------------------
@@ -755,7 +858,7 @@ def test_user_has_a_stable_uuid(data: Path) -> None:
         s.add(b)
         s.flush()
         assert len(a.uid) == 36 and a.uid != b.uid
-        assert a.username is None and a.password_hash is None
+        assert a.email is None and a.password_hash is None
 
 
 def test_project_agents_rejects_unknown_agent_and_duplicates(data: Path) -> None:
@@ -806,7 +909,8 @@ def test_m2_columns_exist(data: Path) -> None:
         t: {c["name"] for c in insp.get_columns(t)}
         for t in ("users", "projects", "scan_runs")
     }
-    assert {"uid", "username", "password_hash"} <= cols["users"]
+    assert {"uid", "email", "password_hash"} <= cols["users"]
+    assert "username" not in cols["users"]  # replaced by email (M2c)
     assert "role" not in cols["users"]  # per org, in memberships (M2b)
     assert {"created_by", "last_scanned_head", "initialized_at"} <= cols["projects"]
     assert {"requested_by", "analyze", "trigger", "kind"} <= cols["scan_runs"]
@@ -854,7 +958,7 @@ def test_org_slug_is_immutable_and_the_builtin_org_is_kept(org: int) -> None:
 
 def test_project_org_is_immutable(org: int) -> None:
     with portal_db.get_session() as s:
-        beta = create_org(s, slug="beta", name="Beta").id
+        beta = create_org(s, slug="bravo", name="Beta").id
         pid = _project(s).id
     with pytest.raises(ValueError, match="organization is immutable"):
         with portal_db.get_session() as s:
@@ -911,7 +1015,7 @@ def test_memberships_check_the_role_and_follow_the_user(org: int) -> None:
 
 def test_project_rows_must_share_their_projects_org(org: int) -> None:
     with portal_db.get_session() as s:
-        beta = create_org(s, slug="beta", name="Beta").id
+        beta = create_org(s, slug="bravo", name="Beta").id
         pid = _project(s).id
     with pytest.raises(IntegrityError, match="fk_secrets_project"):
         with portal_db.get_session() as s:
@@ -933,7 +1037,7 @@ def test_project_rows_must_share_their_projects_org(org: int) -> None:
 
 def test_orgs_hold_the_same_slug_and_their_own_defaults(org: int) -> None:
     with portal_db.get_session() as s:
-        beta = create_org(s, slug="beta", name="Beta").id
+        beta = create_org(s, slug="bravo", name="Beta").id
         _project(s, "api", root="/r/a")
         _project(s, "api", root="/r/b", org_id=beta)
         save_layer(s, None, {"llm": {"model": "anthropic/a"}}, org_id=org)
@@ -948,7 +1052,7 @@ def test_orgs_hold_the_same_slug_and_their_own_defaults(org: int) -> None:
 
 def test_context_and_endpoint_clearing_stay_within_the_org(org: int) -> None:
     with portal_db.get_session() as s:
-        beta = create_org(s, slug="beta", name="Beta").id
+        beta = create_org(s, slug="bravo", name="Beta").id
         mine, theirs = _project(s, "a"), _project(s, "b", org_id=beta)
         for org_id, value in ((org, "sk-local-1111"), (beta, "sk-beta-2222")):
             save_layer(

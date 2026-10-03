@@ -1,0 +1,8 @@
+# The base host and every org subdomain share one wildcard certificate (DNS-01).
+# Caddy forwards Host unchanged, which the portal's host check depends on.
+{$WHYGRAPH_HOST}, *.{$WHYGRAPH_HOST} {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+	reverse_proxy portal:8765
+}

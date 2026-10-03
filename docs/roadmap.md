@@ -38,9 +38,11 @@ Larger, net-new pieces that aren't built yet:
 
 - **Cross-repo queries** - the portal holds many projects, but each is still analyzed on its own;
   questions that span repos are not built.
-- **A multi-user, remote portal** - the portal is single-user and loopback-only today. Real
-  authentication (per-agent bearer tokens, logins) and a deployable remote mode are what unlock the full
-  [service model](deploy/service.md) beyond one machine.
+- **A multi-user, remote portal** - local mode is single-user and loopback-only. A
+  [production mode](deploy/production.md) with logins, sessions and organizations on their own
+  subdomains is built but unreleased; it holds no projects yet. Per-agent bearer tokens, and projects
+  in a production portal, are what unlock the full [service model](deploy/service.md) beyond one
+  machine.
 - **Per-branch CodeGraph index** - the code index is still single-branch, so switching branches and
   re-syncing rewrites it. WhyGraph's *own* database no longer needs this: it keeps one database and
   [computes branch membership](guide/scanning.md#how-whygraph-sees-branches) per commit, recomputed

@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
 import path from "node:path";
 import { env } from "./env";
 import { themeRepos } from "./lib/fixtures";
@@ -36,14 +37,24 @@ export default async function globalSetup(): Promise<void> {
     throw new Error("the portal is already set up; start a fresh one (`make e2e` does)");
   }
 
-  // The production portal must be unclaimed too. Node resolves *.localhost
-  // inconsistently, so go to the loopback address with the Host the guard expects.
+  // The production portal must be unclaimed too. fetch() ignores a Host override
+  // (and Node resolves *.localhost inconsistently), so go to the loopback address
+  // with node:http and the Host the guard expects.
   const prod = new URL(env.prodUrl);
-  const pres = await fetch(`http://127.0.0.1:${prod.port}/api/portal/state`, {
-    headers: { "X-WhyGraph-Client": "1", Host: prod.host },
+  const pres = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+    http
+      .get(
+        { host: "127.0.0.1", port: prod.port, path: "/api/portal/state", headers: { "X-WhyGraph-Client": "1", Host: prod.host } },
+        (res) => {
+          let body = "";
+          res.on("data", (c) => (body += c));
+          res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+        },
+      )
+      .on("error", reject);
   });
-  if (!pres.ok) throw new Error(`the production portal at ${env.prodUrl} answered ${pres.status}`);
-  const pstate = (await pres.json()) as { mode?: string; bootstrap_required?: boolean };
+  if (pres.status !== 200) throw new Error(`the production portal at ${env.prodUrl} answered ${pres.status}`);
+  const pstate = JSON.parse(pres.body) as { mode?: string; bootstrap_required?: boolean };
   if (pstate.mode !== "production" || !pstate.bootstrap_required) {
     throw new Error("the production portal is not fresh; start a new one (`make e2e` does)");
   }

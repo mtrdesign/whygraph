@@ -41,6 +41,8 @@ from sqlmodel import select
 from conftest import HeaderIdentity, build_fake_codegraph_db
 from test_portal_app import (  # noqa: F401 -- `env`, `production_env` are fixtures
     _NODES,
+    NON_ORG_ACTIONS,
+    NON_ORG_ROUTES,
     PORT,
     PUBLIC_API_ROUTES,
     ROUTE_ACTIONS,
@@ -504,14 +506,22 @@ def test_the_same_slug_binds_each_orgs_own_project(env: SimpleNamespace) -> None
 
 
 def _org_scoped_routes(app) -> list[tuple[str, str]]:  # noqa: ANN001
-    """``(method, path)`` of every ``/api`` route but the public ones."""
+    """``(method, path)`` of every org-scoped ``/api`` route.
+
+    The public routes and the ones that name no org (``user.self`` /
+    ``instance.admin``, M2c plan section 4.7) are left out.
+    """
     found = set()
     for rc in iter_route_contexts(app.routes):
         path = rc.path or ""
         if not path.startswith("/api") or getattr(rc, "dependant", None) is None:
             continue
         if path not in PUBLIC_API_ROUTES:
-            found |= {(method, path) for method in rc.methods if method != "HEAD"}
+            found |= {
+                (method, path)
+                for method in rc.methods
+                if method != "HEAD" and (path, method) not in NON_ORG_ROUTES
+            }
     return sorted(found, key=lambda route: (route[1], route[0]))
 
 
@@ -725,7 +735,8 @@ def test_the_sweep_covers_every_live_route(two_orgs: World) -> None:
     assert _org_scoped_routes(two_orgs.client.app) == API_ROUTES
     assert len(API_ROUTES) > 30
     assert set(ROUTE_REQUESTS) == set(API_ROUTES)
-    assert {(m, p) for (p, m) in ROUTE_ACTIONS} == set(API_ROUTES)
+    org_scoped = {(m, p) for (p, m) in ROUTE_ACTIONS if (p, m) not in NON_ORG_ROUTES}
+    assert org_scoped == set(API_ROUTES)
 
 
 @pytest.mark.parametrize(
@@ -977,7 +988,7 @@ ADMIN_ROUTES = sorted(
     (
         (m, p)
         for (p, m), action in ROUTE_ACTIONS.items()
-        if action not in MEMBER_ACTIONS
+        if action not in MEMBER_ACTIONS and action not in NON_ORG_ACTIONS
     ),
     key=lambda route: (route[0] == "DELETE", route[1], route[0]),  # DELETE last
 )

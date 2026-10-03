@@ -5,6 +5,8 @@ Composition (plan section 4.5.1)::
     PortalGuard (pure ASGI)       Host / Origin / Sec-Fetch-Site / X-WhyGraph-Client,
                                   and the principal, resolved once per request
     /api/portal/*                 management (portal/routes.py)
+    /api/auth/*, /api/account*,   production identity, org creation and admin
+    /api/orgs, /api/admin/*       (portal/auth_routes.py; 404 in local mode)
     /api/projects/*               management; each route names its action through
                                   org_access / project_access / project_db_access
     /api/projects/{slug}/...      serve.routes.router (project.read) + serve.chat.router
@@ -68,6 +70,7 @@ from whygraph.serve.errors import whygraph_error_handler
 from whygraph.serve.routes import router as data_router
 
 from . import db as portal_db
+from .auth_routes import auth_router
 from .authz import Action
 from .deps import (
     ApiError,
@@ -214,6 +217,7 @@ def create_portal_app(
     app.add_exception_handler(RequestValidationError, _validation_error_handler)
 
     app.include_router(public_router)
+    app.include_router(auth_router)  # production-only; local mode answers 404
     app.include_router(portal_router)
     app.include_router(projects_router)
     app.include_router(

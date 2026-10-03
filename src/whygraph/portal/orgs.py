@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from .authz import Role
+from .authz import ROLES, Role
 
 if TYPE_CHECKING:
     from sqlmodel import Session
@@ -256,11 +256,15 @@ def add_member(
     Raises
     ------
     ValueError
-        On an unknown role.
+        On a role a membership may not store (an unknown one, or the
+        internal ``reader``).
     """
     from .models import Membership
 
-    membership = Membership(org_id=org_id, user_id=user_id, role=Role(role).value)
+    value = Role(role).value
+    if value not in ROLES:
+        raise ValueError(f"role {value!r} cannot be stored in a membership")
+    membership = Membership(org_id=org_id, user_id=user_id, role=value)
     session.add(membership)
     session.flush()
     return membership

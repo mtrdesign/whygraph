@@ -162,6 +162,20 @@ def _origins(state: PortalState):
     return state.origins
 
 
+def _refuse_projects_in_production(state: PortalState) -> None:
+    """``403 projects_unavailable`` in production (M2c plan section 4.11).
+
+    Called in route bodies, so after :func:`~whygraph.portal.authz.authorize`
+    (a member without the action still gets ``403 forbidden`` first).
+    """
+    if state.mode == "production":
+        raise ApiError(
+            403,
+            "production organizations cannot add or set up projects yet",
+            code="projects_unavailable",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Request bodies
 # ---------------------------------------------------------------------------
@@ -498,7 +512,12 @@ def _details(state: PortalState, project: BoundProject) -> dict:
             ).all()
         )
     body["missing_key"] = _missing_key(project.ctx.config)
-    body["mcp_url"] = f"{_origins(state).base_url}/mcp/{project.slug}"
+    # Production mounts no MCP endpoint (M2c plan section 4.11).
+    body["mcp_url"] = (
+        None
+        if state.mode == "production"
+        else f"{_origins(state).base_url}/mcp/{project.slug}"
+    )
     body["detected"] = _detected(project) if body["root_status"] == "ok" else None
     body["port_change"] = _port_change_for(state, project)
     body["stats"] = (
@@ -616,7 +635,11 @@ def get_state(request: Request) -> dict:
     org_slug = request_state.get("org_slug")
     # A sync handler already runs in the threadpool, so the lookup does too.
     access = (
-        load_org_access(principal.user_id, org_slug)
+        load_org_access(
+            principal.user_id,
+            org_slug,
+            instance_admin=principal.is_instance_admin,
+        )
         if principal is not None and org_slug is not None
         else None
     )
@@ -695,9 +718,11 @@ def get_repos(
 ) -> dict:
     """Git repositories discovered under the shared folders (cached 60 s).
 
-    ``registered`` reflects only the request's org.
+    ``registered`` reflects only the request's org. ``403
+    projects_unavailable`` in production.
     """
     state = portal_state(request)
+    _refuse_projects_in_production(state)
     org_id = access.org_id
     found = state.discovery.get(state.shared_folders)
     with get_session() as session:
@@ -723,8 +748,12 @@ def get_repos(
     "/check-path", dependencies=[Depends(org_access(Action.ORG_ADD_PROJECT))]
 )
 def post_check_path(body: PathBody, request: Request) -> dict:
-    """Whether a typed path can be added, and the fix command when it cannot."""
+    """Whether a typed path can be added, and the fix command when it cannot.
+
+    ``403 projects_unavailable`` in production.
+    """
     state = portal_state(request)
+    _refuse_projects_in_production(state)
     try:
         return check_path(body.path, state.shared_folders, state.data_dir)
     except ValueError as exc:
@@ -818,9 +847,11 @@ def add_project(
     project, the ``detected`` 1.x state and the import report. Error codes:
     ``bad_token``, ``no_access``, ``not_found``, ``not_shared``,
     ``not_git``, ``duplicate`` (plus ``invalid_url``, ``not_linked``,
-    ``protected``, ``clone_failed``, ``github_error``).
+    ``protected``, ``clone_failed``, ``github_error``); ``403
+    projects_unavailable`` in production.
     """
     state = portal_state(request)
+    _refuse_projects_in_production(state)
     if body.source == "local":
         project_id, detected, preview = _add_local(
             state, body, principal, access.org_id
@@ -1179,7 +1210,7 @@ def _remove_project(
         unsafe = _unsafe_reason(project.root, project.root / LEGACY_HELPER_RELPATH)
         if unsafe:
             warnings.append(f"left the git hooks: {unsafe}")
-        else:
+        elif state.mode != "production":  # production installs no hooks
             try:
                 hooks = _hooks_dict(sync_hooks(project.root, []))
             except HooksError as exc:
@@ -1246,7 +1277,8 @@ def put_project_config(
     that never echoes the value; a changed ``base_url`` / ``host`` clears
     that project's key for the provider (rule 3). A change to
     ``[scan].hooks`` on an initialized local project re-runs
-    :func:`whygraph.hooks.sync_hooks`.
+    :func:`whygraph.hooks.sync_hooks` (never in production, where the
+    config is saved and ``hooks`` is ``null``).
     """
     state = portal_state(request)
     old_hooks = project.ctx.config.scan_hooks
@@ -1273,6 +1305,7 @@ def put_project_config(
     new_hooks = new_ctx.config.scan_hooks
     if (
         new_hooks != old_hooks
+        and state.mode != "production"
         and project.initialized_at is not None
         and project.source == "local"
         and project.root.is_dir()
@@ -1326,9 +1359,11 @@ def init_project(
     or migrated (with a backup) first, under the project context.
     ``initialized_at`` is set only once the markers are written, i.e. no
     agent file awaits confirmation. ``dry_run`` returns the per-file plan
-    and writes nothing; ``force`` is "Update agent files".
+    and writes nothing; ``force`` is "Update agent files". ``403
+    projects_unavailable`` in production (``dry_run`` included).
     """
     state = portal_state(request)
+    _refuse_projects_in_production(state)
     origins = _origins(state)
     if root_status(project.root) != "ok":
         raise ApiError(409, f"{project.root} is not available", code="root_missing")

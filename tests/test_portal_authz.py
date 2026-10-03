@@ -76,7 +76,19 @@ def test_sql_check_mirrors_regex():
 
 
 def test_roles():
+    # The membership roles, explicit: the internal reader is never storable.
     assert ROLES == ("owner", "admin", "member")
+    assert Role.READER.value not in ROLES
+    assert set(ROLES) == {r.value for r in Role} - {"reader"}
+
+
+def test_add_member_refuses_the_reader_role():
+    from whygraph.portal.orgs import add_member
+
+    with pytest.raises(ValueError, match="cannot be stored"):
+        add_member(None, org_id=1, user_id=1, role=Role.READER)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        add_member(None, org_id=1, user_id=1, role="superuser")  # type: ignore[arg-type]
 
 
 def test_role_actions_match_table():
@@ -88,11 +100,14 @@ def test_role_actions_match_table():
         "project.setup",
     }
     owner = admin | {"org.own"}
-    assert {a.value for a in Action} == owner
+    # Every org action is an owner action; user.self / instance.admin are in
+    # no role's set.
+    assert {a.value for a in Action} == owner | {"user.self", "instance.admin"}
     assert {r: {a.value for a in s} for r, s in ROLE_ACTIONS.items()} == {
         Role.MEMBER: member,
         Role.ADMIN: admin,
         Role.OWNER: owner,
+        Role.READER: {"org.read", "project.read"},
     }
 
 

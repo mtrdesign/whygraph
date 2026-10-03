@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from typing import Iterator
 
 import anyio
+import httpx
 import pytest
 from alembic import command
 from click.testing import CliRunner
@@ -221,13 +222,53 @@ def at(slug: str | None = None, base: str = PROD_BASE) -> str:
 
 
 def signed_in(client: TestClient, user_id: int, domain: str = PROD_DOMAIN) -> str:
-    """Sign ``user_id`` in on ``client`` with a real session; return the token."""
+    """Sign ``user_id`` in on ``client`` with a real session; return the token.
+
+    The session row is made directly, so a test can sign a user in that has
+    no password and on a portal whose bootstrap is still pending. Tests of
+    the sign-in route itself use :func:`log_in`.
+    """
     from whygraph.portal import sessions
 
     with portal_db.get_session() as session:
         token = sessions.create_session(session, user_id, "pytest")
     client.cookies.set("whygraph_session", token, domain=domain)
     return token
+
+
+PROD_PASSWORD = "correct horse battery staple"
+"""A password that passes production's rules (15+ chars, not blocklisted)."""
+
+
+def claim_instance(
+    client: TestClient,
+    email: str = "ada@example.com",
+    *,
+    display_name: str = "Ada",
+    password: str = PROD_PASSWORD,
+) -> dict:
+    """Claim a fresh production instance; ``client`` is left signed in as the admin."""
+    secret = client.app.state.portal.bootstrap_secret
+    response = client.post(
+        at() + "/api/auth/bootstrap",
+        json={
+            "secret": secret,
+            "email": email,
+            "display_name": display_name,
+            "password": password,
+        },
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def log_in(
+    client: TestClient, email: str, password: str = PROD_PASSWORD, **extra
+) -> httpx.Response:
+    """Sign in through the real ``POST /api/auth/login`` on the base host."""
+    return client.post(
+        at() + "/api/auth/login", json={"email": email, "password": password, **extra}
+    )
 
 
 @pytest.fixture
@@ -809,10 +850,25 @@ def _api_routes(app) -> list:
     ]
 
 
+PUBLIC_AUTH_ROUTES = {
+    ("/api/auth/bootstrap", "GET"),
+    ("/api/auth/bootstrap", "POST"),
+    ("/api/auth/register", "POST"),
+    ("/api/auth/login", "POST"),
+    ("/api/auth/logout", "POST"),
+    ("/api/auth/reset", "POST"),
+}
+"""Production's public auth routes (M2c plan section 4.7): no session needed."""
+
+
 def test_every_api_route_resolves_current_user_except_state_and_setup(
     client: TestClient,
 ) -> None:
-    exempt = {("/api/portal/state", "GET"), ("/api/portal/setup", "POST")}
+    exempt = {
+        ("/api/portal/state", "GET"),
+        ("/api/portal/setup", "POST"),
+        *PUBLIC_AUTH_ROUTES,
+    }
     routes = _api_routes(client.app)
     assert len(routes) > 30
     seen_exempt = set()
@@ -876,16 +932,37 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     (f"{_P}/chat/sessions/{{session_id}}", "PATCH"): _CHAT,
     (f"{_P}/chat/sessions/{{session_id}}", "DELETE"): _CHAT,
     (f"{_P}/chat/sessions/{{session_id}}/messages", "POST"): _CHAT,
+    # Production's account and org creation: user_access(...) (M2c section 4.7)
+    ("/api/account", "GET"): "user.self",
+    ("/api/account", "PATCH"): "user.self",
+    ("/api/account/password", "POST"): "user.self",
+    ("/api/account/orgs", "GET"): "user.self",
+    ("/api/orgs", "POST"): "user.self",
+    # Production's admin page: instance_access()
+    ("/api/admin/settings", "GET"): "instance.admin",
+    ("/api/admin/orgs", "GET"): "instance.admin",
+    ("/api/admin/users", "GET"): "instance.admin",
+    ("/api/admin/users/{uid}", "PATCH"): "instance.admin",
+    ("/api/admin/users/{uid}/reset-link", "POST"): "instance.admin",
 }
 """Plan section 4.5's route -> action table: a changed action is a visible diff."""
+
+NON_ORG_ACTIONS = {"user.self", "instance.admin"}
+"""Actions of routes that name no org (production-only, M2c section 4.7)."""
+
+NON_ORG_ROUTES = {
+    route for route, action in ROUTE_ACTIONS.items() if action in NON_ORG_ACTIONS
+}
 
 PUBLIC_API_ROUTES = {
     "/api/portal/state",
     "/api/portal/setup",
     "/api",
     "/api/{rest:path}",
+    *(path for path, _ in PUBLIC_AUTH_ROUTES),
 }
-"""The only ``/api`` routes that declare no action (state, setup, 404 fallbacks)."""
+"""The only ``/api`` routes that declare no action (state, setup, the public
+auth routes, 404 fallbacks)."""
 
 
 def test_every_api_route_declares_exactly_one_action(client: TestClient) -> None:
@@ -923,24 +1000,39 @@ def test_only_the_mcp_routes_have_no_dependant(client: TestClient) -> None:
     assert isinstance(dispatcher.endpoint, McpDispatcher)
 
 
+_FILL = {
+    "{slug}": "demo",
+    "{rest:path}": "x/y",
+    "{session_id}": "1",
+    "{sha}": "abc",
+    "{number}": "1",
+    "{run_id}": "1",
+    "{uid}": "someone",
+}
+
+
+def _filled(path: str) -> str:
+    for placeholder, value in _FILL.items():
+        path = path.replace(placeholder, value)
+    assert "{" not in path, path
+    return path
+
+
+PRODUCTION_ONLY_ROUTES = PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES
+"""Routes that answer ``404`` in local mode (M2c plan section 4.7)."""
+
+
 def test_every_api_route_answers_setup_required_before_setup(
     client: TestClient,
 ) -> None:
-    fill = {
-        "{slug}": "demo",
-        "{rest:path}": "x/y",
-        "{session_id}": "1",
-        "{sha}": "abc",
-        "{number}": "1",
-        "{run_id}": "1",
+    exempt = {
+        ("/api/portal/state", "GET"),
+        ("/api/portal/setup", "POST"),
+        *PRODUCTION_ONLY_ROUTES,  # 404 in local mode, before setup or not
     }
-    exempt = {("/api/portal/state", "GET"), ("/api/portal/setup", "POST")}
     checked = 0
     for rc in _api_routes(client.app):
-        url = rc.path
-        for placeholder, value in fill.items():
-            url = url.replace(placeholder, value)
-        assert "{" not in url, url
+        url = _filled(rc.path)
         for method in rc.methods:
             if (rc.path, method) in exempt or method == "HEAD":
                 continue
@@ -949,6 +1041,28 @@ def test_every_api_route_answers_setup_required_before_setup(
             assert response.json() == {"error": "setup required"}, (method, url)
             checked += 1
     assert checked > 30
+
+
+def test_production_only_routes_are_404_in_local_mode(client: TestClient) -> None:
+    """The mode check comes first: before setup, after it, any body."""
+    for setup_done in (False, True):
+        if setup_done:
+            assert (
+                client.post(
+                    "/api/portal/setup", json={"display_name": "Tess"}
+                ).status_code
+                == 201
+            )
+        seen = set()
+        for rc in _api_routes(client.app):
+            for method in rc.methods:
+                if (rc.path, method) not in PRODUCTION_ONLY_ROUTES:
+                    continue
+                seen.add((rc.path, method))
+                response = client.request(method, _filled(rc.path), json={})
+                assert response.status_code == 404, (method, rc.path, response.text)
+                assert response.json() == {"error": "not found"}, (method, rc.path)
+        assert seen == PRODUCTION_ONLY_ROUTES
 
 
 def test_unscoped_api_paths_are_json_404s_not_the_spa(

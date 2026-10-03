@@ -193,3 +193,24 @@ def test_self_check_never_raises(monkeypatch):
 
     monkeypatch.setattr(socket, "getaddrinfo", broken)
     assert isinstance(hosts.self_check(PROD), list)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, ""),
+        ("", ""),
+        (" , ", ""),
+        ("172.18.0.1", "172.18.0.1"),
+        ("10.0.0.1/8, 192.168.1.0/24", "10.0.0.0/8,192.168.1.0/24"),
+        ("::1, fd00::/8", "::1,fd00::/8"),
+    ],
+)
+def test_parse_trusted_proxies(raw, expected):
+    assert hosts.parse_trusted_proxies(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["*", "proxy.internal", "10.0.0.1/33", "1.2.3"])
+def test_parse_trusted_proxies_refuses(raw):
+    with pytest.raises(ValueError, match="WHYGRAPH_TRUSTED_PROXIES entry"):
+        hosts.parse_trusted_proxies(f"10.0.0.1,{raw}")

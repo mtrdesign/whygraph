@@ -39,18 +39,23 @@ from fastapi.testclient import TestClient
 from sqlmodel import select
 
 from conftest import HeaderIdentity, build_fake_codegraph_db
-from test_portal_app import (  # noqa: F401 -- `env` is a fixture
+from test_portal_app import (  # noqa: F401 -- `env`, `production_env` are fixtures
     _NODES,
     PORT,
     PUBLIC_API_ROUTES,
     ROUTE_ACTIONS,
     _git,
+    at,
     env,
     manual_ctx,
     portal_client,
+    prod_portal,
+    production_env,
+    signed_in,
 )
 from test_portal_mcp import MCP_HEADERS, _rpc, _sse_json
 from whygraph.core.context import use_project
+from whygraph.db import ensure_initialized
 from whygraph.db import get_session as project_session
 from whygraph.db.models import Commit, CommitFileChange
 from whygraph.mcp import rationale as mcp_rationale
@@ -69,6 +74,7 @@ from whygraph.services.llm.chat import TextDelta, TurnDone
 FAKE_SCAN = Path(__file__).parent / "fixtures" / "fake_scan.py"
 TERMINAL = ("ok", "failed", "interrupted", "cancelled")
 NOT_FOUND = {"error": "not found"}
+LOGIN_REQUIRED = {"error": "sign-in required", "code": "login_required"}
 
 
 # ---------------------------------------------------------------------------
@@ -1166,55 +1172,74 @@ def test_system_scans_get_only_their_own_orgs_secrets(
             assert not leaked, (start, org.slug, leaked)
 
 
-def test_hook_scans_are_refused_in_production_and_no_org_resolves_by_default(
-    env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+def test_hook_scans_are_refused_in_production_and_nothing_answers_signed_out(
+    production_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Section 5.4 item 3, with a stored production row (it cannot start otherwise)."""
+    """Section 5.4 item 3 on a real production portal (M2c sessions and hosts).
+
+    Production refuses Initialize, so the project is inserted directly with
+    ``initialized_at`` set and its DB created as Initialize would.
+    """
+    env = production_env
     scanner = _fake_scanner(env, monkeypatch)
-    portal_db.ensure_initialized()
-    with portal_db.get_session() as session:
-        session.add(Setting(id=1, mode="production"))
-        session.flush()
-        beta_id = create_org(session, slug="bravo", name="Beta").id
-        bob = User(display_name="Bob")
-        session.add(bob)
-        session.flush()
-        add_member(session, org_id=beta_id, user_id=bob.id, role="owner")
-        headers = {"x-test-user": bob.uid, "x-test-org": "bravo"}
     root = _marked_repo(env, "narwhal")
     _seed_codegraph(root, "narwhal")
-    with portal_client(identity=HeaderIdentity()) as client:
-        assert client.app.state.portal.mode == "production"
-        added = client.post(
-            "/api/projects",
-            json={"source": "local", "path": str(root)},
-            headers=headers,
+    with use_project(manual_ctx(root, slug="api")):
+        ensure_initialized()
+    with prod_portal() as client:
+        state = client.app.state.portal
+        assert state.mode == "production" and state.builtin_org_slug is None
+        # After the start, so its catch-up never sees the project.
+        with portal_db.get_session() as session:
+            beta_id = create_org(session, slug="bravo", name="Beta").id
+            bob = User(display_name="Bob", email="bob@example.com")
+            session.add(bob)
+            session.flush()
+            add_member(session, org_id=beta_id, user_id=bob.id, role="owner")
+            session.add(
+                Project(
+                    org_id=beta_id,
+                    slug="api",
+                    name="Narwhal API",
+                    source="local",
+                    root=str(root),
+                    initialized_at="2026-10-03T00:00:00+00:00",
+                    created_by=bob.id,
+                )
+            )
+            bob_id = bob.id
+        bravo = at("bravo")
+        # Signed out: every org route is a 401, MCP and setup do not exist.
+        for method, path in API_ROUTES:
+            url = _url(path, SimpleNamespace(run_id=1, marker_sha="abc", session_id=1))
+            response = client.request(method, bravo + url)
+            assert response.status_code == 401, (method, path, response.text)
+            assert response.json() == LOGIN_REQUIRED, (method, path)
+        mcp = client.post(
+            bravo + "/mcp/api", json=_rpc("tools/list"), headers=MCP_HEADERS
         )
-        _ok(added, 201)
-        _ok(client.post("/api/projects/api/init", json={"agents": []}, headers=headers))
-        hook = client.post(
-            "/api/projects/api/scans", json={"trigger": "hook"}, headers=headers
-        )
+        assert mcp.status_code == 404
+        assert mcp.json() == {"error": "no MCP endpoint /mcp/api"}
+        setup = client.post(bravo + "/api/portal/setup", json={"display_name": "Eve"})
+        assert setup.status_code == 404
+        body = _ok(client.get(bravo + "/api/portal/state"))
+        assert body["user"] is None and body["org"] is None
+
+        signed_in(client, bob_id)
+        hook = client.post(bravo + "/api/projects/api/scans", json={"trigger": "hook"})
         assert hook.status_code == 403
         assert hook.json() == {
             "error": "hook scans exist only in local mode",
             "code": "hook_local_only",
         }
         manual = client.post(
-            "/api/projects/api/scans", json={"trigger": "manual"}, headers=headers
+            bravo + "/api/projects/api/scans", json={"trigger": "manual"}
         )
         _ok(manual, 202)
-        wait_idle(client, headers)
+        wait_for(
+            lambda: (
+                (rs := _ok(client.get(bravo + "/api/projects/api/scans"))["runs"])
+                and all(r["status"] in TERMINAL for r in rs)
+            )
+        )
         assert len(scanner.calls()) == 1  # only the manual scan ran
-    with portal_client() as client:  # LocalIdentity: a user, but no built-in org
-        state = client.app.state.portal
-        assert state.builtin_org_slug is None
-        for method, path in API_ROUTES:
-            url = _url(path, SimpleNamespace(run_id=1, marker_sha="abc", session_id=1))
-            response = client.request(method, url)
-            assert response.status_code == 404, (method, path, response.text)
-            assert response.json() == NOT_FOUND, (method, path)
-        mcp = client.post("/mcp/api", json=_rpc("tools/list"), headers=MCP_HEADERS)
-        assert mcp.status_code == 404 and mcp.json() == NOT_FOUND
-        setup = client.post("/api/portal/setup", json={"display_name": "Eve"})
-        assert setup.status_code == 404

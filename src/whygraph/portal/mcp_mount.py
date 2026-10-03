@@ -9,6 +9,11 @@ the seam.
 * **Routing.** A Starlette ``Route("/mcp/{slug}")`` with a pure-ASGI
   endpoint, not ``Mount``: a mount compiles to ``/mcp/{slug}/{path:path}``
   and 307-redirects the bare URL, which agents do not follow on POST.
+* **Local mode only.** Outside local mode (and on a degraded portal
+  serving production hosts) the dispatcher answers ``404`` before any
+  other check, and no session manager is built: production has no MCP
+  endpoint yet. The route itself stays registered, because routes are
+  added before the stored mode is known.
 * **Gate.** The same principal (resolved by the guard), the same org
   membership (:func:`~whygraph.portal.deps.load_org_access`, ``404``
   outside the org), the same :func:`~whygraph.portal.deps.bind_project`
@@ -32,6 +37,7 @@ from __future__ import annotations
 import anyio.to_thread
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
+from starlette.responses import JSONResponse
 from starlette.types import Receive, Scope, Send
 
 from whygraph.core.context import use_project
@@ -72,6 +78,22 @@ def build_session_manager(origins: PortalOrigins) -> StreamableHTTPSessionManage
     )
 
 
+def serves_mcp(state: PortalState) -> bool:
+    """Whether this portal serves ``/mcp`` (local mode only).
+
+    A degraded portal has no stored mode; it follows the origins it serves,
+    which are production's when the environment asks for production.
+    """
+    if state.mode is not None:
+        return state.mode == "local"
+    return state.origins is None or state.origins.base is None
+
+
+def mcp_not_found(scope: Scope) -> JSONResponse:
+    """The ``404`` for a path with no MCP endpoint."""
+    return JSONResponse({"error": f"no MCP endpoint {scope['path']}"}, status_code=404)
+
+
 class McpDispatcher:
     """ASGI endpoint of ``/mcp/{slug}``: gate, bind, hand to the session manager.
 
@@ -85,6 +107,9 @@ class McpDispatcher:
         self.state = state
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if not serves_mcp(self.state):
+            await mcp_not_found(scope)(scope, receive, send)
+            return
         try:
             request_state = scope.get("state", {})
             principal = request_state.get("principal")
@@ -111,4 +136,4 @@ class McpDispatcher:
             await self.state.session_manager.handle_request(scope, receive, send)
 
 
-__all__ = ["McpDispatcher", "build_session_manager"]
+__all__ = ["McpDispatcher", "build_session_manager", "mcp_not_found", "serves_mcp"]

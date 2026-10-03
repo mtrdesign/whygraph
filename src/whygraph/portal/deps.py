@@ -49,6 +49,7 @@ import anyio.to_thread
 from fastapi import Depends, Request
 from fastapi.responses import JSONResponse
 from sqlmodel import select
+from starlette.datastructures import Headers
 from starlette.types import Scope
 
 from whygraph.core.config import ConfigError
@@ -57,7 +58,9 @@ from whygraph.core.safe_paths import UnsafePathError
 
 from .authz import Action, OrgAccess, Role, authorize
 from .context import ContextCache, ProjectNotFound, resolve_root
+from . import sessions
 from .db import InstanceLock, get_session
+from .hosts import BaseUrl, classify
 from .migrate import ProjectMigrations
 from .models import Membership, Organization, Project, User
 from .orgs import is_valid_org_slug
@@ -148,6 +151,66 @@ class LocalIdentity:
         return self.state.builtin_org_slug
 
 
+class SessionIdentity:
+    """Production identity: the session cookie names the user, the Host names the org.
+
+    The guard calls it only on ``/api`` and ``/mcp``, so static assets and
+    SPA pages never query the database. The membership is still checked
+    per request by :func:`current_org`.
+
+    Parameters
+    ----------
+    state : PortalState
+        The portal state; its ``base_url`` must be set (the lifespan does
+        so before it installs this resolver).
+    """
+
+    def __init__(self, state: PortalState) -> None:
+        self.state = state
+
+    async def principal(self, scope: Scope) -> Principal | None:
+        """Return the session cookie's user, or ``None`` (signed out).
+
+        More than one ``whygraph_session`` cookie (another host under the
+        same parent domain tossed one in) counts as signed out, and sets
+        ``scope["state"]["clear_session_cookie"]`` so the guard clears both
+        cookie forms on the response. A live session last touched over
+        :data:`~whygraph.portal.sessions.TOUCH_EVERY` ago is touched.
+        """
+        tokens = sessions.session_cookies(Headers(scope=scope).getlist("cookie"))
+        if not tokens:
+            return None
+        if len(tokens) > 1:
+            scope.setdefault("state", {})["clear_session_cookie"] = True
+            return None
+        row = await anyio.to_thread.run_sync(_lookup_session, tokens[0])
+        if row is None:
+            return None
+        return Principal(
+            user_id=row.user_id,
+            uid=row.uid,
+            display_name=row.display_name,
+            email=row.email,
+            session_id=row.session_id,
+            is_instance_admin=row.is_instance_admin,
+        )
+
+    async def org_slug(self, scope: Scope) -> str | None:
+        """Return the org label of ``Host`` (``None`` on the base host)."""
+        base = self.state.base_url
+        if base is None:
+            return None
+        kind = classify(Headers(scope=scope).get("host"), base)
+        return None if kind is None else kind.slug
+
+
+def _lookup_session(token: str) -> sessions.SessionRow | None:
+    row = sessions.lookup(token)
+    if row is not None and sessions.is_stale(row):
+        sessions.touch(row.session_id)
+    return row
+
+
 class PortalState:
     """Everything one portal app shares between requests.
 
@@ -209,8 +272,19 @@ class PortalState:
         production.
     identity : IdentityResolver
         What the guard asks for the principal and the org slug;
-        :class:`LocalIdentity` by default (tests inject their own through
+        :class:`LocalIdentity` by default, :class:`SessionIdentity` in
+        production (tests inject their own through
         :func:`whygraph.portal.app.create_portal_app`).
+    identity_injected : bool
+        Whether ``identity`` was injected (then production keeps it).
+    base_url : BaseUrl or None
+        Production's validated ``WHYGRAPH_BASE_URL``; ``None`` in local mode.
+    bootstrap_secret : str or None
+        Production's one-time bootstrap secret, kept only in memory while
+        no instance admin exists.
+    base_check : list of str or None
+        What the base-URL DNS self-check found (production; ``None`` until
+        it ran, ``[]`` when healthy).
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -237,6 +311,10 @@ class PortalState:
         self.builtin_org_id: int | None = None
         self.builtin_org_slug: str | None = None
         self.identity: IdentityResolver = LocalIdentity(self)
+        self.identity_injected = False
+        self.base_url: BaseUrl | None = None
+        self.bootstrap_secret: str | None = None
+        self.base_check: list[str] | None = None
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0
@@ -305,10 +383,13 @@ async def current_user(request: Request) -> Principal:
     Raises
     ------
     ApiError
-        ``409`` when no user exists yet.
+        ``409`` when no user exists yet (local mode);
+        ``401 {"code": "login_required"}`` without a session (production).
     """
     principal = request.scope.get("state", {}).get("principal")
     if principal is None:
+        if portal_state(request).mode == "production":
+            raise ApiError(401, "sign-in required", code="login_required")
         raise ApiError(409, "setup required")
     return principal
 
@@ -642,6 +723,7 @@ __all__ = [
     "IdentityResolver",
     "LocalIdentity",
     "PortalState",
+    "SessionIdentity",
     "bind_project",
     "bound_from",
     "checked_db_paths",

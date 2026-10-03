@@ -21,6 +21,12 @@ from urllib.parse import urlsplit
 
 from .orgs import NEVER_ORG_HOSTS, is_valid_org_slug
 
+BASE_URL_ENV = "WHYGRAPH_BASE_URL"
+"""The production portal's public base URL (scheme, host, optional port)."""
+
+TRUSTED_PROXIES_ENV = "WHYGRAPH_TRUSTED_PROXIES"
+"""Comma-separated IPs / CIDRs whose ``X-Forwarded-For`` uvicorn trusts."""
+
 _LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
@@ -210,6 +216,47 @@ def safe_redirect(next_url: str | None, base: BaseUrl) -> str | None:
     if classify(parts.netloc, base) is None:
         return None
     return next_url
+
+
+def parse_trusted_proxies(raw: str | None) -> str:
+    """Validate ``WHYGRAPH_TRUSTED_PROXIES`` into uvicorn's ``forwarded_allow_ips``.
+
+    Parameters
+    ----------
+    raw : str or None
+        Comma-separated IP addresses and CIDR networks; empty or ``None``
+        trusts no proxy.
+
+    Returns
+    -------
+    str
+        The entries normalized (``10.0.0.1/8`` becomes ``10.0.0.0/8``) and
+        joined by commas; ``""`` for none. Normalizing matters: uvicorn
+        silently treats an entry it cannot parse as a literal that never
+        matches.
+
+    Raises
+    ------
+    ValueError
+        Naming the first entry that is neither an IP address nor a network
+        (``*`` included: trusting every peer is never what a deployment means).
+    """
+    entries = []
+    for entry in (raw or "").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            if "/" in entry:
+                entries.append(str(ipaddress.ip_network(entry, strict=False)))
+            else:
+                entries.append(str(ipaddress.ip_address(entry)))
+        except ValueError:
+            raise ValueError(
+                f"{TRUSTED_PROXIES_ENV} entry {entry!r} is not an IP address or "
+                "CIDR network"
+            ) from None
+    return ",".join(entries)
 
 
 def _resolves(name: str) -> bool:

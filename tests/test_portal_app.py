@@ -176,6 +176,60 @@ def portal_client(
         yield client
 
 
+PROD_DOMAIN = "whygraph.localhost"
+PROD_BASE = f"http://{PROD_DOMAIN}:{PORT}"
+PROD_CLIENT = ("203.0.113.5", 1)
+
+
+@pytest.fixture
+def production_env(
+    env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> SimpleNamespace:
+    """``env`` for a production portal at :data:`PROD_BASE` (M2c plan section 5.1)."""
+    monkeypatch.setenv("WHYGRAPH_MODE", "production")
+    monkeypatch.setenv("WHYGRAPH_BASE_URL", PROD_BASE)
+    for var in ("WHYGRAPH_SHARED_FOLDERS", "WHYGRAPH_TRUSTED_PROXIES"):
+        monkeypatch.delenv(var, raising=False)
+    return env
+
+
+@contextmanager
+def prod_portal(
+    base_url: str = PROD_BASE,
+    *,
+    client: tuple[str, int] = PROD_CLIENT,
+    instance_lock: bool = True,
+    identity: IdentityResolver | None = None,
+) -> Iterator[TestClient]:
+    """A production portal client on a real host name (so the cookie jar works).
+
+    No identity is injected by default, so ``SessionIdentity`` runs.
+    """
+    app = create_portal_app(port=PORT, instance_lock=instance_lock, identity=identity)
+    with TestClient(
+        app, base_url=base_url, headers=CLIENT_HEADER, client=client
+    ) as test_client:
+        yield test_client
+
+
+def at(slug: str | None = None, base: str = PROD_BASE) -> str:
+    """The URL prefix of an org host (``None``: the base host)."""
+    if slug is None:
+        return base
+    scheme, rest = base.split("://", 1)
+    return f"{scheme}://{slug}.{rest}"
+
+
+def signed_in(client: TestClient, user_id: int, domain: str = PROD_DOMAIN) -> str:
+    """Sign ``user_id`` in on ``client`` with a real session; return the token."""
+    from whygraph.portal import sessions
+
+    with portal_db.get_session() as session:
+        token = sessions.create_session(session, user_id, "pytest")
+    client.cookies.set("whygraph_session", token, domain=domain)
+    return token
+
+
 @pytest.fixture
 def client(env: SimpleNamespace) -> Iterator[TestClient]:
     with portal_client() as c:
@@ -286,14 +340,11 @@ def test_the_builtin_org_is_seeded_at_start_and_setup_makes_its_owner(
         assert len(session.exec(select(Organization)).all()) == 1
 
 
-def test_setup_is_404_without_a_builtin_org(env: SimpleNamespace) -> None:
-    """A stored production row: no built-in org, so no unauthenticated setup."""
-    from whygraph.portal.models import Organization, Setting, User
+def test_setup_is_404_without_a_builtin_org(production_env: SimpleNamespace) -> None:
+    """A production portal: no built-in org, so no unauthenticated setup."""
+    from whygraph.portal.models import Organization, User
 
-    portal_db.ensure_initialized()
-    with portal_db.get_session() as session:
-        session.add(Setting(id=1, mode="production"))
-    with portal_client() as client:
+    with prod_portal() as client:
         state = client.app.state.portal
         assert state.mode == "production"
         assert state.builtin_org_id is None and state.builtin_org_slug is None
@@ -681,8 +732,8 @@ def test_the_guard_stores_the_org_slug_and_none_when_degraded(
     state.degraded = "portal database unavailable"
     anyio.run(call)
     assert seen == [
-        {"principal": None, "org_slug": "local"},
-        {"principal": None, "org_slug": None},
+        {"principal": None, "org_slug": "local", "host_kind": "local"},
+        {"principal": None, "org_slug": None, "host_kind": "local"},
     ]
 
 

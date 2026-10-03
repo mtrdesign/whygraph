@@ -603,7 +603,10 @@ def get_state(request: Request) -> dict:
 
     In degraded mode (the portal DB failed to migrate or import, or another
     portal holds it) the body is just ``{"error": ...}``, so the UI can show
-    the failure.
+    the failure. In production the body also names ``host_kind``,
+    ``base_url``, ``bootstrap_required`` and the user's ``email`` /
+    ``is_instance_admin``, and ``setup_complete`` means "an instance admin
+    exists"; local mode's body has none of them.
     """
     state = portal_state(request)
     if state.degraded:
@@ -617,7 +620,7 @@ def get_state(request: Request) -> dict:
         if principal is not None and org_slug is not None
         else None
     )
-    return {
+    body = {
         "mode": state.mode,
         "setup_complete": principal is not None,
         "user": _user_dict(principal, access),
@@ -631,6 +634,18 @@ def get_state(request: Request) -> dict:
         # this org, or null.
         "port_change": _port_change_in(state, access),
     }
+    if state.mode == "production":
+        # Production-only fields, so the local body stays exactly as it was.
+        assert state.base_url is not None
+        bootstrap_required = state.bootstrap_secret is not None
+        body["setup_complete"] = not bootstrap_required  # an admin exists
+        body["host_kind"] = request_state.get("host_kind")
+        body["base_url"] = state.base_url.origin
+        body["bootstrap_required"] = bootstrap_required
+        if body["user"] is not None:
+            body["user"]["email"] = principal.email
+            body["user"]["is_instance_admin"] = principal.is_instance_admin
+    return body
 
 
 @public_router.post("/setup", status_code=201)

@@ -31,6 +31,13 @@ exit it sets the shutdown event (open streams end), stops the runner, turns
 strict mode off again and releases the lock - on every path, including a
 failed start.
 
+Production mode (``WHYGRAPH_MODE=production``, M2c) validates its
+environment at every start (``WHYGRAPH_BASE_URL``, no shared folders,
+``WHYGRAPH_TRUSTED_PROXIES``) before anything commits, never seeds a built-in
+org, installs :class:`~whygraph.portal.deps.SessionIdentity`, logs a one-time
+bootstrap secret while no instance admin exists, and serves without shared
+folders, port reconcile or MCP session manager (plan section 4.2).
+
 The portal is **one process**: the runner, migration lock and caches are
 in-process, so it must never run with several workers.
 """
@@ -39,7 +46,8 @@ from __future__ import annotations
 
 import logging
 import os
-from contextlib import asynccontextmanager
+import secrets
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -65,26 +73,40 @@ from .deps import (
     ApiError,
     IdentityResolver,
     PortalState,
+    SessionIdentity,
     current_user,
     project_db_access,
 )
+from .hosts import (
+    BASE_URL_ENV,
+    TRUSTED_PROXIES_ENV,
+    BaseUrl,
+    parse_trusted_proxies,
+    self_check,
+)
 from .mcp_mount import McpDispatcher, build_session_manager
 from .migrate import MIGRATION_LOCK
-from .models import ScanRun, Setting
+from .models import ScanRun, Setting, User
 from .orgs import ensure_builtin_org
 from .port_change import reconcile_port
 from .repos import SHARED_FOLDERS_ENV, parse_shared_folders
 from .routes import portal_router, projects_router, public_router
 from .runner import ScanRunner
-from .security import DEV_ORIGINS_ENV, PortalGuard, build_origins
+from .security import (
+    DEV_ORIGINS_ENV,
+    PortalGuard,
+    PortalOrigins,
+    build_origins,
+    build_production_origins,
+)
 
 _log = logging.getLogger(__name__)
 
 MODE_ENV = "WHYGRAPH_MODE"
-"""Mode requested at first start (``local``); later only compared."""
+"""Mode requested at first start (``local`` or ``production``); later only compared."""
 
-SUPPORTED_MODES: tuple[str, ...] = ("local",)
-"""Modes this release can run (production mode is M2)."""
+SUPPORTED_MODES: tuple[str, ...] = ("local", "production")
+"""Modes this release can run."""
 
 _ALL_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
 
@@ -175,6 +197,7 @@ def create_portal_app(
         state.instance_lock = portal_db.InstanceLock()
     if identity is not None:
         state.identity = identity
+    state.identity_injected = identity is not None
 
     app = FastAPI(
         title="WhyGraph Portal",
@@ -246,24 +269,45 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 @asynccontextmanager
 async def _serving(state: PortalState) -> AsyncIterator[None]:
-    state.shared_folders = parse_shared_folders(
-        os.environ.get(SHARED_FOLDERS_ENV), state.data_dir
-    )
-    origins = build_origins(state.port, os.environ.get(DEV_ORIGINS_ENV))
+    """Serve one lifespan; what runs depends on the mode (plan section 4.2).
+
+    Local mode: shared folders, the loopback origins, the port reconcile,
+    the MCP session manager and the runner. Production: the base URL's
+    origins, no shared folders, no port reconcile, no MCP manager, the
+    runner and the DNS self-check. Degraded (no stored mode): the origins
+    the environment asks for, so a degraded production portal still shows
+    its error instead of ``421``; the MCP manager only for local origins.
+    """
+    if state.mode == "production":
+        assert state.base_url is not None  # _startup validated it
+        origins = build_production_origins(state.base_url, state.port)
+    elif state.mode == "local":
+        origins = build_origins(state.port, os.environ.get(DEV_ORIGINS_ENV))
+    else:
+        origins = _degraded_origins(state)
+    local = origins.base is None
+    if local:
+        state.shared_folders = parse_shared_folders(
+            os.environ.get(SHARED_FOLDERS_ENV), state.data_dir
+        )
     state.shutdown_event = anyio.Event()
-    if not state.degraded:
+    if state.mode == "local":
         state.port_change = await anyio.to_thread.run_sync(
             _reconcile_port, state, origins.agent_host
         )
-    manager = build_session_manager(origins)
-    async with manager.run():
-        state.session_manager = manager
+    async with AsyncExitStack() as stack:
+        if local:
+            manager = build_session_manager(origins)
+            await stack.enter_async_context(manager.run())
+            state.session_manager = manager
         if not state.degraded:
             await state.runner.start(state)
         watcher = anyio.create_task_group()
         await watcher.__aenter__()
         if not state.degraded and state.instance_lock is not None:
             watcher.start_soon(_watch_instance_lock, state)
+        if state.mode == "production":
+            watcher.start_soon(_check_base_url, state)
         set_strict(True)
         state.origins = origins
         try:
@@ -278,6 +322,29 @@ async def _serving(state: PortalState) -> AsyncIterator[None]:
             finally:
                 set_strict(False)
                 state.session_manager = None
+
+
+def _degraded_origins(state: PortalState) -> PortalOrigins:
+    """The origins of a degraded portal, from the environment alone."""
+    if (os.environ.get(MODE_ENV) or "").strip().lower() == "production":
+        try:
+            base = BaseUrl.parse(os.environ.get(BASE_URL_ENV, ""))
+        except ValueError:
+            pass
+        else:
+            return build_production_origins(base, state.port)
+    return build_origins(state.port, os.environ.get(DEV_ORIGINS_ENV))
+
+
+async def _check_base_url(state: PortalState) -> None:
+    """Run the never-fatal DNS self-check; keep and log what it finds."""
+    assert state.base_url is not None
+    problems = await anyio.to_thread.run_sync(
+        self_check, state.base_url, abandon_on_cancel=True
+    )
+    state.base_check = problems
+    for problem in problems:
+        _log.warning("base URL check: %s", problem)
 
 
 async def _watch_instance_lock(state: PortalState) -> None:
@@ -317,7 +384,11 @@ def _startup(state: PortalState) -> None:
         import) sets ``state.degraded`` instead, so it shows its reason
         rather than crash-looping.
     PortalStartupError
-        On a ``WHYGRAPH_MODE`` mismatch.
+        On a ``WHYGRAPH_MODE`` mismatch, an unsupported mode, or a
+        production portal whose environment does not validate (no or a bad
+        ``WHYGRAPH_BASE_URL``, shared folders, bad trusted proxies). Raised
+        before anything commits, so a refused first start writes no
+        ``settings`` row.
     """
     portal_db.wait_for_database()
 
@@ -364,6 +435,10 @@ def _startup(state: PortalState) -> None:
                     f"({state.data_dir}) was set up in {mode!r} mode; the mode "
                     "cannot be changed"
                 )
+        if mode == "production":
+            # On the resolved mode, so a stored production portal started
+            # without WHYGRAPH_MODE is validated too.
+            state.base_url = _production_base_url()
         state.mode = mode
         if mode == "local":
             # Idempotent: creates the built-in org at first start, and
@@ -371,6 +446,15 @@ def _startup(state: PortalState) -> None:
             org = ensure_builtin_org(session, setting)
             state.builtin_org_id = org.id
             state.builtin_org_slug = org.slug
+        else:
+            if not state.identity_injected:
+                state.identity = SessionIdentity(state)
+            has_admin = session.exec(
+                select(User.id).where(col(User.is_instance_admin).is_(True)).limit(1)
+            ).first()
+            state.bootstrap_secret = None
+            if has_admin is None:
+                _start_bootstrap(state)
 
         # A run still "running" belongs to a previous process that is gone.
         for run in session.exec(
@@ -378,6 +462,55 @@ def _startup(state: PortalState) -> None:
         ).all():
             run.status = "interrupted"
             session.add(run)
+
+
+def _production_base_url() -> BaseUrl:
+    """Validate production's environment and return its base URL.
+
+    Raises
+    ------
+    PortalStartupError
+        ``WHYGRAPH_BASE_URL`` missing or invalid, ``WHYGRAPH_SHARED_FOLDERS``
+        set (production has no shared folders), or ``WHYGRAPH_TRUSTED_PROXIES``
+        invalid.
+    """
+    raw = (os.environ.get(BASE_URL_ENV) or "").strip()
+    if not raw:
+        raise PortalStartupError(
+            f"production mode needs {BASE_URL_ENV} (e.g. https://whygraph.example.com)"
+        )
+    try:
+        base = BaseUrl.parse(raw)
+    except ValueError as exc:
+        raise PortalStartupError(f"invalid {BASE_URL_ENV}: {exc}") from exc
+    if (os.environ.get(SHARED_FOLDERS_ENV) or "").strip():
+        raise PortalStartupError(
+            f"{SHARED_FOLDERS_ENV} must be empty in production mode: production "
+            "projects come from GitHub, never from a shared folder"
+        )
+    try:
+        parse_trusted_proxies(os.environ.get(TRUSTED_PROXIES_ENV))
+    except ValueError as exc:
+        raise PortalStartupError(str(exc)) from exc
+    if (os.environ.get(DEV_ORIGINS_ENV) or "").strip():
+        _log.warning("%s is ignored in production mode", DEV_ORIGINS_ENV)
+    return base
+
+
+def _start_bootstrap(state: PortalState) -> None:
+    """Make this start's bootstrap secret and log it (plan section 4.3).
+
+    Two short ``WARNING`` records, so a log formatter that wraps long lines
+    never splits the secret; tools read it with
+    ``Bootstrap secret: ([A-Za-z0-9_-]{24})``.
+    """
+    assert state.base_url is not None
+    state.bootstrap_secret = secrets.token_urlsafe(18)
+    _log.warning(
+        "First-time setup: open %s/setup and enter the bootstrap secret below.",
+        state.base_url.origin,
+    )
+    _log.warning("Bootstrap secret: %s", state.bootstrap_secret)
 
 
 def _reconcile_port(state: PortalState, agent_host: str) -> dict | None:

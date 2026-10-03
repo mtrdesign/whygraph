@@ -5,7 +5,13 @@ This is the command the Docker runtime starts inside the image
 publish). Run natively it is **dev-only** in this release: there is no
 ``--folder`` flag (shared folders come from ``WHYGRAPH_SHARED_FOLDERS``),
 and a non-loopback ``--host`` outside the image is refused unless
-``--dev-expose`` is given, because local mode has no login.
+``--dev-expose`` is given (the CLI cannot know the stored mode, and local
+mode has no login).
+
+``WHYGRAPH_TRUSTED_PROXIES`` (comma-separated IPs / CIDRs) becomes uvicorn's
+``forwarded_allow_ips``; unset trusts no proxy, and a malformed value exits
+2 before the app starts, as does a :class:`~whygraph.portal.app.PortalStartupError`
+(a refused production environment or a mode mismatch).
 
 The portal's own data lives in Postgres since 2.1: ``WHYGRAPH_DATABASE_URL``
 (plus an optional ``WHYGRAPH_DATABASE_PASSWORD_FILE``) must name it - the
@@ -75,9 +81,8 @@ def portal_cmd(host: str, port: int, data_dir: Path | None, dev_expose: bool) ->
     in_image = os.environ.get(IN_IMAGE_ENV) == "1"
     if host not in _LOOPBACK and not in_image and not dev_expose:
         click.echo(
-            f"error: refusing to bind {host} outside the WhyGraph image: the portal "
-            "has no login in local mode. Use `whygraph up`, or pass --dev-expose "
-            "for development.",
+            f"error: refusing to bind {host} outside the WhyGraph image. Use "
+            "`whygraph up`, or pass --dev-expose for development.",
             err=True,
         )
         sys.exit(2)
@@ -86,7 +91,15 @@ def portal_cmd(host: str, port: int, data_dir: Path | None, dev_expose: bool) ->
     import uvicorn
 
     from whygraph.portal import db as portal_db
-    from whygraph.portal.app import PortalServer, create_portal_app
+    from whygraph.portal.app import PortalServer, PortalStartupError, create_portal_app
+    from whygraph.portal.hosts import TRUSTED_PROXIES_ENV, parse_trusted_proxies
+
+    try:
+        # Unset trusts no proxy - not uvicorn's default of 127.0.0.1.
+        forwarded_allow_ips = parse_trusted_proxies(os.environ.get(TRUSTED_PROXIES_ENV))
+    except ValueError as exc:
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(2)
 
     from ..console import console
 
@@ -106,13 +119,14 @@ def portal_cmd(host: str, port: int, data_dir: Path | None, dev_expose: bool) ->
     lock = _lock_data_dir(portal_db.data_dir())
     try:
         app = create_portal_app(port=port)
-        console.print(f"[bold]WhyGraph portal[/] → http://127.0.0.1:{port}")
+        console.print(f"[bold]WhyGraph portal[/] → {_banner_url(port)}")
         config = uvicorn.Config(
             app,
             host=host,
             port=port,
             log_config=None,
             timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SEC,
+            forwarded_allow_ips=forwarded_allow_ips,
         )
         # PortalServer ends open event streams at the start of shutdown,
         # before uvicorn's graceful wait (which would otherwise sit out
@@ -130,6 +144,27 @@ def portal_cmd(host: str, port: int, data_dir: Path | None, dev_expose: bool) ->
         )
         click.echo(f"error: {error} - {hint}", err=True)
         sys.exit(EXIT_DATABASE_UNREACHABLE)
+    if isinstance(error, PortalStartupError):
+        click.echo(f"error: {error}", err=True)
+        sys.exit(2)
+
+
+def _banner_url(port: int) -> str:
+    """The URL the start banner names: production's base URL, else loopback.
+
+    The stored mode is only known once the lifespan ran, so this reads the
+    environment: a production deployment sets ``WHYGRAPH_MODE`` and
+    ``WHYGRAPH_BASE_URL`` (the lifespan refuses a bad base URL anyway).
+    """
+    from whygraph.portal.app import MODE_ENV
+    from whygraph.portal.hosts import BASE_URL_ENV, BaseUrl
+
+    if (os.environ.get(MODE_ENV) or "").strip().lower() == "production":
+        try:
+            return BaseUrl.parse(os.environ.get(BASE_URL_ENV, "")).origin
+        except ValueError:
+            pass
+    return f"http://127.0.0.1:{port}"
 
 
 def _lock_data_dir(data: Path):  # noqa: ANN202 -- an open file object

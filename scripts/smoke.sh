@@ -29,11 +29,19 @@ whygraph() {
     if [ -x "$wg" ]; then "$wg" "$@"; else echo "smoke: no shim installed" >&2; return 1; fi
 }
 
+# Production-mode section: direct docker runs (the shim passes no environment).
+PROD_NAME=whygraph-portal-smoke-prod
+PROD_PORT=${SMOKE_PROD_PORT:-8798}
+PROD_BASE="http://whygraph.localhost:$PROD_PORT"
+PROD_ORG="http://acme.whygraph.localhost:$PROD_PORT"
+
 step=""
 passed=0
 cleanup() {
     code=$?
     [ ! -x "$wg" ] || "$wg" down >/dev/null 2>&1 || true
+    docker rm -f "$PROD_NAME" "$PROD_NAME-postgres" >/dev/null 2>&1 || true
+    docker network rm "$PROD_NAME" >/dev/null 2>&1 || true
     rm -rf "$S"
     if [ "$code" -ne 0 ]; then
         echo "SMOKE FAILED at: $step" >&2
@@ -157,3 +165,58 @@ hook_ok() { runs | tr ' ' '\n' | grep -c '^hook:ok' || true; }
 i=0
 while [ $i -lt 60 ] && [ "$(hook_ok)" -lt 2 ]; do i=$((i + 1)); sleep 1; done
 check "restart catches up the missed commit (a second hook scan)" test "$(hook_ok)" -ge 2
+
+echo "== production mode"
+# The shim has no production verbs, so run the image directly: a network, a
+# Postgres of the pinned image, and the portal with the three production
+# variables. The base URL carries the *published* port.
+step="start the production-mode portal"
+pg_image=$(docker run --rm "$IMAGE" python -c 'from whygraph.cli.commands.install import POSTGRES_IMAGE; print(POSTGRES_IMAGE)')
+[ -n "$pg_image" ] || { echo "cannot read POSTGRES_IMAGE from $IMAGE" >&2; exit 1; }
+docker network create "$PROD_NAME" >/dev/null
+docker run -d --name "$PROD_NAME-postgres" --network "$PROD_NAME" \
+    --network-alias postgres --tmpfs /var/lib/postgresql \
+    --health-cmd "pg_isready -h 127.0.0.1 -U whygraph -d whygraph" \
+    --health-interval 2s --health-timeout 3s --health-retries 30 --health-start-period 5s \
+    -e POSTGRES_USER=whygraph -e POSTGRES_DB=whygraph -e POSTGRES_PASSWORD=smoke-prod \
+    "$pg_image" >/dev/null
+pg_ready() {
+    i=0
+    while [ $i -lt 60 ]; do
+        [ "$(docker inspect -f '{{.State.Health.Status}}' "$PROD_NAME-postgres" 2>/dev/null)" = healthy ] && return 0
+        i=$((i + 1)); sleep 1
+    done
+    return 1
+}
+check "production postgres is healthy" pg_ready
+docker run -d --name "$PROD_NAME" --network "$PROD_NAME" --init \
+    -p "127.0.0.1:$PROD_PORT:8765" \
+    -e WHYGRAPH_MODE=production -e "WHYGRAPH_BASE_URL=$PROD_BASE" \
+    -e "WHYGRAPH_DATABASE_URL=postgresql+psycopg://whygraph:smoke-prod@postgres:5432/whygraph" \
+    "$IMAGE" whygraph portal --host 0.0.0.0 --port 8765 >/dev/null
+jar="$S/prod.jar"
+# Real URLs (curl >= 7.85 resolves *.localhost) so the cookie jar matches hosts.
+pcode() { m=$1 u=$2; shift 2; curl -sS -o "$S/last-body" -w '%{http_code}' -X "$m" -H "$H" -H 'Content-Type: application/json' "$u" "$@"; }
+pget() { u=$1; shift; curl -sS -H "$H" "$u" "$@"; }
+is2xx() { case $1 in 2??) return 0 ;; *) return 1 ;; esac; }
+prod_up() {
+    i=0
+    while [ $i -lt 60 ]; do
+        curl -fsS -o /dev/null -H "$H" "$PROD_BASE/api/portal/state" 2>/dev/null && return 0
+        i=$((i + 1)); sleep 1
+    done
+    return 1
+}
+check "production portal answers on the base host" prod_up
+check "state: production, base host, bootstrap required" \
+    test "$(pget "$PROD_BASE/api/portal/state" | json 'd["mode"] + " " + d["host_kind"] + " " + str(d["bootstrap_required"])')" = "production base True"
+secret=$(docker logs "$PROD_NAME" 2>&1 | sed -n 's/.*Bootstrap secret: \([A-Za-z0-9_-]\{24\}\).*/\1/p' | head -n 1)
+check "the log prints a bootstrap secret" test -n "$secret"
+boot=$(printf '{"secret":"%s","email":"ada@example.com","display_name":"Ada","password":"correct horse battery staple 42"}' "$secret")
+check "bootstrap claims the instance" is2xx "$(pcode POST "$PROD_BASE/api/auth/bootstrap" -c "$jar" -d "$boot")"
+check "bootstrap is inert once claimed" test "$(pcode POST "$PROD_BASE/api/auth/bootstrap" -d "$boot" | cut -c1)" = 4
+check "create org acme" is2xx "$(pcode POST "$PROD_BASE/api/orgs" -b "$jar" -c "$jar" -d '{"slug":"acme","name":"Acme"}')"
+check "state on the org host names acme" \
+    test "$(pget "$PROD_ORG/api/portal/state" -b "$jar" | json 'd["host_kind"] + " " + str(d["org"]["slug"])')" = "org acme"
+check "/mcp does not exist in production" test "$(pcode GET "$PROD_ORG/mcp/x" -b "$jar")" = 404
+check "no cookie: the org API answers 401" test "$(pcode GET "$PROD_ORG/api/projects")" = 401

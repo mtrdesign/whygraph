@@ -36,6 +36,18 @@ export default async function globalSetup(): Promise<void> {
     throw new Error("the portal is already set up; start a fresh one (`make e2e` does)");
   }
 
+  // The production portal must be unclaimed too. Node resolves *.localhost
+  // inconsistently, so go to the loopback address with the Host the guard expects.
+  const prod = new URL(env.prodUrl);
+  const pres = await fetch(`http://127.0.0.1:${prod.port}/api/portal/state`, {
+    headers: { "X-WhyGraph-Client": "1", Host: prod.host },
+  });
+  if (!pres.ok) throw new Error(`the production portal at ${env.prodUrl} answered ${pres.status}`);
+  const pstate = (await pres.json()) as { mode?: string; bootstrap_required?: boolean };
+  if (pstate.mode !== "production" || !pstate.bootstrap_required) {
+    throw new Error("the production portal is not fresh; start a new one (`make e2e` does)");
+  }
+
   fs.mkdirSync(env.control, { recursive: true });
   fs.rmSync(path.join(env.control, "fail"), { force: true });
   for (const theme of ["light", "dark"] as const) {

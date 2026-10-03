@@ -12,6 +12,7 @@
 #   E2E_PORTAL_CMD     how to launch whygraph (default: uv run --no-sync whygraph)
 #   E2E_SCAN_PYTHON    interpreter for the fake scanner (default: python3)
 #   E2E_PORT           portal port (default: 18765)
+#   E2E_PROD_PORT      production-mode portal port (default: 18766)
 #   E2E_CHANNEL        browser channel, e.g. `chrome` to use the locally installed
 #                      Chrome; unset = Playwright's own Chromium (installed on demand)
 #   E2E_KEEP=1         keep the temp dir (portal log, artifacts) after the run
@@ -25,6 +26,7 @@ playground=$(dirname "$here")
 repo=$(cd "$playground/../.." && pwd -P)
 
 port=${E2E_PORT:-18765}
+prod_port=${E2E_PROD_PORT:-18766}
 portal_cmd=${E2E_PORTAL_CMD:-uv run --no-sync whygraph}
 scan_python=${E2E_SCAN_PYTHON:-python3}
 
@@ -33,6 +35,7 @@ root=$(cd "$root" && pwd -P)
 mkdir "$root/shared" "$root/data" "$root/control"
 
 portal_pid=
+prod_pid=
 pg_name=
 cleanup() {
   status=$?
@@ -40,12 +43,20 @@ cleanup() {
     kill "$portal_pid" 2>/dev/null || true
     wait "$portal_pid" 2>/dev/null || true
   fi
+  if [ -n "$prod_pid" ]; then
+    kill "$prod_pid" 2>/dev/null || true
+    wait "$prod_pid" 2>/dev/null || true
+  fi
   if [ -n "$pg_name" ]; then
     docker rm -f "$pg_name" >/dev/null 2>&1 || true
   fi
   if [ "$status" -ne 0 ] && [ -f "$root/portal.log" ]; then
     echo "--- portal log (tail) ---" >&2
     tail -n 40 "$root/portal.log" >&2
+  fi
+  if [ "$status" -ne 0 ] && [ -f "$root/portal-prod.log" ]; then
+    echo "--- production portal log (tail) ---" >&2
+    tail -n 40 "$root/portal-prod.log" >&2
   fi
   if [ "${E2E_KEEP:-}" = 1 ]; then
     echo "kept $root" >&2
@@ -86,6 +97,11 @@ done
 pg_port=$(docker port "$pg_name" 5432/tcp | head -n 1)
 pg_port=${pg_port##*:}
 database_url="postgresql+psycopg://postgres:test@127.0.0.1:$pg_port/postgres"
+# The production-mode portal gets its own database on the same server (the
+# advisory lock is per database, so two portals cannot share one).
+docker exec "$pg_name" psql -h 127.0.0.1 -U postgres -c 'CREATE DATABASE prod' >/dev/null
+prod_database_url="postgresql+psycopg://postgres:test@127.0.0.1:$pg_port/prod"
+mkdir -p "$root/prod-data"
 
 # Provider keys from the developer's shell must not leak into the run.
 (
@@ -100,6 +116,20 @@ database_url="postgresql+psycopg://postgres:test@127.0.0.1:$pg_port/postgres"
 ) >"$root/portal.log" 2>&1 &
 portal_pid=$!
 
+# The production-mode portal: no shared folders, no fake scanner, only the
+# three production variables. Its base URL carries the port it listens on.
+(
+  cd "$repo"
+  unset ANTHROPIC_API_KEY OPENAI_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY GH_TOKEN GITHUB_TOKEN
+  unset WHYGRAPH_SHARED_FOLDERS WHYGRAPH_DEV_ORIGINS WHYGRAPH_CONFIG_JSON WHYGRAPH_DATABASE_PASSWORD_FILE WHYGRAPH_SCAN_CMD
+  export WHYGRAPH_MODE=production
+  export WHYGRAPH_BASE_URL="http://whygraph.localhost:$prod_port"
+  export WHYGRAPH_DATABASE_URL="$prod_database_url"
+  # shellcheck disable=SC2086  # the command is deliberately word-split
+  exec $portal_cmd portal --data "$root/prod-data" --port "$prod_port"
+) >"$root/portal-prod.log" 2>&1 &
+prod_pid=$!
+
 url="http://127.0.0.1:$port"
 i=0
 until curl -fsS --noproxy '*' -H 'X-WhyGraph-Client: 1' "$url/api/portal/state" >/dev/null 2>&1; do
@@ -111,8 +141,21 @@ until curl -fsS --noproxy '*' -H 'X-WhyGraph-Client: 1' "$url/api/portal/state" 
   sleep 0.5
 done
 
+i=0
+until curl --noproxy '*' -fsS -H "Host: whygraph.localhost:$prod_port" -H 'X-WhyGraph-Client: 1' \
+    "http://127.0.0.1:$prod_port/api/portal/state" >/dev/null 2>&1; do
+  i=$((i + 1))
+  if [ "$i" -gt 60 ] || ! kill -0 "$prod_pid" 2>/dev/null; then
+    echo "error: the production-mode portal did not come up on port $prod_port" >&2
+    exit 1
+  fi
+  sleep 0.5
+done
+
 cd "$playground"
+export WHYGRAPH_E2E_PROD_URL="http://whygraph.localhost:$prod_port"
+export WHYGRAPH_E2E_PROD_LOG="$root/portal-prod.log"
 export WHYGRAPH_E2E_ROOT="$root"
 export WHYGRAPH_E2E_URL="$url"
-export NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
+export NO_PROXY="127.0.0.1,localhost,whygraph.localhost,.whygraph.localhost${NO_PROXY:+,$NO_PROXY}"
 npx playwright test -c e2e/playwright.config.ts "$@"

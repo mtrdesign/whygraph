@@ -46,8 +46,11 @@ production mode:
   cookie and the portal's host check all see one origin per host. Vite passes the `Host` header
   through unchanged, which is what lets `<org>.whygraph.localhost:5173` reach the portal. Open
   `http://whygraph.localhost:5173`, not `localhost`: that one gets `421`.
-- The first run prints a `Bootstrap secret:` line in the portal's log; enter it at
-  `http://whygraph.localhost:5173/setup`.
+- The first run prints a `Bootstrap secret:` line in the terminal (the portal's log); the page at
+  `http://whygraph.localhost:5173` asks for it to create the first account.
+- Under the hood `make dev-production` runs `scripts/dev_portal.py --preserve-host`: Vite then
+  forwards `Host` unchanged and only answers `*.whygraph.localhost`, and the script prints the
+  `whygraph.localhost` URL (the bare `127.0.0.1:8778` address is refused with `421` in production).
 - It cannot run beside `dev-local`: both keep Vite on `:5173`.
 - Use **Chromium or Firefox**: they resolve every `*.localhost` name to the loopback address, while
   Safari's handling of `*.localhost` varies by version.

@@ -11,7 +11,7 @@ Stdlib only - it runs both from the uv venv and inside the Docker image.
 
 Usage::
 
-    python scripts/dev_portal.py [--no-reload] [--no-vite] [--vite-host H] \
+    python scripts/dev_portal.py [--no-reload] [--no-vite] [--preserve-host] [--vite-host H] \
         -- <whygraph portal args>
 """
 
@@ -125,6 +125,11 @@ def main(argv: list[str] | None = None) -> int:
         "--no-reload", action="store_true", help="never restart the portal"
     )
     parser.add_argument("--no-vite", action="store_true", help="run the portal only")
+    parser.add_argument(
+        "--preserve-host",
+        action="store_true",
+        help="production-mode dev: Vite forwards Host unchanged; print whygraph.localhost URLs",
+    )
     parser.add_argument("--vite-host", default="127.0.0.1", help="Vite bind address")
     parser.add_argument("portal_args", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
@@ -143,10 +148,20 @@ def main(argv: list[str] | None = None) -> int:
 
     port = portal_port(portal_args)
     portal_cmd = [sys.executable, "-m", "whygraph", "portal", *portal_args]
+    portal_env: dict[str, str] | None = None
+    if args.preserve_host:
+        # Production mode refuses shared folders, and dev origins are a local-mode knob.
+        portal_env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("WHYGRAPH_SHARED_FOLDERS", "WHYGRAPH_DEV_ORIGINS")
+        }
     vite: subprocess.Popen | None = None
     if not args.no_vite:
         _ensure_node_modules()
         vite_env = {**os.environ, "WHYGRAPH_DEV_PORTAL": f"http://127.0.0.1:{port}"}
+        if args.preserve_host:
+            vite_env["WHYGRAPH_DEV_PRESERVE_HOST"] = "1"
         vite = _start(
             [
                 "npm", "--prefix", str(PLAYGROUND), "run", "dev", "--",
@@ -154,12 +169,14 @@ def main(argv: list[str] | None = None) -> int:
             ],
             env=vite_env,
         )  # fmt: skip
-        _say(f"playground (HMR) -> http://localhost:{VITE_PORT}   (open this)")
-    _say(f"portal + MCP      -> http://127.0.0.1:{port}   (/mcp/<slug>)")
+        shown = "whygraph.localhost" if args.preserve_host else "localhost"
+        _say(f"playground (HMR) -> http://{shown}:{VITE_PORT}   (open this)")
+    if not args.preserve_host:  # in production the bare IP answers 421
+        _say(f"portal + MCP      -> http://127.0.0.1:{port}   (/mcp/<slug>)")
     if not args.no_reload:
         _say(f"restarting the portal on changes under {PACKAGE.relative_to(CHECKOUT)}/")
 
-    portal = _start(portal_cmd)
+    portal = _start(portal_cmd, env=portal_env)
     seen = snapshot(PACKAGE) if not args.no_reload else {}
     reported_exit = False
     code = 0
@@ -188,7 +205,7 @@ def main(argv: list[str] | None = None) -> int:
             seen = now
             _say(f"↻ backend changed ({changed.relative_to(CHECKOUT)}) - restarting")
             _stop(portal)
-            portal = _start(portal_cmd)
+            portal = _start(portal_cmd, env=portal_env)
             reported_exit = False
     finally:
         _say("stopping")

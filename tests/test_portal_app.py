@@ -11,7 +11,10 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 from contextlib import contextmanager
+from dataclasses import dataclass
+from http.server import ThreadingHTTPServer
 from importlib.metadata import version as package_version
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +25,7 @@ import anyio
 import httpx
 import pytest
 from alembic import command
+from cryptography.hazmat.primitives.asymmetric import rsa
 from click.testing import CliRunner
 from fastapi import Depends
 from fastapi.routing import iter_route_contexts
@@ -30,7 +34,13 @@ from sqlalchemy import text
 from sqlmodel import select
 
 from conftest import HeaderIdentity, build_fake_codegraph_db, builtin_org_id
-from github_fake import FakeGitHub
+from github_fake import (
+    FakeGitHub,
+    FakeRepo,
+    _make_handler,
+    create_bare_repo,
+    push_commit,
+)
 from whygraph.core.config import Config
 from whygraph.core.context import ProjectContext, is_strict, use_project
 from whygraph.db import bootstrap
@@ -47,6 +57,7 @@ from whygraph.portal.deps import (
     current_user,
     load_org_access,
 )
+from whygraph.portal.github_app import APP_ENV_VARS
 from whygraph.portal.github_auth import GitHubAuthConfig, GitHubOAuth
 from whygraph.portal.mcp_mount import McpDispatcher
 from whygraph.portal.models import Project, ScanRun, User
@@ -196,7 +207,7 @@ def production_env(
     """``env`` for a production portal at :data:`PROD_BASE` (M2c plan section 5.1)."""
     monkeypatch.setenv("WHYGRAPH_MODE", "production")
     monkeypatch.setenv("WHYGRAPH_BASE_URL", PROD_BASE)
-    for var in ("WHYGRAPH_SHARED_FOLDERS", "WHYGRAPH_TRUSTED_PROXIES"):
+    for var in ("WHYGRAPH_SHARED_FOLDERS", "WHYGRAPH_TRUSTED_PROXIES", *APP_ENV_VARS):
         monkeypatch.delenv(var, raising=False)
     secret_file = env.tmp / "github-oauth-secret"
     secret_file.write_text(GITHUB_CLIENT_SECRET + "\n")
@@ -228,6 +239,121 @@ def github_fake(
 
     monkeypatch.setattr("whygraph.portal.app.GitHubOAuth", build)
     return fake
+
+
+GITHUB_APP_CLIENT_ID = "Iv1.test-app"
+GITHUB_APP_CLIENT_SECRET = "test-app-client-secret"
+GITHUB_APP_SLUG = "whygraph-test"
+GITHUB_WEBHOOK_SECRET = "test-webhook-secret-of-at-least-32-chars"
+
+
+@pytest.fixture(scope="session")
+def github_app_key() -> rsa.RSAPrivateKey:
+    """The GitHub App's private key for the whole run (RSA generation is slow-ish)."""
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+@dataclass
+class GitServer:
+    """A :class:`FakeGitHub` served on ``127.0.0.1:<port>`` (``github_git_server``).
+
+    Attributes
+    ----------
+    fake : FakeGitHub
+        The fake, with the GitHub App enabled (client id
+        :data:`GITHUB_APP_CLIENT_ID`, the ``github_app_key`` public half).
+        Its API also answers through ``httpx.MockTransport(fake.handle)``.
+    url : str
+        ``http://127.0.0.1:<port>`` - the web root git clones from.
+    repos_dir : Path
+        Where the fixture's bare repositories live.
+    """
+
+    fake: FakeGitHub
+    url: str
+    repos_dir: Path
+
+    def add_repo(
+        self,
+        id: int,  # noqa: A002
+        full_name: str,
+        installation: int | None,
+        *,
+        default_branch: str = "main",
+        readers: dict[str, dict[str, bool]] | None = None,
+        public: bool = False,
+        files: dict[str, str] | None = None,
+    ) -> FakeRepo:
+        """Create a bare repo with one commit and register it with the fake."""
+        path = self.repos_dir / f"{full_name}.git"
+        create_bare_repo(path, default_branch=default_branch, files=files)
+        return self.fake.add_repo(
+            id,
+            full_name,
+            installation,
+            default_branch=default_branch,
+            readers=readers,
+            public=public,
+            path=path,
+        )
+
+    def commit(
+        self,
+        full_name: str,
+        *,
+        branch: str | None = None,
+        files: dict[str, str] | None = None,
+        message: str = "Update",
+    ) -> str:
+        """Add a commit to a fixture repo (default: its default branch); return the SHA."""
+        repo = next(r for r in self.fake.repos.values() if r.full_name == full_name)
+        assert repo.path is not None
+        return push_commit(
+            repo.path,
+            branch=branch or repo.default_branch,
+            files=files,
+            message=message,
+        )
+
+    def clone_url(self, full_name: str) -> str:
+        """``<url>/<full_name>.git``, as the portal derives it."""
+        return f"{self.url}/{full_name}.git"
+
+
+@pytest.fixture
+def github_git_server(
+    tmp_path: Path, github_app_key: rsa.RSAPrivateKey
+) -> Iterator[GitServer]:
+    """The fake GitHub on a real socket, serving fixture repos over dumb HTTP.
+
+    The same handler as the out-of-process fake, in a ``ThreadingHTTPServer``
+    thread on ``127.0.0.1:0``. Add repositories with
+    :meth:`GitServer.add_repo` and commits with :meth:`GitServer.commit`.
+    """
+    fake = FakeGitHub(
+        GITHUB_CLIENT_ID,
+        GITHUB_CLIENT_SECRET,
+        f"{PROD_BASE}/auth/github",
+        app_client_id=GITHUB_APP_CLIENT_ID,
+        app_client_secret=GITHUB_APP_CLIENT_SECRET,
+        app_callback=f"{PROD_BASE}/auth/github-app",
+        app_public_key=github_app_key.public_key(),
+        app_slug=GITHUB_APP_SLUG,
+        webhook_secret=GITHUB_WEBHOOK_SECRET,
+    )
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _make_handler(fake))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield GitServer(
+            fake=fake,
+            url=f"http://127.0.0.1:{server.server_address[1]}",
+            repos_dir=tmp_path / "github-repos",
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
 
 
 @contextmanager

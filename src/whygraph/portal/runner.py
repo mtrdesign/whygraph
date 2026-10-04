@@ -127,6 +127,8 @@ ACCESS_CHECK_SEC = 5.0
 TRIGGER_PRECEDENCE: tuple[str, ...] = (
     "hook",
     "poll",
+    "reconcile",
+    "push",
     "sync",
     "initial",
     "manual",

@@ -86,6 +86,7 @@ from .security import PortalOrigins, Principal
 from .throttle import Throttle
 
 if TYPE_CHECKING:
+    from .github_app import GitHubApp
     from .github_auth import GitHubOAuth
 
 
@@ -319,6 +320,9 @@ class PortalState:
         it ran, ``[]`` when healthy).
     github : GitHubOAuth or None
         Production's GitHub sign-in client (M2d-1); ``None`` in local mode.
+    github_app : GitHubApp or None
+        Production's GitHub App client (M2d-2), when the
+        ``WHYGRAPH_GITHUB_APP_*`` variables are set; ``None`` otherwise.
     login_pair, login_email, login_ip : Throttle
         Sign-in **failures** (also wrong current passwords): per
         ``(email, ip_key)`` 5 / 15 min, per email 100 / hour, per
@@ -360,6 +364,7 @@ class PortalState:
         self.bootstrap_secret: str | None = None
         self.base_check: list[str] | None = None
         self.github: GitHubOAuth | None = None
+        self.github_app: GitHubApp | None = None
         self.login_pair = Throttle(5, 15 * 60)
         self.login_email = Throttle(100, 60 * 60)
         self.login_ip = Throttle(20, 15 * 60)

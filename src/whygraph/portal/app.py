@@ -80,6 +80,7 @@ from .deps import (
     current_user,
     project_db_access,
 )
+from .github_app import GitHubApp, load_github_app_config
 from .github_auth import GitHubOAuth, load_github_config
 from .hosts import (
     BASE_URL_ENV,
@@ -309,6 +310,8 @@ async def _serving(state: PortalState) -> AsyncIterator[None]:
             state.session_manager = manager
         if state.github is not None:
             stack.callback(state.github.close)
+        if state.github_app is not None:
+            stack.callback(state.github_app.close)
         if not state.degraded:
             await state.runner.start(state)
         watcher = anyio.create_task_group()
@@ -453,6 +456,12 @@ def _startup(state: PortalState) -> None:
             except ValueError as exc:
                 raise PortalStartupError(str(exc)) from exc
             state.github = GitHubOAuth(github_config)
+            try:
+                app_config = load_github_app_config(os.environ)
+            except ValueError as exc:
+                raise PortalStartupError(str(exc)) from exc
+            if app_config is not None:
+                state.github_app = GitHubApp(app_config)
         state.mode = mode
         if mode == "local":
             # Idempotent: creates the built-in org at first start, and

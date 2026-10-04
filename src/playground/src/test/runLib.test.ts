@@ -112,6 +112,8 @@ describe("scan formatting", () => {
   it("names triggers and outcomes", () => {
     expect(triggerLabel(row({ trigger: "hook" }))).toBe("Git hook");
     expect(triggerLabel(row({ trigger: "initial" }))).toBe("Initial");
+    expect(triggerLabel(row({ trigger: "push" }))).toBe("Push");
+    expect(triggerLabel(row({ trigger: "reconcile" }))).toBe("Reconcile");
     expect(runOutcome(row({ status: "failed", summary: { error: "boom" } }))).toBe("boom");
     expect(runOutcome(row({ status: "failed", summary: { exit_code: 2 } }))).toBe("Exit code 2");
     expect(runOutcome(row({ status: "cancelled", summary: { merged_into: 9 } }))).toBe("Merged into run #9");

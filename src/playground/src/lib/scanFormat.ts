@@ -28,6 +28,8 @@ const TRIGGER: Record<string, string> = {
   hook: "Git hook",
   poll: "Poll",
   sync: "Sync",
+  push: "Push",
+  reconcile: "Reconcile",
 };
 
 /** `Initial` / `Manual` / `Git hook` ... for a run. */

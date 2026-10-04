@@ -310,6 +310,8 @@ def test_trigger_precedence() -> None:
     assert TRIGGER_PRECEDENCE == (
         "hook",
         "poll",
+        "reconcile",
+        "push",
         "sync",
         "initial",
         "manual",
@@ -320,6 +322,9 @@ def test_trigger_precedence() -> None:
     assert merge_trigger("describe", "manual") == "describe"
     assert merge_trigger("poll", "sync") == "sync"
     assert merge_trigger("initial", "sync") == "initial"
+    assert merge_trigger("push", "reconcile") == "push"
+    assert merge_trigger("reconcile", "poll") == "reconcile"
+    assert merge_trigger("push", "sync") == "sync"
 
 
 def test_child_env_allowlist_and_injected_secrets(tmp_path: Path) -> None:

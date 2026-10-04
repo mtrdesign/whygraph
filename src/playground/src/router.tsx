@@ -18,7 +18,7 @@ import { ApiError, portalApi, portalKey, projectApi, projectKey, setBaseUrl, typ
 import { projectProblem } from "./lib/errors";
 import { getLastProject, setLastProject } from "./lib/lastProject";
 import { ProjectProvider } from "./lib/project";
-import { isProduction, isSafeNext, signInUrl, usePortalState } from "./lib/identity";
+import { canAdmin, isProduction, isSafeNext, signInUrl, usePortalState } from "./lib/identity";
 import { hardNavigate } from "./lib/navigation";
 import { AppShell } from "./components/shell/AppShell";
 import { useGlobalShortcuts } from "./components/shell/shortcuts";
@@ -37,6 +37,7 @@ import { ScansPage } from "./pages/ScansPage";
 import { AccountPage } from "./pages/AccountPage";
 import { AdminPage } from "./pages/AdminPage";
 import { BootstrapPage } from "./pages/BootstrapPage";
+import { GitHubAppCallbackPage, type GitHubAppCallbackParams } from "./pages/GitHubAppCallbackPage";
 import { GitHubCallbackPage } from "./pages/GitHubCallbackPage";
 import { CreateOrgPage } from "./pages/CreateOrgPage";
 import { NoOrgAccessPage } from "./pages/NoOrgAccessPage";
@@ -56,7 +57,7 @@ import {
 // exist yet when `tsc --noEmit` runs ahead of `vite build`).
 //
 //   /setup                               first run (no shell); production: the bootstrap
-//   /signin /auth/github /reset /orgs /orgs/new /admin /account
+//   /signin /auth/github /auth/github-app /reset /orgs /orgs/new /admin /account
 //                                        production base host only (no AppShell)
 //   /                                    Projects              ┐ portal layout
 //   /projects/new                        add-project wizard    │ (sidebar: Projects,
@@ -156,6 +157,7 @@ function RootError({ error, reset }: { error: Error; reset: () => void }) {
 const BASE_PATHS = new Set([
   "/signin",
   "/auth/github",
+  "/auth/github-app",
   "/setup",
   "/reset",
   "/orgs",
@@ -306,6 +308,21 @@ const githubCallbackRoute = createRoute({
   }),
   component: GitHubCallbackPage,
 });
+// The GitHub App's return address (M2d-2): after a user authorization or an
+// install, both started from an org's import page.
+const githubAppCallbackRoute = createRoute({
+  getParentRoute: () => baseLayout,
+  path: "/auth/github-app",
+  validateSearch: (search: Record<string, unknown>): GitHubAppCallbackParams => ({
+    code: text(search.code),
+    state: text(search.state),
+    installation_id: text(search.installation_id),
+    setup_action: text(search.setup_action),
+    iss: text(search.iss),
+    error: text(search.error),
+  }),
+  component: GitHubAppCallbackPage,
+});
 const resetRoute = createRoute({ getParentRoute: () => baseLayout, path: "/reset", component: ResetPasswordPage });
 const orgsRoute = createRoute({
   getParentRoute: () => baseLayout,
@@ -330,10 +347,18 @@ function PortalLayout() {
 
 const portalLayout = createRoute({ getParentRoute: () => rootRoute, id: "portal", component: PortalLayout });
 const projectsRoute = createRoute({ getParentRoute: () => portalLayout, path: "/", component: ProjectsPage });
+// Local mode's single user may always add; in production only an org's owners
+// and admins may (`org.add_project`), everyone else goes back to Projects.
+function NewProjectRoute() {
+  const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
+  const state = usePortalState().data ?? portal;
+  if (isProduction(state) && !canAdmin(state.org?.role ?? undefined)) return <Navigate to="/" replace />;
+  return <AddProjectPage />;
+}
 const newProjectRoute = createRoute({
   getParentRoute: () => portalLayout,
   path: "/projects/new",
-  component: AddProjectPage,
+  component: NewProjectRoute,
 });
 const globalSettingsRoute = createRoute({
   getParentRoute: () => portalLayout,
@@ -497,7 +522,16 @@ const legacyChatRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   setupRoute,
-  baseLayout.addChildren([signInRoute, githubCallbackRoute, resetRoute, orgsRoute, newOrgRoute, adminRoute, accountRoute]),
+  baseLayout.addChildren([
+    signInRoute,
+    githubCallbackRoute,
+    githubAppCallbackRoute,
+    resetRoute,
+    orgsRoute,
+    newOrgRoute,
+    adminRoute,
+    accountRoute,
+  ]),
   portalLayout.addChildren([projectsRoute, newProjectRoute, globalSettingsRoute, membersRoute]),
   projectRoute.addChildren([
     projectHomeRoute,

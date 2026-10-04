@@ -2020,6 +2020,9 @@ def test_a_local_github_row_is_listed_unsupported_unscannable_and_removable(
     )
     assert listed["demo"]["source_supported"] is True
     assert ready.get("/api/projects/legacy").json()["source_supported"] is False
+    # Neither row is an import: no repo name or installation account to show.
+    for row in (listed["legacy"], listed["demo"]):
+        assert (row["github_full_name"], row["installation_account"]) == (None, None)
 
     for body in (None, {"trigger": "manual"}, {"trigger": "describe"}):
         refused = ready.post("/api/projects/legacy/scans", json=body)

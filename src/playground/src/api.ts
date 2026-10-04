@@ -321,7 +321,17 @@ export interface ProjectSummary {
   last_scan_status?: "ok" | "failed" | "interrupted" | "cancelled" | null;
   // `null` = up to date / never scanned; `commits_behind` is null after a history rewrite.
   stale: { commits_behind: number | null } | null;
+  // False for a local-mode GitHub clone of an older build: listed, not scannable, removable.
+  source_supported: boolean;
+  // A production project GitHub no longer lets WhyGraph read (scans are refused).
+  access_lost: boolean;
+  access_lost_reason: AccessLostReason | null;
+  // An imported repo's `owner/name` and the account the app is installed on.
+  github_full_name: string | null;
+  installation_account: string | null;
 }
+
+export type AccessLostReason = "no_access" | "git_access_denied" | "repo_deleted" | "tracked_whygraph_state";
 
 export interface ProjectDetails extends ProjectSummary {
   agents: string[];
@@ -401,7 +411,7 @@ export interface AddProjectResult {
 
 export type AddProjectBody =
   | { source: "local"; path: string; name?: string; token?: string }
-  | { source: "github"; url: string; token: string; name?: string };
+  | { source: "github"; installation_id: number; repo_id: number; name?: string };
 
 /** A v2 config layer (`[llm]`, `[analyze]`, ... as nested tables). */
 export type ConfigDict = Record<string, unknown>;
@@ -775,6 +785,50 @@ export const accountApi = {
 export const orgsApi = {
   create: (body: { slug: string; name: string }) =>
     send<{ slug: string; url: string }>("POST", "/orgs", body),
+  // The request's org (org host, owner, production only); the slug, typed, confirms it.
+  remove: (confirm_slug: string) =>
+    send<{ deleted: string; projects: number }>("DELETE", "/org", { confirm_slug }),
+};
+
+// ---- GitHub App (portal/github_app_routes.py, production only) -------------------
+
+export interface GitHubInstallation {
+  id: number;
+  account_login: string;
+  account_type: string;
+  avatar_url: string | null;
+  repository_selection: string;
+}
+
+export interface GitHubRepo {
+  id: number;
+  full_name: string;
+  private: boolean;
+  default_branch: string;
+  /** Already a project in this org. */
+  imported: boolean;
+}
+
+/** GitHub's redirect query, as `/auth/github-app` received it (minus `error`). */
+export interface GitHubAppCallbackBody {
+  code?: string;
+  state?: string;
+  iss?: string;
+  installation_id?: number;
+  setup_action?: "install" | "update" | "request";
+}
+
+export const githubApi = {
+  // Org host: GitHub's authorize URL, or with `install` the app's install page.
+  authorize: (install = false) => send<{ url: string }>("POST", "/github/app/authorize", { install }),
+  // Base host: the server names where to go next (`null` for a request it did not start).
+  callback: (body: GitHubAppCallbackBody) =>
+    send<{ return_to: string | null; requested?: boolean }>("POST", "/github/app/callback", body),
+  installations: () => get<{ installations: GitHubInstallation[] }>("/github/installations"),
+  repos: (installationId: number, page = 1) =>
+    get<{ repos: GitHubRepo[]; total_count: number; page: number }>(
+      `/github/installations/${installationId}/repos?page=${page}`,
+    ),
 };
 
 export const adminApi = {
@@ -822,7 +876,6 @@ export function projectApi(slug: string) {
     init: (body: InitBody) => send<InitResult>("POST", `${base}/init`, body),
     requestScan: (body: { trigger?: "manual" | "hook" | "describe"; analyze?: boolean } = {}) =>
       send<{ run_id: number }>("POST", `${base}/scans`, body),
-    sync: () => send<{ run_id: number }>("POST", `${base}/sync`),
     scans: () => get<{ runs: ScanRunRow[] }>(`${base}/scans`),
     scanLog: (runId: number) => get<ScanLog>(`${base}/scans/${runId}/log`),
     cancelScan: (runId: number) =>

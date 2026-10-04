@@ -676,6 +676,14 @@ def test_import_clones_initializes_and_saves_the_forge_layer(
     body = response.json()
     assert body["project"]["slug"] == "api" and body["project"]["initialized"]
     assert body["project"]["remote_url"] == f"{w.server.url}/acme/api"
+    assert (
+        body["project"]["github_full_name"],
+        body["project"]["installation_account"],
+    ) == ("acme/api", "acme")
+    listed = w.client.get(at("acme") + "/api/projects").json()["projects"]
+    assert [(p["github_full_name"], p["installation_account"]) for p in listed] == [
+        ("acme/api", "acme")
+    ]
     root = w.repos / "acme" / "api"
     assert body["project"]["root"] == str(root)
     assert (root / "README.md").read_text() == "api\n"

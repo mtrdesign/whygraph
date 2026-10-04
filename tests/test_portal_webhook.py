@@ -498,6 +498,11 @@ def test_a_transfer_follows_the_installation_or_loses_access(hooked: World) -> N
     assert row().github_installation_id == NEW_INSTALLATION
     assert row().remote_url == f"{w.server.url}/neworg/api"
     assert row().access_lost_at is None
+    shown = w.client.get(at("acme") + "/api/projects/api").json()
+    assert (shown["github_full_name"], shown["installation_account"]) == (
+        "neworg/api",
+        "neworg",
+    )
     # The sync now mints through the new installation.
     response = w.client.post(at("acme") + "/api/projects/api/scans")
     assert response.status_code == 202, response.text

@@ -535,10 +535,24 @@ def _last_scan_status(session: Session, project_id: int) -> str | None:
     ).first()
 
 
+def _github_full_name(project: Project) -> str | None:
+    """``owner/name`` of an imported repo, from ``remote_url`` (``<web>/<owner>/<name>``).
+
+    The webhook keeps ``remote_url`` current across a rename or a transfer,
+    so no GitHub call is needed. ``None`` for a local project and for a
+    local-mode clone of an older build (no ``github_repo_id``).
+    """
+    if project.github_repo_id is None or not project.remote_url:
+        return None
+    parts = project.remote_url.rstrip("/").rsplit("/", 2)
+    return f"{parts[1]}/{parts[2]}" if len(parts) == 3 else None
+
+
 def _summary(
     session: Session, project: Project, root: Path, *, mode: str | None
 ) -> dict:
     status = root_status(root)
+    full_name = _github_full_name(project)
     stale = (
         stale_info(root, project.last_scanned_head)
         if status == "ok" and project.initialized_at is not None
@@ -568,6 +582,11 @@ def _summary(
         # .codegraph/ (reason "tracked_whygraph_state").
         "access_lost": project.access_lost_at is not None,
         "access_lost_reason": project.access_lost_reason,
+        # An imported repo's `owner/name`, and the account the app is
+        # installed on: an installation covers only its own account's repos,
+        # so that is the owner.
+        "github_full_name": full_name,
+        "installation_account": full_name.split("/", 1)[0] if full_name else None,
     }
 
 

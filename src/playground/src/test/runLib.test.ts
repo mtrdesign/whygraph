@@ -148,6 +148,11 @@ describe("projectStatus with the last scan outcome", () => {
     running_scan: null,
     last_scan_status: "ok",
     stale: null,
+    source_supported: true,
+    access_lost: false,
+    access_lost_reason: null,
+    github_full_name: null,
+    installation_account: null,
     ...over,
   });
 

@@ -339,7 +339,8 @@ describe("Projects", () => {
       summary("fresh", { initialized: false, initialized_at: null, last_scan_at: null }),
       summary("busy", { running_scan: { id: 3, status: "running", trigger: "manual" } }),
       summary("gone", { root_status: "missing" }),
-      summary("hub", { source: "github", remote_url: "https://github.com/acme/hub" }),
+      // A local-mode GitHub clone of an older build: listed, with the notice.
+      summary("hub", { source: "github", remote_url: "https://github.com/acme/hub", source_supported: false }),
     ];
     mount("/");
     await screen.findByTestId("project-ready");
@@ -354,6 +355,10 @@ describe("Projects", () => {
     expect(status("gone")).toHaveTextContent("Folder missing");
     expect(screen.getByTestId("project-hub")).toHaveTextContent("github.com/acme/hub");
     expect(screen.getByTestId("project-hub")).toHaveTextContent("GitHub");
+    expect(within(screen.getByTestId("project-hub")).getByTestId("source-unsupported")).toHaveTextContent(
+      "This source is no longer supported in local mode - remove the project.",
+    );
+    expect(within(screen.getByTestId("project-ready")).queryByTestId("source-unsupported")).toBeNull();
 
     // An unfinished project resumes the wizard; a finished one opens its home.
     expect(within(screen.getByTestId("project-fresh")).getByRole("link", { name: "Fresh" })).toHaveAttribute(
@@ -429,51 +434,18 @@ describe("Add project - local repo", () => {
   });
 });
 
-// ---- add: GitHub --------------------------------------------------------------------------------
+// ---- add: no GitHub in local mode ----------------------------------------------------------------
 
-describe("Add project - from GitHub", () => {
-  async function openTab() {
-    const user = userEvent.setup();
-    const ctx = mount("/projects/new");
-    await user.click(await screen.findByRole("tab", { name: "From GitHub" }));
-    return { user, ...ctx };
-  }
-
-  it("validates the URL and requires a token before any request", async () => {
-    const { user } = await openTab();
-    await user.type(screen.getByLabelText("Repository URL"), "github.com/nope");
-    await user.click(screen.getByRole("button", { name: "Add project" }));
-    expect(await screen.findByText(/Enter a repository URL like/)).toBeInTheDocument();
-    expect(screen.getByText("A token is required to clone")).toBeInTheDocument();
-    expect(posts("/api/projects")).toHaveLength(0);
-  });
-
-  it.each([
-    ["bad_token", 400, /rejected this token/, "Access token"],
-    ["no_access", 400, /cannot read the repository/, "Access token"],
-    ["not_found", 400, /not found, or not visible/i, "Repository URL"],
-  ])("maps %s onto its field", async (code, status, message, field) => {
-    fake.addError = { status, body: { error: "probe failed", code } };
-    const { user } = await openTab();
-    await user.type(screen.getByLabelText("Repository URL"), "https://github.com/acme/secret");
-    await user.type(screen.getByLabelText("Access token"), "ghp_x");
-    await user.click(screen.getByRole("button", { name: "Add project" }));
-    const error = await screen.findByText(message);
-    expect(screen.getByLabelText(field)).toHaveAttribute("aria-invalid", "true");
-    expect(error).toHaveAttribute("role", "alert");
-  });
-
-  it("adds and continues to Configure", async () => {
-    const { user, router } = await openTab();
-    await user.type(screen.getByLabelText("Repository URL"), "https://github.com/acme/repo");
-    await user.type(screen.getByLabelText("Access token"), "ghp_ok");
-    await user.click(screen.getByRole("button", { name: "Add project" }));
-    await waitFor(() => expect(here(router)).toBe("/p/repo/init?step=configure"));
-    expect(posts("/api/projects")[0].body).toEqual({
-      source: "github",
-      url: "https://github.com/acme/repo",
-      token: "ghp_ok",
-    });
+describe("Add project - local mode has no GitHub source", () => {
+  it("shows the folder picker only: no tabs, no URL or token field, no GitHub calls", async () => {
+    mount("/projects/new");
+    await screen.findByText("web");
+    expect(screen.queryByRole("tab")).toBeNull();
+    expect(screen.queryByLabelText("Repository URL")).toBeNull();
+    expect(screen.queryByText(/Import from GitHub/)).toBeNull();
+    expect(fake.log.some((c) => c.path.startsWith("/api/github"))).toBe(false);
+    // All four steps, Initialize included.
+    expect(within(screen.getByRole("list", { name: "Steps" })).getByText("Initialize")).toBeInTheDocument();
   });
 });
 
@@ -547,12 +519,14 @@ describe("Configure (screen 5)", () => {
     ]);
   });
 
-  it("hides the hooks for a GitHub clone", async () => {
+  it("hides the hooks for a GitHub clone, with no scheduled-sync note", async () => {
     fake.projects = [summary("alpha", { source: "github", initialized: false, initialized_at: null })];
     mount("/p/alpha/init?step=configure");
     await screen.findByTestId("config-form");
-    await screen.findByText(/Git hooks are not installed in a GitHub clone/);
     expect(screen.queryByRole("heading", { name: "Git hooks" })).toBeNull();
+    expect(screen.queryByText(/syncs it on a schedule/)).toBeNull();
+    // Local mode keeps the GitHub token for the PR crawl.
+    expect(screen.getByLabelText("GitHub token")).toBeInTheDocument();
   });
 
   it("saves the whole layer (unknown keys kept) and secrets write-only, then moves to Initialize", async () => {

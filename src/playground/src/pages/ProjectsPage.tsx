@@ -4,8 +4,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { FolderGit2Icon, GitBranchIcon, MoreHorizontalIcon, PlusIcon } from "lucide-react";
 import { portalApi, portalKey, projectApi, type ProjectSummary } from "../api";
-import { isProduction, useReadOnly, usePortalState } from "../lib/identity";
+import { canAdmin, isProduction, useReadOnly, usePortalState, useRole } from "../lib/identity";
 import { timeAgo } from "../lib/projectStatus";
+import { AccessLostNotice, UnsupportedSourceNotice } from "../components/portal/AccessLost";
 import { PortChangeBanner } from "../components/portal/PortChangeNotice";
 import { ProjectStatusBadge as StatusBadge } from "../components/portal/ProjectStatusBadge";
 import { Badge } from "../components/ui/badge";
@@ -34,21 +35,13 @@ function ProjectCard({ project }: { project: ProjectSummary }) {
   const readOnly = useReadOnly();
   const scanned = timeAgo(project.last_scan_at);
   const usable = project.initialized && project.root_status === "ok";
+  const scannable = usable && !project.access_lost && project.source_supported !== false;
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: portalKey("projects") });
   const scan = useMutation({
     mutationFn: () => projectApi(project.slug).requestScan({ trigger: "manual" }),
     onSuccess: ({ run_id }) => {
       toast.success(`Scan queued for ${project.name}`);
-      void refresh();
-      void navigate({ to: "/p/$slug/scans/{-$runId}", params: { slug: project.slug, runId: String(run_id) } });
-    },
-    onError: (err) => toast.error(err.message),
-  });
-  const sync = useMutation({
-    mutationFn: () => projectApi(project.slug).sync(),
-    onSuccess: ({ run_id }) => {
-      toast.success(`Sync started for ${project.name}`);
       void refresh();
       void navigate({ to: "/p/$slug/scans/{-$runId}", params: { slug: project.slug, runId: String(run_id) } });
     },
@@ -88,13 +81,8 @@ function ProjectCard({ project }: { project: ProjectSummary }) {
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
             {!readOnly && (
-              <DropdownMenuItem disabled={!usable || scan.isPending} onClick={() => scan.mutate()}>
+              <DropdownMenuItem disabled={!scannable || scan.isPending} onClick={() => scan.mutate()}>
                 Scan now
-              </DropdownMenuItem>
-            )}
-            {project.source === "github" && !readOnly && (
-              <DropdownMenuItem disabled={!usable || sync.isPending} onClick={() => sync.mutate()}>
-                Sync now
               </DropdownMenuItem>
             )}
             <DropdownMenuItem
@@ -105,6 +93,8 @@ function ProjectCard({ project }: { project: ProjectSummary }) {
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
+      <AccessLostNotice project={project} />
+      <UnsupportedSourceNotice project={project} />
       <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
         <StatusBadge project={project} />
         <span>{scanned ? `Scanned ${scanned}` : project.initialized ? "Never scanned" : ""}</span>
@@ -126,6 +116,9 @@ export function ProjectsPage() {
     refetchInterval: (q) => (q.state.data?.projects.some((p) => p.running_scan) ? 3000 : false),
   });
   const production = isProduction(usePortalState().data);
+  const role = useRole();
+  // Local mode's single user always may; in production owners and admins import.
+  const canAdd = !production || canAdmin(role);
   const [filter, setFilter] = useState("");
   const list = projects.data?.projects ?? [];
   const needle = filter.trim().toLowerCase();
@@ -144,7 +137,7 @@ export function ProjectsPage() {
             </p>
           )}
         </div>
-        {list.length > 0 && !production && (
+        {list.length > 0 && canAdd && (
           <Button render={<Link to="/projects/new" />}>
             <PlusIcon data-icon="inline-start" />
             New project
@@ -172,16 +165,18 @@ export function ProjectsPage() {
             </EmptyMedia>
             <EmptyTitle>No projects yet</EmptyTitle>
             <EmptyDescription>
-              {production
-                ? "Adding projects arrives in the next release."
-                : "Add a repository from a shared folder, or clone one from GitHub, and WhyGraph will index its history."}
+              {!production
+                ? "Add a repository from a shared folder and WhyGraph will index its history."
+                : canAdd
+                  ? "Import a repository from GitHub and WhyGraph will index its history."
+                  : "An owner or admin of this organization can import repositories from GitHub."}
             </EmptyDescription>
           </EmptyHeader>
-          {!production && (
+          {canAdd && (
             <EmptyContent>
               <Button render={<Link to="/projects/new" />}>
                 <PlusIcon data-icon="inline-start" />
-                Add project
+                {production ? "Import from GitHub" : "Add project"}
               </Button>
             </EmptyContent>
           )}

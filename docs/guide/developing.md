@@ -52,8 +52,8 @@ production mode:
   To use the real GitHub instead, create a dev OAuth App whose callback URL is
   `http://whygraph.localhost:5173/auth/github` and set `WHYGRAPH_GITHUB_OAUTH_CLIENT_ID`,
   `WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE`, `WHYGRAPH_GITHUB_URL` and `WHYGRAPH_GITHUB_API_URL`
-  yourself before starting (see [GitHub sign-in](../deploy/production.md#github-sign-in)); values you
-  set override the fake's.
+  yourself before starting (see [GitHub sign-in](../deploy/production.md#github-sign-in)); when
+  `WHYGRAPH_GITHUB_OAUTH_CLIENT_ID` is set, the fake is not started.
 - The first run prints a `Bootstrap secret:` line in the terminal (the portal's log); the page at
   `http://whygraph.localhost:5173` asks for it to create the first account.
 - Under the hood `make dev-production` runs `scripts/dev_portal.py --preserve-host`: Vite then

@@ -13,6 +13,7 @@
 #   E2E_SCAN_PYTHON    interpreter for the fake scanner (default: python3)
 #   E2E_PORT           portal port (default: 18765)
 #   E2E_PROD_PORT      production-mode portal port (default: 18766)
+#   E2E_GITHUB_PORT    the fake GitHub's port (default: 18767)
 #   E2E_CHANNEL        browser channel, e.g. `chrome` to use the locally installed
 #                      Chrome; unset = Playwright's own Chromium (installed on demand)
 #   E2E_KEEP=1         keep the temp dir (portal log, artifacts) after the run
@@ -29,6 +30,7 @@ port=${E2E_PORT:-18765}
 prod_port=${E2E_PROD_PORT:-18766}
 portal_cmd=${E2E_PORTAL_CMD:-uv run --no-sync whygraph}
 scan_python=${E2E_SCAN_PYTHON:-python3}
+github_port=${E2E_GITHUB_PORT:-18767}
 
 root=$(mktemp -d "${TMPDIR:-/tmp}/whygraph-e2e.XXXXXX")
 root=$(cd "$root" && pwd -P)
@@ -36,6 +38,7 @@ mkdir "$root/shared" "$root/data" "$root/control"
 
 portal_pid=
 prod_pid=
+fake_pid=
 pg_name=
 cleanup() {
   status=$?
@@ -46,6 +49,10 @@ cleanup() {
   if [ -n "$prod_pid" ]; then
     kill "$prod_pid" 2>/dev/null || true
     wait "$prod_pid" 2>/dev/null || true
+  fi
+  if [ -n "$fake_pid" ]; then
+    kill "$fake_pid" 2>/dev/null || true
+    wait "$fake_pid" 2>/dev/null || true
   fi
   if [ -n "$pg_name" ]; then
     docker rm -f "$pg_name" >/dev/null 2>&1 || true
@@ -116,8 +123,30 @@ mkdir -p "$root/prod-data"
 ) >"$root/portal.log" 2>&1 &
 portal_pid=$!
 
+# The fake GitHub the production portal signs in against (tests/github_fake.py),
+# listening on the loopback IP; its redirect URI is the production portal's.
+printf 'e2e-client-secret\n' >"$root/github-secret"
+chmod 600 "$root/github-secret"
+(
+  cd "$repo"
+  exec uv run --no-sync python tests/github_fake.py --host 127.0.0.1 --port "$github_port" \
+    --client-id e2e-client --client-secret-file "$root/github-secret" \
+    --redirect-uri "http://whygraph.localhost:$prod_port/auth/github"
+) >"$root/github-fake.log" 2>&1 &
+fake_pid=$!
+i=0
+until curl -sS --noproxy '*' -o /dev/null "http://127.0.0.1:$github_port/login/oauth/authorize" 2>/dev/null; do
+  i=$((i + 1))
+  if [ "$i" -gt 60 ] || ! kill -0 "$fake_pid" 2>/dev/null; then
+    echo "error: the fake GitHub did not come up on port $github_port" >&2
+    cat "$root/github-fake.log" >&2 || true
+    exit 1
+  fi
+  sleep 0.5
+done
+
 # The production-mode portal: no shared folders, no fake scanner, only the
-# three production variables. Its base URL carries the port it listens on.
+# production variables and the fake GitHub's four. Its base URL carries the port it listens on.
 (
   cd "$repo"
   unset ANTHROPIC_API_KEY OPENAI_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY GH_TOKEN GITHUB_TOKEN
@@ -125,6 +154,10 @@ portal_pid=$!
   export WHYGRAPH_MODE=production
   export WHYGRAPH_BASE_URL="http://whygraph.localhost:$prod_port"
   export WHYGRAPH_DATABASE_URL="$prod_database_url"
+  export WHYGRAPH_GITHUB_OAUTH_CLIENT_ID=e2e-client
+  export WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE="$root/github-secret"
+  export WHYGRAPH_GITHUB_URL="http://127.0.0.1:$github_port"
+  export WHYGRAPH_GITHUB_API_URL="http://127.0.0.1:$github_port/api/v3"
   # shellcheck disable=SC2086  # the command is deliberately word-split
   exec $portal_cmd portal --data "$root/prod-data" --port "$prod_port"
 ) >"$root/portal-prod.log" 2>&1 &

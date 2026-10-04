@@ -36,13 +36,22 @@ async function createOrg(page: Page, name: string, slug: string): Promise<void> 
   await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
 }
 
+/** The administrator's password form, behind its disclosure on the sign-in page. */
 async function signIn(page: Page, email: string): Promise<void> {
+  await page.getByRole("button", { name: "Administrator sign-in" }).click();
   await page.getByLabel("Email").fill(email);
   await page.getByLabel("Password").fill(PASSWORD);
-  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
 }
 
-test("bootstrap, organizations on their own hosts, sign-in hand-off and reader access", async ({ page }) => {
+/** Sign in with GitHub through the fake: the button, then "Continue as <login>". */
+async function githubSignIn(page: Page, login: string): Promise<void> {
+  await page.goto("/signin");
+  await page.getByRole("button", { name: "Sign in with GitHub" }).click();
+  await page.getByRole("link", { name: `Continue as ${login}` }).click();
+}
+
+test("bootstrap, organizations on their own hosts, sign-in hand-off and reader access", async ({ page, browser }) => {
   // Bootstrap: the first visitor claims the instance with the logged secret.
   await page.goto("/");
   await expect(page).toHaveURL(/\/setup$/);
@@ -56,21 +65,50 @@ test("bootstrap, organizations on their own hosts, sign-in hand-off and reader a
   await expect(page).toHaveURL(/\/orgs\/new$/);
   await createOrg(page, "Acme", "acme");
   await expect(page.getByTestId("reader-banner")).toHaveCount(0);
-  await signOut(page);
 
-  // Ben registers and creates bravo (the plan says beta, which is a reserved slug).
-  await page.goto("/register");
-  await page.getByLabel("Your name").fill("Ben Bitdiddle");
-  await page.getByLabel("Email").fill("ben@example.com");
-  await page.getByLabel("Password").fill(PASSWORD);
-  await page.getByRole("button", { name: "Create account" }).click();
-  await expect(page).toHaveURL(/\/orgs\/new$/);
-  await createOrg(page, "Bravo", "bravo");
+  // Ben (a second browser context, so his cookies are his own) signs in with
+  // GitHub and creates bravo (the plan says beta, which is a reserved slug).
+  const benContext = await browser.newContext({ baseURL: env.prodUrl });
+  const ben = await benContext.newPage();
+  await githubSignIn(ben, "ben");
+  await expect(ben).toHaveURL(/\/orgs\/new$/);
+  await createOrg(ben, "Bravo", "bravo");
 
   // Ben is signed in but not a member of acme.
-  await page.goto(`${orgUrl("acme")}/`);
-  await expect(page.getByRole("heading", { name: "No access to this organization" })).toBeVisible();
-  await signOut(page, "button");
+  await ben.goto(`${orgUrl("acme")}/`);
+  await expect(ben.getByRole("heading", { name: "No access to this organization" })).toBeVisible();
+
+  // Ada adds ben on acme's Members page; Ben reloads and sees Projects.
+  await page.goto(`${orgUrl("acme")}/members`);
+  await expect(page.getByRole("heading", { name: "Members" })).toBeVisible();
+  await page.getByLabel("GitHub username").fill("ben");
+  await page.getByRole("button", { name: "Add member" }).click();
+  await expect(page.getByTestId("member-list")).toContainText("@ben");
+  await ben.reload();
+  await expect(ben.getByRole("heading", { name: "Projects" })).toBeVisible();
+
+  // Promoted to admin, Ben gets the Members page's controls; then Ada removes him.
+  await page.getByLabel("Role for Ben").selectOption("admin");
+  await expect(page.getByLabel("Role for Ben")).toHaveValue("admin");
+  await ben.goto(`${orgUrl("acme")}/members`);
+  await expect(ben.getByLabel("GitHub username")).toBeVisible();
+  await page.getByTestId("member-list").getByRole("listitem").filter({ hasText: "@ben" })
+    .getByRole("button", { name: "Remove" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Remove", exact: true }).click();
+  await expect(page.getByTestId("member-list")).not.toContainText("@ben");
+  await ben.reload();
+  await expect(ben.getByRole("heading", { name: "No access to this organization" })).toBeVisible();
+  await signOut(ben, "button");
+  await benContext.close();
+
+  // A GitHub account without two-factor authentication is refused.
+  const nofaContext = await browser.newContext({ baseURL: env.prodUrl });
+  const nofa = await nofaContext.newPage();
+  await githubSignIn(nofa, "nofa");
+  await expect(nofa.getByTestId("github-callback-error")).toContainText("two-factor authentication");
+  await nofaContext.close();
+
+  await signOut(page);
 
   // Signed out, acme's host sends the browser to the base host's sign-in.
   await page.goto(`${orgUrl("acme")}/`);

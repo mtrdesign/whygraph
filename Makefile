@@ -65,8 +65,9 @@ dev-production: node-check dev-fixtures dev-db  ## Develop in production mode: p
 	@mkdir -p "$(DEV)/production/data"
 	@echo "open http://whygraph.localhost:5173 (Chromium or Firefox); the bootstrap secret is printed below"
 	@set -e; \
+	if [ -f .env.dev ]; then echo "loading .env.dev"; set -a; . ./.env.dev; set +a; fi; \
 	if [ -z "$${WHYGRAPH_GITHUB_OAUTH_CLIENT_ID:-}" ]; then \
-		echo "GitHub: the fake on 127.0.0.1:$(DEV_GITHUB_PORT) (set WHYGRAPH_GITHUB_OAUTH_CLIENT_ID and friends to use a real dev OAuth App)"; \
+		echo "GitHub: the fake on 127.0.0.1:$(DEV_GITHUB_PORT) (see .env.dev.example to use a real dev OAuth App)"; \
 		(umask 077; printf 'dev-client-secret\n' > "$(DEV)/production/github-secret"); \
 		$(UV_RUN) python tests/github_fake.py --host 127.0.0.1 --port $(DEV_GITHUB_PORT) \
 			--client-id dev-client --client-secret-file "$(DEV)/production/github-secret" \

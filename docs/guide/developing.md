@@ -50,10 +50,12 @@ production mode:
   on `DEV_GITHUB_PORT` and points the portal's four `WHYGRAPH_GITHUB_*` variables at it. Nothing leaves
   your machine, and you can sign in as any username to try members, roles and two-factor refusals.
   To use the real GitHub instead, create a dev OAuth App whose callback URL is
-  `http://whygraph.localhost:5173/auth/github` and set `WHYGRAPH_GITHUB_OAUTH_CLIENT_ID`,
-  `WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE`, `WHYGRAPH_GITHUB_URL` and `WHYGRAPH_GITHUB_API_URL`
-  yourself before starting (see [GitHub sign-in](../deploy/production.md#github-sign-in)); when
-  `WHYGRAPH_GITHUB_OAUTH_CLIENT_ID` is set, the fake is not started.
+  `http://whygraph.localhost:5173/auth/github` (see
+  [GitHub sign-in](../deploy/production.md#github-sign-in)), then copy `.env.dev.example` to
+  `.env.dev` (gitignored) and fill in its client ID and the path of a file holding its client
+  secret. `make dev-production` loads `.env.dev` when it exists; when
+  `WHYGRAPH_GITHUB_OAUTH_CLIENT_ID` ends up set (from `.env.dev` or your shell), the fake is not
+  started. Values in `.env.dev` win over your shell's.
 - The first run prints a `Bootstrap secret:` line in the terminal (the portal's log); the page at
   `http://whygraph.localhost:5173` asks for it to create the first account.
 - Under the hood `make dev-production` runs `scripts/dev_portal.py --preserve-host`: Vite then

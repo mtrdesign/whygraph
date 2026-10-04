@@ -41,8 +41,12 @@ services:
       WHYGRAPH_DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
       # Caddy's fixed address: the only peer whose X-Forwarded-For the portal trusts.
       WHYGRAPH_TRUSTED_PROXIES: 172.30.0.10
+      # The GitHub OAuth App that signs people in (docs/deploy/production.md, "GitHub sign-in").
+      WHYGRAPH_GITHUB_OAUTH_CLIENT_ID: ${WHYGRAPH_GITHUB_OAUTH_CLIENT_ID:?set WHYGRAPH_GITHUB_OAUTH_CLIENT_ID in .env}
+      WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE: /run/secrets/github_oauth_client_secret
     secrets:
       - postgres_password
+      - github_oauth_client_secret
     volumes:
       # secret.key (the key to every stored secret) and portal.lock live here.
       - portal-data:/data
@@ -83,3 +87,5 @@ volumes:
 secrets:
   postgres_password:
     file: ./secrets/postgres_password
+  github_oauth_client_secret:
+    file: ./secrets/github_oauth_client_secret

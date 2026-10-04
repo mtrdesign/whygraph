@@ -59,12 +59,21 @@ The Welcome screen says the same thing the first time you open the portal.
 Everything above describes local mode. In production mode the portal is reached over the network, so
 the checks change:
 
-- **Sessions.** Sign-in is email and password (argon2, 15 characters minimum, a common-password
-  blocklist). The session is a random token whose hash only is stored in the database; the cookie is
+- **Sign-in is GitHub.** Users sign in through an OAuth App with the read-only `read:user` scope and
+  GitHub two-factor authentication required. The portal sends a random `state` and a PKCE challenge
+  (S256) whose verifier it keeps in memory, bound to a host-only cookie, so the callback only works in
+  the browser that started it and only once, within 10 minutes. GitHub redirects to a page of the
+  app (`/auth/github`), which strips the one-time code from the address bar before posting it, so the
+  `/api` origin checks need no exception, and the access log redacts that query. The portal reads the
+  user, then **revokes GitHub's token** at once and keeps none. It stores the GitHub id (the identity),
+  username, display name and avatar, **never an email**. Only the bootstrap admin has a password
+  (argon2, 15 characters minimum, a common-password blocklist). A disabled account is refused at
+  sign-in and its sessions end at once.
+- **Sessions.** The session is a random token whose hash only is stored in the database; the cookie is
   `HttpOnly`, `SameSite=Lax`, `Secure` over `https`, and set on the base host so it reaches every
   organization. Sessions last 30 days at most and 7 days idle, a password change rotates the current
-  one and ends the others, and a reset ends all of them. Sign-in, registration and reset happen on
-  the base host only.
+  one and ends the others, and a reset ends all of them. Sign-in, setup and reset happen on the
+  base host only.
 - **Hosts.** The `Host` must be the base host or exactly one valid label under it
   (`<org>.<base host>`); anything else, including `www.` and lookalike suffixes, gets `421`. An
   organization is served only on its own host, and membership is checked on every request.
@@ -75,8 +84,13 @@ the checks change:
   security policy, `Referrer-Policy: same-origin` and `nosniff`; `/api` responses and any response
   that sets a cookie are `no-store`; over `https` there is HSTS with `includeSubDomains`. A full
   script content security policy is not part of this release.
-- **Throttling.** Sign-in failures are limited per account and address, and registration, setup and
-  reset per address.
+- **Throttling.** Password sign-in failures are limited per account and address, GitHub sign-in starts
+  and callbacks, setup and reset per address, and adding members per organization (60 an hour, so the
+  add form cannot be used to probe which usernames have accounts).
+- **Roles.** Members read and use projects; admins also manage people and per-project settings and
+  keys; only owners touch owners and change the organization's settings and organization-level keys.
+  Chat sessions are private to the user who started them. See
+  [Members](../deploy/production.md#members).
 - **No user-controlled markup** is rendered on an organization host, because the session cookie is
   shared across them.
 - **A dedicated base host.** The cookie reaches every subdomain, so the base host must belong to

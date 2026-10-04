@@ -258,6 +258,10 @@ its start. None is a `whygraph.toml` key either.
 |---|---|
 | `WHYGRAPH_MODE` | `local` (the default) or `production`. It is fixed at the portal's first start and stored in its database; a different value later is refused. |
 | `WHYGRAPH_BASE_URL` | **Required in production.** The public address, such as `https://whygraph.example.com` or `http://whygraph.localhost:8765`: scheme and host (and a non-default port), no path. Organizations live on `<org>.<host>`. `http` is accepted only for hosts ending in `.localhost`; an IP address or a single-label host is refused. A default port (`:443`, `:80`) is dropped. An invalid value, or `WHYGRAPH_SHARED_FOLDERS` set in production, stops the first start with exit code `2`. |
+| `WHYGRAPH_GITHUB_OAUTH_CLIENT_ID` | **Required in production.** The client ID of the GitHub OAuth App that signs people in; its callback URL is `<WHYGRAPH_BASE_URL>/auth/github`. See [GitHub sign-in](../deploy/production.md#github-sign-in). |
+| `WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE` | **Required in production.** A file holding that app's client secret (trailing whitespace stripped). The secret is never an environment value. A missing variable, or an unreadable or empty file, stops the start with exit code `2`. |
+| `WHYGRAPH_GITHUB_URL` | The GitHub web address, default `https://github.com`; set it for GitHub Enterprise Server. `https` only, except `http` for `localhost` and loopback addresses. |
+| `WHYGRAPH_GITHUB_API_URL` | The GitHub API address, default `https://api.github.com`; on Enterprise Server `<WHYGRAPH_GITHUB_URL>/api/v3`. Same scheme rule. |
 | `WHYGRAPH_TRUSTED_PROXIES` | Comma-separated IPs or CIDRs of the reverse proxies whose `X-Forwarded-For` the portal believes (it is uvicorn's `forwarded_allow_ips`). Unset trusts none. A bad entry exits with status `2`. |
 
 !!! tip "Provider keys degrade gracefully - for scan and rationale"

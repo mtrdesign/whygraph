@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { authApi, portalApi, portalKey, type PortalState } from "../api";
+import { authApi, portalApi, portalKey, type PortalState, type PortalUser } from "../api";
 import { hardNavigate } from "./navigation";
 
 // Helpers for production-mode identity (M2c). Local mode never reaches them: a
@@ -16,6 +16,32 @@ export function usePortalState() {
  */
 export function useReadOnly(): boolean {
   return usePortalState().data?.org?.role === "reader";
+}
+
+/**
+ * The caller's role in the request's org (`owner` / `admin` / `member`, or
+ * `reader` for an instance admin outside it), or `undefined` without one. Local
+ * mode's single user is the built-in org's owner.
+ */
+export function useRole(): string | undefined {
+  const data = usePortalState().data;
+  return data?.org?.role ?? data?.user?.role ?? undefined;
+}
+
+/** Owners and admins manage members and per-project settings. */
+export function canAdmin(role: string | undefined): boolean {
+  return role === "owner" || role === "admin";
+}
+
+/** Only owners change the org settings and org-level keys, and touch owners. */
+export function canOwn(role: string | undefined): boolean {
+  return role === "owner";
+}
+
+/** Who the user is, for "signed in as": the email, else `@login`, else the display name. */
+export function signedInAs(user: PortalUser | null | undefined): string | undefined {
+  if (!user) return undefined;
+  return user.email ?? (user.github_login ? `@${user.github_login}` : undefined) ?? user.display_name;
 }
 
 /** True when the state is production's (base or org host). */

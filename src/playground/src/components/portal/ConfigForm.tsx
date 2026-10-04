@@ -197,15 +197,18 @@ export function ConfigForm({
   submitLabel = "Save",
   onSaved,
   secondaryActions,
+  readOnly: readOnlyProp = false,
 }: {
   scope: ConfigScope;
   submitLabel?: string;
   /** Called after a successful save (with the response), or immediately when nothing changed. */
   onSaved?: (saved?: StoredConfig & { cleared_project_keys?: { slug: string; provider: string }[] }) => void;
   secondaryActions?: ReactNode;
+  /** Show the settings without a way to save them (besides a `reader`, who never can). */
+  readOnly?: boolean;
 }) {
   const queryClient = useQueryClient();
-  const readOnly = useReadOnly();
+  const readOnly = useReadOnly() || readOnlyProp;
   const slug = scope.kind === "project" ? scope.slug : null;
   const isProject = slug !== null;
 

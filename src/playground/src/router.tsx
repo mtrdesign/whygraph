@@ -31,15 +31,16 @@ import { AddProjectPage } from "./pages/AddProjectPage";
 import { InitProjectPage, type InitStep } from "./pages/InitProjectPage";
 import { SetupPage } from "./pages/SetupPage";
 import { GlobalSettingsPage } from "./pages/GlobalSettingsPage";
+import { MembersPage } from "./pages/MembersPage";
 import { ProjectSettingsPage } from "./pages/ProjectSettingsPage";
 import { ScansPage } from "./pages/ScansPage";
 import { AccountPage } from "./pages/AccountPage";
 import { AdminPage } from "./pages/AdminPage";
 import { BootstrapPage } from "./pages/BootstrapPage";
+import { GitHubCallbackPage } from "./pages/GitHubCallbackPage";
 import { CreateOrgPage } from "./pages/CreateOrgPage";
 import { NoOrgAccessPage } from "./pages/NoOrgAccessPage";
 import { OrgPickerPage } from "./pages/OrgPickerPage";
-import { RegisterPage } from "./pages/RegisterPage";
 import { ResetPasswordPage } from "./pages/ResetPasswordPage";
 import { SessionNotReceivedPage } from "./pages/SessionNotReceivedPage";
 import { SignInPage } from "./pages/SignInPage";
@@ -55,11 +56,12 @@ import {
 // exist yet when `tsc --noEmit` runs ahead of `vite build`).
 //
 //   /setup                               first run (no shell); production: the bootstrap
-//   /signin /register /reset /orgs /orgs/new /admin /account
+//   /signin /auth/github /reset /orgs /orgs/new /admin /account
 //                                        production base host only (no AppShell)
 //   /                                    Projects              ┐ portal layout
 //   /projects/new                        add-project wizard    │ (sidebar: Projects,
-//   /settings                            global settings       ┘  Settings)
+//   /settings                            global settings       │  Settings, and
+//   /members                             org members           ┘  Members in production)
 //   /p/$slug                             ProjectHome           ┐ project layout
 //   /p/$slug/explorer?node=&file=        Explorer              │ (sidebar: Overview,
 //   /p/$slug/chat/{-$id}                 Chat                  │  Explorer, Chat,
@@ -151,8 +153,17 @@ function RootError({ error, reset }: { error: Error; reset: () => void }) {
 
 // What the base host serves (everything else is the org tree, which lives on an
 // org host), and the subset a signed-out visitor may open.
-const BASE_PATHS = new Set(["/signin", "/register", "/setup", "/reset", "/orgs", "/orgs/new", "/admin", "/account"]);
-const SIGNED_OUT_PATHS = new Set(["/signin", "/register", "/reset"]);
+const BASE_PATHS = new Set([
+  "/signin",
+  "/auth/github",
+  "/setup",
+  "/reset",
+  "/orgs",
+  "/orgs/new",
+  "/admin",
+  "/account",
+]);
+const SIGNED_OUT_PATHS = new Set(["/signin", "/auth/github", "/reset"]);
 
 /**
  * Where the base host sends this request instead of rendering it, or `null` to
@@ -165,7 +176,7 @@ export function baseHostRedirect(portal: PortalState, pathname: string): string 
   if (portal.bootstrap_required) return path === "/setup" ? null : "/setup";
   if (path === "/setup") return "/";
   if (!portal.user) return SIGNED_OUT_PATHS.has(path) ? null : "/signin";
-  if (path === "/" || path === "/register") return "/orgs";
+  if (path === "/") return "/orgs";
   if (!BASE_PATHS.has(path)) return "/";
   if (path === "/admin" && !portal.user.is_instance_admin) return "/orgs";
   return null;
@@ -283,7 +294,18 @@ const signInRoute = createRoute({
   validateSearch: validateNext,
   component: SignInRoute,
 });
-const registerRoute = createRoute({ getParentRoute: () => baseLayout, path: "/register", component: RegisterPage });
+// GitHub's return address (M2d-1); a signed-in visitor may land here too (a new
+// sign-in replaces the session).
+const githubCallbackRoute = createRoute({
+  getParentRoute: () => baseLayout,
+  path: "/auth/github",
+  validateSearch: (search: Record<string, unknown>): { code?: string; state?: string; error?: string } => ({
+    code: text(search.code),
+    state: text(search.state),
+    error: text(search.error),
+  }),
+  component: GitHubCallbackPage,
+});
 const resetRoute = createRoute({ getParentRoute: () => baseLayout, path: "/reset", component: ResetPasswordPage });
 const orgsRoute = createRoute({
   getParentRoute: () => baseLayout,
@@ -318,6 +340,13 @@ const globalSettingsRoute = createRoute({
   path: "/settings",
   component: GlobalSettingsPage,
 });
+
+// Org members exist only in production; local mode has one implicit user.
+function MembersRoute() {
+  const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
+  return isProduction(portal) ? <MembersPage /> : <NotFoundPage />;
+}
+const membersRoute = createRoute({ getParentRoute: () => portalLayout, path: "/members", component: MembersRoute });
 
 // ---- project layout ---------------------------------------------------------
 
@@ -468,8 +497,8 @@ const legacyChatRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   setupRoute,
-  baseLayout.addChildren([signInRoute, registerRoute, resetRoute, orgsRoute, newOrgRoute, adminRoute, accountRoute]),
-  portalLayout.addChildren([projectsRoute, newProjectRoute, globalSettingsRoute]),
+  baseLayout.addChildren([signInRoute, githubCallbackRoute, resetRoute, orgsRoute, newOrgRoute, adminRoute, accountRoute]),
+  portalLayout.addChildren([projectsRoute, newProjectRoute, globalSettingsRoute, membersRoute]),
   projectRoute.addChildren([
     projectHomeRoute,
     explorerRoute,

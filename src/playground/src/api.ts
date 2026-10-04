@@ -231,9 +231,13 @@ export interface PortalUser {
   uid: string;
   display_name: string;
   role: string | null;
-  // Production only (M2c).
-  email?: string;
+  // Production only (M2c). `email` is null for a GitHub account (M2d-1).
+  email?: string | null;
   is_instance_admin?: boolean;
+  // Production only (M2d-1).
+  github_login?: string | null;
+  avatar_url?: string | null;
+  has_password?: boolean;
 }
 
 // `GET /api/portal/state` is public. In degraded mode (the portal DB failed to
@@ -688,9 +692,13 @@ export interface Redirect {
 
 export interface AccountView {
   uid: string;
-  email: string;
+  // Null for a GitHub account.
+  email: string | null;
   display_name: string;
   is_instance_admin: boolean;
+  github_login: string | null;
+  avatar_url: string | null;
+  has_password: boolean;
 }
 
 export interface OrgEntry {
@@ -702,11 +710,28 @@ export interface OrgEntry {
 
 export interface AdminUser {
   uid: string;
-  email: string;
+  // Null for a GitHub account.
+  email: string | null;
   display_name: string;
   is_instance_admin: boolean;
+  github_login: string | null;
+  has_password: boolean;
+  disabled: boolean;
   created_at: string;
   org_count: number;
+}
+
+export type MemberRole = "owner" | "admin" | "member";
+
+// One org member (`portal/member_routes.py`); never an email.
+export interface Member {
+  uid: string;
+  display_name: string;
+  github_login: string | null;
+  avatar_url: string | null;
+  role: MemberRole;
+  joined_at: string;
+  disabled: boolean;
 }
 
 export interface AdminOrg {
@@ -726,8 +751,11 @@ export interface AdminSettings {
 export const authApi = {
   bootstrap: (body: { secret: string; email: string; display_name: string; password: string }) =>
     send<Redirect>("POST", "/auth/bootstrap", body),
-  register: (body: { email: string; display_name: string; password: string }) =>
-    send<Redirect>("POST", "/auth/register", body),
+  // GitHub sign-in (M2d-1): `start` returns GitHub's authorize URL; GitHub sends
+  // the browser back to `/auth/github`, whose page posts `callback`.
+  githubStart: (body: { next?: string }) => send<{ authorize_url: string }>("POST", "/auth/github/start", body),
+  githubCallback: (body: { code: string; state: string }) =>
+    send<Redirect>("POST", "/auth/github/callback", body),
   login: (body: { email: string; password: string; next?: string }) =>
     send<Redirect>("POST", "/auth/login", body),
   logout: () => send<Redirect>("POST", "/auth/logout"),
@@ -753,8 +781,26 @@ export const adminApi = {
   users: () => get<AdminUser[]>("/admin/users"),
   setAdmin: (uid: string, is_instance_admin: boolean) =>
     send<unknown>("PATCH", `/admin/users/${encodeURIComponent(uid)}`, { is_instance_admin }),
+  setDisabled: (uid: string, disabled: boolean) =>
+    send<unknown>("PATCH", `/admin/users/${encodeURIComponent(uid)}`, { disabled }),
   resetLink: (uid: string) =>
     send<{ url: string }>("POST", `/admin/users/${encodeURIComponent(uid)}/reset-link`),
+};
+
+// A call answered with `204 No Content` (no JSON body to parse).
+async function sendEmpty(method: string, path: string): Promise<void> {
+  const res = await fetch(`/api${path}`, init(method));
+  if (!res.ok) throw await failure(res);
+}
+
+// Org members (`portal/member_routes.py`): org host, production only.
+export const membersApi = {
+  list: () => get<Member[]>("/org/members"),
+  add: (body: { github_login: string; role: MemberRole }) => send<Member>("POST", "/org/members", body),
+  setRole: (uid: string, role: MemberRole) =>
+    send<Member>("PATCH", `/org/members/${encodeURIComponent(uid)}`, { role }),
+  remove: (uid: string) => sendEmpty("DELETE", `/org/members/${encodeURIComponent(uid)}`),
+  leave: () => sendEmpty("DELETE", "/org/membership"),
 };
 
 // ---- project-scoped calls ---------------------------------------------------

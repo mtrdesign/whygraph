@@ -1001,6 +1001,12 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/portal/defaults", "PUT"): "org.configure",
     ("/api/projects", "GET"): "org.read",
     ("/api/projects", "POST"): "org.add_project",
+    # Production's members page: org_access(...) (M2d-1 section 4.5)
+    ("/api/org/members", "GET"): "org.read",
+    ("/api/org/members", "POST"): "org.members",
+    ("/api/org/members/{uid}", "PATCH"): "org.members",
+    ("/api/org/members/{uid}", "DELETE"): "org.members",
+    ("/api/org/membership", "DELETE"): "org.read",
     # Project management: project_access(...)
     (_P, "GET"): _READ,
     (f"{_P}/config", "GET"): _READ,
@@ -1124,7 +1130,17 @@ def _filled(path: str) -> str:
     return path
 
 
-PRODUCTION_ONLY_ROUTES = PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES
+PRODUCTION_ORG_ROUTES = {
+    ("/api/org/members", "GET"),
+    ("/api/org/members", "POST"),
+    ("/api/org/members/{uid}", "PATCH"),
+    ("/api/org/members/{uid}", "DELETE"),
+    ("/api/org/membership", "DELETE"),
+}
+"""Org-scoped routes that exist only in production: the members page
+(``require_production`` before the org dependency, M2d-1 plan section 0.2 #19)."""
+
+PRODUCTION_ONLY_ROUTES = PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES | PRODUCTION_ORG_ROUTES
 """Routes that answer ``404`` in local mode (M2c plan section 4.7)."""
 
 

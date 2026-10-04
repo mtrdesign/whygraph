@@ -89,6 +89,7 @@ from .hosts import (
     self_check,
 )
 from .mcp_mount import McpDispatcher, build_session_manager
+from .member_routes import members_router
 from .migrate import MIGRATION_LOCK
 from .models import ScanRun, Setting, User
 from .orgs import ensure_builtin_org
@@ -219,6 +220,7 @@ def create_portal_app(
 
     app.include_router(public_router)
     app.include_router(auth_router)  # production-only; local mode answers 404
+    app.include_router(members_router)  # production-only, org-scoped
     app.include_router(portal_router)
     app.include_router(projects_router)
     app.include_router(

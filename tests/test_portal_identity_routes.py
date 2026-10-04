@@ -957,7 +957,17 @@ def test_every_security_event_is_logged_once_with_its_fields(
         ann = password_user("ann@example.com")  # inserted: no event
         github_sign_in(client, "ben")
         ben = uid_of_login("ben")
+        with portal_db.get_session() as session:  # inserted: no event
+            session.add(User(display_name="Cy", github_id=2002, github_login="cy"))
+        cy = uid_of_login("cy")
         create_org(client, "quokka", "Quokka")
+        members = at("quokka") + "/api/org/members"
+        client.post(members, json={"github_login": "nobody", "role": "member"})
+        client.post(members, json={"github_login": "cy", "role": "member"})
+        client.patch(f"{members}/{cy}", json={"role": "admin"})
+        client.delete(f"{members}/{cy}")
+        client.post(members, json={"github_login": "cy", "role": "owner"})
+        client.delete(at("quokka") + "/api/org/membership")  # ben leaves
         github_sign_in(client, "nofa")  # refused: no 2FA
         client.post(at() + "/api/auth/logout")
         log_in(client, "ann@example.com", "the wrong passphrase")
@@ -973,6 +983,8 @@ def test_every_security_event_is_logged_once_with_its_fields(
         client.patch(
             at() + f"/api/admin/users/{ann}", json={"is_instance_admin": False}
         )
+        client.patch(at() + f"/api/admin/users/{cy}", json={"disabled": True})
+        client.patch(at() + f"/api/admin/users/{cy}", json={"disabled": False})
         client.get(at("quokka") + "/api/projects")  # ada reads as `reader`
         client.cookies.clear()
         assert (
@@ -999,6 +1011,12 @@ def test_every_security_event_is_logged_once_with_its_fields(
         "bootstrap_claimed",
         "github_signin",
         "org_created",
+        "member_add_refused",
+        "member_added",
+        "member_role_changed",
+        "member_removed",
+        "member_added",
+        "member_left",
         "github_signin_refused",
         "logout",
         "login_failure",
@@ -1008,6 +1026,8 @@ def test_every_security_event_is_logged_once_with_its_fields(
         "reset_link_issued",
         "admin_granted",
         "admin_revoked",
+        "user_disabled",
+        "user_enabled",
         "reader_request",
         "reset_link_used",
         "github_token_revoke_failed",
@@ -1035,6 +1055,27 @@ def test_every_security_event_is_logged_once_with_its_fields(
     assert by_event["reset_link_issued"]["uid"] == ada
     assert by_event["reset_link_issued"]["target"] == ann
     assert by_event["admin_granted"]["target"] == ann
+    assert by_event["member_add_refused"]["reason"] == "no_such_user"
+    assert by_event["member_add_refused"]["github_login"] == "nobody"
+    added = [r for r in records if r["event"] == "member_added"]
+    assert [(r["uid"], r["target"], r["role"]) for r in added] == [
+        (ben, cy, "member"),
+        (ben, cy, "owner"),
+    ]
+    assert all(r["org"] == "quokka" and r["github_login"] == "cy" for r in added)
+    changed = by_event["member_role_changed"]
+    assert (changed["target"], changed["role"], changed["previous"]) == (
+        cy,
+        "admin",
+        "member",
+    )
+    assert by_event["member_removed"]["target"] == cy
+    assert (by_event["member_left"]["uid"], by_event["member_left"]["role"]) == (
+        ben,
+        "owner",
+    )
+    for event in ("user_disabled", "user_enabled"):
+        assert (by_event[event]["uid"], by_event[event]["target"]) == (ada, cy)
     assert by_event["reader_request"]["org"] == "quokka"
     assert by_event["reader_request"]["method"] == "GET"
     assert all(r["ip"] == "203.0.113.5" for r in records)

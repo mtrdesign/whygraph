@@ -95,11 +95,13 @@ def test_role_actions_match_table():
     member = {"org.read", "project.read", "project.chat", "project.scan"}
     admin = member | {
         "org.add_project",
-        "org.configure",
+        "org.members",
         "project.configure",
         "project.setup",
     }
-    owner = admin | {"org.own"}
+    # Only an owner changes the org settings (and org-level keys): M2d-1
+    # moved org.configure from admin to owner (plan section 0.1).
+    owner = admin | {"org.configure", "org.own"}
     # Every org action is an owner action; user.self / instance.admin are in
     # no role's set.
     assert {a.value for a in Action} == owner | {"user.self", "instance.admin"}
@@ -116,6 +118,11 @@ def test_allowed():
     assert not allowed(Role.MEMBER, Action.PROJECT_CONFIGURE)
     assert not allowed(Role.ADMIN, Action.ORG_OWN)
     assert allowed(Role.OWNER, Action.ORG_OWN)
+    assert allowed(Role.ADMIN, Action.ORG_MEMBERS)
+    assert not allowed(Role.MEMBER, Action.ORG_MEMBERS)
+    assert not allowed(Role.ADMIN, Action.ORG_CONFIGURE)
+    assert allowed(Role.OWNER, Action.ORG_CONFIGURE)
+    assert allowed(Role.ADMIN, Action.PROJECT_CONFIGURE)
 
 
 def _access(role):

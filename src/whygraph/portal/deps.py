@@ -326,6 +326,9 @@ class PortalState:
     bootstrap_ip, reset_ip, github_ip : Throttle
         Every attempt, per ``ip_key``: bootstrap and reset 10 / 15 min,
         GitHub sign-in (start and callback, shared) 60 / 15 min.
+    member_add_org : Throttle
+        Every ``POST /api/org/members`` attempt, per org id: 60 / hour, so
+        the route cannot probe which usernames have accounts at scale.
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -363,6 +366,7 @@ class PortalState:
         self.bootstrap_ip = Throttle(10, 15 * 60)
         self.reset_ip = Throttle(10, 15 * 60)
         self.github_ip = Throttle(60, 15 * 60)
+        self.member_add_org = Throttle(60, 60 * 60)
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0

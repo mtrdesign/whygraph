@@ -154,9 +154,10 @@ class OrgBody(_Strict):
 
 
 class AdminUserBody(_Strict):
-    """``PATCH /api/admin/users/{uid}``."""
+    """``PATCH /api/admin/users/{uid}``: either field, or both (at least one)."""
 
-    is_instance_admin: bool
+    is_instance_admin: bool | None = None
+    disabled: bool | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +241,10 @@ def _email_taken() -> ApiError:
     return ApiError(
         409, "an account with that email already exists", code="email_taken"
     )
+
+
+def _account_disabled() -> ApiError:
+    return ApiError(403, "this account is disabled", code="account_disabled")
 
 
 def _no_password() -> ApiError:
@@ -592,8 +597,10 @@ def post_login(body: LoginBody, request: Request, response: Response) -> dict:
     ``409 bootstrap_required`` before the bootstrap. A wrong password and
     an unknown email answer the same ``401 bad_credentials`` in the same
     time (a dummy verify). Failures count per ``(email, ip_key)``, per
-    email and per ``ip_key``; all three are checked first (``429``). An
-    outdated hash is upgraded. ``redirect`` is ``next`` when it is a safe
+    email and per ``ip_key``; all three are checked first (``429``). A
+    disabled account is ``403 account_disabled`` - only after a correct
+    password, so the route tells nothing to a guesser. An outdated hash is
+    upgraded. ``redirect`` is ``next`` when it is a safe
     portal URL, else ``<base>/orgs``.
     """
     state = portal_state(request)
@@ -605,7 +612,9 @@ def post_login(body: LoginBody, request: Request, response: Response) -> dict:
     _check_login_throttles(rules)
     with get_session() as db:
         row = db.exec(
-            select(User.id, User.uid, User.password_hash).where(User.email == email)
+            select(User.id, User.uid, User.password_hash, User.disabled_at).where(
+                User.email == email
+            )
         ).first()
     ok, needs_rehash = verify_password(None if row is None else row[2], body.password)
     if row is None or not ok:
@@ -618,7 +627,16 @@ def post_login(body: LoginBody, request: Request, response: Response) -> dict:
             email=truncate_email(email),
         )
         raise ApiError(401, "wrong email or password", code="bad_credentials")
-    user_id, uid, _ = row
+    user_id, uid, _, disabled_at = row
+    if disabled_at is not None:
+        audit(
+            "login_failure",
+            request,
+            uid=uid,
+            email=truncate_email(email),
+            reason="disabled",
+        )
+        raise _account_disabled()
     new_hash = hash_password(body.password) if needs_rehash else None
     with get_session() as db:
         if new_hash is not None:
@@ -650,7 +668,8 @@ def post_reset(body: ResetBody, request: Request, response: Response) -> dict:
     """Set a new password with an admin-issued reset link, and sign in.
 
     ``429`` past 10 attempts per ``ip_key`` in 15 minutes; ``400 bad_token``
-    for an unknown, used, superseded or expired link; the password rules
+    for an unknown, used, superseded or expired link; ``403
+    account_disabled`` for a disabled account; the password rules
     (``422``). Marks the link used, ends **every** session of the user,
     then starts a new one.
     """
@@ -675,6 +694,8 @@ def post_reset(body: ResetBody, request: Request, response: Response) -> dict:
         user = db.get(User, live_link(db, lock=False).user_id)
         if user is None:
             raise bad_token
+        if user.disabled_at is not None:
+            raise _account_disabled()
         email = user.email or ""
     validate_password(body.password, email)
     password_hash = hash_password(body.password)
@@ -684,6 +705,8 @@ def post_reset(body: ResetBody, request: Request, response: Response) -> dict:
         user = db.get(User, link.user_id)
         if user is None:
             raise bad_token
+        if user.disabled_at is not None:
+            raise _account_disabled()
         assert user.id is not None
         user.password_hash = password_hash
         user.password_changed_at = now
@@ -949,38 +972,67 @@ def patch_admin_user(
     request: Request,
     principal: Principal = Depends(instance_access()),
 ) -> dict:
-    """Make a user an instance admin, or remove that.
+    """Make a user an instance admin or remove that; disable or enable them.
 
-    ``409 last_admin`` when it would leave no admin. The admin rows are
-    locked (``SELECT ... FOR UPDATE``) first, so two concurrent demotions
-    cannot both pass the count.
+    ``422`` with neither field. ``409 self_disable`` for your own account;
+    ``409 last_admin`` when a demotion or a disable would leave no
+    **enabled** admin. The enabled admins' rows are locked (``SELECT ...
+    FOR UPDATE``) first, so two concurrent changes cannot both pass the
+    count. Disabling ends every session of the user at once and kills
+    their unused reset links; memberships and the GitHub id stay, so
+    enabling restores everything.
     """
+    if body.is_instance_admin is None and body.disabled is None:
+        raise ApiError(422, "nothing to change: set is_instance_admin or disabled")
     with get_session() as db:
         admins = db.exec(
             select(User.id)
-            .where(col(User.is_instance_admin).is_(True))
+            .where(
+                col(User.is_instance_admin).is_(True),
+                col(User.disabled_at).is_(None),
+            )
             .with_for_update()
         ).all()
         user = _user_by_uid(db, uid, lock=True)
-        changed = user.is_instance_admin != body.is_instance_admin
-        if changed and not body.is_instance_admin and len(admins) <= 1:
+        assert user.id is not None
+        was_admin, was_disabled = user.is_instance_admin, user.disabled_at is not None
+        admin = was_admin if body.is_instance_admin is None else body.is_instance_admin
+        disabled = was_disabled if body.disabled is None else body.disabled
+        if disabled and not was_disabled and user.id == principal.user_id:
+            raise ApiError(
+                409, "you cannot disable your own account", code="self_disable"
+            )
+        was_enabled_admin = was_admin and not was_disabled
+        if was_enabled_admin and not (admin and not disabled) and len(admins) <= 1:
             raise ApiError(
                 409,
-                "this is the last instance admin: make someone else an admin first",
+                "this is the last enabled instance admin: make someone else an "
+                "admin first",
                 code="last_admin",
             )
-        user.is_instance_admin = body.is_instance_admin
+        user.is_instance_admin = admin
+        if disabled != was_disabled:
+            user.disabled_at = _iso(_now()) if disabled else None
         db.add(user)
         db.flush()
+        if disabled and not was_disabled:
+            revoke_user(user.id, db=db)
+            _invalidate_reset_links(db, user.id)
         target = user.uid
         result = {
             "uid": user.uid,
             "email": user.email,
             "display_name": user.display_name,
             "is_instance_admin": user.is_instance_admin,
+            "github_login": user.github_login,
+            "has_password": user.password_hash is not None,
+            "disabled": user.disabled_at is not None,
         }
-    if changed:
-        event = "admin_granted" if body.is_instance_admin else "admin_revoked"
+    if admin != was_admin:
+        event = "admin_granted" if admin else "admin_revoked"
+        audit(event, request, uid=principal.uid, target=target)
+    if disabled != was_disabled:
+        event = "user_disabled" if disabled else "user_enabled"
         audit(event, request, uid=principal.uid, target=target)
     return result
 
@@ -993,7 +1045,8 @@ def post_admin_reset_link(
 ) -> dict:
     """Issue a one-time, 24-hour reset link for a password account.
 
-    ``409 no_password`` for a GitHub account. The user's earlier unused
+    ``409 no_password`` for a GitHub account, ``409 user_disabled`` for a
+    disabled one. The user's earlier unused
     links stop working. The token travels in the
     URL **fragment** (``<base>/reset#token=...``), so it never reaches a
     proxy log or a ``Referer``; only its SHA-256 is stored.
@@ -1006,6 +1059,10 @@ def post_admin_reset_link(
         assert user.id is not None
         if user.password_hash is None:
             raise _no_password()
+        if user.disabled_at is not None:
+            raise ApiError(
+                409, "this account is disabled: enable it first", code="user_disabled"
+            )
         _invalidate_reset_links(db, user.id)
         db.add(
             PasswordReset(

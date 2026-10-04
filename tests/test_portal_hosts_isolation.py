@@ -45,6 +45,7 @@ from starlette.middleware.cors import CORSMiddleware
 from github_fake import FakeGitHub
 from test_portal_app import (  # noqa: F401 -- fixtures
     NON_ORG_ROUTES,
+    PRODUCTION_ORG_ROUTES,
     PUBLIC_AUTH_ROUTES,
     ROUTE_ACTIONS,
     at,
@@ -141,14 +142,28 @@ ANY_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
 )
 """Logout and the account routes: served on the base host and on org hosts."""
 
-PRODUCTION_ONLY_ROUTES = PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES
-"""Every route that names no org (public auth, ``user.self``, ``instance.admin``)."""
+ORG_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("/api/org/members", "GET"),
+        ("/api/org/members", "POST"),
+        ("/api/org/members/{uid}", "PATCH"),
+        ("/api/org/members/{uid}", "DELETE"),
+        ("/api/org/membership", "DELETE"),
+    }
+)
+"""The members routes (M2d-1 section 4.5): org-scoped, so served on org hosts
+only, and swept with every other org-scoped route below."""
+
+PRODUCTION_ONLY_ROUTES = PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES | PRODUCTION_ORG_ROUTES
+"""Every route local mode does not serve: the ones that name no org (public
+auth, ``user.self``, ``instance.admin``) and the members routes."""
 
 
 def test_every_production_only_route_is_classified_by_host() -> None:
-    """A new non-org route must be put on a host before the sweeps run."""
-    assert BASE_ONLY_ROUTES | ANY_HOST_ROUTES == PRODUCTION_ONLY_ROUTES
-    assert not (BASE_ONLY_ROUTES & ANY_HOST_ROUTES)
+    """A new production-only route must be put on a host before the sweeps run."""
+    classes = (BASE_ONLY_ROUTES, ANY_HOST_ROUTES, ORG_HOST_ROUTES)
+    assert frozenset().union(*classes) == PRODUCTION_ONLY_ROUTES
+    assert sum(len(c) for c in classes) == len(PRODUCTION_ONLY_ROUTES)  # disjoint
 
 
 # ---------------------------------------------------------------------------
@@ -299,10 +314,10 @@ def prod_world(
     """Plan section 5.1's ``prod_world``: Ada, Ann, Bob and two ``api``s.
 
     Every account and org is made through the real routes (bootstrap, GitHub
-    sign-in through the fake GitHub, create org), so the sessions the sweeps
-    use are the ones a browser would hold. Ada is the password admin; Ann
-    and Bob are GitHub accounts. Bob's extra ``quokka`` membership is added
-    directly (the members route arrives with M2d-1 step 4).
+    sign-in through the fake GitHub, create org, add member), so the
+    sessions the sweeps use are the ones a browser would hold. Ada is the
+    password admin; Ann and Bob are GitHub accounts. Bob's extra ``quokka``
+    membership is made by Ann through ``POST /api/org/members``.
     """
     env = production_env
     scanner = _fake_scanner(env, monkeypatch)
@@ -330,11 +345,17 @@ def prod_world(
                 org.org_id = session.exec(
                     select(Organization.id).where(Organization.slug == org.slug)
                 ).one()
-            # Bob is also a plain member of quokka (the role matrix over
-            # real sessions, and the membership the removal test drops).
-            add_member(
-                session, org_id=quokka.org_id, user_id=ids["bob"], role=Role.MEMBER
-            )
+        quokka.owner_uid, narwhal.owner_uid = uids["ann"], uids["bob"]
+        # Bob is also a plain member of quokka (the role matrix over real
+        # sessions, and the membership the removal test drops), added by
+        # quokka's owner the way the Members page does.
+        assert github_sign_in(client, "ann").status_code == 200
+        added = client.post(
+            at("quokka") + "/api/org/members",
+            json={"github_login": "bob", "role": "member"},
+        )
+        assert added.status_code == 201, added.text
+        client.cookies.clear()
         world = ProdWorld(client, env, quokka, narwhal, uids, ids, scanner)
         # narwhal first, so its secret rows are the older ones: a scope
         # filter that forgot the org would let quokka's rows win.
@@ -671,6 +692,14 @@ def _is_binding_404(response: httpx.Response) -> bool:
 
 def test_the_reader_route_split_is_the_planned_one() -> None:
     assert READER_ACTIONS == {"org.read", "project.read"}
+    # A reader lists an org's members, and changes nothing about them.
+    assert ("GET", "/api/org/members") in READ_ROUTES
+    assert {
+        ("POST", "/api/org/members"),
+        ("PATCH", "/api/org/members/{uid}"),
+        ("DELETE", "/api/org/members/{uid}"),
+        ("DELETE", "/api/org/membership"),
+    } <= set(OTHER_ROUTES)
     assert ("POST", "/api/projects/{slug}/node/rationale") in OTHER_ROUTES
     assert ("GET", "/api/projects/{slug}/node/rationale") in READ_ROUTES
     assert len(READ_ROUTES) > 10 and len(OTHER_ROUTES) > 10
@@ -793,6 +822,48 @@ def test_removing_a_membership_applies_on_the_next_request(
     assert refused.status_code == 404 and refused.json() == NOT_FOUND
     # His own org is untouched, on the same session.
     assert w.client.get(at("narwhal") + "/api/projects").status_code == 200
+
+
+def test_an_orgs_member_list_is_invisible_on_another_orgs_host(
+    prod_world: ProdWorld,
+) -> None:
+    w = prod_world
+    w.sign_in("ann")  # owner of quokka, no member of narwhal
+    refused = w.client.get(at("narwhal") + "/api/org/members")
+    assert refused.status_code == 404 and refused.json() == NOT_FOUND
+    own = _ok(w.client.get(at("quokka") + "/api/org/members"))
+    assert sorted(m["github_login"] for m in own) == ["ann", "bob"]
+    w.sign_in("bob")  # in both orgs: each host lists only its own
+    narwhal = _ok(w.client.get(at("narwhal") + "/api/org/members"))
+    assert [(m["github_login"], m["role"]) for m in narwhal] == [("bob", "owner")]
+
+
+def test_another_orgs_member_cannot_be_changed_through_this_orgs_host(
+    prod_world: ProdWorld, github_fake: FakeGitHub
+) -> None:
+    """A ``uid`` from narwhal is ``not_member`` on quokka's host, whatever its role."""
+    w = prod_world
+    assert github_sign_in(w.client, "cy").status_code == 200
+    w.sign_in("bob")
+    added = w.client.post(
+        at("narwhal") + "/api/org/members",
+        json={"github_login": "cy", "role": "admin"},
+    )
+    cy = _ok(added, 201)["uid"]
+    w.sign_in("ann")  # owner of quokka
+    for method, body in (("PATCH", {"role": "member"}), ("DELETE", None)):
+        here = w.client.request(
+            method, at("quokka") + f"/api/org/members/{cy}", json=body
+        )
+        assert here.status_code == 404, (method, here.text)
+        assert here.json()["code"] == "not_member", method
+        there = w.client.request(
+            method, at("narwhal") + f"/api/org/members/{cy}", json=body
+        )
+        assert there.status_code == 404 and there.json() == NOT_FOUND, method
+    w.sign_in("bob")
+    narwhal = _ok(w.client.get(at("narwhal") + "/api/org/members"))
+    assert ("cy", "admin") in [(m["github_login"], m["role"]) for m in narwhal]
 
 
 def test_memberships_cannot_store_the_reader_role(prod_world: ProdWorld) -> None:

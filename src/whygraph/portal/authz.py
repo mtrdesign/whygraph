@@ -35,6 +35,10 @@ class Action(StrEnum):
     ORG_READ = "org.read"
     ORG_ADD_PROJECT = "org.add_project"
     ORG_CONFIGURE = "org.configure"
+    """The org settings page: defaults and org-level keys (owner only)."""
+    ORG_MEMBERS = "org.members"
+    """Add, re-role and remove members (admin and owner; the owner rules of
+    :mod:`whygraph.portal.member_routes` apply inside it)."""
     ORG_OWN = "org.own"
     PROJECT_READ = "project.read"
     PROJECT_CHAT = "project.chat"
@@ -52,7 +56,7 @@ _MEMBER = frozenset(
 )
 _ADMIN = _MEMBER | {
     Action.ORG_ADD_PROJECT,
-    Action.ORG_CONFIGURE,
+    Action.ORG_MEMBERS,
     Action.PROJECT_CONFIGURE,
     Action.PROJECT_SETUP,
 }
@@ -60,7 +64,7 @@ _ADMIN = _MEMBER | {
 ROLE_ACTIONS: dict[Role, frozenset[Action]] = {
     Role.MEMBER: _MEMBER,
     Role.ADMIN: _ADMIN,
-    Role.OWNER: _ADMIN | {Action.ORG_OWN},
+    Role.OWNER: _ADMIN | {Action.ORG_CONFIGURE, Action.ORG_OWN},
     Role.READER: frozenset({Action.ORG_READ, Action.PROJECT_READ}),
 }
 """The actions each role may perform."""

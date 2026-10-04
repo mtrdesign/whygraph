@@ -40,6 +40,14 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     production_env,
 )
 from whygraph.portal.app import PortalStartupError
+from whygraph.services.git import (
+    GitError,
+    InvalidRepoUrlError,
+    Repository,
+    git_env,
+    parse_github_url,
+)
+from whygraph.services.git.credentials import GITHUB_URL_ENV
 from whygraph.portal.github_app import (
     APP_ENV_VARS,
     INSTALLATION_PERMISSIONS,
@@ -662,6 +670,32 @@ def test_git_refuses_another_repo_an_expired_token_and_no_token(
     # An unscoped (installation-wide) token reads both - what scoping prevents.
     wide = server.fake.issue_installation_token(7)
     assert _git("ls-remote", server.clone_url("acme/web"), token=wide).returncode == 0
+
+
+def test_the_portal_git_commands_reach_the_configured_loopback_host(
+    git_world: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``WHYGRAPH_GITHUB_URL`` drives git's host: http, port and helper (section 0.2 #7)."""
+    server, app = git_world.server, git_world.app
+    monkeypatch.setenv(GITHUB_URL_ENV, server.url)
+    token = app.installation_token(7, 501).token
+    url = server.clone_url("acme/api")
+    assert parse_github_url(url) == ("acme", "api")
+
+    dest = tmp_path / "clone"
+    Repository.clone(url, dest, env=git_env(token))
+    assert (dest / "README.md").read_text() == "api\n"
+    assert token not in (dest / ".git" / "config").read_text()
+    sha = server.commit("acme/api", message="second")
+    Repository(dest).fetch_default(env=git_env(token))
+    assert _git("rev-parse", "origin/main", token=None, cwd=dest).stdout.strip() == sha
+
+    # The helper answers that host only: without a token the server refuses.
+    with pytest.raises(GitError, match="clone of"):
+        Repository.clone(url, tmp_path / "anonymous", env=git_env(None))
+    # github.com is not the configured host any more, so its URL is refused.
+    with pytest.raises(InvalidRepoUrlError):
+        Repository.clone("https://github.com/acme/api", tmp_path / "x")
 
 
 def test_webhook_delivery_is_signed(github_git_server: GitServer) -> None:

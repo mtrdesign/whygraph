@@ -20,6 +20,7 @@ from .credentials import (
     git_env,
     parse_github_url,
     pass_through_env,
+    redact_tokens,
     strip_userinfo,
 )
 from .exceptions import GitError, InvalidRepoUrlError
@@ -39,5 +40,6 @@ __all__ = [
     "git_env",
     "parse_github_url",
     "pass_through_env",
+    "redact_tokens",
     "strip_userinfo",
 ]

@@ -1,4 +1,4 @@
-"""The scan runner: ``whygraph scan`` child processes, GitHub sync, poll and catch-up.
+"""The scan runner: ``whygraph scan`` child processes, GitHub sync and catch-up.
 
 A small in-process queue (plan section 4.6), living in the single portal
 process:
@@ -14,23 +14,27 @@ process:
   first explicit ``requested_by``. A project with no completed (``ok``)
   scan records every request as ``initial`` (structure-only, section 4.14).
 * **Global cap** of :data:`MAX_CONCURRENT` running jobs across projects.
-* **Jobs.** ``kind=scan`` spawns the child scanner. ``kind=sync`` (GitHub
-  clones) runs ``fetch_default`` + ``fast_forward`` inside the project's
-  slot, then the scan in the same slot when HEAD moved (or when a merged
-  request asked for a scan anyway) - so a fast-forward never moves the
-  tree under a running crawl.
+* **Jobs.** ``kind=scan`` spawns the child scanner. ``kind=sync`` (server
+  clones of GitHub projects) runs ``fetch_default`` + ``fast_forward``
+  inside the project's slot, then the scan in the same slot when HEAD
+  moved (or when a merged request asked for a scan anyway) - so a
+  fast-forward never moves the tree under a running crawl.
 * **Child I/O.** stdout JSON lines go to ``<data>/runs/<id>.jsonl``, stderr
   to ``<data>/runs/<id>.log``; both pipes are drained by their own thread
   so a flood never deadlocks the child. Every injected secret value is
-  replaced by its hint before a line is written. Children run in their
-  own session (process group); :meth:`ScanRunner.shutdown` SIGTERMs each
-  group, waits, SIGKILLs and records the runs ``interrupted``.
+  replaced by its hint, and anything shaped like a GitHub token by its
+  prefix (:func:`~whygraph.services.git.credentials.redact_tokens`),
+  before a line is written. Children run in their own session (process
+  group); :meth:`ScanRunner.shutdown` SIGTERMs each group, waits,
+  SIGKILLs and records the runs ``interrupted``.
 * **Child environment.** Only :func:`~whygraph.services.git.credentials.pass_through_env`
   from the portal's own environment, plus ``WHYGRAPH_CONFIG_JSON`` (the
-  resolved config, no secrets), ``GH_TOKEN`` when the forge is on, the
-  one ``<PROVIDER>_API_KEY`` the analyze model needs (analyzing runs
-  only), the git credential-helper token for GitHub clones and
-  ``GIT_TERMINAL_PROMPT=0``. Never a portal-env API key or token.
+  resolved config, no secrets), ``GH_TOKEN`` (a local folder's personal
+  access token) when the forge is on, the one ``<PROVIDER>_API_KEY`` the
+  analyze model needs (analyzing runs only) and ``GIT_TERMINAL_PROMPT=0``;
+  a GitHub project's child gets no personal access token, git with no
+  global or system config, and the configured GitHub URL. Never a
+  portal-env API key or token.
 * **Path check.** Before a sync and before spawning the child scan, the
   project's DB paths go through
   :func:`~whygraph.portal.paths.check_project_paths`; a symlinked
@@ -43,13 +47,16 @@ process:
   ``id:`` byte offsets for resume, heartbeats, a terminal ``end`` frame.
   In production the route passes an access re-check, so a stream whose
   caller lost access ends early with ``reason: "access_revoked"``.
-* **Poll and catch-up.** Every :data:`POLL_INTERVAL_SEC` the poller
-  enqueues a ``sync`` (``trigger=poll``) for each initialized GitHub
-  clone - it never fetches itself - and runs the catch-up check, which is
-  also run once at start: a local project whose HEAD differs from
+* **Catch-up.** At start and every :data:`POLL_INTERVAL_SEC` (local mode
+  only), a local project whose HEAD differs from
   ``projects.last_scanned_head`` gets a ``trigger=hook`` scan.
+* **Source policy.** Every request - from a route or an internal caller -
+  for a project whose source the mode does not accept
+  (:func:`~whygraph.portal.policy.allowed_sources`, e.g. a local-mode
+  GitHub clone of an older build) raises :class:`SourceNotAllowed`, and a
+  leftover queued run of one fails without touching the repository.
 
-**System callers.** :meth:`ScanRunner.tick`, :meth:`ScanRunner.catch_up`,
+**System callers.** :meth:`ScanRunner.catch_up`,
 the queued-run recovery and the run finisher are internal: no request,
 no user and no org reach them. An internal caller starts from a project
 **id** read from the DB, never from a request's slug, and resolves config
@@ -91,12 +98,18 @@ from sqlmodel import col, select
 from whygraph.core.config import Config, ConfigError
 from whygraph.core.safe_paths import UnsafePathError
 from whygraph.services.git import GitError, Repository
-from whygraph.services.git.credentials import TOKEN_ENV_VAR, git_env, pass_through_env
+from whygraph.services.git.credentials import (
+    GITHUB_URL_ENV,
+    git_env,
+    pass_through_env,
+    redact_tokens,
+)
 
 from .context import resolve_root, resolved_layer
 from .db import data_dir, get_session
 from .models import Project, ScanRun
 from .paths import check_project_paths
+from .policy import allowed_sources
 from .repos import root_status
 from .secrets import hint_for
 
@@ -113,7 +126,7 @@ MAX_CONCURRENT = 2
 """Jobs running at once across all projects."""
 
 POLL_INTERVAL_SEC = 15 * 60
-"""GitHub poll + catch-up tick."""
+"""Seconds between catch-up checks (local mode)."""
 
 HEARTBEAT_SEC = 15.0
 """Idle SSE heartbeat interval."""
@@ -189,6 +202,10 @@ class ProjectBusy(RuntimeError):
 
 class RunFinished(RuntimeError):
     """The run already ended, so there is nothing to cancel - HTTP 409."""
+
+
+class SourceNotAllowed(RuntimeError):
+    """The project's source is not accepted in this mode - HTTP 409 ``source_not_allowed``."""
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +311,9 @@ def child_env(
         The resolved config v2 dict **without** secrets
         (:func:`~whygraph.portal.context.resolved_layer`).
     source : str
-        ``"local"`` or ``"github"``.
+        ``"local"`` or ``"github"``. Only a local folder's child gets the
+        personal access token; a GitHub project's (production) child gets
+        none, and its git reads no global or system config.
     analyze : bool
         Whether the run describes commits (only then is an LLM key passed).
     environ : Mapping[str, str], optional
@@ -306,18 +325,23 @@ def child_env(
         The environment, and every secret value injected into it (the
         redaction list).
     """
-    env = pass_through_env(environ)
+    source_env = os.environ if environ is None else environ
+    env = pass_through_env(source_env)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["WHYGRAPH_CONFIG_JSON"] = json.dumps(layer, default=str, sort_keys=True)
     secrets: list[str] = []
-    token = config.scan_token
+    # No personal access token for a GitHub project (M2d-2 plan section 0.2 #13).
+    token = config.scan_token if source == "local" else None
     if token and config.scan_forge != "off":
         env["GH_TOKEN"] = token
         secrets.append(token)
-    if token and source == "github":
-        env[TOKEN_ENV_VAR] = token
-        if token not in secrets:
-            secrets.append(token)
+    if source == "github":
+        # A server clone: a developer's insteadOf / http.* / include must not
+        # rewrite its git calls, and the helper's host follows the config.
+        env["GIT_CONFIG_GLOBAL"] = os.devnull
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
+        if source_env.get(GITHUB_URL_ENV):
+            env[GITHUB_URL_ENV] = source_env[GITHUB_URL_ENV]
     if analyze:
         try:
             provider: str | None = config.model_for("analyze").provider
@@ -339,14 +363,20 @@ def child_env(
 
 
 def redactor(secrets: list[str]) -> Callable[[str], str]:
-    """Return a function replacing each secret value by its hint (``...a1b2``)."""
+    """Return a function replacing each secret value by its hint (``...a1b2``).
+
+    Anything still shaped like a GitHub token - one the runner never
+    injected, or a partly masked one (``gh auth status`` prints most of a
+    token) - is then replaced by its prefix and ``***``
+    (:func:`~whygraph.services.git.credentials.redact_tokens`).
+    """
     pairs = [(s, hint_for(s)) for s in sorted(set(secrets), key=len, reverse=True) if s]
 
     def redact(text: str) -> str:
         for value, hint in pairs:
             if value in text:
                 text = text.replace(value, hint)
-        return text
+        return redact_tokens(text)
 
     return redact
 
@@ -497,7 +527,7 @@ class ScanRunner:
     max_concurrent : int
         Global cap on running jobs.
     poll_interval : float
-        Seconds between poll ticks.
+        Seconds between catch-up checks.
     heartbeat : float
         Seconds of SSE idleness before a heartbeat comment.
     sleep : callable, optional
@@ -743,6 +773,9 @@ class ScanRunner:
         if self._tg is None or self._lock is None or self._stopping:
             raise RunnerUnavailable("the scan runner is not running")
         with self._claim_request(project_id):
+            source = await anyio.to_thread.run_sync(_project_source, project_id)
+            if source is not None and source not in allowed_sources(self._mode()):
+                raise SourceNotAllowed(_unsupported_source(source))
             return await self._request_claimed(
                 project_id,
                 kind=kind,
@@ -854,32 +887,9 @@ class ScanRunner:
         if job.alive():
             job.signal(signal.SIGKILL)
 
-    # ---- poll + catch-up -------------------------------------------------
+    # ---- catch-up --------------------------------------------------------
 
-    async def tick(self) -> None:
-        """One poll tick: a ``poll`` sync per GitHub clone, then the catch-up check.
-
-        Local mode only: production skips both (M2c plan section 4.11).
-        """
-        if not self._local_mode():
-            return
-        projects = await anyio.to_thread.run_sync(_initialized_projects)
-        for p in projects:
-            if p["source"] == "github" and p["root_ok"]:
-                try:
-                    await self._request(
-                        p["id"],
-                        kind="sync",
-                        trigger="poll",
-                        analyze=False,
-                        requested_by=None,
-                        scan_requested=False,
-                    )
-                except ProjectBusy:
-                    continue  # being removed
-        await self.catch_up(projects)
-
-    async def catch_up(self, projects: list[dict] | None = None) -> None:
+    async def catch_up(self) -> None:
         """Queue a ``trigger=hook`` scan for each local project whose HEAD moved.
 
         Covers commits made while the portal was down (the hook POST was
@@ -890,8 +900,7 @@ class ScanRunner:
         """
         if not self._local_mode():
             return
-        if projects is None:
-            projects = await anyio.to_thread.run_sync(_initialized_projects)
+        projects = await anyio.to_thread.run_sync(_initialized_projects)
         for p in projects:
             if p["source"] != "local" or not p["root_ok"] or not p["last_scanned_head"]:
                 continue
@@ -909,19 +918,23 @@ class ScanRunner:
                 except ProjectBusy:
                     continue  # being removed
 
+    def _mode(self) -> str | None:
+        """The portal's mode (``None`` before :meth:`start`)."""
+        return None if self._state is None else self._state.mode
+
     def _local_mode(self) -> bool:
         """Whether the portal runs in local mode (system work is local-only)."""
-        return self._state is not None and self._state.mode == "local"
+        return self._mode() == "local"
 
     async def _poll_loop(self) -> None:
         while True:
             await self._sleep(self.poll_interval)
             try:
-                await self.tick()
+                await self.catch_up()
             except RunnerUnavailable:
                 return
             except Exception:  # noqa: BLE001 -- the poller must survive
-                _log.exception("scan runner: poll tick failed")
+                _log.exception("scan runner: catch-up failed")
 
     # ---- dispatch + execution -------------------------------------------
 
@@ -990,6 +1003,13 @@ class ScanRunner:
             run = session.get(ScanRun, spec.run_id)
             if project is None or run is None:
                 return "cancelled", {"error": "the project is gone"}, redactor([])
+            if project.source not in allowed_sources(state.mode):
+                # A run queued before the source was dropped (requeued at start).
+                return (
+                    "failed",
+                    {"error": _unsupported_source(project.source)},
+                    redactor([]),
+                )
             layer = resolved_layer(session, project)
             root = resolve_root(project)
             source = project.source
@@ -1257,6 +1277,22 @@ def _error_chain(exc: BaseException) -> str:
         parts.append(str(current))
         current = current.__cause__
     return ": ".join(p for p in parts if p)
+
+
+def _project_source(project_id: int) -> str | None:
+    """``projects.source``, or ``None`` for a missing project."""
+    with get_session() as session:
+        project = session.get(Project, project_id)
+        return None if project is None else project.source
+
+
+def _unsupported_source(source: str) -> str:
+    """The refusal message for a project whose ``source`` the mode does not accept."""
+    if source == "github":
+        return (
+            "GitHub projects are no longer supported in local mode - remove the project"
+        )
+    return f"{source} projects are not supported in this mode"
 
 
 def _has_ok_scan(project_id: int) -> bool:
@@ -1578,6 +1614,7 @@ __all__ = [
     "RunNotFound",
     "RunnerUnavailable",
     "ScanRunner",
+    "SourceNotAllowed",
     "child_env",
     "commits_behind",
     "git_head",

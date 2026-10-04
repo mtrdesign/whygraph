@@ -54,7 +54,12 @@ TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 """Where the CLI reads a ``claude setup-token`` subscription token."""
 
 _WITHHELD_ENV = frozenset(
-    {"ANTHROPIC_API_KEY", "WHYGRAPH_DATABASE_URL", "WHYGRAPH_DATABASE_PASSWORD_FILE"}
+    {
+        "ANTHROPIC_API_KEY",
+        "WHYGRAPH_DATABASE_URL",
+        "WHYGRAPH_DATABASE_PASSWORD_FILE",
+        "WHYGRAPH_GITHUB_TOKEN_FILE",
+    }
 )
 """Ambient variables ``claude`` never inherits (the key is re-added only when given)."""
 

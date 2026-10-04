@@ -680,7 +680,12 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     ("PATCH", "/api/projects/{slug}"): Call(
         200, body=lambda w, o: {"name": o.name}, shows=lambda o: [o.name]
     ),
-    ("DELETE", "/api/projects/{slug}"): Call(200, check=_deleted_check),
+    ("DELETE", "/api/projects/{slug}"): Call(
+        # (a production project is a GitHub one, removed by typing its name)
+        200,
+        body=lambda w, o: {"confirm_name": o.name},
+        check=_deleted_check,
+    ),
     ("GET", "/api/projects/{slug}/config"): Call(
         200, shows=lambda o: [o.hint("project_openai")]
     ),
@@ -704,7 +709,6 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     ("GET", "/api/projects/{slug}/scans/{run_id}/log"): Call(
         200, shows=lambda o: [f'"run_id":{o.run_id}']
     ),
-    ("POST", "/api/projects/{slug}/sync"): Call(400, shows=lambda o: ["not_github"]),
     ("GET", "/api/projects/{slug}/scan-estimate"): Call(200),
     # The Explorer router
     ("GET", "/api/projects/{slug}/search"): Call(
@@ -1254,7 +1258,7 @@ def test_system_scans_get_only_their_own_orgs_secrets(
                 scan_requested=True,
             )
 
-    for start in (runner.catch_up, runner.tick, describe):
+    for start in (runner.catch_up, describe):
         rewind()
         seen.clear()
         w.client.portal.call(start)

@@ -22,6 +22,9 @@ has an allowlist (plan section 4.2.1):
   ``[llm]`` (with the 1b connection keys), ``[analyze]``, ``[rationale]``
   and ``[chat]``.
 
+Beside the config allowlists, :func:`allowed_sources` is the one place
+that says which project sources a mode accepts.
+
 Layers are passed through :func:`whygraph.core.config.normalize_v2`
 before filtering, so a 1.x alias (``[scan].provider``,
 ``[scan].max_workers``, ``[llm.claude-cli]``) is judged by its v2 key.
@@ -101,6 +104,27 @@ PUT_ALLOWLIST: Spec = {
 
 DEFAULTS_ALLOWLIST: Spec = {k: v for k, v in PUT_ALLOWLIST.items() if k != "scan"}
 """Rule 6: what ``PUT /api/portal/defaults`` may store."""
+
+
+def allowed_sources(mode: str | None) -> frozenset[str]:
+    """The project sources a portal in ``mode`` accepts (M2d-2 plan section 0.2 #15).
+
+    Applied on the server by the add route and by every path that acts on
+    a project's source (scans, Initialize): production holds GitHub
+    projects only, local mode local folders only.
+
+    Parameters
+    ----------
+    mode : str or None
+        ``"production"`` or ``"local"`` (``None`` before start-up counts as
+        local; a degraded portal refuses requests anyway).
+
+    Returns
+    -------
+    frozenset[str]
+        ``{"github"}`` in production, ``{"local"}`` otherwise.
+    """
+    return frozenset({"github"}) if mode == "production" else frozenset({"local"})
 
 
 def filter_layer(layer: Mapping[str, Any], spec: Spec) -> tuple[dict, list[str]]:
@@ -340,6 +364,7 @@ __all__ = [
     "ImportPreview",
     "PROVIDER_TABLES",
     "PUT_ALLOWLIST",
+    "allowed_sources",
     "filter_layer",
     "preview_import",
 ]

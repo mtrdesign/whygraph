@@ -279,9 +279,6 @@ class PortalState:
         This app's MCP ``StreamableHTTPSessionManager``.
     setup_lock : threading.Lock
         Serializes first-run setup.
-    github_add_lock : threading.Lock
-        Serializes GitHub adds (duplicate check, clone and insert), so a
-        double-submit never clones twice into one directory.
     port_change : dict or None
         What the start-up port reconcile did
         (:func:`whygraph.portal.port_change.reconcile_port`), or ``None``.
@@ -349,7 +346,6 @@ class PortalState:
         self.shutdown_event: anyio.Event | None = None
         self.session_manager: Any = None
         self.setup_lock = threading.Lock()
-        self.github_add_lock = threading.Lock()
         self.port_change: dict | None = None
         self.instance_lock: InstanceLock | None = None
         self.lock_check_interval = LOCK_CHECK_INTERVAL_SEC

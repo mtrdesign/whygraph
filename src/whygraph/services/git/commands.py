@@ -17,7 +17,7 @@ from whygraph.core import ShellCommand
 
 from .blame import BlameHunk
 from .commit import Commit
-from .credentials import GITHUB_GIT_CONFIG, TOKEN_ENV_VAR
+from .credentials import TOKEN_ENV_VAR, github_git_config
 from .file_change import FileChange
 
 GitRevParseCmd = ShellCommand(
@@ -353,7 +353,7 @@ class GitFetchRefsCmd(ShellCommand[None]):
 
     When :data:`~.credentials.TOKEN_ENV_VAR` is set in this process (a
     portal scan of a GitHub clone), the argv carries
-    :data:`~.credentials.GITHUB_GIT_CONFIG` like :class:`GitFetchDefaultCmd`,
+    :func:`~.credentials.github_git_config` like :class:`GitFetchDefaultCmd`,
     so a private clone's PR refs are fetched with the token (read from the
     environment by the helper, never argv). Without it, a local repo's
     remote keeps its own transport and credentials.
@@ -375,7 +375,7 @@ class GitFetchRefsCmd(ShellCommand[None]):
     def argv(self) -> list[str]:
         # `--` ends options: a remote read from config is never a flag
         # (`--upload-pack=<cmd>` would run a command).
-        config = GITHUB_GIT_CONFIG if os.environ.get(TOKEN_ENV_VAR) else ()
+        config = github_git_config() if os.environ.get(TOKEN_ENV_VAR) else ()
         return [
             "git",
             *config,
@@ -393,10 +393,11 @@ class GitFetchRefsCmd(ShellCommand[None]):
 class GitCloneCmd(ShellCommand[None]):
     """``git clone -- <url> <dest>`` with https-only transport and a host-scoped helper.
 
-    The argv carries :data:`~.credentials.GITHUB_GIT_CONFIG`: every other
+    The argv carries :func:`~.credentials.github_git_config`: every other
     protocol is refused (``file://``, ``ext::``, ``ssh``), inherited
     credential helpers are reset, and the one inline helper answers only
-    for ``github.com`` over https. The token is read from the child
+    for the configured GitHub host (``github.com`` over https by default).
+    The token is read from the child
     environment, never argv. The command does not validate ``url`` -
     :meth:`Repository.clone` does, before building it.
 
@@ -413,7 +414,7 @@ class GitCloneCmd(ShellCommand[None]):
         self.dest = dest
 
     def argv(self) -> list[str]:
-        return ["git", *GITHUB_GIT_CONFIG, "clone", "--", self.url, str(self.dest)]
+        return ["git", *github_git_config(), "clone", "--", self.url, str(self.dest)]
 
     def parse(self, result: CompletedProcess[str]) -> None:
         return None
@@ -436,7 +437,7 @@ class GitFetchDefaultCmd(ShellCommand[None]):
         self.remote = remote
 
     def argv(self) -> list[str]:
-        return ["git", *GITHUB_GIT_CONFIG, "fetch", "--no-tags", "--", self.remote]
+        return ["git", *github_git_config(), "fetch", "--no-tags", "--", self.remote]
 
     def parse(self, result: CompletedProcess[str]) -> None:
         return None

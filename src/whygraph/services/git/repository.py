@@ -30,7 +30,7 @@ from .commands import (
 )
 from .commit import Commit
 from .commits import Commits
-from .credentials import TOKEN_ENV_VAR, git_env, parse_github_url
+from .credentials import TOKEN_ENV_VAR, git_env, parse_github_url, redact_tokens
 from .exceptions import GitError
 from .file_change import FileChange
 
@@ -545,8 +545,8 @@ class Repository:
     ) -> Repository:
         """Clone a GitHub repository into ``dest`` without persisting any credential.
 
-        ``url`` must be a plain ``https://github.com/<owner>/<repo>`` URL
-        (see :func:`~.credentials.parse_github_url`); it is stored as
+        ``url`` must be a plain ``<GitHub URL>/<owner>/<repo>`` URL on the
+        configured host (see :func:`~.credentials.parse_github_url`); it is stored as
         ``origin`` exactly as given, so no token can end up in
         ``.git/config``. Credentials come only from ``env`` (build it with
         :func:`~.credentials.git_env`) via a host-scoped inline helper.
@@ -571,7 +571,7 @@ class Repository:
         Raises
         ------
         InvalidRepoUrlError
-            If ``url`` is not a plain GitHub https URL (nothing is run).
+            If ``url`` is not a plain GitHub URL (nothing is run).
         GitError
             If git fails, is missing, or the clone exceeds ``timeout``.
         """
@@ -734,8 +734,9 @@ def _run_network(
 ) -> None:
     """Run a network git command, mapping failures to :class:`GitError`.
 
-    The message carries git's last stderr line with the token (if any)
-    scrubbed, never the argv or the environment.
+    The message carries git's last stderr line with the token (if any) and
+    anything shaped like a GitHub token scrubbed, never the argv or the
+    environment.
     """
     effective_env = git_env() if env is None else env
     try:
@@ -750,4 +751,5 @@ def _run_network(
         token = effective_env.get(TOKEN_ENV_VAR)
         if token:
             detail = detail.replace(token, "***")
+        detail = redact_tokens(detail)
         raise GitError(f"{what} failed: {detail}") from exc

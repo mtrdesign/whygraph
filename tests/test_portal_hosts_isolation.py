@@ -90,14 +90,26 @@ from whygraph.db.models import ChatSession as ChatSessionRow
 from whygraph.portal import db as portal_db
 from whygraph.portal import runner as runner_mod
 from whygraph.portal.authz import ROLE_ACTIONS, Role
-from whygraph.portal.models import Membership, Organization, Project, ScanRun, User
+from whygraph.portal.models import (
+    Membership,
+    Organization,
+    Project,
+    ScanRun,
+    Secret,
+    User,
+)
 from whygraph.portal.orgs import add_member
+from whygraph.portal.secrets import GITHUB_TOKEN, put_secret
 
 NOT_FOUND = {"error": "not found"}
 LOGIN_REQUIRED = {"error": "sign-in required", "code": "login_required"}
 PROJECTS_UNAVAILABLE = {
     "error": "production organizations cannot add or set up projects yet",
     "code": "projects_unavailable",
+}
+SOURCE_NOT_ALLOWED = {
+    "error": "production organizations add projects from GitHub only",
+    "code": "source_not_allowed",
 }
 HOOK_LOCAL_ONLY = {
     "error": "hook scans exist only in local mode",
@@ -175,15 +187,16 @@ def test_every_production_only_route_is_classified_by_host() -> None:
 # What production refuses in a route body (plan section 4.11)
 # ---------------------------------------------------------------------------
 
-PROJECTS_UNAVAILABLE_ROUTES: frozenset[tuple[str, str]] = frozenset(
-    {
-        ("GET", "/api/portal/repos"),
-        ("POST", "/api/portal/check-path"),
-        ("POST", "/api/projects"),
-        ("POST", "/api/projects/{slug}/init"),
-    }
-)
-"""Routes whose body answers ``403 projects_unavailable`` in production."""
+PRODUCTION_REFUSALS: dict[tuple[str, str], tuple[int, dict]] = {
+    # The local-folder flow does not exist in production.
+    ("GET", "/api/portal/repos"): (404, NOT_FOUND),
+    ("POST", "/api/portal/check-path"): (404, NOT_FOUND),
+    # The source policy (the sweep's body is a local folder).
+    ("POST", "/api/projects"): (403, SOURCE_NOT_ALLOWED),
+    # Until the GitHub App import lands (M2d-2 step 4).
+    ("POST", "/api/projects/{slug}/init"): (403, PROJECTS_UNAVAILABLE),
+}
+"""Routes whose body refuses in production, after ``authorize()``, and how."""
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +259,9 @@ def _insert_project(org_id: int, slug: str, name: str, root, created_by: int) ->
     """Insert an initialized project row directly and return its id.
 
     Production refuses Initialize (plan section 4.11), so the row and the
-    project database are made the way Initialize would have.
+    project database are made the way Initialize would have. A ``github``
+    row, since production holds no other source (its root stays absolute:
+    the GitHub import is not wired yet).
     """
     with use_project(manual_ctx(root, slug=slug)):
         ensure_initialized()
@@ -255,7 +270,7 @@ def _insert_project(org_id: int, slug: str, name: str, root, created_by: int) ->
             org_id=org_id,
             slug=slug,
             name=name,
-            source="local",
+            source="github",
             root=str(root),
             initialized_at="2026-10-03T00:00:00+00:00",
             created_by=created_by,
@@ -366,7 +381,6 @@ def prod_world(
         # filter that forgot the org would let quokka's rows win.
         narwhal.secrets = {
             "anthropic": "sk-narwhal-N7N7",
-            "github": "ghp_narwhal_N9N9",
             "project_openai": "sk-narwhal-proj-N6N6",
         }
         _add_prod_project(
@@ -376,14 +390,12 @@ def prod_world(
                 "config": {"llm": {"model": narwhal.model}},
                 "secrets": {
                     "llm": {"anthropic": narwhal.secrets["anthropic"]},
-                    "github_token": narwhal.secrets["github"],
                 },
             },
         )
         quokka.secrets = {
             "anthropic": "sk-quokka-Q7Q7",
             "openai": "sk-quokka-Q8Q8",
-            "github": "ghp_quokka_Q9Q9",
             "project_openai": "sk-quokka-proj-Q6Q6",
         }
         _add_prod_project(
@@ -395,7 +407,6 @@ def prod_world(
                     "llm": {
                         tag: quokka.secrets[tag] for tag in ("anthropic", "openai")
                     },
-                    "github_token": quokka.secrets["github"],
                 },
             },
         )
@@ -454,7 +465,7 @@ def test_the_sweeps_cover_every_live_route(prod_world: ProdWorld) -> None:
     assert _org_scoped_routes(prod_world.client.app) == API_ROUTES
     assert len(API_ROUTES) > 30
     assert set(ROUTE_REQUESTS) == set(API_ROUTES)
-    assert PROJECTS_UNAVAILABLE_ROUTES <= set(API_ROUTES)
+    assert set(PRODUCTION_REFUSALS) <= set(API_ROUTES)
 
 
 @pytest.mark.parametrize(
@@ -483,9 +494,10 @@ def test_every_org_scoped_route_is_isolated_over_real_sessions(
         w.sign_in(w.owner_of(org))
         response = _call(w, org, method, path, spec)
         where = f"{org.slug}: {method} {path}"
-        if (method, path) in PROJECTS_UNAVAILABLE_ROUTES:
-            assert response.status_code == 403, (where, response.text)
-            assert response.json() == PROJECTS_UNAVAILABLE, where
+        if (method, path) in PRODUCTION_REFUSALS:
+            status, body = PRODUCTION_REFUSALS[(method, path)]
+            assert response.status_code == status, (where, response.text)
+            assert response.json() == body, where
             continue
         assert response.status_code == spec.status, (where, response.text)
         assert_no_leak(response.text, other, where=where)
@@ -577,14 +589,14 @@ def test_without_a_session_every_non_public_route_needs_one_on_its_own_host(
 # ---------------------------------------------------------------------------
 
 
-def test_a_member_is_refused_before_the_projects_unavailable_message(
+def test_a_member_is_refused_before_the_production_refusals(
     prod_world: ProdWorld,
 ) -> None:
     """The refusals sit after ``authorize()``, so a member gets ``403 forbidden``."""
     w = prod_world
     w.sign_in("bob")  # a plain member of quokka
     seen = set()
-    for method, path in sorted(PROJECTS_UNAVAILABLE_ROUTES):
+    for method, path in sorted(PRODUCTION_REFUSALS):
         action = ROUTE_ACTIONS[(path, method)]
         spec = ROUTE_REQUESTS[(method, path)]
         response = w.client.request(
@@ -592,18 +604,89 @@ def test_a_member_is_refused_before_the_projects_unavailable_message(
             at("quokka") + _url(path, w.quokka),
             json=spec.body(w, w.quokka) if spec.body else None,
         )
-        assert response.status_code == 403, (method, path, response.text)
         if action in {str(a) for a in ROLE_ACTIONS[Role.MEMBER]}:
             # org.read: a member passes authorize and meets the refusal.
-            assert response.json() == PROJECTS_UNAVAILABLE, (method, path)
+            status, body = PRODUCTION_REFUSALS[(method, path)]
+            assert response.status_code == status, (method, path, response.text)
+            assert response.json() == body, (method, path)
         else:
+            assert response.status_code == 403, (method, path, response.text)
             assert response.json() == {
                 "error": f"your role (member) cannot {action}",
                 "code": "forbidden",
                 "action": action,
             }, (method, path)
             seen.add((method, path))
-    assert seen == PROJECTS_UNAVAILABLE_ROUTES - {("GET", "/api/portal/repos")}
+    assert seen == set(PRODUCTION_REFUSALS) - {("GET", "/api/portal/repos")}
+
+
+def test_the_source_policy_in_production(prod_world: ProdWorld) -> None:
+    """GitHub only (API included); the import itself is not wired yet."""
+    w = prod_world
+    w.sign_in("ann")
+    prefix = at("quokka")
+    local = w.client.post(
+        prefix + "/api/projects", json={"source": "local", "path": str(w.quokka.root)}
+    )
+    assert (local.status_code, local.json()) == (403, SOURCE_NOT_ALLOWED)
+    github = w.client.post(
+        prefix + "/api/projects",
+        json={"source": "github", "installation_id": 7, "repo_id": 501},
+    )
+    assert (github.status_code, github.json()) == (403, PROJECTS_UNAVAILABLE)
+    for body in (
+        {"source": "github", "installation_id": 7, "repo_id": 501, "path": "/x"},
+        {"source": "github", "url": "https://github.com/acme/api"},
+        {"source": "local", "path": "/x", "repo_id": 501},
+    ):
+        response = w.client.post(prefix + "/api/projects", json=body)
+        assert response.status_code == 422, (body, response.text)
+    for method, path in (("GET", "repos"), ("POST", "check-path")):
+        response = w.client.request(
+            method, f"{prefix}/api/portal/{path}", json={"path": "/x"}
+        )
+        assert (response.status_code, response.json()) == (404, NOT_FOUND), path
+    listed = _ok(w.client.get(prefix + "/api/projects"))["projects"]
+    assert [(p["source"], p["source_supported"]) for p in listed] == [("github", True)]
+
+
+def test_a_github_token_is_never_stored_or_injected_in_production(
+    prod_world: ProdWorld,
+) -> None:
+    """No personal access token in production (M2d-2 section 0.2 #13)."""
+    w = prod_world
+    w.sign_in("ann")
+    prefix = at("quokka")
+    token = "ghp_prod_refused_T9T9"
+    for url in ("/api/portal/defaults", "/api/projects/api/config"):
+        response = w.client.put(prefix + url, json={"secrets": {"github_token": token}})
+        assert response.status_code == 422, (url, response.text)
+        assert response.json()["code"] == "not_in_production", url
+        assert token not in response.text
+        # Deleting one stays allowed.
+        _ok(w.client.put(prefix + url, json={"secrets": {"github_token": None}}))
+    with portal_db.get_session() as session:
+        assert (
+            session.exec(select(Secret.id).where(Secret.kind == GITHUB_TOKEN)).all()
+            == []
+        )
+        # One stored before this release (org and project scope) is never
+        # injected into a production child.
+        for project_id in (None, w.quokka.project_id):
+            put_secret(
+                session,
+                kind=GITHUB_TOKEN,
+                value=token,
+                project_id=project_id,
+                org_id=w.quokka.org_id,
+            )
+    w.client.app.state.portal.contexts.invalidate(None)
+    before = len(w.scanner.calls())
+    _ok(w.client.post(prefix + "/api/projects/api/scans"), 202)
+    _wait_idle(w, w.quokka)
+    (call,) = w.scanner.calls()[before:]
+    assert "GH_TOKEN" not in call["env"]
+    assert token not in json.dumps(call)
 
 
 def test_production_has_no_setup_route_and_no_mcp_url(prod_world: ProdWorld) -> None:
@@ -648,10 +731,10 @@ def test_a_hooks_config_change_is_saved_but_never_synced(
     assert not [p for p in hooks_dir.glob("post-*") if p.suffix != ".sample"]
 
 
-def test_the_catch_up_and_the_poll_tick_never_run_in_production(
+def test_the_catch_up_never_runs_in_production(
     prod_world: ProdWorld,
 ) -> None:
-    """Both are local-mode only, so a moved HEAD queues nothing."""
+    """It is local-mode only, so a moved HEAD queues nothing."""
     w = prod_world
     before = len(w.scanner.calls())
     with portal_db.get_session() as session:
@@ -660,7 +743,7 @@ def test_the_catch_up_and_the_poll_tick_never_run_in_production(
             row.last_scanned_head = org.first_sha  # HEAD moved since
             session.add(row)
     runner = w.client.app.state.portal.runner
-    for start in (runner.catch_up, runner.tick):
+    for start in (runner.catch_up,):
         w.client.portal.call(start)
     with portal_db.get_session() as session:
         queued = session.exec(
@@ -727,9 +810,10 @@ def test_an_instance_admin_reads_every_org_and_writes_to_none(
         for method, path in READ_ROUTES:
             response = w.client.request(method, prefix + _url(path, org))
             where = f"{org.slug}: {method} {path}"
-            if (method, path) in PROJECTS_UNAVAILABLE_ROUTES:
-                assert response.status_code == 403, (where, response.text)
-                assert response.json() == PROJECTS_UNAVAILABLE, where
+            if (method, path) in PRODUCTION_REFUSALS:
+                status, body = PRODUCTION_REFUSALS[(method, path)]
+                assert response.status_code == status, (where, response.text)
+                assert response.json() == body, where
                 continue
             # Neither the role refusal nor current_org's 404: a data 404
             # (an unscanned PR / issue) is fine, the binding's is not.

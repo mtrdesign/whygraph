@@ -584,6 +584,8 @@ export type ScanEvent =
   | { type: "sync"; status: "fetching" | "ok" | "failed"; moved?: boolean; error?: string }
   | { type: "error"; message: string }
   | { type: "end"; run_id: number; status: ScanRunStatus; summary: ScanRunSummary | null }
+  /** The stream was cut because the viewer lost access (signed out, removed, disabled); the run goes on. */
+  | { type: "end"; run_id: number; status: null; summary: null; reason: "access_revoked" }
   | { type: "shutdown"; run_id: number };
 
 // ---- transport --------------------------------------------------------------

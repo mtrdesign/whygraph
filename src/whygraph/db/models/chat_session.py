@@ -47,8 +47,9 @@ class ChatSession(WhygraphTable, table=True):
         Bumped on every message write; the session list orders by this so
         the most recently active conversation sits on top.
     owner_uid : str or None
-        ``users.uid`` of the portal user who started the session (M2d-1);
-        ``None`` for rows from before M2d and for local mode.
+        ``users.uid`` of the portal user who started the session (M2d-1),
+        written in both modes but only enforced in production; ``None`` for
+        rows from before M2d-1 (visible in local mode, never in production).
     """
 
     id: int | None = Field(default=None, primary_key=True)

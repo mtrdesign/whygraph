@@ -90,6 +90,12 @@ export function reduceScanRun(state: ScanRunState, action: Action): ScanRunState
     case "result":
       return { ...state, result: e };
     case "end":
+      if ("reason" in e && e.reason === "access_revoked") {
+        return {
+          ...state,
+          failure: { status: 403, message: "You no longer have access to this project.", code: "access_revoked" },
+        };
+      }
       return { ...state, finished: e.status, summary: e.summary };
     default:
       return state;

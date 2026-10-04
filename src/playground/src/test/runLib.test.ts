@@ -10,6 +10,21 @@ const fold = (events: Parameters<typeof reduceScanRun>[1][]): ScanRunState =>
   events.reduce(reduceScanRun, initialScanRunState);
 const ev = (event: object) => ({ type: "event", event }) as Parameters<typeof reduceScanRun>[1];
 
+describe("reduceScanRun access_revoked", () => {
+  it("turns a cut stream into a failure, not a finished run", () => {
+    const s = fold([
+      ev({ type: "start", phase_total: 4 }),
+      ev({ type: "end", run_id: 7, status: null, summary: null, reason: "access_revoked" }),
+    ]);
+    expect(s.finished).toBeNull();
+    expect(s.failure).toEqual({
+      status: 403,
+      message: "You no longer have access to this project.",
+      code: "access_revoked",
+    });
+  });
+});
+
 describe("phaseRows", () => {
   it("marks earlier phases done, the current one running, and later ones pending", () => {
     const s = fold([

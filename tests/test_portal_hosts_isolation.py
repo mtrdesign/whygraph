@@ -30,6 +30,8 @@ are ``test_portal_identity_routes.py``; startup and the pure modules are
 
 from __future__ import annotations
 
+import json
+import threading
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Iterator
@@ -83,7 +85,10 @@ from test_portal_tenancy import (
 )
 from whygraph.core.context import use_project
 from whygraph.db import ensure_initialized
+from whygraph.db import get_session as project_session
+from whygraph.db.models import ChatSession as ChatSessionRow
 from whygraph.portal import db as portal_db
+from whygraph.portal import runner as runner_mod
 from whygraph.portal.authz import ROLE_ACTIONS, Role
 from whygraph.portal.models import Membership, Organization, Project, ScanRun, User
 from whygraph.portal.orgs import add_member
@@ -883,6 +888,202 @@ def test_memberships_cannot_store_the_reader_role(prod_world: ProdWorld) -> None
                 ),
                 {"org": w.narwhal.org_id, "user": w.ids["ada"]},
             )
+
+
+# ---------------------------------------------------------------------------
+# Per-user chat (M2d-1 plan section 4.7)
+# ---------------------------------------------------------------------------
+
+
+def _chat_row_owner(org: OrgWorld, session_id: int) -> str | None:
+    """The ``owner_uid`` stored on one of ``org``'s ``api`` chat sessions."""
+    with use_project(manual_ctx(org.root, slug="api")), project_session() as session:
+        return session.get(ChatSessionRow, session_id).owner_uid
+
+
+def test_each_member_sees_and_touches_only_their_own_chat_sessions(
+    prod_world: ProdWorld,
+) -> None:
+    """Ann (owner) and Bob (member) of quokka: the other's session is a plain 404."""
+    w = prod_world
+    chat = at("quokka") + "/api/projects/api/chat/sessions"
+    w.sign_in("bob")
+    bobs = _ok(w.client.post(chat, json={"title": "bob's chat"}), 201)["id"]
+    assert _chat_row_owner(w.quokka, bobs) == w.uids["bob"]
+    assert _chat_row_owner(w.quokka, w.quokka.session_id) == w.uids["ann"]
+    # A row with no owner (pre-M2d-1) belongs to nobody in production.
+    with use_project(manual_ctx(w.quokka.root, slug="api")), project_session() as s:
+        ownerless = ChatSessionRow(
+            title="ownerless",
+            provider="openai",
+            model="gpt-4o",
+            created_at="2026-10-01T00:00:00+00:00",
+            updated_at="2026-10-01T00:00:00+00:00",
+        )
+        s.add(ownerless)
+        s.commit()
+        s.refresh(ownerless)
+        ownerless_id = ownerless.id
+
+    seen = {}
+    for name, own, others in (
+        ("bob", bobs, (w.quokka.session_id, ownerless_id)),
+        ("ann", w.quokka.session_id, (bobs, ownerless_id)),
+    ):
+        w.sign_in(name)
+        seen[name] = [row["id"] for row in _ok(w.client.get(chat))]
+        assert _ok(w.client.get(f"{chat}/{own}"))["id"] == own
+        for other in others:
+            for method, suffix, body in (
+                ("GET", "", None),
+                ("PATCH", "", {"title": "taken over"}),
+                ("DELETE", "", None),
+                ("POST", "/messages", {"content": "hello"}),
+            ):
+                refused = w.client.request(method, f"{chat}/{other}{suffix}", json=body)
+                where = (name, method, suffix, other)
+                assert refused.status_code == 404, (where, refused.text)
+                assert refused.json() == {"detail": f"session {other} not found"}
+    assert seen == {"bob": [bobs], "ann": [w.quokka.session_id]}
+    # Nothing the refused calls aimed at changed.
+    anns = _ok(w.client.get(f"{chat}/{w.quokka.session_id}"))
+    assert (anns["title"], anns["messages"]) == (w.quokka.session_title, [])
+    w.sign_in("bob")
+    mine = _ok(w.client.get(f"{chat}/{bobs}"))
+    assert (mine["title"], mine["messages"]) == ("bob's chat", [])
+
+
+def test_a_reader_has_no_chat(prod_world: ProdWorld) -> None:
+    """Ada reads quokka as ``reader``, which carries no ``project.chat``."""
+    w = prod_world
+    w.sign_in("ada")
+    chat = at("quokka") + "/api/projects/api/chat/sessions"
+    for method, url, body in (
+        ("GET", chat, None),
+        ("POST", chat, {"title": "a reader's"}),
+        ("GET", f"{chat}/{w.quokka.session_id}", None),
+        ("POST", f"{chat}/{w.quokka.session_id}/messages", {"content": "hi"}),
+    ):
+        refused = w.client.request(method, url, json=body)
+        assert refused.status_code == 403, (method, url, refused.text)
+        assert refused.json()["code"] == "forbidden", (method, url)
+
+
+# ---------------------------------------------------------------------------
+# An open scan-event stream ends when its access goes (plan section 4.8)
+# ---------------------------------------------------------------------------
+
+
+def _session_token(client: TestClient) -> str:
+    token = client.cookies.get("whygraph_session")
+    assert token, "not signed in"
+    return token
+
+
+@pytest.mark.parametrize("revoke", ["removed", "disabled", "signed_out"])
+def test_an_open_scan_event_stream_ends_when_its_access_goes(
+    prod_world: ProdWorld, monkeypatch: pytest.MonkeyPatch, revoke: str
+) -> None:
+    """Bob follows a held quokka run; removal, disabling or sign-out cuts it."""
+    w = prod_world
+    monkeypatch.setattr(runner_mod, "ACCESS_CHECK_SEC", 0.0)
+    w.scanner.hold.touch()
+    w.sign_in("ann")
+    run_id = _ok(w.client.post(at("quokka") + "/api/projects/api/scans"), 202)["run_id"]
+    runs_url = at("quokka") + "/api/projects/api/scans"
+    wait_for(
+        lambda: (
+            next(r for r in _ok(w.client.get(runs_url))["runs"] if r["id"] == run_id)[
+                "status"
+            ]
+            == "running"
+        )
+    )
+    # Each actor keeps their own session: the client is cleared between
+    # sign-ins, since a sign-in over a session revokes it.
+    actor = {"removed": "ann", "disabled": "ada", "signed_out": "bob"}[revoke]
+    tokens = {"ann": _session_token(w.client)}
+    w.client.cookies.clear()
+    w.sign_in("ada")
+    tokens["ada"] = _session_token(w.client)
+    w.client.cookies.clear()
+    w.sign_in("bob")
+    tokens["bob"] = _session_token(w.client)
+
+    runner = w.client.app.state.portal.runner
+    real_events = runner.events
+    opened, done = threading.Event(), threading.Event()
+    revoked: list[httpx.Response] = []
+
+    async def events(*args, **kwargs):
+        response = await real_events(*args, **kwargs)
+        opened.set()
+        return response
+
+    monkeypatch.setattr(runner, "events", events)
+
+    def take_access_away() -> None:
+        assert opened.wait(20)
+        method, url, body = {
+            "removed": (
+                "DELETE",
+                at("quokka") + f"/api/org/members/{w.uids['bob']}",
+                None,
+            ),
+            "disabled": (
+                "PATCH",
+                at() + f"/api/admin/users/{w.uids['bob']}",
+                {"disabled": True},
+            ),
+            "signed_out": ("POST", at() + "/api/auth/logout", None),
+        }[revoke]
+        revoked.append(
+            w.client.request(
+                method,
+                url,
+                json=body,
+                headers={"cookie": f"whygraph_session={tokens[actor]}"},
+            )
+        )
+        if not done.wait(20):  # never hang: let the run end on its own
+            w.scanner.hold.unlink(missing_ok=True)
+
+    thread = threading.Thread(target=take_access_away)
+    thread.start()
+    try:
+        stream = w.client.get(
+            at("quokka") + f"/api/projects/api/scans/{run_id}/events",
+            headers={"cookie": f"whygraph_session={tokens['bob']}"},
+        )
+    finally:
+        done.set()
+        thread.join()
+    assert len(revoked) == 1 and revoked[0].status_code in (200, 204), revoked
+    assert stream.status_code == 200, stream.text
+    blocks = [b for b in stream.text.split("\n\n") if b.strip()]
+    assert "event: end" in blocks[-1], blocks[-1]
+    end = json.loads(blocks[-1].split("data: ", 1)[1])
+    assert end == {
+        "type": "end",
+        "run_id": run_id,
+        "status": None,
+        "summary": None,
+        "reason": "access_revoked",
+    }
+    # The run itself goes on: only the stream was cut.
+    w.client.cookies.clear()
+    owner = w.client.get(
+        runs_url, headers={"cookie": f"whygraph_session={tokens['ann']}"}
+    )
+    assert next(r for r in _ok(owner)["runs"] if r["id"] == run_id)["status"] == (
+        "running"
+    )
+    if revoke == "removed":  # Bob's session itself still works elsewhere
+        own = w.client.get(
+            at("narwhal") + "/api/projects",
+            headers={"cookie": f"whygraph_session={tokens['bob']}"},
+        )
+        assert own.status_code == 200, own.text
 
 
 # ---------------------------------------------------------------------------

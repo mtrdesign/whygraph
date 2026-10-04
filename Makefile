@@ -20,6 +20,7 @@ UV_RUN ?= uv run
 DEV ?= $(shell cd "$${TMPDIR:-/tmp}" && pwd -P)/whygraph-dev
 DEV_PORT ?= 8777
 DEV_PROD_PORT ?= 8778
+DEV_GITHUB_PORT ?= 18767
 
 # `make dev-db`: the dev portal's Postgres, laid out like the shim's
 # (`whygraph up`) but published on 127.0.0.1 with a dev-only password.
@@ -63,6 +64,21 @@ dev-production: node-check dev-fixtures dev-db  ## Develop in production mode: p
 		|| docker exec $(PG_DEV_NAME) createdb -U whygraph whygraph_prod
 	@mkdir -p "$(DEV)/production/data"
 	@echo "open http://whygraph.localhost:5173 (Chromium or Firefox); the bootstrap secret is printed below"
+	@set -e; \
+	if [ -f .env.dev ]; then echo "loading .env.dev"; set -a; . ./.env.dev; set +a; fi; \
+	if [ -z "$${WHYGRAPH_GITHUB_OAUTH_CLIENT_ID:-}" ]; then \
+		echo "GitHub: the fake on 127.0.0.1:$(DEV_GITHUB_PORT) (see .env.dev.example to use a real dev OAuth App)"; \
+		(umask 077; printf 'dev-client-secret\n' > "$(DEV)/production/github-secret"); \
+		$(UV_RUN) python tests/github_fake.py --host 127.0.0.1 --port $(DEV_GITHUB_PORT) \
+			--client-id dev-client --client-secret-file "$(DEV)/production/github-secret" \
+			--redirect-uri http://whygraph.localhost:5173/auth/github & \
+		fake=$$!; \
+		trap 'kill $$fake 2>/dev/null || true' EXIT INT TERM; \
+		export WHYGRAPH_GITHUB_OAUTH_CLIENT_ID=dev-client \
+			WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE="$(DEV)/production/github-secret" \
+			WHYGRAPH_GITHUB_URL=http://127.0.0.1:$(DEV_GITHUB_PORT) \
+			WHYGRAPH_GITHUB_API_URL=http://127.0.0.1:$(DEV_GITHUB_PORT)/api/v3; \
+	fi; \
 	env -u WHYGRAPH_SHARED_FOLDERS -u WHYGRAPH_DEV_ORIGINS \
 	WHYGRAPH_MODE=production WHYGRAPH_BASE_URL=http://whygraph.localhost:5173 \
 	WHYGRAPH_DATABASE_URL="$(DEV_PROD_DATABASE_URL)" \

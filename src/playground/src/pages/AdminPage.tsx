@@ -7,36 +7,52 @@ import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Skeleton } from "../components/ui/skeleton";
+import { authMessage } from "../lib/authErrors";
+import { usePortalState } from "../lib/identity";
 
 const USERS = ["@admin", "users"] as const;
 
-/** One user's row: the admin toggle and a one-time reset link (shown once, to copy). */
-function UserRow({ user }: { user: AdminUser }) {
+/**
+ * One user's row: the admin toggle, Disable / Enable and, for a password account,
+ * a one-time reset link (shown once, to copy).
+ */
+function UserRow({ user, isMe }: { user: AdminUser; isMe: boolean }) {
   const queryClient = useQueryClient();
   const [link, setLink] = useState<string | null>(null);
   const setAdmin = useMutation({
     mutationFn: (value: boolean) => adminApi.setAdmin(user.uid, value),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: USERS }),
-    onError: (err) => toast.error(err.message),
+    onError: (err) => toast.error(authMessage(err)),
+  });
+  const setDisabled = useMutation({
+    mutationFn: (value: boolean) => adminApi.setDisabled(user.uid, value),
+    onSuccess: (_, value) => {
+      toast.success(value ? `Disabled ${user.display_name}; their sessions ended` : `Enabled ${user.display_name}`);
+      return queryClient.invalidateQueries({ queryKey: USERS });
+    },
+    onError: (err) => toast.error(authMessage(err)),
   });
   const reset = useMutation({
     mutationFn: () => adminApi.resetLink(user.uid),
     onSuccess: ({ url }) => setLink(url),
-    onError: (err) => toast.error(err.message),
+    onError: (err) => toast.error(authMessage(err)),
   });
   return (
-    <li className="flex flex-col gap-2 py-3" data-testid={`admin-user-${user.email}`}>
+    <li className="flex flex-col gap-2 py-3" data-testid={`admin-user-${user.uid}`}>
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex min-w-0 flex-1 flex-col leading-tight">
           <span className="truncate font-medium">
             {user.display_name}
           </span>
-          <span className="truncate font-mono text-xs text-muted-foreground">{user.email}</span>
+          <span className="truncate font-mono text-xs text-muted-foreground">
+            {user.github_login ? `@${user.github_login}` : user.email}
+          </span>
         </div>
         <span className="text-xs text-muted-foreground">
           {user.org_count} org{user.org_count === 1 ? "" : "s"}
         </span>
         {user.is_instance_admin && <Badge variant="secondary">admin</Badge>}
+        {user.disabled && <Badge variant="destructive">disabled</Badge>}
         <Button
           size="sm"
           variant="outline"
@@ -45,9 +61,21 @@ function UserRow({ user }: { user: AdminUser }) {
         >
           {user.is_instance_admin ? "Remove admin" : "Make admin"}
         </Button>
-        <Button size="sm" variant="outline" disabled={reset.isPending} onClick={() => reset.mutate()}>
-          Copy reset link
-        </Button>
+        {!isMe && (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={setDisabled.isPending}
+            onClick={() => setDisabled.mutate(!user.disabled)}
+          >
+            {user.disabled ? "Enable" : "Disable"}
+          </Button>
+        )}
+        {user.has_password && !user.disabled && (
+          <Button size="sm" variant="outline" disabled={reset.isPending} onClick={() => reset.mutate()}>
+            Copy reset link
+          </Button>
+        )}
       </div>
       {link && (
         <div className="flex flex-wrap items-center gap-2" data-testid="reset-link">
@@ -64,6 +92,7 @@ function UserRow({ user }: { user: AdminUser }) {
 
 /** `/admin` on the base host: users, organizations and the base-URL self-check. */
 export function AdminPage() {
+  const me = usePortalState().data?.user?.uid;
   const settings = useQuery({ queryKey: ["@admin", "settings"], queryFn: adminApi.settings });
   const users = useQuery({ queryKey: USERS, queryFn: adminApi.users });
   const orgs = useQuery({ queryKey: ["@admin", "orgs"], queryFn: adminApi.orgs });
@@ -101,7 +130,7 @@ export function AdminPage() {
         {users.data && (
           <ul className="divide-y divide-border">
             {users.data.map((u) => (
-              <UserRow key={u.uid} user={u} />
+              <UserRow key={u.uid} user={u} isMe={u.uid === me} />
             ))}
           </ul>
         )}

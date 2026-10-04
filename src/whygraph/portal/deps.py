@@ -47,7 +47,15 @@ import threading
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Protocol
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Literal,
+    Protocol,
+)
 
 import anyio
 import anyio.to_thread
@@ -76,6 +84,9 @@ from .repos import DiscoveryCache
 from .runner import ScanRunner
 from .security import PortalOrigins, Principal
 from .throttle import Throttle
+
+if TYPE_CHECKING:
+    from .github_auth import GitHubOAuth
 
 
 class ApiError(Exception):
@@ -211,6 +222,9 @@ class SessionIdentity:
             email=row.email,
             session_id=row.session_id,
             is_instance_admin=row.is_instance_admin,
+            github_login=row.github_login,
+            avatar_url=row.avatar_url,
+            has_password=row.has_password,
         )
 
     async def org_slug(self, scope: Scope) -> str | None:
@@ -303,13 +317,18 @@ class PortalState:
     base_check : list of str or None
         What the base-URL DNS self-check found (production; ``None`` until
         it ran, ``[]`` when healthy).
+    github : GitHubOAuth or None
+        Production's GitHub sign-in client (M2d-1); ``None`` in local mode.
     login_pair, login_email, login_ip : Throttle
         Sign-in **failures** (also wrong current passwords): per
         ``(email, ip_key)`` 5 / 15 min, per email 100 / hour, per
         ``ip_key`` 20 / 15 min (plan section 0.2).
-    register_ip, bootstrap_ip, reset_ip : Throttle
-        Every attempt, per ``ip_key``: register 5 / hour, bootstrap and
-        reset 10 / 15 min.
+    bootstrap_ip, reset_ip, github_ip : Throttle
+        Every attempt, per ``ip_key``: bootstrap and reset 10 / 15 min,
+        GitHub sign-in (start and callback, shared) 60 / 15 min.
+    member_add_org : Throttle
+        Every ``POST /api/org/members`` attempt, per org id: 60 / hour, so
+        the route cannot probe which usernames have accounts at scale.
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -340,12 +359,14 @@ class PortalState:
         self.base_url: BaseUrl | None = None
         self.bootstrap_secret: str | None = None
         self.base_check: list[str] | None = None
+        self.github: GitHubOAuth | None = None
         self.login_pair = Throttle(5, 15 * 60)
         self.login_email = Throttle(100, 60 * 60)
         self.login_ip = Throttle(20, 15 * 60)
-        self.register_ip = Throttle(5, 60 * 60)
         self.bootstrap_ip = Throttle(10, 15 * 60)
         self.reset_ip = Throttle(10, 15 * 60)
+        self.github_ip = Throttle(60, 15 * 60)
+        self.member_add_org = Throttle(60, 60 * 60)
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0

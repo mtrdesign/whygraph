@@ -16,6 +16,7 @@ from importlib.metadata import version as package_version
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Iterator
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import anyio
 import httpx
@@ -29,6 +30,7 @@ from sqlalchemy import text
 from sqlmodel import select
 
 from conftest import HeaderIdentity, build_fake_codegraph_db, builtin_org_id
+from github_fake import FakeGitHub
 from whygraph.core.config import Config
 from whygraph.core.context import ProjectContext, is_strict, use_project
 from whygraph.db import bootstrap
@@ -45,6 +47,7 @@ from whygraph.portal.deps import (
     current_user,
     load_org_access,
 )
+from whygraph.portal.github_auth import GitHubAuthConfig, GitHubOAuth
 from whygraph.portal.mcp_mount import McpDispatcher
 from whygraph.portal.models import Project, ScanRun, User
 from whygraph.portal.orgs import add_member, create_org
@@ -180,6 +183,10 @@ def portal_client(
 PROD_DOMAIN = "whygraph.localhost"
 PROD_BASE = f"http://{PROD_DOMAIN}:{PORT}"
 PROD_CLIENT = ("203.0.113.5", 1)
+GITHUB_CLIENT_ID = "test-client-id"
+GITHUB_CLIENT_SECRET = "test-client-secret"
+GITHUB_FAKE_URL = "http://127.0.0.1:9"
+"""Where ``production_env`` points GitHub: a port nothing listens on."""
 
 
 @pytest.fixture
@@ -191,7 +198,36 @@ def production_env(
     monkeypatch.setenv("WHYGRAPH_BASE_URL", PROD_BASE)
     for var in ("WHYGRAPH_SHARED_FOLDERS", "WHYGRAPH_TRUSTED_PROXIES"):
         monkeypatch.delenv(var, raising=False)
+    secret_file = env.tmp / "github-oauth-secret"
+    secret_file.write_text(GITHUB_CLIENT_SECRET + "\n")
+    monkeypatch.setenv("WHYGRAPH_GITHUB_OAUTH_CLIENT_ID", GITHUB_CLIENT_ID)
+    monkeypatch.setenv("WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE", str(secret_file))
+    monkeypatch.setenv("WHYGRAPH_GITHUB_URL", GITHUB_FAKE_URL)
+    monkeypatch.setenv("WHYGRAPH_GITHUB_API_URL", GITHUB_FAKE_URL + "/api/v3")
     return env
+
+
+@pytest.fixture
+def github_fake(
+    production_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> FakeGitHub:
+    """A :class:`FakeGitHub` wired into every production portal started after it.
+
+    The portal's ``GitHubOAuth`` is built with ``httpx.MockTransport`` over
+    the fake's handler, so nothing reaches the network; the fake is
+    configured with ``production_env``'s client id / secret and the
+    callback ``<base>/auth/github``. Request it before the portal starts
+    (``prod_portal()``), then drive it (``add_user``, ``force``, ...).
+    """
+    fake = FakeGitHub(
+        GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, f"{PROD_BASE}/auth/github"
+    )
+
+    def build(config: GitHubAuthConfig) -> GitHubOAuth:
+        return GitHubOAuth(config, transport=httpx.MockTransport(fake.handle))
+
+    monkeypatch.setattr("whygraph.portal.app.GitHubOAuth", build)
+    return fake
 
 
 @contextmanager
@@ -269,6 +305,74 @@ def log_in(
     return client.post(
         at() + "/api/auth/login", json={"email": email, "password": password, **extra}
     )
+
+
+def github_sign_in(
+    client: TestClient, login: str, *, next: str | None = None
+) -> httpx.Response:
+    """Sign ``login`` in through the real GitHub routes and the fake GitHub.
+
+    ``POST /api/auth/github/start`` (asserted ``200``), then the fake's
+    authorize step with ``login=`` (asserted ``302``) - sent through the
+    portal's own :class:`GitHubOAuth`, so it reaches the ``github_fake``
+    fixture, which the test must request - then ``POST
+    /api/auth/github/callback`` with the redirect's ``code`` and ``state``
+    and the browser's ``whygraph_oauth`` cookie.
+
+    Returns
+    -------
+    httpx.Response
+        The callback's response, **unchecked**: on success ``200`` with
+        ``{"redirect": ...}`` and the session cookie (``client`` is then
+        signed in as ``login``); a refusal (``nofa``, a disabled account,
+        a forced GitHub failure) is the error response.
+    """
+    start = client.post(at() + "/api/auth/github/start", json={"next": next})
+    assert start.status_code == 200, start.text
+    github = client.app.state.portal.github
+    authorize = github._request(
+        "GET", start.json()["authorize_url"] + "&" + urlencode({"login": login})
+    )
+    assert authorize.status_code == 302, authorize.text
+    query = parse_qs(urlsplit(authorize.headers["location"]).query)
+    return client.post(
+        at() + "/api/auth/github/callback",
+        json={"code": query["code"][0], "state": query["state"][0]},
+    )
+
+
+def uid_of_login(login: str) -> str:
+    """The stable uid of the GitHub account currently holding ``login``."""
+    with portal_db.get_session() as session:
+        return session.exec(select(User.uid).where(User.github_login == login)).one()
+
+
+def password_user(
+    email: str,
+    password: str = PROD_PASSWORD,
+    *,
+    admin: bool = False,
+    display_name: str | None = None,
+) -> str:
+    """Insert an email + password account directly; return its uid.
+
+    The M2c-era state M2d-1 keeps valid (no route creates one any more),
+    for tests of the password paths. ``display_name`` defaults to the
+    email's local part, capitalized.
+    """
+    from whygraph.portal.passwords import hash_password
+
+    email = email.strip().lower()
+    user = User(
+        display_name=display_name or email.partition("@")[0].capitalize(),
+        email=email,
+        password_hash=hash_password(password),
+        is_instance_admin=admin,
+    )
+    with portal_db.get_session() as session:
+        session.add(user)
+        session.flush()
+        return user.uid
 
 
 @pytest.fixture
@@ -853,12 +957,14 @@ def _api_routes(app) -> list:
 PUBLIC_AUTH_ROUTES = {
     ("/api/auth/bootstrap", "GET"),
     ("/api/auth/bootstrap", "POST"),
-    ("/api/auth/register", "POST"),
+    ("/api/auth/github/start", "POST"),
+    ("/api/auth/github/callback", "POST"),
     ("/api/auth/login", "POST"),
     ("/api/auth/logout", "POST"),
     ("/api/auth/reset", "POST"),
 }
-"""Production's public auth routes (M2c plan section 4.7): no session needed."""
+"""Production's public auth routes (M2c plan section 4.7, M2d-1 section 4.4):
+no session needed."""
 
 
 def test_every_api_route_resolves_current_user_except_state_and_setup(
@@ -895,6 +1001,12 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/portal/defaults", "PUT"): "org.configure",
     ("/api/projects", "GET"): "org.read",
     ("/api/projects", "POST"): "org.add_project",
+    # Production's members page: org_access(...) (M2d-1 section 4.5)
+    ("/api/org/members", "GET"): "org.read",
+    ("/api/org/members", "POST"): "org.members",
+    ("/api/org/members/{uid}", "PATCH"): "org.members",
+    ("/api/org/members/{uid}", "DELETE"): "org.members",
+    ("/api/org/membership", "DELETE"): "org.read",
     # Project management: project_access(...)
     (_P, "GET"): _READ,
     (f"{_P}/config", "GET"): _READ,
@@ -1018,7 +1130,17 @@ def _filled(path: str) -> str:
     return path
 
 
-PRODUCTION_ONLY_ROUTES = PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES
+PRODUCTION_ORG_ROUTES = {
+    ("/api/org/members", "GET"),
+    ("/api/org/members", "POST"),
+    ("/api/org/members/{uid}", "PATCH"),
+    ("/api/org/members/{uid}", "DELETE"),
+    ("/api/org/membership", "DELETE"),
+}
+"""Org-scoped routes that exist only in production: the members page
+(``require_production`` before the org dependency, M2d-1 plan section 0.2 #19)."""
+
+PRODUCTION_ONLY_ROUTES = PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES | PRODUCTION_ORG_ROUTES
 """Routes that answer ``404`` in local mode (M2c plan section 4.7)."""
 
 

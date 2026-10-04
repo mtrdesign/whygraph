@@ -562,6 +562,9 @@ def test_a_members_session_works_on_its_org_host(
             "role": "owner",
             "email": "ann@example.com",
             "is_instance_admin": False,
+            "github_login": None,
+            "avatar_url": None,
+            "has_password": False,  # this row was inserted with no hash
         }
         projects = client.get(at("quokka") + "/api/projects")
         assert projects.status_code == 200 and projects.json() == {"projects": []}

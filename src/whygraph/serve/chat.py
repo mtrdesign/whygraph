@@ -20,6 +20,13 @@ Two consequences of streaming shape the error contract:
 
 This module is where the harness meets persistence: the harness yields
 events and knows nothing about rows; this router owns every read and write.
+
+Sessions are **per user** on a production host: each row records its
+creator's ``users.uid`` (``owner_uid``), and the list and every
+``/sessions/{id}`` route see only the caller's own rows - another user's
+session (or an ownerless one) is a plain ``404``. Local mode has one user
+and filters nothing. The caller comes from the scope the portal's guard
+filled, not from a ``portal`` import, so ``serve/`` stays below the portal.
 """
 
 from __future__ import annotations
@@ -30,7 +37,7 @@ import os
 from collections.abc import Iterator
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import col, func, select
@@ -249,13 +256,29 @@ def models(provider: str = Query(...)) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _owner_filter(request: Request) -> str | None:
+    """The caller's uid on a production host; ``None`` in local mode (never filtered)."""
+    state = request.scope.get("state", {})
+    if state.get("host_kind") in (None, "local"):
+        return None
+    return state["principal"].uid
+
+
+def _caller_uid(request: Request) -> str | None:
+    """The uid of whoever the guard resolved, in either mode (``None`` if nobody)."""
+    principal = request.scope.get("state", {}).get("principal")
+    return None if principal is None else principal.uid
+
+
 @router.get("/sessions")
-def list_sessions() -> list[dict]:
-    """Every session, newest activity first, with its message count."""
+def list_sessions(request: Request) -> list[dict]:
+    """The caller's sessions, newest activity first, with their message counts."""
+    query = select(ChatSessionRow)
+    owner = _owner_filter(request)
+    if owner is not None:
+        query = query.where(ChatSessionRow.owner_uid == owner)
     with get_session() as session:
-        rows = session.exec(
-            select(ChatSessionRow).order_by(col(ChatSessionRow.updated_at).desc())
-        ).all()
+        rows = session.exec(query.order_by(col(ChatSessionRow.updated_at).desc())).all()
         counts = dict(
             session.exec(
                 select(ChatMessageRow.session_id, func.count()).group_by(
@@ -267,12 +290,12 @@ def list_sessions() -> list[dict]:
 
 
 @router.post("/sessions", status_code=201)
-def create_session(body: CreateSessionBody | None = None) -> dict:
+def create_session(request: Request, body: CreateSessionBody | None = None) -> dict:
     """Create a session, defaulting provider / model from ``model_for("chat")``.
 
     The resolved model is stored on the row rather than looked up per turn,
     so the transcript records what actually answered even if config changes
-    later.
+    later. The caller's uid is stored as ``owner_uid`` in both modes.
     """
     body = body or CreateSessionBody()
     if body.provider and body.provider not in CHAT_PROVIDERS:
@@ -297,6 +320,7 @@ def create_session(body: CreateSessionBody | None = None) -> dict:
         model=model,
         created_at=now,
         updated_at=now,
+        owner_uid=_caller_uid(request),
     )
     with get_session() as session:
         session.add(row)
@@ -305,19 +329,21 @@ def create_session(body: CreateSessionBody | None = None) -> dict:
         return _session_dict(row, message_count=0)
 
 
-def _require_session(session, session_id: int) -> ChatSessionRow:
-    """Fetch a session row or raise 404."""
+def _require_session(
+    session, session_id: int, owner: str | None = None
+) -> ChatSessionRow:
+    """Fetch a session row or raise 404 - also when ``owner`` is set and differs."""
     row = session.get(ChatSessionRow, session_id)
-    if row is None:
+    if row is None or (owner is not None and row.owner_uid != owner):
         raise HTTPException(status_code=404, detail=f"session {session_id} not found")
     return row
 
 
 @router.get("/sessions/{session_id}")
-def get_transcript(session_id: int) -> dict:
+def get_transcript(session_id: int, request: Request) -> dict:
     """One session plus its full transcript, for replay after a restart."""
     with get_session() as session:
-        row = _require_session(session, session_id)
+        row = _require_session(session, session_id, _owner_filter(request))
         messages = session.exec(
             select(ChatMessageRow)
             .where(ChatMessageRow.session_id == session_id)
@@ -330,7 +356,7 @@ def get_transcript(session_id: int) -> dict:
 
 
 @router.patch("/sessions/{session_id}")
-def update_session(session_id: int, body: UpdateSessionBody) -> dict:
+def update_session(session_id: int, body: UpdateSessionBody, request: Request) -> dict:
     """Update a session's title, provider, and/or model.
 
     A title set here always wins over first-message titling. A provider or
@@ -347,7 +373,7 @@ def update_session(session_id: int, body: UpdateSessionBody) -> dict:
         )
 
     with get_session() as session:
-        row = _require_session(session, session_id)
+        row = _require_session(session, session_id, _owner_filter(request))
 
         if body.title is not None:
             title = body.title.strip()
@@ -376,7 +402,7 @@ def update_session(session_id: int, body: UpdateSessionBody) -> dict:
 
 
 @router.delete("/sessions/{session_id}", status_code=204)
-def delete_session(session_id: int) -> Response:
+def delete_session(session_id: int, request: Request) -> Response:
     """Delete a session and its messages.
 
     Messages are removed explicitly rather than by cascade: the FK has no
@@ -384,7 +410,7 @@ def delete_session(session_id: int) -> Response:
     parent delete.
     """
     with get_session() as session:
-        row = _require_session(session, session_id)
+        row = _require_session(session, session_id, _owner_filter(request))
         for message in session.exec(
             select(ChatMessageRow).where(ChatMessageRow.session_id == session_id)
         ).all():
@@ -668,7 +694,9 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
 
 
 @router.post("/sessions/{session_id}/messages")
-def send_message(session_id: int, body: SendMessageBody) -> StreamingResponse:
+def send_message(
+    session_id: int, body: SendMessageBody, request: Request
+) -> StreamingResponse:
     """Send a user message and stream the assistant's turn as SSE.
 
     The user row is persisted (and the session titled) **before** streaming
@@ -681,7 +709,7 @@ def send_message(session_id: int, body: SendMessageBody) -> StreamingResponse:
         raise HTTPException(status_code=400, detail="content must not be empty")
 
     with get_session() as session:
-        row = _require_session(session, session_id)
+        row = _require_session(session, session_id, _owner_filter(request))
         provider, model = row.provider, row.model
 
     _persist_user_message(session_id, content)

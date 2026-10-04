@@ -46,6 +46,16 @@ production mode:
   cookie and the portal's host check all see one origin per host. Vite passes the `Host` header
   through unchanged, which is what lets `<org>.whygraph.localhost:5173` reach the portal. Open
   `http://whygraph.localhost:5173`, not `localhost`: that one gets `421`.
+- **GitHub is a fake.** Sign-in needs a GitHub, so `make dev-production` also starts a small fake one
+  on `DEV_GITHUB_PORT` and points the portal's four `WHYGRAPH_GITHUB_*` variables at it. Nothing leaves
+  your machine, and you can sign in as any username to try members, roles and two-factor refusals.
+  To use the real GitHub instead, create a dev OAuth App whose callback URL is
+  `http://whygraph.localhost:5173/auth/github` (see
+  [GitHub sign-in](../deploy/production.md#github-sign-in)), then copy `.env.dev.example` to
+  `.env.dev` (gitignored) and fill in its client ID and the path of a file holding its client
+  secret. `make dev-production` loads `.env.dev` when it exists; when
+  `WHYGRAPH_GITHUB_OAUTH_CLIENT_ID` ends up set (from `.env.dev` or your shell), the fake is not
+  started. Values in `.env.dev` win over your shell's.
 - The first run prints a `Bootstrap secret:` line in the terminal (the portal's log); the page at
   `http://whygraph.localhost:5173` asks for it to create the first account.
 - Under the hood `make dev-production` runs `scripts/dev_portal.py --preserve-host`: Vite then

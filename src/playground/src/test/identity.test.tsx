@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
@@ -21,11 +21,15 @@ const hard = vi.mocked(hardNavigate);
 const BASE = "http://whygraph.localhost:8765";
 const ORG = "http://acme.whygraph.localhost:8765";
 
+type Handler = (method: string, body: unknown) => Response;
+
 interface Fake {
   state: Record<string, unknown>;
   orgs: { slug: string; name: string; role: string; url: string }[];
   login: { status: number; body: unknown };
   calls: { path: string; method: string; body: unknown }[];
+  // Per-test routes, matched by exact path before the fixed ones.
+  routes: Record<string, Handler>;
 }
 let fake: Fake;
 
@@ -87,6 +91,8 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     body = init?.body;
   }
   fake.calls.push({ path, method: init?.method ?? "GET", body });
+  const route = fake.routes[path];
+  if (route) return Promise.resolve(route(init?.method ?? "GET", body));
   if (path === "/api/portal/state") return Promise.resolve(json(fake.state));
   if (path === "/api/account/orgs") return Promise.resolve(json(fake.orgs));
   if (path === "/api/auth/login") return Promise.resolve(json(fake.login.body, fake.login.status));
@@ -118,6 +124,7 @@ beforeEach(() => {
     orgs: [],
     login: { status: 401, body: { error: "bad", code: "bad_credentials" } },
     calls: [],
+    routes: {},
   };
   hard.mockClear();
   setBaseUrl(null);
@@ -160,19 +167,26 @@ describe("router gate - production base host", () => {
     }
   });
 
-  it("lets a signed-out visitor open /register and /reset", async () => {
+  it("lets a signed-out visitor open GitHub's return address", async () => {
     fake.state = baseState({ user: null });
-    const router = mount("/register");
-    await screen.findByRole("heading", { name: /create.*account|register/i });
-    expect(where(router)).toBe("/register");
+    const router = mount("/auth/github?error=access_denied&state=s");
+    await screen.findByTestId("github-callback-error");
+    expect(where(router)).toBe("/auth/github");
   });
 
-  it("sends / and /register to the picker when signed in", async () => {
-    for (const path of ["/", "/register"]) {
-      const router = mount(path);
-      await waitFor(() => expect(where(router)).toBe("/orgs"));
-      document.body.innerHTML = "";
-    }
+  it("sends / to the picker when signed in", async () => {
+    const router = mount("/");
+    await waitFor(() => expect(where(router)).toBe("/orgs"));
+  });
+
+  it("has no /register any more (signed out: sign-in; signed in: the picker)", async () => {
+    fake.state = baseState({ user: null });
+    const out = mount("/register");
+    await waitFor(() => expect(where(out)).toBe("/signin"));
+    document.body.innerHTML = "";
+    fake.state = baseState();
+    const signedIn = mount("/register");
+    await waitFor(() => expect(where(signedIn)).toBe("/orgs"));
   });
 
   it("keeps /admin for instance admins", async () => {
@@ -322,12 +336,58 @@ describe("login_required redirect", () => {
 // ---- pages -------------------------------------------------------------------------
 
 describe("sign-in page", () => {
+  /** Open the "Administrator sign-in" disclosure. */
+  async function openAdmin(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(await screen.findByRole("button", { name: "Administrator sign-in" }));
+  }
+
+  it("leads with GitHub: start with next, then go to the authorize URL", async () => {
+    fake.state = baseState({ user: null });
+    const authorize = "https://github.com/login/oauth/authorize?client_id=x&state=s";
+    fake.routes["/api/auth/github/start"] = () => json({ authorize_url: authorize });
+    const next = `${ORG}/p/alpha`;
+    mount(`/signin?next=${encodeURIComponent(next)}`);
+    expect(await screen.findByText("New here? Signing in with GitHub creates your account.")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /create one/i })).toBeNull();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Sign in with GitHub" }));
+    await waitFor(() => expect(hard).toHaveBeenCalledWith(authorize));
+    const start = fake.calls.find((c) => c.path === "/api/auth/github/start");
+    expect(start?.method).toBe("POST");
+    expect(start?.body).toEqual({ next });
+  });
+
+  it("shows a refused start (throttled) and does not navigate", async () => {
+    fake.state = baseState({ user: null });
+    fake.routes["/api/auth/github/start"] = () => json({ error: "slow down", code: "throttled" }, 429);
+    mount("/signin");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Sign in with GitHub" }));
+    await screen.findByText(/Too many attempts/);
+    expect(hard).not.toHaveBeenCalled();
+  });
+
+  it("keeps the password form behind the Administrator sign-in disclosure", async () => {
+    fake.state = baseState({ user: null });
+    mount("/signin");
+    const toggle = await screen.findByRole("button", { name: "Administrator sign-in" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByLabelText("Email")).toBeNull();
+    expect(screen.queryByLabelText("Password")).toBeNull();
+    const user = userEvent.setup();
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByLabelText("Email")).toBeInTheDocument();
+    expect(screen.getByText(/Ask an instance administrator for a reset link/)).toBeInTheDocument();
+  });
+
   it("posts the credentials with next, then follows the server's redirect", async () => {
     fake.state = baseState({ user: null });
     fake.login = { status: 200, body: { redirect: `${ORG}/` } };
     const next = `${ORG}/p/alpha`;
     mount(`/signin?next=${encodeURIComponent(next)}`);
     const user = userEvent.setup();
+    await openAdmin(user);
     await user.type(await screen.findByLabelText("Email"), "ada@example.com");
     await user.type(screen.getByLabelText("Password"), "correct horse battery");
     await user.click(screen.getByRole("button", { name: "Sign in" }));
@@ -340,11 +400,94 @@ describe("sign-in page", () => {
     fake.state = baseState({ user: null });
     mount("/signin");
     const user = userEvent.setup();
+    await openAdmin(user);
     await user.type(await screen.findByLabelText("Email"), "ada@example.com");
     await user.type(screen.getByLabelText("Password"), "wrong");
     await user.click(screen.getByRole("button", { name: "Sign in" }));
     await screen.findByText("Incorrect email or password.");
     expect(hard).not.toHaveBeenCalled();
+  });
+
+  it("says so when a correct password belongs to a disabled account", async () => {
+    fake.state = baseState({ user: null });
+    fake.login = { status: 403, body: { error: "this account is disabled", code: "account_disabled" } };
+    mount("/signin");
+    const user = userEvent.setup();
+    await openAdmin(user);
+    await user.type(await screen.findByLabelText("Email"), "ada@example.com");
+    await user.type(screen.getByLabelText("Password"), "correct horse battery");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await screen.findByText(/This account is disabled/);
+    expect(hard).not.toHaveBeenCalled();
+  });
+});
+
+// ---- GitHub's return address ------------------------------------------------------
+
+describe("GitHub callback page", () => {
+  function callbackReply(status: number, body: unknown) {
+    fake.routes["/api/auth/github/callback"] = () => json(body, status);
+  }
+  /** Mount the page with the query in both the router and the address bar. */
+  function visit(query: string) {
+    fake.state = baseState({ user: null });
+    window.history.replaceState(null, "", `/auth/github${query}`);
+    return mount(`/auth/github${query}`);
+  }
+
+  it("strips the query, posts code and state, then follows the redirect", async () => {
+    callbackReply(200, { redirect: `${ORG}/p/alpha` });
+    visit("?code=the-code&state=the-state");
+    await waitFor(() => expect(hard).toHaveBeenCalledWith(`${ORG}/p/alpha`));
+    expect(window.location.search).toBe("");
+    expect(window.location.pathname).toBe("/auth/github");
+    const posts = fake.calls.filter((c) => c.path === "/api/auth/github/callback");
+    expect(posts).toHaveLength(1);
+    expect(posts[0].method).toBe("POST");
+    expect(posts[0].body).toEqual({ code: "the-code", state: "the-state" });
+  });
+
+  it("says the sign-in was cancelled on GitHub's access_denied (no POST)", async () => {
+    visit("?error=access_denied&error_description=x&state=s");
+    const alert = await screen.findByTestId("github-callback-error");
+    expect(alert).toHaveTextContent("Sign-in was cancelled.");
+    expect(window.location.search).toBe("");
+    expect(fake.calls.some((c) => c.path === "/api/auth/github/callback")).toBe(false);
+    expect(screen.getByRole("link", { name: "Back to sign in" })).toHaveAttribute("href", "/signin");
+  });
+
+  it("links to GitHub's security settings when 2FA is required", async () => {
+    callbackReply(403, {
+      error: "turn on 2FA",
+      code: "github_2fa_required",
+      fix_url: "https://github.com/settings/security",
+    });
+    visit("?code=c&state=s");
+    const alert = await screen.findByTestId("github-callback-error");
+    expect(alert).toHaveTextContent(/two-factor authentication/);
+    expect(within(alert).getByRole("link", { name: /two-factor/ })).toHaveAttribute(
+      "href",
+      "https://github.com/settings/security",
+    );
+    expect(hard).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["account_disabled", 403, /This account is disabled/],
+    ["oauth_state", 400, /The sign-in expired - try again\./],
+    ["github_unavailable", 502, /GitHub could not be reached/],
+    ["github_auth_failed", 400, /GitHub did not accept the sign-in/],
+  ])("renders %s", async (code, status, text) => {
+    callbackReply(status, { error: "server words", code });
+    visit("?code=c&state=s");
+    expect(await screen.findByTestId("github-callback-error")).toHaveTextContent(text);
+    expect(hard).not.toHaveBeenCalled();
+  });
+
+  it("an incomplete return address posts nothing", async () => {
+    visit("?state=s");
+    await screen.findByTestId("github-callback-error");
+    expect(fake.calls.some((c) => c.path === "/api/auth/github/callback")).toBe(false);
   });
 });
 
@@ -478,9 +621,347 @@ describe("identity helpers", () => {
     );
   });
 
+  it("authMessage shows no_such_user verbatim and maps the new codes", () => {
+    const words =
+      "No one with that GitHub username has signed in to WhyGraph yet. Ask them to sign in once, then add them.";
+    expect(authMessage(new ApiError(404, words, "no_such_user"))).toBe(words);
+    for (const code of [
+      "oauth_state",
+      "github_auth_failed",
+      "github_unavailable",
+      "github_2fa_required",
+      "account_disabled",
+      "no_password",
+      "bad_login",
+      "already_member",
+      "user_disabled",
+      "last_owner",
+      "not_member",
+      "self_disable",
+    ]) {
+      expect(authMessage(new ApiError(400, "raw server words", code))).not.toBe("raw server words");
+    }
+  });
+
   it("authMessage maps the password codes inline", () => {
     expect(authMessage(new ApiError(422, "x", "weak_password"))).toMatch(/15 characters/);
     expect(authMessage(new ApiError(422, "x", "common_password"))).toMatch(/too common/);
     expect(authMessage(new ApiError(429, "slow"))).toMatch(/Too many/);
+  });
+});
+
+// ---- members (M2d-1) -----------------------------------------------------------------
+
+describe("members page", () => {
+  type Row = {
+    uid: string;
+    display_name: string;
+    github_login: string | null;
+    avatar_url: string | null;
+    role: string;
+    joined_at: string;
+    disabled: boolean;
+  };
+  const row = (uid: string, name: string, login: string, role: string): Row => ({
+    uid,
+    display_name: name,
+    github_login: login,
+    avatar_url: null,
+    role,
+    joined_at: "2026-10-01T00:00:00Z",
+    disabled: false,
+  });
+  // Ada (u1, the viewer in `orgState`) plus an owner, an admin and a member.
+  let members: Row[];
+
+  function serveMembers(add: { status: number; body: unknown } = { status: 201, body: {} }) {
+    fake.routes["/api/org/members"] = (method, body) => {
+      if (method === "POST") {
+        if (add.status !== 201) return json(add.body, add.status);
+        const b = body as { github_login: string; role: string };
+        const created = row("u9", "Dan", b.github_login, b.role);
+        members.push(created);
+        return json(created, 201);
+      }
+      return json(members);
+    };
+  }
+  function visit(role: string, tweak: (rows: Row[]) => Row[] = (rows) => rows) {
+    members = [
+      row("u1", "Ada", "ada", role === "reader" ? "member" : role),
+      row("u2", "Olga", "olga", "owner"),
+      row("u3", "Abe", "abe", "admin"),
+      row("u4", "Meg", "meg", "member"),
+    ];
+    if (role === "reader") members = members.filter((m) => m.uid !== "u1");
+    members = tweak(members);
+    fake.state = orgState(role, role === "reader" ? { user: adminAda } : {});
+    serveMembers();
+    return mount("/members");
+  }
+  const rowOf = async (uid: string) => within(await screen.findByTestId(`member-${uid}`));
+  const roleOptions = (select: HTMLElement) =>
+    Array.from((select as HTMLSelectElement).options).map((o) => o.value);
+
+  it("an owner adds, re-roles and removes on every row (owner role included)", async () => {
+    visit("owner");
+    await screen.findByTestId("add-member");
+    const addRole = screen.getByLabelText("Role");
+    expect(roleOptions(addRole)).toEqual(["member", "admin", "owner"]);
+
+    const olga = await rowOf("u2");
+    expect(roleOptions(olga.getByRole("combobox", { name: "Role for Olga" }))).toEqual(["member", "admin", "owner"]);
+    expect(olga.getByRole("button", { name: "Remove" })).toBeInTheDocument();
+    for (const uid of ["u3", "u4"]) {
+      const r = await rowOf(uid);
+      expect(r.getByRole("combobox")).toBeInTheDocument();
+      expect(r.getByRole("button", { name: "Remove" })).toBeInTheDocument();
+    }
+    // Ada is not the last owner (Olga is one too), so she may leave.
+    expect(screen.getByRole("button", { name: "Leave organization" })).toBeInTheDocument();
+  });
+
+  it("an admin adds and acts on members and admins only (no owner option, no owner rows)", async () => {
+    visit("admin");
+    await screen.findByTestId("add-member");
+    expect(roleOptions(screen.getByLabelText("Role"))).toEqual(["member", "admin"]);
+
+    const olga = await rowOf("u2");
+    expect(olga.queryByRole("combobox")).toBeNull();
+    expect(olga.queryByRole("button", { name: "Remove" })).toBeNull();
+    expect(olga.getByText("owner")).toBeInTheDocument();
+
+    const meg = await rowOf("u4");
+    expect(roleOptions(meg.getByRole("combobox", { name: "Role for Meg" }))).toEqual(["member", "admin"]);
+    expect(meg.getByRole("button", { name: "Remove" })).toBeInTheDocument();
+  });
+
+  it("a member sees the list and Leave only", async () => {
+    visit("member");
+    await screen.findByTestId("member-list");
+    expect(screen.queryByTestId("add-member")).toBeNull();
+    expect(screen.queryAllByRole("combobox")).toHaveLength(0);
+    expect(screen.queryAllByRole("button", { name: "Remove" })).toHaveLength(0);
+    expect(screen.getByRole("button", { name: "Leave organization" })).toBeInTheDocument();
+  });
+
+  it("a reader sees the list only", async () => {
+    visit("reader");
+    const list = await screen.findByTestId("member-list");
+    expect(within(list).getAllByRole("listitem")).toHaveLength(3);
+    expect(screen.queryByTestId("add-member")).toBeNull();
+    expect(screen.queryAllByRole("combobox")).toHaveLength(0);
+    expect(screen.queryAllByRole("button", { name: "Remove" })).toHaveLength(0);
+    expect(screen.queryByRole("button", { name: "Leave organization" })).toBeNull();
+  });
+
+  it("hides Leave from the last owner", async () => {
+    visit("owner", (rows) => rows.map((m) => (m.uid === "u2" ? { ...m, role: "admin" } : m)));
+    await screen.findByTestId("member-u2");
+    expect(screen.queryByRole("button", { name: "Leave organization" })).toBeNull();
+  });
+
+  it("adds by GitHub username and role", async () => {
+    visit("admin");
+    const user = userEvent.setup();
+    await user.type(await screen.findByLabelText("GitHub username"), "@dan");
+    await user.selectOptions(screen.getByLabelText("Role"), "admin");
+    await user.click(screen.getByRole("button", { name: "Add member" }));
+    await screen.findByTestId("member-u9");
+    const post = fake.calls.find((c) => c.path === "/api/org/members" && c.method === "POST");
+    expect(post?.body).toEqual({ github_login: "@dan", role: "admin" });
+  });
+
+  it("shows no_such_user verbatim", async () => {
+    const words =
+      "No one with that GitHub username has signed in to WhyGraph yet. Ask them to sign in once, then add them.";
+    visit("owner");
+    serveMembers({ status: 404, body: { error: words, code: "no_such_user" } });
+    const user = userEvent.setup();
+    await user.type(await screen.findByLabelText("GitHub username"), "nobody");
+    await user.click(screen.getByRole("button", { name: "Add member" }));
+    expect(await screen.findByTestId("add-member-error")).toHaveTextContent(words);
+  });
+
+  it("changes a role with PATCH and removes with DELETE after a confirm", async () => {
+    visit("owner");
+    fake.routes["/api/org/members/u4"] = (method, body) =>
+      method === "DELETE"
+        ? new Response(null, { status: 204 })
+        : json({ ...members[3], role: (body as { role: string }).role });
+    const user = userEvent.setup();
+    const meg = await rowOf("u4");
+    await user.selectOptions(meg.getByRole("combobox", { name: "Role for Meg" }), "admin");
+    await waitFor(() =>
+      expect(fake.calls.find((c) => c.path === "/api/org/members/u4" && c.method === "PATCH")?.body).toEqual({
+        role: "admin",
+      }),
+    );
+    await user.click(meg.getByRole("button", { name: "Remove" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+    await waitFor(() =>
+      expect(fake.calls.some((c) => c.path === "/api/org/members/u4" && c.method === "DELETE")).toBe(true),
+    );
+  });
+
+  it("leaving goes to the base host's picker", async () => {
+    visit("member");
+    fake.routes["/api/org/membership"] = () => new Response(null, { status: 204 });
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Leave organization" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Leave organization" }));
+    await waitFor(() => expect(hard).toHaveBeenCalledWith(`${BASE}/orgs`));
+    expect(fake.calls.find((c) => c.path === "/api/org/membership")?.method).toBe("DELETE");
+  });
+
+  it("the sidebar has a Members item in production, for every role", async () => {
+    for (const role of ["member", "reader"]) {
+      fake.state = orgState(role, role === "reader" ? { user: adminAda } : {});
+      mount("/");
+      const nav = await screen.findByRole("navigation", { name: "Main" });
+      expect(await within(nav).findByRole("link", { name: "Members" })).toHaveAttribute("href", "/members");
+      document.body.innerHTML = "";
+    }
+  });
+});
+
+describe("local mode has no members", () => {
+  const local = { mode: "local", setup_complete: true, user: { uid: "u", display_name: "T", role: "owner" } };
+
+  it("shows no Members item in the sidebar", async () => {
+    fake.state = local;
+    mount("/");
+    await screen.findByText("Project alpha");
+    const nav = screen.getByRole("navigation", { name: "Main" });
+    expect(within(nav).getByRole("link", { name: "Settings" })).toBeInTheDocument();
+    expect(within(nav).queryByRole("link", { name: "Members" })).toBeNull();
+  });
+
+  it("/members is not a page", async () => {
+    fake.state = local;
+    mount("/members");
+    await screen.findByRole("heading", { name: "Page not found" });
+    expect(screen.queryByTestId("member-list")).toBeNull();
+    expect(fake.calls.some((c) => c.path === "/api/org/members")).toBe(false);
+  });
+});
+
+// ---- account, admin and org settings (M2d-1) ------------------------------------------
+
+describe("account page", () => {
+  const account = (over: Record<string, unknown>) => ({
+    uid: "u1",
+    email: null,
+    display_name: "Ada",
+    is_instance_admin: false,
+    github_login: "ada",
+    avatar_url: "https://avatars.example/ada.png",
+    has_password: false,
+    ...over,
+  });
+
+  it("shows the GitHub login and avatar, and no password section for a GitHub account", async () => {
+    fake.routes["/api/account"] = () => json(account({}));
+    mount("/account");
+    expect(await screen.findByTestId("account-identity")).toHaveTextContent("@ada");
+    expect(document.querySelector('img[src="https://avatars.example/ada.png"]')).not.toBeNull();
+    expect(screen.queryByRole("heading", { name: "Change password" })).toBeNull();
+    expect(screen.queryByLabelText("Current password")).toBeNull();
+  });
+
+  it("keeps the password section for a password account", async () => {
+    fake.routes["/api/account"] = () =>
+      json(account({ email: "ada@example.com", github_login: null, avatar_url: null, has_password: true }));
+    mount("/account");
+    expect(await screen.findByTestId("account-identity")).toHaveTextContent("ada@example.com");
+    expect(await screen.findByRole("heading", { name: "Change password" })).toBeInTheDocument();
+  });
+});
+
+describe("admin page", () => {
+  const user = (over: Record<string, unknown>) => ({
+    uid: "u2",
+    email: null,
+    display_name: "Ben",
+    is_instance_admin: false,
+    github_login: "ben",
+    has_password: false,
+    disabled: false,
+    created_at: "2026-10-01T00:00:00Z",
+    org_count: 1,
+    ...over,
+  });
+  let users: ReturnType<typeof user>[];
+
+  beforeEach(() => {
+    fake.state = baseState({ user: adminAda });
+    users = [
+      user({ uid: "u1", email: "ada@example.com", display_name: "Ada", github_login: null, has_password: true, is_instance_admin: true }),
+      user({}),
+    ];
+    fake.routes["/api/admin/settings"] = () => json({ base_url: BASE, base_check: [] });
+    fake.routes["/api/admin/orgs"] = () => json([]);
+    fake.routes["/api/admin/users"] = () => json(users);
+    fake.routes["/api/admin/users/u2"] = (_method, body) => {
+      users = users.map((u) => (u.uid === "u2" ? { ...u, ...(body as object) } : u));
+      return json(users[1]);
+    };
+  });
+
+  it("lists @login or email by uid, reset links only for password accounts", async () => {
+    mount("/admin");
+    const ben = within(await screen.findByTestId("admin-user-u2"));
+    expect(ben.getByText("@ben")).toBeInTheDocument();
+    expect(ben.queryByRole("button", { name: "Copy reset link" })).toBeNull();
+    const ada = within(screen.getByTestId("admin-user-u1"));
+    expect(ada.getByText("ada@example.com")).toBeInTheDocument();
+    expect(ada.getByRole("button", { name: "Copy reset link" })).toBeInTheDocument();
+    // Your own account cannot be disabled from here.
+    expect(ada.queryByRole("button", { name: "Disable" })).toBeNull();
+  });
+
+  it("disables and enables an account", async () => {
+    mount("/admin");
+    const u = userEvent.setup();
+    const ben = within(await screen.findByTestId("admin-user-u2"));
+    await u.click(ben.getByRole("button", { name: "Disable" }));
+    await waitFor(() =>
+      expect(fake.calls.find((c) => c.path === "/api/admin/users/u2")?.body).toEqual({ disabled: true }),
+    );
+    expect(await ben.findByText("disabled")).toBeInTheDocument();
+    await u.click(ben.getByRole("button", { name: "Enable" }));
+    await waitFor(() =>
+      expect(fake.calls.filter((c) => c.path === "/api/admin/users/u2").at(-1)?.body).toEqual({ disabled: false }),
+    );
+  });
+});
+
+describe("org settings page", () => {
+  const noKey = { set: false, hint: null };
+  beforeEach(() => {
+    fake.routes["/api/portal/defaults"] = () =>
+      json({
+        config: {},
+        secrets: { llm: { anthropic: noKey, openai: noKey, deepseek: noKey, openrouter: noKey }, github_token: noKey },
+        no_provider_key: false,
+      });
+  });
+
+  it("is editable for an owner", async () => {
+    fake.state = orgState("owner");
+    mount("/settings");
+    await screen.findByTestId("config-form");
+    expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument();
+    expect(screen.queryByTestId("settings-owner-only")).toBeNull();
+  });
+
+  it("is read-only for an admin (org.configure is owner-only)", async () => {
+    fake.state = orgState("admin");
+    mount("/settings");
+    await screen.findByTestId("config-form");
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+    expect(screen.getByTestId("settings-owner-only")).toBeInTheDocument();
   });
 });

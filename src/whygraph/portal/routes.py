@@ -33,6 +33,7 @@ import json
 import os
 import secrets as secrets_mod
 import shutil
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError
@@ -85,7 +86,8 @@ from whygraph.services.git import (
 )
 from whygraph.services.github import GitHubError, RepoAccessError, check_repo_access
 
-from .authz import Action, OrgAccess, Role
+from . import sessions
+from .authz import Action, OrgAccess, Role, authorize
 from .config_layers import ConfigPolicyError, find_secret_paths, load_layer, save_layer
 from .context import build_project_context, resolve_root
 from .db import get_session
@@ -668,6 +670,9 @@ def get_state(request: Request) -> dict:
         if body["user"] is not None:
             body["user"]["email"] = principal.email
             body["user"]["is_instance_admin"] = principal.is_instance_admin
+            body["user"]["github_login"] = principal.github_login
+            body["user"]["avatar_url"] = principal.avatar_url
+            body["user"]["has_password"] = principal.has_password
     return body
 
 
@@ -1504,6 +1509,43 @@ def list_scans(
         }
 
 
+def _stream_access(
+    request: Request, project: BoundProject
+) -> Callable[[], bool] | None:
+    """The re-check an open scan-event stream runs (production), or ``None``.
+
+    Built from the request's own session cookie and org, so each call
+    re-runs :func:`~whygraph.portal.sessions.lookup` (sign-out, expiry,
+    disabling) and :func:`load_org_access` (removal, demotion of an
+    instance admin) - each in its own database session - and requires
+    ``PROJECT_READ`` on ``project`` through
+    :func:`~whygraph.portal.authz.authorize`. Local mode has one user and
+    never re-checks.
+    """
+    if portal_state(request).mode != "production":
+        return None
+    tokens = sessions.session_cookies(request.headers.getlist("cookie"))
+    token = tokens[0] if len(tokens) == 1 else ""
+    org_slug = request.scope.get("state", {}).get("org_slug")
+
+    def still_allowed() -> bool:
+        row = sessions.lookup(token)
+        if row is None or org_slug is None:
+            return False
+        access = load_org_access(
+            row.user_id, org_slug, instance_admin=row.is_instance_admin
+        )
+        if access is None:
+            return False
+        try:
+            authorize(access, Action.PROJECT_READ, project)
+        except ApiError:
+            return False
+        return True
+
+    return still_allowed
+
+
 @projects_router.get("/{slug}/scans/{run_id}/events")
 async def scan_events(
     run_id: int,
@@ -1522,7 +1564,11 @@ async def scan_events(
     offset = int(last) if last.isascii() and last.isdigit() else 0
     try:
         return await state.runner.events(
-            project, run_id, shutdown=state.shutdown_event, offset=offset
+            project,
+            run_id,
+            shutdown=state.shutdown_event,
+            offset=offset,
+            still_allowed=_stream_access(request, project),
         )
     except RunNotFound as exc:
         raise ApiError(404, f"run {run_id} not found") from exc

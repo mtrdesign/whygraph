@@ -44,6 +44,7 @@ from test_portal_app import (  # noqa: F401 -- `env`, `production_env` are fixtu
     NON_ORG_ACTIONS,
     NON_ORG_ROUTES,
     PORT,
+    PRODUCTION_ORG_ROUTES,
     PUBLIC_API_ROUTES,
     ROUTE_ACTIONS,
     _git,
@@ -66,7 +67,7 @@ from whygraph.portal import runner as runner_mod
 from whygraph.portal.app import create_portal_app
 from whygraph.portal.authz import ROLE_ACTIONS as ROLE_TABLE
 from whygraph.portal.authz import Role
-from whygraph.portal.models import Project, ScanRun, Setting, User
+from whygraph.portal.models import Membership, Project, ScanRun, Setting, User
 from whygraph.portal.orgs import add_member, create_org
 from whygraph.serve import chat as serve_chat
 from whygraph.services.llm import LlmError
@@ -98,6 +99,7 @@ class OrgWorld:
     run_id: int = 0
     session_id: int = 0
     secrets: dict[str, str] = field(default_factory=dict)  # label -> value
+    owner_uid: str = ""  # the owner's users.uid (production's members routes)
 
     @property
     def name(self) -> str:
@@ -508,7 +510,10 @@ def _org_scoped_routes(app) -> list[tuple[str, str]]:  # noqa: ANN001
     """``(method, path)`` of every org-scoped ``/api`` route.
 
     The public routes and the ones that name no org (``user.self`` /
-    ``instance.admin``, M2c plan section 4.7) are left out.
+    ``instance.admin``, M2c plan section 4.7) are left out. The
+    production-only members routes are in: the production sweeps of
+    ``test_portal_hosts_isolation.py`` cover them, and the local ones skip
+    them (:data:`LOCAL_API_ROUTES`).
     """
     found = set()
     for rc in iter_route_contexts(app.routes):
@@ -533,12 +538,21 @@ def _collect_routes() -> list[tuple[str, str]]:
 
 API_ROUTES = _collect_routes()
 
+LOCAL_API_ROUTES = [
+    (method, path)
+    for method, path in API_ROUTES
+    if (path, method) not in PRODUCTION_ORG_ROUTES
+]
+"""The org-scoped routes local mode serves: the members routes are ``404``
+there by design (M2d-1 plan section 0.2 #19)."""
+
 PATH_PARAMS: dict[str, Callable[[OrgWorld], str]] = {
     "{slug}": lambda o: "api",
     "{run_id}": lambda o: str(o.run_id),
     "{sha}": lambda o: o.marker_sha,
     "{number}": lambda o: "1",
     "{session_id}": lambda o: str(o.session_id),
+    "{uid}": lambda o: o.owner_uid,
 }
 """How to fill each path parameter for an org; an unmapped one fails the sweep."""
 
@@ -592,6 +606,39 @@ def _qn(o: OrgWorld) -> dict:
     return {"qualified_name": o.qualified_name}
 
 
+def _newcomer(o: OrgWorld) -> str:
+    """A GitHub account in no org, inserted directly once; its login."""
+    login = f"{o.mark}-newcomer"
+    with portal_db.get_session() as session:
+        exists = session.exec(select(User.id).where(User.github_login == login))
+        if exists.first() is None:
+            session.add(
+                User(
+                    display_name=login,
+                    github_id=sum(map(ord, login)) + 900_000,
+                    github_login=login,
+                )
+            )
+    return login
+
+
+def _members_check(body: list, w: World, o: OrgWorld) -> None:
+    owners = [m["uid"] for m in body if m["role"] == "owner"]
+    assert owners == [o.owner_uid]
+    assert all("email" not in m for m in body)
+
+
+def _added_check(body: dict, w: World, o: OrgWorld) -> None:
+    assert (body["github_login"], body["role"]) == (f"{o.mark}-newcomer", "member")
+    with portal_db.get_session() as session:
+        user_id = session.exec(select(User.id).where(User.uid == body["uid"])).one()
+        assert session.get(Membership, (o.org_id, user_id)).role == "member"
+
+
+def _owner_kept_check(body: dict, w: World, o: OrgWorld) -> None:
+    assert (body["uid"], body["role"]) == (o.owner_uid, "owner")
+
+
 ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     # Portal level
     ("GET", "/api/portal/repos"): Call(200, check=_repos_check, discovery=True),
@@ -607,6 +654,19 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         shows=lambda o: [o.model, o.hint("anthropic")],
     ),
     ("GET", "/api/projects"): Call(200, check=_projects_check),
+    # Production's members page (swept on org hosts only, over prod_world)
+    ("GET", "/api/org/members"): Call(200, check=_members_check),
+    ("POST", "/api/org/members"): Call(
+        201,
+        body=lambda w, o: {"github_login": _newcomer(o), "role": "member"},
+        shows=lambda o: [f"{o.mark}-newcomer"],
+        check=_added_check,
+    ),
+    ("PATCH", "/api/org/members/{uid}"): Call(
+        200, body=lambda w, o: {"role": "owner"}, check=_owner_kept_check
+    ),
+    ("DELETE", "/api/org/members/{uid}"): Call(409, shows=lambda o: ["last_owner"]),
+    ("DELETE", "/api/org/membership"): Call(409, shows=lambda o: ["last_owner"]),
     ("POST", "/api/projects"): Call(
         201,
         body=lambda w, o: {
@@ -736,10 +796,15 @@ def test_the_sweep_covers_every_live_route(two_orgs: World) -> None:
     assert set(ROUTE_REQUESTS) == set(API_ROUTES)
     org_scoped = {(m, p) for (p, m) in ROUTE_ACTIONS if (p, m) not in NON_ORG_ROUTES}
     assert org_scoped == set(API_ROUTES)
+    production_org = {(m, p) for (p, m) in PRODUCTION_ORG_ROUTES}
+    assert production_org <= set(API_ROUTES)
+    assert set(LOCAL_API_ROUTES) == set(API_ROUTES) - production_org
 
 
 @pytest.mark.parametrize(
-    ("method", "path"), API_ROUTES, ids=[f"{m} {p}" for m, p in API_ROUTES]
+    ("method", "path"),
+    LOCAL_API_ROUTES,
+    ids=[f"{m} {p}" for m, p in LOCAL_API_ROUTES],
 )
 def test_every_org_scoped_route_is_isolated(
     two_orgs: World, method: str, path: str
@@ -983,16 +1048,33 @@ def test_the_port_report_is_scoped_to_the_org(two_orgs: World) -> None:
 # ---------------------------------------------------------------------------
 
 MEMBER_ACTIONS = {str(a) for a in ROLE_TABLE[Role.MEMBER]}
+ADMIN_ACTIONS = {str(a) for a in ROLE_TABLE[Role.ADMIN]}
+_LOCAL_ROUTE_ACTIONS = {
+    (m, p): action
+    for (p, m), action in ROUTE_ACTIONS.items()
+    if action not in NON_ORG_ACTIONS and (p, m) not in PRODUCTION_ORG_ROUTES
+}
+"""Local mode's org-scoped routes and their actions (the members routes are
+production-only; their role matrix is ``test_portal_members.py``)."""
 ADMIN_ROUTES = sorted(
     (
-        (m, p)
-        for (p, m), action in ROUTE_ACTIONS.items()
-        if action not in MEMBER_ACTIONS and action not in NON_ORG_ACTIONS
+        route
+        for route, action in _LOCAL_ROUTE_ACTIONS.items()
+        if action in ADMIN_ACTIONS - MEMBER_ACTIONS
     ),
     key=lambda route: (route[0] == "DELETE", route[1], route[0]),  # DELETE last
 )
+OWNER_ROUTES = sorted(
+    route
+    for route, action in _LOCAL_ROUTE_ACTIONS.items()
+    if action not in ADMIN_ACTIONS
+)
 MEMBER_ROUTES = sorted(
-    ((m, p) for (p, m), action in ROUTE_ACTIONS.items() if action in MEMBER_ACTIONS),
+    (
+        route
+        for route, action in _LOCAL_ROUTE_ACTIONS.items()
+        if action in MEMBER_ACTIONS
+    ),
     key=lambda route: (route[0] == "DELETE", route[1], route[0]),
 )
 
@@ -1019,8 +1101,9 @@ def context_calls(two_orgs: World, monkeypatch: pytest.MonkeyPatch) -> list[int]
 
 
 def test_the_admin_routes_are_the_planned_ones() -> None:
+    # Org settings and org-level keys are the owner's (M2d-1 plan section 0.1).
+    assert OWNER_ROUTES == [("PUT", "/api/portal/defaults")]
     assert set(ADMIN_ROUTES) == {
-        ("PUT", "/api/portal/defaults"),
         ("POST", "/api/projects"),
         ("POST", "/api/portal/check-path"),
         ("PATCH", "/api/projects/{slug}"),
@@ -1034,7 +1117,7 @@ def test_a_member_is_refused_every_admin_action_before_any_context(
     two_orgs: World, context_calls: list[int]
 ) -> None:
     w = two_orgs
-    for method, path in ADMIN_ROUTES:
+    for method, path in OWNER_ROUTES + ADMIN_ROUTES:
         spec = ROUTE_REQUESTS[(method, path)]
         response = w.client.request(
             method,
@@ -1050,7 +1133,24 @@ def test_a_member_is_refused_every_admin_action_before_any_context(
             "action": action,
         }
         assert context_calls == [], (method, path)  # no secret was decrypted
-    # The admin passes every one of them, in the same order (DELETE last).
+    # The admin is refused the owner's routes the same way.
+    for method, path in OWNER_ROUTES:
+        spec = ROUTE_REQUESTS[(method, path)]
+        response = w.client.request(
+            method,
+            _url(path, w.local),
+            json=spec.body(w, w.local) if spec.body else None,
+            headers=w.as_("dave", "local"),
+        )
+        action = ROUTE_ACTIONS[(path, method)]
+        assert response.status_code == 403, (method, path, response.text)
+        assert response.json() == {
+            "error": f"your role (admin) cannot {action}",
+            "code": "forbidden",
+            "action": action,
+        }
+    assert context_calls == []
+    # The admin passes every admin route, in the same order (DELETE last).
     for method, path in ADMIN_ROUTES:
         spec = ROUTE_REQUESTS[(method, path)]
         if path == "/api/projects":  # carol's body made the repo; nothing registered it
@@ -1221,7 +1321,10 @@ def test_nothing_answers_signed_out_in_production(
         bravo = at("bravo")
         # Signed out: every org route is a 401, MCP and setup do not exist.
         for method, path in API_ROUTES:
-            url = _url(path, SimpleNamespace(run_id=1, marker_sha="abc", session_id=1))
+            org = SimpleNamespace(
+                run_id=1, marker_sha="abc", session_id=1, owner_uid="x"
+            )
+            url = _url(path, org)
             response = client.request(method, bravo + url)
             assert response.status_code == 401, (method, path, response.text)
             assert response.json() == LOGIN_REQUIRED, (method, path)

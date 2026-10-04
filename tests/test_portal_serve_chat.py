@@ -24,12 +24,17 @@ from types import SimpleNamespace
 from typing import Iterator
 
 import pytest
+from sqlmodel import select
 
 from test_portal_app import env  # noqa: F401 -- `env` is a fixture
 from test_portal_serve_api import ScopedClient, portal_with_project, use_project_config
 from whygraph.chat.harness import RoundLimit, ToolCallStarted, ToolResultReady
 from whygraph.core.config import ChatConfig, Config, LlmConfig, OpenAIConfig
 from whygraph.core.context import use_project
+from whygraph.db import get_session as project_session
+from whygraph.db.models import ChatSession as ChatSessionRow
+from whygraph.portal import db as portal_db
+from whygraph.portal.models import User
 from whygraph.serve import chat as serve_chat
 from whygraph.services.llm.chat import ModelInfo, TextDelta, ToolCall, TurnDone
 from whygraph.services.llm.exceptions import LlmError
@@ -215,6 +220,52 @@ def test_unknown_session_is_404_everywhere(chat_client) -> None:
             "/api/chat/sessions/999/messages", json={"content": "hi"}
         ).status_code
         == 404
+    )
+
+
+def test_local_mode_writes_the_owner_but_filters_nothing(chat_client) -> None:
+    """M2d-1 plan section 4.7: one user, so the list and the routes see every row."""
+    created = _new_session(chat_client, title="mine")
+    assert set(created) == {
+        "id",
+        "title",
+        "provider",
+        "model",
+        "created_at",
+        "updated_at",
+        "message_count",
+    }
+    with portal_db.get_session() as session:
+        (local_uid,) = session.exec(select(User.uid)).all()
+    with use_project(chat_client.context()), project_session() as session:
+        assert session.get(ChatSessionRow, created["id"]).owner_uid == local_uid
+        # A pre-M2d-1 row and one recorded for someone else stay visible.
+        for title, owner, when in (
+            ("ownerless", None, "2000-01-02T00:00:00+00:00"),
+            ("foreign", "someone-else", "2000-01-01T00:00:00+00:00"),
+        ):
+            session.add(
+                ChatSessionRow(
+                    title=title,
+                    provider="openai",
+                    model="gpt-4o",
+                    created_at=when,
+                    updated_at=when,
+                    owner_uid=owner,
+                )
+            )
+        session.commit()
+
+    listed = chat_client.get("/api/chat/sessions").json()
+    assert [s["title"] for s in listed] == ["mine", "ownerless", "foreign"]
+    assert all(set(s) == set(created) for s in listed)
+    for row in listed:
+        url = f"/api/chat/sessions/{row['id']}"
+        assert chat_client.get(url).status_code == 200
+        renamed = chat_client.patch(url, json={"title": f"{row['title']} 2"})
+        assert renamed.status_code == 200
+    assert (
+        chat_client.delete(f"/api/chat/sessions/{listed[1]['id']}").status_code == 204
     )
 
 

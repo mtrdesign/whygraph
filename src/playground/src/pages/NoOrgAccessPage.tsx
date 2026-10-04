@@ -1,6 +1,6 @@
 import { AuthLayout } from "../components/auth/AuthLayout";
 import { Button } from "../components/ui/button";
-import { usePortalState, useSignOut } from "../lib/identity";
+import { signedInAs, usePortalState, useSignOut } from "../lib/identity";
 
 /** Signed in on an org host the account has no membership in. */
 export function NoOrgAccessPage() {
@@ -12,7 +12,7 @@ export function NoOrgAccessPage() {
       title="No access to this organization"
       description={
         <>
-          You are signed in as <strong>{state.data?.user?.email ?? state.data?.user?.display_name}</strong>,
+          You are signed in as <strong>{signedInAs(state.data?.user)}</strong>,
           but that account is not a member of this organization.
         </>
       }

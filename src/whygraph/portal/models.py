@@ -32,6 +32,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     Column,
@@ -43,6 +44,7 @@ from sqlalchemy import (
     UniqueConstraint,
     event,
     inspect,
+    text,
 )
 from sqlalchemy.orm import registry
 from sqlmodel import Field, SQLModel
@@ -228,10 +230,22 @@ class User(PortalBase, table=True):
         May use the instance admin page and read every org (M2c).
     password_changed_at : str or None
         ISO-8601 UTC timestamp of the last password change.
+    github_id : int or None
+        The GitHub numeric user id - the identity of a GitHub account
+        (M2d-1); ``NULL`` for password accounts and local mode's user.
+    github_login : str or None
+        The GitHub username, for display and lookup; unique
+        case-insensitively. Refreshed on every sign-in.
+    avatar_url : str or None
+        From GitHub's profile; refreshed on sign-in.
+    disabled_at : str or None
+        ISO-8601 UTC timestamp when an instance admin disabled the
+        account; ``NULL`` means active.
 
     Notes
     -----
-    A user's role lives in :class:`Membership`, per organization.
+    A user holds a password **or** a GitHub id, never both
+    (``ck_users_one_credential``). A user's role lives in :class:`Membership`, per organization.
     """
 
     __tablename__ = "users"
@@ -239,6 +253,20 @@ class User(PortalBase, table=True):
         UniqueConstraint("uid", name="uq_users_uid"),
         UniqueConstraint("email", name="uq_users_email"),
         CheckConstraint("email = lower(email)", name="ck_users_email_lower"),
+        UniqueConstraint("github_id", name="uq_users_github_id"),
+        Index(
+            "uq_users_github_login_lower",
+            text("lower(github_login)"),
+            unique=True,
+        ),
+        CheckConstraint(
+            "NOT (password_hash IS NOT NULL AND github_id IS NOT NULL)",
+            name="ck_users_one_credential",
+        ),
+        CheckConstraint(
+            "github_login IS NULL OR github_id IS NOT NULL",
+            name="ck_users_login_needs_id",
+        ),
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -248,6 +276,10 @@ class User(PortalBase, table=True):
     password_hash: str | None = Field(default=None, sa_type=Text)
     is_instance_admin: bool = Field(default=False)
     password_changed_at: str | None = Field(default=None, sa_type=Text)
+    github_id: int | None = Field(default=None, sa_type=BigInteger)
+    github_login: str | None = Field(default=None, sa_type=Text)
+    avatar_url: str | None = Field(default=None, sa_type=Text)
+    disabled_at: str | None = Field(default=None, sa_type=Text)
     created_at: str = Field(default_factory=_now, sa_type=Text)
 
 

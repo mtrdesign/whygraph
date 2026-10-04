@@ -113,6 +113,7 @@ export function CommandPalette({ slug }: { slug?: string }) {
         { label: "Projects", run: () => navigate({ to: "/" }) },
         ...(production ? [] : [{ label: "Add project", run: () => navigate({ to: "/projects/new" }) }]),
         { label: "Settings", run: () => navigate({ to: "/settings" }) },
+        ...(production ? [{ label: "Members", run: () => navigate({ to: "/members" }) }] : []),
       ];
   const shownPages = pages.filter((p) => match(p.label));
   const shownProjects = (projects.data?.projects ?? []).filter(

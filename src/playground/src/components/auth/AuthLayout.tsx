@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { NetworkIcon } from "lucide-react";
 
-/** The centred card the sign-in, register, bootstrap and reset pages share. */
+/** The centred card the sign-in, GitHub callback, bootstrap and reset pages share. */
 export function AuthLayout({
   title,
   description,

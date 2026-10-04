@@ -1,7 +1,7 @@
 import { Link, useSearch } from "@tanstack/react-router";
 import { AuthLayout } from "../components/auth/AuthLayout";
 import { Button } from "../components/ui/button";
-import { usePortalState } from "../lib/identity";
+import { signedInAs, usePortalState } from "../lib/identity";
 
 /**
  * Signed in on `/signin` with a `next`: the address you came from did not receive
@@ -11,7 +11,7 @@ import { usePortalState } from "../lib/identity";
 export function SessionNotReceivedPage() {
   const { next } = useSearch({ strict: false }) as { next?: string };
   const state = usePortalState();
-  const who = state.data?.user?.email ?? state.data?.user?.display_name ?? "your account";
+  const who = signedInAs(state.data?.user) ?? "your account";
   let host = next ?? "";
   try {
     host = new URL(next ?? "").host;

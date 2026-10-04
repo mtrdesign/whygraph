@@ -34,13 +34,18 @@ PROD_NAME=whygraph-portal-smoke-prod
 PROD_PORT=${SMOKE_PROD_PORT:-8798}
 PROD_BASE="http://whygraph.localhost:$PROD_PORT"
 PROD_ORG="http://acme.whygraph.localhost:$PROD_PORT"
+# The fake GitHub (tests/github_fake.py) runs in the portal container's network
+# namespace, so the portal and the host-side curl both reach it on loopback.
+FAKE_PORT=${SMOKE_GITHUB_PORT:-18767}
+FAKE="http://127.0.0.1:$FAKE_PORT"
+FAKE_PY=$(cd -- "$(dirname -- "$0")/.." && pwd -P)/tests/github_fake.py
 
 step=""
 passed=0
 cleanup() {
     code=$?
     [ ! -x "$wg" ] || "$wg" down >/dev/null 2>&1 || true
-    docker rm -f "$PROD_NAME" "$PROD_NAME-postgres" >/dev/null 2>&1 || true
+    docker rm -f "$PROD_NAME-github" "$PROD_NAME" "$PROD_NAME-postgres" >/dev/null 2>&1 || true
     docker network rm "$PROD_NAME" >/dev/null 2>&1 || true
     rm -rf "$S"
     if [ "$code" -ne 0 ]; then
@@ -189,11 +194,22 @@ pg_ready() {
     return 1
 }
 check "production postgres is healthy" pg_ready
+printf 'smoke-client-secret\n' > "$S/github-secret"
+chmod 644 "$S/github-secret"
 docker run -d --name "$PROD_NAME" --network "$PROD_NAME" --init \
-    -p "127.0.0.1:$PROD_PORT:8765" \
+    -p "127.0.0.1:$PROD_PORT:8765" -p "127.0.0.1:$FAKE_PORT:$FAKE_PORT" \
+    -v "$S/github-secret:/run/secrets/github-oauth-secret:ro" \
     -e WHYGRAPH_MODE=production -e "WHYGRAPH_BASE_URL=$PROD_BASE" \
+    -e WHYGRAPH_GITHUB_OAUTH_CLIENT_ID=smoke-client \
+    -e WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE=/run/secrets/github-oauth-secret \
+    -e "WHYGRAPH_GITHUB_URL=$FAKE" -e "WHYGRAPH_GITHUB_API_URL=$FAKE/api/v3" \
     -e "WHYGRAPH_DATABASE_URL=postgresql+psycopg://whygraph:smoke-prod@postgres:5432/whygraph" \
     "$IMAGE" whygraph portal --host 0.0.0.0 --port 8765 >/dev/null
+docker run -d --name "$PROD_NAME-github" --network "container:$PROD_NAME" \
+    -v "$FAKE_PY:/fake.py:ro" -v "$S/github-secret:/run/secrets/github-oauth-secret:ro" \
+    "$IMAGE" python /fake.py --host 0.0.0.0 --port "$FAKE_PORT" \
+    --client-id smoke-client --client-secret-file /run/secrets/github-oauth-secret \
+    --redirect-uri "$PROD_BASE/auth/github" >/dev/null
 jar="$S/prod.jar"
 # Real URLs (curl >= 7.85 resolves *.localhost) so the cookie jar matches hosts.
 pcode() { m=$1 u=$2; shift 2; curl -sS -o "$S/last-body" -w '%{http_code}' -X "$m" -H "$H" -H 'Content-Type: application/json' "$u" "$@"; }
@@ -220,3 +236,27 @@ check "state on the org host names acme" \
     test "$(pget "$PROD_ORG/api/portal/state" -b "$jar" | json 'd["host_kind"] + " " + str(d["org"]["slug"])')" = "org acme"
 check "/mcp does not exist in production" test "$(pcode GET "$PROD_ORG/mcp/x" -b "$jar")" = 404
 check "no cookie: the org API answers 401" test "$(pcode GET "$PROD_ORG/api/projects")" = 401
+
+echo "== GitHub sign-in"
+fake_up() {
+    i=0
+    while [ $i -lt 30 ]; do
+        curl -sS -o /dev/null "$FAKE/login/oauth/authorize" 2>/dev/null && return 0
+        i=$((i + 1)); sleep 1
+    done
+    return 1
+}
+check "the fake GitHub answers" fake_up
+bjar="$S/ben.jar"
+start_body=$(curl -sS -X POST -H "$H" -H 'Content-Type: application/json' -c "$bjar" -d '{}' "$PROD_BASE/api/auth/github/start")
+printf '%s' "$start_body" > "$S/last-body"
+authorize_url=$(printf '%s' "$start_body" | json 'd["authorize_url"]')
+check "start returns an authorize URL on the fake" sh -c "case '$authorize_url' in $FAKE/login/oauth/authorize?*) exit 0 ;; *) exit 1 ;; esac"
+location=$(curl -sS -o /dev/null -D - "$authorize_url&login=ben" | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')
+cb_body=$(printf '%s' "$location" | python3 -c "import json,sys; from urllib.parse import urlsplit, parse_qs; q=parse_qs(urlsplit(sys.stdin.read().strip()).query); print(json.dumps({'code': q['code'][0], 'state': q['state'][0]}))")
+check "the callback signs Ben in" is2xx "$(pcode POST "$PROD_BASE/api/auth/github/callback" -b "$bjar" -c "$bjar" -d "$cb_body")"
+check "Ben's session names his GitHub login" \
+    test "$(pget "$PROD_BASE/api/account" -b "$bjar" | json 'd["github_login"]')" = ben
+check "password registration is gone (404 even signed in)" test "$(pcode POST "$PROD_BASE/api/auth/register" -b "$bjar" -d '{"email":"x@example.com","display_name":"X","password":"correct horse battery staple 42"}')" = 404
+check "acme lists exactly one owner" \
+    test "$(pget "$PROD_ORG/api/org/members" -b "$jar" | json '" ".join(m["role"] for m in d)')" = owner

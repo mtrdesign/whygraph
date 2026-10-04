@@ -126,7 +126,7 @@ database, and migrates it.
 
 | Exit code | When |
 |---|---|
-| `2` | `WHYGRAPH_DATABASE_URL` is unset or not a Postgres URL, or the password file cannot be read; another portal already holds the data directory; a refused `--host`; a refused production start (an invalid `WHYGRAPH_BASE_URL` or `WHYGRAPH_TRUSTED_PROXIES`, or shared folders set), with the reason on stderr |
+| `2` | `WHYGRAPH_DATABASE_URL` is unset or not a Postgres URL, or the password file cannot be read; another portal already holds the data directory; a refused `--host`; a refused production start (an invalid `WHYGRAPH_BASE_URL` or `WHYGRAPH_TRUSTED_PROXIES`, shared folders set, or a missing or invalid GitHub sign-in setting: no `WHYGRAPH_GITHUB_OAUTH_CLIENT_ID`, an unreadable or empty `WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE`, or a bad `WHYGRAPH_GITHUB_URL` / `WHYGRAPH_GITHUB_API_URL`), with the reason on stderr |
 | `3` | The database stayed unreachable through the start-up wait. Under the shim, Docker's restart policy retries with back-off. |
 
 The portal is a single process. It holds an exclusive lock on its data directory, so a second
@@ -141,8 +141,10 @@ a transaction-mode pooler such as PgBouncer's makes the lock meaningless. In loc
 are rejected. `WHYGRAPH_DEV_ORIGINS` (comma-separated origins, e.g. `http://localhost:5173`) adds
 origins for a local frontend dev server.
 
-Three more variables select [production mode](../deploy/production.md) - `WHYGRAPH_MODE`,
-`WHYGRAPH_BASE_URL` and `WHYGRAPH_TRUSTED_PROXIES`; see
+Five more variables select and shape [production mode](../deploy/production.md) - `WHYGRAPH_MODE`,
+`WHYGRAPH_BASE_URL` and `WHYGRAPH_TRUSTED_PROXIES`, plus the two required GitHub sign-in ones,
+`WHYGRAPH_GITHUB_OAUTH_CLIENT_ID` and `WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE` (two optional ones
+point at GitHub Enterprise Server); see
 [Configuration](configuration.md#environment-variables). In production the `Host` is the base host or
 an organization's subdomain, and the guard described above is replaced by the one on the
 [security model](../portal/security.md#production-mode) page.

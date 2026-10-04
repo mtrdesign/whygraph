@@ -11,6 +11,7 @@ import {
   NetworkIcon,
   SearchIcon,
   SlidersHorizontalIcon,
+  UsersIcon,
 } from "lucide-react";
 import { portalApi, portalKey } from "../../api";
 import { baseHostOf, isProduction, useSignOut } from "../../lib/identity";
@@ -28,9 +29,10 @@ import {
 } from "../ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 
-// The app-shell sidebar (§4.12.4). Two scopes: portal (Projects, Settings) and
-// project (Overview, Explorer, Chat, Scans, Settings), with the project switcher
-// on top and ⌘K / theme / user / version at the bottom.
+// The app-shell sidebar (§4.12.4). Two scopes: portal (Projects, Settings, and
+// Members in production) and project (Overview, Explorer, Chat, Scans,
+// Settings), with the project switcher on top and ⌘K / theme / user / version
+// at the bottom.
 
 interface NavItem {
   label: string;
@@ -87,6 +89,9 @@ const PORTAL_ITEMS: NavItem[] = [
   { label: "Projects", icon: LayoutGridIcon, to: "/", exact: true },
   { label: "Settings", icon: SlidersHorizontalIcon, to: "/settings" },
 ];
+
+// Production only (M2d-1), for every role: a reader and a member can read the list.
+const MEMBERS_ITEM: NavItem = { label: "Members", icon: UsersIcon, to: "/members" };
 
 function ProjectSwitcher({ slug, name }: { slug?: string; name?: string }) {
   const navigate = useNavigate();
@@ -178,7 +183,7 @@ export function Sidebar({ slug, projectName }: { slug?: string; projectName?: st
           </>
         ) : (
           <Section title="Portal">
-            {PORTAL_ITEMS.map((item) => (
+            {(production ? [...PORTAL_ITEMS, MEMBERS_ITEM] : PORTAL_ITEMS).map((item) => (
               <NavLink key={item.label} item={item} />
             ))}
           </Section>

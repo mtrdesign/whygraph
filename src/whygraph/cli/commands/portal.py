@@ -27,6 +27,7 @@ as soon as shutdown begins, so they cannot hold up a stop.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -91,6 +92,7 @@ def portal_cmd(host: str, port: int, data_dir: Path | None, dev_expose: bool) ->
     import uvicorn
 
     from whygraph.portal import db as portal_db
+    from whygraph.portal.github_auth import AccessLogRedactor
     from whygraph.portal.app import PortalServer, PortalStartupError, create_portal_app
     from whygraph.portal.hosts import TRUSTED_PROXIES_ENV, parse_trusted_proxies
 
@@ -119,6 +121,8 @@ def portal_cmd(host: str, port: int, data_dir: Path | None, dev_expose: bool) ->
     lock = _lock_data_dir(portal_db.data_dir())
     try:
         app = create_portal_app(port=port)
+        # GitHub's redirect puts a one-time code and the state in the query.
+        logging.getLogger("uvicorn.access").addFilter(AccessLogRedactor())
         console.print(f"[bold]WhyGraph portal[/] → {_banner_url(port)}")
         config = uvicorn.Config(
             app,

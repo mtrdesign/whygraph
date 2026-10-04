@@ -41,6 +41,8 @@ process:
 * **Events.** The events file is the single source of the SSE stream
   (:meth:`ScanRunner.events`): replay from a byte offset, then follow,
   ``id:`` byte offsets for resume, heartbeats, a terminal ``end`` frame.
+  In production the route passes an access re-check, so a stream whose
+  caller lost access ends early with ``reason: "access_revoked"``.
 * **Poll and catch-up.** Every :data:`POLL_INTERVAL_SEC` the poller
   enqueues a ``sync`` (``trigger=poll``) for each initialized GitHub
   clone - it never fetches itself - and runs the catch-up check, which is
@@ -118,6 +120,9 @@ HEARTBEAT_SEC = 15.0
 
 TAIL_INTERVAL_SEC = 0.25
 """How often an SSE stream re-reads a live run's events file."""
+
+ACCESS_CHECK_SEC = 5.0
+"""How often an SSE stream re-checks that its caller may still read the run."""
 
 TRIGGER_PRECEDENCE: tuple[str, ...] = (
     "hook",
@@ -1139,6 +1144,7 @@ class ScanRunner:
         *,
         shutdown: anyio.Event,
         offset: int = 0,
+        still_allowed: Callable[[], bool] | None = None,
     ) -> StreamingResponse:
         """Return the SSE response streaming a run's events.
 
@@ -1153,6 +1159,12 @@ class ScanRunner:
         offset : int
             Byte offset to resume from (the last ``id:`` the client saw,
             from ``Last-Event-ID``).
+        still_allowed : callable, optional
+            A blocking check that the caller may still read the run, run
+            in a worker thread at most every :data:`ACCESS_CHECK_SEC`; when
+            it returns ``False`` the stream sends a terminal ``end`` frame
+            with ``reason: "access_revoked"`` and closes. ``None`` (local
+            mode) never re-checks.
 
         Returns
         -------
@@ -1172,20 +1184,41 @@ class ScanRunner:
             raise RunNotFound(run_id)
         path = data_dir() / events_rel
         return StreamingResponse(
-            self._stream(run_id, path, max(0, offset), shutdown),
+            self._stream(run_id, path, max(0, offset), shutdown, still_allowed),
             media_type="text/event-stream",
             headers=dict(_SSE_HEADERS),
         )
 
     async def _stream(
-        self, run_id: int, path: Path, offset: int, shutdown: anyio.Event
+        self,
+        run_id: int,
+        path: Path,
+        offset: int,
+        shutdown: anyio.Event,
+        still_allowed: Callable[[], bool] | None = None,
     ) -> AsyncIterator[str]:
         pos = offset
-        last_sent = time.monotonic()
+        last_sent = last_checked = time.monotonic()
         while True:
             if shutdown.is_set():
                 yield f'event: shutdown\ndata: {{"type": "shutdown", "run_id": {run_id}}}\n\n'
                 return
+            if (
+                still_allowed is not None
+                and time.monotonic() - last_checked >= ACCESS_CHECK_SEC
+            ):
+                allowed = await anyio.to_thread.run_sync(still_allowed)
+                last_checked = time.monotonic()
+                if not allowed:
+                    end = {
+                        "type": "end",
+                        "run_id": run_id,
+                        "status": None,
+                        "summary": None,
+                        "reason": "access_revoked",
+                    }
+                    yield f"id: {pos}\nevent: end\ndata: {json.dumps(end)}\n\n"
+                    return
             finished = run_id not in self._live
             frames, pos = _read_frames(path, pos)
             for frame in frames:

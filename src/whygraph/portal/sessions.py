@@ -63,6 +63,12 @@ class SessionRow:
         Shown in the UI.
     is_instance_admin : bool
         Whether the user is an instance admin.
+    github_login : str or None
+        The GitHub username of a GitHub account (M2d-1).
+    avatar_url : str or None
+        The GitHub avatar of a GitHub account.
+    has_password : bool
+        Whether the account signs in with a password.
     """
 
     session_id: int
@@ -72,6 +78,9 @@ class SessionRow:
     email: str | None
     display_name: str
     is_instance_admin: bool
+    github_login: str | None = None
+    avatar_url: str | None = None
+    has_password: bool = False
 
 
 def _now() -> datetime:
@@ -166,8 +175,9 @@ def lookup(token: str) -> SessionRow | None:
     Returns
     -------
     SessionRow or None
-        ``None`` for an unknown token, or a session past its absolute or idle
-        lifetime.
+        ``None`` for an unknown token, a session past its absolute or idle
+        lifetime, or one whose user is disabled (so a disabled user's
+        surviving session simply resolves to signed out).
     """
     if not token:
         return None
@@ -182,12 +192,16 @@ def lookup(token: str) -> SessionRow | None:
                 User.email,
                 User.display_name,
                 User.is_instance_admin,
+                User.github_login,
+                User.avatar_url,
+                col(User.password_hash).is_not(None),
             )
             .join(User, col(User.id) == col(UserSession.user_id))
             .where(
                 col(UserSession.token_hash) == hash_token(token),
                 col(UserSession.expires_at) > _iso(now),
                 col(UserSession.last_seen_at) > _iso(now - IDLE),
+                col(User.disabled_at).is_(None),
             )
         ).first()
     if row is None:

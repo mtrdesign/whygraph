@@ -2,7 +2,8 @@
 
 Every test here drives a production portal with **no** injected identity, so
 ``SessionIdentity`` resolves each request from a real session cookie (set by
-``POST /api/auth/login``) and :func:`whygraph.portal.hosts.classify` resolves
+the GitHub sign-in callback, or ``POST /api/auth/login`` for the password
+admin) and :func:`whygraph.portal.hosts.classify` resolves
 the organization from the ``Host`` header. The :func:`prod_world` fixture
 (plan section 5.1) builds Ada (instance admin, no memberships), Ann (owner of
 ``quokka``), Bob (owner of ``narwhal`` and member of ``quokka``), and one
@@ -29,6 +30,8 @@ are ``test_portal_identity_routes.py``; startup and the pure modules are
 
 from __future__ import annotations
 
+import json
+import threading
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Iterator
@@ -41,13 +44,17 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, select
 from starlette.middleware.cors import CORSMiddleware
 
+from github_fake import FakeGitHub
 from test_portal_app import (  # noqa: F401 -- fixtures
     NON_ORG_ROUTES,
+    PRODUCTION_ORG_ROUTES,
     PUBLIC_AUTH_ROUTES,
     ROUTE_ACTIONS,
     at,
     claim_instance,
     env,
+    github_fake,
+    github_sign_in,
     log_in,
     manual_ctx,
     portal_client,
@@ -58,7 +65,6 @@ from test_portal_identity_routes import (  # noqa: F401 -- `audit_log` is a fixt
     audit_log,
     create_org,
     events,
-    register,
 )
 from test_portal_tenancy import (
     API_ROUTES,
@@ -79,7 +85,10 @@ from test_portal_tenancy import (
 )
 from whygraph.core.context import use_project
 from whygraph.db import ensure_initialized
+from whygraph.db import get_session as project_session
+from whygraph.db.models import ChatSession as ChatSessionRow
 from whygraph.portal import db as portal_db
+from whygraph.portal import runner as runner_mod
 from whygraph.portal.authz import ROLE_ACTIONS, Role
 from whygraph.portal.models import Membership, Organization, Project, ScanRun, User
 from whygraph.portal.orgs import add_member
@@ -98,12 +107,11 @@ READER_ONLY_READS = (
     "instance admins can only read an organization they are not a member of"
 )
 
-EMAILS = {
-    "ada": "ada@example.com",
-    "ann": "ann@example.com",
-    "bob": "bob@example.com",
-}
-"""The three accounts of :func:`prod_world`, by short name."""
+ADA_EMAIL = "ada@example.com"
+"""The password admin of :func:`prod_world`."""
+
+GITHUB_LOGINS = ("ann", "bob")
+"""The GitHub accounts of :func:`prod_world` (their short name is the login)."""
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +122,8 @@ BASE_ONLY_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
         ("/api/auth/bootstrap", "GET"),
         ("/api/auth/bootstrap", "POST"),
-        ("/api/auth/register", "POST"),
+        ("/api/auth/github/start", "POST"),
+        ("/api/auth/github/callback", "POST"),
         ("/api/auth/login", "POST"),
         ("/api/auth/reset", "POST"),
         ("/api/orgs", "POST"),
@@ -138,14 +147,28 @@ ANY_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
 )
 """Logout and the account routes: served on the base host and on org hosts."""
 
-PRODUCTION_ONLY_ROUTES = PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES
-"""Every route that names no org (public auth, ``user.self``, ``instance.admin``)."""
+ORG_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("/api/org/members", "GET"),
+        ("/api/org/members", "POST"),
+        ("/api/org/members/{uid}", "PATCH"),
+        ("/api/org/members/{uid}", "DELETE"),
+        ("/api/org/membership", "DELETE"),
+    }
+)
+"""The members routes (M2d-1 section 4.5): org-scoped, so served on org hosts
+only, and swept with every other org-scoped route below."""
+
+PRODUCTION_ONLY_ROUTES = PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES | PRODUCTION_ORG_ROUTES
+"""Every route local mode does not serve: the ones that name no org (public
+auth, ``user.self``, ``instance.admin``) and the members routes."""
 
 
 def test_every_production_only_route_is_classified_by_host() -> None:
-    """A new non-org route must be put on a host before the sweeps run."""
-    assert BASE_ONLY_ROUTES | ANY_HOST_ROUTES == PRODUCTION_ONLY_ROUTES
-    assert not (BASE_ONLY_ROUTES & ANY_HOST_ROUTES)
+    """A new production-only route must be put on a host before the sweeps run."""
+    classes = (BASE_ONLY_ROUTES, ANY_HOST_ROUTES, ORG_HOST_ROUTES)
+    assert frozenset().union(*classes) == PRODUCTION_ONLY_ROUTES
+    assert sum(len(c) for c in classes) == len(PRODUCTION_ONLY_ROUTES)  # disjoint
 
 
 # ---------------------------------------------------------------------------
@@ -205,8 +228,12 @@ class ProdWorld:
         return "ann" if org is self.quokka else "bob"
 
     def sign_in(self, name: str) -> httpx.Response:
-        """Sign ``name`` in through the real login route."""
-        response = log_in(self.client, EMAILS[name])
+        """Sign ``name`` in for real: GitHub for Ann and Bob, a password for Ada."""
+        if name in GITHUB_LOGINS:
+            response = github_sign_in(self.client, name)
+        else:
+            assert name == "ada", name
+            response = log_in(self.client, ADA_EMAIL)
         assert response.status_code == 200, (name, response.text)
         return response
 
@@ -285,41 +312,55 @@ def _wait_idle(world: ProdWorld, org: OrgWorld) -> list[dict]:
 
 @pytest.fixture
 def prod_world(
-    production_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+    production_env: SimpleNamespace,
+    github_fake: FakeGitHub,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[ProdWorld]:
     """Plan section 5.1's ``prod_world``: Ada, Ann, Bob and two ``api``s.
 
-    Every account and org is made through the real routes (bootstrap,
-    register, create org), so the sessions the sweeps use are the ones a
-    browser would hold. Bob's extra ``quokka`` membership is added
-    directly: there is no invite route until M2d.
+    Every account and org is made through the real routes (bootstrap, GitHub
+    sign-in through the fake GitHub, create org, add member), so the
+    sessions the sweeps use are the ones a browser would hold. Ada is the
+    password admin; Ann and Bob are GitHub accounts. Bob's extra ``quokka``
+    membership is made by Ann through ``POST /api/org/members``.
     """
     env = production_env
     scanner = _fake_scanner(env, monkeypatch)
     _offline_llms(monkeypatch)
+    for login in GITHUB_LOGINS:
+        github_fake.add_user(login)
     with prod_portal() as client:
-        claim_instance(client, EMAILS["ada"], display_name="Ada")
+        claim_instance(client, ADA_EMAIL, display_name="Ada")
         client.cookies.clear()
         quokka = OrgWorld("quokka", "quokka", {})
         narwhal = OrgWorld("narwhal", "narwhal", {})
         for org, owner in ((quokka, "ann"), (narwhal, "bob")):
-            assert register(client, EMAILS[owner], owner.title()).status_code == 200
+            assert github_sign_in(client, owner).status_code == 200
             assert create_org(client, org.slug, org.slug.title()).status_code == 201
         client.cookies.clear()
         uids, ids = {}, {}
         with portal_db.get_session() as session:
-            for name, email in EMAILS.items():
-                user = session.exec(select(User).where(User.email == email)).one()
+            people = [("ada", User.email == ADA_EMAIL)] + [
+                (login, User.github_login == login) for login in GITHUB_LOGINS
+            ]
+            for name, where in people:
+                user = session.exec(select(User).where(where)).one()
                 uids[name], ids[name] = user.uid, user.id
             for org in (quokka, narwhal):
                 org.org_id = session.exec(
                     select(Organization.id).where(Organization.slug == org.slug)
                 ).one()
-            # Bob is also a plain member of quokka (the role matrix over
-            # real sessions, and the membership the removal test drops).
-            add_member(
-                session, org_id=quokka.org_id, user_id=ids["bob"], role=Role.MEMBER
-            )
+        quokka.owner_uid, narwhal.owner_uid = uids["ann"], uids["bob"]
+        # Bob is also a plain member of quokka (the role matrix over real
+        # sessions, and the membership the removal test drops), added by
+        # quokka's owner the way the Members page does.
+        assert github_sign_in(client, "ann").status_code == 200
+        added = client.post(
+            at("quokka") + "/api/org/members",
+            json={"github_login": "bob", "role": "member"},
+        )
+        assert added.status_code == 201, added.text
+        client.cookies.clear()
         world = ProdWorld(client, env, quokka, narwhal, uids, ids, scanner)
         # narwhal first, so its secret rows are the older ones: a scope
         # filter that forgot the org would let quokka's rows win.
@@ -656,6 +697,14 @@ def _is_binding_404(response: httpx.Response) -> bool:
 
 def test_the_reader_route_split_is_the_planned_one() -> None:
     assert READER_ACTIONS == {"org.read", "project.read"}
+    # A reader lists an org's members, and changes nothing about them.
+    assert ("GET", "/api/org/members") in READ_ROUTES
+    assert {
+        ("POST", "/api/org/members"),
+        ("PATCH", "/api/org/members/{uid}"),
+        ("DELETE", "/api/org/members/{uid}"),
+        ("DELETE", "/api/org/membership"),
+    } <= set(OTHER_ROUTES)
     assert ("POST", "/api/projects/{slug}/node/rationale") in OTHER_ROUTES
     assert ("GET", "/api/projects/{slug}/node/rationale") in READ_ROUTES
     assert len(READ_ROUTES) > 10 and len(OTHER_ROUTES) > 10
@@ -780,6 +829,48 @@ def test_removing_a_membership_applies_on_the_next_request(
     assert w.client.get(at("narwhal") + "/api/projects").status_code == 200
 
 
+def test_an_orgs_member_list_is_invisible_on_another_orgs_host(
+    prod_world: ProdWorld,
+) -> None:
+    w = prod_world
+    w.sign_in("ann")  # owner of quokka, no member of narwhal
+    refused = w.client.get(at("narwhal") + "/api/org/members")
+    assert refused.status_code == 404 and refused.json() == NOT_FOUND
+    own = _ok(w.client.get(at("quokka") + "/api/org/members"))
+    assert sorted(m["github_login"] for m in own) == ["ann", "bob"]
+    w.sign_in("bob")  # in both orgs: each host lists only its own
+    narwhal = _ok(w.client.get(at("narwhal") + "/api/org/members"))
+    assert [(m["github_login"], m["role"]) for m in narwhal] == [("bob", "owner")]
+
+
+def test_another_orgs_member_cannot_be_changed_through_this_orgs_host(
+    prod_world: ProdWorld, github_fake: FakeGitHub
+) -> None:
+    """A ``uid`` from narwhal is ``not_member`` on quokka's host, whatever its role."""
+    w = prod_world
+    assert github_sign_in(w.client, "cy").status_code == 200
+    w.sign_in("bob")
+    added = w.client.post(
+        at("narwhal") + "/api/org/members",
+        json={"github_login": "cy", "role": "admin"},
+    )
+    cy = _ok(added, 201)["uid"]
+    w.sign_in("ann")  # owner of quokka
+    for method, body in (("PATCH", {"role": "member"}), ("DELETE", None)):
+        here = w.client.request(
+            method, at("quokka") + f"/api/org/members/{cy}", json=body
+        )
+        assert here.status_code == 404, (method, here.text)
+        assert here.json()["code"] == "not_member", method
+        there = w.client.request(
+            method, at("narwhal") + f"/api/org/members/{cy}", json=body
+        )
+        assert there.status_code == 404 and there.json() == NOT_FOUND, method
+    w.sign_in("bob")
+    narwhal = _ok(w.client.get(at("narwhal") + "/api/org/members"))
+    assert ("cy", "admin") in [(m["github_login"], m["role"]) for m in narwhal]
+
+
 def test_memberships_cannot_store_the_reader_role(prod_world: ProdWorld) -> None:
     """``reader`` is internal: neither ``add_member`` nor the database takes it."""
     w = prod_world
@@ -797,6 +888,202 @@ def test_memberships_cannot_store_the_reader_role(prod_world: ProdWorld) -> None
                 ),
                 {"org": w.narwhal.org_id, "user": w.ids["ada"]},
             )
+
+
+# ---------------------------------------------------------------------------
+# Per-user chat (M2d-1 plan section 4.7)
+# ---------------------------------------------------------------------------
+
+
+def _chat_row_owner(org: OrgWorld, session_id: int) -> str | None:
+    """The ``owner_uid`` stored on one of ``org``'s ``api`` chat sessions."""
+    with use_project(manual_ctx(org.root, slug="api")), project_session() as session:
+        return session.get(ChatSessionRow, session_id).owner_uid
+
+
+def test_each_member_sees_and_touches_only_their_own_chat_sessions(
+    prod_world: ProdWorld,
+) -> None:
+    """Ann (owner) and Bob (member) of quokka: the other's session is a plain 404."""
+    w = prod_world
+    chat = at("quokka") + "/api/projects/api/chat/sessions"
+    w.sign_in("bob")
+    bobs = _ok(w.client.post(chat, json={"title": "bob's chat"}), 201)["id"]
+    assert _chat_row_owner(w.quokka, bobs) == w.uids["bob"]
+    assert _chat_row_owner(w.quokka, w.quokka.session_id) == w.uids["ann"]
+    # A row with no owner (pre-M2d-1) belongs to nobody in production.
+    with use_project(manual_ctx(w.quokka.root, slug="api")), project_session() as s:
+        ownerless = ChatSessionRow(
+            title="ownerless",
+            provider="openai",
+            model="gpt-4o",
+            created_at="2026-10-01T00:00:00+00:00",
+            updated_at="2026-10-01T00:00:00+00:00",
+        )
+        s.add(ownerless)
+        s.commit()
+        s.refresh(ownerless)
+        ownerless_id = ownerless.id
+
+    seen = {}
+    for name, own, others in (
+        ("bob", bobs, (w.quokka.session_id, ownerless_id)),
+        ("ann", w.quokka.session_id, (bobs, ownerless_id)),
+    ):
+        w.sign_in(name)
+        seen[name] = [row["id"] for row in _ok(w.client.get(chat))]
+        assert _ok(w.client.get(f"{chat}/{own}"))["id"] == own
+        for other in others:
+            for method, suffix, body in (
+                ("GET", "", None),
+                ("PATCH", "", {"title": "taken over"}),
+                ("DELETE", "", None),
+                ("POST", "/messages", {"content": "hello"}),
+            ):
+                refused = w.client.request(method, f"{chat}/{other}{suffix}", json=body)
+                where = (name, method, suffix, other)
+                assert refused.status_code == 404, (where, refused.text)
+                assert refused.json() == {"detail": f"session {other} not found"}
+    assert seen == {"bob": [bobs], "ann": [w.quokka.session_id]}
+    # Nothing the refused calls aimed at changed.
+    anns = _ok(w.client.get(f"{chat}/{w.quokka.session_id}"))
+    assert (anns["title"], anns["messages"]) == (w.quokka.session_title, [])
+    w.sign_in("bob")
+    mine = _ok(w.client.get(f"{chat}/{bobs}"))
+    assert (mine["title"], mine["messages"]) == ("bob's chat", [])
+
+
+def test_a_reader_has_no_chat(prod_world: ProdWorld) -> None:
+    """Ada reads quokka as ``reader``, which carries no ``project.chat``."""
+    w = prod_world
+    w.sign_in("ada")
+    chat = at("quokka") + "/api/projects/api/chat/sessions"
+    for method, url, body in (
+        ("GET", chat, None),
+        ("POST", chat, {"title": "a reader's"}),
+        ("GET", f"{chat}/{w.quokka.session_id}", None),
+        ("POST", f"{chat}/{w.quokka.session_id}/messages", {"content": "hi"}),
+    ):
+        refused = w.client.request(method, url, json=body)
+        assert refused.status_code == 403, (method, url, refused.text)
+        assert refused.json()["code"] == "forbidden", (method, url)
+
+
+# ---------------------------------------------------------------------------
+# An open scan-event stream ends when its access goes (plan section 4.8)
+# ---------------------------------------------------------------------------
+
+
+def _session_token(client: TestClient) -> str:
+    token = client.cookies.get("whygraph_session")
+    assert token, "not signed in"
+    return token
+
+
+@pytest.mark.parametrize("revoke", ["removed", "disabled", "signed_out"])
+def test_an_open_scan_event_stream_ends_when_its_access_goes(
+    prod_world: ProdWorld, monkeypatch: pytest.MonkeyPatch, revoke: str
+) -> None:
+    """Bob follows a held quokka run; removal, disabling or sign-out cuts it."""
+    w = prod_world
+    monkeypatch.setattr(runner_mod, "ACCESS_CHECK_SEC", 0.0)
+    w.scanner.hold.touch()
+    w.sign_in("ann")
+    run_id = _ok(w.client.post(at("quokka") + "/api/projects/api/scans"), 202)["run_id"]
+    runs_url = at("quokka") + "/api/projects/api/scans"
+    wait_for(
+        lambda: (
+            next(r for r in _ok(w.client.get(runs_url))["runs"] if r["id"] == run_id)[
+                "status"
+            ]
+            == "running"
+        )
+    )
+    # Each actor keeps their own session: the client is cleared between
+    # sign-ins, since a sign-in over a session revokes it.
+    actor = {"removed": "ann", "disabled": "ada", "signed_out": "bob"}[revoke]
+    tokens = {"ann": _session_token(w.client)}
+    w.client.cookies.clear()
+    w.sign_in("ada")
+    tokens["ada"] = _session_token(w.client)
+    w.client.cookies.clear()
+    w.sign_in("bob")
+    tokens["bob"] = _session_token(w.client)
+
+    runner = w.client.app.state.portal.runner
+    real_events = runner.events
+    opened, done = threading.Event(), threading.Event()
+    revoked: list[httpx.Response] = []
+
+    async def events(*args, **kwargs):
+        response = await real_events(*args, **kwargs)
+        opened.set()
+        return response
+
+    monkeypatch.setattr(runner, "events", events)
+
+    def take_access_away() -> None:
+        assert opened.wait(20)
+        method, url, body = {
+            "removed": (
+                "DELETE",
+                at("quokka") + f"/api/org/members/{w.uids['bob']}",
+                None,
+            ),
+            "disabled": (
+                "PATCH",
+                at() + f"/api/admin/users/{w.uids['bob']}",
+                {"disabled": True},
+            ),
+            "signed_out": ("POST", at() + "/api/auth/logout", None),
+        }[revoke]
+        revoked.append(
+            w.client.request(
+                method,
+                url,
+                json=body,
+                headers={"cookie": f"whygraph_session={tokens[actor]}"},
+            )
+        )
+        if not done.wait(20):  # never hang: let the run end on its own
+            w.scanner.hold.unlink(missing_ok=True)
+
+    thread = threading.Thread(target=take_access_away)
+    thread.start()
+    try:
+        stream = w.client.get(
+            at("quokka") + f"/api/projects/api/scans/{run_id}/events",
+            headers={"cookie": f"whygraph_session={tokens['bob']}"},
+        )
+    finally:
+        done.set()
+        thread.join()
+    assert len(revoked) == 1 and revoked[0].status_code in (200, 204), revoked
+    assert stream.status_code == 200, stream.text
+    blocks = [b for b in stream.text.split("\n\n") if b.strip()]
+    assert "event: end" in blocks[-1], blocks[-1]
+    end = json.loads(blocks[-1].split("data: ", 1)[1])
+    assert end == {
+        "type": "end",
+        "run_id": run_id,
+        "status": None,
+        "summary": None,
+        "reason": "access_revoked",
+    }
+    # The run itself goes on: only the stream was cut.
+    w.client.cookies.clear()
+    owner = w.client.get(
+        runs_url, headers={"cookie": f"whygraph_session={tokens['ann']}"}
+    )
+    assert next(r for r in _ok(owner)["runs"] if r["id"] == run_id)["status"] == (
+        "running"
+    )
+    if revoke == "removed":  # Bob's session itself still works elsewhere
+        own = w.client.get(
+            at("narwhal") + "/api/projects",
+            headers={"cookie": f"whygraph_session={tokens['bob']}"},
+        )
+        assert own.status_code == 200, own.text
 
 
 # ---------------------------------------------------------------------------

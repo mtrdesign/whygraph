@@ -14,14 +14,15 @@ the child ends however it ends); access lost on a refused mint, on a git
 ``401`` and in the refresher, the ``409 github_access_lost`` refusal, the
 summary fields and the restore on a successful mint; the reconcile (a sync
 only when the remote moved, access lost and restored by its mint, its own
-loop at start that survives an exception).
+loop at start that survives an exception); and no GitHub credential in the
+portal DB, a run file, the clone's git config or a response after an
+import, a scan and a refresh (acceptance criterion 9).
 """
 
 # ruff: noqa: F811 -- pytest fixtures imported from other test modules
 
 from __future__ import annotations
 
-import json
 import subprocess
 import tempfile
 import threading
@@ -32,6 +33,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlmodel import select
 
 from github_fake import _git as fixture_git
@@ -46,6 +48,7 @@ from test_portal_app import (  # noqa: F401
 from test_portal_github_import import (  # noqa: F401 -- fixtures
     API_REPO,
     INSTALLATION,
+    TOKEN_SHAPE,
     World,
     app_env,
     connected,
@@ -581,12 +584,63 @@ def test_the_reconcile_runs_at_start_on_its_own_loop_and_survives_an_exception(
     assert row is not None and row.last_scanned_head == pushed
 
 
-def test_no_token_reaches_a_run_file(world: World, scanner: SimpleNamespace) -> None:
+def test_no_github_credential_lands_in_the_db_a_run_file_or_a_response(
+    world: World, scanner: SimpleNamespace
+) -> None:
+    """Acceptance criterion 9, after an import, a scan and a token refresh.
+
+    Nothing shaped like a GitHub token (``gh[opsur]_...``: the user's
+    ``ghu_`` / ``ghr_``, the installation's ``ghs_``) is in any column of
+    any portal table, in the run's log and events files, in the clone's git
+    config or in the body of a route a member uses. The pattern-redacted
+    ``ghs_***`` is not one.
+    """
     w = world
-    imported(w)
-    run = wait_run(w, scan(w))
-    assert run["status"] == "ok"
-    for path in (w.env.data / "runs").iterdir():
-        text = path.read_text()
-        assert "ghs_" not in text.replace("ghs_***", ""), path
-    assert json.dumps(run).count("ghs_") == 0
+    w.fake.installation_token_ttl = 4
+    root = imported(w)
+    w.state.runner.token_refresh_margin = 3
+    seen = w.env.tmp / "tokens.txt"
+    scanner.configure(
+        token_check=f"{w.server.url}/acme/api.git/info/refs",
+        token_wait=5,
+        token_record=seen,
+    )
+    run_id = scan(w)
+    run = wait_run(w, run_id)
+    assert run["status"] == "ok", (run, run_log(w, run_id))
+    first, second = seen.read_text().split()
+    assert first != second  # the child outlived its first token
+
+    with portal_db.get_session() as session:
+        tables = session.exec(
+            text(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'"
+            )
+        ).all()
+        assert len(tables) > 10
+        for (table,) in tables:
+            rows = session.exec(text(f'SELECT * FROM "{table}"')).all()
+            assert not TOKEN_SHAPE.search(repr(rows)), table
+    run_files = sorted((w.env.data / "runs").iterdir())
+    assert {p.suffix for p in run_files} >= {".log", ".jsonl"}, run_files
+    for path in run_files:
+        assert not TOKEN_SHAPE.search(path.read_text()), path
+    assert not TOKEN_SHAPE.search((root / ".git" / "config").read_text())
+
+    project = at(ORG) + "/api/projects/api"
+    for url in (
+        at(ORG) + "/api/portal/state",
+        at(ORG) + "/api/portal/defaults",
+        at(ORG) + "/api/projects",
+        at(ORG) + "/api/github/installations",
+        at(ORG) + f"/api/github/installations/{INSTALLATION}/repos",
+        project,
+        project + "/config",
+        project + "/scans",
+        project + f"/scans/{run_id}/log",
+        project + f"/scans/{run_id}/events",
+    ):
+        response = w.client.get(url)
+        assert response.status_code == 200, (url, response.text)
+        assert not TOKEN_SHAPE.search(response.text), url

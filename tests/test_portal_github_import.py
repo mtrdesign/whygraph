@@ -951,22 +951,6 @@ def test_removing_an_imported_project_deletes_its_clone(world: World) -> None:
     assert clone_dirs(w) == [] and (w.repos / "acme").is_dir()
 
 
-def test_no_github_credential_lands_in_the_portal_db(world: World) -> None:
-    w = world
-    connected(w)
-    assert import_repo(w, API_REPO).status_code == 201
-    with portal_db.get_session() as session:
-        tables = session.exec(
-            text(
-                "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'"
-            )
-        ).all()
-        for (table,) in tables:
-            rows = session.exec(text(f'SELECT * FROM "{table}"')).all()
-            assert not TOKEN_SHAPE.search(repr(rows)), table
-
-
 # ---------------------------------------------------------------------------
 # The clone folder guard (plan section 0.2 #3)
 # ---------------------------------------------------------------------------

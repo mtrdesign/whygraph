@@ -12,7 +12,8 @@ Covered: signature refusals (missing, wrong, truncated, prefix-only, SHA-1
 only) before anything is parsed; the body cap by header and by stream; the
 org host, local mode and degraded refusals; replayed delivery ids; pushes
 to the default branch, another branch, a tag and a deletion; the fan-out
-across two orgs and its filters; the installation, installation_repositories
+across two orgs and its filters, and the isolation of one repository imported
+into two orgs; the installation, installation_repositories
 and repository events.
 """
 
@@ -30,7 +31,13 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import select
 
-from test_portal_app import GITHUB_WEBHOOK_SECRET, at, client, env  # noqa: F401
+from test_portal_app import (  # noqa: F401
+    GITHUB_WEBHOOK_SECRET,
+    at,
+    client,
+    env,
+    github_sign_in,
+)
 from test_portal_github_import import (  # noqa: F401 -- fixtures
     API_REPO,
     INSTALLATION,
@@ -395,6 +402,64 @@ def test_a_push_fans_out_across_orgs_and_skips_what_it_must(
     requests_seen.clear()
     deliver(w, "push", push())
     assert requests_seen == []
+
+
+def test_the_same_repo_in_two_orgs_stays_apart_after_a_push(
+    hooked: World, requests_seen: list[tuple[int, str]]
+) -> None:
+    """One repository imported into two orgs: one push, two runs, no crossing.
+
+    The push fans out to both copies, but a member of ``bravo`` alone sees
+    ``bravo``'s copy and runs only: ``acme``'s host is the binding's plain
+    ``404``, ``acme``'s run ids are not found under ``bravo``'s ``api``, and
+    ``acme``'s access state does not show in ``bravo``.
+    """
+    w = hooked
+    assert create_org(w.client, "bravo", "Bravo").status_code == 201
+    assert import_repo(w, API_REPO, org="bravo").status_code == 201
+    scanned(w, "bravo")
+    assert github_sign_in(w.client, "cy").status_code == 200
+    assert github_sign_in(w.client, "ben").status_code == 200
+    added = w.client.post(
+        at("bravo") + "/api/org/members", json={"github_login": "cy", "role": "member"}
+    )
+    assert added.status_code == 201, added.text
+
+    pushed = w.server.commit("acme/api")
+    assert deliver(w, "push", push()).json() == {"status": "queued"}
+    assert sorted(requests_seen) == sorted(
+        [(row().id, "push"), (row("bravo").id, "push")]
+    )
+    ids = {}
+    for org in ("acme", "bravo"):
+        runs = wait_idle(w, org)
+        assert len(runs) == 2 and runs[0]["trigger"] == "push", (org, runs)
+        assert row(org).last_scanned_head == pushed
+        ids[org] = [r["id"] for r in runs]
+    assert not set(ids["acme"]) & set(ids["bravo"])
+    _mark_access_lost(row().id, REASON_NO_ACCESS)
+
+    assert github_sign_in(w.client, "cy").status_code == 200
+    acme_run = ids["acme"][0]
+    for path in (
+        "/api/projects",
+        "/api/projects/api",
+        "/api/projects/api/scans",
+        f"/api/projects/api/scans/{acme_run}/log",
+    ):
+        refused = w.client.get(at("acme") + path)
+        assert (refused.status_code, refused.json()) == (404, {"error": "not found"})
+    listed = w.client.get(at("bravo") + "/api/projects").json()["projects"]
+    assert [
+        (p["slug"], p["github_full_name"], p["access_lost"], p["root"]) for p in listed
+    ] == [("api", "acme/api", False, str(w.repos / "bravo" / "api"))]
+    assert [r["id"] for r in org_runs(w, "bravo")] == ids["bravo"]
+    for method, suffix in (("GET", "/log"), ("GET", "/events"), ("POST", "/cancel")):
+        other = w.client.request(
+            method, at("bravo") + f"/api/projects/api/scans/{acme_run}{suffix}"
+        )
+        assert other.status_code == 404, (suffix, other.text)
+        assert other.json() == {"error": f"run {acme_run} not found"}, suffix
 
 
 # ---------------------------------------------------------------------------

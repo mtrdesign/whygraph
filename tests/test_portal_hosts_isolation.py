@@ -492,6 +492,11 @@ def test_the_fixture_is_two_marked_orgs_over_real_sessions(
         w.sign_in(w.owner_of(org))
         body = _ok(w.client.get(at(org.slug) + "/api/projects/api"))
         assert (body["name"], body["root"]) == (org.name, str(org.root))
+        # M2d-2's summary fields carry the org's mark, so the sweeps'
+        # assert_no_leak covers them on every route that shows them.
+        assert body["github_full_name"].startswith(f"{org.slug}/api")
+        assert body["installation_account"] == org.slug
+        assert body["access_lost"] is False
         assert_no_leak(str(body), w.other(org), where=org.slug)
     # Ada holds a session but no membership anywhere.
     with portal_db.get_session() as session:

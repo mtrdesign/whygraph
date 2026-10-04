@@ -475,6 +475,38 @@ describe("production project pages", () => {
     );
     expect(screen.queryByText(/removes its git hooks/)).toBeNull();
   });
+
+  it("removing names the server copy, never hooks or agent files, and needs the name typed", async () => {
+    handlers["DELETE /api/projects/api"] = () => ({
+      removed: "api",
+      hooks: null,
+      agent_files: [],
+      checkout_deleted: true,
+      warnings: [],
+    });
+    const user = userEvent.setup();
+    mount("/p/api/settings");
+    await user.click(await screen.findByRole("button", { name: "Remove project" }));
+    const dialog = await screen.findByTestId("remove-dialog");
+    expect(dialog).toHaveTextContent("This removes the server copy and every scan.");
+    expect(dialog).toHaveTextContent("/data/repos/acme/api");
+    expect(dialog).toHaveTextContent("The repository on GitHub; nothing is changed there.");
+    expect(dialog).not.toHaveTextContent(/git hooks|portal\.\*|MCP entries|checkout/);
+    expect(within(dialog).queryByRole("checkbox")).toBeNull();
+
+    const remove = within(dialog).getByRole("button", { name: "Remove project" });
+    expect(remove).toBeDisabled();
+    await user.type(within(dialog).getByLabelText(/to confirm deleting the server copy/), "Api");
+    expect(remove).toBeEnabled();
+    await user.click(remove);
+    await waitFor(() => expect(calls("DELETE", "/api/projects/api")).toHaveLength(1));
+    expect(calls("DELETE", "/api/projects/api")[0].body).toEqual({
+      strip_agent_entries: false,
+      confirm_tracked: [],
+      confirm_name: "Api",
+    });
+    expect(await screen.findByTestId("remove-done")).toHaveTextContent("The server copy was deleted.");
+  });
 });
 
 // ---- access lost ---------------------------------------------------------------------------------

@@ -668,6 +668,13 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     ),
     ("DELETE", "/api/org/members/{uid}"): Call(409, shows=lambda o: ["last_owner"]),
     ("DELETE", "/api/org/membership"): Call(409, shows=lambda o: ["last_owner"]),
+    # Deleting the org (test_portal_org_delete.py deletes one for real; the
+    # sweep must keep its world, so it sends a wrong slug)
+    ("DELETE", "/api/org"): Call(
+        409,
+        body=lambda w, o: {"confirm_slug": "wrong"},
+        shows=lambda o: ["confirm_slug"],
+    ),
     # Production's GitHub App import page (swept over prod_world, whose
     # owners have not connected GitHub; test_portal_github_import.py drives it)
     ("POST", "/api/github/app/authorize"): Call(

@@ -1133,6 +1133,8 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/org/members/{uid}", "PATCH"): "org.members",
     ("/api/org/members/{uid}", "DELETE"): "org.members",
     ("/api/org/membership", "DELETE"): "org.read",
+    # Deleting a production org: org_access(ORG_OWN) (M2d-2 section 4.8)
+    ("/api/org", "DELETE"): "org.own",
     # Production's GitHub App import page: org_access(...) (M2d-2 section 4.4)
     ("/api/github/app/authorize", "POST"): "org.add_project",
     ("/api/github/installations", "GET"): "org.add_project",
@@ -1279,13 +1281,14 @@ PRODUCTION_ORG_ROUTES = {
     ("/api/org/members/{uid}", "PATCH"),
     ("/api/org/members/{uid}", "DELETE"),
     ("/api/org/membership", "DELETE"),
+    ("/api/org", "DELETE"),
     ("/api/github/app/authorize", "POST"),
     ("/api/github/installations", "GET"),
     ("/api/github/installations/{installation_id}/repos", "GET"),
 }
-"""Org-scoped routes that exist only in production: the members page and the
-GitHub App import page (``require_production`` before the org dependency,
-M2d-1 plan section 0.2 #19)."""
+"""Org-scoped routes that exist only in production: the members page, the
+org's deletion and the GitHub App import page (``require_production`` before
+the org dependency, M2d-1 plan section 0.2 #19)."""
 
 PRODUCTION_ONLY_ROUTES = PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES | PRODUCTION_ORG_ROUTES
 """Routes that answer ``404`` in local mode (M2c plan section 4.7)."""

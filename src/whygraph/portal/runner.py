@@ -82,6 +82,13 @@ process:
   default branch with a fresh token, and a ``trigger=reconcile`` sync when
   it differs from ``last_scanned_head``. It catches the pushes whose
   webhooks a down instance missed.
+* **Org deletion** (M2d-2 plan section 4.8). :meth:`ScanRunner.reserve_projects`
+  marks an org as being deleted - every later request for one of its
+  projects, from a route or an internal caller, raises
+  :class:`ProjectBusy` - waits for the requests already past that check,
+  cancels the org's queued runs and its running ones (SIGTERM, as a user
+  cancel), and waits for them to end; a sync still fetching makes it give
+  up (:class:`ProjectBusy`) and release everything.
 * **Source policy.** Every request - from a route or an internal caller -
   for a project whose source the mode does not accept
   (:func:`~whygraph.portal.policy.allowed_sources`, e.g. a local-mode
@@ -117,8 +124,15 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Iterator,
+    Mapping,
+)
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -130,7 +144,7 @@ from fastapi.responses import StreamingResponse
 from sqlmodel import col, select
 
 from whygraph.core.config import Config, ConfigError
-from whygraph.core.safe_paths import UnsafePathError
+from whygraph.core.safe_paths import UnsafePathError, check_inside
 from whygraph.services.git import GitError, InvalidRepoUrlError, Repository
 from whygraph.services.git.credentials import (
     GITHUB_URL_ENV,
@@ -217,6 +231,14 @@ LOG_TAIL_BYTES = 64 * 1024
 
 CANCEL_GRACE_SEC = 10.0
 """Seconds between a cancel's SIGTERM and the SIGKILL that follows."""
+
+ORG_DELETE_WAIT_SEC = CANCEL_GRACE_SEC + 5.0
+"""Seconds an org deletion waits for its runs to end before it answers ``409 busy``.
+
+A child gets SIGTERM, then SIGKILL after :data:`CANCEL_GRACE_SEC`; a sync
+whose ``git fetch`` still runs in the portal cannot be interrupted and
+outlasts this wait.
+"""
 
 CANCELLED_BY_USER: dict[str, str] = {"cancelled_by": "user"}
 """The ``summary`` of a run the user cancelled (vs. a merged or orphaned one)."""
@@ -819,6 +841,9 @@ class ScanRunner:
         tests shorten it).
     token_retry : float
         Seconds between refresh attempts while GitHub is unavailable.
+    org_delete_wait : float
+        Seconds :meth:`reserve_projects` waits for an org's runs to end
+        (:data:`ORG_DELETE_WAIT_SEC`; tests shorten it).
     """
 
     def __init__(
@@ -837,6 +862,7 @@ class ScanRunner:
         self.tail_interval = TAIL_INTERVAL_SEC
         self.token_refresh_margin: float = TOKEN_REFRESH_MARGIN_SEC
         self.token_retry: float = TOKEN_RETRY_SEC
+        self.org_delete_wait: float = ORG_DELETE_WAIT_SEC
         self._sleep = sleep or anyio.sleep
         self._state: PortalState | None = None
         self._tg: Any = None
@@ -850,6 +876,9 @@ class ScanRunner:
         self._claims = threading.Lock()
         self._removing: set[int] = set()
         self._requesting: dict[int, int] = {}
+        # Org deletion: orgs being deleted, and requests past the org check.
+        self._deleting_orgs: set[int] = set()
+        self._org_requests: dict[int, int] = {}
 
     # ---- lifecycle ------------------------------------------------------
 
@@ -989,6 +1018,110 @@ class ScanRunner:
             with self._claims:
                 self._removing.discard(project_id)
 
+    @asynccontextmanager
+    async def reserve_projects(self, org_id: int) -> AsyncIterator[frozenset[int]]:
+        """Stop and hold off every run of an org's projects while the org is deleted.
+
+        In order (M2d-2 plan section 4.8 step 1): mark the org as being
+        deleted, so every later run request for one of its projects - from
+        a route, the webhook or the reconcile - raises
+        :class:`ProjectBusy`; reserve its projects as a removal does; wait
+        for the requests already past the org check; drop its queued runs
+        (recorded ``cancelled``) and cancel its running ones (SIGTERM, then
+        SIGKILL after :data:`CANCEL_GRACE_SEC`); wait for them to end.
+
+        Parameters
+        ----------
+        org_id : int
+            ``organizations.id``.
+
+        Yields
+        ------
+        frozenset of int
+            The org's project ids at the time of the reservation (a project
+            imported later can never get a run either). Everything is
+            released when the block exits, however it exits.
+
+        Raises
+        ------
+        ProjectBusy
+            The org is already being deleted, one of its projects is being
+            removed, or a run did not end within :attr:`org_delete_wait`
+            seconds (a sync whose fetch cannot be interrupted).
+        """
+        with self._claims:
+            if org_id in self._deleting_orgs:
+                raise ProjectBusy("the organization is already being deleted")
+            self._deleting_orgs.add(org_id)
+        reserved: set[int] = set()
+        try:
+            ids = await anyio.to_thread.run_sync(_org_project_ids, org_id)
+            with self._claims:
+                if ids & self._removing:
+                    raise ProjectBusy(
+                        "a project of this organization is being removed; try again"
+                    )
+                self._removing |= ids
+                reserved = set(ids)
+            deadline = time.monotonic() + self.org_delete_wait
+            while not self._org_idle(org_id, ids):
+                if time.monotonic() >= deadline:
+                    raise ProjectBusy("a scan is being requested; try again")
+                await anyio.sleep(0.02)
+            jobs = await self._cancel_projects(ids)
+            while not all(job.done.is_set() for job in jobs):
+                if time.monotonic() >= deadline:
+                    raise ProjectBusy("a sync is finishing; try again in a minute")
+                await anyio.sleep(0.05)
+            yield frozenset(ids)
+        finally:
+            with self._claims:
+                self._deleting_orgs.discard(org_id)
+                self._removing -= reserved
+
+    def _org_idle(self, org_id: int, ids: set[int]) -> bool:
+        """Whether no run request for the org (or one of ``ids``) is in flight."""
+        with self._claims:
+            return not self._org_requests.get(org_id) and not any(
+                self._requesting.get(i) for i in ids
+            )
+
+    async def _cancel_projects(self, ids: set[int]) -> list[_Job]:
+        """Drop the queued runs of ``ids`` and cancel their running ones; return those jobs."""
+        if self._lock is None:  # never started: nothing queued or running
+            return []
+        async with self._lock:
+            # Nothing awaits between the pops and the cancels, so _dispatch
+            # cannot start one of these runs in between.
+            dropped = [self._pending.pop(i) for i in ids if i in self._pending]
+            jobs = [self._running[i] for i in ids if i in self._running]
+            for job in jobs:
+                job.cancel()
+                if self._tg is not None:
+                    self._tg.start_soon(self._kill_after_grace, job)
+            for pending in dropped:
+                await anyio.to_thread.run_sync(_mark_cancelled, pending.run_id)
+                self._live.discard(pending.run_id)
+        return jobs
+
+    @contextmanager
+    def _claim_org(self, org_id: int | None) -> Iterator[None]:
+        """Count a request past the org check, or refuse it while its org is deleted."""
+        if org_id is None:
+            yield
+            return
+        with self._claims:
+            if org_id in self._deleting_orgs:
+                raise ProjectBusy("the organization is being deleted")
+            self._org_requests[org_id] = self._org_requests.get(org_id, 0) + 1
+        try:
+            yield
+        finally:
+            with self._claims:
+                left = self._org_requests.pop(org_id) - 1
+                if left:
+                    self._org_requests[org_id] = left
+
     @contextmanager
     def _claim_request(self, project_id: int) -> Iterator[None]:
         """Mark a request in flight for the project, or refuse it during a removal."""
@@ -1125,26 +1258,27 @@ class ScanRunner:
             raise RunnerUnavailable("the scan runner is not running")
         with self._claim_request(project_id):
             gate = await anyio.to_thread.run_sync(_project_gate, project_id)
-            if gate is not None:
-                source, lost, reason = gate
-                if source not in allowed_sources(self._mode()):
-                    raise SourceNotAllowed(_unsupported_source(source))
-                if lost and reason != REASON_TRACKED_STATE:
-                    raise ProjectAccessLost(reason)
-                github = self._mode() == "production" and source == "github"
-                if kind == "sync" and not github:
-                    raise SourceNotAllowed("only a production GitHub project syncs")
-                if github and kind == "scan":
-                    # Scan now fetches first (M2d-2 plan section 0.2 #23).
-                    kind, scan_requested = "sync", True
-            return await self._request_claimed(
-                project_id,
-                kind=kind,
-                trigger=trigger,
-                analyze=analyze,
-                requested_by=requested_by,
-                scan_requested=scan_requested,
-            )
+            with self._claim_org(None if gate is None else gate[3]):
+                if gate is not None:
+                    source, lost, reason, _org_id = gate
+                    if source not in allowed_sources(self._mode()):
+                        raise SourceNotAllowed(_unsupported_source(source))
+                    if lost and reason != REASON_TRACKED_STATE:
+                        raise ProjectAccessLost(reason)
+                    github = self._mode() == "production" and source == "github"
+                    if kind == "sync" and not github:
+                        raise SourceNotAllowed("only a production GitHub project syncs")
+                    if github and kind == "scan":
+                        # Scan now fetches first (M2d-2 plan section 0.2 #23).
+                        kind, scan_requested = "sync", True
+                return await self._request_claimed(
+                    project_id,
+                    kind=kind,
+                    trigger=trigger,
+                    analyze=analyze,
+                    requested_by=requested_by,
+                    scan_requested=scan_requested,
+                )
 
     async def _request_claimed(
         self,
@@ -1948,8 +2082,8 @@ def _error_chain(exc: BaseException) -> str:
     return ": ".join(p for p in parts if p)
 
 
-def _project_gate(project_id: int) -> tuple[str, bool, str | None] | None:
-    """``(source, access lost?, access_lost_reason)``, or ``None`` for a missing project."""
+def _project_gate(project_id: int) -> tuple[str, bool, str | None, int] | None:
+    """``(source, access lost?, access_lost_reason, org_id)``, or ``None`` for a missing project."""
     with get_session() as session:
         project = session.get(Project, project_id)
         if project is None:
@@ -1958,7 +2092,82 @@ def _project_gate(project_id: int) -> tuple[str, bool, str | None] | None:
             project.source,
             project.access_lost_at is not None,
             project.access_lost_reason,
+            project.org_id,
         )
+
+
+def _org_project_ids(org_id: int) -> set[int]:
+    """The ids of an org's projects."""
+    with get_session() as session:
+        return set(session.exec(select(Project.id).where(Project.org_id == org_id)))
+
+
+def run_files(project_ids: Iterable[int]) -> list[tuple[int, str | None, str | None]]:
+    """The run files of some projects' runs, read before their rows go.
+
+    Parameters
+    ----------
+    project_ids : iterable of int
+        ``projects.id`` values.
+
+    Returns
+    -------
+    list of tuple
+        ``(run id, events_path, log_path)`` per ``scan_runs`` row (the
+        paths relative to the data dir), for :func:`remove_run_files`.
+    """
+    ids = list(project_ids)
+    if not ids:
+        return []
+    with get_session() as session:
+        rows = session.exec(
+            select(ScanRun.id, ScanRun.events_path, ScanRun.log_path).where(
+                col(ScanRun.project_id).in_(ids)
+            )
+        ).all()
+    return [(int(run_id), events, log) for run_id, events, log in rows]
+
+
+def remove_run_files(
+    base: Path, runs: Iterable[tuple[int, str | None, str | None]]
+) -> int:
+    """Delete removed runs' events, log and token files (M2d-2 plan section 0.2 #17).
+
+    Each path must stay inside ``<base>/runs`` with no symlink on the way
+    (:func:`~whygraph.core.safe_paths.check_inside`); one that does not is
+    left and logged. Missing files are fine.
+
+    Parameters
+    ----------
+    base : Path
+        The data directory.
+    runs : iterable of tuple
+        ``(run id, events_path, log_path)`` as :func:`run_files` returns.
+
+    Returns
+    -------
+    int
+        How many files were removed.
+    """
+    runs_dir = base / "runs"
+    removed = 0
+    for run_id, events, log in runs:
+        for rel in (events, log, f"runs/{run_id}.token"):
+            if not rel:
+                continue
+            try:
+                path = check_inside(runs_dir, base / rel)
+            except UnsafePathError as exc:
+                _log.warning("scan runner: left run file %s: %s", rel, exc)
+                continue
+            try:
+                path.unlink()
+                removed += 1
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                _log.warning("scan runner: could not remove %s: %s", path, exc)
+    return removed
 
 
 def _github_project(project_id: int) -> _GitHubProject | None:

@@ -56,7 +56,7 @@ from .github_auth import (
 )
 from .hosts import BaseUrl, safe_redirect
 from .models import Membership, Organization, PasswordReset, User
-from .orgs import add_member, create_org, validate_org_slug
+from .orgs import OrgSlugTaken, add_member, create_org, validate_org_slug
 from .passwords import (
     hash_password,
     normalize_email,
@@ -863,7 +863,8 @@ def post_org(
     """Create an org; the caller becomes its owner (one transaction).
 
     ``422 bad_slug`` (with the rule) for a malformed, reserved or ``xn--``
-    style slug, ``409 slug_taken`` when it exists.
+    style slug, ``409 slug_taken`` when it exists or a deleted org retired
+    it (one answer, so a deletion is not disclosed).
     """
     base = _base(portal_state(request))
     slug = body.slug
@@ -885,6 +886,8 @@ def post_org(
             raise slug_taken
         try:
             org = create_org(db, slug=slug, name=name)
+        except OrgSlugTaken as exc:  # retired by a deletion: the same answer
+            raise slug_taken from exc
         except IntegrityError as exc:  # a concurrent create of the same slug
             raise slug_taken from exc
         assert org.id is not None

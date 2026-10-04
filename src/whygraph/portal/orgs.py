@@ -162,8 +162,41 @@ def validate_org_slug(slug: str) -> None:
         )
 
 
+class OrgSlugTaken(ValueError):
+    """The slug is a live organization's or was retired by a deletion.
+
+    One exception for both, so a caller answers them alike and a deletion
+    is never disclosed (M2d-2 plan section 4.1).
+    """
+
+
+def lock_org_slug(session: Session, slug: str) -> None:
+    """Take the transaction-scoped advisory lock of an org slug.
+
+    ``pg_advisory_xact_lock(hashtext('org-slug:' || slug))``: an org's
+    creation and its deletion both hold it until they commit, so a create
+    cannot slip between a deletion's check and its commit.
+
+    Parameters
+    ----------
+    session : Session
+        A portal DB session; the lock is released when its transaction ends.
+    slug : str
+        The org slug.
+    """
+    from sqlalchemy import text
+
+    session.exec(
+        text("SELECT pg_advisory_xact_lock(hashtext(:key))"),  # type: ignore[call-overload]
+        params={"key": f"org-slug:{slug}"},
+    )
+
+
 def create_org(session: Session, *, slug: str, name: str) -> Organization:
     """Insert an organization and flush it.
+
+    Takes the slug's advisory lock (:func:`lock_org_slug`) first, then
+    refuses a slug in ``retired_org_slugs``.
 
     Parameters
     ----------
@@ -181,12 +214,17 @@ def create_org(session: Session, *, slug: str, name: str) -> Organization:
 
     Raises
     ------
+    OrgSlugTaken
+        If the slug was retired by an org's deletion.
     ValueError
         If the slug breaks the rules.
     """
-    from .models import Organization
+    from .models import Organization, RetiredOrgSlug
 
     validate_org_slug(slug)
+    lock_org_slug(session, slug)
+    if session.get(RetiredOrgSlug, slug) is not None:
+        raise OrgSlugTaken(f"organization slug {slug!r} is taken")
     org = Organization(slug=slug, name=name)
     session.add(org)
     session.flush()

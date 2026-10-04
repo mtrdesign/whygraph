@@ -1001,6 +1001,45 @@ def test_scan_request_refused_while_a_removal_runs(
         assert session.exec(select(ScanRun)).all() == []
 
 
+def test_removing_a_project_deletes_its_run_files(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    """``runs/<id>.jsonl``, ``.log`` and ``.token`` go with the row (M2d-2 section 0.2 #17)."""
+    local_project(portal, env, "demo")
+    local_project(portal, env, "other")
+    run_id = scan(portal, "demo")
+    other_id = scan(portal, "other")
+    wait_idle(portal, "demo")
+    wait_idle(portal, "other")
+    runs_dir = env.data / "runs"
+    (runs_dir / f"{run_id}.token").write_text("left over")
+    mine = [runs_dir / f"{run_id}{ext}" for ext in (".jsonl", ".log", ".token")]
+    others = [runs_dir / f"{other_id}{ext}" for ext in (".jsonl", ".log")]
+    assert all(p.is_file() for p in mine + others)
+
+    response = portal.delete("/api/projects/demo")
+    assert response.status_code == 200, response.text
+    assert not any(p.exists() for p in mine)
+    assert all(p.is_file() for p in others)
+
+
+def test_run_files_outside_the_runs_dir_are_never_deleted(
+    env: SimpleNamespace,
+) -> None:
+    outside = env.tmp / "precious.log"
+    outside.write_text("keep")
+    (env.data / "runs").mkdir(parents=True, exist_ok=True)
+    escape = env.data / "runs" / "link"
+    escape.symlink_to(env.tmp, target_is_directory=True)
+    runs = [
+        (1, "../precious.log", "runs/../../precious.log"),
+        (2, "runs/link/precious.log", None),
+        (3, str(outside), None),
+    ]
+    assert runner_mod.remove_run_files(env.data, runs) == 0
+    assert outside.read_text() == "keep"
+
+
 class FakeClock:
     """An ``async sleep`` the test advances by hand."""
 

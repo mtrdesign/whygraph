@@ -149,6 +149,8 @@ from .runner import (
     RunnerUnavailable,
     SourceNotAllowed,
     log_tail,
+    remove_run_files,
+    run_files,
     stale_info,
 )
 from .secrets import (
@@ -1338,8 +1340,14 @@ def _import_github(
                 continue
             _discard_clone(state, dest)
             raise duplicate from exc
-        except BaseException:
+        except BaseException as exc:
             _discard_clone(state, dest)
+            if isinstance(exc, ApiError) and exc.status == 404:
+                # The org was deleted meanwhile: leave no empty repos/<org>/.
+                try:
+                    org_dir.rmdir()
+                except OSError:
+                    pass
             raise
         state.contexts.invalidate(project_id)
         audit(
@@ -1409,7 +1417,8 @@ def delete_project(
     never deletes a local repo or the rest of its ``.whygraph/``. A GitHub
     clone's checkout is deleted only when ``confirm_name`` equals the
     project name and the checkout sits directly under
-    ``<data dir>/repos``.
+    ``<data dir>/repos``. The project's run files (``runs/<id>.jsonl``,
+    ``.log``, ``.token``) are deleted with its row.
     """
     state = portal_state(request)
     body = body or DeleteProjectBody()
@@ -1496,10 +1505,12 @@ def _remove_project(
     else:
         warnings.append(f"{project.root} is not mounted; hooks and markers were left")
 
+    runs = run_files([project.id])
     with get_session() as session:
         row = session.get(Project, project.id)
         if row is not None:
             session.delete(row)
+    remove_run_files(state.data_dir, runs)
 
     checkout_deleted = False
     if project.source == "github":

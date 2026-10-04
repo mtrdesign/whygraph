@@ -171,13 +171,14 @@ ORG_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/org/members/{uid}", "PATCH"),
         ("/api/org/members/{uid}", "DELETE"),
         ("/api/org/membership", "DELETE"),
+        ("/api/org", "DELETE"),
         ("/api/github/app/authorize", "POST"),
         ("/api/github/installations", "GET"),
         ("/api/github/installations/{installation_id}/repos", "GET"),
     }
 )
-"""The members routes (M2d-1 section 4.5) and the GitHub App import page
-(M2d-2 section 4.4): org-scoped, so served on org hosts only, and swept with
+"""The members routes (M2d-1 section 4.5), the org's deletion (M2d-2 section
+4.8) and the GitHub App import page (M2d-2 section 4.4): org-scoped, so served on org hosts only, and swept with
 every other org-scoped route below."""
 
 PRODUCTION_ONLY_ROUTES = PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES | PRODUCTION_ORG_ROUTES

@@ -15,6 +15,7 @@ import { ProjectStatusBadge } from "../components/portal/ProjectStatusBadge";
 import { RunStatusBadge } from "../components/portal/RunStatusBadge";
 import { EstimateBody } from "../components/portal/ScanEstimateCard";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
+import { useReadOnly, usePortalState, isProduction } from "../lib/identity";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Skeleton } from "../components/ui/skeleton";
@@ -60,6 +61,8 @@ export function ProjectHome() {
     retry: false,
   });
   const { scanNow, syncNow, scanPending, syncPending } = useScanActions(slug);
+  const readOnly = useReadOnly();
+  const production = isProduction(usePortalState().data);
   const [dismissed, setDismissed] = useState(false);
 
   if (project.isLoading) {
@@ -105,14 +108,16 @@ export function ProjectHome() {
               Open Explorer
             </Button>
           )}
-          {github && (
+          {github && !readOnly && (
             <Button variant="outline" onClick={syncNow} disabled={!ready || syncPending}>
               Sync now
             </Button>
           )}
-          <Button onClick={() => scanNow()} disabled={!ready || scanPending}>
-            Scan now
-          </Button>
+          {!readOnly && (
+            <Button onClick={() => scanNow()} disabled={!ready || scanPending}>
+              Scan now
+            </Button>
+          )}
         </div>
       </div>
 
@@ -121,7 +126,7 @@ export function ProjectHome() {
       {p.root_status === "ok" && !p.initialized && <NotInitialized slug={slug} />}
       {problem?.kind === "unsafe_path" && <ProblemAlert problem={problem} />}
 
-      {ready && stale && (
+      {ready && stale && !readOnly && (
         <Alert data-testid="stale-banner">
           <AlertTitle>
             {stale.commits_behind === null
@@ -173,7 +178,7 @@ export function ProjectHome() {
         <p className="text-xs text-muted-foreground">Stats are unavailable right now.</p>
       )}
 
-      {ready && !dismissed && estimate.data && estimate.data.commits > ESTIMATE_THRESHOLD && (
+      {ready && !readOnly && !dismissed && estimate.data && estimate.data.commits > ESTIMATE_THRESHOLD && (
         <section className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5">
           <h2 className="text-sm font-semibold">Commits waiting for a description</h2>
           <EstimateBody
@@ -229,7 +234,7 @@ export function ProjectHome() {
         </section>
       )}
 
-      {p.initialized && <ConnectAgent mcpUrl={p.mcp_url} configured={p.agents} />}
+      {p.initialized && p.mcp_url && !production && <ConnectAgent mcpUrl={p.mcp_url} configured={p.agents} />}
     </div>
   );
 }

@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { FolderGit2Icon, GitBranchIcon, MoreHorizontalIcon, PlusIcon } from "lucide-react";
 import { portalApi, portalKey, projectApi, type ProjectSummary } from "../api";
+import { isProduction, useReadOnly, usePortalState } from "../lib/identity";
 import { timeAgo } from "../lib/projectStatus";
 import { PortChangeBanner } from "../components/portal/PortChangeNotice";
 import { ProjectStatusBadge as StatusBadge } from "../components/portal/ProjectStatusBadge";
@@ -30,6 +31,7 @@ function ProjectCard({ project }: { project: ProjectSummary }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const target = openTarget(project);
+  const readOnly = useReadOnly();
   const scanned = timeAgo(project.last_scan_at);
   const usable = project.initialized && project.root_status === "ok";
 
@@ -85,10 +87,12 @@ function ProjectCard({ project }: { project: ProjectSummary }) {
             <MoreHorizontalIcon className="size-4" />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem disabled={!usable || scan.isPending} onClick={() => scan.mutate()}>
-              Scan now
-            </DropdownMenuItem>
-            {project.source === "github" && (
+            {!readOnly && (
+              <DropdownMenuItem disabled={!usable || scan.isPending} onClick={() => scan.mutate()}>
+                Scan now
+              </DropdownMenuItem>
+            )}
+            {project.source === "github" && !readOnly && (
               <DropdownMenuItem disabled={!usable || sync.isPending} onClick={() => sync.mutate()}>
                 Sync now
               </DropdownMenuItem>
@@ -121,6 +125,7 @@ export function ProjectsPage() {
     // Scans change status under the page; keep it fresh without a manual reload.
     refetchInterval: (q) => (q.state.data?.projects.some((p) => p.running_scan) ? 3000 : false),
   });
+  const production = isProduction(usePortalState().data);
   const [filter, setFilter] = useState("");
   const list = projects.data?.projects ?? [];
   const needle = filter.trim().toLowerCase();
@@ -139,7 +144,7 @@ export function ProjectsPage() {
             </p>
           )}
         </div>
-        {list.length > 0 && (
+        {list.length > 0 && !production && (
           <Button render={<Link to="/projects/new" />}>
             <PlusIcon data-icon="inline-start" />
             New project
@@ -167,16 +172,19 @@ export function ProjectsPage() {
             </EmptyMedia>
             <EmptyTitle>No projects yet</EmptyTitle>
             <EmptyDescription>
-              Add a repository from a shared folder, or clone one from GitHub, and WhyGraph will index
-              its history.
+              {production
+                ? "Adding projects arrives in the next release."
+                : "Add a repository from a shared folder, or clone one from GitHub, and WhyGraph will index its history."}
             </EmptyDescription>
           </EmptyHeader>
-          <EmptyContent>
-            <Button render={<Link to="/projects/new" />}>
-              <PlusIcon data-icon="inline-start" />
-              Add project
-            </Button>
-          </EmptyContent>
+          {!production && (
+            <EmptyContent>
+              <Button render={<Link to="/projects/new" />}>
+                <PlusIcon data-icon="inline-start" />
+                Add project
+              </Button>
+            </EmptyContent>
+          )}
         </Empty>
       )}
 

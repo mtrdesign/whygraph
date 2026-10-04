@@ -102,6 +102,7 @@ nav:
       - deploy/index.md
       - Run with Docker: deploy/docker.md
       - WhyGraph as a service: deploy/service.md
+      - Run in production: deploy/production.md
   - Reference:
       - reference/index.md
       - CLI: reference/cli.md

@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from typing import Iterator
 
 import anyio
+import httpx
 import pytest
 from alembic import command
 from click.testing import CliRunner
@@ -176,6 +177,100 @@ def portal_client(
         yield client
 
 
+PROD_DOMAIN = "whygraph.localhost"
+PROD_BASE = f"http://{PROD_DOMAIN}:{PORT}"
+PROD_CLIENT = ("203.0.113.5", 1)
+
+
+@pytest.fixture
+def production_env(
+    env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> SimpleNamespace:
+    """``env`` for a production portal at :data:`PROD_BASE` (M2c plan section 5.1)."""
+    monkeypatch.setenv("WHYGRAPH_MODE", "production")
+    monkeypatch.setenv("WHYGRAPH_BASE_URL", PROD_BASE)
+    for var in ("WHYGRAPH_SHARED_FOLDERS", "WHYGRAPH_TRUSTED_PROXIES"):
+        monkeypatch.delenv(var, raising=False)
+    return env
+
+
+@contextmanager
+def prod_portal(
+    base_url: str = PROD_BASE,
+    *,
+    client: tuple[str, int] = PROD_CLIENT,
+    instance_lock: bool = True,
+    identity: IdentityResolver | None = None,
+) -> Iterator[TestClient]:
+    """A production portal client on a real host name (so the cookie jar works).
+
+    No identity is injected by default, so ``SessionIdentity`` runs.
+    """
+    app = create_portal_app(port=PORT, instance_lock=instance_lock, identity=identity)
+    with TestClient(
+        app, base_url=base_url, headers=CLIENT_HEADER, client=client
+    ) as test_client:
+        yield test_client
+
+
+def at(slug: str | None = None, base: str = PROD_BASE) -> str:
+    """The URL prefix of an org host (``None``: the base host)."""
+    if slug is None:
+        return base
+    scheme, rest = base.split("://", 1)
+    return f"{scheme}://{slug}.{rest}"
+
+
+def signed_in(client: TestClient, user_id: int, domain: str = PROD_DOMAIN) -> str:
+    """Sign ``user_id`` in on ``client`` with a real session; return the token.
+
+    The session row is made directly, so a test can sign a user in that has
+    no password and on a portal whose bootstrap is still pending. Tests of
+    the sign-in route itself use :func:`log_in`.
+    """
+    from whygraph.portal import sessions
+
+    with portal_db.get_session() as session:
+        token = sessions.create_session(session, user_id, "pytest")
+    client.cookies.set("whygraph_session", token, domain=domain)
+    return token
+
+
+PROD_PASSWORD = "correct horse battery staple"
+"""A password that passes production's rules (15+ chars, not blocklisted)."""
+
+
+def claim_instance(
+    client: TestClient,
+    email: str = "ada@example.com",
+    *,
+    display_name: str = "Ada",
+    password: str = PROD_PASSWORD,
+) -> dict:
+    """Claim a fresh production instance; ``client`` is left signed in as the admin."""
+    secret = client.app.state.portal.bootstrap_secret
+    response = client.post(
+        at() + "/api/auth/bootstrap",
+        json={
+            "secret": secret,
+            "email": email,
+            "display_name": display_name,
+            "password": password,
+        },
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def log_in(
+    client: TestClient, email: str, password: str = PROD_PASSWORD, **extra
+) -> httpx.Response:
+    """Sign in through the real ``POST /api/auth/login`` on the base host."""
+    return client.post(
+        at() + "/api/auth/login", json={"email": email, "password": password, **extra}
+    )
+
+
 @pytest.fixture
 def client(env: SimpleNamespace) -> Iterator[TestClient]:
     with portal_client() as c:
@@ -286,14 +381,11 @@ def test_the_builtin_org_is_seeded_at_start_and_setup_makes_its_owner(
         assert len(session.exec(select(Organization)).all()) == 1
 
 
-def test_setup_is_404_without_a_builtin_org(env: SimpleNamespace) -> None:
-    """A stored production row: no built-in org, so no unauthenticated setup."""
-    from whygraph.portal.models import Organization, Setting, User
+def test_setup_is_404_without_a_builtin_org(production_env: SimpleNamespace) -> None:
+    """A production portal: no built-in org, so no unauthenticated setup."""
+    from whygraph.portal.models import Organization, User
 
-    portal_db.ensure_initialized()
-    with portal_db.get_session() as session:
-        session.add(Setting(id=1, mode="production"))
-    with portal_client() as client:
+    with prod_portal() as client:
         state = client.app.state.portal
         assert state.mode == "production"
         assert state.builtin_org_id is None and state.builtin_org_slug is None
@@ -544,10 +636,10 @@ def test_no_cors_headers_are_ever_sent(ready: TestClient) -> None:
 
 
 def _seed_two_orgs() -> SimpleNamespace:
-    """``local`` (alice admin), ``beta`` (bob owner) and erin with no membership."""
+    """``local`` (alice admin), ``bravo`` (bob owner) and erin with no membership."""
     with portal_db.get_session() as session:
         local = builtin_org_id(session)
-        beta = create_org(session, slug="beta", name="Beta")
+        beta = create_org(session, slug="bravo", name="Bravo")
         alice, bob, erin = (
             User(display_name=name) for name in ("Alice", "Bob", "Erin")
         )
@@ -586,9 +678,9 @@ def test_load_org_access(env: SimpleNamespace) -> None:
     assert load_org_access(orgs.alice, "local") == OrgAccess(
         org_id=orgs.local, org_slug="local", org_name="Local", role=Role.ADMIN
     )
-    bob = load_org_access(orgs.bob, "beta")
+    bob = load_org_access(orgs.bob, "bravo")
     assert bob is not None and bob.role is Role.OWNER and bob.org_id == orgs.beta
-    assert load_org_access(orgs.alice, "beta") is None  # another org's member
+    assert load_org_access(orgs.alice, "bravo") is None  # another org's member
     assert load_org_access(orgs.bob, "local") is None
     assert load_org_access(orgs.erin, "local") is None  # no membership at all
     assert load_org_access(orgs.alice, "nope") is None  # unknown org
@@ -617,7 +709,7 @@ def test_current_org_answers_setup_required_before_not_found(
         erin = {"x-test-user": orgs.uids["erin"]}
         for headers in (
             alice,  # the request names no org
-            {**alice, "x-test-org": "beta"},  # not a member
+            {**alice, "x-test-org": "bravo"},  # not a member
             {**alice, "x-test-org": "nope"},  # no such org
             {**erin, "x-test-org": "local"},  # no membership anywhere
         ):
@@ -631,7 +723,7 @@ def test_current_org_answers_setup_required_before_not_found(
             "org_name": "Local",
             "role": "admin",
         }
-        bob = {"x-test-user": orgs.uids["bob"], "x-test-org": "beta"}
+        bob = {"x-test-user": orgs.uids["bob"], "x-test-org": "bravo"}
         assert client.get("/api/test/org", headers=bob).json()["role"] == "owner"
 
 
@@ -647,7 +739,7 @@ def test_local_identity_resolves_the_builtin_org_after_setup(
         "role": "owner",
     }
     # Test headers mean nothing to the default resolver.
-    other = ready.get("/api/test/org", headers={"x-test-org": "beta"})
+    other = ready.get("/api/test/org", headers={"x-test-org": "bravo"})
     assert other.json()["org_slug"] == "local"
 
 
@@ -681,8 +773,8 @@ def test_the_guard_stores_the_org_slug_and_none_when_degraded(
     state.degraded = "portal database unavailable"
     anyio.run(call)
     assert seen == [
-        {"principal": None, "org_slug": "local"},
-        {"principal": None, "org_slug": None},
+        {"principal": None, "org_slug": "local", "host_kind": "local"},
+        {"principal": None, "org_slug": None, "host_kind": "local"},
     ]
 
 
@@ -721,8 +813,8 @@ def test_state_names_the_org_and_scopes_the_port_report(
             "projects": [item(1, orgs.local)],
             "unmounted": [],
         }
-        bob = state(**{"x-test-user": orgs.uids["bob"], "x-test-org": "beta"})
-        assert bob["org"] == {"slug": "beta", "name": "Beta", "role": "owner"}
+        bob = state(**{"x-test-user": orgs.uids["bob"], "x-test-org": "bravo"})
+        assert bob["org"] == {"slug": "bravo", "name": "Bravo", "role": "owner"}
         assert bob["port_change"]["projects"] == [item(2, orgs.beta)]
         assert bob["port_change"]["unmounted"] == [item(3, orgs.beta)]
         for headers in (
@@ -758,10 +850,25 @@ def _api_routes(app) -> list:
     ]
 
 
+PUBLIC_AUTH_ROUTES = {
+    ("/api/auth/bootstrap", "GET"),
+    ("/api/auth/bootstrap", "POST"),
+    ("/api/auth/register", "POST"),
+    ("/api/auth/login", "POST"),
+    ("/api/auth/logout", "POST"),
+    ("/api/auth/reset", "POST"),
+}
+"""Production's public auth routes (M2c plan section 4.7): no session needed."""
+
+
 def test_every_api_route_resolves_current_user_except_state_and_setup(
     client: TestClient,
 ) -> None:
-    exempt = {("/api/portal/state", "GET"), ("/api/portal/setup", "POST")}
+    exempt = {
+        ("/api/portal/state", "GET"),
+        ("/api/portal/setup", "POST"),
+        *PUBLIC_AUTH_ROUTES,
+    }
     routes = _api_routes(client.app)
     assert len(routes) > 30
     seen_exempt = set()
@@ -825,16 +932,37 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     (f"{_P}/chat/sessions/{{session_id}}", "PATCH"): _CHAT,
     (f"{_P}/chat/sessions/{{session_id}}", "DELETE"): _CHAT,
     (f"{_P}/chat/sessions/{{session_id}}/messages", "POST"): _CHAT,
+    # Production's account and org creation: user_access(...) (M2c section 4.7)
+    ("/api/account", "GET"): "user.self",
+    ("/api/account", "PATCH"): "user.self",
+    ("/api/account/password", "POST"): "user.self",
+    ("/api/account/orgs", "GET"): "user.self",
+    ("/api/orgs", "POST"): "user.self",
+    # Production's admin page: instance_access()
+    ("/api/admin/settings", "GET"): "instance.admin",
+    ("/api/admin/orgs", "GET"): "instance.admin",
+    ("/api/admin/users", "GET"): "instance.admin",
+    ("/api/admin/users/{uid}", "PATCH"): "instance.admin",
+    ("/api/admin/users/{uid}/reset-link", "POST"): "instance.admin",
 }
 """Plan section 4.5's route -> action table: a changed action is a visible diff."""
+
+NON_ORG_ACTIONS = {"user.self", "instance.admin"}
+"""Actions of routes that name no org (production-only, M2c section 4.7)."""
+
+NON_ORG_ROUTES = {
+    route for route, action in ROUTE_ACTIONS.items() if action in NON_ORG_ACTIONS
+}
 
 PUBLIC_API_ROUTES = {
     "/api/portal/state",
     "/api/portal/setup",
     "/api",
     "/api/{rest:path}",
+    *(path for path, _ in PUBLIC_AUTH_ROUTES),
 }
-"""The only ``/api`` routes that declare no action (state, setup, 404 fallbacks)."""
+"""The only ``/api`` routes that declare no action (state, setup, the public
+auth routes, 404 fallbacks)."""
 
 
 def test_every_api_route_declares_exactly_one_action(client: TestClient) -> None:
@@ -872,24 +1000,39 @@ def test_only_the_mcp_routes_have_no_dependant(client: TestClient) -> None:
     assert isinstance(dispatcher.endpoint, McpDispatcher)
 
 
+_FILL = {
+    "{slug}": "demo",
+    "{rest:path}": "x/y",
+    "{session_id}": "1",
+    "{sha}": "abc",
+    "{number}": "1",
+    "{run_id}": "1",
+    "{uid}": "someone",
+}
+
+
+def _filled(path: str) -> str:
+    for placeholder, value in _FILL.items():
+        path = path.replace(placeholder, value)
+    assert "{" not in path, path
+    return path
+
+
+PRODUCTION_ONLY_ROUTES = PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES
+"""Routes that answer ``404`` in local mode (M2c plan section 4.7)."""
+
+
 def test_every_api_route_answers_setup_required_before_setup(
     client: TestClient,
 ) -> None:
-    fill = {
-        "{slug}": "demo",
-        "{rest:path}": "x/y",
-        "{session_id}": "1",
-        "{sha}": "abc",
-        "{number}": "1",
-        "{run_id}": "1",
+    exempt = {
+        ("/api/portal/state", "GET"),
+        ("/api/portal/setup", "POST"),
+        *PRODUCTION_ONLY_ROUTES,  # 404 in local mode, before setup or not
     }
-    exempt = {("/api/portal/state", "GET"), ("/api/portal/setup", "POST")}
     checked = 0
     for rc in _api_routes(client.app):
-        url = rc.path
-        for placeholder, value in fill.items():
-            url = url.replace(placeholder, value)
-        assert "{" not in url, url
+        url = _filled(rc.path)
         for method in rc.methods:
             if (rc.path, method) in exempt or method == "HEAD":
                 continue
@@ -898,6 +1041,28 @@ def test_every_api_route_answers_setup_required_before_setup(
             assert response.json() == {"error": "setup required"}, (method, url)
             checked += 1
     assert checked > 30
+
+
+def test_production_only_routes_are_404_in_local_mode(client: TestClient) -> None:
+    """The mode check comes first: before setup, after it, any body."""
+    for setup_done in (False, True):
+        if setup_done:
+            assert (
+                client.post(
+                    "/api/portal/setup", json={"display_name": "Tess"}
+                ).status_code
+                == 201
+            )
+        seen = set()
+        for rc in _api_routes(client.app):
+            for method in rc.methods:
+                if (rc.path, method) not in PRODUCTION_ONLY_ROUTES:
+                    continue
+                seen.add((rc.path, method))
+                response = client.request(method, _filled(rc.path), json={})
+                assert response.status_code == 404, (method, rc.path, response.text)
+                assert response.json() == {"error": "not found"}, (method, rc.path)
+        assert seen == PRODUCTION_ONLY_ROUTES
 
 
 def test_unscoped_api_paths_are_json_404s_not_the_spa(

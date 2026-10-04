@@ -1,6 +1,7 @@
 # WhyGraph dev tasks. Run `make` (or `make help`) to list targets.
 #
 #   make dev-local    develop natively  (portal :8777 + Vite HMR :5173, auto-restart)
+#   make dev-production  the same in production mode (whygraph.localhost:5173; not beside dev-local)
 #   make dev-docker   develop in Docker (the same, inside the image via the real shim)
 #   make prod         the image exactly as released, through the shim (:8777)
 #   make check        everything CI runs, plus e2e and the release smoke test
@@ -18,12 +19,14 @@ UV_RUN ?= uv run
 # Scratch state for all dev modes (canonical path: Docker shares it at the same path).
 DEV ?= $(shell cd "$${TMPDIR:-/tmp}" && pwd -P)/whygraph-dev
 DEV_PORT ?= 8777
+DEV_PROD_PORT ?= 8778
 
 # `make dev-db`: the dev portal's Postgres, laid out like the shim's
 # (`whygraph up`) but published on 127.0.0.1 with a dev-only password.
 PG_DEV_PORT ?= 55432
 PG_DEV_NAME := whygraph-dev-postgres
 DEV_DATABASE_URL = postgresql+psycopg://whygraph:whygraph-dev@127.0.0.1:$(PG_DEV_PORT)/whygraph
+DEV_PROD_DATABASE_URL = postgresql+psycopg://whygraph:whygraph-dev@127.0.0.1:$(PG_DEV_PORT)/whygraph_prod
 
 # `make inspect SLUG=<slug>` points the MCP Inspector at one project's MCP
 # endpoint on the running dev portal.
@@ -37,13 +40,13 @@ CLAUDE_CODE_VERSION := $(shell sed -n "s/^ *CLAUDE_CODE_VERSION: *'\([^']*\)'.*/
 # What the image is built from besides src/: a change here means `dev-docker` rebuilds.
 DEPS_HASH = $(shell cat pyproject.toml uv.lock hatch_build.py docker/whygraph/Dockerfile src/playground/package-lock.json | git hash-object --stdin | cut -c1-16)
 
-.PHONY: help dev dev-local dev-docker prod check test e2e docs docs-build db db-down dev-db dev-db-down inspect image sync playground node-check playground-deps dev-fixtures dev-image
+.PHONY: help dev dev-local dev-production dev-docker prod check test e2e docs docs-build db db-down dev-db dev-db-down inspect image sync playground node-check playground-deps dev-fixtures dev-image
 
 help:  ## List available targets
 	@echo "Run WhyGraph:"
-	@grep -hE '^(dev-local|dev-docker|prod|check):.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-11s %s\n", $$1, $$2}'
+	@grep -hE '^(dev-local|dev-production|dev-docker|prod|check):.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-15s %s\n", $$1, $$2}'
 	@echo "Helpers:"
-	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | grep -vE '^(help|dev-local|dev-docker|prod|check):' | sort | awk 'BEGIN{FS=":.*?## "}{printf "  %-11s %s\n", $$1, $$2}'
+	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | grep -vE '^(help|dev-local|dev-production|dev-docker|prod|check):' | sort | awk 'BEGIN{FS=":.*?## "}{printf "  %-15s %s\n", $$1, $$2}'
 
 # --- run -------------------------------------------------------------------
 
@@ -54,6 +57,16 @@ dev-local: node-check dev-fixtures dev-db  ## Develop natively: portal :8777 (au
 	WHYGRAPH_DATABASE_URL="$(DEV_DATABASE_URL)" \
 	WHYGRAPH_SHARED_FOLDERS="$(DEV)/repos" WHYGRAPH_DEV_ORIGINS=http://localhost:5173,http://127.0.0.1:5173 \
 		$(UV_RUN) python scripts/dev_portal.py -- --data "$(DEV)/local/data" --port $(DEV_PORT)
+
+dev-production: node-check dev-fixtures dev-db  ## Develop in production mode: portal :8778 + Vite :5173 on whygraph.localhost:5173 (not beside dev-local)
+	@docker exec $(PG_DEV_NAME) psql -U whygraph -d whygraph -tAc "SELECT 1 FROM pg_database WHERE datname='whygraph_prod'" | grep -q 1 \
+		|| docker exec $(PG_DEV_NAME) createdb -U whygraph whygraph_prod
+	@mkdir -p "$(DEV)/production/data"
+	@echo "open http://whygraph.localhost:5173 (Chromium or Firefox); the bootstrap secret is printed below"
+	env -u WHYGRAPH_SHARED_FOLDERS -u WHYGRAPH_DEV_ORIGINS \
+	WHYGRAPH_MODE=production WHYGRAPH_BASE_URL=http://whygraph.localhost:5173 \
+	WHYGRAPH_DATABASE_URL="$(DEV_PROD_DATABASE_URL)" \
+		$(UV_RUN) python scripts/dev_portal.py --preserve-host -- --data "$(DEV)/production/data" --port $(DEV_PROD_PORT)
 
 dev-docker: dev-fixtures dev-image  ## Develop in Docker: the same, inside the image via the real shim - open :5173
 	sh scripts/dev_docker.sh dev "$(IMAGE)" "$(DEV)" $(DEV_PORT)

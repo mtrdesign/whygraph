@@ -16,6 +16,10 @@ const root = need("WHYGRAPH_E2E_ROOT");
 
 export const env = {
   baseUrl: need("WHYGRAPH_E2E_URL"),
+  // The production-mode portal (`http://whygraph.localhost:<port>`) and its log,
+  // where the one-time bootstrap secret is printed.
+  prodUrl: need("WHYGRAPH_E2E_PROD_URL"),
+  prodLog: need("WHYGRAPH_E2E_PROD_LOG"),
   root,
   shared: path.join(root, "shared"),
   outside: path.join(root, "outside"),

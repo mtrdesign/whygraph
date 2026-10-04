@@ -23,6 +23,7 @@ dependencies = [
     "cryptography>=43",
     "psycopg[binary]>=3.2,<4",
     "sqlalchemy>=2.0.16",
+    "argon2-cffi>=23.1",
 ]
 
 [project.scripts]

@@ -14,8 +14,9 @@ endpoint per project, on the portal's port (`8765` by default). The same tools, 
 back every project; the endpoint binds the project named in the URL for the duration of each call.
 
 - The project must be **initialized** in the portal, or the endpoint answers `409`.
-- In this release there is no authentication: the portal is loopback-only and local. The `Host` must be
-  the loopback address and port, and a request carrying a foreign `Origin` is rejected.
+- The MCP endpoint exists **only in local mode**; a [production](../deploy/production.md) portal
+  answers `404` at `/mcp`. In local mode there is no authentication: the portal is loopback-only. The
+  `Host` must be the loopback address and port, and a request carrying a foreign `Origin` is rejected.
 - Agents are configured for you when you initialize a project - see
   [Connecting agents](../portal/agents.md). The stdio `whygraph-mcp` server of 1.x no longer exists.
 

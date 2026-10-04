@@ -483,3 +483,21 @@ def test_ci_postgres_service_matches_the_pinned_image() -> None:
         f"POSTGRES_MAJOR {POSTGRES_MAJOR} is not the major of {POSTGRES_IMAGE}"
     )
     assert tag.endswith("-trixie"), f"{POSTGRES_IMAGE} left the trixie variant"
+
+
+PRODUCTION_COMPOSE = REPO_ROOT / "docker" / "production" / "compose.yml"
+
+
+def test_production_compose_pins() -> None:
+    # The production compose file carries two image literals that no docs scan
+    # sees. Read them with a regex: pyyaml is only in the docs group, not in
+    # the CI tests job.
+    images = re.findall(r"^\s*image:\s*(\S+)\s*$", PRODUCTION_COMPOSE.read_text(), re.M)
+    portal = [i for i in images if i.startswith(f"{IMAGE_REPO}:")]
+    postgres = [i for i in images if i.startswith("postgres:")]
+    assert portal == [f"{IMAGE_REPO}:{_default_version()}"], (
+        f"compose portal image {portal} != {IMAGE_REPO}:{_default_version()}"
+    )
+    assert postgres == [POSTGRES_IMAGE], (
+        f"compose postgres image {postgres} != POSTGRES_IMAGE {POSTGRES_IMAGE}"
+    )

@@ -39,18 +39,24 @@ from fastapi.testclient import TestClient
 from sqlmodel import select
 
 from conftest import HeaderIdentity, build_fake_codegraph_db
-from test_portal_app import (  # noqa: F401 -- `env` is a fixture
+from test_portal_app import (  # noqa: F401 -- `env`, `production_env` are fixtures
     _NODES,
+    NON_ORG_ACTIONS,
+    NON_ORG_ROUTES,
     PORT,
     PUBLIC_API_ROUTES,
     ROUTE_ACTIONS,
     _git,
+    at,
     env,
     manual_ctx,
     portal_client,
+    prod_portal,
+    production_env,
 )
 from test_portal_mcp import MCP_HEADERS, _rpc, _sse_json
 from whygraph.core.context import use_project
+from whygraph.db import ensure_initialized
 from whygraph.db import get_session as project_session
 from whygraph.db.models import Commit, CommitFileChange
 from whygraph.mcp import rationale as mcp_rationale
@@ -69,6 +75,7 @@ from whygraph.services.llm.chat import TextDelta, TurnDone
 FAKE_SCAN = Path(__file__).parent / "fixtures" / "fake_scan.py"
 TERMINAL = ("ok", "failed", "interrupted", "cancelled")
 NOT_FOUND = {"error": "not found"}
+LOGIN_REQUIRED = {"error": "sign-in required", "code": "login_required"}
 
 
 # ---------------------------------------------------------------------------
@@ -370,7 +377,7 @@ def _seed_orgs(client: TestClient) -> tuple[OrgWorld, OrgWorld, dict]:
     users = {"alice": {"x-test-user": _ok(setup, 201)["user"]["uid"]}}
     with portal_db.get_session() as session:
         local_id = session.get(Setting, 1).builtin_org_id
-        beta_id = create_org(session, slug="beta", name="Beta").id
+        beta_id = create_org(session, slug="bravo", name="Beta").id
         made = {
             n: User(display_name=n.title()) for n in ("bob", "carol", "dave", "erin")
         }
@@ -381,7 +388,7 @@ def _seed_orgs(client: TestClient) -> tuple[OrgWorld, OrgWorld, dict]:
         add_member(session, org_id=local_id, user_id=made["dave"].id, role="admin")
         users |= {n: {"x-test-user": u.uid} for n, u in made.items()}
     local = OrgWorld("local", "quokka", {**users["alice"], "x-test-org": "local"})
-    beta = OrgWorld("beta", "narwhal", {**users["bob"], "x-test-org": "beta"})
+    beta = OrgWorld("bravo", "narwhal", {**users["bob"], "x-test-org": "bravo"})
     local.org_id, beta.org_id = local_id, beta_id
     return local, beta, users
 
@@ -498,14 +505,22 @@ def test_the_same_slug_binds_each_orgs_own_project(env: SimpleNamespace) -> None
 
 
 def _org_scoped_routes(app) -> list[tuple[str, str]]:  # noqa: ANN001
-    """``(method, path)`` of every ``/api`` route but the public ones."""
+    """``(method, path)`` of every org-scoped ``/api`` route.
+
+    The public routes and the ones that name no org (``user.self`` /
+    ``instance.admin``, M2c plan section 4.7) are left out.
+    """
     found = set()
     for rc in iter_route_contexts(app.routes):
         path = rc.path or ""
         if not path.startswith("/api") or getattr(rc, "dependant", None) is None:
             continue
         if path not in PUBLIC_API_ROUTES:
-            found |= {(method, path) for method in rc.methods if method != "HEAD"}
+            found |= {
+                (method, path)
+                for method in rc.methods
+                if method != "HEAD" and (path, method) not in NON_ORG_ROUTES
+            }
     return sorted(found, key=lambda route: (route[1], route[0]))
 
 
@@ -719,7 +734,8 @@ def test_the_sweep_covers_every_live_route(two_orgs: World) -> None:
     assert _org_scoped_routes(two_orgs.client.app) == API_ROUTES
     assert len(API_ROUTES) > 30
     assert set(ROUTE_REQUESTS) == set(API_ROUTES)
-    assert {(m, p) for (p, m) in ROUTE_ACTIONS} == set(API_ROUTES)
+    org_scoped = {(m, p) for (p, m) in ROUTE_ACTIONS if (p, m) not in NON_ORG_ROUTES}
+    assert org_scoped == set(API_ROUTES)
 
 
 @pytest.mark.parametrize(
@@ -736,9 +752,9 @@ def test_every_org_scoped_route_is_isolated(
     # unknown org - one indistinguishable 404, before any body is read.
     for headers in (
         w.as_("bob", "local"),
-        w.as_("alice", "beta"),
+        w.as_("alice", "bravo"),
         w.as_("erin", "local"),
-        w.as_("erin", "beta"),
+        w.as_("erin", "bravo"),
         w.as_("alice", "nope"),
     ):
         response = w.client.request(method, _url(path, w.local), headers=headers)
@@ -844,7 +860,7 @@ def test_every_mcp_tool_answers_from_its_own_org(two_orgs: World) -> None:
         assert f"{other.mark} marker commit" not in foreign.text
     for headers in (
         w.as_("bob", "local"),
-        w.as_("alice", "beta"),
+        w.as_("alice", "bravo"),
         w.as_("erin", "local"),
         w.as_("alice", "nope"),
     ):
@@ -971,7 +987,7 @@ ADMIN_ROUTES = sorted(
     (
         (m, p)
         for (p, m), action in ROUTE_ACTIONS.items()
-        if action not in MEMBER_ACTIONS
+        if action not in MEMBER_ACTIONS and action not in NON_ORG_ACTIONS
     ),
     key=lambda route: (route[0] == "DELETE", route[1], route[0]),  # DELETE last
 )
@@ -1166,55 +1182,55 @@ def test_system_scans_get_only_their_own_orgs_secrets(
             assert not leaked, (start, org.slug, leaked)
 
 
-def test_hook_scans_are_refused_in_production_and_no_org_resolves_by_default(
-    env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+def test_nothing_answers_signed_out_in_production(
+    production_env: SimpleNamespace,
 ) -> None:
-    """Section 5.4 item 3, with a stored production row (it cannot start otherwise)."""
-    scanner = _fake_scanner(env, monkeypatch)
-    portal_db.ensure_initialized()
-    with portal_db.get_session() as session:
-        session.add(Setting(id=1, mode="production"))
-        session.flush()
-        beta_id = create_org(session, slug="beta", name="Beta").id
-        bob = User(display_name="Bob")
-        session.add(bob)
-        session.flush()
-        add_member(session, org_id=beta_id, user_id=bob.id, role="owner")
-        headers = {"x-test-user": bob.uid, "x-test-org": "beta"}
+    """Section 5.4 item 3 on a real production portal (M2c sessions and hosts).
+
+    Production refuses Initialize, so the project is inserted directly with
+    ``initialized_at`` set and its DB created as Initialize would. The
+    hook-refusal half of this case lives in
+    ``test_portal_hosts_isolation.py`` (M2c plan section 7, step 5).
+    """
+    env = production_env
     root = _marked_repo(env, "narwhal")
     _seed_codegraph(root, "narwhal")
-    with portal_client(identity=HeaderIdentity()) as client:
-        assert client.app.state.portal.mode == "production"
-        added = client.post(
-            "/api/projects",
-            json={"source": "local", "path": str(root)},
-            headers=headers,
-        )
-        _ok(added, 201)
-        _ok(client.post("/api/projects/api/init", json={"agents": []}, headers=headers))
-        hook = client.post(
-            "/api/projects/api/scans", json={"trigger": "hook"}, headers=headers
-        )
-        assert hook.status_code == 403
-        assert hook.json() == {
-            "error": "hook scans exist only in local mode",
-            "code": "hook_local_only",
-        }
-        manual = client.post(
-            "/api/projects/api/scans", json={"trigger": "manual"}, headers=headers
-        )
-        _ok(manual, 202)
-        wait_idle(client, headers)
-        assert len(scanner.calls()) == 1  # only the manual scan ran
-    with portal_client() as client:  # LocalIdentity: a user, but no built-in org
+    with use_project(manual_ctx(root, slug="api")):
+        ensure_initialized()
+    with prod_portal() as client:
         state = client.app.state.portal
-        assert state.builtin_org_slug is None
+        assert state.mode == "production" and state.builtin_org_slug is None
+        # After the start, so its catch-up never sees the project.
+        with portal_db.get_session() as session:
+            beta_id = create_org(session, slug="bravo", name="Beta").id
+            bob = User(display_name="Bob", email="bob@example.com")
+            session.add(bob)
+            session.flush()
+            add_member(session, org_id=beta_id, user_id=bob.id, role="owner")
+            session.add(
+                Project(
+                    org_id=beta_id,
+                    slug="api",
+                    name="Narwhal API",
+                    source="local",
+                    root=str(root),
+                    initialized_at="2026-10-03T00:00:00+00:00",
+                    created_by=bob.id,
+                )
+            )
+        bravo = at("bravo")
+        # Signed out: every org route is a 401, MCP and setup do not exist.
         for method, path in API_ROUTES:
             url = _url(path, SimpleNamespace(run_id=1, marker_sha="abc", session_id=1))
-            response = client.request(method, url)
-            assert response.status_code == 404, (method, path, response.text)
-            assert response.json() == NOT_FOUND, (method, path)
-        mcp = client.post("/mcp/api", json=_rpc("tools/list"), headers=MCP_HEADERS)
-        assert mcp.status_code == 404 and mcp.json() == NOT_FOUND
-        setup = client.post("/api/portal/setup", json={"display_name": "Eve"})
+            response = client.request(method, bravo + url)
+            assert response.status_code == 401, (method, path, response.text)
+            assert response.json() == LOGIN_REQUIRED, (method, path)
+        mcp = client.post(
+            bravo + "/mcp/api", json=_rpc("tools/list"), headers=MCP_HEADERS
+        )
+        assert mcp.status_code == 404
+        assert mcp.json() == {"error": "no MCP endpoint /mcp/api"}
+        setup = client.post(bravo + "/api/portal/setup", json={"display_name": "Eve"})
         assert setup.status_code == 404
+        body = _ok(client.get(bravo + "/api/portal/state"))
+        assert body["user"] is None and body["org"] is None

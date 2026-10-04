@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useReadOnly } from "../../lib/identity";
 import { Controller, useForm, type FieldPath } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -204,6 +205,7 @@ export function ConfigForm({
   secondaryActions?: ReactNode;
 }) {
   const queryClient = useQueryClient();
+  const readOnly = useReadOnly();
   const slug = scope.kind === "project" ? scope.slug : null;
   const isProject = slug !== null;
 
@@ -543,12 +545,14 @@ export function ConfigForm({
         </Alert>
       )}
 
-      <div className="flex items-center justify-end gap-2">
-        {secondaryActions}
-        <Button type="submit" disabled={save.isPending}>
-          {save.isPending ? "Saving…" : submitLabel}
-        </Button>
-      </div>
+      {!readOnly && (
+        <div className="flex items-center justify-end gap-2">
+          {secondaryActions}
+          <Button type="submit" disabled={save.isPending}>
+            {save.isPending ? "Saving…" : submitLabel}
+          </Button>
+        </div>
+      )}
     </form>
   );
 }

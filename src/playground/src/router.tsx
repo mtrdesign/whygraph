@@ -1,5 +1,7 @@
 import { useEffect } from "react";
 import {
+  Link,
+  Navigate,
   Outlet,
   createRootRouteWithContext,
   createRoute,
@@ -8,13 +10,16 @@ import {
   useParams,
   useRouteContext,
   useRouterState,
+  useSearch,
   type RouterHistory,
 } from "@tanstack/react-router";
 import { useQuery, type QueryClient } from "@tanstack/react-query";
-import { ApiError, portalApi, portalKey, projectApi, projectKey, type PortalState } from "./api";
+import { ApiError, portalApi, portalKey, projectApi, projectKey, setBaseUrl, type PortalState } from "./api";
 import { projectProblem } from "./lib/errors";
 import { getLastProject, setLastProject } from "./lib/lastProject";
 import { ProjectProvider } from "./lib/project";
+import { isProduction, isSafeNext, signInUrl, usePortalState } from "./lib/identity";
+import { hardNavigate } from "./lib/navigation";
 import { AppShell } from "./components/shell/AppShell";
 import { useGlobalShortcuts } from "./components/shell/shortcuts";
 import { CommandPalette } from "./components/CommandPalette";
@@ -28,6 +33,16 @@ import { SetupPage } from "./pages/SetupPage";
 import { GlobalSettingsPage } from "./pages/GlobalSettingsPage";
 import { ProjectSettingsPage } from "./pages/ProjectSettingsPage";
 import { ScansPage } from "./pages/ScansPage";
+import { AccountPage } from "./pages/AccountPage";
+import { AdminPage } from "./pages/AdminPage";
+import { BootstrapPage } from "./pages/BootstrapPage";
+import { CreateOrgPage } from "./pages/CreateOrgPage";
+import { NoOrgAccessPage } from "./pages/NoOrgAccessPage";
+import { OrgPickerPage } from "./pages/OrgPickerPage";
+import { RegisterPage } from "./pages/RegisterPage";
+import { ResetPasswordPage } from "./pages/ResetPasswordPage";
+import { SessionNotReceivedPage } from "./pages/SessionNotReceivedPage";
+import { SignInPage } from "./pages/SignInPage";
 import {
   DegradedPage,
   NotFoundPage,
@@ -39,7 +54,9 @@ import {
 // The route tree for §4.9, code-based (a generated `routeTree.gen.ts` would not
 // exist yet when `tsc --noEmit` runs ahead of `vite build`).
 //
-//   /setup                               first run (no shell)
+//   /setup                               first run (no shell); production: the bootstrap
+//   /signin /register /reset /orgs /orgs/new /admin /account
+//                                        production base host only (no AppShell)
 //   /                                    Projects              ┐ portal layout
 //   /projects/new                        add-project wizard    │ (sidebar: Projects,
 //   /settings                            global settings       ┘  Settings)
@@ -130,11 +147,49 @@ function RootError({ error, reset }: { error: Error; reset: () => void }) {
   );
 }
 
+// ---- production identity gate (M2c section 4.10) ----------------------------
+
+// What the base host serves (everything else is the org tree, which lives on an
+// org host), and the subset a signed-out visitor may open.
+const BASE_PATHS = new Set(["/signin", "/register", "/setup", "/reset", "/orgs", "/orgs/new", "/admin", "/account"]);
+const SIGNED_OUT_PATHS = new Set(["/signin", "/register", "/reset"]);
+
+/**
+ * Where the base host sends this request instead of rendering it, or `null` to
+ * render. `/signin` with a valid `next` while signed in is *not* redirected: the
+ * route renders the "session not received" page there, which breaks the loop
+ * org host (no cookie) -> sign-in -> picker -> org host.
+ */
+export function baseHostRedirect(portal: PortalState, pathname: string): string | null {
+  const path = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
+  if (portal.bootstrap_required) return path === "/setup" ? null : "/setup";
+  if (path === "/setup") return "/";
+  if (!portal.user) return SIGNED_OUT_PATHS.has(path) ? null : "/signin";
+  if (path === "/" || path === "/register") return "/orgs";
+  if (!BASE_PATHS.has(path)) return "/";
+  if (path === "/admin" && !portal.user.is_instance_admin) return "/orgs";
+  return null;
+}
+
 function RootLayout() {
   const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
   useGlobalShortcuts();
   if (portal.error) return <DegradedPage message={portal.error} />;
+  if (portal.mode === "production" && portal.host_kind === "org" && portal.user && !portal.org) {
+    return <NoOrgAccessPage />;
+  }
   return <Outlet />;
+}
+
+function RootNotFound() {
+  const state = usePortalState();
+  // The shell's sidebar calls /api/projects, which is a 404 on the base host.
+  if (isProduction(state.data) && state.data?.host_kind === "base") return <NotFoundPage />;
+  return (
+    <AppShell>
+      <NotFoundPage />
+    </AppShell>
+  );
 }
 
 const rootRoute = createRootRouteWithContext<RouterContext>()({
@@ -147,7 +202,21 @@ const rootRoute = createRootRouteWithContext<RouterContext>()({
       queryFn: portalApi.state,
       staleTime: 30_000,
     });
-    if (!portal.error) {
+    const kind = portal.mode === "production" ? portal.host_kind : undefined;
+    setBaseUrl(!portal.error && kind && kind !== "local" ? (portal.base_url ?? null) : null);
+    if (!portal.error && kind === "base") {
+      const to = baseHostRedirect(portal, location.pathname);
+      if (to) throw redirect({ to, replace: true });
+    } else if (!portal.error && kind === "org" && portal.base_url) {
+      const base = new URL(portal.base_url);
+      if (!portal.user) {
+        // `href` is the path and query; the org host's own origin completes it.
+        const here = new URL(location.href, window.location.origin).href;
+        await hardNavigate(signInUrl(portal.base_url, here));
+      } else if (portal.org && BASE_PATHS.has(location.pathname)) {
+        await hardNavigate(`${base.origin}${location.pathname}${location.searchStr ?? ""}`);
+      }
+    } else if (!portal.error) {
       const onSetup = location.pathname === "/setup";
       if (!portal.setup_complete && !onSetup) throw redirect({ to: "/setup", replace: true });
       if (portal.setup_complete && onSetup) throw redirect({ to: "/", replace: true });
@@ -156,14 +225,75 @@ const rootRoute = createRootRouteWithContext<RouterContext>()({
   },
   component: RootLayout,
   errorComponent: ({ error, reset }) => <RootError error={error as Error} reset={reset} />,
-  notFoundComponent: () => (
-    <AppShell>
-      <NotFoundPage />
-    </AppShell>
-  ),
+  notFoundComponent: RootNotFound,
 });
 
-const setupRoute = createRoute({ getParentRoute: () => rootRoute, path: "/setup", component: SetupPage });
+// One /setup route: local mode's first-run page, or production's bootstrap.
+function SetupRoute() {
+  const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
+  return portal.mode === "production" ? <BootstrapPage /> : <SetupPage />;
+}
+const setupRoute = createRoute({ getParentRoute: () => rootRoute, path: "/setup", component: SetupRoute });
+
+// ---- base-host pages (production; no AppShell) ----------------------------------
+
+const validateNext = (search: Record<string, unknown>): { next?: string } => ({ next: text(search.next) });
+
+function BaseLayout() {
+  const state = usePortalState();
+  const user = state.data?.user;
+  if (!user) return <Outlet />;
+  return (
+    <>
+      <nav aria-label="Account" className="flex items-center gap-4 border-b border-border px-6 py-2 text-sm">
+        <Link to="/orgs" className="font-medium hover:underline">
+          Organizations
+        </Link>
+        {user.is_instance_admin && (
+          <Link to="/admin" className="hover:underline">
+            Administration
+          </Link>
+        )}
+        <Link to="/account" className="ml-auto hover:underline">
+          {user.display_name}
+        </Link>
+      </nav>
+      <Outlet />
+    </>
+  );
+}
+
+function SignInRoute() {
+  const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
+  const { next } = useSearch({ strict: false }) as { next?: string };
+  const state = usePortalState().data ?? portal;
+  if (state.user) {
+    // Signed in: no `next` goes to the picker; a valid `next` means that address
+    // did not receive the cookie, so say so instead of looping.
+    if (isSafeNext(next, state.base_url)) return <SessionNotReceivedPage />;
+    return <Navigate to="/orgs" replace />;
+  }
+  return <SignInPage />;
+}
+
+const baseLayout = createRoute({ getParentRoute: () => rootRoute, id: "base", component: BaseLayout });
+const signInRoute = createRoute({
+  getParentRoute: () => baseLayout,
+  path: "/signin",
+  validateSearch: validateNext,
+  component: SignInRoute,
+});
+const registerRoute = createRoute({ getParentRoute: () => baseLayout, path: "/register", component: RegisterPage });
+const resetRoute = createRoute({ getParentRoute: () => baseLayout, path: "/reset", component: ResetPasswordPage });
+const orgsRoute = createRoute({
+  getParentRoute: () => baseLayout,
+  path: "/orgs",
+  validateSearch: validateNext,
+  component: OrgPickerPage,
+});
+const newOrgRoute = createRoute({ getParentRoute: () => baseLayout, path: "/orgs/new", component: CreateOrgPage });
+const adminRoute = createRoute({ getParentRoute: () => baseLayout, path: "/admin", component: AdminPage });
+const accountRoute = createRoute({ getParentRoute: () => baseLayout, path: "/account", component: AccountPage });
 
 // ---- portal layout ----------------------------------------------------------
 
@@ -338,6 +468,7 @@ const legacyChatRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   setupRoute,
+  baseLayout.addChildren([signInRoute, registerRoute, resetRoute, orgsRoute, newOrgRoute, adminRoute, accountRoute]),
   portalLayout.addChildren([projectsRoute, newProjectRoute, globalSettingsRoute]),
   projectRoute.addChildren([
     projectHomeRoute,

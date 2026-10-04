@@ -1,3 +1,4 @@
+import { useReadOnly } from "../../lib/identity";
 import { useActiveSessionId } from "../../lib/nav";
 import { useProjectQuery, useSlug } from "../../lib/project";
 import { SessionList } from "./SessionList";
@@ -18,11 +19,20 @@ import { Empty, EmptyDescription } from "../ui/empty";
 export function ChatView() {
   const slug = useSlug();
   const activeSessionId = useActiveSessionId();
+  const readOnly = useReadOnly();
 
   // Header context for the open session, and the reason a deleted-elsewhere
   // session degrades gracefully rather than 404-looping.
   const sessions = useProjectQuery(["chat", "sessions"], (api) => api.chatSessions());
   const active = sessions.data?.find((s) => s.id === activeSessionId);
+
+  if (readOnly) {
+    return (
+      <Empty className="h-full p-8" data-testid="chat-read-only">
+        <EmptyDescription>Chat is not available while viewing as an instance administrator (read-only).</EmptyDescription>
+      </Empty>
+    );
+  }
 
   return (
     <div className="flex min-h-0 flex-1">

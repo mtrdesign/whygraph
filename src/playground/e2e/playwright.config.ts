@@ -34,15 +34,22 @@ export default defineConfig({
     { name: "setup", testMatch: /setup\.spec\.ts/, use: { colorScheme: "light" } },
     {
       name: "light",
-      testIgnore: /setup\.spec\.ts/,
+      testIgnore: /(setup|production)\.spec\.ts/,
       dependencies: ["setup"],
       use: { colorScheme: "light" },
     },
     {
       name: "dark",
-      testIgnore: /setup\.spec\.ts/,
+      testIgnore: /(setup|production)\.spec\.ts/,
       dependencies: ["light"],
       use: { colorScheme: "dark" },
+    },
+    // Production mode: its own portal (`env.prodUrl`), claimed through the
+    // logged bootstrap secret. Independent of the local-mode projects above.
+    {
+      name: "production",
+      testMatch: /production\.spec\.ts/,
+      use: { baseURL: env.prodUrl, colorScheme: "light" },
     },
   ],
 });

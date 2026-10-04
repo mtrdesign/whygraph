@@ -1,6 +1,6 @@
 # Security model
 
-The portal is built for **one person on their own machine** (local mode). It has no login. What keeps
+In local mode the portal is built for **one person on their own machine**. It has no login. What keeps
 it safe is where it listens, what it refuses to do, and what it is never given. This page lists those
 boundaries so you can judge them.
 
@@ -45,10 +45,46 @@ routes:
     The portal is reachable by **every user of the machine** through the loopback address, and it
     holds your LLM API keys and GitHub tokens. On a machine that other people log in to, another user
     can open the portal, read your projects' history and spend your keys. Do not run local mode on a
-    shared host. A multi-user mode with real authentication is planned; until then, use one machine
-    per person.
+    shared host. For several people, use [production mode](../deploy/production.md), which has real
+    accounts; otherwise use one machine per person.
 
 The Welcome screen says the same thing the first time you open the portal.
+
+## Production mode
+
+!!! note "Unreleased"
+    Production mode is on `main` and in no released image yet. Setup is in
+    [Run in production](../deploy/production.md).
+
+Everything above describes local mode. In production mode the portal is reached over the network, so
+the checks change:
+
+- **Sessions.** Sign-in is email and password (argon2, 15 characters minimum, a common-password
+  blocklist). The session is a random token whose hash only is stored in the database; the cookie is
+  `HttpOnly`, `SameSite=Lax`, `Secure` over `https`, and set on the base host so it reaches every
+  organization. Sessions last 30 days at most and 7 days idle, a password change rotates the current
+  one and ends the others, and a reset ends all of them. Sign-in, registration and reset happen on
+  the base host only.
+- **Hosts.** The `Host` must be the base host or exactly one valid label under it
+  (`<org>.<base host>`); anything else, including `www.` and lookalike suffixes, gets `421`. An
+  organization is served only on its own host, and membership is checked on every request.
+- **Origin.** `X-WhyGraph-Client` is still required, `cross-site` and `same-site` requests to `/api`
+  are refused, and an `Origin` must be exactly the request's own host, so a page on one
+  organization cannot write to another's host. No CORS headers are sent.
+- **Headers.** Every response carries `X-Frame-Options: DENY`, a `frame-ancestors 'none'` content
+  security policy, `Referrer-Policy: same-origin` and `nosniff`; `/api` responses and any response
+  that sets a cookie are `no-store`; over `https` there is HSTS with `includeSubDomains`. A full
+  script content security policy is not part of this release.
+- **Throttling.** Sign-in failures are limited per account and address, and registration, setup and
+  reset per address.
+- **No user-controlled markup** is rendered on an organization host, because the session cookie is
+  shared across them.
+- **A dedicated base host.** The cookie reaches every subdomain, so the base host must belong to
+  WhyGraph alone. See [why](../deploy/production.md#why-a-dedicated-domain).
+- **Instance admins** can read every organization, read-only, and every such request is logged.
+  Authentication events go to the `whygraph.portal.audit` log.
+- **What is off.** No shared folders, no projects added, no `/mcp`, no git-hook scans, no repository
+  access: production organizations hold no projects yet.
 
 ## Keys and tokens
 

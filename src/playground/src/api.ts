@@ -1,6 +1,8 @@
 // Typed client for the WhyGraph Explorer API. Shapes mirror `serve/routes.py`
 // exactly — the same payloads the MCP tools serve, over HTTP.
 
+import { hardNavigate } from "./lib/navigation";
+
 export interface Symbol {
   id: string;
   qualified_name: string;
@@ -229,6 +231,9 @@ export interface PortalUser {
   uid: string;
   display_name: string;
   role: string | null;
+  // Production only (M2c).
+  email?: string;
+  is_instance_admin?: boolean;
 }
 
 // `GET /api/portal/state` is public. In degraded mode (the portal DB failed to
@@ -243,9 +248,20 @@ export interface PortalState {
   version?: string | null;
   // What the portal did when it started on a new port (computed once at start).
   port_change?: PortChange | null;
-  // The organization the request is in (M2b); null before setup.
-  org?: { slug: string; name: string; role: string } | null;
+  // The organization the request is in (M2b); null before setup. `reader` is an
+  // instance admin looking at an org they are not a member of (read-only).
+  org?: PortalOrg | null;
+  // Production only (M2c); a missing `host_kind` means local mode.
+  host_kind?: "local" | "base" | "org";
+  base_url?: string;
+  bootstrap_required?: boolean;
   error?: string;
+}
+
+export interface PortalOrg {
+  slug: string;
+  name: string;
+  role: "owner" | "admin" | "member" | "reader" | (string & {});
 }
 
 // ---- port change (portal/port_change.py) ----------------------------------------
@@ -306,7 +322,8 @@ export interface ProjectSummary {
 export interface ProjectDetails extends ProjectSummary {
   agents: string[];
   missing_key: string | null;
-  mcp_url: string;
+  // `null` in production (no MCP endpoint there).
+  mcp_url: string | null;
   // The repo's 1.x / agent-file state, recomputed on every read; `null` while
   // the project folder is unusable.
   detected?: Detected | null;
@@ -596,9 +613,33 @@ function init(method: string, body?: unknown, signal?: AbortSignal): RequestInit
   };
 }
 
+// The public base URL, set by the root gate from the portal state (production only).
+let baseUrl: string | null = null;
+
+/** Tell the transport where the sign-in page lives; `null` in local mode. */
+export function setBaseUrl(url: string | null): void {
+  baseUrl = url;
+}
+
+// An org host without a session answers `401 login_required`: send the browser to
+// the base host's sign-in with a way back. `bad_credentials` (also 401) never gets
+// here, and the base host's own /signin never redirects to itself.
+function redirectToSignIn(): void {
+  if (!baseUrl) return;
+  let base: URL;
+  try {
+    base = new URL(baseUrl);
+  } catch {
+    return;
+  }
+  if (window.location.origin === base.origin && window.location.pathname === "/signin") return;
+  hardNavigate(`${base.origin}/signin?next=${encodeURIComponent(window.location.href)}`);
+}
+
 async function failure(res: Response): Promise<ApiError> {
   const body = await res.json().catch(() => ({}));
   const { detail, error, code, ...extra } = body;
+  if (res.status === 401 && code === "login_required") redirectToSignIn();
   return new ApiError(res.status, detail ?? error ?? res.statusText, code, extra);
 }
 
@@ -637,6 +678,83 @@ export const portalApi = {
   defaults: () => get<DefaultsView>("/portal/defaults"),
   putDefaults: (body: ConfigPut) => send<DefaultsView>("PUT", "/portal/defaults", body),
   addProject: (body: AddProjectBody) => send<AddProjectResult>("POST", "/projects", body),
+};
+
+// ---- identity (portal/auth_routes.py, production only) ----------------------------
+
+export interface Redirect {
+  redirect: string;
+}
+
+export interface AccountView {
+  uid: string;
+  email: string;
+  display_name: string;
+  is_instance_admin: boolean;
+}
+
+export interface OrgEntry {
+  slug: string;
+  name: string;
+  role: string;
+  url: string;
+}
+
+export interface AdminUser {
+  uid: string;
+  email: string;
+  display_name: string;
+  is_instance_admin: boolean;
+  created_at: string;
+  org_count: number;
+}
+
+export interface AdminOrg {
+  slug: string;
+  name: string;
+  url: string;
+  member_count: number;
+  created_at: string;
+}
+
+export interface AdminSettings {
+  base_url: string;
+  // The base-URL self-check's warnings; `null` until it has run, `[]` when clean.
+  base_check: string[] | null;
+}
+
+export const authApi = {
+  bootstrap: (body: { secret: string; email: string; display_name: string; password: string }) =>
+    send<Redirect>("POST", "/auth/bootstrap", body),
+  register: (body: { email: string; display_name: string; password: string }) =>
+    send<Redirect>("POST", "/auth/register", body),
+  login: (body: { email: string; password: string; next?: string }) =>
+    send<Redirect>("POST", "/auth/login", body),
+  logout: () => send<Redirect>("POST", "/auth/logout"),
+  reset: (body: { token: string; password: string }) => send<Redirect>("POST", "/auth/reset", body),
+};
+
+export const accountApi = {
+  get: () => get<AccountView>("/account"),
+  update: (display_name: string) => send<AccountView>("PATCH", "/account", { display_name }),
+  password: (body: { current: string; new: string }) =>
+    send<unknown>("POST", "/account/password", body),
+  orgs: () => get<OrgEntry[]>("/account/orgs"),
+};
+
+export const orgsApi = {
+  create: (body: { slug: string; name: string }) =>
+    send<{ slug: string; url: string }>("POST", "/orgs", body),
+};
+
+export const adminApi = {
+  settings: () => get<AdminSettings>("/admin/settings"),
+  orgs: () => get<AdminOrg[]>("/admin/orgs"),
+  users: () => get<AdminUser[]>("/admin/users"),
+  setAdmin: (uid: string, is_instance_admin: boolean) =>
+    send<unknown>("PATCH", `/admin/users/${encodeURIComponent(uid)}`, { is_instance_admin }),
+  resetLink: (uid: string) =>
+    send<{ url: string }>("POST", `/admin/users/${encodeURIComponent(uid)}/reset-link`),
 };
 
 // ---- project-scoped calls ---------------------------------------------------

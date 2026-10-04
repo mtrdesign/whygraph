@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { portalApi, portalKey, projectApi, projectKey } from "../api";
+import { useReadOnly } from "../lib/identity";
 import { useSlug } from "../lib/project";
 import { useScanActions } from "../lib/scanActions";
 import { ConfigForm } from "../components/portal/ConfigForm";
@@ -61,6 +62,7 @@ function General({ slug }: { slug: string }) {
   });
   const [name, setName] = useState<string | null>(null);
   const { syncNow, syncPending } = useScanActions(slug);
+  const readOnly = useReadOnly();
   const rename = useMutation({
     mutationFn: (value: string) => projectApi(slug).rename(value),
     onSuccess: () => {
@@ -90,9 +92,11 @@ function General({ slug }: { slug: string }) {
         </label>
         <div className="flex gap-2">
           <Input id="project-name" value={value} onChange={(e) => setName(e.target.value)} />
-          <Button type="submit" disabled={!dirty || rename.isPending}>
-            Rename
-          </Button>
+          {!readOnly && (
+            <Button type="submit" disabled={!dirty || rename.isPending}>
+              Rename
+            </Button>
+          )}
         </div>
         <p className="text-xs text-muted-foreground">
           The URL name <span className="font-mono">{p.slug}</span> never changes.
@@ -109,13 +113,17 @@ function General({ slug }: { slug: string }) {
             <dd className="font-mono text-xs">{p.remote_url}</dd>
           </>
         )}
-        <dt className="text-muted-foreground">MCP endpoint</dt>
-        <dd className="flex flex-wrap items-center gap-2">
-          <span className="font-mono text-xs">{p.mcp_url}</span>
-          <CopyButton text={p.mcp_url} variant="ghost" />
-        </dd>
+        {p.mcp_url && (
+          <>
+            <dt className="text-muted-foreground">MCP endpoint</dt>
+            <dd className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-xs">{p.mcp_url}</span>
+              <CopyButton text={p.mcp_url} variant="ghost" />
+            </dd>
+          </>
+        )}
       </dl>
-      {p.source === "github" && (
+      {p.source === "github" && !readOnly && (
         <div className="flex flex-col gap-1.5 border-t border-border pt-4">
           <p className="text-sm font-medium">Sync with GitHub</p>
           <p className="text-xs text-muted-foreground">
@@ -150,6 +158,7 @@ export function ProjectSettingsPage() {
     queryKey: projectKey(slug, "project"),
     queryFn: () => portalApi.project(slug),
   });
+  const readOnly = useReadOnly();
   const [removing, setRemoving] = useState(false);
   const p = project.data;
   const scrollTo = (id: string) =>
@@ -188,7 +197,7 @@ export function ProjectSettingsPage() {
         >
           {!p && <Skeleton className="h-24" />}
           {p && !p.initialized && <NotInitialized slug={slug} />}
-          {p && p.initialized && p.root_status === "ok" && (
+          {p && p.initialized && p.root_status === "ok" && !readOnly && (
             <InitializeStep
               slug={slug}
               mode="settings"
@@ -199,18 +208,20 @@ export function ProjectSettingsPage() {
           )}
         </Section>
 
-        <Section
-          id="danger"
-          title="Danger zone"
-          description="Unregisters the project and removes its git hooks. Your repository and its .whygraph folder are not deleted."
-          danger
-        >
-          <div>
-            <Button variant="destructive" disabled={!p} onClick={() => setRemoving(true)}>
-              Remove project
-            </Button>
-          </div>
-        </Section>
+        {!readOnly && (
+          <Section
+            id="danger"
+            title="Danger zone"
+            description="Unregisters the project and removes its git hooks. Your repository and its .whygraph folder are not deleted."
+            danger
+          >
+            <div>
+              <Button variant="destructive" disabled={!p} onClick={() => setRemoving(true)}>
+                Remove project
+              </Button>
+            </div>
+          </Section>
+        )}
       </div>
 
       {p && <RemoveProjectDialog project={p} open={removing} onOpenChange={setRemoving} />}

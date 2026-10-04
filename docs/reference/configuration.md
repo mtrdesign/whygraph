@@ -208,8 +208,9 @@ A 1.x file resolves to exactly the same providers, models, and timeouts it did b
 
 ## Environment variables
 
-These apply to **headless** `whygraph scan`. The portal does not read them: its container is started
-with none of your environment, so credentials are entered under Settings instead.
+The variables in the first two tables apply to **headless** `whygraph scan`. The portal does not read
+them: its container is started with none of your environment, so credentials are entered under
+Settings instead. The portal has variables of its own, in the tables further down.
 
 Omit an `api_key` from an `[llm.*]` table and headless WhyGraph reads the standard environment variable
 instead.
@@ -249,6 +250,15 @@ so you only set them to run `whygraph portal` yourself:
 
 Neither is a `whygraph.toml` key: the portal database is host configuration, not project
 configuration.
+
+These select and shape the portal's [production mode](../deploy/production.md), and are read once at
+its start. None is a `whygraph.toml` key either.
+
+| Variable | Used for |
+|---|---|
+| `WHYGRAPH_MODE` | `local` (the default) or `production`. It is fixed at the portal's first start and stored in its database; a different value later is refused. |
+| `WHYGRAPH_BASE_URL` | **Required in production.** The public address, such as `https://whygraph.example.com` or `http://whygraph.localhost:8765`: scheme and host (and a non-default port), no path. Organizations live on `<org>.<host>`. `http` is accepted only for hosts ending in `.localhost`; an IP address or a single-label host is refused. A default port (`:443`, `:80`) is dropped. An invalid value, or `WHYGRAPH_SHARED_FOLDERS` set in production, stops the first start with exit code `2`. |
+| `WHYGRAPH_TRUSTED_PROXIES` | Comma-separated IPs or CIDRs of the reverse proxies whose `X-Forwarded-For` the portal believes (it is uvicorn's `forwarded_allow_ips`). Unset trusts none. A bad entry exits with status `2`. |
 
 !!! tip "Provider keys degrade gracefully - for scan and rationale"
     Missing a key for the analysis or rationale phase isn't fatal - that phase skips, and the rest of

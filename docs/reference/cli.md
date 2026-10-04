@@ -108,7 +108,9 @@ command the Docker runtime runs inside the image.
     In this release the supported way to run the portal is the Docker runtime, which publishes it on
     `127.0.0.1` only. Run natively, `whygraph portal` is for development: shared folders come only
     from `WHYGRAPH_SHARED_FOLDERS`, and a non-loopback `--host` is refused unless `--dev-expose` is
-    given, because local mode has no login.
+    given, because local mode has no login. The compose bundle for
+    [production mode](../deploy/production.md) runs the portal in the image with `--host 0.0.0.0`,
+    behind a TLS proxy.
 
 | Option | Default | Description |
 |---|---|---|
@@ -124,7 +126,7 @@ database, and migrates it.
 
 | Exit code | When |
 |---|---|
-| `2` | `WHYGRAPH_DATABASE_URL` is unset or not a Postgres URL, or the password file cannot be read; another portal already holds the data directory; a refused `--host` |
+| `2` | `WHYGRAPH_DATABASE_URL` is unset or not a Postgres URL, or the password file cannot be read; another portal already holds the data directory; a refused `--host`; a refused production start (an invalid `WHYGRAPH_BASE_URL` or `WHYGRAPH_TRUSTED_PROXIES`, or shared folders set), with the reason on stderr |
 | `3` | The database stayed unreachable through the start-up wait. Under the shim, Docker's restart policy retries with back-off. |
 
 The portal is a single process. It holds an exclusive lock on its data directory, so a second
@@ -134,10 +136,16 @@ directory) starts **degraded** with `another WhyGraph portal is already using th
 touches nothing. If the database connection that holds that lock drops, the portal shuts down so the
 restart policy can bring it back and take the lock again. An advisory lock is held by a database
 session, so an external database must be reached directly or through a **session-mode** pooler;
-a transaction-mode pooler such as PgBouncer's makes the lock meaningless. Every `/api` request must carry the
+a transaction-mode pooler such as PgBouncer's makes the lock meaningless. In local mode every `/api` request must carry the
 `X-WhyGraph-Client: 1` header and a loopback `Host`; cross-site requests and foreign `Origin` values
 are rejected. `WHYGRAPH_DEV_ORIGINS` (comma-separated origins, e.g. `http://localhost:5173`) adds
 origins for a local frontend dev server.
+
+Three more variables select [production mode](../deploy/production.md) - `WHYGRAPH_MODE`,
+`WHYGRAPH_BASE_URL` and `WHYGRAPH_TRUSTED_PROXIES`; see
+[Configuration](configuration.md#environment-variables). In production the `Host` is the base host or
+an organization's subdomain, and the guard described above is replaced by the one on the
+[security model](../portal/security.md#production-mode) page.
 
 The portal never follows a symbolic link out of a project's folder, since a repository's content
 (especially a GitHub clone's) is not trusted. When `.whygraph/`, `.codegraph/`, either database,

@@ -7,6 +7,8 @@ Composition (plan section 4.5.1)::
     /api/portal/*                 management (portal/routes.py)
     /api/auth/*, /api/account*,   production identity, org creation and admin
     /api/orgs, /api/admin/*       (portal/auth_routes.py; 404 in local mode)
+    /api/github/*                 the GitHub App's authorize / callback / listings
+                                  (portal/github_app_routes.py; 404 in local mode)
     /api/projects/*               management; each route names its action through
                                   org_access / project_access / project_db_access
     /api/projects/{slug}/...      serve.routes.router (project.read) + serve.chat.router
@@ -81,6 +83,7 @@ from .deps import (
     project_db_access,
 )
 from .github_app import GitHubApp, load_github_app_config
+from .github_app_routes import github_app_router
 from .github_auth import GitHubOAuth, load_github_config
 from .hosts import (
     BASE_URL_ENV,
@@ -222,6 +225,7 @@ def create_portal_app(
     app.include_router(public_router)
     app.include_router(auth_router)  # production-only; local mode answers 404
     app.include_router(members_router)  # production-only, org-scoped
+    app.include_router(github_app_router)  # production-only (M2d-2)
     app.include_router(portal_router)
     app.include_router(projects_router)
     app.include_router(

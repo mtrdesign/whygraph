@@ -22,8 +22,10 @@ has an allowlist (plan section 4.2.1):
   ``[llm]`` (with the 1b connection keys), ``[analyze]``, ``[rationale]``
   and ``[chat]``.
 
-Beside the config allowlists, :func:`allowed_sources` is the one place
-that says which project sources a mode accepts.
+In production a project ``PUT`` uses :data:`PRODUCTION_PUT_ALLOWLIST`
+(:func:`put_allowlist`). Beside the config allowlists,
+:func:`allowed_sources` is the one place that says which project sources a
+mode accepts.
 
 Layers are passed through :func:`whygraph.core.config.normalize_v2`
 before filtering, so a 1.x alias (``[scan].provider``,
@@ -104,6 +106,28 @@ PUT_ALLOWLIST: Spec = {
 
 DEFAULTS_ALLOWLIST: Spec = {k: v for k, v in PUT_ALLOWLIST.items() if k != "scan"}
 """Rule 6: what ``PUT /api/portal/defaults`` may store."""
+
+PRODUCTION_PUT_ALLOWLIST: Spec = {**PUT_ALLOWLIST, "scan": {"forge": True}}
+"""Rule 1b in production: ``[scan].remote``, ``default_branch`` and ``hooks``
+are fixed for a GitHub App project (M2d-2 plan section 0.2 #21); only the PR
+crawl switch ``[scan].forge`` stays writable."""
+
+
+def put_allowlist(mode: str | None) -> Spec:
+    """The project ``PUT`` allowlist of a portal in ``mode``.
+
+    Parameters
+    ----------
+    mode : str or None
+        ``"production"`` or ``"local"``.
+
+    Returns
+    -------
+    Spec
+        :data:`PRODUCTION_PUT_ALLOWLIST` in production, else
+        :data:`PUT_ALLOWLIST`.
+    """
+    return PRODUCTION_PUT_ALLOWLIST if mode == "production" else PUT_ALLOWLIST
 
 
 def allowed_sources(mode: str | None) -> frozenset[str]:
@@ -363,8 +387,10 @@ __all__ = [
     "IMPORT_ALLOWLIST",
     "ImportPreview",
     "PROVIDER_TABLES",
+    "PRODUCTION_PUT_ALLOWLIST",
     "PUT_ALLOWLIST",
     "allowed_sources",
     "filter_layer",
     "preview_import",
+    "put_allowlist",
 ]

@@ -23,6 +23,7 @@ from .commands import (
     GitHeadShaCmd,
     GitIsShallowCmd,
     GitLogCommitCmd,
+    GitLsTreeNamesCmd,
     GitRefExistsCmd,
     GitRemoteUrlCmd,
     GitRevListShasCmd,
@@ -305,6 +306,31 @@ class Repository:
             return self._shell.run(GitSymbolicRefCmd(ref), cwd=self.root, check=False)
         except ShellError:
             return None
+
+    def tracked_paths(self, ref: str, *paths: str) -> tuple[str, ...]:
+        """List the files ``ref`` tracks under ``paths`` (purely local).
+
+        Parameters
+        ----------
+        ref : str
+            The commit-ish to read, e.g. ``"HEAD"`` or ``"origin/main"``.
+        *paths : str
+            Directories or files relative to the root, e.g. ``".whygraph"``.
+
+        Returns
+        -------
+        tuple of str
+            The tracked file paths; empty when ``ref`` tracks nothing there.
+
+        Raises
+        ------
+        GitError
+            If ``git`` fails (an unknown ``ref``, not a repository).
+        """
+        try:
+            return self._shell.run(GitLsTreeNamesCmd(ref, paths), cwd=self.root)
+        except ShellError as exc:
+            raise GitError(f"failed to list the files {ref} tracks") from exc
 
     def _ref_exists(self, ref: str) -> bool:
         """Whether ``ref`` resolves to a commit; ``False`` if git fails."""

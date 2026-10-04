@@ -36,6 +36,7 @@ import logging
 import re
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -53,6 +54,8 @@ from .github_auth import (
     DEFAULT_WEB_URL,
     GITHUB_API_URL_ENV,
     GITHUB_URL_ENV,
+    PENDING_MAX,
+    PENDING_TTL_SEC,
     GitHubAuthFailed,
     GitHubHttp,
     GitHubUnavailable,
@@ -458,6 +461,8 @@ class GitHubApp(GitHubHttp):
     Attributes
     ----------
     config : GitHubAppConfig
+    pending : PendingAuthorizations
+        The user authorizations and installs started from the portal.
     """
 
     def __init__(
@@ -469,6 +474,7 @@ class GitHubApp(GitHubHttp):
     ) -> None:
         super().__init__(config, transport=transport)
         self._clock = clock
+        self.pending = PendingAuthorizations()
         self._tokens: dict[tuple[int, int], InstallationToken] = {}
         self._tokens_lock = threading.Lock()
 
@@ -950,6 +956,122 @@ class GitHubApp(GitHubHttp):
 
 
 # ---------------------------------------------------------------------------
+# Authorizations in flight
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PendingAuthorization:
+    """A user authorization (or install) started from an org's import page.
+
+    Attributes
+    ----------
+    verifier : str
+        The PKCE verifier (unused by an install arrival; never leaves the server).
+    session_id : int
+        The WhyGraph session that started it.
+    user_id : int
+        The user who started it.
+    org_slug : str
+        The org whose import page started it (where the callback returns).
+    expires_at : float
+        Clock reading after which the entry is dead.
+    """
+
+    verifier: str = field(repr=False)
+    session_id: int
+    user_id: int
+    org_slug: str
+    expires_at: float
+
+
+class PendingAuthorizations:
+    """In-memory map of GitHub App authorizations in flight, keyed by ``state``.
+
+    Thread-safe, as M2d-1's :class:`~whygraph.portal.github_auth.PendingLogins`:
+    entries live :data:`~whygraph.portal.github_auth.PENDING_TTL_SEC`, are
+    single use, and past
+    :data:`~whygraph.portal.github_auth.PENDING_MAX` the oldest is evicted.
+
+    Parameters
+    ----------
+    clock : callable, optional
+        Returns seconds; injectable for tests (default ``time.monotonic``).
+    ttl : float
+        Entry lifetime in seconds.
+    max_entries : int
+        Capacity before the oldest entry is evicted.
+    """
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        ttl: float = PENDING_TTL_SEC,
+        max_entries: int = PENDING_MAX,
+    ) -> None:
+        self._clock = clock
+        self._ttl = ttl
+        self._max = max_entries
+        self._entries: OrderedDict[str, PendingAuthorization] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def put(
+        self,
+        state: str,
+        *,
+        verifier: str,
+        session_id: int,
+        user_id: int,
+        org_slug: str,
+    ) -> None:
+        """Remember a started authorization.
+
+        Parameters
+        ----------
+        state : str
+            The OAuth ``state``.
+        verifier : str
+            The PKCE verifier.
+        session_id, user_id : int
+            Who started it, in which session.
+        org_slug : str
+            The org it was started for.
+        """
+        entry = PendingAuthorization(
+            verifier, session_id, user_id, org_slug, self._clock() + self._ttl
+        )
+        with self._lock:
+            self._entries.pop(state, None)
+            self._entries[state] = entry
+            while len(self._entries) > self._max:
+                self._entries.popitem(last=False)
+
+    def pop(self, state: str) -> PendingAuthorization | None:
+        """Take an authorization out of the map (single use).
+
+        Parameters
+        ----------
+        state : str
+            The OAuth ``state``.
+
+        Returns
+        -------
+        PendingAuthorization or None
+            The entry, or ``None`` when it is unknown, used or expired.
+        """
+        with self._lock:
+            entry = self._entries.pop(state, None)
+        if entry is None or entry.expires_at <= self._clock():
+            return None
+        return entry
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+
+# ---------------------------------------------------------------------------
 # User tokens, in memory
 # ---------------------------------------------------------------------------
 
@@ -1064,6 +1186,23 @@ class UserTokens:
         with self._lock:
             return self._entries.pop(session_id, None)
 
+    def drop_user(self, user_id: int) -> list[UserToken]:
+        """Forget every token held for a user's sessions (all of them ended).
+
+        Parameters
+        ----------
+        user_id : int
+            The user whose sessions ended (password change, reset, disabling).
+
+        Returns
+        -------
+        list of UserToken
+            The dropped entries (so the caller can revoke them).
+        """
+        with self._lock:
+            sids = [sid for sid, e in self._entries.items() if e.user_id == user_id]
+            return [self._entries.pop(sid) for sid in sids]
+
     def sweep(self) -> int:
         """Forget every expired token.
 
@@ -1095,6 +1234,8 @@ __all__ = [
     "GitHubTokenRejected",
     "Installation",
     "InstallationToken",
+    "PendingAuthorization",
+    "PendingAuthorizations",
     "RepoPage",
     "UserAuthorization",
     "UserToken",

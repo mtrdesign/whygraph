@@ -283,22 +283,27 @@ class PendingLogins:
 
 
 class AccessLogRedactor(logging.Filter):
-    """Blank the query of ``/auth/github`` in uvicorn's access log.
+    """Blank the query of the GitHub callbacks in uvicorn's access log.
 
-    GitHub's redirect carries the single-use ``code`` and the ``state`` in
-    that query. uvicorn's access records carry the request line as
-    ``args[2]``; this filter rewrites ``/auth/github?...`` to
-    ``/auth/github?<redacted>`` and always lets the record through.
+    GitHub's redirects to ``/auth/github`` (sign-in) and
+    ``/auth/github-app`` (the GitHub App's authorize and install, M2d-2)
+    carry the single-use ``code`` and the ``state`` in that query.
+    uvicorn's access records carry the request line as ``args[2]``; this
+    filter rewrites ``/auth/github?...`` to ``/auth/github?<redacted>``
+    (and the same for ``/auth/github-app``) and always lets the record
+    through.
     """
 
-    PATH = "/auth/github"
+    PATHS = ("/auth/github", "/auth/github-app")
 
     def filter(self, record: logging.LogRecord) -> bool:
         """Redact the callback query in place; never drops a record."""
         args = record.args
         if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
             path = args[2]
-            if path == self.PATH or path.startswith((self.PATH + "?", self.PATH + "/")):
+            if any(
+                path == p or path.startswith((p + "?", p + "/")) for p in self.PATHS
+            ):
                 head, sep, _ = path.partition("?")
                 if sep:
                     record.args = (*args[:2], head + "?<redacted>", *args[3:])

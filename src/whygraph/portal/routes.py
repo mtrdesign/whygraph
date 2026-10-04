@@ -31,6 +31,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import secrets as secrets_mod
 import shutil
 from collections.abc import Callable
 from dataclasses import asdict
@@ -53,7 +54,7 @@ from whygraph.agents import (
     resolve_agent,
 )
 from whygraph.core.config import Config, ConfigError, normalize_v2
-from whygraph.core.context import use_project
+from whygraph.core.context import ProjectContext, use_project
 from whygraph.core.safe_paths import UnsafePathError, check_inside
 from whygraph.db import get_session as project_session
 from whygraph.db.engine import dispose_engine
@@ -75,10 +76,19 @@ from whygraph.project_setup import (
     PortalMarker,
     initialize_project,
 )
-from whygraph.services.git import redact_tokens, strip_userinfo
+from whygraph.services.git import (
+    GitError,
+    InvalidRepoUrlError,
+    Repository,
+    git_env,
+    redact_tokens,
+    strip_userinfo,
+)
+from whygraph.services.git.credentials import github_git_host
 from whygraph.services.github import GitHubError, RepoAccessError, check_repo_access
 
 from . import sessions
+from .audit import audit
 from .authz import Action, OrgAccess, Role, authorize
 from .config_layers import ConfigPolicyError, find_secret_paths, load_layer, save_layer
 from .context import build_project_context, resolve_root
@@ -98,18 +108,32 @@ from .deps import (
     project_db_access,
     unsafe_path_error,
 )
-from .models import Project, ProjectAgent, ScanRun, Secret, User
+from .github_app import (
+    GitHubAccessLost,
+    GitHubNotFound,
+    GitHubRepo,
+    GitHubTokenRejected,
+)
+from .github_app_routes import (
+    github_id_of,
+    github_unavailable,
+    require_github_app,
+    token_rejected,
+    user_token,
+)
+from .github_auth import GitHubUnavailable
+from .models import Organization, Project, ProjectAgent, ScanRun, Secret, User
 from .orgs import add_member
 from .paths import BACKUPS_DIR, check_project_paths
 from .policy import (
     DEFAULTS_ALLOWLIST,
-    PUT_ALLOWLIST,
     ImportPreview,
     allowed_sources,
     filter_layer,
     preview_import,
+    put_allowlist,
 )
-from .projects import unique_slug
+from .projects import slugify, unique_slug
 from .repos import (
     DISCOVERY_LIMIT,
     check_path,
@@ -156,22 +180,6 @@ def _now() -> str:
 def _origins(state: PortalState):
     assert state.origins is not None  # the guard refuses requests before startup
     return state.origins
-
-
-def _refuse_projects_in_production(state: PortalState) -> None:
-    """``403 projects_unavailable`` in production (M2c plan section 4.11).
-
-    Left for the GitHub import and Initialize until the GitHub App wiring
-    lands. Called in route bodies, so after
-    :func:`~whygraph.portal.authz.authorize` (a member without the action
-    still gets ``403 forbidden`` first).
-    """
-    if state.mode == "production":
-        raise ApiError(
-            403,
-            "production organizations cannot add or set up projects yet",
-            code="projects_unavailable",
-        )
 
 
 def _refuse_local_flow_in_production(state: PortalState) -> None:
@@ -644,14 +652,24 @@ def _unsafe_reason(root: Path, *paths: Path) -> str | None:
     return None
 
 
-def _clone_dir_is_safe(root: Path, data_dir: Path) -> bool:
-    """Whether ``root`` is a direct child of ``<data dir>/repos`` (rmtree guard).
+def _clone_dir_is_safe(root: Path, data_dir: Path, *, depth: int) -> bool:
+    """Whether ``root`` sits exactly ``depth`` levels under ``<data dir>/repos`` (rmtree guard).
 
-    The layout of the local GitHub clones of earlier builds, which can
-    still be removed.
+    ``depth`` is 2 for production's ``repos/<org slug>/<slug>`` (and its
+    ``repos/<org slug>/.clone-*`` temp dirs), 1 for a local GitHub clone of
+    an earlier build (``repos/<slug>``). Neither ``root`` nor any directory
+    between it and ``repos`` may be a symlink, and its real path's parent
+    chain must reach ``realpath(<data dir>/repos)``. Works for a path that
+    does not exist yet.
     """
+    repos = Path(os.path.realpath(data_dir / "repos"))
     real = Path(os.path.realpath(root))
-    return real.parent == Path(os.path.realpath(data_dir / "repos"))
+    path = Path(root)
+    for _ in range(depth):
+        if path.is_symlink():
+            return False
+        path, real = path.parent, real.parent
+    return real == repos and Path(os.path.realpath(path)) == repos
 
 
 def _probe(owner: str, name: str, token: str | None) -> None:
@@ -912,25 +930,26 @@ def add_project(
     principal: Principal = Depends(current_user),
     access: OrgAccess = Depends(org_access(Action.ORG_ADD_PROJECT)),
 ) -> dict:
-    """Register a local repo (under a shared folder).
+    """Register a local repo (local mode) or import a GitHub repo (production).
 
     Nothing inside a local repo is written. The response carries the
-    project, the ``detected`` 1.x state and the import report. Error codes:
-    ``bad_token``, ``no_access``, ``not_found``, ``not_shared``,
-    ``not_git``, ``duplicate`` (plus ``not_linked``, ``protected``,
-    ``github_error``). The source policy
+    project, the ``detected`` 1.x state and the import report. Error codes
+    of a local add: ``bad_token``, ``no_access``, ``not_found``,
+    ``not_shared``, ``not_git``, ``duplicate`` (plus ``not_linked``,
+    ``protected``, ``github_error``). The source policy
     (:func:`~whygraph.portal.policy.allowed_sources`) answers ``403
     source_not_allowed`` for ``github`` in local mode and ``local`` in
-    production; a production GitHub import is still ``403
-    projects_unavailable``.
+    production. A production import is :func:`_import_github`.
     """
     state = portal_state(request)
     _refuse_source(state, body.source)
     if isinstance(body, GitHubProjectBody):
-        # Production only (the source policy), and the import is not wired yet.
-        _refuse_projects_in_production(state)
-    assert isinstance(body, LocalProjectBody)
-    project_id, detected, preview = _add_local(state, body, principal, access.org_id)
+        project_id = _import_github(state, body, principal, access, request)
+        detected, preview = None, ImportPreview()
+    else:
+        project_id, detected, preview = _add_local(
+            state, body, principal, access.org_id
+        )
     ctx = state.contexts.get(project_id)
     with get_session() as session:
         row = session.get(Project, project_id)
@@ -939,6 +958,8 @@ def add_project(
     project = bound_from(row, ctx)
     with use_project(ctx):
         details = _details(state, project)
+    if detected is None:
+        detected = details["detected"]
     return {"project": details, "detected": detected, "import": preview.report()}
 
 
@@ -1065,8 +1086,276 @@ def _add_local(
     return project_id, detected, preview
 
 
-def _remove_clone(path: Path, data_dir: Path) -> bool:
-    if path.exists() and _clone_dir_is_safe(path, data_dir):
+IMPORT_SLUG_ATTEMPTS = 3
+"""Slugs an import tries when a concurrent one takes its first choice."""
+
+TRACKED_STATE_PATHS: tuple[str, ...] = (".whygraph", ".codegraph")
+"""Paths a repository must not track: WhyGraph's own state (M2d-2 plan section 0.2 #20)."""
+
+
+def _no_access() -> ApiError:
+    return ApiError(
+        404,
+        "that repository is not available to you through that installation",
+        code="no_access",
+    )
+
+
+def _constraint(exc: IntegrityError) -> str | None:
+    """The name of the constraint an ``IntegrityError`` violated, if known."""
+    diag = getattr(exc.orig, "diag", None)
+    return getattr(diag, "constraint_name", None)
+
+
+def _check_import_access(
+    state: PortalState, body: GitHubProjectBody, principal: Principal
+) -> tuple[GitHubRepo, str]:
+    """Steps 2-4 of the import: the user sees the installation and reads the repo,
+    and the installation covers it.
+
+    Returns
+    -------
+    tuple of (GitHubRepo, str)
+        The repository as the user sees it, and a repo-scoped installation
+        token.
+
+    Raises
+    ------
+    ApiError
+        ``503`` / ``403 github_required`` / ``401
+        github_authorization_required``; one ``404 no_access`` for all
+        three checks, so nothing about another account is disclosed;
+        ``502 github_unavailable``.
+    """
+    app = require_github_app(state)
+    github_id_of(principal)
+    token = user_token(state, principal)
+    try:
+        visible = {i.id for i in app.installations(token)}
+        if body.installation_id not in visible:
+            raise _no_access()
+        try:
+            repo = app.repository(token, body.repo_id)
+        except GitHubNotFound:
+            raise _no_access() from None
+        if not repo.can_pull or repo.id != body.repo_id:
+            raise _no_access()
+    except GitHubTokenRejected:
+        raise token_rejected(state, principal) from None
+    except GitHubNotFound:  # the token cannot list installations at all
+        raise token_rejected(state, principal) from None
+    except GitHubUnavailable:
+        raise github_unavailable() from None
+    try:
+        minted = app.installation_token(body.installation_id, body.repo_id)
+    except GitHubAccessLost:
+        raise _no_access() from None
+    except GitHubUnavailable:
+        raise github_unavailable() from None
+    return repo, minted.token
+
+
+def _production_initialize(state: PortalState, ctx: ProjectContext) -> None:
+    """A production project's Initialize: checked DB paths, then the migration.
+
+    No agent files, hooks or markers (M2d-2 plan section 0.2 #12); the
+    caller sets ``initialized_at``. Idempotent.
+
+    Raises
+    ------
+    ApiError
+        ``409 unsafe_path`` when a DB path is a symlink.
+    """
+    try:
+        check_project_paths(ctx.root)
+        state.migrations.ensure(ctx)
+    except UnsafePathError as exc:
+        raise unsafe_path_error(exc) from exc
+
+
+def _discard_clone(state: PortalState, path: Path) -> None:
+    """Remove an import's clone (and forget its DB) after a failed import."""
+    db_path = path / ".whygraph" / "whygraph.db"
+    dispose_engine(db_path)
+    state.migrations.forget(db_path)
+    _remove_clone(path, state.data_dir, depth=2)
+
+
+def _insert_imported(
+    state: PortalState,
+    *,
+    access: OrgAccess,
+    principal: Principal,
+    slug: str,
+    name: str,
+    repo: GitHubRepo,
+    installation_id: int,
+) -> int:
+    """Step 7 of the import: one transaction, the row, the forge layer, Initialize.
+
+    Raises
+    ------
+    ApiError
+        ``404`` when the org was deleted meanwhile (its row is locked
+        ``FOR SHARE`` first, so a deletion cannot interleave).
+    IntegrityError
+        A duplicate repo or slug in the org (the caller tells which).
+    """
+    web = require_github_app(state).config.web_url
+    with get_session() as session:
+        org = session.exec(
+            select(Organization.id)
+            .where(Organization.id == access.org_id)
+            .with_for_update(read=True)
+        ).first()
+        if org is None:
+            raise ApiError(404, "not found")
+        project = Project(
+            org_id=access.org_id,
+            slug=slug,
+            name=name,
+            source="github",
+            root=f"repos/{access.org_slug}/{slug}",
+            remote_url=f"{web}/{repo.full_name}",
+            created_by=principal.user_id,
+            github_repo_id=repo.id,
+            github_installation_id=installation_id,
+            default_branch=repo.default_branch,
+        )
+        session.add(project)
+        session.flush()
+        assert project.id is not None
+        save_layer(
+            session, project.id, {"scan": {"forge": "auto"}}, org_id=access.org_id
+        )
+        _production_initialize(state, build_project_context(session, project))
+        project.initialized_at = _now()
+        session.add(project)
+        return project.id
+
+
+def _import_github(
+    state: PortalState,
+    body: GitHubProjectBody,
+    principal: Principal,
+    access: OrgAccess,
+    request: Request,
+) -> int:
+    """Import a repository through the GitHub App (M2d-2 plan section 4.5).
+
+    The user must see the installation and read the repository with their
+    user token, and the installation must cover it (one ``404 no_access``
+    otherwise); ``409 duplicate`` when it is already a project of this
+    org; ``429`` past 30 imports per org per hour. The clone, made with a
+    repo-scoped installation token, lands in ``repos/<org>/.clone-*`` and
+    is refused (``422 tracked_whygraph_state``) when it tracks
+    ``.whygraph/`` or ``.codegraph/``; it then moves to
+    ``repos/<org>/<slug>`` and the row, the forge layer and the production
+    Initialize commit together. Every failure removes the clone.
+
+    Returns
+    -------
+    int
+        The new project's id.
+    """
+    repo, token = _check_import_access(state, body, principal)
+    duplicate = ApiError(
+        409, "this repository is already a project here", code="duplicate"
+    )
+    with get_session() as session:
+        if session.exec(
+            select(Project.id).where(
+                Project.org_id == access.org_id,
+                Project.github_repo_id == body.repo_id,
+            )
+        ).first():
+            raise duplicate
+    retry_after = state.import_org.hit(access.org_id)
+    if retry_after is not None:
+        raise ApiError(
+            429,
+            "too many imports; try again later",
+            code="throttled",
+            headers={"Retry-After": str(retry_after)},
+        )
+    name = (body.name or "").strip() or repo.full_name.split("/", 1)[1]
+
+    org_dir = state.data_dir / "repos" / access.org_slug
+    org_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # A dot-name is never a slug, so the temp dir cannot collide with a
+    # project; only this request knows it, so only this request removes it.
+    tmp = org_dir / f".clone-{slugify(name)}-{secrets_mod.token_hex(6)}"
+    if not _clone_dir_is_safe(tmp, state.data_dir, depth=2):
+        raise ApiError(500, f"refusing to clone into {org_dir}: not a portal folder")
+    url = f"{github_git_host().url}/{repo.full_name}.git"
+    try:
+        Repository.clone(url, tmp, env=git_env(token))
+        tracked = Repository(tmp).tracked_paths("HEAD", *TRACKED_STATE_PATHS)
+    except (GitError, InvalidRepoUrlError) as exc:
+        _remove_clone(tmp, state.data_dir, depth=2)
+        raise ApiError(
+            502, redact_tokens(str(exc)).replace(token, "***"), code="clone_failed"
+        ) from exc
+    if tracked:
+        _remove_clone(tmp, state.data_dir, depth=2)
+        raise ApiError(
+            422,
+            "this repository tracks WhyGraph's own state (.whygraph/ or "
+            ".codegraph/); remove it from the repository to import it",
+            code="tracked_whygraph_state",
+            paths=list(tracked[:20]),
+        )
+
+    tried: set[str] = set()
+    for _ in range(IMPORT_SLUG_ATTEMPTS):
+        with get_session() as session:
+            slug = unique_slug(session, name, org_id=access.org_id, exclude=tried)
+        tried.add(slug)
+        dest = org_dir / slug
+        try:
+            os.rename(tmp, dest)  # fails on a non-empty dest; never merges into it
+        except OSError:
+            continue  # a concurrent import holds this slug's folder
+        try:
+            project_id = _insert_imported(
+                state,
+                access=access,
+                principal=principal,
+                slug=slug,
+                name=name,
+                repo=repo,
+                installation_id=body.installation_id,
+            )
+        except IntegrityError as exc:
+            if _constraint(exc) == "uq_projects_org_slug":
+                db_path = dest / ".whygraph" / "whygraph.db"
+                dispose_engine(db_path)
+                state.migrations.forget(db_path)
+                os.rename(dest, tmp)
+                continue
+            _discard_clone(state, dest)
+            raise duplicate from exc
+        except BaseException:
+            _discard_clone(state, dest)
+            raise
+        state.contexts.invalidate(project_id)
+        audit(
+            "project_imported",
+            request,
+            uid=principal.uid,
+            org=access.org_slug,
+            repo_id=repo.id,
+            full_name=repo.full_name,
+        )
+        return project_id
+    _remove_clone(tmp, state.data_dir, depth=2)
+    raise ApiError(
+        409, "could not find a free slug for this project; try again", code="busy"
+    )
+
+
+def _remove_clone(path: Path, data_dir: Path, *, depth: int) -> bool:
+    if path.exists() and _clone_dir_is_safe(path, data_dir, depth=depth):
         shutil.rmtree(path)
         return True
     return False
@@ -1211,7 +1500,10 @@ def _remove_project(
 
     checkout_deleted = False
     if project.source == "github":
-        checkout_deleted = _remove_clone(project.root, state.data_dir)
+        # Production clones live at repos/<org>/<slug>; a local-mode row is
+        # an earlier build's repos/<slug> (M2d-2 plan section 0.2 #3).
+        depth = 2 if state.mode == "production" else 1
+        checkout_deleted = _remove_clone(project.root, state.data_dir, depth=depth)
         if not checkout_deleted and project.root.exists():
             warnings.append(f"refused to delete {project.root}: not a portal clone")
     return {
@@ -1269,7 +1561,7 @@ def put_project_config(
         if row is None:
             raise ApiError(404, f"project {project.slug!r} not found")
         if body.config is not None:
-            kept = _checked_layer(body.config, PUT_ALLOWLIST, project.root)
+            kept = _checked_layer(body.config, put_allowlist(state.mode), project.root)
             try:
                 save_layer(session, project.id, kept, org_id=project.org_id)
             except ConfigPolicyError as exc:
@@ -1341,12 +1633,13 @@ def init_project(
     or migrated (with a backup) first, under the project context.
     ``initialized_at`` is set only once the markers are written, i.e. no
     agent file awaits confirmation. ``dry_run`` returns the per-file plan
-    and writes nothing; ``force`` is "Update agent files". ``403
-    projects_unavailable`` in production (``dry_run`` included); ``409
+    and writes nothing; ``force`` is "Update agent files". ``409
     source_not_allowed`` for a local-mode GitHub clone of an older build.
+    In production it is :func:`_init_production`.
     """
     state = portal_state(request)
-    _refuse_projects_in_production(state)
+    if state.mode == "production":
+        return _init_production(state, project, body)
     if project.source not in allowed_sources(state.mode):
         raise ApiError(
             409,
@@ -1424,6 +1717,49 @@ def init_project(
     )
     response["custom_db_paths"] = [p for p in preview.custom_db_paths if p["exists"]]
     return response
+
+
+def _init_production(state: PortalState, project: BoundProject, body: InitBody) -> dict:
+    """Production's Initialize: re-run the import's (idempotent).
+
+    Checked DB paths and the migration, then ``initialized_at`` (M2d-2 plan
+    section 0.2 #12); no agent files, hooks or markers, so ``agents`` must
+    be empty (``422 not_in_production``). ``dry_run`` changes nothing.
+    ``409 root_missing`` when the clone is gone.
+    """
+    if body.agents:
+        raise ApiError(
+            422,
+            "production projects configure no agent files",
+            code="not_in_production",
+        )
+    if project.source not in allowed_sources(state.mode):
+        raise ApiError(
+            409, "this project source is not supported here", code="source_not_allowed"
+        )
+    if root_status(project.root) != "ok":
+        raise ApiError(409, f"{project.root} is not available", code="root_missing")
+    if not body.dry_run:
+        _production_initialize(state, project.ctx)
+        with get_session() as session:
+            row = session.get(Project, project.id)
+            if row is not None and row.initialized_at is None:
+                row.initialized_at = _now()
+                session.add(row)
+    return {
+        "dry_run": body.dry_run,
+        "gitignore_added": [],
+        "hooks": None,
+        "hooks_error": None,
+        "agent_files": [],
+        "asset_files": [],
+        "configured_agents": [],
+        "needs_confirmation": [],
+        "refused": [],
+        "marker_written": False,
+        "initialized": not body.dry_run or project.initialized_at is not None,
+        "custom_db_paths": [],
+    }
 
 
 # ---- scans (portal/runner.py) ---------------------------------------------

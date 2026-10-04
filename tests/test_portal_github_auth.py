@@ -324,6 +324,13 @@ def _record(path: str) -> logging.LogRecord:
         ("/auth/github?code=abc&state=xyz", "/auth/github?<redacted>"),
         ("/auth/github?error=access_denied", "/auth/github?<redacted>"),
         ("/auth/github", "/auth/github"),
+        # The GitHub App's callback page (M2d-2 section 4.4).
+        ("/auth/github-app?code=abc&state=xyz&iss=x", "/auth/github-app?<redacted>"),
+        (
+            "/auth/github-app?code=abc&state=xyz&installation_id=7&setup_action=install",
+            "/auth/github-app?<redacted>",
+        ),
+        ("/auth/github-app", "/auth/github-app"),
         ("/signin?next=/orgs", "/signin?next=/orgs"),
         ("/api/auth/github/callback", "/api/auth/github/callback"),
     ],

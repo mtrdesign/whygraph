@@ -155,6 +155,28 @@ class GitRefExistsCmd(ShellCommand[bool]):
         return result.returncode == 0
 
 
+class GitLsTreeNamesCmd(ShellCommand[tuple[str, ...]]):
+    """``git ls-tree -r --name-only <ref> -- <path>...`` - the files ``ref`` tracks there.
+
+    Parameters
+    ----------
+    ref : str
+        The commit-ish to read (``HEAD``, ``origin/main``).
+    paths : Sequence[str]
+        The paths (directories or files) to list under.
+    """
+
+    def __init__(self, ref: str, paths: Sequence[str]) -> None:
+        self.ref = ref
+        self.paths = tuple(paths)
+
+    def argv(self) -> list[str]:
+        return ["git", "ls-tree", "-r", "--name-only", self.ref, "--", *self.paths]
+
+    def parse(self, result: CompletedProcess[str]) -> tuple[str, ...]:
+        return tuple(line for line in result.stdout.splitlines() if line)
+
+
 class GitRevListShasCmd(ShellCommand[frozenset[str]]):
     """``git rev-list <ref>...`` — every SHA reachable from the given refs.
 

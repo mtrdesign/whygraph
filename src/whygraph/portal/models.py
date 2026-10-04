@@ -381,8 +381,9 @@ class Project(PortalBase, table=True):
         ``"local"`` (a shared-folder repo mounted in place) or
         ``"github"`` (cloned by the portal under the data dir).
     root : str
-        Absolute path for a local repo; relative to the data dir
-        (``repos/<slug>``) for a GitHub clone.
+        Absolute path for a local repo; relative to the data dir for a
+        GitHub clone (``repos/<org slug>/<slug>``; ``repos/<slug>`` for a
+        local clone of an earlier build).
     remote_url : str or None
         Git remote URL, when known (display only for an imported repo).
     initialized_at, last_scan_at, last_scanned_head : str or None

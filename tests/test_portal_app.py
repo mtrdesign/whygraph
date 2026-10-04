@@ -1133,6 +1133,10 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/org/members/{uid}", "PATCH"): "org.members",
     ("/api/org/members/{uid}", "DELETE"): "org.members",
     ("/api/org/membership", "DELETE"): "org.read",
+    # Production's GitHub App import page: org_access(...) (M2d-2 section 4.4)
+    ("/api/github/app/authorize", "POST"): "org.add_project",
+    ("/api/github/installations", "GET"): "org.add_project",
+    ("/api/github/installations/{installation_id}/repos", "GET"): "org.add_project",
     # Project management: project_access(...)
     (_P, "GET"): _READ,
     (f"{_P}/config", "GET"): _READ,
@@ -1175,6 +1179,8 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/account/password", "POST"): "user.self",
     ("/api/account/orgs", "GET"): "user.self",
     ("/api/orgs", "POST"): "user.self",
+    # The GitHub App's callback, on the base host (M2d-2 section 4.4)
+    ("/api/github/app/callback", "POST"): "user.self",
     # Production's admin page: instance_access()
     ("/api/admin/settings", "GET"): "instance.admin",
     ("/api/admin/orgs", "GET"): "instance.admin",
@@ -1245,6 +1251,7 @@ _FILL = {
     "{number}": "1",
     "{run_id}": "1",
     "{uid}": "someone",
+    "{installation_id}": "7",
 }
 
 
@@ -1261,9 +1268,13 @@ PRODUCTION_ORG_ROUTES = {
     ("/api/org/members/{uid}", "PATCH"),
     ("/api/org/members/{uid}", "DELETE"),
     ("/api/org/membership", "DELETE"),
+    ("/api/github/app/authorize", "POST"),
+    ("/api/github/installations", "GET"),
+    ("/api/github/installations/{installation_id}/repos", "GET"),
 }
-"""Org-scoped routes that exist only in production: the members page
-(``require_production`` before the org dependency, M2d-1 plan section 0.2 #19)."""
+"""Org-scoped routes that exist only in production: the members page and the
+GitHub App import page (``require_production`` before the org dependency,
+M2d-1 plan section 0.2 #19)."""
 
 PRODUCTION_ONLY_ROUTES = PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES | PRODUCTION_ORG_ROUTES
 """Routes that answer ``404`` in local mode (M2c plan section 4.7)."""

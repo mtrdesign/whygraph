@@ -553,6 +553,7 @@ PATH_PARAMS: dict[str, Callable[[OrgWorld], str]] = {
     "{number}": lambda o: "1",
     "{session_id}": lambda o: str(o.session_id),
     "{uid}": lambda o: o.owner_uid,
+    "{installation_id}": lambda o: "7",
 }
 """How to fill each path parameter for an org; an unmapped one fails the sweep."""
 
@@ -667,6 +668,17 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     ),
     ("DELETE", "/api/org/members/{uid}"): Call(409, shows=lambda o: ["last_owner"]),
     ("DELETE", "/api/org/membership"): Call(409, shows=lambda o: ["last_owner"]),
+    # Production's GitHub App import page (swept over prod_world, which has
+    # no GitHub App configured; test_portal_github_import.py drives it)
+    ("POST", "/api/github/app/authorize"): Call(
+        503, body=lambda w, o: {}, shows=lambda o: ["github_app_not_configured"]
+    ),
+    ("GET", "/api/github/installations"): Call(
+        503, shows=lambda o: ["github_app_not_configured"]
+    ),
+    ("GET", "/api/github/installations/{installation_id}/repos"): Call(
+        503, shows=lambda o: ["github_app_not_configured"]
+    ),
     ("POST", "/api/projects"): Call(
         201,
         body=lambda w, o: {
@@ -1291,9 +1303,9 @@ def test_nothing_answers_signed_out_in_production(
 ) -> None:
     """Section 5.4 item 3 on a real production portal (M2c sessions and hosts).
 
-    Production refuses Initialize, so the project is inserted directly with
-    ``initialized_at`` set and its DB created as Initialize would. The
-    hook-refusal half of this case lives in
+    Production makes projects only by a GitHub App import, so the project is
+    inserted directly with ``initialized_at`` set and its DB created as the
+    import would. The hook-refusal half of this case lives in
     ``test_portal_hosts_isolation.py`` (M2c plan section 7, step 5).
     """
     env = production_env

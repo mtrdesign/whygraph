@@ -47,6 +47,7 @@ from .deps import (
     require_mode_and_host,
     user_access,
 )
+from .github_app_routes import end_user_tokens
 from .github_auth import (
     GitHubAuthFailed,
     GitHubOAuth,
@@ -508,6 +509,8 @@ def _github_callback(
         refused("disabled", user.login)
         raise ApiError(403, "this account is disabled", code="account_disabled")
     token, uid, new_user, released = signed_in
+    if principal is not None and principal.session_id is not None:
+        end_user_tokens(state, session_id=principal.session_id)  # it was revoked
     for target in released:
         audit("github_login_released", request, target=target, github_login=user.login)
     audit("github_signin", request, uid=uid, github_login=user.login, new_user=new_user)
@@ -658,6 +661,7 @@ def post_logout(request: Request, response: Response) -> dict:
     principal: Principal | None = request.scope.get("state", {}).get("principal")
     if principal is not None and principal.session_id is not None:
         revoke(principal.session_id)
+        end_user_tokens(state, session_id=principal.session_id)
         audit("logout", request, uid=principal.uid)
     clear_cookie(response, base)
     return {"redirect": f"{base.origin}/signin"}
@@ -715,6 +719,8 @@ def post_reset(body: ResetBody, request: Request, response: Response) -> dict:
         revoke_user(user.id, db=db)
         token = create_session(db, user.id, _user_agent(request))
         uid = user.uid
+        user_id = user.id
+    end_user_tokens(state, user_id=user_id)  # every earlier session ended
     audit("reset_link_used", request, uid=uid)
     set_cookie(response, token, base)
     return {"redirect": f"{base.origin}/orgs"}
@@ -822,6 +828,8 @@ def post_account_password(
         else:
             token = create_session(db, principal.user_id, _user_agent(request))
         _invalidate_reset_links(db, principal.user_id)
+    # Every session ended: the others, and this one (rotated).
+    end_user_tokens(state, user_id=principal.user_id)
     audit("password_changed", request, uid=principal.uid)
     set_cookie(response, token, base)
     return {"changed": True}
@@ -1019,6 +1027,7 @@ def patch_admin_user(
             revoke_user(user.id, db=db)
             _invalidate_reset_links(db, user.id)
         target = user.uid
+        target_id = user.id
         result = {
             "uid": user.uid,
             "email": user.email,
@@ -1031,6 +1040,8 @@ def patch_admin_user(
     if admin != was_admin:
         event = "admin_granted" if admin else "admin_revoked"
         audit(event, request, uid=principal.uid, target=target)
+    if disabled and not was_disabled:
+        end_user_tokens(portal_state(request), user_id=target_id)
     if disabled != was_disabled:
         event = "user_disabled" if disabled else "user_enabled"
         audit(event, request, uid=principal.uid, target=target)

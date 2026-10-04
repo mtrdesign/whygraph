@@ -8,8 +8,9 @@ the organization from the ``Host`` header. The :func:`prod_world` fixture
 (plan section 5.1) builds Ada (instance admin, no memberships), Ann (owner of
 ``quokka``), Bob (owner of ``narwhal`` and member of ``quokka``), and one
 project ``api`` per org - inserted directly with ``initialized_at`` set and
-its database created directly, because production refuses Initialize
-(section 4.11).
+its database created directly, because production makes projects only by a
+GitHub App import (``test_portal_github_import.py``), which this world has
+no app for.
 
 The route sweeps are generated from the live app and
 :data:`~test_portal_app.ROUTE_ACTIONS`, as M2b's ``test_portal_tenancy.py``
@@ -103,9 +104,10 @@ from whygraph.portal.secrets import GITHUB_TOKEN, put_secret
 
 NOT_FOUND = {"error": "not found"}
 LOGIN_REQUIRED = {"error": "sign-in required", "code": "login_required"}
-PROJECTS_UNAVAILABLE = {
-    "error": "production organizations cannot add or set up projects yet",
-    "code": "projects_unavailable",
+APP_NOT_CONFIGURED = {
+    "error": "this portal has no GitHub App configured: set the "
+    "WHYGRAPH_GITHUB_APP_* variables",
+    "code": "github_app_not_configured",
 }
 SOURCE_NOT_ALLOWED = {
     "error": "production organizations add projects from GitHub only",
@@ -139,6 +141,7 @@ BASE_ONLY_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/auth/login", "POST"),
         ("/api/auth/reset", "POST"),
         ("/api/orgs", "POST"),
+        ("/api/github/app/callback", "POST"),
         ("/api/admin/settings", "GET"),
         ("/api/admin/orgs", "GET"),
         ("/api/admin/users", "GET"),
@@ -166,10 +169,14 @@ ORG_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/org/members/{uid}", "PATCH"),
         ("/api/org/members/{uid}", "DELETE"),
         ("/api/org/membership", "DELETE"),
+        ("/api/github/app/authorize", "POST"),
+        ("/api/github/installations", "GET"),
+        ("/api/github/installations/{installation_id}/repos", "GET"),
     }
 )
-"""The members routes (M2d-1 section 4.5): org-scoped, so served on org hosts
-only, and swept with every other org-scoped route below."""
+"""The members routes (M2d-1 section 4.5) and the GitHub App import page
+(M2d-2 section 4.4): org-scoped, so served on org hosts only, and swept with
+every other org-scoped route below."""
 
 PRODUCTION_ONLY_ROUTES = PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES | PRODUCTION_ORG_ROUTES
 """Every route local mode does not serve: the ones that name no org (public
@@ -193,8 +200,6 @@ PRODUCTION_REFUSALS: dict[tuple[str, str], tuple[int, dict]] = {
     ("POST", "/api/portal/check-path"): (404, NOT_FOUND),
     # The source policy (the sweep's body is a local folder).
     ("POST", "/api/projects"): (403, SOURCE_NOT_ALLOWED),
-    # Until the GitHub App import lands (M2d-2 step 4).
-    ("POST", "/api/projects/{slug}/init"): (403, PROJECTS_UNAVAILABLE),
 }
 """Routes whose body refuses in production, after ``authorize()``, and how."""
 
@@ -258,10 +263,10 @@ class ProdWorld:
 def _insert_project(org_id: int, slug: str, name: str, root, created_by: int) -> int:
     """Insert an initialized project row directly and return its id.
 
-    Production refuses Initialize (plan section 4.11), so the row and the
-    project database are made the way Initialize would have. A ``github``
-    row, since production holds no other source (its root stays absolute:
-    the GitHub import is not wired yet).
+    Production makes projects only by a GitHub App import, which this world
+    has no app for, so the row and the project database are made the way
+    the import would have. A ``github`` row, since production holds no
+    other source (its root stays absolute: no clone is made).
     """
     with use_project(manual_ctx(root, slug=slug)):
         ensure_initialized()
@@ -621,7 +626,7 @@ def test_a_member_is_refused_before_the_production_refusals(
 
 
 def test_the_source_policy_in_production(prod_world: ProdWorld) -> None:
-    """GitHub only (API included); the import itself is not wired yet."""
+    """GitHub only (API included); without a GitHub App the import is a ``503``."""
     w = prod_world
     w.sign_in("ann")
     prefix = at("quokka")
@@ -633,7 +638,7 @@ def test_the_source_policy_in_production(prod_world: ProdWorld) -> None:
         prefix + "/api/projects",
         json={"source": "github", "installation_id": 7, "repo_id": 501},
     )
-    assert (github.status_code, github.json()) == (403, PROJECTS_UNAVAILABLE)
+    assert (github.status_code, github.json()) == (503, APP_NOT_CONFIGURED)
     for body in (
         {"source": "github", "installation_id": 7, "repo_id": 501, "path": "/x"},
         {"source": "github", "url": "https://github.com/acme/api"},
@@ -717,16 +722,17 @@ def test_a_hook_scan_is_refused_and_starts_nothing(prod_world: ProdWorld) -> Non
     assert len(w.scanner.calls()) == before + 1  # only the manual scan ran
 
 
-def test_a_hooks_config_change_is_saved_but_never_synced(
+def test_a_hooks_config_change_is_refused_and_never_synced(
     prod_world: ProdWorld,
 ) -> None:
-    """``[scan].hooks`` is stored; ``hooks`` is ``null`` (no hook is written)."""
+    """``[scan].hooks`` is not writable in production (M2d-2 section 0.2 #21)."""
     w = prod_world
     w.sign_in("ann")
     url = at("quokka") + "/api/projects/api/config"
-    body = _ok(w.client.put(url, json={"config": {"scan": {"hooks": False}}}))
-    assert body["hooks"] is None and body.get("hooks_error") is None
-    assert _ok(w.client.get(url))["config"]["scan"]["hooks"] is False
+    response = w.client.put(url, json={"config": {"scan": {"hooks": False}}})
+    assert response.status_code == 422, response.text
+    assert response.json()["keys"] == ["scan.hooks"]
+    assert "hooks" not in _ok(w.client.get(url))["config"].get("scan", {})
     hooks_dir = w.quokka.root / ".git" / "hooks"
     assert not [p for p in hooks_dir.glob("post-*") if p.suffix != ".sample"]
 

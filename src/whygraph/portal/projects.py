@@ -1,7 +1,7 @@
 """Project registry helpers: slug rules.
 
 A project's slug is its identity across the portal: it builds the clone
-path (``repos/<slug>``), is interpolated by the host hook helper and the
+path (``repos/<org slug>/<slug>``), is interpolated by the host hook helper and the
 agent MCP URL (``/mcp/<slug>``), and scopes every query key. That is why
 the rules are strict and the slug is **immutable** once a row exists
 (:mod:`whygraph.portal.models` enforces it on flush); ``PATCH`` renames
@@ -11,6 +11,7 @@ only ``name``.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 
 from sqlmodel import Session
 
@@ -87,7 +88,9 @@ def slugify(name: str) -> str:
     return slug or "project"
 
 
-def unique_slug(session: Session, name: str, *, org_id: int) -> str:
+def unique_slug(
+    session: Session, name: str, *, org_id: int, exclude: Iterable[str] = ()
+) -> str:
     """Return a slug for ``name`` that no project of ``org_id`` uses yet.
 
     On collision a numeric suffix is appended (``foo``, ``foo-2``,
@@ -101,6 +104,8 @@ def unique_slug(session: Session, name: str, *, org_id: int) -> str:
         The name to derive the slug from (see :func:`slugify`).
     org_id : int
         The organization the project joins; slugs are unique per org.
+    exclude : Iterable[str], optional
+        Slugs to treat as taken too (a caller retrying after a race).
 
     Returns
     -------
@@ -116,7 +121,7 @@ def unique_slug(session: Session, name: str, *, org_id: int) -> str:
     base = slugify(name)
     taken = set(
         session.exec(select(Project.slug).where(Project.org_id == org_id)).all()
-    )
+    ) | set(exclude)
     candidate = base
     n = 1
     while candidate in taken:

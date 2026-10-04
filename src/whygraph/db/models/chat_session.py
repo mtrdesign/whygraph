@@ -46,6 +46,9 @@ class ChatSession(WhygraphTable, table=True):
     updated_at : str
         Bumped on every message write; the session list orders by this so
         the most recently active conversation sits on top.
+    owner_uid : str or None
+        ``users.uid`` of the portal user who started the session (M2d-1);
+        ``None`` for rows from before M2d and for local mode.
     """
 
     id: int | None = Field(default=None, primary_key=True)
@@ -54,3 +57,4 @@ class ChatSession(WhygraphTable, table=True):
     model: str = Field(sa_type=Text)
     created_at: str = Field(sa_type=Text)
     updated_at: str = Field(sa_type=Text)
+    owner_uid: str | None = Field(default=None, sa_type=Text)

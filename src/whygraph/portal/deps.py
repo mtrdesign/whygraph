@@ -47,7 +47,15 @@ import threading
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Protocol
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Literal,
+    Protocol,
+)
 
 import anyio
 import anyio.to_thread
@@ -76,6 +84,9 @@ from .repos import DiscoveryCache
 from .runner import ScanRunner
 from .security import PortalOrigins, Principal
 from .throttle import Throttle
+
+if TYPE_CHECKING:
+    from .github_auth import GitHubOAuth
 
 
 class ApiError(Exception):
@@ -303,6 +314,8 @@ class PortalState:
     base_check : list of str or None
         What the base-URL DNS self-check found (production; ``None`` until
         it ran, ``[]`` when healthy).
+    github : GitHubOAuth or None
+        Production's GitHub sign-in client (M2d-1); ``None`` in local mode.
     login_pair, login_email, login_ip : Throttle
         Sign-in **failures** (also wrong current passwords): per
         ``(email, ip_key)`` 5 / 15 min, per email 100 / hour, per
@@ -340,6 +353,7 @@ class PortalState:
         self.base_url: BaseUrl | None = None
         self.bootstrap_secret: str | None = None
         self.base_check: list[str] | None = None
+        self.github: GitHubOAuth | None = None
         self.login_pair = Throttle(5, 15 * 60)
         self.login_email = Throttle(100, 60 * 60)
         self.login_ip = Throttle(20, 15 * 60)

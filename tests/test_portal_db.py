@@ -222,7 +222,7 @@ def test_baseline_inserts_no_rows(empty_portal_database: str) -> None:
 
 BASELINE = "86e839432e62"
 TENANCY = "4ebfd8b89904"
-IDENTITY = "e3a055b4530a"
+GITHUB = "b7d2c9a41e63"
 
 
 def _seed_m2a(conn) -> dict[str, int]:  # noqa: ANN001
@@ -390,7 +390,7 @@ def test_tenancy_downgrade_refuses_with_two_orgs(empty_portal_database: str) -> 
     with portal_db.get_engine().connect() as conn:
         assert conn.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar() == (IDENTITY)
+        ).scalar() == (GITHUB)
         assert conn.execute(text("SELECT count(*) FROM organizations")).scalar() == 2
 
 
@@ -432,7 +432,7 @@ def test_identity_upgrade_on_an_empty_database(empty_portal_database: str) -> No
     with portal_db.get_engine().connect() as conn:
         assert conn.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar() == (IDENTITY)
+        ).scalar() == (GITHUB)
 
 
 def test_identity_downgrade_in_local_mode(empty_portal_database: str) -> None:
@@ -471,7 +471,7 @@ def test_identity_downgrade_refuses_in_production(empty_portal_database: str) ->
     with portal_db.get_engine().connect() as conn:
         assert conn.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar() == (IDENTITY)
+        ).scalar() == (GITHUB)
     assert "email" in _columns("users")
 
 
@@ -492,6 +492,34 @@ def test_identity_email_constraints(empty_portal_database: str) -> None:
     with pytest.raises(IntegrityError, match="ck_users_email_lower"):
         with portal_db.get_engine().begin() as conn:
             conn.execute(insert, {"uid": "e", "email": "Y@Example.com"})
+
+
+def test_github_identity_constraints_and_index(empty_portal_database: str) -> None:
+    portal_db.ensure_initialized()
+    assert {"github_id", "github_login", "avatar_url", "disabled_at"} <= _columns(
+        "users"
+    )
+    insert = text(
+        "INSERT INTO users (uid, display_name, password_hash, github_id, "
+        "github_login, is_instance_admin, created_at) "
+        "VALUES (:uid, 'x', :hash, :gid, :login, false, 'now')"
+    )
+
+    def add(uid: str, *, hash=None, gid=None, login=None) -> None:  # noqa: ANN001
+        with portal_db.get_engine().begin() as conn:
+            conn.execute(insert, {"uid": uid, "hash": hash, "gid": gid, "login": login})
+
+    add("a", gid=1, login="Ben")
+    add("b")  # a user with neither credential (local mode's) still fits
+    add("c", hash="h")
+    with pytest.raises(IntegrityError, match="uq_users_github_id"):
+        add("d", gid=1)
+    with pytest.raises(IntegrityError, match="uq_users_github_login_lower"):
+        add("e", gid=2, login="bEN")
+    with pytest.raises(IntegrityError, match="ck_users_one_credential"):
+        add("f", hash="h", gid=3)
+    with pytest.raises(IntegrityError, match="ck_users_login_needs_id"):
+        add("g", login="orphan")
 
 
 # ---------------------------------------------------------------------------

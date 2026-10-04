@@ -29,6 +29,7 @@ from sqlalchemy import text
 from sqlmodel import select
 
 from conftest import HeaderIdentity, build_fake_codegraph_db, builtin_org_id
+from github_fake import FakeGitHub
 from whygraph.core.config import Config
 from whygraph.core.context import ProjectContext, is_strict, use_project
 from whygraph.db import bootstrap
@@ -45,6 +46,7 @@ from whygraph.portal.deps import (
     current_user,
     load_org_access,
 )
+from whygraph.portal.github_auth import GitHubAuthConfig, GitHubOAuth
 from whygraph.portal.mcp_mount import McpDispatcher
 from whygraph.portal.models import Project, ScanRun, User
 from whygraph.portal.orgs import add_member, create_org
@@ -180,6 +182,10 @@ def portal_client(
 PROD_DOMAIN = "whygraph.localhost"
 PROD_BASE = f"http://{PROD_DOMAIN}:{PORT}"
 PROD_CLIENT = ("203.0.113.5", 1)
+GITHUB_CLIENT_ID = "test-client-id"
+GITHUB_CLIENT_SECRET = "test-client-secret"
+GITHUB_FAKE_URL = "http://127.0.0.1:9"
+"""Where ``production_env`` points GitHub: a port nothing listens on."""
 
 
 @pytest.fixture
@@ -191,7 +197,36 @@ def production_env(
     monkeypatch.setenv("WHYGRAPH_BASE_URL", PROD_BASE)
     for var in ("WHYGRAPH_SHARED_FOLDERS", "WHYGRAPH_TRUSTED_PROXIES"):
         monkeypatch.delenv(var, raising=False)
+    secret_file = env.tmp / "github-oauth-secret"
+    secret_file.write_text(GITHUB_CLIENT_SECRET + "\n")
+    monkeypatch.setenv("WHYGRAPH_GITHUB_OAUTH_CLIENT_ID", GITHUB_CLIENT_ID)
+    monkeypatch.setenv("WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE", str(secret_file))
+    monkeypatch.setenv("WHYGRAPH_GITHUB_URL", GITHUB_FAKE_URL)
+    monkeypatch.setenv("WHYGRAPH_GITHUB_API_URL", GITHUB_FAKE_URL + "/api/v3")
     return env
+
+
+@pytest.fixture
+def github_fake(
+    production_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> FakeGitHub:
+    """A :class:`FakeGitHub` wired into every production portal started after it.
+
+    The portal's ``GitHubOAuth`` is built with ``httpx.MockTransport`` over
+    the fake's handler, so nothing reaches the network; the fake is
+    configured with ``production_env``'s client id / secret and the
+    callback ``<base>/auth/github``. Request it before the portal starts
+    (``prod_portal()``), then drive it (``add_user``, ``force``, ...).
+    """
+    fake = FakeGitHub(
+        GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, f"{PROD_BASE}/auth/github"
+    )
+
+    def build(config: GitHubAuthConfig) -> GitHubOAuth:
+        return GitHubOAuth(config, transport=httpx.MockTransport(fake.handle))
+
+    monkeypatch.setattr("whygraph.portal.app.GitHubOAuth", build)
+    return fake
 
 
 @contextmanager

@@ -80,6 +80,7 @@ from .deps import (
     current_user,
     project_db_access,
 )
+from .github_auth import GitHubOAuth, load_github_config
 from .hosts import (
     BASE_URL_ENV,
     TRUSTED_PROXIES_ENV,
@@ -304,6 +305,8 @@ async def _serving(state: PortalState) -> AsyncIterator[None]:
             manager = build_session_manager(origins)
             await stack.enter_async_context(manager.run())
             state.session_manager = manager
+        if state.github is not None:
+            stack.callback(state.github.close)
         if not state.degraded:
             await state.runner.start(state)
         watcher = anyio.create_task_group()
@@ -443,6 +446,11 @@ def _startup(state: PortalState) -> None:
             # On the resolved mode, so a stored production portal started
             # without WHYGRAPH_MODE is validated too.
             state.base_url = _production_base_url()
+            try:
+                github_config = load_github_config(os.environ)
+            except ValueError as exc:
+                raise PortalStartupError(str(exc)) from exc
+            state.github = GitHubOAuth(github_config)
         state.mode = mode
         if mode == "local":
             # Idempotent: creates the built-in org at first start, and

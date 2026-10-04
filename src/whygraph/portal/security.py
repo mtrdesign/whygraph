@@ -194,6 +194,12 @@ class Principal:
         The ``sessions.id`` the request signed in with (production).
     is_instance_admin : bool
         Whether the user is an instance admin (production).
+    github_login : str or None
+        The GitHub username of a GitHub account (production, M2d-1).
+    avatar_url : str or None
+        The GitHub avatar of a GitHub account (production).
+    has_password : bool
+        Whether the account signs in with a password (production).
 
     Notes
     -----
@@ -206,6 +212,9 @@ class Principal:
     email: str | None = None
     session_id: int | None = None
     is_instance_admin: bool = False
+    github_login: str | None = None
+    avatar_url: str | None = None
+    has_password: bool = False
 
 
 _principal: ContextVar[Principal | None] = ContextVar(

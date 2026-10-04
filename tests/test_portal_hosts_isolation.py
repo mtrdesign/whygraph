@@ -2,7 +2,8 @@
 
 Every test here drives a production portal with **no** injected identity, so
 ``SessionIdentity`` resolves each request from a real session cookie (set by
-``POST /api/auth/login``) and :func:`whygraph.portal.hosts.classify` resolves
+the GitHub sign-in callback, or ``POST /api/auth/login`` for the password
+admin) and :func:`whygraph.portal.hosts.classify` resolves
 the organization from the ``Host`` header. The :func:`prod_world` fixture
 (plan section 5.1) builds Ada (instance admin, no memberships), Ann (owner of
 ``quokka``), Bob (owner of ``narwhal`` and member of ``quokka``), and one
@@ -41,6 +42,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, select
 from starlette.middleware.cors import CORSMiddleware
 
+from github_fake import FakeGitHub
 from test_portal_app import (  # noqa: F401 -- fixtures
     NON_ORG_ROUTES,
     PUBLIC_AUTH_ROUTES,
@@ -48,6 +50,8 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     at,
     claim_instance,
     env,
+    github_fake,
+    github_sign_in,
     log_in,
     manual_ctx,
     portal_client,
@@ -58,7 +62,6 @@ from test_portal_identity_routes import (  # noqa: F401 -- `audit_log` is a fixt
     audit_log,
     create_org,
     events,
-    register,
 )
 from test_portal_tenancy import (
     API_ROUTES,
@@ -98,12 +101,11 @@ READER_ONLY_READS = (
     "instance admins can only read an organization they are not a member of"
 )
 
-EMAILS = {
-    "ada": "ada@example.com",
-    "ann": "ann@example.com",
-    "bob": "bob@example.com",
-}
-"""The three accounts of :func:`prod_world`, by short name."""
+ADA_EMAIL = "ada@example.com"
+"""The password admin of :func:`prod_world`."""
+
+GITHUB_LOGINS = ("ann", "bob")
+"""The GitHub accounts of :func:`prod_world` (their short name is the login)."""
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +116,8 @@ BASE_ONLY_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
         ("/api/auth/bootstrap", "GET"),
         ("/api/auth/bootstrap", "POST"),
-        ("/api/auth/register", "POST"),
+        ("/api/auth/github/start", "POST"),
+        ("/api/auth/github/callback", "POST"),
         ("/api/auth/login", "POST"),
         ("/api/auth/reset", "POST"),
         ("/api/orgs", "POST"),
@@ -205,8 +208,12 @@ class ProdWorld:
         return "ann" if org is self.quokka else "bob"
 
     def sign_in(self, name: str) -> httpx.Response:
-        """Sign ``name`` in through the real login route."""
-        response = log_in(self.client, EMAILS[name])
+        """Sign ``name`` in for real: GitHub for Ann and Bob, a password for Ada."""
+        if name in GITHUB_LOGINS:
+            response = github_sign_in(self.client, name)
+        else:
+            assert name == "ada", name
+            response = log_in(self.client, ADA_EMAIL)
         assert response.status_code == 200, (name, response.text)
         return response
 
@@ -285,31 +292,39 @@ def _wait_idle(world: ProdWorld, org: OrgWorld) -> list[dict]:
 
 @pytest.fixture
 def prod_world(
-    production_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+    production_env: SimpleNamespace,
+    github_fake: FakeGitHub,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[ProdWorld]:
     """Plan section 5.1's ``prod_world``: Ada, Ann, Bob and two ``api``s.
 
-    Every account and org is made through the real routes (bootstrap,
-    register, create org), so the sessions the sweeps use are the ones a
-    browser would hold. Bob's extra ``quokka`` membership is added
-    directly: there is no invite route until M2d.
+    Every account and org is made through the real routes (bootstrap, GitHub
+    sign-in through the fake GitHub, create org), so the sessions the sweeps
+    use are the ones a browser would hold. Ada is the password admin; Ann
+    and Bob are GitHub accounts. Bob's extra ``quokka`` membership is added
+    directly (the members route arrives with M2d-1 step 4).
     """
     env = production_env
     scanner = _fake_scanner(env, monkeypatch)
     _offline_llms(monkeypatch)
+    for login in GITHUB_LOGINS:
+        github_fake.add_user(login)
     with prod_portal() as client:
-        claim_instance(client, EMAILS["ada"], display_name="Ada")
+        claim_instance(client, ADA_EMAIL, display_name="Ada")
         client.cookies.clear()
         quokka = OrgWorld("quokka", "quokka", {})
         narwhal = OrgWorld("narwhal", "narwhal", {})
         for org, owner in ((quokka, "ann"), (narwhal, "bob")):
-            assert register(client, EMAILS[owner], owner.title()).status_code == 200
+            assert github_sign_in(client, owner).status_code == 200
             assert create_org(client, org.slug, org.slug.title()).status_code == 201
         client.cookies.clear()
         uids, ids = {}, {}
         with portal_db.get_session() as session:
-            for name, email in EMAILS.items():
-                user = session.exec(select(User).where(User.email == email)).one()
+            people = [("ada", User.email == ADA_EMAIL)] + [
+                (login, User.github_login == login) for login in GITHUB_LOGINS
+            ]
+            for name, where in people:
+                user = session.exec(select(User).where(where)).one()
                 uids[name], ids[name] = user.uid, user.id
             for org in (quokka, narwhal):
                 org.org_id = session.exec(

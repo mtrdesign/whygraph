@@ -16,6 +16,7 @@ from importlib.metadata import version as package_version
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Iterator
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import anyio
 import httpx
@@ -304,6 +305,74 @@ def log_in(
     return client.post(
         at() + "/api/auth/login", json={"email": email, "password": password, **extra}
     )
+
+
+def github_sign_in(
+    client: TestClient, login: str, *, next: str | None = None
+) -> httpx.Response:
+    """Sign ``login`` in through the real GitHub routes and the fake GitHub.
+
+    ``POST /api/auth/github/start`` (asserted ``200``), then the fake's
+    authorize step with ``login=`` (asserted ``302``) - sent through the
+    portal's own :class:`GitHubOAuth`, so it reaches the ``github_fake``
+    fixture, which the test must request - then ``POST
+    /api/auth/github/callback`` with the redirect's ``code`` and ``state``
+    and the browser's ``whygraph_oauth`` cookie.
+
+    Returns
+    -------
+    httpx.Response
+        The callback's response, **unchecked**: on success ``200`` with
+        ``{"redirect": ...}`` and the session cookie (``client`` is then
+        signed in as ``login``); a refusal (``nofa``, a disabled account,
+        a forced GitHub failure) is the error response.
+    """
+    start = client.post(at() + "/api/auth/github/start", json={"next": next})
+    assert start.status_code == 200, start.text
+    github = client.app.state.portal.github
+    authorize = github._request(
+        "GET", start.json()["authorize_url"] + "&" + urlencode({"login": login})
+    )
+    assert authorize.status_code == 302, authorize.text
+    query = parse_qs(urlsplit(authorize.headers["location"]).query)
+    return client.post(
+        at() + "/api/auth/github/callback",
+        json={"code": query["code"][0], "state": query["state"][0]},
+    )
+
+
+def uid_of_login(login: str) -> str:
+    """The stable uid of the GitHub account currently holding ``login``."""
+    with portal_db.get_session() as session:
+        return session.exec(select(User.uid).where(User.github_login == login)).one()
+
+
+def password_user(
+    email: str,
+    password: str = PROD_PASSWORD,
+    *,
+    admin: bool = False,
+    display_name: str | None = None,
+) -> str:
+    """Insert an email + password account directly; return its uid.
+
+    The M2c-era state M2d-1 keeps valid (no route creates one any more),
+    for tests of the password paths. ``display_name`` defaults to the
+    email's local part, capitalized.
+    """
+    from whygraph.portal.passwords import hash_password
+
+    email = email.strip().lower()
+    user = User(
+        display_name=display_name or email.partition("@")[0].capitalize(),
+        email=email,
+        password_hash=hash_password(password),
+        is_instance_admin=admin,
+    )
+    with portal_db.get_session() as session:
+        session.add(user)
+        session.flush()
+        return user.uid
 
 
 @pytest.fixture
@@ -888,12 +957,14 @@ def _api_routes(app) -> list:
 PUBLIC_AUTH_ROUTES = {
     ("/api/auth/bootstrap", "GET"),
     ("/api/auth/bootstrap", "POST"),
-    ("/api/auth/register", "POST"),
+    ("/api/auth/github/start", "POST"),
+    ("/api/auth/github/callback", "POST"),
     ("/api/auth/login", "POST"),
     ("/api/auth/logout", "POST"),
     ("/api/auth/reset", "POST"),
 }
-"""Production's public auth routes (M2c plan section 4.7): no session needed."""
+"""Production's public auth routes (M2c plan section 4.7, M2d-1 section 4.4):
+no session needed."""
 
 
 def test_every_api_route_resolves_current_user_except_state_and_setup(

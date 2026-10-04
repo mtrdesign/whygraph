@@ -3,11 +3,13 @@
 Every route here is **production-only** - local mode answers ``404`` - and
 none names an organization, so none is org-scoped (M2c plan section 4.7):
 
-* Public routes (bootstrap, register, login, logout, reset) declare no
-  action. Their gate (:func:`~whygraph.portal.deps.require_mode_and_host`)
+* Public routes (bootstrap, GitHub sign-in, login, logout, reset) declare
+  no action. Their gate (:func:`~whygraph.portal.deps.require_mode_and_host`)
   runs as a route dependency, so a wrong mode or host is a ``404`` before
   the body is even validated. The credential routes are served on the base
-  host only; logout on any host.
+  host only; logout on any host. End users sign in with GitHub (M2d-1 plan
+  section 4.4); email + password is kept for password accounts only - in
+  practice the bootstrap instance admin - and no route creates another.
 * ``user.self`` routes (:func:`~whygraph.portal.deps.user_access`): the
   caller's own account, and org creation (base host).
 * ``instance.admin`` routes (:func:`~whygraph.portal.deps.instance_access`):
@@ -24,11 +26,13 @@ from __future__ import annotations
 
 import hmac
 import secrets
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import update
+from sqlalchemy import literal_column, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, func, select
 
@@ -42,6 +46,12 @@ from .deps import (
     portal_state,
     require_mode_and_host,
     user_access,
+)
+from .github_auth import (
+    GitHubAuthFailed,
+    GitHubOAuth,
+    GitHubUnavailable,
+    GitHubUser,
 )
 from .hosts import BaseUrl, safe_redirect
 from .models import Membership, Organization, PasswordReset, User
@@ -95,12 +105,17 @@ class BootstrapBody(_Strict):
     password: str = _PASSWORD
 
 
-class RegisterBody(_Strict):
-    """``POST /api/auth/register``."""
+class GitHubStartBody(_Strict):
+    """``POST /api/auth/github/start``."""
 
-    email: str = Field(max_length=1024)
-    display_name: str = Field(min_length=1, max_length=100)
-    password: str = _PASSWORD
+    next: str | None = Field(default=None, max_length=4096)
+
+
+class GitHubCallbackBody(_Strict):
+    """``POST /api/auth/github/callback``."""
+
+    code: str = Field(min_length=1, max_length=512)
+    state: str = Field(min_length=1, max_length=512)
 
 
 class LoginBody(_Strict):
@@ -227,6 +242,14 @@ def _email_taken() -> ApiError:
     )
 
 
+def _no_password() -> ApiError:
+    return ApiError(
+        409,
+        "this account signs in with GitHub and has no password",
+        code="no_password",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Bootstrap (plan section 4.3)
 # ---------------------------------------------------------------------------
@@ -244,7 +267,7 @@ def post_bootstrap(body: BootstrapBody, request: Request, response: Response) ->
 
     ``404`` once no bootstrap is pending (the route is inert afterwards),
     ``429`` past 10 attempts per ``ip_key`` in 15 minutes, ``403
-    bad_secret``, the register validation (``422``), ``409 email_taken``.
+    bad_secret``, the email and password rules (``422``), ``409 email_taken``.
     The password is hashed before ``setup_lock`` is taken; under it the
     pending secret and the absence of an admin are re-checked, so a double
     submit makes one admin.
@@ -291,41 +314,275 @@ def post_bootstrap(body: BootstrapBody, request: Request, response: Response) ->
 
 
 # ---------------------------------------------------------------------------
-# Register, login, logout, reset (plan sections 4.7, 4.8)
+# GitHub sign-in (M2d-1 plan section 4.4)
 # ---------------------------------------------------------------------------
 
+OAUTH_COOKIE = "whygraph_oauth"
+"""The cookie binding a started GitHub sign-in to this browser (its ``state``)."""
 
-@auth_router.post("/api/auth/register", dependencies=_PUBLIC_BASE)
-def post_register(body: RegisterBody, request: Request, response: Response) -> dict:
-    """Create an account (registration is always open) and sign it in.
+OAUTH_COOKIE_PATH = "/api/auth/github"
+"""The only path the browser sends :data:`OAUTH_COOKIE` to."""
 
-    ``409 bootstrap_required`` before the bootstrap, ``429`` past 5
-    attempts per ``ip_key`` an hour, ``422`` ``bad_email`` /
-    ``weak_password`` / ``common_password``, ``409 email_taken``.
+OAUTH_COOKIE_MAX_AGE = 600
+"""Seconds: the pending sign-in's own lifetime."""
+
+_UPSERT_ATTEMPTS = 3
+"""Tries of the sign-in transaction when a concurrent one wins a unique index."""
+
+
+def _github(state: PortalState) -> GitHubOAuth:
+    assert state.github is not None  # production startup built it
+    return state.github
+
+
+def _redirect_uri(base: BaseUrl) -> str:
+    """The OAuth App's one callback URL: an SPA page (plan section 0.2 #4)."""
+    return f"{base.origin}/auth/github"
+
+
+def _oauth_cookie_args(base: BaseUrl) -> dict:
+    return {
+        "path": OAUTH_COOKIE_PATH,
+        "secure": base.scheme == "https",
+        "httponly": True,
+        "samesite": "lax",
+    }
+
+
+def _oauth_clearing_header(base: BaseUrl) -> str:
+    """The ``Set-Cookie`` value that clears :data:`OAUTH_COOKIE` (host-only)."""
+    response = Response()
+    response.delete_cookie(OAUTH_COOKIE, **_oauth_cookie_args(base))
+    return response.headers["set-cookie"]
+
+
+def _oauth_cookies(request: Request) -> list[str]:
+    """Every :data:`OAUTH_COOKIE` value the request carried (duplicates kept)."""
+    found = []
+    for header in request.headers.getlist("cookie"):
+        for chunk in header.split(";"):
+            name, sep, value = chunk.partition("=")
+            if sep and name.strip() == OAUTH_COOKIE:
+                found.append(value.strip().strip('"'))
+    return found
+
+
+@auth_router.post("/api/auth/github/start", dependencies=_PUBLIC_BASE)
+def post_github_start(
+    body: GitHubStartBody, request: Request, response: Response
+) -> dict:
+    """Start a GitHub sign-in: ``state`` + PKCE, and where to send the browser.
+
+    ``409 bootstrap_required`` before the bootstrap; ``429`` past 60
+    attempts per ``ip_key`` in 15 minutes (shared with the callback).
+    ``next`` is kept server-side with the PKCE verifier when it is a safe
+    portal URL (else dropped). Sets the host-only ``whygraph_oauth`` cookie
+    (``Path=/api/auth/github``, ``HttpOnly``, ``SameSite=Lax``, ``Secure``
+    on https, ten minutes) carrying the same ``state``.
     """
     state = portal_state(request)
     base = _base(state)
     _require_claimed(state)
-    _throttled(state.register_ip.hit(ip_key(request.scope)))
-    email = normalize_email(body.email)
-    name = _display_name(body.display_name)
-    validate_password(body.password, email)
-    password_hash = hash_password(body.password)
-    with get_session() as db:
-        if db.exec(select(User.id).where(User.email == email)).first() is not None:
-            raise _email_taken()
-        user = User(display_name=name, email=email, password_hash=password_hash)
-        db.add(user)
-        try:
-            db.flush()
-        except IntegrityError as exc:  # a concurrent register of the same email
-            raise _email_taken() from exc
-        assert user.id is not None
-        token = create_session(db, user.id, _user_agent(request))
-        uid = user.uid
-    audit("register", request, uid=uid)
+    _throttled(state.github_ip.hit(ip_key(request.scope)))
+    oauth_state, url = _github(state).begin(
+        safe_redirect(body.next, base), _redirect_uri(base)
+    )
+    response.set_cookie(
+        OAUTH_COOKIE,
+        oauth_state,
+        max_age=OAUTH_COOKIE_MAX_AGE,
+        **_oauth_cookie_args(base),
+    )
+    return {"authorize_url": url}
+
+
+@auth_router.post("/api/auth/github/callback", dependencies=_PUBLIC_BASE)
+def post_github_callback(
+    body: GitHubCallbackBody, request: Request, response: Response
+) -> dict:
+    """Finish a GitHub sign-in: verify, exchange, refuse or upsert, sign in.
+
+    ``429`` (the start route's throttle), ``409 bootstrap_required``,
+    ``400 oauth_state`` (no, several or a mismatched ``whygraph_oauth``
+    cookie, or an unknown, expired or already used ``state``), ``400
+    github_auth_failed`` (GitHub refused the code - a wrong PKCE verifier
+    included - or granted a scope other than ``read:user``), ``502
+    github_unavailable`` (network error, timeout, 5xx), ``403
+    github_2fa_required`` (with ``fix_url``; no user row is written) and
+    ``403 account_disabled``. The ``whygraph_oauth`` cookie is cleared on
+    every one of these outcomes and on success. On success the account is
+    created or refreshed by its GitHub id, any session the request carried
+    ends, a new one starts, and ``redirect`` is the pending ``next`` or
+    ``<base>/orgs``.
+    """
+    state = portal_state(request)
+    base = _base(state)
+    try:
+        result = _github_callback(state, base, body, request, response)
+    except ApiError as exc:
+        # An ApiError builds its own response, so the clearing header rides
+        # on the error (plan section 4.4 step 2).
+        exc.headers = {
+            **(exc.headers or {}),
+            "set-cookie": _oauth_clearing_header(base),
+        }
+        raise
+    response.delete_cookie(OAUTH_COOKIE, **_oauth_cookie_args(base))
+    return result
+
+
+def _github_callback(
+    state: PortalState,
+    base: BaseUrl,
+    body: GitHubCallbackBody,
+    request: Request,
+    response: Response,
+) -> dict:
+    """The callback's steps; every refusal is an :class:`ApiError`."""
+    _throttled(state.github_ip.hit(ip_key(request.scope)))
+    _require_claimed(state)
+    github = _github(state)
+
+    def refused(reason: str, login: str | None = None) -> None:
+        audit("github_signin_refused", request, reason=reason, github_login=login)
+
+    # The cookie must be the browser's one and only, and equal the posted
+    # state; only then is the state spent (single use).
+    cookies = _oauth_cookies(request)
+    pending = None
+    if len(cookies) == 1 and hmac.compare_digest(
+        cookies[0].encode("utf-8"), body.state.encode("utf-8")
+    ):
+        pending = github.pending.pop(body.state)
+    if pending is None:
+        refused("oauth_state")
+        raise ApiError(
+            400,
+            "this sign-in expired or was started in another browser: try again",
+            code="oauth_state",
+        )
+
+    try:
+        user = github.identify(
+            body.code,
+            pending.verifier,
+            _redirect_uri(base),
+            on_revoke_failure=lambda: audit("github_token_revoke_failed", request),
+        )
+    except GitHubAuthFailed as exc:
+        refused(exc.reason)
+        raise ApiError(
+            400,
+            "GitHub did not confirm this sign-in: try again",
+            code="github_auth_failed",
+        ) from None
+    except GitHubUnavailable:
+        refused("unavailable")
+        raise ApiError(
+            502,
+            "GitHub could not be reached: try again in a moment",
+            code="github_unavailable",
+        ) from None
+
+    if not user.two_factor:
+        refused("2fa_required", user.login)
+        raise ApiError(
+            403,
+            "turn on two-factor authentication for your GitHub account, then "
+            "sign in again",
+            code="github_2fa_required",
+            fix_url=f"{github.config.web_url}/settings/security",
+        )
+    principal: Principal | None = request.scope.get("state", {}).get("principal")
+    signed_in = _sign_in_github_user(
+        user,
+        replaces=None if principal is None else principal.session_id,
+        user_agent=_user_agent(request),
+    )
+    if signed_in is None:
+        refused("disabled", user.login)
+        raise ApiError(403, "this account is disabled", code="account_disabled")
+    token, uid, new_user, released = signed_in
+    for target in released:
+        audit("github_login_released", request, target=target, github_login=user.login)
+    audit("github_signin", request, uid=uid, github_login=user.login, new_user=new_user)
     set_cookie(response, token, base)
-    return {"redirect": f"{base.origin}/orgs"}
+    return {"redirect": safe_redirect(pending.next, base) or f"{base.origin}/orgs"}
+
+
+def _sign_in_github_user(
+    user: GitHubUser, *, replaces: int | None, user_agent: str | None
+) -> tuple[str, str, bool, list[str]] | None:
+    """Upsert the account by GitHub id and start its session, in one transaction.
+
+    Any other row holding the incoming login (case-insensitively) has it
+    released first (plan section 0.2 #7). ``INSERT ... ON CONFLICT
+    (github_id) DO UPDATE`` refreshes ``github_login`` and ``avatar_url``
+    only - never the user-editable ``display_name`` - so two concurrent
+    first sign-ins converge on one row; a race that still trips a unique
+    index (a login claimed by two ids at once) retries the transaction.
+
+    Returns
+    -------
+    tuple or None
+        ``(session token, uid, new_user, released uids)``, or ``None`` when
+        the account is disabled (then nothing is written).
+    """
+    users = User.__table__
+    for attempt in range(_UPSERT_ATTEMPTS):
+        try:
+            with get_session() as db:
+                released = list(
+                    db.exec(
+                        update(User)
+                        .where(
+                            func.lower(col(User.github_login)) == user.login.lower(),
+                            col(User.github_id) != user.id,
+                        )
+                        .values(github_login=None)
+                        .returning(col(User.uid))
+                    ).scalars()
+                )
+                insert = pg_insert(users).values(
+                    uid=str(uuid.uuid4()),
+                    display_name=(user.name or user.login).strip()[:100],
+                    is_instance_admin=False,
+                    github_id=user.id,
+                    github_login=user.login,
+                    avatar_url=user.avatar_url,
+                    created_at=_iso(_now()),
+                )
+                row = db.exec(
+                    insert.on_conflict_do_update(
+                        index_elements=[users.c.github_id],
+                        set_={
+                            "github_login": insert.excluded.github_login,
+                            "avatar_url": insert.excluded.avatar_url,
+                        },
+                    ).returning(
+                        users.c.id,
+                        users.c.uid,
+                        users.c.disabled_at,
+                        literal_column("xmax = 0"),  # inserted, not updated
+                    )
+                ).one()
+                user_id, uid, disabled_at, inserted = row
+                if disabled_at is not None:
+                    db.rollback()  # the refresh and any release are undone
+                    return None
+                if replaces is not None:
+                    revoke(replaces, db=db)  # plan section 0.2 #20
+                token = create_session(db, user_id, user_agent)
+            return token, uid, bool(inserted), released
+        except IntegrityError:
+            if attempt == _UPSERT_ATTEMPTS - 1:
+                raise
+    raise AssertionError("unreachable")
+
+
+# ---------------------------------------------------------------------------
+# Login, logout, reset (plan sections 4.7, 4.8)
+# ---------------------------------------------------------------------------
 
 
 @auth_router.post("/api/auth/login", dependencies=_PUBLIC_BASE)
@@ -451,6 +708,9 @@ def _account(user: User) -> dict:
         "email": user.email,
         "display_name": user.display_name,
         "is_instance_admin": user.is_instance_admin,
+        "github_login": user.github_login,
+        "avatar_url": user.avatar_url,
+        "has_password": user.password_hash is not None,
     }
 
 
@@ -462,6 +722,9 @@ def get_account(principal: Principal = Depends(user_access())) -> dict:
         "email": principal.email,
         "display_name": principal.display_name,
         "is_instance_admin": principal.is_instance_admin,
+        "github_login": principal.github_login,
+        "avatar_url": principal.avatar_url,
+        "has_password": principal.has_password,
     }
 
 
@@ -490,8 +753,9 @@ def post_account_password(
 ) -> dict:
     """Change the password; rotate this session, end every other one.
 
-    A wrong ``current`` is ``403 bad_credentials`` and counts as a sign-in
-    failure (the same three throttles, ``429``). On success the current
+    ``409 no_password`` for a GitHub account. A wrong ``current`` is ``403
+    bad_credentials`` and counts as a sign-in failure (the same three
+    throttles, ``429``). On success the current
     session is replaced by a new one (new cookie), the user's other
     sessions end and their unused reset links stop working.
     """
@@ -502,6 +766,8 @@ def post_account_password(
         if user is None:
             raise ApiError(404, "not found")
         email, stored = user.email or "", user.password_hash
+    if stored is None:
+        raise _no_password()
     rules = _login_throttles(state, email, ip_key(request.scope))
     _check_login_throttles(rules)
     ok, _ = verify_password(stored, body.current)
@@ -656,6 +922,9 @@ def get_admin_users(_: Principal = Depends(instance_access())) -> list[dict]:
                 "email": user.email,
                 "display_name": user.display_name,
                 "is_instance_admin": user.is_instance_admin,
+                "github_login": user.github_login,
+                "has_password": user.password_hash is not None,
+                "disabled": user.disabled_at is not None,
                 "created_at": user.created_at,
                 "org_count": count,
             }
@@ -722,9 +991,10 @@ def post_admin_reset_link(
     request: Request,
     principal: Principal = Depends(instance_access()),
 ) -> dict:
-    """Issue a one-time, 24-hour reset link for a user.
+    """Issue a one-time, 24-hour reset link for a password account.
 
-    The user's earlier unused links stop working. The token travels in the
+    ``409 no_password`` for a GitHub account. The user's earlier unused
+    links stop working. The token travels in the
     URL **fragment** (``<base>/reset#token=...``), so it never reaches a
     proxy log or a ``Referer``; only its SHA-256 is stored.
     """
@@ -734,6 +1004,8 @@ def post_admin_reset_link(
     with get_session() as db:
         user = _user_by_uid(db, uid)
         assert user.id is not None
+        if user.password_hash is None:
+            raise _no_password()
         _invalidate_reset_links(db, user.id)
         db.add(
             PasswordReset(
@@ -749,4 +1021,9 @@ def post_admin_reset_link(
     return {"url": f"{base.origin}/reset#token={raw}"}
 
 
-__all__ = ["RESET_LINK_LIFETIME", "auth_router"]
+__all__ = [
+    "OAUTH_COOKIE",
+    "OAUTH_COOKIE_PATH",
+    "RESET_LINK_LIFETIME",
+    "auth_router",
+]

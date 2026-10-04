@@ -668,6 +668,9 @@ def get_state(request: Request) -> dict:
         if body["user"] is not None:
             body["user"]["email"] = principal.email
             body["user"]["is_instance_admin"] = principal.is_instance_admin
+            body["user"]["github_login"] = principal.github_login
+            body["user"]["avatar_url"] = principal.avatar_url
+            body["user"]["has_password"] = principal.has_password
     return body
 
 

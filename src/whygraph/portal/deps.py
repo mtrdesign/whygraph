@@ -222,6 +222,9 @@ class SessionIdentity:
             email=row.email,
             session_id=row.session_id,
             is_instance_admin=row.is_instance_admin,
+            github_login=row.github_login,
+            avatar_url=row.avatar_url,
+            has_password=row.has_password,
         )
 
     async def org_slug(self, scope: Scope) -> str | None:
@@ -320,9 +323,9 @@ class PortalState:
         Sign-in **failures** (also wrong current passwords): per
         ``(email, ip_key)`` 5 / 15 min, per email 100 / hour, per
         ``ip_key`` 20 / 15 min (plan section 0.2).
-    register_ip, bootstrap_ip, reset_ip : Throttle
-        Every attempt, per ``ip_key``: register 5 / hour, bootstrap and
-        reset 10 / 15 min.
+    bootstrap_ip, reset_ip, github_ip : Throttle
+        Every attempt, per ``ip_key``: bootstrap and reset 10 / 15 min,
+        GitHub sign-in (start and callback, shared) 60 / 15 min.
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -357,9 +360,9 @@ class PortalState:
         self.login_pair = Throttle(5, 15 * 60)
         self.login_email = Throttle(100, 60 * 60)
         self.login_ip = Throttle(20, 15 * 60)
-        self.register_ip = Throttle(5, 60 * 60)
         self.bootstrap_ip = Throttle(10, 15 * 60)
         self.reset_ip = Throttle(10, 15 * 60)
+        self.github_ip = Throttle(60, 15 * 60)
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0

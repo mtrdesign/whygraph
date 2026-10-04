@@ -2,8 +2,12 @@
 
 Everything here drives the real routes of
 :mod:`whygraph.portal.auth_routes` through a production ``TestClient``:
-the bootstrap, register, login, logout and reset, the account and org
-routes, and the instance-admin page's data. Startup, the pure session
+the bootstrap, login, logout and reset, the account and org routes, and
+the instance-admin page's data. End users sign in with GitHub (M2d-1)
+through the fake GitHub (:func:`github_sign_in`); password accounts other
+than the bootstrap admin are inserted directly (:func:`password_user`), as no
+route creates one any more. The GitHub sign-in routes themselves are
+``test_portal_github_auth.py``. Startup, the pure session
 helpers and the request-identity seam live in ``test_portal_identity.py``;
 the guard (hosts, origins, headers) in ``test_portal_production_guard.py``.
 
@@ -26,6 +30,7 @@ from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
 from sqlmodel import col, select
 
+from github_fake import FakeGitHub
 from test_portal_app import (  # noqa: F401 -- fixtures
     PORT,
     PROD_BASE,
@@ -33,9 +38,13 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     at,
     claim_instance,
     env,
+    github_fake,
+    github_sign_in,
     log_in,
+    password_user,
     prod_portal,
     production_env,
+    uid_of_login,
 )
 from whygraph.portal import db as portal_db
 from whygraph.portal import sessions
@@ -60,8 +69,14 @@ COOKIE = sessions.COOKIE_NAME
 
 
 @pytest.fixture
-def fresh(production_env: SimpleNamespace) -> Iterator[TestClient]:
-    """An unclaimed production portal (its bootstrap is still pending)."""
+def fresh(github_fake: FakeGitHub) -> Iterator[TestClient]:
+    """An unclaimed production portal (its bootstrap is still pending).
+
+    Its GitHub is the ``github_fake`` fixture's, which also knows ``ann``
+    and ``bob``.
+    """
+    github_fake.add_user("ann")
+    github_fake.add_user("bob")
     with prod_portal() as client:
         yield client
 
@@ -76,22 +91,26 @@ def claimed(fresh: TestClient) -> TestClient:
 
 @pytest.fixture
 def world(claimed: TestClient) -> SimpleNamespace:
-    """Ada (admin), Ann (owner of ``quokka``) and Bob (owner of ``narwhal``).
+    """Ada (admin), Ann (owner of ``quokka``), Bob (owner of ``narwhal``), Pat.
 
-    Every account and org is made through the real routes, so the fixture
-    is itself a sign-up / org-creation walk-through. The client is left
-    signed out.
+    Ann and Bob are GitHub accounts and every org is made through the real
+    routes, so the fixture is itself a sign-in / org-creation walk-through.
+    Pat (``pat@example.com``) is a password account in no org, inserted
+    directly - the M2c-era state the password routes still serve. The
+    client is left signed out.
     """
-    register(claimed, "ann@example.com", "Ann")
+    assert github_sign_in(claimed, "ann").status_code == 200
     assert create_org(claimed, "quokka", "Quokka").status_code == 201
-    register(claimed, "bob@example.com", "Bob")
+    assert github_sign_in(claimed, "bob").status_code == 200
     assert create_org(claimed, "narwhal", "Narwhal").status_code == 201
     claimed.cookies.clear()
+    pat = password_user("pat@example.com")
     return SimpleNamespace(
         client=claimed,
         ada=uid_of("ada@example.com"),
-        ann=uid_of("ann@example.com"),
-        bob=uid_of("bob@example.com"),
+        ann=uid_of_login("ann"),
+        bob=uid_of_login("bob"),
+        pat=pat,
     )
 
 
@@ -105,25 +124,6 @@ def audit_log(
     return caplog
 
 
-def register(
-    client: TestClient,
-    email: str,
-    display_name: str = "Someone",
-    password: str = PROD_PASSWORD,
-    **extra,
-) -> httpx.Response:
-    """``POST /api/auth/register`` on the base host."""
-    return client.post(
-        at() + "/api/auth/register",
-        json={
-            "email": email,
-            "display_name": display_name,
-            "password": password,
-            **extra,
-        },
-    )
-
-
 def create_org(client: TestClient, slug: str, name: str = "Org") -> httpx.Response:
     """``POST /api/orgs`` on the base host."""
     return client.post(at() + "/api/orgs", json={"slug": slug, "name": name})
@@ -135,10 +135,16 @@ def uid_of(email: str) -> str:
         return session.exec(select(User.uid).where(User.email == email)).one()
 
 
-def user_row(email: str) -> SimpleNamespace:
-    """A snapshot of a user row, by email."""
+def _who(email: str | None, login: str | None):  # noqa: ANN202
+    """The ``WHERE`` naming a user by email or (GitHub) login."""
+    assert (email is None) != (login is None)
+    return User.email == email if login is None else User.github_login == login
+
+
+def user_row(email: str | None = None, *, login: str | None = None) -> SimpleNamespace:
+    """A snapshot of a user row, by email or by GitHub login."""
     with portal_db.get_session() as session:
-        user = session.exec(select(User).where(User.email == email)).one()
+        user = session.exec(select(User).where(_who(email, login))).one()
         return SimpleNamespace(
             id=user.id,
             uid=user.uid,
@@ -146,13 +152,16 @@ def user_row(email: str) -> SimpleNamespace:
             password_hash=user.password_hash,
             password_changed_at=user.password_changed_at,
             is_instance_admin=user.is_instance_admin,
+            github_id=user.github_id,
+            github_login=user.github_login,
+            avatar_url=user.avatar_url,
         )
 
 
-def session_count(email: str) -> int:
-    """How many live session rows the user with ``email`` has."""
+def session_count(email: str | None = None, *, login: str | None = None) -> int:
+    """How many live session rows a user has, by email or by GitHub login."""
     with portal_db.get_session() as session:
-        user_id = session.exec(select(User.id).where(User.email == email)).one()
+        user_id = session.exec(select(User.id).where(_who(email, login))).one()
         return len(
             session.exec(
                 select(UserSession.id).where(UserSession.user_id == user_id)
@@ -336,89 +345,12 @@ def test_the_bootstrap_is_throttled_per_ip(fresh: TestClient) -> None:
     assert fresh.post(at() + "/api/auth/bootstrap", json=body).status_code == 403
 
 
-def test_register_and_login_are_refused_before_the_bootstrap(
-    fresh: TestClient,
-) -> None:
-    for response in (
-        register(fresh, "ann@example.com", "Ann"),
-        log_in(fresh, "ann@example.com"),
-    ):
-        assert response.status_code == 409, response.text
-        assert response.json()["code"] == "bootstrap_required"
+def test_login_is_refused_before_the_bootstrap(fresh: TestClient) -> None:
+    response = log_in(fresh, "ann@example.com")
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "bootstrap_required"
     with portal_db.get_session() as session:
         assert session.exec(select(User)).all() == []
-
-
-# ---------------------------------------------------------------------------
-# Register (plan section 4.8: always open)
-# ---------------------------------------------------------------------------
-
-
-def test_anyone_can_register_and_is_signed_in(claimed: TestClient) -> None:
-    response = register(claimed, " Ann@Example.com ", " Ann ")
-    assert response.status_code == 200, response.text
-    assert response.json() == {"redirect": f"{PROD_BASE}/orgs"}
-    assert response.headers["cache-control"] == "no-store"
-    ann = user_row("ann@example.com")
-    assert ann.display_name == "Ann" and ann.is_instance_admin is False
-    assert ann.password_hash and PROD_PASSWORD not in ann.password_hash
-    account = claimed.get(at() + "/api/account").json()
-    assert account == {
-        "uid": ann.uid,
-        "email": "ann@example.com",
-        "display_name": "Ann",
-        "is_instance_admin": False,
-    }
-    # No org yet, and registration needs no setting to allow it.
-    assert claimed.get(at() + "/api/account/orgs").json() == []
-
-
-def test_registering_a_taken_email_is_409(claimed: TestClient) -> None:
-    assert register(claimed, "ann@example.com", "Ann").status_code == 200
-    response = register(claimed, "ANN@example.com", "Impostor")
-    assert response.status_code == 409 and response.json()["code"] == "email_taken"
-    with portal_db.get_session() as session:
-        assert session.exec(
-            select(User.display_name).where(User.email == "ann@example.com")
-        ).all() == ["Ann"]
-
-
-@pytest.mark.parametrize(
-    ("field", "value", "code"),
-    [
-        ("email", "ann at example.com", "bad_email"),
-        ("email", "ann@@example.com", "bad_email"),
-        ("email", "", "bad_email"),
-        ("password", "fourteen chars", "weak_password"),
-        ("password", "x" * 257, "weak_password"),
-        ("password", "passwordpassword", "common_password"),
-        ("password", "ann@example.com", "common_password"),
-    ],
-)
-def test_register_refuses_a_bad_email_or_password(
-    claimed: TestClient, field: str, value: str, code: str
-) -> None:
-    body = {
-        "email": "ann@example.com",
-        "display_name": "Ann",
-        "password": PROD_PASSWORD,
-    }
-    body[field] = value
-    response = claimed.post(at() + "/api/auth/register", json=body)
-    assert response.status_code == 422, response.text
-    assert response.json()["code"] == code
-    with portal_db.get_session() as session:
-        assert session.exec(select(User.email)).all() == ["ada@example.com"]
-
-
-def test_register_is_throttled_per_ip(claimed: TestClient) -> None:
-    for n in range(5):
-        assert register(claimed, f"u{n}@example.com").status_code == 200
-    response = register(claimed, "u5@example.com")
-    assert response.status_code == 429 and response.json()["code"] == "throttled"
-    assert int(response.headers["Retry-After"]) > 0
-    from_ip(claimed, "198.51.100.9")
-    assert register(claimed, "u5@example.com").status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -427,8 +359,7 @@ def test_register_is_throttled_per_ip(claimed: TestClient) -> None:
 
 
 def test_login_signs_in_and_starts_one_session(claimed: TestClient) -> None:
-    register(claimed, "ann@example.com", "Ann")
-    claimed.cookies.clear()
+    password_user("ann@example.com")
     assert claimed.get(at() + "/api/account").status_code == 401
 
     response = log_in(claimed, "ANN@example.com ")
@@ -450,8 +381,7 @@ def test_login_signs_in_and_starts_one_session(claimed: TestClient) -> None:
 def test_a_wrong_password_and_an_unknown_email_answer_the_same(
     claimed: TestClient, email: str, password: str
 ) -> None:
-    register(claimed, "ann@example.com", "Ann")
-    claimed.cookies.clear()
+    password_user("ann@example.com")
     response = log_in(claimed, email, password)
     assert response.status_code == 401
     assert response.json() == {
@@ -463,7 +393,7 @@ def test_a_wrong_password_and_an_unknown_email_answer_the_same(
 
 
 def test_login_upgrades_an_outdated_hash(claimed: TestClient) -> None:
-    register(claimed, "ann@example.com", "Ann")
+    password_user("ann@example.com")
     weak = PasswordHasher(time_cost=1, memory_cost=8, parallelism=1).hash(PROD_PASSWORD)
     with portal_db.get_session() as session:
         user = session.exec(select(User).where(User.email == "ann@example.com")).one()
@@ -479,8 +409,7 @@ def test_login_upgrades_an_outdated_hash(claimed: TestClient) -> None:
 
 
 def test_the_login_redirect_only_accepts_a_portal_url(claimed: TestClient) -> None:
-    register(claimed, "ann@example.com", "Ann")
-    claimed.cookies.clear()
+    password_user("ann@example.com")
     kept = [f"{PROD_BASE}/account", at("quokka") + "/p/api/explorer"]
     dropped = [
         "https://evil.example/",
@@ -505,7 +434,7 @@ def test_logout_revokes_the_session_and_clears_the_cookie(
     world: SimpleNamespace,
 ) -> None:
     client = world.client
-    token = cookie_of(log_in(client, "ann@example.com"))
+    token = cookie_of(github_sign_in(client, "ann"))
     for prefix in (at("quokka"), at()):  # logout works on any host
         response = client.post(prefix + "/api/auth/logout")
         assert response.status_code == 200
@@ -524,8 +453,7 @@ def test_logout_revokes_the_session_and_clears_the_cookie(
 def test_five_failures_lock_the_pair_but_not_the_victim_elsewhere(
     claimed: TestClient,
 ) -> None:
-    register(claimed, "ann@example.com", "Ann")
-    claimed.cookies.clear()
+    password_user("ann@example.com")
     from_ip(claimed, "198.51.100.10")
     for _ in range(5):
         assert (
@@ -545,8 +473,7 @@ def test_five_failures_lock_the_pair_but_not_the_victim_elsewhere(
 
 def test_the_per_email_ceiling_holds_across_addresses(claimed: TestClient) -> None:
     claimed.app.state.portal.login_email = Throttle(3, 3600)
-    register(claimed, "ann@example.com", "Ann")
-    claimed.cookies.clear()
+    password_user("ann@example.com")
     for n in range(3):
         from_ip(claimed, f"198.51.100.{n + 20}")
         assert (
@@ -559,8 +486,7 @@ def test_the_per_email_ceiling_holds_across_addresses(claimed: TestClient) -> No
 
 def test_the_per_ip_rule_holds_across_emails(claimed: TestClient) -> None:
     claimed.app.state.portal.login_ip = Throttle(3, 900)
-    register(claimed, "ann@example.com", "Ann")
-    claimed.cookies.clear()
+    password_user("ann@example.com")
     from_ip(claimed, "198.51.100.30")
     for n in range(3):
         assert log_in(claimed, f"u{n}@example.com").status_code == 401
@@ -622,18 +548,33 @@ def test_the_account_routes_need_a_session_and_work_on_any_host(
     for prefix in (at(), at("quokka")):
         response = client.get(prefix + "/api/account")
         assert response.status_code == 401 and response.json() == LOGIN_REQUIRED
-    log_in(client, "ann@example.com")
+    github_sign_in(client, "ann")
     for prefix in (at(), at("quokka"), at("narwhal")):
         body = client.get(prefix + "/api/account").json()
-        assert body["email"] == "ann@example.com" and body["uid"] == world.ann
+        assert body == {
+            "uid": world.ann,
+            "email": None,  # no email is stored for a GitHub account
+            "display_name": "Ann",
+            "is_instance_admin": False,
+            "github_login": "ann",
+            "avatar_url": user_row(login="ann").avatar_url,
+            "has_password": False,
+        }
+    log_in(client, "pat@example.com")
+    body = client.get(at() + "/api/account").json()
+    assert body["email"] == "pat@example.com" and body["uid"] == world.pat
+    assert body["github_login"] is None and body["avatar_url"] is None
+    assert body["has_password"] is True
 
 
 def test_patch_account_changes_the_display_name(world: SimpleNamespace) -> None:
     client = world.client
-    log_in(client, "ann@example.com")
+    github_sign_in(client, "ann")
     response = client.patch(at() + "/api/account", json={"display_name": " Annie "})
     assert response.status_code == 200
     assert response.json()["display_name"] == "Annie"
+    assert response.json()["github_login"] == "ann"
+    assert response.json()["has_password"] is False
     assert client.get(at() + "/api/account").json()["display_name"] == "Annie"
     assert (
         client.patch(at() + "/api/account", json={"display_name": "  "}).status_code
@@ -643,7 +584,7 @@ def test_patch_account_changes_the_display_name(world: SimpleNamespace) -> None:
 
 def test_account_orgs_lists_real_memberships_only(world: SimpleNamespace) -> None:
     client = world.client
-    log_in(client, "ann@example.com")
+    github_sign_in(client, "ann")
     assert client.get(at() + "/api/account/orgs").json() == [
         {
             "slug": "quokka",
@@ -660,10 +601,10 @@ def test_a_password_change_rotates_this_session_and_ends_the_others(
     world: SimpleNamespace,
 ) -> None:
     client = world.client
-    other = cookie_of(log_in(client, "ann@example.com"))
-    link = token_in(reset_link(signed_in_admin(client), world.ann).json()["url"])
-    current = cookie_of(log_in(client, "ann@example.com"))
-    before = user_row("ann@example.com").password_changed_at
+    other = cookie_of(log_in(client, "pat@example.com"))
+    link = token_in(reset_link(signed_in_admin(client), world.pat).json()["url"])
+    current = cookie_of(log_in(client, "pat@example.com"))
+    before = user_row("pat@example.com").password_changed_at
 
     response = client.post(
         at() + "/api/account/password",
@@ -676,17 +617,17 @@ def test_a_password_change_rotates_this_session_and_ends_the_others(
     assert as_token(client, rotated) == 200
     assert as_token(client, current) == 401  # rotated away
     assert as_token(client, other) == 401  # every other session ended
-    assert session_count("ann@example.com") == 1
-    assert user_row("ann@example.com").password_changed_at != before
+    assert session_count("pat@example.com") == 1
+    assert user_row("pat@example.com").password_changed_at != before
     # The outstanding reset link stops working, and the new password is live.
     stale = client.post(
         at() + "/api/auth/reset", json={"token": link, "password": "yet another phrase"}
     )
     assert stale.status_code == 400 and stale.json()["code"] == "bad_token"
     client.cookies.clear()
-    assert log_in(client, "ann@example.com", PROD_PASSWORD).status_code == 401
+    assert log_in(client, "pat@example.com", PROD_PASSWORD).status_code == 401
     assert (
-        log_in(client, "ann@example.com", "a brand new passphrase").status_code == 200
+        log_in(client, "pat@example.com", "a brand new passphrase").status_code == 200
     )
 
 
@@ -695,7 +636,7 @@ def test_a_wrong_current_password_is_403_and_counts_as_a_failure(
 ) -> None:
     client = world.client
     client.app.state.portal.login_pair = Throttle(2, 900)
-    log_in(client, "ann@example.com")
+    log_in(client, "pat@example.com")
     body = {"current": "not the passphrase", "new": "a brand new passphrase"}
     for _ in range(2):
         response = client.post(at() + "/api/account/password", json=body)
@@ -703,12 +644,12 @@ def test_a_wrong_current_password_is_403_and_counts_as_a_failure(
         assert response.json()["code"] == "bad_credentials"
     throttled = client.post(at() + "/api/account/password", json=body)
     assert throttled.status_code == 429
-    assert user_row("ann@example.com").password_changed_at is None
+    assert user_row("pat@example.com").password_changed_at is None
 
 
 def test_a_new_password_must_meet_the_rules(world: SimpleNamespace) -> None:
     client = world.client
-    log_in(client, "ann@example.com")
+    log_in(client, "pat@example.com")
     for new, code in (
         ("short one", "weak_password"),
         ("passwordpassword", "common_password"),
@@ -717,7 +658,7 @@ def test_a_new_password_must_meet_the_rules(world: SimpleNamespace) -> None:
             at() + "/api/account/password", json={"current": PROD_PASSWORD, "new": new}
         )
         assert response.status_code == 422 and response.json()["code"] == code
-    assert user_row("ann@example.com").password_changed_at is None
+    assert user_row("pat@example.com").password_changed_at is None
 
 
 # ---------------------------------------------------------------------------
@@ -729,7 +670,7 @@ def test_a_reset_link_carries_its_token_in_the_fragment(
     world: SimpleNamespace,
 ) -> None:
     client = signed_in_admin(world.client)
-    response = reset_link(client, world.ann)
+    response = reset_link(client, world.pat)
     assert response.status_code == 200, response.text
     url = response.json()["url"]
     raw = token_in(url)
@@ -745,40 +686,40 @@ def test_a_reset_sets_the_password_signs_in_and_ends_every_session(
     world: SimpleNamespace,
 ) -> None:
     client = world.client
-    old = cookie_of(log_in(client, "ann@example.com"))
-    raw = token_in(reset_link(signed_in_admin(client), world.ann).json()["url"])
+    old = cookie_of(log_in(client, "pat@example.com"))
+    raw = token_in(reset_link(signed_in_admin(client), world.pat).json()["url"])
     client.cookies.clear()
 
     response = client.post(
         at() + "/api/auth/reset",
-        json={"token": raw, "password": "ann's new passphrase"},
+        json={"token": raw, "password": "pat's new passphrase"},
     )
     assert response.status_code == 200, response.text
     assert response.json() == {"redirect": f"{PROD_BASE}/orgs"}
     fresh_token = cookie_of(response)
     assert as_token(client, old) == 401  # every earlier session ended
     assert as_token(client, fresh_token) == 200
-    assert session_count("ann@example.com") == 1
-    assert user_row("ann@example.com").password_changed_at is not None
+    assert session_count("pat@example.com") == 1
+    assert user_row("pat@example.com").password_changed_at is not None
     client.cookies.clear()
-    assert log_in(client, "ann@example.com", "ann's new passphrase").status_code == 200
+    assert log_in(client, "pat@example.com", "pat's new passphrase").status_code == 200
 
 
 @pytest.mark.parametrize("why", ["used", "superseded", "expired", "unknown"])
 def test_a_dead_reset_link_is_400_bad_token(world: SimpleNamespace, why: str) -> None:
     client = world.client
-    raw = token_in(reset_link(signed_in_admin(client), world.ann).json()["url"])
+    raw = token_in(reset_link(signed_in_admin(client), world.pat).json()["url"])
     client.cookies.clear()
     if why == "used":
         assert (
             client.post(
                 at() + "/api/auth/reset",
-                json={"token": raw, "password": "ann's first new phrase"},
+                json={"token": raw, "password": "pat's first new phrase"},
             ).status_code
             == 200
         )
     elif why == "superseded":
-        reset_link(signed_in_admin(client), world.ann)
+        reset_link(signed_in_admin(client), world.pat)
     elif why == "expired":
         with portal_db.get_session() as session:
             row = session.exec(select(PasswordReset)).one()
@@ -789,7 +730,7 @@ def test_a_dead_reset_link_is_400_bad_token(world: SimpleNamespace, why: str) ->
     client.cookies.clear()
     response = client.post(
         at() + "/api/auth/reset",
-        json={"token": raw, "password": "ann's second new phrase"},
+        json={"token": raw, "password": "pat's second new phrase"},
     )
     assert response.status_code == 400
     assert response.json() == {
@@ -813,7 +754,7 @@ def test_the_reset_route_is_throttled_per_ip(world: SimpleNamespace) -> None:
 
 
 def test_creating_an_org_makes_the_caller_its_owner(claimed: TestClient) -> None:
-    register(claimed, "ann@example.com", "Ann")
+    assert github_sign_in(claimed, "ann").status_code == 200
     response = create_org(claimed, "quokka", " Quokka ")
     assert response.status_code == 201, response.text
     assert response.json() == {"slug": "quokka", "url": at("quokka")}
@@ -834,7 +775,7 @@ def test_creating_an_org_makes_the_caller_its_owner(claimed: TestClient) -> None
 
 @pytest.mark.parametrize("slug", ["Quokka", "-bad", "a" * 41, "", "xn--abc", "api"])
 def test_a_bad_or_reserved_slug_is_422(claimed: TestClient, slug: str) -> None:
-    register(claimed, "ann@example.com", "Ann")
+    assert github_sign_in(claimed, "ann").status_code == 200
     response = create_org(claimed, slug)
     assert response.status_code == 422, (slug, response.text)
     assert response.json()["code"] == "bad_slug"
@@ -844,7 +785,7 @@ def test_a_bad_or_reserved_slug_is_422(claimed: TestClient, slug: str) -> None:
 
 
 def test_every_reserved_slug_is_refused(claimed: TestClient) -> None:
-    register(claimed, "ann@example.com", "Ann")
+    assert github_sign_in(claimed, "ann").status_code == 200
     for slug in sorted(RESERVED_ORG_SLUGS):
         assert create_org(claimed, slug).status_code == 422, slug
     assert "local" not in RESERVED_ORG_SLUGS  # the built-in org's slug
@@ -853,7 +794,7 @@ def test_every_reserved_slug_is_refused(claimed: TestClient) -> None:
 
 def test_a_taken_slug_is_409(world: SimpleNamespace) -> None:
     client = world.client
-    log_in(client, "bob@example.com")
+    github_sign_in(client, "bob")
     response = create_org(client, "quokka", "Quokka Two")
     assert response.status_code == 409 and response.json()["code"] == "slug_taken"
     assert create_org(client, "", "Blank name").status_code == 422
@@ -864,7 +805,7 @@ def test_a_taken_slug_is_409(world: SimpleNamespace) -> None:
 
 def test_org_creation_is_base_host_only(world: SimpleNamespace) -> None:
     client = world.client
-    log_in(client, "ann@example.com")
+    github_sign_in(client, "ann")
     response = client.post(
         at("quokka") + "/api/orgs", json={"slug": "another", "name": "Another"}
     )
@@ -892,7 +833,7 @@ def test_the_admin_routes_refuse_a_non_admin_and_an_org_host(
         response = client.request(method, at() + path, json={"is_instance_admin": True})
         assert response.status_code == 401, (method, path)
         assert response.json() == LOGIN_REQUIRED
-    log_in(client, "ann@example.com")
+    github_sign_in(client, "ann")
     for method, path in paths:
         response = client.request(method, at() + path, json={"is_instance_admin": True})
         assert response.status_code == 403, (method, path, response.text)
@@ -909,11 +850,14 @@ def test_the_admin_routes_refuse_a_non_admin_and_an_org_host(
 def test_the_admin_lists_every_user_and_org(world: SimpleNamespace) -> None:
     client = signed_in_admin(world.client)
     users = client.get(at() + "/api/admin/users").json()
-    assert [u["email"] for u in users] == [
-        "ada@example.com",
-        "ann@example.com",
-        "bob@example.com",
+    assert [(u["email"], u["github_login"]) for u in users] == [
+        ("ada@example.com", None),
+        (None, "ann"),
+        (None, "bob"),
+        ("pat@example.com", None),
     ]
+    assert [u["has_password"] for u in users] == [True, False, False, True]
+    assert [u["disabled"] for u in users] == [False] * 4
     assert users[0]["is_instance_admin"] is True and users[0]["org_count"] == 0
     assert users[1]["uid"] == world.ann and users[1]["org_count"] == 1
     assert all(u["created_at"] and u["display_name"] for u in users)
@@ -953,7 +897,7 @@ def test_the_last_instance_admin_cannot_be_demoted(world: SimpleNamespace) -> No
         == 200
     )
     assert client.get(at() + "/api/admin/users").status_code == 403
-    log_in(client, "ann@example.com")
+    github_sign_in(client, "ann")
     assert client.get(at() + "/api/admin/users").status_code == 200
     assert (
         client.patch(
@@ -986,7 +930,7 @@ def test_an_instance_admin_reads_an_org_they_do_not_belong_to(
         at() + f"/api/admin/users/{world.ann}", json={"is_instance_admin": True}
     )
     assert promoted.status_code == 200
-    log_in(client, "ann@example.com")
+    github_sign_in(client, "ann")
     assert (
         client.patch(
             at() + f"/api/admin/users/{world.ada}", json={"is_instance_admin": False}
@@ -1003,16 +947,18 @@ def test_an_instance_admin_reads_an_org_they_do_not_belong_to(
 
 
 def test_every_security_event_is_logged_once_with_its_fields(
-    production_env: SimpleNamespace, audit_log: pytest.LogCaptureFixture
+    github_fake: FakeGitHub, audit_log: pytest.LogCaptureFixture
 ) -> None:
     secrets_used = []
     with prod_portal() as client:
         secrets_used.append(client.app.state.portal.bootstrap_secret)
         claim_instance(client)
         ada = uid_of("ada@example.com")
-        register(client, "ann@example.com", "Ann")
-        ann = uid_of("ann@example.com")
+        ann = password_user("ann@example.com")  # inserted: no event
+        github_sign_in(client, "ben")
+        ben = uid_of_login("ben")
         create_org(client, "quokka", "Quokka")
+        github_sign_in(client, "nofa")  # refused: no 2FA
         client.post(at() + "/api/auth/logout")
         log_in(client, "ann@example.com", "the wrong passphrase")
         log_in(client, "ann@example.com")
@@ -1036,15 +982,24 @@ def test_every_security_event_is_logged_once_with_its_fields(
             ).status_code
             == 200
         )
+        # Ben renames on GitHub and a newcomer claims "ben"; GitHub's revoke
+        # fails this once.
+        github_fake.rename_user("ben", "benjamin")
+        newcomer = github_fake.add_user("ben")
+        github_fake.force("revoke", status=500)
+        assert github_sign_in(client, "ben").status_code == 200
+        ben2 = uid_of_login("ben")
         secrets_used.extend(
             [PROD_PASSWORD, raw, "ann's second passphrase", "ann's third passphrase"]
         )
+        secrets_used.extend([*github_fake.codes, *github_fake.tokens])
 
     records = events(audit_log)
     assert [r["event"] for r in records] == [
         "bootstrap_claimed",
-        "register",
+        "github_signin",
         "org_created",
+        "github_signin_refused",
         "logout",
         "login_failure",
         "login_success",
@@ -1055,10 +1010,27 @@ def test_every_security_event_is_logged_once_with_its_fields(
         "admin_revoked",
         "reader_request",
         "reset_link_used",
+        "github_token_revoke_failed",
+        "github_login_released",
+        "github_signin",
     ]
     by_event = {r["event"]: r for r in records}
     assert by_event["bootstrap_claimed"]["uid"] == ada
+    first, second = (r for r in records if r["event"] == "github_signin")
+    assert (first["uid"], first["github_login"], first["new_user"]) == (
+        ben,
+        "ben",
+        True,
+    )
+    assert (second["uid"], second["new_user"]) == (ben2, True) and ben2 != ben
+    assert newcomer.id != github_fake.users["benjamin"].id
+    assert by_event["github_signin_refused"]["reason"] == "2fa_required"
+    assert by_event["github_signin_refused"]["github_login"] == "nofa"
+    assert by_event["github_login_released"]["target"] == ben
+    assert by_event["github_login_released"]["github_login"] == "ben"
     assert by_event["org_created"]["org"] == "quokka"
+    assert by_event["org_created"]["uid"] == ben
+    assert by_event["logout"]["uid"] == ben
     assert by_event["login_failure"]["email"] == "ann...@example.com"
     assert by_event["reset_link_issued"]["uid"] == ada
     assert by_event["reset_link_issued"]["target"] == ann
@@ -1069,7 +1041,8 @@ def test_every_security_event_is_logged_once_with_its_fields(
     assert by_event["reader_request"]["host"] == f"quokka.whygraph.localhost:{PORT}"
     assert by_event["login_success"]["host"] == f"whygraph.localhost:{PORT}"
 
-    # No password, session token, bootstrap secret or reset token is ever logged.
+    # No password, session token, bootstrap secret, reset token, GitHub code
+    # or GitHub token is ever logged.
     text = "\n".join(
         f"{r.getMessage()} {r.audit!r}"
         for r in audit_log.records

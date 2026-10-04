@@ -85,6 +85,7 @@ from .repos import DiscoveryCache
 from .runner import ScanRunner
 from .security import PortalOrigins, Principal
 from .throttle import Throttle
+from .webhook import DeliveryIds
 
 if TYPE_CHECKING:
     from .github_app import GitHubApp
@@ -337,6 +338,9 @@ class PortalState:
     user_tokens : UserTokens
         The import page's GitHub App user tokens, per WhyGraph session, in
         memory only (M2d-2 plan section 4.3).
+    webhook_deliveries : DeliveryIds
+        The ``X-GitHub-Delivery`` ids of the GitHub App's webhook seen lately,
+        so a replayed delivery does nothing (M2d-2 plan section 4.7).
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -377,6 +381,7 @@ class PortalState:
         self.member_add_org = Throttle(60, 60 * 60)
         self.import_org = Throttle(30, 60 * 60)
         self.user_tokens = UserTokens()
+        self.webhook_deliveries = DeliveryIds()
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0

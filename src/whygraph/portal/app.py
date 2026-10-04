@@ -14,6 +14,8 @@ Composition (plan section 4.5.1)::
     /api/projects/{slug}/...      serve.routes.router (project.read) + serve.chat.router
                                   (/chat, project.chat), via project_db_access
     /mcp/{slug}                   per-project MCP dispatcher (portal/mcp_mount.py)
+    POST /github/webhook          the GitHub App's webhook, base host, outside /api
+                                  (portal/webhook.py; 404 in local mode)
     /api/*, /mcp/* not matched    404 {"error"} - never the SPA's index.html
     everything else               the SPA (serve.app._mount_static)
 
@@ -108,6 +110,7 @@ from .security import (
     build_origins,
     build_production_origins,
 )
+from .webhook import webhook_router
 
 _log = logging.getLogger(__name__)
 
@@ -252,6 +255,7 @@ def create_portal_app(
         app.add_route(
             path, _mcp_not_found, methods=_ALL_METHODS, include_in_schema=False
         )
+    app.include_router(webhook_router)  # before the SPA's catch-all
 
     _mount_static(app)
     return app

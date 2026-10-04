@@ -1231,6 +1231,17 @@ def test_every_api_route_declares_exactly_one_action(client: TestClient) -> None
     assert seen_public == PUBLIC_API_ROUTES
 
 
+def test_the_webhook_is_the_only_post_outside_api_and_mcp(client: TestClient) -> None:
+    """GitHub's deliveries carry no ``X-WhyGraph-Client`` (M2d-2 section 0.2 #8)."""
+    posts = sorted(
+        rc.path
+        for rc in iter_route_contexts(client.app.routes)
+        if not (rc.path or "").startswith(("/api", "/mcp"))
+        and "POST" in (getattr(rc, "methods", None) or ())
+    )
+    assert posts == ["/github/webhook"]
+
+
 def test_only_the_mcp_routes_have_no_dependant(client: TestClient) -> None:
     bare = [
         rc

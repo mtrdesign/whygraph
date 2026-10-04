@@ -73,14 +73,24 @@ process:
 * **Catch-up.** At start and every :data:`POLL_INTERVAL_SEC` (local mode
   only), a local project whose HEAD differs from
   ``projects.last_scanned_head`` gets a ``trigger=hook`` scan.
+* **Reconcile** (production only, M2d-2 plan section 4.7). Its own loop in
+  the runner's task group, started by :meth:`ScanRunner.start` but never
+  awaited there: at start and every :attr:`ScanRunner.reconcile_interval`
+  seconds, each initialized, already scanned GitHub project that is not
+  busy is checked in turn - an access-lost one gets one
+  :meth:`ScanRunner.check_access`, the others a ``git ls-remote`` of the
+  default branch with a fresh token, and a ``trigger=reconcile`` sync when
+  it differs from ``last_scanned_head``. It catches the pushes whose
+  webhooks a down instance missed.
 * **Source policy.** Every request - from a route or an internal caller -
   for a project whose source the mode does not accept
   (:func:`~whygraph.portal.policy.allowed_sources`, e.g. a local-mode
   GitHub clone of an older build) raises :class:`SourceNotAllowed`, and a
   leftover queued run of one fails without touching the repository.
 
-**System callers.** :meth:`ScanRunner.catch_up`,
-the queued-run recovery and the run finisher are internal: no request,
+**System callers.** :meth:`ScanRunner.catch_up`, :meth:`ScanRunner.reconcile`,
+the webhook (:mod:`whygraph.portal.webhook`), the queued-run recovery and
+the run finisher are internal: no request,
 no user and no org reach them. An internal caller starts from a project
 **id** read from the DB, never from a request's slug, and resolves config
 and secrets through ``ContextCache.get(project_id)``, which reads that
@@ -157,6 +167,12 @@ MAX_CONCURRENT = 2
 POLL_INTERVAL_SEC = 15 * 60
 """Seconds between catch-up checks (local mode)."""
 
+RECONCILE_INTERVAL_SEC = 60 * 60
+"""Seconds between reconcile passes (production)."""
+
+LS_REMOTE_TIMEOUT_SEC = 30
+"""Seconds before a reconcile's ``git ls-remote`` is killed."""
+
 HEARTBEAT_SEC = 15.0
 """Idle SSE heartbeat interval."""
 
@@ -217,6 +233,10 @@ REASON_NO_ACCESS = "no_access"
 
 REASON_GIT_DENIED = "git_access_denied"
 """``access_lost_reason``: git answered ``401`` / "not found" to a fresh token."""
+
+REASON_REPO_DELETED = "repo_deleted"
+"""``access_lost_reason``: the repository was deleted on GitHub (a ``repository``
+webhook); a repository restored on GitHub comes back on the next successful mint."""
 
 REASON_TRACKED_STATE = "tracked_whygraph_state"
 """``access_lost_reason``: the default branch tracks ``.whygraph/`` / ``.codegraph/``.
@@ -673,6 +693,17 @@ class _GitHubProject:
     last_scanned_head: str | None
 
 
+@dataclass(frozen=True)
+class _ReconcileTarget:
+    """A production GitHub project the reconcile looks at (read at the pass's start)."""
+
+    id: int
+    root: Path
+    root_ok: bool
+    lost: bool
+    github: _GitHubProject
+
+
 class _SyncFailed(Exception):
     """A production sync failed; the message is shown (redacted) in the run."""
 
@@ -771,12 +802,14 @@ class ScanRunner:
     max_concurrent : int
         Global cap on running jobs.
     poll_interval : float
-        Seconds between catch-up checks.
+        Seconds between catch-up checks (local mode).
     heartbeat : float
         Seconds of SSE idleness before a heartbeat comment.
     sleep : callable, optional
-        ``async (seconds) -> None`` the poller waits with; tests inject a
-        fake clock. Defaults to :func:`anyio.sleep`.
+        ``async (seconds) -> None`` the poller and the reconcile wait with;
+        tests inject a fake clock. Defaults to :func:`anyio.sleep`.
+    reconcile_interval : float
+        Seconds between reconcile passes (production).
 
     Attributes
     ----------
@@ -795,9 +828,11 @@ class ScanRunner:
         poll_interval: float = POLL_INTERVAL_SEC,
         heartbeat: float = HEARTBEAT_SEC,
         sleep: Callable[[float], Awaitable[None]] | None = None,
+        reconcile_interval: float = RECONCILE_INTERVAL_SEC,
     ) -> None:
         self.max_concurrent = max_concurrent
         self.poll_interval = poll_interval
+        self.reconcile_interval = reconcile_interval
         self.heartbeat = heartbeat
         self.tail_interval = TAIL_INTERVAL_SEC
         self.token_refresh_margin: float = TOKEN_REFRESH_MARGIN_SEC
@@ -822,7 +857,10 @@ class ScanRunner:
         """Start the queue: sweep token files, requeue ``queued`` rows, catch up, poll.
 
         Called by the lifespan after the portal DB is migrated and stale
-        ``running`` rows were marked ``interrupted``.
+        ``running`` rows were marked ``interrupted``. Local mode then polls
+        (:meth:`catch_up`); production starts the reconcile loop
+        (:meth:`reconcile`), which runs on its own and never delays the
+        start.
 
         Parameters
         ----------
@@ -843,7 +881,10 @@ class ScanRunner:
             await self.catch_up()
         except Exception:  # noqa: BLE001 -- never fail the portal start
             _log.exception("scan runner: startup recovery failed")
-        tg.start_soon(self._poll_loop)
+        if self._local_mode():
+            tg.start_soon(self._poll_loop)
+        elif self._mode() == "production":
+            tg.start_soon(self._reconcile_loop)
 
     async def shutdown(self, *, grace: float = 5.0) -> None:
         """Stop every child and record its run ``interrupted``.
@@ -1255,6 +1296,96 @@ class ScanRunner:
                 return
             except Exception:  # noqa: BLE001 -- the poller must survive
                 _log.exception("scan runner: catch-up failed")
+
+    # ---- reconcile (production) ------------------------------------------
+
+    async def reconcile(self) -> None:
+        """Queue a ``trigger=reconcile`` sync for each GitHub project whose remote moved.
+
+        The safety net under the webhook (M2d-2 plan section 4.7): a push
+        whose delivery a down or unreachable instance missed is caught here.
+        Sequentially, for each initialized production GitHub project that is
+        not busy and not being removed:
+
+        * an access-lost one (other than :data:`REASON_TRACKED_STATE`) gets
+          one :meth:`check_access` - a success clears the state, so a
+          restored repository or re-added installation comes back without
+          a webhook;
+        * the others, once scanned, get ``git ls-remote origin
+          refs/heads/<default>`` with a freshly minted token (at most
+          :data:`LS_REMOTE_TIMEOUT_SEC` seconds), and a sync when the answer
+          differs from ``last_scanned_head``. A never-scanned project is
+          left to its first, explicit scan, as :meth:`catch_up` does.
+
+        A refused mint marks the project access-lost (:meth:`_mint`); GitHub
+        or git being unavailable skips the project until the next pass.
+        Production only, and only with the GitHub App configured.
+
+        Raises
+        ------
+        RunnerUnavailable
+            The runner stopped during the pass.
+        """
+        state = self._state
+        if state is None or state.mode != "production" or state.github_app is None:
+            return
+        targets = await anyio.to_thread.run_sync(_reconcile_targets)
+        for target in targets:
+            if self._tg is None or self._stopping:
+                raise RunnerUnavailable("the scan runner is not running")
+            if self._is_removing(target.id):
+                continue  # a project removal (or its org's deletion) holds it
+            if await anyio.to_thread.run_sync(self.is_busy, target.id):
+                continue
+            try:
+                if target.lost:
+                    await anyio.to_thread.run_sync(
+                        self.check_access, target.id, abandon_on_cancel=True
+                    )
+                    continue
+                if not target.root_ok or target.github.last_scanned_head is None:
+                    continue
+                head = await anyio.to_thread.run_sync(
+                    self._remote_head, target, abandon_on_cancel=True
+                )
+            except GitHubAccessLost:
+                continue  # marked by _mint
+            except (GitHubUnavailable, GitError) as exc:
+                _log.warning(
+                    "scan runner: reconcile skipped project %s: %s", target.id, exc
+                )
+                continue
+            if head is None or head == target.github.last_scanned_head:
+                continue
+            try:
+                await self.request_sync(target.id, trigger="reconcile")
+            except (ProjectBusy, ProjectAccessLost, SourceNotAllowed):
+                continue
+
+    def _remote_head(self, target: _ReconcileTarget) -> str | None:
+        """Mint a token and ``ls-remote`` the default branch (worker thread)."""
+        token = self._mint(target.id, target.github, force=True)
+        branch = target.github.default_branch
+        assert branch is not None  # _reconcile_targets keeps only these
+        return Repository(target.root).remote_branch_head(
+            branch, env=git_env(token.token), timeout=LS_REMOTE_TIMEOUT_SEC
+        )
+
+    def _is_removing(self, project_id: int) -> bool:
+        """Whether a removal holds the project's reservation."""
+        with self._claims:
+            return project_id in self._removing
+
+    async def _reconcile_loop(self) -> None:
+        """Reconcile at start, then every :attr:`reconcile_interval` seconds."""
+        while True:
+            try:
+                await self.reconcile()
+            except RunnerUnavailable:
+                return
+            except Exception:  # noqa: BLE001 -- the loop must survive
+                _log.exception("scan runner: reconcile failed")
+            await self._sleep(self.reconcile_interval)
 
     # ---- dispatch + execution -------------------------------------------
 
@@ -1853,6 +1984,8 @@ def _access_lost_message(reason: str | None) -> str:
     """The refusal message for an access-lost project."""
     if reason == REASON_GIT_DENIED:
         return "GitHub refused git access to this repository - reconnect it on GitHub"
+    if reason == REASON_REPO_DELETED:
+        return "the repository was deleted on GitHub"
     return (
         "the WhyGraph GitHub App cannot reach this repository any more - "
         "reconnect it on GitHub"
@@ -1865,7 +1998,14 @@ def _mark_access_lost(project_id: int, reason: str) -> None:
         project = session.get(Project, project_id)
         if project is None:
             return
-        if project.access_lost_at is not None and project.access_lost_reason == reason:
+        if project.access_lost_at is not None and (
+            project.access_lost_reason == reason
+            # A refused mint is what a deleted repository looks like: keep saying so.
+            or (
+                project.access_lost_reason == REASON_REPO_DELETED
+                and reason == REASON_NO_ACCESS
+            )
+        ):
             return
         project.access_lost_at = project.access_lost_at or _now()
         project.access_lost_reason = reason
@@ -2100,6 +2240,42 @@ def _initialized_projects() -> list[dict]:
         return out
 
 
+def _reconcile_targets() -> list[_ReconcileTarget]:
+    """Every initialized GitHub App project with a default branch, oldest first."""
+    with get_session() as session:
+        rows = session.exec(
+            select(Project)
+            .where(Project.source == "github")
+            .where(col(Project.initialized_at).is_not(None))
+            .where(col(Project.github_repo_id).is_not(None))
+            .where(col(Project.github_installation_id).is_not(None))
+            .where(col(Project.default_branch).is_not(None))
+            .order_by(col(Project.id))
+        ).all()
+        out = []
+        for project in rows:
+            assert project.id is not None
+            assert project.github_repo_id is not None
+            assert project.github_installation_id is not None
+            root = resolve_root(project)
+            out.append(
+                _ReconcileTarget(
+                    id=project.id,
+                    root=root,
+                    root_ok=root_status(root) == "ok",
+                    lost=project.access_lost_at is not None
+                    and project.access_lost_reason != REASON_TRACKED_STATE,
+                    github=_GitHubProject(
+                        repo_id=project.github_repo_id,
+                        installation_id=project.github_installation_id,
+                        default_branch=project.default_branch,
+                        last_scanned_head=project.last_scanned_head,
+                    ),
+                )
+            )
+        return out
+
+
 def _run_events_path(project_id: int, run_id: int) -> str | None:
     with get_session() as session:
         run = session.get(ScanRun, run_id)
@@ -2226,10 +2402,13 @@ __all__ = [
     "LOG_TAIL_BYTES",
     "MAX_CONCURRENT",
     "MAX_EVENT_LINE",
+    "LS_REMOTE_TIMEOUT_SEC",
     "POLL_INTERVAL_SEC",
     "PROVIDER_KEY_ENV",
     "REASON_GIT_DENIED",
     "REASON_NO_ACCESS",
+    "REASON_REPO_DELETED",
+    "RECONCILE_INTERVAL_SEC",
     "REASON_TRACKED_STATE",
     "SCAN_CMD_ENV",
     "TOKEN_REFRESH_MARGIN_SEC",

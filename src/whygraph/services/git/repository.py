@@ -7,6 +7,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from functools import cached_property
 from pathlib import Path
+from typing import Any
 
 from whygraph.core import Shell, ShellError
 
@@ -26,6 +27,7 @@ from .commands import (
     GitIsAncestorCmd,
     GitIsShallowCmd,
     GitLogCommitCmd,
+    GitLsRemoteBranchCmd,
     GitLsTreeNamesCmd,
     GitRefExistsCmd,
     GitRemoteUrlCmd,
@@ -672,6 +674,50 @@ class Repository:
             what=f"fetch in {self.root}",
         )
 
+    def remote_branch_head(
+        self,
+        branch: str,
+        *,
+        env: Mapping[str, str] | None = None,
+        timeout: int = _NETWORK_TIMEOUT,
+    ) -> str | None:
+        """Ask the origin remote where ``branch`` points (``git ls-remote``).
+
+        Same protocol and credential rules as :meth:`fetch_default`, but
+        nothing is fetched and no ref moves.
+
+        Parameters
+        ----------
+        branch : str
+            The branch's short name.
+        env : Mapping[str, str], optional
+            The complete child environment. ``None`` (default) means an
+            anonymous, allowlisted one.
+        timeout : int, optional
+            Seconds before git is killed. Default ``900``.
+
+        Returns
+        -------
+        str or None
+            The full SHA, or ``None`` when the remote has no such branch.
+
+        Raises
+        ------
+        GitError
+            If ``branch`` starts with ``-``, or git fails, is missing or
+            exceeds ``timeout``.
+        """
+        if not branch or branch.startswith("-"):
+            raise GitError(f"refusing the branch name {branch!r}")
+        return _run_network(
+            self._shell,
+            GitLsRemoteBranchCmd(branch, self._origin_remote),
+            cwd=self.root,
+            env=env,
+            timeout=timeout,
+            what=f"ls-remote in {self.root}",
+        )
+
     def fast_forward(self) -> bool:
         """Fast-forward the checked-out branch to its upstream, with git hooks disabled.
 
@@ -894,22 +940,22 @@ class Repository:
 
 def _run_network(
     shell: Shell,
-    cmd: GitCloneCmd | GitFetchDefaultCmd,
+    cmd: GitCloneCmd | GitFetchDefaultCmd | GitLsRemoteBranchCmd,
     *,
     cwd: Path | None,
     env: Mapping[str, str] | None,
     timeout: int,
     what: str,
-) -> None:
+) -> Any:
     """Run a network git command, mapping failures to :class:`GitError`.
 
-    The message carries git's last stderr line with the token (if any) and
-    anything shaped like a GitHub token scrubbed, never the argv or the
-    environment.
+    Returns the command's parsed result. The message carries git's last
+    stderr line with the token (if any) and anything shaped like a GitHub
+    token scrubbed, never the argv or the environment.
     """
     effective_env = git_env() if env is None else env
     try:
-        shell.run(cmd, cwd=cwd, env=effective_env, timeout=timeout)
+        return shell.run(cmd, cwd=cwd, env=effective_env, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         raise GitError(f"{what} timed out after {timeout}s") from exc
     except FileNotFoundError as exc:

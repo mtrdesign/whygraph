@@ -12,7 +12,9 @@ that tracks WhyGraph's state; the child's token file (``0600``, never the
 environment, refreshed across an expiry, every value redacted, deleted when
 the child ends however it ends); access lost on a refused mint, on a git
 ``401`` and in the refresher, the ``409 github_access_lost`` refusal, the
-summary fields and the restore on a successful mint.
+summary fields and the restore on a successful mint; the reconcile (a sync
+only when the remote moved, access lost and restored by its mint, its own
+loop at start that survives an exception).
 """
 
 # ruff: noqa: F811 -- pytest fixtures imported from other test modules
@@ -22,15 +24,25 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
+from sqlmodel import select
 
 from github_fake import _git as fixture_git
-from test_portal_app import at  # noqa: F401
+from test_portal_app import (  # noqa: F401
+    CLIENT_HEADER,
+    PROD_BASE,
+    at,
+    claim_instance,
+    github_sign_in,
+    prod_portal,
+)
 from test_portal_github_import import (  # noqa: F401 -- fixtures
     API_REPO,
     INSTALLATION,
@@ -47,9 +59,15 @@ from test_portal_github_import import (  # noqa: F401 -- fixtures
 )
 from test_portal_identity_routes import (  # noqa: F401 -- `audit_log` is a fixture
     audit_log,
+    create_org,
     events,
 )
-from test_portal_runner import TERMINAL, scanner, wait_for  # noqa: F401
+from test_portal_runner import TERMINAL, FakeClock, scanner, wait_for  # noqa: F401
+from whygraph.portal import db as portal_db
+from whygraph.portal import runner as runner_mod
+from whygraph.portal.app import create_portal_app
+from whygraph.portal.models import ScanRun
+from whygraph.portal.runner import ScanRunner
 from whygraph.portal.secrets import hint_for
 from whygraph.services.git.credentials import TOKEN_ENV_VAR, TOKEN_FILE_ENV
 
@@ -448,6 +466,119 @@ def test_a_queued_run_of_an_access_lost_project_fails_without_syncing(
     run = wait_run(w, queued)
     assert run["status"] == "failed" and "reconnect" in run["summary"]["error"]
     assert len(scanner.calls()) == 1
+
+
+# ---------------------------------------------------------------------------
+# The reconcile (plan section 4.7, acceptance criteria 4 and 6)
+# ---------------------------------------------------------------------------
+
+
+def reconcile(w: World) -> None:
+    w.client.portal.call(w.state.runner.reconcile)
+
+
+def test_the_reconcile_syncs_only_when_the_remote_moved(
+    world: World, scanner: SimpleNamespace
+) -> None:
+    w = world
+    imported(w)
+    reconcile(w)  # never scanned: left to the first, explicit scan
+    assert runs(w) == []
+    wait_run(w, scan(w))
+
+    reconcile(w)  # nothing moved
+    assert len(runs(w)) == 1
+    pushed = w.server.commit("acme/api", message="A push whose webhook was missed")
+    reconcile(w)
+    (run, _first) = runs(w)
+    run = wait_run(w, run["id"])
+    assert (run["status"], run["kind"], run["trigger"]) == ("ok", "sync", "reconcile")
+    row = project_row(ORG, "api")
+    assert row is not None and row.last_scanned_head == pushed
+    reconcile(w)
+    assert len(runs(w)) == 2
+
+
+def test_the_reconcile_marks_a_refused_mint_and_clears_it_once_access_returns(
+    world: World, scanner: SimpleNamespace, audit_log: pytest.LogCaptureFixture
+) -> None:
+    w = world
+    imported(w)
+    wait_run(w, scan(w))
+    w.fake.uninstall(INSTALLATION)
+    w.server.commit("acme/api")
+    reconcile(w)
+    assert details(w)["access_lost_reason"] == "no_access"
+    assert len(runs(w)) == 1
+
+    reconcile(w)  # still uninstalled: still lost, nothing queued
+    assert details(w)["access_lost"] is True and len(runs(w)) == 1
+
+    w.fake.add_installation(INSTALLATION, "acme", account_type="Organization")
+    w.fake.repos[API_REPO].installation = INSTALLATION
+    reconcile(w)  # one mint: access is back, without a webhook
+    assert details(w)["access_lost"] is False
+    assert [e["event"] for e in events(audit_log)].count("project_access_restored") == 1
+    assert len(runs(w)) == 1
+    reconcile(w)  # and the missed push is synced on the next pass
+    assert wait_run(w, runs(w)[0]["id"])["trigger"] == "reconcile"
+
+
+def test_the_reconcile_runs_at_start_on_its_own_loop_and_survives_an_exception(
+    app_env: object,
+    production_env: SimpleNamespace,
+    scanner: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restart that missed a push syncs it (acceptance criterion 4)."""
+    with prod_portal() as client:
+        w = World(client, app_env, production_env)  # type: ignore[arg-type]
+        claim_instance(client)
+        client.cookies.clear()
+        assert github_sign_in(client, "ben").status_code == 200
+        assert create_org(client, "acme", "Acme").status_code == 201
+        imported(w)
+        wait_run(w, scan(w))
+    pushed = w.server.commit("acme/api", message="Pushed while the portal was down")
+
+    release, entered = threading.Event(), threading.Event()
+    real = runner_mod._reconcile_targets
+    passes: list[int] = []
+
+    def targets():  # noqa: ANN202
+        passes.append(1)
+        if len(passes) == 1:
+            entered.set()
+            assert release.wait(20)
+            raise RuntimeError("the first pass fails")
+        return real()
+
+    monkeypatch.setattr(runner_mod, "_reconcile_targets", targets)
+
+    def reconcile_runs() -> list[str]:
+        """The statuses of the reconcile runs."""
+        with portal_db.get_session() as session:
+            return list(
+                session.exec(
+                    select(ScanRun.status).where(ScanRun.trigger == "reconcile")
+                ).all()
+            )
+
+    clock = FakeClock()
+    app = create_portal_app(runner=ScanRunner(sleep=clock.sleep))
+    with TestClient(app, base_url=PROD_BASE, headers=CLIENT_HEADER) as client:
+        # The start did not wait for the (blocked) first pass.
+        assert entered.wait(10)
+        assert client.get(PROD_BASE + "/api/portal/state").status_code == 200
+        release.set()
+        wait_for(lambda: clock.requested == [3600])
+        assert reconcile_runs() == []  # the failed pass queued nothing
+
+        clock.advance()  # the loop survived: the next pass catches up
+        wait_for(lambda: reconcile_runs() == ["ok"])
+        assert len(passes) == 2
+    row = project_row(ORG, "api")
+    assert row is not None and row.last_scanned_head == pushed
 
 
 def test_no_token_reaches_a_run_file(world: World, scanner: SimpleNamespace) -> None:

@@ -468,6 +468,45 @@ class GitFetchDefaultCmd(ShellCommand[None]):
         return None
 
 
+class GitLsRemoteBranchCmd(ShellCommand[str | None]):
+    """``git ls-remote -- <remote> refs/heads/<branch>`` - a remote branch's commit.
+
+    One small request, no objects fetched: the portal's reconcile compares
+    it with the last scanned commit. Same credential and protocol
+    arguments as :class:`GitCloneCmd`.
+
+    Parameters
+    ----------
+    branch : str
+        The branch's short name (never starting with ``-``; the caller checks).
+    remote : str, optional
+        Remote to ask. Default ``"origin"``.
+    """
+
+    def __init__(self, branch: str, remote: str = "origin") -> None:
+        self.branch = branch
+        self.remote = remote
+
+    def argv(self) -> list[str]:
+        return [
+            "git",
+            *github_git_config(),
+            "ls-remote",
+            "--",
+            self.remote,
+            f"refs/heads/{self.branch}",
+        ]
+
+    def parse(self, result: CompletedProcess[str]) -> str | None:
+        # A pattern matches a ref's tail; keep only the exact ref.
+        wanted = f"refs/heads/{self.branch}"
+        for line in result.stdout.splitlines():
+            sha, _, ref = line.partition("\t")
+            if ref.strip() == wanted and sha.strip():
+                return sha.strip()
+        return None
+
+
 class GitSetRemoteUrlCmd(ShellCommand[None]):
     """``git remote set-url -- <remote> <url>`` - point a remote somewhere else.
 

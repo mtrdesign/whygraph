@@ -10,15 +10,24 @@ land in the recorded argv. Options (all before the runner's own flags):
 ``--stderr-bytes N``     write N bytes of noise to stderr before exiting
 ``--echo-env VAR``       print VAR's value in a stdout event and on stderr
 ``--ignore-term``        ignore SIGTERM (only SIGKILL stops it)
+``--token-check URL``    read the GitHub token (``github_token()``: the portal's
+                         token file, else ``GH_TOKEN``), GET URL with it as git's
+                         Basic password, wait ``--token-wait SEC`` (default 0),
+                         read and check again; exit 3 / 4 when the first / second
+                         check is refused. Each token goes to stderr and, with
+                         ``--token-record FILE``, one per line to FILE
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import signal
 import sys
 import time
+import urllib.error
+import urllib.request
 
 
 def _take(args: list[str], name: str) -> str | None:
@@ -35,6 +44,36 @@ def _emit(obj: dict) -> None:
     sys.stdout.flush()
 
 
+def _token_ok(url: str, token: str | None) -> bool:
+    if not token:
+        return False
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    request = urllib.request.Request(url, headers={"Authorization": f"Basic {basic}"})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=10) as response:
+            return response.status == 200
+    except urllib.error.URLError:
+        return False
+
+
+def _check_tokens(url: str, wait: float, record: str | None) -> int:
+    from whygraph.services.github.token import github_token
+
+    for attempt, code in ((0, 3), (1, 4)):
+        if attempt:
+            time.sleep(wait)
+        token = github_token()
+        sys.stderr.write(f"token value={token}\n")
+        sys.stderr.flush()
+        if record:
+            with open(record, "a", encoding="utf-8") as fh:
+                fh.write(f"{token}\n")
+        if not _token_ok(url, token):
+            return code
+    return 0
+
+
 def main() -> int:
     args = sys.argv[1:]
     record = _take(args, "--record")
@@ -42,6 +81,9 @@ def main() -> int:
     code = int(_take(args, "--exit") or 0)
     noise = int(_take(args, "--stderr-bytes") or 0)
     echo = _take(args, "--echo-env")
+    token_check = _take(args, "--token-check")
+    token_wait = float(_take(args, "--token-wait") or 0)
+    token_record = _take(args, "--token-record")
     if "--ignore-term" in args:
         args.remove("--ignore-term")
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -63,6 +105,10 @@ def main() -> int:
         sys.stdout.flush()
     while hold and os.path.exists(hold):
         time.sleep(0.02)
+    if token_check:
+        checked = _check_tokens(token_check, token_wait, token_record)
+        if checked:
+            return checked
     if noise:
         chunk = "x" * 1023 + "\n"
         for _ in range(noise // 1024 + 1):

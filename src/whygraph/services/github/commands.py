@@ -17,6 +17,7 @@ from typing import Any
 from whygraph.core import Shell, ShellCommand, ShellError
 
 from .exceptions import GitHubError
+from .token import GH_TOKEN_ENV, token_env
 
 
 class GhApiGraphqlCmd(ShellCommand[dict]):
@@ -93,6 +94,11 @@ def paginate_graphql(
         ``{"owner": owner, "name": name}``). The ``cursor`` variable is
         injected by this function and overrides any caller value.
 
+    Notes
+    -----
+    Each page is its own ``gh`` process, so a token file the portal
+    refreshes is re-read for every page (:func:`~.token.token_env`).
+
     Yields
     ------
     dict
@@ -111,7 +117,9 @@ def paginate_graphql(
         if cursor is not None:
             request_vars["cursor"] = cursor
         try:
-            data = shell.run(GhApiGraphqlCmd(query, request_vars))
+            data = shell.run(
+                GhApiGraphqlCmd(query, request_vars), env=token_env(GH_TOKEN_ENV)
+            )
         except ShellError as exc:
             detail = exc.stderr.strip() or exc.stdout.strip()
             raise GitHubError(f"gh api graphql failed: {detail}") from exc

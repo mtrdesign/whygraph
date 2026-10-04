@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Mapping, Sequence
 from functools import cached_property
@@ -13,6 +14,7 @@ from .blame import BlameHunk
 from .commands import (
     GitBlameCmd,
     GitCheckMailmapCmd,
+    GitCheckoutResetCmd,
     GitCloneCmd,
     GitCurrentBranchCmd,
     GitDiffCmd,
@@ -21,17 +23,27 @@ from .commands import (
     GitFetchDefaultCmd,
     GitFetchRefsCmd,
     GitHeadShaCmd,
+    GitIsAncestorCmd,
     GitIsShallowCmd,
     GitLogCommitCmd,
     GitLsTreeNamesCmd,
     GitRefExistsCmd,
     GitRemoteUrlCmd,
+    GitResolveCommitCmd,
     GitRevListShasCmd,
+    GitSetRemoteHeadCmd,
+    GitSetRemoteUrlCmd,
     GitSymbolicRefCmd,
 )
 from .commit import Commit
 from .commits import Commits
-from .credentials import TOKEN_ENV_VAR, git_env, parse_github_url, redact_tokens
+from .credentials import (
+    TOKEN_ENV_VAR,
+    TOKEN_FILE_ENV,
+    git_env,
+    parse_github_url,
+    redact_tokens,
+)
 from .exceptions import GitError
 from .file_change import FileChange
 
@@ -549,12 +561,27 @@ class Repository:
             If ``git fetch`` fails — an unknown remote, a missing/GC'd
             source ref, or no network. Callers that treat enrichment as
             best-effort should catch this.
+
+        Notes
+        -----
+        In a portal scan child with a token file
+        (:data:`~.credentials.TOKEN_FILE_ENV`), the file is re-read for
+        this fetch and its token handed to the credential helper through
+        this one process's environment.
         """
         if not refspecs:
             return
         target = remote or self._origin_remote
+        env = None
+        if os.environ.get(TOKEN_FILE_ENV):
+            # Imported here: the github service imports this package.
+            from whygraph.services.github.token import token_env
+
+            env = token_env(TOKEN_ENV_VAR)
         try:
-            self._shell.run(GitFetchRefsCmd(*refspecs, remote=target), cwd=self.root)
+            self._shell.run(
+                GitFetchRefsCmd(*refspecs, remote=target), cwd=self.root, env=env
+            )
         except ShellError as exc:
             raise GitError(
                 f"failed to fetch {len(refspecs)} refspec(s) from {target!r}"
@@ -668,6 +695,122 @@ class Repository:
         except ShellError as exc:
             raise GitError(f"failed to fast-forward {self.root}") from exc
         return before != after
+
+    def set_remote_url(self, url: str) -> None:
+        """Point the origin remote at ``url`` (purely local).
+
+        ``url`` must be a plain ``<GitHub URL>/<owner>/<repo>`` URL on the
+        configured host, as for :meth:`clone`, so no credential and no other
+        host can end up in ``.git/config``.
+
+        Parameters
+        ----------
+        url : str
+            The new URL.
+
+        Raises
+        ------
+        InvalidRepoUrlError
+            If ``url`` is not a plain GitHub URL (nothing is run).
+        GitError
+            If git fails (e.g. no such remote).
+        """
+        parse_github_url(url)
+        try:
+            self._shell.run(GitSetRemoteUrlCmd(self._origin_remote, url), cwd=self.root)
+        except ShellError as exc:
+            raise GitError(f"failed to set the {self._origin_remote} URL") from exc
+
+    def remote_branch_commit(self, branch: str) -> str | None:
+        """The commit ``refs/remotes/<origin>/<branch>`` names, or ``None``.
+
+        Parameters
+        ----------
+        branch : str
+            The branch's short name.
+
+        Returns
+        -------
+        str or None
+            The full SHA, or ``None`` when the remote-tracking branch does
+            not exist (or the name is unusable).
+        """
+        if not branch or branch.startswith("-"):
+            return None
+        try:
+            return self._shell.run(
+                GitResolveCommitCmd(f"refs/remotes/{self._origin_remote}/{branch}"),
+                cwd=self.root,
+                check=False,
+            )
+        except ShellError:
+            return None
+
+    def checkout_reset(self, branch: str, commit: str) -> None:
+        """Create or reset ``branch`` to ``commit`` and check it out, hooks disabled.
+
+        Purely local (run it after :meth:`fetch_default`). Unlike
+        :meth:`fast_forward` it follows a rewritten history; git still
+        refuses to overwrite untracked files in the way.
+
+        Parameters
+        ----------
+        branch : str
+            The local branch name.
+        commit : str
+            The commit to reset it to.
+
+        Raises
+        ------
+        GitError
+            If ``branch`` starts with ``-`` or git fails.
+        """
+        if not branch or branch.startswith("-"):
+            raise GitError(f"refusing the branch name {branch!r}")
+        try:
+            self._shell.run(GitCheckoutResetCmd(branch, commit), cwd=self.root)
+        except ShellError as exc:
+            raise GitError(f"failed to check out {branch} at {commit[:9]}") from exc
+
+    def set_remote_head(self, branch: str) -> None:
+        """Record ``branch`` as the origin remote's default (``refs/remotes/<origin>/HEAD``).
+
+        Parameters
+        ----------
+        branch : str
+            The remote's default branch.
+
+        Raises
+        ------
+        GitError
+            If git fails (e.g. the remote-tracking branch does not exist).
+        """
+        try:
+            self._shell.run(
+                GitSetRemoteHeadCmd(self._origin_remote, branch), cwd=self.root
+            )
+        except ShellError as exc:
+            raise GitError(f"failed to set {self._origin_remote}/HEAD") from exc
+
+    def is_ancestor(self, old: str, new: str) -> bool | None:
+        """Whether ``old`` is in ``new``'s history (purely local).
+
+        Parameters
+        ----------
+        old, new : str
+            Two commits.
+
+        Returns
+        -------
+        bool or None
+            ``None`` when git cannot tell (an unknown commit).
+        """
+        try:
+            return self._shell.run(
+                GitIsAncestorCmd(old, new), cwd=self.root, check=False
+            )
+        except ShellError:
+            return None
 
     def check_mailmap(self, contacts: Sequence[str]) -> tuple[str, ...]:
         """Canonicalize ``Name <email>`` contacts through the repo's mailmap.

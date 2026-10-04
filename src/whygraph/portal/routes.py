@@ -124,7 +124,7 @@ from .github_app_routes import (
 from .github_auth import GitHubUnavailable
 from .models import Organization, Project, ProjectAgent, ScanRun, Secret, User
 from .orgs import add_member
-from .paths import BACKUPS_DIR, check_project_paths
+from .paths import BACKUPS_DIR, TRACKED_STATE_PATHS, check_project_paths
 from .policy import (
     DEFAULTS_ALLOWLIST,
     ImportPreview,
@@ -142,6 +142,7 @@ from .repos import (
 )
 from .estimate import scan_estimate as _scan_estimate
 from .runner import (
+    ProjectAccessLost,
     ProjectBusy,
     RunFinished,
     RunNotFound,
@@ -560,6 +561,11 @@ def _summary(
         "last_scan_status": _last_scan_status(session, project.id),  # type: ignore[arg-type]
         # HEAD vs last_scanned_head (the runner's catch-up check, section 4.6).
         "stale": stale,
+        # A production project GitHub no longer lets the app read (M2d-2 plan
+        # section 0.2 #14), or whose default branch tracks .whygraph/ /
+        # .codegraph/ (reason "tracked_whygraph_state").
+        "access_lost": project.access_lost_at is not None,
+        "access_lost_reason": project.access_lost_reason,
     }
 
 
@@ -1088,9 +1094,6 @@ def _add_local(
 
 IMPORT_SLUG_ATTEMPTS = 3
 """Slugs an import tries when a concurrent one takes its first choice."""
-
-TRACKED_STATE_PATHS: tuple[str, ...] = (".whygraph", ".codegraph")
-"""Paths a repository must not track: WhyGraph's own state (M2d-2 plan section 0.2 #20)."""
 
 
 def _no_access() -> ApiError:
@@ -1777,7 +1780,9 @@ async def post_scan(
     A ``hook`` scan (the credential-less git-hook ``curl``) exists only in
     local mode: elsewhere it is a ``403 {"code": "hook_local_only"}``. A
     project whose source the mode no longer accepts is a ``409
-    source_not_allowed``.
+    source_not_allowed``. On a production GitHub project the run is a sync
+    that fetches first, then scans; one that lost its GitHub access is a
+    ``409 github_access_lost``.
     """
     body = body or ScanBody()
     state = portal_state(request)
@@ -1795,6 +1800,10 @@ async def post_scan(
         raise ApiError(409, str(exc)) from exc
     except SourceNotAllowed as exc:
         raise ApiError(409, str(exc), code="source_not_allowed") from exc
+    except ProjectAccessLost as exc:
+        raise ApiError(
+            409, str(exc), code="github_access_lost", reason=exc.reason
+        ) from exc
     return {"run_id": run_id}
 
 

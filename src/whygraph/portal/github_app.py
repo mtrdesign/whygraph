@@ -514,7 +514,7 @@ class GitHubApp(GitHubHttp):
         }
 
     def installation_token(
-        self, installation_id: int, repo_id: int
+        self, installation_id: int, repo_id: int, *, force: bool = False
     ) -> InstallationToken:
         """Return a read-only token scoped to one repository, minting when needed.
 
@@ -529,6 +529,9 @@ class GitHubApp(GitHubHttp):
             The installation that covers the repository.
         repo_id : int
             The repository's numeric id.
+        force : bool, optional
+            Mint a new token even when a cached one is still usable (the
+            scan runner's token-file refresh); it replaces the cached one.
 
         Returns
         -------
@@ -548,7 +551,8 @@ class GitHubApp(GitHubHttp):
         with self._tokens_lock:
             cached = self._tokens.get(key)
             if (
-                cached is not None
+                not force
+                and cached is not None
                 and cached.expires_at - TOKEN_REFRESH_MARGIN_SEC > self._clock()
             ):
                 return cached

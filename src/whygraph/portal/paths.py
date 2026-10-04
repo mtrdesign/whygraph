@@ -26,6 +26,13 @@ CODEGRAPH_DB = Path(".codegraph") / "codegraph.db"
 BACKUPS_DIR = Path(".whygraph") / "backups"
 """Where migration and agent-file backups are written, relative to the root."""
 
+TRACKED_STATE_PATHS: tuple[str, ...] = (".whygraph", ".codegraph")
+"""Paths a server clone must not track: WhyGraph's own state (M2d-2 plan section 0.2 #20).
+
+Checked at import (``HEAD``) and before every sync's checkout (the fetched
+default branch).
+"""
+
 
 def db_paths(root: Path) -> tuple[Path, Path]:
     """Return the forced ``(whygraph_db, codegraph_db)`` paths of a root (unchecked)."""
@@ -62,6 +69,7 @@ def check_project_paths(root: Path) -> tuple[Path, Path]:
 __all__ = [
     "BACKUPS_DIR",
     "CODEGRAPH_DB",
+    "TRACKED_STATE_PATHS",
     "UnsafePathError",
     "WHYGRAPH_DB",
     "check_project_paths",

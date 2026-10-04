@@ -45,7 +45,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, select
 from starlette.middleware.cors import CORSMiddleware
 
-from github_fake import FakeGitHub
+from github_fake import _git as fixture_git
 from test_portal_app import (  # noqa: F401 -- fixtures
     NON_ORG_ROUTES,
     PRODUCTION_ORG_ROUTES,
@@ -53,14 +53,19 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     ROUTE_ACTIONS,
     at,
     claim_instance,
+    GitServer,
     env,
-    github_fake,
     github_sign_in,
     log_in,
     manual_ctx,
     portal_client,
     prod_portal,
     production_env,
+)
+from test_portal_github_import import (  # noqa: F401 -- fixtures
+    app_env,
+    github_app_key,
+    github_git_server,
 )
 from test_portal_identity_routes import (  # noqa: F401 -- `audit_log` is a fixture
     audit_log,
@@ -104,11 +109,8 @@ from whygraph.portal.secrets import GITHUB_TOKEN, put_secret
 
 NOT_FOUND = {"error": "not found"}
 LOGIN_REQUIRED = {"error": "sign-in required", "code": "login_required"}
-APP_NOT_CONFIGURED = {
-    "error": "this portal has no GitHub App configured: set the "
-    "WHYGRAPH_GITHUB_APP_* variables",
-    "code": "github_app_not_configured",
-}
+GITHUB_IDS = {"quokka": (71, 7101), "narwhal": (72, 7201)}
+"""Each org's GitHub App installation and the repository id of its ``api``."""
 SOURCE_NOT_ALLOWED = {
     "error": "production organizations add projects from GitHub only",
     "code": "source_not_allowed",
@@ -260,13 +262,24 @@ class ProdWorld:
         self.client.cookies.clear()
 
 
-def _insert_project(org_id: int, slug: str, name: str, root, created_by: int) -> int:
+def _insert_project(
+    org_id: int,
+    slug: str,
+    name: str,
+    root,
+    created_by: int,
+    *,
+    github: tuple[int, int] | None = None,
+    remote_url: str | None = None,
+    default_branch: str | None = None,
+) -> int:
     """Insert an initialized project row directly and return its id.
 
-    Production makes projects only by a GitHub App import, which this world
-    has no app for, so the row and the project database are made the way
-    the import would have. A ``github`` row, since production holds no
-    other source (its root stays absolute: no clone is made).
+    Production makes projects only by a GitHub App import; the row and the
+    project database are made the way the import would have. With its
+    GitHub identity (``github`` is the installation and repository id) a
+    scan syncs against the fake's git server; without it the row serves
+    every route but a scan. Its root stays absolute (no clone is made).
     """
     with use_project(manual_ctx(root, slug=slug)):
         ensure_initialized()
@@ -277,6 +290,10 @@ def _insert_project(org_id: int, slug: str, name: str, root, created_by: int) ->
             name=name,
             source="github",
             root=str(root),
+            github_installation_id=github[0] if github else None,
+            github_repo_id=github[1] if github else None,
+            remote_url=remote_url,
+            default_branch=default_branch,
             initialized_at="2026-10-03T00:00:00+00:00",
             created_by=created_by,
         )
@@ -285,14 +302,46 @@ def _insert_project(org_id: int, slug: str, name: str, root, created_by: int) ->
         return project.id
 
 
-def _add_prod_project(world: ProdWorld, org: OrgWorld, defaults: dict) -> None:
+def _publish(server: GitServer, org: OrgWorld) -> tuple[str, str]:
+    """Serve ``org``'s marked repo as ``<org>/api`` under its own installation.
+
+    Returns the clone URL and the default branch. The scan's sync fetches
+    from here and checks the same commits out again.
+    """
+    installation, repo_id = GITHUB_IDS[org.slug]
+    full_name = f"{org.slug}/api"
+    branch = _git(org.root, "symbolic-ref", "--short", "HEAD").strip()
+    path = server.repos_dir / f"{full_name}.git"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fixture_git("clone", "-q", "--bare", str(org.root), str(path))
+    fixture_git("--git-dir", str(path), "update-server-info")
+    server.fake.add_installation(installation, org.slug, account_type="Organization")
+    server.fake.add_repo(
+        repo_id, full_name, installation, default_branch=branch, path=path
+    )
+    url = server.clone_url(full_name)
+    _git(org.root, "remote", "add", "origin", url)  # as the import's clone has
+    return url, branch
+
+
+def _add_prod_project(
+    world: ProdWorld, server: GitServer, org: OrgWorld, defaults: dict
+) -> None:
     """Give ``org`` its marked ``api``: repo, graph, history, config and a scan."""
     client = world.client
     org.root = _marked_repo(world.env, org.mark)
     _seed_codegraph(org.root, org.mark)
+    url, branch = _publish(server, org)
     owner = world.owner_of(org)
     org.project_id = _insert_project(
-        org.org_id, "api", org.name, org.root, world.ids[owner]
+        org.org_id,
+        "api",
+        org.name,
+        org.root,
+        world.ids[owner],
+        github=GITHUB_IDS[org.slug],
+        remote_url=url,
+        default_branch=branch,
     )
     world.sign_in(owner)
     prefix = at(org.slug)
@@ -333,7 +382,7 @@ def _wait_idle(world: ProdWorld, org: OrgWorld) -> list[dict]:
 @pytest.fixture
 def prod_world(
     production_env: SimpleNamespace,
-    github_fake: FakeGitHub,
+    app_env: GitServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[ProdWorld]:
     """Plan section 5.1's ``prod_world``: Ada, Ann, Bob and two ``api``s.
@@ -342,9 +391,12 @@ def prod_world(
     sign-in through the fake GitHub, create org, add member), so the
     sessions the sweeps use are the ones a browser would hold. Ada is the
     password admin; Ann and Bob are GitHub accounts. Bob's extra ``quokka``
-    membership is made by Ann through ``POST /api/org/members``.
+    membership is made by Ann through ``POST /api/org/members``. The portal
+    has the GitHub App (``app_env``), and each ``api`` is served by the
+    fake's git server, so its scans sync the way an imported project's do.
     """
     env = production_env
+    github_fake = app_env.fake
     scanner = _fake_scanner(env, monkeypatch)
     _offline_llms(monkeypatch)
     for login in GITHUB_LOGINS:
@@ -390,6 +442,7 @@ def prod_world(
         }
         _add_prod_project(
             world,
+            app_env,
             narwhal,
             {
                 "config": {"llm": {"model": narwhal.model}},
@@ -405,6 +458,7 @@ def prod_world(
         }
         _add_prod_project(
             world,
+            app_env,
             quokka,
             {
                 "config": {"llm": {"model": quokka.model}},
@@ -626,7 +680,7 @@ def test_a_member_is_refused_before_the_production_refusals(
 
 
 def test_the_source_policy_in_production(prod_world: ProdWorld) -> None:
-    """GitHub only (API included); without a GitHub App the import is a ``503``."""
+    """GitHub only (API included); an import first needs the user's GitHub authorization."""
     w = prod_world
     w.sign_in("ann")
     prefix = at("quokka")
@@ -638,7 +692,10 @@ def test_the_source_policy_in_production(prod_world: ProdWorld) -> None:
         prefix + "/api/projects",
         json={"source": "github", "installation_id": 7, "repo_id": 501},
     )
-    assert (github.status_code, github.json()) == (503, APP_NOT_CONFIGURED)
+    assert (github.status_code, github.json()["code"]) == (
+        401,
+        "github_authorization_required",
+    ), github.text
     for body in (
         {"source": "github", "installation_id": 7, "repo_id": 501, "path": "/x"},
         {"source": "github", "url": "https://github.com/acme/api"},
@@ -934,7 +991,7 @@ def test_an_orgs_member_list_is_invisible_on_another_orgs_host(
 
 
 def test_another_orgs_member_cannot_be_changed_through_this_orgs_host(
-    prod_world: ProdWorld, github_fake: FakeGitHub
+    prod_world: ProdWorld,
 ) -> None:
     """A ``uid`` from narwhal is ``not_member`` on quokka's host, whatever its role."""
     w = prod_world

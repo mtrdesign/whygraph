@@ -14,11 +14,34 @@ process:
   first explicit ``requested_by``. A project with no completed (``ok``)
   scan records every request as ``initial`` (structure-only, section 4.14).
 * **Global cap** of :data:`MAX_CONCURRENT` running jobs across projects.
-* **Jobs.** ``kind=scan`` spawns the child scanner. ``kind=sync`` (server
-  clones of GitHub projects) runs ``fetch_default`` + ``fast_forward``
-  inside the project's slot, then the scan in the same slot when HEAD
-  moved (or when a merged request asked for a scan anyway) - so a
-  fast-forward never moves the tree under a running crawl.
+* **Jobs.** ``kind=scan`` spawns the child scanner. ``kind=sync`` (the
+  server clone of a production GitHub project) syncs the clone inside the
+  project's slot, then runs the scan in the same slot when HEAD differs
+  from ``last_scanned_head`` (or when a merged request asked for a scan
+  anyway) - so a checkout never moves the tree under a running crawl.
+* **Production GitHub projects** (M2d-2 plan sections 0.2 #5, #6, #14,
+  #23, 4.6). Every request to scan one is a ``sync`` with
+  ``scan_requested`` (manual, describe and initial scans included: the
+  clone is stale by definition). The sync mints a repo-scoped
+  installation token in this process, re-derives ``origin`` from the
+  repository id (a rename is followed), refreshes ``default_branch`` /
+  ``remote_url``, fetches, refuses a default branch that tracks
+  ``.whygraph/`` / ``.codegraph/``, then ``checkout -B <default>`` (a
+  force-push is followed and noted as ``history_rewritten``) and
+  ``remote set-head``. The child gets the token through
+  ``<data>/runs/<id>.token`` (0600, written atomically) named by
+  ``WHYGRAPH_GITHUB_TOKEN_FILE`` - never ``GH_TOKEN`` /
+  ``WHYGRAPH_GIT_TOKEN`` - which a refresher thread rewrites
+  :attr:`ScanRunner.token_refresh_margin` seconds before the token
+  expires; the file is deleted when the child exits, and leftovers are
+  swept at start. Losing access (a refused mint or repository lookup, a
+  git ``401`` / "not found") sets ``projects.access_lost_at`` /
+  ``access_lost_reason`` (audited ``project_access_lost``) and every
+  request is refused with :class:`ProjectAccessLost` until a successful
+  mint clears it (``project_access_restored``). A default branch that
+  tracks WhyGraph's state fails the run and marks the project with reason
+  ``tracked_whygraph_state``; that mark does not refuse requests (the
+  next sync re-checks, and clears it once the repository is fixed).
 * **Child I/O.** stdout JSON lines go to ``<data>/runs/<id>.jsonl``, stderr
   to ``<data>/runs/<id>.log``; both pipes are drained by their own thread
   so a flood never deadlocks the child. Every injected secret value is
@@ -33,8 +56,8 @@ process:
   access token) when the forge is on, the one ``<PROVIDER>_API_KEY`` the
   analyze model needs (analyzing runs only) and ``GIT_TERMINAL_PROMPT=0``;
   a GitHub project's child gets no personal access token, git with no
-  global or system config, and the configured GitHub URL. Never a
-  portal-env API key or token.
+  global or system config, the configured GitHub URL and (production)
+  the token file. Never a portal-env API key or token.
 * **Path check.** Before a sync and before spawning the child scan, the
   project's DB paths go through
   :func:`~whygraph.portal.paths.check_project_paths`; a symlinked
@@ -77,6 +100,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -97,18 +121,23 @@ from sqlmodel import col, select
 
 from whygraph.core.config import Config, ConfigError
 from whygraph.core.safe_paths import UnsafePathError
-from whygraph.services.git import GitError, Repository
+from whygraph.services.git import GitError, InvalidRepoUrlError, Repository
 from whygraph.services.git.credentials import (
     GITHUB_URL_ENV,
+    TOKEN_FILE_ENV,
     git_env,
+    github_git_host,
     pass_through_env,
     redact_tokens,
 )
 
+from .audit import audit
 from .context import resolve_root, resolved_layer
 from .db import data_dir, get_session
+from .github_app import GitHubAccessLost, InstallationToken
+from .github_auth import GitHubUnavailable
 from .models import Project, ScanRun
-from .paths import check_project_paths
+from .paths import TRACKED_STATE_PATHS, check_project_paths
 from .policy import allowed_sources
 from .repos import root_status
 from .secrets import hint_for
@@ -176,6 +205,32 @@ CANCEL_GRACE_SEC = 10.0
 CANCELLED_BY_USER: dict[str, str] = {"cancelled_by": "user"}
 """The ``summary`` of a run the user cancelled (vs. a merged or orphaned one)."""
 
+TOKEN_REFRESH_MARGIN_SEC = 10 * 60
+"""Seconds before an installation token expires that a child's token file is rewritten."""
+
+TOKEN_RETRY_SEC = 30.0
+"""Seconds between token-refresh attempts while GitHub is unavailable."""
+
+REASON_NO_ACCESS = "no_access"
+"""``access_lost_reason``: GitHub refused a token or the repository lookup
+(the app was uninstalled or suspended, or no longer covers the repository)."""
+
+REASON_GIT_DENIED = "git_access_denied"
+"""``access_lost_reason``: git answered ``401`` / "not found" to a fresh token."""
+
+REASON_TRACKED_STATE = "tracked_whygraph_state"
+"""``access_lost_reason``: the default branch tracks ``.whygraph/`` / ``.codegraph/``.
+
+Shown like an access loss, but it never refuses a request: the next sync
+re-checks and clears it once the repository is fixed.
+"""
+
+_GIT_ACCESS_DENIED = re.compile(
+    r"Authentication failed|[Rr]epository not found|repository '[^']*' not found"
+    r"|returned error: 40[134]"
+)
+"""git's words for a token that cannot read the repository."""
+
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 _READ_CHUNK = 256 * 1024
 
@@ -206,6 +261,20 @@ class RunFinished(RuntimeError):
 
 class SourceNotAllowed(RuntimeError):
     """The project's source is not accepted in this mode - HTTP 409 ``source_not_allowed``."""
+
+
+class ProjectAccessLost(RuntimeError):
+    """The project lost its GitHub access - HTTP 409 ``github_access_lost``.
+
+    Attributes
+    ----------
+    reason : str or None
+        ``projects.access_lost_reason``.
+    """
+
+    def __init__(self, reason: str | None) -> None:
+        super().__init__(_access_lost_message(reason))
+        self.reason = reason
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +369,7 @@ def child_env(
     source: str,
     analyze: bool,
     environ: Mapping[str, str] | None = None,
+    token_file: Path | None = None,
 ) -> tuple[dict[str, str], list[str]]:
     """Build the child scanner's environment and the secrets it carries.
 
@@ -318,6 +388,10 @@ def child_env(
         Whether the run describes commits (only then is an LLM key passed).
     environ : Mapping[str, str], optional
         The portal environment to filter (default :data:`os.environ`).
+    token_file : Path, optional
+        A production GitHub project's token file, passed as
+        ``WHYGRAPH_GITHUB_TOKEN_FILE`` (the token itself never enters the
+        environment; the runner writes and refreshes the file).
 
     Returns
     -------
@@ -342,6 +416,8 @@ def child_env(
         env["GIT_CONFIG_NOSYSTEM"] = "1"
         if source_env.get(GITHUB_URL_ENV):
             env[GITHUB_URL_ENV] = source_env[GITHUB_URL_ENV]
+        if token_file is not None:
+            env[TOKEN_FILE_ENV] = str(token_file)
     if analyze:
         try:
             provider: str | None = config.model_for("analyze").provider
@@ -362,23 +438,96 @@ def child_env(
     return env, secrets
 
 
-def redactor(secrets: list[str]) -> Callable[[str], str]:
-    """Return a function replacing each secret value by its hint (``...a1b2``).
+class Redactor:
+    """Replaces each known secret value by its hint (``...a1b2``); learns new ones.
 
     Anything still shaped like a GitHub token - one the runner never
     injected, or a partly masked one (``gh auth status`` prints most of a
     token) - is then replaced by its prefix and ``***``
     (:func:`~whygraph.services.git.credentials.redact_tokens`).
-    """
-    pairs = [(s, hint_for(s)) for s in sorted(set(secrets), key=len, reverse=True) if s]
 
-    def redact(text: str) -> str:
-        for value, hint in pairs:
+    Parameters
+    ----------
+    secrets : iterable of str
+        The values known from the start.
+    """
+
+    def __init__(self, secrets: list[str] | tuple[str, ...] = ()) -> None:
+        self._pairs: tuple[tuple[str, str], ...] = ()
+        self.learn(*secrets)
+
+    def learn(self, *values: str) -> None:
+        """Add values to redact from now on (e.g. a refreshed installation token).
+
+        Safe to call from another thread while lines are being redacted:
+        the pairs are replaced in one assignment.
+        """
+        known = {value for value, _ in self._pairs} | {v for v in values if v}
+        self._pairs = tuple(
+            (s, hint_for(s)) for s in sorted(known, key=len, reverse=True)
+        )
+
+    def __call__(self, text: str) -> str:
+        for value, hint in self._pairs:
             if value in text:
                 text = text.replace(value, hint)
         return redact_tokens(text)
 
-    return redact
+
+def redactor(secrets: list[str]) -> Redactor:
+    """Return a :class:`Redactor` for ``secrets`` (see there)."""
+    return Redactor(secrets)
+
+
+def write_token_file(path: Path, token: str) -> None:
+    """Write a token file atomically, mode ``0600``.
+
+    The token goes to a temporary file in the same directory, created with
+    ``O_EXCL`` (and ``O_NOFOLLOW``) at mode ``0600``, which then replaces
+    ``path`` with :func:`os.replace` - so a reader sees the old token or the
+    new one, never a torn file.
+
+    Parameters
+    ----------
+    path : Path
+        The token file (``<data>/runs/<id>.token``).
+    token : str
+        The token.
+    """
+    tmp = path.with_name(f"{path.name}.{os.urandom(6).hex()}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp, flags, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(token)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def sweep_token_files(base: Path) -> int:
+    """Delete token files a previous process left in ``<base>/runs``.
+
+    Parameters
+    ----------
+    base : Path
+        The data directory.
+
+    Returns
+    -------
+    int
+        How many files were removed.
+    """
+    runs = base / "runs"
+    removed = 0
+    for path in {*runs.glob("*.token"), *runs.glob("*.token.*.tmp")}:
+        try:
+            path.unlink()
+            removed += 1
+        except FileNotFoundError:
+            pass
+    return removed
 
 
 def git_head(root: Path) -> str | None:
@@ -514,6 +663,101 @@ class _Job:
         self.signal(signal.SIGTERM)
 
 
+@dataclass(frozen=True)
+class _GitHubProject:
+    """What a job needs to know about a production GitHub project (read at job start)."""
+
+    repo_id: int
+    installation_id: int
+    default_branch: str | None
+    last_scanned_head: str | None
+
+
+class _SyncFailed(Exception):
+    """A production sync failed; the message is shown (redacted) in the run."""
+
+
+class _TokenRefresher:
+    """Rewrites a running child's token file before its token expires.
+
+    A daemon thread: it sleeps until ``margin`` seconds before the current
+    token's expiry, mints a new one through ``mint``, teaches it to the
+    redactor, then replaces the file (:func:`write_token_file`). A refused
+    mint (``GitHubAccessLost`` - ``mint`` has marked the project) stops it,
+    and the child fails on its next call; GitHub being unavailable is
+    retried every ``retry`` seconds. After :meth:`stop` returns, the file is
+    never written again, so the caller may delete it.
+
+    Parameters
+    ----------
+    mint : callable
+        Returns a fresh :class:`~whygraph.portal.github_app.InstallationToken`.
+    path : Path
+        The token file.
+    expires_at : float
+        Epoch seconds when the token in the file expires.
+    margin, retry : float
+        Seconds before expiry to refresh; seconds between failed attempts.
+    redact : Redactor
+        Learns every new token before it is written.
+    """
+
+    def __init__(
+        self,
+        *,
+        mint: Callable[[], InstallationToken],
+        path: Path,
+        expires_at: float,
+        margin: float,
+        retry: float,
+        redact: Redactor,
+    ) -> None:
+        self._mint = mint
+        self._path = path
+        self._expires_at = expires_at
+        self._margin = margin
+        self._retry = retry
+        self._redact = redact
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(
+            target=self._run, name=f"token-refresh-{path.stem}", daemon=True
+        )
+
+    def start(self) -> None:
+        """Start the thread."""
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Stop refreshing; no write happens after this returns."""
+        with self._lock:
+            self._stop.set()
+
+    def _run(self) -> None:
+        expires = self._expires_at
+        while not self._stop.wait(max(0.0, expires - self._margin - time.time())):
+            try:
+                token = self._mint()
+            except GitHubAccessLost:
+                _log.warning(
+                    "scan runner: GitHub access lost; %s not refreshed", self._path.name
+                )
+                return
+            except Exception:  # noqa: BLE001 -- e.g. GitHub unavailable: retry
+                _log.warning(
+                    "scan runner: could not refresh %s; retrying", self._path.name
+                )
+                if self._stop.wait(self._retry):
+                    return
+                continue
+            self._redact.learn(token.token)
+            with self._lock:
+                if self._stop.is_set():
+                    return
+                write_token_file(self._path, token.token)
+            expires = token.expires_at
+
+
 # ---------------------------------------------------------------------------
 # The runner
 # ---------------------------------------------------------------------------
@@ -533,6 +777,15 @@ class ScanRunner:
     sleep : callable, optional
         ``async (seconds) -> None`` the poller waits with; tests inject a
         fake clock. Defaults to :func:`anyio.sleep`.
+
+    Attributes
+    ----------
+    token_refresh_margin : float
+        Seconds before an installation token expires that a running
+        child's token file is rewritten (:data:`TOKEN_REFRESH_MARGIN_SEC`;
+        tests shorten it).
+    token_retry : float
+        Seconds between refresh attempts while GitHub is unavailable.
     """
 
     def __init__(
@@ -547,6 +800,8 @@ class ScanRunner:
         self.poll_interval = poll_interval
         self.heartbeat = heartbeat
         self.tail_interval = TAIL_INTERVAL_SEC
+        self.token_refresh_margin: float = TOKEN_REFRESH_MARGIN_SEC
+        self.token_retry: float = TOKEN_RETRY_SEC
         self._sleep = sleep or anyio.sleep
         self._state: PortalState | None = None
         self._tg: Any = None
@@ -564,7 +819,7 @@ class ScanRunner:
     # ---- lifecycle ------------------------------------------------------
 
     async def start(self, state: PortalState) -> None:
-        """Start the queue: requeue leftover ``queued`` rows, catch up, start the poller.
+        """Start the queue: sweep token files, requeue ``queued`` rows, catch up, poll.
 
         Called by the lifespan after the portal DB is migrated and stale
         ``running`` rows were marked ``interrupted``.
@@ -582,6 +837,8 @@ class ScanRunner:
         await tg.__aenter__()
         self._tg = tg
         try:
+            # A previous process's children are gone: so is any use of their tokens.
+            await anyio.to_thread.run_sync(sweep_token_files, data_dir())
             await self._requeue()
             await self.catch_up()
         except Exception:  # noqa: BLE001 -- never fail the portal start
@@ -733,6 +990,16 @@ class ScanRunner:
         -------
         int
             The pending run's id (the same for every coalesced request).
+
+        Raises
+        ------
+        RunnerUnavailable, ProjectBusy, SourceNotAllowed, ProjectAccessLost
+            As for :meth:`request_sync`.
+
+        Notes
+        -----
+        For a production GitHub project the request becomes a ``sync`` that
+        scans afterwards (the clone is fetched first).
         """
         requested = trigger or "manual"
         user = (
@@ -748,16 +1015,59 @@ class ScanRunner:
         )
 
     async def request_sync(
-        self, project: BoundProject, *, principal: Principal | None
+        self,
+        project_id: int,
+        *,
+        trigger: str = "sync",
+        scan_requested: bool = False,
+        principal: Principal | None = None,
     ) -> int:
-        """Queue a GitHub ``sync`` job (``trigger=sync``) and return its id."""
+        """Queue (or coalesce into) a sync of a production GitHub project.
+
+        The sync fetches and checks out the default branch, then scans when
+        HEAD differs from ``last_scanned_head`` (or when ``scan_requested``,
+        or a merged request asked for a scan). Internal callers (webhook,
+        reconcile) pass a project id read from the DB.
+
+        Parameters
+        ----------
+        project_id : int
+            ``projects.id``.
+        trigger : str
+            ``sync`` (default), ``push`` or ``reconcile`` - a member of
+            :data:`TRIGGER_PRECEDENCE`.
+        scan_requested : bool
+            Scan even when HEAD did not move.
+        principal : Principal or None
+            Recorded as ``requested_by``.
+
+        Returns
+        -------
+        int
+            The pending run's id (the same for every coalesced request).
+
+        Raises
+        ------
+        RunnerUnavailable
+            The runner is not running.
+        ProjectBusy
+            The project is being removed.
+        SourceNotAllowed
+            The project is not a GitHub project of a production portal (or
+            its source is not accepted in this mode).
+        ProjectAccessLost
+            The project lost its GitHub access (``access_lost_at`` set,
+            other than for :data:`REASON_TRACKED_STATE`).
+        """
+        if trigger not in TRIGGER_PRECEDENCE:
+            raise ValueError(f"unknown trigger {trigger!r}")
         return await self._request(
-            project.id,
+            project_id,
             kind="sync",
-            trigger="sync",
+            trigger=trigger,
             analyze=False,
             requested_by=principal.user_id if principal else None,
-            scan_requested=False,
+            scan_requested=scan_requested,
         )
 
     async def _request(
@@ -773,9 +1083,19 @@ class ScanRunner:
         if self._tg is None or self._lock is None or self._stopping:
             raise RunnerUnavailable("the scan runner is not running")
         with self._claim_request(project_id):
-            source = await anyio.to_thread.run_sync(_project_source, project_id)
-            if source is not None and source not in allowed_sources(self._mode()):
-                raise SourceNotAllowed(_unsupported_source(source))
+            gate = await anyio.to_thread.run_sync(_project_gate, project_id)
+            if gate is not None:
+                source, lost, reason = gate
+                if source not in allowed_sources(self._mode()):
+                    raise SourceNotAllowed(_unsupported_source(source))
+                if lost and reason != REASON_TRACKED_STATE:
+                    raise ProjectAccessLost(reason)
+                github = self._mode() == "production" and source == "github"
+                if kind == "sync" and not github:
+                    raise SourceNotAllowed("only a production GitHub project syncs")
+                if github and kind == "scan":
+                    # Scan now fetches first (M2d-2 plan section 0.2 #23).
+                    kind, scan_requested = "sync", True
             return await self._request_claimed(
                 project_id,
                 kind=kind,
@@ -998,6 +1318,7 @@ class ScanRunner:
         state = self._state
         assert state is not None
         spec = job.spec
+        github: _GitHubProject | None = None
         with get_session() as session:
             project = session.get(Project, spec.project_id)
             run = session.get(ScanRun, spec.run_id)
@@ -1009,6 +1330,35 @@ class ScanRunner:
                     "failed",
                     {"error": _unsupported_source(project.source)},
                     redactor([]),
+                )
+            if state.mode == "production" and project.source == "github":
+                reason = project.access_lost_reason
+                if (
+                    project.access_lost_at is not None
+                    and reason != REASON_TRACKED_STATE
+                ):
+                    # Queued before the access was lost (or requeued at start).
+                    return (
+                        "failed",
+                        {"error": _access_lost_message(reason)},
+                        redactor([]),
+                    )
+                if (
+                    project.github_repo_id is None
+                    or project.github_installation_id is None
+                ):
+                    return (
+                        "failed",
+                        {
+                            "error": "this project was not imported through the GitHub App"
+                        },
+                        redactor([]),
+                    )
+                github = _GitHubProject(
+                    repo_id=project.github_repo_id,
+                    installation_id=project.github_installation_id,
+                    default_branch=project.default_branch,
+                    last_scanned_head=project.last_scanned_head,
                 )
             layer = resolved_layer(session, project)
             root = resolve_root(project)
@@ -1022,9 +1372,12 @@ class ScanRunner:
             events_rel, log_rel = run.events_path, run.log_path
         ctx = state.contexts.get(spec.project_id)
         config = ctx.config
-        env, secrets = child_env(config, layer, source=source, analyze=spec.analyze)
-        redact = redactor(secrets)
         base = data_dir()
+        token_path = base / "runs" / f"{spec.run_id}.token" if github else None
+        env, secrets = child_env(
+            config, layer, source=source, analyze=spec.analyze, token_file=token_path
+        )
+        redact = redactor(secrets)
         events_path, log_path = base / str(events_rel), base / str(log_rel)
         events_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -1062,83 +1415,125 @@ class ScanRunner:
                 return "failed", {"error": message}, redact
 
             summary: dict[str, Any] = {}
+            token: InstallationToken | None = None
             if spec.kind == "sync":
+                if github is None:
+                    message = "only a production GitHub project syncs"
+                    log(message)
+                    event({"type": "error", "message": message})
+                    return "failed", {"error": message}, redact
                 event({"type": "sync", "status": "fetching"})
-                repo = Repository(root, origin_remote=config.scan_remote)
                 try:
-                    repo.fetch_default(env=git_env(config.scan_token))
-                    if job.cancelled:
-                        # Not after the fetch either: a moved HEAD with no scan
-                        # would never be caught up (catch-up is local-only).
-                        return "cancelled", summary, redact
-                    moved = repo.fast_forward()
-                except GitError as exc:
-                    message = _error_chain(exc)
+                    synced = self._github_sync(job, github, root, redact)
+                except _SyncFailed as exc:
+                    message = redact(str(exc))
                     log(f"sync failed: {message}")
                     event({"type": "sync", "status": "failed", "error": message})
-                    return "failed", {"error": redact(message)}, redact
-                event({"type": "sync", "status": "ok", "moved": moved})
-                summary["moved"] = moved
-                if not moved and not spec.scan_requested:
+                    return "failed", {"error": message}, redact
+                if synced is None:
+                    # Cancelled after the fetch: the tree did not move.
+                    return "cancelled", summary, redact
+                token, synced_summary = synced
+                summary.update(synced_summary)
+                event({"type": "sync", "status": "ok", **synced_summary})
+                if (
+                    not spec.scan_requested
+                    and git_head(root) == github.last_scanned_head
+                ):
                     return "ok", summary, redact
             if job.interrupted:
                 return "interrupted", summary, redact
             if spec.kind == "sync" and (message := refused()) is not None:
-                # The fast-forward may have brought the symlink in.
+                # The checkout may have brought the symlink in.
                 summary["error"] = message
                 return "failed", summary, redact
 
             job.head = git_head(root)
             argv = scan_argv(spec.trigger, spec.analyze)
             log(f"$ {shlex.join(argv)}")
-            proc = subprocess.Popen(
-                argv,
-                cwd=root,
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=True,
-            )
-            with job.lock:
-                job.proc = proc
-                interrupted = job.interrupted
-            if interrupted:
-                job.signal(signal.SIGTERM)
-            job.scanned = True
-
-            def drain_stdout(stream: IO[bytes]) -> None:
-                for raw in iter(stream.readline, b""):
-                    text = redact(raw.decode("utf-8", "replace").rstrip("\r\n"))
+            refresher: _TokenRefresher | None = None
+            try:
+                if github is not None:
+                    assert token_path is not None
                     try:
-                        obj = json.loads(text)
-                    except ValueError:
-                        obj = None
-                    if isinstance(obj, dict):
-                        with job.write_lock:
-                            events_fh.write(_event_line(text, obj))
-                            events_fh.flush()
-                        if obj.get("type") == "result":
-                            job.result = obj
-                    elif text:
-                        log(f"[stdout] {text}")
+                        if token is None:
+                            token = self._mint(spec.project_id, github)
+                    except (GitHubAccessLost, GitHubUnavailable) as exc:
+                        message = f"could not get a GitHub token: {exc}"
+                        log(message)
+                        event({"type": "error", "message": message})
+                        return "failed", {**summary, "error": message}, redact
+                    redact.learn(token.token)
+                    write_token_file(token_path, token.token)
+                proc = subprocess.Popen(
+                    argv,
+                    cwd=root,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
+                )
+                with job.lock:
+                    job.proc = proc
+                    interrupted = job.interrupted
+                if interrupted:
+                    job.signal(signal.SIGTERM)
+                job.scanned = True
+                if github is not None and token is not None:
+                    assert token_path is not None
+                    gh = github
+                    refresher = _TokenRefresher(
+                        mint=lambda: self._mint(spec.project_id, gh, force=True),
+                        path=token_path,
+                        expires_at=token.expires_at,
+                        margin=self.token_refresh_margin,
+                        retry=self.token_retry,
+                        redact=redact,
+                    )
+                    refresher.start()
 
-            def drain_stderr(stream: IO[bytes]) -> None:
-                for raw in iter(stream.readline, b""):
-                    log(raw.decode("utf-8", "replace").rstrip("\r\n"))
+                def drain_stdout(stream: IO[bytes]) -> None:
+                    for raw in iter(stream.readline, b""):
+                        text = redact(raw.decode("utf-8", "replace").rstrip("\r\n"))
+                        try:
+                            obj = json.loads(text)
+                        except ValueError:
+                            obj = None
+                        if isinstance(obj, dict):
+                            with job.write_lock:
+                                events_fh.write(_event_line(text, obj))
+                                events_fh.flush()
+                            if obj.get("type") == "result":
+                                job.result = obj
+                        elif text:
+                            log(f"[stdout] {text}")
 
-            assert proc.stdout is not None and proc.stderr is not None
-            readers = [
-                threading.Thread(target=drain_stdout, args=(proc.stdout,), daemon=True),
-                threading.Thread(target=drain_stderr, args=(proc.stderr,), daemon=True),
-            ]
-            for reader in readers:
-                reader.start()
-            code = proc.wait()
-            for reader in readers:
-                reader.join()
-            proc.stdout.close()
-            proc.stderr.close()
+                def drain_stderr(stream: IO[bytes]) -> None:
+                    for raw in iter(stream.readline, b""):
+                        log(raw.decode("utf-8", "replace").rstrip("\r\n"))
+
+                assert proc.stdout is not None and proc.stderr is not None
+                readers = [
+                    threading.Thread(
+                        target=drain_stdout, args=(proc.stdout,), daemon=True
+                    ),
+                    threading.Thread(
+                        target=drain_stderr, args=(proc.stderr,), daemon=True
+                    ),
+                ]
+                for reader in readers:
+                    reader.start()
+                code = proc.wait()
+                for reader in readers:
+                    reader.join()
+                proc.stdout.close()
+                proc.stderr.close()
+            finally:
+                if refresher is not None:
+                    refresher.stop()
+                if token_path is not None:
+                    token_path.unlink(missing_ok=True)
             state.migrations.forget(
                 Path(config.whygraph_db or root / ".whygraph/whygraph.db")
             )
@@ -1147,6 +1542,149 @@ class ScanRunner:
                 summary.update({k: v for k, v in job.result.items() if k != "type"})
             summary["exit_code"] = code
             return ("ok" if code == 0 else "failed"), summary, redact
+
+    # ---- production GitHub projects --------------------------------------
+
+    def check_access(self, project_id: int) -> bool:
+        """Mint the project's installation token once, to learn whether access returned.
+
+        Blocking (call it from a worker thread). A successful mint clears
+        an access loss (``project_access_restored``) - except a
+        :data:`REASON_TRACKED_STATE` mark, which only a passing sync
+        clears -; a refused one marks it. Not a run request: it works on an
+        access-lost project, which is how the reconcile retries one.
+
+        Parameters
+        ----------
+        project_id : int
+            ``projects.id`` of a production GitHub project.
+
+        Returns
+        -------
+        bool
+            ``True`` when GitHub minted a token; ``False`` when it refused,
+            or the project is not a GitHub App project.
+
+        Raises
+        ------
+        GitHubUnavailable
+            GitHub could not answer, or the GitHub App is not configured.
+        """
+        github = _github_project(project_id)
+        if github is None:
+            return False
+        try:
+            # Forced: a cached token outlives an uninstall, so it proves nothing.
+            self._mint(project_id, github, force=True)
+        except GitHubAccessLost:
+            return False
+        return True
+
+    def _mint(
+        self, project_id: int, github: _GitHubProject, *, force: bool = False
+    ) -> InstallationToken:
+        """Mint (or reuse) the project's installation token; track access loss.
+
+        A refused mint marks the project access-lost (:data:`REASON_NO_ACCESS`);
+        a successful one clears an access loss, except the
+        :data:`REASON_TRACKED_STATE` mark (only a passing sync clears that).
+
+        Raises
+        ------
+        GitHubAccessLost
+            GitHub refused the token.
+        GitHubUnavailable
+            GitHub could not answer, or the GitHub App is not configured.
+        """
+        app = None if self._state is None else self._state.github_app
+        if app is None:
+            raise GitHubUnavailable("the GitHub App is not configured")
+        try:
+            token = app.installation_token(
+                github.installation_id, github.repo_id, force=force
+            )
+        except GitHubAccessLost:
+            _mark_access_lost(project_id, REASON_NO_ACCESS)
+            raise
+        _clear_access_lost(project_id, keep=REASON_TRACKED_STATE)
+        return token
+
+    def _github_sync(
+        self, job: _Job, github: _GitHubProject, root: Path, redact: Redactor
+    ) -> tuple[InstallationToken, dict[str, Any]] | None:
+        """Sync a production clone (worker thread): see the module docstring.
+
+        Returns
+        -------
+        tuple or None
+            The token it minted and the summary fields (``moved``, plus
+            ``history_rewritten`` / ``default_branch`` when they apply);
+            ``None`` when the job was cancelled after the fetch.
+
+        Raises
+        ------
+        _SyncFailed
+            Any failure; access loss and tracked state also mark the project.
+        """
+        project_id = job.spec.project_id
+        try:
+            # Forced: a cached token may have died with an uninstall, and the
+            # child that follows wants a token with its whole hour ahead.
+            token = self._mint(project_id, github, force=True)
+            redact.learn(token.token)
+            assert self._state is not None and self._state.github_app is not None
+            app = self._state.github_app
+            info = app.installation_repository(token.token, github.repo_id)
+        except GitHubAccessLost as exc:
+            _mark_access_lost(project_id, REASON_NO_ACCESS)
+            raise _SyncFailed(f"GitHub access lost: {exc}") from exc
+        except GitHubUnavailable as exc:
+            raise _SyncFailed(f"GitHub is unavailable: {exc}") from exc
+        if info.id != github.repo_id:
+            raise _SyncFailed("GitHub answered for another repository")
+        branch = info.default_branch
+        repo = Repository(root)
+        try:
+            # origin is re-derived from the repository id on every sync, so a
+            # renamed or transferred repo is followed and a freed name never
+            # fetches someone else's history (M2d-2 plan section 0.2 #1).
+            repo.set_remote_url(f"{github_git_host().url}/{info.full_name}.git")
+            _update_github_repo(
+                project_id,
+                remote_url=f"{app.config.web_url}/{info.full_name}",
+                default_branch=branch,
+            )
+            try:
+                repo.fetch_default(env=git_env(token.token))
+            except GitError as exc:
+                if _GIT_ACCESS_DENIED.search(_error_chain(exc)):
+                    _mark_access_lost(project_id, REASON_GIT_DENIED)
+                raise
+            if job.cancelled:
+                return None
+            target = repo.remote_branch_commit(branch)
+            if target is None:
+                raise _SyncFailed(f"the fetch brought no {branch!r} branch")
+            tracked = repo.tracked_paths(target, *TRACKED_STATE_PATHS)
+            if tracked:
+                _mark_access_lost(project_id, REASON_TRACKED_STATE)
+                raise _SyncFailed(
+                    f"{info.full_name} tracks WhyGraph's own state "
+                    f"({', '.join(tracked[:5])}); remove .whygraph/ and "
+                    ".codegraph/ from the repository"
+                )
+            before = git_head(root)
+            repo.checkout_reset(branch, target)
+            repo.set_remote_head(branch)
+        except (GitError, InvalidRepoUrlError) as exc:
+            raise _SyncFailed(_error_chain(exc)) from exc
+        _clear_access_lost(project_id)
+        summary: dict[str, Any] = {"moved": before != target}
+        if before and before != target and repo.is_ancestor(before, target) is False:
+            summary["history_rewritten"] = True
+        if branch != github.default_branch:
+            summary["default_branch"] = branch
+        return token, summary
 
     async def _requeue(self) -> None:
         """Turn ``queued`` rows left by a previous process back into pending jobs."""
@@ -1279,11 +1817,93 @@ def _error_chain(exc: BaseException) -> str:
     return ": ".join(p for p in parts if p)
 
 
-def _project_source(project_id: int) -> str | None:
-    """``projects.source``, or ``None`` for a missing project."""
+def _project_gate(project_id: int) -> tuple[str, bool, str | None] | None:
+    """``(source, access lost?, access_lost_reason)``, or ``None`` for a missing project."""
     with get_session() as session:
         project = session.get(Project, project_id)
-        return None if project is None else project.source
+        if project is None:
+            return None
+        return (
+            project.source,
+            project.access_lost_at is not None,
+            project.access_lost_reason,
+        )
+
+
+def _github_project(project_id: int) -> _GitHubProject | None:
+    """A GitHub App project's identity, or ``None`` (missing, or not imported through the app)."""
+    with get_session() as session:
+        project = session.get(Project, project_id)
+        if (
+            project is None
+            or project.source != "github"
+            or project.github_repo_id is None
+            or project.github_installation_id is None
+        ):
+            return None
+        return _GitHubProject(
+            repo_id=project.github_repo_id,
+            installation_id=project.github_installation_id,
+            default_branch=project.default_branch,
+            last_scanned_head=project.last_scanned_head,
+        )
+
+
+def _access_lost_message(reason: str | None) -> str:
+    """The refusal message for an access-lost project."""
+    if reason == REASON_GIT_DENIED:
+        return "GitHub refused git access to this repository - reconnect it on GitHub"
+    return (
+        "the WhyGraph GitHub App cannot reach this repository any more - "
+        "reconnect it on GitHub"
+    )
+
+
+def _mark_access_lost(project_id: int, reason: str) -> None:
+    """Set ``access_lost_at`` (first time only) and ``access_lost_reason``; audit a change."""
+    with get_session() as session:
+        project = session.get(Project, project_id)
+        if project is None:
+            return
+        if project.access_lost_at is not None and project.access_lost_reason == reason:
+            return
+        project.access_lost_at = project.access_lost_at or _now()
+        project.access_lost_reason = reason
+        session.add(project)
+        org_id, slug = project.org_id, project.slug
+    audit("project_access_lost", {}, org_id=org_id, project=slug, reason=reason)
+
+
+def _clear_access_lost(project_id: int, *, keep: str | None = None) -> bool:
+    """Clear an access loss (unless its reason is ``keep``); audit it. Whether it cleared."""
+    with get_session() as session:
+        project = session.get(Project, project_id)
+        if project is None or project.access_lost_at is None:
+            return False
+        if keep is not None and project.access_lost_reason == keep:
+            return False
+        reason = project.access_lost_reason
+        project.access_lost_at = None
+        project.access_lost_reason = None
+        session.add(project)
+        org_id, slug = project.org_id, project.slug
+    audit("project_access_restored", {}, org_id=org_id, project=slug, reason=reason)
+    return True
+
+
+def _update_github_repo(
+    project_id: int, *, remote_url: str, default_branch: str
+) -> None:
+    """Record a production project's current display URL and default branch."""
+    with get_session() as session:
+        project = session.get(Project, project_id)
+        if project is None:
+            return
+        if (project.remote_url, project.default_branch) == (remote_url, default_branch):
+            return
+        project.remote_url = remote_url
+        project.default_branch = default_branch
+        session.add(project)
 
 
 def _unsupported_source(source: str) -> str:
@@ -1608,9 +2228,15 @@ __all__ = [
     "MAX_EVENT_LINE",
     "POLL_INTERVAL_SEC",
     "PROVIDER_KEY_ENV",
+    "REASON_GIT_DENIED",
+    "REASON_NO_ACCESS",
+    "REASON_TRACKED_STATE",
     "SCAN_CMD_ENV",
+    "TOKEN_REFRESH_MARGIN_SEC",
     "TRIGGER_PRECEDENCE",
+    "ProjectAccessLost",
     "ProjectBusy",
+    "Redactor",
     "RunNotFound",
     "RunnerUnavailable",
     "ScanRunner",
@@ -1625,4 +2251,6 @@ __all__ = [
     "scan_argv",
     "scan_flags",
     "stale_info",
+    "sweep_token_files",
+    "write_token_file",
 ]

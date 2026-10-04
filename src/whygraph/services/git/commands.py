@@ -17,7 +17,7 @@ from whygraph.core import ShellCommand
 
 from .blame import BlameHunk
 from .commit import Commit
-from .credentials import TOKEN_ENV_VAR, github_git_config
+from .credentials import TOKEN_ENV_VAR, TOKEN_FILE_ENV, github_git_config
 from .file_change import FileChange
 
 GitRevParseCmd = ShellCommand(
@@ -373,12 +373,14 @@ class GitFetchRefsCmd(ShellCommand[None]):
     the command is run for its effect (objects + refs land in the local
     object store), not its stdout.
 
-    When :data:`~.credentials.TOKEN_ENV_VAR` is set in this process (a
-    portal scan of a GitHub clone), the argv carries
+    When :data:`~.credentials.TOKEN_ENV_VAR` or
+    :data:`~.credentials.TOKEN_FILE_ENV` is set in this process (a portal
+    scan of a GitHub clone), the argv carries
     :func:`~.credentials.github_git_config` like :class:`GitFetchDefaultCmd`,
     so a private clone's PR refs are fetched with the token (read from the
-    environment by the helper, never argv). Without it, a local repo's
-    remote keeps its own transport and credentials.
+    environment by the helper, never argv; :meth:`Repository.fetch_refs`
+    puts a token file's current value there). Without either, a local
+    repo's remote keeps its own transport and credentials.
 
     Parameters
     ----------
@@ -397,7 +399,8 @@ class GitFetchRefsCmd(ShellCommand[None]):
     def argv(self) -> list[str]:
         # `--` ends options: a remote read from config is never a flag
         # (`--upload-pack=<cmd>` would run a command).
-        config = github_git_config() if os.environ.get(TOKEN_ENV_VAR) else ()
+        portal = os.environ.get(TOKEN_ENV_VAR) or os.environ.get(TOKEN_FILE_ENV)
+        config = github_git_config() if portal else ()
         return [
             "git",
             *config,
@@ -463,6 +466,143 @@ class GitFetchDefaultCmd(ShellCommand[None]):
 
     def parse(self, result: CompletedProcess[str]) -> None:
         return None
+
+
+class GitSetRemoteUrlCmd(ShellCommand[None]):
+    """``git remote set-url -- <remote> <url>`` - point a remote somewhere else.
+
+    Purely local. ``--`` ends options, so neither value is ever read as a
+    flag. The command does not validate ``url`` -
+    :meth:`Repository.set_remote_url` does, before building it.
+
+    Parameters
+    ----------
+    remote : str
+        The remote to change.
+    url : str
+        The already-validated URL.
+    """
+
+    def __init__(self, remote: str, url: str) -> None:
+        self.remote = remote
+        self.url = url
+
+    def argv(self) -> list[str]:
+        return ["git", "remote", "set-url", "--", self.remote, self.url]
+
+    def parse(self, result: CompletedProcess[str]) -> None:
+        return None
+
+
+class GitSetRemoteHeadCmd(ShellCommand[None]):
+    """``git remote set-head -- <remote> <branch>`` - record the remote's default branch.
+
+    Purely local: writes ``refs/remotes/<remote>/HEAD``, which
+    :attr:`Repository.default_branch_refs` resolves first.
+
+    Parameters
+    ----------
+    remote : str
+        The remote.
+    branch : str
+        The branch ``refs/remotes/<remote>/HEAD`` should point at.
+    """
+
+    def __init__(self, remote: str, branch: str) -> None:
+        self.remote = remote
+        self.branch = branch
+
+    def argv(self) -> list[str]:
+        return ["git", "remote", "set-head", "--", self.remote, self.branch]
+
+    def parse(self, result: CompletedProcess[str]) -> None:
+        return None
+
+
+class GitResolveCommitCmd(ShellCommand[str | None]):
+    """``git rev-parse --verify --quiet <ref>^{commit}`` - the commit ``ref`` names.
+
+    Must be run with ``check=False``: an unknown ``ref`` collapses to
+    ``None``.
+
+    Parameters
+    ----------
+    ref : str
+        A full ref, e.g. ``"refs/remotes/origin/main"``.
+    """
+
+    def __init__(self, ref: str) -> None:
+        self.ref = ref
+
+    def argv(self) -> list[str]:
+        return ["git", "rev-parse", "--verify", "--quiet", f"{self.ref}^{{commit}}"]
+
+    def parse(self, result: CompletedProcess[str]) -> str | None:
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
+
+
+class GitCheckoutResetCmd(ShellCommand[None]):
+    """``git -c core.hooksPath=/dev/null checkout -q -B <branch> <commit> --``.
+
+    Creates or resets ``branch`` to ``commit`` and checks it out, with git
+    hooks disabled - purely local. Unlike ``merge --ff-only`` it follows a
+    force-pushed history. Git still refuses to overwrite an untracked file
+    in the way, which is what keeps a commit from replacing the portal's
+    untracked ``.whygraph/`` / ``.codegraph/`` state. The trailing ``--``
+    keeps ``commit`` from being read as a path.
+
+    Parameters
+    ----------
+    branch : str
+        The local branch name (never starting with ``-``; the caller checks).
+    commit : str
+        The commit to reset it to (a full SHA).
+    """
+
+    def __init__(self, branch: str, commit: str) -> None:
+        self.branch = branch
+        self.commit = commit
+
+    def argv(self) -> list[str]:
+        return [
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "checkout",
+            "-q",
+            "-B",
+            self.branch,
+            self.commit,
+            "--",
+        ]
+
+    def parse(self, result: CompletedProcess[str]) -> None:
+        return None
+
+
+class GitIsAncestorCmd(ShellCommand[bool | None]):
+    """``git merge-base --is-ancestor <old> <new>`` - is ``old`` in ``new``'s history?
+
+    Must be run with ``check=False``: exit ``0`` is ``True``, ``1`` is
+    ``False``, anything else (an unknown commit) is ``None``.
+
+    Parameters
+    ----------
+    old, new : str
+        Two commits.
+    """
+
+    def __init__(self, old: str, new: str) -> None:
+        self.old = old
+        self.new = new
+
+    def argv(self) -> list[str]:
+        return ["git", "merge-base", "--is-ancestor", self.old, self.new]
+
+    def parse(self, result: CompletedProcess[str]) -> bool | None:
+        return {0: True, 1: False}.get(result.returncode)
 
 
 GitHeadShaCmd = ShellCommand(

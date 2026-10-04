@@ -138,6 +138,7 @@ class Shell:
         timeout: int | None = None,
         check: bool = True,
         env: Mapping[str, str] | None = None,
+        log_output: bool = True,
     ) -> T: ...
 
     @overload
@@ -149,6 +150,7 @@ class Shell:
         timeout: int | None = None,
         check: bool = True,
         env: Mapping[str, str] | None = None,
+        log_output: bool = True,
     ) -> subprocess.CompletedProcess[str]: ...
 
     def run(
@@ -159,6 +161,7 @@ class Shell:
         timeout: int | None = None,
         check: bool = True,
         env: Mapping[str, str] | None = None,
+        log_output: bool = True,
     ) -> subprocess.CompletedProcess[str] | T:
         """Run a subprocess, capture its output, and optionally raise on failure.
 
@@ -194,6 +197,10 @@ class Shell:
             regardless of exit code.
         env : Mapping[str, str], optional
             Override the instance's :attr:`env` for this call.
+        log_output : bool, optional
+            ``False`` keeps the captured stdout / stderr out of the DEBUG
+            trace, for a command whose output may hold a credential
+            (``gh auth status`` prints most of a token). Default ``True``.
 
         Returns
         -------
@@ -216,6 +223,7 @@ class Shell:
                 timeout=timeout,
                 check=check,
                 env=env,
+                log_output=log_output,
             )
             return cmd.parse(result)
 
@@ -225,6 +233,7 @@ class Shell:
             timeout=timeout,
             check=check,
             env=env,
+            log_output=log_output,
         )
 
     def _run_argv(
@@ -235,6 +244,7 @@ class Shell:
         timeout: int | None,
         check: bool,
         env: Mapping[str, str] | None,
+        log_output: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         """Execute ``cmd`` and return the captured :class:`CompletedProcess`.
 
@@ -258,7 +268,7 @@ class Shell:
         )
         elapsed_ms = int((time.monotonic() - start) * 1000)
         _log.debug("→ returncode=%d in %dms", result.returncode, elapsed_ms)
-        if _log.isEnabledFor(logging.DEBUG):
+        if log_output and _log.isEnabledFor(logging.DEBUG):
             _log_stream("stdout", result.stdout)
             _log_stream("stderr", result.stderr)
         if check and result.returncode != 0:

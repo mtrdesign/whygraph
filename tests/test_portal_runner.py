@@ -84,6 +84,8 @@ from whygraph.portal.runner import (
     resolve_analyze,
     scan_argv,
     scan_flags,
+    sweep_token_files,
+    write_token_file,
 )
 
 FAKE_SCAN = Path(__file__).parent / "fixtures" / "fake_scan.py"
@@ -360,6 +362,19 @@ def test_child_env_allowlist_and_injected_secrets(tmp_path: Path) -> None:
         config, layer, source="github", analyze=False, environ=portal_env
     )
     assert "WHYGRAPH_GITHUB_URL" not in no_url
+    # Production: the token file's path, never a token value.
+    token_file = tmp_path / "runs" / "7.token"
+    with_file, secrets = child_env(
+        config,
+        layer,
+        source="github",
+        analyze=False,
+        environ=portal_env,
+        token_file=token_file,
+    )
+    assert with_file["WHYGRAPH_GITHUB_TOKEN_FILE"] == str(token_file)
+    assert "GH_TOKEN" not in with_file and "WHYGRAPH_GIT_TOKEN" not in with_file
+    assert secrets == []
 
     bare, secrets = child_env(
         Config.from_dict({}, tmp_path),
@@ -388,6 +403,55 @@ def test_redactor_matches_a_partly_masked_token_it_never_injected() -> None:
     assert minted[:16] not in out and "*" * 14 not in out
     assert out == "Logged in (GH_TOKEN) token: ghs_*** and …9876"
     assert redactor([])(json.dumps({"line": shown})) == '{"line": "ghs_***"}'
+
+
+def test_the_redactor_learns_new_values() -> None:
+    redact = redactor(["sk-zzzz9876"])
+    first, second = "ghs_" + "a" * 36 + "1111", "ghs_" + "b" * 36 + "2222"
+    redact.learn(first)
+    redact.learn(second, "")
+    out = redact(f"{first} {second} sk-zzzz9876")
+    assert out == "…1111 …2222 …9876"
+
+
+def test_token_file_is_0600_and_never_read_torn(tmp_path: Path) -> None:
+    path = tmp_path / "runs" / "3.token"
+    path.parent.mkdir()
+    values = ["ghs_" + c * 4000 for c in "abcdef"]
+    write_token_file(path, values[0])
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.read_text() == values[0]
+
+    stop = threading.Event()
+    seen: set[str] = set()
+
+    def reader() -> None:
+        while not stop.is_set():
+            seen.add(path.read_text())
+
+    thread = threading.Thread(target=reader)
+    thread.start()
+    try:
+        for i in range(300):
+            write_token_file(path, values[i % len(values)])
+    finally:
+        stop.set()
+        thread.join()
+    assert seen <= set(values) and len(seen) > 1
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert sorted(p.name for p in path.parent.iterdir()) == ["3.token"]
+
+
+def test_leftover_token_files_are_swept_at_start(
+    env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    runs_dir = env.data / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("4.token", "5.token.0a1b2c.tmp", "4.log", "4.jsonl"):
+        (runs_dir / name).write_text("x")
+    assert sweep_token_files(env.tmp) == 0  # nothing there
+    with client_for():
+        assert sorted(p.name for p in runs_dir.iterdir()) == ["4.jsonl", "4.log"]
 
 
 def test_estimate_arithmetic() -> None:

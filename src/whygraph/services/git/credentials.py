@@ -33,6 +33,14 @@ from .exceptions import InvalidRepoUrlError
 TOKEN_ENV_VAR = "WHYGRAPH_GIT_TOKEN"
 """Env var the inline credential helper reads the token from."""
 
+TOKEN_FILE_ENV = "WHYGRAPH_GITHUB_TOKEN_FILE"
+"""Env var naming the 0600 file a portal scan child reads its GitHub token from.
+
+The portal rewrites the file before the token expires, so the child reads it
+before each ``gh`` / ``git`` call (:func:`whygraph.services.github.token.github_token`)
+instead of holding one value for its whole life.
+"""
+
 GITHUB_URL_ENV = "WHYGRAPH_GITHUB_URL"
 """GitHub's web root (GitHub Enterprise Server, or the test fake); git's host comes from it."""
 

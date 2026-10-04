@@ -668,16 +668,16 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     ),
     ("DELETE", "/api/org/members/{uid}"): Call(409, shows=lambda o: ["last_owner"]),
     ("DELETE", "/api/org/membership"): Call(409, shows=lambda o: ["last_owner"]),
-    # Production's GitHub App import page (swept over prod_world, which has
-    # no GitHub App configured; test_portal_github_import.py drives it)
+    # Production's GitHub App import page (swept over prod_world, whose
+    # owners have not connected GitHub; test_portal_github_import.py drives it)
     ("POST", "/api/github/app/authorize"): Call(
-        503, body=lambda w, o: {}, shows=lambda o: ["github_app_not_configured"]
+        200, body=lambda w, o: {}, shows=lambda o: ["/login/oauth/authorize"]
     ),
     ("GET", "/api/github/installations"): Call(
-        503, shows=lambda o: ["github_app_not_configured"]
+        401, shows=lambda o: ["github_authorization_required"]
     ),
     ("GET", "/api/github/installations/{installation_id}/repos"): Call(
-        503, shows=lambda o: ["github_app_not_configured"]
+        401, shows=lambda o: ["github_authorization_required"]
     ),
     ("POST", "/api/projects"): Call(
         201,

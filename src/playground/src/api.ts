@@ -912,7 +912,10 @@ export interface PendingPlatformLink {
   project: { slug: string; name: string; [key: string]: unknown };
   clone_url: string;
   clone_command: string;
+  /** A genuine name collision: that slug is a project here this link cannot reconnect. */
   slug_taken: boolean;
+  /** The already-linked project this link reconnects (a new token), when it is one. */
+  reconnect: { path: string; slug: string } | null;
   candidates: { path: string; name: string; match: "origin" }[];
   other_repos: { path: string; name: string }[];
 }

@@ -96,11 +96,14 @@ export function ConnectForm({
 function PathRow({
   path,
   name,
+  note,
   selected,
   onSelect,
 }: {
   path: string;
   name: string;
+  /** A short badge beside the name, for example the already-linked checkout. */
+  note?: string;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -108,7 +111,14 @@ function PathRow({
     <label className="flex cursor-pointer items-center gap-3 border-b border-border px-3.5 py-2.5 last:border-b-0 hover:bg-muted/50">
       <input type="radio" name="checkout" className="accent-primary" checked={selected} onChange={onSelect} />
       <span className="flex min-w-0 flex-1 flex-col">
-        <span className="font-medium">{name}</span>
+        <span className="font-medium">
+          {name}
+          {note && (
+            <span className="ml-2 rounded-full bg-muted px-2 py-0.5 text-xs font-normal text-muted-foreground">
+              {note}
+            </span>
+          )}
+        </span>
         <span className="truncate font-mono text-xs text-muted-foreground" title={path}>
           {path}
         </span>
@@ -129,9 +139,14 @@ function Picker({
   refreshing: boolean;
 }) {
   const navigate = useNavigate();
-  const [path, setPath] = useState("");
+  const reconnect = pending.reconnect;
+  // The one sensible pick when this link reconnects, so it starts selected.
+  const [path, setPath] = useState(reconnect?.path ?? "");
   const [typed, setTyped] = useState("");
   const chosen = typed.trim() || path;
+  const reconnecting = !!reconnect && chosen === reconnect.path;
+  // A name collision this link cannot reconnect is the only dead end.
+  const blocked = pending.slug_taken && !reconnect;
   const add = useMutation({
     mutationFn: () => portalApi.addProject({ source: "platform", link_id: pending.link_id, path: chosen }),
     onSuccess: onAdded,
@@ -141,7 +156,7 @@ function Picker({
     // Gone either way (an expired link has nothing left to revoke): back to a clean form.
     onSettled: () => void navigate({ to: "/projects/new", search: { source: "platform" } }),
   });
-  const none = pending.candidates.length === 0;
+  const none = pending.candidates.length === 0 && !reconnect;
 
   return (
     <div className="flex flex-col gap-4" data-testid="platform-picker">
@@ -153,7 +168,7 @@ function Picker({
         </span>{" "}
         on {platformHost(pending.platform_origin)}
       </p>
-      {pending.slug_taken && (
+      {blocked && (
         <Alert variant="destructive" data-testid="slug-taken">
           <AlertTitle>Already on this machine</AlertTitle>
           <AlertDescription>
@@ -162,10 +177,32 @@ function Picker({
           </AlertDescription>
         </Alert>
       )}
+      {reconnect && (
+        <Alert data-testid="reconnect-notice">
+          <AlertTitle>Already linked on this machine</AlertTitle>
+          <AlertDescription>
+            This checkout is already linked to {pending.org}/{pending.project.name}. Linking it again
+            reconnects it: it gets a new connection token and access is restored. Nothing else about the
+            project changes - the same project row, its index and its agent wiring stay as they are.
+          </AlertDescription>
+        </Alert>
+      )}
 
       <div className="flex flex-col gap-2">
         <h2 className="text-sm font-semibold">Checkouts of this repository</h2>
         <div className="flex flex-col rounded-lg border border-border" role="radiogroup" aria-label="Checkout">
+          {reconnect && (
+            <PathRow
+              path={reconnect.path}
+              name={reconnect.slug}
+              note="already linked"
+              selected={path === reconnect.path && !typed.trim()}
+              onSelect={() => {
+                setPath(reconnect.path);
+                setTyped("");
+              }}
+            />
+          )}
           {pending.candidates.map((c) => (
             <PathRow
               key={c.path}
@@ -244,8 +281,14 @@ function Picker({
         <Button variant="ghost" onClick={() => abandon.mutate()} disabled={abandon.isPending}>
           Cancel
         </Button>
-        <Button onClick={() => add.mutate()} disabled={!chosen || pending.slug_taken || add.isPending}>
-          {add.isPending ? "Linking…" : "Link this checkout"}
+        <Button onClick={() => add.mutate()} disabled={!chosen || blocked || add.isPending}>
+          {add.isPending
+            ? reconnecting
+              ? "Reconnecting…"
+              : "Linking…"
+            : reconnecting
+              ? "Reconnect this checkout"
+              : "Link this checkout"}
         </Button>
       </div>
     </div>

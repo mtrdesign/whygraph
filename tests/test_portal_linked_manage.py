@@ -40,6 +40,7 @@ from test_portal_app import (  # noqa: F401 -- `env` is a fixture
     make_repo,
 )
 from test_portal_link import (  # noqa: F401 -- `fake` / `portal` are fixtures
+    _transport,
     allow,
     callback,
     connect,
@@ -48,6 +49,7 @@ from test_portal_link import (  # noqa: F401 -- `fake` / `portal` are fixtures
     link_row,
     linked,
     mirror,
+    pending_of,
     portal,
     project_id,
 )
@@ -442,6 +444,99 @@ def test_reconnect_refuses_a_different_link_target(
     assert mismatch.status_code in (409, 422), mismatch.text
     assert mismatch.json()["code"] in ("slug_taken", "duplicate", "origin_mismatch")
     assert decrypt(link_row(SLUG).token_ciphertext) == kept
+
+
+def test_pending_offers_the_checkout_a_reconnect_replaces(
+    portal: TestClient,
+    fake: FakePlatform,
+    env: SimpleNamespace,
+    scanner: SimpleNamespace,
+) -> None:
+    """The picker names the already-linked checkout, and the add route takes it.
+
+    The POST is driven with the ``reconnect.path`` the picker was given, so
+    the offering side and the accepting side cannot drift apart.
+    """
+    root = linked_project(portal, fake, env)
+    fake.revoke_token(TOKEN, "admin_revoked")
+    refresh_links(transport=transport_of(portal))
+    was = project_id(SLUG)
+
+    fresh = "wgc_" + "R" * 43
+    started = connect(portal, fake)
+    allow(fake, started, code="second", token=fresh)
+    link_id = callback(portal, started, code="second").json()["link_id"]
+    body = pending_of(portal, link_id)
+    assert body["reconnect"] == {"path": str(root), "slug": SLUG}
+    # Not a dead end any more, and the checkout is offered exactly once.
+    assert body["slug_taken"] is False
+    assert str(root) not in [c["path"] for c in body["candidates"]]
+    assert str(root) not in [r["path"] for r in body["other_repos"]]
+
+    again = link(portal, link_id, Path(body["reconnect"]["path"]))
+    assert again.status_code == 201, again.text
+    assert project_id(SLUG) == was
+    assert decrypt(link_row(SLUG).token_ciphertext) == fresh
+
+
+def test_pending_reports_no_reconnect_for_another_link_target(
+    portal: TestClient,
+    fake: FakePlatform,
+    env: SimpleNamespace,
+    scanner: SimpleNamespace,
+) -> None:
+    """Same slug, another platform / org / project / clone URL: not a reconnect.
+
+    Each of these is the ``409 slug_taken`` it was before, so the picker must
+    not offer the checkout: the rule is the add route's
+    (:func:`whygraph.portal.platform_routes.reconnect_target`).
+    """
+    root = linked_project(portal, fake, env)
+    second = FakePlatform("https://wg2.example.com")  # also serves `demo`
+    portal.app.state.portal.platform_transport = _transport(fake, second)
+
+    def pending_for(platform: FakePlatform, code: str, **over: Any) -> dict:
+        started = connect(portal, platform)
+        allow(platform, started, code=code, token="wgc_" + code[0].upper() * 43, **over)
+        reply = callback(portal, started, code=code)
+        assert reply.status_code == 200, reply.text
+        return pending_of(portal, reply.json()["link_id"])
+
+    # Another platform serving a project of the same slug and clone URL.
+    other_platform = pending_for(second, "xplatform")
+    assert other_platform["reconnect"] is None
+    assert other_platform["slug_taken"] is True
+
+    # The same platform and project, but another org there.
+    other_org = pending_for(fake, "yorg", org="other")
+    assert other_org["reconnect"] is None
+    assert other_org["slug_taken"] is True
+
+    # The same link, but the platform project's clone URL changed.
+    fake.projects[SLUG] = status_body(
+        clone_url="https://github.com/acme/renamed.git", last_scanned_head=None
+    )
+    renamed = pending_for(fake, "zclone")
+    assert renamed["reconnect"] is None
+    assert renamed["slug_taken"] is True
+    fake.projects[SLUG] = status_body()
+
+    # A link row whose remote_slug is no longer the reply's project.
+    with portal_db.get_session() as session:
+        row = session.get(PlatformLink, project_id(SLUG))
+        assert row is not None
+        row.remote_slug = "elsewhere"
+        session.add(row)
+    moved = pending_for(fake, "wslug")
+    assert moved["reconnect"] is None
+    assert moved["slug_taken"] is True
+
+    # None of that touched the link, and the checkout stays unofferable.
+    assert decrypt(link_row(SLUG).token_ciphertext) == TOKEN
+    for body in (other_platform, other_org, renamed, moved):
+        paths = [c["path"] for c in body["candidates"]]
+        paths += [r["path"] for r in body["other_repos"]]
+        assert str(root) not in paths
 
 
 # ---------------------------------------------------------------------------

@@ -82,6 +82,7 @@ const PENDING = {
   clone_url: "https://github.com/acme/alpha.git",
   clone_command: "git clone https://github.com/acme/alpha.git",
   slug_taken: false,
+  reconnect: null,
   candidates: [{ path: "/repos/alpha", name: "alpha", match: "origin" }],
   other_repos: [{ path: "/repos/other", name: "other" }],
 };
@@ -321,6 +322,64 @@ describe("platform source", () => {
     mount("/projects/new?source=platform&link=L1");
     expect(await screen.findByTestId("slug-taken")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Link this checkout" })).toBeDisabled();
+    expect(screen.queryByTestId("reconnect-notice")).toBeNull();
+  });
+
+  // The server filters an already-linked checkout out of both lists and names it
+  // under `reconnect` instead, so the picker offers it as its own row.
+  const RECONNECT = {
+    ...PENDING,
+    candidates: [],
+    other_repos: [],
+    reconnect: { path: "/repos/alpha", slug: "alpha" },
+  };
+
+  it("offers the already-linked checkout as a reconnect and posts its path", async () => {
+    const user = userEvent.setup();
+    fake.routes["GET /api/platform/pending/L1"] = () => json(RECONNECT);
+    fake.routes["POST /api/projects"] = () =>
+      json(
+        {
+          project: project(),
+          detected: { existing_db: false, managed_hooks: [], detected_agents: [], custom_db_paths: [] },
+          import: { found: false, error: null, secrets_moved: [], dropped: [], custom_db_paths: [], warnings: [] },
+        },
+        201,
+      );
+    mount("/projects/new?source=platform&link=L1");
+    const notice = await screen.findByTestId("reconnect-notice");
+    expect(notice).toHaveTextContent("already linked");
+    expect(notice).toHaveTextContent("new connection token");
+    // Non-destructive: it is not the collision dead end, and nothing says Remove first.
+    expect(screen.queryByTestId("slug-taken")).toBeNull();
+    // The row is there, marked, and - being the one sensible pick - selected.
+    const group = screen.getByRole("radiogroup", { name: "Checkout" });
+    expect(group).toHaveTextContent("/repos/alpha");
+    expect(group).toHaveTextContent("already linked");
+    expect(within(group).getByRole("radio")).toBeChecked();
+    // No "nothing matches" clone block, although the candidate list is empty.
+    expect(screen.queryByTestId("no-candidates")).toBeNull();
+
+    const submit = screen.getByRole("button", { name: "Reconnect this checkout" });
+    expect(submit).toBeEnabled();
+    await user.click(submit);
+    await waitFor(() =>
+      expect(mutations().find((c) => c.path === "/api/projects")?.body).toEqual({
+        source: "platform",
+        link_id: "L1",
+        path: "/repos/alpha",
+      }),
+    );
+  });
+
+  it("another path than the reconnect target is still an ordinary link", async () => {
+    const user = userEvent.setup();
+    fake.routes["GET /api/platform/pending/L1"] = () =>
+      json({ ...RECONNECT, other_repos: [{ path: "/repos/other", name: "other" }] });
+    mount("/projects/new?source=platform&link=L1");
+    await screen.findByTestId("reconnect-notice");
+    await user.click(screen.getByRole("radio", { name: /other/ }));
+    expect(screen.getByRole("button", { name: "Link this checkout" })).toBeEnabled();
   });
 });
 

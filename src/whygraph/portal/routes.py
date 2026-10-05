@@ -145,6 +145,7 @@ from .platform_routes import (
     default_client_name,
     origin_identity,
     origin_url,
+    reconnect_target,
     sweep_links,
 )
 from .policy import (
@@ -1443,19 +1444,10 @@ def _reconnectable(root: Path, org_id: int, entry: PendingLink) -> int | None:
     A revoked link is reconnected by running the whole connect flow again
     and posting the same body as a first link (plan section 4.11's
     "reconnect or remove"), so that post must not be a dead ``409
-    slug_taken``. It replaces an existing project only when it is
-    unambiguously the same link target - the same checkout, the same
-    platform, and the same project there:
-
-    * ``projects.root`` is this checkout and the row's ``source`` is
-      ``platform``,
-    * its slug is the platform's slug,
-    * and its link row's ``platform_origin``, ``org_slug``,
-      ``remote_slug`` and ``clone_url`` all match the reply.
-
-    Any other collision - another checkout of the same project, another
-    project at this path, the same org and slug on a *different* platform -
-    is the refusal it was before.
+    slug_taken``. The rule is
+    :func:`~whygraph.portal.platform_routes.reconnect_target`'s, shared with
+    the picker that offers the checkout
+    (``GET /api/platform/pending/{link_id}``) so the two cannot drift.
 
     Parameters
     ----------
@@ -1471,23 +1463,9 @@ def _reconnectable(root: Path, org_id: int, entry: PendingLink) -> int | None:
     int or None
         ``projects.id`` to replace, or ``None`` to add a new project.
     """
-    reply = entry.reply
     with get_session() as session:
-        row = session.exec(
-            select(Project).where(Project.org_id == org_id, Project.root == str(root))
-        ).first()
-        if row is None or row.source != "platform" or row.slug != reply.project.slug:
-            return None
-        link = session.get(PlatformLink, row.id)
-        if link is None:
-            return None
-        same = (
-            link.platform_origin == entry.platform_origin
-            and link.org_slug == reply.org
-            and link.remote_slug == reply.project.slug
-            and link.clone_url == (reply.project.clone_url or "")
-        )
-        return row.id if same else None
+        row = reconnect_target(session, org_id, entry, root=root)
+        return None if row is None else row.id
 
 
 def _reconnect(state: PortalState, project_id: int, entry: PendingLink) -> None:

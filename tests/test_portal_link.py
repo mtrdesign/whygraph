@@ -174,6 +174,13 @@ def link(client: TestClient, link_id: str, root: Path) -> httpx.Response:
     )
 
 
+def pending_of(client: TestClient, link_id: str) -> dict:
+    """``GET /api/platform/pending/{link_id}``: what the picker is given."""
+    response = client.get(f"/api/platform/pending/{link_id}")
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
 def mirror(env: SimpleNamespace, name: str, remote: str | None = CLONE_URL) -> Path:
     """A fresh checkout under the shared folder with ``remote`` as its ``origin``."""
     root = make_repo(env.shared, name, remote=remote)
@@ -387,6 +394,7 @@ def test_pending_lists_the_matching_checkouts(
     assert pending["clone_url"] == CLONE_URL
     assert pending["clone_command"] == f"git clone {CLONE_URL}"
     assert pending["slug_taken"] is False
+    assert pending["reconnect"] is None  # nothing is linked yet
     assert [c["path"] for c in pending["candidates"]] == [str(root)]
     assert pending["candidates"][0]["match"] == "origin"
     assert str(other) in [r["path"] for r in pending["other_repos"]]
@@ -496,7 +504,10 @@ def test_link_refuses_slug_collision(
     add_local(portal, mirror(env, SLUG, remote=None))
     root = mirror(env, "demo-checkout")
     link_id = linked(portal, fake)
-    assert portal.get(f"/api/platform/pending/{link_id}").json()["slug_taken"] is True
+    # A *local* project of that name is a genuine collision, never a reconnect.
+    pending = pending_of(portal, link_id)
+    assert pending["slug_taken"] is True
+    assert pending["reconnect"] is None
     response = link(portal, link_id, root)
     assert response.status_code == 409, response.text
     assert response.json()["code"] == "slug_taken"

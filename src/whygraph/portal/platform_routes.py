@@ -44,7 +44,7 @@ from urllib.parse import quote, urlencode, urlsplit
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field
-from sqlmodel import col, select
+from sqlmodel import Session, col, select
 
 from whygraph.services.git import GitError, Repository, strip_userinfo
 from whygraph.services.github import remote_identity
@@ -222,6 +222,70 @@ def _candidates(state: PortalState, clone_url: str) -> tuple[str, ...]:
         for root in state.discovery.get(state.shared_folders)
         if origin_identity(root) == wanted
     )
+
+
+def reconnect_target(
+    session: Session,
+    org_id: int,
+    entry: PendingLink,
+    *,
+    root: Path | None = None,
+) -> Project | None:
+    """The linked project ``entry`` *replaces* rather than adds, or ``None``.
+
+    The one rule behind both call sites of plan section 4.11's "reconnect or
+    remove": :func:`whygraph.portal.routes._add_platform`, which replaces the
+    row, and :func:`get_pending`, which offers it. A pending link reconnects
+    an existing project only when it is unambiguously the same link target:
+
+    * the project is this org's, its ``source`` is ``platform`` and its slug
+      is the platform's slug,
+    * its link row's ``platform_origin``, ``org_slug``, ``remote_slug`` and
+      ``clone_url`` all match the reply,
+    * and - when ``root`` is given - its ``root`` is that checkout.
+
+    Any other collision (another checkout of the same project, another
+    project at this path, the same org and slug on a *different* platform) is
+    not a reconnect and stays the refusal it was.
+
+    Parameters
+    ----------
+    session : Session
+        An open portal DB session.
+    org_id : int
+        The local org.
+    entry : PendingLink
+        The pending link the wizard is consuming.
+    root : Path, optional
+        The checkout being linked. Omitted by the picker, which has no path
+        yet: the project's own ``root`` is then the path to offer.
+
+    Returns
+    -------
+    Project or None
+        The row to replace (attached to ``session``), or ``None`` to add a
+        new project.
+    """
+    reply = entry.reply
+    row = session.exec(
+        select(Project).where(
+            Project.org_id == org_id,
+            Project.slug == reply.project.slug,
+            Project.source == "platform",
+        )
+    ).first()
+    if row is None or (root is not None and row.root != str(root)):
+        return None
+    link = session.get(PlatformLink, row.id)
+    if link is None:
+        return None
+    same = (
+        link.platform_origin == entry.platform_origin
+        and link.org_slug == reply.org
+        and link.remote_slug == reply.project.slug
+        and link.clone_url == (reply.project.clone_url or "")
+    )
+    return row if same else None
 
 
 def _registered_roots(org_id: int) -> set[str]:
@@ -459,9 +523,23 @@ def get_pending(
     """What the wizard's checkout picker shows for a pending link.
 
     ``{link_id, platform_origin, org, project, clone_url, clone_command,
-    slug_taken, candidates: [{path, name, match: "origin"}], other_repos:
-    [{path, name}]}`` - registered checkouts are left out of both lists.
-    ``410 link_expired`` for an unknown or expired link.
+    slug_taken, reconnect, candidates: [{path, name, match: "origin"}],
+    other_repos: [{path, name}]}`` - registered checkouts are left out of
+    both lists. ``410 link_expired`` for an unknown or expired link.
+
+    ``reconnect`` is ``{"path": ..., "slug": ...}`` when a project of this
+    org is the very same link target (:func:`reconnect_target`, minus the
+    path part - the picker has no path yet, so that project's own ``root``
+    *is* the path to offer), else ``None``. Its root is one of the
+    registered ones, so it is in neither list and the picker offers it as
+    its own row.
+
+    ``slug_taken`` is therefore a **genuine** name collision only: the
+    platform's slug belongs to a project here that this link cannot
+    reconnect (another platform, another org or project there, or a local
+    project of that name). The two are mutually exclusive, so the picker
+    reads "you may reconnect this" off ``reconnect`` and "that name is
+    taken" off ``slug_taken`` without comparing them.
     """
     state = portal_state(request)
     sweep_links(state)
@@ -477,7 +555,11 @@ def get_pending(
     ]
     project = entry.reply.project
     with get_session() as session:
-        slug_taken = (
+        target = reconnect_target(session, access.org_id, entry)
+        reconnect = (
+            None if target is None else {"path": target.root, "slug": target.slug}
+        )
+        slug_taken = reconnect is None and (
             session.exec(
                 select(Project.id).where(
                     Project.org_id == access.org_id, Project.slug == project.slug
@@ -493,6 +575,7 @@ def get_pending(
         "clone_url": project.clone_url,
         "clone_command": f"git clone {project.clone_url}",
         "slug_taken": slug_taken,
+        "reconnect": reconnect,
         "candidates": [
             {"path": p, "name": Path(p).name, "match": "origin"} for p in candidates
         ],
@@ -524,6 +607,7 @@ __all__ = [
     "origin_url",
     "platform_http",
     "platform_router",
+    "reconnect_target",
     "revoke_pending",
     "sweep_links",
 ]

@@ -384,6 +384,70 @@ Owners and admins remove a project from its settings, by typing the project's na
 server copy - with its history, descriptions, rationale cards and chat sessions - and every scan of
 it. The repository on GitHub is not touched; importing it again starts from scratch.
 
+## Connected portals
+
+People on your team can link a checkout on their own machine to a project here, so their coding
+agent reads the project's history through their **local** WhyGraph, with their uncommitted work kept
+on the laptop. Nothing about this needs setup beyond a working production portal: the project's home
+page has a **Use with your agent** panel that walks a member through it, and the member-side steps
+are in [Projects from a platform](../portal/platform-projects.md).
+
+Each link is a **connection token**: one project, one person, with that person's role re-checked on
+every call. A member **allows** it on a consent page on the base host, signed in as themselves. Their
+local portal then calls this one over `/api/v1`, on the organization's host, with the token as a
+bearer. Only members can connect: an instance admin's read-only access to an organization cannot.
+
+There are two lists, both called **Connected portals**:
+
+- **Your own**, on your Account page: every portal you have linked, across projects, with the
+  machine name, when it was linked and when it was last used. You can revoke any of them.
+- **A project's**, in its settings, for **owners and admins**: every member's connection to that
+  project, with the **machine name each member gave it**, their name and when it was last used. An
+  admin can revoke any of them, which covers a lost laptop whose owner is unreachable (the reason is
+  recorded as `admin_revoked`). Members' machine names are therefore visible to the project's admins.
+
+A revoked token stays in the lists for 30 days, with its reason, then is deleted.
+
+Revocation follows membership, in the same transaction:
+
+| Event | What happens to tokens |
+|---|---|
+| A member is removed, or leaves | Their tokens for that organization are revoked |
+| An instance admin disables an account | All of that person's tokens are revoked |
+| A project is removed, or an organization deleted | Its tokens are revoked |
+| The member removes the project from their machine | That one token is revoked |
+| A token is unused for 90 days, or never used within an hour | It expires |
+
+**Re-enabling a disabled account, or adding a member back, does not restore any token.** The person
+links again. A removed member's token is also refused the moment they are not a member, whether or
+not the revocation had run.
+
+Connections are written to the [event log](#the-security-event-log) (`connection_authorized`,
+`connection_token_issued`, `connection_token_refused`, `connection_revoked`), never with a token or a
+code.
+
+### Agent limits
+
+An agent on a connected portal can cause work here: a rationale card nobody has generated yet, and
+the lazy description of commits that have none. Both spend the organization's own model keys, so an
+**owner** bounds them in the organization's **Settings**, under **Agent limits**:
+
+| Setting | Default | Counts |
+|---|---|---|
+| `[rationale].agent_generations_per_hour` | `120` | Rationale cards generated for agents, per hour, across the organization |
+| `[analyze].agent_descriptions_per_hour` | `600` | Commits described for agents' evidence, per hour, across the organization |
+
+`0` means agents get only what already exists: cached cards and existing descriptions. A card
+already in the cache is always served, and it is shared by every member and by the Explorer, so each
+is paid for once. When the limit is reached an agent is told so (`429 generation_limited`, or `403
+generation_disabled` for `0`); a missing rationale key is `409 no_llm_key`. These two keys exist
+**only** as organization defaults: they are never set per project and never imported from a
+repository. See [Configuration](../reference/configuration.md#agent-limits-organization-only).
+
+Beyond the limits, each token is rate limited, at most two evidence or rationale requests run at
+once per organization (a third is answered `503 busy` rather than queued), and one request does a
+bounded amount of `git` work.
+
 ## Deleting an organization
 
 An **owner** deletes an organization from its **Settings** page (the danger zone), by typing the
@@ -415,6 +479,7 @@ plus these GitHub, member, project and organization events:
 | `github_app_authorized` | Someone authorized the GitHub App, or installed it, from the import page. |
 | `github_account_mismatch` | That authorization was for a different GitHub account than the signed-in one, and was refused. |
 | `project_imported` | A repository was imported. |
+| `connection_authorized`, `connection_token_issued`, `connection_token_refused`, `connection_revoked` | A member allowed a connected portal, its token was issued, a token exchange was refused, or a token was revoked (with the reason). |
 | `project_access_lost`, `project_access_restored` | A project lost its GitHub access (with the reason), or got it back. |
 | `webhook_rejected` | A webhook delivery had a missing or wrong signature. |
 | `org_deleted` | An owner deleted an organization (with its project count). |
@@ -430,7 +495,8 @@ of this release, so ship the log somewhere if you need history.
 
 - **Email**: no verification and no reset mail (GitHub sign-in needs none), and no invitations: members are added directly.
 - **Agents and MCP**: there is no `/mcp` endpoint in production, and a server copy gets no agent
-  files or git hooks.
+  files or git hooks. Agents reach a production portal's projects through a developer's
+  [connected portal](#connected-portals).
 - **Projects from anywhere but GitHub**: shared folders and local repositories are refused, and
   only the default branch is scanned. On GitHub Enterprise Server the pull request and issue crawl
   is skipped.

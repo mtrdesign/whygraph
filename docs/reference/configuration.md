@@ -75,6 +75,7 @@ max_workers = 2               # parallel LLM calls in the diff-analyzer crawler
 # max_diff_chars = 50000      # diff truncated past this length before prompting
 # large_commit_file_count = 30  # commits touching more files are described per-file on demand
 # pr_origin_min_commits = 5   # recover a squash-merged PR's original commits past this size
+# agent_descriptions_per_hour = 600  # org setting only, see "Agent limits" below
 
 [rationale]
 # provider = "anthropic"      # which [llm.*] adapter writes the rationale card
@@ -82,6 +83,7 @@ max_workers = 2               # parallel LLM calls in the diff-analyzer crawler
 # pr_roster_max_commits = 30      # squashed-commit headlines shown per PR in the prompt
 # pr_discussion_max_comments = 20 # PR comments shown per PR in the prompt
 # pr_comment_max_chars = 500      # each PR comment clipped to this length
+# agent_generations_per_hour = 120  # org setting only, see "Agent limits" below
 
 [chat]
 # The chat assistant. Provider/model are DEFAULTS for new sessions only -
@@ -145,12 +147,34 @@ timeout_sec = 120
 | top-level `log_level` | Console log verbosity. |
 | `[scan]` | The crawl: which source-control forge to pull PRs and issues from, the git remote name, an optional pinned GitHub token (headless only), which [auto-rescan hooks](../guide/scanning.md#keep-it-fresh) to install, and which branch counts as [shipped history](../guide/scanning.md#how-whygraph-sees-branches). |
 | `[llm]` | `model` - the default `"provider/model"` for every role. See [Choosing models](#choosing-models). |
-| `[analyze]` | The per-commit LLM diff descriptions written during `scan` - provider, model, parallelism (`max_workers`), and the truncation / per-file thresholds. |
-| `[rationale]` | The `whygraph_rationale_brief` card - provider, model, and how much of a squash-merged PR is rendered into the prompt. |
+| `[analyze]` | The per-commit LLM diff descriptions written during `scan` - provider, model, parallelism (`max_workers`), the truncation / per-file thresholds, and an [org-only agent limit](#agent-limits-organization-only). |
+| `[rationale]` | The `whygraph_rationale_brief` card - provider, model, how much of a squash-merged PR is rendered into the prompt, and an [org-only agent limit](#agent-limits-organization-only). |
 | `[chat]` | The [chat assistant](../guide/chat.md) - default provider and model for new sessions, plus the per-turn tool, generation, and context budgets. |
 | `whygraph_db` / `codegraph_db` | Override either database path. |
 | `[logging]` | An optional rotating file log, in addition to the always-on stderr log. |
 | `[llm.*]` | Per-provider **connection** settings - key, timeout, and `base_url` / `host` where relevant. Six adapters; only four can drive chat. See [LLM providers](llm-providers.md). |
+
+## Agent limits (organization only)
+
+Two keys bound the LLM spend that agents on [connected portals](../portal/platform-projects.md) can
+cause on a [production](../deploy/production.md) portal. They are different from every other key:
+
+| Key | Default | Range | Bounds |
+|---|---|---|---|
+| `[rationale].agent_generations_per_hour` | `120` | `0` to `10000` | Uncached rationale cards generated for agents, per hour, across the organization |
+| `[analyze].agent_descriptions_per_hour` | `600` | `0` to `10000` | Commits described by the lazy backfill for agents' evidence, per hour, across the organization |
+
+`0` gives agents only what exists: cached cards, and descriptions already written. Cached cards are
+always served.
+
+- **Organization defaults only.** They are set by an **owner**, in the organization's **Settings**
+  under **Agent limits** (or `PUT /api/portal/defaults`). An admin cannot set them.
+- **Never per project.** A project's settings refuse them, and the platform reads them from the
+  organization's defaults row, never from a project's merged configuration.
+- **Never imported from a repository.** A `whygraph.toml` that sets them has them dropped and
+  reported on import, because a repository is untrusted input and must not raise its own organization's
+  spend.
+- **Production only.** Local mode has no connected portals, so they have no effect there.
 
 ## Choosing models
 

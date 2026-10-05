@@ -9,6 +9,12 @@ unchanged, so `mcp__whygraph__*` tool names still work.
 The portal must be running for an agent to reach it - there is no per-session process to launch any
 more.
 
+!!! note "Linked projects use the same files"
+    A checkout [linked to a platform](platform-projects.md) gets exactly the same entry and assets as a
+    local-folder project, with the platform project's slug in the URL, so teammates linked to the same
+    project share one committed entry. The agent still talks to **your local portal**, never to the
+    platform: the local portal answers from your working tree and the platform's history.
+
 ## What gets written
 
 All four agents are project-scoped: the file lives in your repository, so teammates can share it.

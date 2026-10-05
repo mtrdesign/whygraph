@@ -118,6 +118,10 @@ another. They no longer collide - the local portal's Vite is on `:5174`, the pla
 
 Neither is part of the supported interface; a real platform is always `https`.
 
+`make dev-docker` cannot link: inside its container `*.localhost` names resolve to the container
+itself, not to your `dev-production`. Link from `make dev-local`. `make e2e` runs the whole flow
+(import on a platform, link, an MCP call, revoke, remove) against a fake GitHub, with no setup.
+
 ## Which one to use
 
 - **`dev-local`** for most work: the UI, routes, MCP tools, chat. A saved `.py` file under

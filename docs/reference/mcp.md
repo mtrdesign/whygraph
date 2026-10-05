@@ -120,6 +120,52 @@ Orchestration recipes that wire the tools into a workflow.
 | `whygraph_why_was_this_written` | Why was this written? | `path` / `line_start` / `line_end` / `qualified_name` | Recover the original intent behind a chunk of code from its commits, PRs, and closing issues. |
 | `whygraph_triage_commit` | Triage a commit | `sha` | Summarize what one commit did and why, using its linked PR and closing issues. |
 
+## Linked projects
+
+A project [linked to a platform](../portal/platform-projects.md) has no local WhyGraph database, so
+its tools blame your working tree locally and ask the platform about the **pushed** commits. The
+tools, parameters and resources are the same; the results differ in three ways.
+
+**A `platform` block.** Every tool result and resource payload of a linked project carries
+`"platform": { "status": "...", "url": "..." }`: the link's status after the call, and the platform
+organization's address.
+
+| `status` | Meaning |
+|---|---|
+| `ok` | The platform answered (a refusal about one request, such as an unknown commit, leaves it `ok`) |
+| `unreachable` | The platform did not answer |
+| `revoked` | The platform refused the connection token; reconnect or remove the project |
+| `removed` | The platform project, or its organization, was deleted |
+| `access_lost` | The platform can no longer read the repository; its history may be stale |
+| `update_required` | The platform needs a newer WhyGraph than this portal |
+
+**A `push_status` on commits the platform did not supply.** In `whygraph_evidence_for`, a commit that
+blame names but the platform cannot account for is returned from git alone (`"source": "local"`, a
+null `llm_description`, no pull requests or issues) with one of:
+
+| `push_status` | Meaning |
+|---|---|
+| `uncommitted` | The lines are not committed yet |
+| `not_pushed` | The commit is in this checkout only: no `origin/*` ref holds it |
+| `pending_scan` | Pushed to the default branch, but the platform has not scanned it yet |
+| `not_on_default_branch` | Pushed, but not to the branch the platform scans |
+
+The labels come from your `origin/*` refs as the last fetch left them; WhyGraph never fetches.
+`whygraph://commit/{sha}` for a commit the platform lacks returns its git message with the same
+label.
+
+**Offline behaviour.** If the platform cannot be reached, is revoked or is gone,
+`whygraph_evidence_for` still answers with your blame, every pushed commit labelled `pending_scan`
+or `not_on_default_branch`, and a `platform.status` that says why. `whygraph_area_history`,
+`whygraph_rationale_brief` and the resources need the platform's history and fail with a message that
+names the fix.
+
+**Other differences.** Only pushed commits, paths and symbol names are sent to the platform.
+`whygraph_rationale_brief` returns a card generated and cached on the platform (shared by the whole
+team), and fails with "no pushed history" while the target's lines are not on a pushed commit.
+`whygraph_area_history` answers for a path only when a pushed default-branch revision tracks it.
+`whygraph_evidence_for` never writes a description locally.
+
 ## Composition with CodeGraph
 
 **This MCP surface** exposes no graph-traversal tools on purpose. The split:

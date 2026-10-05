@@ -1,13 +1,26 @@
 # Adding projects
 
 A **project** is one repository the portal knows about. Add one from the **Projects** page with
-**New project**. The wizard has up to four steps: pick the repository, configure it, initialize it,
-and run the first scan.
+**New project**. A project has one of three **sources**:
+
+| Source | Where it lives | Where it is added |
+|---|---|---|
+| **Local folder** | A repository in a [shared folder](shared-folders.md) on your machine, scanned by this portal | Local mode, **New project**, from a folder |
+| **A platform** | A checkout on your machine **linked** to a project on a [production](../deploy/production.md) WhyGraph; its history stays there | Local mode, **New project**, **From a platform** - see [Projects from a platform](platform-projects.md) |
+| **GitHub** | A repository the portal cloned itself, through a GitHub App | [Production mode](../deploy/production.md#projects) only |
+
+The rest of this page describes the local-folder wizard, with up to four steps: pick the repository,
+configure it, initialize it, and run the first scan.
 
 !!! note "Production mode imports from GitHub"
-    This page describes local mode, where a project is a repository in a folder you share. In
-    [production mode](../deploy/production.md#projects) projects are imported from GitHub through the
-    GitHub App instead, and the wizard is Source, Configure and First scan.
+    In [production mode](../deploy/production.md#projects) projects are imported from GitHub through
+    the GitHub App instead, and the wizard is Source, Configure and First scan.
+
+!!! note "A linked project is different after the first step"
+    A platform project has no Configure step and no local database: its models, keys and history are
+    the platform's, its Explorer and Chat open there, and its first scan builds the CodeGraph index only.
+    The only setting it keeps is which git hooks rescan the checkout. Initializing it writes the same
+    agent files as any project.
 
 ## Pick a repository
 

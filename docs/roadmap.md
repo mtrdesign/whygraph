@@ -15,6 +15,7 @@ of dates.
 | [Author identity](guide/concepts.md#people) | One row per human, resolved from mailmap and GitHub rather than guessed. |
 | [Branch membership](guide/scanning.md#how-whygraph-sees-branches) | Shipped history is distinguished from work in progress, recomputed and self-healing every scan. |
 | [Auto-rescan git hooks](guide/scanning.md#keep-it-fresh) | The portal tracks your commits in the background; hooks just ask it to rescan. |
+| [Projects from a platform](portal/platform-projects.md) | Link a local checkout to a project on a production WhyGraph: your agent gets the team's history through your local portal while your uncommitted work never leaves your machine. |
 | [Curl install](getting-started/installation.md) | A tag-pinned one-liner; the tag in the URL is the version you get. |
 
 ## More source-control providers
@@ -41,8 +42,10 @@ Larger, net-new pieces that aren't built yet:
 - **A multi-user, remote portal** - local mode is single-user and loopback-only. A
   [production mode](deploy/production.md) with logins, sessions and organizations on their own
   subdomains, whose projects are imported from GitHub through a GitHub App, is built but unreleased.
-  It has no MCP endpoint yet: per-agent bearer tokens, and agents reaching a production portal's
-  projects, are what unlock the full [service model](deploy/service.md) beyond one machine.
+  Agents reach its projects through a developer's [connected local portal](portal/platform-projects.md),
+  but the production portal itself has no MCP endpoint: agents that talk to it directly (per-agent
+  tokens, cloud agents) are what unlock the full [service model](deploy/service.md) beyond one
+  machine.
 - **Per-branch CodeGraph index** - the code index is still single-branch, so switching branches and
   re-syncing rewrites it. WhyGraph's *own* database no longer needs this: it keeps one database and
   [computes branch membership](guide/scanning.md#how-whygraph-sees-branches) per commit, recomputed

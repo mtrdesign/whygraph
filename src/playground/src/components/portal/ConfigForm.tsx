@@ -16,6 +16,8 @@ import {
 } from "../../api";
 import {
   CHAT_PROVIDER_TAGS,
+  DEFAULT_AGENT_DESCRIPTIONS,
+  DEFAULT_AGENT_GENERATIONS,
   HOOK_NAMES,
   KEYED_PROVIDERS,
   PROVIDERS,
@@ -300,11 +302,13 @@ export function ConfigForm({
   const showHooks = isProject && !production && project.data?.source === "local";
   const missingKey = project.data?.missing_key ?? null;
   const noProviderKey = !isProject && stored.data.no_provider_key === true;
+  // The org limits on agent spend: the org defaults only, and only an owner (who may save) sees them.
+  const showLimits = !isProject && production && !readOnly;
   const importReport = isProject ? (stored.data.import ?? null) : null;
 
   const onSubmit = handleSubmit((values) => {
     const base = stored.data!.config;
-    const layer = valuesToLayer(base, values, { scan: isProject });
+    const layer = valuesToLayer(base, values, { scan: isProject, limits: showLimits });
     const patch = secretsPatch(values, removed, { github: isProject && !production });
     const body: ConfigPut = {};
     if (JSON.stringify(layer) !== JSON.stringify(base)) body.config = layer;
@@ -460,6 +464,44 @@ export function ConfigForm({
           )}
         </Field>
       </Section>
+
+      {showLimits && (
+        <Section
+          title="Agent limits"
+          description="How much language-model work agents connected to a project may trigger, across the whole organization. They apply to every project; a project cannot override them."
+        >
+          <Field
+            label="Rationale cards per hour"
+            hint={`Generated when an agent asks for a rationale. Blank = ${DEFAULT_AGENT_GENERATIONS}; 0 turns it off.`}
+            error={errors.agentGenerations?.message}
+          >
+            {(p) => (
+              <Input
+                {...p}
+                inputMode="numeric"
+                placeholder={String(DEFAULT_AGENT_GENERATIONS)}
+                className="max-w-40 font-mono"
+                {...register("agentGenerations")}
+              />
+            )}
+          </Field>
+          <Field
+            label="Commit descriptions per hour"
+            hint={`Generated when an agent asks for evidence on undescribed commits. Blank = ${DEFAULT_AGENT_DESCRIPTIONS}; 0 turns it off.`}
+            error={errors.agentDescriptions?.message}
+          >
+            {(p) => (
+              <Input
+                {...p}
+                inputMode="numeric"
+                placeholder={String(DEFAULT_AGENT_DESCRIPTIONS)}
+                className="max-w-40 font-mono"
+                {...register("agentDescriptions")}
+              />
+            )}
+          </Field>
+        </Section>
+      )}
 
       {isProject && (
         <Section

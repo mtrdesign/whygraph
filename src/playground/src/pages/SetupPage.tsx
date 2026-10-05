@@ -1,9 +1,10 @@
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useRouter, useSearch } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { portalApi, portalKey } from "../api";
+import { safeLinkNext } from "../lib/linkNext";
 import { Field } from "../components/portal/Field";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
@@ -22,6 +23,8 @@ type Values = z.infer<typeof schema>;
  */
 export function SetupPage() {
   const navigate = useNavigate();
+  const router = useRouter();
+  const { next } = useSearch({ strict: false }) as { next?: string };
   const queryClient = useQueryClient();
   // The router's gate already fetched the state, so this is a cache hit.
   const state = useQuery({ queryKey: portalKey("state"), queryFn: portalApi.state });
@@ -33,7 +36,10 @@ export function SetupPage() {
       // The route gate reads `setup_complete` from this query; refetch it before
       // leaving or it would bounce straight back to /setup.
       await queryClient.invalidateQueries({ queryKey: portalKey("state") });
-      await navigate({ to: "/", replace: true });
+      // A `/link` request that arrived before setup resumes here (the gate kept its query).
+      const resume = safeLinkNext(next ? `?next=${encodeURIComponent(next)}` : undefined);
+      if (resume) router.history.replace(resume);
+      else await navigate({ to: "/", replace: true });
     },
   });
 

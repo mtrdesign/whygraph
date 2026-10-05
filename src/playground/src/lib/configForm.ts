@@ -41,7 +41,24 @@ export interface ConfigFormValues {
   claudeToken: string;
   /** Write-only per provider; blank leaves the stored key alone. */
   keys: Record<string, string>;
+  /** `[rationale].agent_generations_per_hour`, as typed (blank = the default). Org defaults only. */
+  agentGenerations: string;
+  /** `[analyze].agent_descriptions_per_hour`, as typed (blank = the default). Org defaults only. */
+  agentDescriptions: string;
 }
+
+/**
+ * The org limits on agent LLM spend (`ORG_ONLY_KEYS` in `portal/policy.py`): an
+ * owner sets them on the org defaults, never per project. Largest allowed value:
+ * `MAX_AGENT_LIMIT` in `core/config.py`.
+ */
+export const MAX_AGENT_LIMIT = 10_000;
+export const DEFAULT_AGENT_GENERATIONS = 120;
+export const DEFAULT_AGENT_DESCRIPTIONS = 600;
+const AGENT_LIMIT_KEYS = {
+  rationale: ["agentGenerations", "agent_generations_per_hour"],
+  analyze: ["agentDescriptions", "agent_descriptions_per_hour"],
+} as const;
 
 const obj = (v: unknown): Record<string, unknown> =>
   v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
@@ -94,8 +111,12 @@ export function layerToValues(layer: ConfigDict): ConfigFormValues {
     githubToken: "",
     claudeToken: "",
     keys: Object.fromEntries(KEYED_PROVIDERS.map((p) => [p, ""])),
+    agentGenerations: limitText(obj(layer.rationale).agent_generations_per_hour),
+    agentDescriptions: limitText(obj(layer.analyze).agent_descriptions_per_hour),
   };
 }
+
+const limitText = (v: unknown): string => (typeof v === "number" ? String(v) : "");
 
 /** The `[scan].hooks` value for a set of checkboxes (`undefined` = the default, all on). */
 export function hooksToValue(hooks: Record<HookName, boolean>): boolean | string[] | undefined {
@@ -119,7 +140,7 @@ function prune(root: Record<string, unknown>, key: string) {
 export function valuesToLayer(
   base: ConfigDict,
   v: ConfigFormValues,
-  opts: { scan: boolean },
+  opts: { scan: boolean; limits?: boolean },
 ): ConfigDict {
   const layer = structuredClone(base) as Record<string, Record<string, unknown>>;
 
@@ -143,6 +164,14 @@ export function valuesToLayer(
     // that itself contains a slash (OpenRouter's) must not be re-split.
     setOrDrop(table, "provider", pick.provider);
     setOrDrop(table, "model", pick.model);
+    // The org-only limits are written by the org defaults form alone; a project
+    // layer is never given them (the server refuses them there).
+    if (opts.limits && (task === "rationale" || task === "analyze")) {
+      const [field, key] = AGENT_LIMIT_KEYS[task];
+      const typed = v[field].trim();
+      if (typed === "") delete table[key];
+      else table[key] = Number(typed);
+    }
     prune(layer, task);
   }
 
@@ -202,6 +231,14 @@ const pick = (chat = false) =>
       path: ["provider"],
     });
 
+const agentLimit = z.string().refine(
+  (s) => {
+    const t = s.trim();
+    return t === "" || (/^[0-9]{1,5}$/.test(t) && Number(t) <= MAX_AGENT_LIMIT);
+  },
+  `Enter a whole number from 0 to ${MAX_AGENT_LIMIT.toLocaleString("en-US")}, or leave it blank`,
+);
+
 export const configFormSchema = z.object({
   defaultModel: z
     .object({ provider: z.string(), model: modelText })
@@ -228,4 +265,6 @@ export const configFormSchema = z.object({
   githubToken: z.string(),
   claudeToken: z.string(),
   keys: z.record(z.string(), z.string()),
+  agentGenerations: agentLimit,
+  agentDescriptions: agentLimit,
 });

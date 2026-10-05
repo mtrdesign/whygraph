@@ -308,7 +308,7 @@ export type ProjectPortChange =
 export interface ProjectSummary {
   slug: string;
   name: string;
-  source: "local" | "github";
+  source: "local" | "github" | "platform";
   root: string;
   remote_url: string | null;
   initialized: boolean;
@@ -329,6 +329,24 @@ export interface ProjectSummary {
   // An imported repo's `owner/name` and the account the app is installed on.
   github_full_name: string | null;
   installation_account: string | null;
+  // A `platform` project's link to its platform project (local mode, M2e); absent otherwise.
+  link?: ProjectLink | null;
+}
+
+/** How a linked project's connection to its platform stands (plan section 4.11). */
+export type LinkStatus = "ok" | "access_lost" | "removed" | "revoked" | "unreachable" | "update_required";
+
+/** `_summary`'s `link` of a `platform` project. The three URLs are built by the server. */
+export interface ProjectLink {
+  platform_origin: string;
+  org: string;
+  remote_slug: string;
+  status: LinkStatus;
+  status_reason: string | null;
+  last_platform_head: string | null;
+  explorer_url: string;
+  chat_url: string;
+  manage_url: string;
 }
 
 export type AccessLostReason = "no_access" | "git_access_denied" | "repo_deleted" | "tracked_whygraph_state";
@@ -780,6 +798,87 @@ export const accountApi = {
   password: (body: { current: string; new: string }) =>
     send<unknown>("POST", "/account/password", body),
   orgs: () => get<OrgEntry[]>("/account/orgs"),
+};
+
+// ---- connected portals (portal/connect_routes.py, production only) ----------------
+
+/** The consent page's query: what a local portal sent in the address. */
+export interface ConnectRequest {
+  redirect_uri: string;
+  code_challenge: string;
+  code_challenge_method: string;
+  state: string;
+  client_name: string;
+  org?: string;
+  project?: string;
+}
+
+/** `POST /api/connect/validate`. Both URLs the page navigates to come from the server. */
+export interface ConnectValidated {
+  ok: true;
+  client_name: string;
+  port: number;
+  org: string | null;
+  project: string | null;
+  orgs: { slug: string; name: string; role: string }[];
+  cancel_url: string;
+}
+
+export interface ConnectProject {
+  org: string;
+  org_name: string;
+  slug: string;
+  name: string;
+  github_full_name: string | null;
+  access_lost: boolean;
+}
+
+/** Why a connection token was revoked (`REVOKED_REASONS` in `portal/models.py`). */
+export type RevokedReason =
+  | "user_revoked"
+  | "admin_revoked"
+  | "removed_locally"
+  | "member_removed"
+  | "member_left"
+  | "user_disabled"
+  | "project_deleted"
+  | "org_deleted"
+  | "idle";
+
+/** `GET /api/connect/tokens`: one of the caller's own connected portals. */
+export interface MyConnection {
+  uid: string;
+  org: string | null;
+  project: string | null;
+  project_name: string | null;
+  client_name: string;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  revoked_reason: RevokedReason | null;
+}
+
+/** `GET /api/projects/{slug}/connections`: a member's live token of that project. */
+export interface ProjectConnection {
+  uid: string;
+  user_login: string | null;
+  user_name: string | null;
+  client_name: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+export const connectApi = {
+  validate: (body: ConnectRequest) => send<ConnectValidated>("POST", "/connect/validate", body),
+  projects: () => get<ConnectProject[]>("/connect/projects"),
+  authorize: (body: ConnectRequest & { org: string; project: string }) =>
+    send<{ redirect: string; access_lost: boolean }>("POST", "/connect/authorize", body),
+  tokens: () => get<MyConnection[]>("/connect/tokens"),
+  revokeToken: (uid: string) => sendEmpty("DELETE", `/connect/tokens/${encodeURIComponent(uid)}`),
+  projectConnections: (slug: string) =>
+    get<ProjectConnection[]>(`/projects/${encodeURIComponent(slug)}/connections`),
+  revokeProjectConnection: (slug: string, uid: string) =>
+    sendEmpty("DELETE", `/projects/${encodeURIComponent(slug)}/connections/${encodeURIComponent(uid)}`),
 };
 
 export const orgsApi = {

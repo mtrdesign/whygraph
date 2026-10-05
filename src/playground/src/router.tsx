@@ -20,6 +20,7 @@ import { getLastProject, setLastProject } from "./lib/lastProject";
 import { ProjectProvider } from "./lib/project";
 import { canAdmin, isProduction, isSafeNext, signInUrl, usePortalState } from "./lib/identity";
 import { hardNavigate } from "./lib/navigation";
+import { safeLinkNext } from "./lib/linkNext";
 import { AppShell } from "./components/shell/AppShell";
 import { useGlobalShortcuts } from "./components/shell/shortcuts";
 import { CommandPalette } from "./components/CommandPalette";
@@ -34,6 +35,7 @@ import { GlobalSettingsPage } from "./pages/GlobalSettingsPage";
 import { MembersPage } from "./pages/MembersPage";
 import { ProjectSettingsPage } from "./pages/ProjectSettingsPage";
 import { ScansPage } from "./pages/ScansPage";
+import { ConnectPage, type ConnectSearch } from "./pages/ConnectPage";
 import { AccountPage } from "./pages/AccountPage";
 import { AdminPage } from "./pages/AdminPage";
 import { BootstrapPage } from "./pages/BootstrapPage";
@@ -57,7 +59,7 @@ import {
 // exist yet when `tsc --noEmit` runs ahead of `vite build`).
 //
 //   /setup                               first run (no shell); production: the bootstrap
-//   /signin /auth/github /auth/github-app /reset /orgs /orgs/new /admin /account
+//   /signin /auth/github /auth/github-app /reset /orgs /orgs/new /admin /account /connect
 //                                        production base host only (no AppShell)
 //   /                                    Projects              ┐ portal layout
 //   /projects/new                        add-project wizard    │ (sidebar: Projects,
@@ -164,8 +166,34 @@ const BASE_PATHS = new Set([
   "/orgs/new",
   "/admin",
   "/account",
+  "/connect",
 ]);
 const SIGNED_OUT_PATHS = new Set(["/signin", "/auth/github", "/reset"]);
+
+/** A redirect target that may carry a query (`/signin?next=...`) as TanStack's `to` + `search`. */
+function redirectTo(target: string) {
+  const url = new URL(target, "http://placeholder.invalid");
+  return { to: url.pathname, search: parseSearch(url.search), replace: true as const };
+}
+
+/**
+ * Where the local portal's first-run gate sends this request, or `null` to render.
+ * A `/link` request (a platform's "Open in my local WhyGraph") keeps its query:
+ * it rides `/setup?next=` and is resumed once setup is done (`safeLinkNext`).
+ */
+export function setupRedirect(
+  portal: PortalState,
+  location: { pathname: string; search?: string },
+): string | null {
+  const onSetup = location.pathname === "/setup";
+  if (!portal.setup_complete && !onSetup) {
+    return location.pathname === "/link"
+      ? `/setup?next=${encodeURIComponent(`/link${location.search ?? ""}`)}`
+      : "/setup";
+  }
+  if (portal.setup_complete && onSetup) return safeLinkNext(location.search) ?? "/";
+  return null;
+}
 
 /**
  * Where the base host sends this request instead of rendering it, or `null` to
@@ -173,11 +201,17 @@ const SIGNED_OUT_PATHS = new Set(["/signin", "/auth/github", "/reset"]);
  * route renders the "session not received" page there, which breaks the loop
  * org host (no cookie) -> sign-in -> picker -> org host.
  */
-export function baseHostRedirect(portal: PortalState, pathname: string): string | null {
+export function baseHostRedirect(portal: PortalState, pathname: string, href?: string): string | null {
   const path = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
   if (portal.bootstrap_required) return path === "/setup" ? null : "/setup";
   if (path === "/setup") return "/";
-  if (!portal.user) return SIGNED_OUT_PATHS.has(path) ? null : "/signin";
+  if (!portal.user) {
+    if (SIGNED_OUT_PATHS.has(path)) return null;
+    // A consent request keeps its whole query across sign-in: `next` is the full
+    // address, which the server accepts for the base host (`safe_redirect`).
+    if (path === "/connect" && href) return `/signin?next=${encodeURIComponent(href)}`;
+    return "/signin";
+  }
   if (path === "/") return "/orgs";
   if (!BASE_PATHS.has(path)) return "/";
   if (path === "/admin" && !portal.user.is_instance_admin) return "/orgs";
@@ -218,8 +252,9 @@ const rootRoute = createRootRouteWithContext<RouterContext>()({
     const kind = portal.mode === "production" ? portal.host_kind : undefined;
     setBaseUrl(!portal.error && kind && kind !== "local" ? (portal.base_url ?? null) : null);
     if (!portal.error && kind === "base") {
-      const to = baseHostRedirect(portal, location.pathname);
-      if (to) throw redirect({ to, replace: true });
+      const href = new URL(location.href, window.location.origin).href;
+      const to = baseHostRedirect(portal, location.pathname, href);
+      if (to) throw redirect(redirectTo(to));
     } else if (!portal.error && kind === "org" && portal.base_url) {
       const base = new URL(portal.base_url);
       if (!portal.user) {
@@ -230,9 +265,8 @@ const rootRoute = createRootRouteWithContext<RouterContext>()({
         await hardNavigate(`${base.origin}${location.pathname}${location.searchStr ?? ""}`);
       }
     } else if (!portal.error) {
-      const onSetup = location.pathname === "/setup";
-      if (!portal.setup_complete && !onSetup) throw redirect({ to: "/setup", replace: true });
-      if (portal.setup_complete && onSetup) throw redirect({ to: "/", replace: true });
+      const to = setupRedirect(portal, { pathname: location.pathname, search: location.searchStr });
+      if (to) throw redirect(redirectTo(to));
     }
     return { portal };
   },
@@ -246,7 +280,12 @@ function SetupRoute() {
   const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
   return portal.mode === "production" ? <BootstrapPage /> : <SetupPage />;
 }
-const setupRoute = createRoute({ getParentRoute: () => rootRoute, path: "/setup", component: SetupRoute });
+const setupRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/setup",
+  validateSearch: (search: Record<string, unknown>): { next?: string } => ({ next: text(search.next) }),
+  component: SetupRoute,
+});
 
 // ---- base-host pages (production; no AppShell) ----------------------------------
 
@@ -333,6 +372,22 @@ const orgsRoute = createRoute({
 const newOrgRoute = createRoute({ getParentRoute: () => baseLayout, path: "/orgs/new", component: CreateOrgPage });
 const adminRoute = createRoute({ getParentRoute: () => baseLayout, path: "/admin", component: AdminPage });
 const accountRoute = createRoute({ getParentRoute: () => baseLayout, path: "/account", component: AccountPage });
+// A local portal's consent request (M2e): signed-out visitors are sent to sign in
+// first, with this whole address as `next`.
+const connectRoute = createRoute({
+  getParentRoute: () => baseLayout,
+  path: "/connect",
+  validateSearch: (search: Record<string, unknown>): ConnectSearch => ({
+    redirect_uri: text(search.redirect_uri),
+    code_challenge: text(search.code_challenge),
+    code_challenge_method: text(search.code_challenge_method),
+    state: text(search.state),
+    client_name: text(search.client_name),
+    org: text(search.org),
+    project: text(search.project),
+  }),
+  component: ConnectPage,
+});
 
 // ---- portal layout ----------------------------------------------------------
 
@@ -531,6 +586,7 @@ const routeTree = rootRoute.addChildren([
     newOrgRoute,
     adminRoute,
     accountRoute,
+    connectRoute,
   ]),
   portalLayout.addChildren([projectsRoute, newProjectRoute, globalSettingsRoute, membersRoute]),
   projectRoute.addChildren([

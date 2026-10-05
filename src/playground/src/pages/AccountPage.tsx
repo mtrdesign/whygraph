@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ApiError, accountApi, portalKey } from "../api";
 import { UserAvatar } from "../components/auth/UserAvatar";
+import { MyConnectedPortals } from "../components/portal/ConnectedPortals";
 import { Field } from "../components/portal/Field";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
@@ -154,6 +155,8 @@ export function AccountPage() {
           </div>
         </form>
       )}
+
+      <MyConnectedPortals />
 
       <div>
         <Button variant="outline" onClick={() => void signOut()}>

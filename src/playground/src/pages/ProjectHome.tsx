@@ -9,6 +9,7 @@ import { timeAgo } from "../lib/projectStatus";
 import { useScanActions } from "../lib/scanActions";
 import { formatSeconds, runSeconds, triggerLabel } from "../lib/scanFormat";
 import { AccessLostNotice, UnsupportedSourceNotice } from "../components/portal/AccessLost";
+import { UseWithAgent } from "../components/portal/UseWithAgent";
 import { ConnectAgent } from "../components/portal/ConnectAgent";
 import { NotInitialized, ProblemAlert, ProjectUnavailable } from "../components/portal/EdgeStates";
 import { ProjectPortChangeNotice } from "../components/portal/PortChangeNotice";
@@ -63,7 +64,8 @@ export function ProjectHome() {
   });
   const { scanNow, scanPending } = useScanActions(slug);
   const readOnly = useReadOnly();
-  const production = isProduction(usePortalState().data);
+  const portal = usePortalState().data;
+  const production = isProduction(portal);
   const [dismissed, setDismissed] = useState(false);
 
   if (project.isLoading) {
@@ -229,6 +231,9 @@ export function ProjectHome() {
         </section>
       )}
 
+      {production && ready && !readOnly && portal?.org && portal.base_url && (
+        <UseWithAgent baseUrl={portal.base_url} org={portal.org.slug} slug={slug} />
+      )}
       {p.initialized && p.mcp_url && !production && <ConnectAgent mcpUrl={p.mcp_url} configured={p.agents} />}
     </div>
   );

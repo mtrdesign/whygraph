@@ -2,9 +2,10 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { portalApi, portalKey, projectApi, projectKey } from "../api";
-import { isProduction, usePortalState, useReadOnly } from "../lib/identity";
+import { canAdmin, isProduction, usePortalState, useReadOnly, useRole } from "../lib/identity";
 import { useSlug } from "../lib/project";
 import { ConfigForm } from "../components/portal/ConfigForm";
+import { ProjectConnectedPortals } from "../components/portal/ConnectedPortals";
 import { CopyButton } from "../components/portal/CopyButton";
 import { NotInitialized, ProjectUnavailable } from "../components/portal/EdgeStates";
 import { InitializeStep } from "../components/portal/InitializeStep";
@@ -25,6 +26,7 @@ const SECTIONS = [
 const PRODUCTION_SECTIONS = [
   { id: "general", label: "General" },
   { id: "config", label: "Models and keys" },
+  { id: "connections", label: "Connected portals" },
   { id: "danger", label: "Danger zone" },
 ] as const;
 
@@ -164,6 +166,8 @@ export function ProjectSettingsPage() {
   });
   const readOnly = useReadOnly();
   const production = isProduction(usePortalState().data);
+  // Connected portals: production only, for the owners and admins who may revoke them.
+  const showConnections = production && canAdmin(useRole());
   const [removing, setRemoving] = useState(false);
   const p = project.data;
   const scrollTo = (id: string) =>
@@ -172,7 +176,9 @@ export function ProjectSettingsPage() {
   return (
     <div className="mx-auto flex w-full max-w-5xl gap-8 p-6 sm:p-8">
       <nav aria-label="Settings sections" className="sticky top-6 mt-11 hidden h-fit w-44 shrink-0 flex-col gap-0.5 md:flex">
-        {(production ? PRODUCTION_SECTIONS : SECTIONS).map((s) => (
+        {(production ? PRODUCTION_SECTIONS : SECTIONS)
+          .filter((s) => s.id !== "connections" || showConnections)
+          .map((s) => (
           <button
             key={s.id}
             type="button"
@@ -194,6 +200,8 @@ export function ProjectSettingsPage() {
         <div id="settings-config" className="scroll-mt-4">
           <ConfigForm scope={{ kind: "project", slug }} submitLabel="Save settings" />
         </div>
+
+        {showConnections && <ProjectConnectedPortals slug={slug} />}
 
         {!production && (
           <Section

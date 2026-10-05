@@ -51,6 +51,7 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     PRODUCTION_ORG_ROUTES,
     PUBLIC_AUTH_ROUTES,
     ROUTE_ACTIONS,
+    V1_ROUTES,
     at,
     claim_instance,
     GitServer,
@@ -149,9 +150,17 @@ BASE_ONLY_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/admin/users", "GET"),
         ("/api/admin/users/{uid}", "PATCH"),
         ("/api/admin/users/{uid}/reset-link", "POST"),
+        # The consent page, the code exchange and the caller's connected
+        # portals (M2e section 4.4)
+        ("/api/connect/validate", "POST"),
+        ("/api/connect/projects", "GET"),
+        ("/api/connect/authorize", "POST"),
+        ("/api/connect/token", "POST"),
+        ("/api/connect/tokens", "GET"),
+        ("/api/connect/tokens/{uid}", "DELETE"),
     }
 )
-"""Credential, org-creation and admin routes: ``404`` on an org host."""
+"""Credential, org-creation, admin and consent routes: ``404`` on an org host."""
 
 ANY_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
@@ -160,9 +169,11 @@ ANY_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/account", "PATCH"),
         ("/api/account/password", "POST"),
         ("/api/account/orgs", "GET"),
+        ("/api/v1/meta", "GET"),  # public: a connected portal's version check
     }
 )
-"""Logout and the account routes: served on the base host and on org hosts."""
+"""Logout, the account routes and ``/api/v1/meta``: served on the base host
+and on org hosts."""
 
 ORG_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
@@ -175,20 +186,31 @@ ORG_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/github/app/authorize", "POST"),
         ("/api/github/installations", "GET"),
         ("/api/github/installations/{installation_id}/repos", "GET"),
+        ("/api/projects/{slug}/connections", "GET"),
+        ("/api/projects/{slug}/connections/{uid}", "DELETE"),
     }
 )
 """The members routes (M2d-1 section 4.5), the org's deletion (M2d-2 section
-4.8) and the GitHub App import page (M2d-2 section 4.4): org-scoped, so served on org hosts only, and swept with
-every other org-scoped route below."""
+4.8), the GitHub App import page (M2d-2 section 4.4) and a project's
+connected portals (M2e section 4.4): org-scoped, so served on org hosts only,
+and swept with every other org-scoped route below."""
 
-PRODUCTION_ONLY_ROUTES = PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES | PRODUCTION_ORG_ROUTES
+PRODUCTION_ONLY_ROUTES = (
+    PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES | PRODUCTION_ORG_ROUTES | V1_ROUTES
+)
 """Every route local mode does not serve: the ones that name no org (public
-auth, ``user.self``, ``instance.admin``) and the members routes."""
+auth, ``user.self``, ``instance.admin``), the members routes and the
+bearer-only ``/api/v1`` routes."""
 
 
 def test_every_production_only_route_is_classified_by_host() -> None:
-    """A new production-only route must be put on a host before the sweeps run."""
-    classes = (BASE_ONLY_ROUTES, ANY_HOST_ROUTES, ORG_HOST_ROUTES)
+    """A new production-only route must be put on a host before the sweeps run.
+
+    :data:`~test_portal_app.V1_ROUTES` is its own class: org host, but a
+    bearer token rather than a session, so none of this module's session
+    sweeps covers it (``test_portal_connect.py``'s bearer sweep does).
+    """
+    classes = (BASE_ONLY_ROUTES, ANY_HOST_ROUTES, ORG_HOST_ROUTES, V1_ROUTES)
     assert frozenset().union(*classes) == PRODUCTION_ONLY_ROUTES
     assert sum(len(c) for c in classes) == len(PRODUCTION_ONLY_ROUTES)  # disjoint
 

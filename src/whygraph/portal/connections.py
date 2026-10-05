@@ -30,6 +30,10 @@ from __future__ import annotations
 
 import re
 import secrets
+import threading
+import time
+from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -175,6 +179,131 @@ class TokenInfo:
     last_used_at: str | None
     revoked_at: str | None
     revoked_reason: str | None
+
+
+CODE_TTL_SEC = 60.0
+"""How long an authorization code from ``POST /api/connect/authorize`` works."""
+
+CODE_MAX = 10_000
+"""Most codes in flight; past it the oldest is evicted."""
+
+
+@dataclass(frozen=True)
+class PendingCode:
+    """What an authorization code was issued for, kept until its exchange.
+
+    Attributes
+    ----------
+    user_id, org_id, project_id : int
+        Who allowed the connection, and the one project it reaches.
+    redirect_uri : str
+        The exact ``redirect_uri`` of the consent (the exchange must repeat it
+        byte for byte).
+    code_challenge : str
+        The PKCE S256 challenge.
+    client_name : str
+        The connecting portal's name.
+    expires_at : float
+        Clock reading after which the code is dead.
+    """
+
+    user_id: int
+    org_id: int
+    project_id: int
+    redirect_uri: str
+    code_challenge: str
+    client_name: str
+    expires_at: float
+
+
+class PendingCodes:
+    """In-memory map of authorization codes in flight, keyed by the code's SHA-256.
+
+    A copy of :class:`whygraph.portal.github_auth.PendingLogins`: thread-safe,
+    entries live :data:`CODE_TTL_SEC` and are single use (:meth:`pop`), and
+    past :data:`CODE_MAX` entries the oldest is evicted. Only the hash of a
+    code is held, so a memory dump does not hand out live codes.
+
+    Parameters
+    ----------
+    clock : callable, optional
+        Returns seconds; injectable for tests (default ``time.monotonic``).
+    ttl : float
+        Entry lifetime in seconds.
+    max_entries : int
+        Capacity before the oldest entry is evicted.
+    """
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        ttl: float = CODE_TTL_SEC,
+        max_entries: int = CODE_MAX,
+    ) -> None:
+        self._clock = clock
+        self._ttl = ttl
+        self._max = max_entries
+        self._entries: OrderedDict[str, PendingCode] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def put(
+        self,
+        *,
+        user_id: int,
+        org_id: int,
+        project_id: int,
+        redirect_uri: str,
+        code_challenge: str,
+        client_name: str,
+    ) -> str:
+        """Issue a new code for a consent; return it (the raw code, once).
+
+        Returns
+        -------
+        str
+            ``secrets.token_urlsafe(32)``: 43 URL-safe characters.
+        """
+        code = secrets.token_urlsafe(32)
+        entry = PendingCode(
+            user_id=user_id,
+            org_id=org_id,
+            project_id=project_id,
+            redirect_uri=redirect_uri,
+            code_challenge=code_challenge,
+            client_name=client_name,
+            expires_at=self._clock() + self._ttl,
+        )
+        key = hash_token(code)
+        with self._lock:
+            self._entries.pop(key, None)
+            self._entries[key] = entry
+            while len(self._entries) > self._max:
+                self._entries.popitem(last=False)
+        return code
+
+    def pop(self, code: str) -> PendingCode | None:
+        """Take a code out of the map (single use), whatever happens next.
+
+        Parameters
+        ----------
+        code : str
+            The raw authorization code.
+
+        Returns
+        -------
+        PendingCode or None
+            The entry, or ``None`` when it is unknown, used or expired.
+        """
+        with self._lock:
+            entry = self._entries.pop(hash_token(code), None)
+        if entry is None or entry.expires_at <= self._clock():
+            return None
+        return entry
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
 
 
 def _now() -> datetime:
@@ -530,6 +659,8 @@ def sweep() -> tuple[int, int]:
 
 __all__ = [
     "CLIENT_NAME_RE",
+    "CODE_MAX",
+    "CODE_TTL_SEC",
     "IDLE",
     "INVALID",
     "PURGE_AFTER",
@@ -537,6 +668,8 @@ __all__ = [
     "TOKEN_RE",
     "TOUCH_EVERY",
     "UNUSED",
+    "PendingCode",
+    "PendingCodes",
     "Refusal",
     "TokenInfo",
     "TokenPrincipal",

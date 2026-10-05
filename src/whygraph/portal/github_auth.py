@@ -283,18 +283,20 @@ class PendingLogins:
 
 
 class AccessLogRedactor(logging.Filter):
-    """Blank the query of the GitHub callbacks in uvicorn's access log.
+    """Blank the query of the OAuth callbacks in uvicorn's access log.
 
     GitHub's redirects to ``/auth/github`` (sign-in) and
     ``/auth/github-app`` (the GitHub App's authorize and install, M2d-2)
-    carry the single-use ``code`` and the ``state`` in that query.
+    carry the single-use ``code`` and the ``state`` in that query; so do a
+    connected portal's consent page ``/connect`` (its PKCE ``state``) and
+    the local portal's ``/connect/callback`` (the platform's code, M2e).
     uvicorn's access records carry the request line as ``args[2]``; this
     filter rewrites ``/auth/github?...`` to ``/auth/github?<redacted>``
     (and the same for ``/auth/github-app``) and always lets the record
     through.
     """
 
-    PATHS = ("/auth/github", "/auth/github-app")
+    PATHS = ("/auth/github", "/auth/github-app", "/connect", "/connect/callback")
 
     def filter(self, record: logging.LogRecord) -> bool:
         """Redact the callback query in place; never drops a record."""

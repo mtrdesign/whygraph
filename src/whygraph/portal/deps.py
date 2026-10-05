@@ -441,6 +441,14 @@ class PortalState:
     v1_auth_ip : Throttle
         Failed ``/api/v1`` bearer lookups, per ``ip_key``: 30 / 10 min
         (M2e plan section 4.3); a valid token is never refused by it.
+    connect_codes : PendingCodes
+        The authorization codes of ``POST /api/connect/authorize`` in
+        flight, single use, 60 s (M2e plan section 4.4).
+    connect_user : Throttle
+        Every ``POST /api/connect/authorize`` attempt, per user id: 30 / hour.
+    connect_ip : Throttle
+        Failed ``POST /api/connect/token`` exchanges, per ``ip_key``:
+        60 / 10 min (a successful exchange is never counted).
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -483,6 +491,9 @@ class PortalState:
         self.user_tokens = UserTokens()
         self.webhook_deliveries = DeliveryIds()
         self.v1_auth_ip = Throttle(30, 10 * 60)
+        self.connect_codes = connections.PendingCodes()
+        self.connect_user = Throttle(30, 60 * 60)
+        self.connect_ip = Throttle(60, 10 * 60)
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0

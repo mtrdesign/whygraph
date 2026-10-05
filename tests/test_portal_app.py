@@ -1124,9 +1124,23 @@ PUBLIC_AUTH_ROUTES = {
     ("/api/auth/login", "POST"),
     ("/api/auth/logout", "POST"),
     ("/api/auth/reset", "POST"),
+    # A connected portal's version check and code exchange (M2e section 4.4)
+    ("/api/v1/meta", "GET"),
+    ("/api/connect/token", "POST"),
 }
-"""Production's public auth routes (M2c plan section 4.7, M2d-1 section 4.4):
-no session needed."""
+"""Production's public auth routes (M2c plan section 4.7, M2d-1 section 4.4,
+M2e section 4.4): no session needed."""
+
+V1_ROUTES = {
+    ("/api/v1/projects/{slug}/token", "DELETE"),
+}
+"""Production's bearer-only ``/api/v1`` project routes (M2e plan section 4.3):
+org host, a connection token instead of a session. They resolve
+:func:`~whygraph.portal.deps.v1_user`, never ``current_user``, so every
+**session** sweep leaves them out (this module's ``current_user`` check,
+``test_portal_tenancy._org_scoped_routes`` and the sweeps built on it - the
+local matrix, the hosts sweeps, ``READ_ROUTES``, the signed-out sweep); the
+bearer sweep in ``test_portal_connect.py`` covers them instead."""
 
 
 def test_every_api_route_resolves_current_user_except_state_and_setup(
@@ -1136,6 +1150,7 @@ def test_every_api_route_resolves_current_user_except_state_and_setup(
         ("/api/portal/state", "GET"),
         ("/api/portal/setup", "POST"),
         *PUBLIC_AUTH_ROUTES,
+        *V1_ROUTES,  # a bearer token (v1_user), never a session
     }
     routes = _api_routes(client.app)
     assert len(routes) > 30
@@ -1175,6 +1190,11 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/github/app/authorize", "POST"): "org.add_project",
     ("/api/github/installations", "GET"): "org.add_project",
     ("/api/github/installations/{installation_id}/repos", "GET"): "org.add_project",
+    # A project's connected portals: project_access(...) (M2e section 4.4)
+    (f"{_P}/connections", "GET"): _CONFIGURE,
+    (f"{_P}/connections/{{uid}}", "DELETE"): _CONFIGURE,
+    # A connected portal revokes its own token: v1_project_access(...)
+    ("/api/v1/projects/{slug}/token", "DELETE"): _READ,
     # Project management: project_access(...)
     (_P, "GET"): _READ,
     (f"{_P}/config", "GET"): _READ,
@@ -1219,6 +1239,12 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/orgs", "POST"): "user.self",
     # The GitHub App's callback, on the base host (M2d-2 section 4.4)
     ("/api/github/app/callback", "POST"): "user.self",
+    # The consent page and the caller's connected portals (M2e section 4.4)
+    ("/api/connect/validate", "POST"): "user.self",
+    ("/api/connect/projects", "GET"): "user.self",
+    ("/api/connect/authorize", "POST"): "user.self",
+    ("/api/connect/tokens", "GET"): "user.self",
+    ("/api/connect/tokens/{uid}", "DELETE"): "user.self",
     # Production's admin page: instance_access()
     ("/api/admin/settings", "GET"): "instance.admin",
     ("/api/admin/orgs", "GET"): "instance.admin",
@@ -1321,12 +1347,17 @@ PRODUCTION_ORG_ROUTES = {
     ("/api/github/app/authorize", "POST"),
     ("/api/github/installations", "GET"),
     ("/api/github/installations/{installation_id}/repos", "GET"),
+    ("/api/projects/{slug}/connections", "GET"),
+    ("/api/projects/{slug}/connections/{uid}", "DELETE"),
 }
 """Org-scoped routes that exist only in production: the members page, the
-org's deletion and the GitHub App import page (``require_production`` before
-the org dependency, M2d-1 plan section 0.2 #19)."""
+org's deletion, the GitHub App import page and a project's connected portals
+(``require_production`` before the org dependency, M2d-1 plan section 0.2
+#19)."""
 
-PRODUCTION_ONLY_ROUTES = PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES | PRODUCTION_ORG_ROUTES
+PRODUCTION_ONLY_ROUTES = (
+    PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES | PRODUCTION_ORG_ROUTES | V1_ROUTES
+)
 """Routes that answer ``404`` in local mode (M2c plan section 4.7)."""
 
 

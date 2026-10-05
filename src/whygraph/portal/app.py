@@ -80,6 +80,7 @@ from whygraph.serve.routes import router as data_router
 from . import connections
 from . import db as portal_db
 from .auth_routes import auth_router
+from .connect_routes import connect_router
 from .authz import Action
 from .deps import (
     ApiError,
@@ -239,6 +240,7 @@ def create_portal_app(
     app.include_router(members_router)  # production-only, org-scoped
     app.include_router(org_router)  # production-only: DELETE /api/org (M2d-2)
     app.include_router(github_app_router)  # production-only (M2d-2)
+    app.include_router(connect_router)  # production-only: consent, exchange (M2e)
     app.include_router(portal_router)
     app.include_router(projects_router)
     app.include_router(

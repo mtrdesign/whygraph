@@ -80,6 +80,7 @@ from . import connections, sessions
 from .db import InstanceLock, get_session
 from .github_app import UserTokens
 from .hosts import BaseUrl, classify
+from .linked import LinkRefresh
 from .migrate import ProjectMigrations
 from .models import Membership, Organization, Project, User
 from .orgs import is_valid_org_slug
@@ -475,6 +476,9 @@ class PortalState:
         Replaces the network of every
         :class:`~whygraph.portal.platform_client.PlatformHttp` the platform
         routes build (tests plug a fake platform in); ``None`` in a real run.
+    link_refresh : LinkRefresh
+        The link statuses ``GET /api/projects`` asked to have refreshed; the
+        lifespan's status task drains it (M2e plan section 4.11).
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -529,6 +533,7 @@ class PortalState:
         self.pending_connects = PendingConnects()
         self.pending_links = PendingLinks()
         self.platform_transport: Any = None
+        self.link_refresh = LinkRefresh()
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0
@@ -995,7 +1000,7 @@ def project_access(
 
 
 def project_db_access(
-    action: Action,
+    action: Action, *, guard: Callable[[BoundProject], None] | None = None
 ) -> Callable[..., AsyncIterator[BoundProject]]:
     """:func:`project_access` plus the initialized gate and the migration.
 
@@ -1006,6 +1011,13 @@ def project_db_access(
     ----------
     action : Action
         The route's action (also stored as ``whygraph_action``).
+    guard : callable, optional
+        One more refusal, run with the bound project **before** the
+        initialized gate - so it answers for a project that has no local
+        database at all. The Explorer and Chat mounts pass
+        :func:`whygraph.portal.routes.linked_guard` here, because a linked
+        project's Explorer and Chat live on its platform (M2e plan
+        section 4.11).
 
     Returns
     -------
@@ -1021,6 +1033,8 @@ def project_db_access(
         state = portal_state(request)
         project = await bind_project(state, access, slug, action)
         with use_project(project.ctx):
+            if guard is not None:
+                guard(project)
             await require_initialized(state, project)
             yield project
 

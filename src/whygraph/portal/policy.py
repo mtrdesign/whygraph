@@ -24,7 +24,9 @@ has an allowlist (plan section 4.2.1):
   :data:`ORG_ONLY_KEYS`, which 1a (hence 1b) leaves out.
 
 In production a project ``PUT`` uses :data:`PRODUCTION_PUT_ALLOWLIST`
-(:func:`put_allowlist`). Beside the config allowlists,
+(:func:`put_allowlist`), and a *linked* project's
+:data:`LINKED_PUT_ALLOWLIST` (M2e): everything but ``[scan].hooks`` is
+managed on its platform. Beside the config allowlists,
 :func:`allowed_sources` is the one place that says which project sources a
 mode accepts.
 
@@ -130,6 +132,14 @@ PRODUCTION_PUT_ALLOWLIST: Spec = {**PUT_ALLOWLIST, "scan": {"forge": True}}
 """Rule 1b in production: ``[scan].remote``, ``default_branch`` and ``hooks``
 are fixed for a GitHub App project (M2d-2 plan section 0.2 #21); only the PR
 crawl switch ``[scan].forge`` stays writable."""
+
+LINKED_PUT_ALLOWLIST: Spec = {"scan": {"hooks": True}}
+"""What a *linked* project's ``PUT .../config`` may store (M2e plan section 4.11).
+
+A project linked to a WhyGraph platform is configured there: the whole
+config route is refused (``403 managed_on_platform``) except ``[scan].hooks``,
+which is a property of this checkout - which local git hooks keep its
+CodeGraph index fresh - and so stays writable here."""
 
 
 def put_allowlist(mode: str | None) -> Spec:
@@ -406,6 +416,7 @@ __all__ = [
     "CONNECTION_KEYS",
     "DEFAULTS_ALLOWLIST",
     "IMPORT_ALLOWLIST",
+    "LINKED_PUT_ALLOWLIST",
     "ImportPreview",
     "ORG_ONLY_KEYS",
     "PROVIDER_TABLES",

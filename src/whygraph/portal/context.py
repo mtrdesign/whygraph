@@ -166,6 +166,8 @@ def _linked_remote(
         platform_origin=row.platform_origin,
         status=row.status,
         reason=row.status_reason,
+        # So every call persists what it learned about the link (M2e 4.11).
+        project_id=project.id,
     )
 
 

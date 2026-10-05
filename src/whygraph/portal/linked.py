@@ -15,9 +15,20 @@ Two things live here rather than in :mod:`whygraph.mcp` on purpose:
   status through :func:`~whygraph.portal.platform_client.link_status_for`
   (the table of plan section 4.11). The mapping is recorded on the
   instance (:attr:`LinkedProject.status`, :attr:`LinkedProject.reason`),
-  which is what a tool result's ``platform`` block reports; persisting it
-  to the ``platform_links`` row, and refreshing it on a timer, is step 9's
-  job and deliberately not done here.
+  which is what a tool result's ``platform`` block reports, and - when the
+  instance knows its ``project_id`` - persisted to the ``platform_links``
+  row by :func:`save_status`, which writes only when the status, the
+  platform's name for the project or its head actually changed.
+
+Nothing of the platform's *content* is stored: the row carries the link's
+bookkeeping (status, reason, the project's name and its last scanned head)
+and nothing else, which is what keeps "no shared data on the laptop"
+structural.
+
+Beside the per-call update, :func:`refresh_links` probes every link
+(one ``meta`` per distinct platform, then each link's status) - the portal
+runs it once at start and then for whatever ``GET /api/projects`` put in
+the :class:`LinkRefresh` queue, so a listing never waits on a platform.
 
 Request bodies are built with :mod:`whygraph.api_v1`, so the privacy and
 size rules the platform enforces are checked **before** anything leaves
@@ -28,9 +39,13 @@ rather than sent.
 from __future__ import annotations
 
 import logging
+import threading
+from datetime import datetime, timezone
 from typing import Any, Callable, Sequence, TypeVar
 
+from cryptography.fernet import InvalidToken
 from pydantic import ValidationError
+from sqlmodel import Session, select
 
 from whygraph.api_v1 import (
     MAX_HUNKS,
@@ -40,18 +55,22 @@ from whygraph.api_v1 import (
     HunkIn,
     OriginIn,
     RationaleIn,
+    StatusOut,
     TargetIn,
 )
 from whygraph.core.remote import RemoteError, RemoteNotFound
 from whygraph.mcp.targets import Target
 from whygraph.services.git import BlameHunk
 
+from .db import get_session
+from .models import PlatformLink, Project
 from .platform_client import (
     PlatformError,
     PlatformHttp,
     PlatformRefused,
     link_status_for,
 )
+from .secrets import decrypt
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +78,14 @@ _T = TypeVar("_T")
 
 NOT_FOUND_CODE = "not_found"
 """The platform's code for an object it does not hold."""
+
+REFRESH_AFTER_SEC = 300
+"""How old a link's recorded status may be before ``GET /api/projects``
+schedules a refresh of it (plan section 4.11); the listing itself never waits."""
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _target_in(target: Target) -> TargetIn:
@@ -113,6 +140,11 @@ class LinkedProject:
         The link's last known status (:data:`~whygraph.core.remote.LINK_STATUSES`).
     reason : str or None, optional
         Its last known reason.
+    project_id : int or None, optional
+        The **local** ``projects.id``. When it is set, every call persists
+        what it learned to the project's ``platform_links`` row
+        (:func:`save_status`); ``None`` keeps the instance in memory only
+        (the tests that drive the tool bodies without a portal database).
 
     Attributes
     ----------
@@ -133,6 +165,7 @@ class LinkedProject:
         platform_origin: str,
         status: str = "ok",
         reason: str | None = None,
+        project_id: int | None = None,
     ) -> None:
         self._client = client
         self.slug = slug
@@ -140,6 +173,7 @@ class LinkedProject:
         self.platform_origin = platform_origin
         self.status = status
         self.reason = reason
+        self.project_id = project_id
 
     @property
     def url(self) -> str:
@@ -155,16 +189,31 @@ class LinkedProject:
     # -- plumbing -----------------------------------------------------------
 
     def _guard(self, call: Callable[[], _T]) -> _T:
-        """Run one platform call, recording what it says about the link."""
+        """Run one platform call, recording what it says about the link.
+
+        The mapping lands on the instance (what a tool result's ``platform``
+        block reports) and, when :attr:`project_id` is set, in the project's
+        ``platform_links`` row - so the Projects page shows what the agent's
+        last call saw without a status loop (plan section 4.11).
+        """
         try:
             value = call()
         except PlatformError as exc:
             status, reason = link_status_for(exc)
-            self.status, self.reason = status, reason
+            self._record(status, reason, None)
             raise self._error(exc, status, reason) from exc
-        status, reason = link_status_for(self._client.last_project)
-        self.status, self.reason = status, reason
+        project = self._client.last_project
+        status, reason = link_status_for(project)
+        self._record(status, reason, project)
         return value
+
+    def _record(
+        self, status: str, reason: str | None, project: StatusOut | None
+    ) -> None:
+        """Keep ``(status, reason)`` on the instance and in the link row."""
+        self.status, self.reason = status, reason
+        if self.project_id is not None:
+            save_status(self.project_id, status, reason, project)
 
     def _error(
         self, exc: PlatformError, status: str, reason: str | None
@@ -349,4 +398,355 @@ def status_of(outcome: Any) -> tuple[str, str | None]:
     return link_status_for(outcome)
 
 
-__all__ = ["NOT_FOUND_CODE", "LinkedProject", "status_of"]
+# ---------------------------------------------------------------------------
+# The link row: status, the card's URLs, and the refresh
+# ---------------------------------------------------------------------------
+
+
+def link_block(row: PlatformLink) -> dict[str, Any]:
+    """The ``link`` block of a linked project's summary (plan section 4.11).
+
+    Parameters
+    ----------
+    row : PlatformLink
+        The project's link row (detached from its session is fine - only
+        its columns are read).
+
+    Returns
+    -------
+    dict
+        ``platform_origin``, ``org``, ``remote_slug``, ``status``,
+        ``status_reason``, ``last_platform_head`` and the three deep links
+        into the platform's SPA: ``manage_url`` (the project's home),
+        ``explorer_url`` and ``chat_url``. All three live on the org host,
+        because that is where the project is.
+    """
+    home = f"{row.api_origin}/p/{row.remote_slug}"
+    return {
+        "platform_origin": row.platform_origin,
+        "org": row.org_slug,
+        "remote_slug": row.remote_slug,
+        "status": row.status,
+        "status_reason": row.status_reason,
+        "last_platform_head": row.last_platform_head,
+        "explorer_url": f"{home}/explorer",
+        "chat_url": f"{home}/chat",
+        "manage_url": home,
+    }
+
+
+def save_status(
+    project_id: int,
+    status: str,
+    reason: str | None,
+    project: StatusOut | None = None,
+) -> bool:
+    """Record what a platform answer says about one link (plan section 4.11).
+
+    The row is written **only** when the status, the platform's name for
+    the project or its last scanned head changed, so an agent's steady
+    stream of MCP calls does not write on every tool call. A rename on the
+    platform renames the local project too: a linked project's name follows
+    the platform's.
+
+    A ``status`` of ``ok`` stores no ``status_reason``: a per-request code
+    (``not_found`` for an unknown commit, ``generation_limited``) is an
+    answer about that one request, not a fact about the link.
+
+    Parameters
+    ----------
+    project_id : int
+        The local ``projects.id``.
+    status : str
+        One of :data:`~whygraph.core.remote.LINK_STATUSES`.
+    reason : str or None
+        The platform's reason, when it gave one.
+    project : StatusOut or None, optional
+        The ``project`` block the answer carried, for the name and the head.
+
+    Returns
+    -------
+    bool
+        Whether anything was written.
+    """
+    reason = None if status == "ok" else reason
+    with get_session() as session:
+        row = session.get(PlatformLink, project_id)
+        if row is None:  # the project was removed while a call was in flight
+            return False
+        changed = False
+        if (row.status, row.status_reason) != (status, reason):
+            row.status, row.status_reason = status, reason
+            row.status_at = _now()
+            changed = True
+        if project is not None:
+            if project.name and row.remote_name != project.name:
+                row.remote_name = project.name
+                local = session.get(Project, project_id)
+                if local is not None and local.name != project.name:
+                    local.name = project.name
+                    session.add(local)
+                changed = True
+            if row.last_platform_head != project.last_scanned_head:
+                row.last_platform_head = project.last_scanned_head
+                changed = True
+        if changed:
+            session.add(row)
+        return changed
+
+
+def touch_status(project_id: int) -> None:
+    """Mark a link's status as just checked, without changing it.
+
+    Keeps a link that is already ``ok`` (or already ``unreachable``) out of
+    the next listing's refresh queue, which :func:`save_status` alone would
+    not do: it writes nothing when nothing changed.
+    """
+    with get_session() as session:
+        row = session.get(PlatformLink, project_id)
+        if row is not None:
+            row.status_at = _now()
+            session.add(row)
+
+
+def due_for_refresh(
+    session: Session, org_id: int | None = None, *, after_sec: int = REFRESH_AFTER_SEC
+) -> list[int]:
+    """The project ids of the links whose recorded status is stale.
+
+    Parameters
+    ----------
+    session : Session
+        An open portal DB session.
+    org_id : int or None, optional
+        Only the links of this organization's projects; every link when
+        ``None``.
+    after_sec : int, optional
+        How old a status may be (default :data:`REFRESH_AFTER_SEC`).
+
+    Returns
+    -------
+    list[int]
+        Sorted ``projects.id`` values; a row whose ``status_at`` cannot be
+        parsed counts as stale.
+    """
+    statement = select(PlatformLink.project_id, PlatformLink.status_at)
+    if org_id is not None:
+        statement = statement.join(
+            Project,
+            Project.id == PlatformLink.project_id,  # type: ignore[arg-type]
+        ).where(Project.org_id == org_id)
+    cutoff = datetime.now(timezone.utc).timestamp() - after_sec
+    due: list[int] = []
+    for project_id, status_at in session.exec(statement).all():
+        try:
+            seen = datetime.fromisoformat(status_at).timestamp()
+        except (TypeError, ValueError):
+            seen = 0.0
+        if seen <= cutoff:
+            due.append(project_id)
+    return sorted(due)
+
+
+class LinkRefresh:
+    """The link statuses a listing asked to have refreshed (plan section 4.11).
+
+    ``GET /api/projects`` serves each link's **recorded** status and calls
+    :meth:`schedule` for the stale ones; the portal's lifespan task drains
+    the queue with :func:`refresh_links`. So the listing never waits on a
+    platform, and there is no status poll loop - the queue stays empty
+    unless someone looked at the Projects page.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._due: set[int] = set()
+
+    def schedule(self, project_id: int) -> None:
+        """Ask for ``project_id``'s link to be refreshed."""
+        with self._lock:
+            self._due.add(project_id)
+
+    def take(self) -> list[int]:
+        """Return and clear what is queued (sorted)."""
+        with self._lock:
+            due, self._due = sorted(self._due), set()
+        return due
+
+    def pending(self) -> list[int]:
+        """What is queued, without clearing it (tests, logs)."""
+        with self._lock:
+            return sorted(self._due)
+
+
+def refresh_links(
+    *, project_ids: Sequence[int] | None = None, transport: Any = None
+) -> int:
+    """Probe each linked project's platform and record what it says.
+
+    One ``GET /api/v1/meta`` per distinct ``platform_origin`` (the version
+    check, no credentials), then one ``GET /api/v1/projects/{slug}`` per
+    link. A platform whose ``meta`` fails decides its links' status without
+    a second request: ``update_required`` for an incompatible version,
+    ``unreachable`` otherwise.
+
+    Blocking: the portal runs it on a worker thread. It never raises - a
+    link that cannot be probed is recorded, not propagated.
+
+    Parameters
+    ----------
+    project_ids : Sequence[int] or None, optional
+        Only these projects' links; every link when ``None``.
+    transport : httpx.BaseTransport, optional
+        Replaces the network (tests plug a fake platform in).
+
+    Returns
+    -------
+    int
+        How many links were probed.
+    """
+    with get_session() as session:
+        rows = list(session.exec(_rows_statement(project_ids)).all())
+        for row in rows:
+            session.expunge(row)
+    if not rows:
+        return 0
+    verdicts = {
+        origin: _meta_verdict(origin, transport)
+        for origin in sorted({row.platform_origin for row in rows})
+    }
+    for row in rows:
+        verdict = verdicts[row.platform_origin]
+        if verdict is None:
+            _refresh_one(row, transport)
+        else:
+            save_status(row.project_id, *verdict)
+            touch_status(row.project_id)
+    return len(rows)
+
+
+def revoke_token(row: PlatformLink, *, transport: Any = None) -> str | None:
+    """Give up a connection token on its platform, best effort.
+
+    ``DELETE /api/v1/projects/{slug}/token``, so the token this machine
+    holds stops working even when the row that holds it is about to be
+    deleted or replaced here. Used by "Remove from this machine" and by a
+    reconnect, which revokes the token it supersedes (plan section 4.11).
+
+    Parameters
+    ----------
+    row : PlatformLink
+        The link whose token to revoke (detached from its session is fine).
+    transport : httpx.BaseTransport, optional
+        Replaces the network (tests plug a fake platform in).
+
+    Returns
+    -------
+    str or None
+        ``None`` when the platform confirmed it, else why it could not be
+        done - a message for the user, free of the token.
+    """
+    try:
+        token: str | None = decrypt(row.token_ciphertext)
+    except InvalidToken:
+        return "this portal can no longer read the token it held"
+    try:
+        client = PlatformHttp(
+            platform_origin=row.platform_origin,
+            api_origin=row.api_origin,
+            token=token,
+            transport=transport,
+        )
+    except ValueError as exc:
+        return str(exc)
+    try:
+        client.revoke(row.remote_slug)
+    except PlatformError as exc:
+        return str(exc)
+    except Exception as exc:  # noqa: BLE001 -- a removal must still finish
+        # Only the kind of failure: an unexpected exception's message has
+        # not been through the client's redaction.
+        logger.exception("revoking the token of project %s failed", row.project_id)
+        return f"the platform could not be reached ({type(exc).__name__})"
+    finally:
+        client.close()
+    return None
+
+
+def _rows_statement(project_ids: Sequence[int] | None):
+    """The ``select`` of the link rows to refresh."""
+    statement = select(PlatformLink)
+    if project_ids is None:
+        return statement
+    return statement.where(
+        PlatformLink.project_id.in_(tuple(project_ids))  # type: ignore[attr-defined]
+    )
+
+
+def _meta_verdict(
+    platform_origin: str, transport: Any
+) -> tuple[str, str | None] | None:
+    """``None`` when the platform's ``meta`` is fine, else its links' status."""
+    try:
+        client = PlatformHttp(platform_origin=platform_origin, transport=transport)
+    except ValueError:
+        # A stored origin the current settings no longer accept (an `http`
+        # platform without the development switch): nothing can be asked.
+        return "unreachable", None
+    try:
+        client.meta()
+    except PlatformError as exc:
+        return link_status_for(exc)
+    except Exception:  # noqa: BLE001 -- a probe must never take the portal down
+        logger.exception("the meta probe of %s failed", platform_origin)
+        return "unreachable", None
+    finally:
+        client.close()
+    return None
+
+
+def _refresh_one(row: PlatformLink, transport: Any) -> None:
+    """Ask one platform for one project's status and record the answer."""
+    try:
+        token: str | None = decrypt(row.token_ciphertext)
+    except InvalidToken:
+        token = None
+    try:
+        client = PlatformHttp(
+            platform_origin=row.platform_origin,
+            api_origin=row.api_origin,
+            token=token,
+            transport=transport,
+        )
+    except ValueError:
+        save_status(row.project_id, "unreachable", None)
+        touch_status(row.project_id)
+        return
+    try:
+        project = client.status(row.remote_slug)
+    except PlatformError as exc:
+        save_status(row.project_id, *link_status_for(exc))
+    except Exception:  # noqa: BLE001 -- a probe must never take the portal down
+        logger.exception("the status probe of project %s failed", row.project_id)
+        save_status(row.project_id, "unreachable", None)
+    else:
+        status, reason = link_status_for(project)
+        save_status(row.project_id, status, reason, project)
+    finally:
+        client.close()
+    touch_status(row.project_id)
+
+
+__all__ = [
+    "NOT_FOUND_CODE",
+    "REFRESH_AFTER_SEC",
+    "LinkRefresh",
+    "LinkedProject",
+    "due_for_refresh",
+    "link_block",
+    "refresh_links",
+    "revoke_token",
+    "save_status",
+    "status_of",
+    "touch_status",
+]

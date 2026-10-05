@@ -58,6 +58,7 @@ import logging
 import os
 import secrets
 from contextlib import AsyncExitStack, asynccontextmanager
+from functools import partial
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -100,6 +101,7 @@ from .hosts import (
     parse_trusted_proxies,
     self_check,
 )
+from .linked import refresh_links
 from .mcp_mount import McpDispatcher, build_session_manager
 from .member_routes import members_router
 from .migrate import MIGRATION_LOCK
@@ -109,7 +111,7 @@ from .orgs import ensure_builtin_org
 from .platform_routes import platform_router
 from .port_change import reconcile_port
 from .repos import SHARED_FOLDERS_ENV, parse_shared_folders
-from .routes import portal_router, projects_router, public_router
+from .routes import linked_guard, portal_router, projects_router, public_router
 from .runner import ScanRunner
 from .security import (
     DEV_ORIGINS_ENV,
@@ -131,6 +133,12 @@ SUPPORTED_MODES: tuple[str, ...] = ("local", "production")
 
 CONNECTION_SWEEP_EVERY_SEC = 60 * 60
 """How often production sweeps expired connection tokens (also once at start)."""
+
+LINK_REFRESH_POLL_SEC = 2.0
+"""How often local mode drains the link-status refresh queue
+(:class:`~whygraph.portal.linked.LinkRefresh`). There is no status *loop*: the
+pass at start is the only unprompted one, and the queue stays empty unless a
+``GET /api/projects`` found a stale link (M2e plan section 4.11)."""
 
 _ALL_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
 
@@ -247,15 +255,27 @@ def create_portal_app(
     app.include_router(portal_router)
     app.include_router(projects_router)
     app.include_router(platform_router)  # local-only: connect and link (M2e)
+    # A linked project's Explorer and Chat live on its platform (M2e plan
+    # section 4.11, decision 0.1 #5): the mount refuses before the
+    # initialized gate, which would otherwise ask for a database the
+    # project deliberately does not have.
     app.include_router(
         data_router,
         prefix="/api/projects/{slug}",
-        dependencies=[Depends(project_db_access(Action.PROJECT_READ))],
+        dependencies=[
+            Depends(
+                project_db_access(
+                    Action.PROJECT_READ, guard=linked_guard("the Explorer")
+                )
+            )
+        ],
     )
     app.include_router(
         chat_router,
         prefix="/api/projects/{slug}/chat",
-        dependencies=[Depends(project_db_access(Action.PROJECT_CHAT))],
+        dependencies=[
+            Depends(project_db_access(Action.PROJECT_CHAT, guard=linked_guard("Chat")))
+        ],
     )
     app.add_route("/mcp/{slug}", McpDispatcher(state), include_in_schema=False)
 
@@ -304,7 +324,8 @@ async def _serving(state: PortalState) -> AsyncIterator[None]:
     """Serve one lifespan; what runs depends on the mode (plan section 4.2).
 
     Local mode: shared folders, the loopback origins, the port reconcile,
-    the MCP session manager and the runner. Production: the base URL's
+    the MCP session manager, the runner and the linked projects' status
+    refresh (:func:`_refresh_link_statuses`). Production: the base URL's
     origins, no shared folders, no port reconcile, no MCP manager, the
     runner and the DNS self-check. Degraded (no stored mode): the origins
     the environment asks for, so a degraded production portal still shows
@@ -346,6 +367,8 @@ async def _serving(state: PortalState) -> AsyncIterator[None]:
             watcher.start_soon(_check_base_url, state)
             if not state.degraded:
                 watcher.start_soon(_sweep_connections)
+        elif state.mode == "local" and not state.degraded:
+            watcher.start_soon(_refresh_link_statuses, state)
         set_strict(True)
         state.origins = origins
         try:
@@ -398,6 +421,39 @@ async def _sweep_connections() -> None:
                     "connection token sweep: %d expired, %d deleted", revoked, deleted
                 )
         await anyio.sleep(CONNECTION_SWEEP_EVERY_SEC)
+
+
+async def _refresh_link_statuses(state: PortalState) -> None:
+    """Refresh linked projects' statuses: once at start, then on request.
+
+    Local mode only (M2e plan section 4.11). The start-up pass probes every
+    link - one ``meta`` per platform, then each project's status - so the
+    Projects page is truthful about a token revoked or a project deleted
+    while the portal was down. Afterwards the task only drains what
+    ``GET /api/projects`` queued in ``state.link_refresh``: there is no
+    status loop, because every MCP call already updates the link it uses.
+
+    Never fatal, and never blocking: the work runs on a worker thread with
+    ``abandon_on_cancel``, so a platform that does not answer cannot delay
+    the portal's shutdown.
+    """
+    due: list[int] | None = None  # `None` is the start-up pass: every link.
+    while True:
+        try:
+            await anyio.to_thread.run_sync(
+                partial(
+                    refresh_links,
+                    project_ids=due,
+                    transport=state.platform_transport,
+                ),
+                abandon_on_cancel=True,
+            )
+        except Exception:  # noqa: BLE001 -- the refresher must survive
+            _log.exception("refreshing the linked projects' statuses failed")
+        due = []
+        while not due:
+            await anyio.sleep(LINK_REFRESH_POLL_SEC)
+            due = state.link_refresh.take()
 
 
 async def _watch_instance_lock(state: PortalState) -> None:

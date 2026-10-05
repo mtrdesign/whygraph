@@ -383,6 +383,15 @@ def test_linked_hooks_toggle_resyncs(
         assert response.status_code == 200, response.text
         assert response.json()["hooks"]["installed"] == ["post-commit"]
         assert managed_hook_names(root) == ("post-commit",)
+        # And it is the *only* key this portal still sets: everything else
+        # about a linked project is configured on the platform (step 9).
+        refused = client.put(
+            "/api/projects/lnk/config",
+            json={"config": {"scan": {"hooks": True, "forge": "github"}}},
+        )
+        assert refused.status_code == 403, refused.text
+        assert refused.json()["code"] == "managed_on_platform"
+        assert managed_hook_names(root) == ("post-commit",)
 
 
 def test_catch_up_includes_linked(

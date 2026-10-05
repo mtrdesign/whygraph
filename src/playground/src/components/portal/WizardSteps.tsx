@@ -15,13 +15,24 @@ const STEPS: { id: WizardStep; label: string }[] = [
 /**
  * The add wizard's stepper (§4.12.1: import is a full-page flow, not a modal).
  * With a `slug`, earlier steps link back to their own page - each step is also
- * reachable on its own at `/p/<slug>/init?step=...`.
+ * reachable on its own at `/p/<slug>/init?step=...`. In production there is no
+ * Initialize step: the import already did it, and there are no agent files or
+ * hooks to write on a server copy.
  */
-export function WizardSteps({ current, slug }: { current: WizardStep; slug?: string }) {
-  const at = STEPS.findIndex((s) => s.id === current);
+export function WizardSteps({
+  current,
+  slug,
+  production = false,
+}: {
+  current: WizardStep;
+  slug?: string;
+  production?: boolean;
+}) {
+  const steps = production ? STEPS.filter((s) => s.id !== "initialize") : STEPS;
+  const at = steps.findIndex((s) => s.id === current);
   return (
     <ol aria-label="Steps" className="flex items-center gap-2 text-[13px]">
-      {STEPS.map((step, i) => {
+      {steps.map((step, i) => {
         const state = i < at ? "done" : i === at ? "current" : "todo";
         const badge = (
           <span

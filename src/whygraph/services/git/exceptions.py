@@ -7,7 +7,9 @@ class GitError(RuntimeError):
 
 
 class InvalidRepoUrlError(GitError):
-    """Raised when a clone URL is not a plain ``https://github.com/<owner>/<repo>``.
+    """Raised when a clone URL is not a plain ``<GitHub URL>/<owner>/<repo>``.
+
+    Also raised when ``WHYGRAPH_GITHUB_URL`` itself is not a usable git host.
 
     A distinct subclass so a caller (the portal's add-project endpoint) can
     report a bad URL separately from a failed ``git`` run.

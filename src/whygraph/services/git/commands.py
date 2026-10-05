@@ -17,7 +17,7 @@ from whygraph.core import ShellCommand
 
 from .blame import BlameHunk
 from .commit import Commit
-from .credentials import GITHUB_GIT_CONFIG, TOKEN_ENV_VAR
+from .credentials import TOKEN_ENV_VAR, TOKEN_FILE_ENV, github_git_config
 from .file_change import FileChange
 
 GitRevParseCmd = ShellCommand(
@@ -153,6 +153,28 @@ class GitRefExistsCmd(ShellCommand[bool]):
 
     def parse(self, result: CompletedProcess[str]) -> bool:
         return result.returncode == 0
+
+
+class GitLsTreeNamesCmd(ShellCommand[tuple[str, ...]]):
+    """``git ls-tree -r --name-only <ref> -- <path>...`` - the files ``ref`` tracks there.
+
+    Parameters
+    ----------
+    ref : str
+        The commit-ish to read (``HEAD``, ``origin/main``).
+    paths : Sequence[str]
+        The paths (directories or files) to list under.
+    """
+
+    def __init__(self, ref: str, paths: Sequence[str]) -> None:
+        self.ref = ref
+        self.paths = tuple(paths)
+
+    def argv(self) -> list[str]:
+        return ["git", "ls-tree", "-r", "--name-only", self.ref, "--", *self.paths]
+
+    def parse(self, result: CompletedProcess[str]) -> tuple[str, ...]:
+        return tuple(line for line in result.stdout.splitlines() if line)
 
 
 class GitRevListShasCmd(ShellCommand[frozenset[str]]):
@@ -351,12 +373,14 @@ class GitFetchRefsCmd(ShellCommand[None]):
     the command is run for its effect (objects + refs land in the local
     object store), not its stdout.
 
-    When :data:`~.credentials.TOKEN_ENV_VAR` is set in this process (a
-    portal scan of a GitHub clone), the argv carries
-    :data:`~.credentials.GITHUB_GIT_CONFIG` like :class:`GitFetchDefaultCmd`,
+    When :data:`~.credentials.TOKEN_ENV_VAR` or
+    :data:`~.credentials.TOKEN_FILE_ENV` is set in this process (a portal
+    scan of a GitHub clone), the argv carries
+    :func:`~.credentials.github_git_config` like :class:`GitFetchDefaultCmd`,
     so a private clone's PR refs are fetched with the token (read from the
-    environment by the helper, never argv). Without it, a local repo's
-    remote keeps its own transport and credentials.
+    environment by the helper, never argv; :meth:`Repository.fetch_refs`
+    puts a token file's current value there). Without either, a local
+    repo's remote keeps its own transport and credentials.
 
     Parameters
     ----------
@@ -375,7 +399,8 @@ class GitFetchRefsCmd(ShellCommand[None]):
     def argv(self) -> list[str]:
         # `--` ends options: a remote read from config is never a flag
         # (`--upload-pack=<cmd>` would run a command).
-        config = GITHUB_GIT_CONFIG if os.environ.get(TOKEN_ENV_VAR) else ()
+        portal = os.environ.get(TOKEN_ENV_VAR) or os.environ.get(TOKEN_FILE_ENV)
+        config = github_git_config() if portal else ()
         return [
             "git",
             *config,
@@ -393,10 +418,11 @@ class GitFetchRefsCmd(ShellCommand[None]):
 class GitCloneCmd(ShellCommand[None]):
     """``git clone -- <url> <dest>`` with https-only transport and a host-scoped helper.
 
-    The argv carries :data:`~.credentials.GITHUB_GIT_CONFIG`: every other
+    The argv carries :func:`~.credentials.github_git_config`: every other
     protocol is refused (``file://``, ``ext::``, ``ssh``), inherited
     credential helpers are reset, and the one inline helper answers only
-    for ``github.com`` over https. The token is read from the child
+    for the configured GitHub host (``github.com`` over https by default).
+    The token is read from the child
     environment, never argv. The command does not validate ``url`` -
     :meth:`Repository.clone` does, before building it.
 
@@ -413,7 +439,7 @@ class GitCloneCmd(ShellCommand[None]):
         self.dest = dest
 
     def argv(self) -> list[str]:
-        return ["git", *GITHUB_GIT_CONFIG, "clone", "--", self.url, str(self.dest)]
+        return ["git", *github_git_config(), "clone", "--", self.url, str(self.dest)]
 
     def parse(self, result: CompletedProcess[str]) -> None:
         return None
@@ -436,10 +462,186 @@ class GitFetchDefaultCmd(ShellCommand[None]):
         self.remote = remote
 
     def argv(self) -> list[str]:
-        return ["git", *GITHUB_GIT_CONFIG, "fetch", "--no-tags", "--", self.remote]
+        return ["git", *github_git_config(), "fetch", "--no-tags", "--", self.remote]
 
     def parse(self, result: CompletedProcess[str]) -> None:
         return None
+
+
+class GitLsRemoteBranchCmd(ShellCommand[str | None]):
+    """``git ls-remote -- <remote> refs/heads/<branch>`` - a remote branch's commit.
+
+    One small request, no objects fetched: the portal's reconcile compares
+    it with the last scanned commit. Same credential and protocol
+    arguments as :class:`GitCloneCmd`.
+
+    Parameters
+    ----------
+    branch : str
+        The branch's short name (never starting with ``-``; the caller checks).
+    remote : str, optional
+        Remote to ask. Default ``"origin"``.
+    """
+
+    def __init__(self, branch: str, remote: str = "origin") -> None:
+        self.branch = branch
+        self.remote = remote
+
+    def argv(self) -> list[str]:
+        return [
+            "git",
+            *github_git_config(),
+            "ls-remote",
+            "--",
+            self.remote,
+            f"refs/heads/{self.branch}",
+        ]
+
+    def parse(self, result: CompletedProcess[str]) -> str | None:
+        # A pattern matches a ref's tail; keep only the exact ref.
+        wanted = f"refs/heads/{self.branch}"
+        for line in result.stdout.splitlines():
+            sha, _, ref = line.partition("\t")
+            if ref.strip() == wanted and sha.strip():
+                return sha.strip()
+        return None
+
+
+class GitSetRemoteUrlCmd(ShellCommand[None]):
+    """``git remote set-url -- <remote> <url>`` - point a remote somewhere else.
+
+    Purely local. ``--`` ends options, so neither value is ever read as a
+    flag. The command does not validate ``url`` -
+    :meth:`Repository.set_remote_url` does, before building it.
+
+    Parameters
+    ----------
+    remote : str
+        The remote to change.
+    url : str
+        The already-validated URL.
+    """
+
+    def __init__(self, remote: str, url: str) -> None:
+        self.remote = remote
+        self.url = url
+
+    def argv(self) -> list[str]:
+        return ["git", "remote", "set-url", "--", self.remote, self.url]
+
+    def parse(self, result: CompletedProcess[str]) -> None:
+        return None
+
+
+class GitSetRemoteHeadCmd(ShellCommand[None]):
+    """``git remote set-head -- <remote> <branch>`` - record the remote's default branch.
+
+    Purely local: writes ``refs/remotes/<remote>/HEAD``, which
+    :attr:`Repository.default_branch_refs` resolves first.
+
+    Parameters
+    ----------
+    remote : str
+        The remote.
+    branch : str
+        The branch ``refs/remotes/<remote>/HEAD`` should point at.
+    """
+
+    def __init__(self, remote: str, branch: str) -> None:
+        self.remote = remote
+        self.branch = branch
+
+    def argv(self) -> list[str]:
+        return ["git", "remote", "set-head", "--", self.remote, self.branch]
+
+    def parse(self, result: CompletedProcess[str]) -> None:
+        return None
+
+
+class GitResolveCommitCmd(ShellCommand[str | None]):
+    """``git rev-parse --verify --quiet <ref>^{commit}`` - the commit ``ref`` names.
+
+    Must be run with ``check=False``: an unknown ``ref`` collapses to
+    ``None``.
+
+    Parameters
+    ----------
+    ref : str
+        A full ref, e.g. ``"refs/remotes/origin/main"``.
+    """
+
+    def __init__(self, ref: str) -> None:
+        self.ref = ref
+
+    def argv(self) -> list[str]:
+        return ["git", "rev-parse", "--verify", "--quiet", f"{self.ref}^{{commit}}"]
+
+    def parse(self, result: CompletedProcess[str]) -> str | None:
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
+
+
+class GitCheckoutResetCmd(ShellCommand[None]):
+    """``git -c core.hooksPath=/dev/null checkout -q -B <branch> <commit> --``.
+
+    Creates or resets ``branch`` to ``commit`` and checks it out, with git
+    hooks disabled - purely local. Unlike ``merge --ff-only`` it follows a
+    force-pushed history. Git still refuses to overwrite an untracked file
+    in the way, which is what keeps a commit from replacing the portal's
+    untracked ``.whygraph/`` / ``.codegraph/`` state. The trailing ``--``
+    keeps ``commit`` from being read as a path.
+
+    Parameters
+    ----------
+    branch : str
+        The local branch name (never starting with ``-``; the caller checks).
+    commit : str
+        The commit to reset it to (a full SHA).
+    """
+
+    def __init__(self, branch: str, commit: str) -> None:
+        self.branch = branch
+        self.commit = commit
+
+    def argv(self) -> list[str]:
+        return [
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "checkout",
+            "-q",
+            "-B",
+            self.branch,
+            self.commit,
+            "--",
+        ]
+
+    def parse(self, result: CompletedProcess[str]) -> None:
+        return None
+
+
+class GitIsAncestorCmd(ShellCommand[bool | None]):
+    """``git merge-base --is-ancestor <old> <new>`` - is ``old`` in ``new``'s history?
+
+    Must be run with ``check=False``: exit ``0`` is ``True``, ``1`` is
+    ``False``, anything else (an unknown commit) is ``None``.
+
+    Parameters
+    ----------
+    old, new : str
+        Two commits.
+    """
+
+    def __init__(self, old: str, new: str) -> None:
+        self.old = old
+        self.new = new
+
+    def argv(self) -> list[str]:
+        return ["git", "merge-base", "--is-ancestor", self.old, self.new]
+
+    def parse(self, result: CompletedProcess[str]) -> bool | None:
+        return {0: True, 1: False}.get(result.returncode)
 
 
 GitHeadShaCmd = ShellCommand(

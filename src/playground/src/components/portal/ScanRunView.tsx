@@ -315,7 +315,7 @@ export function ScanRunView({ slug, runId }: { slug: string; runId: number }) {
   const live = useScanRun(slug, runId);
   const status: ScanRunStatus | null = live.finished ?? row?.status ?? null;
   const active = status === "queued" || status === "running" || (status === null && !live.failure);
-  const { scanNow, syncNow, scanPending, syncPending, followUp } = useScanActions(slug, {
+  const { scanNow, scanPending, followUp } = useScanActions(slug, {
     id: runId,
     active,
   });
@@ -386,11 +386,6 @@ export function ScanRunView({ slug, runId }: { slug: string; runId: number }) {
           <div className="flex gap-2">
             {(status === "queued" || status === "running") && (
               <CancelRunButton slug={slug} runId={runId} status={status} kind={kind} />
-            )}
-            {kind === "sync" && (
-              <Button variant="outline" onClick={syncNow} disabled={syncPending}>
-                Sync again
-              </Button>
             )}
             <Button variant={active ? "outline" : "default"} onClick={() => scanNow()} disabled={scanPending}>
               {active ? "Scan now" : "Scan again"}

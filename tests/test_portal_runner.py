@@ -48,6 +48,7 @@ from test_portal_mcp import _free_port
 from whygraph.cli.commands.portal import GRACEFUL_SHUTDOWN_SEC
 from whygraph.core.config import Config
 from whygraph.core.context import use_project
+from whygraph.db import ensure_initialized
 from whygraph.db import get_session as project_session
 from whygraph.db.models import Commit
 from whygraph.portal import db as portal_db
@@ -70,6 +71,7 @@ from whygraph.portal.runner import (
     TRIGGER_PRECEDENCE,
     RunnerUnavailable,
     ScanRunner,
+    SourceNotAllowed,
     _event_line,
     _insert_run,
     _Pending,
@@ -82,8 +84,9 @@ from whygraph.portal.runner import (
     resolve_analyze,
     scan_argv,
     scan_flags,
+    sweep_token_files,
+    write_token_file,
 )
-from whygraph.services.git import Repository
 
 FAKE_SCAN = Path(__file__).parent / "fixtures" / "fake_scan.py"
 TERMINAL = ("ok", "failed", "interrupted", "cancelled")
@@ -196,32 +199,25 @@ def local_project(client: TestClient, env: SimpleNamespace, name: str) -> Path:
     return root
 
 
-def github_project(
-    client: TestClient, env: SimpleNamespace, name: str
-) -> tuple[Path, Path]:
-    """A "GitHub clone" under ``<data>/repos`` whose origin is a local upstream."""
-    upstream = make_repo(env.tmp / "upstream", name)
-    dest = env.data / "repos" / name
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["git", "clone", "-q", str(upstream), str(dest)],
-        check=True,
-        capture_output=True,
-    )
+def legacy_github_project(env: SimpleNamespace, name: str) -> int:
+    """A local-mode GitHub clone of an earlier build, initialized; its id."""
+    dest = make_repo(env.data / "repos", name)
     seed_codegraph(dest)
+    with use_project(manual_ctx(dest, slug=name)):
+        ensure_initialized()
     with portal_db.get_session() as session:
-        session.add(
-            Project(
-                org_id=builtin_org_id(session),
-                slug=name,
-                name=name,
-                source="github",
-                root=f"repos/{name}",
-                remote_url=f"https://github.com/acme/{name}",
-            )
+        project = Project(
+            org_id=builtin_org_id(session),
+            slug=name,
+            name=name,
+            source="github",
+            root=f"repos/{name}",
+            remote_url=f"https://github.com/acme/{name}",
+            initialized_at="2026-10-01T00:00:00+00:00",
         )
-    assert init_project(client, name)["initialized"] is True
-    return upstream, dest
+        session.add(project)
+        session.flush()
+        return project.id
 
 
 def commit(root: Path, text: str) -> str:
@@ -236,26 +232,6 @@ def first_scan(client: TestClient, slug: str) -> dict:
     run = wait_run(client, slug, scan(client, slug))
     assert run["status"] == "ok" and run["trigger"] == "initial"
     return run
-
-
-@pytest.fixture
-def plain_fetch(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
-    """Replace the https-only GitHub fetch with a plain ``git fetch`` of a local origin."""
-    gate = SimpleNamespace(hold=None, calls=0)
-
-    def fetch_default(self: Repository, *, env=None, timeout=900) -> None:
-        gate.calls += 1
-        while gate.hold is not None and gate.hold.exists():
-            time.sleep(0.02)
-        subprocess.run(
-            ["git", "fetch", "-q", "origin"],
-            cwd=self.root,
-            check=True,
-            capture_output=True,
-        )
-
-    monkeypatch.setattr(Repository, "fetch_default", fetch_default)
-    return gate
 
 
 # ---------------------------------------------------------------------------
@@ -310,6 +286,8 @@ def test_trigger_precedence() -> None:
     assert TRIGGER_PRECEDENCE == (
         "hook",
         "poll",
+        "reconcile",
+        "push",
         "sync",
         "initial",
         "manual",
@@ -320,6 +298,9 @@ def test_trigger_precedence() -> None:
     assert merge_trigger("describe", "manual") == "describe"
     assert merge_trigger("poll", "sync") == "sync"
     assert merge_trigger("initial", "sync") == "initial"
+    assert merge_trigger("push", "reconcile") == "push"
+    assert merge_trigger("reconcile", "poll") == "reconcile"
+    assert merge_trigger("push", "sync") == "sync"
 
 
 def test_child_env_allowlist_and_injected_secrets(tmp_path: Path) -> None:
@@ -359,12 +340,41 @@ def test_child_env_allowlist_and_injected_secrets(tmp_path: Path) -> None:
     assert "WHYGRAPH_GIT_TOKEN" not in env
     assert sorted(secrets) == ["ghp_project", "sk-proj"]
 
+    assert "GIT_CONFIG_GLOBAL" not in env and "GIT_CONFIG_NOSYSTEM" not in env
+
+    # A GitHub (production) project: no personal access token at all - not
+    # for gh, not for git - and git reads no global or system config.
     structure_only, secrets = child_env(
-        config, layer, source="github", analyze=False, environ=portal_env
+        config,
+        layer,
+        source="github",
+        analyze=False,
+        environ={**portal_env, "WHYGRAPH_GITHUB_URL": "http://127.0.0.1:9999"},
     )
     assert "ANTHROPIC_API_KEY" not in structure_only
-    assert structure_only["WHYGRAPH_GIT_TOKEN"] == "ghp_project"
-    assert secrets == ["ghp_project"]
+    assert "GH_TOKEN" not in structure_only
+    assert "WHYGRAPH_GIT_TOKEN" not in structure_only
+    assert structure_only["GIT_CONFIG_GLOBAL"] == os.devnull
+    assert structure_only["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert structure_only["WHYGRAPH_GITHUB_URL"] == "http://127.0.0.1:9999"
+    assert secrets == []
+    no_url, _ = child_env(
+        config, layer, source="github", analyze=False, environ=portal_env
+    )
+    assert "WHYGRAPH_GITHUB_URL" not in no_url
+    # Production: the token file's path, never a token value.
+    token_file = tmp_path / "runs" / "7.token"
+    with_file, secrets = child_env(
+        config,
+        layer,
+        source="github",
+        analyze=False,
+        environ=portal_env,
+        token_file=token_file,
+    )
+    assert with_file["WHYGRAPH_GITHUB_TOKEN_FILE"] == str(token_file)
+    assert "GH_TOKEN" not in with_file and "WHYGRAPH_GIT_TOKEN" not in with_file
+    assert secrets == []
 
     bare, secrets = child_env(
         Config.from_dict({}, tmp_path),
@@ -382,6 +392,66 @@ def test_redactor_replaces_secrets_with_hints() -> None:
     out = redact("token ghp_abcdefgh1234 and key sk-zzzz9876 end")
     assert "ghp_abcdefgh1234" not in out and "sk-zzzz9876" not in out
     assert out.count("1234") == 1 and out.count("9876") == 1
+
+
+def test_redactor_matches_a_partly_masked_token_it_never_injected() -> None:
+    """Spike #7: ``gh auth status`` prints most of an installation token."""
+    minted = "ghs_1227_eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJJdjEifQ.c2lnbmF0dXJl"
+    shown = minted[:-14] + "*" * 14
+    redact = redactor(["sk-zzzz9876"])
+    out = redact(f"Logged in (GH_TOKEN) token: {shown} and sk-zzzz9876")
+    assert minted[:16] not in out and "*" * 14 not in out
+    assert out == "Logged in (GH_TOKEN) token: ghs_*** and …9876"
+    assert redactor([])(json.dumps({"line": shown})) == '{"line": "ghs_***"}'
+
+
+def test_the_redactor_learns_new_values() -> None:
+    redact = redactor(["sk-zzzz9876"])
+    first, second = "ghs_" + "a" * 36 + "1111", "ghs_" + "b" * 36 + "2222"
+    redact.learn(first)
+    redact.learn(second, "")
+    out = redact(f"{first} {second} sk-zzzz9876")
+    assert out == "…1111 …2222 …9876"
+
+
+def test_token_file_is_0600_and_never_read_torn(tmp_path: Path) -> None:
+    path = tmp_path / "runs" / "3.token"
+    path.parent.mkdir()
+    values = ["ghs_" + c * 4000 for c in "abcdef"]
+    write_token_file(path, values[0])
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.read_text() == values[0]
+
+    stop = threading.Event()
+    seen: set[str] = set()
+
+    def reader() -> None:
+        while not stop.is_set():
+            seen.add(path.read_text())
+
+    thread = threading.Thread(target=reader)
+    thread.start()
+    try:
+        for i in range(300):
+            write_token_file(path, values[i % len(values)])
+    finally:
+        stop.set()
+        thread.join()
+    assert seen <= set(values) and len(seen) > 1
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert sorted(p.name for p in path.parent.iterdir()) == ["3.token"]
+
+
+def test_leftover_token_files_are_swept_at_start(
+    env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    runs_dir = env.data / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("4.token", "5.token.0a1b2c.tmp", "4.log", "4.jsonl"):
+        (runs_dir / name).write_text("x")
+    assert sweep_token_files(env.tmp) == 0  # nothing there
+    with client_for():
+        assert sorted(p.name for p in runs_dir.iterdir()) == ["4.jsonl", "4.log"]
 
 
 def test_estimate_arithmetic() -> None:
@@ -508,9 +578,12 @@ def test_hook_scans_are_refused_outside_local_mode(
         "error": "hook scans exist only in local mode",
         "code": "hook_local_only",
     }
-    wait_run(portal, "demo", scan(portal, "demo", trigger="manual"))
-    assert len(scanner.calls()) == 1  # only the manual scan ran
+    # (and production holds no local folder at all: the source policy)
+    manual = portal.post("/api/projects/demo/scans", json={"trigger": "manual"})
+    assert manual.status_code == 409 and manual.json()["code"] == "source_not_allowed"
+    assert scanner.calls() == []
     portal.app.state.portal.mode = "local"
+    first_scan(portal, "demo")
     run = wait_run(portal, "demo", scan(portal, "demo", trigger="hook"))
     assert run["trigger"] == "hook"
 
@@ -649,6 +722,29 @@ def test_injected_secrets_never_reach_run_files(
             assert f"value=…{secret[-4:]}" in text
         for line in jsonl.splitlines():
             json.loads(line)  # the jsonl stays pure JSON lines
+
+
+def test_a_partly_masked_token_never_reaches_run_files(
+    portal: TestClient,
+    env: SimpleNamespace,
+    scanner: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pattern catches what exact-value redaction cannot (spike #7)."""
+    local_project(portal, env, "demo")
+    first_scan(portal, "demo")
+    minted = "ghs_1227_eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJJdjEifQ.c2lnbmF0dXJl"
+    # LC_* passes the allowlist, so the child sees (and prints) it.
+    monkeypatch.setenv("LC_WHYGRAPH_PROBE", minted[:-14] + "*" * 14)
+    scanner.configure(echo_env="LC_WHYGRAPH_PROBE")
+    run = wait_run(portal, "demo", scan(portal, "demo", trigger="hook"))
+    jsonl = (env.data / "runs" / f"{run['id']}.jsonl").read_text()
+    log = (env.data / "runs" / f"{run['id']}.log").read_text()
+    for text in (jsonl, log):
+        assert minted[:16] not in text and "**********" not in text
+        assert "value=ghs_***" in text
+    for line in jsonl.splitlines():
+        json.loads(line)
 
 
 def test_events_sse_replays_then_follows(
@@ -812,42 +908,6 @@ def test_restart_interrupts_running_and_requeues_queued(
     assert [runner_flags(c)[3:] for c in scanner.calls()] == [[]]
 
 
-def test_restart_keeps_a_scan_merged_into_a_first_sync(
-    env: SimpleNamespace, scanner: SimpleNamespace, plain_fetch: SimpleNamespace
-) -> None:
-    """Fix pass 2: a never-scanned clone's queued sync (trigger ``initial``)
-    that a scan was merged into still scans after a restart, HEAD unmoved."""
-    plain_fetch.hold = env.tmp / "fetch-hold"
-    plain_fetch.hold.touch()
-    with client_for() as client:
-        client.post("/api/portal/setup", json={"display_name": "Tess"})
-        github_project(client, env, "gh")
-        running = client.post("/api/projects/gh/sync").json()["run_id"]
-        wait_for(lambda: plain_fetch.calls == 1)
-        queued = client.post("/api/projects/gh/sync").json()["run_id"]
-        assert scan(client, "gh") == queued  # the scan merges into the sync
-        row = run_by_id(client, "gh", queued)
-        assert (row["kind"], row["trigger"], row["status"]) == (
-            "sync",
-            "initial",
-            "queued",
-        )
-    plain_fetch.hold.unlink()  # let the abandoned first sync thread finish
-
-    def _first_sync_ended() -> bool:
-        with portal_db.get_session() as session:
-            return session.get(ScanRun, running).status != "running"
-
-    wait_for(_first_sync_ended)
-    assert scanner.calls() == []
-
-    with client_for() as client:
-        run = wait_run(client, "gh", queued)
-        assert run["status"] == "ok"
-        assert run["summary"]["moved"] is False
-        assert len(scanner.calls()) == 1  # the merged scan ran
-
-
 def test_recover_queued_reads_the_persisted_scan_flag(
     env: SimpleNamespace, scanner: SimpleNamespace
 ) -> None:
@@ -941,42 +1001,43 @@ def test_scan_request_refused_while_a_removal_runs(
         assert session.exec(select(ScanRun)).all() == []
 
 
-def test_sync_holds_the_slot_while_a_scan_waits(
-    portal: TestClient,
-    env: SimpleNamespace,
-    scanner: SimpleNamespace,
-    plain_fetch: SimpleNamespace,
+def test_removing_a_project_deletes_its_run_files(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
 ) -> None:
-    upstream, clone = github_project(portal, env, "gh")
-    first_scan(portal, "gh")
-    new_head = commit(upstream, "moved upstream\n")
+    """``runs/<id>.jsonl``, ``.log`` and ``.token`` go with the row (M2d-2 section 0.2 #17)."""
+    local_project(portal, env, "demo")
+    local_project(portal, env, "other")
+    run_id = scan(portal, "demo")
+    other_id = scan(portal, "other")
+    wait_idle(portal, "demo")
+    wait_idle(portal, "other")
+    runs_dir = env.data / "runs"
+    (runs_dir / f"{run_id}.token").write_text("left over")
+    mine = [runs_dir / f"{run_id}{ext}" for ext in (".jsonl", ".log", ".token")]
+    others = [runs_dir / f"{other_id}{ext}" for ext in (".jsonl", ".log")]
+    assert all(p.is_file() for p in mine + others)
 
-    plain_fetch.hold = env.tmp / "fetch-hold"
-    plain_fetch.hold.touch()
-    sync_id = portal.post("/api/projects/gh/sync").json()["run_id"]
-    wait_for(lambda: plain_fetch.calls == 1)
-    scan_id = scan(portal, "gh", trigger="manual")
-    assert scan_id != sync_id
-    time.sleep(0.3)
-    assert run_by_id(portal, "gh", sync_id)["status"] == "running"
-    assert run_by_id(portal, "gh", scan_id)["status"] == "queued"
-    assert len(scanner.calls()) == 1  # only the first scan so far
+    response = portal.delete("/api/projects/demo")
+    assert response.status_code == 200, response.text
+    assert not any(p.exists() for p in mine)
+    assert all(p.is_file() for p in others)
 
-    plain_fetch.hold.unlink()
-    sync = wait_run(portal, "gh", sync_id)
-    assert (sync["kind"], sync["trigger"], sync["status"]) == ("sync", "sync", "ok")
-    assert sync["summary"]["moved"] is True
-    assert wait_run(portal, "gh", scan_id)["status"] == "ok"
-    assert _git(clone, "rev-parse", "HEAD").strip() == new_head
-    calls = scanner.calls()
-    assert len(calls) == 3  # the sync's own follow-up scan, then the manual one
-    assert runner_flags(calls[1])[3:] == ["--skip-analyze"]
-    assert runner_flags(calls[2])[3:] == []
 
-    # A sync that does not move HEAD does not scan.
-    run = wait_run(portal, "gh", portal.post("/api/projects/gh/sync").json()["run_id"])
-    assert run["status"] == "ok" and run["summary"]["moved"] is False
-    assert len(scanner.calls()) == 3
+def test_run_files_outside_the_runs_dir_are_never_deleted(
+    env: SimpleNamespace,
+) -> None:
+    outside = env.tmp / "precious.log"
+    outside.write_text("keep")
+    (env.data / "runs").mkdir(parents=True, exist_ok=True)
+    escape = env.data / "runs" / "link"
+    escape.symlink_to(env.tmp, target_is_directory=True)
+    runs = [
+        (1, "../precious.log", "runs/../../precious.log"),
+        (2, "runs/link/precious.log", None),
+        (3, str(outside), None),
+    ]
+    assert runner_mod.remove_run_files(env.data, runs) == 0
+    assert outside.read_text() == "keep"
 
 
 class FakeClock:
@@ -996,32 +1057,21 @@ class FakeClock:
         self.gate.set()
 
 
-def test_poll_tick_syncs_github_clones_only_and_catches_up(
-    env: SimpleNamespace, scanner: SimpleNamespace, plain_fetch: SimpleNamespace
+def test_poll_loop_runs_the_catch_up(
+    env: SimpleNamespace, scanner: SimpleNamespace
 ) -> None:
     clock = FakeClock()
     with client_for(ScanRunner(sleep=clock.sleep)) as client:
         client.post("/api/portal/setup", json={"display_name": "Tess"})
         local = local_project(client, env, "loc")
-        github_project(client, env, "gh")
         first_scan(client, "loc")
-        first_scan(client, "gh")
         assert clock.requested == [900]
 
-        clock.advance()  # tick 1: HEADs match, so only the GitHub poll
-        wait_for(lambda: len(runs(client, "gh")) == 2)
-        wait_idle(client, "gh")
-        poll = runs(client, "gh")[0]
-        assert (poll["kind"], poll["trigger"], poll["requested_by"]) == (
-            "sync",
-            "poll",
-            None,
-        )
-        assert poll["summary"]["moved"] is False
+        clock.advance()  # tick 1: HEAD matches, so nothing is queued
+        wait_for(lambda: len(clock.requested) == 2)
         assert len(runs(client, "loc")) == 1
 
         commit(local, "a commit the hook never reported\n")
-        wait_for(lambda: len(clock.requested) == 2)
         clock.advance()  # tick 2: the local HEAD moved -> one catch-up hook scan
         wait_for(lambda: len(runs(client, "loc")) == 2)
         catch_up = wait_idle(client, "loc")[0]
@@ -1030,8 +1080,52 @@ def test_poll_tick_syncs_github_clones_only_and_catches_up(
             "--skip-analyze",
             "--no-remote",
         ]
-        assert len(runs(client, "gh")) == 3  # the second poll
-        assert client.get("/api/projects").json()["projects"][1]["stale"] is None
+        assert client.get("/api/projects").json()["projects"][0]["stale"] is None
+
+
+def test_a_local_github_row_is_refused_on_every_request_path(
+    env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    """Routes and internal callers alike (M2d-2 section 0.2 #16)."""
+    runner = ScanRunner(sleep=FakeClock().sleep)
+    with client_for(runner) as client:
+        client.post("/api/portal/setup", json={"display_name": "Tess"})
+        project_id = legacy_github_project(env, "gh")
+        refused = client.post("/api/projects/gh/scans")
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["code"] == "source_not_allowed"
+
+        async def internal() -> None:
+            await runner._request(
+                project_id,
+                kind="sync",
+                trigger="poll",
+                analyze=False,
+                requested_by=None,
+                scan_requested=False,
+            )
+
+        with pytest.raises(SourceNotAllowed, match="no longer supported"):
+            client.portal.call(internal)
+        client.portal.call(runner.catch_up)  # skips it, no error
+    with portal_db.get_session() as session:
+        assert session.exec(select(ScanRun.id)).all() == []
+    assert scanner.calls() == []
+
+
+def test_a_queued_run_of_a_local_github_row_fails_without_scanning(
+    env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    """A run an older build queued is requeued at start, then refused."""
+    with client_for() as client:
+        client.post("/api/portal/setup", json={"display_name": "Tess"})
+    project_id = legacy_github_project(env, "gh")
+    run_id = _insert_run(project_id, "sync", "poll", False, None)
+    with client_for(ScanRunner(sleep=FakeClock().sleep)):
+        row = _wait_row(run_id)
+    assert row.status == "failed"
+    assert "no longer supported" in json.loads(row.summary)["error"]
+    assert scanner.calls() == []
 
 
 def test_catch_up_on_start_only_when_head_moved(
@@ -1353,28 +1447,6 @@ def test_runner_refuses_a_symlinked_db_instead_of_scanning(
     assert [e["type"] for e in events] == ["error"]
     log = (env.data / "runs" / f"{queued}.log").read_text()
     assert "refusing to scan" in log
-
-
-def test_runner_refuses_a_symlinked_db_instead_of_syncing(
-    portal: TestClient,
-    env: SimpleNamespace,
-    scanner: SimpleNamespace,
-    plain_fetch: SimpleNamespace,
-) -> None:
-    _, clone = github_project(portal, env, "gh")
-    first_scan(portal, "gh")
-    running = _queue_behind_a_held_scan(portal, scanner, "gh")
-    sync_id = portal.post("/api/projects/gh/sync").json()["run_id"]
-    assert sync_id != running
-    _swap_for_symlink(clone / ".codegraph" / "codegraph.db", env.tmp / "cg.db")
-    scanner.hold.unlink()
-
-    run = _wait_row(sync_id)
-    assert (run.kind, run.status) == ("sync", "failed")
-    assert "symbolic link" in json.loads(run.summary)["error"]
-    assert portal.get("/api/projects/gh/scans").json()["code"] == "unsafe_path"
-    assert plain_fetch.calls == 0
-    assert len(scanner.calls()) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1713,31 +1785,6 @@ def test_cancel_refuses_finished_unknown_and_foreign_runs(
     assert cancel(portal, "demo", 9999).status_code == 404
     assert cancel(portal, "other", done).status_code == 404  # another project's run
     assert run_by_id(portal, "demo", done)["status"] == "ok"
-
-
-def test_cancel_during_a_sync_fetch_leaves_head_where_it_was(
-    env: SimpleNamespace, scanner: SimpleNamespace, plain_fetch: SimpleNamespace
-) -> None:
-    """A fast-forward after the cancel would move HEAD with no scan, and a
-    GitHub clone is never caught up (catch-up is for local projects)."""
-    plain_fetch.hold = env.tmp / "fetch-hold"
-    with client_for() as client:
-        client.post("/api/portal/setup", json={"display_name": "Tess"})
-        upstream, dest = github_project(client, env, "gh")
-        first_scan(client, "gh")
-        before = _git(dest, "rev-parse", "HEAD").strip()
-        commit(upstream, "print('new upstream work')\n")
-        plain_fetch.hold.touch()
-        running = client.post("/api/projects/gh/sync").json()["run_id"]
-        wait_for(lambda: plain_fetch.calls == 1)
-
-        assert cancel(client, "gh", running).status_code == 202
-        plain_fetch.hold.unlink()
-        run = wait_run(client, "gh", running)
-
-        assert (run["status"], run["summary"]["cancelled_by"]) == ("cancelled", "user")
-        assert _git(dest, "rev-parse", "HEAD").strip() == before
-        assert len(scanner.calls()) == 1  # only the first scan ever ran
 
 
 def test_cancel_after_the_runner_stopped_is_unavailable(

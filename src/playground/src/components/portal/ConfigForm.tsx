@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { useReadOnly } from "../../lib/identity";
+import { isProduction, usePortalState, useReadOnly } from "../../lib/identity";
 import { Controller, useForm, type FieldPath } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -191,6 +191,9 @@ function KeyRow({
  * A save sends the WHOLE layer (the server replaces it), rebuilt from the stored
  * one with only this form's keys overwritten, so keys the form does not show
  * survive. A key the resolved model needs but lacks shows "no key for <provider>".
+ *
+ * In production a project is a server copy read through the GitHub App: no git
+ * hooks and no GitHub token (no PATs in production); the forge toggle stays.
  */
 export function ConfigForm({
   scope,
@@ -209,6 +212,7 @@ export function ConfigForm({
 }) {
   const queryClient = useQueryClient();
   const readOnly = useReadOnly() || readOnlyProp;
+  const production = isProduction(usePortalState().data);
   const slug = scope.kind === "project" ? scope.slug : null;
   const isProject = slug !== null;
 
@@ -293,7 +297,7 @@ export function ConfigForm({
 
   const secrets = stored.data.secrets;
   const errors = formState.errors;
-  const showHooks = isProject && project.data?.source === "local";
+  const showHooks = isProject && !production && project.data?.source === "local";
   const missingKey = project.data?.missing_key ?? null;
   const noProviderKey = !isProject && stored.data.no_provider_key === true;
   const importReport = isProject ? (stored.data.import ?? null) : null;
@@ -301,7 +305,7 @@ export function ConfigForm({
   const onSubmit = handleSubmit((values) => {
     const base = stored.data!.config;
     const layer = valuesToLayer(base, values, { scan: isProject });
-    const patch = secretsPatch(values, removed, { github: isProject });
+    const patch = secretsPatch(values, removed, { github: isProject && !production });
     const body: ConfigPut = {};
     if (JSON.stringify(layer) !== JSON.stringify(base)) body.config = layer;
     if (patch) body.secrets = patch;
@@ -460,7 +464,11 @@ export function ConfigForm({
       {isProject && (
         <Section
           title="GitHub"
-          description="Pull requests and issues come from the GitHub API and need a token; commits do not."
+          description={
+            production
+              ? "Pull requests and issues come from the GitHub API, read through the WhyGraph GitHub App."
+              : "Pull requests and issues come from the GitHub API and need a token; commits do not."
+          }
         >
           <Controller
             control={control}
@@ -472,44 +480,46 @@ export function ConfigForm({
               </div>
             )}
           />
-          <div className="flex flex-col gap-1.5">
-            <div className="flex flex-wrap items-center gap-2">
-              <Label htmlFor="github-token">GitHub token</Label>
-              {secrets.github_token.set ? (
-                <Badge variant="secondary">set {secrets.github_token.hint}</Badge>
-              ) : (
-                <Badge variant="outline">not set</Badge>
-              )}
-              {removed.includes("github") && <Badge variant="outline">will be removed on save</Badge>}
-              {secrets.github_token.set &&
-                (removed.includes("github") ? (
-                  <Button
-                    type="button"
-                    size="xs"
-                    variant="ghost"
-                    onClick={() => setRemoved((r) => r.filter((x) => x !== "github"))}
-                  >
-                    Undo
-                  </Button>
+          {!production && (
+            <div className="flex flex-col gap-1.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <Label htmlFor="github-token">GitHub token</Label>
+                {secrets.github_token.set ? (
+                  <Badge variant="secondary">set {secrets.github_token.hint}</Badge>
                 ) : (
-                  <Button
-                    type="button"
-                    size="xs"
-                    variant="ghost"
-                    onClick={() => setRemoved((r) => [...r, "github"])}
-                  >
-                    Remove
-                  </Button>
-                ))}
+                  <Badge variant="outline">not set</Badge>
+                )}
+                {removed.includes("github") && <Badge variant="outline">will be removed on save</Badge>}
+                {secrets.github_token.set &&
+                  (removed.includes("github") ? (
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="ghost"
+                      onClick={() => setRemoved((r) => r.filter((x) => x !== "github"))}
+                    >
+                      Undo
+                    </Button>
+                  ) : (
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="ghost"
+                      onClick={() => setRemoved((r) => [...r, "github"])}
+                    >
+                      Remove
+                    </Button>
+                  ))}
+              </div>
+              <Input
+                id="github-token"
+                type="password"
+                autoComplete="off"
+                placeholder={secrets.github_token.set ? "Enter a new token to replace it" : "GitHub token"}
+                {...register("githubToken")}
+              />
             </div>
-            <Input
-              id="github-token"
-              type="password"
-              autoComplete="off"
-              placeholder={secrets.github_token.set ? "Enter a new token to replace it" : "GitHub token"}
-              {...register("githubToken")}
-            />
-          </div>
+          )}
         </Section>
       )}
 
@@ -534,11 +544,6 @@ export function ConfigForm({
             ))}
           </div>
         </Section>
-      )}
-      {isProject && project.data?.source === "github" && (
-        <p className="text-xs text-muted-foreground">
-          Git hooks are not installed in a GitHub clone; the portal syncs it on a schedule instead.
-        </p>
       )}
 
       {serverError && (

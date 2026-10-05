@@ -67,7 +67,7 @@ def resolve_root(project: Project) -> Path:
     ----------
     project : Project
         A project row. A relative ``root`` (a GitHub clone, stored as
-        ``repos/<slug>``) resolves against the data directory.
+        ``repos/<org slug>/<slug>``) resolves against the data directory.
 
     Returns
     -------

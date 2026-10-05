@@ -15,7 +15,7 @@ import subprocess
 from dataclasses import dataclass
 
 from whygraph.core import Shell
-from whygraph.services.git import pass_through_env
+from whygraph.services.git import pass_through_env, redact_tokens
 
 from .exceptions import GitHubError, RepoAccessError
 
@@ -130,6 +130,7 @@ def check_repo_access(
     message = (result.stderr or result.stdout).strip()
     if token:
         message = message.replace(token, "***")
+    message = redact_tokens(message)
     match = _HTTP_STATUS.search(message)
     status = int(match.group(1)) if match else None
 

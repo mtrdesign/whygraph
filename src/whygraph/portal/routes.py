@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Body, Depends, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -54,7 +54,7 @@ from whygraph.agents import (
     resolve_agent,
 )
 from whygraph.core.config import Config, ConfigError, normalize_v2
-from whygraph.core.context import use_project
+from whygraph.core.context import ProjectContext, use_project
 from whygraph.core.safe_paths import UnsafePathError, check_inside
 from whygraph.db import get_session as project_session
 from whygraph.db.engine import dispose_engine
@@ -81,12 +81,14 @@ from whygraph.services.git import (
     InvalidRepoUrlError,
     Repository,
     git_env,
-    parse_github_url,
+    redact_tokens,
     strip_userinfo,
 )
+from whygraph.services.git.credentials import github_git_host
 from whygraph.services.github import GitHubError, RepoAccessError, check_repo_access
 
 from . import sessions
+from .audit import audit
 from .authz import Action, OrgAccess, Role, authorize
 from .config_layers import ConfigPolicyError, find_secret_paths, load_layer, save_layer
 from .context import build_project_context, resolve_root
@@ -106,17 +108,32 @@ from .deps import (
     project_db_access,
     unsafe_path_error,
 )
-from .models import Project, ProjectAgent, ScanRun, Secret, User
+from .github_app import (
+    GitHubAccessLost,
+    GitHubNotFound,
+    GitHubRepo,
+    GitHubTokenRejected,
+)
+from .github_app_routes import (
+    github_id_of,
+    github_unavailable,
+    require_github_app,
+    token_rejected,
+    user_token,
+)
+from .github_auth import GitHubUnavailable
+from .models import Organization, Project, ProjectAgent, ScanRun, Secret, User
 from .orgs import add_member
-from .paths import BACKUPS_DIR, check_project_paths
+from .paths import BACKUPS_DIR, TRACKED_STATE_PATHS, check_project_paths
 from .policy import (
     DEFAULTS_ALLOWLIST,
-    PUT_ALLOWLIST,
     ImportPreview,
+    allowed_sources,
     filter_layer,
     preview_import,
+    put_allowlist,
 )
-from .projects import unique_slug
+from .projects import slugify, unique_slug
 from .repos import (
     DISCOVERY_LIMIT,
     check_path,
@@ -125,11 +142,15 @@ from .repos import (
 )
 from .estimate import scan_estimate as _scan_estimate
 from .runner import (
+    ProjectAccessLost,
     ProjectBusy,
     RunFinished,
     RunNotFound,
     RunnerUnavailable,
+    SourceNotAllowed,
     log_tail,
+    remove_run_files,
+    run_files,
     stale_info,
 )
 from .secrets import (
@@ -164,18 +185,21 @@ def _origins(state: PortalState):
     return state.origins
 
 
-def _refuse_projects_in_production(state: PortalState) -> None:
-    """``403 projects_unavailable`` in production (M2c plan section 4.11).
-
-    Called in route bodies, so after :func:`~whygraph.portal.authz.authorize`
-    (a member without the action still gets ``403 forbidden`` first).
-    """
+def _refuse_local_flow_in_production(state: PortalState) -> None:
+    """``404`` in production for a route that serves only the local-folder flow."""
     if state.mode == "production":
-        raise ApiError(
-            403,
-            "production organizations cannot add or set up projects yet",
-            code="projects_unavailable",
+        raise ApiError(404, "not found")
+
+
+def _refuse_source(state: PortalState, source: str) -> None:
+    """``403 source_not_allowed`` when the mode does not accept ``source`` as a new project."""
+    if source not in allowed_sources(state.mode):
+        message = (
+            "production organizations add projects from GitHub only"
+            if state.mode == "production"
+            else "local mode adds local folders only"
         )
+        raise ApiError(403, message, code="source_not_allowed")
 
 
 # ---------------------------------------------------------------------------
@@ -217,14 +241,31 @@ class ConfigBody(_Strict):
     secrets: SecretsBody | None = None
 
 
-class AddProjectBody(_Strict):
-    """``POST /api/projects``."""
+class LocalProjectBody(_Strict):
+    """``POST /api/projects`` for a local folder (local mode).
 
-    source: Literal["local", "github"]
-    path: str | None = None
-    url: str | None = None
+    ``token`` is the optional personal access token for the PR crawl.
+    """
+
+    source: Literal["local"]
+    path: str
     token: str | None = None
     name: str | None = Field(default=None, max_length=200)
+
+
+class GitHubProjectBody(_Strict):
+    """``POST /api/projects`` importing a repository through the GitHub App (production)."""
+
+    source: Literal["github"]
+    installation_id: int
+    repo_id: int
+    name: str | None = Field(default=None, max_length=200)
+
+
+AddProjectBody = Annotated[
+    LocalProjectBody | GitHubProjectBody, Body(discriminator="source")
+]
+"""``POST /api/projects``: one body per source, so neither can carry the other's fields."""
 
 
 class PatchProjectBody(_Strict):
@@ -344,6 +385,26 @@ def _apply_secrets(
             secrets.claude_oauth_token,
             project_id,
             org_id,
+        )
+
+
+def _refuse_pat_in_production(state: PortalState, secrets: SecretsBody | None) -> None:
+    """``422 not_in_production`` for a ``github_token`` set in production.
+
+    Production projects use the GitHub App's installation tokens, never a
+    personal access token (M2d-2 plan section 0.2 #13). Deleting one
+    (``null``) stays allowed.
+    """
+    if (
+        state.mode == "production"
+        and secrets is not None
+        and secrets.github_token is not None
+    ):
+        raise ApiError(
+            422,
+            "a GitHub token cannot be stored in production: projects use the "
+            "GitHub App's installation tokens",
+            code="not_in_production",
         )
 
 
@@ -474,8 +535,24 @@ def _last_scan_status(session: Session, project_id: int) -> str | None:
     ).first()
 
 
-def _summary(session: Session, project: Project, root: Path) -> dict:
+def _github_full_name(project: Project) -> str | None:
+    """``owner/name`` of an imported repo, from ``remote_url`` (``<web>/<owner>/<name>``).
+
+    The webhook keeps ``remote_url`` current across a rename or a transfer,
+    so no GitHub call is needed. ``None`` for a local project and for a
+    local-mode clone of an older build (no ``github_repo_id``).
+    """
+    if project.github_repo_id is None or not project.remote_url:
+        return None
+    parts = project.remote_url.rstrip("/").rsplit("/", 2)
+    return f"{parts[1]}/{parts[2]}" if len(parts) == 3 else None
+
+
+def _summary(
+    session: Session, project: Project, root: Path, *, mode: str | None
+) -> dict:
     status = root_status(root)
+    full_name = _github_full_name(project)
     stale = (
         stale_info(root, project.last_scanned_head)
         if status == "ok" and project.initialized_at is not None
@@ -485,6 +562,9 @@ def _summary(session: Session, project: Project, root: Path) -> dict:
         "slug": project.slug,
         "name": project.name,
         "source": project.source,
+        # False for a local-mode GitHub clone of an older build: list it,
+        # refuse its scans, let it be removed.
+        "source_supported": project.source in allowed_sources(mode),
         "root": str(root),
         "remote_url": project.remote_url,
         "initialized": project.initialized_at is not None,
@@ -497,6 +577,16 @@ def _summary(session: Session, project: Project, root: Path) -> dict:
         "last_scan_status": _last_scan_status(session, project.id),  # type: ignore[arg-type]
         # HEAD vs last_scanned_head (the runner's catch-up check, section 4.6).
         "stale": stale,
+        # A production project GitHub no longer lets the app read (M2d-2 plan
+        # section 0.2 #14), or whose default branch tracks .whygraph/ /
+        # .codegraph/ (reason "tracked_whygraph_state").
+        "access_lost": project.access_lost_at is not None,
+        "access_lost_reason": project.access_lost_reason,
+        # An imported repo's `owner/name`, and the account the app is
+        # installed on: an installation covers only its own account's repos,
+        # so that is the owner.
+        "github_full_name": full_name,
+        "installation_account": full_name.split("/", 1)[0] if full_name else None,
     }
 
 
@@ -506,7 +596,7 @@ def _details(state: PortalState, project: BoundProject) -> dict:
         row = session.get(Project, project.id)
         if row is None:
             raise ApiError(404, f"project {project.slug!r} not found")
-        body = _summary(session, row, project.root)
+        body = _summary(session, row, project.root, mode=state.mode)
         body["agents"] = sorted(
             a.agent
             for a in session.exec(
@@ -589,10 +679,24 @@ def _unsafe_reason(root: Path, *paths: Path) -> str | None:
     return None
 
 
-def _clone_dir_is_safe(root: Path, data_dir: Path) -> bool:
-    """Whether ``root`` is a direct child of ``<data dir>/repos`` (rmtree guard)."""
+def _clone_dir_is_safe(root: Path, data_dir: Path, *, depth: int) -> bool:
+    """Whether ``root`` sits exactly ``depth`` levels under ``<data dir>/repos`` (rmtree guard).
+
+    ``depth`` is 2 for production's ``repos/<org slug>/<slug>`` (and its
+    ``repos/<org slug>/.clone-*`` temp dirs), 1 for a local GitHub clone of
+    an earlier build (``repos/<slug>``). Neither ``root`` nor any directory
+    between it and ``repos`` may be a symlink, and its real path's parent
+    chain must reach ``realpath(<data dir>/repos)``. Works for a path that
+    does not exist yet.
+    """
+    repos = Path(os.path.realpath(data_dir / "repos"))
     real = Path(os.path.realpath(root))
-    return real.parent == Path(os.path.realpath(data_dir / "repos"))
+    path = Path(root)
+    for _ in range(depth):
+        if path.is_symlink():
+            return False
+        path, real = path.parent, real.parent
+    return real == repos and Path(os.path.realpath(path)) == repos
 
 
 def _probe(owner: str, name: str, token: str | None) -> None:
@@ -602,7 +706,7 @@ def _probe(owner: str, name: str, token: str | None) -> None:
         raise ApiError(400, str(exc), code=exc.code) from exc
     except GitHubError as exc:
         message = str(exc).replace(token, "***") if token else str(exc)
-        raise ApiError(502, message, code="github_error") from exc
+        raise ApiError(502, redact_tokens(message), code="github_error") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -723,11 +827,11 @@ def get_repos(
 ) -> dict:
     """Git repositories discovered under the shared folders (cached 60 s).
 
-    ``registered`` reflects only the request's org. ``403
-    projects_unavailable`` in production.
+    ``registered`` reflects only the request's org. ``404`` in production
+    (local folders only).
     """
     state = portal_state(request)
-    _refuse_projects_in_production(state)
+    _refuse_local_flow_in_production(state)
     org_id = access.org_id
     found = state.discovery.get(state.shared_folders)
     with get_session() as session:
@@ -755,10 +859,10 @@ def get_repos(
 def post_check_path(body: PathBody, request: Request) -> dict:
     """Whether a typed path can be added, and the fix command when it cannot.
 
-    ``403 projects_unavailable`` in production.
+    ``404`` in production (local folders only).
     """
     state = portal_state(request)
-    _refuse_projects_in_production(state)
+    _refuse_local_flow_in_production(state)
     try:
         return check_path(body.path, state.shared_folders, state.data_dir)
     except ValueError as exc:
@@ -793,12 +897,14 @@ def put_defaults(
 
     Only ``[llm]`` (with connection keys), ``[analyze]``, ``[rationale]``
     and ``[chat]`` are accepted (rule 6); secrets inside ``config`` are a
-    ``422`` (rule 4). A changed provider endpoint clears the global key
+    ``422`` (rule 4), and so is a ``github_token`` in production
+    (``not_in_production``). A changed provider endpoint clears the global key
     and the project keys of every project that inherits the endpoint
     (rule 3); ``cleared_project_keys`` lists them as ``{slug, provider}``.
     Invalidates every project's context.
     """
     state = portal_state(request)
+    _refuse_pat_in_production(state, body.secrets)
     org_id = access.org_id
     cleared: list[dict] = []
     with get_session() as session:
@@ -828,15 +934,20 @@ def put_defaults(
 
 
 @projects_router.get("")
-def list_projects(access: OrgAccess = Depends(org_access(Action.ORG_READ))) -> dict:
+def list_projects(
+    request: Request, access: OrgAccess = Depends(org_access(Action.ORG_READ))
+) -> dict:
     """Every project of the request's org, with its status."""
+    mode = portal_state(request).mode
     with get_session() as session:
         rows = session.exec(
             select(Project)
             .where(Project.org_id == access.org_id)
             .order_by(Project.name)
         ).all()
-        return {"projects": [_summary(session, p, resolve_root(p)) for p in rows]}
+        return {
+            "projects": [_summary(session, p, resolve_root(p), mode=mode) for p in rows]
+        }
 
 
 @projects_router.post("", status_code=201)
@@ -846,23 +957,24 @@ def add_project(
     principal: Principal = Depends(current_user),
     access: OrgAccess = Depends(org_access(Action.ORG_ADD_PROJECT)),
 ) -> dict:
-    """Register a local repo (under a shared folder) or clone a GitHub repo.
+    """Register a local repo (local mode) or import a GitHub repo (production).
 
     Nothing inside a local repo is written. The response carries the
-    project, the ``detected`` 1.x state and the import report. Error codes:
-    ``bad_token``, ``no_access``, ``not_found``, ``not_shared``,
-    ``not_git``, ``duplicate`` (plus ``invalid_url``, ``not_linked``,
-    ``protected``, ``clone_failed``, ``github_error``); ``403
-    projects_unavailable`` in production.
+    project, the ``detected`` 1.x state and the import report. Error codes
+    of a local add: ``bad_token``, ``no_access``, ``not_found``,
+    ``not_shared``, ``not_git``, ``duplicate`` (plus ``not_linked``,
+    ``protected``, ``github_error``). The source policy
+    (:func:`~whygraph.portal.policy.allowed_sources`) answers ``403
+    source_not_allowed`` for ``github`` in local mode and ``local`` in
+    production. A production import is :func:`_import_github`.
     """
     state = portal_state(request)
-    _refuse_projects_in_production(state)
-    if body.source == "local":
-        project_id, detected, preview = _add_local(
-            state, body, principal, access.org_id
-        )
+    _refuse_source(state, body.source)
+    if isinstance(body, GitHubProjectBody):
+        project_id = _import_github(state, body, principal, access, request)
+        detected, preview = None, ImportPreview()
     else:
-        project_id, detected, preview = _add_github(
+        project_id, detected, preview = _add_local(
             state, body, principal, access.org_id
         )
     ctx = state.contexts.get(project_id)
@@ -873,6 +985,8 @@ def add_project(
     project = bound_from(row, ctx)
     with use_project(ctx):
         details = _details(state, project)
+    if detected is None:
+        detected = details["detected"]
     return {"project": details, "detected": detected, "import": preview.report()}
 
 
@@ -903,7 +1017,7 @@ def _insert_project(
 
 
 def _add_local(
-    state: PortalState, body: AddProjectBody, principal: Principal, org_id: int
+    state: PortalState, body: LocalProjectBody, principal: Principal, org_id: int
 ) -> tuple[int, dict, ImportPreview]:
     if not body.path:
         raise ApiError(422, "path is required for a local project")
@@ -999,99 +1113,279 @@ def _add_local(
     return project_id, detected, preview
 
 
-def _add_github(
-    state: PortalState, body: AddProjectBody, principal: Principal, org_id: int
-) -> tuple[int, dict, ImportPreview]:
-    url = (body.url or "").strip()
-    token = (body.token or "").strip() or None
+IMPORT_SLUG_ATTEMPTS = 3
+"""Slugs an import tries when a concurrent one takes its first choice."""
+
+
+def _no_access() -> ApiError:
+    return ApiError(
+        404,
+        "that repository is not available to you through that installation",
+        code="no_access",
+    )
+
+
+def _constraint(exc: IntegrityError) -> str | None:
+    """The name of the constraint an ``IntegrityError`` violated, if known."""
+    diag = getattr(exc.orig, "diag", None)
+    return getattr(diag, "constraint_name", None)
+
+
+def _check_import_access(
+    state: PortalState, body: GitHubProjectBody, principal: Principal
+) -> tuple[GitHubRepo, str]:
+    """Steps 2-4 of the import: the user sees the installation and reads the repo,
+    and the installation covers it.
+
+    Returns
+    -------
+    tuple of (GitHubRepo, str)
+        The repository as the user sees it, and a repo-scoped installation
+        token.
+
+    Raises
+    ------
+    ApiError
+        ``503`` / ``403 github_required`` / ``401
+        github_authorization_required``; one ``404 no_access`` for all
+        three checks, so nothing about another account is disclosed;
+        ``502 github_unavailable``.
+    """
+    app = require_github_app(state)
+    github_id_of(principal)
+    token = user_token(state, principal)
     try:
-        owner, repo = parse_github_url(url)
-    except InvalidRepoUrlError as exc:
-        raise ApiError(400, str(exc), code="invalid_url") from exc
-    _probe(owner, repo, token)
+        visible = {i.id for i in app.installations(token)}
+        if body.installation_id not in visible:
+            raise _no_access()
+        try:
+            repo = app.repository(token, body.repo_id)
+        except GitHubNotFound:
+            raise _no_access() from None
+        if not repo.can_pull or repo.id != body.repo_id:
+            raise _no_access()
+    except GitHubTokenRejected:
+        raise token_rejected(state, principal) from None
+    except GitHubNotFound:  # the token cannot list installations at all
+        raise token_rejected(state, principal) from None
+    except GitHubUnavailable:
+        raise github_unavailable() from None
+    try:
+        minted = app.installation_token(body.installation_id, body.repo_id)
+    except GitHubAccessLost:
+        raise _no_access() from None
+    except GitHubUnavailable:
+        raise github_unavailable() from None
+    return repo, minted.token
 
-    canonical = f"https://github.com/{owner}/{repo}"
-    name = (body.name or "").strip() or repo
-    # One GitHub add at a time: the duplicate check, the slug, the clone and
-    # the insert happen under the lock, so a double-submit of one URL gets
-    # "duplicate" instead of racing the other request's clone.
-    with state.github_add_lock:
-        return _clone_and_insert(state, canonical, name, token, principal, org_id)
+
+def _production_initialize(state: PortalState, ctx: ProjectContext) -> None:
+    """A production project's Initialize: checked DB paths, then the migration.
+
+    No agent files, hooks or markers (M2d-2 plan section 0.2 #12); the
+    caller sets ``initialized_at``. Idempotent.
+
+    Raises
+    ------
+    ApiError
+        ``409 unsafe_path`` when a DB path is a symlink.
+    """
+    try:
+        check_project_paths(ctx.root)
+        state.migrations.ensure(ctx)
+    except UnsafePathError as exc:
+        raise unsafe_path_error(exc) from exc
 
 
-def _clone_and_insert(
+def _discard_clone(state: PortalState, path: Path) -> None:
+    """Remove an import's clone (and forget its DB) after a failed import."""
+    db_path = path / ".whygraph" / "whygraph.db"
+    dispose_engine(db_path)
+    state.migrations.forget(db_path)
+    _remove_clone(path, state.data_dir, depth=2)
+
+
+def _insert_imported(
     state: PortalState,
-    canonical: str,
-    name: str,
-    token: str | None,
+    *,
+    access: OrgAccess,
     principal: Principal,
-    org_id: int,
-) -> tuple[int, dict, ImportPreview]:
-    """Clone into a private temp dir, move it into place, insert the row."""
-    with get_session() as session:
-        for remote in session.exec(
-            select(Project.remote_url).where(Project.source == "github")
-        ).all():
-            if remote and remote.removesuffix(".git").lower() == canonical.lower():
-                raise ApiError(
-                    409, "this repository is already registered", code="duplicate"
-                )
-        slug = unique_slug(session, name, org_id=org_id)
+    slug: str,
+    name: str,
+    repo: GitHubRepo,
+    installation_id: int,
+) -> int:
+    """Step 7 of the import: one transaction, the row, the forge layer, Initialize.
 
-    repos_dir = state.data_dir / "repos"
-    repos_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    dest = repos_dir / slug
-    if dest.exists() or dest.is_symlink():
-        raise ApiError(409, f"{dest} already exists", code="duplicate")
+    Raises
+    ------
+    ApiError
+        ``404`` when the org was deleted meanwhile (its row is locked
+        ``FOR SHARE`` first, so a deletion cannot interleave).
+    IntegrityError
+        A duplicate repo or slug in the org (the caller tells which).
+    """
+    web = require_github_app(state).config.web_url
+    with get_session() as session:
+        org = session.exec(
+            select(Organization.id)
+            .where(Organization.id == access.org_id)
+            .with_for_update(read=True)
+        ).first()
+        if org is None:
+            raise ApiError(404, "not found")
+        project = Project(
+            org_id=access.org_id,
+            slug=slug,
+            name=name,
+            source="github",
+            root=f"repos/{access.org_slug}/{slug}",
+            remote_url=f"{web}/{repo.full_name}",
+            created_by=principal.user_id,
+            github_repo_id=repo.id,
+            github_installation_id=installation_id,
+            default_branch=repo.default_branch,
+        )
+        session.add(project)
+        session.flush()
+        assert project.id is not None
+        save_layer(
+            session, project.id, {"scan": {"forge": "auto"}}, org_id=access.org_id
+        )
+        _production_initialize(state, build_project_context(session, project))
+        project.initialized_at = _now()
+        session.add(project)
+        return project.id
+
+
+def _import_github(
+    state: PortalState,
+    body: GitHubProjectBody,
+    principal: Principal,
+    access: OrgAccess,
+    request: Request,
+) -> int:
+    """Import a repository through the GitHub App (M2d-2 plan section 4.5).
+
+    The user must see the installation and read the repository with their
+    user token, and the installation must cover it (one ``404 no_access``
+    otherwise); ``409 duplicate`` when it is already a project of this
+    org; ``429`` past 30 imports per org per hour. The clone, made with a
+    repo-scoped installation token, lands in ``repos/<org>/.clone-*`` and
+    is refused (``422 tracked_whygraph_state``) when it tracks
+    ``.whygraph/`` or ``.codegraph/``; it then moves to
+    ``repos/<org>/<slug>`` and the row, the forge layer and the production
+    Initialize commit together. Every failure removes the clone.
+
+    Returns
+    -------
+    int
+        The new project's id.
+    """
+    repo, token = _check_import_access(state, body, principal)
+    duplicate = ApiError(
+        409, "this repository is already a project here", code="duplicate"
+    )
+    with get_session() as session:
+        if session.exec(
+            select(Project.id).where(
+                Project.org_id == access.org_id,
+                Project.github_repo_id == body.repo_id,
+            )
+        ).first():
+            raise duplicate
+    retry_after = state.import_org.hit(access.org_id)
+    if retry_after is not None:
+        raise ApiError(
+            429,
+            "too many imports; try again later",
+            code="throttled",
+            headers={"Retry-After": str(retry_after)},
+        )
+    name = (body.name or "").strip() or repo.full_name.split("/", 1)[1]
+
+    org_dir = state.data_dir / "repos" / access.org_slug
+    org_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     # A dot-name is never a slug, so the temp dir cannot collide with a
     # project; only this request knows it, so only this request removes it.
-    tmp = repos_dir / f".clone-{slug}-{secrets_mod.token_hex(6)}"
+    tmp = org_dir / f".clone-{slugify(name)}-{secrets_mod.token_hex(6)}"
+    if not _clone_dir_is_safe(tmp, state.data_dir, depth=2):
+        raise ApiError(500, f"refusing to clone into {org_dir}: not a portal folder")
+    url = f"{github_git_host().url}/{repo.full_name}.git"
     try:
-        Repository.clone(canonical, tmp, env=git_env(token))
-    except GitError as exc:
-        _remove_clone(tmp, state.data_dir)
-        message = str(exc).replace(token, "***") if token else str(exc)
-        raise ApiError(502, message, code="clone_failed") from exc
-    try:
-        os.rename(tmp, dest)  # fails on a non-empty dest; never merges into it
-    except OSError as exc:
-        _remove_clone(tmp, state.data_dir)
-        raise ApiError(409, f"{dest} already exists", code="duplicate") from exc
+        Repository.clone(url, tmp, env=git_env(token))
+        tracked = Repository(tmp).tracked_paths("HEAD", *TRACKED_STATE_PATHS)
+    except (GitError, InvalidRepoUrlError) as exc:
+        _remove_clone(tmp, state.data_dir, depth=2)
+        raise ApiError(
+            502, redact_tokens(str(exc)).replace(token, "***"), code="clone_failed"
+        ) from exc
+    if tracked:
+        _remove_clone(tmp, state.data_dir, depth=2)
+        raise ApiError(
+            422,
+            "this repository tracks WhyGraph's own state (.whygraph/ or "
+            ".codegraph/); remove it from the repository to import it",
+            code="tracked_whygraph_state",
+            paths=list(tracked[:20]),
+        )
 
-    try:
+    tried: set[str] = set()
+    for _ in range(IMPORT_SLUG_ATTEMPTS):
         with get_session() as session:
-            project_id = _insert_project(
-                session,
-                org_id=org_id,
+            slug = unique_slug(session, name, org_id=access.org_id, exclude=tried)
+        tried.add(slug)
+        dest = org_dir / slug
+        try:
+            os.rename(tmp, dest)  # fails on a non-empty dest; never merges into it
+        except OSError:
+            continue  # a concurrent import holds this slug's folder
+        try:
+            project_id = _insert_imported(
+                state,
+                access=access,
+                principal=principal,
                 slug=slug,
                 name=name,
-                source="github",
-                root=f"repos/{slug}",
-                remote_url=canonical,
-                principal=principal,
+                repo=repo,
+                installation_id=body.installation_id,
             )
-            save_layer(session, project_id, {"scan": {"forge": "auto"}}, org_id=org_id)
-            if token:
-                put_secret(
-                    session,
-                    kind=GITHUB_TOKEN,
-                    value=token,
-                    project_id=project_id,
-                    org_id=org_id,
-                )
-    except IntegrityError as exc:
-        _remove_clone(dest, state.data_dir)  # the checkout this request moved in
-        raise ApiError(
-            409, "this repository is already registered", code="duplicate"
-        ) from exc
-    state.contexts.invalidate(project_id)
-    # A fresh clone carries no WhyGraph state, and its whygraph.toml is never
-    # imported (rule 5) - but report what is there, like a local add.
-    return project_id, detect_existing(dest), ImportPreview()
+        except IntegrityError as exc:
+            if _constraint(exc) == "uq_projects_org_slug":
+                db_path = dest / ".whygraph" / "whygraph.db"
+                dispose_engine(db_path)
+                state.migrations.forget(db_path)
+                os.rename(dest, tmp)
+                continue
+            _discard_clone(state, dest)
+            raise duplicate from exc
+        except BaseException as exc:
+            _discard_clone(state, dest)
+            if isinstance(exc, ApiError) and exc.status == 404:
+                # The org was deleted meanwhile: leave no empty repos/<org>/.
+                try:
+                    org_dir.rmdir()
+                except OSError:
+                    pass
+            raise
+        state.contexts.invalidate(project_id)
+        audit(
+            "project_imported",
+            request,
+            uid=principal.uid,
+            org=access.org_slug,
+            repo_id=repo.id,
+            full_name=repo.full_name,
+        )
+        return project_id
+    _remove_clone(tmp, state.data_dir, depth=2)
+    raise ApiError(
+        409, "could not find a free slug for this project; try again", code="busy"
+    )
 
 
-def _remove_clone(path: Path, data_dir: Path) -> bool:
-    if path.exists() and _clone_dir_is_safe(path, data_dir):
+def _remove_clone(path: Path, data_dir: Path, *, depth: int) -> bool:
+    if path.exists() and _clone_dir_is_safe(path, data_dir, depth=depth):
         shutil.rmtree(path)
         return True
     return False
@@ -1142,7 +1436,8 @@ def delete_project(
     never deletes a local repo or the rest of its ``.whygraph/``. A GitHub
     clone's checkout is deleted only when ``confirm_name`` equals the
     project name and the checkout sits directly under
-    ``<data dir>/repos``.
+    ``<data dir>/repos``. The project's run files (``runs/<id>.jsonl``,
+    ``.log``, ``.token``) are deleted with its row.
     """
     state = portal_state(request)
     body = body or DeleteProjectBody()
@@ -1229,14 +1524,19 @@ def _remove_project(
     else:
         warnings.append(f"{project.root} is not mounted; hooks and markers were left")
 
+    runs = run_files([project.id])
     with get_session() as session:
         row = session.get(Project, project.id)
         if row is not None:
             session.delete(row)
+    remove_run_files(state.data_dir, runs)
 
     checkout_deleted = False
     if project.source == "github":
-        checkout_deleted = _remove_clone(project.root, state.data_dir)
+        # Production clones live at repos/<org>/<slug>; a local-mode row is
+        # an earlier build's repos/<slug> (M2d-2 plan section 0.2 #3).
+        depth = 2 if state.mode == "production" else 1
+        checkout_deleted = _remove_clone(project.root, state.data_dir, depth=depth)
         if not checkout_deleted and project.root.exists():
             warnings.append(f"refused to delete {project.root}: not a portal clone")
     return {
@@ -1279,20 +1579,22 @@ def put_project_config(
     """Replace the project's config layer and / or set its secrets.
 
     Rule 1b allowlist; ``api_key`` / ``token`` in ``config`` is a ``422``
-    that never echoes the value; a changed ``base_url`` / ``host`` clears
+    that never echoes the value, and so is a ``github_token`` secret in
+    production (``not_in_production``); a changed ``base_url`` / ``host`` clears
     that project's key for the provider (rule 3). A change to
     ``[scan].hooks`` on an initialized local project re-runs
     :func:`whygraph.hooks.sync_hooks` (never in production, where the
     config is saved and ``hooks`` is ``null``).
     """
     state = portal_state(request)
+    _refuse_pat_in_production(state, body.secrets)
     old_hooks = project.ctx.config.scan_hooks
     with get_session() as session:
         row = session.get(Project, project.id)
         if row is None:
             raise ApiError(404, f"project {project.slug!r} not found")
         if body.config is not None:
-            kept = _checked_layer(body.config, PUT_ALLOWLIST, project.root)
+            kept = _checked_layer(body.config, put_allowlist(state.mode), project.root)
             try:
                 save_layer(session, project.id, kept, org_id=project.org_id)
             except ConfigPolicyError as exc:
@@ -1360,15 +1662,23 @@ def init_project(
     Runs :func:`whygraph.project_setup.initialize_project` with the
     portal's :class:`~whygraph.agents.HttpMcp` and
     :class:`~whygraph.project_setup.PortalMarker`; hooks come from
-    ``[scan].hooks`` (none for a GitHub clone). The project DB is created
+    ``[scan].hooks``. The project DB is created
     or migrated (with a backup) first, under the project context.
     ``initialized_at`` is set only once the markers are written, i.e. no
     agent file awaits confirmation. ``dry_run`` returns the per-file plan
-    and writes nothing; ``force`` is "Update agent files". ``403
-    projects_unavailable`` in production (``dry_run`` included).
+    and writes nothing; ``force`` is "Update agent files". ``409
+    source_not_allowed`` for a local-mode GitHub clone of an older build.
+    In production it is :func:`_init_production`.
     """
     state = portal_state(request)
-    _refuse_projects_in_production(state)
+    if state.mode == "production":
+        return _init_production(state, project, body)
+    if project.source not in allowed_sources(state.mode):
+        raise ApiError(
+            409,
+            "GitHub projects are no longer supported in local mode - remove the project",
+            code="source_not_allowed",
+        )
     origins = _origins(state)
     if root_status(project.root) != "ok":
         raise ApiError(409, f"{project.root} is not available", code="root_missing")
@@ -1378,11 +1688,6 @@ def init_project(
         actions = _agent_actions(body.agent_actions)
     except UnknownAgentError as exc:
         raise ApiError(422, str(exc)) from exc
-    # GitHub clones never get hooks: Sync's fast-forward would fire post-merge
-    # inside the container (section 4.4).
-    hooks: bool | tuple[str, ...] = (
-        () if project.source == "github" else project.ctx.config.scan_hooks
-    )
     checked_db_paths(project)
 
     try:
@@ -1391,7 +1696,7 @@ def init_project(
         result = initialize_project(
             project.root,
             agents=body.agents,
-            hooks=hooks,
+            hooks=project.ctx.config.scan_hooks,
             mcp=HttpMcp(slug=project.slug, port=origins.port, host=origins.agent_host),
             marker=PortalMarker(slug=project.slug, port=origins.port),
             force=body.force,
@@ -1447,6 +1752,49 @@ def init_project(
     return response
 
 
+def _init_production(state: PortalState, project: BoundProject, body: InitBody) -> dict:
+    """Production's Initialize: re-run the import's (idempotent).
+
+    Checked DB paths and the migration, then ``initialized_at`` (M2d-2 plan
+    section 0.2 #12); no agent files, hooks or markers, so ``agents`` must
+    be empty (``422 not_in_production``). ``dry_run`` changes nothing.
+    ``409 root_missing`` when the clone is gone.
+    """
+    if body.agents:
+        raise ApiError(
+            422,
+            "production projects configure no agent files",
+            code="not_in_production",
+        )
+    if project.source not in allowed_sources(state.mode):
+        raise ApiError(
+            409, "this project source is not supported here", code="source_not_allowed"
+        )
+    if root_status(project.root) != "ok":
+        raise ApiError(409, f"{project.root} is not available", code="root_missing")
+    if not body.dry_run:
+        _production_initialize(state, project.ctx)
+        with get_session() as session:
+            row = session.get(Project, project.id)
+            if row is not None and row.initialized_at is None:
+                row.initialized_at = _now()
+                session.add(row)
+    return {
+        "dry_run": body.dry_run,
+        "gitignore_added": [],
+        "hooks": None,
+        "hooks_error": None,
+        "agent_files": [],
+        "asset_files": [],
+        "configured_agents": [],
+        "needs_confirmation": [],
+        "refused": [],
+        "marker_written": False,
+        "initialized": not body.dry_run or project.initialized_at is not None,
+        "custom_db_paths": [],
+    }
+
+
 # ---- scans (portal/runner.py) ---------------------------------------------
 
 
@@ -1460,7 +1808,11 @@ async def post_scan(
     """Queue (or coalesce into) a scan; returns the pending run's id.
 
     A ``hook`` scan (the credential-less git-hook ``curl``) exists only in
-    local mode: elsewhere it is a ``403 {"code": "hook_local_only"}``.
+    local mode: elsewhere it is a ``403 {"code": "hook_local_only"}``. A
+    project whose source the mode no longer accepts is a ``409
+    source_not_allowed``. On a production GitHub project the run is a sync
+    that fetches first, then scans; one that lost its GitHub access is a
+    ``409 github_access_lost``.
     """
     body = body or ScanBody()
     state = portal_state(request)
@@ -1476,6 +1828,12 @@ async def post_scan(
         raise ApiError(501, str(exc)) from exc
     except ProjectBusy as exc:
         raise ApiError(409, str(exc)) from exc
+    except SourceNotAllowed as exc:
+        raise ApiError(409, str(exc), code="source_not_allowed") from exc
+    except ProjectAccessLost as exc:
+        raise ApiError(
+            409, str(exc), code="github_access_lost", reason=exc.reason
+        ) from exc
     return {"run_id": run_id}
 
 
@@ -1616,26 +1974,6 @@ def scan_log(
         return log_tail(project.id, run_id)
     except RunNotFound as exc:
         raise ApiError(404, f"run {run_id} not found") from exc
-
-
-@projects_router.post("/{slug}/sync", status_code=202)
-async def post_sync(
-    request: Request,
-    project: BoundProject = Depends(project_db_access(Action.PROJECT_SCAN)),
-    principal: Principal = Depends(current_user),
-) -> dict:
-    """GitHub clones: fetch + fast-forward, then rescan when HEAD moved."""
-    if project.source != "github":
-        raise ApiError(400, "only GitHub clones can be synced", code="not_github")
-    try:
-        run_id = await portal_state(request).runner.request_sync(
-            project, principal=principal
-        )
-    except RunnerUnavailable as exc:
-        raise ApiError(501, str(exc)) from exc
-    except ProjectBusy as exc:
-        raise ApiError(409, str(exc)) from exc
-    return {"run_id": run_id}
 
 
 @projects_router.get("/{slug}/scan-estimate")

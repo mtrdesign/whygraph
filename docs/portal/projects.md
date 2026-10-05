@@ -4,31 +4,23 @@ A **project** is one repository the portal knows about. Add one from the **Proje
 **New project**. The wizard has up to four steps: pick the repository, configure it, initialize it,
 and run the first scan.
 
+!!! note "Production mode imports from GitHub"
+    This page describes local mode, where a project is a repository in a folder you share. In
+    [production mode](../deploy/production.md#projects) projects are imported from GitHub through the
+    GitHub App instead, and the wizard is Source, Configure and First scan.
+
 ## Pick a repository
 
-=== "Local repository"
+Choose a repository from the list of those under your [shared folders](shared-folders.md), or type a
+path. The portal checks that the path is under a shared folder and is a git repository. Local mode
+does not clone: to work on a GitHub repository, clone it into a shared folder yourself and add that.
 
-    Choose a repository from the list of those under your [shared folders](shared-folders.md), or
-    type a path. The portal checks that the path is under a shared folder and is a git repository.
+Adding a local repository **writes nothing into it**. It only registers the project, reads an
+existing `whygraph.toml` to offer its settings, and reports what 1.x left behind (see
+[Upgrading from 1.x](upgrading.md#from-1x)).
 
-    Adding a local repository **writes nothing into it**. It only registers the project, reads an
-    existing `whygraph.toml` to offer its settings, and reports what 1.x left behind (see
-    [Upgrading from 1.x](upgrading.md#from-1x)).
-
-    If the origin is on GitHub you can paste a token here so the remote crawl (pull requests and
-    issues) can work; it is checked against GitHub before anything is stored.
-
-=== "GitHub URL"
-
-    Paste `https://github.com/<owner>/<repo>` and, for a private repository, a token with read access
-    to it. The portal checks access, then clones into `repos/<slug>` under its data directory.
-
-    The token is passed to git through a host-scoped credential helper for that one clone. It is
-    never written to `.git/config`, to argv, or to a log. A clone gets a **Sync now** button instead of
-    git hooks: Sync fetches the default branch, fast-forwards the checkout, and rescans only when that
-    moved it. The portal also syncs every 15 minutes.
-
-    Only `https://github.com/...` URLs are accepted.
+If the origin is on GitHub you can paste a token here so the remote crawl (pull requests and issues)
+can work; it is checked against GitHub before anything is stored.
 
 The project's name defaults to the repository name and becomes its **slug** (lowercase letters,
 digits and hyphens), which appears in URLs and in the MCP endpoint. The slug cannot change later; the
@@ -44,7 +36,7 @@ The second step sets how this project uses LLMs and GitHub:
 | **Provider keys** | One key per provider. Keys are **write-only**: the page shows `set ...a1b2` and never the key. Providers without a key show a "no key" badge while a task resolves to them |
 | **Endpoints** | A base URL for OpenAI-compatible gateways, and the Ollama host. Changing an endpoint clears the key stored for it - a key must not follow you to a different server |
 | **GitHub** | A token, and whether to crawl pull requests and issues at all |
-| **Git hooks** | Which of `post-commit`, `post-merge`, `post-rewrite` and `post-checkout` refresh the project. Not offered for GitHub clones |
+| **Git hooks** | Which of `post-commit`, `post-merge`, `post-rewrite` and `post-checkout` refresh the project |
 
 Every project inherits the defaults from **Settings** in the portal sidebar: models, provider keys
 and endpoints you set there apply to all projects unless a project overrides them. Set your keys once

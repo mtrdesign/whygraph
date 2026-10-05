@@ -24,6 +24,7 @@ from whygraph.services.git import Repository
 from .exceptions import GitHubError
 from .issues import Issues
 from .pull_requests import PullRequests
+from .token import GH_TOKEN_ENV, token_env
 
 _GITHUB_URL_PATTERNS = (
     re.compile(r"^https://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$"),
@@ -104,7 +105,9 @@ class GitHubClient:
             Complete environment for the ``gh`` call, so a candidate token
             can be validated (build it with
             :func:`~whygraph.services.github.access.github_env`). ``None``
-            (default) inherits the current process environment.
+            (default) inherits the current process environment, with the
+            token of a portal token file when one is configured
+            (:func:`~.token.token_env`).
 
         Raises
         ------
@@ -112,8 +115,13 @@ class GitHubClient:
             If ``gh`` is not on PATH, or ``gh auth status`` reports an
             unauthenticated session.
         """
+        if env is None:
+            env = token_env(GH_TOKEN_ENV)
         try:
-            result = Shell().run(["gh", "auth", "status"], check=False, env=env)
+            # `gh auth status` prints most of a token: never into the log.
+            result = Shell().run(
+                ["gh", "auth", "status"], check=False, env=env, log_output=False
+            )
         except FileNotFoundError as exc:
             raise GitHubError(
                 "gh CLI is not installed. Install from https://cli.github.com/"

@@ -46,16 +46,39 @@ production mode:
   cookie and the portal's host check all see one origin per host. Vite passes the `Host` header
   through unchanged, which is what lets `<org>.whygraph.localhost:5173` reach the portal. Open
   `http://whygraph.localhost:5173`, not `localhost`: that one gets `421`.
-- **GitHub is a fake.** Sign-in needs a GitHub, so `make dev-production` also starts a small fake one
-  on `DEV_GITHUB_PORT` and points the portal's four `WHYGRAPH_GITHUB_*` variables at it. Nothing leaves
-  your machine, and you can sign in as any username to try members, roles and two-factor refusals.
-  To use the real GitHub instead, create a dev OAuth App whose callback URL is
-  `http://whygraph.localhost:5173/auth/github` (see
-  [GitHub sign-in](../deploy/production.md#github-sign-in)), then copy `.env.dev.example` to
-  `.env.dev` (gitignored) and fill in its client ID and the path of a file holding its client
-  secret. `make dev-production` loads `.env.dev` when it exists; when
-  `WHYGRAPH_GITHUB_OAUTH_CLIENT_ID` ends up set (from `.env.dev` or your shell), the fake is not
-  started. Values in `.env.dev` win over your shell's.
+- **GitHub is a fake.** Sign-in and projects need a GitHub, so `make dev-production` also starts a
+  small fake one (`tests/github_fake.py`) on `DEV_GITHUB_PORT` that serves **both apps**: the OAuth
+  App and the GitHub App. It points every `WHYGRAPH_GITHUB_*` variable at it, with a generated app
+  key, client secrets and webhook secret kept under `$TMPDIR/whygraph-dev/production/github/`
+  (generating them needs `openssl`). Nothing leaves your machine. Its sign-in page offers four users,
+  `ben`, `cy`, `dee` and `nofa` (no two-factor authentication), to try members, roles and two-factor
+  refusals.
+- **The fake's repositories.** It serves two fixture repositories, `ben/demo` and `ben/notes`, as bare
+  repositories in `$TMPDIR/whygraph-dev/production/github/repos`, covered by installation `100` on
+  Ben's account: sign in as `ben` to import them. Its control routes change its state and send the
+  matching signed webhook to the portal, so you can try the webhook paths without a real GitHub:
+
+    ```bash
+    curl -X POST http://127.0.0.1:18767/_fake/push -d '{"repo": "ben/demo"}'          # a commit + a push
+    curl -X POST http://127.0.0.1:18767/_fake/uninstall -d '{"installation": 100}'    # access lost
+    curl -X POST http://127.0.0.1:18767/_fake/remove-repo -d '{"repo": "ben/demo"}'   # access lost
+    ```
+
+- **A real GitHub** is used only when **every** OAuth App and GitHub App variable is set, because the
+  two apps share `WHYGRAPH_GITHUB_URL` and a real one cannot be mixed with the fake; with none set the
+  fake serves both, and a partial set stops `make dev-production` before anything starts, naming the
+  missing variables. Create a dev OAuth App and a dev GitHub App with the callback URLs
+  `http://whygraph.localhost:5173/auth/github` and `http://whygraph.localhost:5173/auth/github-app`
+  (see [GitHub sign-in](../deploy/production.md#github-sign-in) and
+  [The GitHub App](../deploy/production.md#the-github-app)), then copy `.env.dev.example` to
+  `.env.dev` (gitignored) and fill in all seven variables. `make dev-production` loads `.env.dev` (or
+  the file `DEV_ENV_FILE=...` names) when it exists; values in it win over your shell's.
+- **Webhooks from a real GitHub** cannot reach `whygraph.localhost`, so relay them through a
+  [smee.io](https://smee.io) channel: set the dev app's webhook URL to the channel, then run
+  `npx smee-client -u https://smee.io/<channel> -t http://whygraph.localhost:5173/github/webhook`
+  beside `make dev-production`. The relay goes through Vite, which proxies `/github` to the portal and
+  keeps the base host it requires. Without the relay, pushes still arrive through the hourly check
+  and **Scan now**.
 - The first run prints a `Bootstrap secret:` line in the terminal (the portal's log); the page at
   `http://whygraph.localhost:5173` asks for it to create the first account.
 - Under the hood `make dev-production` runs `scripts/dev_portal.py --preserve-host`: Vite then
@@ -76,7 +99,7 @@ production mode:
   (`pyproject.toml`, `uv.lock`, the Dockerfile, `package-lock.json`); everyday edits reach the
   container through the mount.
 - **`dev-production`** for anything that only exists in production mode: accounts, sessions,
-  organization hosts, the admin page.
+  organization hosts, the admin page, projects imported from GitHub and the webhook.
 - **`make check`** always, before pushing. Its smoke test catches what `dev-local` cannot see.
 
 ## What stays isolated
@@ -112,6 +135,8 @@ The three run modes share port `8777`, so run one at a time. Override it with `D
 
 - **Node 22.12 or newer** for the playground toolchain (`nvm use 22`).
 - **Docker** for `dev-local` (its Postgres), `dev-docker`, `prod`, `make e2e` and `make check`.
+- **`openssl`** for `make e2e` and for `make dev-production` with the fake GitHub: both generate the
+  fake GitHub App's key and webhook secret with it.
 - **The tests need a Postgres.** The portal tests run against a real one: by default `pytest` starts a
   throwaway container of the pinned image for the session (on a random loopback port, in memory) and
   gives every test its own database, so plain `uv run pytest` needs Docker. Without Docker, set

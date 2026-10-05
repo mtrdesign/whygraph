@@ -53,6 +53,29 @@ export function authMessage(err: unknown): string {
       return "You cannot disable your own account.";
     case "last_admin":
       return "This is the last enabled instance administrator. Make someone else an administrator first.";
+    // Projects from GitHub and org deletion (M2d-2)
+    case "source_not_allowed":
+      return "This kind of project is not supported here. Remove the project.";
+    case "no_access":
+      return "That repository is not available to you through this installation. Check that you can read it on GitHub and that the WhyGraph app covers it.";
+    case "github_access_lost":
+      return "WhyGraph can no longer read this repository on GitHub. Reconnect it on GitHub, then scan again.";
+    case "github_authorization_required":
+      return "Connect GitHub first: WhyGraph needs your authorization to list your repositories.";
+    case "github_account_mismatch":
+      return "You authorized a different GitHub account than the one you signed in with. Switch accounts on GitHub and try again.";
+    case "github_required":
+      return "Importing from GitHub needs an account that signs in with GitHub.";
+    case "github_app_not_configured":
+      return "This portal has no GitHub App configured. Ask an instance administrator.";
+    case "start_from_portal":
+      return "Open your organization in WhyGraph and choose Import from GitHub.";
+    case "tracked_whygraph_state":
+      return "This repository tracks WhyGraph's own state (.whygraph/ or .codegraph/). Remove it from the repository to import it.";
+    case "confirm_slug":
+      return "Type the organization's slug exactly to delete it.";
+    case "busy":
+      return "A sync is finishing - try again in a minute.";
   }
   if (err.status === 429) return "Too many attempts. Wait a few minutes and try again.";
   return err.message;

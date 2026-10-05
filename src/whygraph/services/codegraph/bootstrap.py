@@ -50,6 +50,7 @@ _CREDENTIAL_ENV: frozenset[str] = frozenset(
     {
         "GH_TOKEN",
         "WHYGRAPH_GIT_TOKEN",
+        "WHYGRAPH_GITHUB_TOKEN_FILE",
         "CLAUDE_CODE_OAUTH_TOKEN",
         # The portal database: never a secret value, but none of codegraph's business.
         "WHYGRAPH_DATABASE_URL",

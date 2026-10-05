@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { portalKey, projectApi, projectKey } from "../api";
 
 /**
- * "Scan now" / "Sync now" for one project. The portal coalesces requests: while a
+ * "Scan now" for one project (on a production project it fetches first). The portal coalesces requests: while a
  * job runs, every request joins the one pending run and gets the same id back.
  * So a call from a page showing an *active* run (`current.active`) stays put and
  * reports the follow-up (`followUp`), or says the run was already queued when the
@@ -47,17 +47,10 @@ export function useScanActions(slug: string, current?: { id: number; active: boo
     onSuccess: ({ run_id }) => landed(run_id, "Scan"),
     onError: (err) => toast.error(err.message),
   });
-  const sync = useMutation({
-    mutationFn: () => projectApi(slug).sync(),
-    onSuccess: ({ run_id }) => landed(run_id, "Sync"),
-    onError: (err) => toast.error(err.message),
-  });
 
   return {
     scanNow: (body?: { trigger?: "manual" | "describe" }) => scan.mutate(body),
-    syncNow: () => sync.mutate(),
     scanPending: scan.isPending,
-    syncPending: sync.isPending,
     /** The run a click during an active run was folded into, if it is not the current one. */
     followUp,
   };

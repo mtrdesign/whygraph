@@ -30,10 +30,13 @@ export default defineConfig({
     // 421); the forwarded Origin (http://localhost:5173) is allowed by the
     // WHYGRAPH_DEV_ORIGINS those targets set (else 403).
     // With WHYGRAPH_DEV_PRESERVE_HOST=1 (production mode) Host is forwarded as is.
+    // `/github` carries the GitHub App's webhook (`/github/webhook`, base host),
+    // e.g. relayed by smee-client in `make dev-production` against a real GitHub.
     allowedHosts: preserveHost ? [".whygraph.localhost"] : undefined,
     proxy: {
       "/api": { target: devPortal, changeOrigin: !preserveHost },
       "/mcp": { target: devPortal, changeOrigin: !preserveHost },
+      "/github": { target: devPortal, changeOrigin: !preserveHost },
     },
   },
   test: {

@@ -66,6 +66,8 @@ SCAN_TRIGGERS: tuple[str, ...] = (
     "hook",
     "poll",
     "sync",
+    "push",
+    "reconcile",
 )
 SCAN_STATUSES: tuple[str, ...] = (
     "queued",
@@ -379,14 +381,27 @@ class Project(PortalBase, table=True):
         ``"local"`` (a shared-folder repo mounted in place) or
         ``"github"`` (cloned by the portal under the data dir).
     root : str
-        Absolute path for a local repo; relative to the data dir
-        (``repos/<slug>``) for a GitHub clone.
+        Absolute path for a local repo; relative to the data dir for a
+        GitHub clone (``repos/<org slug>/<slug>``; ``repos/<slug>`` for a
+        local clone of an earlier build).
     remote_url : str or None
-        Git remote URL, when known.
+        Git remote URL, when known (display only for an imported repo).
     initialized_at, last_scan_at, last_scanned_head : str or None
         Lifecycle timestamps and the HEAD of the last successful scan.
     created_by : int or None
         ``users.id`` (M2 audit); ``NULL`` when the user is gone.
+    github_repo_id : int or None
+        GitHub's numeric repository id - the identity of a repo imported
+        through the GitHub App (M2d-2); it survives a rename or transfer.
+        Unique per org (``uq_projects_org_github_repo``, a partial index
+        over the non-``NULL`` ids); ``NULL`` for a local project.
+    github_installation_id : int or None
+        The GitHub App installation that covers the repo.
+    default_branch : str or None
+        The repo's default branch as GitHub reports it (the one scanned).
+    access_lost_at, access_lost_reason : str or None
+        When and why the portal lost access to the repo (app uninstalled,
+        repo removed or deleted); ``NULL`` while it has access.
     """
 
     __tablename__ = "projects"
@@ -408,6 +423,14 @@ class Project(PortalBase, table=True):
             name="fk_projects_created_by",
             ondelete="SET NULL",
         ),
+        Index(
+            "uq_projects_org_github_repo",
+            "org_id",
+            "github_repo_id",
+            unique=True,
+            postgresql_where=text("github_repo_id IS NOT NULL"),
+        ),
+        Index("ix_projects_github_repo_id", "github_repo_id"),
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -422,6 +445,28 @@ class Project(PortalBase, table=True):
     last_scanned_head: str | None = Field(default=None, sa_type=Text)
     created_by: int | None = Field(default=None)
     created_at: str = Field(default_factory=_now, sa_type=Text)
+    github_repo_id: int | None = Field(default=None, sa_type=BigInteger)
+    github_installation_id: int | None = Field(default=None, sa_type=BigInteger)
+    default_branch: str | None = Field(default=None, sa_type=Text)
+    access_lost_at: str | None = Field(default=None, sa_type=Text)
+    access_lost_reason: str | None = Field(default=None, sa_type=Text)
+
+
+class RetiredOrgSlug(PortalBase, table=True):
+    """The slug of a deleted organization, never handed out again (M2d-2).
+
+    Attributes
+    ----------
+    slug : str
+        The retired slug (the primary key).
+    retired_at : str
+        ISO-8601 UTC timestamp of the deletion.
+    """
+
+    __tablename__ = "retired_org_slugs"
+
+    slug: str = Field(sa_type=Text, primary_key=True)
+    retired_at: str = Field(default_factory=_now, sa_type=Text)
 
 
 class ProjectAgent(PortalBase, table=True):
@@ -562,7 +607,8 @@ class ScanRun(PortalBase, table=True):
         ``"scan"`` or ``"sync"``.
     trigger : str
         ``"initial"``, ``"manual"``, ``"describe"``, ``"hook"``,
-        ``"poll"`` or ``"sync"``.
+        ``"poll"``, ``"sync"``, ``"push"`` (a GitHub webhook) or
+        ``"reconcile"`` (the periodic remote-head check).
     analyze : bool
         Whether the run describes commits (resolved from the trigger).
     requested_by : int or None
@@ -650,6 +696,7 @@ __all__ = [
     "Project",
     "ProjectAgent",
     "ProjectConfig",
+    "RetiredOrgSlug",
     "ScanRun",
     "Secret",
     "Setting",

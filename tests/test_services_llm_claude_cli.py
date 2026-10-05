@@ -123,6 +123,23 @@ def test_complete_withholds_the_portal_database_variables(
     assert "WHYGRAPH_DATABASE_PASSWORD_FILE" not in captured["env"]
 
 
+def test_complete_withholds_the_github_token_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scan child's installation-token file is none of ``claude``'s business."""
+    monkeypatch.setenv("WHYGRAPH_GITHUB_TOKEN_FILE", "/data/runs/1.token")
+    captured: dict = {}
+
+    def fake_run(cmd, *, env, **_):
+        captured["env"] = env
+        return _ok("ok")
+
+    with patch("whygraph.services.llm.claude_cli.subprocess.run", side_effect=fake_run):
+        ClaudeCliAdapter(model="m").complete(CompletionRequest.of("hi"))
+
+    assert "WHYGRAPH_GITHUB_TOKEN_FILE" not in captured["env"]
+
+
 def test_complete_sets_anthropic_api_key_when_provided(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

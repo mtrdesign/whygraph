@@ -29,7 +29,7 @@ export function ScanHistory({ slug }: { slug: string }) {
     queryKey: projectKey(slug, "project"),
     queryFn: () => portalApi.project(slug),
   });
-  const { scanNow, syncNow, scanPending, syncPending } = useScanActions(slug);
+  const { scanNow, scanPending } = useScanActions(slug);
   const readOnly = useReadOnly();
   const list = runs.data?.runs ?? [];
   const usable = !!project.data?.initialized && project.data.root_status === "ok";
@@ -45,11 +45,6 @@ export function ScanHistory({ slug }: { slug: string }) {
         </div>
         {!readOnly && (
           <div className="flex gap-2">
-            {project.data?.source === "github" && (
-              <Button variant="outline" onClick={syncNow} disabled={!usable || syncPending}>
-                Sync now
-              </Button>
-            )}
             <Button onClick={() => scanNow()} disabled={!usable || scanPending}>
               Scan now
             </Button>

@@ -127,3 +127,111 @@ test("bootstrap, organizations on their own hosts, sign-in hand-off and reader a
   await expect(page.getByTestId("reader-banner")).toBeVisible();
   await expect(page).not.toHaveURL(/\/signin/);
 });
+
+/** Wait until a GitHub sign-in (or a password one) has landed back on WhyGraph and rendered. */
+async function signedIn(page: Page): Promise<void> {
+  await expect(page).toHaveURL(
+    (url) =>
+      url.hostname.endsWith(base.hostname) && !/^\/(auth\/|signin)/.test(url.pathname),
+  );
+  await page.waitForLoadState();
+  await expect(page.getByRole("heading").first()).toBeVisible();
+}
+
+/** The scan runs of a project, read in the page (same origin, its own cookies). */
+async function runs(page: Page, slug: string): Promise<{ kind: string; trigger: string; status: string }[]> {
+  return page.evaluate(async (s) => {
+    const r = await fetch(`/api/projects/${s}/scans`, { headers: { "X-WhyGraph-Client": "1" } });
+    if (!r.ok) throw new Error(`scans answered ${r.status}`);
+    return ((await r.json()) as { runs: { kind: string; trigger: string; status: string }[] }).runs;
+  }, slug);
+}
+
+test("projects from GitHub: connect, import, scan, members, a push, deleting the org", async ({ page, browser }) => {
+  // Ben (GitHub) creates rocket and imports the fake's fixture repo ben/demo
+  // through the GitHub App (the fake installs it on his account at start).
+  const benContext = await browser.newContext({ baseURL: env.prodUrl });
+  const ben = await benContext.newPage();
+  await githubSignIn(ben, "ben");
+  await signedIn(ben);
+  await ben.goto("/orgs/new");
+  await createOrg(ben, "Rocket", "rocket");
+  await ben.getByRole("link", { name: "Import from GitHub" }).click();
+  await expect(ben.getByRole("heading", { name: "Import from GitHub" })).toBeVisible();
+
+  // No user authorization yet in this session: Connect GitHub, authorize as
+  // ben on the fake, and the callback page sends him back to the import page.
+  await ben.getByTestId("github-connect").getByRole("button", { name: "Connect GitHub" }).click();
+  await ben.getByRole("link", { name: "Continue as ben" }).click();
+  await expect(ben).toHaveURL(new RegExp(`^${orgUrl("rocket")}/projects/new`));
+  await expect(ben.getByRole("radiogroup", { name: "GitHub accounts" }).getByRole("radio", { name: "ben" })).toBeChecked();
+  await expect(ben.getByTestId("repo-ben/notes")).toBeVisible();
+  await ben.getByTestId("repo-ben/demo").getByRole("button", { name: "Import ben/demo" }).click();
+
+  // The import cloned it: configure, then the first scan (the stub scanner,
+  // which fails on an unreadable token file) completes.
+  await expect(ben).toHaveURL(new RegExp(`/p/demo/init\\?step=configure`));
+  await ben.getByRole("button", { name: "Save and continue" }).click();
+  await expect(ben).toHaveURL(new RegExp(`/p/demo/init\\?step=scan`));
+  await ben.getByRole("button", { name: "Start first scan" }).click();
+  await expect(ben.getByText("First scan complete")).toBeVisible({ timeout: 30_000 });
+  await ben.getByRole("button", { name: "Open project" }).click();
+  await expect(ben).toHaveURL(new RegExp(`/p/demo$`));
+  expect((await runs(ben, "demo")).map((r) => r.status)).toEqual(["ok"]);
+
+  // Ada, the instance administrator, signs in with a password: she cannot
+  // import from GitHub, not even into her own organization.
+  // Signed out, acme's import page sends her to sign in and back (no second
+  // navigation that could race the sign-in's own).
+  await page.goto(`${orgUrl("acme")}/projects/new`);
+  await expect(page).toHaveURL(new RegExp(`^${base.origin}/signin\\?next=`));
+  const refused = page.waitForResponse((r) => r.url().endsWith("/api/github/installations"));
+  await signIn(page, "ada@example.com");
+  await expect(page).toHaveURL(`${orgUrl("acme")}/projects/new`);
+  const answer = await refused;
+  expect(answer.status()).toBe(403);
+  expect(((await answer.json()) as { code?: string }).code).toBe("github_required");
+  await expect(page.getByTestId("github-error")).toContainText("needs an account that signs in with GitHub");
+
+  // cy signs in once, Ben adds him as a member (M2d-1's flow): cy sees the
+  // project, without the owners' and admins' New project.
+  const cyContext = await browser.newContext({ baseURL: env.prodUrl });
+  const cy = await cyContext.newPage();
+  await githubSignIn(cy, "cy");
+  await signedIn(cy);
+  await ben.goto(`${orgUrl("rocket")}/members`);
+  await ben.getByLabel("GitHub username").fill("cy");
+  await ben.getByRole("button", { name: "Add member" }).click();
+  await expect(ben.getByTestId("member-list")).toContainText("@cy");
+  await expect(ben.getByLabel("Role for Cy")).toHaveValue("member");
+  await cy.goto(`${orgUrl("rocket")}/`);
+  await expect(cy.getByTestId("project-demo")).toBeVisible();
+  await expect(cy.getByRole("link", { name: "New project" })).toHaveCount(0);
+  await cyContext.close();
+
+  // A push on the fake: its webhook delivery queues a sync + scan of the project.
+  const pushed = await fetch(`${env.githubUrl}/_fake/push`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repo: "ben/demo", message: "Pushed in e2e" }),
+  });
+  expect(pushed.status).toBe(200);
+  expect(((await pushed.json()) as { webhook_status: number }).webhook_status).toBe(202);
+  await expect
+    .poll(async () => (await runs(ben, "demo")).find((r) => r.trigger === "push")?.status, { timeout: 30_000 })
+    .toBe("ok");
+
+  // Ben, the owner, deletes rocket; its slug can never be created again.
+  await ben.goto(`${orgUrl("rocket")}/settings`);
+  await ben.getByTestId("org-danger-zone").getByRole("button", { name: "Delete organization" }).click();
+  const dialog = ben.getByTestId("delete-org-dialog");
+  await dialog.getByLabel("Type rocket to confirm").fill("rocket");
+  await dialog.getByRole("button", { name: "Delete organization" }).click();
+  await expect(ben).toHaveURL(new RegExp(`^${base.origin}/orgs$`));
+  await ben.goto("/orgs/new");
+  await ben.getByLabel("Organization name").fill("Rocket");
+  await ben.getByLabel("URL name").fill("rocket");
+  await ben.getByRole("button", { name: "Create organization" }).click();
+  await expect(ben.getByText("That URL name is already taken.")).toBeVisible();
+  await benContext.close();
+});

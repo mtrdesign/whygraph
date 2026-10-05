@@ -7,7 +7,7 @@ One section per finding:
 2. an imported or stored ``[scan].remote`` must never become a git option;
 3. init / import / delete never read or write through a symlink out of the
    repository root;
-4. two concurrent GitHub adds of one URL never delete each other's clone;
+4. (removed with the local GitHub clone source: concurrent GitHub adds);
 5. a slow first principal load never overwrites the principal setup set;
 6. a project-scope key never follows an inherited global endpoint change.
 """
@@ -55,8 +55,7 @@ from whygraph.services.git.commands import (
     GitFetchRefsCmd,
     GitRemoteUrlCmd,
 )
-from whygraph.services.git.credentials import GITHUB_GIT_CONFIG, TOKEN_ENV_VAR
-from whygraph.services.github import RepoAccess
+from whygraph.services.git.credentials import TOKEN_ENV_VAR, github_git_config
 
 MCP_HEADERS = {"Accept": "application/json, text/event-stream"}
 MCP_LIST = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
@@ -254,12 +253,12 @@ def test_pr_ref_fetch_uses_the_token_helper_only_with_a_token(
 
     monkeypatch.setenv(TOKEN_ENV_VAR, token)
     argv = GitFetchRefsCmd("refs/pull/1/head:refs/whygraph/pull/1").argv()
-    assert argv[: 1 + len(GITHUB_GIT_CONFIG)] == ["git", *GITHUB_GIT_CONFIG]
+    config = list(github_git_config())
+    assert argv[: 1 + len(config)] == ["git", *config]
     assert argv[-3:] == ["--", "origin", "refs/pull/1/head:refs/whygraph/pull/1"]
     assert all(token not in a for a in argv)
 
     # The argv's helper answers github.com over https with the env token...
-    config = list(GITHUB_GIT_CONFIG)
     fill = subprocess.run(
         ["git", *config, "credential", "fill"],
         input="protocol=https\nhost=github.com\npath=acme/private\n\n",
@@ -423,83 +422,6 @@ def test_delete_never_unlinks_through_a_symlinked_whygraph_dir(
     assert any("symbolic link" in w for w in response.json()["warnings"])
     assert (alpha / PORTAL_JSON).is_file() and (alpha / PORTAL_ENV).is_file()
     assert helper.is_file()
-
-
-# ---------------------------------------------------------------------------
-# 4. Concurrent GitHub adds (MINOR)
-# ---------------------------------------------------------------------------
-
-
-def test_concurrent_github_adds_keep_the_winners_clone(
-    ready: TestClient, env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    both_cloning = threading.Barrier(2, timeout=1.0)
-    clones: list[Path] = []
-
-    def _access(owner, name, token, **kw):
-        return RepoAccess(
-            full_name=f"{owner}/{name}", private=False, default_branch="main"
-        )
-
-    def _clone(url, dest, *, env=None, timeout=None):
-        clones.append(dest)
-        try:
-            both_cloning.wait()  # before the fix both requests get here
-        except threading.BrokenBarrierError:
-            pass
-        if dest.exists():
-            raise GitError(f"destination path '{dest}' already exists")
-        make_repo(dest.parent, dest.name)
-        (dest / "WINNER").write_text("mine\n")
-
-    monkeypatch.setattr("whygraph.portal.routes.check_repo_access", _access)
-    monkeypatch.setattr("whygraph.portal.routes.Repository.clone", _clone)
-
-    results: list = []
-
-    def add() -> None:
-        results.append(
-            ready.post(
-                "/api/projects",
-                json={"source": "github", "url": "https://github.com/acme/widget"},
-            )
-        )
-
-    threads = [threading.Thread(target=add) for _ in range(2)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    codes = sorted(r.status_code for r in results)
-    assert codes == [201, 409], [r.text for r in results]
-    loser = next(r for r in results if r.status_code == 409)
-    assert loser.json()["code"] == "duplicate"
-    dest = env.data / "repos" / "widget"
-    assert (dest / "WINNER").read_text() == "mine\n"
-    # Only the final checkout is left under repos/.
-    assert sorted(p.name for p in (env.data / "repos").iterdir()) == ["widget"]
-
-
-def test_failed_clone_removes_only_its_own_directory(
-    ready: TestClient, env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def _access(owner, name, token, **kw):
-        return RepoAccess(
-            full_name=f"{owner}/{name}", private=False, default_branch="main"
-        )
-
-    def _clone(url, dest, *, env=None, timeout=None):
-        dest.mkdir(parents=True)
-        (dest / "partial").write_text("x")
-        raise GitError("network down")
-
-    monkeypatch.setattr("whygraph.portal.routes.check_repo_access", _access)
-    monkeypatch.setattr("whygraph.portal.routes.Repository.clone", _clone)
-    response = ready.post(
-        "/api/projects", json={"source": "github", "url": "https://github.com/acme/w"}
-    )
-    assert response.status_code == 502 and response.json()["code"] == "clone_failed"
-    assert list((env.data / "repos").iterdir()) == []
 
 
 # ---------------------------------------------------------------------------

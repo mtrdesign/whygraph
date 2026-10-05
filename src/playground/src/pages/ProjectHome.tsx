@@ -8,6 +8,7 @@ import { useSlug } from "../lib/project";
 import { timeAgo } from "../lib/projectStatus";
 import { useScanActions } from "../lib/scanActions";
 import { formatSeconds, runSeconds, triggerLabel } from "../lib/scanFormat";
+import { AccessLostNotice, UnsupportedSourceNotice } from "../components/portal/AccessLost";
 import { ConnectAgent } from "../components/portal/ConnectAgent";
 import { NotInitialized, ProblemAlert, ProjectUnavailable } from "../components/portal/EdgeStates";
 import { ProjectPortChangeNotice } from "../components/portal/PortChangeNotice";
@@ -35,7 +36,7 @@ function Stat({ label, value, hint }: { label: string; value: string; hint?: str
 
 /**
  * Screen 9a, the project's landing page: status (with the stale badge and its
- * *Scan now* / *Sync now*), stats, the describe-cost card when many commits wait,
+ * *Scan now*), stats, the describe-cost card when many commits wait,
  * recent scans, and how to connect an agent. Edge states replace or precede the
  * content: folder missing, not initialized, a symlink in the way.
  */
@@ -60,7 +61,7 @@ export function ProjectHome() {
     enabled: ready && !!p?.last_scan_at,
     retry: false,
   });
-  const { scanNow, syncNow, scanPending, syncPending } = useScanActions(slug);
+  const { scanNow, scanPending } = useScanActions(slug);
   const readOnly = useReadOnly();
   const production = isProduction(usePortalState().data);
   const [dismissed, setDismissed] = useState(false);
@@ -79,6 +80,8 @@ export function ProjectHome() {
   const stats = p.stats;
   const stale = p.stale;
   const github = p.source === "github";
+  // Access lost / an unsupported source: what was scanned stays readable, scans are refused.
+  const scannable = ready && !p.access_lost && p.source_supported !== false;
 
   return (
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-5 p-6 sm:p-8">
@@ -108,19 +111,16 @@ export function ProjectHome() {
               Open Explorer
             </Button>
           )}
-          {github && !readOnly && (
-            <Button variant="outline" onClick={syncNow} disabled={!ready || syncPending}>
-              Sync now
-            </Button>
-          )}
           {!readOnly && (
-            <Button onClick={() => scanNow()} disabled={!ready || scanPending}>
+            <Button onClick={() => scanNow()} disabled={!scannable || scanPending}>
               Scan now
             </Button>
           )}
         </div>
       </div>
 
+      <AccessLostNotice project={p} />
+      <UnsupportedSourceNotice project={p} />
       {p.root_status !== "ok" && <ProjectUnavailable project={p} />}
       <ProjectPortChangeNotice slug={slug} change={p.port_change} />
       {p.root_status === "ok" && !p.initialized && <NotInitialized slug={slug} />}
@@ -139,12 +139,7 @@ export function ProjectHome() {
               newest work.
             </p>
             <div className="mt-2 flex gap-2">
-              {github && (
-                <Button size="sm" variant="outline" onClick={syncNow} disabled={syncPending}>
-                  Sync now
-                </Button>
-              )}
-              <Button size="sm" onClick={() => scanNow()} disabled={scanPending}>
+              <Button size="sm" onClick={() => scanNow()} disabled={!scannable || scanPending}>
                 Scan now
               </Button>
             </div>

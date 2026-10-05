@@ -28,7 +28,14 @@ from whygraph.services.git import (
     strip_userinfo,
 )
 from whygraph.services.git.commands import GitCloneCmd, GitFetchDefaultCmd
-from whygraph.services.git.credentials import GITHUB_GIT_CONFIG, TOKEN_ENV_VAR
+from whygraph.services.git.credentials import (
+    GITHUB_URL_ENV,
+    TOKEN_ENV_VAR,
+    GitHost,
+    github_git_config,
+    github_git_host,
+    redact_tokens,
+)
 
 TOKEN = "ghp_SECRETTOKEN0123456789abcdefghijkl"
 URL = "https://github.com/octo/demo.git"
@@ -171,6 +178,86 @@ def test_strip_userinfo(url: str, expected: str):
     assert strip_userinfo(url) == expected
 
 
+def test_parse_github_url_follows_the_configured_host():
+    ghes = {GITHUB_URL_ENV: "https://GHE.example.com:8443/"}
+    assert parse_github_url("https://ghe.example.com:8443/o/r.git", environ=ghes) == (
+        "o",
+        "r",
+    )
+    fake = {GITHUB_URL_ENV: "http://127.0.0.1:9999"}
+    assert parse_github_url("http://127.0.0.1:9999/acme/api.git", environ=fake) == (
+        "acme",
+        "api",
+    )
+    for url, environ in [
+        ("https://github.com/o/r", ghes),  # github.com is not the configured host
+        ("https://ghe.example.com/o/r", ghes),  # the port is part of the host
+        ("https://127.0.0.1:9999/acme/api", fake),  # the scheme is too
+        ("http://127.0.0.1:9998/acme/api", fake),
+    ]:
+        with pytest.raises(InvalidRepoUrlError):
+            parse_github_url(url, environ=environ)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, GitHost("https", "github.com")),
+        ("", GitHost("https", "github.com")),
+        ("https://github.com/", GitHost("https", "github.com")),
+        ("https://github.com:443", GitHost("https", "github.com")),
+        ("https://GHE.Example.com:8443", GitHost("https", "ghe.example.com:8443")),
+        (
+            "https://code.example.com/github",
+            GitHost("https", "code.example.com", "/github"),
+        ),
+        ("http://127.0.0.1:9999", GitHost("http", "127.0.0.1:9999")),
+        ("http://localhost", GitHost("http", "localhost")),
+    ],
+)
+def test_github_git_host_reads_the_config(raw: str | None, expected: GitHost):
+    assert github_git_host({} if raw is None else {GITHUB_URL_ENV: raw}) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "http://github.com",  # http only for a loopback host
+        "http://ghe.example.com:8080",
+        "http://10.0.0.1",
+        "ftp://github.com",
+        "https://user:pw@github.com",
+        "https://github.com?x=1",
+        "https://github.com#frag",
+        "https://",
+        "https://gith'ub.com",
+        "https://github.com:99999",
+    ],
+)
+def test_github_git_host_refuses_a_bad_url(raw: str):
+    with pytest.raises(InvalidRepoUrlError, match=GITHUB_URL_ENV):
+        github_git_host({GITHUB_URL_ENV: raw})
+
+
+def test_http_is_allowed_only_for_a_loopback_host():
+    https = github_git_config({})
+    assert "protocol.https.allow=always" in https
+    assert not any(a.startswith("protocol.http.") for a in https)
+    ghes = github_git_config({GITHUB_URL_ENV: "https://ghe.example.com:8443"})
+    assert not any(a.startswith("protocol.http.") for a in ghes)
+    loopback = github_git_config({GITHUB_URL_ENV: "http://127.0.0.1:9999"})
+    assert loopback[:6] == (
+        "-c",
+        "protocol.allow=never",
+        "-c",
+        "protocol.https.allow=always",
+        "-c",
+        "protocol.http.allow=always",
+    )
+    with pytest.raises(InvalidRepoUrlError):
+        github_git_config({GITHUB_URL_ENV: "http://ghe.example.com"})
+
+
 def test_clone_rejects_bad_url_before_running_git(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -219,14 +306,42 @@ def test_pass_through_env_is_an_allowlist():
     }
 
 
-def test_git_env_adds_token_and_disables_prompts():
+def test_git_env_adds_token_and_disables_prompts_and_user_config():
     env = git_env(TOKEN, environ={"PATH": "/bin", "GH_TOKEN": "leak"})
     assert env == {
         "PATH": "/bin",
         "GIT_TERMINAL_PROMPT": "0",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
         TOKEN_ENV_VAR: TOKEN,
     }
-    assert TOKEN_ENV_VAR not in git_env(None, environ={"PATH": "/bin"})
+    anonymous = git_env(None, environ={"PATH": "/bin"})
+    assert TOKEN_ENV_VAR not in anonymous
+    assert anonymous["GIT_CONFIG_GLOBAL"] == os.devnull
+    assert anonymous["GIT_CONFIG_NOSYSTEM"] == "1"
+
+
+def test_git_env_ignores_a_global_insteadof(tmp_path: Path):
+    """Spike #6: a developer's ``insteadOf`` rewrote an https clone to ssh."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".gitconfig").write_text(
+        '[url "git@github.com:"]\n\tinsteadOf = https://github.com/\n'
+    )
+    base = {"PATH": os.environ["PATH"], "HOME": str(home)}
+
+    def rewritten(env: dict[str, str]) -> str:
+        return subprocess.run(
+            ["git", "ls-remote", "--get-url", URL],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=tmp_path,
+            check=True,
+        ).stdout.strip()
+
+    assert rewritten(base) == "git@github.com:octo/demo.git"  # the trap is set
+    assert rewritten(git_env(None, environ=base)) == URL
 
 
 # --------------------------------------------------------------------------
@@ -253,7 +368,8 @@ def test_clone_argv_is_https_only_with_reset_then_inline_helper():
 
 def test_fetch_argv_carries_the_same_config():
     argv = GitFetchDefaultCmd().argv()
-    assert list(GITHUB_GIT_CONFIG) == argv[1 : 1 + len(GITHUB_GIT_CONFIG)]
+    config = github_git_config()
+    assert list(config) == argv[1 : 1 + len(config)]
     assert argv[-4:] == ["fetch", "--no-tags", "--", "origin"]
 
 
@@ -285,10 +401,13 @@ def test_production_argv_refuses_ext_transport(tmp_path: Path):
 # --------------------------------------------------------------------------
 
 
-def _credential_fill(tmp_path: Path, request: str, token: str | None):
+def _credential_fill(
+    tmp_path: Path, request: str, token: str | None, github_url: str | None = None
+):
     env = git_env(token, environ={"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+    config = github_git_config({GITHUB_URL_ENV: github_url} if github_url else {})
     return subprocess.run(
-        ["git", *GITHUB_GIT_CONFIG, "credential", "fill"],
+        ["git", *config, "credential", "fill"],
         input=request,
         capture_output=True,
         text=True,
@@ -320,6 +439,42 @@ def test_helper_returns_nothing_for_other_hosts_or_protocols(
     assert res.returncode != 0
     assert TOKEN not in res.stdout
     assert TOKEN not in res.stderr
+
+
+@pytest.mark.parametrize(
+    ("github_url", "answered", "refused"),
+    [
+        (
+            "https://ghe.example.com:8443",
+            "protocol=https\nhost=ghe.example.com:8443\n\n",
+            [
+                "protocol=https\nhost=ghe.example.com\n\n",  # the port matters
+                "protocol=https\nhost=github.com\n\n",
+                "protocol=http\nhost=ghe.example.com:8443\n\n",
+            ],
+        ),
+        (
+            "http://127.0.0.1:9999",
+            "protocol=http\nhost=127.0.0.1:9999\n\n",
+            [
+                "protocol=https\nhost=127.0.0.1:9999\n\n",  # the protocol matters
+                "protocol=http\nhost=127.0.0.1:9998\n\n",
+                "protocol=http\nhost=127.0.0.1\n\n",
+                "protocol=https\nhost=github.com\n\n",
+            ],
+        ),
+    ],
+)
+def test_helper_answers_for_the_configured_host_only(
+    tmp_path: Path, github_url: str, answered: str, refused: list[str]
+):
+    res = _credential_fill(tmp_path, answered, TOKEN, github_url)
+    assert res.returncode == 0, res.stderr
+    assert f"password={TOKEN}" in res.stdout
+    for request_text in refused:
+        res = _credential_fill(tmp_path, request_text, TOKEN, github_url)
+        assert res.returncode != 0, request_text
+        assert TOKEN not in res.stdout and TOKEN not in res.stderr
 
 
 def test_helper_returns_nothing_without_a_token(tmp_path: Path):
@@ -403,6 +558,39 @@ def test_failure_message_scrubs_the_token(tmp_path: Path):
 
     assert TOKEN not in str(info.value)
     assert "***" in str(info.value)
+
+
+def test_failure_message_scrubs_a_partly_masked_token(tmp_path: Path):
+    """Spike #7: a tool prints most of an installation token, masking its tail."""
+    minted = "ghs_12345_eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJJdjEifQ.c2lnbmF0dXJl"
+    shown = minted[:40] + "*" * 12
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "git"
+    fake.write_text(f"#!/bin/sh\necho 'fatal: token {shown} rejected' >&2\nexit 128\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    # Not the token in the env (a different one), so only the pattern can catch it.
+    env = {"PATH": str(bin_dir), TOKEN_ENV_VAR: TOKEN}
+
+    with pytest.raises(GitError) as info:
+        Repository.clone(URL, tmp_path / "dest", env=env)
+
+    message = str(info.value)
+    assert minted[:12] not in message and "*" * 12 not in message
+    assert "fatal: token ghs_*** rejected" in message
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("token ghp_abcdefgh1234 here", "token ghp_*** here"),
+        ("ghs_1_abc.def-ghi_jkl****** done", "ghs_*** done"),
+        ("gho_ABCDEFGH ghu_12345678 ghr_xyzxyzxy", "gho_*** ghu_*** ghr_***"),
+        ("ghp_short and ghx_abcdefghij stay", "ghp_short and ghx_abcdefghij stay"),
+    ],
+)
+def test_redact_tokens_matches_the_token_pattern(text: str, expected: str):
+    assert redact_tokens(text) == expected
 
 
 def test_fetch_default_and_fast_forward(tmp_path: Path, bare: Path):

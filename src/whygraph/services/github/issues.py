@@ -14,6 +14,7 @@ from whygraph.core import Shell
 from .commands import GhApiGraphqlCmd, paginate_graphql
 from .exceptions import GitHubError
 from .issue import Issue
+from .token import GH_TOKEN_ENV, token_env
 
 _LIST_QUERY = """
 query($owner: String!, $name: String!, $cursor: String) {
@@ -104,7 +105,8 @@ class Issues(Collection[Issue]):
                 GhApiGraphqlCmd(
                     _COUNT_QUERY,
                     {"owner": self.owner, "name": self.name},
-                )
+                ),
+                env=token_env(GH_TOKEN_ENV),
             )
             try:
                 self._len_cache = int(data["repository"]["issues"]["totalCount"])

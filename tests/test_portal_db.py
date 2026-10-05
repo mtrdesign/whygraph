@@ -78,6 +78,7 @@ PORTAL_TABLES = {
     "scan_runs",
     "sessions",
     "password_resets",
+    "retired_org_slugs",
 }
 
 
@@ -223,6 +224,8 @@ def test_baseline_inserts_no_rows(empty_portal_database: str) -> None:
 BASELINE = "86e839432e62"
 TENANCY = "4ebfd8b89904"
 GITHUB = "b7d2c9a41e63"
+PROJECTS = "73bf248ea6fd"
+HEAD = PROJECTS
 
 
 def _seed_m2a(conn) -> dict[str, int]:  # noqa: ANN001
@@ -390,7 +393,7 @@ def test_tenancy_downgrade_refuses_with_two_orgs(empty_portal_database: str) -> 
     with portal_db.get_engine().connect() as conn:
         assert conn.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar() == (GITHUB)
+        ).scalar() == (HEAD)
         assert conn.execute(text("SELECT count(*) FROM organizations")).scalar() == 2
 
 
@@ -432,7 +435,7 @@ def test_identity_upgrade_on_an_empty_database(empty_portal_database: str) -> No
     with portal_db.get_engine().connect() as conn:
         assert conn.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar() == (GITHUB)
+        ).scalar() == (HEAD)
 
 
 def test_identity_downgrade_in_local_mode(empty_portal_database: str) -> None:
@@ -471,7 +474,7 @@ def test_identity_downgrade_refuses_in_production(empty_portal_database: str) ->
     with portal_db.get_engine().connect() as conn:
         assert conn.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar() == (GITHUB)
+        ).scalar() == (HEAD)
     assert "email" in _columns("users")
 
 
@@ -520,6 +523,203 @@ def test_github_identity_constraints_and_index(empty_portal_database: str) -> No
         add("f", hash="h", gid=3)
     with pytest.raises(IntegrityError, match="ck_users_login_needs_id"):
         add("g", login="orphan")
+
+
+# ---------------------------------------------------------------------------
+# The github projects revision (M2d-2): repo ids, retired slugs, triggers
+# ---------------------------------------------------------------------------
+
+_INSERT_PROJECT = text(
+    "INSERT INTO projects (org_id, slug, name, source, root, github_repo_id, "
+    "created_at) VALUES (:org, :slug, :slug, 'github', :root, :repo, 'now')"
+)
+
+
+def _insert_run(conn, project: int, trigger: str) -> None:  # noqa: ANN001
+    conn.execute(
+        text(
+            'INSERT INTO scan_runs (project_id, kind, trigger, "analyze", status) '
+            "VALUES (:p, 'sync', :t, false, 'queued')"
+        ),
+        {"p": project, "t": trigger},
+    )
+
+
+def test_github_projects_columns_index_and_triggers(
+    empty_portal_database: str,
+) -> None:
+    portal_db.ensure_initialized()
+    assert {
+        "github_repo_id",
+        "github_installation_id",
+        "default_branch",
+        "access_lost_at",
+        "access_lost_reason",
+    } <= _columns("projects")
+    with portal_db.get_session() as s:
+        one = builtin_org_id(s)
+        two = create_org(s, slug="bravo", name="Bravo").id
+        s.commit()
+    big = 2**31 + 5  # repository ids pass 2^31 (spike #9): BIGINT
+    with portal_db.get_engine().begin() as conn:
+        conn.execute(
+            _INSERT_PROJECT, {"org": one, "slug": "a", "root": "r/a", "repo": big}
+        )
+        # The same repo in another org fits (the index is per org) ...
+        conn.execute(
+            _INSERT_PROJECT, {"org": two, "slug": "a", "root": "r/b", "repo": big}
+        )
+        # ... and many repo-less projects in one org.
+        conn.execute(
+            _INSERT_PROJECT, {"org": one, "slug": "b", "root": "r/c", "repo": None}
+        )
+        conn.execute(
+            _INSERT_PROJECT, {"org": one, "slug": "c", "root": "r/d", "repo": None}
+        )
+        project = conn.execute(
+            text("SELECT id FROM projects WHERE root = 'r/a'")
+        ).scalar()
+        assert (
+            conn.execute(
+                text("SELECT github_repo_id FROM projects WHERE id = :p"),
+                {"p": project},
+            ).scalar()
+            == big
+        )
+        for trigger in ("push", "reconcile"):
+            _insert_run(conn, project, trigger)
+        defs = dict(
+            conn.execute(
+                text(
+                    "SELECT indexname, indexdef FROM pg_indexes WHERE indexname IN "
+                    "('uq_projects_org_github_repo', 'ix_projects_github_repo_id')"
+                )
+            ).all()
+        )
+    assert "WHERE (github_repo_id IS NOT NULL)" in defs["uq_projects_org_github_repo"]
+    assert "UNIQUE" in defs["uq_projects_org_github_repo"]
+    assert "UNIQUE" not in defs["ix_projects_github_repo_id"]
+    with pytest.raises(IntegrityError, match="uq_projects_org_github_repo"):
+        with portal_db.get_engine().begin() as conn:
+            conn.execute(
+                _INSERT_PROJECT, {"org": one, "slug": "d", "root": "r/e", "repo": big}
+            )
+    with pytest.raises(IntegrityError, match="ck_scan_runs_trigger"):
+        with portal_db.get_engine().begin() as conn:
+            _insert_run(conn, project, "webhook")
+
+
+def test_retired_org_slugs_table(empty_portal_database: str) -> None:
+    from whygraph.portal.models import RetiredOrgSlug
+
+    portal_db.ensure_initialized()
+    with portal_db.get_session() as s:
+        s.add(RetiredOrgSlug(slug="acme"))
+        s.commit()
+        (row,) = s.exec(select(RetiredOrgSlug)).all()
+        assert row.slug == "acme" and row.retired_at
+    with pytest.raises(IntegrityError):
+        with portal_db.get_session() as s:
+            s.add(RetiredOrgSlug(slug="acme"))
+            s.commit()
+
+
+def test_github_projects_upgrade_keeps_existing_projects(
+    empty_portal_database: str,
+) -> None:
+    portal_db.ensure_initialized()
+    with portal_db.get_session() as s:
+        org = builtin_org_id(s)
+        s.commit()
+    portal_db._reset_engine()
+    command.downgrade(portal_db.alembic_config(), GITHUB)
+    with portal_db.get_engine().begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO projects (org_id, slug, name, source, root, created_at) "
+                "VALUES (:org, 'api', 'API', 'github', 'repos/api', 'now')"
+            ),
+            {"org": org},
+        )
+    portal_db._reset_engine()
+    command.upgrade(portal_db.alembic_config(), "head")
+    with portal_db.get_engine().connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT slug, github_repo_id, github_installation_id, default_branch, "
+                "access_lost_at, access_lost_reason FROM projects"
+            )
+        ).one()
+    assert tuple(row) == ("api", None, None, None, None, None)
+
+
+def test_github_projects_downgrade_round_trip(empty_portal_database: str) -> None:
+    portal_db.ensure_initialized()
+    portal_db._reset_engine()
+    command.downgrade(portal_db.alembic_config(), GITHUB)
+    portal_db._reset_engine()
+    assert "retired_org_slugs" not in inspect(portal_db.get_engine()).get_table_names()
+    assert not _columns("projects") & {"github_repo_id", "access_lost_at"}
+    with portal_db.get_engine().connect() as conn:
+        assert conn.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar() == (GITHUB)
+        check = conn.execute(
+            text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = 'ck_scan_runs_trigger'"
+            )
+        ).scalar_one()
+    assert "push" not in check and "poll" in check
+    # And back up again: the round trip is clean.
+    command.upgrade(portal_db.alembic_config(), "head")
+    portal_db._reset_engine()
+    assert "retired_org_slugs" in inspect(portal_db.get_engine()).get_table_names()
+
+
+@pytest.mark.parametrize(
+    "seed, match",
+    [
+        (
+            "INSERT INTO retired_org_slugs (slug, retired_at) VALUES ('x', 'now')",
+            "slug",
+        ),
+        (
+            "INSERT INTO projects (org_id, slug, name, source, root, github_repo_id, "
+            "created_at) VALUES (:org, 'gh', 'gh', 'github', 'repos/gh', 7, 'now')",
+            "imported GitHub projects",
+        ),
+        (
+            'INSERT INTO scan_runs (project_id, kind, trigger, "analyze", status) '
+            "VALUES (:project, 'sync', 'push', false, 'ok')",
+            "push / reconcile",
+        ),
+    ],
+)
+def test_github_projects_downgrade_refuses_m2d2_data(
+    empty_portal_database: str, seed: str, match: str
+) -> None:
+    portal_db.ensure_initialized()
+    with portal_db.get_session() as s:
+        org = builtin_org_id(s)
+        s.commit()
+    with portal_db.get_engine().begin() as conn:
+        project = conn.execute(
+            text(
+                "INSERT INTO projects (org_id, slug, name, source, root, created_at) "
+                "VALUES (:org, 'api', 'API', 'local', '/r/api', 'now') RETURNING id"
+            ),
+            {"org": org},
+        ).scalar_one()
+        conn.execute(text(seed), {"org": org, "project": project})
+    portal_db._reset_engine()
+    with pytest.raises(RuntimeError, match=match):
+        command.downgrade(portal_db.alembic_config(), GITHUB)
+    portal_db._reset_engine()
+    with portal_db.get_engine().connect() as conn:
+        assert conn.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar() == (HEAD)
 
 
 # ---------------------------------------------------------------------------

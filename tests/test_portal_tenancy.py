@@ -553,6 +553,7 @@ PATH_PARAMS: dict[str, Callable[[OrgWorld], str]] = {
     "{number}": lambda o: "1",
     "{session_id}": lambda o: str(o.session_id),
     "{uid}": lambda o: o.owner_uid,
+    "{installation_id}": lambda o: "7",
 }
 """How to fill each path parameter for an org; an unmapped one fails the sweep."""
 
@@ -667,6 +668,24 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     ),
     ("DELETE", "/api/org/members/{uid}"): Call(409, shows=lambda o: ["last_owner"]),
     ("DELETE", "/api/org/membership"): Call(409, shows=lambda o: ["last_owner"]),
+    # Deleting the org (test_portal_org_delete.py deletes one for real; the
+    # sweep must keep its world, so it sends a wrong slug)
+    ("DELETE", "/api/org"): Call(
+        409,
+        body=lambda w, o: {"confirm_slug": "wrong"},
+        shows=lambda o: ["confirm_slug"],
+    ),
+    # Production's GitHub App import page (swept over prod_world, whose
+    # owners have not connected GitHub; test_portal_github_import.py drives it)
+    ("POST", "/api/github/app/authorize"): Call(
+        200, body=lambda w, o: {}, shows=lambda o: ["/login/oauth/authorize"]
+    ),
+    ("GET", "/api/github/installations"): Call(
+        401, shows=lambda o: ["github_authorization_required"]
+    ),
+    ("GET", "/api/github/installations/{installation_id}/repos"): Call(
+        401, shows=lambda o: ["github_authorization_required"]
+    ),
     ("POST", "/api/projects"): Call(
         201,
         body=lambda w, o: {
@@ -680,7 +699,12 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     ("PATCH", "/api/projects/{slug}"): Call(
         200, body=lambda w, o: {"name": o.name}, shows=lambda o: [o.name]
     ),
-    ("DELETE", "/api/projects/{slug}"): Call(200, check=_deleted_check),
+    ("DELETE", "/api/projects/{slug}"): Call(
+        # (a production project is a GitHub one, removed by typing its name)
+        200,
+        body=lambda w, o: {"confirm_name": o.name},
+        check=_deleted_check,
+    ),
     ("GET", "/api/projects/{slug}/config"): Call(
         200, shows=lambda o: [o.hint("project_openai")]
     ),
@@ -704,7 +728,6 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     ("GET", "/api/projects/{slug}/scans/{run_id}/log"): Call(
         200, shows=lambda o: [f'"run_id":{o.run_id}']
     ),
-    ("POST", "/api/projects/{slug}/sync"): Call(400, shows=lambda o: ["not_github"]),
     ("GET", "/api/projects/{slug}/scan-estimate"): Call(200),
     # The Explorer router
     ("GET", "/api/projects/{slug}/search"): Call(
@@ -1254,7 +1277,7 @@ def test_system_scans_get_only_their_own_orgs_secrets(
                 scan_requested=True,
             )
 
-    for start in (runner.catch_up, runner.tick, describe):
+    for start in (runner.catch_up, describe):
         rewind()
         seen.clear()
         w.client.portal.call(start)
@@ -1287,9 +1310,9 @@ def test_nothing_answers_signed_out_in_production(
 ) -> None:
     """Section 5.4 item 3 on a real production portal (M2c sessions and hosts).
 
-    Production refuses Initialize, so the project is inserted directly with
-    ``initialized_at`` set and its DB created as Initialize would. The
-    hook-refusal half of this case lives in
+    Production makes projects only by a GitHub App import, so the project is
+    inserted directly with ``initialized_at`` set and its DB created as the
+    import would. The hook-refusal half of this case lives in
     ``test_portal_hosts_isolation.py`` (M2c plan section 7, step 5).
     """
     env = production_env

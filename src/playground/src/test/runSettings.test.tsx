@@ -447,18 +447,20 @@ describe("Project overview (screen 9a)", () => {
     expect(await screen.findByText(/\[mcp_servers\.whygraph\]/)).toBeInTheDocument();
   });
 
-  it("a stale GitHub project offers Sync now and Scan now", async () => {
+  it("a stale GitHub project offers Scan now only (it fetches first; there is no Sync now)", async () => {
     handlers["GET /api/projects/alpha"] = () =>
       details("alpha", { source: "github", remote_url: "https://github.com/o/r", stale: { commits_behind: 3 } });
-    handlers["POST /api/projects/alpha/sync"] = () => ({ status: 202, body: { run_id: 12 } });
+    handlers["POST /api/projects/alpha/scans"] = () => ({ status: 202, body: { run_id: 12 } });
     handlers["GET /api/projects/alpha/scans/12/events"] = () => sse([]);
     const user = userEvent.setup();
     const { router } = mount("/p/alpha");
     const banner = await screen.findByTestId("stale-banner");
     expect(banner).toHaveTextContent("3 commits behind");
-    await user.click(within(banner).getByRole("button", { name: "Sync now" }));
-    await waitFor(() => expect(calls("POST", "/api/projects/alpha/sync")).toHaveLength(1));
+    expect(screen.queryByRole("button", { name: "Sync now" })).toBeNull();
+    await user.click(within(banner).getByRole("button", { name: "Scan now" }));
+    await waitFor(() => expect(calls("POST", "/api/projects/alpha/scans")).toHaveLength(1));
     await waitFor(() => expect(here(router)).toBe("/p/alpha/scans/12"));
+    expect(calls("POST", "/api/projects/alpha/sync")).toHaveLength(0);
   });
 
   it("shows the describe-cost card when more than 500 commits wait", async () => {

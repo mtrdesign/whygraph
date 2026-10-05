@@ -20,6 +20,9 @@ export const env = {
   // where the one-time bootstrap secret is printed.
   prodUrl: need("WHYGRAPH_E2E_PROD_URL"),
   prodLog: need("WHYGRAPH_E2E_PROD_LOG"),
+  // The fake GitHub (tests/github_fake.py) both production apps talk to; its
+  // control routes (`POST /_fake/push`, ...) change state and send the webhook.
+  githubUrl: need("WHYGRAPH_E2E_GITHUB_URL"),
   root,
   shared: path.join(root, "shared"),
   outside: path.join(root, "outside"),

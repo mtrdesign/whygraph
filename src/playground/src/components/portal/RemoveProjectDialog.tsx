@@ -11,6 +11,7 @@ import {
   type ProjectDetails,
 } from "../../api";
 import { agentInfo } from "../../lib/agents";
+import { isProduction, usePortalState } from "../../lib/identity";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
@@ -30,7 +31,9 @@ import { DiffView } from "./InitPreview";
  * agents' MCP entries too, and for a GitHub clone asks for the project's name
  * (the checkout is deleted). A git-tracked agent file the removal would change
  * comes back from the backend (`needs_confirmation`) with its diff and is
- * confirmed in place. Removal is refused while a scan runs.
+ * confirmed in place. Removal is refused while a scan runs. In production a
+ * project is a server copy of a GitHub repository with no hooks or agent
+ * files, so the dialog says only that the copy and its scans go.
  */
 export function RemoveProjectDialog({
   project,
@@ -44,6 +47,7 @@ export function RemoveProjectDialog({
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const github = project.source === "github";
+  const production = isProduction(usePortalState().data);
   const [strip, setStrip] = useState(false);
   const [typed, setTyped] = useState("");
   const [pending, setPending] = useState<FileOutcome[]>([]);
@@ -95,7 +99,9 @@ export function RemoveProjectDialog({
             <DialogTitle>{project.name} was removed</DialogTitle>
             <DialogDescription>
               {result.checkout_deleted
-                ? "The checkout was deleted."
+                ? production
+                  ? "The server copy was deleted. The repository on GitHub was not changed."
+                  : "The checkout was deleted."
                 : "Your repository was left as it was."}
             </DialogDescription>
           </DialogHeader>
@@ -124,62 +130,88 @@ export function RemoveProjectDialog({
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg" data-testid="remove-dialog">
         <DialogHeader>
           <DialogTitle>Remove {project.name}?</DialogTitle>
-          <DialogDescription>This unregisters the project from the portal.</DialogDescription>
+          <DialogDescription>
+            {production
+              ? "This removes the server copy and every scan."
+              : "This unregisters the project from the portal."}
+          </DialogDescription>
         </DialogHeader>
 
         <div className="flex flex-col gap-3 text-sm">
-          <div>
-            <p className="font-medium">Removed</p>
-            <ul className="list-disc pl-5 text-muted-foreground">
-              <li>The portal's record of the project: its settings, keys and scan history.</li>
-              <li>
-                The managed git hooks and the <span className="font-mono">.whygraph/portal.*</span>{" "}
-                markers in the repository.
-              </li>
-              {github && (
-                <li>
-                  The cloned checkout at <span className="font-mono">{project.root}</span>.
-                </li>
-              )}
-            </ul>
-          </div>
-          <div>
-            <p className="font-medium">Kept</p>
-            <ul className="list-disc pl-5 text-muted-foreground">
-              {!github && (
-                <li>
-                  Your repository, including its <span className="font-mono">.whygraph/</span> and{" "}
-                  <span className="font-mono">.codegraph/</span> data. <span className="font-mono">whygraph scan</span>{" "}
-                  works in it again.
-                </li>
-              )}
-              {github && <li>The repository on GitHub; nothing is changed there.</li>}
-              <li>The agents' MCP entries, unless you tick the box below.</li>
-            </ul>
-          </div>
+          {production ? (
+            <>
+              <div>
+                <p className="font-medium">Removed</p>
+                <ul className="list-disc pl-5 text-muted-foreground">
+                  <li>The project's settings, keys and scan history.</li>
+                  <li>
+                    The server copy of the repository at <span className="font-mono">{project.root}</span>.
+                  </li>
+                </ul>
+              </div>
+              <div>
+                <p className="font-medium">Kept</p>
+                <ul className="list-disc pl-5 text-muted-foreground">
+                  <li>The repository on GitHub; nothing is changed there.</li>
+                </ul>
+              </div>
+            </>
+          ) : (
+            <>
+              <div>
+                <p className="font-medium">Removed</p>
+                <ul className="list-disc pl-5 text-muted-foreground">
+                  <li>The portal's record of the project: its settings, keys and scan history.</li>
+                  <li>
+                    The managed git hooks and the <span className="font-mono">.whygraph/portal.*</span>{" "}
+                    markers in the repository.
+                  </li>
+                  {github && (
+                    <li>
+                      The cloned checkout at <span className="font-mono">{project.root}</span>.
+                    </li>
+                  )}
+                </ul>
+              </div>
+              <div>
+                <p className="font-medium">Kept</p>
+                <ul className="list-disc pl-5 text-muted-foreground">
+                  {!github && (
+                    <li>
+                      Your repository, including its <span className="font-mono">.whygraph/</span> and{" "}
+                      <span className="font-mono">.codegraph/</span> data. <span className="font-mono">whygraph scan</span>{" "}
+                      works in it again.
+                    </li>
+                  )}
+                  {github && <li>The repository on GitHub; nothing is changed there.</li>}
+                  <li>The agents' MCP entries, unless you tick the box below.</li>
+                </ul>
+              </div>
 
-          <label className="flex cursor-pointer items-start gap-2">
-            <Checkbox checked={strip} onCheckedChange={setStrip} className="mt-0.5" />
-            <span>
-              Also remove the agent MCP entries
-              <span className="block text-xs text-muted-foreground">
-                {agentFiles.length > 0 ? (
-                  <>
-                    Removes the whygraph entry from{" "}
-                    <span className="font-mono">{agentFiles.join(", ")}</span>.
-                  </>
-                ) : (
-                  "No agent was set up through the portal, so there is nothing to remove."
-                )}
-              </span>
-            </span>
-          </label>
+              <label className="flex cursor-pointer items-start gap-2">
+                <Checkbox checked={strip} onCheckedChange={setStrip} className="mt-0.5" />
+                <span>
+                  Also remove the agent MCP entries
+                  <span className="block text-xs text-muted-foreground">
+                    {agentFiles.length > 0 ? (
+                      <>
+                        Removes the whygraph entry from{" "}
+                        <span className="font-mono">{agentFiles.join(", ")}</span>.
+                      </>
+                    ) : (
+                      "No agent was set up through the portal, so there is nothing to remove."
+                    )}
+                  </span>
+                </span>
+              </label>
+            </>
+          )}
 
           {github && (
             <div className="flex flex-col gap-1.5">
               <label htmlFor="confirm-name" className="text-sm">
-                Type <span className="font-mono font-medium">{project.name}</span> to confirm deleting the
-                checkout
+                Type <span className="font-mono font-medium">{project.name}</span> to confirm deleting the{" "}
+                {production ? "server copy" : "checkout"}
               </label>
               <Input id="confirm-name" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" />
             </div>

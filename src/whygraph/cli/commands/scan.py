@@ -603,9 +603,13 @@ def _apply_github_token(config: "Config") -> None:
     all authenticate uniformly — ``gh`` reads ``GH_TOKEN`` natively and
     child processes inherit it.
 
-    A no-op when ``[scan].forge`` is ``"off"`` (no remote crawl). Each
-    scan runs as a fresh process per project, so mutating the environment
-    here cannot leak one project's token into another.
+    A no-op when ``[scan].forge`` is ``"off"`` (no remote crawl), and
+    when the portal passed a token file (``WHYGRAPH_GITHUB_TOKEN_FILE``):
+    that token is refreshed while the scan runs, so every ``gh`` / ``git``
+    call re-reads the file instead of a value frozen here
+    (:func:`whygraph.services.github.token.token_env`). Each scan runs as a
+    fresh process per project, so mutating the environment here cannot
+    leak one project's token into another.
 
     Parameters
     ----------
@@ -613,7 +617,9 @@ def _apply_github_token(config: "Config") -> None:
         The loaded configuration; ``scan_token`` and ``scan_forge`` are
         consulted.
     """
-    if config.scan_forge == "off":
+    from whygraph.services.git.credentials import TOKEN_FILE_ENV
+
+    if config.scan_forge == "off" or os.environ.get(TOKEN_FILE_ENV):
         return
     token = (
         config.scan_token

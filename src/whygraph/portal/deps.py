@@ -74,6 +74,7 @@ from .authz import Action, OrgAccess, Role, authorize
 from .context import ContextCache, ProjectNotFound, resolve_root
 from . import sessions
 from .db import InstanceLock, get_session
+from .github_app import UserTokens
 from .hosts import BaseUrl, classify
 from .migrate import ProjectMigrations
 from .models import Membership, Organization, Project, User
@@ -84,8 +85,10 @@ from .repos import DiscoveryCache
 from .runner import ScanRunner
 from .security import PortalOrigins, Principal
 from .throttle import Throttle
+from .webhook import DeliveryIds
 
 if TYPE_CHECKING:
+    from .github_app import GitHubApp
     from .github_auth import GitHubOAuth
 
 
@@ -278,9 +281,6 @@ class PortalState:
         This app's MCP ``StreamableHTTPSessionManager``.
     setup_lock : threading.Lock
         Serializes first-run setup.
-    github_add_lock : threading.Lock
-        Serializes GitHub adds (duplicate check, clone and insert), so a
-        double-submit never clones twice into one directory.
     port_change : dict or None
         What the start-up port reconcile did
         (:func:`whygraph.portal.port_change.reconcile_port`), or ``None``.
@@ -319,6 +319,9 @@ class PortalState:
         it ran, ``[]`` when healthy).
     github : GitHubOAuth or None
         Production's GitHub sign-in client (M2d-1); ``None`` in local mode.
+    github_app : GitHubApp or None
+        Production's GitHub App client (M2d-2), when the
+        ``WHYGRAPH_GITHUB_APP_*`` variables are set; ``None`` otherwise.
     login_pair, login_email, login_ip : Throttle
         Sign-in **failures** (also wrong current passwords): per
         ``(email, ip_key)`` 5 / 15 min, per email 100 / hour, per
@@ -329,6 +332,15 @@ class PortalState:
     member_add_org : Throttle
         Every ``POST /api/org/members`` attempt, per org id: 60 / hour, so
         the route cannot probe which usernames have accounts at scale.
+    import_org : Throttle
+        GitHub imports that passed the access checks, per org id: 30 / hour
+        (M2d-2 plan section 4.12).
+    user_tokens : UserTokens
+        The import page's GitHub App user tokens, per WhyGraph session, in
+        memory only (M2d-2 plan section 4.3).
+    webhook_deliveries : DeliveryIds
+        The ``X-GitHub-Delivery`` ids of the GitHub App's webhook seen lately,
+        so a replayed delivery does nothing (M2d-2 plan section 4.7).
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -345,7 +357,6 @@ class PortalState:
         self.shutdown_event: anyio.Event | None = None
         self.session_manager: Any = None
         self.setup_lock = threading.Lock()
-        self.github_add_lock = threading.Lock()
         self.port_change: dict | None = None
         self.instance_lock: InstanceLock | None = None
         self.lock_check_interval = LOCK_CHECK_INTERVAL_SEC
@@ -360,6 +371,7 @@ class PortalState:
         self.bootstrap_secret: str | None = None
         self.base_check: list[str] | None = None
         self.github: GitHubOAuth | None = None
+        self.github_app: GitHubApp | None = None
         self.login_pair = Throttle(5, 15 * 60)
         self.login_email = Throttle(100, 60 * 60)
         self.login_ip = Throttle(20, 15 * 60)
@@ -367,6 +379,9 @@ class PortalState:
         self.reset_ip = Throttle(10, 15 * 60)
         self.github_ip = Throttle(60, 15 * 60)
         self.member_add_org = Throttle(60, 60 * 60)
+        self.import_org = Throttle(30, 60 * 60)
+        self.user_tokens = UserTokens()
+        self.webhook_deliveries = DeliveryIds()
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0

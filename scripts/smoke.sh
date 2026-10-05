@@ -34,8 +34,12 @@ PROD_NAME=whygraph-portal-smoke-prod
 PROD_PORT=${SMOKE_PROD_PORT:-8798}
 PROD_BASE="http://whygraph.localhost:$PROD_PORT"
 PROD_ORG="http://acme.whygraph.localhost:$PROD_PORT"
+PROD_BRAVO="http://bravo.whygraph.localhost:$PROD_PORT"
 # The fake GitHub (tests/github_fake.py) runs in the portal container's network
-# namespace, so the portal and the host-side curl both reach it on loopback.
+# namespace, so the portal and the host-side curl both reach it on loopback. It
+# serves both apps, and its fixture repos (created in its own container, which
+# has git) over dumb HTTP; its control routes deliver webhooks to the portal's
+# in-container port with the base host as Host.
 FAKE_PORT=${SMOKE_GITHUB_PORT:-18767}
 FAKE="http://127.0.0.1:$FAKE_PORT"
 FAKE_PY=$(cd -- "$(dirname -- "$0")/.." && pwd -P)/tests/github_fake.py
@@ -195,21 +199,47 @@ pg_ready() {
 }
 check "production postgres is healthy" pg_ready
 printf 'smoke-client-secret\n' > "$S/github-secret"
-chmod 644 "$S/github-secret"
+printf 'smoke-app-client-secret\n' > "$S/github-app-secret"
+printf 'smoke-webhook-secret-0123456789abcdef\n' > "$S/github-webhook-secret"
+# The GitHub App's key, generated inside the image (no openssl needed on the host).
+docker run --rm "$IMAGE" python -c 'from cryptography.hazmat.primitives import serialization as s
+from cryptography.hazmat.primitives.asymmetric import rsa
+k = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+print(k.private_bytes(s.Encoding.PEM, s.PrivateFormat.PKCS8, s.NoEncryption()).decode(), end="")' \
+    > "$S/github-app-key.pem"
+check "the GitHub App key is generated in the image" grep -q 'BEGIN PRIVATE KEY' "$S/github-app-key.pem"
+chmod 644 "$S/github-secret" "$S/github-app-secret" "$S/github-webhook-secret" "$S/github-app-key.pem"
+secrets_ro() {  # the four secret files, read-only, at the same paths in both containers
+    for f in github-secret github-app-secret github-webhook-secret github-app-key.pem; do
+        printf -- '-v\n%s/%s:/run/secrets/%s:ro\n' "$S" "$f" "$f"
+    done
+}
+# shellcheck disable=SC2046  # one mount argument per line
 docker run -d --name "$PROD_NAME" --network "$PROD_NAME" --init \
     -p "127.0.0.1:$PROD_PORT:8765" -p "127.0.0.1:$FAKE_PORT:$FAKE_PORT" \
-    -v "$S/github-secret:/run/secrets/github-oauth-secret:ro" \
+    $(secrets_ro) \
     -e WHYGRAPH_MODE=production -e "WHYGRAPH_BASE_URL=$PROD_BASE" \
     -e WHYGRAPH_GITHUB_OAUTH_CLIENT_ID=smoke-client \
-    -e WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE=/run/secrets/github-oauth-secret \
+    -e WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE=/run/secrets/github-secret \
+    -e WHYGRAPH_GITHUB_APP_SLUG=whygraph-smoke -e WHYGRAPH_GITHUB_APP_CLIENT_ID=smoke-app \
+    -e WHYGRAPH_GITHUB_APP_CLIENT_SECRET_FILE=/run/secrets/github-app-secret \
+    -e WHYGRAPH_GITHUB_APP_PRIVATE_KEY_FILE=/run/secrets/github-app-key.pem \
+    -e WHYGRAPH_GITHUB_APP_WEBHOOK_SECRET_FILE=/run/secrets/github-webhook-secret \
     -e "WHYGRAPH_GITHUB_URL=$FAKE" -e "WHYGRAPH_GITHUB_API_URL=$FAKE/api/v3" \
     -e "WHYGRAPH_DATABASE_URL=postgresql+psycopg://whygraph:smoke-prod@postgres:5432/whygraph" \
     "$IMAGE" whygraph portal --host 0.0.0.0 --port 8765 >/dev/null
+# shellcheck disable=SC2046
 docker run -d --name "$PROD_NAME-github" --network "container:$PROD_NAME" \
-    -v "$FAKE_PY:/fake.py:ro" -v "$S/github-secret:/run/secrets/github-oauth-secret:ro" \
+    -v "$FAKE_PY:/fake.py:ro" $(secrets_ro) \
     "$IMAGE" python /fake.py --host 0.0.0.0 --port "$FAKE_PORT" \
-    --client-id smoke-client --client-secret-file /run/secrets/github-oauth-secret \
-    --redirect-uri "$PROD_BASE/auth/github" >/dev/null
+    --client-id smoke-client --client-secret-file /run/secrets/github-secret \
+    --redirect-uri "$PROD_BASE/auth/github" \
+    --app-client-id smoke-app --app-client-secret-file /run/secrets/github-app-secret \
+    --app-callback "$PROD_BASE/auth/github-app" --app-slug whygraph-smoke \
+    --app-key-file /run/secrets/github-app-key.pem \
+    --webhook-secret-file /run/secrets/github-webhook-secret \
+    --webhook-url http://127.0.0.1:8765/github/webhook --webhook-host "whygraph.localhost:$PROD_PORT" \
+    --repos /tmp/fake-repos >/dev/null
 jar="$S/prod.jar"
 # Real URLs (curl >= 7.85 resolves *.localhost) so the cookie jar matches hosts.
 pcode() { m=$1 u=$2; shift 2; curl -sS -o "$S/last-body" -w '%{http_code}' -X "$m" -H "$H" -H 'Content-Type: application/json' "$u" "$@"; }
@@ -260,3 +290,46 @@ check "Ben's session names his GitHub login" \
 check "password registration is gone (404 even signed in)" test "$(pcode POST "$PROD_BASE/api/auth/register" -b "$bjar" -d '{"email":"x@example.com","display_name":"X","password":"correct horse battery staple 42"}')" = 404
 check "acme lists exactly one owner" \
     test "$(pget "$PROD_ORG/api/org/members" -b "$jar" | json '" ".join(m["role"] for m in d)')" = owner
+
+echo "== projects from GitHub"
+check "Ben creates org bravo" is2xx "$(pcode POST "$PROD_BASE/api/orgs" -b "$bjar" -c "$bjar" -d '{"slug":"bravo","name":"Bravo"}')"
+auth_body=$(curl -sS -X POST -H "$H" -H 'Content-Type: application/json' -b "$bjar" -c "$bjar" -d '{}' "$PROD_BRAVO/api/github/app/authorize")
+printf '%s' "$auth_body" > "$S/last-body"
+app_url=$(printf '%s' "$auth_body" | json 'd["url"]')
+check "authorize returns the fake's authorize URL" sh -c "case '$app_url' in $FAKE/login/oauth/authorize?*client_id=smoke-app*) exit 0 ;; *) exit 1 ;; esac"
+location=$(curl -sS -o /dev/null -D - "$app_url&login=ben" | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')
+app_cb=$(printf '%s' "$location" | python3 -c "import json,sys; from urllib.parse import urlsplit, parse_qs; q=parse_qs(urlsplit(sys.stdin.read().strip()).query); print(json.dumps({k: q[k][0] for k in ('code', 'state', 'iss') if k in q}))")
+check "the app callback keeps Ben's user token" is2xx "$(pcode POST "$PROD_BASE/api/github/app/callback" -b "$bjar" -c "$bjar" -d "$app_cb")"
+check "the import page lists the fixture installation" \
+    test "$(pget "$PROD_BRAVO/api/github/installations" -b "$bjar" | json '" ".join(i["account_login"] + ":" + str(i["id"]) for i in d["installations"])')" = "ben:100"
+check "the listing has ben/demo" sh -c "curl -sS -H '$H' -b '$bjar' '$PROD_BRAVO/api/github/installations/100/repos' | grep -q '\"ben/demo\"'"
+check "import ben/demo" test "$(pcode POST "$PROD_BRAVO/api/projects" -b "$bjar" -d '{"source":"github","installation_id":100,"repo_id":700001}')" = 201
+check "the imported project is initialized" \
+    test "$(pget "$PROD_BRAVO/api/projects" -b "$bjar" | json '" ".join(p["slug"] + ":" + str(p["initialized"]) for p in d["projects"])')" = "demo:True"
+prod_runs() { pget "$PROD_BRAVO/api/projects/demo/scans" -b "$bjar"; }
+prod_wait_run() {  # prod_wait_run <trigger>: until a run with that trigger finishes; prints its status
+    i=0
+    while [ $i -lt 180 ]; do
+        st=$(prod_runs | json "next((r['status'] for r in d['runs'] if r['trigger']=='$1' and r['status'] not in ('queued','running')), '')")
+        if [ -n "$st" ]; then echo "$st"; return 0; fi
+        i=$((i + 1)); sleep 1
+    done
+    echo timeout
+}
+check "request the first scan (fetch + scan)" test "$(pcode POST "$PROD_BRAVO/api/projects/demo/scans" -b "$bjar" -d '{"trigger":"manual"}')" = 202
+first_trigger=$(prod_runs | json 'd["runs"][-1]["trigger"]')
+first_status=$(prod_wait_run "$first_trigger")
+prod_runs > "$S/last-body"
+check "the first scan (the real scan child, an installation token) ends ok" test "$first_status" = ok
+# The fake's remote is not github.com: the PR crawl is skipped, never failed (plan 0.2 #7).
+crawl_ok() {
+    prod_runs | json '(lambda cs: all(c.get("status") != "failed" for c in cs) and not any(c.get("name") == "github" and c.get("status") == "ok" for c in cs))((d["runs"][-1]["summary"] or {}).get("crawlers") or [])' | grep -qx True
+}
+check "the GitHub crawl is skipped, not failed" crawl_ok
+push_body=$(curl -sS -X POST -H 'Content-Type: application/json' -d '{"repo":"ben/demo","message":"Pushed in smoke"}' "$FAKE/_fake/push")
+printf '%s' "$push_body" > "$S/last-body"
+check "a push on the fake is delivered to the webhook (202)" test "$(printf '%s' "$push_body" | json 'd["webhook_status"]')" = 202
+check "the push queues a run that fetches and scans it" test "$(prod_wait_run push)" = ok
+prod_runs > "$S/last-body"
+check "the push run fetched the pushed commit" \
+    test "$(prod_runs | json 'next(r for r in d["runs"] if r["trigger"] == "push")["summary"].get("moved")')" = True

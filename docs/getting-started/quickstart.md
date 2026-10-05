@@ -20,8 +20,7 @@ empty **Projects** page.
 
 ## 3. Add a project
 
-Choose **New project**, pick a repository from your shared folders (or paste a GitHub URL), and follow
-the four steps:
+Choose **New project**, pick a repository from your shared folders, and follow the four steps:
 
 1. **Source** - the repository.
 2. **Configure** - models and provider keys. Set keys once under **Settings** and every project

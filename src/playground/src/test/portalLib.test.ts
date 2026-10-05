@@ -248,6 +248,11 @@ function project(over: Partial<ProjectSummary> = {}): ProjectSummary {
     root_status: "ok",
     running_scan: null,
     stale: null,
+    source_supported: true,
+    access_lost: false,
+    access_lost_reason: null,
+    github_full_name: null,
+    installation_account: null,
     ...over,
   };
 }

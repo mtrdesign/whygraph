@@ -8,10 +8,14 @@ repos. The MCP transport has its own module, ``test_portal_mcp.py``.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import subprocess
+import threading
 from contextlib import contextmanager
+from dataclasses import dataclass
+from http.server import ThreadingHTTPServer
 from importlib.metadata import version as package_version
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +26,8 @@ import anyio
 import httpx
 import pytest
 from alembic import command
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from click.testing import CliRunner
 from fastapi import Depends
 from fastapi.routing import iter_route_contexts
@@ -30,10 +36,16 @@ from sqlalchemy import text
 from sqlmodel import select
 
 from conftest import HeaderIdentity, build_fake_codegraph_db, builtin_org_id
-from github_fake import FakeGitHub
+from github_fake import (
+    FakeGitHub,
+    FakeRepo,
+    _make_handler,
+    create_bare_repo,
+    push_commit,
+)
 from whygraph.core.config import Config
 from whygraph.core.context import ProjectContext, is_strict, use_project
-from whygraph.db import bootstrap
+from whygraph.db import bootstrap, ensure_initialized
 from whygraph.db import engine as db_engine
 from whygraph.hooks import managed_hook_names
 from whygraph.portal import db as portal_db
@@ -47,6 +59,7 @@ from whygraph.portal.deps import (
     current_user,
     load_org_access,
 )
+from whygraph.portal.github_app import APP_ENV_VARS
 from whygraph.portal.github_auth import GitHubAuthConfig, GitHubOAuth
 from whygraph.portal.mcp_mount import McpDispatcher
 from whygraph.portal.models import Project, ScanRun, User
@@ -54,7 +67,7 @@ from whygraph.portal.orgs import add_member, create_org
 from whygraph.portal.runner import ScanRunner
 from whygraph.portal.security import PortalGuard, build_origins
 from whygraph.serve import chat as serve_chat
-from whygraph.services.github import RepoAccess, RepoAccessError
+from whygraph.services.github import GitHubError, RepoAccessError
 from whygraph.services.llm.chat import TextDelta, TurnDone
 
 PORT = 8765
@@ -193,7 +206,13 @@ GITHUB_FAKE_URL = "http://127.0.0.1:9"
 def production_env(
     env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> SimpleNamespace:
-    """``env`` for a production portal at :data:`PROD_BASE` (M2c plan section 5.1)."""
+    """``env`` for a production portal at :data:`PROD_BASE` (M2c plan section 5.1).
+
+    Both GitHub apps are configured, as production requires (M2d-2 plan
+    section 0.2 #9): the OAuth App and the GitHub App (the five
+    ``WHYGRAPH_GITHUB_APP_*`` variables, the private key from
+    :func:`github_app_private_key`), all pointing at :data:`GITHUB_FAKE_URL`.
+    """
     monkeypatch.setenv("WHYGRAPH_MODE", "production")
     monkeypatch.setenv("WHYGRAPH_BASE_URL", PROD_BASE)
     for var in ("WHYGRAPH_SHARED_FOLDERS", "WHYGRAPH_TRUSTED_PROXIES"):
@@ -204,6 +223,24 @@ def production_env(
     monkeypatch.setenv("WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE", str(secret_file))
     monkeypatch.setenv("WHYGRAPH_GITHUB_URL", GITHUB_FAKE_URL)
     monkeypatch.setenv("WHYGRAPH_GITHUB_API_URL", GITHUB_FAKE_URL + "/api/v3")
+    app_secret = env.tmp / "github-app-secret"
+    app_secret.write_text(GITHUB_APP_CLIENT_SECRET + "\n")
+    app_key = env.tmp / "github-app-key.pem"
+    app_key.write_bytes(
+        github_app_private_key().private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    hook_secret = env.tmp / "github-webhook-secret"
+    hook_secret.write_text(GITHUB_WEBHOOK_SECRET + "\n")
+    for var, value in zip(
+        APP_ENV_VARS,
+        (GITHUB_APP_SLUG, GITHUB_APP_CLIENT_ID, app_secret, app_key, hook_secret),
+        strict=True,
+    ):
+        monkeypatch.setenv(var, str(value))
     return env
 
 
@@ -228,6 +265,131 @@ def github_fake(
 
     monkeypatch.setattr("whygraph.portal.app.GitHubOAuth", build)
     return fake
+
+
+GITHUB_APP_CLIENT_ID = "Iv1.test-app"
+GITHUB_APP_CLIENT_SECRET = "test-app-client-secret"
+GITHUB_APP_SLUG = "whygraph-test"
+GITHUB_WEBHOOK_SECRET = "test-webhook-secret-of-at-least-32-chars"
+
+
+@functools.cache
+def github_app_private_key() -> rsa.RSAPrivateKey:
+    """The GitHub App's private key for the whole run (RSA generation is slow-ish).
+
+    A cached function rather than only a fixture, so ``production_env``
+    needs no fixture that a module importing it would also have to import.
+    """
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+@pytest.fixture(scope="session")
+def github_app_key() -> rsa.RSAPrivateKey:
+    """:func:`github_app_private_key` as a fixture."""
+    return github_app_private_key()
+
+
+@dataclass
+class GitServer:
+    """A :class:`FakeGitHub` served on ``127.0.0.1:<port>`` (``github_git_server``).
+
+    Attributes
+    ----------
+    fake : FakeGitHub
+        The fake, with the GitHub App enabled (client id
+        :data:`GITHUB_APP_CLIENT_ID`, the ``github_app_key`` public half).
+        Its API also answers through ``httpx.MockTransport(fake.handle)``.
+    url : str
+        ``http://127.0.0.1:<port>`` - the web root git clones from.
+    repos_dir : Path
+        Where the fixture's bare repositories live.
+    """
+
+    fake: FakeGitHub
+    url: str
+    repos_dir: Path
+
+    def add_repo(
+        self,
+        id: int,  # noqa: A002
+        full_name: str,
+        installation: int | None,
+        *,
+        default_branch: str = "main",
+        readers: dict[str, dict[str, bool]] | None = None,
+        public: bool = False,
+        files: dict[str, str] | None = None,
+    ) -> FakeRepo:
+        """Create a bare repo with one commit and register it with the fake."""
+        path = self.repos_dir / f"{full_name}.git"
+        create_bare_repo(path, default_branch=default_branch, files=files)
+        return self.fake.add_repo(
+            id,
+            full_name,
+            installation,
+            default_branch=default_branch,
+            readers=readers,
+            public=public,
+            path=path,
+        )
+
+    def commit(
+        self,
+        full_name: str,
+        *,
+        branch: str | None = None,
+        files: dict[str, str] | None = None,
+        message: str = "Update",
+    ) -> str:
+        """Add a commit to a fixture repo (default: its default branch); return the SHA."""
+        repo = next(r for r in self.fake.repos.values() if r.full_name == full_name)
+        assert repo.path is not None
+        return push_commit(
+            repo.path,
+            branch=branch or repo.default_branch,
+            files=files,
+            message=message,
+        )
+
+    def clone_url(self, full_name: str) -> str:
+        """``<url>/<full_name>.git``, as the portal derives it."""
+        return f"{self.url}/{full_name}.git"
+
+
+@pytest.fixture
+def github_git_server(
+    tmp_path: Path, github_app_key: rsa.RSAPrivateKey
+) -> Iterator[GitServer]:
+    """The fake GitHub on a real socket, serving fixture repos over dumb HTTP.
+
+    The same handler as the out-of-process fake, in a ``ThreadingHTTPServer``
+    thread on ``127.0.0.1:0``. Add repositories with
+    :meth:`GitServer.add_repo` and commits with :meth:`GitServer.commit`.
+    """
+    fake = FakeGitHub(
+        GITHUB_CLIENT_ID,
+        GITHUB_CLIENT_SECRET,
+        f"{PROD_BASE}/auth/github",
+        app_client_id=GITHUB_APP_CLIENT_ID,
+        app_client_secret=GITHUB_APP_CLIENT_SECRET,
+        app_callback=f"{PROD_BASE}/auth/github-app",
+        app_public_key=github_app_key.public_key(),
+        app_slug=GITHUB_APP_SLUG,
+        webhook_secret=GITHUB_WEBHOOK_SECRET,
+    )
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _make_handler(fake))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield GitServer(
+            fake=fake,
+            url=f"http://127.0.0.1:{server.server_address[1]}",
+            repos_dir=tmp_path / "github-repos",
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
 
 
 @contextmanager
@@ -1007,6 +1169,12 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/org/members/{uid}", "PATCH"): "org.members",
     ("/api/org/members/{uid}", "DELETE"): "org.members",
     ("/api/org/membership", "DELETE"): "org.read",
+    # Deleting a production org: org_access(ORG_OWN) (M2d-2 section 4.8)
+    ("/api/org", "DELETE"): "org.own",
+    # Production's GitHub App import page: org_access(...) (M2d-2 section 4.4)
+    ("/api/github/app/authorize", "POST"): "org.add_project",
+    ("/api/github/installations", "GET"): "org.add_project",
+    ("/api/github/installations/{installation_id}/repos", "GET"): "org.add_project",
     # Project management: project_access(...)
     (_P, "GET"): _READ,
     (f"{_P}/config", "GET"): _READ,
@@ -1017,7 +1185,6 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     # Scans: project_db_access(...)
     (f"{_P}/scans", "POST"): _SCAN,
     (f"{_P}/scans/{{run_id}}/cancel", "POST"): _SCAN,
-    (f"{_P}/sync", "POST"): _SCAN,
     (f"{_P}/scans", "GET"): _READ,
     (f"{_P}/scans/{{run_id}}/events", "GET"): _READ,
     (f"{_P}/scans/{{run_id}}/log", "GET"): _READ,
@@ -1050,6 +1217,8 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/account/password", "POST"): "user.self",
     ("/api/account/orgs", "GET"): "user.self",
     ("/api/orgs", "POST"): "user.self",
+    # The GitHub App's callback, on the base host (M2d-2 section 4.4)
+    ("/api/github/app/callback", "POST"): "user.self",
     # Production's admin page: instance_access()
     ("/api/admin/settings", "GET"): "instance.admin",
     ("/api/admin/orgs", "GET"): "instance.admin",
@@ -1100,6 +1269,17 @@ def test_every_api_route_declares_exactly_one_action(client: TestClient) -> None
     assert seen_public == PUBLIC_API_ROUTES
 
 
+def test_the_webhook_is_the_only_post_outside_api_and_mcp(client: TestClient) -> None:
+    """GitHub's deliveries carry no ``X-WhyGraph-Client`` (M2d-2 section 0.2 #8)."""
+    posts = sorted(
+        rc.path
+        for rc in iter_route_contexts(client.app.routes)
+        if not (rc.path or "").startswith(("/api", "/mcp"))
+        and "POST" in (getattr(rc, "methods", None) or ())
+    )
+    assert posts == ["/github/webhook"]
+
+
 def test_only_the_mcp_routes_have_no_dependant(client: TestClient) -> None:
     bare = [
         rc
@@ -1120,6 +1300,7 @@ _FILL = {
     "{number}": "1",
     "{run_id}": "1",
     "{uid}": "someone",
+    "{installation_id}": "7",
 }
 
 
@@ -1136,9 +1317,14 @@ PRODUCTION_ORG_ROUTES = {
     ("/api/org/members/{uid}", "PATCH"),
     ("/api/org/members/{uid}", "DELETE"),
     ("/api/org/membership", "DELETE"),
+    ("/api/org", "DELETE"),
+    ("/api/github/app/authorize", "POST"),
+    ("/api/github/installations", "GET"),
+    ("/api/github/installations/{installation_id}/repos", "GET"),
 }
-"""Org-scoped routes that exist only in production: the members page
-(``require_production`` before the org dependency, M2d-1 plan section 0.2 #19)."""
+"""Org-scoped routes that exist only in production: the members page, the
+org's deletion and the GitHub App import page (``require_production`` before
+the org dependency, M2d-1 plan section 0.2 #19)."""
 
 PRODUCTION_ONLY_ROUTES = PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES | PRODUCTION_ORG_ROUTES
 """Routes that answer ``404`` in local mode (M2c plan section 4.7)."""
@@ -1760,148 +1946,138 @@ def test_remove_is_refused_while_a_scan_is_queued(
     assert ready.delete("/api/projects/demo").status_code == 409
 
 
-def _fake_github(monkeypatch: pytest.MonkeyPatch, *, error: str | None = None) -> list:
-    calls: list = []
-
-    def _access(owner, name, token, **kw):
-        calls.append(("probe", owner, name, token))
-        if error:
-            raise RepoAccessError(error, f"{error} for {owner}/{name}")
-        return RepoAccess(
-            full_name=f"{owner}/{name}", private=True, default_branch="main"
-        )
-
-    def _clone(url, dest, *, env=None, timeout=None):
-        calls.append(("clone", url, dest, env))
-        make_repo(dest.parent, dest.name)
-
-    monkeypatch.setattr("whygraph.portal.routes.check_repo_access", _access)
-    monkeypatch.setattr("whygraph.portal.routes.Repository.clone", _clone)
-    return calls
-
-
-def test_github_init_passes_no_hooks_and_a_hooks_change_installs_none(
-    ready: TestClient, env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Plan section 4.4 / criterion 29: POST init on a GitHub clone passes
-    # hooks=[] (Sync's fast-forward would fire post-merge in the container),
-    # and a later [scan].hooks change does not install them either.
-    from whygraph.portal import routes as portal_routes
-
-    _fake_github(monkeypatch)
-    added = ready.post(
-        "/api/projects",
-        json={"source": "github", "url": "https://github.com/acme/widget"},
-    )
-    assert added.status_code == 201, added.text
-    dest = Path(added.json()["project"]["root"])
-    seen: list = []
-    real = portal_routes.initialize_project
-
-    def _spy(root, **kwargs):
-        seen.append(kwargs["hooks"])
-        return real(root, **kwargs)
-
-    monkeypatch.setattr(portal_routes, "initialize_project", _spy)
-    assert init_project(ready, "widget")["initialized"] is True
-    assert len(seen) == 1 and list(seen[0]) == []
-
-    changed = ready.put(
-        "/api/projects/widget/config",
-        json={"config": {"scan": {"hooks": ["post-commit"]}}},
-    )
-    assert changed.status_code == 200, changed.text
-    assert changed.json()["hooks"] is None
-    assert managed_hook_names(dest) == ()
-    assert not (dest / ".whygraph" / "hooks").exists()
-
-
-def test_add_github_clones_under_the_data_dir(
-    ready: TestClient, env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls = _fake_github(monkeypatch)
-    token = "ghp_secret_token_7777"
-    response = ready.post(
-        "/api/projects",
-        json={
-            "source": "github",
-            "url": "https://github.com/acme/widget.git",
-            "token": token,
-        },
-    )
-    assert response.status_code == 201, response.text
-    assert token not in response.text
-    project = response.json()["project"]
-    dest = Path(os.path.realpath(env.data / "repos" / "widget"))
-    assert project["slug"] == "widget" and project["root"] == str(dest)
-    assert project["remote_url"] == "https://github.com/acme/widget"
-    clone = next(c for c in calls if c[0] == "clone")
-    assert clone[1] == "https://github.com/acme/widget"
-    assert clone[3]["WHYGRAPH_GIT_TOKEN"] == token
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"source": "github", "installation_id": 7, "repo_id": 501},
+        {"source": "github", "installation_id": 7, "repo_id": 501, "name": "W"},
+    ],
+)
+def test_local_mode_refuses_a_github_project(ready: TestClient, body: dict) -> None:
+    response = ready.post("/api/projects", json=body)
+    assert response.status_code == 403, response.text
+    assert response.json()["code"] == "source_not_allowed"
     with portal_db.get_session() as session:
-        assert session.exec(select(Project.root)).one() == "repos/widget"
-    config = ready.get("/api/projects/widget/config").json()
-    assert config["config"] == {"scan": {"forge": "auto"}}
-    assert config["secrets"]["github_token"]["set"] is True
-
-    # GitHub clones never get hooks (their Sync fast-forward would fire them).
-    init = init_project(ready, "widget")
-    assert init["hooks"]["installed"] == []
-    assert managed_hook_names(dest) == ()
-
-    duplicate = ready.post(
-        "/api/projects",
-        json={
-            "source": "github",
-            "url": "https://github.com/acme/widget",
-            "token": token,
-        },
-    )
-    assert duplicate.json()["code"] == "duplicate"
-
-    refused = ready.delete("/api/projects/widget")
-    assert refused.status_code == 409 and refused.json()["code"] == "confirm_name"
-    assert dest.is_dir()
-    removed = ready.request(
-        "DELETE", "/api/projects/widget", json={"confirm_name": "widget"}
-    )
-    assert removed.status_code == 200
-    assert removed.json()["checkout_deleted"] is True
-    assert not dest.exists()
-
-
-@pytest.mark.parametrize("code", ["bad_token", "no_access", "not_found"])
-def test_add_github_maps_access_errors(
-    ready: TestClient, monkeypatch: pytest.MonkeyPatch, code: str
-) -> None:
-    _fake_github(monkeypatch, error=code)
-    response = ready.post(
-        "/api/projects",
-        json={
-            "source": "github",
-            "url": "https://github.com/acme/widget",
-            "token": "t",
-        },
-    )
-    assert response.status_code == 400
-    assert response.json()["code"] == code
+        assert session.exec(select(Project.id)).all() == []
 
 
 @pytest.mark.parametrize(
-    "url",
+    "body",
     [
-        "file:///etc",
-        "https://x:y@github.com/a/b",
-        "ext::sh -c id",
-        "https://gitlab.com/a/b",
+        # The pre-M2d-2 clone body: a URL is no field of either source.
+        {"source": "github", "url": "https://github.com/acme/widget"},
+        {"source": "github", "installation_id": 7},  # repo_id missing
+        {"source": "github", "installation_id": "x", "repo_id": 1},
+        {"source": "github", "installation_id": 7, "repo_id": 501, "path": "/x"},
+        {"source": "local", "path": "/x", "installation_id": 7},
+        {"source": "local", "path": "/x", "url": "https://github.com/o/r"},
+        {"source": "local"},  # path missing
+        {"source": "gitlab", "path": "/x"},
+        {"path": "/x"},
     ],
 )
-def test_add_github_rejects_non_github_urls(ready: TestClient, url: str) -> None:
+def test_add_project_bodies_are_one_per_source(ready: TestClient, body: dict) -> None:
+    """The discriminated union: neither source can carry the other's fields."""
+    response = ready.post("/api/projects", json=body)
+    assert response.status_code == 422, response.text
+
+
+@pytest.mark.parametrize("code", ["bad_token", "no_access", "not_found"])
+def test_add_local_maps_token_probe_errors(
+    ready: TestClient, env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, code: str
+) -> None:
+    root = make_repo(env.shared, "linked", remote="https://github.com/acme/widget.git")
+    seen: list = []
+
+    def _access(owner, name, token, **kw):
+        seen.append((owner, name, token))
+        raise RepoAccessError(code, f"{code} for {owner}/{name}")
+
+    monkeypatch.setattr("whygraph.portal.routes.check_repo_access", _access)
     response = ready.post(
-        "/api/projects", json={"source": "github", "url": url, "token": "t"}
+        "/api/projects",
+        json={"source": "local", "path": str(root), "token": "ghp_typed_1234567"},
     )
-    assert response.status_code == 400
-    assert response.json()["code"] == "invalid_url"
+    assert response.status_code == 400, response.text
+    assert response.json()["code"] == code
+    assert seen == [("acme", "widget", "ghp_typed_1234567")]
+
+
+def test_add_local_probe_failure_scrubs_token_shapes(
+    ready: TestClient, env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = make_repo(env.shared, "linked", remote="https://github.com/acme/widget.git")
+    typed = "ghp_typed_token_7777777"
+    other = "ghs_1_eyJhbGciOiJSUzI1NiJ9.payload_part"
+
+    def _access(owner, name, token, **kw):
+        raise GitHubError(f"probe failed: {token} and {other[:30]}*********")
+
+    monkeypatch.setattr("whygraph.portal.routes.check_repo_access", _access)
+    response = ready.post(
+        "/api/projects", json={"source": "local", "path": str(root), "token": typed}
+    )
+    assert response.status_code == 502, response.text
+    assert response.json()["code"] == "github_error"
+    assert typed not in response.text and other[:12] not in response.text
+    assert "*****" not in response.text
+
+
+def _legacy_github_row(env: SimpleNamespace, slug: str = "legacy") -> Path:
+    """A local-mode GitHub clone made by an earlier build (M2d-2 section 0.2 #16)."""
+    clone = make_repo(env.data / "repos", slug)
+    seed_codegraph(clone)
+    with use_project(manual_ctx(clone, slug=slug)):
+        ensure_initialized()  # what that build's Initialize left
+    with portal_db.get_session() as session:
+        session.add(
+            Project(
+                org_id=builtin_org_id(session),
+                slug=slug,
+                name=slug,
+                source="github",
+                root=f"repos/{slug}",
+                remote_url=f"https://github.com/acme/{slug}",
+                initialized_at="2026-10-01T00:00:00+00:00",
+            )
+        )
+    return clone
+
+
+def test_a_local_github_row_is_listed_unsupported_unscannable_and_removable(
+    ready: TestClient, env: SimpleNamespace
+) -> None:
+    clone = _legacy_github_row(env)
+    initialized_repo(ready, env, "demo")
+    listed = {p["slug"]: p for p in ready.get("/api/projects").json()["projects"]}
+    assert (listed["legacy"]["source"], listed["legacy"]["source_supported"]) == (
+        "github",
+        False,
+    )
+    assert listed["demo"]["source_supported"] is True
+    assert ready.get("/api/projects/legacy").json()["source_supported"] is False
+    # Neither row is an import: no repo name or installation account to show.
+    for row in (listed["legacy"], listed["demo"]):
+        assert (row["github_full_name"], row["installation_account"]) == (None, None)
+
+    for body in (None, {"trigger": "manual"}, {"trigger": "describe"}):
+        refused = ready.post("/api/projects/legacy/scans", json=body)
+        assert refused.status_code == 409, refused.text
+        assert refused.json().get("code") == "source_not_allowed", refused.text
+    init = ready.post("/api/projects/legacy/init", json={"agents": []})
+    assert init.status_code == 409 and init.json()["code"] == "source_not_allowed"
+    assert ready.post("/api/projects/legacy/sync").status_code == 404  # route gone
+    with portal_db.get_session() as session:
+        assert session.exec(select(ScanRun.id)).all() == []
+
+    refused = ready.delete("/api/projects/legacy")
+    assert refused.status_code == 409 and refused.json()["code"] == "confirm_name"
+    removed = ready.request(
+        "DELETE", "/api/projects/legacy", json={"confirm_name": "legacy"}
+    )
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["checkout_deleted"] is True
+    assert not clone.exists()
 
 
 def test_remove_never_rmtrees_outside_the_repos_dir(
@@ -1931,7 +2107,6 @@ def test_scan_endpoints_without_runs(ready: TestClient, env: SimpleNamespace) ->
     initialized_repo(ready, env, "demo")
     assert ready.get("/api/projects/demo/scans").json() == {"runs": []}
     assert ready.get("/api/projects/demo/scans/1/events").status_code == 404
-    assert ready.post("/api/projects/demo/sync").json()["code"] == "not_github"
 
 
 # ---------------------------------------------------------------------------

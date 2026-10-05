@@ -7,11 +7,17 @@ Composition (plan section 4.5.1)::
     /api/portal/*                 management (portal/routes.py)
     /api/auth/*, /api/account*,   production identity, org creation and admin
     /api/orgs, /api/admin/*       (portal/auth_routes.py; 404 in local mode)
+    /api/github/*                 the GitHub App's authorize / callback / listings
+                                  (portal/github_app_routes.py; 404 in local mode)
+    DELETE /api/org               an owner deletes the org (portal/org_routes.py;
+                                  404 in local mode)
     /api/projects/*               management; each route names its action through
                                   org_access / project_access / project_db_access
     /api/projects/{slug}/...      serve.routes.router (project.read) + serve.chat.router
                                   (/chat, project.chat), via project_db_access
     /mcp/{slug}                   per-project MCP dispatcher (portal/mcp_mount.py)
+    POST /github/webhook          the GitHub App's webhook, base host, outside /api
+                                  (portal/webhook.py; 404 in local mode)
     /api/*, /mcp/* not matched    404 {"error"} - never the SPA's index.html
     everything else               the SPA (serve.app._mount_static)
 
@@ -80,6 +86,8 @@ from .deps import (
     current_user,
     project_db_access,
 )
+from .github_app import GitHubApp, load_github_app_config
+from .github_app_routes import github_app_router
 from .github_auth import GitHubOAuth, load_github_config
 from .hosts import (
     BASE_URL_ENV,
@@ -92,6 +100,7 @@ from .mcp_mount import McpDispatcher, build_session_manager
 from .member_routes import members_router
 from .migrate import MIGRATION_LOCK
 from .models import ScanRun, Setting, User
+from .org_routes import org_router
 from .orgs import ensure_builtin_org
 from .port_change import reconcile_port
 from .repos import SHARED_FOLDERS_ENV, parse_shared_folders
@@ -104,6 +113,7 @@ from .security import (
     build_origins,
     build_production_origins,
 )
+from .webhook import webhook_router
 
 _log = logging.getLogger(__name__)
 
@@ -221,6 +231,8 @@ def create_portal_app(
     app.include_router(public_router)
     app.include_router(auth_router)  # production-only; local mode answers 404
     app.include_router(members_router)  # production-only, org-scoped
+    app.include_router(org_router)  # production-only: DELETE /api/org (M2d-2)
+    app.include_router(github_app_router)  # production-only (M2d-2)
     app.include_router(portal_router)
     app.include_router(projects_router)
     app.include_router(
@@ -247,6 +259,7 @@ def create_portal_app(
         app.add_route(
             path, _mcp_not_found, methods=_ALL_METHODS, include_in_schema=False
         )
+    app.include_router(webhook_router)  # before the SPA's catch-all
 
     _mount_static(app)
     return app
@@ -309,6 +322,8 @@ async def _serving(state: PortalState) -> AsyncIterator[None]:
             state.session_manager = manager
         if state.github is not None:
             stack.callback(state.github.close)
+        if state.github_app is not None:
+            stack.callback(state.github_app.close)
         if not state.degraded:
             await state.runner.start(state)
         watcher = anyio.create_task_group()
@@ -453,6 +468,11 @@ def _startup(state: PortalState) -> None:
             except ValueError as exc:
                 raise PortalStartupError(str(exc)) from exc
             state.github = GitHubOAuth(github_config)
+            try:
+                app_config = load_github_app_config(os.environ)
+            except ValueError as exc:
+                raise PortalStartupError(str(exc)) from exc
+            state.github_app = GitHubApp(app_config)
         state.mode = mode
         if mode == "local":
             # Idempotent: creates the built-in org at first start, and

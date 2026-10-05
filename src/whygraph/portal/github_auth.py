@@ -283,22 +283,27 @@ class PendingLogins:
 
 
 class AccessLogRedactor(logging.Filter):
-    """Blank the query of ``/auth/github`` in uvicorn's access log.
+    """Blank the query of the GitHub callbacks in uvicorn's access log.
 
-    GitHub's redirect carries the single-use ``code`` and the ``state`` in
-    that query. uvicorn's access records carry the request line as
-    ``args[2]``; this filter rewrites ``/auth/github?...`` to
-    ``/auth/github?<redacted>`` and always lets the record through.
+    GitHub's redirects to ``/auth/github`` (sign-in) and
+    ``/auth/github-app`` (the GitHub App's authorize and install, M2d-2)
+    carry the single-use ``code`` and the ``state`` in that query.
+    uvicorn's access records carry the request line as ``args[2]``; this
+    filter rewrites ``/auth/github?...`` to ``/auth/github?<redacted>``
+    (and the same for ``/auth/github-app``) and always lets the record
+    through.
     """
 
-    PATH = "/auth/github"
+    PATHS = ("/auth/github", "/auth/github-app")
 
     def filter(self, record: logging.LogRecord) -> bool:
         """Redact the callback query in place; never drops a record."""
         args = record.args
         if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
             path = args[2]
-            if path == self.PATH or path.startswith((self.PATH + "?", self.PATH + "/")):
+            if any(
+                path == p or path.startswith((p + "?", p + "/")) for p in self.PATHS
+            ):
                 head, sep, _ = path.partition("?")
                 if sep:
                     record.args = (*args[:2], head + "?<redacted>", *args[3:])
@@ -319,30 +324,34 @@ def _origin(url: str) -> tuple[str, str, int | None]:
     )
 
 
-class GitHubOAuth:
-    """The portal's GitHub client: config, one HTTP client, pending sign-ins.
+class GitHubHttp:
+    """One origin-guarded HTTP client for a configured GitHub, shared by both apps.
+
+    The base of :class:`GitHubOAuth` (sign-in) and
+    :class:`whygraph.portal.github_app.GitHubApp` (the GitHub App): the
+    host guard, the error mapping of :meth:`_send`, ``GET /user`` and the
+    token revoke. ``config`` needs ``web_url``, ``api_url``, ``client_id``
+    and ``client_secret``.
 
     Parameters
     ----------
-    config : GitHubAuthConfig
+    config : GitHubAuthConfig or GitHubAppConfig
         The validated settings.
     transport : httpx.BaseTransport, optional
         Replaces the network (tests pass ``httpx.MockTransport``).
 
     Attributes
     ----------
-    config : GitHubAuthConfig
-    pending : PendingLogins
+    config : GitHubAuthConfig or GitHubAppConfig
     """
 
     def __init__(
         self,
-        config: GitHubAuthConfig,
+        config: Any,
         *,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.config = config
-        self.pending = PendingLogins()
         self._allowed = {_origin(config.web_url), _origin(config.api_url)}
         self._client = httpx.Client(
             timeout=httpx.Timeout(10.0, connect=5.0),
@@ -365,6 +374,118 @@ class GitHubOAuth:
                 "not the configured GitHub"
             )
         return self._client.request(method, url, **kwargs)
+
+    def _user(self, token: str) -> GitHubUser:
+        """``GET <api>/user`` with the token."""
+        response = self._send(
+            "GET",
+            f"{self.config.api_url}/user",
+            "user lookup",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+            },
+        )
+        if response.status_code != 200:
+            logger.warning("GitHub user lookup answered %s", response.status_code)
+            raise GitHubAuthFailed("exchange_failed", "GitHub refused the user lookup")
+        body = _json(response)
+        ident = None if body is None else body.get("id")
+        login = None if body is None else body.get("login")
+        if (
+            body is None
+            or not isinstance(ident, int)
+            or isinstance(ident, bool)
+            or not isinstance(login, str)
+            or not login
+        ):
+            raise GitHubUnavailable("GitHub answered the user lookup oddly")
+        name = body.get("name")
+        avatar = body.get("avatar_url")
+        return GitHubUser(
+            id=ident,
+            login=login,
+            name=name if isinstance(name, str) and name.strip() else None,
+            avatar_url=avatar if isinstance(avatar, str) and avatar else None,
+            # Only an explicit true counts: false and a missing field (a token
+            # without read:user) are both "no 2FA".
+            two_factor=body.get("two_factor_authentication") is True,
+        )
+
+    def revoke(self, token: str) -> bool:
+        """Revoke an access token (best-effort); return whether GitHub did.
+
+        ``DELETE <api>/applications/{client_id}/token`` with basic auth
+        ``client_id:client_secret`` and the token in the JSON body.
+
+        Parameters
+        ----------
+        token : str
+            The access token to revoke.
+
+        Returns
+        -------
+        bool
+            ``True`` on GitHub's ``204``; ``False`` on any other answer or
+            any error (never raised).
+        """
+        try:
+            response = self._request(
+                "DELETE",
+                f"{self.config.api_url}/applications/{self.config.client_id}/token",
+                auth=(self.config.client_id, self.config.client_secret),
+                json={"access_token": token},
+                headers={"Accept": "application/vnd.github+json"},
+            )
+        except Exception as exc:  # noqa: BLE001 -- best-effort by design
+            logger.warning("GitHub token revoke failed: %s", type(exc).__name__)
+            return False
+        if response.status_code != 204:
+            logger.warning("GitHub token revoke answered %s", response.status_code)
+            return False
+        return True
+
+    def _send(self, method: str, url: str, what: str, **kwargs: Any) -> httpx.Response:
+        """Send a request; a network error, timeout or ``5xx`` is unavailable."""
+        try:
+            response = self._request(method, url, **kwargs)
+        except httpx.HTTPError as exc:
+            logger.warning("GitHub %s failed: %s", what, type(exc).__name__)
+            raise GitHubUnavailable(f"GitHub could not be reached ({what})") from None
+        if response.status_code >= 500:
+            logger.warning("GitHub %s answered %s", what, response.status_code)
+            raise GitHubUnavailable(f"GitHub is unavailable ({what})")
+        return response
+
+    def close(self) -> None:
+        """Close the HTTP client."""
+        self._client.close()
+
+
+class GitHubOAuth(GitHubHttp):
+    """The portal's GitHub client: config, one HTTP client, pending sign-ins.
+
+    Parameters
+    ----------
+    config : GitHubAuthConfig
+        The validated settings.
+    transport : httpx.BaseTransport, optional
+        Replaces the network (tests pass ``httpx.MockTransport``).
+
+    Attributes
+    ----------
+    config : GitHubAuthConfig
+    pending : PendingLogins
+    """
+
+    def __init__(
+        self,
+        config: GitHubAuthConfig,
+        *,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        super().__init__(config, transport=transport)
+        self.pending = PendingLogins()
 
     # -- the sign-in protocol (part 2) ---------------------------------------
 
@@ -506,92 +627,6 @@ class GitHubOAuth:
         scope = body.get("scope")
         return token, scope if isinstance(scope, str) else ""
 
-    def _user(self, token: str) -> GitHubUser:
-        """``GET <api>/user`` with the token."""
-        response = self._send(
-            "GET",
-            f"{self.config.api_url}/user",
-            "user lookup",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github+json",
-            },
-        )
-        if response.status_code != 200:
-            logger.warning("GitHub user lookup answered %s", response.status_code)
-            raise GitHubAuthFailed("exchange_failed", "GitHub refused the user lookup")
-        body = _json(response)
-        ident = None if body is None else body.get("id")
-        login = None if body is None else body.get("login")
-        if (
-            body is None
-            or not isinstance(ident, int)
-            or isinstance(ident, bool)
-            or not isinstance(login, str)
-            or not login
-        ):
-            raise GitHubUnavailable("GitHub answered the user lookup oddly")
-        name = body.get("name")
-        avatar = body.get("avatar_url")
-        return GitHubUser(
-            id=ident,
-            login=login,
-            name=name if isinstance(name, str) and name.strip() else None,
-            avatar_url=avatar if isinstance(avatar, str) and avatar else None,
-            # Only an explicit true counts: false and a missing field (a token
-            # without read:user) are both "no 2FA".
-            two_factor=body.get("two_factor_authentication") is True,
-        )
-
-    def revoke(self, token: str) -> bool:
-        """Revoke an access token (best-effort); return whether GitHub did.
-
-        ``DELETE <api>/applications/{client_id}/token`` with basic auth
-        ``client_id:client_secret`` and the token in the JSON body.
-
-        Parameters
-        ----------
-        token : str
-            The access token to revoke.
-
-        Returns
-        -------
-        bool
-            ``True`` on GitHub's ``204``; ``False`` on any other answer or
-            any error (never raised).
-        """
-        try:
-            response = self._request(
-                "DELETE",
-                f"{self.config.api_url}/applications/{self.config.client_id}/token",
-                auth=(self.config.client_id, self.config.client_secret),
-                json={"access_token": token},
-                headers={"Accept": "application/vnd.github+json"},
-            )
-        except Exception as exc:  # noqa: BLE001 -- best-effort by design
-            logger.warning("GitHub token revoke failed: %s", type(exc).__name__)
-            return False
-        if response.status_code != 204:
-            logger.warning("GitHub token revoke answered %s", response.status_code)
-            return False
-        return True
-
-    def _send(self, method: str, url: str, what: str, **kwargs: Any) -> httpx.Response:
-        """Send a request; a network error, timeout or ``5xx`` is unavailable."""
-        try:
-            response = self._request(method, url, **kwargs)
-        except httpx.HTTPError as exc:
-            logger.warning("GitHub %s failed: %s", what, type(exc).__name__)
-            raise GitHubUnavailable(f"GitHub could not be reached ({what})") from None
-        if response.status_code >= 500:
-            logger.warning("GitHub %s answered %s", what, response.status_code)
-            raise GitHubUnavailable(f"GitHub is unavailable ({what})")
-        return response
-
-    def close(self) -> None:
-        """Close the HTTP client."""
-        self._client.close()
-
 
 @dataclass(frozen=True)
 class GitHubUser:
@@ -670,6 +705,7 @@ __all__ = [
     "GitHubAuthConfig",
     "GitHubAuthFailed",
     "GitHubHostError",
+    "GitHubHttp",
     "GitHubOAuth",
     "GitHubUnavailable",
     "GitHubUser",

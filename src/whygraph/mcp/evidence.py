@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 from sqlalchemy.exc import OperationalError
@@ -58,6 +61,52 @@ _TOOL_DESCRIPTION = (
     "(or run `whygraph scan` outside it) first to populate the WhyGraph "
     "database."
 )
+
+
+@dataclass
+class EvidenceResult:
+    """What :func:`evidence_from_hunks` found for a set of blamed hunks.
+
+    Attributes
+    ----------
+    evidence : list[CommitEvidence]
+        The evidence bundle, newest first and capped - what
+        :func:`collect_evidence` returns.
+    unknown : list[BlameHunk]
+        The given (``"blame"``-label) hunks whose SHA is not in the
+        WhyGraph DB, once per SHA, in input order. Uncommitted hunks are
+        never listed; walked, predecessor and PR-origin SHAs missing from
+        the DB are dropped silently.
+    """
+
+    evidence: list[CommitEvidence] = field(default_factory=list)
+    unknown: list[BlameHunk] = field(default_factory=list)
+
+
+class _Blamer:
+    """The blame calls of one evidence run: one ignore-revs file, one budget.
+
+    ``.git-blame-ignore-revs`` is resolved (with ``check_inside``) once,
+    here, and passed to every blame. ``budget`` caps the number of blame
+    calls; :meth:`blame` returns ``None`` once it is spent.
+    """
+
+    def __init__(self, repo: Repository, *, budget: int | None = None) -> None:
+        self.repo = repo
+        self.ignore_revs_file: Path | None = repo.blame_ignore_revs_file()
+        self.remaining = budget
+
+    def blame(self, path: str, **kwargs: object) -> tuple[BlameHunk, ...] | None:
+        """Run one blame, or return ``None`` when the budget is spent."""
+        if self.remaining is not None:
+            if self.remaining <= 0:
+                return None
+            self.remaining -= 1
+        return self.repo.blame(
+            path,
+            ignore_revs_file=self.ignore_revs_file,
+            **kwargs,  # type: ignore[arg-type]
+        )
 
 
 def _json_list(raw: str | None) -> list:
@@ -173,12 +222,11 @@ def collect_evidence(target: Target, *, limit: int = 20) -> list[CommitEvidence]
     """
     repo = Repository(repo_root())
     try:
-        initial = repo.blame(target.path, target.line_start, target.line_end)
-    except GitError as exc:
-        raise WhyGraphError.wrap("git blame failed", exc)
-
-    try:
-        return _collect_evidence_against_db(repo, target, initial, limit)
+        try:
+            initial = repo.blame(target.path, target.line_start, target.line_end)
+        except GitError as exc:
+            raise WhyGraphError.wrap("git blame failed", exc)
+        return evidence_from_hunks(repo, target, initial, limit=limit).evidence
     except OperationalError as exc:
         raise WhyGraphError(
             "WhyGraph DB is missing or unscanned — scan from the WhyGraph portal "
@@ -186,20 +234,57 @@ def collect_evidence(target: Target, *, limit: int = 20) -> list[CommitEvidence]
         ) from exc
 
 
-def _collect_evidence_against_db(
+def evidence_from_hunks(
     repo: Repository,
     target: Target,
-    initial: tuple[BlameHunk, ...],
-    limit: int,
-) -> list[CommitEvidence]:
-    """The DB-dependent half of :func:`collect_evidence`.
+    hunks: Sequence[BlameHunk],
+    *,
+    limit: int = 20,
+    git_budget: int | None = None,
+) -> EvidenceResult:
+    """The evidence bundle for already-blamed hunks of ``target``.
 
-    Split out so the caller can wrap every DB touch — walk-past,
-    predecessor-blame, the main commit/PR/issue join, and the
-    area-history fill — in a single ``OperationalError`` translation.
+    The DB-dependent half of :func:`collect_evidence`: walk-past,
+    predecessor-blame, squash-PR attribution, the commit / PR / issue join
+    and the area-history fill, without blaming the working tree. Every
+    git call runs against commit objects (each hunk's
+    :attr:`BlameHunk.origins` at its own SHA), so a server clone answers
+    for a developer's checkout.
+
+    Parameters
+    ----------
+    repo : Repository
+        The repository holding the hunks' commits.
+    target : Target
+        The code chunk the hunks were blamed from. Its path and range are
+        reused by predecessor-blame and squash-PR attribution, and by the
+        walk-past of a hunk without origins.
+    hunks : Sequence[BlameHunk]
+        The blame of ``target`` (uncommitted hunks are skipped).
+    limit : int, optional
+        Cap on the number of commits returned, newest first (default 20).
+    git_budget : int or None, optional
+        Cap on the number of blame calls this run may make; ``None``
+        (default) means no cap. Calls past it are skipped: hunks stay
+        unwalked, and further predecessor / squash blames do not run.
+
+    Returns
+    -------
+    EvidenceResult
+        The evidence, plus the given hunks whose SHA the DB does not know.
+
+    Raises
+    ------
+    sqlalchemy.exc.OperationalError
+        If the WhyGraph DB is missing or unscanned (:func:`collect_evidence`
+        translates it).
     """
-    walked_hunks, _boring = _walk_past_boring(repo, target, initial_hunks=initial)
-    predecessor_hunks = _predecessor_blame(repo, target)
+    initial = tuple(hunks)
+    blamer = _Blamer(repo, budget=git_budget)
+    walked_hunks, _boring = _walk_past_boring(
+        repo, target, initial_hunks=initial, blamer=blamer
+    )
+    predecessor_hunks = _predecessor_blame(repo, target, blamer=blamer)
 
     base_labeled: list[tuple[BlameHunk, str]] = (
         [(h, "blame") for h in initial]
@@ -211,12 +296,13 @@ def _collect_evidence_against_db(
     blame_shas = {h.sha for h, _ in base_labeled if not h.is_uncommitted}
 
     by_sha: dict[str, CommitEvidence] = {}
+    unknown: dict[str, BlameHunk] = {}
     with get_session() as session:
         # Per-line squash attribution: re-blame at each enriched squash PR's
         # head_sha so origin commits surface with the existing dedupe /
         # priority / cap machinery (no special-casing past the label).
         origin_hunks = _attribute_squash_origins(
-            repo, target, blame_shas=blame_shas, session=session
+            repo, target, blame_shas=blame_shas, session=session, blamer=blamer
         )
         labeled_hunks = base_labeled + [(h, "pr-origin") for h in origin_hunks]
         for hunk, source in labeled_hunks:
@@ -224,6 +310,8 @@ def _collect_evidence_against_db(
                 continue
             commit = session.get(Commit, hunk.sha)
             if commit is None:
+                if source == "blame":
+                    unknown.setdefault(hunk.sha, hunk)
                 continue
             if not _should_replace(by_sha.get(hunk.sha), source):
                 continue
@@ -249,7 +337,7 @@ def _collect_evidence_against_db(
         items.extend(extras)
 
     items.sort(key=lambda item: item.commit.committed_at or "", reverse=True)
-    return items[:limit]
+    return EvidenceResult(evidence=items[:limit], unknown=list(unknown.values()))
 
 
 def _should_replace(existing: CommitEvidence | None, new_source: str) -> bool:
@@ -262,15 +350,30 @@ def _should_replace(existing: CommitEvidence | None, new_source: str) -> bool:
 
 
 def _walk_past_boring(
-    repo: Repository, target: Target, *, initial_hunks: tuple[BlameHunk, ...]
+    repo: Repository,
+    target: Target,
+    *,
+    initial_hunks: tuple[BlameHunk, ...],
+    blamer: _Blamer | None = None,
 ) -> tuple[list[BlameHunk], set[str]]:
-    """Re-run blame with refactor-heavy commits ignored, up to a cap.
+    """Blame refactor-heavy hunks past their own commit, up to a cap.
 
     Returns the set of hunks that *appeared only after* a boring commit
     was ignored, along with the set of boring SHAs we ended up walking
-    past. Used by :func:`collect_evidence` to tag those hunks
+    past. Used by :func:`evidence_from_hunks` to tag those hunks
     ``source="blame-walked"``.
+
+    Each hop blames every boring hunk at its own SHA - per origin path,
+    the hunk's line ranges on that path - with every boring SHA seen so
+    far ignored, so no working tree is needed. A hunk git refuses to
+    blame keeps its lines (the walk goes on with the others); a spent
+    ``blamer`` budget leaves the remaining hunks unwalked. New hunks are
+    merged by SHA before the next hop, and each inherits the first
+    ``final_start`` of the boring hunk(s) it came from, which keeps the
+    first-appearance order of a working-tree re-blame.
     """
+    if blamer is None:
+        blamer = _Blamer(repo)
     seen_shas = {h.sha for h in initial_hunks if not h.is_uncommitted}
     boring_shas = _boring_shas_in(seen_shas)
     if not boring_shas:
@@ -278,29 +381,108 @@ def _walk_past_boring(
 
     walked: list[BlameHunk] = []
     ignored = set(boring_shas)
+    frontier = [
+        (h, _first_final_start(h))
+        for h in initial_hunks
+        if not h.is_uncommitted and h.sha in boring_shas
+    ]
     for _ in range(_MAX_BORING_HOPS):
-        try:
-            hunks = repo.blame(
-                target.path,
-                target.line_start,
-                target.line_end,
-                ignore_revs=tuple(sorted(ignored)),
-            )
-        except GitError:
-            # Walk-past is best-effort: if git refuses the call (e.g.
-            # an ignored SHA can't be resolved), bail out cleanly and
-            # keep whatever we already have.
+        found: dict[str, tuple[BlameHunk, int]] = {}
+        spent = False
+        for hunk, order_key in frontier:
+            hunks = _blame_hunk_at_its_sha(blamer, target, hunk, ignored)
+            if hunks is None:
+                spent = True
+                break
+            for new in hunks:
+                if new.is_uncommitted or new.sha in seen_shas:
+                    continue
+                prior = found.get(new.sha)
+                if prior is None:
+                    found[new.sha] = (new, order_key)
+                else:
+                    found[new.sha] = (
+                        _merge_hunks(prior[0], new),
+                        min(prior[1], order_key),
+                    )
+        # sorted() is stable: ties keep first-appearance order.
+        new_walked = sorted(found.values(), key=lambda pair: pair[1])
+        walked.extend(h for h, _ in new_walked)
+        seen_shas.update(found)
+        if spent:
             break
-        new_walked = [
-            h for h in hunks if not h.is_uncommitted and h.sha not in seen_shas
-        ]
-        walked.extend(new_walked)
-        seen_shas.update(h.sha for h in new_walked)
-        new_boring = _boring_shas_in({h.sha for h in new_walked}) - ignored
+        new_boring = _boring_shas_in(set(found)) - ignored
         if not new_boring:
             break
         ignored.update(new_boring)
+        frontier = [(h, key) for h, key in new_walked if h.sha in new_boring]
     return walked, ignored
+
+
+def _first_final_start(hunk: BlameHunk) -> int:
+    """The first blamed-file line ``hunk`` owns (``0`` without origins)."""
+    return min((o.final_start for o in hunk.origins), default=0)
+
+
+def _blame_hunk_at_its_sha(
+    blamer: _Blamer, target: Target, hunk: BlameHunk, ignored: set[str]
+) -> list[BlameHunk] | None:
+    """Blame ``hunk``'s lines at ``hunk.sha`` with ``ignored`` walked past.
+
+    One blame per origin path, with that path's ranges. A hunk without
+    origins falls back to ``target``'s path and range. Returns ``[]`` when
+    git refuses any of the calls (the hunk stays unwalked), ``None`` when
+    the budget runs out.
+    """
+    ignore_revs = tuple(sorted(ignored))
+    by_path: dict[str, list[tuple[int, int]]] = {}
+    for origin in hunk.origins:
+        by_path.setdefault(origin.path, []).append((origin.start, origin.end))
+    if not by_path:
+        by_path[target.path] = [(target.line_start, target.line_end)]
+    out: list[BlameHunk] = []
+    for path, ranges in by_path.items():
+        try:
+            hunks = blamer.blame(
+                path,
+                ranges=_normalize_ranges(ranges),
+                rev=hunk.sha,
+                ignore_revs=ignore_revs,
+            )
+        except GitError:
+            # Walk-past is best-effort: if git refuses the call (e.g. an
+            # ignored SHA can't be resolved), this hunk keeps its lines
+            # and the walk goes on with the others.
+            return []
+        if hunks is None:
+            return None
+        out.extend(hunks)
+    return out
+
+
+def _normalize_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Sort ``ranges`` and merge overlapping or adjacent ones."""
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _merge_hunks(first: BlameHunk, other: BlameHunk) -> BlameHunk:
+    """One hunk for a SHA two blames returned: lines summed, origins unioned."""
+    origins = first.origins + tuple(o for o in other.origins if o not in first.origins)
+    return BlameHunk(
+        sha=first.sha,
+        lines_owned=first.lines_owned + other.lines_owned,
+        author_name=first.author_name or other.author_name,
+        author_email=first.author_email or other.author_email,
+        summary=first.summary or other.summary,
+        committed_at=first.committed_at or other.committed_at,
+        origins=origins,
+    )
 
 
 def _boring_shas_in(shas: set[str]) -> set[str]:
@@ -324,7 +506,9 @@ def _boring_shas_in(shas: set[str]) -> set[str]:
     return set(rows)
 
 
-def _predecessor_blame(repo: Repository, target: Target) -> list[BlameHunk]:
+def _predecessor_blame(
+    repo: Repository, target: Target, *, blamer: _Blamer | None = None
+) -> list[BlameHunk]:
     """Blame ``target``'s line range inside every rename predecessor.
 
     For each rename event in the target's lineage, this re-runs blame
@@ -332,22 +516,26 @@ def _predecessor_blame(repo: Repository, target: Target) -> list[BlameHunk]:
     parent. The line range is reused as-is — when the predecessor file
     was too short for the range, git errors out and the event is
     skipped (predecessor-blame is best-effort signal, not a strict
-    guarantee).
+    guarantee). A spent ``blamer`` budget stops it.
     """
+    if blamer is None:
+        blamer = _Blamer(repo)
     out: list[BlameHunk] = []
     for rename_commit_sha, predecessor_path in _rename_events_for(target.path):
         parent_sha = _first_parent_of(rename_commit_sha)
         if parent_sha is None:
             continue
         try:
-            hunks = repo.blame(
+            hunks = blamer.blame(
                 predecessor_path,
-                target.line_start,
-                target.line_end,
+                line_start=target.line_start,
+                line_end=target.line_end,
                 rev=parent_sha,
             )
         except GitError:
             continue
+        if hunks is None:
+            break
         out.extend(h for h in hunks if not h.is_uncommitted)
     return out
 
@@ -396,6 +584,7 @@ def _attribute_squash_origins(
     *,
     blame_shas: set[str],
     session: Session,
+    blamer: _Blamer | None = None,
 ) -> list[BlameHunk]:
     """Re-blame the target range at each enriched squash PR's ``head_sha``.
 
@@ -406,19 +595,24 @@ def _attribute_squash_origins(
     predecessor-blame uses with ``rev=parent_sha``. Best-effort: a
     squash-vs-head mismatch or absent object skips that PR (mirrors
     :func:`_predecessor_blame`'s per-event ``GitError`` swallow), leaving
-    the PR-level Stage 1 evidence untouched.
+    the PR-level Stage 1 evidence untouched. A spent ``blamer`` budget
+    stops it.
     """
+    if blamer is None:
+        blamer = _Blamer(repo)
     out: list[BlameHunk] = []
     for pr in _enriched_squash_prs_for(session, blame_shas):
         try:
-            hunks = repo.blame(
+            hunks = blamer.blame(
                 target.path,
-                target.line_start,
-                target.line_end,
+                line_start=target.line_start,
+                line_end=target.line_end,
                 rev=pr.head_sha,
             )
         except GitError:
             continue
+        if hunks is None:
+            break
         out.extend(h for h in hunks if not h.is_uncommitted)
     return out
 

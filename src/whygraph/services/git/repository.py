@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from whygraph.core import Shell, ShellError
+from whygraph.core.safe_paths import UnsafePathError, check_inside
 
 from .blame import BlameHunk
 from .commands import (
@@ -23,6 +24,7 @@ from .commands import (
     GitFastForwardCmd,
     GitFetchDefaultCmd,
     GitFetchRefsCmd,
+    GitHasCommitCmd,
     GitHeadShaCmd,
     GitIsAncestorCmd,
     GitIsShallowCmd,
@@ -30,6 +32,7 @@ from .commands import (
     GitLsRemoteBranchCmd,
     GitLsTreeNamesCmd,
     GitRefExistsCmd,
+    GitRemoteRefsContainingCmd,
     GitRemoteUrlCmd,
     GitResolveCommitCmd,
     GitRevListShasCmd,
@@ -48,6 +51,11 @@ from .credentials import (
 )
 from .exceptions import GitError
 from .file_change import FileChange
+
+# The ``ignore_revs_file`` default of :meth:`Repository.blame`: detect the
+# work tree's ``.git-blame-ignore-revs`` (see
+# :meth:`Repository.blame_ignore_revs_file`).
+_AUTO = object()
 
 # Git's well-known empty-tree object (SHA-1 repositories). Diffing a root
 # commit against it yields exactly what that commit introduced. Note that
@@ -397,35 +405,60 @@ class Repository:
                 f"failed to diff {commit.sha[:7]} against its parent"
             ) from exc
 
+    def blame_ignore_revs_file(self) -> Path | None:
+        """The work tree's ``.git-blame-ignore-revs``, when it is safe to read.
+
+        The file is repository content, so it goes through
+        :func:`~whygraph.core.safe_paths.check_inside`: a symlink (or a
+        path resolving outside :attr:`root`) is ignored, as is anything
+        that is not a regular file.
+
+        Returns
+        -------
+        Path or None
+            The absolute path to pass to ``--ignore-revs-file``, or
+            ``None`` when there is no usable file.
+        """
+        try:
+            path = check_inside(self.root, _BLAME_IGNORE_REVS_FILE)
+        except UnsafePathError:
+            return None
+        return path if path.is_file() else None
+
     def blame(
         self,
         path: str,
-        line_start: int,
-        line_end: int,
+        line_start: int | None = None,
+        line_end: int | None = None,
         *,
         ignore_revs: tuple[str, ...] | None = None,
         rev: str | None = None,
+        ranges: Sequence[tuple[int, int]] | None = None,
+        ignore_revs_file: Any = _AUTO,
     ) -> tuple[BlameHunk, ...]:
-        """Blame a contiguous line range of one file.
+        """Blame a line range (or several) of one file.
 
         Reports which commit owns each line of ``path`` between
-        ``line_start`` and ``line_end`` (both 1-based, inclusive),
-        aggregated into one :class:`BlameHunk` per commit.
+        ``line_start`` and ``line_end`` (both 1-based, inclusive) - or in
+        each of ``ranges`` - aggregated into one :class:`BlameHunk` per
+        commit.
 
         The underlying ``git blame`` invocation always runs with
         whitespace-blind and move/copy detection enabled (see
         :class:`GitBlameCmd`). When the working tree contains a
         ``.git-blame-ignore-revs`` file at :attr:`root`, that file is
         passed through too — so checked-in skip lists work without
-        requiring per-user ``blame.ignoreRevsFile`` config.
+        requiring per-user ``blame.ignoreRevsFile`` config. The file is
+        found by :meth:`blame_ignore_revs_file` (a symlink is ignored)
+        unless the caller passes ``ignore_revs_file`` explicitly.
 
         Parameters
         ----------
         path : str
             File to blame, relative to :attr:`root`.
-        line_start : int
+        line_start : int or None, optional
             First line of the range (1-based, inclusive).
-        line_end : int
+        line_end : int or None, optional
             Last line of the range (1-based, inclusive).
         ignore_revs : tuple[str, ...] or None, optional
             Extra commit SHAs to walk past for this single call. The
@@ -438,6 +471,14 @@ class Repository:
             to blame the file as of that commit — used by the
             predecessor-blame bridge to reach commits that touched a file
             at its pre-rename name.
+        ranges : Sequence[tuple[int, int]] or None, optional
+            Several ``(start, end)`` ranges (1-based, inclusive), one
+            ``-L`` each, in place of ``line_start`` / ``line_end`` (the two
+            forms are exclusive).
+        ignore_revs_file : Path, str or None, optional
+            The skip-list file to pass, already resolved by the caller
+            (:meth:`blame_ignore_revs_file`), or ``None`` for none. Omitted,
+            the file is detected for this call.
 
         Returns
         -------
@@ -450,24 +491,83 @@ class Repository:
         ------
         GitError
             If ``git`` fails — unknown path, or a range outside the file.
+        ValueError
+            If both or neither of ``ranges`` and ``line_start`` /
+            ``line_end`` are given.
         """
-        ignore_revs_file: str | None = None
-        if (self.root / _BLAME_IGNORE_REVS_FILE).is_file():
-            ignore_revs_file = _BLAME_IGNORE_REVS_FILE
+        if ignore_revs_file is _AUTO:
+            ignore_revs_file = self.blame_ignore_revs_file()
+        cmd = GitBlameCmd(
+            path,
+            line_start,
+            line_end,
+            ignore_revs_file=None
+            if ignore_revs_file is None
+            else str(ignore_revs_file),
+            ignore_revs=ignore_revs,
+            rev=rev,
+            ranges=ranges,
+        )
+        try:
+            return self._shell.run(cmd, cwd=self.root)
+        except ShellError as exc:
+            spans = ",".join(f"{a}-{b}" for a, b in cmd.ranges)
+            raise GitError(f"failed to blame {path}:{spans}") from exc
+
+    def has_commit(self, sha: str) -> bool:
+        """Whether ``sha`` names a commit present in this repository.
+
+        Purely local (``git cat-file -e <sha>^{commit}``).
+
+        Parameters
+        ----------
+        sha : str
+            A full commit SHA.
+
+        Returns
+        -------
+        bool
+            ``False`` for an unknown object, a non-commit, or an unusable
+            argument (empty, or starting with ``-``).
+        """
+        if not sha or sha.startswith("-"):
+            return False
         try:
             return self._shell.run(
-                GitBlameCmd(
-                    path,
-                    line_start,
-                    line_end,
-                    ignore_revs_file=ignore_revs_file,
-                    ignore_revs=ignore_revs,
-                    rev=rev,
-                ),
-                cwd=self.root,
+                GitHasCommitCmd(sha), cwd=self.root, check=False, env=git_env()
             )
-        except ShellError as exc:
-            raise GitError(f"failed to blame {path}:{line_start}-{line_end}") from exc
+        except ShellError:
+            return False
+
+    def remote_refs_containing(self, sha: str) -> tuple[str, ...]:
+        """The origin remote's tracking refs whose history contains ``sha``.
+
+        Purely local: reads ``refs/remotes/<origin>/`` as the last fetch
+        left them (``git for-each-ref --contains``).
+
+        Parameters
+        ----------
+        sha : str
+            A full commit SHA.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Full ref names (``refs/remotes/origin/main``), empty when no
+            remote-tracking ref contains ``sha``, ``sha`` is unknown, or the
+            argument is unusable (empty, or starting with ``-``).
+        """
+        if not sha or sha.startswith("-"):
+            return ()
+        try:
+            return self._shell.run(
+                GitRemoteRefsContainingCmd(sha, f"refs/remotes/{self._origin_remote}/"),
+                cwd=self.root,
+                check=False,
+                env=git_env(),
+            )
+        except ShellError:
+            return ()
 
     def commit_file_changes(self, commit: Commit) -> tuple[FileChange, ...]:
         """Per-file structural changes recorded by ``commit``.

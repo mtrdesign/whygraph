@@ -15,6 +15,9 @@ Options (before the runner's own ``--progress json --managed-by-portal ...``):
                     ``DIR/delay`` (seconds per tick) on every run
 ``--delay SEC``     seconds per tick when ``DIR/delay`` is absent (default 0.15)
 
+With ``--codegraph-only`` (a project linked to a platform) it runs one phase,
+seeds the CodeGraph index and touches nothing else; ``DIR/fail`` fails it.
+
 A production portal's runner passes a GitHub project's installation token
 as a file (``WHYGRAPH_GITHUB_TOKEN_FILE``); when that variable is set the
 file must be readable and non-empty, else the scan fails at once, as a real
@@ -118,6 +121,36 @@ def seed_codegraph(root: Path) -> None:
         conn.close()
 
 
+def codegraph_only(fail: bool, delay: float) -> int:
+    """The ``--codegraph-only`` run: one phase, only the CodeGraph index."""
+    emit({"type": "start", "phase_total": 1})
+    emit({"type": "phase", "phase": 1, "title": "CodeGraph"})
+    emit({"type": "task", "name": "codegraph", "description": "indexing"})
+    time.sleep(delay)
+    if fail:
+        sys.stderr.write("crawler 'codegraph' failed: simulated codegraph error\n")
+    else:
+        seed_codegraph(Path(os.getcwd()))
+    emit(
+        {
+            "type": "result",
+            "status": "failed" if fail else "ok",
+            "elapsed_sec": 0.5,
+            "phase_timings": {"CodeGraph": 0.5},
+            "crawlers": [
+                {
+                    "name": "codegraph",
+                    "status": "failed" if fail else "ok",
+                    "summary": "" if fail else "synced",
+                    **({"error": "simulated codegraph error"} if fail else {}),
+                }
+            ],
+            "analyze_skipped": "--codegraph-only",
+        }
+    )
+    return 1 if fail else 0
+
+
 def main() -> int:
     args = sys.argv[1:]
     control = Path(args[args.index("--control") + 1]) if "--control" in args else None
@@ -152,6 +185,9 @@ def main() -> int:
                 }
             )
             return 1
+
+    if "--codegraph-only" in args:
+        return codegraph_only(fail, delay)
 
     emit({"type": "start", "phase_total": 4 if analyze else 3})
     emit({"type": "phase", "phase": 1, "title": "Structural crawl"})

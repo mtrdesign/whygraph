@@ -147,6 +147,7 @@ from .runner import (
     RunFinished,
     RunNotFound,
     RunnerUnavailable,
+    ManagedOnPlatform,
     SourceNotAllowed,
     log_tail,
     remove_run_files,
@@ -481,8 +482,11 @@ def _project_stats(state: PortalState, project: BoundProject) -> dict | None:
     """Counts for the project home, or ``None`` until initialized (blocking).
 
     Also ``None`` when a DB path is a symlink (nothing is opened); the data
-    routes answer ``409 unsafe_path`` for such a project.
+    routes answer ``409 unsafe_path`` for such a project. A linked
+    (``platform``) project has no local DB: ``None``, the file untouched.
     """
+    if project.source == "platform":
+        return None
     try:
         check_project_paths(project.root)
     except UnsafePathError:
@@ -1617,7 +1621,7 @@ def put_project_config(
         new_hooks != old_hooks
         and state.mode != "production"
         and project.initialized_at is not None
-        and project.source == "local"
+        and project.source in ("local", "platform")
         and project.root.is_dir()
     ):
         unsafe = _unsafe_reason(project.root, project.root / LEGACY_HELPER_RELPATH)
@@ -1694,7 +1698,8 @@ def init_project(
     checked_db_paths(project)
 
     try:
-        if not body.dry_run:
+        if not body.dry_run and project.source != "platform":
+            # A linked project has no local DB: a leftover one is ignored.
             state.migrations.ensure(project.ctx)
         result = initialize_project(
             project.root,
@@ -1833,6 +1838,8 @@ async def post_scan(
         raise ApiError(409, str(exc)) from exc
     except SourceNotAllowed as exc:
         raise ApiError(409, str(exc), code="source_not_allowed") from exc
+    except ManagedOnPlatform as exc:
+        raise ApiError(403, str(exc), code="managed_on_platform") from exc
     except ProjectAccessLost as exc:
         raise ApiError(
             409, str(exc), code="github_access_lost", reason=exc.reason

@@ -102,7 +102,8 @@ def build_project_context(session: Session, project: Project) -> ProjectContext:
     """
     root = resolve_root(project)
     project_layer, merged = _merged_layer(session, project, root)
-    _inject_secrets(session, project, project_layer, merged)
+    if project.source != "platform":  # a linked project reads no secrets
+        _inject_secrets(session, project, project_layer, merged)
     return ProjectContext(
         slug=project.slug, root=root, config=Config.from_dict(merged, root)
     )
@@ -134,12 +135,22 @@ def resolved_layer(session: Session, project: Project) -> dict:
 
 
 def _merged_layer(session: Session, project: Project, root: Path) -> tuple[dict, dict]:
-    """Return ``(project_layer, merged)`` - normalized, merged, DB paths forced."""
-    org_layer = load_layer(session, None, org_id=project.org_id)
+    """Return ``(project_layer, merged)`` - normalized, merged, DB paths forced.
+
+    A linked (``platform``) project is built from the ``Config`` defaults and
+    the project layer's ``[scan]`` table only (hooks); its org layer is
+    never read (M2e plan section 4.9).
+    """
+    if project.source == "platform":
+        raw = load_layer(session, project.id, org_id=project.org_id)
+        scan = raw.get("scan")
+        org_layer: dict = {}
+        project_raw = {"scan": scan} if isinstance(scan, dict) else {}
+    else:
+        org_layer = load_layer(session, None, org_id=project.org_id)
+        project_raw = load_layer(session, project.id, org_id=project.org_id)
     global_layer, _ = normalize_v2(org_layer, root)
-    project_layer, _ = normalize_v2(
-        load_layer(session, project.id, org_id=project.org_id), root
-    )
+    project_layer, _ = normalize_v2(project_raw, root)
     merged = merge_v2(global_layer, project_layer)
 
     # Rule 4.2.1 #2: DB paths are the root's defaults, never a row's value.

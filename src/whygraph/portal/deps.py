@@ -915,6 +915,12 @@ async def require_initialized(state: PortalState, project: BoundProject) -> None
         (checked first, before anything follows it).
     """
     checked_db_paths(project)
+    if project.source == "platform":
+        # A linked project has no local WhyGraph DB: only Initialize gates it,
+        # and a leftover whygraph.db is neither required nor migrated.
+        if project.initialized_at is None:
+            raise ApiError(409, "not initialized")
+        return
     if project.initialized_at is None or not project.db_path.is_file():
         raise ApiError(409, "not initialized")
     try:

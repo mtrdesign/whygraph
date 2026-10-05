@@ -305,6 +305,10 @@ class SourceNotAllowed(RuntimeError):
     """The project's source is not accepted in this mode - HTTP 409 ``source_not_allowed``."""
 
 
+class ManagedOnPlatform(RuntimeError):
+    """A linked project's LLM work happens on the platform - HTTP 403 ``managed_on_platform``."""
+
+
 class ProjectAccessLost(RuntimeError):
     """The project lost its GitHub access - HTTP 409 ``github_access_lost``.
 
@@ -333,12 +337,15 @@ def merge_trigger(a: str, b: str) -> str:
     return a if TRIGGER_PRECEDENCE.index(a) >= TRIGGER_PRECEDENCE.index(b) else b
 
 
-def resolve_analyze(trigger: str, analyze: bool | None) -> bool:
+def resolve_analyze(trigger: str, analyze: bool | None, source: str = "local") -> bool:
     """Whether a request of ``trigger`` describes commits.
 
     Only ``manual`` (unless ``analyze`` is ``False``) and ``describe`` spend
-    on the LLM; every other trigger is structure-only.
+    on the LLM; every other trigger is structure-only. A linked
+    (``platform``) project never describes locally.
     """
+    if source == "platform":
+        return False
     if trigger == "describe":
         return True
     if trigger == "manual":
@@ -346,7 +353,7 @@ def resolve_analyze(trigger: str, analyze: bool | None) -> bool:
     return False
 
 
-def scan_flags(trigger: str, analyze: bool) -> list[str]:
+def scan_flags(trigger: str, analyze: bool, source: str = "local") -> list[str]:
     """The ``whygraph scan`` flags of the section 4.6 trigger-to-flags table.
 
     Parameters
@@ -361,8 +368,11 @@ def scan_flags(trigger: str, analyze: bool) -> list[str]:
     list[str]
         ``hook`` -> ``--skip-analyze --no-remote``; ``initial`` / ``poll``
         / ``sync`` -> ``--skip-analyze``; ``manual`` / ``describe`` -> none
-        (full scan), or ``--skip-analyze`` when ``analyze`` is off.
+        (full scan), or ``--skip-analyze`` when ``analyze`` is off. A
+        ``platform`` project's scan is always ``--codegraph-only``.
     """
+    if source == "platform":
+        return ["--codegraph-only"]
     if trigger == "hook":
         return ["--skip-analyze", "--no-remote"]
     if trigger in EXPLICIT_TRIGGERS and analyze:
@@ -371,7 +381,10 @@ def scan_flags(trigger: str, analyze: bool) -> list[str]:
 
 
 def scan_argv(
-    trigger: str, analyze: bool, environ: Mapping[str, str] | None = None
+    trigger: str,
+    analyze: bool,
+    environ: Mapping[str, str] | None = None,
+    source: str = "local",
 ) -> list[str]:
     """The child scanner's argv.
 
@@ -381,6 +394,8 @@ def scan_argv(
         As for :func:`scan_flags`.
     environ : Mapping[str, str], optional
         Where :data:`SCAN_CMD_ENV` is read (default :data:`os.environ`).
+    source : str, optional
+        The project's source (``"platform"`` -> ``--codegraph-only``).
 
     Returns
     -------
@@ -388,8 +403,8 @@ def scan_argv(
         ``$WHYGRAPH_SCAN_CMD`` (``shlex.split``) or ``<python> -m whygraph
         scan``, then ``--progress json --managed-by-portal`` and the flags.
     """
-    source = os.environ if environ is None else environ
-    override = (source.get(SCAN_CMD_ENV) or "").strip()
+    env_source = os.environ if environ is None else environ
+    override = (env_source.get(SCAN_CMD_ENV) or "").strip()
     prefix = (
         shlex.split(override)
         if override
@@ -400,7 +415,7 @@ def scan_argv(
         "--progress",
         "json",
         "--managed-by-portal",
-        *scan_flags(trigger, analyze),
+        *scan_flags(trigger, analyze, source),
     ]
 
 
@@ -1169,6 +1184,9 @@ class ScanRunner:
         ------
         RunnerUnavailable, ProjectBusy, SourceNotAllowed, ProjectAccessLost
             As for :meth:`request_sync`.
+        ManagedOnPlatform
+            A linked project was asked to describe commits (explicit
+            ``analyze: true`` or ``describe``): that runs on the platform.
 
         Notes
         -----
@@ -1176,6 +1194,10 @@ class ScanRunner:
         scans afterwards (the clone is fetched first).
         """
         requested = trigger or "manual"
+        if project.source == "platform" and (
+            analyze is True or requested == "describe"
+        ):
+            raise ManagedOnPlatform("a linked project is described on the platform")
         user = (
             principal.user_id if principal and requested in EXPLICIT_TRIGGERS else None
         )
@@ -1183,7 +1205,7 @@ class ScanRunner:
             project.id,
             kind="scan",
             trigger=requested,
-            analyze=resolve_analyze(requested, analyze),
+            analyze=resolve_analyze(requested, analyze, project.source),
             requested_by=user,
             scan_requested=True,
         )
@@ -1397,7 +1419,11 @@ class ScanRunner:
             return
         projects = await anyio.to_thread.run_sync(_initialized_projects)
         for p in projects:
-            if p["source"] != "local" or not p["root_ok"] or not p["last_scanned_head"]:
+            if (
+                p["source"] not in ("local", "platform")
+                or not p["root_ok"]
+                or not p["last_scanned_head"]
+            ):
                 continue
             head = await anyio.to_thread.run_sync(git_head, p["root"])
             if head is not None and head != p["last_scanned_head"]:
@@ -1714,7 +1740,7 @@ class ScanRunner:
                 return "failed", summary, redact
 
             job.head = git_head(root)
-            argv = scan_argv(spec.trigger, spec.analyze)
+            argv = scan_argv(spec.trigger, spec.analyze, source=source)
             log(f"$ {shlex.join(argv)}")
             refresher: _TokenRefresher | None = None
             try:
@@ -2629,6 +2655,7 @@ __all__ = [
     "RunnerUnavailable",
     "ScanRunner",
     "SourceNotAllowed",
+    "ManagedOnPlatform",
     "child_env",
     "commits_behind",
     "git_head",

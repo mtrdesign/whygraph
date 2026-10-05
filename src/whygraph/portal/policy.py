@@ -146,9 +146,11 @@ def allowed_sources(mode: str | None) -> frozenset[str]:
     Returns
     -------
     frozenset[str]
-        ``{"github"}`` in production, ``{"local"}`` otherwise.
+        ``{"github"}`` in production, ``{"local", "platform"}`` otherwise.
     """
-    return frozenset({"github"}) if mode == "production" else frozenset({"local"})
+    if mode == "production":
+        return frozenset({"github"})
+    return frozenset({"local", "platform"})
 
 
 def filter_layer(layer: Mapping[str, Any], spec: Spec) -> tuple[dict, list[str]]:

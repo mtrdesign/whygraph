@@ -42,8 +42,10 @@ failed start.
 Production mode (``WHYGRAPH_MODE=production``, M2c) validates its
 environment at every start (``WHYGRAPH_BASE_URL``, no shared folders,
 ``WHYGRAPH_TRUSTED_PROXIES``) before anything commits, never seeds a built-in
-org, installs :class:`~whygraph.portal.deps.SessionIdentity`, logs a one-time
-bootstrap secret while no instance admin exists, and serves without shared
+org, installs :class:`~whygraph.portal.deps.TokenIdentity` (sessions, plus
+bearer connection tokens on ``/api/v1``), logs a one-time bootstrap secret
+while no instance admin exists, sweeps expired connection tokens at start and
+hourly (:func:`whygraph.portal.connections.sweep`), and serves without shared
 folders, port reconcile or MCP session manager (plan section 4.2).
 
 The portal is **one process**: the runner, migration lock and caches are
@@ -75,6 +77,7 @@ from whygraph.serve.chat import router as chat_router
 from whygraph.serve.errors import whygraph_error_handler
 from whygraph.serve.routes import router as data_router
 
+from . import connections
 from . import db as portal_db
 from .auth_routes import auth_router
 from .authz import Action
@@ -82,7 +85,7 @@ from .deps import (
     ApiError,
     IdentityResolver,
     PortalState,
-    SessionIdentity,
+    TokenIdentity,
     current_user,
     project_db_access,
 )
@@ -122,6 +125,9 @@ MODE_ENV = "WHYGRAPH_MODE"
 
 SUPPORTED_MODES: tuple[str, ...] = ("local", "production")
 """Modes this release can run."""
+
+CONNECTION_SWEEP_EVERY_SEC = 60 * 60
+"""How often production sweeps expired connection tokens (also once at start)."""
 
 _ALL_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
 
@@ -332,6 +338,8 @@ async def _serving(state: PortalState) -> AsyncIterator[None]:
             watcher.start_soon(_watch_instance_lock, state)
         if state.mode == "production":
             watcher.start_soon(_check_base_url, state)
+            if not state.degraded:
+                watcher.start_soon(_sweep_connections)
         set_strict(True)
         state.origins = origins
         try:
@@ -369,6 +377,21 @@ async def _check_base_url(state: PortalState) -> None:
     state.base_check = problems
     for problem in problems:
         _log.warning("base URL check: %s", problem)
+
+
+async def _sweep_connections() -> None:
+    """Sweep connection tokens at start and every hour; never fatal (M2e section 4.3)."""
+    while True:
+        try:
+            revoked, deleted = await anyio.to_thread.run_sync(connections.sweep)
+        except Exception:  # noqa: BLE001 -- a failed sweep is retried next hour
+            _log.exception("connection token sweep failed")
+        else:
+            if revoked or deleted:
+                _log.info(
+                    "connection token sweep: %d expired, %d deleted", revoked, deleted
+                )
+        await anyio.sleep(CONNECTION_SWEEP_EVERY_SEC)
 
 
 async def _watch_instance_lock(state: PortalState) -> None:
@@ -482,7 +505,7 @@ def _startup(state: PortalState) -> None:
             state.builtin_org_slug = org.slug
         else:
             if not state.identity_injected:
-                state.identity = SessionIdentity(state)
+                state.identity = TokenIdentity(state)
             has_admin = session.exec(
                 select(User.id).where(col(User.is_instance_admin).is_(True)).limit(1)
             ).first()

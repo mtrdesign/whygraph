@@ -87,7 +87,7 @@ from whygraph.services.git import (
 from whygraph.services.git.credentials import github_git_host
 from whygraph.services.github import GitHubError, RepoAccessError, check_repo_access
 
-from . import sessions
+from . import connections, sessions
 from .audit import audit
 from .authz import Action, OrgAccess, Role, authorize
 from .config_layers import ConfigPolicyError, find_secret_paths, load_layer, save_layer
@@ -1437,7 +1437,8 @@ def delete_project(
     clone's checkout is deleted only when ``confirm_name`` equals the
     project name and the checkout sits directly under
     ``<data dir>/repos``. The project's run files (``runs/<id>.jsonl``,
-    ``.log``, ``.token``) are deleted with its row.
+    ``.log``, ``.token``) are deleted with its row, and its connection
+    tokens are revoked (``project_deleted``) in the row's transaction.
     """
     state = portal_state(request)
     body = body or DeleteProjectBody()
@@ -1528,6 +1529,8 @@ def _remove_project(
     with get_session() as session:
         row = session.get(Project, project.id)
         if row is not None:
+            # Before the delete, which sets the tokens' project_id to NULL.
+            connections.revoke_for_project(session, project.id, "project_deleted")
             session.delete(row)
     remove_run_files(state.data_dir, runs)
 

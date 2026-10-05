@@ -36,6 +36,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, func, select
 
+from . import connections
 from .audit import audit, truncate_email
 from .authz import Role
 from .db import get_session
@@ -989,9 +990,10 @@ def patch_admin_user(
     ``409 last_admin`` when a demotion or a disable would leave no
     **enabled** admin. The enabled admins' rows are locked (``SELECT ...
     FOR UPDATE``) first, so two concurrent changes cannot both pass the
-    count. Disabling ends every session of the user at once and kills
-    their unused reset links; memberships and the GitHub id stay, so
-    enabling restores everything.
+    count. Disabling ends every session of the user at once, revokes their
+    connection tokens (``user_disabled``) and kills their unused reset
+    links; memberships and the GitHub id stay, so enabling restores
+    everything but the tokens.
     """
     if body.is_instance_admin is None and body.disabled is None:
         raise ApiError(422, "nothing to change: set is_instance_admin or disabled")
@@ -1028,6 +1030,7 @@ def patch_admin_user(
         db.flush()
         if disabled and not was_disabled:
             revoke_user(user.id, db=db)
+            connections.revoke_for_user(db, user.id, "user_disabled")
             _invalidate_reset_links(db, user.id)
         target = user.uid
         target_id = user.id

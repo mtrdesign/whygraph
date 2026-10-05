@@ -200,6 +200,13 @@ class Principal:
         The GitHub avatar of a GitHub account (production).
     has_password : bool
         Whether the account signs in with a password (production).
+    token_id : int or None
+        The ``connection_tokens.id`` a ``/api/v1`` request authenticated
+        with (production, M2e); ``None`` for a session or local principal.
+        A token principal never has a session and is never an instance
+        admin.
+    token_project_id : int or None
+        The one ``projects.id`` that token reaches.
 
     Notes
     -----
@@ -215,6 +222,8 @@ class Principal:
     github_login: str | None = None
     avatar_url: str | None = None
     has_password: bool = False
+    token_id: int | None = None
+    token_project_id: int | None = None
 
 
 _principal: ContextVar[Principal | None] = ContextVar(

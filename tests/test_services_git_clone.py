@@ -587,6 +587,8 @@ def test_failure_message_scrubs_a_partly_masked_token(tmp_path: Path):
         ("ghs_1_abc.def-ghi_jkl****** done", "ghs_*** done"),
         ("gho_ABCDEFGH ghu_12345678 ghr_xyzxyzxy", "gho_*** ghu_*** ghr_***"),
         ("ghp_short and ghx_abcdefghij stay", "ghp_short and ghx_abcdefghij stay"),
+        ("bearer wgc_Ab-9_xYz0123456789 sent", "bearer wgc_*** sent"),
+        ("wgc_short and wgcx_abcdefghij stay", "wgc_short and wgcx_abcdefghij stay"),
     ],
 )
 def test_redact_tokens_matches_the_token_pattern(text: str, expected: str):

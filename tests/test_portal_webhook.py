@@ -31,6 +31,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import select
 
+from github_fake import FakeControl
 from test_portal_app import (  # noqa: F401
     GITHUB_WEBHOOK_SECRET,
     at,
@@ -529,6 +530,32 @@ def test_repositories_removed_and_added(hooked: World) -> None:
     )
     assert row().access_lost_at is None
     assert row().github_installation_id == NEW_INSTALLATION
+
+
+def test_the_fakes_control_routes_send_what_the_portal_acts_on(hooked: World) -> None:
+    """The out-of-process fake's ``/_fake/*`` routes (e2e, smoke, the dev loop)."""
+    w = hooked
+    control = FakeControl(w.fake, HOOK, client=w.client)
+    assert control.handle("GET", "/_fake/push", b"")[0] == 405
+    assert control.handle("POST", "/_fake/nope", b"{}")[0] == 404
+    assert control.handle("POST", "/_fake/push", b'{"repo": "acme/none"}')[0] == 404
+
+    status, body = control.handle("POST", "/_fake/push", b'{"repo": "acme/api"}')
+    assert (status, body["webhook_status"]) == (200, 202), body
+    run = wait_idle(w)[0]
+    assert (run["kind"], run["trigger"], run["status"]) == ("sync", "push", "ok")
+    assert row().last_scanned_head == body["sha"]
+
+    status, body = control.handle("POST", "/_fake/remove-repo", b'{"repo": "acme/api"}')
+    assert (status, body["webhook_status"]) == (200, 202), body
+    assert row().access_lost_reason == "no_access"
+    assert w.fake.repos[API_REPO].installation is None
+
+    payload = b'{"installation": %d}' % INSTALLATION
+    status, body = control.handle("POST", "/_fake/uninstall", payload)
+    assert (status, body["webhook_status"]) == (200, 202), body
+    assert INSTALLATION not in w.fake.installations
+    assert control.handle("POST", "/_fake/uninstall", payload)[0] == 404
 
 
 # ---------------------------------------------------------------------------

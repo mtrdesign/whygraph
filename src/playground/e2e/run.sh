@@ -13,7 +13,8 @@
 #   E2E_SCAN_PYTHON    interpreter for the fake scanner (default: python3)
 #   E2E_PORT           portal port (default: 18765)
 #   E2E_PROD_PORT      production-mode portal port (default: 18766)
-#   E2E_GITHUB_PORT    the fake GitHub's port (default: 18767)
+#   E2E_GITHUB_PORT    the fake GitHub's port (default: 18767); needs openssl
+#                      (the fake GitHub App's key is generated per run)
 #   E2E_CHANNEL        browser channel, e.g. `chrome` to use the locally installed
 #                      Chrome; unset = Playwright's own Chromium (installed on demand)
 #   E2E_KEEP=1         keep the temp dir (portal log, artifacts) after the run
@@ -64,6 +65,10 @@ cleanup() {
   if [ "$status" -ne 0 ] && [ -f "$root/portal-prod.log" ]; then
     echo "--- production portal log (tail) ---" >&2
     tail -n 40 "$root/portal-prod.log" >&2
+  fi
+  if [ "$status" -ne 0 ] && [ -f "$root/github-fake.log" ]; then
+    echo "--- fake GitHub log (tail) ---" >&2
+    tail -n 20 "$root/github-fake.log" >&2
   fi
   if [ "${E2E_KEEP:-}" = 1 ]; then
     echo "kept $root" >&2
@@ -123,15 +128,33 @@ mkdir -p "$root/prod-data"
 ) >"$root/portal.log" 2>&1 &
 portal_pid=$!
 
-# The fake GitHub the production portal signs in against (tests/github_fake.py),
-# listening on the loopback IP; its redirect URI is the production portal's.
-printf 'e2e-client-secret\n' >"$root/github-secret"
-chmod 600 "$root/github-secret"
+# The fake GitHub the production portal signs in against and imports from
+# (tests/github_fake.py), listening on the loopback IP: the OAuth App (redirect
+# URI: the production portal's) and the GitHub App (a key generated for this
+# run, its secrets, the fixture repos under github-repos/ served over dumb
+# HTTP, and the control routes' deliveries to the portal's webhook with the
+# base host as Host).
+loopback="127.0.0.1,localhost,.localhost"
+(
+  umask 077
+  printf 'e2e-client-secret\n' >"$root/github-secret"
+  printf 'e2e-app-client-secret\n' >"$root/github-app-secret"
+  printf 'e2e-webhook-secret-%s\n' "$(openssl rand -hex 16)" >"$root/github-webhook-secret"
+  openssl genrsa -out "$root/github-app-key.pem" 2048 2>/dev/null
+) || { echo "error: cannot write the fake GitHub's secrets (is openssl installed?)" >&2; exit 1; }
 (
   cd "$repo"
+  export NO_PROXY="$loopback${NO_PROXY:+,$NO_PROXY}" no_proxy="$loopback${no_proxy:+,$no_proxy}"
   exec uv run --no-sync python tests/github_fake.py --host 127.0.0.1 --port "$github_port" \
     --client-id e2e-client --client-secret-file "$root/github-secret" \
-    --redirect-uri "http://whygraph.localhost:$prod_port/auth/github"
+    --redirect-uri "http://whygraph.localhost:$prod_port/auth/github" \
+    --app-client-id e2e-app --app-client-secret-file "$root/github-app-secret" \
+    --app-callback "http://whygraph.localhost:$prod_port/auth/github-app" \
+    --app-key-file "$root/github-app-key.pem" --app-slug whygraph-e2e \
+    --webhook-secret-file "$root/github-webhook-secret" \
+    --webhook-url "http://127.0.0.1:$prod_port/github/webhook" \
+    --webhook-host "whygraph.localhost:$prod_port" \
+    --repos "$root/github-repos"
 ) >"$root/github-fake.log" 2>&1 &
 fake_pid=$!
 i=0
@@ -145,17 +168,27 @@ until curl -sS --noproxy '*' -o /dev/null "http://127.0.0.1:$github_port/login/o
   sleep 0.5
 done
 
-# The production-mode portal: no shared folders, no fake scanner, only the
-# production variables and the fake GitHub's four. Its base URL carries the port it listens on.
+# The production-mode portal: no shared folders, only the production variables,
+# both GitHub apps on the fake, and the fake scanner (with its own control dir;
+# it fails if the runner's token file is unreadable). Its base URL carries the
+# port it listens on. It clones and fetches from the fake with real git.
+mkdir -p "$root/prod-control"
 (
   cd "$repo"
   unset ANTHROPIC_API_KEY OPENAI_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY GH_TOKEN GITHUB_TOKEN
-  unset WHYGRAPH_SHARED_FOLDERS WHYGRAPH_DEV_ORIGINS WHYGRAPH_CONFIG_JSON WHYGRAPH_DATABASE_PASSWORD_FILE WHYGRAPH_SCAN_CMD
+  unset WHYGRAPH_SHARED_FOLDERS WHYGRAPH_DEV_ORIGINS WHYGRAPH_CONFIG_JSON WHYGRAPH_DATABASE_PASSWORD_FILE
+  export NO_PROXY="$loopback${NO_PROXY:+,$NO_PROXY}" no_proxy="$loopback${no_proxy:+,$no_proxy}"
   export WHYGRAPH_MODE=production
   export WHYGRAPH_BASE_URL="http://whygraph.localhost:$prod_port"
   export WHYGRAPH_DATABASE_URL="$prod_database_url"
+  export WHYGRAPH_SCAN_CMD="$scan_python $repo/tests/fixtures/e2e_scan.py --control $root/prod-control"
   export WHYGRAPH_GITHUB_OAUTH_CLIENT_ID=e2e-client
   export WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE="$root/github-secret"
+  export WHYGRAPH_GITHUB_APP_SLUG=whygraph-e2e
+  export WHYGRAPH_GITHUB_APP_CLIENT_ID=e2e-app
+  export WHYGRAPH_GITHUB_APP_CLIENT_SECRET_FILE="$root/github-app-secret"
+  export WHYGRAPH_GITHUB_APP_PRIVATE_KEY_FILE="$root/github-app-key.pem"
+  export WHYGRAPH_GITHUB_APP_WEBHOOK_SECRET_FILE="$root/github-webhook-secret"
   export WHYGRAPH_GITHUB_URL="http://127.0.0.1:$github_port"
   export WHYGRAPH_GITHUB_API_URL="http://127.0.0.1:$github_port/api/v3"
   # shellcheck disable=SC2086  # the command is deliberately word-split
@@ -187,6 +220,7 @@ done
 
 cd "$playground"
 export WHYGRAPH_E2E_PROD_URL="http://whygraph.localhost:$prod_port"
+export WHYGRAPH_E2E_GITHUB_URL="http://127.0.0.1:$github_port"
 export WHYGRAPH_E2E_PROD_LOG="$root/portal-prod.log"
 export WHYGRAPH_E2E_ROOT="$root"
 export WHYGRAPH_E2E_URL="$url"

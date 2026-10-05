@@ -40,6 +40,18 @@ scoped to it (anything else is ``401`` with ``WWW-Authenticate: Basic``).
 and send a signed delivery. :func:`create_bare_repo` and :func:`push_commit`
 keep fixture repositories.
 
+Run as a script with ``--app-client-id`` (and its secret file, callback and
+key file) the GitHub App is on too: ``--repos DIR`` creates the fixture
+repositories (:data:`FIXTURE_REPOS`, bare, under ``DIR``) covered by the
+installation :data:`FIXTURE_INSTALLATION` on Ben's account, and the
+**control routes** (:class:`FakeControl`, out-of-process fake only) change
+the state and send the matching signed delivery to ``--webhook-url`` with
+``Host: --webhook-host``::
+
+    POST /_fake/push         {"repo": "ben/demo"}    a commit on the default branch + push
+    POST /_fake/uninstall    {"installation": 100}   installation.deleted
+    POST /_fake/remove-repo  {"repo": "ben/demo"}    installation_repositories.removed
+
 Never imported by ``src/`` and never copied into the image.
 """
 
@@ -64,6 +76,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, unquote, urlencode
 
 import httpx
@@ -1311,12 +1324,236 @@ def push_commit(
 
 # -- process mode -----------------------------------------------------------
 
+FIXTURE_INSTALLATION = 100
+"""The installation ``--repos`` creates, on Ben's (``ben``) user account."""
 
-def _make_handler(fake: FakeGitHub) -> type[BaseHTTPRequestHandler]:
+FIXTURE_REPOS: tuple[tuple[int, str, dict[str, str]], ...] = (
+    (
+        700001,
+        "ben/demo",
+        {
+            "README.md": "# demo\n\nA fixture repository of the fake GitHub.\n",
+            "src/calc.py": "def add(a, b):\n    return a + b\n",
+        },
+    ),
+    (700002, "ben/notes", {"README.md": "# notes\n"}),
+)
+"""``(id, full_name, files)`` of the repositories ``--repos`` creates."""
+
+
+def seed_fixtures(fake: FakeGitHub, repos_dir: Path) -> list[FakeRepo]:
+    """Create (or reuse) the fixture repositories under ``repos_dir``.
+
+    Adds :data:`FIXTURE_INSTALLATION` on ``ben`` and every repository of
+    :data:`FIXTURE_REPOS` as a bare repo at ``<repos_dir>/<owner>/<name>.git``
+    covered by it. A repository that already exists (a restarted dev loop)
+    keeps its history; ``git update-server-info`` refreshes what dumb HTTP
+    serves either way.
+
+    Returns
+    -------
+    list of FakeRepo
+        The registered repositories.
+    """
+    fake.add_installation(FIXTURE_INSTALLATION, "ben")
+    out = []
+    for ident, full_name, files in FIXTURE_REPOS:
+        path = repos_dir / f"{full_name}.git"
+        if (path / "HEAD").is_file():
+            _git("--git-dir", str(path), "update-server-info")
+        else:
+            create_bare_repo(path, files=files)
+        out.append(fake.add_repo(ident, full_name, FIXTURE_INSTALLATION, path=path))
+    return out
+
+
+@dataclass
+class FakeControl:
+    """The out-of-process fake's control routes (``POST /_fake/...``).
+
+    Each changes the fake's state, then sends GitHub's matching signed
+    delivery to ``webhook_url`` with ``Host: webhook_host`` (the portal's
+    base host, which its guard requires). Without ``webhook_url`` only the
+    state changes.
+
+    Attributes
+    ----------
+    fake : FakeGitHub
+    webhook_url : str or None
+        Where deliveries are POSTed (e.g. ``http://127.0.0.1:8765/github/webhook``).
+    webhook_host : str or None
+        The ``Host`` header of a delivery; default: ``webhook_url``'s own.
+    client : object, optional
+        Anything with httpx's ``post`` (pytest passes the portal's
+        ``TestClient``); default: a short-lived ``httpx.Client`` that
+        ignores proxy variables.
+    """
+
+    fake: FakeGitHub
+    webhook_url: str | None = None
+    webhook_host: str | None = None
+    client: Any = None
+
+    def handle(self, method: str, path: str, body: bytes) -> tuple[int, dict]:
+        """Answer one ``/_fake/...`` request: ``(status, JSON body)``."""
+        routes = {
+            "/_fake/push": self._push,
+            "/_fake/uninstall": self._uninstall,
+            "/_fake/remove-repo": self._remove_repo,
+        }
+        route = routes.get(path)
+        if route is None:
+            return 404, {"error": "no such control route"}
+        if method != "POST":
+            return 405, {"error": "POST only"}
+        try:
+            data = json.loads(body or b"{}")
+        except json.JSONDecodeError:
+            return 400, {"error": "the body is not JSON"}
+        if not isinstance(data, dict):
+            return 400, {"error": "the body is not a JSON object"}
+        try:
+            return route(data)
+        except LookupError as exc:
+            return 404, {"error": str(exc)}
+
+    def _repo(self, ref: object) -> FakeRepo:
+        with self.fake._lock:
+            if isinstance(ref, int) and not isinstance(ref, bool):
+                repo = self.fake.repos.get(ref)
+            elif isinstance(ref, str) and "/" in ref:
+                repo = self.fake._repo_by_name(*ref.split("/", 1))
+            else:
+                repo = None
+        if repo is None:
+            raise LookupError(f"no such repository: {ref!r}")
+        return repo
+
+    @staticmethod
+    def _repo_payload(repo: FakeRepo) -> dict:
+        owner, name = repo.full_name.split("/", 1)
+        return {
+            "id": repo.id,
+            "name": name,
+            "full_name": repo.full_name,
+            "private": not repo.public,
+            "default_branch": repo.default_branch,
+            "owner": {"login": owner},
+        }
+
+    def _send(self, event: str, payload: dict) -> tuple[int, dict]:
+        if self.webhook_url is None:
+            return 200, {"webhook_status": None}
+        host = self.webhook_host or httpx.URL(self.webhook_url).netloc.decode("ascii")
+        try:
+            if self.client is not None:
+                response = self.fake.send_webhook(
+                    self.webhook_url, event, payload, host=host, client=self.client
+                )
+            else:
+                with httpx.Client(timeout=10.0, trust_env=False) as client:
+                    response = self.fake.send_webhook(
+                        self.webhook_url, event, payload, host=host, client=client
+                    )
+        except httpx.HTTPError as exc:
+            return 502, {"error": f"delivering the {event} webhook failed: {exc}"}
+        return 200, {"webhook_status": response.status_code}
+
+    def _push(self, data: dict) -> tuple[int, dict]:
+        repo = self._repo(data.get("repo"))
+        if repo.path is None:
+            raise LookupError(f"{repo.full_name} has no git repository")
+        branch = repo.default_branch
+        before = _git(
+            "--git-dir", str(repo.path), "rev-parse", "-q", "--verify",
+            f"refs/heads/{branch}", check=False,
+        )  # fmt: skip
+        sha = push_commit(
+            repo.path, branch=branch, message=str(data.get("message") or "Update")
+        )
+        with self.fake._lock:
+            installation = repo.installation
+        payload = {
+            "ref": f"refs/heads/{branch}",
+            "before": before or "0" * 40,
+            "after": sha,
+            "created": False,
+            "deleted": False,
+            "forced": False,
+            "repository": self._repo_payload(repo),
+            "pusher": {"name": repo.full_name.split("/")[0]},
+            "sender": {"login": repo.full_name.split("/")[0]},
+        }
+        if installation is not None:
+            payload["installation"] = {"id": installation}
+        status, body = self._send("push", payload)
+        return status, {"sha": sha, **body}
+
+    def _uninstall(self, data: dict) -> tuple[int, dict]:
+        ident = data.get("installation")
+        with self.fake._lock:
+            inst = (
+                self.fake.installations.get(ident)
+                if isinstance(ident, int) and not isinstance(ident, bool)
+                else None
+            )
+            if inst is None:
+                raise LookupError(f"no such installation: {ident!r}")
+            payload = {
+                "action": "deleted",
+                "installation": self.fake._installation_json(inst),
+                "repositories": [
+                    {k: v for k, v in self._repo_payload(r).items() if k != "owner"}
+                    for r in self.fake.repos.values()
+                    if r.installation == inst.id
+                ],
+                "sender": {"login": inst.account},
+            }
+            self.fake.uninstall(inst.id)
+        return self._send("installation", payload)
+
+    def _remove_repo(self, data: dict) -> tuple[int, dict]:
+        repo = self._repo(data.get("repo"))
+        with self.fake._lock:
+            inst = (
+                None
+                if repo.installation is None
+                else self.fake.installations.get(repo.installation)
+            )
+            if inst is None:
+                raise LookupError(f"{repo.full_name} is in no installation")
+            repo.installation = None
+            payload = {
+                "action": "removed",
+                "installation": self.fake._installation_json(inst),
+                "repository_selection": "selected",
+                "repositories_added": [],
+                "repositories_removed": [
+                    {k: v for k, v in self._repo_payload(repo).items() if k != "owner"}
+                ],
+                "sender": {"login": inst.account},
+            }
+        return self._send("installation_repositories", payload)
+
+
+def _make_handler(
+    fake: FakeGitHub, control: FakeControl | None = None
+) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def _serve(self) -> None:
             length = int(self.headers.get("content-length") or 0)
             body = self.rfile.read(length) if length else b""
+            if control is not None and self.path.split("?")[0].startswith("/_fake/"):
+                status, answer = control.handle(
+                    self.command, self.path.split("?")[0], body
+                )
+                raw = json.dumps(answer).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+                return
             host = self.headers.get("host", "127.0.0.1")
             request = httpx.Request(
                 self.command,
@@ -1345,19 +1582,96 @@ def _make_handler(fake: FakeGitHub) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
+def _read(path: str) -> str:
+    with open(path, encoding="utf-8") as handle:
+        return handle.read().strip()
+
+
 def main(argv: list[str] | None = None) -> None:
     """Serve the fake over HTTP (e2e, smoke and the dev loop)."""
-    parser = argparse.ArgumentParser(description="A fake GitHub for WhyGraph sign-in")
+    parser = argparse.ArgumentParser(description="A fake GitHub for WhyGraph")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=18767)
-    parser.add_argument("--client-id", required=True)
+    parser.add_argument("--client-id", required=True, help="the OAuth App's")
     parser.add_argument("--client-secret-file", required=True)
     parser.add_argument("--redirect-uri", required=True)
+    app = parser.add_argument_group("the GitHub App (all four turn it on)")
+    app.add_argument("--app-client-id")
+    app.add_argument("--app-client-secret-file")
+    app.add_argument(
+        "--app-callback", help="the app's first callback URL (<base>/auth/github-app)"
+    )
+    app.add_argument(
+        "--app-key-file",
+        help="the app's public key, PEM (a private key's public half is taken)",
+    )
+    app.add_argument("--app-slug", default="whygraph-test")
+    app.add_argument(
+        "--webhook-secret-file", help="signs the control routes' deliveries"
+    )
+    app.add_argument("--webhook-url", help="where the control routes deliver")
+    app.add_argument(
+        "--webhook-host", help="the deliveries' Host header (default: the URL's)"
+    )
+    app.add_argument(
+        "--repos", type=Path, help="create the fixture repositories under this dir"
+    )
+    app.add_argument(
+        "--installation-token-ttl",
+        type=float,
+        default=INSTALLATION_TOKEN_TTL_SEC,
+        help="seconds an installation token lives",
+    )
     args = parser.parse_args(argv)
-    with open(args.client_secret_file, encoding="utf-8") as handle:
-        secret = handle.read().strip()
-    fake = FakeGitHub(args.client_id, secret, args.redirect_uri)
-    server = ThreadingHTTPServer((args.host, args.port), _make_handler(fake))
+    app_args = (
+        args.app_client_id,
+        args.app_client_secret_file,
+        args.app_callback,
+        args.app_key_file,
+    )
+    if any(app_args) and not all(app_args):
+        parser.error(
+            "the GitHub App needs --app-client-id, --app-client-secret-file, "
+            "--app-callback and --app-key-file"
+        )
+    on = all(app_args)
+    if not on and (args.repos or args.webhook_url or args.webhook_secret_file):
+        parser.error("--repos and the webhook options need the GitHub App options")
+    if args.webhook_url and not args.webhook_secret_file:
+        parser.error("--webhook-url needs --webhook-secret-file")
+
+    public_key: rsa.RSAPublicKey | None = None
+    if on:
+        pem = Path(args.app_key_file).read_bytes()
+        if b"PRIVATE KEY" in pem:
+            private = serialization.load_pem_private_key(pem, password=None)
+            assert isinstance(private, rsa.RSAPrivateKey), "not an RSA key"
+            public_key = private.public_key()
+        else:
+            loaded = serialization.load_pem_public_key(pem)
+            assert isinstance(loaded, rsa.RSAPublicKey), "not an RSA key"
+            public_key = loaded
+    fake = FakeGitHub(
+        args.client_id,
+        _read(args.client_secret_file),
+        args.redirect_uri,
+        app_client_id=args.app_client_id if on else None,
+        app_client_secret=_read(args.app_client_secret_file) if on else None,
+        app_callback=args.app_callback if on else None,
+        app_public_key=public_key,
+        app_slug=args.app_slug,
+        webhook_secret=(
+            _read(args.webhook_secret_file) if args.webhook_secret_file else None
+        ),
+        installation_token_ttl=args.installation_token_ttl,
+    )
+    control = None
+    if on:
+        if args.repos is not None:
+            for repo in seed_fixtures(fake, args.repos.resolve()):
+                print(f"fixture repo {repo.full_name} (id {repo.id})", flush=True)
+        control = FakeControl(fake, args.webhook_url, args.webhook_host)
+    server = ThreadingHTTPServer((args.host, args.port), _make_handler(fake, control))
     print(f"fake GitHub on http://{args.host}:{args.port}", flush=True)
     try:
         server.serve_forever()
@@ -1370,6 +1684,9 @@ def main(argv: list[str] | None = None) -> None:
 __all__ = [
     "API_PREFIX",
     "APP_PERMISSIONS",
+    "FIXTURE_INSTALLATION",
+    "FIXTURE_REPOS",
+    "FakeControl",
     "FakeGitHub",
     "FakeInstallation",
     "FakeRepo",
@@ -1377,6 +1694,7 @@ __all__ = [
     "create_bare_repo",
     "main",
     "push_commit",
+    "seed_fixtures",
 ]
 
 if __name__ == "__main__":

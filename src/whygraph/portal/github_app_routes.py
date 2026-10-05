@@ -3,7 +3,8 @@
 M2d-2 plan sections 4.4 and 4.5. Every route is **production-only** - the
 router's :func:`~whygraph.portal.deps.require_production` runs first, so
 local mode answers ``404`` - and answers ``503 github_app_not_configured``
-while the ``WHYGRAPH_GITHUB_APP_*`` variables are unset:
+if the portal holds no GitHub App client (a guard only: production refuses
+to start without the ``WHYGRAPH_GITHUB_APP_*`` variables):
 
 * ``POST /api/github/app/authorize`` (org host, ``org.add_project``) starts
   a user authorization (PKCE) or an install of the app, bound to this

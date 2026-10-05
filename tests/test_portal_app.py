@@ -8,6 +8,7 @@ repos. The MCP transport has its own module, ``test_portal_mcp.py``.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import subprocess
@@ -25,6 +26,7 @@ import anyio
 import httpx
 import pytest
 from alembic import command
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from click.testing import CliRunner
 from fastapi import Depends
@@ -204,10 +206,16 @@ GITHUB_FAKE_URL = "http://127.0.0.1:9"
 def production_env(
     env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> SimpleNamespace:
-    """``env`` for a production portal at :data:`PROD_BASE` (M2c plan section 5.1)."""
+    """``env`` for a production portal at :data:`PROD_BASE` (M2c plan section 5.1).
+
+    Both GitHub apps are configured, as production requires (M2d-2 plan
+    section 0.2 #9): the OAuth App and the GitHub App (the five
+    ``WHYGRAPH_GITHUB_APP_*`` variables, the private key from
+    :func:`github_app_private_key`), all pointing at :data:`GITHUB_FAKE_URL`.
+    """
     monkeypatch.setenv("WHYGRAPH_MODE", "production")
     monkeypatch.setenv("WHYGRAPH_BASE_URL", PROD_BASE)
-    for var in ("WHYGRAPH_SHARED_FOLDERS", "WHYGRAPH_TRUSTED_PROXIES", *APP_ENV_VARS):
+    for var in ("WHYGRAPH_SHARED_FOLDERS", "WHYGRAPH_TRUSTED_PROXIES"):
         monkeypatch.delenv(var, raising=False)
     secret_file = env.tmp / "github-oauth-secret"
     secret_file.write_text(GITHUB_CLIENT_SECRET + "\n")
@@ -215,6 +223,24 @@ def production_env(
     monkeypatch.setenv("WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE", str(secret_file))
     monkeypatch.setenv("WHYGRAPH_GITHUB_URL", GITHUB_FAKE_URL)
     monkeypatch.setenv("WHYGRAPH_GITHUB_API_URL", GITHUB_FAKE_URL + "/api/v3")
+    app_secret = env.tmp / "github-app-secret"
+    app_secret.write_text(GITHUB_APP_CLIENT_SECRET + "\n")
+    app_key = env.tmp / "github-app-key.pem"
+    app_key.write_bytes(
+        github_app_private_key().private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    hook_secret = env.tmp / "github-webhook-secret"
+    hook_secret.write_text(GITHUB_WEBHOOK_SECRET + "\n")
+    for var, value in zip(
+        APP_ENV_VARS,
+        (GITHUB_APP_SLUG, GITHUB_APP_CLIENT_ID, app_secret, app_key, hook_secret),
+        strict=True,
+    ):
+        monkeypatch.setenv(var, str(value))
     return env
 
 
@@ -247,10 +273,20 @@ GITHUB_APP_SLUG = "whygraph-test"
 GITHUB_WEBHOOK_SECRET = "test-webhook-secret-of-at-least-32-chars"
 
 
+@functools.cache
+def github_app_private_key() -> rsa.RSAPrivateKey:
+    """The GitHub App's private key for the whole run (RSA generation is slow-ish).
+
+    A cached function rather than only a fixture, so ``production_env``
+    needs no fixture that a module importing it would also have to import.
+    """
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
 @pytest.fixture(scope="session")
 def github_app_key() -> rsa.RSAPrivateKey:
-    """The GitHub App's private key for the whole run (RSA generation is slow-ish)."""
-    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    """:func:`github_app_private_key` as a fixture."""
+    return github_app_private_key()
 
 
 @dataclass

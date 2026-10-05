@@ -100,9 +100,13 @@ def app_env(tmp_path: Path, github_app_key: rsa.RSAPrivateKey) -> dict[str, str]
     }
 
 
-def test_config_is_none_when_nothing_is_set() -> None:
-    assert load_github_app_config({}) is None
-    assert load_github_app_config(dict.fromkeys(APP_ENV_VARS, "  ")) is None
+def test_the_config_is_required_and_names_every_variable() -> None:
+    for environ in ({}, dict.fromkeys(APP_ENV_VARS, "  ")):
+        with pytest.raises(
+            ValueError, match="production mode needs the GitHub App"
+        ) as info:
+            load_github_app_config(environ)
+        assert str(info.value).endswith("missing: " + ", ".join(APP_ENV_VARS))
 
 
 def test_a_complete_config_loads_and_hides_its_secrets(
@@ -207,9 +211,16 @@ def test_an_empty_secret_file_is_refused(
         )
 
 
-def test_production_starts_without_the_app(production_env: SimpleNamespace) -> None:
-    with prod_portal() as client:
-        assert client.app.state.portal.github_app is None
+def test_production_refuses_to_start_without_the_app(
+    production_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in APP_ENV_VARS:
+        monkeypatch.delenv(name)
+    with pytest.raises(PortalStartupError, match="needs the GitHub App") as info:
+        with prod_portal():
+            pass
+    for name in APP_ENV_VARS:
+        assert name in str(info.value)
 
 
 def test_production_builds_the_app_when_configured(
@@ -230,10 +241,13 @@ def test_production_refuses_a_partial_app_config(
     monkeypatch: pytest.MonkeyPatch,
     app_env: dict[str, str],
 ) -> None:
+    for name in APP_ENV_VARS:
+        monkeypatch.delenv(name)
     monkeypatch.setenv("WHYGRAPH_GITHUB_APP_SLUG", app_env["WHYGRAPH_GITHUB_APP_SLUG"])
-    with pytest.raises(PortalStartupError, match="the GitHub App needs all of"):
+    with pytest.raises(PortalStartupError, match="needs the GitHub App") as info:
         with prod_portal():
             pass
+    assert "WHYGRAPH_GITHUB_APP_SLUG" not in str(info.value).split("missing:")[1]
 
 
 # ---------------------------------------------------------------------------

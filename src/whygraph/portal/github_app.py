@@ -78,7 +78,7 @@ APP_ENV_VARS: tuple[str, ...] = (
     APP_PRIVATE_KEY_FILE_ENV,
     APP_WEBHOOK_SECRET_FILE_ENV,
 )
-"""The GitHub App's variables: all of them or none."""
+"""The GitHub App's variables: production mode needs all of them."""
 
 WEBHOOK_SECRET_MIN_LENGTH = 32
 """The shortest webhook secret the portal accepts."""
@@ -160,8 +160,12 @@ def _read_secret_file(env: str, path: str) -> str:
     return value
 
 
-def load_github_app_config(environ: Mapping[str, str]) -> GitHubAppConfig | None:
+def load_github_app_config(environ: Mapping[str, str]) -> GitHubAppConfig:
     """Read and validate the GitHub App settings from the environment.
+
+    Production mode requires the app (plan section 0.2 #9): a portal without
+    it could hold no projects, so it refuses to start instead of failing at
+    the first import.
 
     Parameters
     ----------
@@ -170,26 +174,24 @@ def load_github_app_config(environ: Mapping[str, str]) -> GitHubAppConfig | None
 
     Returns
     -------
-    GitHubAppConfig or None
-        The validated settings, or ``None`` when none of
-        :data:`APP_ENV_VARS` is set.
+    GitHubAppConfig
+        The validated settings.
 
     Raises
     ------
     ValueError
-        Some but not all of the variables are set, a file is unreadable or
-        empty, the slug is malformed, the key is not an RSA private key, the
-        webhook secret is shorter than :data:`WEBHOOK_SECRET_MIN_LENGTH`
-        characters, or a GitHub URL is invalid; the message names the
-        variable and never shows a secret.
+        One or more of :data:`APP_ENV_VARS` is unset or empty (the message
+        names each missing one), a file is unreadable or empty, the slug is
+        malformed, the key is not an RSA private key, the webhook secret is
+        shorter than :data:`WEBHOOK_SECRET_MIN_LENGTH` characters, or a
+        GitHub URL is invalid; the message names the variable and never
+        shows a secret.
     """
     values = {name: (environ.get(name) or "").strip() for name in APP_ENV_VARS}
-    if not any(values.values()):
-        return None
     missing = [name for name, value in values.items() if not value]
     if missing:
         raise ValueError(
-            "the GitHub App needs all of "
+            "production mode needs the GitHub App: set all of "
             f"{', '.join(APP_ENV_VARS)}; missing: {', '.join(missing)}"
         )
     slug = values[APP_SLUG_ENV]

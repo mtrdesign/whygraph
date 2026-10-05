@@ -999,6 +999,9 @@ def test_every_route_is_503_without_the_app(
         lambda config: GitHubOAuth(config, transport=transport),
     )
     with prod_portal() as client:
+        # Production refuses to start without the app, so the guard is
+        # reached only by dropping the client after start.
+        client.app.state.portal.github_app = None
         claim_instance(client)
         client.cookies.clear()
         assert github_sign_in(client, "ben").status_code == 200

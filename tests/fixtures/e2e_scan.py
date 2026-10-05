@@ -15,6 +15,11 @@ Options (before the runner's own ``--progress json --managed-by-portal ...``):
                     ``DIR/delay`` (seconds per tick) on every run
 ``--delay SEC``     seconds per tick when ``DIR/delay`` is absent (default 0.15)
 
+A production portal's runner passes a GitHub project's installation token
+as a file (``WHYGRAPH_GITHUB_TOKEN_FILE``); when that variable is set the
+file must be readable and non-empty, else the scan fails at once, as a real
+scan's ``git`` / ``gh`` calls would.
+
 Standard library only, so any ``python3`` will run it.
 """
 
@@ -123,6 +128,30 @@ def main() -> int:
         if (control / "delay").exists():
             delay = float((control / "delay").read_text().strip())
     analyze = "--skip-analyze" not in args
+
+    token_file = os.environ.get("WHYGRAPH_GITHUB_TOKEN_FILE")
+    if token_file:
+        try:
+            token = Path(token_file).read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError) as exc:
+            token, problem = "", f"cannot read WHYGRAPH_GITHUB_TOKEN_FILE: {exc}"
+        else:
+            problem = "WHYGRAPH_GITHUB_TOKEN_FILE is empty"
+        if not token:
+            sys.stderr.write(f"scan failed: {problem}\n")
+            emit({"type": "start", "phase_total": 3})
+            emit(
+                {
+                    "type": "result",
+                    "status": "failed",
+                    "elapsed_sec": 0.0,
+                    "phase_timings": {},
+                    "crawlers": [],
+                    "analyze_skipped": None,
+                    "error": problem,
+                }
+            )
+            return 1
 
     emit({"type": "start", "phase_total": 4 if analyze else 3})
     emit({"type": "phase", "phase": 1, "title": "Structural crawl"})

@@ -29,6 +29,23 @@ PG_DEV_NAME := whygraph-dev-postgres
 DEV_DATABASE_URL = postgresql+psycopg://whygraph:whygraph-dev@127.0.0.1:$(PG_DEV_PORT)/whygraph
 DEV_PROD_DATABASE_URL = postgresql+psycopg://whygraph:whygraph-dev@127.0.0.1:$(PG_DEV_PORT)/whygraph_prod
 
+# `make dev-production`'s GitHub: a real one only when every OAuth App and
+# GitHub App variable is set (in $(DEV_ENV_FILE) or the environment), the fake
+# (tests/github_fake.py) for both when none is; a partial set stops before
+# anything starts. DEV_GITHUB_MODE loads the file and sets `github=real|fake`.
+DEV_ENV_FILE ?= ./.env.dev
+DEV_GITHUB_VARS := WHYGRAPH_GITHUB_OAUTH_CLIENT_ID WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE \
+	WHYGRAPH_GITHUB_APP_SLUG WHYGRAPH_GITHUB_APP_CLIENT_ID WHYGRAPH_GITHUB_APP_CLIENT_SECRET_FILE \
+	WHYGRAPH_GITHUB_APP_PRIVATE_KEY_FILE WHYGRAPH_GITHUB_APP_WEBHOOK_SECRET_FILE
+DEV_GITHUB_MODE = if [ -f "$(DEV_ENV_FILE)" ]; then echo "loading $(DEV_ENV_FILE)"; set -a; . "$(DEV_ENV_FILE)"; set +a; fi; \
+	present=; missing=; \
+	for v in $(DEV_GITHUB_VARS); do \
+		if [ -n "$$(printenv $$v)" ]; then present="$$present $$v"; else missing="$$missing $$v"; fi; \
+	done; \
+	if [ -z "$$present" ]; then github=fake; \
+	elif [ -z "$$missing" ]; then github=real; \
+	else echo "error: a real GitHub needs every OAuth App and GitHub App variable (see .env.dev.example); missing:$$missing" >&2; exit 1; fi
+
 # `make inspect SLUG=<slug>` points the MCP Inspector at one project's MCP
 # endpoint on the running dev portal.
 SLUG ?= whygraph
@@ -41,7 +58,7 @@ CLAUDE_CODE_VERSION := $(shell sed -n "s/^ *CLAUDE_CODE_VERSION: *'\([^']*\)'.*/
 # What the image is built from besides src/: a change here means `dev-docker` rebuilds.
 DEPS_HASH = $(shell cat pyproject.toml uv.lock hatch_build.py docker/whygraph/Dockerfile src/playground/package-lock.json | git hash-object --stdin | cut -c1-16)
 
-.PHONY: help dev dev-local dev-production dev-docker prod check test e2e docs docs-build db db-down dev-db dev-db-down inspect image sync playground node-check playground-deps dev-fixtures dev-image
+.PHONY: help dev dev-local dev-production dev-docker prod check test e2e docs docs-build db db-down dev-db dev-db-down inspect image sync playground node-check playground-deps dev-fixtures dev-image dev-github-check
 
 help:  ## List available targets
 	@echo "Run WhyGraph:"
@@ -59,25 +76,42 @@ dev-local: node-check dev-fixtures dev-db  ## Develop natively: portal :8777 (au
 	WHYGRAPH_SHARED_FOLDERS="$(DEV)/repos" WHYGRAPH_DEV_ORIGINS=http://localhost:5173,http://127.0.0.1:5173 \
 		$(UV_RUN) python scripts/dev_portal.py -- --data "$(DEV)/local/data" --port $(DEV_PORT)
 
-dev-production: node-check dev-fixtures dev-db  ## Develop in production mode: portal :8778 + Vite :5173 on whygraph.localhost:5173 (not beside dev-local)
+dev-production: dev-github-check node-check dev-fixtures dev-db  ## Develop in production mode: portal :8778 + Vite :5173 on whygraph.localhost:5173 (not beside dev-local)
 	@docker exec $(PG_DEV_NAME) psql -U whygraph -d whygraph -tAc "SELECT 1 FROM pg_database WHERE datname='whygraph_prod'" | grep -q 1 \
 		|| docker exec $(PG_DEV_NAME) createdb -U whygraph whygraph_prod
 	@mkdir -p "$(DEV)/production/data"
 	@echo "open http://whygraph.localhost:5173 (Chromium or Firefox); the bootstrap secret is printed below"
-	@set -e; \
-	if [ -f .env.dev ]; then echo "loading .env.dev"; set -a; . ./.env.dev; set +a; fi; \
-	if [ -z "$${WHYGRAPH_GITHUB_OAUTH_CLIENT_ID:-}" ]; then \
-		echo "GitHub: the fake on 127.0.0.1:$(DEV_GITHUB_PORT) (see .env.dev.example to use a real dev OAuth App)"; \
-		(umask 077; printf 'dev-client-secret\n' > "$(DEV)/production/github-secret"); \
+	@set -e; $(DEV_GITHUB_MODE); \
+	if [ "$$github" = fake ]; then \
+		gh="$(DEV)/production/github"; mkdir -p "$$gh"; \
+		( umask 077; \
+		  [ -s "$$gh/oauth-secret" ] || printf 'dev-client-secret\n' > "$$gh/oauth-secret"; \
+		  [ -s "$$gh/app-secret" ] || printf 'dev-app-client-secret\n' > "$$gh/app-secret"; \
+		  [ -s "$$gh/webhook-secret" ] || openssl rand -hex 24 > "$$gh/webhook-secret"; \
+		  [ -s "$$gh/app-key.pem" ] || openssl genrsa -out "$$gh/app-key.pem" 2048 2>/dev/null ); \
+		echo "GitHub: the fake on 127.0.0.1:$(DEV_GITHUB_PORT) for both apps, fixture repos in $$gh/repos (see .env.dev.example to use a real GitHub)"; \
 		$(UV_RUN) python tests/github_fake.py --host 127.0.0.1 --port $(DEV_GITHUB_PORT) \
-			--client-id dev-client --client-secret-file "$(DEV)/production/github-secret" \
-			--redirect-uri http://whygraph.localhost:5173/auth/github & \
+			--client-id dev-client --client-secret-file "$$gh/oauth-secret" \
+			--redirect-uri http://whygraph.localhost:5173/auth/github \
+			--app-client-id dev-app --app-client-secret-file "$$gh/app-secret" \
+			--app-callback http://whygraph.localhost:5173/auth/github-app \
+			--app-key-file "$$gh/app-key.pem" --app-slug whygraph-dev \
+			--webhook-secret-file "$$gh/webhook-secret" \
+			--webhook-url http://127.0.0.1:$(DEV_PROD_PORT)/github/webhook --webhook-host whygraph.localhost:5173 \
+			--repos "$$gh/repos" & \
 		fake=$$!; \
 		trap 'kill $$fake 2>/dev/null || true' EXIT INT TERM; \
 		export WHYGRAPH_GITHUB_OAUTH_CLIENT_ID=dev-client \
-			WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE="$(DEV)/production/github-secret" \
+			WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE="$$gh/oauth-secret" \
+			WHYGRAPH_GITHUB_APP_SLUG=whygraph-dev WHYGRAPH_GITHUB_APP_CLIENT_ID=dev-app \
+			WHYGRAPH_GITHUB_APP_CLIENT_SECRET_FILE="$$gh/app-secret" \
+			WHYGRAPH_GITHUB_APP_PRIVATE_KEY_FILE="$$gh/app-key.pem" \
+			WHYGRAPH_GITHUB_APP_WEBHOOK_SECRET_FILE="$$gh/webhook-secret" \
 			WHYGRAPH_GITHUB_URL=http://127.0.0.1:$(DEV_GITHUB_PORT) \
 			WHYGRAPH_GITHUB_API_URL=http://127.0.0.1:$(DEV_GITHUB_PORT)/api/v3; \
+	else \
+		echo "GitHub: real (both apps from $(DEV_ENV_FILE) or the environment); relay its webhooks with:"; \
+		echo "  npx smee-client -u <channel> -t http://whygraph.localhost:5173/github/webhook"; \
 	fi; \
 	env -u WHYGRAPH_SHARED_FOLDERS -u WHYGRAPH_DEV_ORIGINS \
 	WHYGRAPH_MODE=production WHYGRAPH_BASE_URL=http://whygraph.localhost:5173 \
@@ -183,6 +217,9 @@ dev-db-down:  ## Stop and remove the dev Postgres (its data stays under $TMPDIR/
 	else echo "$(PG_DEV_NAME) is not running"; fi
 
 # --- internal --------------------------------------------------------------
+
+dev-github-check:  # dev-production's GitHub: stop on a partial set of variables before anything starts
+	@$(DEV_GITHUB_MODE); echo "GitHub for dev-production: $$github"
 
 node-check:  # assert Node >= 22.12 for the playground toolchain (Vite 8 / Vitest 5)
 	@node -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||(a===22&&b>=12)?0:1)' 2>/dev/null || { echo "error: the playground needs Node >= 22.12 (have $$(node -v 2>/dev/null || echo none)) - try 'nvm use 22'"; exit 1; }

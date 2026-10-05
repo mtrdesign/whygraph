@@ -11,7 +11,8 @@ The route lives on the **base host, outside** ``/api`` (plan section 0.2
 ``/api`` the guard still validates ``Host`` without an exemption. In order:
 
 * ``503`` while the portal is degraded; ``404`` in local mode and on an
-  org host; ``503 github_app_not_configured`` without the GitHub App;
+  org host; ``503 github_app_not_configured`` without the GitHub App
+  client (a guard only: production refuses to start without it);
 * the body is capped at :data:`MAX_BODY_BYTES` - ``Content-Length`` first,
   then a counting read of the stream, never an unbounded read - else
   ``413``;

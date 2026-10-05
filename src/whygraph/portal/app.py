@@ -472,8 +472,7 @@ def _startup(state: PortalState) -> None:
                 app_config = load_github_app_config(os.environ)
             except ValueError as exc:
                 raise PortalStartupError(str(exc)) from exc
-            if app_config is not None:
-                state.github_app = GitHubApp(app_config)
+            state.github_app = GitHubApp(app_config)
         state.mode = mode
         if mode == "local":
             # Idempotent: creates the built-in org at first start, and

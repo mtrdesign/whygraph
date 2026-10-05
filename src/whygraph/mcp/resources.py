@@ -34,18 +34,33 @@ from the existing tool modules:
    while the concrete ``whygraph://repo/overview`` shows up in
    :meth:`FastMCP.list_resources`. Clients must check both to find
    the full surface.
+
+A project *linked* to a WhyGraph platform (M2e) has no local database:
+all four resources are read from the platform instead, and each payload
+carries a ``platform`` block. Only ``whygraph://commit/{sha}`` has a
+local half - a commit the platform does not hold is still in the
+checkout, so its raw git message is returned with the ``push_status``
+that explains the gap.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from typing import Callable
 
 from mcp.server.fastmcp import FastMCP
 from sqlalchemy import func
 from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, col, select
 
+from whygraph.core.context import current_project
+from whygraph.core.remote import (
+    RemoteError,
+    RemoteNotFound,
+    RemoteProject,
+    platform_block,
+)
 from whygraph.core.utils import LIKE_ESCAPE_CHAR, like_escape
 from whygraph.db import get_session
 from whygraph.db.models import (
@@ -55,10 +70,12 @@ from whygraph.db.models import (
     PRIssueLink,
     PullRequest,
 )
+from whygraph.services.git import GitError, Repository
 
 from .errors import WhyGraphError
-from .evidence import _json_list, _linked_prs
+from .evidence import _json_list, _linked_prs, local_push_status
 from .path_history import current_branch_scope, resolve_path_aliases
+from .targets import repo_root
 
 _log = logging.getLogger(__name__)
 
@@ -194,12 +211,108 @@ def _closing_prs_for_issue(session: Session, issue_number: int) -> list[PullRequ
     return sorted(prs, key=lambda pr: pr.number)
 
 
+# ---- linked projects -----------------------------------------------------
+
+
+def _remote() -> RemoteProject | None:
+    """The bound project's platform, or ``None`` for an ordinary project."""
+    ctx = current_project()
+    return None if ctx is None else ctx.remote
+
+
+def _linked_read(
+    remote: RemoteProject, read: Callable[[], dict], missing: dict
+) -> dict:
+    """One platform resource read, with the module's not-found-is-content rule.
+
+    Parameters
+    ----------
+    remote : RemoteProject
+        The project's platform.
+    read : callable
+        The call to make on it.
+    missing : dict
+        The payload for an object the platform does not know (rule 2 of
+        the module docstring).
+
+    Returns
+    -------
+    dict
+        The platform's body plus a ``platform`` block.
+
+    Raises
+    ------
+    WhyGraphError
+        The platform could not be reached, or refused - a setup failure
+        the user must act on, like an unscanned database.
+    """
+    try:
+        body = read()
+    except RemoteNotFound:
+        body = missing
+    except RemoteError as exc:
+        raise WhyGraphError(str(exc)) from exc
+    return {**body, "platform": platform_block(remote)}
+
+
+def _linked_commit(remote: RemoteProject, sha: str) -> dict:
+    """``whygraph://commit/{sha}`` for a linked project, with a local fallback.
+
+    A commit the platform has not scanned (or has never seen - an
+    unpushed one) is still in the developer's checkout, so the raw git
+    message is returned with the ``push_status`` that explains the gap,
+    rather than a bare not-found.
+    """
+    try:
+        body = remote.commit(sha)
+    except RemoteNotFound:
+        body = _local_commit(sha)
+    except RemoteError as exc:
+        raise WhyGraphError(str(exc)) from exc
+    return {**body, "platform": platform_block(remote)}
+
+
+def _local_commit(sha: str) -> dict:
+    """The checkout's own view of ``sha``: raw message, no PRs, a push status."""
+    repo = Repository(repo_root())
+    push_status = local_push_status(repo, sha)
+    if push_status is None:
+        return {"error": "not_found", "sha": sha}
+    try:
+        commit = repo.commit_metadata(sha)
+    except GitError:
+        return {"error": "not_found", "sha": sha}
+    return {
+        "commit": {
+            "sha": commit.sha,
+            "llm_description": None,
+            "subject": commit.subject,
+            "body": commit.body,
+            "author_name": commit.author_name,
+            "author_email": commit.author_email,
+            "authored_at": commit.authored_at,
+            "committed_at": commit.committed_at,
+            "parent_shas": " ".join(commit.parent_shas),
+        },
+        "linked_prs": [],
+        "source": "local",
+        "push_status": push_status,
+    }
+
+
 # ---- resource bodies -----------------------------------------------------
 
 
 def _commit_resource(sha: str) -> dict:
-    """Read the resource backing ``whygraph://commit/{sha}``."""
+    """Read the resource backing ``whygraph://commit/{sha}``.
+
+    For a project linked to a WhyGraph platform the commit comes from
+    there (:func:`_linked_commit`), falling back to local git.
+    """
     _log.debug("commit resource read: sha=%r", sha)
+    remote = _remote()
+    if remote is not None:
+        return _linked_commit(remote, sha)
     try:
         with get_session() as session:
             commit = session.get(Commit, sha)
@@ -215,8 +328,19 @@ def _commit_resource(sha: str) -> dict:
 
 
 def _pr_resource(number: int) -> dict:
-    """Read the resource backing ``whygraph://pr/{number}``."""
+    """Read the resource backing ``whygraph://pr/{number}``.
+
+    A linked project's pull requests live only on the platform - there is
+    no local fallback for one.
+    """
     _log.debug("pr resource read: number=%r", number)
+    remote = _remote()
+    if remote is not None:
+        return _linked_read(
+            remote,
+            lambda: remote.pr(number),
+            {"error": "not_found", "number": number},
+        )
     try:
         with get_session() as session:
             pr = session.get(PullRequest, number)
@@ -232,8 +356,19 @@ def _pr_resource(number: int) -> dict:
 
 
 def _issue_resource(number: int) -> dict:
-    """Read the resource backing ``whygraph://issue/{number}``."""
+    """Read the resource backing ``whygraph://issue/{number}``.
+
+    A linked project's issues live only on the platform - there is no
+    local fallback for one.
+    """
     _log.debug("issue resource read: number=%r", number)
+    remote = _remote()
+    if remote is not None:
+        return _linked_read(
+            remote,
+            lambda: remote.issue(number),
+            {"error": "not_found", "number": number},
+        )
     try:
         with get_session() as session:
             issue = session.get(Issue, number)
@@ -640,8 +775,13 @@ def _repo_overview_resource() -> dict:
     directly — ``top_contributors`` is computed from ``Commit`` (not the
     ``Author`` table) because authors-resolution is a separate scan step
     that may not have run.
+
+    A linked project's summary is the platform's, over its server clone.
     """
     _log.debug("repo overview resource read")
+    remote = _remote()
+    if remote is not None:
+        return _linked_read(remote, remote.overview, {})
     try:
         with get_session() as session:
             commit_count = session.exec(select(func.count()).select_from(Commit)).one()

@@ -16,6 +16,7 @@ import json
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -23,6 +24,8 @@ from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, col, select
 
 from whygraph.analyze import CommitEvidence
+from whygraph.core.context import current_project
+from whygraph.core.remote import RemoteError, RemoteProject, platform_block
 from whygraph.db import get_session
 from whygraph.db.models import Commit, CommitFileChange, Issue, PRIssueLink, PullRequest
 from whygraph.scan.refactor_score import BORING_THRESHOLD
@@ -846,6 +849,401 @@ def _evidence_dict(item: CommitEvidence) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Linked projects: the platform answers for the pushed SHAs
+# ---------------------------------------------------------------------------
+
+PUSH_UNCOMMITTED = "uncommitted"
+"""The lines are not committed yet, so no SHA exists to ask about."""
+
+PUSH_NOT_PUSHED = "not_pushed"
+"""The owning commit is in this checkout only - no ``origin/*`` ref holds it."""
+
+PUSH_NOT_ON_DEFAULT = "not_on_default_branch"
+"""The owning commit is pushed, but not on the branch the platform scans."""
+
+PUSH_PENDING_SCAN = "pending_scan"
+"""Pushed and on the default branch, but the platform has not scanned it yet."""
+
+LOCAL_SOURCE = "local"
+"""The ``source`` of an evidence item built from blame alone (no platform row)."""
+
+_EPOCH = datetime.min.replace(tzinfo=timezone.utc)
+
+
+@dataclass(frozen=True)
+class PushSplit:
+    """Blame hunks divided by what a platform can be told about them.
+
+    Nothing a platform is not already holding may leave the machine (M2e
+    plan section 0.2 #8), so only :attr:`pushed` is ever sent.
+
+    Attributes
+    ----------
+    pushed : tuple[BlameHunk, ...]
+        Committed hunks some ``origin/*`` ref contains, in blame order -
+        the ones the platform may be asked about.
+    on_default : frozenset[str]
+        Which of those SHAs the default-branch remote ref contains. A
+        pushed SHA the platform does not know is ``pending_scan`` when it
+        is on the default branch and ``not_on_default_branch`` otherwise.
+    local : tuple[tuple[BlameHunk, str], ...]
+        The hunks that stay here, each with its ``push_status``
+        (:data:`PUSH_UNCOMMITTED` or :data:`PUSH_NOT_PUSHED`), in blame
+        order.
+    """
+
+    pushed: tuple[BlameHunk, ...] = ()
+    on_default: frozenset[str] = frozenset()
+    local: tuple[tuple[BlameHunk, str], ...] = ()
+
+
+def default_remote_refs(repo: Repository) -> tuple[str, ...]:
+    """The full remote-tracking refs of ``repo``'s default branch.
+
+    :attr:`Repository.default_branch_refs` answers in short form
+    (``("origin/main", "main")``) while
+    :meth:`Repository.remote_refs_containing` answers in full form, so the
+    remote entries are expanded and the local branch dropped.
+
+    Returns
+    -------
+    tuple[str, ...]
+        ``("refs/remotes/origin/main",)``, or empty when the default
+        branch does not resolve (the caller must read that as "cannot
+        judge", never as "off the default branch").
+    """
+    return tuple(
+        f"refs/remotes/{ref}" for ref in repo.default_branch_refs if "/" in ref
+    )
+
+
+def split_by_push_status(repo: Repository, hunks: Sequence[BlameHunk]) -> PushSplit:
+    """Classify blamed ``hunks`` by whether the platform can see them.
+
+    Purely local: the ``origin/*`` refs as the last fetch left them, never
+    a network call (M2e plan section 0.1 #2 - no fetch on demand).
+
+    Parameters
+    ----------
+    repo : Repository
+        The developer's checkout.
+    hunks : Sequence[BlameHunk]
+        A working-tree blame of the target.
+
+    Returns
+    -------
+    PushSplit
+        The sendable hunks, which of them are on the default branch, and
+        the ones that stay local with their labels.
+
+    Notes
+    -----
+    When the default branch does not resolve (:func:`default_remote_refs`
+    is empty) every pushed hunk counts as on-default, so an unknown SHA
+    reads as ``pending_scan`` rather than being mislabelled as living on
+    another branch.
+    """
+    default = set(default_remote_refs(repo))
+    pushed: list[BlameHunk] = []
+    on_default: set[str] = set()
+    local: list[tuple[BlameHunk, str]] = []
+    for hunk in hunks:
+        if hunk.is_uncommitted:
+            local.append((hunk, PUSH_UNCOMMITTED))
+            continue
+        refs = repo.remote_refs_containing(hunk.sha)
+        if not refs:
+            local.append((hunk, PUSH_NOT_PUSHED))
+            continue
+        pushed.append(hunk)
+        if not default or default & set(refs):
+            on_default.add(hunk.sha)
+    return PushSplit(tuple(pushed), frozenset(on_default), tuple(local))
+
+
+def path_tracked_at(repo: Repository, path: str, revs: Sequence[str]) -> bool:
+    """Whether ``path`` is tracked at any of ``revs``.
+
+    Parameters
+    ----------
+    repo : Repository
+        The checkout.
+    path : str
+        A repository-relative path.
+    revs : Sequence[str]
+        Revisions known to be pushed (a remote-tracking ref, or a pushed
+        commit SHA).
+
+    Returns
+    -------
+    bool
+        ``True`` as soon as one of them tracks it; ``False`` for none, for
+        no revisions at all, or when ``git`` fails.
+    """
+    for rev in revs:
+        try:
+            if repo.tracked_paths(rev, path):
+                return True
+        except GitError:
+            return False
+    return False
+
+
+def pushed_target(repo: Repository, target: Target, split: PushSplit) -> Target | None:
+    """``target`` reduced to what may be sent to the platform.
+
+    Two fields are privileged. The **path** goes only when it is tracked
+    at a pushed revision; when it is not (a file renamed or added locally
+    and not pushed) the path of a pushed hunk's own origin takes its place,
+    because that path exists in a commit the platform already holds. The
+    **qualified name** goes only when the target's first line - the symbol's
+    declaration - blames to a pushed SHA.
+
+    Parameters
+    ----------
+    repo : Repository
+        The checkout.
+    target : Target
+        The locally resolved target.
+    split : PushSplit
+        Its classified hunks.
+
+    Returns
+    -------
+    Target or None
+        The target to send, or ``None`` when nothing may be sent (no
+        pushed hunk, or no pushed path to name it by) - in which case no
+        request is made at all.
+    """
+    if not split.pushed:
+        return None
+    path = _pushed_path(repo, target.path, split)
+    if path is None:
+        return None
+    return Target(
+        path=path,
+        line_start=target.line_start,
+        line_end=target.line_end,
+        qualified_name=(
+            target.qualified_name if _declaration_pushed(target, split) else None
+        ),
+    )
+
+
+def _pushed_path(repo: Repository, path: str, split: PushSplit) -> str | None:
+    """``path`` when a pushed rev tracks it, else a pushed hunk's origin path."""
+    revs = [*default_remote_refs(repo)[:1], split.pushed[0].sha]
+    if path_tracked_at(repo, path, revs):
+        return path
+    for hunk in split.pushed:
+        for origin in hunk.origins:
+            return origin.path
+    return None
+
+
+def _declaration_pushed(target: Target, split: PushSplit) -> bool:
+    """Whether ``target``'s first line is owned by a pushed commit.
+
+    Read off the blame that produced ``split``: an origin range starting at
+    working-tree line ``final_start`` covers as many lines as it spans at
+    its own commit. A target with no name, or a line no pushed origin
+    claims, answers ``False`` - the conservative direction.
+    """
+    if target.qualified_name is None:
+        return False
+    line = target.line_start
+    for hunk in split.pushed:
+        for origin in hunk.origins:
+            if (
+                origin.final_start
+                <= line
+                <= origin.final_start + (origin.end - origin.start)
+            ):
+                return True
+    return False
+
+
+def local_push_status(repo: Repository, sha: str) -> str | None:
+    """Why the platform could not answer for ``sha``, judged locally.
+
+    Parameters
+    ----------
+    repo : Repository
+        The checkout.
+    sha : str
+        A full commit SHA.
+
+    Returns
+    -------
+    str or None
+        One of :data:`PUSH_NOT_PUSHED`, :data:`PUSH_PENDING_SCAN`,
+        :data:`PUSH_NOT_ON_DEFAULT`, or ``None`` when the commit is not in
+        this checkout either.
+    """
+    if not repo.has_commit(sha):
+        return None
+    refs = repo.remote_refs_containing(sha)
+    if not refs:
+        return PUSH_NOT_PUSHED
+    default = set(default_remote_refs(repo))
+    if not default or default & set(refs):
+        return PUSH_PENDING_SCAN
+    return PUSH_NOT_ON_DEFAULT
+
+
+def local_evidence_dict(hunk: BlameHunk, push_status: str) -> dict:
+    """An evidence item built from blame alone, for a SHA the platform lacks.
+
+    Parameters
+    ----------
+    hunk : BlameHunk
+        The blamed hunk (its porcelain metadata is all there is).
+    push_status : str
+        Why the platform has nothing for it.
+
+    Returns
+    -------
+    dict
+        The shape of :func:`_evidence_dict` with ``source: "local"``, a
+        null ``llm_description`` (nothing generated it) and no PRs or
+        issues (those live in the platform's database), plus
+        ``push_status``.
+    """
+    return {
+        "commit": {
+            "sha": hunk.sha,
+            "llm_description": None,
+            "subject": hunk.summary or "",
+            "body": "",
+            "author_name": hunk.author_name,
+            "author_email": hunk.author_email,
+            "committed_at": hunk.committed_at,
+        },
+        "pull_requests": [],
+        "issues": [],
+        "source": LOCAL_SOURCE,
+        "push_status": push_status,
+    }
+
+
+def _parsed_time(value: object) -> datetime:
+    """``value`` as an aware datetime; the epoch floor for anything unusable.
+
+    The two sides time-stamp differently - the platform's rows carry
+    ``git``'s ``%cI`` with the committer's offset, a blame hunk carries UTC -
+    so the merged list must sort on parsed instants, not on strings.
+    """
+    if not isinstance(value, str) or not value:
+        return _EPOCH
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return _EPOCH
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def merge_linked_evidence(
+    platform_items: Sequence[dict],
+    unknown_shas: Sequence[str],
+    split: PushSplit,
+    *,
+    limit: int,
+) -> list[dict]:
+    """Merge a platform's evidence with the locally labelled hunks.
+
+    Parameters
+    ----------
+    platform_items : Sequence[dict]
+        What the platform answered (empty when it was not asked, or could
+        not be reached).
+    unknown_shas : Sequence[str]
+        The sent SHAs it has no row for.
+    split : PushSplit
+        The classification the request was built from.
+    limit : int
+        Cap on the merged list.
+
+    Returns
+    -------
+    list[dict]
+        Newest first by parsed timestamp, one entry per SHA - a platform
+        item always beats a locally built one - capped at ``limit``.
+    """
+    by_sha: dict[str, dict] = {}
+    for item in platform_items:
+        sha = (item.get("commit") or {}).get("sha")
+        if isinstance(sha, str) and sha not in by_sha:
+            by_sha[sha] = item
+    pushed = {hunk.sha: hunk for hunk in split.pushed}
+    for sha in unknown_shas:
+        hunk = pushed.get(sha)
+        if hunk is None or sha in by_sha:
+            continue
+        by_sha[sha] = local_evidence_dict(
+            hunk,
+            PUSH_PENDING_SCAN if sha in split.on_default else PUSH_NOT_ON_DEFAULT,
+        )
+    for hunk, push_status in split.local:
+        by_sha.setdefault(hunk.sha, local_evidence_dict(hunk, push_status))
+    items = sorted(
+        by_sha.values(),
+        key=lambda item: _parsed_time((item.get("commit") or {}).get("committed_at")),
+        reverse=True,
+    )
+    return items[:limit]
+
+
+def blame_target(repo: Repository, target: Target) -> tuple[BlameHunk, ...]:
+    """Blame ``target``'s range in the working tree, as a tool error on failure."""
+    try:
+        return repo.blame(target.path, target.line_start, target.line_end)
+    except GitError as exc:
+        raise WhyGraphError.wrap("git blame failed", exc)
+
+
+def linked_evidence(remote: RemoteProject, target: Target, *, limit: int) -> dict:
+    """``whygraph_evidence_for``'s answer for a project linked to a platform.
+
+    Blames the working tree here, sends only the pushed hunks, and labels
+    everything the platform could not account for with its
+    ``push_status``. Never opens a local WhyGraph database, never
+    backfills a description and never touches the rationale cache - a
+    linked project has none of the three.
+
+    Parameters
+    ----------
+    remote : RemoteProject
+        The project's platform.
+    target : Target
+        The resolved target.
+    limit : int
+        Cap on the evidence items.
+
+    Returns
+    -------
+    dict
+        ``{"target", "evidence", "platform"}``.
+    """
+    repo = Repository(repo_root())
+    split = split_by_push_status(repo, blame_target(repo, target))
+    sendable = pushed_target(repo, target, split)
+    items: list[dict] = []
+    unknown: list[str] = [hunk.sha for hunk in split.pushed]
+    if sendable is not None:
+        try:
+            items, unknown = remote.evidence(sendable, split.pushed, limit)
+        except RemoteError:
+            # Offline, revoked or removed: the agent still gets blame, with
+            # every pushed SHA labelled from the local refs.
+            items, unknown = [], [hunk.sha for hunk in split.pushed]
+    return {
+        "target": target_dict(target),
+        "evidence": merge_linked_evidence(items, unknown, split, limit=limit),
+        "platform": platform_block(remote),
+    }
+
+
 def whygraph_evidence_for(
     path: str | None = None,
     line_start: int | None = None,
@@ -856,6 +1254,9 @@ def whygraph_evidence_for(
     """MCP tool — historical evidence for a chunk of code.
 
     See :data:`_TOOL_DESCRIPTION` for the agent-facing summary.
+
+    For a project linked to a WhyGraph platform the answer comes from
+    :func:`linked_evidence` instead, and carries a ``platform`` block.
     """
     _log.debug(
         "whygraph_evidence_for called: path=%r line_start=%r line_end=%r "
@@ -874,6 +1275,9 @@ def whygraph_evidence_for(
         line_end=line_end,
         qualified_name=qualified_name,
     )
+    ctx = current_project()
+    if ctx is not None and ctx.remote is not None:
+        return linked_evidence(ctx.remote, target, limit=limit)
     evidence = collect_evidence(target, limit=limit)
     backfill_evidence_descriptions(evidence, target_path=target.path)
     return {

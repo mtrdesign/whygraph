@@ -484,7 +484,9 @@ class PortalState:
         self.mode: str | None = None
         self.degraded: str | None = None
         self.shared_folders: tuple[Path, ...] = ()
-        self.contexts = ContextCache()
+        # Read lazily: `platform_transport` is set below, and tests replace
+        # it after start-up.
+        self.contexts = ContextCache(transport=lambda: self.platform_transport)
         self.migrations = ProjectMigrations()
         self.runner = runner
         self.discovery = DiscoveryCache()

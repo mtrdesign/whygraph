@@ -36,6 +36,7 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session, create_engine
 
 from whygraph.core import _resolve_root, get_config
+from whygraph.core.context import ProjectContextError, current_project
 
 # Path constants duplicated locally to honor the "leave scan/db.py
 # alone" constraint of the initial DB-layer plumbing PR. If the
@@ -49,8 +50,40 @@ _engines: dict[Path, Engine] = {}
 _engines_lock = threading.Lock()
 
 
+def _refuse_linked() -> None:
+    """Raise when the bound project's history lives on a platform (M2e).
+
+    A *linked* project has no local WhyGraph database by design ("no
+    shared data on the laptop"), so resolving a path for one is a
+    programming error, not a user error. The check sits here - the one
+    function both :func:`get_engine` and :func:`get_session` go through -
+    so it fires *before* :func:`_build_engine` can create
+    ``.whygraph/`` and an empty SQLite file in the checkout.
+
+    Raises
+    ------
+    whygraph.core.context.ProjectContextError
+        If the bound context carries a
+        :class:`~whygraph.core.remote.RemoteProject`.
+    """
+    ctx = current_project()
+    if ctx is not None and ctx.remote is not None:
+        raise ProjectContextError(
+            f"project {ctx.slug!r} is linked to a WhyGraph platform and has no "
+            "local WhyGraph database; read its history through the project's "
+            "remote instead"
+        )
+
+
 def _resolved_db_path() -> Path:
-    """Return the configured DB path or the project-relative default."""
+    """Return the configured DB path or the project-relative default.
+
+    Raises
+    ------
+    whygraph.core.context.ProjectContextError
+        If the bound project is linked to a platform (:func:`_refuse_linked`).
+    """
+    _refuse_linked()
     override = get_config().whygraph_db
     if override is not None:
         return override
@@ -109,7 +142,9 @@ def get_engine() -> Engine:
     Raises
     ------
     whygraph.core.context.ProjectContextError
-        If strict mode is on and no project context is bound.
+        If strict mode is on and no project context is bound, or if the
+        bound project is linked to a WhyGraph platform and so has no
+        local database (:func:`_refuse_linked`).
     """
     path = _resolved_db_path()
     key = path.resolve()

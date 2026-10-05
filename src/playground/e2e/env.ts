@@ -23,6 +23,9 @@ export const env = {
   // The fake GitHub (tests/github_fake.py) both production apps talk to; its
   // control routes (`POST /_fake/push`, ...) change state and send the webhook.
   githubUrl: need("WHYGRAPH_E2E_GITHUB_URL"),
+  // Where `run.sh` told the fake to create its bare fixture repositories
+  // (`--repos`), so a spec can clone one without an installation token.
+  githubRepos: path.join(root, "github-repos"),
   root,
   shared: path.join(root, "shared"),
   outside: path.join(root, "outside"),

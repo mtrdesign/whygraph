@@ -10,7 +10,11 @@
 #
 # Environment (all optional):
 #   E2E_PORTAL_CMD     how to launch whygraph (default: uv run --no-sync whygraph)
-#   E2E_SCAN_PYTHON    interpreter for the fake scanner (default: python3)
+#   E2E_SCAN_PYTHON    interpreter for the fake scanner (default: the checkout's
+#                      .venv/bin/python, else python3). The production portal's
+#                      scanner runs `--real-git`, which hands over to the real
+#                      `python -m whygraph scan`, so it must be able to import
+#                      whygraph (see tests/fixtures/e2e_scan.py)
 #   E2E_PORT           portal port (default: 18765)
 #   E2E_PROD_PORT      production-mode portal port (default: 18766)
 #   E2E_GITHUB_PORT    the fake GitHub's port (default: 18767); needs openssl
@@ -30,7 +34,14 @@ repo=$(cd "$playground/../.." && pwd -P)
 port=${E2E_PORT:-18765}
 prod_port=${E2E_PROD_PORT:-18766}
 portal_cmd=${E2E_PORTAL_CMD:-uv run --no-sync whygraph}
-scan_python=${E2E_SCAN_PYTHON:-python3}
+scan_python=${E2E_SCAN_PYTHON:-}
+if [ -z "$scan_python" ]; then
+  if [ -x "$repo/.venv/bin/python" ]; then
+    scan_python="$repo/.venv/bin/python"
+  else
+    scan_python=python3
+  fi
+fi
 github_port=${E2E_GITHUB_PORT:-18767}
 
 root=$(mktemp -d "${TMPDIR:-/tmp}/whygraph-e2e.XXXXXX")
@@ -115,11 +126,19 @@ docker exec "$pg_name" psql -h 127.0.0.1 -U postgres -c 'CREATE DATABASE prod' >
 prod_database_url="postgresql+psycopg://postgres:test@127.0.0.1:$pg_port/prod"
 mkdir -p "$root/prod-data"
 
-# Provider keys from the developer's shell must not leak into the run.
+# Nothing in the run goes through a proxy: the fake GitHub, both portals and
+# the platform client's `*.localhost` hosts are all on loopback.
+loopback="127.0.0.1,localhost,.localhost"
+
+# Provider keys from the developer's shell must not leak into the run. The
+# local portal links to the production one as a platform (M2e), which is an
+# `http` origin on `*.localhost`, so it gets the dev switch.
 (
   cd "$repo"
   unset ANTHROPIC_API_KEY OPENAI_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY GH_TOKEN GITHUB_TOKEN
   unset WHYGRAPH_MODE WHYGRAPH_DEV_ORIGINS WHYGRAPH_CONFIG_JSON WHYGRAPH_DATABASE_PASSWORD_FILE
+  export NO_PROXY="$loopback${NO_PROXY:+,$NO_PROXY}" no_proxy="$loopback${no_proxy:+,$no_proxy}"
+  export WHYGRAPH_DEV_PLATFORM_HTTP=1
   export WHYGRAPH_DATABASE_URL="$database_url"
   export WHYGRAPH_SHARED_FOLDERS="$root/shared"
   export WHYGRAPH_SCAN_CMD="$scan_python $repo/tests/fixtures/e2e_scan.py --control $root/control"
@@ -134,7 +153,6 @@ portal_pid=$!
 # run, its secrets, the fixture repos under github-repos/ served over dumb
 # HTTP, and the control routes' deliveries to the portal's webhook with the
 # base host as Host).
-loopback="127.0.0.1,localhost,.localhost"
 (
   umask 077
   printf 'e2e-client-secret\n' >"$root/github-secret"
@@ -170,8 +188,10 @@ done
 
 # The production-mode portal: no shared folders, only the production variables,
 # both GitHub apps on the fake, and the fake scanner (with its own control dir;
-# it fails if the runner's token file is unreadable). Its base URL carries the
-# port it listens on. It clones and fetches from the fake with real git.
+# it fails if the runner's token file is unreadable). It runs `--real-git`, so
+# every scan does the real git crawl of the server clone and a connected portal
+# has evidence to ask for. Its base URL carries the port it listens on. It
+# clones and fetches from the fake with real git.
 mkdir -p "$root/prod-control"
 (
   cd "$repo"
@@ -181,7 +201,7 @@ mkdir -p "$root/prod-control"
   export WHYGRAPH_MODE=production
   export WHYGRAPH_BASE_URL="http://whygraph.localhost:$prod_port"
   export WHYGRAPH_DATABASE_URL="$prod_database_url"
-  export WHYGRAPH_SCAN_CMD="$scan_python $repo/tests/fixtures/e2e_scan.py --control $root/prod-control"
+  export WHYGRAPH_SCAN_CMD="$scan_python $repo/tests/fixtures/e2e_scan.py --control $root/prod-control --real-git"
   export WHYGRAPH_GITHUB_OAUTH_CLIENT_ID=e2e-client
   export WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE="$root/github-secret"
   export WHYGRAPH_GITHUB_APP_SLUG=whygraph-e2e

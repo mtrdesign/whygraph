@@ -985,10 +985,13 @@ def test_v1_bearer_sweep_over_two_orgs(
     Ben's token (``acme/api``) and Dee's (``bravo/lib``): the other org's
     host, the other project of the same org, the base host and a host naming
     no org are each a ``404``; no token, a malformed one and a session alone
-    are ``401``; the token's own project answers.
+    are ``401``, and so is a revoked token (with its reason); the token's own
+    project answers, naming its own project at the user's role and nothing of
+    the other org.
     """
     tokens = {"acme": issue(cn, "ben", "api"), "bravo": issue(cn, "dee", "lib")}
     own = {"acme": "api", "bravo": "lib"}
+    owner = {"acme": "ben", "bravo": "dee"}
 
     expected_status, expected_code, kwargs = V1_REQUESTS[(path, method)]
 
@@ -1015,15 +1018,41 @@ def test_v1_bearer_sweep_over_two_orgs(
             response = call(org, own[org], headers)
             assert response.status_code == 401, (org, headers, response.text)
             assert response.json()["code"] == "invalid_token"
-        signed_in(cn.client, cn.ids["ben" if org == "acme" else "dee"])
+        signed_in(cn.client, cn.ids[owner[org]])
         response = cn.client.request(
             method, at(org) + _v1_url(path, own[org]), **kwargs
         )
         assert (
             response.status_code == 401 and response.json()["code"] == "invalid_token"
         )
+        # A token the owner revoked is refused here too, with the reason -
+        # never by letting the request through to the route body.
+        spent = issue(cn, owner[org], own[org], name="old-laptop")
+        be(cn, owner[org])
+        gone = cn.client.delete(
+            at(org) + f"/api/projects/{own[org]}/connections/{uid_of_token(spent)}"
+        )
+        assert gone.status_code == 204, gone.text
+        response = call(org, own[org], bearer(spent))
+        assert response.status_code == 401, (org, response.text)
+        assert (response.json()["code"], response.json()["reason"]) == (
+            "token_revoked",
+            "admin_revoked",
+        )
     for org in ("acme", "bravo"):
+        other = own["bravo" if org == "acme" else "acme"]
         response = call(org, own[org], bearer(tokens[org]))
         assert response.status_code == expected_status, response.text
         if expected_code is not None:
             assert response.json()["code"] == expected_code, response.text
+        if response.status_code == 200:
+            # Every answer names the token's own project, at its user's role,
+            # and carries nothing of the other org (as the session sweeps'
+            # ``assert_no_leak``; ``cn``'s projects differ only by name). The
+            # status route *is* that block; every other answer carries it.
+            body = response.json()
+            project = body if (path, method) == (_V1, "GET") else body["project"]
+            assert project["slug"] == own[org], response.text
+            assert project["name"] == f"{own[org].title()} project", response.text
+            assert project["role"] == "owner", response.text
+            assert f"{other.title()} project" not in response.text, response.text

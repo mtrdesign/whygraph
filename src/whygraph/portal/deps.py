@@ -84,6 +84,7 @@ from .migrate import ProjectMigrations
 from .models import Membership, Organization, Project, User
 from .orgs import is_valid_org_slug
 from .paths import check_project_paths
+from .platform_pending import PendingConnects, PendingLinks
 from .projects import is_valid_slug
 from .repos import DiscoveryCache
 from .runner import ScanRunner
@@ -464,6 +465,16 @@ class PortalState:
         (``[rationale].agent_generations_per_hour``) and ``desc:<org_id>``
         (``[analyze].agent_descriptions_per_hour``), each call passing the
         org's limit.
+    pending_connects : PendingConnects
+        Local mode's started connects, keyed by OAuth ``state``, 10 min
+        (M2e plan section 4.8).
+    pending_links : PendingLinks
+        Local mode's exchanged links waiting for the wizard, 30 min; an
+        expired one's token is revoked by the platform routes.
+    platform_transport : httpx.BaseTransport or None
+        Replaces the network of every
+        :class:`~whygraph.portal.platform_client.PlatformHttp` the platform
+        routes build (tests plug a fake platform in); ``None`` in a real run.
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -513,6 +524,9 @@ class PortalState:
         self.v1_heavy = Throttle(60, 60)
         self.v1_in_flight = InFlight(2)
         self.agent_budget = Throttle(0, 60 * 60)
+        self.pending_connects = PendingConnects()
+        self.pending_links = PendingLinks()
+        self.platform_transport: Any = None
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0
@@ -1169,6 +1183,23 @@ def require_production(request: Request) -> None:
         raise ApiError(404, "not found")
 
 
+def require_local(request: Request) -> None:
+    """Refuse (``404``) unless the portal runs in local mode.
+
+    The gate of the connected portal's own routes (``/api/platform/*``,
+    M2e plan section 4.8): a production platform never links to another
+    one. Declared on the router, before :func:`current_user`, so production
+    answers ``404`` on every host, signed in or not.
+
+    Raises
+    ------
+    ApiError
+        ``404 {"error": "not found"}`` in production (or degraded) mode.
+    """
+    if portal_state(request).mode != "local":
+        raise ApiError(404, "not found")
+
+
 def require_base_host(request: Request) -> None:
     """Refuse (``404``) unless the request addresses the base host.
 
@@ -1295,6 +1326,7 @@ __all__ = [
     "project_db_access",
     "require_base_host",
     "require_initialized",
+    "require_local",
     "require_mode_and_host",
     "require_production",
     "unsafe_path_error",

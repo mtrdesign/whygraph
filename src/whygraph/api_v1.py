@@ -452,12 +452,18 @@ class TokenReply(_Out):
         The linked project.
     api_version : int
         The contract version the platform speaks.
+    api_origin : str or None
+        Not sent by this platform. A client computes the org origin itself
+        from the platform origin and ``org`` and refuses a reply that names
+        another one (M2e plan section 4.7), so the field is read only to be
+        checked, never trusted.
     """
 
     token: str
     org: str
     project: StatusOut
     api_version: int
+    api_origin: str | None = None
 
 
 class EvidenceReplyOut(_Out):

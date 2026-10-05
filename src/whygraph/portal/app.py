@@ -106,6 +106,7 @@ from .migrate import MIGRATION_LOCK
 from .models import ScanRun, Setting, User
 from .org_routes import org_router
 from .orgs import ensure_builtin_org
+from .platform_routes import platform_router
 from .port_change import reconcile_port
 from .repos import SHARED_FOLDERS_ENV, parse_shared_folders
 from .routes import portal_router, projects_router, public_router
@@ -245,6 +246,7 @@ def create_portal_app(
     app.include_router(v1_router)  # production-only: the /api/v1 data routes (M2e)
     app.include_router(portal_router)
     app.include_router(projects_router)
+    app.include_router(platform_router)  # local-only: connect and link (M2e)
     app.include_router(
         data_router,
         prefix="/api/projects/{slug}",

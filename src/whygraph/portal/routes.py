@@ -31,6 +31,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import secrets as secrets_mod
 import shutil
 from collections.abc import Callable
@@ -85,7 +86,12 @@ from whygraph.services.git import (
     strip_userinfo,
 )
 from whygraph.services.git.credentials import github_git_host
-from whygraph.services.github import GitHubError, RepoAccessError, check_repo_access
+from whygraph.services.github import (
+    GitHubError,
+    RepoAccessError,
+    check_repo_access,
+    remote_identity,
+)
 
 from . import connections, sessions
 from .audit import audit
@@ -122,9 +128,24 @@ from .github_app_routes import (
     user_token,
 )
 from .github_auth import GitHubUnavailable
-from .models import Organization, Project, ProjectAgent, ScanRun, Secret, User
+from .models import (
+    Organization,
+    PlatformLink,
+    Project,
+    ProjectAgent,
+    ScanRun,
+    Secret,
+    User,
+)
 from .orgs import add_member
 from .paths import BACKUPS_DIR, TRACKED_STATE_PATHS, check_project_paths
+from .platform_pending import PendingLink
+from .platform_routes import (
+    default_client_name,
+    origin_identity,
+    origin_url,
+    sweep_links,
+)
 from .policy import (
     DEFAULTS_ALLOWLIST,
     ImportPreview,
@@ -160,6 +181,8 @@ from .secrets import (
     LLM_API_KEY,
     LLM_KEY_PROVIDERS,
     delete_secret,
+    encrypt,
+    hint_for,
     put_secret,
     secret_status,
 )
@@ -263,8 +286,20 @@ class GitHubProjectBody(_Strict):
     name: str | None = Field(default=None, max_length=200)
 
 
+class PlatformProjectBody(_Strict):
+    """``POST /api/projects`` linking a checkout to a platform project (local mode).
+
+    ``link_id`` names the pending link of ``POST /api/platform/callback``.
+    """
+
+    source: Literal["platform"]
+    link_id: str = Field(min_length=1, max_length=64)
+    path: str
+
+
 AddProjectBody = Annotated[
-    LocalProjectBody | GitHubProjectBody, Body(discriminator="source")
+    LocalProjectBody | GitHubProjectBody | PlatformProjectBody,
+    Body(discriminator="source"),
 ]
 """``POST /api/projects``: one body per source, so neither can carry the other's fields."""
 
@@ -735,7 +770,8 @@ def get_state(request: Request) -> dict:
     the failure. In production the body also names ``host_kind``,
     ``base_url``, ``bootstrap_required`` and the user's ``email`` /
     ``is_instance_admin``, and ``setup_complete`` means "an instance admin
-    exists"; local mode's body has none of them.
+    exists"; local mode's body has none of them, and names ``hostname``
+    instead (the machine name the platform link page prefills, M2e).
     """
     state = portal_state(request)
     if state.degraded:
@@ -767,6 +803,9 @@ def get_state(request: Request) -> dict:
         # this org, or null.
         "port_change": _port_change_in(state, access),
     }
+    if state.mode == "local":
+        # The machine name the link page prefills (M2e section 4.8).
+        body["hostname"] = default_client_name()
     if state.mode == "production":
         # Production-only fields, so the local body stays exactly as it was.
         assert state.base_url is not None
@@ -831,7 +870,8 @@ def get_repos(
 ) -> dict:
     """Git repositories discovered under the shared folders (cached 60 s).
 
-    ``registered`` reflects only the request's org. ``404`` in production
+    ``registered`` reflects only the request's org (a local or a linked
+    project over that checkout). ``404`` in production
     (local folders only).
     """
     state = portal_state(request)
@@ -842,7 +882,8 @@ def get_repos(
         registered = set(
             session.exec(
                 select(Project.root).where(
-                    Project.org_id == org_id, Project.source == "local"
+                    Project.org_id == org_id,
+                    col(Project.source).in_(("local", "platform")),
                 )
             ).all()
         )
@@ -970,12 +1011,16 @@ def add_project(
     ``protected``, ``github_error``). The source policy
     (:func:`~whygraph.portal.policy.allowed_sources`) answers ``403
     source_not_allowed`` for ``github`` in local mode and ``local`` in
-    production. A production import is :func:`_import_github`.
+    production. A production import is :func:`_import_github`; a link to a
+    platform project (local mode, M2e) is :func:`_add_platform`.
     """
     state = portal_state(request)
     _refuse_source(state, body.source)
     if isinstance(body, GitHubProjectBody):
         project_id = _import_github(state, body, principal, access, request)
+        detected, preview = None, ImportPreview()
+    elif isinstance(body, PlatformProjectBody):
+        project_id = _add_platform(state, body, principal, access.org_id)
         detected, preview = None, ImportPreview()
     else:
         project_id, detected, preview = _add_local(
@@ -1020,13 +1065,19 @@ def _insert_project(
     return project.id
 
 
-def _add_local(
-    state: PortalState, body: LocalProjectBody, principal: Principal, org_id: int
-) -> tuple[int, dict, ImportPreview]:
-    if not body.path:
+def _checked_path(state: PortalState, path: str) -> dict:
+    """:func:`~whygraph.portal.repos.check_path` of a checkout to add, or the refusal.
+
+    Raises
+    ------
+    ApiError
+        ``422`` (no or a relative path), ``400 protected`` / ``not_shared`` /
+        ``not_git``.
+    """
+    if not path:
         raise ApiError(422, "path is required for a local project")
     try:
-        check = check_path(body.path, state.shared_folders, state.data_dir)
+        check = check_path(path, state.shared_folders, state.data_dir)
     except ValueError as exc:
         raise ApiError(422, str(exc)) from exc
     if check["protected"]:
@@ -1043,7 +1094,13 @@ def _add_local(
         )
     if not check["is_git"]:
         raise ApiError(400, "the path is not a git repository", code="not_git")
+    return check
 
+
+def _add_local(
+    state: PortalState, body: LocalProjectBody, principal: Principal, org_id: int
+) -> tuple[int, dict, ImportPreview]:
+    check = _checked_path(state, body.path)
     root = Path(check["path"])
     link = check["github"]
     token = (body.token or "").strip() or None
@@ -1115,6 +1172,134 @@ def _add_local(
         ) from exc
     state.contexts.invalidate(project_id)
     return project_id, detected, preview
+
+
+_FULL_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+def _check_link_match(entry: PendingLink, root: Path) -> None:
+    """Refuse a checkout that is not the platform project's (plan section 0.1 #12).
+
+    Accepted: a candidate of the callback, a checkout whose ``origin`` names
+    the clone URL's repository (host, owner and name), or one that holds
+    the platform's ``last_scanned_head`` (a mirror, a same-history fork, an
+    SSH host alias). A project the platform never scanned needs the origin
+    match.
+
+    Raises
+    ------
+    ApiError
+        ``422 origin_mismatch`` with ``origin`` and ``clone_url``.
+    """
+    project = entry.reply.project
+    clone_url = project.clone_url or ""
+    if str(root) in entry.candidates:
+        return
+    wanted = remote_identity(strip_userinfo(clone_url))
+    if wanted is not None and origin_identity(root) == wanted:
+        return
+    head = project.last_scanned_head
+    if head and _FULL_SHA.fullmatch(head):
+        if Repository(root).has_commit(head):
+            return
+        message = (
+            f"this checkout's origin is not {clone_url} and it does not hold the "
+            "platform's last scanned commit"
+        )
+    else:
+        message = (
+            f"this checkout's origin is not {clone_url}, and the platform has not "
+            "scanned the project yet, so its history cannot be compared"
+        )
+    raise ApiError(
+        422,
+        message,
+        code="origin_mismatch",
+        origin=origin_url(root),
+        clone_url=clone_url,
+    )
+
+
+def _add_platform(
+    state: PortalState, body: PlatformProjectBody, principal: Principal, org_id: int
+) -> int:
+    """Link a checkout to the platform project of a pending link (plan section 4.8).
+
+    The project (``source = "platform"``, uninitialized, the platform's slug
+    and name) and its :class:`~whygraph.portal.models.PlatformLink` row (the
+    token encrypted) are written in one transaction, then the pending link
+    is consumed. Nothing inside the checkout is written.
+
+    Raises
+    ------
+    ApiError
+        ``410 link_expired``, the :func:`_checked_path` refusals, ``422
+        origin_mismatch``, ``409 slug_taken`` (the platform's slug is
+        already a project here) or ``409 duplicate`` (the checkout is).
+    """
+    sweep_links(state)
+    entry = state.pending_links.get(body.link_id, org_id)
+    if entry is None:
+        raise ApiError(
+            410, "this link expired or was used; connect again", code="link_expired"
+        )
+    check = _checked_path(state, body.path)
+    root = Path(check["path"])
+    _check_link_match(entry, root)
+    project = entry.reply.project
+    clone_url = project.clone_url or ""
+    slug_taken = ApiError(
+        409,
+        f"a project named {project.slug!r} already exists on this portal; "
+        "remove it first",
+        code="slug_taken",
+    )
+    duplicate = ApiError(409, "this repository is already registered", code="duplicate")
+    try:
+        with get_session() as session:
+            if session.exec(
+                select(Project.id).where(Project.root == str(root))
+            ).first():
+                raise duplicate
+            if session.exec(
+                select(Project.id).where(
+                    Project.org_id == org_id, Project.slug == project.slug
+                )
+            ).first():
+                raise slug_taken
+            project_id = _insert_project(
+                session,
+                org_id=org_id,
+                slug=project.slug,
+                name=project.name,
+                source="platform",
+                root=str(root),
+                remote_url=strip_userinfo(clone_url),
+                principal=principal,
+            )
+            session.add(
+                PlatformLink(
+                    project_id=project_id,
+                    platform_origin=entry.platform_origin,
+                    api_origin=entry.api_origin,
+                    org_slug=entry.reply.org,
+                    remote_slug=project.slug,
+                    remote_name=project.name,
+                    clone_url=clone_url,
+                    default_branch=project.default_branch or "",
+                    token_ciphertext=encrypt(entry.token),
+                    token_hint=hint_for(entry.token),
+                    status="ok",
+                    last_platform_head=project.last_scanned_head,
+                )
+            )
+    except IntegrityError as exc:
+        raise (
+            slug_taken if _constraint(exc) == "uq_projects_org_slug" else duplicate
+        ) from exc
+    state.pending_links.pop(body.link_id, org_id)
+    state.contexts.invalidate(project_id)
+    return project_id
 
 
 IMPORT_SLUG_ATTEMPTS = 3
@@ -1757,6 +1942,14 @@ def init_project(
         preview_import(project.root) if project.source == "local" else ImportPreview()
     )
     response["custom_db_paths"] = [p for p in preview.custom_db_paths if p["exists"]]
+    # A linked project has no local DB; a leftover one from an earlier local
+    # project over the same checkout is never opened (M2e section 4.8).
+    response["ignored_db"] = (
+        ".whygraph/whygraph.db"
+        if project.source == "platform"
+        and (project.root / ".whygraph" / "whygraph.db").is_file()
+        else None
+    )
     return response
 
 

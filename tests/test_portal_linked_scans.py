@@ -401,9 +401,14 @@ def test_catch_up_includes_linked(
         assert len(session.exec(select(ScanRun.id)).all()) == 2
 
 
-def test_platform_source_still_refused_on_add(
+def test_platform_source_needs_a_pending_link(
     env: SimpleNamespace, scanner: SimpleNamespace
 ) -> None:
+    """A ``platform`` add exists only as the last step of a link (step 6).
+
+    Without a live ``link_id`` there is no platform, no token and no
+    project; ``tests/test_portal_link.py`` drives the whole flow.
+    """
     root = make_repo(env.shared, "lnk")
     with client_for() as client:
         client.post("/api/portal/setup", json={"display_name": "Tess"})
@@ -411,5 +416,6 @@ def test_platform_source_still_refused_on_add(
             "/api/projects",
             json={"source": "platform", "path": str(root), "link_id": "x"},
         )
-        assert response.status_code == 422, response.text
+        assert response.status_code == 410, response.text
+        assert response.json()["code"] == "link_expired"
         assert client.get("/api/projects").json()["projects"] == []

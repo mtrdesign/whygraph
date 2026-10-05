@@ -461,7 +461,7 @@ def post_token(body: TokenBody, request: Request) -> dict:
     )
     return TokenReply(
         token=token, org=org_slug, project=status, api_version=API_VERSION
-    ).model_dump(mode="json")
+    ).model_dump(mode="json", exclude={"api_origin"})  # the client computes it
 
 
 # ---------------------------------------------------------------------------

@@ -269,6 +269,10 @@ class PortalGuard:
         origins = self.state.origins
         if origins is not None and origins.base is not None:
             send = _production_send(scope, send, origins.base)
+        elif origins is not None and not (
+            _is_under(scope["path"], "/api") or _is_under(scope["path"], "/mcp")
+        ):
+            send = _local_page_send(send)
 
         rejection, host_kind = self._check(scope)
         if rejection is not None:
@@ -398,6 +402,29 @@ def _production_send(scope: Scope, send: Send, base: BaseUrl) -> Send:
     return wrapped
 
 
+LOCAL_PAGE_HEADERS: tuple[tuple[str, str], ...] = (
+    ("x-frame-options", "DENY"),
+    ("content-security-policy", "frame-ancestors 'none'"),
+)
+"""Headers every local-mode page (non-``/api``, non-``/mcp``) response carries.
+
+No other site may frame the portal: ``/link`` and ``/connect/callback``
+must never be clickjacked (M2e plan section 4.8)."""
+
+
+def _local_page_send(send: Send) -> Send:
+    """Wrap ``send`` to add :data:`LOCAL_PAGE_HEADERS` (local mode's pages)."""
+
+    async def wrapped(message: Message) -> None:
+        if message["type"] == "http.response.start":
+            headers = MutableHeaders(scope=message)
+            for name, value in LOCAL_PAGE_HEADERS:
+                headers[name] = value
+        await send(message)
+
+    return wrapped
+
+
 def _error(status: int, message: str) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status)
 
@@ -405,6 +432,7 @@ def _error(status: int, message: str) -> JSONResponse:
 __all__ = [
     "CLIENT_HEADER",
     "DEV_ORIGINS_ENV",
+    "LOCAL_PAGE_HEADERS",
     "LOOPBACK_HOSTS",
     "PortalGuard",
     "PortalOrigins",

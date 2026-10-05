@@ -64,6 +64,7 @@ from whygraph.portal.github_auth import GitHubAuthConfig, GitHubOAuth
 from whygraph.portal.mcp_mount import McpDispatcher
 from whygraph.portal.models import Project, ScanRun, User
 from whygraph.portal.orgs import add_member, create_org
+from whygraph.portal.platform_routes import default_client_name
 from whygraph.portal.runner import ScanRunner
 from whygraph.portal.security import PortalGuard, build_origins
 from whygraph.serve import chat as serve_chat
@@ -589,6 +590,8 @@ def test_setup_flow(client: TestClient, env: SimpleNamespace) -> None:
         "shared_folders": [str(env.shared)],
         "version": package_version("whygraph"),  # what `whygraph version` prints
         "port_change": None,
+        # The machine name the platform link page prefills (M2e section 4.8)
+        "hostname": default_client_name(),
     }
     assert client.get("/api/projects").json() == {"error": "setup required"}
 
@@ -1259,6 +1262,11 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/orgs", "POST"): "user.self",
     # The GitHub App's callback, on the base host (M2d-2 section 4.4)
     ("/api/github/app/callback", "POST"): "user.self",
+    # Local mode's connect and link to a platform (M2e section 4.8)
+    ("/api/platform/connect", "POST"): "org.add_project",
+    ("/api/platform/callback", "POST"): "org.add_project",
+    ("/api/platform/pending/{link_id}", "GET"): "org.add_project",
+    ("/api/platform/pending/{link_id}", "DELETE"): "org.add_project",
     # The consent page and the caller's connected portals (M2e section 4.4)
     ("/api/connect/validate", "POST"): "user.self",
     ("/api/connect/projects", "GET"): "user.self",
@@ -1280,6 +1288,18 @@ NON_ORG_ACTIONS = {"user.self", "instance.admin"}
 NON_ORG_ROUTES = {
     route for route, action in ROUTE_ACTIONS.items() if action in NON_ORG_ACTIONS
 }
+
+LOCAL_ONLY_ROUTES = {
+    ("/api/platform/connect", "POST"),
+    ("/api/platform/callback", "POST"),
+    ("/api/platform/pending/{link_id}", "GET"),
+    ("/api/platform/pending/{link_id}", "DELETE"),
+}
+"""Local mode's own routes (M2e plan section 4.8): org-scoped, but gated by
+:func:`~whygraph.portal.deps.require_local`, so production answers ``404`` on
+every host - before ``current_user``. Every **production** sweep leaves them
+out (``test_portal_hosts_isolation.PROD_API_ROUTES`` and the signed-out sweep
+of ``test_portal_tenancy``); ``test_portal_link.py`` covers their ``404``."""
 
 PUBLIC_API_ROUTES = {
     "/api/portal/state",
@@ -1347,6 +1367,7 @@ _FILL = {
     "{run_id}": "1",
     "{uid}": "someone",
     "{installation_id}": "7",
+    "{link_id}": "nolink",
 }
 
 

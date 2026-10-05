@@ -41,6 +41,7 @@ from sqlmodel import select
 from conftest import HeaderIdentity, build_fake_codegraph_db
 from test_portal_app import (  # noqa: F401 -- `env`, `production_env` are fixtures
     _NODES,
+    LOCAL_ONLY_ROUTES,
     NON_ORG_ACTIONS,
     NON_ORG_ROUTES,
     PORT,
@@ -559,6 +560,7 @@ PATH_PARAMS: dict[str, Callable[[OrgWorld], str]] = {
     "{session_id}": lambda o: str(o.session_id),
     "{uid}": lambda o: o.owner_uid,
     "{installation_id}": lambda o: "7",
+    "{link_id}": lambda o: "nolink",  # no pending link: 410 link_expired
 }
 """How to fill each path parameter for an org; an unmapped one fails the sweep."""
 
@@ -709,6 +711,25 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
             "path": str(_marked_repo(w.env, o.mark, "extra")),
         },
         shows=lambda o: [f"{o.mark}/extra"],
+    ),
+    # Local mode's connect and link (M2e section 4.8; the sweep never reaches
+    # a platform: a bad URL and an unknown state / link_id refuse first.
+    # test_portal_link.py drives the whole flow against the fake platform)
+    ("POST", "/api/platform/connect"): Call(
+        422,
+        body=lambda w, o: {"platform_url": "not a url"},
+        shows=lambda o: ["bad_platform_url"],
+    ),
+    ("POST", "/api/platform/callback"): Call(
+        410,
+        body=lambda w, o: {"state": "nostate", "iss": "https://wg.example.com"},
+        shows=lambda o: ["connect_expired"],
+    ),
+    ("GET", "/api/platform/pending/{link_id}"): Call(
+        410, shows=lambda o: ["link_expired"]
+    ),
+    ("DELETE", "/api/platform/pending/{link_id}"): Call(
+        410, shows=lambda o: ["link_expired"]
     ),
     # Project management
     ("GET", "/api/projects/{slug}"): Call(200, shows=lambda o: [o.name, str(o.root)]),
@@ -1156,6 +1177,12 @@ def test_the_admin_routes_are_the_planned_ones() -> None:
         ("DELETE", "/api/projects/{slug}"),
         ("PUT", "/api/projects/{slug}/config"),
         ("POST", "/api/projects/{slug}/init"),
+        # Linking to a platform adds a project, so it is the admin's (M2e
+        # section 4.8)
+        ("POST", "/api/platform/connect"),
+        ("POST", "/api/platform/callback"),
+        ("GET", "/api/platform/pending/{link_id}"),
+        ("DELETE", "/api/platform/pending/{link_id}"),
     }
 
 
@@ -1366,7 +1393,10 @@ def test_nothing_answers_signed_out_in_production(
             )
         bravo = at("bravo")
         # Signed out: every org route is a 401, MCP and setup do not exist.
+        # (the local-only routes are 404 in production, before current_user)
         for method, path in API_ROUTES:
+            if (path, method) in LOCAL_ONLY_ROUTES:
+                continue
             org = SimpleNamespace(
                 run_id=1, marker_sha="abc", session_id=1, owner_uid="x"
             )

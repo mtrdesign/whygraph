@@ -47,6 +47,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 from github_fake import _git as fixture_git
 from test_portal_app import (  # noqa: F401 -- fixtures
+    LOCAL_ONLY_ROUTES,
     NON_ORG_ROUTES,
     PRODUCTION_ORG_ROUTES,
     PUBLIC_AUTH_ROUTES,
@@ -194,6 +195,16 @@ ORG_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
 4.8), the GitHub App import page (M2d-2 section 4.4) and a project's
 connected portals (M2e section 4.4): org-scoped, so served on org hosts only,
 and swept with every other org-scoped route below."""
+
+PROD_API_ROUTES = [
+    (method, path)
+    for method, path in API_ROUTES
+    if (path, method) not in LOCAL_ONLY_ROUTES
+]
+"""The org-scoped routes a **production** portal serves: local mode's own
+``/api/platform/*`` are ``404`` there, before ``current_user``, so the session
+sweeps below leave them out (``test_portal_link.py`` asserts that ``404``)."""
+
 
 PRODUCTION_ONLY_ROUTES = (
     PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES | PRODUCTION_ORG_ROUTES | V1_ROUTES
@@ -553,10 +564,16 @@ def test_the_sweeps_cover_every_live_route(prod_world: ProdWorld) -> None:
     assert len(API_ROUTES) > 30
     assert set(ROUTE_REQUESTS) == set(API_ROUTES)
     assert set(PRODUCTION_REFUSALS) <= set(API_ROUTES)
+    # Every route production serves is swept; only the local-only ones are out.
+    assert {(p, m) for (m, p) in set(API_ROUTES) - set(PROD_API_ROUTES)} == (
+        LOCAL_ONLY_ROUTES
+    )
 
 
 @pytest.mark.parametrize(
-    ("method", "path"), API_ROUTES, ids=[f"{m} {p}" for m, p in API_ROUTES]
+    ("method", "path"),
+    PROD_API_ROUTES,
+    ids=[f"{m} {p}" for m, p in PROD_API_ROUTES],
 )
 def test_every_org_scoped_route_is_isolated_over_real_sessions(
     prod_world: ProdWorld, method: str, path: str
@@ -654,7 +671,7 @@ def test_without_a_session_every_non_public_route_needs_one_on_its_own_host(
     """
     w = prod_world
     w.sign_out()
-    for method, path in API_ROUTES:
+    for method, path in PROD_API_ROUTES:
         for prefix in (at("quokka"), at()):
             response = w.client.request(method, prefix + _url(path, w.quokka))
             assert response.status_code == 401, (prefix, method, path, response.text)
@@ -853,10 +870,10 @@ READER_ACTIONS = {str(action) for action in ROLE_ACTIONS[Role.READER]}
 
 READ_ROUTES = sorted(
     (m, p)
-    for (m, p) in API_ROUTES
+    for (m, p) in PROD_API_ROUTES
     if m == "GET" and ROUTE_ACTIONS[(p, m)] in READER_ACTIONS
 )
-OTHER_ROUTES = sorted(set(API_ROUTES) - set(READ_ROUTES))
+OTHER_ROUTES = sorted(set(PROD_API_ROUTES) - set(READ_ROUTES))
 
 
 def _is_binding_404(response: httpx.Response) -> bool:

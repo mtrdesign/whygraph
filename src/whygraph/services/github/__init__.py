@@ -33,7 +33,7 @@ Examples
 """
 
 from .access import RepoAccess, check_repo_access, github_env
-from .client import GitHubClient
+from .client import GitHubClient, remote_identity
 from .exceptions import GitHubError, RepoAccessError
 from .issue import Issue
 from .issues import Issues
@@ -54,4 +54,5 @@ __all__ = [
     "check_repo_access",
     "github_env",
     "github_token",
+    "remote_identity",
 ]

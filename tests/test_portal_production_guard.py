@@ -318,12 +318,27 @@ def test_hsts_only_for_an_https_base_url(
         assert refused.status_code == 403
 
 
-def test_local_mode_sends_no_production_headers(env: SimpleNamespace) -> None:
+def test_local_mode_sends_only_frame_headers(env: SimpleNamespace, spa: Path) -> None:
+    """Local pages refuse framing; the rest of the production set stays off.
+
+    ``/link`` and ``/connect/callback`` must never be framed (M2e plan
+    section 4.8), so every non-``/api`` / non-``/mcp`` response carries
+    ``X-Frame-Options`` and a ``frame-ancestors 'none'`` CSP - and nothing
+    else production adds (no ``Referrer-Policy``, ``X-Content-Type-Options``
+    or ``Cache-Control``, and the CSP is only the frame directive).
+    """
     with prod_portal(base_url=f"http://127.0.0.1:{PORT}") as client:
-        response = client.get("/api/portal/state")
-        assert response.status_code == 200
-        assert "x-frame-options" not in response.headers
-        assert "cache-control" not in response.headers
+        api = client.get("/api/portal/state")
+        assert api.status_code == 200
+        assert "x-frame-options" not in api.headers
+        assert "content-security-policy" not in api.headers
+        assert "cache-control" not in api.headers
+        page = client.get("/")
+        assert page.status_code == 200
+        assert page.headers["x-frame-options"] == "DENY"
+        assert page.headers["content-security-policy"] == "frame-ancestors 'none'"
+        for header in ("referrer-policy", "x-content-type-options", "cache-control"):
+            assert header not in page.headers, header
 
 
 def test_no_cors_preflight_is_ever_granted(world: SimpleNamespace) -> None:

@@ -44,11 +44,22 @@ services:
       # The GitHub OAuth App that signs people in (docs/deploy/production.md, "GitHub sign-in").
       WHYGRAPH_GITHUB_OAUTH_CLIENT_ID: ${WHYGRAPH_GITHUB_OAUTH_CLIENT_ID:?set WHYGRAPH_GITHUB_OAUTH_CLIENT_ID in .env}
       WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE: /run/secrets/github_oauth_client_secret
+      # The GitHub App that projects are imported through (docs/deploy/production.md,
+      # "The GitHub App"). Production refuses to start without all five.
+      WHYGRAPH_GITHUB_APP_SLUG: ${WHYGRAPH_GITHUB_APP_SLUG:?set WHYGRAPH_GITHUB_APP_SLUG in .env}
+      WHYGRAPH_GITHUB_APP_CLIENT_ID: ${WHYGRAPH_GITHUB_APP_CLIENT_ID:?set WHYGRAPH_GITHUB_APP_CLIENT_ID in .env}
+      WHYGRAPH_GITHUB_APP_CLIENT_SECRET_FILE: /run/secrets/github_app_client_secret
+      WHYGRAPH_GITHUB_APP_PRIVATE_KEY_FILE: /run/secrets/github_app_private_key
+      WHYGRAPH_GITHUB_APP_WEBHOOK_SECRET_FILE: /run/secrets/github_app_webhook_secret
     secrets:
       - postgres_password
       - github_oauth_client_secret
+      - github_app_client_secret
+      - github_app_private_key
+      - github_app_webhook_secret
     volumes:
-      # secret.key (the key to every stored secret) and portal.lock live here.
+      # secret.key (the key to every stored secret), portal.lock, the projects'
+      # clones (repos/<org>/<slug>) and the scan run files (runs/) live here.
       - portal-data:/data
     networks:
       - internal
@@ -89,3 +100,9 @@ secrets:
     file: ./secrets/postgres_password
   github_oauth_client_secret:
     file: ./secrets/github_oauth_client_secret
+  github_app_client_secret:
+    file: ./secrets/github_app_client_secret
+  github_app_private_key:
+    file: ./secrets/github_app_private_key.pem
+  github_app_webhook_secret:
+    file: ./secrets/github_app_webhook_secret

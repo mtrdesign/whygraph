@@ -5,9 +5,10 @@ picks up new commits and backfills what's missing.
 
 **In the portal you don't run it by hand.** The [portal](../portal/index.md) runs every scan itself, as
 a `whygraph scan` child process in the project's folder: the first scan during
-[project setup](../portal/projects.md#first-scan), then **Scan now**, **Sync now** (GitHub clones), the
-git hooks, and a periodic catch-up. Progress and the log of each run are on the project's **Scans**
-page. How runs are triggered, queued and coalesced is in the
+[project setup](../portal/projects.md#first-scan), then **Scan now**, the git hooks, and a periodic
+catch-up (in [production mode](../deploy/production.md#keeping-projects-current), GitHub's push
+webhooks and an hourly check instead). Progress and the log of each run are on the project's
+**Scans** page. How runs are triggered, queued and coalesced is in the
 [CLI reference](../reference/cli.md#scans-in-the-portal).
 
 The command is still there for headless use - a CI job, or a checkout that is not in the portal:
@@ -123,8 +124,8 @@ whose checkout moved past its last scanned commit, and repeats that check every 
 ### Choosing which hooks to install
 
 `[scan].hooks` governs the set. In the portal it is the four **Git hooks** checkboxes in a project's
-configuration, and saving a change reconciles `.git/hooks` to match. GitHub clones get no hooks (their
-**Sync** does the same job).
+configuration, and saving a change reconciles `.git/hooks` to match. A production portal's copies of
+GitHub repositories get no hooks (GitHub's push webhooks do the same job).
 
 ```toml
 [scan]

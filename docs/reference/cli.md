@@ -141,16 +141,18 @@ a transaction-mode pooler such as PgBouncer's makes the lock meaningless. In loc
 are rejected. `WHYGRAPH_DEV_ORIGINS` (comma-separated origins, e.g. `http://localhost:5173`) adds
 origins for a local frontend dev server.
 
-Five more variables select and shape [production mode](../deploy/production.md) - `WHYGRAPH_MODE`,
-`WHYGRAPH_BASE_URL` and `WHYGRAPH_TRUSTED_PROXIES`, plus the two required GitHub sign-in ones,
-`WHYGRAPH_GITHUB_OAUTH_CLIENT_ID` and `WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE` (two optional ones
-point at GitHub Enterprise Server); see
+More variables select and shape [production mode](../deploy/production.md) - `WHYGRAPH_MODE`,
+`WHYGRAPH_BASE_URL` and `WHYGRAPH_TRUSTED_PROXIES`, the two required GitHub sign-in ones,
+`WHYGRAPH_GITHUB_OAUTH_CLIENT_ID` and `WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE`, and the five
+required GitHub App ones, `WHYGRAPH_GITHUB_APP_SLUG`, `WHYGRAPH_GITHUB_APP_CLIENT_ID`,
+`WHYGRAPH_GITHUB_APP_CLIENT_SECRET_FILE`, `WHYGRAPH_GITHUB_APP_PRIVATE_KEY_FILE` and
+`WHYGRAPH_GITHUB_APP_WEBHOOK_SECRET_FILE` (two optional ones point at GitHub Enterprise Server); see
 [Configuration](configuration.md#environment-variables). In production the `Host` is the base host or
 an organization's subdomain, and the guard described above is replaced by the one on the
 [security model](../portal/security.md#production-mode) page.
 
 The portal never follows a symbolic link out of a project's folder, since a repository's content
-(especially a GitHub clone's) is not trusted. When `.whygraph/`, `.codegraph/`, either database,
+(especially a production portal's copy of a GitHub repository) is not trusted. When `.whygraph/`, `.codegraph/`, either database,
 `.gitignore`, `whygraph.toml`, a portal marker, an agent config file or a bundled agent folder
 (such as `.claude/`) is a symlink, the portal refuses it with an `unsafe_path` error: Initialize,
 the Explorer, Chat, the MCP endpoint and scans all stop for that project, a `whygraph.toml` link is
@@ -168,19 +170,24 @@ scan. At most two projects scan at once.
 |---|---|---|
 | `initial` | Any request while the project has no successful scan yet | No (structure only) |
 | `hook` | A git hook after a commit, merge, rebase or checkout, and the catch-up check | No, and offline (`--no-remote`) |
-| `sync`, `poll` | The **Sync** button, and a poll every 15 minutes, for projects cloned from GitHub | No |
+| `push`, `reconcile` | Production mode: a push to the default branch (the GitHub App's webhook), and the hourly check of the default branch on GitHub | No |
 | `manual` | **Scan now** | Yes (unless turned off for that run) |
 | `describe` | **Describe now** on the first-scan estimate | Yes |
 
 The first scan never calls the LLM. Afterwards the project shows how many commits a full scan would
 describe, with which model and a token (and, for known models, cost) estimate, so you choose when
-to spend. A sync fetches the default branch, fast-forwards the checkout and rescans only when that
-moved it. When the portal starts, and on every poll, it also rescans a local project whose checkout
-moved past the last scanned commit while the portal was not running.
+to spend. In local mode, when the portal starts and every 15 minutes, it also rescans a local
+project whose checkout moved past the last scanned commit while the portal was not running.
+
+In production mode every run of a project first **syncs** its server copy: it fetches the default
+branch with a repository-scoped installation token and checks it out, then scans. A `push` or
+`reconcile` run scans only when the branch moved past the last scanned commit; **Scan now**, `initial` and `describe`
+always scan. The scan gets the token through a `0600` file named by `WHYGRAPH_GITHUB_TOKEN_FILE`,
+rewritten before it expires, never through its environment. `hook` scans exist only in local mode.
 
 Only an allowlist of the portal's environment reaches a scan (`PATH`, `HOME`, locale, `TZ`, the TLS
-bundle and proxy variables); API keys and GitHub tokens come only from the portal's own settings,
-and never appear in run files: each run's progress (`runs/<id>.jsonl`) and log (`runs/<id>.log`)
+bundle and proxy variables); API keys and GitHub tokens come only from the portal's own settings (in
+production, from the GitHub App), and never appear in run files: each run's progress (`runs/<id>.jsonl`) and log (`runs/<id>.log`)
 under the data directory show a key as its last four characters. Stopping the portal stops running
 scans and records them as `interrupted`.
 

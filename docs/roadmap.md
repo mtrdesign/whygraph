@@ -40,9 +40,9 @@ Larger, net-new pieces that aren't built yet:
   questions that span repos are not built.
 - **A multi-user, remote portal** - local mode is single-user and loopback-only. A
   [production mode](deploy/production.md) with logins, sessions and organizations on their own
-  subdomains is built but unreleased; it holds no projects yet. Per-agent bearer tokens, and projects
-  in a production portal, are what unlock the full [service model](deploy/service.md) beyond one
-  machine.
+  subdomains, whose projects are imported from GitHub through a GitHub App, is built but unreleased.
+  It has no MCP endpoint yet: per-agent bearer tokens, and agents reaching a production portal's
+  projects, are what unlock the full [service model](deploy/service.md) beyond one machine.
 - **Per-branch CodeGraph index** - the code index is still single-branch, so switching branches and
   re-syncing rewrites it. WhyGraph's *own* database no longer needs this: it keeps one database and
   [computes branch membership](guide/scanning.md#how-whygraph-sees-branches) per commit, recomputed

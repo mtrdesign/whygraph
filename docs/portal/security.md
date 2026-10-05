@@ -85,8 +85,9 @@ the checks change:
   that sets a cookie are `no-store`; over `https` there is HSTS with `includeSubDomains`. A full
   script content security policy is not part of this release.
 - **Throttling.** Password sign-in failures are limited per account and address, GitHub sign-in starts
-  and callbacks, setup and reset per address, and adding members per organization (60 an hour, so the
-  add form cannot be used to probe which usernames have accounts).
+  and callbacks, setup and reset per address, adding members per organization (60 an hour, so the
+  add form cannot be used to probe which usernames have accounts), and imports per organization (30
+  an hour). Webhook deliveries are not throttled: the signature check rejects a forged one first.
 - **Roles.** Members read and use projects; admins also manage people and per-project settings and
   keys; only owners touch owners and change the organization's settings and organization-level keys.
   Chat sessions are private to the user who started them. See
@@ -97,8 +98,31 @@ the checks change:
   WhyGraph alone. See [why](../deploy/production.md#why-a-dedicated-domain).
 - **Instance admins** can read every organization, read-only, and every such request is logged.
   Authentication events go to the `whygraph.portal.audit` log.
-- **What is off.** No shared folders, no projects added, no `/mcp`, no git-hook scans, no repository
-  access: production organizations hold no projects yet.
+- **Projects come only from GitHub, through the GitHub App.** The server refuses any other source.
+  The app's private key never leaves the portal process: for each fetch and scan the portal mints
+  an **installation token scoped to the one repository** and to read-only access (contents,
+  metadata, pull requests, issues), valid for at most an hour. A scan receives it through a file in
+  the data directory (`runs/<id>.token`, mode `0600`, written atomically), never its environment;
+  the portal rewrites the file before the token expires and deletes it when the scan ends, and
+  leftovers are removed at start. CodeGraph and `claude` never see that file's name.
+- **No personal access tokens.** Storing a GitHub token is refused in production; every GitHub call
+  a project makes uses the app's token. The import page's user authorization (8 hours) is kept in
+  memory for the session, never in the database or a response, and must belong to the GitHub
+  account the user signed in with.
+- **Webhooks are verified first.** `POST /github/webhook` is served only on the base host. The body
+  is capped at 5 MiB, `X-Hub-Signature-256` is required and compared in constant time against the
+  raw body **before** anything is parsed (the older SHA-1 header alone is refused), and a missing or
+  wrong signature is answered `401` and logged as `webhook_rejected`. A replayed delivery id is
+  ignored. Projects are found by GitHub's numeric repository and installation ids, never by name.
+- **A repository that tracks WhyGraph's state is refused.** A repository whose commits contain
+  `.whygraph/` or `.codegraph/` is not imported, and a fetch that finds them on the default branch
+  fails before the checkout: a committed database would otherwise be served to every member. See
+  [Run in production](../deploy/production.md#repositories-that-track-whygraphs-state).
+- **Git ignores global and system config.** Every git process for a server copy runs with
+  `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`, so an `insteadOf`, `http.*` or `include`
+  in the host's git config cannot redirect a fetch. `origin` is set from the repository id before
+  every fetch, and the checkout runs with hooks disabled.
+- **What is off.** No shared folders, no local repositories, no `/mcp`, no git-hook scans.
 
 ## Keys and tokens
 
@@ -114,8 +138,10 @@ the checks change:
 - A scan runs as a child process with an allowlisted environment (`PATH`, `HOME`, locale, `TZ`, TLS and
   proxy variables). Keys and tokens reach it only as the variables that one scan needs, and any key
   that appears in a run's progress or log file is masked to its last four characters.
-- A GitHub token used for a clone is handed to git through a host-scoped credential helper. It is not
-  in `.git/config`, argv, logs or run files, and is not sent to any other host.
+- A GitHub token used for a fetch (in production, the installation token) is handed to git through a
+  host-scoped credential helper. It is not in `.git/config`, argv, logs or run files, and is not sent
+  to any other host. Anything shaped like a GitHub token in a run's output is masked, even when a
+  tool already masked part of it.
 - Changing a provider's endpoint clears the key stored for the old one, and an endpoint found in a
   repository's `whygraph.toml` is never imported. A committed file cannot redirect your key to another
   server.
@@ -151,8 +177,10 @@ and never runs a scan itself.
 
 ### Clones
 
-Only `https://github.com/<owner>/<repo>` URLs are cloned, with a restricted protocol list. The portal
-removes a failed clone it created and will not delete a directory it did not.
+Local mode clones nothing: a local project is a folder you shared. In production the portal clones
+only a repository the GitHub App covers, from `WHYGRAPH_GITHUB_URL` (`https` except on loopback), with
+a restricted protocol list, into `repos/<org>/<project>` under its data directory. It removes a failed
+clone it created and will not delete a directory it did not.
 
 ## What the portal writes to your repository
 

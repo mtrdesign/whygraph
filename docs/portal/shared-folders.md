@@ -5,8 +5,8 @@ it starts. Each shared folder is mounted into the container at the **same path**
 so `/Users/you/Work/api` is `/Users/you/Work/api` inside too. That is what lets the portal, your
 editor and your git hooks all agree on where a repository lives.
 
-A local project has to live under a shared folder. A GitHub project added by URL does not: the portal
-clones it into its own data directory.
+A project has to live under a shared folder. Local mode does not clone repositories: clone one into a
+shared folder yourself, then add it.
 
 ## Share a folder
 

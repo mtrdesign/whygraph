@@ -83,7 +83,7 @@ Inside the data directory:
 | `secret.key` | The encryption key for the keys and tokens stored in the database |
 | `backups/` | Database dumps from `whygraph backup` and the automatic pre-upgrade dump |
 | `runs/` | Scan progress and log files |
-| `repos/` | GitHub clones |
+| `repos/` | Production mode only: the copies of the repositories imported from GitHub |
 
 The data directory is created with mode `0700`, owned by you, and the database files in it are owned
 by you too. Keep it out of every project folder: the portal refuses to share a folder that contains it

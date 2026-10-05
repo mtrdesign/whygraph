@@ -38,7 +38,6 @@ flowchart LR
 | The encryption key for those keys and tokens, and database backups | The data directory, as `secret.key` and `backups/` |
 | A project's evidence, descriptions, rationale cache and chat history | The repository itself, in `.whygraph/whygraph.db` |
 | A project's CodeGraph index | The repository itself, in `.codegraph/` |
-| Clones of GitHub repositories you added by URL | Under the data directory, in `repos/<slug>` |
 | The folders, port and image the portal was started with | `~/.config/whygraph` on your host |
 
 Because each project's databases stay in its own repository, removing a project from the portal
@@ -70,7 +69,7 @@ never deletes your history, and a 1.x repository keeps the data it already has. 
 
     ---
 
-    A local repo or a GitHub URL, configure, initialize, first scan.
+    A repository from a shared folder, configure, initialize, first scan.
 
     [:octicons-arrow-right-24: Adding projects](projects.md)
 

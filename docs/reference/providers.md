@@ -28,10 +28,11 @@ remote = "origin"     # the git remote whose URL is inspected
 
 The crawl uses the `gh` CLI, inside the image.
 
-**In the portal**, enter the GitHub token in the project's configure step (or when you add a GitHub
-repository by URL). It is stored encrypted, checked against GitHub when you enter it, and handed to the
+**In the portal**, enter the GitHub token in the project's configure step (or when you add the
+repository). It is stored encrypted, checked against GitHub when you enter it, and handed to the
 scan's `gh` calls as `GH_TOKEN` for that scan only. `GH_TOKEN` and `GITHUB_TOKEN` in your shell do **not**
-reach the portal.
+reach the portal. In [production mode](../deploy/production.md#projects) there is no token to enter:
+the crawl uses the GitHub App's installation token, scoped to the one repository.
 
 **Headless** (`whygraph scan` outside the portal), provide a token one of three ways, checked in this
 order - the first one found wins and is exported as `GH_TOKEN` for that scan's `gh` calls:

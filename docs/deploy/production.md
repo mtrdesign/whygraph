@@ -12,8 +12,10 @@ authentication required), sessions live on the server, and every organization ge
 `<org>.<your host>`. It is the same image and the same portal as [local mode](docker.md), selected by
 `WHYGRAPH_MODE=production` at the first start; the mode can't be changed afterwards.
 
-This release gets you identity and organizations. Production organizations hold **no projects yet** -
-see [what isn't there yet](#what-isnt-there-yet).
+An organization's projects come **from GitHub**: its owners and admins import repositories through a
+[GitHub App](#the-github-app) you create, the portal keeps its own copy of each one on the server,
+and GitHub's push webhooks keep that copy current. Shared folders and local repositories are a
+local-mode feature; see [what isn't there yet](#what-isnt-there-yet) for the rest.
 
 ## What you need
 
@@ -22,6 +24,9 @@ see [what isn't there yet](#what-isnt-there-yet).
 - DNS you can edit, and an API token for the DNS host if you use the bundled Caddy build (Cloudflare
   in the example).
 - A **GitHub OAuth App** for sign-in; see [GitHub sign-in](#github-sign-in).
+- A **GitHub App** for importing projects; see [The GitHub App](#the-github-app). GitHub delivers its
+  webhooks to the base host, so the host should be reachable from GitHub (see
+  [Keeping projects current](#keeping-projects-current) for an instance that is not).
 
 ### Why a dedicated domain
 
@@ -109,12 +114,53 @@ redacts its query string from the access log.
 **GitHub Enterprise Server.** Set `WHYGRAPH_GITHUB_URL` to the server's address (default
 `https://github.com`) and `WHYGRAPH_GITHUB_API_URL` to its API (default `https://api.github.com`; on
 Enterprise Server it is `<url>/api/v3`). `http` is accepted only for `localhost` and loopback
-addresses.
+addresses. Both apps use the same two addresses, and git clones and fetches from
+`WHYGRAPH_GITHUB_URL` too. The pull request and issue crawl still works only for `github.com`: on
+Enterprise Server a scan reads the git history and skips that crawl.
 
-!!! note "Importing projects will use a second app later"
-    The OAuth App only proves who someone is. Reading repositories, when production gains projects,
-    will use a separate GitHub App that an organization owner installs and scopes to the repositories
-    they choose. The sign-in app never gets repository access.
+!!! note "Two apps, two jobs"
+    The OAuth App only proves who someone is and never gets repository access. Repositories are read
+    through a separate [GitHub App](#the-github-app), which the people who own them install and scope
+    to the repositories they choose.
+
+## The GitHub App
+
+Projects are imported through **one GitHub App** for your instance. You create it once; every
+organization on your instance uses it, and the GitHub accounts and organizations that own the
+repositories install it. Create it under your own account or a GitHub organization: Settings,
+Developer settings, GitHub Apps, New GitHub App.
+
+| Setting | Value |
+|---|---|
+| GitHub App name | Anything; its URL name (`github.com/apps/<slug>`) is the **slug** the portal needs. |
+| Homepage URL | Your base URL, `https://whygraph.example.com` |
+| Callback URL | `<your base URL>/auth/github-app`, as the **first** callback URL (GitHub sends an installation back to the first one). |
+| Expire user authorization tokens | On |
+| Request user authorization (OAuth) during installation | On |
+| Redirect on update | On, so configuring the installation returns to the portal too |
+| Webhook | Active, URL `<your base URL>/github/webhook`, with a secret of **at least 32 characters** (`openssl rand -hex 32`) |
+| Repository permissions | **Contents**, **Metadata**, **Pull requests** and **Issues**, all **read-only**. Nothing else, and no account permissions |
+| Subscribe to events | **Push** and **Repository**. GitHub always sends the installation events, which the portal uses too |
+| Where can this GitHub App be installed? | **Any account**, so that people can install it on their own GitHub organizations |
+
+Then, on the app's page, **generate a client secret** and **generate a private key** (GitHub downloads
+a `.pem` file). The portal needs five values, and **all five are required in production**: without
+them the start stops with exit code `2` and a message naming each one that is missing. The files are
+read once at start; the private key must be an unencrypted RSA key, and a webhook secret shorter than
+32 characters is refused.
+
+| Variable | Value |
+|---|---|
+| `WHYGRAPH_GITHUB_APP_SLUG` | The app's URL name. |
+| `WHYGRAPH_GITHUB_APP_CLIENT_ID` | The app's client ID (not its numeric app ID). |
+| `WHYGRAPH_GITHUB_APP_CLIENT_SECRET_FILE` | The path of a file holding the client secret. |
+| `WHYGRAPH_GITHUB_APP_PRIVATE_KEY_FILE` | The path of the private key's `.pem` file. |
+| `WHYGRAPH_GITHUB_APP_WEBHOOK_SECRET_FILE` | The path of a file holding the webhook secret. |
+
+**The private key never leaves the portal process.** For each fetch the portal asks GitHub for an
+installation token **scoped to the one repository** and to read-only access, valid for at most an
+hour. A scan gets that token through a file only it can read, and nothing else in the instance
+holds it. See the [security model](../portal/security.md#production-mode).
 
 ## The compose bundle
 
@@ -138,18 +184,24 @@ openssl rand -base64 32 > secrets/postgres_password
 chmod 600 secrets/postgres_password
 # the OAuth App's client secret, from GitHub (see "GitHub sign-in" above)
 printf '%s' 'the-client-secret' > secrets/github_oauth_client_secret
-chmod 600 secrets/github_oauth_client_secret
+# the GitHub App's client secret, private key and webhook secret (see "The GitHub App" above)
+printf '%s' 'the-app-client-secret' > secrets/github_app_client_secret
+cp /path/to/the-downloaded.private-key.pem secrets/github_app_private_key.pem
+printf '%s' 'the-webhook-secret' > secrets/github_app_webhook_secret   # the one set on the app
+chmod 600 secrets/*
 docker compose up -d --build
 ```
 
-`.env` holds four values: `WHYGRAPH_BASE_URL` (for example `https://whygraph.example.com`, scheme and
-host, no path), `WHYGRAPH_HOST` (the same host without the scheme), `CLOUDFLARE_API_TOKEN` and
-`WHYGRAPH_GITHUB_OAUTH_CLIENT_ID`. `secrets/` holds two files: `postgres_password` and
-`github_oauth_client_secret`. `.env` and `secrets/` are gitignored. Both secrets are handed to the
-containers that need them as files (`/run/secrets/...`, named by `WHYGRAPH_DATABASE_PASSWORD_FILE` and
-`WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE`) and never as environment values. The bundle sets the
-GitHub variables for the default `github.com`; for Enterprise Server add `WHYGRAPH_GITHUB_URL` and
-`WHYGRAPH_GITHUB_API_URL` to the portal's environment.
+`.env` holds six values: `WHYGRAPH_BASE_URL` (for example `https://whygraph.example.com`, scheme and
+host, no path), `WHYGRAPH_HOST` (the same host without the scheme), `CLOUDFLARE_API_TOKEN`,
+`WHYGRAPH_GITHUB_OAUTH_CLIENT_ID`, `WHYGRAPH_GITHUB_APP_SLUG` and `WHYGRAPH_GITHUB_APP_CLIENT_ID`.
+`secrets/` holds five files: `postgres_password`, `github_oauth_client_secret`,
+`github_app_client_secret`, `github_app_private_key.pem` and `github_app_webhook_secret`. `.env` and
+`secrets/` are gitignored. Every secret is handed to the containers that need it as a read-only file
+(`/run/secrets/...`, named by `WHYGRAPH_DATABASE_PASSWORD_FILE` and the `..._FILE` GitHub variables)
+and never as an environment value. The bundle sets the GitHub variables for the default `github.com`;
+for Enterprise Server add `WHYGRAPH_GITHUB_URL` and `WHYGRAPH_GITHUB_API_URL` to the portal's
+environment.
 
 The base URL is the one value the portal and the browser must agree on, because an exact `Origin`
 comparison is made against it. Use `https` in production; plain `http` is accepted only for hosts
@@ -209,9 +261,9 @@ acceptance step, and the person sees the organization in their picker at once. A
 
 | Who | Can |
 |---|---|
-| **Member** | Read the organization and its projects. |
-| **Admin** | Everything a member can, plus manage people - add members and admins, change their roles and remove them - and the per-project settings and keys. Cannot make or touch an owner. |
-| **Owner** | Everything an admin can, plus make or demote an owner, remove an owner, and change the organization's settings and organization-level keys. |
+| **Member** | Read the organization and its projects, use Chat and start a scan. |
+| **Admin** | Everything a member can, plus import and remove projects, manage people - add members and admins, change their roles and remove them - and the per-project settings and keys. Cannot make or touch an owner. |
+| **Owner** | Everything an admin can, plus make or demote an owner, remove an owner, change the organization's settings and organization-level keys, and [delete the organization](#deleting-an-organization). |
 
 - **The last owner is protected.** An organization's final owner cannot be demoted, removed or leave.
 - **Leaving.** Anyone can leave an organization from its members page. Someone added against their will
@@ -246,12 +298,110 @@ list of organizations and the [self-check](#the-self-check).
 
 Sessions last 30 days at most and expire after 7 days idle.
 
+## Projects
+
+A production project is a repository on GitHub. The portal keeps its own copy under the data
+directory, at `repos/<org>/<project>`, scans its **default branch**, and keeps the project's WhyGraph
+and CodeGraph databases in that copy. Nothing is ever written to the repository on GitHub.
+
+### Importing a repository
+
+Owners and admins choose **Import from GitHub** on the Projects page. The wizard has three steps:
+**Source**, **Configure** and **First scan**. There is no Initialize step: the import itself sets
+the project up, and a server copy gets no agent files, git hooks or marker files.
+
+1. **Connect GitHub.** The first time, the page sends you to GitHub to authorize the app for your
+   account. It must be the **same GitHub account you signed in with**; another one is refused. The
+   portal keeps that authorization in memory for your session (at most 8 hours), never in the
+   database; after a restart of the portal you pass through GitHub again.
+2. **Pick an installation.** The page lists the app's installations you can see on GitHub. **Install
+   / configure on GitHub** installs the app on another account or organization, or changes which
+   repositories an installation covers, and brings you back.
+3. **Pick a repository.** Repositories load 100 at a time (**Load more**), with a filter over the
+   loaded ones; those already in this organization are disabled.
+
+An import succeeds only if, at that moment, **you** can see the installation and read the
+repository on GitHub, and the installation covers it. An installation is not tied to one WhyGraph
+organization: whoever can see a repository through it can import it into an organization they
+administer, and the same repository can be a project in two organizations, each with its own copy.
+Within one organization a repository can be imported once. Imports are throttled to 30 an hour per
+organization. The bootstrap admin signs in with a password, not GitHub, so it cannot import.
+
+A production project's settings show its repository and installation account read-only. Its
+remote, default branch and hooks cannot be changed, and a personal access token is refused (the
+GitHub key is a local-mode setting): every GitHub call uses the app's installation token. The pull
+request and issue crawl can still be switched off.
+
+Installing the app from GitHub's own pages works too, but the redirect that follows asks you to
+start from your organization in WhyGraph and choose Import from GitHub.
+
+### Keeping projects current
+
+- **A push** to a project's default branch reaches the portal as a webhook and queues a fetch and a
+  scan within seconds. Pushes to other branches and tags are ignored, and a burst of pushes becomes
+  one follow-up run.
+- **Every hour**, and when the portal starts, it compares each project's default branch on GitHub
+  with the last scanned commit and fetches when it moved. That catches the pushes whose webhooks
+  were missed while the portal was down.
+- **Scan now** always fetches first, then scans.
+
+A fetch follows a renamed or transferred repository (a project is tracked by GitHub's numeric
+repository id, never by its name, so a reused name never brings in someone else's history), a new
+default branch, and a force-push: the copy is reset to GitHub's branch, and the run notes that the
+history was rewritten.
+
+An instance that GitHub cannot reach still works, at the pace of the hourly check plus **Scan now**.
+
+### When access is lost
+
+When GitHub stops letting the app read a repository, the project shows an **Access lost** badge with
+the reason:
+
+| Reason | What happened |
+|---|---|
+| The WhyGraph app can no longer read this repository | The app was uninstalled or suspended, or the installation no longer includes the repository (or GitHub refused a token for it). |
+| GitHub refused git access to this repository | A fetch with a fresh token was refused. |
+| The repository was deleted on GitHub | GitHub reported the repository deleted. |
+
+The Explorer and Chat keep serving what was already scanned; scans are refused until access
+returns. Owners and admins get **Reconnect on GitHub**, the app's install / configure page. The badge
+**clears itself**: at once when the app is installed again or the repository is added back to the
+installation, otherwise at the next hourly check that gets a token for the repository (which also
+brings back a repository restored on GitHub). A project is **never removed automatically**; its
+history is evidence. **Remove** works as usual.
+
+### Repositories that track WhyGraph's state
+
+A repository that commits `.whygraph/` or `.codegraph/` is refused at import: those folders hold the
+databases the portal builds and serves to every member, and a committed copy would be served as if
+the portal had built it. If the default branch starts tracking them later, the next fetch fails and
+the project is marked "The default branch tracks .whygraph/ or .codegraph/". Remove them from the
+repository and push; the next fetch checks again and clears the mark.
+
+### Removing a project
+
+Owners and admins remove a project from its settings, by typing the project's name. That deletes the
+server copy - with its history, descriptions, rationale cards and chat sessions - and every scan of
+it. The repository on GitHub is not touched; importing it again starts from scratch.
+
+## Deleting an organization
+
+An **owner** deletes an organization from its **Settings** page (the danger zone), by typing the
+organization's slug. It is **immediate**, with no grace period and no undo: running scans are
+cancelled, then the projects, their server copies and scan files, the memberships, the settings and
+the keys go in one operation. **The slug is retired forever** - nobody can create an organization
+with it again. Members keep their accounts and sessions, and the organization's address stops
+answering.
+
+If a fetch is still running, the deletion stops with "A sync is finishing - try again in a minute"
+and nothing is deleted. An instance admin who is not an owner cannot delete an organization.
+
 ## The security event log
 
 The portal writes one structured `INFO` record on the `whygraph.portal.audit` logger for each:
 bootstrap claimed, password sign-in (success and failure), sign-out, password change, reset link
 issued and used, admin granted or revoked, organization created, and instance-admin read request,
-plus these GitHub and member events:
+plus these GitHub, member, project and organization events:
 
 | Event | When |
 |---|---|
@@ -262,6 +412,12 @@ plus these GitHub and member events:
 | `member_added`, `member_add_refused` | A member was added, or the attempt was refused (with the reason and the username tried). |
 | `member_role_changed`, `member_removed`, `member_left` | A role changed, or someone was removed or left. |
 | `user_disabled`, `user_enabled` | An instance admin disabled or enabled an account. |
+| `github_app_authorized` | Someone authorized the GitHub App, or installed it, from the import page. |
+| `github_account_mismatch` | That authorization was for a different GitHub account than the signed-in one, and was refused. |
+| `project_imported` | A repository was imported. |
+| `project_access_lost`, `project_access_restored` | A project lost its GitHub access (with the reason), or got it back. |
+| `webhook_rejected` | A webhook delivery had a missing or wrong signature. |
+| `org_deleted` | An owner deleted an organization (with its project count). |
 
 Each carries the event, the user, the target user, the client address and the host. A password
 sign-in failure shows only the first 3 characters of the email and its domain. No token, code, state,
@@ -273,14 +429,16 @@ of this release, so ship the log somewhere if you need history.
 ## What isn't there yet
 
 - **Email**: no verification and no reset mail (GitHub sign-in needs none), and no invitations: members are added directly.
-- **Projects**: production organizations hold none. Adding a project, shared folders and the
-  Initialize step are refused, and there is no `/mcp` endpoint in production.
+- **Agents and MCP**: there is no `/mcp` endpoint in production, and a server copy gets no agent
+  files or git hooks.
+- **Projects from anywhere but GitHub**: shared folders and local repositories are refused, and
+  only the default branch is scanned. On GitHub Enterprise Server the pull request and issue crawl
+  is skipped.
 - **Closing sign-up** (see above).
 - **Other sign-in providers.** GitHub is the only one, and its two-factor authentication is required;
   there is no GitHub-less sign-in for end users and no multi-factor step for the bootstrap password
   account.
-- **Recovery of a locked-out admin**, **deleting** an organization or a user, and a list of your
-  sessions.
+- **Recovery of a locked-out admin**, **deleting** a user, and a list of your sessions.
 
 ## Trusted proxies
 
@@ -306,7 +464,9 @@ Two things hold the instance's state, and both must be backed up:
   encrypted keys. See [Backup and restore](../portal/backup.md) for dumping and restoring.
 - **`/data` in the portal container** (the `portal-data` volume). It holds **`secret.key`**, the key to
   every stored secret: a database dump without it is unreadable for the secrets, and without it the
-  keys have to be entered again.
+  keys have to be entered again. It also holds the projects' server copies (`repos/`), and with them
+  each project's WhyGraph database: its descriptions, rationale cards and chat sessions. Those cannot
+  be fetched from GitHub again; a re-import starts from scratch.
 
 Back up `secret.key` together with each dump, and treat the pair as sensitive as the live data.
 

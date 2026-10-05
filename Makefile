@@ -1,7 +1,7 @@
 # WhyGraph dev tasks. Run `make` (or `make help`) to list targets.
 #
-#   make dev-local    develop natively  (portal :8777 + Vite HMR :5173, auto-restart)
-#   make dev-production  the same in production mode (whygraph.localhost:5173; not beside dev-local)
+#   make dev-local    develop natively  (portal :8777 + Vite HMR :5174, auto-restart)
+#   make dev-production  the same in production mode (whygraph.localhost:5173; runs beside dev-local)
 #   make dev-docker   develop in Docker (the same, inside the image via the real shim)
 #   make prod         the image exactly as released, through the shim (:8777)
 #   make check        everything CI runs, plus e2e and the release smoke test
@@ -71,12 +71,13 @@ help:  ## List available targets
 dev:
 	@echo "pick one: 'make dev-local' (native, fastest) or 'make dev-docker' (inside the image)"; exit 2
 
-dev-local: node-check dev-fixtures dev-db  ## Develop natively: portal :8777 (auto-restart) + Vite HMR :5173 - open :5173
+dev-local: node-check dev-fixtures dev-db  ## Develop natively: portal :8777 (auto-restart) + Vite HMR :5174 - open :5174
 	WHYGRAPH_DATABASE_URL="$(DEV_DATABASE_URL)" \
-	WHYGRAPH_SHARED_FOLDERS="$(DEV)/repos" WHYGRAPH_DEV_ORIGINS=http://localhost:5173,http://127.0.0.1:5173 \
+	WHYGRAPH_SHARED_FOLDERS="$(DEV)/repos" WHYGRAPH_DEV_ORIGINS=http://localhost:5174,http://127.0.0.1:5174 \
+	WHYGRAPH_DEV_PLATFORM_HTTP=1 NO_PROXY=.localhost \
 		$(UV_RUN) python scripts/dev_portal.py -- --data "$(DEV)/local/data" --port $(DEV_PORT)
 
-dev-production: dev-github-check node-check dev-fixtures dev-db  ## Develop in production mode: portal :8778 + Vite :5173 on whygraph.localhost:5173 (not beside dev-local)
+dev-production: dev-github-check node-check dev-fixtures dev-db  ## Develop in production mode: portal :8778 + Vite :5173 on whygraph.localhost:5173 (runs beside dev-local)
 	@docker exec $(PG_DEV_NAME) psql -U whygraph -d whygraph -tAc "SELECT 1 FROM pg_database WHERE datname='whygraph_prod'" | grep -q 1 \
 		|| docker exec $(PG_DEV_NAME) createdb -U whygraph whygraph_prod
 	@mkdir -p "$(DEV)/production/data"
@@ -116,9 +117,9 @@ dev-production: dev-github-check node-check dev-fixtures dev-db  ## Develop in p
 	env -u WHYGRAPH_SHARED_FOLDERS -u WHYGRAPH_DEV_ORIGINS \
 	WHYGRAPH_MODE=production WHYGRAPH_BASE_URL=http://whygraph.localhost:5173 \
 	WHYGRAPH_DATABASE_URL="$(DEV_PROD_DATABASE_URL)" \
-		$(UV_RUN) python scripts/dev_portal.py --preserve-host -- --data "$(DEV)/production/data" --port $(DEV_PROD_PORT)
+		$(UV_RUN) python scripts/dev_portal.py --preserve-host --vite-port 5173 -- --data "$(DEV)/production/data" --port $(DEV_PROD_PORT)
 
-dev-docker: dev-fixtures dev-image  ## Develop in Docker: the same, inside the image via the real shim - open :5173
+dev-docker: dev-fixtures dev-image  ## Develop in Docker: the same, inside the image via the real shim - open :5174
 	sh scripts/dev_docker.sh dev "$(IMAGE)" "$(DEV)" $(DEV_PORT)
 
 prod: dev-fixtures image  ## The image exactly as released, through the shim - open :8777

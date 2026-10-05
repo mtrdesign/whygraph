@@ -62,6 +62,8 @@ export function FirstScanStep({ slug }: { slug: string }) {
 
   if (project.isLoading) return <p className="text-sm text-muted-foreground">Loading…</p>;
   const scanned = !!project.data?.last_scan_at;
+  // A linked project's history is on the platform: nothing to describe, no cost to estimate.
+  const linked = project.data?.source === "platform";
 
   // A run is in flight (or just finished).
   if (attached !== null && run.finished === null) {
@@ -114,6 +116,20 @@ export function FirstScanStep({ slug }: { slug: string }) {
     );
   }
 
+  if ((run.finished === "ok" || scanned) && linked) {
+    return (
+      <Card title="First scan complete">
+        <p className="text-sm text-muted-foreground">
+          The code structure is indexed. Your agent now gets the platform's history for this project,
+          placed against your own checkout.
+        </p>
+        <div>
+          <Button onClick={openProject}>Open project</Button>
+        </div>
+      </Card>
+    );
+  }
+
   if (run.finished === "ok" || scanned) {
     return (
       <Card title="First scan complete">
@@ -134,8 +150,9 @@ export function FirstScanStep({ slug }: { slug: string }) {
   return (
     <Card title="First scan">
       <p className="text-sm text-muted-foreground">
-        The first scan reads git history and indexes the code structure. It makes no LLM calls, so it
-        costs nothing. You can explore while commit descriptions wait.
+        {linked
+          ? "The first scan indexes the code structure of this checkout. It makes no LLM calls and costs nothing."
+          : "The first scan reads git history and indexes the code structure. It makes no LLM calls, so it costs nothing. You can explore while commit descriptions wait."}
       </p>
       <div>
         <Button onClick={() => start.mutate("initial")} disabled={start.isPending}>

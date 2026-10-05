@@ -259,6 +259,8 @@ export interface PortalState {
   host_kind?: "local" | "base" | "org";
   base_url?: string;
   bootstrap_required?: boolean;
+  // Local mode: this machine's name, the prefilled name a platform shows for the connection.
+  hostname?: string;
   error?: string;
 }
 
@@ -429,7 +431,8 @@ export interface AddProjectResult {
 
 export type AddProjectBody =
   | { source: "local"; path: string; name?: string; token?: string }
-  | { source: "github"; installation_id: number; repo_id: number; name?: string };
+  | { source: "github"; installation_id: number; repo_id: number; name?: string }
+  | { source: "platform"; link_id: string; path: string };
 
 /** A v2 config layer (`[llm]`, `[analyze]`, ... as nested tables). */
 export type ConfigDict = Record<string, unknown>;
@@ -509,6 +512,8 @@ export interface InitResult {
   marker_written: boolean;
   initialized: boolean;
   custom_db_paths: CustomDbPath[];
+  // A linked project's leftover `.whygraph/whygraph.db`, which is never opened.
+  ignored_db?: string | null;
 }
 
 export interface ScanEstimate {
@@ -576,6 +581,8 @@ export interface DeleteProjectResult {
   agent_files: FileOutcome[];
   checkout_deleted: boolean;
   warnings: string[];
+  // A removed linked project (M2e): whether this machine's token was revoked on the platform.
+  token_revoked?: boolean;
 }
 
 export interface ScanRunRow {
@@ -879,6 +886,48 @@ export const connectApi = {
     get<ProjectConnection[]>(`/projects/${encodeURIComponent(slug)}/connections`),
   revokeProjectConnection: (slug: string, uid: string) =>
     sendEmpty("DELETE", `/projects/${encodeURIComponent(slug)}/connections/${encodeURIComponent(uid)}`),
+};
+
+// ---- connecting to a platform (portal/platform_routes.py, local mode only) ----------
+
+export interface PlatformConnectBody {
+  platform_url: string;
+  client_name?: string;
+  org?: string;
+  project?: string;
+}
+
+/** What the platform sent back to `/connect/callback`. */
+export interface PlatformCallbackBody {
+  state: string;
+  iss?: string;
+  code?: string;
+  error?: string;
+}
+
+export interface PendingPlatformLink {
+  link_id: string;
+  platform_origin: string;
+  org: string;
+  project: { slug: string; name: string; [key: string]: unknown };
+  clone_url: string;
+  clone_command: string;
+  slug_taken: boolean;
+  candidates: { path: string; name: string; match: "origin" }[];
+  other_repos: { path: string; name: string }[];
+}
+
+export const platformApi = {
+  connect: (body: PlatformConnectBody) =>
+    send<{ authorize_url: string; platform_origin: string; known_platform: boolean }>(
+      "POST",
+      "/platform/connect",
+      body,
+    ),
+  callback: (body: PlatformCallbackBody) => send<{ link_id: string }>("POST", "/platform/callback", body),
+  pending: (linkId: string) => get<PendingPlatformLink>(`/platform/pending/${encodeURIComponent(linkId)}`),
+  abandon: (linkId: string) =>
+    send<{ revoked: boolean }>("DELETE", `/platform/pending/${encodeURIComponent(linkId)}`),
 };
 
 export const orgsApi = {

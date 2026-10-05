@@ -2,11 +2,12 @@ import { useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { FolderGit2Icon, GitBranchIcon, MoreHorizontalIcon, PlusIcon } from "lucide-react";
+import { CloudIcon, FolderGit2Icon, GitBranchIcon, MoreHorizontalIcon, PlusIcon } from "lucide-react";
 import { portalApi, portalKey, projectApi, type ProjectSummary } from "../api";
 import { canAdmin, isProduction, useReadOnly, usePortalState, useRole } from "../lib/identity";
 import { timeAgo } from "../lib/projectStatus";
 import { AccessLostNotice, UnsupportedSourceNotice } from "../components/portal/AccessLost";
+import { LinkNotice } from "../components/portal/LinkNotice";
 import { PortChangeBanner } from "../components/portal/PortChangeNotice";
 import { ProjectStatusBadge as StatusBadge } from "../components/portal/ProjectStatusBadge";
 import { Badge } from "../components/ui/badge";
@@ -69,8 +70,8 @@ function ProjectCard({ project }: { project: ProjectSummary }) {
           </span>
         </div>
         <Badge variant="outline" className="gap-1">
-          {project.source === "github" ? <GitBranchIcon /> : <FolderGit2Icon />}
-          {project.source === "github" ? "GitHub" : "Local"}
+          {project.source === "github" ? <GitBranchIcon /> : project.source === "platform" ? <CloudIcon /> : <FolderGit2Icon />}
+          {project.source === "github" ? "GitHub" : project.source === "platform" ? "Platform" : "Local"}
         </Badge>
         <DropdownMenu>
           <DropdownMenuTrigger
@@ -95,6 +96,7 @@ function ProjectCard({ project }: { project: ProjectSummary }) {
       </div>
       <AccessLostNotice project={project} />
       <UnsupportedSourceNotice project={project} />
+      <LinkNotice project={project} />
       <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
         <StatusBadge project={project} />
         <span>{scanned ? `Scanned ${scanned}` : project.initialized ? "Never scanned" : ""}</span>

@@ -12,6 +12,7 @@ import {
 } from "../../api";
 import { agentInfo } from "../../lib/agents";
 import { isProduction, usePortalState } from "../../lib/identity";
+import { accountUrl, platformHost, safeHref } from "../../lib/platformLink";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
@@ -47,6 +48,7 @@ export function RemoveProjectDialog({
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const github = project.source === "github";
+  const linked = project.source === "platform";
   const production = isProduction(usePortalState().data);
   const [strip, setStrip] = useState(false);
   const [typed, setTyped] = useState("");
@@ -92,19 +94,41 @@ export function RemoveProjectDialog({
   };
 
   if (result) {
+    // The token revoke on the platform is best effort: say so when it failed.
+    const revokeFailed = linked && result.token_revoked === false;
+    const account = safeHref(accountUrl(project.link?.platform_origin));
     return (
       <Dialog open={open} onOpenChange={(o) => (o ? onOpenChange(o) : leave())}>
         <DialogContent data-testid="remove-done">
           <DialogHeader>
             <DialogTitle>{project.name} was removed</DialogTitle>
             <DialogDescription>
-              {result.checkout_deleted
+              {linked
+                ? "This machine no longer answers for the project. Your repository was left as it was."
+                : result.checkout_deleted
                 ? production
                   ? "The server copy was deleted. The repository on GitHub was not changed."
                   : "The checkout was deleted."
                 : "Your repository was left as it was."}
             </DialogDescription>
           </DialogHeader>
+          {revokeFailed && (
+            <Alert variant="destructive" data-testid="revoke-failed">
+              <AlertTitle>This machine's access was not revoked on the platform</AlertTitle>
+              <AlertDescription>
+                The platform could not be reached, so the connection token is still valid until it expires
+                unused. Revoke it yourself on{" "}
+                {account ? (
+                  <a href={account} target="_blank" rel="noreferrer" className="underline">
+                    your account page
+                  </a>
+                ) : (
+                  "your account page on the platform"
+                )}
+                {project.link ? ` at ${platformHost(project.link.platform_origin)}` : ""}.
+              </AlertDescription>
+            </Alert>
+          )}
           {result.warnings.length > 0 && (
             <Alert>
               <AlertTitle>Some things were left alone</AlertTitle>
@@ -129,11 +153,13 @@ export function RemoveProjectDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg" data-testid="remove-dialog">
         <DialogHeader>
-          <DialogTitle>Remove {project.name}?</DialogTitle>
+          <DialogTitle>{linked ? `Remove ${project.name} from this machine?` : `Remove ${project.name}?`}</DialogTitle>
           <DialogDescription>
             {production
               ? "This removes the server copy and every scan."
-              : "This unregisters the project from the portal."}
+              : linked
+                ? "This unlinks the checkout from the platform project."
+                : "This unregisters the project from the portal."}
           </DialogDescription>
         </DialogHeader>
 
@@ -161,7 +187,13 @@ export function RemoveProjectDialog({
               <div>
                 <p className="font-medium">Removed</p>
                 <ul className="list-disc pl-5 text-muted-foreground">
-                  <li>The portal's record of the project: its settings, keys and scan history.</li>
+                  <li>The portal's record of the project: its settings and scan history.</li>
+                  {linked && (
+                    <li>
+                      This machine's connection to the platform: its token is revoked there first (if
+                      that fails you are told how to revoke it yourself).
+                    </li>
+                  )}
                   <li>
                     The managed git hooks and the <span className="font-mono">.whygraph/portal.*</span>{" "}
                     markers in the repository.
@@ -184,6 +216,7 @@ export function RemoveProjectDialog({
                     </li>
                   )}
                   {github && <li>The repository on GitHub; nothing is changed there.</li>}
+                  {linked && <li>The project on the platform, its history and its other members' connections.</li>}
                   <li>The agents' MCP entries, unless you tick the box below.</li>
                 </ul>
               </div>
@@ -261,7 +294,7 @@ export function RemoveProjectDialog({
             Cancel
           </Button>
           <Button variant="destructive" disabled={!canRemove} onClick={() => remove.mutate()}>
-            {remove.isPending ? "Removing…" : "Remove project"}
+            {remove.isPending ? "Removing…" : linked ? "Remove from this machine" : "Remove project"}
           </Button>
         </DialogFooter>
       </DialogContent>

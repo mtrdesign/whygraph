@@ -23,12 +23,17 @@ export function WizardSteps({
   current,
   slug,
   production = false,
+  linked = false,
 }: {
   current: WizardStep;
   slug?: string;
   production?: boolean;
+  /** A linked project (M2e): its config lives on the platform, so there is no Configure step. */
+  linked?: boolean;
 }) {
-  const steps = production ? STEPS.filter((s) => s.id !== "initialize") : STEPS;
+  const steps = STEPS.filter(
+    (s) => !(production && s.id === "initialize") && !(linked && s.id === "configure"),
+  );
   const at = steps.findIndex((s) => s.id === current);
   return (
     <ol aria-label="Steps" className="flex items-center gap-2 text-[13px]">

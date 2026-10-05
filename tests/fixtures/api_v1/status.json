@@ -1,0 +1,14 @@
+{
+  "body": {
+    "access_lost": false,
+    "clone_url": "http://127.0.0.1:9/acme/api.git",
+    "default_branch": "main",
+    "github_full_name": "acme/api",
+    "last_scan_at": null,
+    "last_scanned_head": null,
+    "name": "Api project",
+    "role": "owner",
+    "slug": "api"
+  },
+  "status": 200
+}

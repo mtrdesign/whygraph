@@ -117,6 +117,7 @@ from .security import (
     build_origins,
     build_production_origins,
 )
+from .v1_routes import v1_router
 from .webhook import webhook_router
 
 _log = logging.getLogger(__name__)
@@ -241,6 +242,7 @@ def create_portal_app(
     app.include_router(org_router)  # production-only: DELETE /api/org (M2d-2)
     app.include_router(github_app_router)  # production-only (M2d-2)
     app.include_router(connect_router)  # production-only: consent, exchange (M2e)
+    app.include_router(v1_router)  # production-only: the /api/v1 data routes (M2e)
     app.include_router(portal_router)
     app.include_router(projects_router)
     app.include_router(

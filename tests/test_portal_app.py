@@ -1131,8 +1131,19 @@ PUBLIC_AUTH_ROUTES = {
 """Production's public auth routes (M2c plan section 4.7, M2d-1 section 4.4,
 M2e section 4.4): no session needed."""
 
+_V1 = "/api/v1/projects/{slug}"
+
 V1_ROUTES = {
-    ("/api/v1/projects/{slug}/token", "DELETE"),
+    (f"{_V1}/token", "DELETE"),
+    # The data routes (M2e plan section 4.5)
+    (_V1, "GET"),
+    (f"{_V1}/evidence", "POST"),
+    (f"{_V1}/rationale", "POST"),
+    (f"{_V1}/history", "GET"),
+    (f"{_V1}/commits/{{sha}}", "GET"),
+    (f"{_V1}/prs/{{number}}", "GET"),
+    (f"{_V1}/issues/{{number}}", "GET"),
+    (f"{_V1}/overview", "GET"),
 }
 """Production's bearer-only ``/api/v1`` project routes (M2e plan section 4.3):
 org host, a connection token instead of a session. They resolve
@@ -1194,7 +1205,16 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     (f"{_P}/connections", "GET"): _CONFIGURE,
     (f"{_P}/connections/{{uid}}", "DELETE"): _CONFIGURE,
     # A connected portal revokes its own token: v1_project_access(...)
-    ("/api/v1/projects/{slug}/token", "DELETE"): _READ,
+    (f"{_V1}/token", "DELETE"): _READ,
+    # A connected portal's data routes: v1_project_db_access(...) (M2e section 4.5)
+    (_V1, "GET"): _READ,
+    (f"{_V1}/evidence", "POST"): _READ,
+    (f"{_V1}/rationale", "POST"): _READ,
+    (f"{_V1}/history", "GET"): _READ,
+    (f"{_V1}/commits/{{sha}}", "GET"): _READ,
+    (f"{_V1}/prs/{{number}}", "GET"): _READ,
+    (f"{_V1}/issues/{{number}}", "GET"): _READ,
+    (f"{_V1}/overview", "GET"): _READ,
     # Project management: project_access(...)
     (_P, "GET"): _READ,
     (f"{_P}/config", "GET"): _READ,

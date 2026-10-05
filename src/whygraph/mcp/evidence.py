@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -656,7 +656,10 @@ def _first_parent_of(sha: str) -> str | None:
 
 
 def backfill_evidence_descriptions(
-    items: list[CommitEvidence], *, target_path: str
+    items: list[CommitEvidence],
+    *,
+    target_path: str,
+    allow: Callable[[], bool] | None = None,
 ) -> None:
     """Lazily backfill ``llm_description`` for any commit in ``items``.
 
@@ -696,6 +699,12 @@ def backfill_evidence_descriptions(
         The path the caller resolved the target to — the file used to
         slice bulk commits' diffs. For blame / blame-walked / area
         evidence this is the file the queried lines live in.
+    allow : callable, optional
+        A budget (the platform's org limit for agent requests): called
+        once per commit that may need an LLM call - every normal commit
+        without a description, every bulk commit whose per-file
+        description is not cached - and that commit is skipped when it
+        returns ``False``. ``None`` (default) describes everything.
     """
     from whygraph.core import get_config
 
@@ -723,8 +732,16 @@ def backfill_evidence_descriptions(
         _log.debug("skipping lazy LLM description backfill: %s", exc)
         return
 
+    if allow is not None:
+        normal = [commit for commit in normal if allow()]
     repository = Repository(repo_root())
     for commit in bulk:
+        if (
+            allow is not None
+            and not _file_description_cached(commit.sha, target_path)
+            and not allow()
+        ):
+            continue
         try:
             text = backfill_file_description(
                 commit, target_path, repository=repository, descriptor=descriptor
@@ -743,6 +760,18 @@ def backfill_evidence_descriptions(
             # keeps its bulk-commit stub.
             commit.llm_description = text
     backfill_all(normal, repository=repository, descriptor=descriptor)
+
+
+def _file_description_cached(sha: str, path: str) -> bool:
+    """Whether the per-file description of ``(sha, path)`` is already stored."""
+    with get_session() as session:
+        cached = session.exec(
+            select(CommitFileChange.llm_description).where(
+                CommitFileChange.commit_sha == sha,
+                CommitFileChange.path == path,
+            )
+        ).first()
+    return cached is not None
 
 
 def _commit_dict(commit: Commit) -> dict:

@@ -140,3 +140,33 @@ def test_analyze_model_parsed(tmp_path: Path) -> None:
     cfg = Config.from_toml(config)
 
     assert cfg.analyze.model == "claude-haiku-4-5"
+
+
+# ---------------------------------------------------------------------------
+# The org limit on the agents' description backfill (M2e plan section 4.5)
+# ---------------------------------------------------------------------------
+
+
+def test_analyze_agent_descriptions_per_hour_default() -> None:
+    assert AnalyzeConfig().agent_descriptions_per_hour == 600
+
+
+@pytest.mark.parametrize("value", [0, 1, 600, 10_000])
+def test_analyze_agent_descriptions_per_hour_parsed(tmp_path: Path, value: int) -> None:
+    config = _write(
+        tmp_path / "whygraph.toml",
+        f"[analyze]\nagent_descriptions_per_hour = {value}\n",
+    )
+    assert Config.from_toml(config).analyze.agent_descriptions_per_hour == value
+
+
+@pytest.mark.parametrize("value", ["-1", "10001", "false", '"600"', "2.5"])
+def test_analyze_agent_descriptions_per_hour_out_of_range_raises(
+    tmp_path: Path, value: str
+) -> None:
+    config = _write(
+        tmp_path / "whygraph.toml",
+        f"[analyze]\nagent_descriptions_per_hour = {value}\n",
+    )
+    with pytest.raises(ConfigError, match="agent_descriptions_per_hour"):
+        Config.from_toml(config)

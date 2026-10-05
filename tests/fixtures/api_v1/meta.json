@@ -1,0 +1,13 @@
+{
+  "body": {
+    "api_version": 1,
+    "capabilities": [
+      "evidence",
+      "rationale",
+      "history",
+      "resources"
+    ],
+    "min_client": "2.0.0"
+  },
+  "status": 200
+}

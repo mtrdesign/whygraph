@@ -28,7 +28,8 @@ carries the action as ``whygraph_action``:
   :func:`current_user`, then the action.
 * :func:`v1_project_access` - production's bearer-only ``/api/v1``
   project routes (M2e): :func:`v1_user`, then :func:`bind_v1_project` (the
-  token's one project, by id).
+  token's one project, by id); :func:`v1_project_db_access` adds the
+  initialized gate for the ``/api/v1`` data routes.
 
 A route takes exactly **one** project dependency: two different closures
 are two callables to FastAPI, which would bind the project twice.
@@ -87,7 +88,7 @@ from .projects import is_valid_slug
 from .repos import DiscoveryCache
 from .runner import ScanRunner
 from .security import PortalOrigins, Principal, _is_under
-from .throttle import Throttle, ip_key
+from .throttle import InFlight, Throttle, ip_key
 from .webhook import DeliveryIds
 
 if TYPE_CHECKING:
@@ -449,6 +450,20 @@ class PortalState:
     connect_ip : Throttle
         Failed ``POST /api/connect/token`` exchanges, per ``ip_key``:
         60 / 10 min (a successful exchange is never counted).
+    v1_token : Throttle
+        ``/api/v1`` status, history and resource reads, per connection
+        token: 600 / min (M2e plan section 4.5).
+    v1_heavy : Throttle
+        ``/api/v1`` evidence and rationale requests, per connection token:
+        60 / min.
+    v1_in_flight : InFlight
+        Evidence and rationale requests running at once, per org id: 2
+        (``503 busy`` beyond it).
+    agent_budget : Throttle
+        The org limits on agent LLM spend, per hour: keys ``card:<org_id>``
+        (``[rationale].agent_generations_per_hour``) and ``desc:<org_id>``
+        (``[analyze].agent_descriptions_per_hour``), each call passing the
+        org's limit.
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -494,6 +509,10 @@ class PortalState:
         self.connect_codes = connections.PendingCodes()
         self.connect_user = Throttle(30, 60 * 60)
         self.connect_ip = Throttle(60, 10 * 60)
+        self.v1_token = Throttle(600, 60)
+        self.v1_heavy = Throttle(60, 60)
+        self.v1_in_flight = InFlight(2)
+        self.agent_budget = Throttle(0, 60 * 60)
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0
@@ -1076,6 +1095,42 @@ def v1_project_access(
     return dependency
 
 
+def v1_project_db_access(
+    action: Action,
+) -> Callable[..., AsyncIterator[BoundProject]]:
+    """:func:`v1_project_access` plus the initialized gate (the ``/api/v1`` data routes).
+
+    Its own closure, as :func:`project_db_access` is, so a route binds its
+    project exactly once.
+
+    Parameters
+    ----------
+    action : Action
+        The route's action (also stored as ``whygraph_action``).
+
+    Returns
+    -------
+    callable
+        An ``async`` generator dependency yielding the (bound,
+        initialized, migrated) :class:`BoundProject`: ``401`` / ``429`` /
+        ``404`` / ``403`` / ``400`` as :func:`v1_project_access`, then
+        ``409`` as :func:`require_initialized`.
+    """
+
+    async def dependency(
+        slug: str, request: Request, principal: Principal = Depends(v1_user)
+    ) -> AsyncIterator[BoundProject]:
+        state = portal_state(request)
+        org_slug = request.scope.get("state", {}).get("org_slug")
+        project = await bind_v1_project(state, principal, org_slug, slug, action)
+        with use_project(project.ctx):
+            await require_initialized(state, project)
+            yield project
+
+    dependency.whygraph_action = action  # type: ignore[attr-defined]
+    return dependency
+
+
 def org_access(action: Action) -> Callable[..., Awaitable[OrgAccess]]:
     """Build the dependency of a portal-level route doing ``action``.
 
@@ -1245,6 +1300,7 @@ __all__ = [
     "unsafe_path_error",
     "user_access",
     "v1_project_access",
+    "v1_project_db_access",
     "v1_refusal",
     "v1_user",
 ]

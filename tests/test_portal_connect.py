@@ -913,11 +913,44 @@ def test_connect_end_to_end(
     assert token not in logged and query["code"] not in logged
 
 
-V1_REQUESTS: dict[tuple[str, str], int] = {
-    ("/api/v1/projects/{slug}/token", "DELETE"): 204,
+_V1 = "/api/v1/projects/{slug}"
+_SWEEP_SHA = "a" * 40
+_TARGET = {"path": "sample.py", "line_start": 1, "line_end": 2}
+
+V1_REQUESTS: dict[tuple[str, str], tuple[int, str | None, dict]] = {
+    (f"{_V1}/token", "DELETE"): (204, None, {}),
+    # The data routes (M2e plan section 4.5). ``cn``'s projects are
+    # initialized but empty and their roots hold no git repository, so the
+    # reads answer over nothing: a rationale finds no evidence and an
+    # unknown commit / PR / issue is ``not_found``. Each carries a ``code``,
+    # which the tenancy ``404``s above never do.
+    (_V1, "GET"): (200, None, {}),
+    (f"{_V1}/evidence", "POST"): (200, None, {"json": {"target": _TARGET}}),
+    (f"{_V1}/rationale", "POST"): (
+        404,
+        "no_evidence",
+        {"json": {"target": _TARGET}},
+    ),
+    (f"{_V1}/history", "GET"): (200, None, {"params": {"path": "sample.py"}}),
+    (f"{_V1}/commits/{{sha}}", "GET"): (404, "not_found", {}),
+    (f"{_V1}/prs/{{number}}", "GET"): (404, "not_found", {}),
+    (f"{_V1}/issues/{{number}}", "GET"): (404, "not_found", {}),
+    (f"{_V1}/overview", "GET"): (200, None, {}),
 }
-"""How the bearer sweep calls each ``/api/v1`` project route (step 4 adds
-the data routes), and the status of a successful call."""
+"""How the bearer sweep calls each ``/api/v1`` project route, and the
+``(status, code, request kwargs)`` of a call that gets through."""
+
+
+def _v1_url(path: str, slug: str) -> str:
+    """Fill a v1 route's path parameters for the sweep."""
+    for placeholder, value in (
+        ("{slug}", slug),
+        ("{sha}", _SWEEP_SHA),
+        ("{number}", "4242"),
+    ):
+        path = path.replace(placeholder, value)
+    assert "{" not in path, path
+    return path
 
 
 def _v1_routes(app) -> set[tuple[str, str]]:  # noqa: ANN001
@@ -957,10 +990,12 @@ def test_v1_bearer_sweep_over_two_orgs(
     tokens = {"acme": issue(cn, "ben", "api"), "bravo": issue(cn, "dee", "lib")}
     own = {"acme": "api", "bravo": "lib"}
 
+    expected_status, expected_code, kwargs = V1_REQUESTS[(path, method)]
+
     def call(org: str | None, slug: str, headers: dict) -> httpx.Response:
         cn.client.cookies.clear()
         return cn.client.request(
-            method, at(org) + path.replace("{slug}", slug), headers=headers
+            method, at(org) + _v1_url(path, slug), headers=headers, **kwargs
         )
 
     for org, other in (("acme", "bravo"), ("bravo", "acme")):
@@ -975,15 +1010,20 @@ def test_v1_bearer_sweep_over_two_orgs(
         ):
             response = call(host, slug, mine)
             assert response.status_code == 404, (org, host, slug, response.text)
+            assert response.json().get("code") is None, response.text
         for headers in ({}, bearer("wgc_" + "x" * 43), {"Authorization": "Bearer"}):
             response = call(org, own[org], headers)
             assert response.status_code == 401, (org, headers, response.text)
             assert response.json()["code"] == "invalid_token"
         signed_in(cn.client, cn.ids["ben" if org == "acme" else "dee"])
-        response = cn.client.request(method, at(org) + path.replace("{slug}", own[org]))
+        response = cn.client.request(
+            method, at(org) + _v1_url(path, own[org]), **kwargs
+        )
         assert (
             response.status_code == 401 and response.json()["code"] == "invalid_token"
         )
     for org in ("acme", "bravo"):
         response = call(org, own[org], bearer(tokens[org]))
-        assert response.status_code == V1_REQUESTS[(path, method)], response.text
+        assert response.status_code == expected_status, response.text
+        if expected_code is not None:
+            assert response.json()["code"] == expected_code, response.text

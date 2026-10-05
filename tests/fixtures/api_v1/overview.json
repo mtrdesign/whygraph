@@ -1,0 +1,43 @@
+{
+  "body": {
+    "commit_date_range": {
+      "earliest_authored_at": "<time>",
+      "latest_authored_at": "<time>"
+    },
+    "counts": {
+      "commits": 2,
+      "issues": 1,
+      "pr_issue_links": 1,
+      "pull_requests": 1
+    },
+    "llm_description_coverage": {
+      "described": 0,
+      "fraction": 0.0,
+      "total_commits": 2
+    },
+    "project": {
+      "access_lost": false,
+      "clone_url": "http://127.0.0.1:9/acme/api.git",
+      "default_branch": "main",
+      "github_full_name": "acme/api",
+      "last_scan_at": null,
+      "last_scanned_head": null,
+      "name": "Api project",
+      "role": "owner",
+      "slug": "api"
+    },
+    "scan_freshness": {
+      "latest_issue_fetched_at": "<time>",
+      "latest_pr_fetched_at": "<time>",
+      "latest_scanned_at": "<time>"
+    },
+    "top_contributors": [
+      {
+        "author_email": "tester@example.com",
+        "author_name": "Test User",
+        "commit_count": 2
+      }
+    ]
+  },
+  "status": 200
+}

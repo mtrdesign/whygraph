@@ -124,12 +124,30 @@ class FakePlatform:
     def from_fixtures(cls, directory: Path) -> FakePlatform:
         """Replay recorded ``tests/fixtures/api_v1/*.json`` (step 4's recorder).
 
-        Notes
-        -----
-        A stub until the contract recorder exists: fill :attr:`responses`
-        from the recorded ``(status, body)`` per route name.
+        Each file is ``{"status": int, "body": <JSON or null>}`` and its stem
+        is the route name, so the recording becomes the reply of that route
+        (:attr:`responses`). The recorded ``status`` answer also replaces
+        :attr:`projects`'s entry for :data:`SLUG`, so the ``project`` a reply
+        nests and the one ``status`` returns are the same row.
+
+        Parameters
+        ----------
+        directory : Path
+            The folder holding the recordings.
+
+        Returns
+        -------
+        FakePlatform
+            A fake answering every recorded route from its file.
         """
-        raise NotImplementedError("filled in with the contract recorder (step 4)")
+        fake = cls()
+        for path in sorted(Path(directory).glob("*.json")):
+            recorded = json.loads(path.read_text())
+            fake.responses[path.stem] = (int(recorded["status"]), recorded.get("body"))
+        status = fake.responses.get("status")
+        if status is not None and isinstance(status[1], dict):
+            fake.projects[SLUG] = status[1]
+        return fake
 
     def add_code(
         self,

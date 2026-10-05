@@ -1,0 +1,53 @@
+{
+  "body": {
+    "commit": {
+      "author_email": "tester@example.com",
+      "author_name": "Test User",
+      "authored_at": "<time>",
+      "body": "",
+      "committed_at": "<time>",
+      "deletions": 0,
+      "files_changed": 1,
+      "insertions": 1,
+      "llm_description": null,
+      "parent_shas": "<sha2>",
+      "refactor_score": 0,
+      "sha": "<sha1>",
+      "subject": "second commit"
+    },
+    "linked_prs": [
+      {
+        "author": "octocat",
+        "base_ref": "main",
+        "body": "Closes #42.",
+        "closed_at": null,
+        "created_at": "<time>",
+        "draft": 0,
+        "head_ref": null,
+        "head_sha": "<sha1>",
+        "html_url": "https://github.com/acme/api/pull/7",
+        "labels": [
+          "enhancement"
+        ],
+        "merge_commit_sha": "<sha1>",
+        "merged_at": "<time>",
+        "number": 7,
+        "state": "merged",
+        "title": "Add the sample module",
+        "updated_at": "<time>"
+      }
+    ],
+    "project": {
+      "access_lost": false,
+      "clone_url": "http://127.0.0.1:9/acme/api.git",
+      "default_branch": "main",
+      "github_full_name": "acme/api",
+      "last_scan_at": null,
+      "last_scanned_head": null,
+      "name": "Api project",
+      "role": "owner",
+      "slug": "api"
+    }
+  },
+  "status": 200
+}

@@ -126,3 +126,35 @@ def test_config_no_longer_has_rationale_model() -> None:
     field_names = {f.name for f in fields(Config)}
     assert "rationale_model" not in field_names
     assert "rationale" in field_names
+
+
+# ---------------------------------------------------------------------------
+# The org limit on agent-triggered card generation (M2e plan section 4.5)
+# ---------------------------------------------------------------------------
+
+
+def test_rationale_agent_generations_per_hour_default() -> None:
+    assert RationaleConfig().agent_generations_per_hour == 120
+
+
+@pytest.mark.parametrize("value", [0, 1, 120, 10_000])
+def test_rationale_agent_generations_per_hour_parsed(
+    tmp_path: Path, value: int
+) -> None:
+    config = _write(
+        tmp_path / "whygraph.toml",
+        f"[rationale]\nagent_generations_per_hour = {value}\n",
+    )
+    assert Config.from_toml(config).rationale.agent_generations_per_hour == value
+
+
+@pytest.mark.parametrize("value", ["-1", "10001", "true", '"120"', "1.5"])
+def test_rationale_agent_generations_per_hour_out_of_range_raises(
+    tmp_path: Path, value: str
+) -> None:
+    config = _write(
+        tmp_path / "whygraph.toml",
+        f"[rationale]\nagent_generations_per_hour = {value}\n",
+    )
+    with pytest.raises(ConfigError, match="agent_generations_per_hour"):
+        Config.from_toml(config)

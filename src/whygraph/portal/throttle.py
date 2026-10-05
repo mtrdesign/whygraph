@@ -117,6 +117,39 @@ class Throttle:
             return None
 
 
+class InFlight:
+    """At most ``limit`` requests in flight per key; never waits.
+
+    Parameters
+    ----------
+    limit : int
+        Concurrent holders allowed per key.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self._held: dict[Hashable, int] = {}
+        self._lock = threading.Lock()
+
+    def try_acquire(self, key: Hashable) -> bool:
+        """Take a slot for ``key``; ``False`` (and nothing taken) when all are held."""
+        with self._lock:
+            held = self._held.get(key, 0)
+            if held >= self.limit:
+                return False
+            self._held[key] = held + 1
+            return True
+
+    def release(self, key: Hashable) -> None:
+        """Give back a slot :meth:`try_acquire` took."""
+        with self._lock:
+            held = self._held.get(key, 0) - 1
+            if held > 0:
+                self._held[key] = held
+            else:
+                self._held.pop(key, None)
+
+
 def ip_key(scope: Mapping[str, Any]) -> str:
     """Return the throttle key for a request's client address.
 

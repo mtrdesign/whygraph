@@ -420,6 +420,54 @@ class ErrorOut(_Out):
     retry_after: int | None = None
 
 
+class MetaOut(_Out):
+    """``GET /api/v1/meta``: what a platform speaks.
+
+    Attributes
+    ----------
+    api_version : int
+        The contract version (:data:`API_VERSION` for this client).
+    min_client : str
+        The oldest WhyGraph release the platform still serves (semver).
+    capabilities : list[str]
+        Route families the platform offers (``evidence``, ``rationale``,
+        ``history``, ``resources``).
+    """
+
+    api_version: int
+    min_client: str
+    capabilities: list[str] = Field(default_factory=list)
+
+
+class TokenReply(_Out):
+    """``POST /api/connect/token``: the code exchange's answer.
+
+    Attributes
+    ----------
+    token : str
+        The opaque ``wgc_`` connection token (shown once).
+    org : str
+        The org slug the project belongs to.
+    project : StatusOut
+        The linked project.
+    api_version : int
+        The contract version the platform speaks.
+    """
+
+    token: str
+    org: str
+    project: StatusOut
+    api_version: int
+
+
+class EvidenceReplyOut(_Out):
+    """``POST /api/v1/projects/{slug}/evidence``: items plus unanswered SHAs."""
+
+    evidence: list[EvidenceOut] = Field(default_factory=list)
+    unknown_shas: list[str] = Field(default_factory=list)
+    project: StatusOut | None = None
+
+
 # ---------------------------------------------------------------------------
 # Conversions
 # ---------------------------------------------------------------------------
@@ -500,8 +548,10 @@ __all__ = [
     "EvidenceCountOut",
     "EvidenceIn",
     "EvidenceOut",
+    "EvidenceReplyOut",
     "HunkIn",
     "IssueOut",
+    "MetaOut",
     "OriginIn",
     "PullRequestOut",
     "PushStatus",
@@ -514,6 +564,7 @@ __all__ = [
     "StatusOut",
     "TargetIn",
     "TargetOut",
+    "TokenReply",
     "blame_hunks_from_in",
     "hunk_in_from_blame",
 ]

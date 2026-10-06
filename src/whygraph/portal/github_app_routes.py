@@ -442,6 +442,7 @@ def _callback(
         "github_app_authorized",
         request,
         uid=principal.uid,
+        org_id=access.org_id,
         org=pending.org_slug,
         github_login=user.login,
         arrival="install" if install else "authorize",

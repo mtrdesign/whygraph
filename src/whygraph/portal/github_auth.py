@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 import httpx
 
@@ -447,6 +447,95 @@ class GitHubHttp:
             return False
         return True
 
+    def user_by_login(
+        self,
+        login: str,
+        *,
+        anonymous_budget: Callable[[], int | None] | None = None,
+    ) -> GitHubUser:
+        """Look a GitHub user up by login: ``GET <api>/users/{login}``.
+
+        Sent with basic auth ``client_id:client_secret`` (GitHub's OAuth App
+        rate limit, M2f-1 plan section 4.8). If GitHub refuses those
+        credentials (``401``) the lookup is retried once without them, but
+        only when ``anonymous_budget`` allows it.
+
+        Parameters
+        ----------
+        login : str
+            An already validated GitHub username.
+        anonymous_budget : callable, optional
+            Called before an anonymous retry; returns ``None`` to allow it
+            (and count it) or the seconds to wait. ``None`` means no
+            anonymous retry at all (a refused credential is then
+            :class:`GitHubUnavailable`).
+
+        Returns
+        -------
+        GitHubUser
+            The account's id, login, name and avatar; ``two_factor`` is
+            always ``False`` (the public profile does not say).
+
+        Raises
+        ------
+        GitHubNoSuchUser
+            GitHub has no such login, or it names an organization or a bot.
+        GitHubRateLimited
+            GitHub's rate limit (``403`` / ``429`` with
+            ``x-ratelimit-remaining: 0`` or a ``retry-after``), or the
+            anonymous budget is spent.
+        GitHubUnavailable
+            A network error, a timeout, a ``5xx`` or an unexpected answer.
+        """
+        url = f"{self.config.api_url}/users/{quote(login, safe='')}"
+        headers = {"Accept": "application/vnd.github+json"}
+        response = self._send(
+            "GET",
+            url,
+            "user lookup by login",
+            auth=(self.config.client_id, self.config.client_secret),
+            headers=headers,
+        )
+        if response.status_code == 401:
+            logger.warning("GitHub refused the client credentials for a user lookup")
+            if anonymous_budget is None:
+                raise GitHubUnavailable("GitHub refused the client credentials")
+            wait = anonymous_budget()
+            if wait is not None:
+                raise GitHubRateLimited(wait)
+            response = self._send("GET", url, "user lookup by login", headers=headers)
+        if response.status_code == 404:
+            raise GitHubNoSuchUser(login)
+        if response.status_code in (403, 429):
+            wait = _rate_limit_wait(response)
+            if wait is not None:
+                raise GitHubRateLimited(wait)
+        if response.status_code != 200:
+            logger.warning("GitHub user lookup answered %s", response.status_code)
+            raise GitHubUnavailable("GitHub refused the user lookup")
+        body = _json(response)
+        ident = None if body is None else body.get("id")
+        found = None if body is None else body.get("login")
+        if (
+            body is None
+            or not isinstance(ident, int)
+            or isinstance(ident, bool)
+            or not isinstance(found, str)
+            or not found
+        ):
+            raise GitHubUnavailable("GitHub answered the user lookup oddly")
+        if body.get("type") != "User":
+            raise GitHubNoSuchUser(login)
+        name = body.get("name")
+        avatar = body.get("avatar_url")
+        return GitHubUser(
+            id=ident,
+            login=found,
+            name=name if isinstance(name, str) and name.strip() else None,
+            avatar_url=avatar if isinstance(avatar, str) and avatar else None,
+            two_factor=False,
+        )
+
     def _send(self, method: str, url: str, what: str, **kwargs: Any) -> httpx.Response:
         """Send a request; a network error, timeout or ``5xx`` is unavailable."""
         try:
@@ -676,6 +765,40 @@ class GitHubUnavailable(Exception):
     """GitHub could not answer (``502 github_unavailable``): network, timeout, 5xx."""
 
 
+class GitHubNoSuchUser(Exception):
+    """GitHub has no user with that login (``404 no_such_github_user``).
+
+    An organization or bot login counts as no user.
+    """
+
+
+class GitHubRateLimited(Exception):
+    """GitHub's rate limit was hit (``503 github_rate_limited``).
+
+    Parameters
+    ----------
+    retry_after : int
+        Seconds to wait before trying again (at least 1).
+    """
+
+    def __init__(self, retry_after: int) -> None:
+        super().__init__("GitHub's rate limit was reached")
+        self.retry_after = max(1, int(retry_after))
+
+
+def _rate_limit_wait(response: httpx.Response) -> int | None:
+    """Seconds to wait when ``response`` is a rate-limit refusal, else ``None``."""
+    retry_after = response.headers.get("retry-after", "")
+    if retry_after.strip().isdigit():
+        return max(1, int(retry_after))
+    if response.headers.get("x-ratelimit-remaining", "").strip() != "0":
+        return None
+    reset = response.headers.get("x-ratelimit-reset", "").strip()
+    if reset.isdigit():
+        return max(1, int(reset) - int(time.time()))
+    return 60
+
+
 def pkce_challenge(verifier: str) -> str:
     """Return the PKCE S256 challenge of a verifier.
 
@@ -708,7 +831,9 @@ __all__ = [
     "GitHubAuthFailed",
     "GitHubHostError",
     "GitHubHttp",
+    "GitHubNoSuchUser",
     "GitHubOAuth",
+    "GitHubRateLimited",
     "GitHubUnavailable",
     "GitHubUser",
     "PendingLogin",

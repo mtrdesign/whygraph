@@ -441,6 +441,11 @@ class PortalState:
     member_add_org : Throttle
         Every ``POST /api/org/members`` attempt, per org id: 60 / hour, so
         the route cannot probe which usernames have accounts at scale.
+    github_lookup : Throttle
+        Anonymous GitHub user lookups (``GET /users/{login}`` retried without
+        the OAuth App's credentials after GitHub refused them), instance-wide
+        (one key): 50 / hour, under GitHub's anonymous 60 / hour per IP
+        (M2f-1 plan section 0.3 #3).
     import_org : Throttle
         GitHub imports that passed the access checks, per org id: 30 / hour
         (M2d-2 plan section 4.12).
@@ -528,6 +533,7 @@ class PortalState:
         self.reset_ip = Throttle(10, 15 * 60)
         self.github_ip = Throttle(60, 15 * 60)
         self.member_add_org = Throttle(60, 60 * 60)
+        self.github_lookup = Throttle(50, 60 * 60)
         self.import_org = Throttle(30, 60 * 60)
         self.user_tokens = UserTokens()
         self.webhook_deliveries = DeliveryIds()
@@ -796,6 +802,7 @@ async def current_org(
             "reader_request",
             request,
             uid=principal.uid,
+            org_id=access.org_id,
             org=access.org_slug,
             method=request.method,
             path=request.url.path,

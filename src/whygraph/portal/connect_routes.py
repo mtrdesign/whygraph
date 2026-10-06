@@ -374,6 +374,7 @@ def post_authorize(
         "connection_authorized",
         request,
         uid=principal.uid,
+        org_id=org_id,
         org=body.org,
         project=body.project,
         client_name=repr(body.client_name),
@@ -456,11 +457,12 @@ def post_token(body: TokenBody, request: Request) -> dict:
                 ConnectionToken.token_hash == hash_token(token)
             )
         ).one()
-        uid, project_slug = user.uid, project.slug
+        uid, project_slug, org_id = user.uid, project.slug, project.org_id
     audit(
         "connection_token_issued",
         request,
         uid=uid,
+        org_id=org_id,
         org=org_slug,
         project=project_slug,
         client_name=repr(pending.client_name),
@@ -583,6 +585,7 @@ def delete_project_connection(
         request,
         uid=principal.uid,
         target=target,
+        org_id=project.org_id,
         org=request.scope.get("state", {}).get("org_slug"),
         project=project.slug,
         token_uid=uid,
@@ -625,6 +628,7 @@ def delete_v1_token(
         "connection_revoked",
         request,
         uid=principal.uid,
+        org_id=project.org_id,
         org=request.scope.get("state", {}).get("org_slug"),
         project=project.slug,
         token_uid=token_uid,

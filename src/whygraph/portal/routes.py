@@ -1823,6 +1823,7 @@ def _import_github(
             "project_imported",
             request,
             uid=principal.uid,
+            org_id=access.org_id,
             org=access.org_slug,
             repo_id=repo.id,
             full_name=repo.full_name,
@@ -1879,6 +1880,7 @@ def delete_project(
     request: Request,
     project: BoundProject = Depends(project_access(Action.ORG_REMOVE_PROJECT)),
     body: DeleteProjectBody | None = Body(default=None),
+    principal: Principal = Depends(current_user),
 ) -> dict:
     """Unregister a project (plan section 4.5.5).
 
@@ -1894,6 +1896,7 @@ def delete_project(
     ``<data dir>/repos``. The project's run files (``runs/<id>.jsonl``,
     ``.log``, ``.token``) are deleted with its row, and its connection
     tokens are revoked (``project_deleted``) in the row's transaction.
+    A completed removal is audited as ``project_removed``.
 
     For a **linked** project this is "Remove from this machine" (plan
     section 4.11): this machine's connection token is revoked on the
@@ -1906,9 +1909,20 @@ def delete_project(
     body = body or DeleteProjectBody()
     try:
         with state.runner.reserve_removal(project.id):
-            return _remove_project(state, project, body)
+            result = _remove_project(state, project, body)
     except ProjectBusy as exc:
         raise ApiError(409, str(exc)) from exc
+    audit(
+        "project_removed",
+        request,
+        uid=principal.uid,
+        org_id=project.org_id,
+        org=request.scope.get("state", {}).get("org_slug"),
+        project=project.slug,
+        source=project.source,
+        checkout_deleted=result["checkout_deleted"],
+    )
+    return result
 
 
 def _remove_project(

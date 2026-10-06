@@ -568,6 +568,7 @@ PATH_PARAMS: dict[str, Callable[[OrgWorld], str]] = {
     "{number}": lambda o: "1",
     "{session_id}": lambda o: str(o.session_id),
     "{uid}": lambda o: o.owner_uid,
+    "{user_uid}": lambda o: o.owner_uid,  # an owner: 409 org_admin
     "{installation_id}": lambda o: "7",
     "{link_id}": lambda o: "nolink",  # no pending link: 410 link_expired
 }
@@ -623,8 +624,17 @@ def _qn(o: OrgWorld) -> dict:
     return {"qualified_name": o.qualified_name}
 
 
+def newcomer_github_id(login: str) -> int:
+    """The GitHub id of a ``<mark>-newcomer`` (the fake GitHub must know it too)."""
+    return sum(map(ord, login)) + 900_000
+
+
 def _newcomer(o: OrgWorld) -> str:
-    """A GitHub account in no org, inserted directly once; its login."""
+    """A GitHub account in no org, inserted directly once; its login.
+
+    Adding resolves the login on GitHub and matches the id (M2f-1), so
+    ``prod_world`` registers the same account with the fake GitHub.
+    """
     login = f"{o.mark}-newcomer"
     with portal_db.get_session() as session:
         exists = session.exec(select(User.id).where(User.github_login == login))
@@ -632,11 +642,16 @@ def _newcomer(o: OrgWorld) -> str:
             session.add(
                 User(
                     display_name=login,
-                    github_id=sum(map(ord, login)) + 900_000,
+                    github_id=newcomer_github_id(login),
                     github_login=login,
                 )
             )
     return login
+
+
+def _invitations_check(body: list, w: World, o: OrgWorld) -> None:
+    assert isinstance(body, list)
+    assert all("email" not in i for i in body)
 
 
 def _members_check(body: list, w: World, o: OrgWorld) -> None:
@@ -654,6 +669,19 @@ def _added_check(body: dict, w: World, o: OrgWorld) -> None:
 
 def _no_connections(body: list, w: World, o: OrgWorld) -> None:
     assert body == []
+
+
+def _access_check(body: dict, w: World, o: OrgWorld) -> None:
+    assert body["restricted"] is False
+    assert o.owner_uid in [p["uid"] for p in body["people"]]
+
+
+def _org_settings_check(body: dict, o: OrgWorld) -> None:
+    assert (body["slug"], body["default_project_role"]) == (o.slug, "contributor")
+
+
+def _audit_check(body: dict, o: OrgWorld) -> None:
+    assert all(event["org"] == o.slug for event in body["events"])
 
 
 def _owner_kept_check(body: dict, w: World, o: OrgWorld) -> None:
@@ -688,6 +716,11 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     ),
     ("DELETE", "/api/org/members/{uid}"): Call(409, shows=lambda o: ["last_owner"]),
     ("DELETE", "/api/org/membership"): Call(409, shows=lambda o: ["last_owner"]),
+    # Invitations (M2f-1 section 4.8; test_portal_members.py drives them)
+    ("GET", "/api/org/invitations"): Call(200, check=_invitations_check),
+    ("DELETE", "/api/org/invitations/{uid}"): Call(
+        404, shows=lambda o: ["no_such_invitation"]
+    ),
     # Deleting the org (test_portal_org_delete.py deletes one for real; the
     # sweep must keep its world, so it sends a wrong slug)
     ("DELETE", "/api/org"): Call(
@@ -695,6 +728,23 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         body=lambda w, o: {"confirm_slug": "wrong"},
         shows=lambda o: ["confirm_slug"],
     ),
+    # Org settings, ownership and the audit log (M2f-1 sections 4.8, 4.9;
+    # test_portal_org_settings.py and test_portal_audit.py drive them; the
+    # transfer sends a wrong slug so the sweep keeps its owners)
+    ("PATCH", "/api/org"): Call(
+        200,
+        body=lambda w, o: {"default_project_role": "contributor"},
+        check=lambda body, w, o: _org_settings_check(body, o),
+    ),
+    ("POST", "/api/org/transfer"): Call(
+        409,
+        body=lambda w, o: {"user_uid": "someone", "confirm_slug": "wrong"},
+        shows=lambda o: ["confirm_slug"],
+    ),
+    ("GET", "/api/org/audit"): Call(
+        200, check=lambda body, w, o: _audit_check(body, o)
+    ),
+    ("GET", "/api/org/audit.csv"): Call(200, shows=lambda o: ["created_at"]),
     # Production's GitHub App import page (swept over prod_world, whose
     # owners have not connected GitHub; test_portal_github_import.py drives it)
     ("POST", "/api/github/app/authorize"): Call(
@@ -712,6 +762,18 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     ("GET", "/api/projects/{slug}/connections"): Call(200, check=_no_connections),
     ("DELETE", "/api/projects/{slug}/connections/{uid}"): Call(
         404, shows=lambda o: ["no such connection"]
+    ),
+    # A project's access list (M2f-1 section 4.8; test_portal_access.py
+    # drives it): the owner is an org admin, so a grant is refused
+    ("GET", "/api/projects/{slug}/access"): Call(200, check=_access_check),
+    ("PATCH", "/api/projects/{slug}/access"): Call(
+        200, body=lambda w, o: {"restricted": False}
+    ),
+    ("PUT", "/api/projects/{slug}/access/{user_uid}"): Call(
+        409, body=lambda w, o: {"role": "viewer"}, shows=lambda o: ["org_admin"]
+    ),
+    ("DELETE", "/api/projects/{slug}/access/{user_uid}"): Call(
+        404, shows=lambda o: ["no_grant"]
     ),
     ("POST", "/api/projects"): Call(
         201,

@@ -1218,8 +1218,21 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/org/members/{uid}", "PATCH"): "org.members",
     ("/api/org/members/{uid}", "DELETE"): "org.members",
     ("/api/org/membership", "DELETE"): "org.read",
+    # Production's invitations (M2f-1 section 4.8)
+    ("/api/org/invitations", "GET"): "org.members",
+    ("/api/org/invitations/{uid}", "DELETE"): "org.members",
+    # Production's project access list (M2f-1 section 4.8)
+    ("/api/projects/{slug}/access", "GET"): "project.access",
+    ("/api/projects/{slug}/access", "PATCH"): "project.access",
+    ("/api/projects/{slug}/access/{user_uid}", "PUT"): "project.access",
+    ("/api/projects/{slug}/access/{user_uid}", "DELETE"): "project.access",
     # Deleting a production org: org_access(ORG_OWN) (M2d-2 section 4.8)
     ("/api/org", "DELETE"): "org.own",
+    # Org settings, ownership transfer and the audit log (M2f-1 4.8, 4.9)
+    ("/api/org", "PATCH"): "org.configure",
+    ("/api/org/transfer", "POST"): "org.own",
+    ("/api/org/audit", "GET"): "org.audit",
+    ("/api/org/audit.csv", "GET"): "org.audit",
     # Production's GitHub App import page: org_access(...) (M2d-2 section 4.4)
     ("/api/github/app/authorize", "POST"): "org.add_project",
     ("/api/github/installations", "GET"): "org.add_project",
@@ -1300,6 +1313,7 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/admin/users", "GET"): "instance.admin",
     ("/api/admin/users/{uid}", "PATCH"): "instance.admin",
     ("/api/admin/users/{uid}/reset-link", "POST"): "instance.admin",
+    ("/api/admin/audit", "GET"): "instance.admin",
 }
 """Plan section 4.5's route -> action table: a changed action is a visible diff."""
 
@@ -1387,6 +1401,7 @@ _FILL = {
     "{number}": "1",
     "{run_id}": "1",
     "{uid}": "someone",
+    "{user_uid}": "someone",
     "{installation_id}": "7",
     "{link_id}": "nolink",
 }
@@ -1405,12 +1420,22 @@ PRODUCTION_ORG_ROUTES = {
     ("/api/org/members/{uid}", "PATCH"),
     ("/api/org/members/{uid}", "DELETE"),
     ("/api/org/membership", "DELETE"),
+    ("/api/org/invitations", "GET"),
+    ("/api/org/invitations/{uid}", "DELETE"),
     ("/api/org", "DELETE"),
+    ("/api/org", "PATCH"),
+    ("/api/org/transfer", "POST"),
+    ("/api/org/audit", "GET"),
+    ("/api/org/audit.csv", "GET"),
     ("/api/github/app/authorize", "POST"),
     ("/api/github/installations", "GET"),
     ("/api/github/installations/{installation_id}/repos", "GET"),
     ("/api/projects/{slug}/connections", "GET"),
     ("/api/projects/{slug}/connections/{uid}", "DELETE"),
+    ("/api/projects/{slug}/access", "GET"),
+    ("/api/projects/{slug}/access", "PATCH"),
+    ("/api/projects/{slug}/access/{user_uid}", "PUT"),
+    ("/api/projects/{slug}/access/{user_uid}", "DELETE"),
 }
 """Org-scoped routes that exist only in production: the members page, the
 org's deletion, the GitHub App import page and a project's connected portals

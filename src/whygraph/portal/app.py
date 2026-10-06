@@ -9,7 +9,8 @@ Composition (plan section 4.5.1)::
     /api/orgs, /api/admin/*       (portal/auth_routes.py; 404 in local mode)
     /api/github/*                 the GitHub App's authorize / callback / listings
                                   (portal/github_app_routes.py; 404 in local mode)
-    DELETE /api/org               an owner deletes the org (portal/org_routes.py;
+    /api/org, /api/org/transfer,  an owner's org settings, ownership transfer,
+    /api/org/audit*               audit log and deletion (portal/org_routes.py;
                                   404 in local mode)
     /api/projects/*               management; each route names its action through
                                   org_access / project_access / project_db_access
@@ -81,8 +82,10 @@ from whygraph.serve.errors import whygraph_error_handler
 from whygraph.serve.routes import generate_router
 from whygraph.serve.routes import router as data_router
 
-from . import connections
+from . import audit_store, connections
 from . import db as portal_db
+from .access_routes import access_router
+from .audit import clear_writer, set_writer
 from .auth_routes import auth_router
 from .connect_routes import connect_router
 from .authz import Action
@@ -136,6 +139,9 @@ SUPPORTED_MODES: tuple[str, ...] = ("local", "production")
 
 CONNECTION_SWEEP_EVERY_SEC = 60 * 60
 """How often production sweeps expired connection tokens (also once at start)."""
+
+AUDIT_PRUNE_EVERY_SEC = 24 * 60 * 60
+"""How often production deletes audit rows past their retention (also at start)."""
 
 LINK_REFRESH_POLL_SEC = 2.0
 """How often local mode drains the link-status refresh queue
@@ -251,7 +257,8 @@ def create_portal_app(
     app.include_router(public_router)
     app.include_router(auth_router)  # production-only; local mode answers 404
     app.include_router(members_router)  # production-only, org-scoped
-    app.include_router(org_router)  # production-only: DELETE /api/org (M2d-2)
+    app.include_router(access_router)  # production-only, project-scoped
+    app.include_router(org_router)  # production-only: settings, audit, DELETE /api/org
     app.include_router(github_app_router)  # production-only (M2d-2)
     app.include_router(connect_router)  # production-only: consent, exchange (M2e)
     app.include_router(v1_router)  # production-only: the /api/v1 data routes (M2e)
@@ -375,6 +382,13 @@ async def _serving(state: PortalState) -> AsyncIterator[None]:
             stack.callback(state.github_app.close)
         if not state.degraded:
             await state.runner.start(state)
+            if state.mode == "production":
+                # After the runner (it audits), stopped and flushed after
+                # its shutdown: the stack unwinds after the finally below.
+                writer = audit_store.AuditWriter()
+                writer.start()
+                set_writer(writer)
+                stack.push_async_callback(_stop_audit_writer, writer)
         watcher = anyio.create_task_group()
         await watcher.__aenter__()
         if not state.degraded and state.instance_lock is not None:
@@ -383,6 +397,7 @@ async def _serving(state: PortalState) -> AsyncIterator[None]:
             watcher.start_soon(_check_base_url, state)
             if not state.degraded:
                 watcher.start_soon(_sweep_connections)
+                watcher.start_soon(_prune_audit_events)
         elif state.mode == "local" and not state.degraded:
             watcher.start_soon(_refresh_link_statuses, state)
         set_strict(True)
@@ -437,6 +452,25 @@ async def _sweep_connections() -> None:
                     "connection token sweep: %d expired, %d deleted", revoked, deleted
                 )
         await anyio.sleep(CONNECTION_SWEEP_EVERY_SEC)
+
+
+async def _stop_audit_writer(writer: audit_store.AuditWriter) -> None:
+    """Unregister the audit writer, then write what it still holds."""
+    clear_writer(writer)
+    await anyio.to_thread.run_sync(writer.stop)
+
+
+async def _prune_audit_events() -> None:
+    """Delete audit rows past their retention: at start, then daily; never fatal."""
+    while True:
+        try:
+            deleted = await anyio.to_thread.run_sync(audit_store.prune)
+        except Exception:  # noqa: BLE001 -- a failed prune is retried tomorrow
+            _log.exception("audit log pruning failed")
+        else:
+            if deleted:
+                _log.info("audit log pruning: %d row(s) deleted", deleted)
+        await anyio.sleep(AUDIT_PRUNE_EVERY_SEC)
 
 
 async def _refresh_link_statuses(state: PortalState) -> None:

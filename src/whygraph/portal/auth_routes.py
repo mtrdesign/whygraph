@@ -29,14 +29,14 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import literal_column, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, func, select
 
-from . import connections
+from . import audit_store, connections
 from .audit import audit, truncate_email
 from .authz import Role
 from .db import get_session
@@ -56,6 +56,7 @@ from .github_auth import (
     GitHubUser,
 )
 from .hosts import BaseUrl, safe_redirect
+from .member_routes import Redeemed, redeem_invitations
 from .models import Membership, Organization, PasswordReset, User
 from .orgs import OrgSlugTaken, add_member, create_org, validate_org_slug
 from .passwords import (
@@ -509,19 +510,30 @@ def _github_callback(
     if signed_in is None:
         refused("disabled", user.login)
         raise ApiError(403, "this account is disabled", code="account_disabled")
-    token, uid, new_user, released = signed_in
+    token, uid, new_user, released, redeemed = signed_in
     if principal is not None and principal.session_id is not None:
         end_user_tokens(state, session_id=principal.session_id)  # it was revoked
     for target in released:
         audit("github_login_released", request, target=target, github_login=user.login)
     audit("github_signin", request, uid=uid, github_login=user.login, new_user=new_user)
+    for joined in redeemed:
+        audit(
+            "member_joined_by_invite",
+            request,
+            uid=uid,
+            org_id=joined.org_id,
+            org=joined.org_slug,
+            role=joined.role,
+            invitation=joined.invitation_uid,
+            github_login=user.login,
+        )
     set_cookie(response, token, base)
     return {"redirect": safe_redirect(pending.next, base) or f"{base.origin}/orgs"}
 
 
 def _sign_in_github_user(
     user: GitHubUser, *, replaces: int | None, user_agent: str | None
-) -> tuple[str, str, bool, list[str]] | None:
+) -> tuple[str, str, bool, list[str], list[Redeemed]] | None:
     """Upsert the account by GitHub id and start its session, in one transaction.
 
     Any other row holding the incoming login (case-insensitively) has it
@@ -530,12 +542,16 @@ def _sign_in_github_user(
     only - never the user-editable ``display_name`` - so two concurrent
     first sign-ins converge on one row; a race that still trips a unique
     index (a login claimed by two ids at once) retries the transaction.
+    After the disabled check, the open invitations for the GitHub id are
+    redeemed (:func:`~whygraph.portal.member_routes.redeem_invitations`,
+    M2f-1 plan section 4.8), each in its own savepoint, so a failed one
+    never fails the sign-in.
 
     Returns
     -------
     tuple or None
-        ``(session token, uid, new_user, released uids)``, or ``None`` when
-        the account is disabled (then nothing is written).
+        ``(session token, uid, new_user, released uids, redeemed)``, or
+        ``None`` when the account is disabled (then nothing is written).
     """
     users = User.__table__
     for attempt in range(_UPSERT_ATTEMPTS):
@@ -579,10 +595,11 @@ def _sign_in_github_user(
                 if disabled_at is not None:
                     db.rollback()  # the refresh and any release are undone
                     return None
+                redeemed = redeem_invitations(db, github_id=user.id, user_id=user_id)
                 if replaces is not None:
                     revoke(replaces, db=db)  # plan section 0.2 #20
                 token = create_session(db, user_id, user_agent)
-            return token, uid, bool(inserted), released
+            return token, uid, bool(inserted), released, redeemed
         except IntegrityError:
             if attempt == _UPSERT_ATTEMPTS - 1:
                 raise
@@ -892,8 +909,9 @@ def post_org(
         except IntegrityError as exc:  # a concurrent create of the same slug
             raise slug_taken from exc
         assert org.id is not None
-        add_member(db, org_id=org.id, user_id=principal.user_id, role=Role.OWNER)
-    audit("org_created", request, uid=principal.uid, org=slug)
+        org_id = org.id
+        add_member(db, org_id=org_id, user_id=principal.user_id, role=Role.OWNER)
+    audit("org_created", request, uid=principal.uid, org_id=org_id, org=slug)
     return {"slug": slug, "url": base.org_origin(slug)}
 
 
@@ -939,6 +957,42 @@ def get_admin_orgs(
         }
         for slug, name, created_at, count in rows
     ]
+
+
+@auth_router.get("/api/admin/audit")
+def get_admin_audit(
+    _: Principal = Depends(instance_access()),
+    org: str | None = Query(default=None, max_length=100),
+    event: str | None = Query(default=None, max_length=100),
+    actor: str | None = Query(default=None, max_length=200),
+    since: str | None = Query(default=None, alias="from", max_length=40),
+    until: str | None = Query(default=None, alias="to", max_length=40),
+    before: int | None = Query(default=None, ge=1),
+    limit: int = Query(
+        default=audit_store.PAGE_SIZE, ge=1, le=audit_store.MAX_PAGE_SIZE
+    ),
+) -> dict:
+    """Security events of no org: sign-ins, instance admin, deleted orgs' events.
+
+    The filters of ``GET /api/org/audit``, plus ``org`` (a deleted org's
+    slug, as its events kept it); ``422 bad_date`` for a malformed
+    ``from`` / ``to``.
+
+    Returns
+    -------
+    dict
+        ``{"events": [...], "next": <id or null>}``, newest first.
+    """
+    try:
+        f = audit_store.make_filter(
+            orgless=True, org=org, event=event, actor=actor, since=since, until=until
+        )
+    except ValueError as exc:
+        raise ApiError(
+            422, "from and to must be ISO-8601 dates or date-times", code="bad_date"
+        ) from exc
+    events, next_before = audit_store.query_events(f, before=before, limit=limit)
+    return {"events": events, "next": next_before}
 
 
 @auth_router.get("/api/admin/users")

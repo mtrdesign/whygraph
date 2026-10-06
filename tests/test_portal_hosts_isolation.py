@@ -89,6 +89,7 @@ from test_portal_tenancy import (
     _seed_history,
     _url,
     assert_no_leak,
+    newcomer_github_id,
     wait_for,
 )
 from whygraph.core.context import use_project
@@ -158,6 +159,7 @@ BASE_ONLY_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/admin/users", "GET"),
         ("/api/admin/users/{uid}", "PATCH"),
         ("/api/admin/users/{uid}/reset-link", "POST"),
+        ("/api/admin/audit", "GET"),
         # The consent page, the code exchange and the caller's connected
         # portals (M2e section 4.4)
         ("/api/connect/validate", "POST"),
@@ -190,12 +192,22 @@ ORG_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/org/members/{uid}", "PATCH"),
         ("/api/org/members/{uid}", "DELETE"),
         ("/api/org/membership", "DELETE"),
+        ("/api/org/invitations", "GET"),
+        ("/api/org/invitations/{uid}", "DELETE"),
         ("/api/org", "DELETE"),
+        ("/api/org", "PATCH"),
+        ("/api/org/transfer", "POST"),
+        ("/api/org/audit", "GET"),
+        ("/api/org/audit.csv", "GET"),
         ("/api/github/app/authorize", "POST"),
         ("/api/github/installations", "GET"),
         ("/api/github/installations/{installation_id}/repos", "GET"),
         ("/api/projects/{slug}/connections", "GET"),
         ("/api/projects/{slug}/connections/{uid}", "DELETE"),
+        ("/api/projects/{slug}/access", "GET"),
+        ("/api/projects/{slug}/access", "PATCH"),
+        ("/api/projects/{slug}/access/{user_uid}", "PUT"),
+        ("/api/projects/{slug}/access/{user_uid}", "DELETE"),
     }
 )
 """The members routes (M2d-1 section 4.5), the org's deletion (M2d-2 section
@@ -442,6 +454,9 @@ def prod_world(
     _offline_llms(monkeypatch)
     for login in GITHUB_LOGINS:
         github_fake.add_user(login)
+    for mark in ("quokka", "narwhal"):  # the sweep's `_newcomer` accounts
+        login = f"{mark}-newcomer"
+        github_fake.add_user(login, id=newcomer_github_id(login))
     with prod_portal() as client:
         claim_instance(client, ADA_EMAIL, display_name="Ada")
         client.cookies.clear()
@@ -909,6 +924,9 @@ def test_the_reader_route_split_is_the_planned_one() -> None:
         ("PATCH", "/api/org/members/{uid}"),
         ("DELETE", "/api/org/members/{uid}"),
         ("DELETE", "/api/org/membership"),
+        # Invitations are the members admins' (M2f-1 section 4.8), even to read.
+        ("GET", "/api/org/invitations"),
+        ("DELETE", "/api/org/invitations/{uid}"),
     } <= set(OTHER_ROUTES)
     assert ("POST", "/api/projects/{slug}/node/rationale") in OTHER_ROUTES
     assert ("GET", "/api/projects/{slug}/node/rationale") in READ_ROUTES

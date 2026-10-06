@@ -11,10 +11,11 @@ import {
   NetworkIcon,
   SearchIcon,
   SlidersHorizontalIcon,
+  ScrollTextIcon,
   UsersIcon,
 } from "lucide-react";
 import { portalApi, portalKey } from "../../api";
-import { baseHostOf, isProduction, useSignOut } from "../../lib/identity";
+import { baseHostOf, canOwn, isProduction, useSignOut } from "../../lib/identity";
 import { hardNavigate } from "../../lib/navigation";
 import { can } from "../../lib/permissions";
 import { useUi } from "../../store";
@@ -94,6 +95,9 @@ const PORTAL_ITEMS: NavItem[] = [
 
 // Production only (M2d-1), for every role: a reader and a member can read the list.
 const MEMBERS_ITEM: NavItem = { label: "Members", icon: UsersIcon, to: "/members" };
+
+// Production, owners only (`org.audit`).
+const AUDIT_ITEM: NavItem = { label: "Audit log", icon: ScrollTextIcon, to: "/audit" };
 
 function ProjectSwitcher({ slug, name }: { slug?: string; name?: string }) {
   const navigate = useNavigate();
@@ -188,7 +192,10 @@ export function Sidebar({ slug, projectName }: { slug?: string; projectName?: st
           </>
         ) : (
           <Section title="Portal">
-            {(production ? [...PORTAL_ITEMS, MEMBERS_ITEM] : PORTAL_ITEMS).map((item) => (
+            {(production
+              ? [...PORTAL_ITEMS, MEMBERS_ITEM, ...(canOwn(state.data?.org?.role ?? undefined) ? [AUDIT_ITEM] : [])]
+              : PORTAL_ITEMS
+            ).map((item) => (
               <NavLink key={item.label} item={item} />
             ))}
           </Section>

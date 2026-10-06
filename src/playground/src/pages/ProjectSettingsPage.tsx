@@ -13,6 +13,7 @@ import { ProjectConnectedPortals } from "../components/portal/ConnectedPortals";
 import { CopyButton } from "../components/portal/CopyButton";
 import { NotInitialized, ProjectUnavailable } from "../components/portal/EdgeStates";
 import { InitializeStep } from "../components/portal/InitializeStep";
+import { ProjectAccess } from "../components/portal/ProjectAccess";
 import { ProjectPortChangeNotice } from "../components/portal/PortChangeNotice";
 import { RemoveProjectDialog } from "../components/portal/RemoveProjectDialog";
 import { Button } from "../components/ui/button";
@@ -30,6 +31,7 @@ const SECTIONS = [
 const PRODUCTION_SECTIONS = [
   { id: "general", label: "General" },
   { id: "config", label: "Models and keys" },
+  { id: "access", label: "Access" },
   { id: "connections", label: "Connected portals" },
   { id: "danger", label: "Danger zone" },
 ] as const;
@@ -213,6 +215,7 @@ export function ProjectSettingsPage() {
   // Connected portals: production only, for the owners and admins who may revoke them.
   const role = useRole();
   const showConnections = production && can(project.data, "project.configure");
+  const showAccess = production && can(project.data, "project.access");
   // Removing a project is an org action (ORG_REMOVE_PROJECT), not a project one.
   const showDanger = canAdmin(role);
   const [removing, setRemoving] = useState(false);
@@ -226,7 +229,7 @@ export function ProjectSettingsPage() {
     <div className="mx-auto flex w-full max-w-5xl gap-8 p-6 sm:p-8">
       <nav aria-label="Settings sections" className="sticky top-6 mt-11 hidden h-fit w-44 shrink-0 flex-col gap-0.5 md:flex">
         {sections
-          .filter((s) => (s.id !== "connections" || showConnections) && (s.id !== "danger" || showDanger))
+          .filter((s) => (s.id !== "connections" || showConnections) && (s.id !== "access" || showAccess) && (s.id !== "danger" || showDanger))
           .map((s) => (
           <button
             key={s.id}
@@ -263,6 +266,8 @@ export function ProjectSettingsPage() {
             />
           </div>
         )}
+
+        {showAccess && <ProjectAccess slug={slug} />}
 
         {showConnections && <ProjectConnectedPortals slug={slug} />}
 

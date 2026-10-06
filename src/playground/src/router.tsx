@@ -19,7 +19,7 @@ import { projectProblem } from "./lib/errors";
 import { can } from "./lib/permissions";
 import { getLastProject, setLastProject } from "./lib/lastProject";
 import { ProjectProvider } from "./lib/project";
-import { canAdmin, isProduction, isSafeNext, signInUrl, usePortalState } from "./lib/identity";
+import { canAdmin, canOwn, isProduction, isSafeNext, signInUrl, usePortalState } from "./lib/identity";
 import { hardNavigate } from "./lib/navigation";
 import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
 import { safeLinkNext } from "./lib/linkNext";
@@ -35,6 +35,7 @@ import { AddProjectPage, type NewProjectSearch } from "./pages/AddProjectPage";
 import { InitProjectPage, type InitStep } from "./pages/InitProjectPage";
 import { SetupPage } from "./pages/SetupPage";
 import { GlobalSettingsPage } from "./pages/GlobalSettingsPage";
+import { AuditPage } from "./pages/AuditPage";
 import { MembersPage } from "./pages/MembersPage";
 import { ProjectSettingsPage } from "./pages/ProjectSettingsPage";
 import { ScansPage } from "./pages/ScansPage";
@@ -69,7 +70,8 @@ import {
 //   /                                    Projects              ┐ portal layout
 //   /projects/new                        add-project wizard    │ (sidebar: Projects,
 //   /settings                            global settings       │  Settings, and
-//   /members                             org members           ┘  Members in production)
+//   /members                             org members           │  Members, and the
+//   /audit                               audit log (owners)    ┘  owners' Audit log, in production)
 //   /p/$slug                             ProjectHome           ┐ project layout
 //   /p/$slug/explorer?node=&file=        Explorer              │ (sidebar: Overview,
 //   /p/$slug/chat/{-$id}                 Chat                  │  Explorer, Chat,
@@ -473,6 +475,15 @@ function MembersRoute() {
 }
 const membersRoute = createRoute({ getParentRoute: () => portalLayout, path: "/members", component: MembersRoute });
 
+// The audit log: production, owners only (`org.audit`).
+function AuditRoute() {
+  const state = usePortalState().data;
+  const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
+  const current = state ?? portal;
+  return isProduction(current) && canOwn(current.org?.role ?? undefined) ? <AuditPage /> : <NotFoundPage />;
+}
+const auditRoute = createRoute({ getParentRoute: () => portalLayout, path: "/audit", component: AuditRoute });
+
 // ---- project layout ---------------------------------------------------------
 
 // Pages that read project data; on an unusable project they are replaced by an
@@ -655,6 +666,7 @@ const routeTree = rootRoute.addChildren([
     connectCallbackRoute,
     globalSettingsRoute,
     membersRoute,
+    auditRoute,
   ]),
   projectRoute.addChildren([
     projectHomeRoute,

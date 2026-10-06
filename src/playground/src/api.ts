@@ -1017,11 +1017,118 @@ async function sendEmpty(method: string, path: string): Promise<void> {
 // Org members (`portal/member_routes.py`): org host, production only.
 export const membersApi = {
   list: () => get<Member[]>("/org/members"),
-  add: (body: { github_login: string; role: MemberRole }) => send<Member>("POST", "/org/members", body),
+  // An account is added at once (a `Member`); anyone else gets an invitation (`pending: true`).
+  add: (body: { github_login: string; role: MemberRole; grants?: ProjectGrant[] }) =>
+    send<Member | PendingInvite>("POST", "/org/members", body),
   setRole: (uid: string, role: MemberRole) =>
     send<Member>("PATCH", `/org/members/${encodeURIComponent(uid)}`, { role }),
   remove: (uid: string) => sendEmpty("DELETE", `/org/members/${encodeURIComponent(uid)}`),
   leave: () => sendEmpty("DELETE", "/org/membership"),
+};
+
+/** A project grant carried by an invitation or a new member. */
+export interface ProjectGrant {
+  project: string;
+  role: ProjectRole;
+}
+
+/** One invitation as `GET /api/org/invitations` lists it (never an email). */
+export interface Invitation {
+  uid: string;
+  github_login: string;
+  role: MemberRole;
+  status: "open" | "expired" | "redeemed" | "revoked";
+  invited_by: { uid: string; display_name: string; github_login: string | null } | null;
+  created_at: string;
+  expires_at: string;
+  redeemed_at: string | null;
+  revoked_at: string | null;
+  grants: ProjectGrant[];
+}
+
+/** The `201` of an invite for someone with no account yet. */
+export type PendingInvite = Invitation & { pending: true };
+
+export const invitationsApi = {
+  list: () => get<Invitation[]>("/org/invitations"),
+  revoke: (uid: string) => sendEmpty("DELETE", `/org/invitations/${encodeURIComponent(uid)}`),
+};
+
+// Org settings (`PATCH /api/org`, `POST /api/org/transfer`; production, org host).
+export const orgSettingsApi = {
+  patch: (body: { name?: string; default_project_role?: "contributor" | "viewer" | "none" }) =>
+    send<{ slug: string; name: string; default_project_role: string }>("PATCH", "/org", body),
+  transfer: (user_uid: string, confirm_slug: string) =>
+    send<unknown>("POST", "/org/transfer", { user_uid, confirm_slug }),
+};
+
+/** One person on a project's access list (`GET /api/projects/<slug>/access`). */
+export interface AccessPerson {
+  uid: string;
+  login: string | null;
+  name: string;
+  avatar: string | null;
+  org_role: MemberRole;
+  project_role: ProjectRole | null;
+  source: "org_admin" | "grant" | "default";
+}
+
+export interface ProjectAccessData {
+  restricted: boolean;
+  org_default: "admin" | "contributor" | "viewer" | "none";
+  people: AccessPerson[];
+  invitations: { uid: string; github_login: string; role: ProjectRole; created_at: string; expires_at: string }[];
+}
+
+export const accessApi = (slug: string) => {
+  const base = `/projects/${encodeURIComponent(slug)}/access`;
+  return {
+    get: () => get<ProjectAccessData>(base),
+    setRestricted: (restricted: boolean) => send<{ restricted: boolean }>("PATCH", base, { restricted }),
+    setGrant: (uid: string, role: ProjectRole) => send<unknown>("PUT", `${base}/${encodeURIComponent(uid)}`, { role }),
+    removeGrant: (uid: string) => sendEmpty("DELETE", `${base}/${encodeURIComponent(uid)}`),
+  };
+};
+
+/** One persisted security event (`portal/audit_store.py` `_row`). */
+export interface AuditEventRow {
+  id: number;
+  created_at: string;
+  org: string | null;
+  actor: { uid: string | null; label: string | null } | null;
+  event: string;
+  target: string | null;
+  ip: string | null;
+  fields: Record<string, unknown>;
+}
+
+export interface AuditFilters {
+  event?: string;
+  actor?: string;
+  from?: string;
+  to?: string;
+  before?: number;
+}
+
+function auditQuery(f: AuditFilters): string {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(f)) if (v !== undefined && v !== "") params.set(k, String(v));
+  const qs = params.toString();
+  return qs ? `?${qs}` : "";
+}
+
+export const auditApi = {
+  org: (f: AuditFilters = {}) =>
+    get<{ events: AuditEventRow[]; next: number | null }>(`/org/audit${auditQuery(f)}`),
+  admin: (f: AuditFilters = {}) =>
+    get<{ events: AuditEventRow[]; next: number | null }>(`/admin/audit${auditQuery(f)}`),
+  // A fetch (the `X-WhyGraph-Client` header is required, so a plain link would be refused).
+  csv: async (f: AuditFilters = {}): Promise<Blob> => {
+    const { before: _before, ...rest } = f;
+    const res = await fetch(`/api/org/audit.csv${auditQuery(rest)}`, init("GET"));
+    if (!res.ok) throw await failure(res);
+    return res.blob();
+  },
 };
 
 // ---- project-scoped calls ---------------------------------------------------

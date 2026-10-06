@@ -1,4 +1,4 @@
-import type { LinkStatus, ProjectLink, ProjectSummary } from "../api";
+import type { LinkStatus, ProjectLink, ProjectRole, ProjectSummary } from "../api";
 import { revokedLabel } from "./connections";
 
 /** A `platform` project (local mode): linked to a project on a WhyGraph platform. */
@@ -28,6 +28,14 @@ export function platformHost(origin: string): string {
 export function accountUrl(origin: string | null | undefined): string | undefined {
   const href = safeHref(origin);
   return href ? `${new URL(href).origin}/account` : undefined;
+}
+
+const ROLE_LABELS: Record<ProjectRole, string> = { admin: "Admin", contributor: "Contributor", viewer: "Viewer" };
+
+/** The caller's role on the platform project, for a sentence; `null` until the platform said. */
+export function projectRoleLabel(link: ProjectLink | null | undefined): string | null {
+  const role = link?.project_role;
+  return role && Object.prototype.hasOwnProperty.call(ROLE_LABELS, role) ? ROLE_LABELS[role] : null;
 }
 
 /** The local `/link?...` request that reconnects a project to its platform project. */
@@ -62,6 +70,15 @@ export function linkNotice(link: ProjectLink | null | undefined): LinkNoticeText
         actions: ["remove"],
       };
     case "revoked":
+      if (link.status_reason === "project_access_removed") {
+        // Reconnecting cannot help: only a project admin on the platform can.
+        return {
+          tone: "error",
+          title: `Access revoked (${revokedLabel(link.status_reason)})`,
+          detail: `Ask a project admin on ${host} for access, or remove it from this machine.`,
+          actions: ["remove"],
+        };
+      }
       return {
         tone: "error",
         title: `Access revoked (${link.status_reason ? revokedLabel(link.status_reason) : "no reason given"})`,

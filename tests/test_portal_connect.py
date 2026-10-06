@@ -50,8 +50,16 @@ from whygraph.portal import orgs
 from whygraph.portal.connect_routes import MIN_CLIENT_VERSION, redirect_port
 from whygraph.portal.deps import current_user, v1_user
 from whygraph.portal.github_auth import AccessLogRedactor, pkce_challenge
-from whygraph.portal.models import ConnectionToken, Membership, Project, User
+from whygraph.portal.models import (
+    ConnectionToken,
+    Membership,
+    Organization,
+    Project,
+    ProjectGrant,
+    User,
+)
 from whygraph.portal.throttle import Throttle
+from whygraph.portal.v1_status import load_status
 
 NOT_FOUND = {"error": "not found"}
 LOCAL_PORT = 8765
@@ -575,6 +583,163 @@ def test_exchange_rechecks_membership(
     ]
     assert record["reason"] == "user_disabled"
     assert token_rows() == []
+
+
+# ---------------------------------------------------------------------------
+# Restricted projects never leak (M2f-1 plan section 4.4)
+# ---------------------------------------------------------------------------
+
+
+def _grant(n: SimpleNamespace, who: str, slug: str, role: str | None) -> None:
+    """Set (or, with ``None``, drop) ``who``'s grant on ``slug``."""
+    key = (n.projects[slug], n.ids[who])
+    with portal_db.get_session() as session:
+        found = session.get(ProjectGrant, key)
+        if role is None:
+            if found is not None:
+                session.delete(found)
+            return
+        if found is None:
+            found = ProjectGrant(
+                org_id=session.get(Project, key[0]).org_id,
+                project_id=key[0],
+                user_id=key[1],
+                role=role,
+            )
+        found.role = role
+        session.add(found)
+
+
+def _restrict(n: SimpleNamespace, slug: str, restricted: bool = True) -> None:
+    with portal_db.get_session() as session:
+        session.get(Project, n.projects[slug]).restricted = restricted
+
+
+def _default(n: SimpleNamespace, org: str, value: str) -> None:
+    with portal_db.get_session() as session:
+        session.get(Organization, n.orgs[org]).default_project_role = value
+
+
+def _consent_slugs(n: SimpleNamespace) -> list[str]:
+    listed = n.client.get(at() + "/api/connect/projects")
+    assert listed.status_code == 200, listed.text
+    return [p["slug"] for p in listed.json()]
+
+
+def test_restricted_absent_from_the_consent_list(cn: SimpleNamespace) -> None:
+    _restrict(cn, "api")
+    be(cn, "cy")
+    assert _consent_slugs(cn) == ["web"]
+    _grant(cn, "cy", "api", "viewer")  # viewers may connect agents
+    assert _consent_slugs(cn) == ["api", "web"]
+    # The org default `none` hides everything not granted.
+    _default(cn, "acme", "none")
+    assert _consent_slugs(cn) == ["api"]
+    # Org owners and admins see every project, Restricted included.
+    for who in ("ben", "fay"):
+        be(cn, who)
+        assert _consent_slugs(cn) == ["api", "web"]
+
+
+def test_restricted_validate_hint_is_not_found(cn: SimpleNamespace) -> None:
+    _restrict(cn, "api")
+    be(cn, "cy")
+    hidden = validate(cn, org="acme", project="api")
+    missing = validate(cn, org="acme", project="nosuch")
+    assert hidden.status_code == missing.status_code == 422, hidden.text
+    assert hidden.json() == missing.json()
+    assert hidden.json()["field"] == "project"
+    assert validate(cn, org="acme", project="web").status_code == 200
+    _grant(cn, "cy", "api", "viewer")
+    assert validate(cn, org="acme", project="api").status_code == 200
+    be(cn, "fay")
+    _grant(cn, "cy", "api", None)
+    assert validate(cn, org="acme", project="api").status_code == 200
+
+
+def test_restricted_authorize_is_not_found(cn: SimpleNamespace) -> None:
+    _restrict(cn, "api")
+    be(cn, "cy")
+    for project in ("api", "nosuch"):
+        response = authorize(cn, project=project)
+        assert (response.status_code, response.json()) == (404, NOT_FOUND)
+    assert len(cn.state.connect_codes) == 0
+    _default(cn, "acme", "none")
+    response = authorize(cn, project="web")
+    assert (response.status_code, response.json()) == (404, NOT_FOUND)
+    _grant(cn, "cy", "api", "contributor")
+    assert authorize(cn, project="api").status_code == 200
+
+
+def test_restricted_after_consent_refuses_the_exchange(
+    cn: SimpleNamespace, audit_log: pytest.LogCaptureFixture
+) -> None:
+    code = code_for(cn, "cy")
+    _restrict(cn, "api")
+    audit_log.clear()
+    invalid_grant(exchange(cn, code))
+    (record,) = [
+        r for r in events(audit_log) if r["event"] == "connection_token_refused"
+    ]
+    assert record["reason"] == "project_access_removed"
+    assert record["target"] == cn.uids["cy"]
+    # The default `none` is refused the same way.
+    _restrict(cn, "api", False)
+    code = code_for(cn, "cy")
+    _default(cn, "acme", "none")
+    audit_log.clear()
+    invalid_grant(exchange(cn, code))
+    (record,) = [
+        r for r in events(audit_log) if r["event"] == "connection_token_refused"
+    ]
+    assert record["reason"] == "project_access_removed"
+    assert token_rows() == []
+    # With a grant the exchange answers the project role.
+    _grant(cn, "cy", "api", "viewer")
+    reply = exchange(cn, code_for(cn, "cy"))
+    assert reply.status_code == 200, reply.text
+    project = TokenReply.model_validate(reply.json()).project
+    assert (project.role, project.project_role) == ("member", "viewer")
+
+
+def test_v1_status_carries_the_project_role_and_hides_restricted(
+    cn: SimpleNamespace,
+) -> None:
+    def status(token: str) -> httpx.Response:
+        cn.client.cookies.clear()
+        return cn.client.get(at("acme") + "/api/v1/projects/api", headers=bearer(token))
+
+    ben, cy, fay = (issue(cn, who, "api") for who in ("ben", "cy", "fay"))
+    roles = {}
+    for who, token in (("ben", ben), ("cy", cy), ("fay", fay)):
+        response = status(token)
+        assert response.status_code == 200, response.text
+        roles[who] = (response.json()["role"], response.json()["project_role"])
+    assert roles == {
+        "ben": ("owner", "admin"),
+        "cy": ("member", "contributor"),
+        "fay": ("admin", "admin"),
+    }
+    _grant(cn, "cy", "api", "viewer")
+    assert status(cy).json()["project_role"] == "viewer"
+    # Restricted without a grant: the token is refused, and the status that
+    # every v1 answer carries is never built.
+    _grant(cn, "cy", "api", None)
+    _restrict(cn, "api")
+    response = status(cy)
+    assert response.status_code == 401, response.text
+    assert (response.json()["code"], response.json()["reason"]) == (
+        "token_revoked",
+        "project_access_removed",
+    )
+    assert status(ben).json()["project_role"] == "admin"
+    with portal_db.get_session() as session:
+        api = cn.projects["api"]
+        assert load_status(session, api, cn.ids["cy"]) is None
+        assert load_status(session, api, cn.ids["ada"]) is None  # no membership
+        assert load_status(session, api, cn.ids["fay"]).project_role == "admin"
+        _grant(cn, "cy", "api", "admin")
+        assert load_status(session, api, cn.ids["cy"]).project_role == "admin"
 
 
 # ---------------------------------------------------------------------------

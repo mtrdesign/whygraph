@@ -31,6 +31,7 @@ function link(over: Partial<ProjectLink> = {}): ProjectLink {
     status: "ok",
     status_reason: null,
     last_platform_head: "abc123",
+    project_role: "contributor",
     explorer_url: "https://acme.whygraph.example.com/p/alpha/explorer",
     chat_url: "https://acme.whygraph.example.com/p/alpha/chat",
     manage_url: "https://acme.whygraph.example.com/p/alpha/settings",
@@ -410,6 +411,16 @@ describe("linked project card", () => {
     expect(within(notice).getByRole("link", { name: "Remove from this machine" })).toBeInTheDocument();
   });
 
+  it("offers only remove when the project access was removed", async () => {
+    fake.projects = [project({ link: link({ status: "revoked", status_reason: "project_access_removed" }) })];
+    mount("/");
+    const notice = await screen.findByTestId("link-notice");
+    expect(notice).toHaveTextContent("Access revoked (Your access to the project was removed)");
+    expect(notice).toHaveTextContent("Ask a project admin on whygraph.example.com for access");
+    expect(within(notice).queryByRole("link", { name: "Reconnect" })).toBeNull();
+    expect(within(notice).getByRole("link", { name: "Remove from this machine" })).toBeInTheDocument();
+  });
+
   it("degrades when a platform project has no link", async () => {
     fake.projects = [project({ link: undefined })];
     mount("/");
@@ -430,9 +441,27 @@ describe("linked project pages", () => {
       "https://acme.whygraph.example.com/p/alpha/explorer",
     );
     expect(within(panel).getByRole("link", { name: /Open Chat on platform/ })).toBeInTheDocument();
+    expect(within(panel).getByTestId("linked-role")).toHaveTextContent("Contributor");
     expect(screen.queryByRole("link", { name: "Open Explorer" })).toBeNull();
     expect(screen.queryByTestId("stats")).toBeNull();
     expect(fake.calls.some((c) => c.path.endsWith("/scan-estimate"))).toBe(false);
+  });
+
+  it("a viewer on the platform sees the role and no chat link", async () => {
+    fake.projects = [project({ link: link({ project_role: "viewer" }) })];
+    mount("/p/alpha");
+    const panel = await screen.findByTestId("linked-panel");
+    expect(within(panel).getByTestId("linked-role")).toHaveTextContent("Viewer");
+    expect(within(panel).getByRole("link", { name: /Open Explorer on platform/ })).toBeInTheDocument();
+    expect(within(panel).queryByRole("link", { name: /Open Chat on platform/ })).toBeNull();
+  });
+
+  it("a role not reported yet shows no role line", async () => {
+    fake.projects = [project({ link: link({ project_role: null }) })];
+    mount("/p/alpha");
+    const panel = await screen.findByTestId("linked-panel");
+    expect(within(panel).queryByTestId("linked-role")).toBeNull();
+    expect(within(panel).getByRole("link", { name: /Open Chat on platform/ })).toBeInTheDocument();
   });
 
   it("the local Explorer URL shows the platform notice and reads no data", async () => {

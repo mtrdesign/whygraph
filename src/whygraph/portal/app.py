@@ -13,8 +13,10 @@ Composition (plan section 4.5.1)::
                                   404 in local mode)
     /api/projects/*               management; each route names its action through
                                   org_access / project_access / project_db_access
-    /api/projects/{slug}/...      serve.routes.router (project.read) + serve.chat.router
-                                  (/chat, project.chat), via project_db_access
+    /api/projects/{slug}/...      serve.routes.router (project.read),
+                                  serve.routes.generate_router (POST /node/rationale,
+                                  project.chat) + serve.chat.router (/chat,
+                                  project.chat), via project_db_access
     /mcp/{slug}                   per-project MCP dispatcher (portal/mcp_mount.py)
     POST /github/webhook          the GitHub App's webhook, base host, outside /api
                                   (portal/webhook.py; 404 in local mode)
@@ -76,6 +78,7 @@ from whygraph.mcp.errors import WhyGraphError
 from whygraph.serve.app import _mount_static
 from whygraph.serve.chat import router as chat_router
 from whygraph.serve.errors import whygraph_error_handler
+from whygraph.serve.routes import generate_router
 from whygraph.serve.routes import router as data_router
 
 from . import connections
@@ -266,6 +269,19 @@ def create_portal_app(
             Depends(
                 project_db_access(
                     Action.PROJECT_READ, guard=linked_guard("the Explorer")
+                )
+            )
+        ],
+    )
+    # The Explorer's "Generate" is an explicit LLM call: chat's action, so a
+    # viewer (who never causes LLM spend) is refused (M2f-1 section 4.6).
+    app.include_router(
+        generate_router,
+        prefix="/api/projects/{slug}",
+        dependencies=[
+            Depends(
+                project_db_access(
+                    Action.PROJECT_CHAT, guard=linked_guard("the Explorer")
                 )
             )
         ],

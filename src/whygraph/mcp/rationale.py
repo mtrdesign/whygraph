@@ -96,6 +96,21 @@ class RationaleGenerationError(WhyGraphError):
     """The LLM could not generate a card; ``__cause__`` is the ``AnalyzeError`` / ``LlmError``."""
 
 
+class GenerationNotPermitted(WhyGraphError):
+    """A card is not cached and the caller may not generate one (a project viewer).
+
+    Raised by :func:`rationale_card` on a cache miss when the bound
+    project context has ``llm_allowed`` false (M2f-1 plan section 4.6),
+    before anything is spent or any budget is charged.
+    """
+
+
+_GENERATION_NOT_PERMITTED_MESSAGE = (
+    "no rationale card is cached for this target, and your role on this "
+    "project (viewer) cannot generate one; ask a contributor or admin"
+)
+
+
 _NO_EVIDENCE_MESSAGE = (
     "no historical evidence for this target — the lines map to no "
     "scanned commit. Scan from the WhyGraph portal (or run `whygraph scan` "
@@ -186,6 +201,9 @@ def rationale_card(
     ------
     NoEvidenceError
         ``evidence`` is empty.
+    GenerationNotPermitted
+        A cache miss while the bound project context has ``llm_allowed``
+        false - raised before ``before_generate``, so no budget is charged.
     RationaleGenerationError
         The generator failed.
     """
@@ -199,6 +217,9 @@ def rationale_card(
         rationale, cached_at = cached
         return _format_response(target, rationale, evidence, cached_at)
 
+    ctx = current_project()
+    if ctx is not None and not ctx.llm_allowed:
+        raise GenerationNotPermitted(_GENERATION_NOT_PERMITTED_MESSAGE)
     if before_generate is not None:
         before_generate()
     # Cache miss — lazily backfill any commit whose `llm_description` is

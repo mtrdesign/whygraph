@@ -708,7 +708,16 @@ def backfill_evidence_descriptions(
         without a description, every bulk commit whose per-file
         description is not cached - and that commit is skipped when it
         returns ``False``. ``None`` (default) describes everything.
+
+    Notes
+    -----
+    Does nothing when the bound project context has ``llm_allowed`` false
+    (a project viewer's portal request, M2f-1 plan section 4.6): a viewer
+    never causes LLM spend, so commits keep whatever description they have.
     """
+    ctx = current_project()
+    if ctx is not None and not ctx.llm_allowed:
+        return
     from whygraph.core import get_config
 
     threshold = get_config().analyze.large_commit_file_count

@@ -19,7 +19,7 @@ answers ``404``:
 * ``POST /api/connect/token`` (base host, public): the local portal trades
   the code for a ``wgc_`` token. The code is popped **before** anything is
   verified, so a failed PKCE or ``redirect_uri`` check spends it; then the
-  membership and the account are re-checked.
+  membership, the project access and the account are re-checked.
 * ``GET /api/connect/tokens`` and ``DELETE /api/connect/tokens/{uid}``
   (base host, ``user.self``): the caller's own connected portals.
 * ``GET /api/projects/{slug}/connections`` and ``DELETE
@@ -30,8 +30,12 @@ answers ``404``:
   ``project.read``): a connected portal revokes its own token
   (``removed_locally``).
 
-Tokens are only ever for real org members: an instance admin's ``reader``
-access never consents, and the exchange re-reads the ``memberships`` row.
+Tokens are only ever for real org members with access to the project
+(M2f-1): an instance admin's ``reader`` access never consents, a project
+the member cannot see (Restricted without a grant, or the org default
+``none``) is answered exactly like a missing one in the consent list, the
+validate hint, the authorize step and the exchange, and the exchange
+re-reads the ``memberships`` row and the project access.
 Audit records carry ``client_name`` ``repr()``-quoted and never a token or
 a code.
 """
@@ -51,6 +55,7 @@ from whygraph.api_v1 import API_VERSION, MetaOut, TokenReply
 from . import connections
 from .audit import audit
 from .authz import Action
+from .connections import member_access_select, member_project_role
 from .db import get_session
 from .deps import (
     ApiError,
@@ -260,9 +265,9 @@ def post_validate(
     """Check a consent request before the page shows it; return the Cancel URL.
 
     A hinted ``org`` must be one the caller is a member of, and a hinted
-    ``project`` one of its projects (``422 bad_connect_request`` otherwise,
-    the same answer for an org that does not exist). ``orgs`` lists the
-    caller's member orgs.
+    ``project`` one of its projects the caller has access to (``422
+    bad_connect_request`` otherwise, the same answer for an org or a
+    project that does not exist). ``orgs`` lists the caller's member orgs.
     """
     port = checked_request(body)
     base = _base(portal_state(request))
@@ -274,11 +279,11 @@ def post_validate(
                 raise _bad("org", "that is not one of your organizations")
             if body.project is not None:
                 found = db.exec(
-                    select(Project.id).where(
+                    member_access_select(Project.id, user_id=principal.user_id).where(
                         Project.org_id == org_id, Project.slug == body.project
                     )
                 ).first()
-                if found is None:
+                if found is None or member_project_role(*found[1:]) is None:
                     raise _bad("project", "no such project in that organization")
         elif body.project is not None:
             raise _bad("project", "a project needs its org")
@@ -302,17 +307,16 @@ def post_validate(
 def get_connect_projects(
     principal: Principal = Depends(user_access("base")),
 ) -> list[dict]:
-    """The projects of the caller's **member** orgs (never a ``reader``'s)."""
+    """The projects of the caller's **member** orgs they have access to.
+
+    Never a ``reader``'s, and never a project the caller cannot see
+    (Restricted without a grant, or the org default ``none``).
+    """
     with get_session() as db:
         rows = db.exec(
-            select(Project, Organization.slug, Organization.name)
-            .join(Organization, col(Organization.id) == col(Project.org_id))
-            .join(
-                Membership,
-                (col(Membership.org_id) == col(Project.org_id))
-                & (col(Membership.user_id) == principal.user_id),
-            )
-            .order_by(Organization.name, Organization.slug, Project.name, Project.slug)
+            member_access_select(
+                Project, Organization.slug, Organization.name, user_id=principal.user_id
+            ).order_by(Organization.name, Organization.slug, Project.name, Project.slug)
         ).all()
         return [
             {
@@ -323,7 +327,8 @@ def get_connect_projects(
                 "github_full_name": _github_full_name(project),
                 "access_lost": project.access_lost_at is not None,
             }
-            for project, org_slug, org_name in rows
+            for project, org_slug, org_name, *access in rows
+            if member_project_role(*access) is not None
         ]
 
 
@@ -337,7 +342,8 @@ def post_authorize(
 
     ``429`` past 30 attempts per user an hour; ``422 bad_connect_request``
     as :func:`post_validate`; ``404`` unless the caller holds a real
-    membership of ``org`` and it has ``project``. ``redirect`` is
+    membership of ``org``, it has ``project`` and the caller has access to
+    it (the same ``404`` for a Restricted project). ``redirect`` is
     ``redirect_uri?code=...&state=...&iss=<base origin>``.
     """
     state = portal_state(request)
@@ -346,18 +352,16 @@ def post_authorize(
     base = _base(state)
     with get_session() as db:
         row = db.exec(
-            select(Project.id, Project.org_id, Project.access_lost_at)
-            .join(Organization, col(Organization.id) == col(Project.org_id))
-            .join(
-                Membership,
-                (col(Membership.org_id) == col(Project.org_id))
-                & (col(Membership.user_id) == principal.user_id),
-            )
-            .where(Organization.slug == body.org, Project.slug == body.project)
+            member_access_select(
+                Project.id,
+                Project.org_id,
+                Project.access_lost_at,
+                user_id=principal.user_id,
+            ).where(Organization.slug == body.org, Project.slug == body.project)
         ).first()
-    if row is None:
+    if row is None or member_project_role(*row[3:]) is None:
         raise ApiError(404, "not found")
-    project_id, org_id, access_lost_at = row
+    project_id, org_id, access_lost_at = row[:3]
     code = state.connect_codes.put(
         user_id=principal.user_id,
         org_id=org_id,
@@ -398,7 +402,8 @@ def post_token(body: TokenBody, request: Request) -> dict:
     guessing);
     ``400 invalid_grant`` for an unknown, used or expired code, a wrong
     ``code_verifier``, a ``redirect_uri`` that is not byte-equal to the
-    consent's, a disabled account, a lost membership or a deleted project -
+    consent's, a disabled account, a lost membership, lost access to the
+    project (audited as ``project_access_removed``) or a deleted project -
     one answer for all. The code is spent by the first attempt, whatever
     its outcome. Returns :class:`~whygraph.api_v1.TokenReply`.
     """
@@ -437,7 +442,9 @@ def post_token(body: TokenBody, request: Request) -> dict:
             raise refused("project_deleted")
         status = load_status(db, pending.project_id, pending.user_id)
         if status is None:
-            raise refused("member_removed", target=user.uid)
+            member = db.get(Membership, (project.org_id, user.id))
+            reason = "member_removed" if member is None else "project_access_removed"
+            raise refused(reason, target=user.uid)
         org_slug = db.exec(
             select(Organization.slug).where(Organization.id == project.org_id)
         ).one()

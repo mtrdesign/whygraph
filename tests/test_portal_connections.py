@@ -74,6 +74,7 @@ from whygraph.portal.models import (
     ConnectionToken,
     Organization,
     Project,
+    ProjectGrant,
     User,
 )
 from whygraph.portal.security import Principal
@@ -616,6 +617,166 @@ def test_org_delete_revokes_with_reason(net: SimpleNamespace) -> None:
             "org_deleted",
         )
     assert call(net, bravo, "lib", "bravo").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Tokens follow project access (M2f-1 plan section 4.7)
+# ---------------------------------------------------------------------------
+
+
+def _grant(n: SimpleNamespace, who: str, slug: str, role: str | None) -> None:
+    """Set (or, with ``None``, drop) ``who``'s grant on ``slug``."""
+    key = (n.projects[slug], n.ids[who])
+    with portal_db.get_session() as session:
+        found = session.get(ProjectGrant, key)
+        if role is None:
+            if found is not None:
+                session.delete(found)
+            return
+        if found is None:
+            found = ProjectGrant(
+                org_id=session.get(Project, key[0]).org_id,
+                project_id=key[0],
+                user_id=key[1],
+                role=role,
+            )
+        found.role = role
+        session.add(found)
+
+
+def _restrict(n: SimpleNamespace, slug: str, restricted: bool = True) -> None:
+    with portal_db.get_session() as session:
+        session.get(Project, n.projects[slug]).restricted = restricted
+
+
+def _default(n: SimpleNamespace, org: str, value: str) -> None:
+    with portal_db.get_session() as session:
+        session.get(Organization, n.orgs[org]).default_project_role = value
+
+
+def test_lookup_refuses_a_restricted_project_without_revocation(
+    net: SimpleNamespace,
+) -> None:
+    cy, ben = issue(net, "cy", "api"), issue(net, "ben", "api")
+    web = issue(net, "cy", "web")
+    _restrict(net, "api")
+    refused(call(net, cy), "project_access_removed")
+    assert row(cy).revoked_at is None  # refused on every call, not revoked
+    assert call(net, ben).status_code == 200  # the owner is a project admin
+    assert call(net, web, "web").status_code == 200
+    # A grant restores access, and the token works again.
+    _grant(net, "cy", "api", "viewer")
+    assert call(net, cy).status_code == 200
+    # Removing the grant takes it away again.
+    _grant(net, "cy", "api", None)
+    refused(call(net, cy), "project_access_removed")
+    _restrict(net, "api", False)
+    assert call(net, cy).status_code == 200
+
+
+def test_lookup_refuses_under_the_default_none_until_granted(
+    net: SimpleNamespace,
+) -> None:
+    cy = issue(net, "cy", "api")
+    _default(net, "acme", "none")
+    refused(call(net, cy), "project_access_removed")
+    assert row(cy).revoked_at is None
+    _grant(net, "cy", "api", "contributor")
+    assert call(net, cy).status_code == 200
+    _grant(net, "cy", "api", None)
+    refused(call(net, cy), "project_access_removed")
+    # A viewer default keeps tokens working: viewers may connect agents.
+    _default(net, "acme", "viewer")
+    assert call(net, cy).status_code == 200
+
+
+def test_member_removed_wins_over_project_access(net: SimpleNamespace) -> None:
+    cy = issue(net, "cy", "api")
+    _restrict(net, "api")
+    with portal_db.get_session() as session:
+        session.exec(
+            text("DELETE FROM memberships WHERE org_id = :o AND user_id = :u"),
+            params={"o": net.orgs["acme"], "u": net.ids["cy"]},
+        )
+    refused(call(net, cy), "member_removed")
+
+
+def test_revoke_for_project_user_is_scoped(net: SimpleNamespace) -> None:
+    api, web = issue(net, "cy", "api"), issue(net, "cy", "web")
+    ben = issue(net, "ben", "api")
+    with portal_db.get_session() as session:
+        count = connections.revoke_for_project_user(
+            session, net.projects["api"], net.ids["cy"], "project_access_removed"
+        )
+    assert count == 1
+    assert row(api).revoked_reason == "project_access_removed"
+    refused(call(net, api), "project_access_removed")
+    assert call(net, web, "web").status_code == 200
+    assert call(net, ben).status_code == 200
+
+
+def test_revoke_lost_access_revokes_at_once_and_stays_revoked(
+    net: SimpleNamespace,
+) -> None:
+    with portal_db.get_session() as session:
+        orgs.add_member(
+            session, org_id=net.orgs["acme"], user_id=net.ids["dee"], role="member"
+        )
+    cy_api, cy_web = issue(net, "cy", "api"), issue(net, "cy", "web")
+    dee_api, ben_api = issue(net, "dee", "api"), issue(net, "ben", "api")
+    lib = issue(net, "dee", "lib")
+    _grant(net, "dee", "api", "viewer")
+    # The change and the eager revoke in one transaction.
+    with portal_db.get_session() as session:
+        session.get(Project, net.projects["api"]).restricted = True
+        session.flush()
+        count = connections.revoke_lost_access(
+            session, net.orgs["acme"], project_id=net.projects["api"]
+        )
+    assert count == 1
+    assert row(cy_api).revoked_reason == "project_access_removed"
+    refused(call(net, cy_api), "project_access_removed")
+    for token, slug, org in (
+        (cy_web, "web", "acme"),  # another project
+        (dee_api, "api", "acme"),  # granted
+        (ben_api, "api", "acme"),  # the owner
+        (lib, "lib", "bravo"),  # another org
+    ):
+        assert row(token).revoked_at is None
+        assert call(net, token, slug, org).status_code == 200
+    # Revoked is final: a grant does not bring the revoked token back.
+    _grant(net, "cy", "api", "contributor")
+    refused(call(net, cy_api), "project_access_removed")
+    # Nothing left to revoke: a second pass is a no-op.
+    with portal_db.get_session() as session:
+        assert connections.revoke_lost_access(session, net.orgs["acme"]) == 0
+
+
+def test_revoke_lost_access_after_the_default_none(net: SimpleNamespace) -> None:
+    cy_api, cy_web = issue(net, "cy", "api"), issue(net, "cy", "web")
+    ben = issue(net, "ben", "web")
+    _grant(net, "cy", "web", "viewer")
+    with portal_db.get_session() as session:
+        session.get(Organization, net.orgs["acme"]).default_project_role = "none"
+        session.flush()
+        count = connections.revoke_lost_access(
+            session, net.orgs["acme"], user_id=net.ids["cy"]
+        )
+    assert count == 1
+    assert row(cy_api).revoked_reason == "project_access_removed"
+    assert row(cy_web).revoked_at is None and row(ben).revoked_at is None
+
+
+def test_revoke_lost_access_skips_former_members(net: SimpleNamespace) -> None:
+    """A token whose user left the org is the member routes' to revoke."""
+    cy = issue(net, "cy", "api")
+    with portal_db.get_session() as session:
+        session.exec(
+            text("DELETE FROM memberships WHERE org_id = :o AND user_id = :u"),
+            params={"o": net.orgs["acme"], "u": net.ids["cy"]},
+        )
+        assert connections.revoke_lost_access(session, net.orgs["acme"]) == 0
+    assert row(cy).revoked_at is None
 
 
 def test_lists(net: SimpleNamespace) -> None:

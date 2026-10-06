@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterator
@@ -70,6 +71,7 @@ from whygraph.portal.runner import (
     MAX_EVENT_LINE,
     TRIGGER_PRECEDENCE,
     RunnerUnavailable,
+    ScanForbidden,
     ScanRunner,
     SourceNotAllowed,
     _event_line,
@@ -1115,6 +1117,7 @@ def test_a_local_github_row_is_refused_on_every_request_path(
                 analyze=False,
                 requested_by=None,
                 scan_requested=False,
+                may_spend=False,
             )
 
         with pytest.raises(SourceNotAllowed, match="no longer supported"):
@@ -1808,7 +1811,92 @@ def test_cancel_after_the_runner_stopped_is_unavailable(
         local_project(client, env, "demo")
         done = first_scan(client, "demo")["id"]
     with pytest.raises(RunnerUnavailable):
-        anyio.run(runner.cancel, 1, done)
+        anyio.run(partial(runner.cancel, 1, done, may_cancel_full=True))
+
+
+# ---------------------------------------------------------------------------
+# The quick / full split, gated under the runner lock (M2f-1 plan section 4.5)
+# ---------------------------------------------------------------------------
+
+
+def _project_ref(slug: str) -> SimpleNamespace:
+    """What :meth:`ScanRunner.request_scan` reads of a bound project."""
+    with portal_db.get_session() as session:
+        row = session.exec(select(Project).where(Project.slug == slug)).one()
+        return SimpleNamespace(id=row.id, source=row.source)
+
+
+def _request(client: TestClient, slug: str, **kwargs: Any) -> int:
+    """``request_scan`` on the portal's own loop (no route, no role)."""
+    runner = client.app.state.portal.runner
+    kwargs.setdefault("principal", None)
+    return client.portal.call(
+        partial(runner.request_scan, _project_ref(slug), **kwargs)
+    )
+
+
+def _cancel(client: TestClient, slug: str, run_id: int, *, may_cancel_full: bool):  # noqa: ANN202
+    runner = client.app.state.portal.runner
+    return client.portal.call(
+        partial(
+            runner.cancel,
+            _project_ref(slug).id,
+            run_id,
+            may_cancel_full=may_cancel_full,
+        )
+    )
+
+
+def test_a_request_that_would_spend_needs_may_spend(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    local_project(portal, env, "demo")
+    # The first scan is forced to `initial` (no analyze), so a body-less
+    # request without the right passes: the gate runs after the forcing.
+    first = _request(portal, "demo", trigger=None, analyze=None, may_spend=False)
+    assert wait_run(portal, "demo", first)["trigger"] == "initial"
+
+    for trigger, analyze in (
+        (None, None),  # body-less: `manual` = full
+        ("manual", None),
+        ("manual", True),
+        ("describe", None),
+    ):
+        with pytest.raises(ScanForbidden):
+            _request(portal, "demo", trigger=trigger, analyze=analyze, may_spend=False)
+    assert [r["id"] for r in runs(portal, "demo")] == [first]  # nothing queued
+
+    quick = _request(portal, "demo", trigger="manual", analyze=False, may_spend=False)
+    assert wait_run(portal, "demo", quick)["analyze"] is False
+    full = _request(portal, "demo", trigger="manual", analyze=None, may_spend=True)
+    assert wait_run(portal, "demo", full)["analyze"] is True
+
+
+def test_cancelling_a_full_run_needs_may_cancel_full(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    local_project(portal, env, "demo")
+    first_scan(portal, "demo")
+    scanner.hold.touch()
+    running = _request(portal, "demo", trigger="manual", analyze=None, may_spend=True)
+    wait_for(lambda: len(scanner.calls()) == 2)
+
+    with pytest.raises(ScanForbidden):  # a running full scan
+        _cancel(portal, "demo", running, may_cancel_full=False)
+    quick = _request(portal, "demo", trigger="manual", analyze=False, may_spend=False)
+    assert _cancel(portal, "demo", quick, may_cancel_full=False) == "queued"
+
+    # A full request merged into a queued quick run makes it a full one.
+    queued = _request(portal, "demo", trigger="manual", analyze=False, may_spend=False)
+    merged = _request(portal, "demo", trigger="manual", analyze=True, may_spend=True)
+    assert merged == queued
+    with pytest.raises(ScanForbidden):
+        _cancel(portal, "demo", queued, may_cancel_full=False)
+    assert run_by_id(portal, "demo", queued)["status"] == "queued"
+    assert _cancel(portal, "demo", queued, may_cancel_full=True) == "queued"
+    assert _cancel(portal, "demo", running, may_cancel_full=True) == "running"
+    scanner.hold.unlink()
+    assert wait_run(portal, "demo", running)["status"] == "cancelled"
 
 
 def test_child_env_passes_the_claude_token_only_to_a_claude_cli_analyze_run(

@@ -11,6 +11,9 @@ Rationale is split (the resolved design decision): the **GET** is LLM-free — i
 resolves the target, collects evidence, and reads the cache — while the **POST**
 runs the full ``whygraph_rationale_brief`` generate-and-cache flow. Generation
 therefore happens only on the explicit "Generate" button, never on passive view.
+The POST lives on its own :data:`generate_router`, which the portal mounts with
+``project.chat`` (a viewer may read cards, not generate them); every other route
+is on :data:`router`, mounted with ``project.read``.
 """
 
 from __future__ import annotations
@@ -32,6 +35,8 @@ from whygraph.services.codegraph import CodeGraph, CodeGraphError
 from . import graphdata
 
 router = APIRouter()
+generate_router = APIRouter()
+"""The explicit LLM generation (``POST /node/rationale``), mounted with ``project.chat``."""
 
 
 @contextmanager
@@ -192,7 +197,7 @@ def rationale_read(qualified_name: str = Query(...)) -> dict:
     }
 
 
-@router.post("/node/rationale")
+@generate_router.post("/node/rationale")
 def rationale_generate(qualified_name: str = Query(...)) -> dict:
     """Generate + cache a rationale card (the explicit "Generate" action).
 

@@ -69,6 +69,9 @@ PushStatus = Literal[
 Role = Literal["owner", "admin", "member"]
 """The token user's role in the project's org (never ``reader``)."""
 
+ProjectRoleName = Literal["admin", "contributor", "viewer"]
+"""The token user's effective role on the project (M2f-1)."""
+
 
 def _check_sha(value: str) -> str:
     """Refuse anything but a full lowercase hex SHA (not git's all-zero one)."""
@@ -385,7 +388,11 @@ class StatusOut(_Out):
     access_lost : bool
         The platform can no longer reach the repository.
     role : str
-        The token user's role (:data:`Role`).
+        The token user's role in the org (:data:`Role`).
+    project_role : str
+        The token user's effective role on the project
+        (:data:`ProjectRoleName`): a ``viewer`` causes no LLM spend, so
+        has no chat.
     """
 
     slug: str
@@ -397,6 +404,7 @@ class StatusOut(_Out):
     last_scan_at: str | None = None
     access_lost: bool = False
     role: Role
+    project_role: ProjectRoleName
 
 
 class ErrorOut(_Out):
@@ -559,6 +567,7 @@ __all__ = [
     "IssueOut",
     "MetaOut",
     "OriginIn",
+    "ProjectRoleName",
     "PullRequestOut",
     "PushStatus",
     "RationaleIn",

@@ -4,14 +4,17 @@ A token is ``wgc_`` plus 32 random bytes (:func:`secrets.token_urlsafe`);
 the ``connection_tokens`` table stores only its SHA-256
 (:func:`whygraph.portal.sessions.hash_token`), so a database read alone can
 never be replayed as a token. A token reaches **one project**, as its user,
-and :func:`lookup` re-checks that user's membership on every call, so a role
+and :func:`lookup` re-checks that user's membership **and project access**
+(M2f-1: the org default, a grant, Restricted) on every call, so a role
 change applies to the next request.
 
 Revocation records a reason (:data:`~whygraph.portal.models.REVOKED_REASONS`),
 so the local portal can say precisely what happened, and it follows
-membership: the routes that remove a member, a project or an org revoke
-the affected tokens in the same transaction (``revoke_for_*``). Re-enabling
-a disabled user does **not** restore their tokens.
+membership and project access: the routes that remove a member, a project
+or an org, or take someone's access to a project away, revoke the affected
+tokens in the same transaction (``revoke_for_*``,
+:func:`revoke_lost_access`). Re-enabling a disabled user does **not**
+restore their tokens.
 
 Expiry: a token unused for :data:`IDLE` (90 days), or never used within
 :data:`UNUSED` (1 hour) of being issued, is revoked as ``idle`` - by
@@ -40,8 +43,16 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import and_, delete, or_, update
 from sqlmodel import Session, col, select
 
+from .authz import ProjectRole, Role, effective_project_role
 from .db import get_session
-from .models import ConnectionToken, Membership, Project, User
+from .models import (
+    ConnectionToken,
+    Membership,
+    Organization,
+    Project,
+    ProjectGrant,
+    User,
+)
 from .sessions import hash_token
 
 TOKEN_PREFIX = "wgc_"
@@ -329,6 +340,68 @@ def _expired(now: datetime):  # noqa: ANN202 -- a SQL expression
     )
 
 
+def member_access_select(*columns, user_id: int):  # noqa: ANN002, ANN201
+    """A ``SELECT`` of ``columns`` plus what decides ``user_id``'s project role.
+
+    Selects ``columns`` from ``projects`` joined with ``user_id``'s
+    membership of the project's org (inner: no membership, no row), the org
+    and ``user_id``'s grant on the project (outer), and appends four
+    columns - ``memberships.role``, ``organizations.default_project_role``,
+    ``projects.restricted`` and ``project_grants.role`` - in the order
+    :func:`member_project_role` takes them. The caller adds its ``WHERE``.
+
+    Parameters
+    ----------
+    *columns
+        What to select first; the first must be ``Project`` or one of its
+        columns (it is the ``FROM``).
+    user_id : int
+        ``users.id`` of the member.
+
+    Returns
+    -------
+    Select
+        The statement; each row ends with the four access columns.
+    """
+    return (
+        select(
+            *columns,
+            Membership.role,
+            Organization.default_project_role,
+            Project.restricted,
+            ProjectGrant.role,
+        )
+        .join(
+            Membership,
+            (col(Membership.org_id) == col(Project.org_id))
+            & (col(Membership.user_id) == user_id),
+        )
+        .join(Organization, col(Organization.id) == col(Project.org_id))
+        .outerjoin(
+            ProjectGrant,
+            (col(ProjectGrant.project_id) == col(Project.id))
+            & (col(ProjectGrant.user_id) == user_id),
+        )
+    )
+
+
+def member_project_role(
+    org_role: str, default: str, restricted: bool, grant: str | None
+) -> ProjectRole | None:
+    """A member's effective project role from the stored columns, or ``None``.
+
+    :func:`~whygraph.portal.authz.effective_project_role` over the raw
+    values :func:`member_access_select` appends (a stored org role is never
+    ``reader``).
+    """
+    return effective_project_role(
+        Role(org_role),
+        default,
+        bool(restricted),
+        None if grant is None else ProjectRole(grant),
+    )
+
+
 def is_valid_client_name(name: str) -> bool:
     """Whether ``name`` matches :data:`CLIENT_NAME_RE` in full."""
     return CLIENT_NAME_RE.fullmatch(name) is not None
@@ -385,9 +458,13 @@ def lookup(db: Session, raw: str) -> TokenPrincipal | Refusal:
     (``invalid_token``); a revoked one (``token_revoked`` + its reason); a
     token whose org or project is gone (``org_deleted`` / ``project_deleted``);
     a disabled user (``user_disabled``); an expired one (``idle`` - the row
-    is revoked); and a user who no longer holds a ``memberships`` row in the
+    is revoked); a user who no longer holds a ``memberships`` row in the
     token's org (``member_removed``), whether or not that removal revoked
-    the token.
+    the token; and a member who has no access to the project any more - a
+    grant removed, the project Restricted, the org default ``none``
+    (``project_access_removed``, M2f-1). The last two write nothing, so a
+    restored membership or grant makes the token work again unless an eager
+    revocation already ran.
 
     Parameters
     ----------
@@ -438,13 +515,15 @@ def lookup(db: Session, raw: str) -> TokenPrincipal | Refusal:
         assert token.id is not None
         revoke(db, token_id=token.id, reason="idle")
         return Refusal("token_revoked", "idle")
-    member = db.exec(
-        select(Membership.user_id).where(
-            Membership.org_id == token.org_id, Membership.user_id == token.user_id
+    access = db.exec(
+        member_access_select(Project.id, user_id=token.user_id).where(
+            Project.id == token.project_id, Project.org_id == token.org_id
         )
     ).first()
-    if member is None:
+    if access is None:
         return Refusal("token_revoked", "member_removed")
+    if member_project_role(*access[1:]) is None:
+        return Refusal("token_revoked", "project_access_removed")
     assert token.id is not None
     return TokenPrincipal(
         token_id=token.id,
@@ -570,6 +649,92 @@ def revoke_for_member(db: Session, org_id: int, user_id: int, reason: str) -> in
     )
 
 
+def revoke_for_project_user(
+    db: Session, project_id: int, user_id: int, reason: str
+) -> int:
+    """Revoke every live token of ``user_id`` on ``project_id``; return how many.
+
+    The eager half of "tokens follow project access" (M2f-1): run it in the
+    transaction that takes ``user_id``'s access to the project away, with
+    ``project_access_removed``. :func:`revoke_lost_access` finds who lost it.
+    """
+    return _revoke_where(
+        db,
+        reason,
+        col(ConnectionToken.project_id) == project_id,
+        col(ConnectionToken.user_id) == user_id,
+    )
+
+
+def revoke_lost_access(
+    db: Session,
+    org_id: int,
+    *,
+    project_id: int | None = None,
+    user_id: int | None = None,
+) -> int:
+    """Revoke the live tokens in ``org_id`` whose user lost access to their project.
+
+    Run it in the same transaction, **after** the change (a grant removed,
+    a project made Restricted, the org default set to ``none``, a member
+    demoted) is flushed: every live token of the org - narrowed to
+    ``project_id`` and / or ``user_id`` when given - whose user's effective
+    project role is now ``None`` is revoked as ``project_access_removed``
+    (:func:`revoke_for_project_user`). A token whose user is no longer a
+    member is left alone: removing a member revokes with its own reason.
+
+    Parameters
+    ----------
+    db : Session
+        An open portal DB session; the caller commits.
+    org_id : int
+        The org whose tokens are checked.
+    project_id, user_id : int, optional
+        Only the tokens of this project / this user.
+
+    Returns
+    -------
+    int
+        How many tokens were revoked.
+    """
+    conditions = [col(ConnectionToken.org_id) == org_id, *_live()]
+    if project_id is not None:
+        conditions.append(col(ConnectionToken.project_id) == project_id)
+    if user_id is not None:
+        conditions.append(col(ConnectionToken.user_id) == user_id)
+    rows = db.exec(
+        select(
+            ConnectionToken.project_id,
+            ConnectionToken.user_id,
+            Membership.role,
+            Organization.default_project_role,
+            Project.restricted,
+            ProjectGrant.role,
+        )
+        .join(Project, col(Project.id) == col(ConnectionToken.project_id))
+        .join(Organization, col(Organization.id) == col(Project.org_id))
+        .join(
+            Membership,
+            (col(Membership.org_id) == col(Project.org_id))
+            & (col(Membership.user_id) == col(ConnectionToken.user_id)),
+        )
+        .outerjoin(
+            ProjectGrant,
+            (col(ProjectGrant.project_id) == col(Project.id))
+            & (col(ProjectGrant.user_id) == col(ConnectionToken.user_id)),
+        )
+        .where(*conditions)
+        .distinct()
+    ).all()
+    revoked = 0
+    for token_project, token_user, *access in rows:
+        if member_project_role(*access) is None:
+            revoked += revoke_for_project_user(
+                db, token_project, token_user, "project_access_removed"
+            )
+    return revoked
+
+
 def revoke_for_user(db: Session, user_id: int, reason: str) -> int:
     """Revoke every live token of ``user_id``; return how many."""
     return _revoke_where(db, reason, col(ConnectionToken.user_id) == user_id)
@@ -679,10 +844,14 @@ __all__ = [
     "list_for_project",
     "list_for_user",
     "lookup",
+    "member_access_select",
+    "member_project_role",
     "revoke",
     "revoke_for_member",
     "revoke_for_org",
     "revoke_for_project",
+    "revoke_for_project_user",
+    "revoke_lost_access",
     "revoke_for_user",
     "sweep",
     "touch",

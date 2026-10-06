@@ -18,6 +18,7 @@
       "last_scan_at": null,
       "last_scanned_head": null,
       "name": "Api project",
+      "project_role": "admin",
       "role": "owner",
       "slug": "api"
     },

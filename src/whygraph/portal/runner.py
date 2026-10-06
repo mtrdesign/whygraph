@@ -309,6 +309,15 @@ class ManagedOnPlatform(RuntimeError):
     """A linked project's LLM work happens on the platform - HTTP 403 ``managed_on_platform``."""
 
 
+class ScanForbidden(RuntimeError):
+    """The caller may not start (or cancel) an LLM-spending run - HTTP 403 ``forbidden``.
+
+    Raised under the runner lock, after the trigger default and the
+    first-scan forcing, so the refusal is about what would actually run
+    (M2f-1 plan section 4.5).
+    """
+
+
 class ProjectAccessLost(RuntimeError):
     """The project lost its GitHub access - HTTP 409 ``github_access_lost``.
 
@@ -1161,6 +1170,7 @@ class ScanRunner:
         trigger: str | None,
         analyze: bool | None,
         principal: Principal | None,
+        may_spend: bool,
     ) -> int:
         """Queue (or coalesce into) a scan and return its ``scan_runs.id``.
 
@@ -1174,6 +1184,9 @@ class ScanRunner:
             ``False`` turns a ``manual`` scan structure-only.
         principal : Principal or None
             Recorded as ``requested_by`` for ``manual`` / ``describe`` only.
+        may_spend : bool
+            Whether the caller may start an LLM-spending (full) run - the
+            ``project.scan_full`` action.
 
         Returns
         -------
@@ -1187,6 +1200,12 @@ class ScanRunner:
         ManagedOnPlatform
             A linked project was asked to describe commits (explicit
             ``analyze: true`` or ``describe``): that runs on the platform.
+        ScanForbidden
+            The request would describe commits and ``may_spend`` is false.
+            Decided under the runner lock after the ``manual`` default and
+            the first-scan forcing (a first scan is structure-only, so it is
+            never refused); a request that merges into a pending full run
+            without asking for one is not refused.
 
         Notes
         -----
@@ -1208,6 +1227,7 @@ class ScanRunner:
             analyze=resolve_analyze(requested, analyze, project.source),
             requested_by=user,
             scan_requested=True,
+            may_spend=may_spend,
         )
 
     async def request_sync(
@@ -1264,6 +1284,7 @@ class ScanRunner:
             analyze=False,
             requested_by=principal.user_id if principal else None,
             scan_requested=scan_requested,
+            may_spend=False,  # a sync never describes
         )
 
     async def _request(
@@ -1275,6 +1296,7 @@ class ScanRunner:
         analyze: bool,
         requested_by: int | None,
         scan_requested: bool,
+        may_spend: bool,
     ) -> int:
         if self._tg is None or self._lock is None or self._stopping:
             raise RunnerUnavailable("the scan runner is not running")
@@ -1300,6 +1322,7 @@ class ScanRunner:
                     analyze=analyze,
                     requested_by=requested_by,
                     scan_requested=scan_requested,
+                    may_spend=may_spend,
                 )
 
     async def _request_claimed(
@@ -1311,11 +1334,15 @@ class ScanRunner:
         analyze: bool,
         requested_by: int | None,
         scan_requested: bool,
+        may_spend: bool,
     ) -> int:
         assert self._lock is not None
         async with self._lock:
             if not await anyio.to_thread.run_sync(_has_ok_scan, project_id):
                 trigger, analyze = "initial", False
+            if analyze and not may_spend:
+                # After the default and the forcing: what would really run.
+                raise ScanForbidden("this run would describe commits with the LLM")
             pending = self._pending.get(project_id)
             if pending is None:
                 run_id = await anyio.to_thread.run_sync(
@@ -1344,7 +1371,9 @@ class ScanRunner:
             self._dispatch()
             return run_id
 
-    async def cancel(self, project_id: int, run_id: int) -> str:
+    async def cancel(
+        self, project_id: int, run_id: int, *, may_cancel_full: bool
+    ) -> str:
         """Cancel a queued or running run of a project.
 
         A queued run is dropped from the queue and recorded ``cancelled``.
@@ -1359,6 +1388,9 @@ class ScanRunner:
             ``projects.id`` - a run of another project is "not found".
         run_id : int
             ``scan_runs.id``.
+        may_cancel_full : bool
+            Whether the caller may cancel an LLM-spending (full) run - the
+            ``project.scan_full`` action that would start one.
 
         Returns
         -------
@@ -1369,6 +1401,10 @@ class ScanRunner:
         ------
         RunnerUnavailable
             If the runner is not running.
+        ScanForbidden
+            If the run describes commits and ``may_cancel_full`` is false -
+            decided under the runner lock, so a full request merged into a
+            queued run counts.
         RunNotFound
             If there is no such run for the project.
         RunFinished
@@ -1381,6 +1417,8 @@ class ScanRunner:
                 raise RunnerUnavailable("the scan runner is not running")
             pending = self._pending.get(project_id)
             if pending is not None and pending.run_id == run_id:
+                if pending.analyze and not may_cancel_full:
+                    raise ScanForbidden("this run describes commits with the LLM")
                 del self._pending[project_id]
                 # The row first: a stream that sees the run leave `_live`
                 # reads its final status next, which must not be "queued".
@@ -1389,6 +1427,8 @@ class ScanRunner:
                 return "queued"
             job = self._running.get(project_id)
             if job is not None and job.spec.run_id == run_id:
+                if job.spec.analyze and not may_cancel_full:
+                    raise ScanForbidden("this run describes commits with the LLM")
                 job.cancel()
                 self._tg.start_soon(self._kill_after_grace, job)
                 return "running"
@@ -1435,6 +1475,7 @@ class ScanRunner:
                         analyze=False,
                         requested_by=None,
                         scan_requested=True,
+                        may_spend=False,  # a hook scan never describes
                     )
                 except ProjectBusy:
                     continue  # being removed

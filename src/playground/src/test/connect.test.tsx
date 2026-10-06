@@ -490,7 +490,7 @@ describe("link error messages", () => {
     expect(linkError(new ApiError(500, "boom", "constructor"))).toBe("boom");
   });
   it("labels every revocation reason", () => {
-    for (const r of ["user_revoked", "admin_revoked", "removed_locally", "member_removed", "member_left", "user_disabled", "project_deleted", "org_deleted", "idle"]) {
+    for (const r of ["user_revoked", "admin_revoked", "removed_locally", "member_removed", "member_left", "user_disabled", "project_deleted", "org_deleted", "idle", "project_access_removed"]) {
       expect(revokedLabel(r)).not.toBe("Revoked");
     }
     expect(revokedLabel(null)).toBe("Revoked");

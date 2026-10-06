@@ -338,6 +338,9 @@ export interface ProjectSummary {
 /** How a linked project's connection to its platform stands (plan section 4.11). */
 export type LinkStatus = "ok" | "access_lost" | "removed" | "revoked" | "unreachable" | "update_required";
 
+/** A user's effective role on one project (M2f-1). */
+export type ProjectRole = "admin" | "contributor" | "viewer";
+
 /** `_summary`'s `link` of a `platform` project. The three URLs are built by the server. */
 export interface ProjectLink {
   platform_origin: string;
@@ -346,6 +349,9 @@ export interface ProjectLink {
   status: LinkStatus;
   status_reason: string | null;
   last_platform_head: string | null;
+  // The caller's role on the platform project as last reported; `null` until seen.
+  // A viewer has no chat there.
+  project_role: ProjectRole | null;
   explorer_url: string;
   chat_url: string;
   manage_url: string;
@@ -850,7 +856,8 @@ export type RevokedReason =
   | "user_disabled"
   | "project_deleted"
   | "org_deleted"
-  | "idle";
+  | "idle"
+  | "project_access_removed";
 
 /** `GET /api/connect/tokens`: one of the caller's own connected portals. */
 export interface MyConnection {

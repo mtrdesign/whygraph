@@ -7,13 +7,14 @@ carries ``project`` (M2e plan sections 4.4 and 4.5).
 
 from __future__ import annotations
 
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 from whygraph.api_v1 import StatusOut
 from whygraph.services.git import InvalidRepoUrlError
 from whygraph.services.git.credentials import github_git_host
 
-from .models import Membership, Project
+from .connections import member_access_select, member_project_role
+from .models import Project
 from .routes import _github_full_name
 
 
@@ -35,7 +36,7 @@ def clone_url(project: Project) -> str | None:
         return None
 
 
-def status_out(project: Project, role: str) -> StatusOut:
+def status_out(project: Project, role: str, project_role: str) -> StatusOut:
     """Build the :class:`~whygraph.api_v1.StatusOut` of a ``projects`` row.
 
     Parameters
@@ -45,12 +46,15 @@ def status_out(project: Project, role: str) -> StatusOut:
     role : str
         The token user's role in the project's org (``owner`` / ``admin``
         / ``member``; never ``reader``).
+    project_role : str
+        The token user's effective role on the project (``admin`` /
+        ``contributor`` / ``viewer``).
 
     Returns
     -------
     StatusOut
         Slug, name, the GitHub identity, the scan state, ``access_lost`` and
-        the role.
+        the two roles.
     """
     return StatusOut(
         slug=project.slug,
@@ -62,11 +66,15 @@ def status_out(project: Project, role: str) -> StatusOut:
         last_scan_at=project.last_scan_at,
         access_lost=project.access_lost_at is not None,
         role=role,  # type: ignore[arg-type] -- checked by StatusOut
+        project_role=project_role,  # type: ignore[arg-type] -- checked by StatusOut
     )
 
 
 def load_status(db: Session, project_id: int, user_id: int) -> StatusOut | None:
     """The :class:`StatusOut` of ``project_id`` for ``user_id``, read now.
+
+    One query reads the user's org role, the org default, ``restricted``
+    and the user's grant (M2f-1); the effective project role decides.
 
     Parameters
     ----------
@@ -75,27 +83,27 @@ def load_status(db: Session, project_id: int, user_id: int) -> StatusOut | None:
     project_id : int
         ``projects.id``.
     user_id : int
-        ``users.id``; the role is this user's ``memberships`` row in the
-        project's org.
+        ``users.id``; the roles are this user's ``memberships`` row in the
+        project's org and their effective role on the project.
 
     Returns
     -------
     StatusOut or None
-        ``None`` when the project is gone or the user holds no membership
-        in its org.
+        ``None`` when the project is gone, the user holds no membership in
+        its org, or they have no access to the project (Restricted without
+        a grant, or the org default ``none``) - the same answer for all, so
+        a Restricted project cannot be told from a missing one.
     """
     row = db.exec(
-        select(Project, Membership.role)
-        .join(
-            Membership,
-            (Membership.org_id == Project.org_id) & (Membership.user_id == user_id),
-        )
-        .where(Project.id == project_id)
+        member_access_select(Project, user_id=user_id).where(Project.id == project_id)
     ).first()
     if row is None:
         return None
-    project, role = row
-    return status_out(project, role)
+    project, role, *access = row
+    project_role = member_project_role(role, *access)
+    if project_role is None:
+        return None
+    return status_out(project, role, str(project_role))
 
 
 __all__ = ["clone_url", "load_status", "status_out"]

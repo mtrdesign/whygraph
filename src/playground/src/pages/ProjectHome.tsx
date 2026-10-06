@@ -5,6 +5,7 @@ import { CloudIcon, FolderGit2Icon, GitBranchIcon } from "lucide-react";
 import { portalApi, projectApi, projectKey } from "../api";
 import { projectProblem } from "../lib/errors";
 import { useSlug } from "../lib/project";
+import { projectRoleLabel } from "../lib/platformLink";
 import { timeAgo } from "../lib/projectStatus";
 import { useScanActions } from "../lib/scanActions";
 import { formatSeconds, runSeconds, triggerLabel } from "../lib/scanFormat";
@@ -134,6 +135,11 @@ export function ProjectHome() {
         >
           <h2 className="text-sm font-semibold">Linked project</h2>
           <LinkNotice project={p} />
+          {projectRoleLabel(p.link) && (
+            <p data-testid="linked-role" className="text-xs text-muted-foreground">
+              Your role on the platform project: {projectRoleLabel(p.link)}
+            </p>
+          )}
           <p className="text-xs text-muted-foreground">
             The history, Explorer and Chat for this project are on the platform. This machine indexes
             your checkout so your agent can tell its own changes from the platform's history.

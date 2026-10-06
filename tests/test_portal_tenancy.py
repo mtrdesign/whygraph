@@ -1224,7 +1224,9 @@ def test_the_admin_routes_are_the_planned_ones() -> None:
         ("PUT", "/api/projects/{slug}/config"),
         ("POST", "/api/projects/{slug}/init"),
     }
-    assert ("POST", "/api/projects/{slug}/node/rationale") in VIEWER_ROUTES
+    # Generating a card spends: a contributor's, never a viewer's (section 4.6).
+    assert ("POST", "/api/projects/{slug}/node/rationale") not in VIEWER_ROUTES
+    assert ("POST", "/api/projects/{slug}/node/rationale") in MEMBER_ROUTES
     assert len(VIEWER_ROUTES) > 10
 
 
@@ -1294,10 +1296,12 @@ def test_members_and_admins_can_read_chat_scan_and_use_mcp(
             )
             assert response.status_code == spec.status, (user, method, path)
         wait_idle(w.client, headers)
-        # A real 2xx cancel: a held scan, cancelled while it runs.
+        # A real 2xx cancel: a held quick scan, cancelled while it runs (a
+        # full one is the project admin's, test_only_project_admins_...).
         w.scanner.hold.touch()
+        quick = {"analyze": False}
         run_id = _ok(
-            w.client.post("/api/projects/api/scans", json={}, headers=headers), 202
+            w.client.post("/api/projects/api/scans", json=quick, headers=headers), 202
         )["run_id"]
         wait_for(
             lambda: (
@@ -1313,6 +1317,86 @@ def test_members_and_admins_can_read_chat_scan_and_use_mcp(
         assert wait_idle(w.client, headers)[0]["status"] == "cancelled"
         mcp = _mcp(w, headers, "tools/list")
         assert mcp.status_code == 200, (user, mcp.text)
+
+
+def _post_scan(w: World, user: str, body: dict | None) -> httpx.Response:
+    return w.client.post(
+        "/api/projects/api/scans", json=body, headers=w.as_(user, "local")
+    )
+
+
+def _held_run(w: World, user: str, body: dict | None) -> int:
+    """Start a scan as ``user`` and wait until its (held) child runs."""
+    headers = w.as_(user, "local")
+    run_id = _ok(_post_scan(w, user, body), 202)["run_id"]
+    wait_for(
+        lambda: (
+            next(r for r in runs(w.client, headers) if r["id"] == run_id)["status"]
+            == "running"
+        )
+    )
+    return run_id
+
+
+def test_only_project_admins_start_or_cancel_a_full_scan(two_orgs: World) -> None:
+    """The quick / full split (M2f-1 plan sections 4.5 and 6.2 #2), over HTTP."""
+    w = two_orgs
+    carol, dave = w.as_("carol", "local"), w.as_("dave", "local")
+    full_refusal = _refusal("project.scan_full", "member", "contributor")
+    # A first scan is structure-only, so a contributor's body-less one runs.
+    with portal_db.get_session() as db:
+        db.get(Project, w.local.project_id).last_scan_at = None
+    first = _ok(_post_scan(w, "carol", None), 202)["run_id"]
+    (row,) = [r for r in wait_idle(w.client, carol) if r["id"] == first]
+    assert (row["trigger"], row["analyze"], row["status"]) == ("initial", False, "ok")
+
+    for body in (
+        None,  # body-less: `manual` = full
+        {},
+        {"trigger": "manual"},
+        {"trigger": "manual", "analyze": True},
+        {"trigger": "describe"},
+    ):
+        response = _post_scan(w, "carol", body)
+        assert response.status_code == 403, (body, response.text)
+        assert response.json() == full_refusal, body
+    assert runs(w.client, carol)[0]["id"] == first  # nothing was queued
+    quick = _ok(_post_scan(w, "carol", {"analyze": False}), 202)["run_id"]
+    assert [r for r in wait_idle(w.client, carol) if r["id"] == quick][0][
+        "analyze"
+    ] is False
+    full = _ok(_post_scan(w, "dave", None), 202)["run_id"]
+    (row,) = [r for r in wait_idle(w.client, dave) if r["id"] == full]
+    assert (row["trigger"], row["analyze"], row["status"]) == ("manual", True, "ok")
+
+    # Cancelling needs the action that would start the run (section 0.2 #18).
+    w.scanner.hold.touch()
+    running = _held_run(w, "dave", {"trigger": "manual"})
+    detail = _ok(w.client.get("/api/projects/api", headers=carol))
+    assert detail["running_scan"] == {
+        "id": running,
+        "status": "running",
+        "trigger": "manual",
+        "analyze": True,
+    }
+    refused = w.client.post(f"/api/projects/api/scans/{running}/cancel", headers=carol)
+    assert refused.status_code == 403, refused.text
+    assert refused.json() == full_refusal
+    # Carol's quick request, merged into by Dave's full one, is now full.
+    queued = _ok(_post_scan(w, "carol", {"analyze": False}), 202)["run_id"]
+    assert _ok(_post_scan(w, "dave", {"trigger": "describe"}), 202)["run_id"] == queued
+    refused = w.client.post(f"/api/projects/api/scans/{queued}/cancel", headers=carol)
+    assert refused.status_code == 403, refused.text
+    assert (
+        _ok(w.client.post(f"/api/projects/api/scans/{queued}/cancel", headers=dave))[
+            "was"
+        ]
+        == "queued"
+    )
+    cancelled = w.client.post(f"/api/projects/api/scans/{running}/cancel", headers=dave)
+    assert cancelled.status_code == 202, cancelled.text
+    w.scanner.hold.unlink()
+    wait_idle(w.client, dave)
 
 
 def _grant_carol(w: World, role: str | None) -> None:
@@ -1380,6 +1464,61 @@ def test_a_viewer_grant_reads_and_is_refused_the_rest(
         response = _sweep_call(w, "carol", method, path)
         spec = ROUTE_REQUESTS[(method, path)]
         assert response.status_code == spec.status, (method, path, response.text)
+
+
+def _marker_description(w: World) -> str | None:
+    with use_project(manual_ctx(w.local.root, slug="api")), project_session() as db:
+        return db.get(Commit, w.local.marker_sha).llm_description
+
+
+def test_a_viewer_causes_no_llm_spend(
+    two_orgs: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Zero LLM constructions across every project route (M2f-1 plan section 6.2 #3)."""
+    import whygraph.analyze as analyze_pkg
+
+    w = two_orgs
+    built: list[str] = []
+
+    class _Descriptor:
+        @classmethod
+        def from_config(cls, config):  # noqa: ANN001, ANN206
+            built.append("descriptor")
+            raise LlmError("offline in tests")
+
+    class _Generator(_StubRationale):
+        @classmethod
+        def from_config(cls, config):  # noqa: ANN001, ANN206
+            built.append("generator")
+            return cls()
+
+    def chat_client(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        built.append("chat")
+        return _OfflineChat()
+
+    monkeypatch.setattr(analyze_pkg, "LlmDescriptor", _Descriptor)
+    monkeypatch.setattr(mcp_rationale, "RationaleGenerator", _Generator)
+    monkeypatch.setattr(serve_chat, "make_chat_client", chat_client)
+    # The marker commit loses its description: a read would backfill it.
+    with use_project(manual_ctx(w.local.root, slug="api")), project_session() as db:
+        db.get(Commit, w.local.marker_sha).llm_description = None
+        db.commit()
+    _grant_carol(w, "viewer")
+
+    for method, path in PROJECT_ROUTES:
+        response = _sweep_call(w, "carol", method, path)
+        action = ROUTE_ACTIONS[(path, method)]
+        if action in VIEWER_ACTIONS:
+            spec = ROUTE_REQUESTS[(method, path)]
+            assert response.status_code == spec.status, (method, path, response.text)
+        else:  # generation and every chat route among them
+            assert response.status_code == 403, (method, path, response.text)
+    assert built == []
+    assert _marker_description(w) is None  # GET /node/evidence and /history read only
+    # The same read by a contributor does try to describe the commit.
+    _grant_carol(w, None)
+    assert _sweep_call(w, "carol", "GET", f"{_PROJECT_PATH}/node/evidence").is_success
+    assert built == ["descriptor"]
 
 
 def test_an_admin_grant_configures_but_never_removes(two_orgs: World) -> None:
@@ -1505,6 +1644,7 @@ def test_system_scans_get_only_their_own_orgs_secrets(
                 analyze=True,
                 requested_by=None,
                 scan_requested=True,
+                may_spend=True,
             )
 
     for start in (runner.catch_up, describe):

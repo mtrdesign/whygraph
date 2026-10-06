@@ -77,12 +77,20 @@ class ProjectContext:
         history lives there, so the MCP tool bodies ask it instead of a
         local database and :func:`whygraph.db.get_engine` refuses to open
         one at all. ``None`` (the default) for an ordinary project.
+    llm_allowed : bool
+        Whether a code path serving this context may spend on the LLM
+        implicitly: the lazy description backfill and rationale
+        generation on a cache miss. ``True`` (the default) everywhere but
+        a portal request by a project *viewer*, whose bound context is a
+        ``dataclasses.replace`` copy with ``False`` (M2f-1 plan section
+        4.6) - never a mutation of the cached context.
     """
 
     slug: str
     root: Path
     config: Config
     remote: RemoteProject | None = None
+    llm_allowed: bool = True
 
 
 _current: ContextVar[ProjectContext | None] = ContextVar(

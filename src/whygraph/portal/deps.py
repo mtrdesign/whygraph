@@ -47,6 +47,7 @@ chat ``StreamingResponse`` generator by Starlette's threadpool helpers.
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 from dataclasses import dataclass
 from functools import partial
@@ -934,7 +935,10 @@ async def bind_project(
     :func:`~whygraph.portal.authz.authorize` runs **before** the context
     is built, so a refused request never reaches
     :meth:`ContextCache.get` (which decrypts the project's secrets).
-    No binding and no initialized gate.
+    No binding and no initialized gate. A *viewer* gets a copy of the
+    cached context with ``llm_allowed=False`` (no lazy backfill, no
+    generation on a cache miss - M2f-1 plan section 4.6); everyone else
+    gets the cached object itself, which is never mutated.
 
     Parameters
     ----------
@@ -983,6 +987,8 @@ async def bind_project(
         raise ApiError(404, f"project {slug!r} not found") from exc
     except ConfigError as exc:
         raise ApiError(400, f"invalid project config: {exc}") from exc
+    if role is ProjectRole.VIEWER:
+        ctx = dataclasses.replace(ctx, llm_allowed=False)
     return bound_from(project, ctx, role)
 
 

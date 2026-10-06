@@ -103,6 +103,7 @@ from .authz import (
     Role,
     authorize,
     effective_project_role,
+    project_allowed,
 )
 from .config_layers import ConfigPolicyError, find_secret_paths, load_layer, save_layer
 from .context import build_project_context, resolve_root
@@ -182,6 +183,7 @@ from .runner import (
     RunNotFound,
     RunnerUnavailable,
     ManagedOnPlatform,
+    ScanForbidden,
     SourceNotAllowed,
     log_tail,
     remove_run_files,
@@ -676,7 +678,12 @@ def _active_run(session: Session, project_id: int) -> dict | None:
     ).first()
     if run is None:
         return None
-    return {"id": run.id, "status": run.status, "trigger": run.trigger}
+    return {
+        "id": run.id,
+        "status": run.status,
+        "trigger": run.trigger,
+        "analyze": run.analyze,
+    }
 
 
 FINISHED_STATUSES: tuple[str, ...] = ("ok", "failed", "interrupted", "cancelled")
@@ -1477,6 +1484,7 @@ def _add_platform(
                     token_hint=hint_for(entry.token),
                     status="ok",
                     last_platform_head=project.last_scanned_head,
+                    remote_project_role=project.project_role,
                 )
             )
     except IntegrityError as exc:
@@ -1523,10 +1531,10 @@ def _reconnect(state: PortalState, project_id: int, entry: PendingLink) -> None:
 
     Replaces the token (encrypted) and hint, clears the status back to
     ``ok``, and refreshes what the exchange just told us about the platform
-    project (its name - which the local name follows - its head and default
-    branch). The token it supersedes is revoked on the platform best effort,
-    after the row is written, so a slow platform cannot leave the row
-    half-updated.
+    project (its name - which the local name follows - its head, default
+    branch and the caller's project role). The token it supersedes is
+    revoked on the platform best effort, after the row is written, so a slow
+    platform cannot leave the row half-updated.
     """
     superseded = _link_of(project_id)
     reply = entry.reply
@@ -1545,6 +1553,7 @@ def _reconnect(state: PortalState, project_id: int, entry: PendingLink) -> None:
         row.status_reason = None
         row.status_at = _now()
         row.last_platform_head = reply.project.last_scanned_head
+        row.remote_project_role = reply.project.project_role
         session.add(row)
         local = session.get(Project, project_id)
         if local is not None and local.name != reply.project.name:
@@ -2320,6 +2329,12 @@ async def post_scan(
     source_not_allowed``. On a production GitHub project the run is a sync
     that fetches first, then scans; one that lost its GitHub access is a
     ``409 github_access_lost``.
+
+    The route's action is ``project.scan`` (the quick scan); a request
+    that would describe commits - ``manual`` without ``analyze: false``,
+    a body-less one, or ``describe`` - also needs ``project.scan_full``,
+    checked by the runner under its lock (a first scan is structure-only,
+    so it never is): ``403 forbidden`` with ``action: "project.scan_full"``.
     """
     body = body or ScanBody()
     state = portal_state(request)
@@ -2329,8 +2344,14 @@ async def post_scan(
         )
     try:
         run_id = await state.runner.request_scan(
-            project, trigger=body.trigger, analyze=body.analyze, principal=principal
+            project,
+            trigger=body.trigger,
+            analyze=body.analyze,
+            principal=principal,
+            may_spend=project_allowed(project.role, Action.PROJECT_SCAN_FULL),
         )
+    except ScanForbidden as exc:
+        raise _scan_full_forbidden(project) from exc
     except RunnerUnavailable as exc:
         raise ApiError(501, str(exc)) from exc
     except ProjectBusy as exc:
@@ -2355,6 +2376,17 @@ async def post_scan(
             409, str(exc), code="github_access_lost", reason=exc.reason
         ) from exc
     return {"run_id": run_id}
+
+
+def _scan_full_forbidden(project: BoundProject) -> ApiError:
+    """The ``403`` for a full (LLM-spending) run the caller's role cannot start or cancel."""
+    action = Action.PROJECT_SCAN_FULL
+    return ApiError(
+        403,
+        f"your role on this project ({project.role}) cannot {action}",
+        code="forbidden",
+        action=str(action),
+    )
 
 
 @projects_router.get("/{slug}/scans")
@@ -2470,9 +2502,18 @@ async def cancel_scan(
     A running run ends ``cancelled`` once its child exits (SIGTERM, then
     SIGKILL after 10 s); its event stream closes with that status. ``404``
     for an unknown run or another project's, ``409`` for a finished one.
+    Cancelling a full (LLM-spending) run needs ``project.scan_full``, the
+    action that would start one - decided by the runner under its lock, so
+    a full request merged into a queued run counts (``403 forbidden``).
     """
     try:
-        was = await portal_state(request).runner.cancel(project.id, run_id)
+        was = await portal_state(request).runner.cancel(
+            project.id,
+            run_id,
+            may_cancel_full=project_allowed(project.role, Action.PROJECT_SCAN_FULL),
+        )
+    except ScanForbidden as exc:
+        raise _scan_full_forbidden(project) from exc
     except RunNotFound as exc:
         raise ApiError(404, f"run {run_id} not found") from exc
     except RunFinished as exc:

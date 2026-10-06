@@ -555,7 +555,12 @@ def test_a_members_session_works_on_its_org_host(
         assert body["host_kind"] == "org"
         assert body["base_url"] == PROD_BASE
         assert body["bootstrap_required"] is True  # no instance admin yet
-        assert body["org"] == {"slug": "quokka", "name": "Quokka", "role": "owner"}
+        assert body["org"] == {
+            "slug": "quokka",
+            "name": "Quokka",
+            "role": "owner",
+            "default_project_role": "contributor",
+        }
         assert body["user"] == {
             "uid": world.ann_uid,
             "display_name": "Ann",

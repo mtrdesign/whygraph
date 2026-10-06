@@ -770,7 +770,12 @@ def test_creating_an_org_makes_the_caller_its_owner(claimed: TestClient) -> None
     assert claimed.get(at() + "/api/account/orgs").json()[0]["role"] == "owner"
     # And the org host serves her straight away.
     state = claimed.get(at("quokka") + "/api/portal/state").json()
-    assert state["org"] == {"slug": "quokka", "name": "Quokka", "role": "owner"}
+    assert state["org"] == {
+        "slug": "quokka",
+        "name": "Quokka",
+        "role": "owner",
+        "default_project_role": "contributor",
+    }
 
 
 @pytest.mark.parametrize("slug", ["Quokka", "-bad", "a" * 41, "", "xn--abc", "api"])
@@ -923,7 +928,12 @@ def test_an_instance_admin_reads_an_org_they_do_not_belong_to(
 ) -> None:
     client = signed_in_admin(world.client)
     state = client.get(at("quokka") + "/api/portal/state").json()
-    assert state["org"] == {"slug": "quokka", "name": "Quokka", "role": "reader"}
+    assert state["org"] == {
+        "slug": "quokka",
+        "name": "Quokka",
+        "role": "reader",
+        "default_project_role": "contributor",
+    }
     assert client.get(at("quokka") + "/api/projects").status_code == 200
     # Demoting the admin removes the access on the very next request.
     promoted = client.patch(

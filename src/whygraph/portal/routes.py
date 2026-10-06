@@ -95,7 +95,15 @@ from whygraph.services.github import (
 
 from . import connections, sessions
 from .audit import audit
-from .authz import Action, OrgAccess, Role, authorize
+from .authz import (
+    PROJECT_ROLE_ACTIONS,
+    Action,
+    OrgAccess,
+    ProjectRole,
+    Role,
+    authorize,
+    effective_project_role,
+)
 from .config_layers import ConfigPolicyError, find_secret_paths, load_layer, save_layer
 from .context import build_project_context, resolve_root
 from .db import get_session
@@ -112,6 +120,7 @@ from .deps import (
     principal_of,
     project_access,
     project_db_access,
+    project_role_for,
     unsafe_path_error,
 )
 from .github_app import (
@@ -134,6 +143,7 @@ from .models import (
     PlatformLink,
     Project,
     ProjectAgent,
+    ProjectGrant,
     ScanRun,
     Secret,
     User,
@@ -365,6 +375,8 @@ def _org_dict(access: OrgAccess | None) -> dict | None:
         "slug": access.org_slug,
         "name": access.org_name,
         "role": str(access.role),
+        # What a member holds on a project they have no grant on (M2f-1).
+        "default_project_role": access.default_project_role,
     }
 
 
@@ -693,8 +705,18 @@ def _github_full_name(project: Project) -> str | None:
     return f"{parts[1]}/{parts[2]}" if len(parts) == 3 else None
 
 
+def _permissions(role: ProjectRole) -> list[str]:
+    """The project actions ``role`` may perform, in declaration order (the wire form)."""
+    return [str(a) for a in Action if a in PROJECT_ROLE_ACTIONS[role]]
+
+
 def _summary(
-    session: Session, project: Project, root: Path, *, mode: str | None
+    session: Session,
+    project: Project,
+    root: Path,
+    *,
+    mode: str | None,
+    role: ProjectRole,
 ) -> dict:
     status = root_status(root)
     full_name = _github_full_name(project)
@@ -740,6 +762,11 @@ def _summary(
         # deep links into the platform's SPA (M2e plan section 4.11);
         # `null` for every other source.
         "link": link,
+        # The caller's access (M2f-1 plan section 4.10): the SPA gates every
+        # project control on `permissions`, never on role names.
+        "restricted": project.restricted,
+        "my_role": str(role),
+        "permissions": _permissions(role),
     }
 
 
@@ -749,7 +776,7 @@ def _details(state: PortalState, project: BoundProject) -> dict:
         row = session.get(Project, project.id)
         if row is None:
             raise ApiError(404, f"project {project.slug!r} not found")
-        body = _summary(session, row, project.root, mode=state.mode)
+        body = _summary(session, row, project.root, mode=state.mode, role=project.role)
         body["agents"] = sorted(
             a.agent
             for a in session.exec(
@@ -1096,10 +1123,12 @@ def put_defaults(
 def list_projects(
     request: Request, access: OrgAccess = Depends(org_access(Action.ORG_READ))
 ) -> dict:
-    """Every project of the request's org, with its status.
+    """Every project of the request's org the caller has access to, with its status.
 
-    A linked project's ``link.status`` is the **recorded** one: a link whose
-    status is older than
+    One query with the caller's grants left-joined; a project whose
+    effective role is ``None`` (Restricted without a grant, or the org
+    default ``none``) is left out. A linked project's ``link.status`` is
+    the **recorded** one: a link whose status is older than
     :data:`~whygraph.portal.linked.REFRESH_AFTER_SEC` is queued for the
     lifespan's refresh task instead, so the listing never waits on a
     platform (plan section 4.11).
@@ -1107,15 +1136,34 @@ def list_projects(
     state = portal_state(request)
     with get_session() as session:
         rows = session.exec(
-            select(Project)
+            select(Project, ProjectGrant.role)
+            .outerjoin(
+                ProjectGrant,
+                (ProjectGrant.project_id == Project.id)
+                & (ProjectGrant.user_id == access.user_id),
+            )
             .where(Project.org_id == access.org_id)
             .order_by(Project.name)
         ).all()
-        body = {
-            "projects": [
-                _summary(session, p, resolve_root(p), mode=state.mode) for p in rows
-            ]
-        }
+        projects = []
+        for project, grant in rows:
+            role = effective_project_role(
+                access.role,
+                access.default_project_role,
+                project.restricted,
+                None if grant is None else ProjectRole(grant),
+            )
+            if role is not None:
+                projects.append(
+                    _summary(
+                        session,
+                        project,
+                        resolve_root(project),
+                        mode=state.mode,
+                        role=role,
+                    )
+                )
+        body = {"projects": projects}
         for project_id in due_for_refresh(session, access.org_id):
             state.link_refresh.schedule(project_id)
         return body
@@ -1157,7 +1205,9 @@ def add_project(
         row = session.get(Project, project_id)
         assert row is not None
         session.expunge(row)
-    project = bound_from(row, ctx)
+    # The caller holds ORG_ADD_PROJECT, so they are an org admin or owner:
+    # a project admin on every project.
+    project = bound_from(row, ctx, ProjectRole.ADMIN)
     with use_project(ctx):
         details = _details(state, project)
     if detected is None:
@@ -1818,7 +1868,7 @@ def patch_project(
 @projects_router.delete("/{slug}")
 def delete_project(
     request: Request,
-    project: BoundProject = Depends(project_access(Action.PROJECT_SETUP)),
+    project: BoundProject = Depends(project_access(Action.ORG_REMOVE_PROJECT)),
     body: DeleteProjectBody | None = Body(default=None),
 ) -> dict:
     """Unregister a project (plan section 4.5.5).
@@ -2345,8 +2395,10 @@ def _stream_access(
     Built from the request's own session cookie and org, so each call
     re-runs :func:`~whygraph.portal.sessions.lookup` (sign-out, expiry,
     disabling) and :func:`load_org_access` (removal, demotion of an
-    instance admin) - each in its own database session - and requires
-    ``PROJECT_READ`` on ``project`` through
+    instance admin) - each in its own database session - re-reads the
+    caller's project role (:func:`~whygraph.portal.deps.project_role_for`:
+    a removed grant, a project made Restricted, a demotion under the
+    default ``none``) and requires ``PROJECT_READ`` on ``project`` through
     :func:`~whygraph.portal.authz.authorize`. Local mode has one user and
     never re-checks.
     """
@@ -2365,8 +2417,10 @@ def _stream_access(
         )
         if access is None:
             return False
+        with get_session() as db:
+            role = project_role_for(db, access, project.id)
         try:
-            authorize(access, Action.PROJECT_READ, project)
+            authorize(access, Action.PROJECT_READ, project, project_role=role)
         except ApiError:
             return False
         return True

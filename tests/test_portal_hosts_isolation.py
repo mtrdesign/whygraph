@@ -97,11 +97,18 @@ from whygraph.db import get_session as project_session
 from whygraph.db.models import ChatSession as ChatSessionRow
 from whygraph.portal import db as portal_db
 from whygraph.portal import runner as runner_mod
-from whygraph.portal.authz import ROLE_ACTIONS, Role
+from whygraph.portal.authz import (
+    PROJECT_ACTIONS,
+    PROJECT_ROLE_ACTIONS,
+    ROLE_ACTIONS,
+    ProjectRole,
+    Role,
+)
 from whygraph.portal.models import (
     Membership,
     Organization,
     Project,
+    ProjectGrant,
     ScanRun,
     Secret,
     User,
@@ -866,12 +873,18 @@ def test_the_catch_up_never_runs_in_production(
 # ---------------------------------------------------------------------------
 
 READER_ACTIONS = {str(action) for action in ROLE_ACTIONS[Role.READER]}
-"""``org.read`` and ``project.read``: what a ``reader`` may do."""
+"""``org.read``: the org actions a ``reader`` may do."""
+
+READER_PROJECT_ACTIONS = {
+    str(action) for action in PROJECT_ROLE_ACTIONS[ProjectRole.VIEWER]
+}
+"""``project.read``: a ``reader`` is a viewer on every project (M2f-1 plan
+section 0.2 #19)."""
 
 READ_ROUTES = sorted(
     (m, p)
     for (m, p) in PROD_API_ROUTES
-    if m == "GET" and ROUTE_ACTIONS[(p, m)] in READER_ACTIONS
+    if m == "GET" and ROUTE_ACTIONS[(p, m)] in READER_ACTIONS | READER_PROJECT_ACTIONS
 )
 OTHER_ROUTES = sorted(set(PROD_API_ROUTES) - set(READ_ROUTES))
 
@@ -887,7 +900,8 @@ def _is_binding_404(response: httpx.Response) -> bool:
 
 
 def test_the_reader_route_split_is_the_planned_one() -> None:
-    assert READER_ACTIONS == {"org.read", "project.read"}
+    assert READER_ACTIONS == {"org.read"}
+    assert READER_PROJECT_ACTIONS == {"project.read"}
     # A reader lists an org's members, and changes nothing about them.
     assert ("GET", "/api/org/members") in READ_ROUTES
     assert {
@@ -914,6 +928,7 @@ def test_an_instance_admin_reads_every_org_and_writes_to_none(
             "slug": org.slug,
             "name": org.slug.title(),
             "role": "reader",
+            "default_project_role": "contributor",
         }
         for method, path in READ_ROUTES:
             response = w.client.request(method, prefix + _url(path, org))
@@ -941,7 +956,11 @@ def test_an_instance_admin_reads_every_org_and_writes_to_none(
             assert body["code"] == "forbidden", where
             if method == "GET":  # a GET whose action a reader lacks
                 action = ROUTE_ACTIONS[(path, method)]
-                assert body["error"] == f"your role (reader) cannot {action}", where
+                if action in {str(a) for a in PROJECT_ACTIONS}:
+                    expected = f"your role on this project (viewer) cannot {action}"
+                else:
+                    expected = f"your role (reader) cannot {action}"
+                assert body["error"] == expected, where
             else:  # current_org's GET / HEAD rule, before authorize
                 assert body["error"] == READER_ONLY_READS, where
 
@@ -1159,6 +1178,12 @@ def test_a_reader_has_no_chat(prod_world: ProdWorld) -> None:
         refused = w.client.request(method, url, json=body)
         assert refused.status_code == 403, (method, url, refused.text)
         assert refused.json()["code"] == "forbidden", (method, url)
+    # A reader is a viewer on every project (M2f-1 plan section 0.2 #19).
+    assert w.client.get(chat).json() == {
+        "error": "your role on this project (viewer) cannot project.chat",
+        "code": "forbidden",
+        "action": "project.chat",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1172,13 +1197,63 @@ def _session_token(client: TestClient) -> str:
     return token
 
 
-@pytest.mark.parametrize("revoke", ["removed", "disabled", "signed_out"])
+def _set_project_access(
+    w: ProdWorld, *, restricted: bool | None = None, grant: str | None = None
+) -> None:
+    """Restrict quokka's ``api`` and / or grant Bob a role on it (straight in the DB)."""
+    with portal_db.get_session() as session:
+        if restricted is not None:
+            session.get(Project, w.quokka.project_id).restricted = restricted
+        if grant is not None:
+            session.add(
+                ProjectGrant(
+                    org_id=w.quokka.org_id,
+                    project_id=w.quokka.project_id,
+                    user_id=w.ids["bob"],
+                    role=grant,
+                )
+            )
+
+
+def _drop_bobs_grant(w: ProdWorld) -> None:
+    with portal_db.get_session() as session:
+        session.delete(session.get(ProjectGrant, (w.quokka.project_id, w.ids["bob"])))
+
+
+def _set_default_none_and_bob_admin(w: ProdWorld) -> None:
+    with portal_db.get_session() as session:
+        session.get(Organization, w.quokka.org_id).default_project_role = "none"
+        membership = session.exec(
+            select(Membership).where(
+                Membership.org_id == w.quokka.org_id,
+                Membership.user_id == w.ids["bob"],
+            )
+        ).one()
+        membership.role = "admin"
+
+
+@pytest.mark.parametrize(
+    "revoke",
+    [
+        "removed",
+        "disabled",
+        "signed_out",
+        # M2f-1 plan section 6.3 #5: project access, not the membership, goes.
+        "grant_removed",
+        "restricted",
+        "demoted_under_none",
+    ],
+)
 def test_an_open_scan_event_stream_ends_when_its_access_goes(
     prod_world: ProdWorld, monkeypatch: pytest.MonkeyPatch, revoke: str
 ) -> None:
-    """Bob follows a held quokka run; removal, disabling or sign-out cuts it."""
+    """Bob follows a held quokka run; losing access in any way cuts it."""
     w = prod_world
     monkeypatch.setattr(runner_mod, "ACCESS_CHECK_SEC", 0.0)
+    if revoke == "grant_removed":
+        _set_project_access(w, restricted=True, grant="viewer")
+    elif revoke == "demoted_under_none":
+        _set_default_none_and_bob_admin(w)
     w.scanner.hold.touch()
     w.sign_in("ann")
     run_id = _ok(w.client.post(at("quokka") + "/api/projects/api/scans"), 202)["run_id"]
@@ -1193,7 +1268,12 @@ def test_an_open_scan_event_stream_ends_when_its_access_goes(
     )
     # Each actor keeps their own session: the client is cleared between
     # sign-ins, since a sign-in over a session revokes it.
-    actor = {"removed": "ann", "disabled": "ada", "signed_out": "bob"}[revoke]
+    actor = {
+        "removed": "ann",
+        "disabled": "ada",
+        "signed_out": "bob",
+        "demoted_under_none": "ann",
+    }.get(revoke, "ann")
     tokens = {"ann": _session_token(w.client)}
     w.client.cookies.clear()
     w.sign_in("ada")
@@ -1216,6 +1296,15 @@ def test_an_open_scan_event_stream_ends_when_its_access_goes(
 
     def take_access_away() -> None:
         assert opened.wait(20)
+        if revoke in ("grant_removed", "restricted"):
+            if revoke == "grant_removed":
+                _drop_bobs_grant(w)
+            else:
+                _set_project_access(w, restricted=True)
+            revoked.append(httpx.Response(204))
+            if not done.wait(20):
+                w.scanner.hold.unlink(missing_ok=True)
+            return
         method, url, body = {
             "removed": (
                 "DELETE",
@@ -1228,6 +1317,11 @@ def test_an_open_scan_event_stream_ends_when_its_access_goes(
                 {"disabled": True},
             ),
             "signed_out": ("POST", at() + "/api/auth/logout", None),
+            "demoted_under_none": (
+                "PATCH",
+                at("quokka") + f"/api/org/members/{w.uids['bob']}",
+                {"role": "member"},
+            ),
         }[revoke]
         revoked.append(
             w.client.request(

@@ -606,7 +606,12 @@ def test_setup_flow(client: TestClient, env: SimpleNamespace) -> None:
     assert state["setup_complete"] is True
     assert state["user"]["display_name"] == "Tess"
     assert state["user"]["role"] == "owner"  # the built-in org's membership
-    assert state["org"] == {"slug": "local", "name": "Local", "role": "owner"}
+    assert state["org"] == {
+        "slug": "local",
+        "name": "Local",
+        "role": "owner",
+        "default_project_role": "contributor",
+    }
     assert client.get("/api/projects").json() == {"projects": []}
     again = client.post("/api/portal/setup", json={"display_name": "Other"})
     assert again.status_code == 409
@@ -945,7 +950,12 @@ def _add_org_probe(client: TestClient) -> None:
 def test_load_org_access(env: SimpleNamespace) -> None:
     orgs = _seed_two_orgs()
     assert load_org_access(orgs.alice, "local") == OrgAccess(
-        org_id=orgs.local, org_slug="local", org_name="Local", role=Role.ADMIN
+        org_id=orgs.local,
+        org_slug="local",
+        org_name="Local",
+        role=Role.ADMIN,
+        user_id=orgs.alice,
+        default_project_role="contributor",
     )
     bob = load_org_access(orgs.bob, "bravo")
     assert bob is not None and bob.role is Role.OWNER and bob.org_id == orgs.beta
@@ -1074,7 +1084,12 @@ def test_state_names_the_org_and_scopes_the_port_report(
             return response.json()
 
         alice = state(**{"x-test-user": orgs.uids["alice"], "x-test-org": "local"})
-        assert alice["org"] == {"slug": "local", "name": "Local", "role": "admin"}
+        assert alice["org"] == {
+            "slug": "local",
+            "name": "Local",
+            "role": "admin",
+            "default_project_role": "contributor",
+        }
         assert alice["user"]["role"] == "admin"
         assert alice["port_change"] == {
             "port": PORT,
@@ -1083,7 +1098,12 @@ def test_state_names_the_org_and_scopes_the_port_report(
             "unmounted": [],
         }
         bob = state(**{"x-test-user": orgs.uids["bob"], "x-test-org": "bravo"})
-        assert bob["org"] == {"slug": "bravo", "name": "Bravo", "role": "owner"}
+        assert bob["org"] == {
+            "slug": "bravo",
+            "name": "Bravo",
+            "role": "owner",
+            "default_project_role": "contributor",
+        }
         assert bob["port_change"]["projects"] == [item(2, orgs.beta)]
         assert bob["port_change"]["unmounted"] == [item(3, orgs.beta)]
         for headers in (
@@ -1223,7 +1243,7 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     (f"{_P}/config", "GET"): _READ,
     (_P, "PATCH"): _CONFIGURE,
     (f"{_P}/config", "PUT"): _CONFIGURE,
-    (_P, "DELETE"): _SETUP,
+    (_P, "DELETE"): "org.remove_project",
     (f"{_P}/init", "POST"): _SETUP,
     # Scans: project_db_access(...)
     (f"{_P}/scans", "POST"): _SCAN,

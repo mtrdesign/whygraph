@@ -230,7 +230,12 @@ def test_org_routes_on_the_base_host_are_404(world: SimpleNamespace) -> None:
 def test_a_session_serves_only_its_own_orgs(world: SimpleNamespace) -> None:
     signed_in(world.client, world.ann)
     state = world.client.get(at("quokka") + "/api/portal/state").json()
-    assert state["org"] == {"slug": "quokka", "name": "Quokka", "role": "owner"}
+    assert state["org"] == {
+        "slug": "quokka",
+        "name": "Quokka",
+        "role": "owner",
+        "default_project_role": "contributor",
+    }
     other = world.client.get(at("narwhal") + "/api/portal/state").json()
     assert other["org"] is None and other["user"]["role"] is None
     assert world.client.get(at("narwhal") + "/api/projects").status_code == 404

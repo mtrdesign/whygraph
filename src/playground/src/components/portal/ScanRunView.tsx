@@ -9,8 +9,8 @@ import {
   XCircleIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { ApiError, projectApi, projectKey, type ScanRunRow, type ScanRunStatus } from "../../api";
-import { useReadOnly } from "../../lib/identity";
+import { ApiError, portalApi, projectApi, projectKey, type ScanRunRow, type ScanRunStatus } from "../../api";
+import { can } from "../../lib/permissions";
 import { projectProblem } from "../../lib/errors";
 import { useScanActions } from "../../lib/scanActions";
 import { formatSeconds, runSeconds, triggerLabel } from "../../lib/scanFormat";
@@ -30,6 +30,7 @@ import { Button } from "../ui/button";
 import { Progress } from "../ui/progress";
 import { Spinner } from "../ui/spinner";
 import { CancelRunButton } from "./CancelRunButton";
+import { ScanMenu } from "./ScanMenu";
 import { RunStatusBadge } from "./RunStatusBadge";
 
 /** Re-render every `ms` while `enabled` (a live elapsed-time readout). */
@@ -319,7 +320,13 @@ export function ScanRunView({ slug, runId }: { slug: string; runId: number }) {
     id: runId,
     active,
   });
-  const readOnly = useReadOnly();
+  const project = useQuery({
+    queryKey: projectKey(slug, "project"),
+    queryFn: () => portalApi.project(slug),
+  });
+  // A contributor may stop a structure-only run; a run that may spend needs the full scan action.
+  const mayCancel =
+    can(project.data, "project.scan_full") || (can(project.data, "project.scan") && row?.analyze === false);
   const now = useNow(1000, status === "running");
 
   // The list row is stale the moment the stream ends: refresh it (and the project
@@ -382,16 +389,19 @@ export function ScanRunView({ slug, runId }: { slug: string; runId: number }) {
             {duration !== null ? ` · ${formatSeconds(duration)}` : ""}
           </p>
         </div>
-        {!readOnly && (
-          <div className="flex gap-2">
-            {(status === "queued" || status === "running") && (
-              <CancelRunButton slug={slug} runId={runId} status={status} kind={kind} />
-            )}
-            <Button variant={active ? "outline" : "default"} onClick={() => scanNow()} disabled={scanPending}>
-              {active ? "Scan now" : "Scan again"}
-            </Button>
-          </div>
-        )}
+        <div className="flex gap-2">
+          {mayCancel && (status === "queued" || status === "running") && (
+            <CancelRunButton slug={slug} runId={runId} status={status} kind={kind} />
+          )}
+          {project.data && (
+            <ScanMenu
+              project={project.data}
+              variant={active ? "outline" : "default"}
+              onScan={scanNow}
+              disabled={scanPending}
+            />
+          )}
+        </div>
       </div>
 
       {followUp !== null && followUp !== runId && (

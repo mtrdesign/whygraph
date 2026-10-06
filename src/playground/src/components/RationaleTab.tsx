@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { RationaleCard } from "../api";
-import { useReadOnly } from "../lib/identity";
+import { useProjectCan } from "../lib/permissions";
 import { useProjectApi, useProjectKey, useProjectQuery } from "../lib/project";
 import { Button } from "./ui/button";
 import { Empty, EmptyDescription } from "./ui/empty";
@@ -64,7 +64,7 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
     api.rationaleRead(qualifiedName),
   );
 
-  const readOnly = useReadOnly();
+  const canGenerate = useProjectCan("project.chat");
   const generate = useMutation({
     mutationFn: () => api.rationaleGenerate(qualifiedName),
     onSuccess: (card) => queryClient.setQueryData(queryKey, card),
@@ -91,9 +91,11 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
           <p className="text-sm text-muted-foreground">
             {noEvidence
               ? "No historical evidence maps to this symbol, so a rationale can't be generated. Scan from the WhyGraph portal (or run `whygraph scan` outside it) to populate history."
-              : "No rationale has been generated for this symbol yet."}
+              : canGenerate
+                ? "No rationale has been generated for this symbol yet."
+                : "No rationale yet. A contributor or admin can generate one."}
           </p>
-          {!readOnly && (
+          {canGenerate && (
             <Button
               className="mt-3"
               disabled={noEvidence || generate.isPending}

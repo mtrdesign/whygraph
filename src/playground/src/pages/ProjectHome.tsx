@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { CloudIcon, FolderGit2Icon, GitBranchIcon } from "lucide-react";
+import { CloudIcon, FolderGit2Icon, GitBranchIcon, LockIcon } from "lucide-react";
 import { portalApi, projectApi, projectKey } from "../api";
 import { projectProblem } from "../lib/errors";
 import { useSlug } from "../lib/project";
 import { projectRoleLabel } from "../lib/platformLink";
 import { timeAgo } from "../lib/projectStatus";
+import { can } from "../lib/permissions";
 import { useScanActions } from "../lib/scanActions";
 import { formatSeconds, runSeconds, triggerLabel } from "../lib/scanFormat";
 import { AccessLostNotice, UnsupportedSourceNotice } from "../components/portal/AccessLost";
@@ -18,6 +19,7 @@ import { NotInitialized, ProblemAlert, ProjectUnavailable } from "../components/
 import { ProjectPortChangeNotice } from "../components/portal/PortChangeNotice";
 import { ProjectStatusBadge } from "../components/portal/ProjectStatusBadge";
 import { RunStatusBadge } from "../components/portal/RunStatusBadge";
+import { ScanMenu } from "../components/portal/ScanMenu";
 import { EstimateBody } from "../components/portal/ScanEstimateCard";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { useReadOnly, usePortalState, isProduction } from "../lib/identity";
@@ -100,6 +102,12 @@ export function ProjectHome() {
               {github ? <GitBranchIcon /> : linked ? <CloudIcon /> : <FolderGit2Icon />}
               {github ? "GitHub" : linked ? "Platform" : "Local"}
             </Badge>
+            {p.restricted && (
+              <Badge variant="outline" className="gap-1" data-testid="restricted-badge">
+                <LockIcon />
+                Restricted
+              </Badge>
+            )}
             <span className="font-mono">{p.root}</span>
             {p.remote_url && (
               <>
@@ -118,11 +126,7 @@ export function ProjectHome() {
               Open Explorer
             </Button>
           )}
-          {!readOnly && (
-            <Button onClick={() => scanNow()} disabled={!scannable || scanPending}>
-              Scan now
-            </Button>
-          )}
+          <ScanMenu project={p} onScan={scanNow} disabled={!scannable || scanPending} />
         </div>
       </div>
 
@@ -152,7 +156,7 @@ export function ProjectHome() {
       {p.root_status === "ok" && !p.initialized && <NotInitialized slug={slug} />}
       {problem?.kind === "unsafe_path" && <ProblemAlert problem={problem} />}
 
-      {ready && stale && !readOnly && (
+      {ready && stale && (can(p, "project.scan") || can(p, "project.scan_full")) && (
         <Alert data-testid="stale-banner">
           <AlertTitle>
             {stale.commits_behind === null
@@ -166,9 +170,7 @@ export function ProjectHome() {
                 : "The checkout is ahead of what WhyGraph last scanned, so the Explorer and Chat miss the newest work."}
             </p>
             <div className="mt-2 flex gap-2">
-              <Button size="sm" onClick={() => scanNow()} disabled={!scannable || scanPending}>
-                Scan now
-              </Button>
+              <ScanMenu project={p} size="sm" onScan={scanNow} disabled={!scannable || scanPending} />
             </div>
           </AlertDescription>
         </Alert>
@@ -200,12 +202,14 @@ export function ProjectHome() {
         <p className="text-xs text-muted-foreground">Stats are unavailable right now.</p>
       )}
 
-      {ready && !readOnly && !dismissed && estimate.data && estimate.data.commits > ESTIMATE_THRESHOLD && (
+      {ready && can(p, "project.scan_full") && !dismissed && estimate.data && estimate.data.commits > ESTIMATE_THRESHOLD && (
         <section className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5">
           <h2 className="text-sm font-semibold">Commits waiting for a description</h2>
           <EstimateBody
             slug={slug}
             estimate={estimate.data}
+            canDescribe={can(p, "project.scan_full")}
+            canConfigure={can(p, "project.configure")}
             busy={scanPending}
             onDescribe={() => scanNow({ trigger: "describe" })}
             onLater={() => setDismissed(true)}

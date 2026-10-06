@@ -268,6 +268,8 @@ export interface PortalOrg {
   slug: string;
   name: string;
   role: "owner" | "admin" | "member" | "reader" | (string & {});
+  // What a member without a project grant gets on an unrestricted project (M2f-1).
+  default_project_role?: "admin" | "contributor" | "viewer" | "none";
 }
 
 // ---- port change (portal/port_change.py) ----------------------------------------
@@ -318,7 +320,12 @@ export interface ProjectSummary {
   last_scan_at: string | null;
   created_at: string;
   root_status: "ok" | "missing" | "not_git";
-  running_scan: { id: number; status: string; trigger: string } | null;
+  // `analyze` is whether the run may spend LLM tokens (a full scan).
+  running_scan: { id: number; status: string; trigger: string; analyze?: boolean } | null;
+  // Access (M2f-1): the caller's effective role and the project actions it grants.
+  restricted?: boolean;
+  my_role?: ProjectRole;
+  permissions?: string[];
   // Status of the newest *ended* run, or `null` when none has ended yet.
   last_scan_status?: "ok" | "failed" | "interrupted" | "cancelled" | null;
   // `null` = up to date / never scanned; `commits_behind` is null after a history rewrite.

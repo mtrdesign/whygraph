@@ -1,4 +1,5 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { PROJECT_ACTIONS } from "../lib/permissions";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
@@ -66,6 +67,9 @@ function details(slug: string) {
     created_at: "2026-01-01T00:00:00Z",
     root_status: "ok",
     running_scan: null,
+    restricted: false,
+    my_role: "admin",
+    permissions: PROJECT_ACTIONS,
     stale: null,
     agents: [],
     missing_key: null,

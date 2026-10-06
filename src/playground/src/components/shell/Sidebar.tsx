@@ -16,6 +16,7 @@ import {
 import { portalApi, portalKey } from "../../api";
 import { baseHostOf, isProduction, useSignOut } from "../../lib/identity";
 import { hardNavigate } from "../../lib/navigation";
+import { can } from "../../lib/permissions";
 import { useUi } from "../../store";
 import { ThemeToggle } from "../ThemeToggle";
 import {
@@ -73,12 +74,12 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 }
 
 // A linked project (M2e) has no local data, so no Explorer or Chat here: they live on the platform.
-function projectItems(slug: string, readOnly: boolean, linked: boolean): NavItem[] {
+function projectItems(slug: string, canChat: boolean, linked: boolean): NavItem[] {
   const params = { slug };
   return [
     { label: "Overview", icon: LayoutDashboardIcon, to: "/p/$slug", params, exact: true },
     ...(linked ? [] : [{ label: "Explorer", icon: NetworkIcon, to: "/p/$slug/explorer", params } as NavItem]),
-    ...(readOnly || linked
+    ...(!canChat || linked
       ? []
       : [{ label: "Chat", icon: MessageSquareIcon, to: "/p/$slug/chat/{-$id}", params } as NavItem]),
     { label: "Scans", icon: ActivityIcon, to: "/p/$slug/scans/{-$runId}", params },
@@ -146,9 +147,10 @@ export function Sidebar({ slug, projectName }: { slug?: string; projectName?: st
   const user = state.data?.user;
   const version = state.data?.version;
   const production = isProduction(state.data);
-  const readOnly = state.data?.org?.role === "reader";
   const projects = useQuery({ queryKey: portalKey("projects"), queryFn: portalApi.projects });
-  const linked = projects.data?.projects.find((p) => p.slug === slug)?.source === "platform";
+  const current = projects.data?.projects.find((p) => p.slug === slug);
+  const linked = current?.source === "platform";
+  const canChat = can(current, "project.chat");
   const signOut = useSignOut();
   const base = state.data?.base_url?.replace(/\/$/, "") ?? "";
 
@@ -174,7 +176,7 @@ export function Sidebar({ slug, projectName }: { slug?: string; projectName?: st
         {slug ? (
           <>
             <Section title="Project">
-              {projectItems(slug, readOnly, linked).map((item) => (
+              {projectItems(slug, canChat, linked).map((item) => (
                 <NavLink key={item.label} item={item} />
               ))}
             </Section>

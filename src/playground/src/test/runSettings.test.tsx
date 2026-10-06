@@ -1,4 +1,5 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
+import { PROJECT_ACTIONS } from "../lib/permissions";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
@@ -57,6 +58,9 @@ function summary(slug: string, over: Json = {}): Json {
     created_at: "2026-01-01T00:00:00+00:00",
     root_status: "ok",
     running_scan: null,
+    restricted: false,
+    my_role: "admin",
+    permissions: PROJECT_ACTIONS,
     last_scan_status: "ok",
     stale: null,
     ...over,
@@ -186,6 +190,12 @@ afterEach(() => {
 
 // ---- screen 7: the scan run -----------------------------------------------------------------
 
+/** Rescan is a menu for a project admin: open it, pick the quick one. */
+async function quickRescan(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getAllByRole("button", { name: "Rescan" })[0]);
+  await user.click(await screen.findByRole("menuitem", { name: "Quick rescan" }));
+}
+
 describe("Scan run (screen 7)", () => {
   it("shows phases live from the stream, a bar for the LLM phase, and keeps it on the same run", async () => {
     mount("/p/alpha/scans/6");
@@ -258,6 +268,28 @@ describe("Scan run (screen 7)", () => {
     const log = await screen.findByTestId("run-log");
     await waitFor(() => expect(log).toHaveTextContent("Traceback"));
     expect(log).toHaveTextContent("Showing the end of the log");
+  });
+
+  it("Cancel follows the run: a contributor stops a structure-only run, not one that may spend", async () => {
+    const contributor = ["project.read", "project.chat", "project.scan"];
+    handlers["GET /api/projects/alpha"] = () => details("alpha", { my_role: "contributor", permissions: contributor });
+    handlers["GET /api/projects/alpha/scans"] = () => ({
+      runs: [run(6, { status: "running", analyze: true, finished_at: null, summary: null })],
+    });
+    mount("/p/alpha/scans/6");
+    await screen.findByTestId("phase-3");
+    expect(screen.queryByTestId("cancel-run")).toBeNull();
+  });
+
+  it("a contributor sees Cancel on a structure-only run", async () => {
+    const contributor = ["project.read", "project.chat", "project.scan"];
+    handlers["GET /api/projects/alpha"] = () => details("alpha", { my_role: "contributor", permissions: contributor });
+    handlers["GET /api/projects/alpha/scans"] = () => ({
+      runs: [run(6, { status: "running", analyze: false, finished_at: null, summary: null })],
+    });
+    mount("/p/alpha/scans/6");
+    await screen.findByTestId("phase-3");
+    expect(await screen.findByTestId("cancel-run")).toBeInTheDocument();
   });
 
   it("a queued run says it is waiting", async () => {
@@ -337,20 +369,20 @@ describe("Scan run (screen 7)", () => {
     const { router } = mount("/p/alpha/scans/6");
     await screen.findByTestId("phase-3");
 
-    await user.click(screen.getByRole("button", { name: "Scan now" }));
+    await quickRescan(user);
     const followup = await screen.findByTestId("followup");
     expect(followup).toHaveTextContent("run #7");
     // The live view of the running run is not abandoned.
     expect(here(router)).toBe("/p/alpha/scans/6");
 
-    await user.click(screen.getByRole("button", { name: "Scan now" }));
+    await quickRescan(user);
     await waitFor(() => expect(calls("POST", "/api/projects/alpha/scans")).toHaveLength(2));
     // Same id both times: still exactly one follow-up notice, still on run 6.
     expect(screen.getAllByTestId("followup")).toHaveLength(1);
     expect(here(router)).toBe("/p/alpha/scans/6");
     expect(calls("POST", "/api/projects/alpha/scans").map((c) => c.body)).toEqual([
-      { trigger: "manual" },
-      { trigger: "manual" },
+      { trigger: "manual", analyze: false },
+      { trigger: "manual", analyze: false },
     ]);
   });
 
@@ -361,7 +393,8 @@ describe("Scan run (screen 7)", () => {
     handlers["GET /api/projects/alpha/scans/8/events"] = () => sse([]);
     const user = userEvent.setup();
     const { router } = mount("/p/alpha/scans/6");
-    await user.click(await screen.findByRole("button", { name: "Scan again" }));
+    await screen.findByRole("button", { name: "Rescan" });
+    await quickRescan(user);
     await waitFor(() => expect(here(router)).toBe("/p/alpha/scans/8"));
   });
 });
@@ -402,7 +435,7 @@ describe("Scan history (screen 8)", () => {
     const user = userEvent.setup();
     const { router } = mount("/p/alpha/scans");
     expect(await screen.findByText("No scans yet")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Scan now" }));
+    await quickRescan(user);
     await waitFor(() => expect(here(router)).toBe("/p/alpha/scans/1"));
   });
 
@@ -457,7 +490,8 @@ describe("Project overview (screen 9a)", () => {
     const banner = await screen.findByTestId("stale-banner");
     expect(banner).toHaveTextContent("3 commits behind");
     expect(screen.queryByRole("button", { name: "Sync now" })).toBeNull();
-    await user.click(within(banner).getByRole("button", { name: "Scan now" }));
+    await user.click(within(banner).getByRole("button", { name: "Rescan" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Quick rescan" }));
     await waitFor(() => expect(calls("POST", "/api/projects/alpha/scans")).toHaveLength(1));
     await waitFor(() => expect(here(router)).toBe("/p/alpha/scans/12"));
     expect(calls("POST", "/api/projects/alpha/sync")).toHaveLength(0);

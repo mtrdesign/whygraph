@@ -4,6 +4,9 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { portalKey, projectApi, projectKey } from "../api";
 
+/** What a scan request carries; every call site says what it wants (no default). */
+export type ScanBody = { trigger: "manual" | "describe"; analyze?: boolean };
+
 /**
  * "Scan now" for one project (on a production project it fetches first). The portal coalesces requests: while a
  * job runs, every request joins the one pending run and gets the same id back.
@@ -42,14 +45,13 @@ export function useScanActions(slug: string, current?: { id: number; active: boo
   };
 
   const scan = useMutation({
-    mutationFn: (body?: { trigger?: "manual" | "describe" }) =>
-      projectApi(slug).requestScan(body ?? { trigger: "manual" }),
+    mutationFn: (body: ScanBody) => projectApi(slug).requestScan(body),
     onSuccess: ({ run_id }) => landed(run_id, "Scan"),
     onError: (err) => toast.error(err.message),
   });
 
   return {
-    scanNow: (body?: { trigger?: "manual" | "describe" }) => scan.mutate(body),
+    scanNow: (body: ScanBody) => scan.mutate(body),
     scanPending: scan.isPending,
     /** The run a click during an active run was folded into, if it is not the current one. */
     followUp,

@@ -1,4 +1,5 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
+import { PROJECT_ACTIONS, can } from "../lib/permissions";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
@@ -60,6 +61,16 @@ function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
+const PERMISSIONS: Record<string, string[]> = {
+  admin: PROJECT_ACTIONS,
+  contributor: ["project.read", "project.chat", "project.scan"],
+  viewer: ["project.read"],
+};
+function myRole(): "admin" | "contributor" | "viewer" {
+  const role = (fake.state.org as { role?: string } | null)?.role;
+  return role === "member" ? "contributor" : role === "reader" ? "viewer" : "admin";
+}
+
 function project(slug: string) {
   return {
     slug,
@@ -73,6 +84,10 @@ function project(slug: string) {
     created_at: "2026-01-01T00:00:00Z",
     root_status: "ok",
     running_scan: null,
+    restricted: false,
+    // The project role follows the org role (as the server's `effective_project_role` does).
+    my_role: myRole(),
+    permissions: PERMISSIONS[myRole()],
     stale: null,
     agents: [],
     missing_key: null,
@@ -552,14 +567,14 @@ describe("reader role (instance admin in a foreign org)", () => {
     await screen.findByTestId("reader-banner");
     expect(screen.getByText("Viewing as instance admin (read-only)")).toBeInTheDocument();
     await screen.findByRole("heading", { name: "Project alpha" });
-    expect(screen.queryByRole("button", { name: "Scan now" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Rescan" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Chat" })).toBeNull();
   });
 
-  it("a member sees Scan now and Chat", async () => {
+  it("a member sees one Rescan button and Chat", async () => {
     fake.state = orgState("member");
     mount("/p/alpha");
-    await screen.findByRole("button", { name: "Scan now" });
+    await screen.findByRole("button", { name: "Rescan" });
     expect(screen.getByRole("link", { name: "Chat" })).toBeInTheDocument();
     expect(screen.queryByTestId("reader-banner")).toBeNull();
   });
@@ -574,7 +589,7 @@ describe("reader role (instance admin in a foreign org)", () => {
     fake.state = orgState("reader", { user: adminAda });
     mount("/p/alpha/scans");
     await screen.findByRole("heading", { name: "Scans" });
-    expect(screen.queryByRole("button", { name: "Scan now" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Rescan" })).toBeNull();
   });
 
   function rationale(role: string) {
@@ -591,13 +606,105 @@ describe("reader role (instance admin in a foreign org)", () => {
 
   it("hides RationaleTab's Generate button", async () => {
     rationale("reader");
-    await screen.findByText(/No rationale has been generated/);
+    await screen.findByText(/A contributor or admin can generate one/);
     expect(screen.queryByRole("button", { name: "Generate rationale" })).toBeNull();
   });
 
   it("shows RationaleTab's Generate button to a member", async () => {
     rationale("member");
     await screen.findByRole("button", { name: "Generate rationale" });
+  });
+});
+
+// ---- project roles (M2f-1) -----------------------------------------------------------
+
+describe("project roles", () => {
+  const asViewer = () => {
+    fake.state = orgState("member");
+    const viewer = { ...project("alpha"), my_role: "viewer", permissions: PERMISSIONS.viewer };
+    fake.routes["/api/projects/alpha"] = () => json(viewer);
+    fake.routes["/api/projects"] = () => json({ projects: [viewer] });
+  };
+
+  it("a contributor has one Rescan button, no Rename and no Save settings", async () => {
+    fake.state = orgState("member");
+    fake.routes["/api/projects/alpha/config"] = () =>
+      json({ config: {}, secrets: { llm: {}, github_token: { set: false, hint: null } }, import: null });
+    fake.routes["/api/portal/defaults"] = () =>
+      json({ config: {}, secrets: { llm: {}, github_token: { set: false, hint: null } }, no_provider_key: false });
+    const router = mount("/p/alpha");
+    const rescan = await screen.findByRole("button", { name: "Rescan" });
+    await userEvent.setup().click(rescan);
+    // No menu: the click is the quick rescan.
+    expect(screen.queryByRole("menuitem", { name: "Full rescan" })).toBeNull();
+    await waitFor(() =>
+      expect(fake.calls.find((c) => c.method === "POST" && c.path === "/api/projects/alpha/scans")?.body).toEqual({
+        trigger: "manual",
+        analyze: false,
+      }),
+    );
+    void router;
+  });
+
+  it("a contributor sees no Rename, Save settings, Full rescan or Danger zone", async () => {
+    fake.state = orgState("member");
+    fake.routes["/api/projects/alpha/config"] = () =>
+      json({ config: {}, secrets: { llm: {}, github_token: { set: false, hint: null } }, import: null });
+    fake.routes["/api/portal/defaults"] = () =>
+      json({ config: {}, secrets: { llm: {}, github_token: { set: false, hint: null } }, no_provider_key: false });
+    mount("/p/alpha/settings");
+    await screen.findByRole("heading", { name: "Settings" });
+    expect(screen.queryByRole("button", { name: "Rename" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save settings" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Remove project" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Danger zone" })).toBeNull();
+  });
+
+  it("a project admin gets the Rescan menu with both choices", async () => {
+    fake.state = orgState("admin");
+    mount("/p/alpha");
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Rescan" }));
+    await screen.findByRole("menuitem", { name: "Quick rescan" });
+    expect(screen.getByRole("menuitem", { name: "Full rescan" })).toBeInTheDocument();
+  });
+
+  it("a viewer has no Rescan, no Chat link, and Chat never requests its sessions", async () => {
+    asViewer();
+    mount("/p/alpha");
+    await screen.findByRole("heading", { name: "Project alpha" });
+    expect(screen.queryByRole("button", { name: "Rescan" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Chat" })).toBeNull();
+  });
+
+  it("a viewer's Chat route shows the notice and requests no sessions", async () => {
+    asViewer();
+    mount("/p/alpha/chat");
+    const notice = await screen.findByTestId("chat-read-only");
+    expect(notice).toHaveTextContent("Chat needs the Contributor role");
+    expect(fake.calls.some((c) => c.path.includes("/chat/sessions"))).toBe(false);
+  });
+
+  it("a viewer's command palette has no Chat entry", async () => {
+    asViewer();
+    useUi.setState({ paletteOpen: true });
+    mount("/p/alpha");
+    await screen.findByText("Project settings");
+    await waitFor(() => expect(fake.calls.some((c) => c.path === "/api/projects")).toBe(true));
+    expect(screen.queryByText("Chat")).toBeNull();
+  });
+
+  it("a viewer sees the Restricted badge only on a restricted project", async () => {
+    fake.state = orgState("member");
+    fake.routes["/api/projects/alpha"] = () => json({ ...project("alpha"), restricted: true });
+    mount("/p/alpha");
+    await screen.findByTestId("restricted-badge");
+  });
+
+  it("can() denies on a project without permissions", () => {
+    expect(can(undefined, "project.read")).toBe(false);
+    expect(can({}, "project.read")).toBe(false);
+    expect(can({ permissions: ["project.read"] }, "project.chat")).toBe(false);
+    expect(can({ permissions: ["project.chat"] }, "project.chat")).toBe(true);
   });
 });
 

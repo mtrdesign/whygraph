@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from "@testing-library/react";
+import { PROJECT_ACTIONS } from "../lib/permissions";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
@@ -320,6 +321,13 @@ describe("connected portals", () => {
         created_at: "2026-01-01T00:00:00Z",
         root_status: "ok",
         running_scan: null,
+        restricted: false,
+        // The role follows the org role: a plain member is a contributor.
+        my_role: (fake.state.org as { role: string }).role === "member" ? "contributor" : "admin",
+        permissions:
+          (fake.state.org as { role: string }).role === "member"
+            ? ["project.read", "project.chat", "project.scan"]
+            : PROJECT_ACTIONS,
         stale: null,
         agents: [],
         missing_key: null,

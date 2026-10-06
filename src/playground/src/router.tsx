@@ -16,10 +16,12 @@ import {
 import { useQuery, type QueryClient } from "@tanstack/react-query";
 import { ApiError, portalApi, portalKey, projectApi, projectKey, setBaseUrl, type PortalState } from "./api";
 import { projectProblem } from "./lib/errors";
+import { can } from "./lib/permissions";
 import { getLastProject, setLastProject } from "./lib/lastProject";
 import { ProjectProvider } from "./lib/project";
 import { canAdmin, isProduction, isSafeNext, signInUrl, usePortalState } from "./lib/identity";
 import { hardNavigate } from "./lib/navigation";
+import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
 import { safeLinkNext } from "./lib/linkNext";
 import { LinkedElsewhere } from "./components/portal/LinkedActions";
 import { AppShell } from "./components/shell/AppShell";
@@ -522,6 +524,17 @@ function ProjectLayout() {
   } else if (project.data && DATA_PAGES.has(page) && project.data.source === "platform" && page !== "scans") {
     // No local Explorer or Chat for a linked project: the data routes refuse it (M2e).
     body = notice(<LinkedElsewhere project={project.data} />);
+  } else if (project.data && page === "chat" && !can(project.data, "project.chat")) {
+    // ChatView never mounts, so no chat request fires for a viewer.
+    body = notice(
+      <Alert data-testid="chat-read-only">
+        <AlertTitle>Chat needs the Contributor role</AlertTitle>
+        <AlertDescription>
+          Ask a project admin for the Contributor role to chat. You can still browse the Explorer and the
+          existing rationale cards.
+        </AlertDescription>
+      </Alert>,
+    );
   } else if (project.data && DATA_PAGES.has(page)) {
     if (project.data.root_status === "ok" && project.data.initialized && probeWanted && probe.isLoading) {
       // Hold the page back until the probe says its data can be opened.

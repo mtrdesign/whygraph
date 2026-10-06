@@ -1,4 +1,5 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
+import { PROJECT_ACTIONS } from "../lib/permissions";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
@@ -66,6 +67,9 @@ function project(slug: string, over: Json = {}): Json {
     created_at: "2026-10-01T00:00:00Z",
     root_status: "ok",
     running_scan: null,
+    restricted: false,
+    my_role: "admin",
+    permissions: PROJECT_ACTIONS,
     last_scan_status: "ok",
     stale: null,
     source_supported: true,
@@ -559,7 +563,7 @@ describe("access-lost badge", () => {
     handlers["GET /api/projects/api/scan-estimate"] = () => ({ status: 404, body: { error: "x" } });
     mount("/p/api");
     await screen.findByTestId("access-lost");
-    expect(screen.getByRole("button", { name: "Scan now" })).toBeDisabled();
+    expect(screen.getAllByRole("button", { name: "Rescan" })[0]).toBeDisabled();
     expect(screen.getByRole("link", { name: "Open Explorer" })).toBeInTheDocument();
   });
 });

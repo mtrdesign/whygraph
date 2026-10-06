@@ -1,6 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { projectApi, projectKey, type ScanEstimate } from "../../api";
+import { useCanFor } from "../../lib/permissions";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -31,6 +32,8 @@ export function ScanEstimateCard({
   onLater: () => void;
   busy?: boolean;
 }) {
+  const canDescribe = useCanFor(slug, "project.scan_full");
+  const canConfigure = useCanFor(slug, "project.configure");
   const estimate = useQuery({
     queryKey: projectKey(slug, "scan-estimate"),
     queryFn: () => projectApi(slug).scanEstimate(),
@@ -46,18 +49,34 @@ export function ScanEstimateCard({
       </Alert>
     );
   }
-  return <EstimateBody slug={slug} estimate={estimate.data} onDescribe={onDescribe} onLater={onLater} busy={busy} />;
+  return (
+    <EstimateBody
+      slug={slug}
+      estimate={estimate.data}
+      canDescribe={canDescribe}
+      canConfigure={canConfigure}
+      onDescribe={onDescribe}
+      onLater={onLater}
+      busy={busy}
+    />
+  );
 }
 
 export function EstimateBody({
   slug,
   estimate,
+  canDescribe,
+  canConfigure,
   onDescribe,
   onLater,
   busy = false,
 }: {
   slug: string;
   estimate: ScanEstimate;
+  /** `project.scan_full`: Describe now spends LLM tokens. */
+  canDescribe: boolean;
+  /** `project.configure`: the link to add a key. */
+  canConfigure: boolean;
   onDescribe: () => void;
   onLater: () => void;
   busy?: boolean;
@@ -103,20 +122,22 @@ export function EstimateBody({
           {missing_key && (
             <div className="flex flex-wrap items-center gap-2" data-testid="missing-key">
               <Badge variant="destructive">no key for {missing_key}</Badge>
-              <Link
-                to="/p/$slug/init"
-                params={{ slug }}
-                search={{ step: "configure" }}
-                className="text-sm text-primary-text hover:underline"
-              >
-                Add a key in Configure
-              </Link>
+              {canConfigure && (
+                <Link
+                  to="/p/$slug/init"
+                  params={{ slug }}
+                  search={{ step: "configure" }}
+                  className="text-sm text-primary-text hover:underline"
+                >
+                  Add a key in Configure
+                </Link>
+              )}
             </div>
           )}
         </>
       )}
       <div className="flex items-center gap-2">
-        {commits > 0 && (
+        {commits > 0 && canDescribe && (
           <Button onClick={onDescribe} disabled={!!missing_key || busy}>
             Describe now
           </Button>
@@ -125,7 +146,7 @@ export function EstimateBody({
           {commits > 0 ? "Later" : "Open project"}
         </Button>
       </div>
-      {commits > 0 && (
+      {commits > 0 && canDescribe && (
         <p className="text-xs text-muted-foreground">
           <strong className="font-medium">Later</strong> leaves descriptions to on-demand
           generation as you browse, and to later full scans. Nothing is spent until then.

@@ -28,6 +28,15 @@ ROLES: tuple[str, ...] = ("owner", "admin", "member")
 :func:`~whygraph.portal.orgs.add_member`). Explicit, so adding an enum member
 such as :attr:`Role.READER` never widens what a membership may hold."""
 
+PROJECT_ROLES: tuple[str, ...] = ("admin", "contributor", "viewer")
+"""The roles a project grant may store (``project_grants.role``,
+``invitation_grants.role``). Explicit, like :data:`ROLES`."""
+
+DEFAULT_PROJECT_ROLES: tuple[str, ...] = ("contributor", "viewer", "none")
+"""The values of an organization's default project role
+(``organizations.default_project_role``): what a member holds on a project
+they have no grant on."""
+
 
 class Action(StrEnum):
     """Something a request wants to do, checked by :func:`authorize`."""

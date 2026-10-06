@@ -81,6 +81,7 @@ from whygraph.services.git import redact_tokens
 
 CONNECTIONS_REVISION = "c4e7a19b52d8"
 PREVIOUS_REVISION = "73bf248ea6fd"
+HEAD_REVISION = "d8a31f6c07e5"
 
 
 # ---------------------------------------------------------------------------
@@ -770,7 +771,7 @@ def _source_check() -> str:
 
 def test_connections_migration_round_trip(empty_portal_database: str) -> None:
     portal_db.ensure_initialized()
-    assert _version() == CONNECTIONS_REVISION
+    assert _version() == HEAD_REVISION
     assert "platform" in _source_check()
     with portal_db.get_engine().connect() as conn:
         index = conn.execute(
@@ -790,12 +791,12 @@ def test_connections_migration_round_trip(empty_portal_database: str) -> None:
     assert "platform" not in _source_check() and "github" in _source_check()
     command.upgrade(portal_db.alembic_config(), "head")
     portal_db._reset_engine()
-    assert _version() == CONNECTIONS_REVISION
+    assert _version() == HEAD_REVISION
 
 
 _PROJECT = (
-    "INSERT INTO projects (org_id, slug, name, source, root, created_at) "
-    "VALUES (:org, :slug, :slug, :source, :root, 'now') RETURNING id"
+    "INSERT INTO projects (org_id, slug, name, source, root, created_at, restricted) "
+    "VALUES (:org, :slug, :slug, :source, :root, 'now', false) RETURNING id"
 )
 
 
@@ -848,7 +849,7 @@ def test_connections_downgrade_refuses_m2e_data(
     with pytest.raises(RuntimeError, match="connections revision"):
         command.downgrade(portal_db.alembic_config(), PREVIOUS_REVISION)
     portal_db._reset_engine()
-    assert _version() == CONNECTIONS_REVISION
+    assert _version() == HEAD_REVISION
 
 
 def test_token_identity_is_a_session_identity() -> None:

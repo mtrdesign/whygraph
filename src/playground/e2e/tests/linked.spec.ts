@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { env } from "../env";
+import { base, createOrg, githubSignIn, importRepo, orgUrl, signedIn } from "../lib/production";
 
 // A project linked to a platform (M2e, plan section 4.14): imported on the
 // production portal, linked from the local one through the platform's own
@@ -14,8 +15,6 @@ import { env } from "../env";
 // It drives both portals: `baseURL` is the local one, the platform is opened by
 // absolute URL (its own host carries the org). The `production` project has
 // already claimed the instance and signed Ben and Cy in once on the fake GitHub.
-const base = new URL(env.prodUrl);
-const orgUrl = (slug: string) => `${base.protocol}//${slug}.${base.host}`;
 
 const ORG = "orbit";
 const REPO = "ben/notes";
@@ -24,34 +23,6 @@ const MACHINE = "e2e-laptop.local";
 
 function git(repo: string, ...args: string[]): string {
   return execFileSync("git", ["-C", repo, ...args], { stdio: "pipe", encoding: "utf8" });
-}
-
-/** Sign in with GitHub through the fake, from the page the flow is already on. */
-async function githubSignIn(page: Page, login: string): Promise<void> {
-  await page.getByRole("button", { name: "Sign in with GitHub" }).click();
-  await page.getByRole("link", { name: `Continue as ${login}` }).click();
-}
-
-/**
- * Wait until a sign-in has landed back on WhyGraph and rendered. The callback
- * page navigates by itself once the exchange is done, and a navigation of ours
- * that races it is aborted - so nothing may `goto` before this resolves.
- */
-async function signedIn(page: Page): Promise<void> {
-  await expect(page).toHaveURL(
-    (url) => url.hostname.endsWith(base.hostname) && !/^\/(auth\/|signin)/.test(url.pathname),
-  );
-  await page.waitForLoadState();
-  await expect(page.getByRole("heading").first()).toBeVisible();
-}
-
-async function createOrg(page: Page, name: string, slug: string): Promise<void> {
-  await page.goto(`${base.origin}/orgs/new`);
-  await page.getByLabel("Organization name").fill(name);
-  await page.getByLabel("URL name").fill(slug);
-  await page.getByRole("button", { name: "Create organization" }).click();
-  await expect(page).toHaveURL(new RegExp(`^${orgUrl(slug)}/`));
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
 }
 
 /**
@@ -141,18 +112,6 @@ async function evidenceFor(
   return payload as EvidenceAnswer;
 }
 
-/**
- * Leave a wizard's first-scan step: a project with commits waiting for a
- * description offers *Later*, one with none offers *Open project*.
- */
-async function openAfterFirstScan(page: Page): Promise<void> {
-  const later = page.getByRole("button", { name: "Later", exact: true });
-  const open = page.getByRole("button", { name: "Open project", exact: true });
-  await expect(later.or(open)).toBeVisible();
-  if (await later.isVisible()) await later.click();
-  else await open.click();
-}
-
 /** The evidence item of one commit, when the answer carries it. */
 const itemFor = (answer: EvidenceAnswer, sha: string) =>
   answer.evidence.find((e) => e.commit.sha === sha);
@@ -172,28 +131,14 @@ test("a linked project: connect, evidence over MCP, revocation, removal", async 
   await ben.goto("/signin");
   await githubSignIn(ben, "ben");
   await signedIn(ben);
+  await ben.goto(`${base.origin}/orgs/new`);
   await createOrg(ben, "Orbit", ORG);
 
-  await ben.getByRole("link", { name: "Import from GitHub" }).click();
-  await ben.getByTestId("github-connect").getByRole("button", { name: "Connect GitHub" }).click();
-  await ben.getByRole("link", { name: "Continue as ben" }).click();
-  await expect(ben).toHaveURL(new RegExp(`^${orgUrl(ORG)}/projects/new`));
-  await ben.getByTestId(`repo-${REPO}`).getByRole("button", { name: `Import ${REPO}` }).click();
-
-  // The real git crawl runs in the production portal's scanner (`--real-git`),
-  // so the platform holds the repository's commits - what a linked project asks
-  // it for. With commits waiting, the cost card offers *Later*.
-  await expect(ben).toHaveURL(new RegExp(`/p/${SLUG}/init\\?step=configure`));
-  await ben.getByRole("button", { name: "Save and continue" }).click();
-  await expect(ben).toHaveURL(new RegExp(`/p/${SLUG}/init\\?step=scan`));
-  await ben.getByRole("button", { name: "Start first scan" }).click();
-  await expect(ben.getByText("First scan complete")).toBeVisible({ timeout: 30_000 });
-  await openAfterFirstScan(ben);
-  await expect(ben).toHaveURL(new RegExp(`/p/${SLUG}$`));
+  await importRepo(ben, ORG, REPO);
 
   await ben.goto(`${orgUrl(ORG)}/members`);
   await ben.getByLabel("GitHub username").fill("cy");
-  await ben.getByRole("button", { name: "Add member" }).click();
+  await ben.getByRole("button", { name: "Invite", exact: true }).click();
   await expect(ben.getByTestId("member-list")).toContainText("@cy");
 
   // --- this machine: a checkout of the same repository in a shared folder ---

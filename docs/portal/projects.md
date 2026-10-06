@@ -123,8 +123,14 @@ descriptions, or **Later** to let them backfill on demand. See [Scanning](../gui
 |---|---|
 | **Explorer** | Browse the graph, evidence and rationale ([The Explorer](../guide/playground.md)) |
 | **Chat** | Ask questions ([The Chat assistant](../guide/chat.md)) |
-| **Scans** | See each run's progress and log; start **Scan now**, or **Cancel** a queued or running run |
+| **Scans** | See each run's progress and log; start a rescan, or **Cancel** a queued or running run |
 | **Settings** | Change configuration, reconfigure agents, or remove the project |
+
+In production, the rescan button is a menu: **Quick rescan** reads git history and refreshes CodeGraph
+with no LLM, and **Full rescan** also describes commits. A contributor gets Quick only, and a viewer
+neither; see [project roles](../deploy/production.md#project-roles). A project marked **Restricted** by
+its admins carries a Restricted badge on its card and its home page, and is visible only to people with
+access.
 
 **Cancel** asks first. A queued run just leaves the queue; a running one stops within about ten
 seconds and is recorded as *Cancelled by you*. Commits it had already described are kept, so the next

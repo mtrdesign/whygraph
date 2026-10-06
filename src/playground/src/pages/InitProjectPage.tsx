@@ -34,8 +34,10 @@ export function InitProjectPage() {
   });
 
   const production = isProduction(usePortalState().data);
+  const linked = project.data?.source === "platform";
   const step = search?.step;
-  const misplaced = production && step === "initialize";
+  // Production has no Initialize; a linked project has no Configure (the platform owns it).
+  const misplaced = (production && step === "initialize") || (linked && step === "configure");
   useEffect(() => {
     if ((step && !misplaced) || !project.data) return;
     void navigate({
@@ -64,7 +66,9 @@ export function InitProjectPage() {
       title: "First scan",
       blurb: production
         ? "Index the repository so the Explorer and Chat have something to read."
-        : "Index the repository so the Explorer, Chat and your agents have something to read.",
+        : linked
+          ? "Index the code structure on this machine so your agent can place your changes. The history is on the platform."
+          : "Index the repository so the Explorer, Chat and your agents have something to read.",
     },
   };
 
@@ -76,7 +80,7 @@ export function InitProjectPage() {
         </h1>
         <p className="text-[13px] text-muted-foreground">{titles[step].blurb}</p>
       </div>
-      <WizardSteps current={step as WizardStep} slug={slug} production={production} />
+      <WizardSteps current={step as WizardStep} slug={slug} production={production} linked={linked} />
 
       {step === "configure" && (
         <ConfigForm

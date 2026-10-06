@@ -56,7 +56,28 @@ from .projects import validate_slug
 AGENTS: tuple[str, ...] = ("claude", "cursor", "vscode", "codex")
 """Agents ``project_agents.agent`` accepts (the four ``whygraph.agents`` keys)."""
 
-PROJECT_SOURCES: tuple[str, ...] = ("local", "github")
+PROJECT_SOURCES: tuple[str, ...] = ("local", "github", "platform")
+REVOKED_REASONS: tuple[str, ...] = (
+    "user_revoked",
+    "admin_revoked",
+    "removed_locally",
+    "member_removed",
+    "member_left",
+    "user_disabled",
+    "project_deleted",
+    "org_deleted",
+    "idle",
+)
+"""Why a connection token was revoked (``connection_tokens.revoked_reason``)."""
+LINK_STATUSES: tuple[str, ...] = (
+    "ok",
+    "unreachable",
+    "revoked",
+    "removed",
+    "access_lost",
+    "update_required",
+)
+"""What a local portal last saw of a linked project (``platform_links.status``)."""
 SECRET_KINDS: tuple[str, ...] = ("llm_api_key", "github_token", "claude_oauth_token")
 SCAN_KINDS: tuple[str, ...] = ("scan", "sync")
 SCAN_TRIGGERS: tuple[str, ...] = (
@@ -378,8 +399,10 @@ class Project(PortalBase, table=True):
     name : str
         Display name; the only renamable field.
     source : str
-        ``"local"`` (a shared-folder repo mounted in place) or
-        ``"github"`` (cloned by the portal under the data dir).
+        ``"local"`` (a shared-folder repo mounted in place), ``"github"``
+        (cloned by the portal under the data dir) or ``"platform"`` (a
+        local checkout linked to a project on a WhyGraph platform, M2e; see
+        :class:`PlatformLink`).
     root : str
         Absolute path for a local repo; relative to the data dir for a
         GitHub clone (``repos/<org slug>/<slug>``; ``repos/<slug>`` for a
@@ -658,6 +681,144 @@ class ScanRun(PortalBase, table=True):
     summary: str | None = Field(default=None, sa_type=Text)
 
 
+class ConnectionToken(PortalBase, table=True):
+    """A connection token: a local portal acting as one user on one project (M2e).
+
+    Used in production (:mod:`whygraph.portal.connections`); the table exists
+    in both modes (one schema).
+
+    Attributes
+    ----------
+    uid : str
+        Stable UUID4 - what the Connected-portals lists and the security log
+        name (never ``id``, never the token).
+    user_id : int
+        The user the token acts as; the row goes with the user.
+    org_id, project_id : int or None
+        The one project the token reaches, and its org. Set to ``NULL`` when
+        the org / project is deleted (the row then answers ``token_revoked``
+        until the sweep removes it).
+    token_hash : str
+        SHA-256 hex of the raw ``wgc_...`` token; the token is never stored.
+    client_name : str
+        The connected portal's name (``[A-Za-z0-9._ -]{1,64}``).
+    created_at : str
+        ISO-8601 UTC timestamp.
+    last_used_at : str or None
+        When the token last authenticated a request; ``NULL`` = never used.
+    revoked_at, revoked_reason : str or None
+        When and why the token was revoked (one of :data:`REVOKED_REASONS`);
+        ``NULL`` while it is live.
+    """
+
+    __tablename__ = "connection_tokens"
+    __table_args__ = (
+        UniqueConstraint("uid", name="uq_connection_tokens_uid"),
+        UniqueConstraint("token_hash", name="uq_connection_tokens_token_hash"),
+        CheckConstraint(
+            _in("revoked_reason", REVOKED_REASONS),
+            name="ck_connection_tokens_revoked_reason",
+        ),
+        ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            name="fk_connection_tokens_user",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["org_id"],
+            ["organizations.id"],
+            name="fk_connection_tokens_org",
+            ondelete="SET NULL",
+        ),
+        ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name="fk_connection_tokens_project",
+            ondelete="SET NULL",
+        ),
+        Index("ix_connection_tokens_user_id", "user_id"),
+        Index(
+            "ix_connection_tokens_live_project_id",
+            "project_id",
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True, sa_type=BigInteger)
+    uid: str = Field(default_factory=_uid, sa_type=Text)
+    user_id: int = Field()
+    org_id: int | None = Field(default=None)
+    project_id: int | None = Field(default=None)
+    token_hash: str = Field(sa_type=Text)
+    client_name: str = Field(sa_type=Text)
+    created_at: str = Field(default_factory=_now, sa_type=Text)
+    last_used_at: str | None = Field(default=None, sa_type=Text)
+    revoked_at: str | None = Field(default=None, sa_type=Text)
+    revoked_reason: str | None = Field(default=None, sa_type=Text)
+
+
+class PlatformLink(PortalBase, table=True):
+    """A local project linked to a project on a WhyGraph platform (M2e, local mode).
+
+    One row per ``source = 'platform'`` project; it goes with the project.
+
+    Attributes
+    ----------
+    project_id : int
+        The local ``projects.id`` (the primary key).
+    platform_origin : str
+        The platform's base-host origin, e.g. ``https://whygraph.example``.
+    api_origin : str
+        Computed locally: ``<scheme>://<org>.<platform host>[:port]``.
+    org_slug, remote_slug, remote_name : str
+        The platform org, and the project's slug and name there.
+    clone_url : str
+        The platform project's clone URL (its GitHub host), for matching a
+        checkout and for the hint.
+    default_branch : str
+        The platform project's default branch.
+    token_ciphertext : str
+        The connection token, encrypted (:func:`whygraph.portal.secrets.encrypt`).
+    token_hint : str
+        The token's last characters, for display only.
+    status : str
+        One of :data:`LINK_STATUSES`.
+    status_reason : str or None
+        The platform's reason, e.g. a ``revoked_reason``.
+    status_at : str
+        ISO-8601 UTC timestamp of the last status change.
+    last_platform_head : str or None
+        The platform's ``last_scanned_head`` as last seen.
+    """
+
+    __tablename__ = "platform_links"
+    __table_args__ = (
+        CheckConstraint(_in("status", LINK_STATUSES), name="ck_platform_links_status"),
+        ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name="fk_platform_links_project",
+            ondelete="CASCADE",
+        ),
+    )
+
+    project_id: int = Field(primary_key=True, sa_column_kwargs={"autoincrement": False})
+    platform_origin: str = Field(sa_type=Text)
+    api_origin: str = Field(sa_type=Text)
+    org_slug: str = Field(sa_type=Text)
+    remote_slug: str = Field(sa_type=Text)
+    remote_name: str = Field(sa_type=Text)
+    clone_url: str = Field(sa_type=Text)
+    default_branch: str = Field(sa_type=Text)
+    token_ciphertext: str = Field(sa_type=Text)
+    token_hint: str = Field(sa_type=Text)
+    status: str = Field(default="ok", sa_type=Text)
+    status_reason: str | None = Field(default=None, sa_type=Text)
+    status_at: str = Field(default_factory=_now, sa_type=Text)
+    last_platform_head: str | None = Field(default=None, sa_type=Text)
+
+
 @event.listens_for(Project, "before_insert")
 def _validate_slug_on_insert(mapper, connection, target: Project) -> None:  # noqa: ANN001
     """Reject a slug that breaks :data:`whygraph.portal.projects.SLUG_RE`."""
@@ -689,9 +850,14 @@ def _org_slug_is_immutable(mapper, connection, target: Organization) -> None:  #
 
 __all__ = [
     "AGENTS",
+    "LINK_STATUSES",
+    "PROJECT_SOURCES",
+    "REVOKED_REASONS",
+    "ConnectionToken",
     "Membership",
     "Organization",
     "PasswordReset",
+    "PlatformLink",
     "PortalBase",
     "Project",
     "ProjectAgent",

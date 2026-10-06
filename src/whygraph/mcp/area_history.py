@@ -18,12 +18,19 @@ import logging
 
 from mcp.server.fastmcp import FastMCP
 
+from whygraph.core.context import current_project
+from whygraph.core.remote import RemoteError, RemoteProject, platform_block
+from whygraph.services.git import Repository
+
 from .errors import WhyGraphError, log_tool_errors
 from .evidence import (
     _evidence_dict,
     backfill_evidence_descriptions,
+    default_remote_refs,
+    path_tracked_at,
 )
 from .path_history import area_history_commits
+from .targets import repo_root
 
 _log = logging.getLogger(__name__)
 
@@ -36,6 +43,49 @@ _TOOL_DESCRIPTION = (
     "and issues, newest first. Scan from the WhyGraph portal (or run "
     "`whygraph scan` outside it) first to populate the WhyGraph database."
 )
+
+
+def linked_area_history(
+    remote: RemoteProject, path: str, limit: int, include_renames: bool
+) -> dict:
+    """``whygraph_area_history``'s answer for a project linked to a platform.
+
+    Area history is a database question, so there is no local half to fall
+    back on: the platform answers it against its server clone. ``path`` is
+    sent only when a pushed revision tracks it (M2e plan section 0.2 #8),
+    so a file that exists only in this checkout yields an empty list rather
+    than naming itself to the platform.
+
+    Parameters
+    ----------
+    remote : RemoteProject
+        The project's platform.
+    path, limit, include_renames
+        The tool's arguments, unchanged.
+
+    Returns
+    -------
+    dict
+        ``{"path", "include_renames", "evidence", "platform"}``.
+
+    Raises
+    ------
+    WhyGraphError
+        The platform could not be reached, or refused.
+    """
+    repo = Repository(repo_root())
+    items: list[dict] = []
+    if path_tracked_at(repo, path, default_remote_refs(repo)):
+        try:
+            items = remote.history(path, limit, include_renames)
+        except RemoteError as exc:
+            raise WhyGraphError(str(exc)) from exc
+    return {
+        "path": path,
+        "include_renames": include_renames,
+        "evidence": items,
+        "platform": platform_block(remote),
+    }
 
 
 def whygraph_area_history(
@@ -64,7 +114,9 @@ def whygraph_area_history(
     dict
         ``{"path": str, "include_renames": bool, "evidence": [...]}`` —
         the ``evidence`` list uses the same JSON shape that
-        ``whygraph_evidence_for`` produces.
+        ``whygraph_evidence_for`` produces. A project linked to a WhyGraph
+        platform is answered by :func:`linked_area_history`, which adds a
+        ``platform`` block.
     """
     _log.debug(
         "whygraph_area_history called: path=%r limit=%d include_renames=%s",
@@ -76,6 +128,10 @@ def whygraph_area_history(
         raise WhyGraphError("path is required")
     if limit < 1:
         raise WhyGraphError("limit must be >= 1")
+
+    ctx = current_project()
+    if ctx is not None and ctx.remote is not None:
+        return linked_area_history(ctx.remote, path, limit, include_renames)
 
     items = area_history_commits(path, limit=limit, include_renames=include_renames)
     backfill_evidence_descriptions(items, target_path=path)

@@ -2,9 +2,13 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { portalApi, portalKey, projectApi, projectKey } from "../api";
-import { isProduction, usePortalState, useReadOnly } from "../lib/identity";
+import { canAdmin, isProduction, usePortalState, useReadOnly, useRole } from "../lib/identity";
 import { useSlug } from "../lib/project";
+import { LinkNotice } from "../components/portal/LinkNotice";
+import { PlatformButtons } from "../components/portal/LinkedActions";
+import { LinkedHooks } from "../components/portal/LinkedHooks";
 import { ConfigForm } from "../components/portal/ConfigForm";
+import { ProjectConnectedPortals } from "../components/portal/ConnectedPortals";
 import { CopyButton } from "../components/portal/CopyButton";
 import { NotInitialized, ProjectUnavailable } from "../components/portal/EdgeStates";
 import { InitializeStep } from "../components/portal/InitializeStep";
@@ -25,6 +29,15 @@ const SECTIONS = [
 const PRODUCTION_SECTIONS = [
   { id: "general", label: "General" },
   { id: "config", label: "Models and keys" },
+  { id: "connections", label: "Connected portals" },
+  { id: "danger", label: "Danger zone" },
+] as const;
+
+// A linked project (M2e): the platform owns its name and config; hooks and agents stay local.
+const LINKED_SECTIONS = [
+  { id: "general", label: "General" },
+  { id: "config", label: "Git hooks" },
+  { id: "agents", label: "Agents" },
   { id: "danger", label: "Danger zone" },
 ] as const;
 
@@ -80,6 +93,38 @@ function General({ slug, production }: { slug: string; production: boolean }) {
   });
   const p = project.data;
   if (!p) return <Skeleton className="h-28 rounded-xl" />;
+  if (p.source === "platform") {
+    return (
+      <Section id="general" title="General">
+        <div className="flex flex-col gap-1.5">
+          <span className="text-sm font-medium">Display name</span>
+          <span className="text-sm" data-testid="linked-name">
+            {p.name}
+          </span>
+          <p className="text-xs text-muted-foreground">
+            The name follows the project on the platform; change it there.
+          </p>
+        </div>
+        <LinkNotice project={p} />
+        <PlatformButtons project={p} />
+        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
+          <dt className="text-muted-foreground">Source</dt>
+          <dd>Linked platform project</dd>
+          <dt className="text-muted-foreground">Folder</dt>
+          <dd className="font-mono text-xs">{p.root}</dd>
+          {p.mcp_url && (
+            <>
+              <dt className="text-muted-foreground">MCP endpoint</dt>
+              <dd className="flex flex-wrap items-center gap-2">
+                <span className="font-mono text-xs">{p.mcp_url}</span>
+                <CopyButton text={p.mcp_url} variant="ghost" />
+              </dd>
+            </>
+          )}
+        </dl>
+      </Section>
+    );
+  }
   const value = name ?? p.name;
   const dirty = value.trim() !== p.name && value.trim() !== "";
 
@@ -164,15 +209,21 @@ export function ProjectSettingsPage() {
   });
   const readOnly = useReadOnly();
   const production = isProduction(usePortalState().data);
+  // Connected portals: production only, for the owners and admins who may revoke them.
+  const showConnections = production && canAdmin(useRole());
   const [removing, setRemoving] = useState(false);
   const p = project.data;
+  const linked = p?.source === "platform";
+  const sections = production ? PRODUCTION_SECTIONS : linked ? LINKED_SECTIONS : SECTIONS;
   const scrollTo = (id: string) =>
     document.getElementById(`settings-${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
 
   return (
     <div className="mx-auto flex w-full max-w-5xl gap-8 p-6 sm:p-8">
       <nav aria-label="Settings sections" className="sticky top-6 mt-11 hidden h-fit w-44 shrink-0 flex-col gap-0.5 md:flex">
-        {(production ? PRODUCTION_SECTIONS : SECTIONS).map((s) => (
+        {sections
+          .filter((s) => s.id !== "connections" || showConnections)
+          .map((s) => (
           <button
             key={s.id}
             type="button"
@@ -191,9 +242,21 @@ export function ProjectSettingsPage() {
 
         <General slug={slug} production={production} />
 
-        <div id="settings-config" className="scroll-mt-4">
-          <ConfigForm scope={{ kind: "project", slug }} submitLabel="Save settings" />
-        </div>
+        {linked ? (
+          <Section
+            id="config"
+            title="Git hooks"
+            description="After each of these git events this portal rescans the checkout's code structure. It is the one setting a linked project keeps here; the rest belongs to the platform."
+          >
+            <LinkedHooks slug={slug} />
+          </Section>
+        ) : (
+          <div id="settings-config" className="scroll-mt-4">
+            <ConfigForm scope={{ kind: "project", slug }} submitLabel="Save settings" />
+          </div>
+        )}
+
+        {showConnections && <ProjectConnectedPortals slug={slug} />}
 
         {!production && (
           <Section
@@ -222,13 +285,15 @@ export function ProjectSettingsPage() {
             description={
               production
                 ? "Removes the server copy and every scan. The repository on GitHub is not changed."
-                : "Unregisters the project and removes its git hooks. Your repository and its .whygraph folder are not deleted."
+                : linked
+                  ? "Revokes this machine's access to the platform project and removes its git hooks. The project on the platform and your repository are not changed."
+                  : "Unregisters the project and removes its git hooks. Your repository and its .whygraph folder are not deleted."
             }
             danger
           >
             <div>
               <Button variant="destructive" disabled={!p} onClick={() => setRemoving(true)}>
-                Remove project
+                {linked ? "Remove from this machine" : "Remove project"}
               </Button>
             </div>
           </Section>

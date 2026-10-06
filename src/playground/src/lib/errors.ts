@@ -106,3 +106,43 @@ export function projectProblem(err: unknown): ProjectProblem {
     message: err instanceof Error ? err.message : "The request failed.",
   };
 }
+
+/**
+ * A human sentence for the codes the platform link and the agent routes raise
+ * (M2e). `null` for a code this table does not know, so a caller can fall back to
+ * the server's own message. Shared by the platform pages and the local portal's.
+ */
+const LINK_MESSAGES: Record<string, string> = {
+  managed_on_platform: "This project is managed on the platform. Change it there.",
+  slug_taken: "A project with this name already exists on this machine. Choose another name.",
+  origin_mismatch:
+    "This checkout's origin is not the platform project's repository, so it cannot be linked to it.",
+  connect_expired: "The connection request expired. Start again from the local portal.",
+  link_expired: "The link request expired. Start again from the platform.",
+  issuer_mismatch:
+    "The reply did not come from the platform you asked to connect to, so it was refused. Start again.",
+  access_denied: "The connection was cancelled on the platform.",
+  bad_platform_url: "That is not a valid platform address. Use the https address of your WhyGraph platform.",
+  bad_platform_reply: "The platform sent an answer WhyGraph could not use. Check the address and try again.",
+  bad_connect_request:
+    "This connection request is not valid. Start it again from the local portal; do not edit the address.",
+  invalid_token: "This connection token is not valid. Link the project again.",
+  token_revoked: "This connection was revoked. Link the project again to reconnect.",
+  generation_limited: "Your organization's hourly limit for agent-requested generations is used up. Try again later.",
+  generation_disabled: "Agent-requested generations are turned off for this organization.",
+  no_llm_key: "This project has no LLM key set, so nothing can be generated. Ask an owner to add one.",
+  llm_unavailable: "The language model could not be reached. Try again in a moment.",
+  busy: "The platform is busy right now. Try again in a moment.",
+};
+
+export function linkErrorMessage(err: unknown): string | null {
+  if (err instanceof ApiError && err.code && Object.prototype.hasOwnProperty.call(LINK_MESSAGES, err.code)) {
+    return LINK_MESSAGES[err.code];
+  }
+  return null;
+}
+
+/** The message for a failed platform-link call: the table above, else the server's own words. */
+export function linkError(err: unknown): string {
+  return linkErrorMessage(err) ?? (err instanceof Error ? err.message : "Something went wrong.");
+}

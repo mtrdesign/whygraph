@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Iterator
 
 from .config import Config
+from .remote import RemoteProject
 
 
 class ProjectContextError(RuntimeError):
@@ -71,11 +72,17 @@ class ProjectContext:
         returns while this context is bound. ``whygraph_db`` and
         ``codegraph_db`` are read from it, exactly as from a
         ``whygraph.toml``-loaded config.
+    remote : RemoteProject or None
+        Set for a project *linked* to a WhyGraph platform (M2e): its
+        history lives there, so the MCP tool bodies ask it instead of a
+        local database and :func:`whygraph.db.get_engine` refuses to open
+        one at all. ``None`` (the default) for an ordinary project.
     """
 
     slug: str
     root: Path
     config: Config
+    remote: RemoteProject | None = None
 
 
 _current: ContextVar[ProjectContext | None] = ContextVar(

@@ -26,6 +26,10 @@ carries the action as ``whygraph_action``:
   (``instance.admin``) - production's account, org-creation and admin
   routes, which name no org: mode, then host (both ``404``), then
   :func:`current_user`, then the action.
+* :func:`v1_project_access` - production's bearer-only ``/api/v1``
+  project routes (M2e): :func:`v1_user`, then :func:`bind_v1_project` (the
+  token's one project, by id); :func:`v1_project_db_access` adds the
+  initialized gate for the ``/api/v1`` data routes.
 
 A route takes exactly **one** project dependency: two different closures
 are two callables to FastAPI, which would bind the project twice.
@@ -72,19 +76,21 @@ from whygraph.core.safe_paths import UnsafePathError
 from .audit import audit
 from .authz import Action, OrgAccess, Role, authorize
 from .context import ContextCache, ProjectNotFound, resolve_root
-from . import sessions
+from . import connections, sessions
 from .db import InstanceLock, get_session
 from .github_app import UserTokens
 from .hosts import BaseUrl, classify
+from .linked import LinkRefresh
 from .migrate import ProjectMigrations
 from .models import Membership, Organization, Project, User
 from .orgs import is_valid_org_slug
 from .paths import check_project_paths
+from .platform_pending import PendingConnects, PendingLinks
 from .projects import is_valid_slug
 from .repos import DiscoveryCache
 from .runner import ScanRunner
-from .security import PortalOrigins, Principal
-from .throttle import Throttle
+from .security import PortalOrigins, Principal, _is_under
+from .throttle import InFlight, Throttle, ip_key
 from .webhook import DeliveryIds
 
 if TYPE_CHECKING:
@@ -246,6 +252,99 @@ def _lookup_session(token: str) -> sessions.SessionRow | None:
     return row
 
 
+V1_PREFIX = "/api/v1"
+"""The bearer-only API a connected portal calls (M2e plan section 4.3)."""
+
+V1_META = "/api/v1/meta"
+"""The one public path under :data:`V1_PREFIX` (exactly this path)."""
+
+
+def is_bearer_path(path: str) -> bool:
+    """Whether ``path`` (``scope["path"]``) authenticates with a bearer token only.
+
+    Everything under :data:`V1_PREFIX` except exactly :data:`V1_META`.
+    Decided on ``scope["path"]`` - the value the router matches - so a
+    percent-encoded or doubled slash cannot route to one place and
+    authenticate as another.
+    """
+    return _is_under(path, V1_PREFIX) and path != V1_META
+
+
+def bearer_token(scope: Scope) -> str | None:
+    """The token of the request's single ``Authorization: Bearer`` header, if any."""
+    values = Headers(scope=scope).getlist("authorization")
+    if len(values) != 1:
+        return None
+    scheme, _, token = values[0].strip().partition(" ")
+    if scheme.lower() != "bearer":
+        return None
+    return token.strip() or None
+
+
+class TokenIdentity(SessionIdentity):
+    """Production identity with connection tokens: bearer on ``/api/v1``, else sessions.
+
+    On a :func:`is_bearer_path` path the ``Authorization: Bearer wgc_...``
+    header alone names the user - cookies are never read there - and the
+    principal carries ``token_id`` / ``token_project_id``, no session and
+    never the instance-admin flag. A refused token resolves to ``None`` and
+    stores its :class:`~whygraph.portal.connections.Refusal` in
+    ``scope["state"]["token_refusal"]`` for :func:`v1_user`. Every other
+    path is :class:`SessionIdentity`'s, which ignores ``Authorization``.
+
+    Failed lookups count against :attr:`PortalState.v1_auth_ip` per client
+    address; past its limit a failure answers ``429``. A valid token is
+    never refused by it (the throttle is consulted only after the lookup
+    failed).
+
+    Parameters
+    ----------
+    state : PortalState
+        The portal state, as for :class:`SessionIdentity`.
+    """
+
+    async def principal(self, scope: Scope) -> Principal | None:
+        """Return the request's principal (see the class docstring)."""
+        if not is_bearer_path(scope["path"]):
+            return await super().principal(scope)
+        raw = bearer_token(scope)
+        if raw is None:
+            refusal = connections.INVALID
+        else:
+            found = await anyio.to_thread.run_sync(_lookup_token, raw)
+            if isinstance(found, connections.TokenPrincipal):
+                return Principal(
+                    user_id=found.user_id,
+                    uid=found.uid,
+                    display_name=found.display_name,
+                    email=found.email,
+                    session_id=None,
+                    is_instance_admin=False,
+                    github_login=found.github_login,
+                    avatar_url=found.avatar_url,
+                    has_password=found.has_password,
+                    token_id=found.token_id,
+                    token_project_id=found.project_id,
+                )
+            refusal = found
+            key = ip_key(scope)
+            retry = self.state.v1_auth_ip.check(key)
+            if retry is None:
+                self.state.v1_auth_ip.record(key)
+            else:
+                refusal = connections.Refusal("throttled", retry_after=retry)
+        scope.setdefault("state", {})["token_refusal"] = refusal
+        return None
+
+
+def _lookup_token(raw: str) -> connections.TokenPrincipal | connections.Refusal:
+    with get_session() as db:
+        found = connections.lookup(db, raw)
+    if isinstance(found, connections.TokenPrincipal) and connections.is_stale(found):
+        connections.touch(found.token_id)
+    return found
+
+
 class PortalState:
     """Everything one portal app shares between requests.
 
@@ -304,8 +403,9 @@ class PortalState:
         production.
     identity : IdentityResolver
         What the guard asks for the principal and the org slug;
-        :class:`LocalIdentity` by default, :class:`SessionIdentity` in
-        production (tests inject their own through
+        :class:`LocalIdentity` by default, :class:`TokenIdentity` (a
+        :class:`SessionIdentity` that also reads ``/api/v1`` bearer tokens)
+        in production (tests inject their own through
         :func:`whygraph.portal.app.create_portal_app`).
     identity_injected : bool
         Whether ``identity`` was injected (then production keeps it).
@@ -341,6 +441,44 @@ class PortalState:
     webhook_deliveries : DeliveryIds
         The ``X-GitHub-Delivery`` ids of the GitHub App's webhook seen lately,
         so a replayed delivery does nothing (M2d-2 plan section 4.7).
+    v1_auth_ip : Throttle
+        Failed ``/api/v1`` bearer lookups, per ``ip_key``: 30 / 10 min
+        (M2e plan section 4.3); a valid token is never refused by it.
+    connect_codes : PendingCodes
+        The authorization codes of ``POST /api/connect/authorize`` in
+        flight, single use, 60 s (M2e plan section 4.4).
+    connect_user : Throttle
+        Every ``POST /api/connect/authorize`` attempt, per user id: 30 / hour.
+    connect_ip : Throttle
+        Failed ``POST /api/connect/token`` exchanges, per ``ip_key``:
+        60 / 10 min (a successful exchange is never counted).
+    v1_token : Throttle
+        ``/api/v1`` status, history and resource reads, per connection
+        token: 600 / min (M2e plan section 4.5).
+    v1_heavy : Throttle
+        ``/api/v1`` evidence and rationale requests, per connection token:
+        60 / min.
+    v1_in_flight : InFlight
+        Evidence and rationale requests running at once, per org id: 2
+        (``503 busy`` beyond it).
+    agent_budget : Throttle
+        The org limits on agent LLM spend, per hour: keys ``card:<org_id>``
+        (``[rationale].agent_generations_per_hour``) and ``desc:<org_id>``
+        (``[analyze].agent_descriptions_per_hour``), each call passing the
+        org's limit.
+    pending_connects : PendingConnects
+        Local mode's started connects, keyed by OAuth ``state``, 10 min
+        (M2e plan section 4.8).
+    pending_links : PendingLinks
+        Local mode's exchanged links waiting for the wizard, 30 min; an
+        expired one's token is revoked by the platform routes.
+    platform_transport : httpx.BaseTransport or None
+        Replaces the network of every
+        :class:`~whygraph.portal.platform_client.PlatformHttp` the platform
+        routes build (tests plug a fake platform in); ``None`` in a real run.
+    link_refresh : LinkRefresh
+        The link statuses ``GET /api/projects`` asked to have refreshed; the
+        lifespan's status task drains it (M2e plan section 4.11).
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -350,7 +488,9 @@ class PortalState:
         self.mode: str | None = None
         self.degraded: str | None = None
         self.shared_folders: tuple[Path, ...] = ()
-        self.contexts = ContextCache()
+        # Read lazily: `platform_transport` is set below, and tests replace
+        # it after start-up.
+        self.contexts = ContextCache(transport=lambda: self.platform_transport)
         self.migrations = ProjectMigrations()
         self.runner = runner
         self.discovery = DiscoveryCache()
@@ -382,6 +522,18 @@ class PortalState:
         self.import_org = Throttle(30, 60 * 60)
         self.user_tokens = UserTokens()
         self.webhook_deliveries = DeliveryIds()
+        self.v1_auth_ip = Throttle(30, 10 * 60)
+        self.connect_codes = connections.PendingCodes()
+        self.connect_user = Throttle(30, 60 * 60)
+        self.connect_ip = Throttle(60, 10 * 60)
+        self.v1_token = Throttle(600, 60)
+        self.v1_heavy = Throttle(60, 60)
+        self.v1_in_flight = InFlight(2)
+        self.agent_budget = Throttle(0, 60 * 60)
+        self.pending_connects = PendingConnects()
+        self.pending_links = PendingLinks()
+        self.platform_transport: Any = None
+        self.link_refresh = LinkRefresh()
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0
@@ -447,18 +599,83 @@ async def current_user(request: Request) -> Principal:
     Every ``/api`` route except ``GET /api/portal/state`` and
     ``POST /api/portal/setup`` depends on this.
 
+    A connection-token principal (``token_id`` set) never passes: a token
+    authenticates ``/api/v1`` only (:func:`v1_user`), never a session route.
+
     Raises
     ------
     ApiError
         ``409`` when no user exists yet (local mode);
-        ``401 {"code": "login_required"}`` without a session (production).
+        ``401 {"code": "login_required"}`` without a session (production),
+        or for a token principal.
     """
     principal = request.scope.get("state", {}).get("principal")
+    if principal is not None and principal.token_id is not None:
+        raise ApiError(401, "sign-in required", code="login_required")
     if principal is None:
         if portal_state(request).mode == "production":
             raise ApiError(401, "sign-in required", code="login_required")
         raise ApiError(409, "setup required")
     return principal
+
+
+_REFUSAL_MESSAGES = {
+    "invalid_token": "a valid connection token is required",
+    "token_revoked": "this connection token was revoked",
+}
+
+
+def v1_refusal(refusal: connections.Refusal) -> ApiError:
+    """The ``401`` (or ``429``) a refused bearer token gets.
+
+    Parameters
+    ----------
+    refusal : Refusal
+        What :class:`TokenIdentity` stored.
+
+    Returns
+    -------
+    ApiError
+        ``401 {"code": "invalid_token"}`` or ``401 {"code":
+        "token_revoked", "reason": ...}`` with ``WWW-Authenticate: Bearer
+        error="invalid_token"`` (RFC 6750); ``429 {"code": "throttled"}``
+        with ``Retry-After``.
+    """
+    if refusal.code == "throttled":
+        return ApiError(
+            429,
+            "too many attempts; try again later",
+            code="throttled",
+            headers={"Retry-After": str(refusal.retry_after or 1)},
+        )
+    extra = {} if refusal.reason is None else {"reason": refusal.reason}
+    return ApiError(
+        401,
+        _REFUSAL_MESSAGES.get(refusal.code, _REFUSAL_MESSAGES["invalid_token"]),
+        code=refusal.code,
+        headers={"WWW-Authenticate": 'Bearer error="invalid_token"'},
+        **extra,
+    )
+
+
+async def v1_user(request: Request) -> Principal:
+    """The connection-token principal of an ``/api/v1`` request.
+
+    Never answers ``login_required``: a ``/api/v1`` client is a portal, not
+    a browser.
+
+    Raises
+    ------
+    ApiError
+        As :func:`v1_refusal`, with the refusal :class:`TokenIdentity`
+        stored (``invalid_token`` when there is none, or when the
+        principal did not come from a token).
+    """
+    request_state = request.scope.get("state", {})
+    principal = request_state.get("principal")
+    if principal is not None and principal.token_id is not None:
+        return principal
+    raise v1_refusal(request_state.get("token_refusal") or connections.INVALID)
 
 
 def load_org_access(
@@ -616,7 +833,12 @@ def _lookup(org_id: int, slug: str) -> Project | None:
 
 
 async def bind_project(
-    state: PortalState, access: OrgAccess, slug: str, action: Action
+    state: PortalState,
+    access: OrgAccess,
+    slug: str,
+    action: Action,
+    *,
+    project_id: int | None = None,
 ) -> BoundProject:
     """Resolve ``slug`` in the caller's org, authorize, build its context.
 
@@ -637,6 +859,9 @@ async def bind_project(
         The URL slug.
     action : Action
         What the request does with the project.
+    project_id : int, optional
+        Require this ``projects.id`` (:func:`bind_v1_project`): another
+        project under the slug is ``404`` like an unknown one.
 
     Returns
     -------
@@ -646,12 +871,15 @@ async def bind_project(
     Raises
     ------
     ApiError
-        ``404`` for a slug unknown (or malformed) in the org; ``403``
-        (``code="forbidden"``) when the role lacks ``action``; ``400``
-        when the stored config no longer validates.
+        ``404`` for a slug unknown (or malformed) in the org, or naming
+        another project than ``project_id``; ``403`` (``code="forbidden"``)
+        when the role lacks ``action``; ``400`` when the stored config no
+        longer validates.
     """
     project = await anyio.to_thread.run_sync(_lookup, access.org_id, slug)
     if project is None or project.id is None:
+        raise ApiError(404, f"project {slug!r} not found")
+    if project_id is not None and project.id != project_id:
         raise ApiError(404, f"project {slug!r} not found")
     authorize(access, action, project)
     try:
@@ -727,6 +955,12 @@ async def require_initialized(state: PortalState, project: BoundProject) -> None
         (checked first, before anything follows it).
     """
     checked_db_paths(project)
+    if project.source == "platform":
+        # A linked project has no local WhyGraph DB: only Initialize gates it,
+        # and a leftover whygraph.db is neither required nor migrated.
+        if project.initialized_at is None:
+            raise ApiError(409, "not initialized")
+        return
     if project.initialized_at is None or not project.db_path.is_file():
         raise ApiError(409, "not initialized")
     try:
@@ -766,7 +1000,7 @@ def project_access(
 
 
 def project_db_access(
-    action: Action,
+    action: Action, *, guard: Callable[[BoundProject], None] | None = None
 ) -> Callable[..., AsyncIterator[BoundProject]]:
     """:func:`project_access` plus the initialized gate and the migration.
 
@@ -777,6 +1011,13 @@ def project_db_access(
     ----------
     action : Action
         The route's action (also stored as ``whygraph_action``).
+    guard : callable, optional
+        One more refusal, run with the bound project **before** the
+        initialized gate - so it answers for a project that has no local
+        database at all. The Explorer and Chat mounts pass
+        :func:`whygraph.portal.routes.linked_guard` here, because a linked
+        project's Explorer and Chat live on its platform (M2e plan
+        section 4.11).
 
     Returns
     -------
@@ -791,6 +1032,127 @@ def project_db_access(
     ) -> AsyncIterator[BoundProject]:
         state = portal_state(request)
         project = await bind_project(state, access, slug, action)
+        with use_project(project.ctx):
+            if guard is not None:
+                guard(project)
+            await require_initialized(state, project)
+            yield project
+
+    dependency.whygraph_action = action  # type: ignore[attr-defined]
+    return dependency
+
+
+async def bind_v1_project(
+    state: PortalState,
+    principal: Principal,
+    org_slug: str | None,
+    slug: str,
+    action: Action,
+) -> BoundProject:
+    """Bind the one project a connection token reaches (``/api/v1``).
+
+    :func:`bind_project` with two differences: the org access is loaded
+    with ``instance_admin=False`` (the ``reader`` fallback never applies
+    to a token), and the project must be the token's by **id** - a project
+    deleted and re-created under the same slug is unreachable.
+
+    Parameters
+    ----------
+    state : PortalState
+        The portal state.
+    principal : Principal
+        The :func:`v1_user` principal (``token_project_id`` set).
+    org_slug : str or None
+        The org the request's ``Host`` names.
+    slug : str
+        The URL slug.
+    action : Action
+        What the request does with the project.
+
+    Returns
+    -------
+    BoundProject
+        The snapshot and context.
+
+    Raises
+    ------
+    ApiError
+        ``404`` outside the token's org or project (never saying which);
+        ``403`` / ``400`` as :func:`bind_project`.
+    """
+    if org_slug is None or principal.token_project_id is None:
+        raise ApiError(404, "not found")
+    access = await anyio.to_thread.run_sync(
+        partial(load_org_access, principal.user_id, org_slug, instance_admin=False)
+    )
+    if access is None:
+        raise ApiError(404, "not found")
+    return await bind_project(
+        state, access, slug, action, project_id=principal.token_project_id
+    )
+
+
+def v1_project_access(
+    action: Action,
+) -> Callable[..., AsyncIterator[BoundProject]]:
+    """Build the dependency that binds ``{slug}`` for an ``/api/v1`` route doing ``action``.
+
+    Parameters
+    ----------
+    action : Action
+        The route's action (also stored as ``whygraph_action``).
+
+    Returns
+    -------
+    callable
+        An ``async`` generator dependency yielding the
+        :class:`BoundProject`, its context bound until the request ends:
+        ``401`` / ``429`` as :func:`v1_user`, then ``404`` / ``403`` /
+        ``400`` as :func:`bind_v1_project`. No initialized gate.
+    """
+
+    async def dependency(
+        slug: str, request: Request, principal: Principal = Depends(v1_user)
+    ) -> AsyncIterator[BoundProject]:
+        org_slug = request.scope.get("state", {}).get("org_slug")
+        project = await bind_v1_project(
+            portal_state(request), principal, org_slug, slug, action
+        )
+        with use_project(project.ctx):
+            yield project
+
+    dependency.whygraph_action = action  # type: ignore[attr-defined]
+    return dependency
+
+
+def v1_project_db_access(
+    action: Action,
+) -> Callable[..., AsyncIterator[BoundProject]]:
+    """:func:`v1_project_access` plus the initialized gate (the ``/api/v1`` data routes).
+
+    Its own closure, as :func:`project_db_access` is, so a route binds its
+    project exactly once.
+
+    Parameters
+    ----------
+    action : Action
+        The route's action (also stored as ``whygraph_action``).
+
+    Returns
+    -------
+    callable
+        An ``async`` generator dependency yielding the (bound,
+        initialized, migrated) :class:`BoundProject`: ``401`` / ``429`` /
+        ``404`` / ``403`` / ``400`` as :func:`v1_project_access`, then
+        ``409`` as :func:`require_initialized`.
+    """
+
+    async def dependency(
+        slug: str, request: Request, principal: Principal = Depends(v1_user)
+    ) -> AsyncIterator[BoundProject]:
+        state = portal_state(request)
+        org_slug = request.scope.get("state", {}).get("org_slug")
+        project = await bind_v1_project(state, principal, org_slug, slug, action)
         with use_project(project.ctx):
             await require_initialized(state, project)
             yield project
@@ -834,6 +1196,23 @@ def require_production(request: Request) -> None:
         ``404 {"error": "not found"}`` in local (or degraded) mode.
     """
     if portal_state(request).mode != "production":
+        raise ApiError(404, "not found")
+
+
+def require_local(request: Request) -> None:
+    """Refuse (``404``) unless the portal runs in local mode.
+
+    The gate of the connected portal's own routes (``/api/platform/*``,
+    M2e plan section 4.8): a production platform never links to another
+    one. Declared on the router, before :func:`current_user`, so production
+    answers ``404`` on every host, signed in or not.
+
+    Raises
+    ------
+    ApiError
+        ``404 {"error": "not found"}`` in production (or degraded) mode.
+    """
+    if portal_state(request).mode != "local":
         raise ApiError(404, "not found")
 
 
@@ -943,12 +1322,18 @@ __all__ = [
     "LocalIdentity",
     "PortalState",
     "SessionIdentity",
+    "TokenIdentity",
+    "V1_META",
+    "V1_PREFIX",
+    "bearer_token",
     "bind_project",
+    "bind_v1_project",
     "bound_from",
     "checked_db_paths",
     "current_org",
     "current_user",
     "instance_access",
+    "is_bearer_path",
     "load_org_access",
     "org_access",
     "portal_state",
@@ -957,8 +1342,13 @@ __all__ = [
     "project_db_access",
     "require_base_host",
     "require_initialized",
+    "require_local",
     "require_mode_and_host",
     "require_production",
     "unsafe_path_error",
     "user_access",
+    "v1_project_access",
+    "v1_project_db_access",
+    "v1_refusal",
+    "v1_user",
 ]

@@ -47,10 +47,12 @@ from starlette.middleware.cors import CORSMiddleware
 
 from github_fake import _git as fixture_git
 from test_portal_app import (  # noqa: F401 -- fixtures
+    LOCAL_ONLY_ROUTES,
     NON_ORG_ROUTES,
     PRODUCTION_ORG_ROUTES,
     PUBLIC_AUTH_ROUTES,
     ROUTE_ACTIONS,
+    V1_ROUTES,
     at,
     claim_instance,
     GitServer,
@@ -149,9 +151,17 @@ BASE_ONLY_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/admin/users", "GET"),
         ("/api/admin/users/{uid}", "PATCH"),
         ("/api/admin/users/{uid}/reset-link", "POST"),
+        # The consent page, the code exchange and the caller's connected
+        # portals (M2e section 4.4)
+        ("/api/connect/validate", "POST"),
+        ("/api/connect/projects", "GET"),
+        ("/api/connect/authorize", "POST"),
+        ("/api/connect/token", "POST"),
+        ("/api/connect/tokens", "GET"),
+        ("/api/connect/tokens/{uid}", "DELETE"),
     }
 )
-"""Credential, org-creation and admin routes: ``404`` on an org host."""
+"""Credential, org-creation, admin and consent routes: ``404`` on an org host."""
 
 ANY_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
@@ -160,9 +170,11 @@ ANY_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/account", "PATCH"),
         ("/api/account/password", "POST"),
         ("/api/account/orgs", "GET"),
+        ("/api/v1/meta", "GET"),  # public: a connected portal's version check
     }
 )
-"""Logout and the account routes: served on the base host and on org hosts."""
+"""Logout, the account routes and ``/api/v1/meta``: served on the base host
+and on org hosts."""
 
 ORG_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
@@ -175,20 +187,41 @@ ORG_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/github/app/authorize", "POST"),
         ("/api/github/installations", "GET"),
         ("/api/github/installations/{installation_id}/repos", "GET"),
+        ("/api/projects/{slug}/connections", "GET"),
+        ("/api/projects/{slug}/connections/{uid}", "DELETE"),
     }
 )
 """The members routes (M2d-1 section 4.5), the org's deletion (M2d-2 section
-4.8) and the GitHub App import page (M2d-2 section 4.4): org-scoped, so served on org hosts only, and swept with
-every other org-scoped route below."""
+4.8), the GitHub App import page (M2d-2 section 4.4) and a project's
+connected portals (M2e section 4.4): org-scoped, so served on org hosts only,
+and swept with every other org-scoped route below."""
 
-PRODUCTION_ONLY_ROUTES = PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES | PRODUCTION_ORG_ROUTES
+PROD_API_ROUTES = [
+    (method, path)
+    for method, path in API_ROUTES
+    if (path, method) not in LOCAL_ONLY_ROUTES
+]
+"""The org-scoped routes a **production** portal serves: local mode's own
+``/api/platform/*`` are ``404`` there, before ``current_user``, so the session
+sweeps below leave them out (``test_portal_link.py`` asserts that ``404``)."""
+
+
+PRODUCTION_ONLY_ROUTES = (
+    PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES | PRODUCTION_ORG_ROUTES | V1_ROUTES
+)
 """Every route local mode does not serve: the ones that name no org (public
-auth, ``user.self``, ``instance.admin``) and the members routes."""
+auth, ``user.self``, ``instance.admin``), the members routes and the
+bearer-only ``/api/v1`` routes."""
 
 
 def test_every_production_only_route_is_classified_by_host() -> None:
-    """A new production-only route must be put on a host before the sweeps run."""
-    classes = (BASE_ONLY_ROUTES, ANY_HOST_ROUTES, ORG_HOST_ROUTES)
+    """A new production-only route must be put on a host before the sweeps run.
+
+    :data:`~test_portal_app.V1_ROUTES` is its own class: org host, but a
+    bearer token rather than a session, so none of this module's session
+    sweeps covers it (``test_portal_connect.py``'s bearer sweep does).
+    """
+    classes = (BASE_ONLY_ROUTES, ANY_HOST_ROUTES, ORG_HOST_ROUTES, V1_ROUTES)
     assert frozenset().union(*classes) == PRODUCTION_ONLY_ROUTES
     assert sum(len(c) for c in classes) == len(PRODUCTION_ONLY_ROUTES)  # disjoint
 
@@ -531,10 +564,16 @@ def test_the_sweeps_cover_every_live_route(prod_world: ProdWorld) -> None:
     assert len(API_ROUTES) > 30
     assert set(ROUTE_REQUESTS) == set(API_ROUTES)
     assert set(PRODUCTION_REFUSALS) <= set(API_ROUTES)
+    # Every route production serves is swept; only the local-only ones are out.
+    assert {(p, m) for (m, p) in set(API_ROUTES) - set(PROD_API_ROUTES)} == (
+        LOCAL_ONLY_ROUTES
+    )
 
 
 @pytest.mark.parametrize(
-    ("method", "path"), API_ROUTES, ids=[f"{m} {p}" for m, p in API_ROUTES]
+    ("method", "path"),
+    PROD_API_ROUTES,
+    ids=[f"{m} {p}" for m, p in PROD_API_ROUTES],
 )
 def test_every_org_scoped_route_is_isolated_over_real_sessions(
     prod_world: ProdWorld, method: str, path: str
@@ -632,7 +671,7 @@ def test_without_a_session_every_non_public_route_needs_one_on_its_own_host(
     """
     w = prod_world
     w.sign_out()
-    for method, path in API_ROUTES:
+    for method, path in PROD_API_ROUTES:
         for prefix in (at("quokka"), at()):
             response = w.client.request(method, prefix + _url(path, w.quokka))
             assert response.status_code == 401, (prefix, method, path, response.text)
@@ -831,10 +870,10 @@ READER_ACTIONS = {str(action) for action in ROLE_ACTIONS[Role.READER]}
 
 READ_ROUTES = sorted(
     (m, p)
-    for (m, p) in API_ROUTES
+    for (m, p) in PROD_API_ROUTES
     if m == "GET" and ROUTE_ACTIONS[(p, m)] in READER_ACTIONS
 )
-OTHER_ROUTES = sorted(set(API_ROUTES) - set(READ_ROUTES))
+OTHER_ROUTES = sorted(set(PROD_API_ROUTES) - set(READ_ROUTES))
 
 
 def _is_binding_404(response: httpx.Response) -> bool:

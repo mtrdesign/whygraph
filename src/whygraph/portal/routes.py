@@ -31,6 +31,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import secrets as secrets_mod
 import shutil
 from collections.abc import Callable
@@ -85,9 +86,14 @@ from whygraph.services.git import (
     strip_userinfo,
 )
 from whygraph.services.git.credentials import github_git_host
-from whygraph.services.github import GitHubError, RepoAccessError, check_repo_access
+from whygraph.services.github import (
+    GitHubError,
+    RepoAccessError,
+    check_repo_access,
+    remote_identity,
+)
 
-from . import sessions
+from . import connections, sessions
 from .audit import audit
 from .authz import Action, OrgAccess, Role, authorize
 from .config_layers import ConfigPolicyError, find_secret_paths, load_layer, save_layer
@@ -122,11 +128,29 @@ from .github_app_routes import (
     user_token,
 )
 from .github_auth import GitHubUnavailable
-from .models import Organization, Project, ProjectAgent, ScanRun, Secret, User
+from .linked import due_for_refresh, link_block, revoke_token
+from .models import (
+    Organization,
+    PlatformLink,
+    Project,
+    ProjectAgent,
+    ScanRun,
+    Secret,
+    User,
+)
 from .orgs import add_member
 from .paths import BACKUPS_DIR, TRACKED_STATE_PATHS, check_project_paths
+from .platform_pending import PendingLink
+from .platform_routes import (
+    default_client_name,
+    origin_identity,
+    origin_url,
+    reconnect_target,
+    sweep_links,
+)
 from .policy import (
     DEFAULTS_ALLOWLIST,
+    LINKED_PUT_ALLOWLIST,
     ImportPreview,
     allowed_sources,
     filter_layer,
@@ -147,6 +171,7 @@ from .runner import (
     RunFinished,
     RunNotFound,
     RunnerUnavailable,
+    ManagedOnPlatform,
     SourceNotAllowed,
     log_tail,
     remove_run_files,
@@ -159,6 +184,8 @@ from .secrets import (
     LLM_API_KEY,
     LLM_KEY_PROVIDERS,
     delete_secret,
+    encrypt,
+    hint_for,
     put_secret,
     secret_status,
 )
@@ -262,8 +289,20 @@ class GitHubProjectBody(_Strict):
     name: str | None = Field(default=None, max_length=200)
 
 
+class PlatformProjectBody(_Strict):
+    """``POST /api/projects`` linking a checkout to a platform project (local mode).
+
+    ``link_id`` names the pending link of ``POST /api/platform/callback``.
+    """
+
+    source: Literal["platform"]
+    link_id: str = Field(min_length=1, max_length=64)
+    path: str
+
+
 AddProjectBody = Annotated[
-    LocalProjectBody | GitHubProjectBody, Body(discriminator="source")
+    LocalProjectBody | GitHubProjectBody | PlatformProjectBody,
+    Body(discriminator="source"),
 ]
 """``POST /api/projects``: one body per source, so neither can carry the other's fields."""
 
@@ -408,6 +447,81 @@ def _refuse_pat_in_production(state: PortalState, secrets: SecretsBody | None) -
         )
 
 
+def _link_of(project_id: int) -> PlatformLink | None:
+    """The link row of a ``platform`` project, detached from its session."""
+    with get_session() as session:
+        row = session.get(PlatformLink, project_id)
+        if row is not None:
+            session.expunge(row)
+        return row
+
+
+def _refuse_linked(project: BoundProject, what: str, **extra) -> None:
+    """``403 managed_on_platform`` for what a linked project's platform owns.
+
+    A project linked to a WhyGraph platform (``source = "platform"``) is
+    configured, browsed and scanned **there**; this portal holds the
+    checkout, its CodeGraph index and the agent wiring. Every route of plan
+    section 4.11's table that the platform owns answers with this one code
+    (plan section 0.2 #10) and the three deep links the SPA offers instead.
+
+    A no-op for every other source, so a route can call it unconditionally.
+
+    Parameters
+    ----------
+    project : BoundProject
+        The bound project.
+    what : str
+        What was refused, named in the message ("renaming this project").
+    **extra
+        More JSON fields for the body (the refused config keys).
+
+    Raises
+    ------
+    ApiError
+        ``403 {"code": "managed_on_platform"}`` with ``manage_url``,
+        ``explorer_url`` and ``chat_url``.
+    """
+    if project.source != "platform":
+        return
+    row = _link_of(project.id)
+    block = link_block(row) if row is not None else {}
+    where = f"{row.org_slug}/{row.remote_slug}" if row is not None else project.slug
+    raise ApiError(
+        403,
+        f"{what} is managed on the platform: {where} is configured there",
+        code="managed_on_platform",
+        manage_url=block.get("manage_url"),
+        explorer_url=block.get("explorer_url"),
+        chat_url=block.get("chat_url"),
+        **extra,
+    )
+
+
+def linked_guard(what: str) -> Callable[[BoundProject], None]:
+    """A :func:`~whygraph.portal.deps.project_db_access` guard refusing a linked project.
+
+    The Explorer and Chat routers are mounted with one of these, so they
+    refuse **before** the initialized gate - a linked project has no local
+    WhyGraph database for them to read (plan section 4.11).
+
+    Parameters
+    ----------
+    what : str
+        What the mount serves, for the message.
+
+    Returns
+    -------
+    callable
+        ``(BoundProject) -> None``, raising as :func:`_refuse_linked`.
+    """
+
+    def guard(project: BoundProject) -> None:
+        _refuse_linked(project, what)
+
+    return guard
+
+
 def _put_or_delete(
     session: Session,
     kind: str,
@@ -450,6 +564,34 @@ def _checked_layer(raw: dict, spec, base: Path) -> dict:
     return kept
 
 
+def _linked_layer(raw: dict, project: BoundProject, base: Path) -> dict:
+    """The part of a linked project's ``PUT`` layer this portal may store.
+
+    Only ``[scan].hooks`` (:data:`~whygraph.portal.policy.LINKED_PUT_ALLOWLIST`):
+    which git hooks keep this checkout's CodeGraph index fresh is a property
+    of the checkout. Every other key is the platform's, so it is the one
+    ``403 managed_on_platform`` rather than a dropped-keys ``422`` - the
+    user did not type a bad key, they configured a project they do not
+    configure here.
+
+    Raises
+    ------
+    ApiError
+        ``403 {"code": "managed_on_platform"}``, its ``keys`` naming what
+        was refused; ``422`` for a secret in ``config`` (as for any layer).
+    """
+    secrets_found = find_secret_paths(raw)
+    if secrets_found:
+        raise ApiError(
+            422, "secrets are stored separately, not in config", keys=secrets_found
+        )
+    normalized, _ = normalize_v2(raw, base)
+    kept, dropped = filter_layer(normalized, LINKED_PUT_ALLOWLIST)
+    if dropped:
+        _refuse_linked(project, f"setting {', '.join(dropped)}", keys=dropped)
+    return kept
+
+
 def _missing_key(
     config: Config, tasks: tuple[str, ...] = ("analyze", "chat")
 ) -> str | None:
@@ -481,8 +623,11 @@ def _project_stats(state: PortalState, project: BoundProject) -> dict | None:
     """Counts for the project home, or ``None`` until initialized (blocking).
 
     Also ``None`` when a DB path is a symlink (nothing is opened); the data
-    routes answer ``409 unsafe_path`` for such a project.
+    routes answer ``409 unsafe_path`` for such a project. A linked
+    (``platform``) project has no local DB: ``None``, the file untouched.
     """
+    if project.source == "platform":
+        return None
     try:
         check_project_paths(project.root)
     except UnsafePathError:
@@ -558,6 +703,10 @@ def _summary(
         if status == "ok" and project.initialized_at is not None
         else None
     )
+    link = None
+    if project.source == "platform":
+        row = session.get(PlatformLink, project.id)
+        link = None if row is None else link_block(row)
     return {
         "slug": project.slug,
         "name": project.name,
@@ -587,6 +736,10 @@ def _summary(
         # so that is the owner.
         "github_full_name": full_name,
         "installation_account": full_name.split("/", 1)[0] if full_name else None,
+        # A linked project's platform, its recorded link status and the
+        # deep links into the platform's SPA (M2e plan section 4.11);
+        # `null` for every other source.
+        "link": link,
     }
 
 
@@ -731,7 +884,8 @@ def get_state(request: Request) -> dict:
     the failure. In production the body also names ``host_kind``,
     ``base_url``, ``bootstrap_required`` and the user's ``email`` /
     ``is_instance_admin``, and ``setup_complete`` means "an instance admin
-    exists"; local mode's body has none of them.
+    exists"; local mode's body has none of them, and names ``hostname``
+    instead (the machine name the platform link page prefills, M2e).
     """
     state = portal_state(request)
     if state.degraded:
@@ -763,6 +917,9 @@ def get_state(request: Request) -> dict:
         # this org, or null.
         "port_change": _port_change_in(state, access),
     }
+    if state.mode == "local":
+        # The machine name the link page prefills (M2e section 4.8).
+        body["hostname"] = default_client_name()
     if state.mode == "production":
         # Production-only fields, so the local body stays exactly as it was.
         assert state.base_url is not None
@@ -827,7 +984,8 @@ def get_repos(
 ) -> dict:
     """Git repositories discovered under the shared folders (cached 60 s).
 
-    ``registered`` reflects only the request's org. ``404`` in production
+    ``registered`` reflects only the request's org (a local or a linked
+    project over that checkout). ``404`` in production
     (local folders only).
     """
     state = portal_state(request)
@@ -838,7 +996,8 @@ def get_repos(
         registered = set(
             session.exec(
                 select(Project.root).where(
-                    Project.org_id == org_id, Project.source == "local"
+                    Project.org_id == org_id,
+                    col(Project.source).in_(("local", "platform")),
                 )
             ).all()
         )
@@ -937,17 +1096,29 @@ def put_defaults(
 def list_projects(
     request: Request, access: OrgAccess = Depends(org_access(Action.ORG_READ))
 ) -> dict:
-    """Every project of the request's org, with its status."""
-    mode = portal_state(request).mode
+    """Every project of the request's org, with its status.
+
+    A linked project's ``link.status`` is the **recorded** one: a link whose
+    status is older than
+    :data:`~whygraph.portal.linked.REFRESH_AFTER_SEC` is queued for the
+    lifespan's refresh task instead, so the listing never waits on a
+    platform (plan section 4.11).
+    """
+    state = portal_state(request)
     with get_session() as session:
         rows = session.exec(
             select(Project)
             .where(Project.org_id == access.org_id)
             .order_by(Project.name)
         ).all()
-        return {
-            "projects": [_summary(session, p, resolve_root(p), mode=mode) for p in rows]
+        body = {
+            "projects": [
+                _summary(session, p, resolve_root(p), mode=state.mode) for p in rows
+            ]
         }
+        for project_id in due_for_refresh(session, access.org_id):
+            state.link_refresh.schedule(project_id)
+        return body
 
 
 @projects_router.post("", status_code=201)
@@ -966,12 +1137,16 @@ def add_project(
     ``protected``, ``github_error``). The source policy
     (:func:`~whygraph.portal.policy.allowed_sources`) answers ``403
     source_not_allowed`` for ``github`` in local mode and ``local`` in
-    production. A production import is :func:`_import_github`.
+    production. A production import is :func:`_import_github`; a link to a
+    platform project (local mode, M2e) is :func:`_add_platform`.
     """
     state = portal_state(request)
     _refuse_source(state, body.source)
     if isinstance(body, GitHubProjectBody):
         project_id = _import_github(state, body, principal, access, request)
+        detected, preview = None, ImportPreview()
+    elif isinstance(body, PlatformProjectBody):
+        project_id = _add_platform(state, body, principal, access.org_id)
         detected, preview = None, ImportPreview()
     else:
         project_id, detected, preview = _add_local(
@@ -1016,13 +1191,19 @@ def _insert_project(
     return project.id
 
 
-def _add_local(
-    state: PortalState, body: LocalProjectBody, principal: Principal, org_id: int
-) -> tuple[int, dict, ImportPreview]:
-    if not body.path:
+def _checked_path(state: PortalState, path: str) -> dict:
+    """:func:`~whygraph.portal.repos.check_path` of a checkout to add, or the refusal.
+
+    Raises
+    ------
+    ApiError
+        ``422`` (no or a relative path), ``400 protected`` / ``not_shared`` /
+        ``not_git``.
+    """
+    if not path:
         raise ApiError(422, "path is required for a local project")
     try:
-        check = check_path(body.path, state.shared_folders, state.data_dir)
+        check = check_path(path, state.shared_folders, state.data_dir)
     except ValueError as exc:
         raise ApiError(422, str(exc)) from exc
     if check["protected"]:
@@ -1039,7 +1220,13 @@ def _add_local(
         )
     if not check["is_git"]:
         raise ApiError(400, "the path is not a git repository", code="not_git")
+    return check
 
+
+def _add_local(
+    state: PortalState, body: LocalProjectBody, principal: Principal, org_id: int
+) -> tuple[int, dict, ImportPreview]:
+    check = _checked_path(state, body.path)
     root = Path(check["path"])
     link = check["github"]
     token = (body.token or "").strip() or None
@@ -1111,6 +1298,210 @@ def _add_local(
         ) from exc
     state.contexts.invalidate(project_id)
     return project_id, detected, preview
+
+
+_FULL_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+def _check_link_match(entry: PendingLink, root: Path) -> None:
+    """Refuse a checkout that is not the platform project's (plan section 0.1 #12).
+
+    Accepted: a candidate of the callback, a checkout whose ``origin`` names
+    the clone URL's repository (host, owner and name), or one that holds
+    the platform's ``last_scanned_head`` (a mirror, a same-history fork, an
+    SSH host alias). A project the platform never scanned needs the origin
+    match.
+
+    Raises
+    ------
+    ApiError
+        ``422 origin_mismatch`` with ``origin`` and ``clone_url``.
+    """
+    project = entry.reply.project
+    clone_url = project.clone_url or ""
+    if str(root) in entry.candidates:
+        return
+    wanted = remote_identity(strip_userinfo(clone_url))
+    if wanted is not None and origin_identity(root) == wanted:
+        return
+    head = project.last_scanned_head
+    if head and _FULL_SHA.fullmatch(head):
+        if Repository(root).has_commit(head):
+            return
+        message = (
+            f"this checkout's origin is not {clone_url} and it does not hold the "
+            "platform's last scanned commit"
+        )
+    else:
+        message = (
+            f"this checkout's origin is not {clone_url}, and the platform has not "
+            "scanned the project yet, so its history cannot be compared"
+        )
+    raise ApiError(
+        422,
+        message,
+        code="origin_mismatch",
+        origin=origin_url(root),
+        clone_url=clone_url,
+    )
+
+
+def _add_platform(
+    state: PortalState, body: PlatformProjectBody, principal: Principal, org_id: int
+) -> int:
+    """Link a checkout to the platform project of a pending link (plan section 4.8).
+
+    The project (``source = "platform"``, uninitialized, the platform's slug
+    and name) and its :class:`~whygraph.portal.models.PlatformLink` row (the
+    token encrypted) are written in one transaction, then the pending link
+    is consumed. Nothing inside the checkout is written.
+
+    The same request **reconnects** an existing linked project whose token
+    was revoked (plan section 4.11's "reconnect or remove"): see
+    :func:`_reconnectable`.
+
+    Raises
+    ------
+    ApiError
+        ``410 link_expired``, the :func:`_checked_path` refusals, ``422
+        origin_mismatch``, ``409 slug_taken`` (the platform's slug is
+        already a project here) or ``409 duplicate`` (the checkout is).
+    """
+    sweep_links(state)
+    entry = state.pending_links.get(body.link_id, org_id)
+    if entry is None:
+        raise ApiError(
+            410, "this link expired or was used; connect again", code="link_expired"
+        )
+    check = _checked_path(state, body.path)
+    root = Path(check["path"])
+    _check_link_match(entry, root)
+    project = entry.reply.project
+    clone_url = project.clone_url or ""
+    slug_taken = ApiError(
+        409,
+        f"a project named {project.slug!r} already exists on this portal; "
+        "remove it first",
+        code="slug_taken",
+    )
+    duplicate = ApiError(409, "this repository is already registered", code="duplicate")
+    existing = _reconnectable(root, org_id, entry)
+    if existing is not None:
+        _reconnect(state, existing, entry)
+        state.pending_links.pop(body.link_id, org_id)
+        state.contexts.invalidate(existing)
+        return existing
+    try:
+        with get_session() as session:
+            if session.exec(
+                select(Project.id).where(Project.root == str(root))
+            ).first():
+                raise duplicate
+            if session.exec(
+                select(Project.id).where(
+                    Project.org_id == org_id, Project.slug == project.slug
+                )
+            ).first():
+                raise slug_taken
+            project_id = _insert_project(
+                session,
+                org_id=org_id,
+                slug=project.slug,
+                name=project.name,
+                source="platform",
+                root=str(root),
+                remote_url=strip_userinfo(clone_url),
+                principal=principal,
+            )
+            session.add(
+                PlatformLink(
+                    project_id=project_id,
+                    platform_origin=entry.platform_origin,
+                    api_origin=entry.api_origin,
+                    org_slug=entry.reply.org,
+                    remote_slug=project.slug,
+                    remote_name=project.name,
+                    clone_url=clone_url,
+                    default_branch=project.default_branch or "",
+                    token_ciphertext=encrypt(entry.token),
+                    token_hint=hint_for(entry.token),
+                    status="ok",
+                    last_platform_head=project.last_scanned_head,
+                )
+            )
+    except IntegrityError as exc:
+        raise (
+            slug_taken if _constraint(exc) == "uq_projects_org_slug" else duplicate
+        ) from exc
+    state.pending_links.pop(body.link_id, org_id)
+    state.contexts.invalidate(project_id)
+    return project_id
+
+
+def _reconnectable(root: Path, org_id: int, entry: PendingLink) -> int | None:
+    """The id of the linked project this link *replaces*, or ``None``.
+
+    A revoked link is reconnected by running the whole connect flow again
+    and posting the same body as a first link (plan section 4.11's
+    "reconnect or remove"), so that post must not be a dead ``409
+    slug_taken``. The rule is
+    :func:`~whygraph.portal.platform_routes.reconnect_target`'s, shared with
+    the picker that offers the checkout
+    (``GET /api/platform/pending/{link_id}``) so the two cannot drift.
+
+    Parameters
+    ----------
+    root : Path
+        The checkout being linked.
+    org_id : int
+        The local org.
+    entry : PendingLink
+        The pending link the wizard is consuming.
+
+    Returns
+    -------
+    int or None
+        ``projects.id`` to replace, or ``None`` to add a new project.
+    """
+    with get_session() as session:
+        row = reconnect_target(session, org_id, entry, root=root)
+        return None if row is None else row.id
+
+
+def _reconnect(state: PortalState, project_id: int, entry: PendingLink) -> None:
+    """Point an existing linked project at a fresh connection token.
+
+    Replaces the token (encrypted) and hint, clears the status back to
+    ``ok``, and refreshes what the exchange just told us about the platform
+    project (its name - which the local name follows - its head and default
+    branch). The token it supersedes is revoked on the platform best effort,
+    after the row is written, so a slow platform cannot leave the row
+    half-updated.
+    """
+    superseded = _link_of(project_id)
+    reply = entry.reply
+    with get_session() as session:
+        row = session.get(PlatformLink, project_id)
+        if row is None:
+            raise ApiError(
+                409, "this project's link is gone; add it again", code="not_linked"
+            )
+        row.api_origin = entry.api_origin
+        row.remote_name = reply.project.name
+        row.default_branch = reply.project.default_branch or ""
+        row.token_ciphertext = encrypt(entry.token)
+        row.token_hint = hint_for(entry.token)
+        row.status = "ok"
+        row.status_reason = None
+        row.status_at = _now()
+        row.last_platform_head = reply.project.last_scanned_head
+        session.add(row)
+        local = session.get(Project, project_id)
+        if local is not None and local.name != reply.project.name:
+            local.name = reply.project.name
+            session.add(local)
+    if superseded is not None:
+        revoke_token(superseded, transport=state.platform_transport)
 
 
 IMPORT_SLUG_ATTEMPTS = 3
@@ -1406,7 +1797,12 @@ def patch_project(
     request: Request,
     project: BoundProject = Depends(project_access(Action.PROJECT_CONFIGURE)),
 ) -> dict:
-    """Rename the project's display ``name`` (the slug is immutable)."""
+    """Rename the project's display ``name`` (the slug is immutable).
+
+    A linked project's name follows its platform's, so this is refused for
+    one (``403 managed_on_platform``).
+    """
+    _refuse_linked(project, "renaming this project")
     name = body.name.strip()
     if not name:
         raise ApiError(422, "name must not be blank")
@@ -1437,7 +1833,15 @@ def delete_project(
     clone's checkout is deleted only when ``confirm_name`` equals the
     project name and the checkout sits directly under
     ``<data dir>/repos``. The project's run files (``runs/<id>.jsonl``,
-    ``.log``, ``.token``) are deleted with its row.
+    ``.log``, ``.token``) are deleted with its row, and its connection
+    tokens are revoked (``project_deleted``) in the row's transaction.
+
+    For a **linked** project this is "Remove from this machine" (plan
+    section 4.11): this machine's connection token is revoked on the
+    platform first, best effort, and ``token_revoked`` says whether that
+    worked - when it did not, the user can revoke it on the platform's
+    account page. The platform project itself is untouched, and the link
+    row goes with the project's.
     """
     state = portal_state(request)
     body = body or DeleteProjectBody()
@@ -1470,6 +1874,23 @@ def _remove_project(
     root_ok = project.root.is_dir()
     warnings: list[str] = []
     agent_files: list[dict] = []
+
+    # First, before anything local changes: give up this machine's access.
+    token_revoked = True
+    if project.source == "platform":
+        link = _link_of(project.id)
+        failure = (
+            "this project has no link row"
+            if link is None
+            else revoke_token(link, transport=state.platform_transport)
+        )
+        token_revoked = failure is None
+        if failure is not None:
+            origin = link.platform_origin if link is not None else "the platform"
+            warnings.append(
+                f"this machine's access was not given up on {origin} ({failure}); "
+                "revoke it there under Connected portals"
+            )
     if body.strip_agent_entries and root_ok:
         targets = []
         for target in (AGENT_TARGETS[a] for a in agents if a in AGENT_TARGETS):
@@ -1528,6 +1949,8 @@ def _remove_project(
     with get_session() as session:
         row = session.get(Project, project.id)
         if row is not None:
+            # Before the delete, which sets the tokens' project_id to NULL.
+            connections.revoke_for_project(session, project.id, "project_deleted")
             session.delete(row)
     remove_run_files(state.data_dir, runs)
 
@@ -1544,6 +1967,9 @@ def _remove_project(
         "hooks": hooks,
         "agent_files": agent_files,
         "checkout_deleted": checkout_deleted,
+        # Whether this machine holds no connection token for the project any
+        # more: the platform confirmed the revoke, or there never was one.
+        "token_revoked": token_revoked,
         "warnings": warnings,
     }
 
@@ -1557,11 +1983,20 @@ def get_project_config(
     The import report is recomputed from the repo's ``whygraph.toml``
     (which the portal never modifies), so dropped keys and custom DB
     paths keep showing while the file still has them.
+
+    Allowed for a linked project, which is what its hooks checkboxes read -
+    but read-only (``PUT`` is refused except ``[scan].hooks``) and without
+    the secrets block: a linked project reads no secret at all, so there is
+    nothing to report (plan sections 4.9, 4.11).
     """
     with get_session() as session:
         body = {
             "config": load_layer(session, project.id, org_id=project.org_id),
-            "secrets": _secrets_view(session, project.id, org_id=project.org_id),
+            "secrets": (
+                None
+                if project.source == "platform"
+                else _secrets_view(session, project.id, org_id=project.org_id)
+            ),
         }
     preview = (
         preview_import(project.root) if project.source == "local" else ImportPreview()
@@ -1585,16 +2020,29 @@ def put_project_config(
     ``[scan].hooks`` on an initialized local project re-runs
     :func:`whygraph.hooks.sync_hooks` (never in production, where the
     config is saved and ``hooks`` is ``null``).
+
+    A *linked* project is configured on its platform: everything but
+    ``[scan].hooks`` - and any secret at all - is ``403
+    managed_on_platform`` (:data:`~whygraph.portal.policy.LINKED_PUT_ALLOWLIST`).
     """
     state = portal_state(request)
     _refuse_pat_in_production(state, body.secrets)
+    if body.secrets is not None:
+        _refuse_linked(project, "storing a key or token for this project")
+    linked = project.source == "platform"
     old_hooks = project.ctx.config.scan_hooks
     with get_session() as session:
         row = session.get(Project, project.id)
         if row is None:
             raise ApiError(404, f"project {project.slug!r} not found")
         if body.config is not None:
-            kept = _checked_layer(body.config, put_allowlist(state.mode), project.root)
+            kept = (
+                _linked_layer(body.config, project, project.root)
+                if linked
+                else _checked_layer(
+                    body.config, put_allowlist(state.mode), project.root
+                )
+            )
             try:
                 save_layer(session, project.id, kept, org_id=project.org_id)
             except ConfigPolicyError as exc:
@@ -1614,7 +2062,7 @@ def put_project_config(
         new_hooks != old_hooks
         and state.mode != "production"
         and project.initialized_at is not None
-        and project.source == "local"
+        and project.source in ("local", "platform")
         and project.root.is_dir()
     ):
         unsafe = _unsafe_reason(project.root, project.root / LEGACY_HELPER_RELPATH)
@@ -1691,7 +2139,8 @@ def init_project(
     checked_db_paths(project)
 
     try:
-        if not body.dry_run:
+        if not body.dry_run and project.source != "platform":
+            # A linked project has no local DB: a leftover one is ignored.
             state.migrations.ensure(project.ctx)
         result = initialize_project(
             project.root,
@@ -1749,6 +2198,14 @@ def init_project(
         preview_import(project.root) if project.source == "local" else ImportPreview()
     )
     response["custom_db_paths"] = [p for p in preview.custom_db_paths if p["exists"]]
+    # A linked project has no local DB; a leftover one from an earlier local
+    # project over the same checkout is never opened (M2e section 4.8).
+    response["ignored_db"] = (
+        ".whygraph/whygraph.db"
+        if project.source == "platform"
+        and (project.root / ".whygraph" / "whygraph.db").is_file()
+        else None
+    )
     return response
 
 
@@ -1830,6 +2287,19 @@ async def post_scan(
         raise ApiError(409, str(exc)) from exc
     except SourceNotAllowed as exc:
         raise ApiError(409, str(exc), code="source_not_allowed") from exc
+    except ManagedOnPlatform as exc:
+        # The same code as every other refusal of plan section 4.11, with
+        # the same deep links: the describing happens on the platform.
+        block = _link_of(project.id)
+        links = link_block(block) if block is not None else {}
+        raise ApiError(
+            403,
+            str(exc),
+            code="managed_on_platform",
+            manage_url=links.get("manage_url"),
+            explorer_url=links.get("explorer_url"),
+            chat_url=links.get("chat_url"),
+        ) from exc
     except ProjectAccessLost as exc:
         raise ApiError(
             409, str(exc), code="github_access_lost", reason=exc.reason
@@ -1984,10 +2454,19 @@ def get_scan_estimate(
 
     ``commits`` is an upper bound; ``missing_key`` names the analyze
     provider when it has no key (*Describe now* is then disabled).
+
+    Refused for a linked project (``403 managed_on_platform``): its scans
+    never describe anything - the platform pays for and owns the LLM work.
     """
+    _refuse_linked(project, "estimating this project's describe cost")
     body = _scan_estimate(project.ctx.config)
     body["missing_key"] = _missing_key(project.ctx.config, ("analyze",))
     return body
 
 
-__all__ = ["portal_router", "projects_router", "public_router"]
+__all__ = [
+    "linked_guard",
+    "portal_router",
+    "projects_router",
+    "public_router",
+]

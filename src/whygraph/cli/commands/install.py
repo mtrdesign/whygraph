@@ -262,6 +262,16 @@ portal_up() {
         FOLDERS_JOINED="${FOLDERS_JOINED:+$FOLDERS_JOINED:}$f"
     done < "$FOLDERS_FILE"
 
+    # The container's hostname. Without it the portal reports the container id
+    # as this machine's name when a project is linked to a platform. Recorded
+    # as a label, so a renamed machine recreates the container like a port or
+    # folder change does. Anything docker would refuse as a hostname (or no
+    # `hostname` at all) leaves it to docker.
+    HOST_NAME=$(hostname -s 2>/dev/null || hostname 2>/dev/null || true)
+    HOST_NAME=$(printf '%.63s' "$HOST_NAME")
+    case "$HOST_NAME" in ''|-*|*-|*[!A-Za-z0-9.-]*) HOST_NAME="" ;; esac
+    [ -z "$HOST_NAME" ] || set -- "$@" --hostname "$HOST_NAME"
+
     # Dev mode: the checkout read-only over the installed package, a Linux
     # node_modules for Vite, the Vite port, and the dev wrapper as the command.
     DEV_SRC=""
@@ -273,10 +283,10 @@ portal_up() {
         set -- "$@" --mount "type=bind,source=$DEV_SRC,target=/opt/whygraph-dev,readonly" \
             --mount "type=bind,source=$DATA/dev-node_modules,target=/opt/whygraph-dev/src/playground/node_modules" \
             --label "whygraph.dev_src=$DEV_SRC" \
-            -p "127.0.0.1:5173:5173" \
+            -p "127.0.0.1:5174:5174" \
             -e PYTHONPATH=/opt/whygraph-dev/src \
             -e "WHYGRAPH_SCAN_CMD=env PYTHONPATH=/opt/whygraph-dev/src python -m whygraph scan" \
-            -e WHYGRAPH_DEV_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+            -e WHYGRAPH_DEV_ORIGINS=http://localhost:5174,http://127.0.0.1:5174
         set -- "$@" "$IMAGE" python /opt/whygraph-dev/scripts/dev_portal.py --vite-host 0.0.0.0 --
     else
         set -- "$@" "$IMAGE" whygraph portal
@@ -317,6 +327,7 @@ portal_up() {
                 [ "$(portal_label whygraph.folders)" = "$FOLDERS_JOINED" ] || changed="$changed folders"
                 [ "$(portal_label whygraph.port)" = "$PORT" ] || changed="$changed port"
                 [ "$(portal_label whygraph.image)" = "$IMAGE" ] || changed="$changed image"
+                [ "$(portal_label whygraph.hostname)" = "$HOST_NAME" ] || changed="$changed hostname"
                 [ "$(portal_label whygraph.dev_src)" = "$DEV_SRC" ] || changed="$changed dev_src"
                 [ -z "$pg_changed" ] || changed="$changed database"
                 if [ -z "$changed" ]; then
@@ -374,7 +385,7 @@ portal_up() {
     docker run -d --init --name "$PORTAL" --restart "$RESTART" \
         --network whygraph-portal --add-host=host.docker.internal:host-gateway \
         --label "whygraph.folders=$FOLDERS_JOINED" --label "whygraph.port=$PORT" \
-        --label "whygraph.image=$IMAGE" \
+        --label "whygraph.image=$IMAGE" --label "whygraph.hostname=$HOST_NAME" \
         -p "127.0.0.1:$PORT:$PORT" \
         --user "$(id -u):$(id -g)" -e HOME=/tmp \
         -e WHYGRAPH_DATA=/data -e WHYGRAPH_SHARED_FOLDERS="$FOLDERS_JOINED" \

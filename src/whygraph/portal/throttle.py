@@ -55,19 +55,33 @@ class Throttle:
             return None
         return events
 
-    def _retry_after(self, events: deque[float] | None, now: float) -> int | None:
-        if events is None or len(events) < self.limit:
+    def _retry_after(
+        self, events: deque[float] | None, now: float, limit: int | None = None
+    ) -> int | None:
+        allowed = self.limit if limit is None else limit
+        if allowed <= 0:  # nothing is ever allowed: wait a whole window
+            return max(1, math.ceil(self.window))
+        if events is None or len(events) < allowed:
             return None
         return max(1, math.ceil(events[0] + self.window - now))
 
-    def check(self, key: Hashable) -> int | None:
+    def check(self, key: Hashable, *, limit: int | None = None) -> int | None:
         """Return seconds to wait if ``key`` is over the limit, else ``None``.
 
         Does not count an event.
+
+        Parameters
+        ----------
+        key : Hashable
+            What is counted.
+        limit : int, optional
+            This call's limit instead of :attr:`limit` (a per-org budget,
+            say); the window stays the throttle's. ``0`` (or less) refuses
+            every event with a whole window's wait.
         """
         with self._lock:
             now = self._clock()
-            return self._retry_after(self._live(key, now), now)
+            return self._retry_after(self._live(key, now), now, limit)
 
     def record(self, key: Hashable) -> None:
         """Count one event for ``key``."""
@@ -82,12 +96,15 @@ class Throttle:
                 self._events.move_to_end(key)
             events.append(now)
 
-    def hit(self, key: Hashable) -> int | None:
-        """Check ``key`` and, if allowed, count it; return ``check``'s answer."""
+    def hit(self, key: Hashable, *, limit: int | None = None) -> int | None:
+        """Check ``key`` and, if allowed, count it; return ``check``'s answer.
+
+        ``limit`` is as for :meth:`check`; a refused call is not counted.
+        """
         with self._lock:
             now = self._clock()
             events = self._live(key, now)
-            retry = self._retry_after(events, now)
+            retry = self._retry_after(events, now, limit)
             if retry is not None:
                 return retry
             if events is None:
@@ -98,6 +115,39 @@ class Throttle:
                 self._events.move_to_end(key)
             events.append(now)
             return None
+
+
+class InFlight:
+    """At most ``limit`` requests in flight per key; never waits.
+
+    Parameters
+    ----------
+    limit : int
+        Concurrent holders allowed per key.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self._held: dict[Hashable, int] = {}
+        self._lock = threading.Lock()
+
+    def try_acquire(self, key: Hashable) -> bool:
+        """Take a slot for ``key``; ``False`` (and nothing taken) when all are held."""
+        with self._lock:
+            held = self._held.get(key, 0)
+            if held >= self.limit:
+                return False
+            self._held[key] = held + 1
+            return True
+
+    def release(self, key: Hashable) -> None:
+        """Give back a slot :meth:`try_acquire` took."""
+        with self._lock:
+            held = self._held.get(key, 0) - 1
+            if held > 0:
+                self._held[key] = held
+            else:
+                self._held.pop(key, None)
 
 
 def ip_key(scope: Mapping[str, Any]) -> str:

@@ -9,6 +9,8 @@ land in the recorded argv. Options (all before the runner's own flags):
 ``--exit N``             exit code (default 0)
 ``--stderr-bytes N``     write N bytes of noise to stderr before exiting
 ``--echo-env VAR``       print VAR's value in a stdout event and on stderr
+``--codegraph-only``     accepted (the runner passes it for a linked project); like
+                         every run it writes nothing but the events: no whygraph.db
 ``--ignore-term``        ignore SIGTERM (only SIGKILL stops it)
 ``--token-check URL``    read the GitHub token (``github_token()``: the portal's
                          token file, else ``GH_TOKEN``), GET URL with it as git's

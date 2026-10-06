@@ -197,6 +197,41 @@ def resolve_target(
     )
 
 
+def indexed_symbol_target(qualified_name: str) -> Target | None:
+    """The range CodeGraph's index holds for ``qualified_name``, as it stands.
+
+    Unlike :func:`resolve_target` there is no freshness check and no
+    re-sync: the platform answers for its own server clone, whose index
+    its scans keep current, and a read path there must never start a
+    ``codegraph sync``.
+
+    Parameters
+    ----------
+    qualified_name : str
+        The dotted symbol name.
+
+    Returns
+    -------
+    Target or None
+        ``None`` when the symbol is not indexed or CodeGraph cannot be read.
+    """
+    try:
+        with CodeGraph.for_repository(
+            repo_root(), codegraph_db=get_config().codegraph_db
+        ) as graph:
+            symbol = graph.symbol(qualified_name)
+    except CodeGraphError:
+        return None
+    if symbol is None:
+        return None
+    return Target(
+        path=symbol.file_path,
+        line_start=symbol.start_line,
+        line_end=symbol.end_line,
+        qualified_name=qualified_name,
+    )
+
+
 def _is_stale(graph: CodeGraph, root: Path, symbol: Symbol) -> bool:
     """Whether ``symbol``'s file changed since CodeGraph indexed it.
 

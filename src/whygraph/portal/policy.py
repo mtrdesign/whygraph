@@ -20,10 +20,13 @@ has an allowlist (plan section 4.2.1):
   scope's key (rule 3, :func:`whygraph.portal.config_layers.save_layer`).
 * Rule 6 - :data:`DEFAULTS_ALLOWLIST`: the global defaults hold only
   ``[llm]`` (with the 1b connection keys), ``[analyze]``, ``[rationale]``
-  and ``[chat]``.
+  and ``[chat]`` - and are the only layer that holds the org limits of
+  :data:`ORG_ONLY_KEYS`, which 1a (hence 1b) leaves out.
 
 In production a project ``PUT`` uses :data:`PRODUCTION_PUT_ALLOWLIST`
-(:func:`put_allowlist`). Beside the config allowlists,
+(:func:`put_allowlist`), and a *linked* project's
+:data:`LINKED_PUT_ALLOWLIST` (M2e): everything but ``[scan].hooks`` is
+managed on its platform. Beside the config allowlists,
 :func:`allowed_sources` is the one place that says which project sources a
 mode accepts.
 
@@ -72,14 +75,25 @@ CONNECTION_KEYS: tuple[str, ...] = ("base_url", "host", "timeout_sec")
 """Connection-only provider keys a ``PUT`` may set (rule 1b)."""
 
 
-def _all_fields(cls: type) -> dict[str, bool]:
-    return {f.name: True for f in fields(cls)}
+ORG_ONLY_KEYS: dict[str, tuple[str, ...]] = {
+    "analyze": ("agent_descriptions_per_hour",),
+    "rationale": ("agent_generations_per_hour",),
+}
+"""The org limits on agent LLM spend (M2e plan section 0.1 #7): set by an
+owner on the org defaults only - never imported from a repo (a repo is
+untrusted input), never set per project. The platform reads them from the
+org layer row."""
+
+
+def _all_fields(cls: type, section: str | None = None) -> dict[str, bool]:
+    skip = ORG_ONLY_KEYS.get(section or "", ())
+    return {f.name: True for f in fields(cls) if f.name not in skip}
 
 
 IMPORT_ALLOWLIST: Spec = {
     "llm": {"model": True, **{name: {"model": True} for name in PROVIDER_TABLES}},
-    "analyze": _all_fields(AnalyzeConfig),
-    "rationale": _all_fields(RationaleConfig),
+    "analyze": _all_fields(AnalyzeConfig, "analyze"),
+    "rationale": _all_fields(RationaleConfig, "rationale"),
     "chat": _all_fields(ChatConfig),
     "scan": {"forge": True, "remote": True, "default_branch": True, "hooks": True},
 }
@@ -104,13 +118,28 @@ PUT_ALLOWLIST: Spec = {
 }
 """Rule 1b: what ``PUT /api/projects/{slug}/config`` may store."""
 
-DEFAULTS_ALLOWLIST: Spec = {k: v for k, v in PUT_ALLOWLIST.items() if k != "scan"}
-"""Rule 6: what ``PUT /api/portal/defaults`` may store."""
+DEFAULTS_ALLOWLIST: Spec = {
+    **{k: v for k, v in PUT_ALLOWLIST.items() if k != "scan"},
+    **{
+        section: {**PUT_ALLOWLIST[section], **{key: True for key in keys}}
+        for section, keys in ORG_ONLY_KEYS.items()
+    },
+}
+"""Rule 6: what ``PUT /api/portal/defaults`` may store - plus, alone among
+the allowlists, :data:`ORG_ONLY_KEYS`."""
 
 PRODUCTION_PUT_ALLOWLIST: Spec = {**PUT_ALLOWLIST, "scan": {"forge": True}}
 """Rule 1b in production: ``[scan].remote``, ``default_branch`` and ``hooks``
 are fixed for a GitHub App project (M2d-2 plan section 0.2 #21); only the PR
 crawl switch ``[scan].forge`` stays writable."""
+
+LINKED_PUT_ALLOWLIST: Spec = {"scan": {"hooks": True}}
+"""What a *linked* project's ``PUT .../config`` may store (M2e plan section 4.11).
+
+A project linked to a WhyGraph platform is configured there: the whole
+config route is refused (``403 managed_on_platform``) except ``[scan].hooks``,
+which is a property of this checkout - which local git hooks keep its
+CodeGraph index fresh - and so stays writable here."""
 
 
 def put_allowlist(mode: str | None) -> Spec:
@@ -146,9 +175,11 @@ def allowed_sources(mode: str | None) -> frozenset[str]:
     Returns
     -------
     frozenset[str]
-        ``{"github"}`` in production, ``{"local"}`` otherwise.
+        ``{"github"}`` in production, ``{"local", "platform"}`` otherwise.
     """
-    return frozenset({"github"}) if mode == "production" else frozenset({"local"})
+    if mode == "production":
+        return frozenset({"github"})
+    return frozenset({"local", "platform"})
 
 
 def filter_layer(layer: Mapping[str, Any], spec: Spec) -> tuple[dict, list[str]]:
@@ -385,7 +416,9 @@ __all__ = [
     "CONNECTION_KEYS",
     "DEFAULTS_ALLOWLIST",
     "IMPORT_ALLOWLIST",
+    "LINKED_PUT_ALLOWLIST",
     "ImportPreview",
+    "ORG_ONLY_KEYS",
     "PROVIDER_TABLES",
     "PRODUCTION_PUT_ALLOWLIST",
     "PUT_ALLOWLIST",

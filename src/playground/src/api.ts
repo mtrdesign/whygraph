@@ -259,6 +259,8 @@ export interface PortalState {
   host_kind?: "local" | "base" | "org";
   base_url?: string;
   bootstrap_required?: boolean;
+  // Local mode: this machine's name, the prefilled name a platform shows for the connection.
+  hostname?: string;
   error?: string;
 }
 
@@ -308,7 +310,7 @@ export type ProjectPortChange =
 export interface ProjectSummary {
   slug: string;
   name: string;
-  source: "local" | "github";
+  source: "local" | "github" | "platform";
   root: string;
   remote_url: string | null;
   initialized: boolean;
@@ -329,6 +331,24 @@ export interface ProjectSummary {
   // An imported repo's `owner/name` and the account the app is installed on.
   github_full_name: string | null;
   installation_account: string | null;
+  // A `platform` project's link to its platform project (local mode, M2e); absent otherwise.
+  link?: ProjectLink | null;
+}
+
+/** How a linked project's connection to its platform stands (plan section 4.11). */
+export type LinkStatus = "ok" | "access_lost" | "removed" | "revoked" | "unreachable" | "update_required";
+
+/** `_summary`'s `link` of a `platform` project. The three URLs are built by the server. */
+export interface ProjectLink {
+  platform_origin: string;
+  org: string;
+  remote_slug: string;
+  status: LinkStatus;
+  status_reason: string | null;
+  last_platform_head: string | null;
+  explorer_url: string;
+  chat_url: string;
+  manage_url: string;
 }
 
 export type AccessLostReason = "no_access" | "git_access_denied" | "repo_deleted" | "tracked_whygraph_state";
@@ -411,7 +431,8 @@ export interface AddProjectResult {
 
 export type AddProjectBody =
   | { source: "local"; path: string; name?: string; token?: string }
-  | { source: "github"; installation_id: number; repo_id: number; name?: string };
+  | { source: "github"; installation_id: number; repo_id: number; name?: string }
+  | { source: "platform"; link_id: string; path: string };
 
 /** A v2 config layer (`[llm]`, `[analyze]`, ... as nested tables). */
 export type ConfigDict = Record<string, unknown>;
@@ -491,6 +512,8 @@ export interface InitResult {
   marker_written: boolean;
   initialized: boolean;
   custom_db_paths: CustomDbPath[];
+  // A linked project's leftover `.whygraph/whygraph.db`, which is never opened.
+  ignored_db?: string | null;
 }
 
 export interface ScanEstimate {
@@ -558,6 +581,8 @@ export interface DeleteProjectResult {
   agent_files: FileOutcome[];
   checkout_deleted: boolean;
   warnings: string[];
+  // A removed linked project (M2e): whether this machine's token was revoked on the platform.
+  token_revoked?: boolean;
 }
 
 export interface ScanRunRow {
@@ -780,6 +805,132 @@ export const accountApi = {
   password: (body: { current: string; new: string }) =>
     send<unknown>("POST", "/account/password", body),
   orgs: () => get<OrgEntry[]>("/account/orgs"),
+};
+
+// ---- connected portals (portal/connect_routes.py, production only) ----------------
+
+/** The consent page's query: what a local portal sent in the address. */
+export interface ConnectRequest {
+  redirect_uri: string;
+  code_challenge: string;
+  code_challenge_method: string;
+  state: string;
+  client_name: string;
+  org?: string;
+  project?: string;
+}
+
+/** `POST /api/connect/validate`. Both URLs the page navigates to come from the server. */
+export interface ConnectValidated {
+  ok: true;
+  client_name: string;
+  port: number;
+  org: string | null;
+  project: string | null;
+  orgs: { slug: string; name: string; role: string }[];
+  cancel_url: string;
+}
+
+export interface ConnectProject {
+  org: string;
+  org_name: string;
+  slug: string;
+  name: string;
+  github_full_name: string | null;
+  access_lost: boolean;
+}
+
+/** Why a connection token was revoked (`REVOKED_REASONS` in `portal/models.py`). */
+export type RevokedReason =
+  | "user_revoked"
+  | "admin_revoked"
+  | "removed_locally"
+  | "member_removed"
+  | "member_left"
+  | "user_disabled"
+  | "project_deleted"
+  | "org_deleted"
+  | "idle";
+
+/** `GET /api/connect/tokens`: one of the caller's own connected portals. */
+export interface MyConnection {
+  uid: string;
+  org: string | null;
+  project: string | null;
+  project_name: string | null;
+  client_name: string;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  revoked_reason: RevokedReason | null;
+}
+
+/** `GET /api/projects/{slug}/connections`: a member's live token of that project. */
+export interface ProjectConnection {
+  uid: string;
+  user_login: string | null;
+  user_name: string | null;
+  client_name: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+export const connectApi = {
+  validate: (body: ConnectRequest) => send<ConnectValidated>("POST", "/connect/validate", body),
+  projects: () => get<ConnectProject[]>("/connect/projects"),
+  authorize: (body: ConnectRequest & { org: string; project: string }) =>
+    send<{ redirect: string; access_lost: boolean }>("POST", "/connect/authorize", body),
+  tokens: () => get<MyConnection[]>("/connect/tokens"),
+  revokeToken: (uid: string) => sendEmpty("DELETE", `/connect/tokens/${encodeURIComponent(uid)}`),
+  projectConnections: (slug: string) =>
+    get<ProjectConnection[]>(`/projects/${encodeURIComponent(slug)}/connections`),
+  revokeProjectConnection: (slug: string, uid: string) =>
+    sendEmpty("DELETE", `/projects/${encodeURIComponent(slug)}/connections/${encodeURIComponent(uid)}`),
+};
+
+// ---- connecting to a platform (portal/platform_routes.py, local mode only) ----------
+
+export interface PlatformConnectBody {
+  platform_url: string;
+  client_name?: string;
+  org?: string;
+  project?: string;
+}
+
+/** What the platform sent back to `/connect/callback`. */
+export interface PlatformCallbackBody {
+  state: string;
+  iss?: string;
+  code?: string;
+  error?: string;
+}
+
+export interface PendingPlatformLink {
+  link_id: string;
+  platform_origin: string;
+  org: string;
+  project: { slug: string; name: string; [key: string]: unknown };
+  clone_url: string;
+  clone_command: string;
+  /** A genuine name collision: that slug is a project here this link cannot reconnect. */
+  slug_taken: boolean;
+  /** The already-linked project this link reconnects (a new token), when it is one. */
+  reconnect: { path: string; slug: string } | null;
+  candidates: { path: string; name: string; match: "origin" }[];
+  other_repos: { path: string; name: string }[];
+}
+
+export const platformApi = {
+  connect: (body: PlatformConnectBody) =>
+    send<{ authorize_url: string; platform_origin: string; known_platform: boolean }>(
+      "POST",
+      "/platform/connect",
+      body,
+    ),
+  callback: (body: PlatformCallbackBody) => send<{ link_id: string }>("POST", "/platform/callback", body),
+  pending: (linkId: string) => get<PendingPlatformLink>(`/platform/pending/${encodeURIComponent(linkId)}`),
+  abandon: (linkId: string) =>
+    send<{ revoked: boolean }>("DELETE", `/platform/pending/${encodeURIComponent(linkId)}`),
 };
 
 export const orgsApi = {

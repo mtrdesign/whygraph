@@ -48,7 +48,7 @@ trap 'exit 130' INT TERM
 
 "$wg" up --port "$port" --add-folder "$dev/repos"
 if [ "$mode" = dev ]; then
-    echo "open http://localhost:5173 (HMR)   portal + MCP: http://127.0.0.1:$port   Ctrl-C stops"
+    echo "open http://localhost:5174 (HMR)   portal + MCP: http://127.0.0.1:$port   Ctrl-C stops"
 else
     echo "open http://127.0.0.1:$port   Ctrl-C stops"
 fi

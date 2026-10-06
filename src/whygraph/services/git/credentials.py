@@ -16,7 +16,7 @@ Public API
 * :func:`git_env` - allowlisted env plus the token, no global / system git
   config and ``GIT_TERMINAL_PROMPT=0``.
 * :func:`github_git_config` - the ``-c`` arguments every network git call carries.
-* :func:`redact_tokens` - scrub anything shaped like a GitHub token.
+* :func:`redact_tokens` - scrub anything shaped like a GitHub or connection token.
 """
 
 from __future__ import annotations
@@ -47,12 +47,13 @@ GITHUB_URL_ENV = "WHYGRAPH_GITHUB_URL"
 DEFAULT_GITHUB_URL = "https://github.com"
 """The web root when :data:`GITHUB_URL_ENV` is unset."""
 
-TOKEN_PATTERN = re.compile(r"gh[opsur]_[A-Za-z0-9_.-]{8,}\**")
+TOKEN_PATTERN = re.compile(r"(?:gh[opsur]_[A-Za-z0-9_.-]{8,}|wgc_[A-Za-z0-9_-]{8,})\**")
 """Anything shaped like a GitHub token, plus the ``*`` a tool masked its tail with.
 
 Installation tokens are long (``ghs_<app id>_<JWT>``) and ``gh auth status``
 prints most of one with only the tail masked, so scrubbing exact values
-alone would miss it.
+alone would miss it. WhyGraph's own connection tokens (``wgc_...``, M2e)
+match too.
 """
 
 _PASS_THROUGH_EXACT = frozenset(
@@ -381,6 +382,6 @@ def redact_tokens(text: str) -> str:
     Returns
     -------
     str
-        ``text`` with each match replaced by e.g. ``ghs_***``.
+        ``text`` with each match replaced by e.g. ``ghs_***`` or ``wgc_***``.
     """
     return TOKEN_PATTERN.sub(lambda m: m.group()[:4] + "***", text)

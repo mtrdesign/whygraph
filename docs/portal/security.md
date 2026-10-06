@@ -122,7 +122,63 @@ the checks change:
   `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`, so an `insteadOf`, `http.*` or `include`
   in the host's git config cannot redirect a fetch. `origin` is set from the repository id before
   every fetch, and the checkout runs with hooks disabled.
-- **What is off.** No shared folders, no local repositories, no `/mcp`, no git-hook scans.
+- **What is off.** No shared folders, no local repositories, no `/mcp`, no git-hook scans. Agents
+  reach a production portal's projects through a [connected portal](#connected-portals), not directly.
+
+## Connected portals
+
+A [platform project](platform-projects.md) lets a local portal read a platform's history for one
+project. The credential for that is a **connection token**, and the design assumes the local portal
+runs on a developer's laptop and a repository on it is untrusted.
+
+- **One token reaches one project, as one person.** The token is `wgc_` plus 32 random bytes. The
+  platform stores only its SHA-256, so a database read cannot be replayed as a token. It names a
+  project by id, never by slug, and the person's role and membership are re-checked on **every call**,
+  so a role change applies to the next request and a removed member is cut off at once. An instance
+  admin's read-only access never gets a token, and a token never carries an administrator's powers or
+  a session.
+- **Revocation follows membership.** Removing a member, a member leaving, disabling an account,
+  deleting a project or an organization, an admin revoking one token, and "Remove from this machine"
+  all revoke the affected tokens, each with a reason the local portal can show. **Re-enabling a
+  disabled account does not restore its tokens**: link again. A token unused for 90 days expires, and
+  one never used expires after an hour, which cleans up a link abandoned halfway.
+- **Linking is OAuth 2.0 authorization code with PKCE (S256).** The local portal is a native app
+  on a port the platform cannot know in advance, so the redirect is exactly
+  `http://127.0.0.1:<port>/connect/callback`. The code lasts 60 seconds, works once, and is spent even
+  when its verification fails. The platform builds the redirect itself, from a request it validated
+  before rendering anything, so the consent page can only send the browser to a URL the server
+  returned.
+- **The `iss` check.** Every redirect carries the platform's own address (RFC 9207), and the local
+  portal refuses a callback whose `iss` is not the platform it started with, **before** it uses the
+  code. PKCE alone does not stop a rogue platform from being swapped in mid-flow; this does.
+- **`/api/v1` takes a bearer token and nothing else.** On that path the platform reads the
+  `Authorization: Bearer` header and **never a cookie**, and everywhere else it ignores a bearer
+  header and reads only the session cookie. A bearer token is not ambient, so a web page cannot use
+  one, and the CSRF checks of the session routes need nothing new. Failed token lookups are throttled
+  per address; evidence and rationale requests are throttled per token, limited to two at a time
+  per organization, and capped in `git` work and body size per request. Git's own error text never
+  appears in a response.
+- **The token is never exposed.** It lives encrypted in the local portal's database (the same Fernet
+  store as other secrets), is decrypted only into the client that calls the platform, and is never in
+  an API response, a log line, an error message, a command line or a child process's environment.
+  `wgc_` tokens are masked like GitHub's in anything a run writes. A scan child gets no token: the child
+  environment is an allowlist the token is not on.
+- **Only pushed data leaves your machine.** See [what leaves your
+  machine](platform-projects.md#what-leaves-your-machine). The client also checks every request body
+  against the same models the platform enforces, and caps what it reads back.
+- **A platform address is `https`.** The local portal calls exactly two origins, the platform's base
+  host and its organization host, follows no redirects, and refuses `http` (a development switch
+  allows loopback only).
+- **The local pages cannot be framed.** In local mode every page the portal serves, not only
+  `/api`, carries `X-Frame-Options: DENY` and `frame-ancestors 'none'`, so `/link` and
+  `/connect/callback` cannot be clickjacked. Local mode still sets no CORS headers.
+- **The deep link carries no secret.** **Use with your agent** links to
+  `http://127.0.0.1:<port>/link` with the platform, organization and project names in the query. It
+  grants nothing: the local portal still runs the consent flow, and the platform page never contacts
+  the local one.
+- **Visible to admins.** An owner or admin of a project sees the machine name each member gave
+  their connection, and can revoke it. See [Connected
+  portals](../deploy/production.md#connected-portals).
 
 ## Keys and tokens
 

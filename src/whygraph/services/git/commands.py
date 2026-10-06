@@ -240,10 +240,11 @@ class GitDiffCmd(ShellCommand[str]):
 
 
 class GitBlameCmd(ShellCommand[tuple[BlameHunk, ...]]):
-    """``git blame -w -M -C -L<a>,<b> --porcelain [rev] -- <path>``.
+    """``git blame -w -M -C -L<a>,<b> [-L<c>,<d> ...] --porcelain [rev] -- <path>``.
 
-    Blames a contiguous line range of one file and parses the porcelain
-    output into per-commit :class:`BlameHunk` records.
+    Blames a contiguous line range of one file (or several ranges, one
+    ``-L`` each) and parses the porcelain output into per-commit
+    :class:`BlameHunk` records.
 
     The default flag set deliberately strengthens blame against three
     refactor-mask cases that the bare command misses:
@@ -271,10 +272,12 @@ class GitBlameCmd(ShellCommand[tuple[BlameHunk, ...]]):
     ----------
     path : str
         File to blame, relative to the repository root.
-    line_start : int
-        First line of the range (1-based, inclusive).
-    line_end : int
-        Last line of the range (1-based, inclusive).
+    line_start : int or None
+        First line of the range (1-based, inclusive). ``None`` only with
+        ``ranges``.
+    line_end : int or None
+        Last line of the range (1-based, inclusive). ``None`` only with
+        ``ranges``.
     ignore_revs_file : str or None, optional
         Path to an ``.git-blame-ignore-revs``-style file. ``None``
         means no file-backed skip list, which is the default for repos
@@ -285,20 +288,41 @@ class GitBlameCmd(ShellCommand[tuple[BlameHunk, ...]]):
     rev : str or None, optional
         Revision to blame against. ``None`` (default) blames HEAD's
         working tree.
+    ranges : Sequence[tuple[int, int]] or None, optional
+        Several ``(start, end)`` line ranges (1-based, inclusive), one
+        ``-L`` each, in place of ``line_start`` / ``line_end``. Git
+        coalesces overlapping ranges.
+
+    Raises
+    ------
+    ValueError
+        If both or neither of ``ranges`` and ``line_start`` / ``line_end``
+        are given, or ``ranges`` is empty.
     """
 
     def __init__(
         self,
         path: str,
-        line_start: int,
-        line_end: int,
+        line_start: int | None = None,
+        line_end: int | None = None,
         ignore_revs_file: str | None = None,
         ignore_revs: tuple[str, ...] | None = None,
         rev: str | None = None,
+        *,
+        ranges: Sequence[tuple[int, int]] | None = None,
     ) -> None:
+        if ranges is None:
+            if line_start is None or line_end is None:
+                raise ValueError("pass line_start and line_end, or ranges")
+            ranges = ((line_start, line_end),)
+        elif line_start is not None or line_end is not None:
+            raise ValueError("pass line_start / line_end or ranges, not both")
+        if not ranges:
+            raise ValueError("ranges must not be empty")
         self.path = path
         self.line_start = line_start
         self.line_end = line_end
+        self.ranges = tuple((int(a), int(b)) for a, b in ranges)
         self.ignore_revs_file = ignore_revs_file
         self.ignore_revs = ignore_revs
         self.rev = rev
@@ -310,7 +334,7 @@ class GitBlameCmd(ShellCommand[tuple[BlameHunk, ...]]):
             "-w",
             "-M",
             "-C",
-            f"-L{self.line_start},{self.line_end}",
+            *(f"-L{a},{b}" for a, b in self.ranges),
             "--porcelain",
         ]
         if self.ignore_revs_file is not None:
@@ -324,6 +348,64 @@ class GitBlameCmd(ShellCommand[tuple[BlameHunk, ...]]):
 
     def parse(self, result: CompletedProcess[str]) -> tuple[BlameHunk, ...]:
         return BlameHunk.from_porcelain(result.stdout)
+
+
+class GitHasCommitCmd(ShellCommand[bool]):
+    """``git cat-file -e <sha>^{commit}`` - is ``sha`` a commit in this repository?
+
+    Must be run with ``check=False``: a missing object is the question
+    being asked, so its non-zero exit is a value (``False``). The
+    ``^{commit}`` peel keeps a tree or blob from answering ``True``.
+
+    Parameters
+    ----------
+    sha : str
+        A full commit SHA (never starting with ``-``; the caller checks).
+    """
+
+    def __init__(self, sha: str) -> None:
+        self.sha = sha
+
+    def argv(self) -> list[str]:
+        return ["git", "cat-file", "-e", f"{self.sha}^{{commit}}"]
+
+    def parse(self, result: CompletedProcess[str]) -> bool:
+        return result.returncode == 0
+
+
+class GitRemoteRefsContainingCmd(ShellCommand[tuple[str, ...]]):
+    """``git for-each-ref --contains <sha> --format=%(refname) <prefix>``.
+
+    Lists the refs under ``prefix`` (the origin remote's tracking refs,
+    ``refs/remotes/origin/``) whose history contains ``sha``. Must be run
+    with ``check=False``: an unknown ``sha`` makes git exit non-zero, which
+    parses as no refs.
+
+    Parameters
+    ----------
+    sha : str
+        A full commit SHA (never starting with ``-``; the caller checks).
+    prefix : str
+        The ref namespace to search, ending in ``/``.
+    """
+
+    def __init__(self, sha: str, prefix: str) -> None:
+        self.sha = sha
+        self.prefix = prefix
+
+    def argv(self) -> list[str]:
+        return [
+            "git",
+            "for-each-ref",
+            f"--contains={self.sha}",
+            "--format=%(refname)",
+            self.prefix,
+        ]
+
+    def parse(self, result: CompletedProcess[str]) -> tuple[str, ...]:
+        if result.returncode != 0:
+            return ()
+        return tuple(line for line in result.stdout.splitlines() if line)
 
 
 class GitDiffTreeFileChangesCmd(ShellCommand[tuple[FileChange, ...]]):

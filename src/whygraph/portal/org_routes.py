@@ -14,10 +14,11 @@ The deletion is immediate and confirmed by typing the org's slug:
    (``409 busy`` when a sync is still fetching, everything released);
 2. one transaction takes the slug's advisory lock
    (:func:`~whygraph.portal.orgs.lock_org_slug`), locks the org row ``FOR
-   UPDATE`` (an import holds it ``FOR SHARE`` while it inserts), deletes
-   the org's projects (cascading to their agents, config, secrets and
-   runs), retires the slug and deletes the org (cascading to its
-   memberships, org config and org secrets);
+   UPDATE`` (an import holds it ``FOR SHARE`` while it inserts), revokes
+   the org's connection tokens (``org_deleted``), deletes the org's
+   projects (cascading to their agents, config, secrets and runs), retires
+   the slug and deletes the org (cascading to its memberships, org config
+   and org secrets);
 3. after the commit: project engines disposed and forgotten, contexts
    invalidated, run files deleted, ``<data>/repos/<org>/`` removed
    (including an in-flight import's ``.clone-*``);
@@ -41,6 +42,7 @@ from sqlmodel import col, select
 
 from whygraph.db.engine import dispose_engine
 
+from . import connections
 from .audit import audit
 from .authz import Action, OrgAccess
 from .context import resolve_root
@@ -104,6 +106,8 @@ def _delete_rows(org_id: int, slug: str) -> _Deleted:
         ids = [p.id for p in projects if p.id is not None]
         dbs = [db_paths(resolve_root(p))[0] for p in projects]
         runs = run_files(ids)
+        # Before the deletes, which set the tokens' org_id / project_id to NULL.
+        connections.revoke_for_org(session, org_id, "org_deleted")
         session.exec(delete(Project).where(col(Project.org_id) == org_id))  # type: ignore[call-overload]
         session.add(RetiredOrgSlug(slug=slug))
         session.flush()

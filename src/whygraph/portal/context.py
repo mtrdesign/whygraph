@@ -21,6 +21,11 @@ portal database:
 4. :meth:`whygraph.core.config.Config.from_dict` builds the frozen
    ``Config``. Its ``api_key`` / ``scan_token`` fields are excluded from
    ``repr``, so a traceback never prints a live key.
+5. A ``platform`` project (one *linked* to a WhyGraph platform, M2e) gets
+   a :class:`~whygraph.portal.linked.LinkedProject` as its ``remote``
+   instead of any secrets - its history lives on the platform, and the
+   presence of a ``remote`` is what makes :func:`whygraph.db.get_engine`
+   refuse to open a local database for it.
 
 :class:`ContextCache` keeps one built context per project; a cache miss
 does its database and Fernet work on a worker thread
@@ -32,6 +37,7 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
+from typing import Any, Callable
 
 import anyio.to_thread
 from cryptography.fernet import InvalidToken
@@ -43,8 +49,10 @@ from whygraph.core.context import ProjectContext
 
 from .config_layers import endpoint_of, load_layer
 from .db import data_dir, get_session
-from .models import Project, Secret
+from .linked import LinkedProject
+from .models import PlatformLink, Project, Secret
 from .paths import db_paths
+from .platform_client import PlatformHttp
 from .secrets import (
     CLAUDE_OAUTH_TOKEN,
     GITHUB_TOKEN,
@@ -78,7 +86,9 @@ def resolve_root(project: Project) -> Path:
     return root if root.is_absolute() else data_dir() / root
 
 
-def build_project_context(session: Session, project: Project) -> ProjectContext:
+def build_project_context(
+    session: Session, project: Project, *, transport: Any = None
+) -> ProjectContext:
     """Assemble a project's :class:`ProjectContext` from the portal DB.
 
     Parameters
@@ -87,24 +97,77 @@ def build_project_context(session: Session, project: Project) -> ProjectContext:
         A portal DB session.
     project : Project
         The project row (``project.id`` must be set).
+    transport : httpx.BaseTransport, optional
+        Replaces the network of a linked project's platform client (tests
+        plug a fake platform in); ``None`` in a real run.
 
     Returns
     -------
     ProjectContext
         ``slug``, the absolute ``root`` and a validated ``Config`` with
         forced DB paths and decrypted secrets injected (see the module
-        docstring).
+        docstring). A ``platform`` project also carries its ``remote``.
 
     Raises
     ------
     whygraph.core.config.ConfigError
         If the merged config fails validation.
+    ValueError
+        If a linked project's stored origins are no longer acceptable (an
+        ``http`` platform without the development switch) - loudly, because
+        a linked project without a ``remote`` would read a local database.
     """
     root = resolve_root(project)
     project_layer, merged = _merged_layer(session, project, root)
-    _inject_secrets(session, project, project_layer, merged)
+    remote = None
+    if project.source == "platform":  # a linked project reads no secrets
+        remote = _linked_remote(session, project, transport)
+    else:
+        _inject_secrets(session, project, project_layer, merged)
     return ProjectContext(
-        slug=project.slug, root=root, config=Config.from_dict(merged, root)
+        slug=project.slug,
+        root=root,
+        config=Config.from_dict(merged, root),
+        remote=remote,
+    )
+
+
+def _linked_remote(
+    session: Session, project: Project, transport: Any
+) -> LinkedProject | None:
+    """The platform a ``platform`` project's reads go to (M2e plan section 4.10).
+
+    The connection token is decrypted into the client and never written
+    anywhere else. A token that no longer decrypts is left out rather than
+    guessed at: the platform then answers ``401 invalid_token`` and the
+    link reads as revoked, which is the truth the user has to act on.
+    """
+    row = session.get(PlatformLink, project.id)
+    if row is None:  # a platform project always has one; a bare row is inert
+        _log.warning("project %s is linked but has no link row", project.slug)
+        return None
+    try:
+        token: str | None = decrypt(row.token_ciphertext)
+    except InvalidToken:
+        _log.warning(
+            "the connection token of project %s is unreadable; reconnect it",
+            project.slug,
+        )
+        token = None
+    return LinkedProject(
+        PlatformHttp(
+            platform_origin=row.platform_origin,
+            api_origin=row.api_origin,
+            token=token,
+            transport=transport,
+        ),
+        slug=row.remote_slug,
+        org=row.org_slug,
+        platform_origin=row.platform_origin,
+        status=row.status,
+        reason=row.status_reason,
+        # So every call persists what it learned about the link (M2e 4.11).
+        project_id=project.id,
     )
 
 
@@ -134,12 +197,22 @@ def resolved_layer(session: Session, project: Project) -> dict:
 
 
 def _merged_layer(session: Session, project: Project, root: Path) -> tuple[dict, dict]:
-    """Return ``(project_layer, merged)`` - normalized, merged, DB paths forced."""
-    org_layer = load_layer(session, None, org_id=project.org_id)
+    """Return ``(project_layer, merged)`` - normalized, merged, DB paths forced.
+
+    A linked (``platform``) project is built from the ``Config`` defaults and
+    the project layer's ``[scan]`` table only (hooks); its org layer is
+    never read (M2e plan section 4.9).
+    """
+    if project.source == "platform":
+        raw = load_layer(session, project.id, org_id=project.org_id)
+        scan = raw.get("scan")
+        org_layer: dict = {}
+        project_raw = {"scan": scan} if isinstance(scan, dict) else {}
+    else:
+        org_layer = load_layer(session, None, org_id=project.org_id)
+        project_raw = load_layer(session, project.id, org_id=project.org_id)
     global_layer, _ = normalize_v2(org_layer, root)
-    project_layer, _ = normalize_v2(
-        load_layer(session, project.id, org_id=project.org_id), root
-    )
+    project_layer, _ = normalize_v2(project_raw, root)
     merged = merge_v2(global_layer, project_layer)
 
     # Rule 4.2.1 #2: DB paths are the root's defaults, never a row's value.
@@ -221,12 +294,20 @@ class ContextCache:
     :meth:`invalidate`; the write helpers in
     :mod:`whygraph.portal.config_layers` and
     :mod:`whygraph.portal.secrets` do not know about the cache.
+
+    Parameters
+    ----------
+    transport : callable, optional
+        Returns the HTTP transport a linked project's platform client
+        should use, read at build time (tests swap in a fake platform
+        after start-up). ``None`` means the network.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, transport: Callable[[], Any] | None = None) -> None:
         self._contexts: dict[int, ProjectContext] = {}
         self._generation = 0
         self._lock = threading.Lock()
+        self._transport = transport
 
     def get(self, project_id: int) -> ProjectContext:
         """Return the project's context, building it on a miss (blocking).
@@ -255,7 +336,11 @@ class ContextCache:
             project = session.get(Project, project_id)
             if project is None:
                 raise ProjectNotFound(project_id)
-            ctx = build_project_context(session, project)
+            ctx = build_project_context(
+                session,
+                project,
+                transport=None if self._transport is None else self._transport(),
+            )
         with self._lock:
             # An invalidate() that ran while we built makes this result stale.
             if generation == self._generation:

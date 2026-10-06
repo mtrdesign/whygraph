@@ -3,7 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { CheckCircle2Icon, TriangleAlertIcon } from "lucide-react";
-import { portalKey, projectApi, projectKey, type Detected, type InitResult } from "../../api";
+import { portalApi, portalKey, projectApi, projectKey, type Detected, type InitResult } from "../../api";
 import { loadDetected } from "../../lib/detected";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
@@ -47,6 +47,10 @@ export function InitializeStep({
 }) {
   const settings = mode === "settings";
   const queryClient = useQueryClient();
+  // A linked project (M2e) skips Configure, so there is no step to go Back to.
+  const linked =
+    useQuery({ queryKey: projectKey(slug, "project"), queryFn: () => portalApi.project(slug) }).data?.source ===
+    "platform";
   const detected = useMemo(
     () => (settings ? detectedProp : loadDetected(slug)),
     [settings, detectedProp, slug],
@@ -189,6 +193,16 @@ export function InitializeStep({
             <span className="font-mono"> .whygraph/backups/</span>.
           </p>
         </div>
+        {preview.data?.ignored_db && (
+          <Alert data-testid="ignored-db">
+            <AlertTitle>An older database is ignored</AlertTitle>
+            <AlertDescription>
+              <span className="font-mono">{preview.data.ignored_db}</span> is left over from an earlier
+              local project in this folder. A linked project keeps its history on the platform, so this
+              file is never opened or changed.
+            </AlertDescription>
+          </Alert>
+        )}
         {preview.isError && (
           <Alert variant="destructive">
             <AlertTitle>Could not preview the changes</AlertTitle>
@@ -238,7 +252,7 @@ export function InitializeStep({
             {unconfirmed.length > 1 ? "their agents" : "its agent"}, to continue.
           </span>
         )}
-        {!settings && (
+        {!settings && !linked && (
           <Button variant="ghost" render={<Link to="/p/$slug/init" params={{ slug }} search={{ step: "configure" }} />}>
             Back
           </Button>

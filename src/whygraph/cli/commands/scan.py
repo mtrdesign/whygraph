@@ -124,6 +124,17 @@ _ICON_CODEGRAPH = "🕸"
     ),
 )
 @click.option("--managed-by-portal", "managed_by_portal", is_flag=True, hidden=True)
+@click.option(
+    "--codegraph-only",
+    "codegraph_only",
+    is_flag=True,
+    hidden=True,
+    help=(
+        "Refresh only the CodeGraph index (a project linked to a platform has "
+        "no local WhyGraph DB): no git crawl, GitHub or LLM, and a CodeGraph "
+        "failure fails the run. Requires --managed-by-portal."
+    ),
+)
 def scan_cmd(
     skip_analyze: bool,
     refresh_codegraph: bool,
@@ -132,8 +143,11 @@ def scan_cmd(
     enrich_pr_origins: bool,
     progress_mode: str | None,
     managed_by_portal: bool,
+    codegraph_only: bool,
 ) -> None:
     """Run the source crawlers, then describe each commit with the LLM."""
+    if codegraph_only and not managed_by_portal:
+        raise click.UsageError("--codegraph-only requires --managed-by-portal")
     if not managed_by_portal:
         # Before any config or DB access: a portal-managed repo is scanned by
         # the portal only (its own child scans pass --managed-by-portal).
@@ -157,6 +171,10 @@ def scan_cmd(
         click.get_current_context().call_on_close(
             lambda: setattr(console, "quiet", previous_quiet)
         )
+
+    if codegraph_only:
+        _scan_codegraph_only(json_mode, codegraph_image)
+        return
 
     db_path = ensure_initialized()
     config = get_config()
@@ -375,6 +393,57 @@ def scan_cmd(
     for c in failed:
         click.echo(f"crawler {c.name!r} failed: {c.error}", err=True)
     if failed:
+        raise click.exceptions.Exit(1)
+
+
+def _scan_codegraph_only(json_mode: bool, codegraph_image: str | None) -> None:
+    """Refresh the CodeGraph index and nothing else (``--codegraph-only``).
+
+    Never opens or creates the WhyGraph DB. Unlike a full scan, a CodeGraph
+    failure is the run's failure: exit ``1`` with the usual ``result`` event
+    (``status: failed``) in JSON mode.
+    """
+    from whygraph.core import _resolve_root
+    from whygraph.core.logger import scan_log_redirect
+
+    root = _resolve_root()
+    scan_log_path = root / ".whygraph" / "scan.log"
+    t0 = time.monotonic()
+    progress_ctx = (
+        JsonProgress()
+        if json_mode
+        else Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            console=console,
+        )
+    )
+    with scan_log_redirect(scan_log_path), progress_ctx as progress:
+        if isinstance(progress, JsonProgress):
+            progress.start_event(1)
+        _emit_phase(progress, 1, "CodeGraph")
+        crawler = CodeGraphCrawler(
+            progress, project_root=root, image=codegraph_image, strict=True
+        )
+        crawler.start()
+        crawler.join()
+
+    elapsed = time.monotonic() - t0
+    if isinstance(progress, JsonProgress):
+        progress.flush()
+        progress.emit(
+            _result_event(
+                crawlers=[crawler],
+                phase_timings={"CodeGraph": elapsed},
+                total_elapsed=elapsed,
+                analyze_skip="--codegraph-only",
+            )
+        )
+    if crawler.error is not None:
+        click.echo(f"crawler {crawler.name!r} failed: {crawler.error}", err=True)
         raise click.exceptions.Exit(1)
 
 

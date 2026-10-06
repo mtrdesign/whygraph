@@ -41,12 +41,14 @@ from sqlmodel import select
 from conftest import HeaderIdentity, build_fake_codegraph_db
 from test_portal_app import (  # noqa: F401 -- `env`, `production_env` are fixtures
     _NODES,
+    LOCAL_ONLY_ROUTES,
     NON_ORG_ACTIONS,
     NON_ORG_ROUTES,
     PORT,
     PRODUCTION_ORG_ROUTES,
     PUBLIC_API_ROUTES,
     ROUTE_ACTIONS,
+    V1_ROUTES,
     _git,
     at,
     env,
@@ -507,10 +509,12 @@ def test_the_same_slug_binds_each_orgs_own_project(env: SimpleNamespace) -> None
 
 
 def _org_scoped_routes(app) -> list[tuple[str, str]]:  # noqa: ANN001
-    """``(method, path)`` of every org-scoped ``/api`` route.
+    """``(method, path)`` of every org-scoped ``/api`` route a **session** reaches.
 
-    The public routes and the ones that name no org (``user.self`` /
-    ``instance.admin``, M2c plan section 4.7) are left out. The
+    The public routes, the ones that name no org (``user.self`` /
+    ``instance.admin``, M2c plan section 4.7) and the bearer-only
+    :data:`~test_portal_app.V1_ROUTES` (a connection token, never a
+    session; their sweep is ``test_portal_connect.py``'s) are left out. The
     production-only members routes are in: the production sweeps of
     ``test_portal_hosts_isolation.py`` cover them, and the local ones skip
     them (:data:`LOCAL_API_ROUTES`).
@@ -524,7 +528,9 @@ def _org_scoped_routes(app) -> list[tuple[str, str]]:  # noqa: ANN001
             found |= {
                 (method, path)
                 for method in rc.methods
-                if method != "HEAD" and (path, method) not in NON_ORG_ROUTES
+                if method != "HEAD"
+                and (path, method) not in NON_ORG_ROUTES
+                and (path, method) not in V1_ROUTES
             }
     return sorted(found, key=lambda route: (route[1], route[0]))
 
@@ -554,6 +560,7 @@ PATH_PARAMS: dict[str, Callable[[OrgWorld], str]] = {
     "{session_id}": lambda o: str(o.session_id),
     "{uid}": lambda o: o.owner_uid,
     "{installation_id}": lambda o: "7",
+    "{link_id}": lambda o: "nolink",  # no pending link: 410 link_expired
 }
 """How to fill each path parameter for an org; an unmapped one fails the sweep."""
 
@@ -636,6 +643,10 @@ def _added_check(body: dict, w: World, o: OrgWorld) -> None:
         assert session.get(Membership, (o.org_id, user_id)).role == "member"
 
 
+def _no_connections(body: list, w: World, o: OrgWorld) -> None:
+    assert body == []
+
+
 def _owner_kept_check(body: dict, w: World, o: OrgWorld) -> None:
     assert (body["uid"], body["role"]) == (o.owner_uid, "owner")
 
@@ -686,6 +697,13 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     ("GET", "/api/github/installations/{installation_id}/repos"): Call(
         401, shows=lambda o: ["github_authorization_required"]
     ),
+    # A project's connected portals (M2e section 4.4; swept over prod_world,
+    # which holds no token: the list is empty and a user's uid is no token's;
+    # test_portal_connect.py drives both with tokens)
+    ("GET", "/api/projects/{slug}/connections"): Call(200, check=_no_connections),
+    ("DELETE", "/api/projects/{slug}/connections/{uid}"): Call(
+        404, shows=lambda o: ["no such connection"]
+    ),
     ("POST", "/api/projects"): Call(
         201,
         body=lambda w, o: {
@@ -693,6 +711,25 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
             "path": str(_marked_repo(w.env, o.mark, "extra")),
         },
         shows=lambda o: [f"{o.mark}/extra"],
+    ),
+    # Local mode's connect and link (M2e section 4.8; the sweep never reaches
+    # a platform: a bad URL and an unknown state / link_id refuse first.
+    # test_portal_link.py drives the whole flow against the fake platform)
+    ("POST", "/api/platform/connect"): Call(
+        422,
+        body=lambda w, o: {"platform_url": "not a url"},
+        shows=lambda o: ["bad_platform_url"],
+    ),
+    ("POST", "/api/platform/callback"): Call(
+        410,
+        body=lambda w, o: {"state": "nostate", "iss": "https://wg.example.com"},
+        shows=lambda o: ["connect_expired"],
+    ),
+    ("GET", "/api/platform/pending/{link_id}"): Call(
+        410, shows=lambda o: ["link_expired"]
+    ),
+    ("DELETE", "/api/platform/pending/{link_id}"): Call(
+        410, shows=lambda o: ["link_expired"]
     ),
     # Project management
     ("GET", "/api/projects/{slug}"): Call(200, shows=lambda o: [o.name, str(o.root)]),
@@ -817,7 +854,11 @@ def test_the_sweep_covers_every_live_route(two_orgs: World) -> None:
     assert _org_scoped_routes(two_orgs.client.app) == API_ROUTES
     assert len(API_ROUTES) > 30
     assert set(ROUTE_REQUESTS) == set(API_ROUTES)
-    org_scoped = {(m, p) for (p, m) in ROUTE_ACTIONS if (p, m) not in NON_ORG_ROUTES}
+    org_scoped = {
+        (m, p)
+        for (p, m) in ROUTE_ACTIONS
+        if (p, m) not in NON_ORG_ROUTES and (p, m) not in V1_ROUTES
+    }
     assert org_scoped == set(API_ROUTES)
     production_org = {(m, p) for (p, m) in PRODUCTION_ORG_ROUTES}
     assert production_org <= set(API_ROUTES)
@@ -1075,10 +1116,13 @@ ADMIN_ACTIONS = {str(a) for a in ROLE_TABLE[Role.ADMIN]}
 _LOCAL_ROUTE_ACTIONS = {
     (m, p): action
     for (p, m), action in ROUTE_ACTIONS.items()
-    if action not in NON_ORG_ACTIONS and (p, m) not in PRODUCTION_ORG_ROUTES
+    if action not in NON_ORG_ACTIONS
+    and (p, m) not in PRODUCTION_ORG_ROUTES
+    and (p, m) not in V1_ROUTES
 }
 """Local mode's org-scoped routes and their actions (the members routes are
-production-only; their role matrix is ``test_portal_members.py``)."""
+production-only; their role matrix is ``test_portal_members.py``; the
+bearer-only ``V1_ROUTES`` are production-only too)."""
 ADMIN_ROUTES = sorted(
     (
         route
@@ -1133,6 +1177,12 @@ def test_the_admin_routes_are_the_planned_ones() -> None:
         ("DELETE", "/api/projects/{slug}"),
         ("PUT", "/api/projects/{slug}/config"),
         ("POST", "/api/projects/{slug}/init"),
+        # Linking to a platform adds a project, so it is the admin's (M2e
+        # section 4.8)
+        ("POST", "/api/platform/connect"),
+        ("POST", "/api/platform/callback"),
+        ("GET", "/api/platform/pending/{link_id}"),
+        ("DELETE", "/api/platform/pending/{link_id}"),
     }
 
 
@@ -1343,7 +1393,10 @@ def test_nothing_answers_signed_out_in_production(
             )
         bravo = at("bravo")
         # Signed out: every org route is a 401, MCP and setup do not exist.
+        # (the local-only routes are 404 in production, before current_user)
         for method, path in API_ROUTES:
+            if (path, method) in LOCAL_ONLY_ROUTES:
+                continue
             org = SimpleNamespace(
                 run_id=1, marker_sha="abc", session_id=1, owner_uid="x"
             )

@@ -12,7 +12,7 @@ Stdlib only - it runs both from the uv venv and inside the Docker image.
 Usage::
 
     python scripts/dev_portal.py [--no-reload] [--no-vite] [--preserve-host] [--vite-host H] \
-        -- <whygraph portal args>
+        [--vite-port N] -- <whygraph portal args>
 """
 
 from __future__ import annotations
@@ -34,7 +34,10 @@ WATCHED_SUFFIXES = frozenset({".py", ".md", ".toml"})
 SKIPPED_DIRS = frozenset({"__pycache__", "static"})
 POLL_SEC = 1.0
 STOP_GRACE_SEC = 15.0  # above the portal's 10 s graceful shutdown
-VITE_PORT = 5173
+VITE_PORT = 5174
+"""Default Vite port - the local dev loop's, so it can run beside a
+production-mode portal (``make dev-production``, which keeps ``:5173``
+because the dev GitHub apps' callback URLs are registered on it)."""
 LOCK_STAMP = ".whygraph-lock-sha256"
 
 
@@ -131,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
         help="production-mode dev: Vite forwards Host unchanged; print whygraph.localhost URLs",
     )
     parser.add_argument("--vite-host", default="127.0.0.1", help="Vite bind address")
+    parser.add_argument("--vite-port", type=int, default=VITE_PORT, help="Vite port")
     parser.add_argument("portal_args", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     portal_args = args.portal_args
@@ -165,12 +169,12 @@ def main(argv: list[str] | None = None) -> int:
         vite = _start(
             [
                 "npm", "--prefix", str(PLAYGROUND), "run", "dev", "--",
-                "--host", args.vite_host, "--port", str(VITE_PORT), "--strictPort",
+                "--host", args.vite_host, "--port", str(args.vite_port), "--strictPort",
             ],
             env=vite_env,
         )  # fmt: skip
         shown = "whygraph.localhost" if args.preserve_host else "localhost"
-        _say(f"playground (HMR) -> http://{shown}:{VITE_PORT}   (open this)")
+        _say(f"playground (HMR) -> http://{shown}:{args.vite_port}   (open this)")
     if not args.preserve_host:  # in production the bare IP answers 421
         _say(f"portal + MCP      -> http://127.0.0.1:{port}   (/mcp/<slug>)")
     if not args.no_reload:

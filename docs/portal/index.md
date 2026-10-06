@@ -5,7 +5,8 @@ shows each one in the Explorer and the Chat assistant, runs every scan, and serv
 evidence and rationale to your coding agents over HTTP MCP at `/mcp/<slug>`.
 
 You start it once with `whygraph up`, open it in a browser, and add repositories from the Projects
-page. There is no per-repo setup command: the portal does what `whygraph init` used to do, with a
+page - a folder you share, or a checkout you link to a project on a team's
+[platform](platform-projects.md). There is no per-repo setup command: the portal does what `whygraph init` used to do, with a
 preview of every file it will touch.
 
 ```mermaid
@@ -38,6 +39,7 @@ flowchart LR
 | The encryption key for those keys and tokens, and database backups | The data directory, as `secret.key` and `backups/` |
 | A project's evidence, descriptions, rationale cache and chat history | The repository itself, in `.whygraph/whygraph.db` |
 | A project's CodeGraph index | The repository itself, in `.codegraph/` |
+| A [platform project](platform-projects.md)'s history, descriptions and rationale | The platform, never your machine. Your portal keeps only the link: the platform's address, the project's name and a **connection token**, encrypted |
 | The folders, port and image the portal was started with | `~/.config/whygraph` on your host |
 
 Because each project's databases stay in its own repository, removing a project from the portal
@@ -72,6 +74,14 @@ never deletes your history, and a 1.x repository keeps the data it already has. 
     A repository from a shared folder, configure, initialize, first scan.
 
     [:octicons-arrow-right-24: Adding projects](projects.md)
+
+-   :material-lan-connect:{ .lg .middle } __Projects from a platform__
+
+    ---
+
+    Link a checkout to a team's WhyGraph so your agent reads its history, and your own changes stay local.
+
+    [:octicons-arrow-right-24: Projects from a platform](platform-projects.md)
 
 -   :material-connection:{ .lg .middle } __Connecting agents__
 

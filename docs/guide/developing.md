@@ -4,13 +4,13 @@ Working on WhyGraph itself (not using it) takes five `make` targets from a check
 
 | Command | Mode | What it runs |
 |---|---|---|
-| `make dev-local` | Development, native | The portal from your checkout on `:8777`, restarted on every backend change, plus the Vite dev server with hot reload on `:5173`, against the dev Postgres from `make dev-db` (started for you). Fastest; your IDE's debugger works. |
+| `make dev-local` | Development, native | The portal from your checkout on `:8777`, restarted on every backend change, plus the Vite dev server with hot reload on `:5174`, against the dev Postgres from `make dev-db` (started for you). Fastest; your IDE's debugger works. |
 | `make dev-docker` | Development, in Docker | The same, inside the WhyGraph image through the real `whygraph up` shim, with your checkout mounted read-only over the installed package. |
 | `make prod` | Production | The image built exactly like a release (pinned CodeGraph, the `pyproject.toml` version), run through the shim with no source mounted: what users get. |
-| `make dev-production` | Development, native, production mode | The portal's [production mode](../deploy/production.md) from your checkout on `:8778`, with Vite on `:5173` in front of it, on its own `whygraph_prod` database in the `make dev-db` Postgres. For work on sign-in, organizations and the host checks. See below. |
+| `make dev-production` | Development, native, production mode | The portal's [production mode](../deploy/production.md) from your checkout on `:8778`, with Vite on `:5173` in front of it, on its own `whygraph_prod` database in the `make dev-db` Postgres. For work on sign-in, organizations and the host checks, and the platform `dev-local` links to. See below. |
 | `make check` | Before a pull request | Both `ruff` checks, `pytest`, the frontend typecheck / tests / build, the Playwright suite, then the release smoke test against a freshly built image. Stops at the first failure. |
 
-`dev-local` and `dev-docker` run in the foreground: open `http://localhost:5173`, and press
+`dev-local` and `dev-docker` run in the foreground: open `http://localhost:5174`, and press
 Ctrl-C to stop everything. `prod` serves the built UI itself on `http://127.0.0.1:8777`.
 
 ## The portal database in development
@@ -81,12 +81,46 @@ production mode:
   and **Scan now**.
 - The first run prints a `Bootstrap secret:` line in the terminal (the portal's log); the page at
   `http://whygraph.localhost:5173` asks for it to create the first account.
-- Under the hood `make dev-production` runs `scripts/dev_portal.py --preserve-host`: Vite then
-  forwards `Host` unchanged and only answers `*.whygraph.localhost`, and the script prints the
-  `whygraph.localhost` URL (the bare `127.0.0.1:8778` address is refused with `421` in production).
-- It cannot run beside `dev-local`: both keep Vite on `:5173`.
+- Under the hood `make dev-production` runs
+  `scripts/dev_portal.py --preserve-host --vite-port 5173`: Vite then forwards `Host` unchanged and
+  only answers `*.whygraph.localhost`, and the script prints the `whygraph.localhost` URL (the bare
+  `127.0.0.1:8778` address is refused with `421` in production).
+- It **runs beside `dev-local`**, which is what linking a checkout needs: the two differ in every
+  port (`:8778` with Vite on `:5173` here, `:8777` with Vite on `:5174` there) and use different
+  databases. See [Linking the two dev portals](#linking-the-two-dev-portals).
 - Use **Chromium or Firefox**: they resolve every `*.localhost` name to the loopback address, while
   Safari's handling of `*.localhost` varies by version.
+
+## Linking the two dev portals
+
+A platform project is linked from a local portal, so trying one out means running both:
+`make dev-production` (the platform) in one terminal and `make dev-local` (the local portal) in
+another. They no longer collide - the local portal's Vite is on `:5174`, the platform's on `:5173`.
+
+1. In `dev-production`, sign in to the fake GitHub as `ben`, import `ben/demo` and scan it.
+2. Open the project's **Use with your agent** and enter your local portal's port. In the dev loop
+   that is **5174** - Vite's port, not the portal's `8777`, because the browser talks to Vite (it
+   serves the `/link` and `/connect/callback` pages and proxies `/api` to the portal).
+3. The button lands on the local portal's `/link` page. Press **Connect**, allow it on the platform,
+   and the browser comes back to `http://127.0.0.1:5174/connect/callback`.
+4. Point the link at a checkout under `make dev-local`'s shared folder,
+   `$TMPDIR/whygraph-dev/repos`, whose `origin` names the platform's repository (or which holds the
+   commit the platform scanned). The fake GitHub serves git only to an installation token, so the
+   quickest one is a clone of the platform's **own** server clone -
+   `$TMPDIR/whygraph-dev/production/data/repos/<org>/<slug>` - with its `origin` set to
+   `http://127.0.0.1:18767/ben/demo.git`.
+
+`make dev-local` exports the two switches this needs, because a platform on
+`http://whygraph.localhost:5173` is neither `https` nor a name every resolver maps to loopback:
+
+- `WHYGRAPH_DEV_PLATFORM_HTTP=1` - accept an `http` platform, and only on a loopback host.
+- `NO_PROXY=.localhost` - keep an `HTTP_PROXY` out of the portal's calls to the platform.
+
+Neither is part of the supported interface; a real platform is always `https`.
+
+`make dev-docker` cannot link: inside its container `*.localhost` names resolve to the container
+itself, not to your `dev-production`. Link from `make dev-local`. `make e2e` runs the whole flow
+(import on a platform, link, an MCP call, revoke, remove) against a fake GitHub, with no setup.
 
 ## Which one to use
 
@@ -116,8 +150,9 @@ Every mode keeps to itself, so none of them touches your own portal:
 Your checkout itself is never added to a dev portal, so it never gets WhyGraph's hooks or markers
 and `whygraph scan` keeps working in it.
 
-The three run modes share port `8777`, so run one at a time. Override it with `DEV_PORT=...`.
-`dev-production` uses `:8778` for the portal and `:5173` for Vite, so it cannot run beside `dev-local`.
+`dev-local`, `dev-docker` and `prod` share port `8777`, so run one of those three at a time.
+Override it with `DEV_PORT=...`. `dev-production` uses `:8778` for the portal and `:5173` for Vite,
+so it can run beside any of them.
 
 ## Helpers
 

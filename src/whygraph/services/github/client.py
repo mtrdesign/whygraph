@@ -27,10 +27,51 @@ from .pull_requests import PullRequests
 from .token import GH_TOKEN_ENV, token_env
 
 _GITHUB_URL_PATTERNS = (
-    re.compile(r"^https://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$"),
-    re.compile(r"^git@github\.com:([^/]+)/([^/]+?)(?:\.git)?$"),
-    re.compile(r"^ssh://git@github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$"),
+    re.compile(r"^https://([^/@:]+)(?::(\d+))?/([^/]+)/([^/]+?)(?:\.git)?/?$"),
+    re.compile(r"^git@([^/@:]+)():([^/]+)/([^/]+?)(?:\.git)?$"),
+    re.compile(r"^ssh://git@([^/@:]+)(?::(\d+))?/([^/]+)/([^/]+?)(?:\.git)?/?$"),
 )
+"""Remote URL forms: ``https://host[:port]/o/r``, ``git@host:o/r`` and
+``ssh://git@host[:port]/o/r``, each with an optional ``.git``. Groups: host,
+port (empty for the scp form), owner, name."""
+
+
+def _parse_remote(url: str) -> tuple[str, str | None, str, str] | None:
+    """``(host, port, owner, name)`` of a remote URL, exactly as written."""
+    for pattern in _GITHUB_URL_PATTERNS:
+        if m := pattern.match(url):
+            return m.group(1), m.group(2) or None, m.group(3), m.group(4)
+    return None
+
+
+def remote_identity(url: str | None) -> tuple[str, str, str] | None:
+    """The ``(host, owner, name)`` a git remote URL names, case-folded.
+
+    Matches a checkout's ``origin`` against a platform project's clone URL
+    (M2e plan section 4.8): ``https://host/o/r(.git)``, ``git@host:o/r(.git)``
+    and ``ssh://git@host[:port]/o/r(.git)`` name the same repository. The
+    port is not part of the identity (an ``https`` and an ``ssh`` remote of
+    one host use different ports).
+
+    Parameters
+    ----------
+    url : str or None
+        A remote URL.
+
+    Returns
+    -------
+    tuple[str, str, str] or None
+        Host, owner and name, lower-cased; ``None`` for ``None`` and for a
+        URL of another form (a local path, credentials in the URL, a
+        nested group path).
+    """
+    if not url:
+        return None
+    parsed = _parse_remote(url.strip())
+    if parsed is None:
+        return None
+    host, _port, owner, name = parsed
+    return host.lower(), owner.lower(), name.lower()
 
 
 @dataclass
@@ -90,10 +131,13 @@ class GitHubClient:
         url = repo.origin_url
         if url is None:
             return None
-        for pattern in _GITHUB_URL_PATTERNS:
-            if m := pattern.match(url):
-                return cls(owner=m.group(1), name=m.group(2))
-        return None
+        parsed = _parse_remote(url)
+        if parsed is None:
+            return None
+        host, port, owner, name = parsed
+        if host != "github.com" or port is not None:
+            return None
+        return cls(owner=owner, name=name)
 
     @staticmethod
     def check_auth(env: Mapping[str, str] | None = None) -> None:

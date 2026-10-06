@@ -346,6 +346,19 @@ class LoggingConfig:
             )
 
 
+MAX_AGENT_LIMIT = 10_000
+"""Highest ``agent_*_per_hour`` org limit (M2e plan section 0.1 #7)."""
+
+
+def is_agent_limit(value: object) -> bool:
+    """Whether ``value`` is a valid ``agent_*_per_hour`` limit (an int, ``0..10000``)."""
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= MAX_AGENT_LIMIT
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class AnalyzeConfig:
     """Configuration for the LLM-driven commit descriptor.
@@ -398,6 +411,12 @@ class AnalyzeConfig:
         Thread-pool size for the LLM-description phase of a scan. Must be
         ``>= 1``. Default ``2``. Replaces the 1.x ``[scan].max_workers``,
         which still parses (with a deprecation warning).
+    agent_descriptions_per_hour : int
+        Production only, **org setting** (owners): how many commits the
+        lazy description backfill of connected portals' agent requests
+        (``/api/v1``) may describe per hour across the org. ``0`` gives
+        agents only the descriptions that exist. Read from the org layer,
+        never from a project's; ``0`` to ``10000``. Default ``600``.
     """
 
     provider: str | None = None
@@ -407,6 +426,7 @@ class AnalyzeConfig:
     timeout_sec: int | None = None
     pr_origin_min_commits: int = 5
     max_workers: int = 2
+    agent_descriptions_per_hour: int = 600
 
 
 @dataclass(frozen=True, slots=True)
@@ -448,6 +468,12 @@ class RationaleConfig:
     pr_comment_max_chars : int
         Per-comment body clip applied before rendering a PR comment into
         the rationale prompt. Must be ``>= 1``.
+    agent_generations_per_hour : int
+        Production only, **org setting** (owners): how many uncached
+        rationale cards connected portals' agents (``/api/v1``) may
+        generate per hour across the org. ``0`` gives agents only cached
+        cards. Read from the org layer, never from a project's; ``0`` to
+        ``10000``. Default ``120``.
     """
 
     provider: str | None = None
@@ -456,6 +482,7 @@ class RationaleConfig:
     pr_roster_max_commits: int = 30
     pr_discussion_max_comments: int = 20
     pr_comment_max_chars: int = 500
+    agent_generations_per_hour: int = 120
 
 
 @dataclass(frozen=True, slots=True)
@@ -1128,6 +1155,21 @@ class Config:
                 "rationale.pr_comment_max_chars must be >= 1, "
                 f"got {self.rationale.pr_comment_max_chars}"
             )
+        for name, value in (
+            (
+                "analyze.agent_descriptions_per_hour",
+                self.analyze.agent_descriptions_per_hour,
+            ),
+            (
+                "rationale.agent_generations_per_hour",
+                self.rationale.agent_generations_per_hour,
+            ),
+        ):
+            if not is_agent_limit(value):
+                raise ConfigError(
+                    f"{name} must be an integer from 0 to {MAX_AGENT_LIMIT}, "
+                    f"got {value!r}"
+                )
         if self.chat.max_tool_rounds < 1:
             raise ConfigError(
                 f"chat.max_tool_rounds must be >= 1, got {self.chat.max_tool_rounds}"

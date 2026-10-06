@@ -1,0 +1,37 @@
+{
+  "body": {
+    "cached_at": "<time>",
+    "constraints": [
+      "keep it small"
+    ],
+    "evidence_count": {
+      "commits": 2,
+      "issues": 1,
+      "prs": 1
+    },
+    "model": "fake-1",
+    "project": {
+      "access_lost": false,
+      "clone_url": "http://127.0.0.1:9/acme/api.git",
+      "default_branch": "main",
+      "github_full_name": "acme/api",
+      "last_scan_at": null,
+      "last_scanned_head": null,
+      "name": "Api project",
+      "role": "owner",
+      "slug": "api"
+    },
+    "provider": "fake",
+    "purpose": "Holds the sample lines.",
+    "risks": [],
+    "target": {
+      "line_end": 3,
+      "line_start": 1,
+      "path": "sample.py",
+      "qualified_name": "sample.fn"
+    },
+    "tradeoffs": [],
+    "why": "Two commits built it up."
+  },
+  "status": 200
+}

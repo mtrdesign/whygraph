@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, func, select
 
+from . import connections
 from .audit import audit
 from .authz import ROLES, Action, OrgAccess, Role
 from .db import get_session
@@ -339,6 +340,9 @@ def delete_member(
 ) -> Response:
     """Remove a member (their chat sessions stay theirs, invisible to others).
 
+    Their connection tokens for the org's projects are revoked
+    (``member_removed``) in the same transaction.
+
     ``404 not_member``, ``403 owner_required`` (removing an owner as a
     non-owner), ``409 last_owner``. ``204``.
     """
@@ -352,6 +356,8 @@ def delete_member(
             if not set(owners) - {user.id}:
                 raise _last_owner()
         db.delete(membership)
+        assert user.id is not None
+        connections.revoke_for_member(db, access.org_id, user.id, "member_removed")
     audit(
         "member_removed",
         request,
@@ -371,6 +377,9 @@ def delete_membership(
 ) -> Response:
     """Leave the org (any member; a ``reader`` is refused before this runs).
 
+    The caller's connection tokens for the org's projects are revoked
+    (``member_left``) in the same transaction.
+
     ``409 last_owner`` for the final owner. ``204``.
     """
     with get_session() as db:
@@ -389,6 +398,9 @@ def delete_membership(
         if previous == Role.OWNER.value and not set(owners) - {principal.user_id}:
             raise _last_owner()
         db.delete(membership)
+        connections.revoke_for_member(
+            db, access.org_id, principal.user_id, "member_left"
+        )
     audit("member_left", request, uid=principal.uid, org=access.org_slug, role=previous)
     return Response(status_code=204)
 

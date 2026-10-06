@@ -43,6 +43,23 @@ Prompts are ready-made recipes that wire the tools into a workflow:
 - `whygraph_why_was_this_written` - recover the original intent behind a chunk of code.
 - `whygraph_triage_commit` - summarize what one commit did and why, from its PR and closing issues.
 
+## When the project is linked to a platform
+
+If your checkout is [linked to a platform](../portal/platform-projects.md), the tools work the same,
+and an assistant should read three extra things in each result:
+
+- **`platform.status`.** `ok` means the history came from the platform. Anything else (`unreachable`,
+  `revoked`, `removed`, `access_lost`, `update_required`) means the history may be missing or old, and
+  the user can fix it from the project's card in the portal.
+- **`push_status` on a commit.** A commit labelled `uncommitted`, `not_pushed`, `pending_scan` or
+  `not_on_default_branch` is the user's own recent work, or work the platform has not seen yet. It has
+  an author, a date and a subject from git, but no description, pull request or issue. Treat it as
+  "recent, not explained yet", not as "no reason exists".
+- **Offline.** `whygraph_evidence_for` still returns blame when the platform is down. The rationale
+  tool and area history do not: they report why.
+
+See [Linked projects](../reference/mcp.md#linked-projects) for every value.
+
 ## What WhyGraph won't do
 
 WhyGraph has **no graph-traversal tools** - no callers, no callees, no symbol search. That's

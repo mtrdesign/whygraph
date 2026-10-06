@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { FolderGit2Icon, GitBranchIcon } from "lucide-react";
+import { CloudIcon, FolderGit2Icon, GitBranchIcon } from "lucide-react";
 import { portalApi, projectApi, projectKey } from "../api";
 import { projectProblem } from "../lib/errors";
 import { useSlug } from "../lib/project";
@@ -9,6 +9,9 @@ import { timeAgo } from "../lib/projectStatus";
 import { useScanActions } from "../lib/scanActions";
 import { formatSeconds, runSeconds, triggerLabel } from "../lib/scanFormat";
 import { AccessLostNotice, UnsupportedSourceNotice } from "../components/portal/AccessLost";
+import { LinkNotice } from "../components/portal/LinkNotice";
+import { PlatformButtons } from "../components/portal/LinkedActions";
+import { UseWithAgent } from "../components/portal/UseWithAgent";
 import { ConnectAgent } from "../components/portal/ConnectAgent";
 import { NotInitialized, ProblemAlert, ProjectUnavailable } from "../components/portal/EdgeStates";
 import { ProjectPortChangeNotice } from "../components/portal/PortChangeNotice";
@@ -58,12 +61,14 @@ export function ProjectHome() {
   const estimate = useQuery({
     queryKey: projectKey(slug, "scan-estimate"),
     queryFn: () => projectApi(slug).scanEstimate(),
-    enabled: ready && !!p?.last_scan_at,
+    // A linked project has no describe cost: the route is refused (M2e).
+    enabled: ready && !!p?.last_scan_at && p?.source !== "platform",
     retry: false,
   });
   const { scanNow, scanPending } = useScanActions(slug);
   const readOnly = useReadOnly();
-  const production = isProduction(usePortalState().data);
+  const portal = usePortalState().data;
+  const production = isProduction(portal);
   const [dismissed, setDismissed] = useState(false);
 
   if (project.isLoading) {
@@ -80,6 +85,7 @@ export function ProjectHome() {
   const stats = p.stats;
   const stale = p.stale;
   const github = p.source === "github";
+  const linked = p.source === "platform";
   // Access lost / an unsupported source: what was scanned stays readable, scans are refused.
   const scannable = ready && !p.access_lost && p.source_supported !== false;
 
@@ -90,8 +96,8 @@ export function ProjectHome() {
           <h1 className="text-[22px] font-semibold tracking-tight">{p.name}</h1>
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
             <Badge variant="outline" className="gap-1">
-              {github ? <GitBranchIcon /> : <FolderGit2Icon />}
-              {github ? "GitHub" : "Local"}
+              {github ? <GitBranchIcon /> : linked ? <CloudIcon /> : <FolderGit2Icon />}
+              {github ? "GitHub" : linked ? "Platform" : "Local"}
             </Badge>
             <span className="font-mono">{p.root}</span>
             {p.remote_url && (
@@ -106,7 +112,7 @@ export function ProjectHome() {
           </div>
         </div>
         <div className="flex gap-2">
-          {ready && (
+          {ready && !linked && (
             <Button variant="outline" render={<Link to="/p/$slug/explorer" params={{ slug }} />}>
               Open Explorer
             </Button>
@@ -121,6 +127,20 @@ export function ProjectHome() {
 
       <AccessLostNotice project={p} />
       <UnsupportedSourceNotice project={p} />
+      {linked && (
+        <section
+          data-testid="linked-panel"
+          className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5"
+        >
+          <h2 className="text-sm font-semibold">Linked project</h2>
+          <LinkNotice project={p} />
+          <p className="text-xs text-muted-foreground">
+            The history, Explorer and Chat for this project are on the platform. This machine indexes
+            your checkout so your agent can tell its own changes from the platform's history.
+          </p>
+          <PlatformButtons project={p} />
+        </section>
+      )}
       {p.root_status !== "ok" && <ProjectUnavailable project={p} />}
       <ProjectPortChangeNotice slug={slug} change={p.port_change} />
       {p.root_status === "ok" && !p.initialized && <NotInitialized slug={slug} />}
@@ -135,8 +155,9 @@ export function ProjectHome() {
           </AlertTitle>
           <AlertDescription>
             <p>
-              The checkout is ahead of what WhyGraph last scanned, so the Explorer and Chat miss the
-              newest work.
+              {linked
+                ? "The checkout is ahead of the code index on this machine, so your agent places the newest work less precisely."
+                : "The checkout is ahead of what WhyGraph last scanned, so the Explorer and Chat miss the newest work."}
             </p>
             <div className="mt-2 flex gap-2">
               <Button size="sm" onClick={() => scanNow()} disabled={!scannable || scanPending}>
@@ -147,7 +168,7 @@ export function ProjectHome() {
         </Alert>
       )}
 
-      {ready && (
+      {ready && !linked && (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4" data-testid="stats">
           <Stat
             label="Commits"
@@ -169,7 +190,7 @@ export function ProjectHome() {
           />
         </div>
       )}
-      {ready && !stats && p.last_scan_at && (
+      {ready && !linked && !stats && p.last_scan_at && (
         <p className="text-xs text-muted-foreground">Stats are unavailable right now.</p>
       )}
 
@@ -229,6 +250,9 @@ export function ProjectHome() {
         </section>
       )}
 
+      {production && ready && !readOnly && portal?.org && portal.base_url && (
+        <UseWithAgent baseUrl={portal.base_url} org={portal.org.slug} slug={slug} />
+      )}
       {p.initialized && p.mcp_url && !production && <ConnectAgent mcpUrl={p.mcp_url} configured={p.agents} />}
     </div>
   );

@@ -27,9 +27,10 @@ export default defineConfig({
     // `npm run dev` proxies API and MCP calls to the dev portal
     // (`make dev-local` / `make dev-docker` set WHYGRAPH_DEV_PORTAL).
     // changeOrigin rewrites Host to the portal's own (else its guard answers
-    // 421); the forwarded Origin (http://localhost:5173) is allowed by the
-    // WHYGRAPH_DEV_ORIGINS those targets set (else 403).
-    // With WHYGRAPH_DEV_PRESERVE_HOST=1 (production mode) Host is forwarded as is.
+    // 421); the forwarded Origin (http://localhost:5174, the local dev loop's
+    // port) is allowed by the WHYGRAPH_DEV_ORIGINS those targets set (else 403).
+    // With WHYGRAPH_DEV_PRESERVE_HOST=1 (production mode) Host is forwarded as
+    // is, and `make dev-production` keeps Vite on :5173.
     // `/github` carries the GitHub App's webhook (`/github/webhook`, base host),
     // e.g. relayed by smee-client in `make dev-production` against a real GitHub.
     allowedHosts: preserveHost ? [".whygraph.localhost"] : undefined,

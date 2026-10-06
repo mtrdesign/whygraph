@@ -36,6 +36,17 @@ PORTAL = "whygraph-portal"
 PG = "whygraph-portal-postgres"
 PG_IMAGE = POSTGRES_IMAGE
 DUMP_PAYLOAD = "PGDMP-fake-dump"
+HOST_NAME = "dev-laptop"
+
+_FAKE_HOSTNAME = """#!/bin/sh
+# Stands in for the host's `hostname` (any argument, `-s` included): a fixed
+# name, so the container's hostname label is the same on every machine.
+# $FAKE_HOSTNAME overrides it; `fail` exits non-zero, as a host without the
+# command would.
+name=${FAKE_HOSTNAME-dev-laptop}
+[ "$name" != fail ] || exit 1
+printf '%s\\n' "$name"
+"""
 
 _TOOLS = (
     "sh",
@@ -87,10 +98,11 @@ case "$cmd" in
       *whygraph.port*) cat "$S/c/$name/port" ;;
       *whygraph.image*) cat "$S/c/$name/image" ;;
       *whygraph.dev_src*) cat "$S/c/$name/dev_src" 2>/dev/null || true ;;
+      *whygraph.hostname*) cat "$S/c/$name/host_name" 2>/dev/null || true ;;
     esac
     ;;
   run)
-    name=""; folders=""; port=""; image=""; dev_src=""; pg_image=""
+    name=""; folders=""; port=""; image=""; dev_src=""; pg_image=""; host_name=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --name) name="$2"; shift 2 ;;
@@ -100,6 +112,7 @@ case "$cmd" in
             whygraph.port=*) port="${2#whygraph.port=}" ;;
             whygraph.image=*) image="${2#whygraph.image=}" ;;
             whygraph.dev_src=*) dev_src="${2#whygraph.dev_src=}" ;;
+            whygraph.hostname=*) host_name="${2#whygraph.hostname=}" ;;
             whygraph.pg_image=*) pg_image="${2#whygraph.pg_image=}" ;;
           esac
           shift 2 ;;
@@ -118,6 +131,7 @@ case "$cmd" in
     printf '%s' "$port" > "$S/c/$name/port"
     printf '%s' "$image" > "$S/c/$name/image"
     printf '%s' "$dev_src" > "$S/c/$name/dev_src"
+    printf '%s' "$host_name" > "$S/c/$name/host_name"
     if [ -n "$pg_image" ]; then
       printf '%s' "$pg_image" > "$S/c/$name/pg_image"
       printf '%s\n' "${FAKE_RUN_HEALTH:-healthy}" > "$S/c/$name/health"
@@ -225,6 +239,7 @@ class Shim:
         (d / "status").write_text(status)
         for key in ("folders", "port", "image"):
             (d / key).write_text(labels.get(key, ""))
+        (d / "host_name").write_text(labels.get("hostname", HOST_NAME))
 
     def make_pg_container(
         self,
@@ -271,6 +286,9 @@ def shim(tmp_path: Path) -> Shim:
     docker = path_dir / "docker"
     docker.write_text(_FAKE_DOCKER)
     docker.chmod(docker.stat().st_mode | stat.S_IEXEC)
+    host_name = path_dir / "hostname"
+    host_name.write_text(_FAKE_HOSTNAME)
+    host_name.chmod(host_name.stat().st_mode | stat.S_IEXEC)
     home = tmp_path / "home"
     home.mkdir()
     state = tmp_path / "state"
@@ -497,6 +515,56 @@ def test_up_image_change_recreates(shim: Shim) -> None:
     assert "image" in result.stderr
     assert shim.verbs() == ["stop", "rm", "network", "run"]
     assert f"whygraph.image={IMAGE_REPO}:9.9.9" in shim.run_call()
+
+
+def test_shim_passes_host_hostname(shim: Shim) -> None:
+    # Without --hostname the portal reports the container id as this machine's
+    # name when a project is linked to a platform (M2e).
+    assert shim.run("up").returncode == 0
+    call = shim.run_call()
+    assert call[call.index("--hostname") + 1] == HOST_NAME
+    assert f"whygraph.hostname={HOST_NAME}" in call
+    # A flag, before the image and the portal's own arguments.
+    assert call.index("--hostname") < call.index(IMAGE)
+    # The database container is not given one.
+    assert "--hostname" not in shim.run_call(PG)
+
+
+def test_hostname_change_recreates(shim: Shim) -> None:
+    assert shim.run("up").returncode == 0
+    shim.clear_log()
+    assert "already running" in shim.run("up").stdout
+    assert shim.verbs() == []
+
+    result = shim.run("up", FAKE_HOSTNAME="other-laptop")
+    assert result.returncode == 0, result.stderr
+    assert "changed: hostname" in result.stderr
+    assert shim.verbs() == ["stop", "rm", "network", "run"]
+    assert "whygraph.hostname=other-laptop" in shim.run_call()
+
+
+@pytest.mark.parametrize(
+    "name", ["", "fail", "-dash", "trailing-", "under_score", "a b"]
+)
+def test_an_unusable_host_name_is_left_to_docker(shim: Shim, name: str) -> None:
+    # Anything docker would refuse (and a host with no `hostname` at all) must
+    # not fail `up`: the container keeps docker's own hostname.
+    result = shim.run("up", FAKE_HOSTNAME=name)
+    assert result.returncode == 0, result.stderr
+    call = shim.run_call()
+    assert "--hostname" not in call
+    assert "whygraph.hostname=" in call
+    # And the next `up` does not recreate it over the empty label.
+    shim.clear_log()
+    assert "already running" in shim.run("up", FAKE_HOSTNAME=name).stdout
+    assert shim.verbs() == []
+
+
+def test_a_long_host_name_is_cut_to_a_valid_label(shim: Shim) -> None:
+    result = shim.run("up", FAKE_HOSTNAME="a" * 80)
+    assert result.returncode == 0, result.stderr
+    call = shim.run_call()
+    assert call[call.index("--hostname") + 1] == "a" * 63
 
 
 @pytest.mark.parametrize("status", ["exited", "created", "dead"])
@@ -1251,7 +1319,7 @@ def test_default_up_has_no_dev_mode(shim: Shim) -> None:
     joined = " ".join(call)
     assert "PYTHONPATH" not in joined
     assert "/opt/whygraph-dev" not in joined
-    assert "127.0.0.1:5173:5173" not in call
+    assert "127.0.0.1:5174:5174" not in call
     assert "WHYGRAPH_SCAN_CMD" not in joined
     assert not any(c.startswith("whygraph.dev_src=") for c in call)
 
@@ -1287,14 +1355,14 @@ def test_dev_src_runs_the_checkout_through_the_dev_wrapper(shim: Shim) -> None:
         f"type=bind,source={modules},target=/opt/whygraph-dev/src/playground/node_modules"
         in call
     )
-    assert "127.0.0.1:5173:5173" in call
+    assert "127.0.0.1:5174:5174" in call
     assert "PYTHONPATH=/opt/whygraph-dev/src" in call
     # Scan children get the checkout too, without widening the env allowlist.
     assert (
         "WHYGRAPH_SCAN_CMD=env PYTHONPATH=/opt/whygraph-dev/src python -m whygraph scan"
         in call
     )
-    assert "WHYGRAPH_DEV_ORIGINS=http://localhost:5173,http://127.0.0.1:5173" in call
+    assert "WHYGRAPH_DEV_ORIGINS=http://localhost:5174,http://127.0.0.1:5174" in call
     assert f"whygraph.dev_src={root}" in call
     assert call[call.index("--restart") + 1] == "no"
     assert call[-10:] == [

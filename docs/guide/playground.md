@@ -106,7 +106,7 @@ of it has been analyzed - a quick map of where you've already asked "why?" and w
 ## Develop the UI
 
 The panel's source lives at `src/playground/` (Vite + React + TypeScript). `make dev-local` runs a
-dev portal with the Vite dev server in front of it, so edits hot-reload at `http://localhost:5173`;
+dev portal with the Vite dev server in front of it, so edits hot-reload at `http://localhost:5174`;
 `make playground` builds the production bundle into the wheel's static directory. See
 [Developing WhyGraph](developing.md) for every development mode.
 

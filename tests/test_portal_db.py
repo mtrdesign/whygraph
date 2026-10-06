@@ -79,6 +79,8 @@ PORTAL_TABLES = {
     "sessions",
     "password_resets",
     "retired_org_slugs",
+    "connection_tokens",
+    "platform_links",
 }
 
 
@@ -225,7 +227,8 @@ BASELINE = "86e839432e62"
 TENANCY = "4ebfd8b89904"
 GITHUB = "b7d2c9a41e63"
 PROJECTS = "73bf248ea6fd"
-HEAD = PROJECTS
+CONNECTIONS = "c4e7a19b52d8"
+HEAD = CONNECTIONS
 
 
 def _seed_m2a(conn) -> dict[str, int]:  # noqa: ANN001

@@ -8,18 +8,29 @@ synthesize a structured rationale card.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from mcp.server.fastmcp import FastMCP
 
 from whygraph.analyze import AnalyzeError, RationaleGenerator
 from whygraph.core import get_config
+from whygraph.core.context import current_project
+from whygraph.core.remote import RemoteError, RemoteProject, platform_block
 from whygraph.services.codegraph import CodeGraph, CodeGraphError, SymbolContext
+from whygraph.services.git import Repository
 from whygraph.services.llm import LlmError
 
 from whygraph.analyze import CommitEvidence, Rationale
 
 from .errors import WhyGraphError, log_tool_errors
 from .targets import Target, repo_root, resolve_target, target_dict
-from .evidence import backfill_evidence_descriptions, collect_evidence
+from .evidence import (
+    backfill_evidence_descriptions,
+    blame_target,
+    collect_evidence,
+    pushed_target,
+    split_by_push_status,
+)
 from .rationale_cache import lookup_cached, store_cached
 
 _TOOL_DESCRIPTION = (
@@ -77,6 +88,139 @@ def _format_response(
     }
 
 
+class NoEvidenceError(WhyGraphError):
+    """A rationale was asked for lines that map to no scanned commit."""
+
+
+class RationaleGenerationError(WhyGraphError):
+    """The LLM could not generate a card; ``__cause__`` is the ``AnalyzeError`` / ``LlmError``."""
+
+
+_NO_EVIDENCE_MESSAGE = (
+    "no historical evidence for this target — the lines map to no "
+    "scanned commit. Scan from the WhyGraph portal (or run `whygraph scan` "
+    "outside it) to populate the database."
+)
+
+_NOT_PUSHED_MESSAGE = (
+    "no pushed history for this target — its lines are uncommitted or on "
+    "commits no `origin/*` ref holds yet, and a linked project's rationale "
+    "is generated on the platform. Push the commits, then ask again; "
+    "`whygraph_evidence_for` meanwhile labels each line's push status."
+)
+
+
+def linked_rationale(remote: RemoteProject, target: Target) -> dict:
+    """``whygraph_rationale_brief``'s answer for a project linked to a platform.
+
+    The card is built, cached and paid for **on the platform** (M2e plan
+    section 4.5), so every checkout of the repository shares one cache row:
+    nothing here reads the local rationale cache or calls an LLM. Only the
+    pushed hunks are sent, and with none there is no request at all.
+
+    Parameters
+    ----------
+    remote : RemoteProject
+        The project's platform.
+    target : Target
+        The locally resolved target.
+
+    Returns
+    -------
+    dict
+        The platform's card plus a ``platform`` block. Its ``target`` is
+        the platform's own range for the symbol, which is what the card
+        describes.
+
+    Raises
+    ------
+    NoEvidenceError
+        Nothing about this target may leave the machine yet.
+    WhyGraphError
+        The platform could not be reached, or refused.
+    """
+    repo = Repository(repo_root())
+    split = split_by_push_status(repo, blame_target(repo, target))
+    sendable = pushed_target(repo, target, split)
+    if sendable is None:
+        raise NoEvidenceError(_NOT_PUSHED_MESSAGE)
+    try:
+        card = remote.rationale(sendable, split.pushed)
+    except RemoteError as exc:
+        raise WhyGraphError(str(exc)) from exc
+    return {**card, "platform": platform_block(remote)}
+
+
+def rationale_card(
+    target: Target,
+    evidence: list[CommitEvidence],
+    *,
+    before_generate: Callable[[], None] | None = None,
+    allow_description: Callable[[], bool] | None = None,
+) -> dict:
+    """The rationale card of ``target`` from ``evidence``: cached, or generated and cached.
+
+    The half of :func:`whygraph_rationale_brief` after the target is
+    resolved and its evidence collected, shared with the platform's
+    ``POST /api/v1/projects/{slug}/rationale``.
+
+    Parameters
+    ----------
+    target : Target
+        The resolved code chunk (its path and range key the cache).
+    evidence : list[CommitEvidence]
+        Its evidence (the SHAs fingerprint the cache row).
+    before_generate : callable, optional
+        Called on a cache miss before anything is spent (the platform's
+        org card budget raises from it).
+    allow_description : callable, optional
+        The description backfill's budget (see
+        :func:`~whygraph.mcp.evidence.backfill_evidence_descriptions`).
+
+    Returns
+    -------
+    dict
+        The card (:func:`_format_response`).
+
+    Raises
+    ------
+    NoEvidenceError
+        ``evidence`` is empty.
+    RationaleGenerationError
+        The generator failed.
+    """
+    if not evidence:
+        raise NoEvidenceError(_NO_EVIDENCE_MESSAGE)
+
+    config = get_config()
+    provider, pinned_model = config.cache_identity("rationale")
+    cached = lookup_cached(target, evidence, provider, pinned_model)
+    if cached is not None:
+        rationale, cached_at = cached
+        return _format_response(target, rationale, evidence, cached_at)
+
+    if before_generate is not None:
+        before_generate()
+    # Cache miss — lazily backfill any commit whose `llm_description` is
+    # NULL (e.g. after `whygraph scan --skip-analyze`) so the
+    # rationale prompt sees the richer per-commit summaries. Bulk commits
+    # are described per-file against the target's path instead. The cache
+    # fingerprint is sha256-over-sorted-SHAs, so backfilling here does
+    # not affect cache keys.
+    backfill_evidence_descriptions(
+        evidence, target_path=target.path, allow=allow_description
+    )
+
+    try:
+        generator = RationaleGenerator.from_config(config)
+        rationale = generator.generate(evidence, symbol_context=_symbol_context(target))
+    except (AnalyzeError, LlmError) as exc:
+        raise RationaleGenerationError.wrap("rationale generation failed", exc)
+
+    cached_at = store_cached(target, evidence, rationale, provider, pinned_model)
+    return _format_response(target, rationale, evidence, cached_at)
+
+
 def whygraph_rationale_brief(
     path: str | None = None,
     line_start: int | None = None,
@@ -90,6 +234,9 @@ def whygraph_rationale_brief(
     A previously generated card is returned from the SQLite-backed cache
     (see :mod:`whygraph.mcp.rationale_cache`) when the same target,
     provider, model, and evidence fingerprint are all unchanged.
+
+    For a project linked to a WhyGraph platform the card comes from
+    :func:`linked_rationale` instead, out of the platform's shared cache.
     """
     target = resolve_target(
         path=path,
@@ -97,37 +244,11 @@ def whygraph_rationale_brief(
         line_end=line_end,
         qualified_name=qualified_name,
     )
+    ctx = current_project()
+    if ctx is not None and ctx.remote is not None:
+        return linked_rationale(ctx.remote, target)
     evidence = collect_evidence(target, limit=20)
-    if not evidence:
-        raise WhyGraphError(
-            "no historical evidence for this target — the lines map to no "
-            "scanned commit. Scan from the WhyGraph portal (or run `whygraph scan` "
-            "outside it) to populate the database."
-        )
-
-    config = get_config()
-    provider, pinned_model = config.cache_identity("rationale")
-    cached = lookup_cached(target, evidence, provider, pinned_model)
-    if cached is not None:
-        rationale, cached_at = cached
-        return _format_response(target, rationale, evidence, cached_at)
-
-    # Cache miss — lazily backfill any commit whose `llm_description` is
-    # NULL (e.g. after `whygraph scan --skip-analyze`) so the
-    # rationale prompt sees the richer per-commit summaries. Bulk commits
-    # are described per-file against the target's path instead. The cache
-    # fingerprint is sha256-over-sorted-SHAs, so backfilling here does
-    # not affect cache keys.
-    backfill_evidence_descriptions(evidence, target_path=target.path)
-
-    try:
-        generator = RationaleGenerator.from_config(config)
-        rationale = generator.generate(evidence, symbol_context=_symbol_context(target))
-    except (AnalyzeError, LlmError) as exc:
-        raise WhyGraphError.wrap("rationale generation failed", exc)
-
-    cached_at = store_cached(target, evidence, rationale, provider, pinned_model)
-    return _format_response(target, rationale, evidence, cached_at)
+    return rationale_card(target, evidence)
 
 
 def register(mcp: FastMCP) -> None:

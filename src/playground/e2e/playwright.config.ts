@@ -34,13 +34,13 @@ export default defineConfig({
     { name: "setup", testMatch: /setup\.spec\.ts/, use: { colorScheme: "light" } },
     {
       name: "light",
-      testIgnore: /(setup|production)\.spec\.ts/,
+      testIgnore: /(setup|production|linked)\.spec\.ts/,
       dependencies: ["setup"],
       use: { colorScheme: "light" },
     },
     {
       name: "dark",
-      testIgnore: /(setup|production)\.spec\.ts/,
+      testIgnore: /(setup|production|linked)\.spec\.ts/,
       dependencies: ["light"],
       use: { colorScheme: "dark" },
     },
@@ -50,6 +50,16 @@ export default defineConfig({
       name: "production",
       testMatch: /production\.spec\.ts/,
       use: { baseURL: env.prodUrl, colorScheme: "light" },
+    },
+    // A project linked to the platform (M2e): it drives both portals, so its
+    // baseURL is the local one and it opens the platform by absolute URL. It
+    // needs the local portal's user (`setup`) and the claimed instance with
+    // its organizations (`production`).
+    {
+      name: "linked",
+      testMatch: /linked\.spec\.ts/,
+      dependencies: ["setup", "production"],
+      use: { baseURL: env.baseUrl, colorScheme: "light" },
     },
   ],
 });

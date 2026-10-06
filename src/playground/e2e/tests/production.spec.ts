@@ -128,6 +128,19 @@ test("bootstrap, organizations on their own hosts, sign-in hand-off and reader a
   await expect(page).not.toHaveURL(/\/signin/);
 });
 
+/**
+ * Leave the wizard's first-scan step. The production portal's fake scanner runs
+ * `--real-git`, so the project has commits waiting for a description and the cost
+ * card offers *Later*; with none it offers *Open project* instead.
+ */
+async function openAfterFirstScan(page: Page): Promise<void> {
+  const later = page.getByRole("button", { name: "Later", exact: true });
+  const open = page.getByRole("button", { name: "Open project", exact: true });
+  await expect(later.or(open)).toBeVisible();
+  if (await later.isVisible()) await later.click();
+  else await open.click();
+}
+
 /** Wait until a GitHub sign-in (or a password one) has landed back on WhyGraph and rendered. */
 async function signedIn(page: Page): Promise<void> {
   await expect(page).toHaveURL(
@@ -175,7 +188,7 @@ test("projects from GitHub: connect, import, scan, members, a push, deleting the
   await expect(ben).toHaveURL(new RegExp(`/p/demo/init\\?step=scan`));
   await ben.getByRole("button", { name: "Start first scan" }).click();
   await expect(ben.getByText("First scan complete")).toBeVisible({ timeout: 30_000 });
-  await ben.getByRole("button", { name: "Open project" }).click();
+  await openAfterFirstScan(ben);
   await expect(ben).toHaveURL(new RegExp(`/p/demo$`));
   expect((await runs(ben, "demo")).map((r) => r.status)).toEqual(["ok"]);
 
@@ -228,6 +241,10 @@ test("projects from GitHub: connect, import, scan, members, a push, deleting the
   await dialog.getByLabel("Type rocket to confirm").fill("rocket");
   await dialog.getByRole("button", { name: "Delete organization" }).click();
   await expect(ben).toHaveURL(new RegExp(`^${base.origin}/orgs$`));
+  // Only bravo is left, so the picker sends him to its host. Let that landing
+  // happen before asking for the creation page: a navigation of our own while
+  // the app is redirecting is aborted (`net::ERR_ABORTED`).
+  await expect(ben).toHaveURL(new RegExp(`^${orgUrl("bravo")}/`));
   await ben.goto("/orgs/new");
   await ben.getByLabel("Organization name").fill("Rocket");
   await ben.getByLabel("URL name").fill("rocket");

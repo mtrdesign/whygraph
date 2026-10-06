@@ -50,6 +50,10 @@ class CodeGraphCrawler(Crawler):
         Docker image override for the CodeGraph fallback path; ``None``
         uses the pinned default. Ignored when a local ``codegraph`` binary
         is found.
+    strict : bool, optional
+        Record a :class:`CodeGraphBootstrapError` on :attr:`Crawler.error`
+        (failing the scan) instead of :attr:`warning`. Used by
+        ``whygraph scan --codegraph-only``, where the index is the whole job.
 
     Attributes
     ----------
@@ -60,11 +64,17 @@ class CodeGraphCrawler(Crawler):
     """
 
     def __init__(
-        self, progress: Progress, *, project_root: Path, image: str | None
+        self,
+        progress: Progress,
+        *,
+        project_root: Path,
+        image: str | None,
+        strict: bool = False,
     ) -> None:
         super().__init__("codegraph", progress, total=None)
         self._project_root = project_root
         self._image = image
+        self._strict = strict
         self.warning: str | None = None
 
     def work(self) -> None:
@@ -75,6 +85,8 @@ class CodeGraphCrawler(Crawler):
         try:
             refresh_codegraph_index(self._project_root, image=self._image, capture=True)
         except CodeGraphBootstrapError as exc:
+            if self._strict:
+                raise
             self.warning = f"CodeGraph refresh skipped — {exc}"
             return
 

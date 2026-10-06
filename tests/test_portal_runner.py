@@ -174,8 +174,20 @@ def scan(client: TestClient, slug: str, **body: Any) -> int:
     return response.json()["run_id"]
 
 
+OFFLINE_PLATFORM = httpx.MockTransport(
+    lambda request: httpx.Response(503, json={"error": "offline", "code": "busy"})
+)
+"""No test touches the network: a portal's platform client refuses by default.
+
+The lifespan's link-status refresh (M2e) probes every linked project at start,
+so a test that inserts a link row before the portal starts would otherwise
+reach out. ``tests/test_portal_link.py`` swaps its ``FakePlatform`` in after
+setup."""
+
+
 def client_for(runner: ScanRunner | None = None) -> TestClient:
     app = create_portal_app(port=8765, runner=runner)
+    app.state.portal.platform_transport = OFFLINE_PLATFORM
     return TestClient(app, base_url=BASE_URL, headers=CLIENT_HEADER)
 
 

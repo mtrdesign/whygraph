@@ -606,7 +606,12 @@ def test_setup_flow(client: TestClient, env: SimpleNamespace) -> None:
     assert state["setup_complete"] is True
     assert state["user"]["display_name"] == "Tess"
     assert state["user"]["role"] == "owner"  # the built-in org's membership
-    assert state["org"] == {"slug": "local", "name": "Local", "role": "owner"}
+    assert state["org"] == {
+        "slug": "local",
+        "name": "Local",
+        "role": "owner",
+        "default_project_role": "contributor",
+    }
     assert client.get("/api/projects").json() == {"projects": []}
     again = client.post("/api/portal/setup", json={"display_name": "Other"})
     assert again.status_code == 409
@@ -945,7 +950,12 @@ def _add_org_probe(client: TestClient) -> None:
 def test_load_org_access(env: SimpleNamespace) -> None:
     orgs = _seed_two_orgs()
     assert load_org_access(orgs.alice, "local") == OrgAccess(
-        org_id=orgs.local, org_slug="local", org_name="Local", role=Role.ADMIN
+        org_id=orgs.local,
+        org_slug="local",
+        org_name="Local",
+        role=Role.ADMIN,
+        user_id=orgs.alice,
+        default_project_role="contributor",
     )
     bob = load_org_access(orgs.bob, "bravo")
     assert bob is not None and bob.role is Role.OWNER and bob.org_id == orgs.beta
@@ -1074,7 +1084,12 @@ def test_state_names_the_org_and_scopes_the_port_report(
             return response.json()
 
         alice = state(**{"x-test-user": orgs.uids["alice"], "x-test-org": "local"})
-        assert alice["org"] == {"slug": "local", "name": "Local", "role": "admin"}
+        assert alice["org"] == {
+            "slug": "local",
+            "name": "Local",
+            "role": "admin",
+            "default_project_role": "contributor",
+        }
         assert alice["user"]["role"] == "admin"
         assert alice["port_change"] == {
             "port": PORT,
@@ -1083,7 +1098,12 @@ def test_state_names_the_org_and_scopes_the_port_report(
             "unmounted": [],
         }
         bob = state(**{"x-test-user": orgs.uids["bob"], "x-test-org": "bravo"})
-        assert bob["org"] == {"slug": "bravo", "name": "Bravo", "role": "owner"}
+        assert bob["org"] == {
+            "slug": "bravo",
+            "name": "Bravo",
+            "role": "owner",
+            "default_project_role": "contributor",
+        }
         assert bob["port_change"]["projects"] == [item(2, orgs.beta)]
         assert bob["port_change"]["unmounted"] == [item(3, orgs.beta)]
         for headers in (
@@ -1198,8 +1218,21 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/org/members/{uid}", "PATCH"): "org.members",
     ("/api/org/members/{uid}", "DELETE"): "org.members",
     ("/api/org/membership", "DELETE"): "org.read",
+    # Production's invitations (M2f-1 section 4.8)
+    ("/api/org/invitations", "GET"): "org.members",
+    ("/api/org/invitations/{uid}", "DELETE"): "org.members",
+    # Production's project access list (M2f-1 section 4.8)
+    ("/api/projects/{slug}/access", "GET"): "project.access",
+    ("/api/projects/{slug}/access", "PATCH"): "project.access",
+    ("/api/projects/{slug}/access/{user_uid}", "PUT"): "project.access",
+    ("/api/projects/{slug}/access/{user_uid}", "DELETE"): "project.access",
     # Deleting a production org: org_access(ORG_OWN) (M2d-2 section 4.8)
     ("/api/org", "DELETE"): "org.own",
+    # Org settings, ownership transfer and the audit log (M2f-1 4.8, 4.9)
+    ("/api/org", "PATCH"): "org.configure",
+    ("/api/org/transfer", "POST"): "org.own",
+    ("/api/org/audit", "GET"): "org.audit",
+    ("/api/org/audit.csv", "GET"): "org.audit",
     # Production's GitHub App import page: org_access(...) (M2d-2 section 4.4)
     ("/api/github/app/authorize", "POST"): "org.add_project",
     ("/api/github/installations", "GET"): "org.add_project",
@@ -1223,7 +1256,7 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     (f"{_P}/config", "GET"): _READ,
     (_P, "PATCH"): _CONFIGURE,
     (f"{_P}/config", "PUT"): _CONFIGURE,
-    (_P, "DELETE"): _SETUP,
+    (_P, "DELETE"): "org.remove_project",
     (f"{_P}/init", "POST"): _SETUP,
     # Scans: project_db_access(...)
     (f"{_P}/scans", "POST"): _SCAN,
@@ -1239,7 +1272,8 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     (f"{_P}/graph/ego", "GET"): _READ,
     (f"{_P}/node", "GET"): _READ,
     (f"{_P}/node/rationale", "GET"): _READ,
-    (f"{_P}/node/rationale", "POST"): _READ,
+    # An explicit LLM generation: viewers are refused (M2f-1 section 4.6).
+    (f"{_P}/node/rationale", "POST"): _CHAT,
     (f"{_P}/node/evidence", "GET"): _READ,
     (f"{_P}/history", "GET"): _READ,
     (f"{_P}/commit/{{sha}}", "GET"): _READ,
@@ -1279,6 +1313,7 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/admin/users", "GET"): "instance.admin",
     ("/api/admin/users/{uid}", "PATCH"): "instance.admin",
     ("/api/admin/users/{uid}/reset-link", "POST"): "instance.admin",
+    ("/api/admin/audit", "GET"): "instance.admin",
 }
 """Plan section 4.5's route -> action table: a changed action is a visible diff."""
 
@@ -1366,6 +1401,7 @@ _FILL = {
     "{number}": "1",
     "{run_id}": "1",
     "{uid}": "someone",
+    "{user_uid}": "someone",
     "{installation_id}": "7",
     "{link_id}": "nolink",
 }
@@ -1384,12 +1420,22 @@ PRODUCTION_ORG_ROUTES = {
     ("/api/org/members/{uid}", "PATCH"),
     ("/api/org/members/{uid}", "DELETE"),
     ("/api/org/membership", "DELETE"),
+    ("/api/org/invitations", "GET"),
+    ("/api/org/invitations/{uid}", "DELETE"),
     ("/api/org", "DELETE"),
+    ("/api/org", "PATCH"),
+    ("/api/org/transfer", "POST"),
+    ("/api/org/audit", "GET"),
+    ("/api/org/audit.csv", "GET"),
     ("/api/github/app/authorize", "POST"),
     ("/api/github/installations", "GET"),
     ("/api/github/installations/{installation_id}/repos", "GET"),
     ("/api/projects/{slug}/connections", "GET"),
     ("/api/projects/{slug}/connections/{uid}", "DELETE"),
+    ("/api/projects/{slug}/access", "GET"),
+    ("/api/projects/{slug}/access", "PATCH"),
+    ("/api/projects/{slug}/access/{user_uid}", "PUT"),
+    ("/api/projects/{slug}/access/{user_uid}", "DELETE"),
 }
 """Org-scoped routes that exist only in production: the members page, the
 org's deletion, the GitHub App import page and a project's connected portals

@@ -67,9 +67,18 @@ from whygraph.mcp.targets import repo_root
 from whygraph.portal import db as portal_db
 from whygraph.portal import runner as runner_mod
 from whygraph.portal.app import create_portal_app
+from whygraph.portal.authz import PROJECT_ACTIONS, PROJECT_ROLE_ACTIONS, ProjectRole
 from whygraph.portal.authz import ROLE_ACTIONS as ROLE_TABLE
 from whygraph.portal.authz import Role
-from whygraph.portal.models import Membership, Project, ScanRun, Setting, User
+from whygraph.portal.models import (
+    Membership,
+    Organization,
+    Project,
+    ProjectGrant,
+    ScanRun,
+    Setting,
+    User,
+)
 from whygraph.portal.orgs import add_member, create_org
 from whygraph.serve import chat as serve_chat
 from whygraph.services.llm import LlmError
@@ -559,6 +568,7 @@ PATH_PARAMS: dict[str, Callable[[OrgWorld], str]] = {
     "{number}": lambda o: "1",
     "{session_id}": lambda o: str(o.session_id),
     "{uid}": lambda o: o.owner_uid,
+    "{user_uid}": lambda o: o.owner_uid,  # an owner: 409 org_admin
     "{installation_id}": lambda o: "7",
     "{link_id}": lambda o: "nolink",  # no pending link: 410 link_expired
 }
@@ -614,8 +624,17 @@ def _qn(o: OrgWorld) -> dict:
     return {"qualified_name": o.qualified_name}
 
 
+def newcomer_github_id(login: str) -> int:
+    """The GitHub id of a ``<mark>-newcomer`` (the fake GitHub must know it too)."""
+    return sum(map(ord, login)) + 900_000
+
+
 def _newcomer(o: OrgWorld) -> str:
-    """A GitHub account in no org, inserted directly once; its login."""
+    """A GitHub account in no org, inserted directly once; its login.
+
+    Adding resolves the login on GitHub and matches the id (M2f-1), so
+    ``prod_world`` registers the same account with the fake GitHub.
+    """
     login = f"{o.mark}-newcomer"
     with portal_db.get_session() as session:
         exists = session.exec(select(User.id).where(User.github_login == login))
@@ -623,11 +642,16 @@ def _newcomer(o: OrgWorld) -> str:
             session.add(
                 User(
                     display_name=login,
-                    github_id=sum(map(ord, login)) + 900_000,
+                    github_id=newcomer_github_id(login),
                     github_login=login,
                 )
             )
     return login
+
+
+def _invitations_check(body: list, w: World, o: OrgWorld) -> None:
+    assert isinstance(body, list)
+    assert all("email" not in i for i in body)
 
 
 def _members_check(body: list, w: World, o: OrgWorld) -> None:
@@ -645,6 +669,19 @@ def _added_check(body: dict, w: World, o: OrgWorld) -> None:
 
 def _no_connections(body: list, w: World, o: OrgWorld) -> None:
     assert body == []
+
+
+def _access_check(body: dict, w: World, o: OrgWorld) -> None:
+    assert body["restricted"] is False
+    assert o.owner_uid in [p["uid"] for p in body["people"]]
+
+
+def _org_settings_check(body: dict, o: OrgWorld) -> None:
+    assert (body["slug"], body["default_project_role"]) == (o.slug, "contributor")
+
+
+def _audit_check(body: dict, o: OrgWorld) -> None:
+    assert all(event["org"] == o.slug for event in body["events"])
 
 
 def _owner_kept_check(body: dict, w: World, o: OrgWorld) -> None:
@@ -679,6 +716,11 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     ),
     ("DELETE", "/api/org/members/{uid}"): Call(409, shows=lambda o: ["last_owner"]),
     ("DELETE", "/api/org/membership"): Call(409, shows=lambda o: ["last_owner"]),
+    # Invitations (M2f-1 section 4.8; test_portal_members.py drives them)
+    ("GET", "/api/org/invitations"): Call(200, check=_invitations_check),
+    ("DELETE", "/api/org/invitations/{uid}"): Call(
+        404, shows=lambda o: ["no_such_invitation"]
+    ),
     # Deleting the org (test_portal_org_delete.py deletes one for real; the
     # sweep must keep its world, so it sends a wrong slug)
     ("DELETE", "/api/org"): Call(
@@ -686,6 +728,23 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         body=lambda w, o: {"confirm_slug": "wrong"},
         shows=lambda o: ["confirm_slug"],
     ),
+    # Org settings, ownership and the audit log (M2f-1 sections 4.8, 4.9;
+    # test_portal_org_settings.py and test_portal_audit.py drive them; the
+    # transfer sends a wrong slug so the sweep keeps its owners)
+    ("PATCH", "/api/org"): Call(
+        200,
+        body=lambda w, o: {"default_project_role": "contributor"},
+        check=lambda body, w, o: _org_settings_check(body, o),
+    ),
+    ("POST", "/api/org/transfer"): Call(
+        409,
+        body=lambda w, o: {"user_uid": "someone", "confirm_slug": "wrong"},
+        shows=lambda o: ["confirm_slug"],
+    ),
+    ("GET", "/api/org/audit"): Call(
+        200, check=lambda body, w, o: _audit_check(body, o)
+    ),
+    ("GET", "/api/org/audit.csv"): Call(200, shows=lambda o: ["created_at"]),
     # Production's GitHub App import page (swept over prod_world, whose
     # owners have not connected GitHub; test_portal_github_import.py drives it)
     ("POST", "/api/github/app/authorize"): Call(
@@ -703,6 +762,18 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     ("GET", "/api/projects/{slug}/connections"): Call(200, check=_no_connections),
     ("DELETE", "/api/projects/{slug}/connections/{uid}"): Call(
         404, shows=lambda o: ["no such connection"]
+    ),
+    # A project's access list (M2f-1 section 4.8; test_portal_access.py
+    # drives it): the owner is an org admin, so a grant is refused
+    ("GET", "/api/projects/{slug}/access"): Call(200, check=_access_check),
+    ("PATCH", "/api/projects/{slug}/access"): Call(
+        200, body=lambda w, o: {"restricted": False}
+    ),
+    ("PUT", "/api/projects/{slug}/access/{user_uid}"): Call(
+        409, body=lambda w, o: {"role": "viewer"}, shows=lambda o: ["org_admin"]
+    ),
+    ("DELETE", "/api/projects/{slug}/access/{user_uid}"): Call(
+        404, shows=lambda o: ["no_grant"]
     ),
     ("POST", "/api/projects"): Call(
         201,
@@ -1111,8 +1182,17 @@ def test_the_port_report_is_scoped_to_the_org(two_orgs: World) -> None:
 # The role matrix over HTTP (plan section 5.3)
 # ---------------------------------------------------------------------------
 
-MEMBER_ACTIONS = {str(a) for a in ROLE_TABLE[Role.MEMBER]}
-ADMIN_ACTIONS = {str(a) for a in ROLE_TABLE[Role.ADMIN]}
+_PROJECT_PATH = "/api/projects/{slug}"
+_PROJECT_ACTIONS = {str(a) for a in PROJECT_ACTIONS}
+ORG_MEMBER_ACTIONS = {str(a) for a in ROLE_TABLE[Role.MEMBER]}
+ORG_ADMIN_ACTIONS = {str(a) for a in ROLE_TABLE[Role.ADMIN]}
+VIEWER_ACTIONS = {str(a) for a in PROJECT_ROLE_ACTIONS[ProjectRole.VIEWER]}
+CONTRIBUTOR_ACTIONS = {str(a) for a in PROJECT_ROLE_ACTIONS[ProjectRole.CONTRIBUTOR]}
+PROJECT_ADMIN_ACTIONS = {str(a) for a in PROJECT_ROLE_ACTIONS[ProjectRole.ADMIN]}
+"""Org actions come from the org roles, project actions from the project
+roles (M2f-1 plan section 6.3 #2): carol, a member under the default
+``contributor``, is a contributor on ``api``; dave, an org admin, is a
+project admin on every project."""
 _LOCAL_ROUTE_ACTIONS = {
     (m, p): action
     for (p, m), action in ROUTE_ACTIONS.items()
@@ -1123,27 +1203,43 @@ _LOCAL_ROUTE_ACTIONS = {
 """Local mode's org-scoped routes and their actions (the members routes are
 production-only; their role matrix is ``test_portal_members.py``; the
 bearer-only ``V1_ROUTES`` are production-only too)."""
+
+
+def _routes_doing(actions: set[str]) -> list[tuple[str, str]]:
+    """Local routes whose action is in ``actions``, DELETE last."""
+    return sorted(
+        (route for route, action in _LOCAL_ROUTE_ACTIONS.items() if action in actions),
+        key=lambda route: (route[0] == "DELETE", route[1], route[0]),
+    )
+
+
+ORG_ADMIN_ROUTES = _routes_doing(ORG_ADMIN_ACTIONS - ORG_MEMBER_ACTIONS)
+PROJECT_ADMIN_ROUTES = _routes_doing(PROJECT_ADMIN_ACTIONS - CONTRIBUTOR_ACTIONS)
 ADMIN_ROUTES = sorted(
-    (
-        route
-        for route, action in _LOCAL_ROUTE_ACTIONS.items()
-        if action in ADMIN_ACTIONS - MEMBER_ACTIONS
-    ),
+    ORG_ADMIN_ROUTES + PROJECT_ADMIN_ROUTES,
     key=lambda route: (route[0] == "DELETE", route[1], route[0]),  # DELETE last
 )
 OWNER_ROUTES = sorted(
     route
     for route, action in _LOCAL_ROUTE_ACTIONS.items()
-    if action not in ADMIN_ACTIONS
+    if action not in ORG_ADMIN_ACTIONS | _PROJECT_ACTIONS
 )
-MEMBER_ROUTES = sorted(
-    (
-        route
-        for route, action in _LOCAL_ROUTE_ACTIONS.items()
-        if action in MEMBER_ACTIONS
-    ),
+MEMBER_ROUTES = _routes_doing(ORG_MEMBER_ACTIONS | CONTRIBUTOR_ACTIONS)
+VIEWER_ROUTES = _routes_doing(VIEWER_ACTIONS)
+PROJECT_ROUTES = sorted(
+    (route for route in _LOCAL_ROUTE_ACTIONS if route[1].startswith(_PROJECT_PATH)),
     key=lambda route: (route[0] == "DELETE", route[1], route[0]),
 )
+"""Every local route that names a project, whatever its action."""
+
+
+def _refusal(action: str, org_role: str, project_role: str) -> dict:
+    """The ``403`` body for ``action``: project actions name the project role."""
+    if action in _PROJECT_ACTIONS:
+        error = f"your role on this project ({project_role}) cannot {action}"
+    else:
+        error = f"your role ({org_role}) cannot {action}"
+    return {"error": error, "code": "forbidden", "action": action}
 
 
 @pytest.fixture
@@ -1170,13 +1266,12 @@ def context_calls(two_orgs: World, monkeypatch: pytest.MonkeyPatch) -> list[int]
 def test_the_admin_routes_are_the_planned_ones() -> None:
     # Org settings and org-level keys are the owner's (M2d-1 plan section 0.1).
     assert OWNER_ROUTES == [("PUT", "/api/portal/defaults")]
-    assert set(ADMIN_ROUTES) == {
+    # The org admin's: adding and removing projects (removal is an org
+    # action, M2f-1 plan section 0.2 #7).
+    assert set(ORG_ADMIN_ROUTES) == {
         ("POST", "/api/projects"),
         ("POST", "/api/portal/check-path"),
-        ("PATCH", "/api/projects/{slug}"),
         ("DELETE", "/api/projects/{slug}"),
-        ("PUT", "/api/projects/{slug}/config"),
-        ("POST", "/api/projects/{slug}/init"),
         # Linking to a platform adds a project, so it is the admin's (M2e
         # section 4.8)
         ("POST", "/api/platform/connect"),
@@ -1184,6 +1279,17 @@ def test_the_admin_routes_are_the_planned_ones() -> None:
         ("GET", "/api/platform/pending/{link_id}"),
         ("DELETE", "/api/platform/pending/{link_id}"),
     }
+    # The project admin's (local mode; the connections routes are
+    # production's).
+    assert set(PROJECT_ADMIN_ROUTES) == {
+        ("PATCH", "/api/projects/{slug}"),
+        ("PUT", "/api/projects/{slug}/config"),
+        ("POST", "/api/projects/{slug}/init"),
+    }
+    # Generating a card spends: a contributor's, never a viewer's (section 4.6).
+    assert ("POST", "/api/projects/{slug}/node/rationale") not in VIEWER_ROUTES
+    assert ("POST", "/api/projects/{slug}/node/rationale") in MEMBER_ROUTES
+    assert len(VIEWER_ROUTES) > 10
 
 
 def test_a_member_is_refused_every_admin_action_before_any_context(
@@ -1200,11 +1306,7 @@ def test_a_member_is_refused_every_admin_action_before_any_context(
         )
         action = ROUTE_ACTIONS[(path, method)]
         assert response.status_code == 403, (method, path, response.text)
-        assert response.json() == {
-            "error": f"your role (member) cannot {action}",
-            "code": "forbidden",
-            "action": action,
-        }
+        assert response.json() == _refusal(action, "member", "contributor")
         assert context_calls == [], (method, path)  # no secret was decrypted
     # The admin is refused the owner's routes the same way.
     for method, path in OWNER_ROUTES:
@@ -1217,11 +1319,7 @@ def test_a_member_is_refused_every_admin_action_before_any_context(
         )
         action = ROUTE_ACTIONS[(path, method)]
         assert response.status_code == 403, (method, path, response.text)
-        assert response.json() == {
-            "error": f"your role (admin) cannot {action}",
-            "code": "forbidden",
-            "action": action,
-        }
+        assert response.json() == _refusal(action, "admin", "admin")
     assert context_calls == []
     # The admin passes every admin route, in the same order (DELETE last).
     for method, path in ADMIN_ROUTES:
@@ -1260,10 +1358,12 @@ def test_members_and_admins_can_read_chat_scan_and_use_mcp(
             )
             assert response.status_code == spec.status, (user, method, path)
         wait_idle(w.client, headers)
-        # A real 2xx cancel: a held scan, cancelled while it runs.
+        # A real 2xx cancel: a held quick scan, cancelled while it runs (a
+        # full one is the project admin's, test_only_project_admins_...).
         w.scanner.hold.touch()
+        quick = {"analyze": False}
         run_id = _ok(
-            w.client.post("/api/projects/api/scans", json={}, headers=headers), 202
+            w.client.post("/api/projects/api/scans", json=quick, headers=headers), 202
         )["run_id"]
         wait_for(
             lambda: (
@@ -1279,6 +1379,287 @@ def test_members_and_admins_can_read_chat_scan_and_use_mcp(
         assert wait_idle(w.client, headers)[0]["status"] == "cancelled"
         mcp = _mcp(w, headers, "tools/list")
         assert mcp.status_code == 200, (user, mcp.text)
+
+
+def _post_scan(w: World, user: str, body: dict | None) -> httpx.Response:
+    return w.client.post(
+        "/api/projects/api/scans", json=body, headers=w.as_(user, "local")
+    )
+
+
+def _held_run(w: World, user: str, body: dict | None) -> int:
+    """Start a scan as ``user`` and wait until its (held) child runs."""
+    headers = w.as_(user, "local")
+    run_id = _ok(_post_scan(w, user, body), 202)["run_id"]
+    wait_for(
+        lambda: (
+            next(r for r in runs(w.client, headers) if r["id"] == run_id)["status"]
+            == "running"
+        )
+    )
+    return run_id
+
+
+def test_only_project_admins_start_or_cancel_a_full_scan(two_orgs: World) -> None:
+    """The quick / full split (M2f-1 plan sections 4.5 and 6.2 #2), over HTTP."""
+    w = two_orgs
+    carol, dave = w.as_("carol", "local"), w.as_("dave", "local")
+    full_refusal = _refusal("project.scan_full", "member", "contributor")
+    # A first scan is structure-only, so a contributor's body-less one runs.
+    with portal_db.get_session() as db:
+        db.get(Project, w.local.project_id).last_scan_at = None
+    first = _ok(_post_scan(w, "carol", None), 202)["run_id"]
+    (row,) = [r for r in wait_idle(w.client, carol) if r["id"] == first]
+    assert (row["trigger"], row["analyze"], row["status"]) == ("initial", False, "ok")
+
+    for body in (
+        None,  # body-less: `manual` = full
+        {},
+        {"trigger": "manual"},
+        {"trigger": "manual", "analyze": True},
+        {"trigger": "describe"},
+    ):
+        response = _post_scan(w, "carol", body)
+        assert response.status_code == 403, (body, response.text)
+        assert response.json() == full_refusal, body
+    assert runs(w.client, carol)[0]["id"] == first  # nothing was queued
+    quick = _ok(_post_scan(w, "carol", {"analyze": False}), 202)["run_id"]
+    assert [r for r in wait_idle(w.client, carol) if r["id"] == quick][0][
+        "analyze"
+    ] is False
+    full = _ok(_post_scan(w, "dave", None), 202)["run_id"]
+    (row,) = [r for r in wait_idle(w.client, dave) if r["id"] == full]
+    assert (row["trigger"], row["analyze"], row["status"]) == ("manual", True, "ok")
+
+    # Cancelling needs the action that would start the run (section 0.2 #18).
+    w.scanner.hold.touch()
+    running = _held_run(w, "dave", {"trigger": "manual"})
+    detail = _ok(w.client.get("/api/projects/api", headers=carol))
+    assert detail["running_scan"] == {
+        "id": running,
+        "status": "running",
+        "trigger": "manual",
+        "analyze": True,
+    }
+    refused = w.client.post(f"/api/projects/api/scans/{running}/cancel", headers=carol)
+    assert refused.status_code == 403, refused.text
+    assert refused.json() == full_refusal
+    # Carol's quick request, merged into by Dave's full one, is now full.
+    queued = _ok(_post_scan(w, "carol", {"analyze": False}), 202)["run_id"]
+    assert _ok(_post_scan(w, "dave", {"trigger": "describe"}), 202)["run_id"] == queued
+    refused = w.client.post(f"/api/projects/api/scans/{queued}/cancel", headers=carol)
+    assert refused.status_code == 403, refused.text
+    assert (
+        _ok(w.client.post(f"/api/projects/api/scans/{queued}/cancel", headers=dave))[
+            "was"
+        ]
+        == "queued"
+    )
+    cancelled = w.client.post(f"/api/projects/api/scans/{running}/cancel", headers=dave)
+    assert cancelled.status_code == 202, cancelled.text
+    w.scanner.hold.unlink()
+    wait_idle(w.client, dave)
+
+
+def _grant_carol(w: World, role: str | None) -> None:
+    """Set (or, with ``None``, drop) carol's grant on local's ``api``."""
+    carol = w.users["carol"]["x-test-user"]
+    with portal_db.get_session() as db:
+        user_id = db.exec(select(User.id).where(User.uid == carol)).one()
+        grant = db.get(ProjectGrant, (w.local.project_id, user_id))
+        if role is None:
+            if grant is not None:
+                db.delete(grant)
+            return
+        if grant is None:
+            grant = ProjectGrant(
+                org_id=w.local.org_id,
+                project_id=w.local.project_id,
+                user_id=user_id,
+                role=role,
+            )
+        grant.role = role
+        db.add(grant)
+
+
+def _set_local(w: World, *, restricted: bool | None = None, default: str | None = None):
+    with portal_db.get_session() as db:
+        if restricted is not None:
+            db.get(Project, w.local.project_id).restricted = restricted
+        if default is not None:
+            db.get(Organization, w.local.org_id).default_project_role = default
+
+
+def _sweep_call(w: World, user: str, method: str, path: str) -> httpx.Response:
+    spec = ROUTE_REQUESTS[(method, path)]
+    return w.client.request(
+        method,
+        _url(path, w.local),
+        params=spec.query(w.local) if spec.query else None,
+        json=spec.body(w, w.local) if spec.body else None,
+        headers=w.as_(user, "local"),
+    )
+
+
+def test_a_viewer_grant_reads_and_is_refused_the_rest(
+    two_orgs: World, context_calls: list[int]
+) -> None:
+    """The project-role dimension (M2f-1 plan section 6.3 #2): a viewer by grant."""
+    w = two_orgs
+    _grant_carol(w, "viewer")  # lowers the default contributor
+    listed = _ok(w.client.get("/api/projects", headers=w.as_("carol", "local")))
+    (api,) = listed["projects"]
+    assert (api["my_role"], api["permissions"], api["restricted"]) == (
+        "viewer",
+        ["project.read"],
+        False,
+    )
+    for method, path in PROJECT_ROUTES:
+        action = ROUTE_ACTIONS[(path, method)]
+        if action in VIEWER_ACTIONS:
+            continue
+        response = _sweep_call(w, "carol", method, path)
+        assert response.status_code == 403, (method, path, response.text)
+        assert response.json() == _refusal(action, "member", "viewer"), (method, path)
+    assert context_calls == []  # refused before any secret was decrypted
+    for method, path in VIEWER_ROUTES:
+        response = _sweep_call(w, "carol", method, path)
+        spec = ROUTE_REQUESTS[(method, path)]
+        assert response.status_code == spec.status, (method, path, response.text)
+
+
+def _marker_description(w: World) -> str | None:
+    with use_project(manual_ctx(w.local.root, slug="api")), project_session() as db:
+        return db.get(Commit, w.local.marker_sha).llm_description
+
+
+def test_a_viewer_causes_no_llm_spend(
+    two_orgs: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Zero LLM constructions across every project route (M2f-1 plan section 6.2 #3)."""
+    import whygraph.analyze as analyze_pkg
+
+    w = two_orgs
+    built: list[str] = []
+
+    class _Descriptor:
+        @classmethod
+        def from_config(cls, config):  # noqa: ANN001, ANN206
+            built.append("descriptor")
+            raise LlmError("offline in tests")
+
+    class _Generator(_StubRationale):
+        @classmethod
+        def from_config(cls, config):  # noqa: ANN001, ANN206
+            built.append("generator")
+            return cls()
+
+    def chat_client(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        built.append("chat")
+        return _OfflineChat()
+
+    monkeypatch.setattr(analyze_pkg, "LlmDescriptor", _Descriptor)
+    monkeypatch.setattr(mcp_rationale, "RationaleGenerator", _Generator)
+    monkeypatch.setattr(serve_chat, "make_chat_client", chat_client)
+    # The marker commit loses its description: a read would backfill it.
+    with use_project(manual_ctx(w.local.root, slug="api")), project_session() as db:
+        db.get(Commit, w.local.marker_sha).llm_description = None
+        db.commit()
+    _grant_carol(w, "viewer")
+
+    for method, path in PROJECT_ROUTES:
+        response = _sweep_call(w, "carol", method, path)
+        action = ROUTE_ACTIONS[(path, method)]
+        if action in VIEWER_ACTIONS:
+            spec = ROUTE_REQUESTS[(method, path)]
+            assert response.status_code == spec.status, (method, path, response.text)
+        else:  # generation and every chat route among them
+            assert response.status_code == 403, (method, path, response.text)
+    assert built == []
+    assert _marker_description(w) is None  # GET /node/evidence and /history read only
+    # The same read by a contributor does try to describe the commit.
+    _grant_carol(w, None)
+    assert _sweep_call(w, "carol", "GET", f"{_PROJECT_PATH}/node/evidence").is_success
+    assert built == ["descriptor"]
+
+
+def test_an_admin_grant_configures_but_never_removes(two_orgs: World) -> None:
+    """A project admin by grant passes the project admin routes, not the org's."""
+    w = two_orgs
+    _grant_carol(w, "admin")
+    detail = _ok(w.client.get("/api/projects/api", headers=w.as_("carol", "local")))
+    assert detail["my_role"] == "admin"
+    assert "project.configure" in detail["permissions"]
+    for method, path in PROJECT_ADMIN_ROUTES:
+        response = _sweep_call(w, "carol", method, path)
+        spec = ROUTE_REQUESTS[(method, path)]
+        assert response.status_code == spec.status, (method, path, response.text)
+    # Removing a project stays an org admin's action, whatever the grant.
+    removed = _sweep_call(w, "carol", "DELETE", _PROJECT_PATH)
+    assert removed.status_code == 403, removed.text
+    assert removed.json() == _refusal("org.remove_project", "member", "admin")
+
+
+@pytest.mark.parametrize("how", ["restricted", "default_none"])
+def test_no_access_is_an_unknown_project_on_every_route(
+    two_orgs: World, context_calls: list[int], how: str
+) -> None:
+    """Restricted (or default ``none``) without a grant: 404 like an unknown slug."""
+    w = two_orgs
+    if how == "restricted":
+        _set_local(w, restricted=True)
+    else:
+        _set_local(w, default="none")
+    carol = w.as_("carol", "local")
+    assert _ok(w.client.get("/api/projects", headers=carol)) == {"projects": []}
+    unknown = w.client.get("/api/projects/nope", headers=carol)
+    assert unknown.json() == {"error": "project 'nope' not found"}
+    for method, path in PROJECT_ROUTES:
+        response = _sweep_call(w, "carol", method, path)
+        assert response.status_code == 404, (method, path, response.text)
+        assert response.json() == {"error": "project 'api' not found"}, (method, path)
+    assert context_calls == []
+    # Org admins and owners still see it; for them it is a project like any other.
+    for user in ("dave", "alice"):
+        (api,) = _ok(w.client.get("/api/projects", headers=w.as_(user, "local")))[
+            "projects"
+        ]
+        assert (api["slug"], api["my_role"]) == ("api", "admin")
+        assert api["restricted"] is (how == "restricted")
+    # A grant gives the project back, with the granted role.
+    _grant_carol(w, "contributor")
+    (api,) = _ok(w.client.get("/api/projects", headers=carol))["projects"]
+    assert api["my_role"] == "contributor"
+    assert _ok(w.client.get("/api/projects/api", headers=carol))["slug"] == "api"
+    _grant_carol(w, None)
+    assert w.client.get("/api/projects/api", headers=carol).status_code == 404
+
+
+def test_the_org_default_sets_the_role_of_the_ungranted(two_orgs: World) -> None:
+    w = two_orgs
+    carol = w.as_("carol", "local")
+    expected = {
+        "contributor": ["project.read", "project.chat", "project.scan"],
+        "viewer": ["project.read"],
+    }
+    for default, permissions in expected.items():
+        _set_local(w, default=default)
+        (api,) = _ok(w.client.get("/api/projects", headers=carol))["projects"]
+        assert (api["my_role"], api["permissions"]) == (default, permissions)
+        state = _ok(w.client.get("/api/portal/state", headers=carol))
+        assert state["org"]["default_project_role"] == default
+    # The owner's view never changes.
+    (api,) = _ok(w.client.get("/api/projects", headers=w.local.owner))["projects"]
+    assert api["my_role"] == "admin"
+    assert api["permissions"] == [
+        "project.read",
+        "project.chat",
+        "project.scan",
+        "project.scan_full",
+        "project.configure",
+        "project.setup",
+        "project.access",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1325,6 +1706,7 @@ def test_system_scans_get_only_their_own_orgs_secrets(
                 analyze=True,
                 requested_by=None,
                 scan_requested=True,
+                may_spend=True,
             )
 
     for start in (runner.catch_up, describe):

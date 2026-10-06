@@ -4,13 +4,16 @@ import { platformHost, safeHref } from "../../lib/platformLink";
 import { Button } from "../ui/button";
 import { LinkNotice } from "./LinkNotice";
 
-/** The three platform URLs of a linked project's `link`, as buttons that open in a new tab. */
+/**
+ * The three platform URLs of a linked project's `link`, as buttons that open in a new tab.
+ * Chat is left out for a viewer: viewers have no chat on the platform (M2f-1).
+ */
 export function PlatformButtons({ project, size }: { project: ProjectSummary; size?: "sm" }) {
   const link = project.link;
   const items = [
     { label: "Manage on platform", href: safeHref(link?.manage_url), primary: true },
     { label: "Open Explorer on platform", href: safeHref(link?.explorer_url) },
-    { label: "Open Chat on platform", href: safeHref(link?.chat_url) },
+    { label: "Open Chat on platform", href: link?.project_role === "viewer" ? undefined : safeHref(link?.chat_url) },
   ].filter((i) => i.href);
   if (items.length === 0) return null;
   return (

@@ -3,7 +3,7 @@ import path from "node:path";
 import { expect, test } from "@playwright/test";
 import { env } from "../env";
 import { themeRepos } from "../lib/fixtures";
-import { themeOf } from "../lib/ui";
+import { quickRescan, themeOf } from "../lib/ui";
 
 // Scan runs on an already-initialized project (main-flow.spec.ts sets it up).
 // The fake scanner reads control/delay and control/fail on every run.
@@ -14,7 +14,7 @@ test.afterEach(() => {
   fs.rmSync(flag("delay"), { force: true });
 });
 
-test("two clicks on Scan now during a run coalesce onto one follow-up run", async ({ page }, testInfo) => {
+test("two clicks on Rescan during a run coalesce onto one follow-up run", async ({ page }, testInfo) => {
   const { notes } = themeRepos(themeOf(testInfo));
   fs.writeFileSync(flag("delay"), "0.4"); // ~5 s per phase-1 pass: room to click
 
@@ -26,7 +26,7 @@ test("two clicks on Scan now during a run coalesce onto one follow-up run", asyn
   });
 
   await page.goto(`/p/${notes.slug}`);
-  await page.getByRole("button", { name: "Scan now" }).first().click();
+  await quickRescan(page);
   await page.waitForURL(`**/p/${notes.slug}/scans/*`);
   const running = Number(new URL(page.url()).pathname.split("/").pop());
 
@@ -39,10 +39,9 @@ test("two clicks on Scan now during a run coalesce onto one follow-up run", asyn
 
   // Two more clicks while it runs: one pending follow-up, the same id twice.
   posts.length = 0;
-  const again = page.getByRole("button", { name: "Scan now" });
-  await again.click();
+  await quickRescan(page);
   await expect(page.getByTestId("followup")).toBeVisible();
-  await again.click();
+  await quickRescan(page);
   await expect.poll(() => posts.length).toBe(2);
   expect(new Set(posts).size).toBe(1);
   expect(posts[0]).not.toBe(running);
@@ -63,7 +62,7 @@ test("a failing scan shows the error and the log, and the project card says so",
   fs.writeFileSync(flag("fail"), "1");
 
   await page.goto(`/p/${notes.slug}`);
-  await page.getByRole("button", { name: "Scan now" }).first().click();
+  await quickRescan(page);
   await page.waitForURL(`**/p/${notes.slug}/scans/*`);
 
   await expect(page.getByTestId("run-result")).toContainText("The scan failed", { timeout: 30_000 });
@@ -78,7 +77,7 @@ test("a failing scan shows the error and the log, and the project card says so",
   // A good scan afterwards clears the badge.
   fs.rmSync(flag("fail"), { force: true });
   await page.goto(`/p/${notes.slug}`);
-  await page.getByRole("button", { name: "Scan now" }).first().click();
+  await quickRescan(page);
   await expect(page.getByTestId("run-result")).toContainText("Finished in", { timeout: 40_000 });
   await page.goto("/");
   await expect(page.getByTestId(`project-${notes.slug}`)).not.toContainText("Scan failed");
@@ -89,7 +88,7 @@ test("Cancel stops a running scan; the run and the history say it was cancelled"
   fs.writeFileSync(flag("delay"), "0.4");
 
   await page.goto(`/p/${notes.slug}`);
-  await page.getByRole("button", { name: "Scan now" }).first().click();
+  await quickRescan(page);
   await page.waitForURL(`**/p/${notes.slug}/scans/*`);
   const running = Number(new URL(page.url()).pathname.split("/").pop());
   await expect(page.getByTestId("phase-1")).toHaveAttribute("data-status", "running");

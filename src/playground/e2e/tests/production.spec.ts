@@ -1,12 +1,12 @@
 import fs from "node:fs";
 import { expect, test, type Page } from "@playwright/test";
 import { env } from "../env";
+import { sidebarLink } from "../lib/ui";
+import { base, createOrg, githubSignIn, importRepo, orgUrl, signedIn } from "../lib/production";
 
 // Production mode (M2c): the bootstrap secret, organizations on their own hosts,
 // the shared session cookie and the instance admin's read-only access. Runs
 // against its own portal (`env.prodUrl`), independent of the local-mode projects.
-const base = new URL(env.prodUrl);
-const orgUrl = (slug: string) => `${base.protocol}//${slug}.${base.host}`;
 const PASSWORD = "correct horse battery staple";
 
 /** The one-time secret the portal prints in its log (plan 4.3). */
@@ -27,28 +27,12 @@ async function signOut(page: Page, via: "menu" | "button" = "menu"): Promise<voi
   await expect(page).toHaveURL(/\/signin/);
 }
 
-async function createOrg(page: Page, name: string, slug: string): Promise<void> {
-  await page.getByLabel("Organization name").fill(name);
-  await page.getByLabel("URL name").fill(slug);
-  await expect(page.getByTestId("slug-preview")).toHaveText(`${slug}.${base.host}`);
-  await page.getByRole("button", { name: "Create organization" }).click();
-  await expect(page).toHaveURL(new RegExp(`^${orgUrl(slug)}/`));
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
-}
-
 /** The administrator's password form, behind its disclosure on the sign-in page. */
 async function signIn(page: Page, email: string): Promise<void> {
   await page.getByRole("button", { name: "Administrator sign-in" }).click();
   await page.getByLabel("Email").fill(email);
   await page.getByLabel("Password").fill(PASSWORD);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
-}
-
-/** Sign in with GitHub through the fake: the button, then "Continue as <login>". */
-async function githubSignIn(page: Page, login: string): Promise<void> {
-  await page.goto("/signin");
-  await page.getByRole("button", { name: "Sign in with GitHub" }).click();
-  await page.getByRole("link", { name: `Continue as ${login}` }).click();
 }
 
 test("bootstrap, organizations on their own hosts, sign-in hand-off and reader access", async ({ page, browser }) => {
@@ -82,7 +66,7 @@ test("bootstrap, organizations on their own hosts, sign-in hand-off and reader a
   await page.goto(`${orgUrl("acme")}/members`);
   await expect(page.getByRole("heading", { name: "Members" })).toBeVisible();
   await page.getByLabel("GitHub username").fill("ben");
-  await page.getByRole("button", { name: "Add member" }).click();
+  await page.getByRole("button", { name: "Invite", exact: true }).click();
   await expect(page.getByTestId("member-list")).toContainText("@ben");
   await ben.reload();
   await expect(ben.getByRole("heading", { name: "Projects" })).toBeVisible();
@@ -128,29 +112,6 @@ test("bootstrap, organizations on their own hosts, sign-in hand-off and reader a
   await expect(page).not.toHaveURL(/\/signin/);
 });
 
-/**
- * Leave the wizard's first-scan step. The production portal's fake scanner runs
- * `--real-git`, so the project has commits waiting for a description and the cost
- * card offers *Later*; with none it offers *Open project* instead.
- */
-async function openAfterFirstScan(page: Page): Promise<void> {
-  const later = page.getByRole("button", { name: "Later", exact: true });
-  const open = page.getByRole("button", { name: "Open project", exact: true });
-  await expect(later.or(open)).toBeVisible();
-  if (await later.isVisible()) await later.click();
-  else await open.click();
-}
-
-/** Wait until a GitHub sign-in (or a password one) has landed back on WhyGraph and rendered. */
-async function signedIn(page: Page): Promise<void> {
-  await expect(page).toHaveURL(
-    (url) =>
-      url.hostname.endsWith(base.hostname) && !/^\/(auth\/|signin)/.test(url.pathname),
-  );
-  await page.waitForLoadState();
-  await expect(page.getByRole("heading").first()).toBeVisible();
-}
-
 /** The scan runs of a project, read in the page (same origin, its own cookies). */
 async function runs(page: Page, slug: string): Promise<{ kind: string; trigger: string; status: string }[]> {
   return page.evaluate(async (s) => {
@@ -169,27 +130,7 @@ test("projects from GitHub: connect, import, scan, members, a push, deleting the
   await signedIn(ben);
   await ben.goto("/orgs/new");
   await createOrg(ben, "Rocket", "rocket");
-  await ben.getByRole("link", { name: "Import from GitHub" }).click();
-  await expect(ben.getByRole("heading", { name: "Import from GitHub" })).toBeVisible();
-
-  // No user authorization yet in this session: Connect GitHub, authorize as
-  // ben on the fake, and the callback page sends him back to the import page.
-  await ben.getByTestId("github-connect").getByRole("button", { name: "Connect GitHub" }).click();
-  await ben.getByRole("link", { name: "Continue as ben" }).click();
-  await expect(ben).toHaveURL(new RegExp(`^${orgUrl("rocket")}/projects/new`));
-  await expect(ben.getByRole("radiogroup", { name: "GitHub accounts" }).getByRole("radio", { name: "ben" })).toBeChecked();
-  await expect(ben.getByTestId("repo-ben/notes")).toBeVisible();
-  await ben.getByTestId("repo-ben/demo").getByRole("button", { name: "Import ben/demo" }).click();
-
-  // The import cloned it: configure, then the first scan (the stub scanner,
-  // which fails on an unreadable token file) completes.
-  await expect(ben).toHaveURL(new RegExp(`/p/demo/init\\?step=configure`));
-  await ben.getByRole("button", { name: "Save and continue" }).click();
-  await expect(ben).toHaveURL(new RegExp(`/p/demo/init\\?step=scan`));
-  await ben.getByRole("button", { name: "Start first scan" }).click();
-  await expect(ben.getByText("First scan complete")).toBeVisible({ timeout: 30_000 });
-  await openAfterFirstScan(ben);
-  await expect(ben).toHaveURL(new RegExp(`/p/demo$`));
+  await importRepo(ben, "rocket", "ben/demo");
   expect((await runs(ben, "demo")).map((r) => r.status)).toEqual(["ok"]);
 
   // Ada, the instance administrator, signs in with a password: she cannot
@@ -214,7 +155,7 @@ test("projects from GitHub: connect, import, scan, members, a push, deleting the
   await signedIn(cy);
   await ben.goto(`${orgUrl("rocket")}/members`);
   await ben.getByLabel("GitHub username").fill("cy");
-  await ben.getByRole("button", { name: "Add member" }).click();
+  await ben.getByRole("button", { name: "Invite", exact: true }).click();
   await expect(ben.getByTestId("member-list")).toContainText("@cy");
   await expect(ben.getByLabel("Role for Cy")).toHaveValue("member");
   await cy.goto(`${orgUrl("rocket")}/`);
@@ -250,5 +191,112 @@ test("projects from GitHub: connect, import, scan, members, a push, deleting the
   await ben.getByLabel("URL name").fill("rocket");
   await ben.getByRole("button", { name: "Create organization" }).click();
   await expect(ben.getByText("That URL name is already taken.")).toBeVisible();
+  await benContext.close();
+});
+
+test("project access: Restricted projects, an invited user's grants, roles and an ownership transfer", async ({
+  browser,
+}) => {
+  // Two sign-ins, two imports with first scans and three more browsers.
+  test.setTimeout(300_000);
+  const context = (login: string) => browser.newContext({ baseURL: env.prodUrl }).then(async (c) => {
+    const page = await c.newPage();
+    await githubSignIn(page, login);
+    await signedIn(page);
+    return { c, page };
+  });
+  const rescan = (page: Page) => page.getByRole("button", { name: "Rescan", exact: true });
+
+  // Ben creates comet, imports both fixture repos and restricts both.
+  const { c: benContext, page: ben } = await context("ben");
+  await ben.goto(`${base.origin}/orgs/new`);
+  await createOrg(ben, "Comet", "comet");
+  await importRepo(ben, "comet", "ben/demo");
+  await importRepo(ben, "comet", "ben/notes");
+  for (const slug of ["demo", "notes"]) {
+    await ben.goto(`${orgUrl("comet")}/p/${slug}/settings`);
+    const access = ben.getByTestId("project-access");
+    await access.getByRole("switch", { name: "Restricted" }).click();
+    await expect(access.getByTestId("access-default")).toContainText("no access (Restricted)");
+  }
+
+  // Ben invites dee, who has never signed in (the fake knows her), as a member
+  // with a Viewer grant on demo only: no message, a link to share.
+  await ben.goto(`${orgUrl("comet")}/members`);
+  await ben.getByLabel("GitHub username").fill("dee");
+  await ben.getByLabel("Access to demo").selectOption("viewer");
+  await ben.getByRole("button", { name: "Invite", exact: true }).click();
+  await expect(ben.getByTestId("invite-pending")).toBeVisible();
+  await expect(ben.getByTestId("invitations")).toContainText("@dee");
+  await expect(ben.getByTestId("invitations")).toContainText("demo (viewer)");
+
+  // Dee signs in and is a member at once: she sees demo, not notes; she may
+  // look but not rescan, and has no Chat.
+  const { c: deeContext, page: dee } = await context("dee");
+  await dee.goto(`${orgUrl("comet")}/`);
+  await expect(dee.getByTestId("project-demo")).toBeVisible();
+  await expect(dee.getByTestId("project-notes")).toHaveCount(0);
+  await dee.goto(`${orgUrl("comet")}/p/demo`);
+  await expect(sidebarLink(dee, "Scans")).toBeVisible();
+  await expect(sidebarLink(dee, "Chat")).toHaveCount(0);
+  await expect(rescan(dee)).toHaveCount(0);
+  // The restricted project she holds no grant on answers as if it did not exist.
+  const notes = await dee.request.get(`${orgUrl("comet")}/api/projects/notes`, { headers: { "X-WhyGraph-Client": "1" } });
+  expect(notes.status()).toBe(404);
+
+  // Ben raises her to Contributor on demo: a plain Rescan, no Full rescan.
+  await ben.goto(`${orgUrl("comet")}/p/demo/settings`);
+  const person = ben.getByTestId("project-access").getByTestId("access-people").getByRole("listitem")
+    .filter({ hasText: "@dee" });
+  await person.getByRole("combobox").selectOption("contributor");
+  await expect(person.getByRole("combobox")).toHaveValue("contributor");
+  await dee.reload();
+  await expect(rescan(dee).first()).toBeVisible();
+  await expect(sidebarLink(dee, "Chat")).toBeVisible();
+  await rescan(dee).first().click();
+  await expect(dee.getByRole("menuitem")).toHaveCount(0);
+  await expect(dee.getByText("Full rescan")).toHaveCount(0);
+  await deeContext.close();
+
+  // Contrast: Ben, a project admin, gets the menu with both choices.
+  await ben.goto(`${orgUrl("comet")}/p/demo`);
+  await rescan(ben).first().click();
+  await expect(ben.getByRole("menuitem", { name: "Quick rescan" })).toBeVisible();
+  await expect(ben.getByRole("menuitem", { name: "Full rescan" })).toBeVisible();
+  await ben.keyboard.press("Escape");
+
+  // Cy signs in, Ben adds him, then hands him the organization (typed slug).
+  const { c: cyContext, page: cy } = await context("cy");
+  await ben.goto(`${orgUrl("comet")}/members`);
+  await ben.getByLabel("GitHub username").fill("cy");
+  await ben.getByRole("button", { name: "Invite", exact: true }).click();
+  await expect(ben.getByTestId("member-list")).toContainText("@cy");
+  await ben.goto(`${orgUrl("comet")}/settings`);
+  const ownership = ben.getByTestId("org-ownership");
+  await ownership.getByLabel("New owner").selectOption({ label: "Cy" });
+  await ownership.getByRole("button", { name: "Transfer ownership" }).click();
+  const dialog = ben.getByTestId("transfer-dialog");
+  await dialog.getByLabel("Type comet to confirm").fill("comet");
+  await dialog.getByRole("button", { name: "Transfer ownership" }).click();
+  await expect(ben.getByTestId("org-ownership")).toHaveCount(0);
+
+  // Cy, now the owner, finds all of it on the audit page. The writer batches
+  // for up to a second, so poll with reloads.
+  await cy.goto(`${orgUrl("comet")}/audit`);
+  const table = cy.getByTestId("audit-table");
+  await expect
+    .poll(
+      async () => {
+        await cy.reload();
+        await expect(table).toBeVisible();
+        const text = await table.innerText();
+        return ["invitation_created", "project_restricted_changed", "project_grant_changed", "org_ownership_transferred"]
+          .filter((e) => !text.includes(e));
+      },
+      { timeout: 30_000 },
+    )
+    .toEqual([]);
+  await expect(table).toContainText("@ben");
+  await cyContext.close();
   await benContext.close();
 });

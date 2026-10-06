@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { adminApi, type AdminUser } from "../api";
+import { AuditTable } from "../components/portal/AuditTable";
 import { CopyButton } from "../components/portal/CopyButton";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
@@ -157,6 +158,13 @@ export function AdminPage() {
             ))}
           </ul>
         )}
+      </section>
+      <section className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5" data-testid="admin-audit">
+        <div>
+          <h2 className="text-sm font-semibold">Security events</h2>
+          <p className="text-xs text-muted-foreground">Sign-ins, instance administration and deleted organizations' events.</p>
+        </div>
+        <AuditTable scope="admin" />
       </section>
     </div>
   );

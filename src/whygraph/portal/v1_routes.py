@@ -75,6 +75,7 @@ from whygraph.mcp.evidence import (
 )
 from whygraph.mcp.path_history import area_history_commits
 from whygraph.mcp.rationale import (
+    GenerationNotPermitted,
     NoEvidenceError,
     RationaleGenerationError,
     rationale_card,
@@ -337,6 +338,10 @@ def _mapped_errors() -> Iterator[None]:
         yield
     except NoEvidenceError as exc:
         raise ApiError(404, str(exc), code="no_evidence") from None
+    except GenerationNotPermitted as exc:
+        # A viewer's cache miss (M2f-1 plan section 4.6): ahead of the
+        # generic WhyGraphError below, which would answer 422.
+        raise ApiError(403, str(exc), code="generation_not_permitted") from None
     except (RationaleGenerationError, AnalyzeError, LlmError):
         missing = _missing_key(get_config(), ("rationale",))
         if missing is not None:

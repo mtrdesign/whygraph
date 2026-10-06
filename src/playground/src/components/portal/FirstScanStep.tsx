@@ -3,6 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { portalApi, portalKey, projectApi, projectKey } from "../../api";
+import { can } from "../../lib/permissions";
 import { useScanRun } from "../../lib/scanRun";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
@@ -41,7 +42,9 @@ export function FirstScanStep({ slug }: { slug: string }) {
 
   const start = useMutation({
     mutationFn: (k: Kind) =>
-      projectApi(slug).requestScan(k === "describe" ? { trigger: "describe" } : { trigger: "manual" }),
+      projectApi(slug).requestScan(
+        k === "describe" ? { trigger: "describe" } : { trigger: "manual", analyze: false },
+      ),
     onSuccess: ({ run_id }, k) => {
       setKind(k);
       setRunId(run_id);
@@ -58,6 +61,8 @@ export function FirstScanStep({ slug }: { slug: string }) {
     }
   }, [run.finished, queryClient, slug]);
 
+  // Retrying a describe run spends tokens, so it needs the full-scan action.
+  const mayRetry = kind !== "describe" || can(project.data, "project.scan_full");
   const openProject = () => void navigate({ to: "/p/$slug", params: { slug } });
 
   if (project.isLoading) return <p className="text-sm text-muted-foreground">Loading…</p>;
@@ -92,9 +97,11 @@ export function FirstScanStep({ slug }: { slug: string }) {
           <AlertDescription>{message}</AlertDescription>
         </Alert>
         <div className="flex gap-2">
-          <Button onClick={() => start.mutate(kind)} disabled={start.isPending}>
-            Try again
-          </Button>
+          {mayRetry && (
+            <Button onClick={() => start.mutate(kind)} disabled={start.isPending}>
+              Try again
+            </Button>
+          )}
           <Button variant="outline" onClick={openProject}>
             Open project anyway
           </Button>

@@ -253,17 +253,70 @@ A GitHub account has no password: the password form, change and reset link do no
 ## Members
 
 An organization's people are its **members**, each an `owner`, `admin` or `member`. People are added by
-**exact GitHub username**, with no search and no autocomplete, and only if that person has **already
-signed in to this instance once**; otherwise the answer is "No one with that GitHub username has signed
-in to WhyGraph yet", so ask them to sign in first. Adding is direct: there is no invitation and no
-acceptance step, and the person sees the organization in their picker at once. Adding is throttled to
-60 per hour per organization.
+**exact GitHub username**, with no search and no autocomplete. If that person has already signed in to
+this instance, they are added at once and see the organization in their picker. If not, they get an
+**invitation** instead, and the organization shows them as pending (see [Invitations](#invitations)).
+A username that is not a GitHub user (an organization's login counts) is refused with "No one with that
+GitHub username exists". Adding is throttled to 60 per hour per organization.
+
+### Organization roles
 
 | Who | Can |
 |---|---|
-| **Member** | Read the organization and its projects, use Chat and start a scan. |
-| **Admin** | Everything a member can, plus import and remove projects, manage people - add members and admins, change their roles and remove them - and the per-project settings and keys. Cannot make or touch an owner. |
-| **Owner** | Everything an admin can, plus make or demote an owner, remove an owner, change the organization's settings and organization-level keys, and [delete the organization](#deleting-an-organization). |
+| **Member** | Read the organization. What a member can do on each project comes from their [project role](#project-roles). |
+| **Admin** | Everything a member can, plus import and remove projects, manage people (add members and admins, change their roles, remove them), and administer every project. Cannot make or touch an owner. |
+| **Owner** | Everything an admin can, plus make or demote an owner, remove an owner, change the organization's settings and organization-level keys, read the [audit page](#the-security-event-log), transfer ownership and [delete the organization](#deleting-an-organization). |
+
+Admins and owners are admins of every project in the organization, always, and cannot be Restricted out
+of one.
+
+### Project roles
+
+A member's role on a project is the one granted to them on it, or else the organization's default (see
+[Restricted projects and the default](#restricted-projects-and-the-default)).
+
+| | Viewer | Contributor | Admin |
+|---|---|---|---|
+| See the project, its overview and scan history | yes | yes | yes |
+| Explorer: graph, evidence, history and **existing** rationale cards | yes | yes | yes |
+| Connect agents ("Use with your agent", linked local portals) | yes | yes | yes |
+| Explorer: generate a **new** rationale card | - | yes | yes |
+| Chat | - | yes | yes |
+| Quick rescan (git and CodeGraph, no LLM) | - | yes | yes |
+| Full rescan and Describe now (LLM) | - | - | yes |
+| Settings, keys and the project's access list | - | - | yes |
+
+A viewer never causes LLM spend: no chat, no new rationale card and no lazy description backfill,
+whether they use the Explorer, a connected portal or an agent.
+
+### Restricted projects and the default
+
+The organization's **default project role** (`contributor`, `viewer` or `none`) is what a member gets on
+a project they have no grant on. The owner sets it under the organization's settings. A project's admin
+can mark the project **Restricted**: then only admins, owners and people with an explicit grant can see
+it, whatever the default. A project a person cannot see is not found for them (404), in lists, in
+URLs and over the API. Grants are managed on the project's **Access** tab. Promoting someone to admin or
+owner drops their grants, since the role already covers every project. When a person loses access (the
+project turns Restricted, the default drops to `none`, a grant is removed or the person is demoted),
+their [connection tokens](#connected-portals) for that project are revoked at once.
+
+### Invitations
+
+An invitation names a GitHub username, an organization role and, optionally, project grants (not for
+admins and owners). **No mail is sent**: tell the person to sign in to this instance with that GitHub
+account. On their next sign-in the invitation is redeemed, they become a member and the grants are
+applied. An invitation is valid for 14 days and there is one open invitation per person per
+organization. Admins can revoke it from the members page, and only owners can revoke an owner
+invitation.
+
+### Ownership transfer and renaming
+
+- **Transfer.** An owner can make another member the owner and become an admin in one step, by typing
+  the organization's slug to confirm.
+- **Rename.** An owner can change the organization's display name. The slug (and so the host) never
+  changes.
+
+### Other rules
 
 - **The last owner is protected.** An organization's final owner cannot be demoted, removed or leave.
 - **Leaving.** Anyone can leave an organization from its members page. Someone added against their will
@@ -290,8 +343,8 @@ list of organizations and the [self-check](#the-self-check).
   proxy log. Using it sets the new password and signs out every session of that user.
 - **Read access to every organization.** An admin who is not a member of an organization can still
   open it, **read-only** (GET requests only), under a "Viewing as instance admin" banner. Each such
-  request is written to the security event log. Explorer views can still trigger the lazy backfill
-  with that organization's keys, exactly as a member's views do.
+  request is written to the security event log. These reads never trigger the lazy description
+  backfill, so an admin's reading spends none of the organization's LLM keys.
 - **There is no admin mode.** Admin powers are always on for the session, so a stolen admin cookie
   gives up to 30 days of reading every organization and issuing reset links. Protect admin accounts:
   a long unique passphrase, a trusted device, and the event log below.
@@ -380,7 +433,7 @@ repository and push; the next fetch checks again and clears the mark.
 
 ### Removing a project
 
-Owners and admins remove a project from its settings, by typing the project's name. That deletes the
+Only organization admins and owners remove a project (a project admin who is only a project role holder cannot), from its settings, by typing the project's name. That deletes the
 server copy - with its history, descriptions, rationale cards and chat sessions - and every scan of
 it. The repository on GitHub is not touched; importing it again starts from scratch.
 
@@ -475,10 +528,14 @@ plus these GitHub, member, project and organization events:
 | `github_login_released` | A username moved to another account and was taken from the older one. |
 | `member_added`, `member_add_refused` | A member was added, or the attempt was refused (with the reason and the username tried). |
 | `member_role_changed`, `member_removed`, `member_left` | A role changed, or someone was removed or left. |
+| `invitation_created`, `invitation_revoked`, `member_joined_by_invite` | An invitation was made or revoked, or redeemed at sign-in. |
+| `project_grant_added`, `project_grant_changed`, `project_grant_removed` | A project grant changed. |
+| `project_restricted_changed` | A project was marked or unmarked Restricted. |
+| `org_renamed`, `org_default_role_changed`, `org_ownership_transferred` | An owner renamed the organization, changed its default project role or transferred ownership. |
 | `user_disabled`, `user_enabled` | An instance admin disabled or enabled an account. |
 | `github_app_authorized` | Someone authorized the GitHub App, or installed it, from the import page. |
 | `github_account_mismatch` | That authorization was for a different GitHub account than the signed-in one, and was refused. |
-| `project_imported` | A repository was imported. |
+| `project_imported`, `project_removed` | A repository was imported, or a project was removed. |
 | `connection_authorized`, `connection_token_issued`, `connection_token_refused`, `connection_revoked` | A member allowed a connected portal, its token was issued, a token exchange was refused, or a token was revoked (with the reason). |
 | `project_access_lost`, `project_access_restored` | A project lost its GitHub access (with the reason), or got it back. |
 | `webhook_rejected` | A webhook delivery had a missing or wrong signature. |
@@ -486,14 +543,23 @@ plus these GitHub, member, project and organization events:
 
 Each carries the event, the user, the target user, the client address and the host. A password
 sign-in failure shows only the first 3 characters of the email and its domain. No token, code, state,
-secret or password is ever logged.
+secret or password is ever logged or stored: every value passes through token redaction first.
 
-They go to the portal's normal log: `docker compose logs portal`. A persistent audit table is not part
-of this release, so ship the log somewhere if you need history.
+They go to the portal's normal log (`docker compose logs portal`) and, in production, **also to the
+portal's database**, where they are kept for **400 days** and then deleted.
+
+- **The audit page.** Owners see an **Audit** page for their organization, filterable by event, person
+  and date, 50 events to a page. **Download CSV** exports the same filter (at most 50,000 rows). A cell
+  that starts with `=`, `+`, `-` or `@` is prefixed with `'` so a spreadsheet does not run it.
+- **Instance admins** have the same list on `/admin` for events that belong to no organization and for
+  organizations that were deleted.
+- Rows record **attempts**, so a refused action is there too. A busy portal drops rows rather than
+  slowing requests (and logs a warning); the log line is always written.
+- An instance admin's reads are recorded at most once per hour per organization.
 
 ## What isn't there yet
 
-- **Email**: no verification and no reset mail (GitHub sign-in needs none), and no invitations: members are added directly.
+- **Email**: no verification and no reset mail (GitHub sign-in needs none). An invitation sends no mail either: the person has to be told to sign in.
 - **Agents and MCP**: there is no `/mcp` endpoint in production, and a server copy gets no agent
   files or git hooks. Agents reach a production portal's projects through a developer's
   [connected portal](#connected-portals).

@@ -770,7 +770,12 @@ def test_creating_an_org_makes_the_caller_its_owner(claimed: TestClient) -> None
     assert claimed.get(at() + "/api/account/orgs").json()[0]["role"] == "owner"
     # And the org host serves her straight away.
     state = claimed.get(at("quokka") + "/api/portal/state").json()
-    assert state["org"] == {"slug": "quokka", "name": "Quokka", "role": "owner"}
+    assert state["org"] == {
+        "slug": "quokka",
+        "name": "Quokka",
+        "role": "owner",
+        "default_project_role": "contributor",
+    }
 
 
 @pytest.mark.parametrize("slug", ["Quokka", "-bad", "a" * 41, "", "xn--abc", "api"])
@@ -923,7 +928,12 @@ def test_an_instance_admin_reads_an_org_they_do_not_belong_to(
 ) -> None:
     client = signed_in_admin(world.client)
     state = client.get(at("quokka") + "/api/portal/state").json()
-    assert state["org"] == {"slug": "quokka", "name": "Quokka", "role": "reader"}
+    assert state["org"] == {
+        "slug": "quokka",
+        "name": "Quokka",
+        "role": "reader",
+        "default_project_role": "contributor",
+    }
     assert client.get(at("quokka") + "/api/projects").status_code == 200
     # Demoting the admin removes the access on the very next request.
     promoted = client.patch(
@@ -958,7 +968,8 @@ def test_every_security_event_is_logged_once_with_its_fields(
         github_sign_in(client, "ben")
         ben = uid_of_login("ben")
         with portal_db.get_session() as session:  # inserted: no event
-            session.add(User(display_name="Cy", github_id=2002, github_login="cy"))
+            # Cy's GitHub id in the fake: adding resolves the login on GitHub.
+            session.add(User(display_name="Cy", github_id=1002, github_login="cy"))
         cy = uid_of_login("cy")
         create_org(client, "quokka", "Quokka")
         members = at("quokka") + "/api/org/members"
@@ -1055,7 +1066,7 @@ def test_every_security_event_is_logged_once_with_its_fields(
     assert by_event["reset_link_issued"]["uid"] == ada
     assert by_event["reset_link_issued"]["target"] == ann
     assert by_event["admin_granted"]["target"] == ann
-    assert by_event["member_add_refused"]["reason"] == "no_such_user"
+    assert by_event["member_add_refused"]["reason"] == "no_such_github_user"
     assert by_event["member_add_refused"]["github_login"] == "nobody"
     added = [r for r in records if r["event"] == "member_added"]
     assert [(r["uid"], r["target"], r["role"]) for r in added] == [

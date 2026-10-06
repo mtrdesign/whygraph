@@ -49,7 +49,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import registry
 from sqlmodel import Field, SQLModel
 
-from .authz import ROLES
+from .authz import DEFAULT_PROJECT_ROLES, PROJECT_ROLES, ROLES
 from .orgs import ORG_SLUG_SQL_CHECK, validate_org_slug
 from .projects import validate_slug
 
@@ -67,6 +67,7 @@ REVOKED_REASONS: tuple[str, ...] = (
     "project_deleted",
     "org_deleted",
     "idle",
+    "project_access_removed",
 )
 """Why a connection token was revoked (``connection_tokens.revoked_reason``)."""
 LINK_STATUSES: tuple[str, ...] = (
@@ -177,6 +178,9 @@ class Organization(PortalBase, table=True):
         Display name.
     created_at : str
         ISO-8601 UTC timestamp.
+    default_project_role : str
+        What a member holds on a project they have no grant on: one of
+        :data:`~whygraph.portal.authz.DEFAULT_PROJECT_ROLES`.
     """
 
     __tablename__ = "organizations"
@@ -184,6 +188,10 @@ class Organization(PortalBase, table=True):
         UniqueConstraint("uid", name="uq_organizations_uid"),
         UniqueConstraint("slug", name="uq_organizations_slug"),
         CheckConstraint(ORG_SLUG_SQL_CHECK, name="ck_organizations_slug"),
+        CheckConstraint(
+            _in("default_project_role", DEFAULT_PROJECT_ROLES),
+            name="ck_organizations_default_project_role",
+        ),
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -191,6 +199,7 @@ class Organization(PortalBase, table=True):
     slug: str = Field(sa_type=Text)
     name: str = Field(sa_type=Text)
     created_at: str = Field(default_factory=_now, sa_type=Text)
+    default_project_role: str = Field(default="contributor", sa_type=Text)
 
 
 class Membership(PortalBase, table=True):
@@ -425,6 +434,9 @@ class Project(PortalBase, table=True):
     access_lost_at, access_lost_reason : str or None
         When and why the portal lost access to the repo (app uninstalled,
         repo removed or deleted); ``NULL`` while it has access.
+    restricted : bool
+        When true only org admins / owners and users with a
+        :class:`ProjectGrant` can see the project.
     """
 
     __tablename__ = "projects"
@@ -473,6 +485,7 @@ class Project(PortalBase, table=True):
     default_branch: str | None = Field(default=None, sa_type=Text)
     access_lost_at: str | None = Field(default=None, sa_type=Text)
     access_lost_reason: str | None = Field(default=None, sa_type=Text)
+    restricted: bool = Field(default=False, sa_column=Column(Boolean, nullable=False))
 
 
 class RetiredOrgSlug(PortalBase, table=True):
@@ -790,6 +803,9 @@ class PlatformLink(PortalBase, table=True):
         ISO-8601 UTC timestamp of the last status change.
     last_platform_head : str or None
         The platform's ``last_scanned_head`` as last seen.
+    remote_project_role : str or None
+        The caller's role on the platform project, as the platform last
+        reported it; ``NULL`` until seen.
     """
 
     __tablename__ = "platform_links"
@@ -817,6 +833,226 @@ class PlatformLink(PortalBase, table=True):
     status_reason: str | None = Field(default=None, sa_type=Text)
     status_at: str = Field(default_factory=_now, sa_type=Text)
     last_platform_head: str | None = Field(default=None, sa_type=Text)
+    remote_project_role: str | None = Field(default=None, sa_type=Text)
+
+
+class ProjectGrant(PortalBase, table=True):
+    """A per-user override of the default project role on one project (M2f-1).
+
+    A grant replaces the org default for that user (it can lower as well as
+    raise). It goes with the project and with the user's membership.
+
+    Attributes
+    ----------
+    org_id, project_id, user_id : int
+        The organization, the project (in it) and the member; the primary
+        key is ``(project_id, user_id)``.
+    role : str
+        One of :data:`~whygraph.portal.authz.PROJECT_ROLES`.
+    granted_by : int or None
+        ``users.id`` of the granter; ``NULL`` when that user is gone.
+    created_at : str
+        ISO-8601 UTC timestamp.
+    """
+
+    __tablename__ = "project_grants"
+    __table_args__ = (
+        PrimaryKeyConstraint("project_id", "user_id", name="pk_project_grants"),
+        CheckConstraint(_in("role", PROJECT_ROLES), name="ck_project_grants_role"),
+        ForeignKeyConstraint(
+            ["org_id", "project_id"],
+            ["projects.org_id", "projects.id"],
+            name="fk_project_grants_project",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["org_id", "user_id"],
+            ["memberships.org_id", "memberships.user_id"],
+            name="fk_project_grants_membership",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["granted_by"],
+            ["users.id"],
+            name="fk_project_grants_granted_by",
+            ondelete="SET NULL",
+        ),
+        Index("ix_project_grants_user_id", "user_id"),
+    )
+
+    org_id: int = Field()
+    project_id: int = Field()
+    user_id: int = Field()
+    role: str = Field(sa_type=Text)
+    granted_by: int | None = Field(default=None)
+    created_at: str = Field(default_factory=_now, sa_type=Text)
+
+
+class Invitation(PortalBase, table=True):
+    """An invitation of a GitHub user to an organization (M2f-1).
+
+    Attributes
+    ----------
+    uid : str
+        Stable UUID4.
+    org_id : int
+        The inviting organization.
+    github_id : int
+        GitHub's numeric user id - the identity an invitation is matched by.
+    github_login : str
+        The login as GitHub returned it; display only.
+    role : str
+        One of :data:`~whygraph.portal.authz.ROLES`.
+    invited_by, redeemed_by : int or None
+        ``users.id``; ``NULL`` when the user is gone or nobody redeemed yet.
+    created_at, expires_at : str
+        ISO-8601 UTC timestamps.
+    redeemed_at, revoked_at : str or None
+        Set when the invitation is closed; at most one open invitation
+        exists per ``(org_id, github_id)``.
+    """
+
+    __tablename__ = "invitations"
+    __table_args__ = (
+        UniqueConstraint("uid", name="uq_invitations_uid"),
+        # The target of invitation_grants' composite foreign key.
+        UniqueConstraint("org_id", "id", name="uq_invitations_org_id"),
+        CheckConstraint(_in("role", ROLES), name="ck_invitations_role"),
+        ForeignKeyConstraint(
+            ["org_id"],
+            ["organizations.id"],
+            name="fk_invitations_org",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["invited_by"],
+            ["users.id"],
+            name="fk_invitations_invited_by",
+            ondelete="SET NULL",
+        ),
+        ForeignKeyConstraint(
+            ["redeemed_by"],
+            ["users.id"],
+            name="fk_invitations_redeemed_by",
+            ondelete="SET NULL",
+        ),
+        Index(
+            "uq_invitations_open",
+            "org_id",
+            "github_id",
+            unique=True,
+            postgresql_where=text("redeemed_at IS NULL AND revoked_at IS NULL"),
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    uid: str = Field(default_factory=_uid, sa_type=Text)
+    org_id: int = Field()
+    github_id: int = Field(sa_type=BigInteger)
+    github_login: str = Field(sa_type=Text)
+    role: str = Field(sa_type=Text)
+    invited_by: int | None = Field(default=None)
+    created_at: str = Field(default_factory=_now, sa_type=Text)
+    expires_at: str = Field(sa_type=Text)
+    redeemed_at: str | None = Field(default=None, sa_type=Text)
+    revoked_at: str | None = Field(default=None, sa_type=Text)
+    redeemed_by: int | None = Field(default=None)
+
+
+class InvitationGrant(PortalBase, table=True):
+    """A project grant an invitation carries, applied when it is redeemed (M2f-1).
+
+    Attributes
+    ----------
+    invitation_id, project_id : int
+        The invitation and the project (the primary key).
+    org_id : int
+        The organization both belong to (composite foreign keys tie them).
+    role : str
+        One of :data:`~whygraph.portal.authz.PROJECT_ROLES`.
+    """
+
+    __tablename__ = "invitation_grants"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "invitation_id", "project_id", name="pk_invitation_grants"
+        ),
+        CheckConstraint(_in("role", PROJECT_ROLES), name="ck_invitation_grants_role"),
+        ForeignKeyConstraint(
+            ["org_id", "invitation_id"],
+            ["invitations.org_id", "invitations.id"],
+            name="fk_invitation_grants_invitation",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["org_id", "project_id"],
+            ["projects.org_id", "projects.id"],
+            name="fk_invitation_grants_project",
+            ondelete="CASCADE",
+        ),
+    )
+
+    invitation_id: int = Field()
+    org_id: int = Field()
+    project_id: int = Field()
+    role: str = Field(sa_type=Text)
+
+
+class AuditEvent(PortalBase, table=True):
+    """One persisted security event (M2f-1, written by the audit writer).
+
+    Attributes
+    ----------
+    created_at : str
+        ISO-8601 UTC timestamp.
+    org_id : int or None
+        The organization; ``NULL`` for org-less events or a deleted org.
+    org_slug : str or None
+        Snapshot of the org slug, so a deleted org's events stay readable.
+    actor_id : int or None
+        ``users.id`` of the actor; ``NULL`` when none or the user is gone.
+    actor_label : str or None
+        Snapshot of how the actor was named (``@login`` or an email).
+    event : str
+        The event name.
+    target : str or None
+        What the event is about.
+    ip : str or None
+        The client address, when known.
+    fields : dict
+        Already-redacted extra fields.
+    """
+
+    __tablename__ = "audit_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["org_id"],
+            ["organizations.id"],
+            name="fk_audit_events_org",
+            ondelete="SET NULL",
+        ),
+        ForeignKeyConstraint(
+            ["actor_id"],
+            ["users.id"],
+            name="fk_audit_events_actor",
+            ondelete="SET NULL",
+        ),
+        Index("ix_audit_events_org_id_id", "org_id", text("id DESC")),
+        Index("ix_audit_events_event", "event"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True, sa_type=BigInteger)
+    created_at: str = Field(default_factory=_now, sa_type=Text)
+    org_id: int | None = Field(default=None)
+    org_slug: str | None = Field(default=None, sa_type=Text)
+    actor_id: int | None = Field(default=None)
+    actor_label: str | None = Field(default=None, sa_type=Text)
+    event: str = Field(sa_type=Text)
+    target: str | None = Field(default=None, sa_type=Text)
+    ip: str | None = Field(default=None, sa_type=Text)
+    fields: dict[str, Any] = Field(
+        default_factory=dict, sa_column=Column(JSON, nullable=False)
+    )
 
 
 @event.listens_for(Project, "before_insert")

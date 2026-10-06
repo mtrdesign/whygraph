@@ -81,6 +81,10 @@ PORTAL_TABLES = {
     "retired_org_slugs",
     "connection_tokens",
     "platform_links",
+    "project_grants",
+    "invitations",
+    "invitation_grants",
+    "audit_events",
 }
 
 
@@ -228,7 +232,8 @@ TENANCY = "4ebfd8b89904"
 GITHUB = "b7d2c9a41e63"
 PROJECTS = "73bf248ea6fd"
 CONNECTIONS = "c4e7a19b52d8"
-HEAD = CONNECTIONS
+ACCESS = "d8a31f6c07e5"
+HEAD = ACCESS
 
 
 def _seed_m2a(conn) -> dict[str, int]:  # noqa: ANN001
@@ -534,7 +539,8 @@ def test_github_identity_constraints_and_index(empty_portal_database: str) -> No
 
 _INSERT_PROJECT = text(
     "INSERT INTO projects (org_id, slug, name, source, root, github_repo_id, "
-    "created_at) VALUES (:org, :slug, :slug, 'github', :root, :repo, 'now')"
+    "created_at, restricted) VALUES (:org, :slug, :slug, 'github', :root, :repo, "
+    "'now', false)"
 )
 
 
@@ -689,7 +695,8 @@ def test_github_projects_downgrade_round_trip(empty_portal_database: str) -> Non
         ),
         (
             "INSERT INTO projects (org_id, slug, name, source, root, github_repo_id, "
-            "created_at) VALUES (:org, 'gh', 'gh', 'github', 'repos/gh', 7, 'now')",
+            "created_at, restricted) VALUES (:org, 'gh', 'gh', 'github', "
+            "'repos/gh', 7, 'now', false)",
             "imported GitHub projects",
         ),
         (
@@ -709,8 +716,8 @@ def test_github_projects_downgrade_refuses_m2d2_data(
     with portal_db.get_engine().begin() as conn:
         project = conn.execute(
             text(
-                "INSERT INTO projects (org_id, slug, name, source, root, created_at) "
-                "VALUES (:org, 'api', 'API', 'local', '/r/api', 'now') RETURNING id"
+                "INSERT INTO projects (org_id, slug, name, source, root, created_at, restricted) "
+                "VALUES (:org, 'api', 'API', 'local', '/r/api', 'now', false) RETURNING id"
             ),
             {"org": org},
         ).scalar_one()
@@ -718,6 +725,42 @@ def test_github_projects_downgrade_refuses_m2d2_data(
     portal_db._reset_engine()
     with pytest.raises(RuntimeError, match=match):
         command.downgrade(portal_db.alembic_config(), GITHUB)
+    portal_db._reset_engine()
+    with portal_db.get_engine().connect() as conn:
+        assert conn.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar() == (HEAD)
+
+
+@pytest.mark.parametrize(
+    "seed",
+    [
+        "UPDATE projects SET restricted = true",
+        "UPDATE organizations SET default_project_role = 'viewer'",
+        "INSERT INTO invitations (uid, org_id, github_id, github_login, role, "
+        "created_at, expires_at) VALUES ('i-1', :org, 1, 'octo', 'member', "
+        "'now', 'later')",
+    ],
+)
+def test_access_downgrade_refuses_m2f1_data(
+    empty_portal_database: str, seed: str
+) -> None:
+    portal_db.ensure_initialized()
+    with portal_db.get_session() as s:
+        org = builtin_org_id(s)
+        s.commit()
+    with portal_db.get_engine().begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO projects (org_id, slug, name, source, root, created_at, restricted) "
+                "VALUES (:org, 'api', 'API', 'local', '/r/api', 'now', false)"
+            ),
+            {"org": org},
+        )
+        conn.execute(text(seed), {"org": org})
+    portal_db._reset_engine()
+    with pytest.raises(RuntimeError, match="access revision"):
+        command.downgrade(portal_db.alembic_config(), CONNECTIONS)
     portal_db._reset_engine()
     with portal_db.get_engine().connect() as conn:
         assert conn.execute(
@@ -1165,8 +1208,9 @@ def test_org_slug_format_is_checked_in_the_database(data: Path) -> None:
         with portal_db.get_engine().begin() as conn:
             conn.execute(
                 text(
-                    "INSERT INTO organizations (uid, slug, name, created_at) "
-                    "VALUES ('u1', 'Bad Slug', 'x', 'now')"
+                    "INSERT INTO organizations (uid, slug, name, created_at, "
+                    "default_project_role) VALUES ('u1', 'Bad Slug', 'x', 'now', "
+                    "'contributor')"
                 )
             )
 

@@ -11,6 +11,7 @@ const REASONS: Record<RevokedReason, string> = {
   project_deleted: "The project was deleted",
   org_deleted: "The organization was deleted",
   idle: "Unused for too long",
+  project_access_removed: "Your access to the project was removed",
 };
 
 export function revokedLabel(reason: RevokedReason | string | null): string {

@@ -1,4 +1,5 @@
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { PROJECT_ACTIONS } from "../lib/permissions";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
@@ -54,6 +55,9 @@ function summary(slug: string, over: Json = {}): Json {
     created_at: "2026-01-01T00:00:00+00:00",
     root_status: "ok",
     running_scan: null,
+    restricted: false,
+    my_role: "admin",
+    permissions: PROJECT_ACTIONS,
     stale: null,
     ...over,
   };
@@ -693,7 +697,7 @@ describe("First scan", () => {
 
     // The first scan is a plain manual request; the backend records it as `initial`.
     await waitFor(() => expect(posts("/api/projects/alpha/scans")).toHaveLength(1));
-    expect(posts("/api/projects/alpha/scans")[0].body).toEqual({ trigger: "manual" });
+    expect(posts("/api/projects/alpha/scans")[0].body).toEqual({ trigger: "manual", analyze: false });
     const eventsCall = fake.log.find((c) => c.path === "/api/projects/alpha/scans/7/events");
     expect(eventsCall).toBeTruthy();
 

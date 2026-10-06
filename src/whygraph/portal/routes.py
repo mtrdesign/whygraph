@@ -95,7 +95,16 @@ from whygraph.services.github import (
 
 from . import connections, sessions
 from .audit import audit
-from .authz import Action, OrgAccess, Role, authorize
+from .authz import (
+    PROJECT_ROLE_ACTIONS,
+    Action,
+    OrgAccess,
+    ProjectRole,
+    Role,
+    authorize,
+    effective_project_role,
+    project_allowed,
+)
 from .config_layers import ConfigPolicyError, find_secret_paths, load_layer, save_layer
 from .context import build_project_context, resolve_root
 from .db import get_session
@@ -112,6 +121,7 @@ from .deps import (
     principal_of,
     project_access,
     project_db_access,
+    project_role_for,
     unsafe_path_error,
 )
 from .github_app import (
@@ -134,6 +144,7 @@ from .models import (
     PlatformLink,
     Project,
     ProjectAgent,
+    ProjectGrant,
     ScanRun,
     Secret,
     User,
@@ -172,6 +183,7 @@ from .runner import (
     RunNotFound,
     RunnerUnavailable,
     ManagedOnPlatform,
+    ScanForbidden,
     SourceNotAllowed,
     log_tail,
     remove_run_files,
@@ -365,6 +377,8 @@ def _org_dict(access: OrgAccess | None) -> dict | None:
         "slug": access.org_slug,
         "name": access.org_name,
         "role": str(access.role),
+        # What a member holds on a project they have no grant on (M2f-1).
+        "default_project_role": access.default_project_role,
     }
 
 
@@ -664,7 +678,12 @@ def _active_run(session: Session, project_id: int) -> dict | None:
     ).first()
     if run is None:
         return None
-    return {"id": run.id, "status": run.status, "trigger": run.trigger}
+    return {
+        "id": run.id,
+        "status": run.status,
+        "trigger": run.trigger,
+        "analyze": run.analyze,
+    }
 
 
 FINISHED_STATUSES: tuple[str, ...] = ("ok", "failed", "interrupted", "cancelled")
@@ -693,8 +712,18 @@ def _github_full_name(project: Project) -> str | None:
     return f"{parts[1]}/{parts[2]}" if len(parts) == 3 else None
 
 
+def _permissions(role: ProjectRole) -> list[str]:
+    """The project actions ``role`` may perform, in declaration order (the wire form)."""
+    return [str(a) for a in Action if a in PROJECT_ROLE_ACTIONS[role]]
+
+
 def _summary(
-    session: Session, project: Project, root: Path, *, mode: str | None
+    session: Session,
+    project: Project,
+    root: Path,
+    *,
+    mode: str | None,
+    role: ProjectRole,
 ) -> dict:
     status = root_status(root)
     full_name = _github_full_name(project)
@@ -740,6 +769,11 @@ def _summary(
         # deep links into the platform's SPA (M2e plan section 4.11);
         # `null` for every other source.
         "link": link,
+        # The caller's access (M2f-1 plan section 4.10): the SPA gates every
+        # project control on `permissions`, never on role names.
+        "restricted": project.restricted,
+        "my_role": str(role),
+        "permissions": _permissions(role),
     }
 
 
@@ -749,7 +783,7 @@ def _details(state: PortalState, project: BoundProject) -> dict:
         row = session.get(Project, project.id)
         if row is None:
             raise ApiError(404, f"project {project.slug!r} not found")
-        body = _summary(session, row, project.root, mode=state.mode)
+        body = _summary(session, row, project.root, mode=state.mode, role=project.role)
         body["agents"] = sorted(
             a.agent
             for a in session.exec(
@@ -1096,10 +1130,12 @@ def put_defaults(
 def list_projects(
     request: Request, access: OrgAccess = Depends(org_access(Action.ORG_READ))
 ) -> dict:
-    """Every project of the request's org, with its status.
+    """Every project of the request's org the caller has access to, with its status.
 
-    A linked project's ``link.status`` is the **recorded** one: a link whose
-    status is older than
+    One query with the caller's grants left-joined; a project whose
+    effective role is ``None`` (Restricted without a grant, or the org
+    default ``none``) is left out. A linked project's ``link.status`` is
+    the **recorded** one: a link whose status is older than
     :data:`~whygraph.portal.linked.REFRESH_AFTER_SEC` is queued for the
     lifespan's refresh task instead, so the listing never waits on a
     platform (plan section 4.11).
@@ -1107,15 +1143,34 @@ def list_projects(
     state = portal_state(request)
     with get_session() as session:
         rows = session.exec(
-            select(Project)
+            select(Project, ProjectGrant.role)
+            .outerjoin(
+                ProjectGrant,
+                (ProjectGrant.project_id == Project.id)
+                & (ProjectGrant.user_id == access.user_id),
+            )
             .where(Project.org_id == access.org_id)
             .order_by(Project.name)
         ).all()
-        body = {
-            "projects": [
-                _summary(session, p, resolve_root(p), mode=state.mode) for p in rows
-            ]
-        }
+        projects = []
+        for project, grant in rows:
+            role = effective_project_role(
+                access.role,
+                access.default_project_role,
+                project.restricted,
+                None if grant is None else ProjectRole(grant),
+            )
+            if role is not None:
+                projects.append(
+                    _summary(
+                        session,
+                        project,
+                        resolve_root(project),
+                        mode=state.mode,
+                        role=role,
+                    )
+                )
+        body = {"projects": projects}
         for project_id in due_for_refresh(session, access.org_id):
             state.link_refresh.schedule(project_id)
         return body
@@ -1157,7 +1212,9 @@ def add_project(
         row = session.get(Project, project_id)
         assert row is not None
         session.expunge(row)
-    project = bound_from(row, ctx)
+    # The caller holds ORG_ADD_PROJECT, so they are an org admin or owner:
+    # a project admin on every project.
+    project = bound_from(row, ctx, ProjectRole.ADMIN)
     with use_project(ctx):
         details = _details(state, project)
     if detected is None:
@@ -1427,6 +1484,7 @@ def _add_platform(
                     token_hint=hint_for(entry.token),
                     status="ok",
                     last_platform_head=project.last_scanned_head,
+                    remote_project_role=project.project_role,
                 )
             )
     except IntegrityError as exc:
@@ -1473,10 +1531,10 @@ def _reconnect(state: PortalState, project_id: int, entry: PendingLink) -> None:
 
     Replaces the token (encrypted) and hint, clears the status back to
     ``ok``, and refreshes what the exchange just told us about the platform
-    project (its name - which the local name follows - its head and default
-    branch). The token it supersedes is revoked on the platform best effort,
-    after the row is written, so a slow platform cannot leave the row
-    half-updated.
+    project (its name - which the local name follows - its head, default
+    branch and the caller's project role). The token it supersedes is
+    revoked on the platform best effort, after the row is written, so a slow
+    platform cannot leave the row half-updated.
     """
     superseded = _link_of(project_id)
     reply = entry.reply
@@ -1495,6 +1553,7 @@ def _reconnect(state: PortalState, project_id: int, entry: PendingLink) -> None:
         row.status_reason = None
         row.status_at = _now()
         row.last_platform_head = reply.project.last_scanned_head
+        row.remote_project_role = reply.project.project_role
         session.add(row)
         local = session.get(Project, project_id)
         if local is not None and local.name != reply.project.name:
@@ -1764,6 +1823,7 @@ def _import_github(
             "project_imported",
             request,
             uid=principal.uid,
+            org_id=access.org_id,
             org=access.org_slug,
             repo_id=repo.id,
             full_name=repo.full_name,
@@ -1818,8 +1878,9 @@ def patch_project(
 @projects_router.delete("/{slug}")
 def delete_project(
     request: Request,
-    project: BoundProject = Depends(project_access(Action.PROJECT_SETUP)),
+    project: BoundProject = Depends(project_access(Action.ORG_REMOVE_PROJECT)),
     body: DeleteProjectBody | None = Body(default=None),
+    principal: Principal = Depends(current_user),
 ) -> dict:
     """Unregister a project (plan section 4.5.5).
 
@@ -1835,6 +1896,7 @@ def delete_project(
     ``<data dir>/repos``. The project's run files (``runs/<id>.jsonl``,
     ``.log``, ``.token``) are deleted with its row, and its connection
     tokens are revoked (``project_deleted``) in the row's transaction.
+    A completed removal is audited as ``project_removed``.
 
     For a **linked** project this is "Remove from this machine" (plan
     section 4.11): this machine's connection token is revoked on the
@@ -1847,9 +1909,20 @@ def delete_project(
     body = body or DeleteProjectBody()
     try:
         with state.runner.reserve_removal(project.id):
-            return _remove_project(state, project, body)
+            result = _remove_project(state, project, body)
     except ProjectBusy as exc:
         raise ApiError(409, str(exc)) from exc
+    audit(
+        "project_removed",
+        request,
+        uid=principal.uid,
+        org_id=project.org_id,
+        org=request.scope.get("state", {}).get("org_slug"),
+        project=project.slug,
+        source=project.source,
+        checkout_deleted=result["checkout_deleted"],
+    )
+    return result
 
 
 def _remove_project(
@@ -2270,6 +2343,12 @@ async def post_scan(
     source_not_allowed``. On a production GitHub project the run is a sync
     that fetches first, then scans; one that lost its GitHub access is a
     ``409 github_access_lost``.
+
+    The route's action is ``project.scan`` (the quick scan); a request
+    that would describe commits - ``manual`` without ``analyze: false``,
+    a body-less one, or ``describe`` - also needs ``project.scan_full``,
+    checked by the runner under its lock (a first scan is structure-only,
+    so it never is): ``403 forbidden`` with ``action: "project.scan_full"``.
     """
     body = body or ScanBody()
     state = portal_state(request)
@@ -2279,8 +2358,14 @@ async def post_scan(
         )
     try:
         run_id = await state.runner.request_scan(
-            project, trigger=body.trigger, analyze=body.analyze, principal=principal
+            project,
+            trigger=body.trigger,
+            analyze=body.analyze,
+            principal=principal,
+            may_spend=project_allowed(project.role, Action.PROJECT_SCAN_FULL),
         )
+    except ScanForbidden as exc:
+        raise _scan_full_forbidden(project) from exc
     except RunnerUnavailable as exc:
         raise ApiError(501, str(exc)) from exc
     except ProjectBusy as exc:
@@ -2305,6 +2390,17 @@ async def post_scan(
             409, str(exc), code="github_access_lost", reason=exc.reason
         ) from exc
     return {"run_id": run_id}
+
+
+def _scan_full_forbidden(project: BoundProject) -> ApiError:
+    """The ``403`` for a full (LLM-spending) run the caller's role cannot start or cancel."""
+    action = Action.PROJECT_SCAN_FULL
+    return ApiError(
+        403,
+        f"your role on this project ({project.role}) cannot {action}",
+        code="forbidden",
+        action=str(action),
+    )
 
 
 @projects_router.get("/{slug}/scans")
@@ -2345,8 +2441,10 @@ def _stream_access(
     Built from the request's own session cookie and org, so each call
     re-runs :func:`~whygraph.portal.sessions.lookup` (sign-out, expiry,
     disabling) and :func:`load_org_access` (removal, demotion of an
-    instance admin) - each in its own database session - and requires
-    ``PROJECT_READ`` on ``project`` through
+    instance admin) - each in its own database session - re-reads the
+    caller's project role (:func:`~whygraph.portal.deps.project_role_for`:
+    a removed grant, a project made Restricted, a demotion under the
+    default ``none``) and requires ``PROJECT_READ`` on ``project`` through
     :func:`~whygraph.portal.authz.authorize`. Local mode has one user and
     never re-checks.
     """
@@ -2365,8 +2463,10 @@ def _stream_access(
         )
         if access is None:
             return False
+        with get_session() as db:
+            role = project_role_for(db, access, project.id)
         try:
-            authorize(access, Action.PROJECT_READ, project)
+            authorize(access, Action.PROJECT_READ, project, project_role=role)
         except ApiError:
             return False
         return True
@@ -2416,9 +2516,18 @@ async def cancel_scan(
     A running run ends ``cancelled`` once its child exits (SIGTERM, then
     SIGKILL after 10 s); its event stream closes with that status. ``404``
     for an unknown run or another project's, ``409`` for a finished one.
+    Cancelling a full (LLM-spending) run needs ``project.scan_full``, the
+    action that would start one - decided by the runner under its lock, so
+    a full request merged into a queued run counts (``403 forbidden``).
     """
     try:
-        was = await portal_state(request).runner.cancel(project.id, run_id)
+        was = await portal_state(request).runner.cancel(
+            project.id,
+            run_id,
+            may_cancel_full=project_allowed(project.role, Action.PROJECT_SCAN_FULL),
+        )
+    except ScanForbidden as exc:
+        raise _scan_full_forbidden(project) from exc
     except RunNotFound as exc:
         raise ApiError(404, f"run {run_id} not found") from exc
     except RunFinished as exc:

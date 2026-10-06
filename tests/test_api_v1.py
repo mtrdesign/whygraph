@@ -275,12 +275,18 @@ def test_status_and_error_out() -> None:
             "last_scan_at": "2026-01-01T00:00:00+00:00",
             "access_lost": False,
             "role": "member",
+            "project_role": "viewer",
             "added_later": True,
         }
     )
-    assert status.role == "member"
-    with pytest.raises(ValidationError):
-        StatusOut.model_validate({"slug": "s", "name": "n", "role": "reader"})
+    assert (status.role, status.project_role) == ("member", "viewer")
+    for bad in (
+        {"role": "reader", "project_role": "viewer"},
+        {"role": "member", "project_role": "owner"},
+        {"role": "member"},
+    ):
+        with pytest.raises(ValidationError):
+            StatusOut.model_validate({"slug": "s", "name": "n", **bad})
     error = ErrorOut.model_validate(
         {"error": "nope", "code": "token_revoked", "reason": "left"}
     )

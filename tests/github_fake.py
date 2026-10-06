@@ -19,7 +19,10 @@ use and expire, failures are **200 with an ``error`` field**,
 
 * web: ``GET /login/oauth/authorize``, ``POST /login/oauth/access_token``
 * API (the GHES shape, under ``/api/v3``): ``GET /user``,
-  ``DELETE /applications/{client_id}/token``
+  ``DELETE /applications/{client_id}/token`` and (M2f-1) the public profile
+  ``GET /users/{login}`` (case-insensitive; answered with valid client
+  basic auth or none, ``401`` for wrong credentials; each call is recorded
+  in :attr:`FakeGitHub.user_lookups` with whether basic auth was valid)
 
 M2d-2 (plan section 4.11) adds the **GitHub App**, enabled by the ``app_*``
 constructor arguments: user authorization on the same authorize / token
@@ -107,6 +110,8 @@ class FakeUser:
     name: str | None
     avatar_url: str
     two_factor: bool = True
+    type: str = "User"
+    """``"User"``, or ``"Organization"`` for an org account (M2f-1)."""
 
 
 @dataclass
@@ -225,6 +230,9 @@ class FakeGitHub:
     repos : dict[int, FakeRepo]
     installation_tokens : dict[str, _InstallationToken]
         Minted ``ghs_`` tokens (set ``expires`` / ``revoked`` to age one).
+    user_lookups : list[tuple[str, bool]]
+        ``(login asked for, client credentials valid)`` per ``GET
+        /users/{login}``, in order.
     """
 
     def __init__(
@@ -269,6 +277,7 @@ class FakeGitHub:
         self.tokens: dict[str, _Token] = {}
         self.requests: list[httpx.Request] = []
         self.granted_scope: str | None = None
+        self.user_lookups: list[tuple[str, bool]] = []
         self._forced: dict[str, list[_Forced]] = {}
         self._lock = threading.RLock()
         for ident, (login, tfa) in enumerate(
@@ -285,8 +294,13 @@ class FakeGitHub:
         id: int | None = None,  # noqa: A002
         two_factor: bool = True,
         name: str | None = None,
+        account_type: str = "User",
     ) -> FakeUser:
-        """Add an account; ``id`` defaults to the next free integer."""
+        """Add an account; ``id`` defaults to the next free integer.
+
+        ``account_type="Organization"`` makes an org account: it has a
+        public profile but cannot sign in or be a WhyGraph member.
+        """
         with self._lock:
             ident = (
                 id
@@ -299,6 +313,7 @@ class FakeGitHub:
                 name=name if name is not None else login.capitalize(),
                 avatar_url=f"https://avatars.example.test/u/{ident}",
                 two_factor=two_factor,
+                type=account_type,
             )
             self.users[login] = user
             return user
@@ -329,7 +344,8 @@ class FakeGitHub:
         Parameters
         ----------
         route : str
-            ``"authorize"``, ``"access_token"``, ``"user"`` or ``"revoke"``;
+            ``"authorize"``, ``"access_token"``, ``"user"``, ``"users"``
+            (``GET /users/{login}``) or ``"revoke"``;
             the GitHub App's ``"install"``, ``"app_token"``,
             ``"repo_installation"``, ``"user_installations"``,
             ``"installation_repos"``, ``"repository"`` and ``"git"``.
@@ -563,6 +579,10 @@ class FakeGitHub:
                 route, fn = "access_token", self._access_token
             elif request.method == "GET" and path == f"{API_PREFIX}/user":
                 route, fn = "user", self._user
+            elif request.method == "GET" and re.fullmatch(
+                rf"{API_PREFIX}/users/[^/]+", path
+            ):
+                route, fn = "users", self._public_user
             elif request.method == "DELETE" and path.startswith(
                 f"{API_PREFIX}/applications/"
             ):
@@ -825,6 +845,30 @@ class FakeGitHub:
         if "read:user" in {s.strip() for s in entry.scope.split(",")}:
             body["two_factor_authentication"] = user.two_factor
         return httpx.Response(200, json=body)
+
+    def _public_user(self, request: httpx.Request) -> httpx.Response:
+        """``GET /users/{login}``: the public profile, OAuth App basic auth optional."""
+        login = unquote(request.url.path.rsplit("/", 1)[1])
+        sent = self._basic(request) is not None
+        valid = sent and self._basic_ok(request)
+        self.user_lookups.append((login, valid))
+        if sent and not valid:
+            return httpx.Response(401, json={"message": "Bad credentials"})
+        user = next(
+            (u for u in self.users.values() if u.login.lower() == login.lower()), None
+        )
+        if user is None:
+            return httpx.Response(404, json={"message": "Not Found"})
+        return httpx.Response(
+            200,
+            json={
+                "id": user.id,
+                "login": user.login,
+                "name": user.name,
+                "avatar_url": user.avatar_url,
+                "type": user.type,
+            },
+        )
 
     def _revoke(self, request: httpx.Request) -> httpx.Response:
         client_id = request.url.path[len(f"{API_PREFIX}/applications/") :].split("/")[0]

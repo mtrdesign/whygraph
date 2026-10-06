@@ -47,6 +47,7 @@ chat ``StreamingResponse`` generator by Starlette's threadpool helpers.
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 from dataclasses import dataclass
 from functools import partial
@@ -65,7 +66,7 @@ import anyio
 import anyio.to_thread
 from fastapi import Depends, Request
 from fastapi.responses import JSONResponse
-from sqlmodel import select
+from sqlmodel import Session, select
 from starlette.datastructures import Headers
 from starlette.types import Scope
 
@@ -74,7 +75,15 @@ from whygraph.core.context import ProjectContext, use_project
 from whygraph.core.safe_paths import UnsafePathError
 
 from .audit import audit
-from .authz import Action, OrgAccess, Role, authorize
+from .authz import (
+    PROJECT_ACTIONS,
+    Action,
+    OrgAccess,
+    ProjectRole,
+    Role,
+    authorize,
+    effective_project_role,
+)
 from .context import ContextCache, ProjectNotFound, resolve_root
 from . import connections, sessions
 from .db import InstanceLock, get_session
@@ -82,7 +91,7 @@ from .github_app import UserTokens
 from .hosts import BaseUrl, classify
 from .linked import LinkRefresh
 from .migrate import ProjectMigrations
-from .models import Membership, Organization, Project, User
+from .models import Membership, Organization, Project, ProjectGrant, User
 from .orgs import is_valid_org_slug
 from .paths import check_project_paths
 from .platform_pending import PendingConnects, PendingLinks
@@ -432,6 +441,11 @@ class PortalState:
     member_add_org : Throttle
         Every ``POST /api/org/members`` attempt, per org id: 60 / hour, so
         the route cannot probe which usernames have accounts at scale.
+    github_lookup : Throttle
+        Anonymous GitHub user lookups (``GET /users/{login}`` retried without
+        the OAuth App's credentials after GitHub refused them), instance-wide
+        (one key): 50 / hour, under GitHub's anonymous 60 / hour per IP
+        (M2f-1 plan section 0.3 #3).
     import_org : Throttle
         GitHub imports that passed the access checks, per org id: 30 / hour
         (M2d-2 plan section 4.12).
@@ -519,6 +533,7 @@ class PortalState:
         self.reset_ip = Throttle(10, 15 * 60)
         self.github_ip = Throttle(60, 15 * 60)
         self.member_add_org = Throttle(60, 60 * 60)
+        self.github_lookup = Throttle(50, 60 * 60)
         self.import_org = Throttle(30, 60 * 60)
         self.user_tokens = UserTokens()
         self.webhook_deliveries = DeliveryIds()
@@ -705,29 +720,45 @@ def load_org_access(
         ``None`` when the org does not exist (or the slug is malformed) or
         the user is neither a member of it nor an instance admin - callers
         answer both the same way. A real membership wins over ``READER``.
+        Carries ``user_id`` and the org's ``default_project_role`` (for the
+        project role :func:`bind_project` computes).
     """
     if not is_valid_org_slug(org_slug):
         return None
     with get_session() as session:
         row = session.exec(
             select(
-                Organization.id, Organization.slug, Organization.name, Membership.role
+                Organization.id,
+                Organization.slug,
+                Organization.name,
+                Organization.default_project_role,
+                Membership.role,
             )
             .join(Membership, Membership.org_id == Organization.id)
             .where(Organization.slug == org_slug, Membership.user_id == user_id)
         ).first()
         if row is None and instance_admin:
             org = session.exec(
-                select(Organization.id, Organization.slug, Organization.name).where(
-                    Organization.slug == org_slug
-                )
+                select(
+                    Organization.id,
+                    Organization.slug,
+                    Organization.name,
+                    Organization.default_project_role,
+                ).where(Organization.slug == org_slug)
             ).first()
             if org is not None:
                 row = (*org, Role.READER.value)
     if row is None:
         return None
-    org_id, slug, name, role = row
-    return OrgAccess(org_id=org_id, org_slug=slug, org_name=name, role=Role(role))
+    org_id, slug, name, default_project_role, role = row
+    return OrgAccess(
+        org_id=org_id,
+        org_slug=slug,
+        org_name=name,
+        role=Role(role),
+        user_id=user_id,
+        default_project_role=default_project_role,
+    )
 
 
 async def current_org(
@@ -771,6 +802,7 @@ async def current_org(
             "reader_request",
             request,
             uid=principal.uid,
+            org_id=access.org_id,
             org=access.org_slug,
             method=request.method,
             path=request.url.path,
@@ -799,6 +831,9 @@ class BoundProject:
         The absolute repository root.
     ctx : ProjectContext
         The context bound for the request.
+    role : ProjectRole
+        The caller's effective role on the project (never ``None``: a
+        caller without access is refused before a project is bound).
     """
 
     id: int
@@ -813,6 +848,7 @@ class BoundProject:
     last_scan_at: str | None
     created_at: str
     ctx: ProjectContext
+    role: ProjectRole
 
     @property
     def db_path(self) -> Path:
@@ -820,16 +856,72 @@ class BoundProject:
         return Path(self.ctx.config.whygraph_db or self.root / ".whygraph/whygraph.db")
 
 
-def _lookup(org_id: int, slug: str) -> Project | None:
+def _grant_role(role: str | None) -> ProjectRole | None:
+    return None if role is None else ProjectRole(role)
+
+
+def _lookup(
+    org_id: int, slug: str, user_id: int
+) -> tuple[Project, ProjectRole | None] | None:
+    """The project ``slug`` in ``org_id`` and ``user_id``'s grant on it (one query)."""
     if not is_valid_slug(slug):
         return None
     with get_session() as session:
-        project = session.exec(
-            select(Project).where(Project.org_id == org_id, Project.slug == slug)
+        row = session.exec(
+            select(Project, ProjectGrant.role)
+            .outerjoin(
+                ProjectGrant,
+                (ProjectGrant.project_id == Project.id)
+                & (ProjectGrant.user_id == user_id),
+            )
+            .where(Project.org_id == org_id, Project.slug == slug)
         ).first()
-        if project is not None:
-            session.expunge(project)
-        return project
+        if row is None:
+            return None
+        project, grant = row
+        session.expunge(project)
+        return project, _grant_role(grant)
+
+
+def project_role_for(
+    db: Session, access: OrgAccess, project_id: int
+) -> ProjectRole | None:
+    """Re-read the caller's effective role on ``project_id`` from the database.
+
+    A :class:`BoundProject` is a snapshot; this re-reads
+    ``projects.restricted`` and the caller's grant (the org default and
+    role come from ``access``, so pass a fresh :func:`load_org_access`).
+
+    Parameters
+    ----------
+    db : Session
+        An open portal DB session.
+    access : OrgAccess
+        The caller's (fresh) access to the project's org.
+    project_id : int
+        ``projects.id``.
+
+    Returns
+    -------
+    ProjectRole or None
+        The effective role; ``None`` without access or when the project is
+        gone (or belongs to another org).
+    """
+    row = db.exec(
+        select(Project.restricted, ProjectGrant.role)
+        .outerjoin(
+            ProjectGrant,
+            (ProjectGrant.project_id == Project.id)
+            & (ProjectGrant.user_id == access.user_id),
+        )
+        .where(Project.id == project_id, Project.org_id == access.org_id)
+    ).first()
+    if row is None:
+        return None
+    restricted, grant = row
+    return effective_project_role(
+        access.role, access.default_project_role, restricted, _grant_role(grant)
+    )
 
 
 async def bind_project(
@@ -843,11 +935,17 @@ async def bind_project(
     """Resolve ``slug`` in the caller's org, authorize, build its context.
 
     The order is load-bearing: the lookup is scoped to ``access.org_id``
-    (another org's project is simply not found), and
+    (another org's project is simply not found), the caller's effective
+    project role is computed from the same query (the grant join), a
+    caller without access gets the very same ``404`` as for an unknown
+    slug (a Restricted project cannot be probed), and
     :func:`~whygraph.portal.authz.authorize` runs **before** the context
     is built, so a refused request never reaches
     :meth:`ContextCache.get` (which decrypts the project's secrets).
-    No binding and no initialized gate.
+    No binding and no initialized gate. A *viewer* gets a copy of the
+    cached context with ``llm_allowed=False`` (no lazy backfill, no
+    generation on a cache miss - M2f-1 plan section 4.6); everyone else
+    gets the cached object itself, which is never mutated.
 
     Parameters
     ----------
@@ -866,33 +964,45 @@ async def bind_project(
     Returns
     -------
     BoundProject
-        The snapshot and context.
+        The snapshot, its context and the caller's project role.
 
     Raises
     ------
     ApiError
-        ``404`` for a slug unknown (or malformed) in the org, or naming
-        another project than ``project_id``; ``403`` (``code="forbidden"``)
-        when the role lacks ``action``; ``400`` when the stored config no
-        longer validates.
+        ``404`` for a slug unknown (or malformed) in the org, naming
+        another project than ``project_id``, or a project the caller has
+        no access to (every action, org actions included); ``403``
+        (``code="forbidden"``) when the role lacks ``action``; ``400`` when
+        the stored config no longer validates.
     """
-    project = await anyio.to_thread.run_sync(_lookup, access.org_id, slug)
-    if project is None or project.id is None:
+    found = await anyio.to_thread.run_sync(_lookup, access.org_id, slug, access.user_id)
+    if found is None or found[0].id is None:
         raise ApiError(404, f"project {slug!r} not found")
+    project, grant = found
     if project_id is not None and project.id != project_id:
         raise ApiError(404, f"project {slug!r} not found")
-    authorize(access, action, project)
+    role = effective_project_role(
+        access.role, access.default_project_role, project.restricted, grant
+    )
+    if role is None:
+        # The same body as an unknown slug: existence must not leak.
+        raise ApiError(404, f"project {slug!r} not found")
+    authorize(access, action, project, project_role=role)
     try:
         ctx = await state.contexts.aget(project.id)
     except ProjectNotFound as exc:
         raise ApiError(404, f"project {slug!r} not found") from exc
     except ConfigError as exc:
         raise ApiError(400, f"invalid project config: {exc}") from exc
-    return bound_from(project, ctx)
+    if role is ProjectRole.VIEWER:
+        ctx = dataclasses.replace(ctx, llm_allowed=False)
+    return bound_from(project, ctx, role)
 
 
-def bound_from(project: Project, ctx: ProjectContext) -> BoundProject:
-    """Snapshot a loaded ``projects`` row together with its context."""
+def bound_from(
+    project: Project, ctx: ProjectContext, role: ProjectRole
+) -> BoundProject:
+    """Snapshot a loaded ``projects`` row with its context and the caller's role."""
     assert project.id is not None
     return BoundProject(
         id=project.id,
@@ -907,6 +1017,7 @@ def bound_from(project: Project, ctx: ProjectContext) -> BoundProject:
         last_scan_at=project.last_scan_at,
         created_at=project.created_at,
         ctx=ctx,
+        role=role,
     )
 
 
@@ -1177,7 +1288,15 @@ def org_access(action: Action) -> Callable[..., Awaitable[OrgAccess]]:
         :func:`~whygraph.portal.authz.authorize` passed: ``404`` outside
         the org (:func:`current_org`), ``403`` for a role without
         ``action``.
+
+    Raises
+    ------
+    ValueError
+        At build time (import), for a project action: those need a bound
+        project (:func:`project_access`).
     """
+    if action in PROJECT_ACTIONS:
+        raise ValueError(f"{action} is a project action; use project_access()")
 
     async def dependency(access: OrgAccess = Depends(current_org)) -> OrgAccess:
         authorize(access, action)
@@ -1340,6 +1459,7 @@ __all__ = [
     "principal_of",
     "project_access",
     "project_db_access",
+    "project_role_for",
     "require_base_host",
     "require_initialized",
     "require_local",

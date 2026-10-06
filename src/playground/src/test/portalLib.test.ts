@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { PROJECT_ACTIONS } from "../lib/permissions";
 import { ApiError, projectApi, type ProjectSummary } from "../api";
 import { addProjectError } from "../lib/errors";
 import {
@@ -247,6 +248,9 @@ function project(over: Partial<ProjectSummary> = {}): ProjectSummary {
     created_at: "2026-01-01T00:00:00+00:00",
     root_status: "ok",
     running_scan: null,
+    restricted: false,
+    my_role: "admin",
+    permissions: PROJECT_ACTIONS,
     stale: null,
     source_supported: true,
     access_lost: false,

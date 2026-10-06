@@ -314,3 +314,101 @@ def test_rationale_brief_backfill_failure_does_not_block_rationale(
     # Rationale still succeeds — backfill is best-effort.
     result = whygraph_rationale_brief(path="sample.py", line_start=1, line_end=3)
     assert result["purpose"] == "Holds two sample lines."
+
+
+# ---- a viewer's context never spends (M2f-1 plan section 4.6) ------------
+
+
+def _viewer_ctx(root: Path, db_path: Path):  # noqa: ANN202
+    from whygraph.core.config import Config
+    from whygraph.core.context import ProjectContext
+
+    return ProjectContext(
+        slug="viewer", root=root, config=Config(whygraph_db=db_path), llm_allowed=False
+    )
+
+
+def _forbid_llm_factories(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Make every LLM factory record and raise; return the record."""
+    built: list[str] = []
+
+    class _Refuse:
+        @classmethod
+        def from_config(cls, _cfg: object) -> None:
+            built.append(cls.__name__)
+            raise AssertionError("an LLM client was built")
+
+    class _Descriptor(_Refuse):
+        pass
+
+    class _Generator(_Refuse):
+        pass
+
+    def make_chat_client(*args: object, **kwargs: object) -> None:
+        built.append("chat")
+        raise AssertionError("a chat client was built")
+
+    monkeypatch.setattr("whygraph.analyze.LlmDescriptor", _Descriptor)
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _Generator)
+    monkeypatch.setattr("whygraph.serve.chat.make_chat_client", make_chat_client)
+    return built
+
+
+def test_a_viewer_context_skips_the_description_backfill(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whygraph.core.context import use_project
+    from whygraph.mcp.evidence import backfill_evidence_descriptions, collect_evidence
+    from whygraph.mcp.targets import Target
+
+    newest_sha, oldest_sha = _seed_two_commits_with_nulls(temp_git_repo)
+    built = _forbid_llm_factories(monkeypatch)
+    target = Target(path="sample.py", line_start=1, line_end=3, qualified_name=None)
+
+    with use_project(_viewer_ctx(temp_git_repo, whygraph_db_initialized)):
+        evidence = collect_evidence(target, limit=20)
+        assert len(evidence) == 2
+        backfill_evidence_descriptions(evidence, target_path="sample.py")
+
+    assert built == []
+    with get_session() as session:
+        for sha in (newest_sha, oldest_sha):
+            assert session.get(Commit, sha).llm_description is None
+
+
+def test_a_viewer_context_is_served_a_cached_card_and_never_generates(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whygraph.core.context import use_project
+    from whygraph.mcp.evidence import collect_evidence
+    from whygraph.mcp.rationale import GenerationNotPermitted, rationale_card
+    from whygraph.mcp.targets import Target
+
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    built = _forbid_llm_factories(monkeypatch)
+    viewer = _viewer_ctx(temp_git_repo, whygraph_db_initialized)
+    target = Target(path="sample.py", line_start=1, line_end=3, qualified_name=None)
+    charged: list[bool] = []
+
+    with use_project(viewer):
+        evidence = collect_evidence(target, limit=20)
+        with pytest.raises(GenerationNotPermitted, match="viewer"):
+            rationale_card(
+                target, evidence, before_generate=lambda: charged.append(True)
+            )
+    assert (built, charged) == ([], [])  # refused before any budget or client
+
+    # Generated once by someone who may (no context bound: the CLI default) ...
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _FakeGenerator)
+    rationale_card(target, collect_evidence(target, limit=20))
+    built = _forbid_llm_factories(monkeypatch)
+    # ... the viewer is then served it from the cache.
+    with use_project(viewer):
+        card = rationale_card(target, collect_evidence(target, limit=20))
+    assert card["purpose"] == "Holds two sample lines."
+    assert built == []

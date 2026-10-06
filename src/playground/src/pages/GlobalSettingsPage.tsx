@@ -1,18 +1,13 @@
 import { useState } from "react";
+import { toast } from "sonner";
 import { Link } from "@tanstack/react-router";
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { orgsApi, portalApi, portalKey } from "../api";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { membersApi, orgSettingsApi, orgsApi, portalApi, portalKey, type Member } from "../api";
 import { ConfigForm } from "../components/portal/ConfigForm";
+import { Field, nativeSelectClass } from "../components/portal/Field";
+import { TypedConfirmDialog } from "../components/portal/TypedConfirmDialog";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "../components/ui/dialog";
 import { Input } from "../components/ui/input";
 import { authMessage } from "../lib/authErrors";
 import { canOwn, isProduction, usePortalState, useReadOnly, useRole } from "../lib/identity";
@@ -28,20 +23,12 @@ type Cleared = { slug: string; provider: string }[];
  */
 function DeleteOrganization({ slug, name, baseUrl }: { slug: string; name: string; baseUrl: string }) {
   const [open, setOpen] = useState(false);
-  const [typed, setTyped] = useState("");
   const projects = useQuery({ queryKey: portalKey("projects"), queryFn: portalApi.projects });
   const count = projects.data?.projects.length;
   const remove = useMutation({
-    mutationFn: () => orgsApi.remove(typed),
+    mutationFn: () => orgsApi.remove(slug),
     onSuccess: () => void hardNavigate(`${new URL(baseUrl).origin}/orgs`),
   });
-  const close = (o: boolean) => {
-    setOpen(o);
-    if (!o) {
-      setTyped("");
-      remove.reset();
-    }
-  };
 
   return (
     <section
@@ -57,53 +44,174 @@ function DeleteOrganization({ slug, name, baseUrl }: { slug: string; name: strin
         </p>
       </div>
       <div>
-        <Button variant="destructive" onClick={() => setOpen(true)}>
+        <Button
+          variant="destructive"
+          onClick={() => {
+            remove.reset();
+            setOpen(true);
+          }}
+        >
           Delete organization
         </Button>
       </div>
-      <Dialog open={open} onOpenChange={close}>
-        <DialogContent data-testid="delete-org-dialog">
-          <DialogHeader>
-            <DialogTitle>Delete {name}?</DialogTitle>
-            <DialogDescription>
-              {count === undefined
-                ? "Every project of this organization is deleted with it."
-                : count === 1
-                  ? "Its 1 project is deleted with it."
-                  : `Its ${count} projects are deleted with it.`}{" "}
-              Running scans are cancelled. The repositories on GitHub are not changed.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="flex flex-col gap-1.5">
-            <label htmlFor="confirm-org-slug" className="text-sm">
-              Type <span className="font-mono font-medium">{slug}</span> to confirm
-            </label>
-            <Input
-              id="confirm-org-slug"
-              value={typed}
-              onChange={(e) => setTyped(e.target.value)}
-              autoComplete="off"
-            />
-          </div>
-          {remove.isError && (
-            <Alert variant="destructive" data-testid="delete-org-error">
-              <AlertDescription>{authMessage(remove.error)}</AlertDescription>
-            </Alert>
-          )}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => close(false)}>
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              disabled={typed !== slug || remove.isPending}
-              onClick={() => remove.mutate()}
-            >
-              {remove.isPending ? "Deleting…" : "Delete organization"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <TypedConfirmDialog
+        open={open}
+        onOpenChange={setOpen}
+        testId="delete-org-dialog"
+        errorTestId="delete-org-error"
+        title={`Delete ${name}?`}
+        description={
+          <>
+            {count === undefined
+              ? "Every project of this organization is deleted with it."
+              : count === 1
+                ? "Its 1 project is deleted with it."
+                : `Its ${count} projects are deleted with it.`}{" "}
+            Running scans are cancelled. The repositories on GitHub are not changed.
+          </>
+        }
+        expected={slug}
+        confirmLabel="Delete organization"
+        pendingLabel="Deleting…"
+        pending={remove.isPending}
+        error={remove.isError ? authMessage(remove.error) : null}
+        onConfirm={() => remove.mutate()}
+      />
+    </section>
+  );
+}
+
+const DEFAULT_ROLE_OPTIONS: { value: "contributor" | "viewer" | "none"; label: string }[] = [
+  { value: "contributor", label: "Contributor - read, chat and quick rescans" },
+  { value: "viewer", label: "Viewer - read only" },
+  { value: "none", label: "None - only people given access see a project" },
+];
+
+/** General (production, owners): the organization's name and the default project role. */
+function OrgGeneral({ name, defaultRole }: { name: string; defaultRole: string }) {
+  const queryClient = useQueryClient();
+  const [draft, setDraft] = useState(name);
+  const [role, setRole] = useState(defaultRole);
+  const save = useMutation({
+    mutationFn: () =>
+      orgSettingsApi.patch({
+        ...(draft.trim() !== name ? { name: draft.trim() } : {}),
+        ...(role !== defaultRole ? { default_project_role: role as "contributor" | "viewer" | "none" } : {}),
+      }),
+    onSuccess: async () => {
+      toast.success("Organization settings saved");
+      await queryClient.invalidateQueries({ queryKey: portalKey("state") });
+    },
+  });
+  const dirty = draft.trim() !== name || role !== defaultRole;
+  return (
+    <section
+      aria-label="General"
+      className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5"
+      data-testid="org-general"
+    >
+      <h2 className="text-sm font-semibold">General</h2>
+      <Field label="Organization name">
+        {(p) => <Input {...p} value={draft} onChange={(e) => setDraft(e.target.value)} />}
+      </Field>
+      <Field
+        label="Default project role"
+        hint="What a member gets on a project they have no grant on. A project marked Restricted ignores it."
+      >
+        {(p) => (
+          <select {...p} className={nativeSelectClass} value={role} onChange={(e) => setRole(e.target.value)}>
+            {DEFAULT_ROLE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        )}
+      </Field>
+      {save.isError && (
+        <Alert variant="destructive" data-testid="org-general-error">
+          <AlertDescription>{authMessage(save.error)}</AlertDescription>
+        </Alert>
+      )}
+      <div>
+        <Button disabled={!dirty || !draft.trim() || save.isPending} onClick={() => save.mutate()}>
+          {save.isPending ? "Saving…" : "Save organization"}
+        </Button>
+      </div>
+    </section>
+  );
+}
+
+/** Ownership (production, owners): hand the organization to another member. */
+function Ownership({ slug, name, me }: { slug: string; name: string; me: string | undefined }) {
+  const queryClient = useQueryClient();
+  const members = useQuery({ queryKey: portalKey("members"), queryFn: membersApi.list });
+  const candidates = (members.data ?? []).filter((m) => m.uid !== me && m.role !== "owner" && !m.disabled);
+  const [target, setTarget] = useState("");
+  const [open, setOpen] = useState(false);
+  const transfer = useMutation({
+    mutationFn: () => orgSettingsApi.transfer(target, slug),
+    onSuccess: async () => {
+      setOpen(false);
+      setTarget("");
+      toast.success("Ownership transferred. You are now an admin.");
+      await queryClient.invalidateQueries({ queryKey: portalKey("state") });
+      await queryClient.invalidateQueries({ queryKey: portalKey("members") });
+    },
+  });
+  const chosen = candidates.find((m) => m.uid === target);
+  const label = (m: Member) => m.display_name || (m.github_login ? `@${m.github_login}` : m.uid);
+  return (
+    <section
+      aria-label="Ownership"
+      className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5"
+      data-testid="org-ownership"
+    >
+      <div>
+        <h2 className="text-sm font-semibold">Ownership</h2>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          Make another member the owner of {name}. You become an admin. To share ownership instead, give
+          someone the owner role on the Members page.
+        </p>
+      </div>
+      <Field label="New owner">
+        {(p) => (
+          <select {...p} className={nativeSelectClass} value={target} onChange={(e) => setTarget(e.target.value)}>
+            <option value="">Choose a member</option>
+            {candidates.map((m) => (
+              <option key={m.uid} value={m.uid}>
+                {label(m)}
+              </option>
+            ))}
+          </select>
+        )}
+      </Field>
+      <div>
+        <Button
+          variant="outline"
+          disabled={!target}
+          onClick={() => {
+            transfer.reset();
+            setOpen(true);
+          }}
+        >
+          Transfer ownership
+        </Button>
+      </div>
+      <TypedConfirmDialog
+        open={open}
+        onOpenChange={setOpen}
+        testId="transfer-dialog"
+        errorTestId="transfer-error"
+        title={`Transfer ${name} to ${chosen ? label(chosen) : "this member"}?`}
+        description="They become the owner and you become an admin. Only the new owner can give ownership back."
+        expected={slug}
+        confirmLabel="Transfer ownership"
+        pendingLabel="Transferring…"
+        pending={transfer.isPending}
+        error={transfer.isError ? authMessage(transfer.error) : null}
+        onConfirm={() => transfer.mutate()}
+      />
     </section>
   );
 }
@@ -163,12 +271,22 @@ export function GlobalSettingsPage() {
           </AlertDescription>
         </Alert>
       )}
+      {isProduction(state) && editable && org && (
+        <OrgGeneral
+          key={`${org.name}|${org.default_project_role ?? ""}`}
+          name={org.name}
+          defaultRole={org.default_project_role ?? "contributor"}
+        />
+      )}
       <ConfigForm
         scope={{ kind: "global" }}
         submitLabel="Save"
         readOnly={!editable}
         onSaved={(saved) => setCleared(saved?.cleared_project_keys ?? [])}
       />
+      {isProduction(state) && editable && org && (
+        <Ownership slug={org.slug} name={org.name} me={state?.user?.uid} />
+      )}
       {isProduction(state) && editable && org && state?.base_url && (
         <DeleteOrganization slug={org.slug} name={org.name} baseUrl={state.base_url} />
       )}

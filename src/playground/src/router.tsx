@@ -16,10 +16,12 @@ import {
 import { useQuery, type QueryClient } from "@tanstack/react-query";
 import { ApiError, portalApi, portalKey, projectApi, projectKey, setBaseUrl, type PortalState } from "./api";
 import { projectProblem } from "./lib/errors";
+import { can } from "./lib/permissions";
 import { getLastProject, setLastProject } from "./lib/lastProject";
 import { ProjectProvider } from "./lib/project";
-import { canAdmin, isProduction, isSafeNext, signInUrl, usePortalState } from "./lib/identity";
+import { canAdmin, canOwn, isProduction, isSafeNext, signInUrl, usePortalState } from "./lib/identity";
 import { hardNavigate } from "./lib/navigation";
+import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
 import { safeLinkNext } from "./lib/linkNext";
 import { LinkedElsewhere } from "./components/portal/LinkedActions";
 import { AppShell } from "./components/shell/AppShell";
@@ -33,6 +35,7 @@ import { AddProjectPage, type NewProjectSearch } from "./pages/AddProjectPage";
 import { InitProjectPage, type InitStep } from "./pages/InitProjectPage";
 import { SetupPage } from "./pages/SetupPage";
 import { GlobalSettingsPage } from "./pages/GlobalSettingsPage";
+import { AuditPage } from "./pages/AuditPage";
 import { MembersPage } from "./pages/MembersPage";
 import { ProjectSettingsPage } from "./pages/ProjectSettingsPage";
 import { ScansPage } from "./pages/ScansPage";
@@ -67,7 +70,8 @@ import {
 //   /                                    Projects              ┐ portal layout
 //   /projects/new                        add-project wizard    │ (sidebar: Projects,
 //   /settings                            global settings       │  Settings, and
-//   /members                             org members           ┘  Members in production)
+//   /members                             org members           │  Members, and the
+//   /audit                               audit log (owners)    ┘  owners' Audit log, in production)
 //   /p/$slug                             ProjectHome           ┐ project layout
 //   /p/$slug/explorer?node=&file=        Explorer              │ (sidebar: Overview,
 //   /p/$slug/chat/{-$id}                 Chat                  │  Explorer, Chat,
@@ -471,6 +475,15 @@ function MembersRoute() {
 }
 const membersRoute = createRoute({ getParentRoute: () => portalLayout, path: "/members", component: MembersRoute });
 
+// The audit log: production, owners only (`org.audit`).
+function AuditRoute() {
+  const state = usePortalState().data;
+  const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
+  const current = state ?? portal;
+  return isProduction(current) && canOwn(current.org?.role ?? undefined) ? <AuditPage /> : <NotFoundPage />;
+}
+const auditRoute = createRoute({ getParentRoute: () => portalLayout, path: "/audit", component: AuditRoute });
+
 // ---- project layout ---------------------------------------------------------
 
 // Pages that read project data; on an unusable project they are replaced by an
@@ -522,6 +535,17 @@ function ProjectLayout() {
   } else if (project.data && DATA_PAGES.has(page) && project.data.source === "platform" && page !== "scans") {
     // No local Explorer or Chat for a linked project: the data routes refuse it (M2e).
     body = notice(<LinkedElsewhere project={project.data} />);
+  } else if (project.data && page === "chat" && !can(project.data, "project.chat")) {
+    // ChatView never mounts, so no chat request fires for a viewer.
+    body = notice(
+      <Alert data-testid="chat-read-only">
+        <AlertTitle>Chat needs the Contributor role</AlertTitle>
+        <AlertDescription>
+          Ask a project admin for the Contributor role to chat. You can still browse the Explorer and the
+          existing rationale cards.
+        </AlertDescription>
+      </Alert>,
+    );
   } else if (project.data && DATA_PAGES.has(page)) {
     if (project.data.root_status === "ok" && project.data.initialized && probeWanted && probe.isLoading) {
       // Hold the page back until the probe says its data can be opened.
@@ -642,6 +666,7 @@ const routeTree = rootRoute.addChildren([
     connectCallbackRoute,
     globalSettingsRoute,
     membersRoute,
+    auditRoute,
   ]),
   projectRoute.addChildren([
     projectHomeRoute,

@@ -12,8 +12,10 @@ password routes.
 
 from __future__ import annotations
 
+import base64
 import logging
 import threading
+import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -52,7 +54,10 @@ from whygraph.portal.github_auth import (
     AccessLogRedactor,
     GitHubAuthConfig,
     GitHubHostError,
+    GitHubNoSuchUser,
     GitHubOAuth,
+    GitHubRateLimited,
+    GitHubUnavailable,
     PendingLogins,
     load_github_config,
     parse_github_url,
@@ -1278,3 +1283,145 @@ def test_a_github_account_has_no_password_to_use_change_or_reset(
     # A password account still gets its link.
     pat = password_user("pat@example.com")
     assert portal.post(at() + f"/api/admin/users/{pat}/reset-link").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Looking a login up (M2f-1 plan section 4.8)
+# ---------------------------------------------------------------------------
+
+
+def _profile(**over: object) -> dict:
+    return {
+        "id": 42,
+        "login": "Gus",
+        "name": "Gus G",
+        "avatar_url": "https://a.example/42",
+        "type": "User",
+    } | over
+
+
+def _lookup(*answers: httpx.Response | Exception, budget=None):  # noqa: ANN001, ANN202
+    """``user_by_login("gus")`` against canned answers; ``(result, requests)``."""
+    seen: list[httpx.Request] = []
+    queue = list(answers)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        answer = queue.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    github = _oauth(handler)
+    try:
+        return github.user_by_login("gus", anonymous_budget=budget), seen
+    finally:
+        github.close()
+
+
+def test_user_by_login_sends_the_client_credentials() -> None:
+    user, seen = _lookup(httpx.Response(200, json=_profile()))
+    assert (user.id, user.login, user.name, user.two_factor) == (
+        42,
+        "Gus",
+        "Gus G",
+        False,
+    )
+    (request,) = seen
+    assert str(request.url) == "https://api.github.com/users/gus"
+    assert request.headers["authorization"] == "Basic " + base64.b64encode(
+        b"id:secret"
+    ).decode("ascii")
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx.Response(404, json={"message": "Not Found"}),
+        httpx.Response(200, json=_profile(type="Organization")),
+        httpx.Response(200, json=_profile(type="Bot")),
+    ],
+)
+def test_user_by_login_no_such_user(answer: httpx.Response) -> None:
+    with pytest.raises(GitHubNoSuchUser):
+        _lookup(answer)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx.Response(500),
+        httpx.Response(502),
+        httpx.ReadTimeout("slow"),
+        httpx.ConnectError("down"),
+        httpx.Response(403, json={"message": "Forbidden"}),  # not a rate limit
+        httpx.Response(200, json={"id": "42", "login": "gus", "type": "User"}),
+        httpx.Response(200, text="not json"),
+    ],
+)
+def test_user_by_login_unavailable(answer: httpx.Response | Exception) -> None:
+    with pytest.raises(GitHubUnavailable):
+        _lookup(answer)
+
+
+def test_user_by_login_rate_limits() -> None:
+    reset = str(int(time.time()) + 120)
+    with pytest.raises(GitHubRateLimited) as primary:
+        _lookup(
+            httpx.Response(
+                403,
+                headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": reset},
+            )
+        )
+    assert 100 <= primary.value.retry_after <= 120
+    with pytest.raises(GitHubRateLimited) as secondary:
+        _lookup(httpx.Response(429, headers={"retry-after": "30"}))
+    assert secondary.value.retry_after == 30
+
+
+def test_refused_credentials_retry_anonymously_within_the_budget() -> None:
+    refused = httpx.Response(401, json={"message": "Bad credentials"})
+    budget = Throttle(1, 3600)
+    user, seen = _lookup(
+        refused,
+        httpx.Response(200, json=_profile()),
+        budget=lambda: budget.hit("anonymous"),
+    )
+    assert user.id == 42
+    assert [("authorization" in r.headers) for r in seen] == [True, False]
+    # The budget is spent: no anonymous retry.
+    with pytest.raises(GitHubRateLimited) as spent:
+        _lookup(refused, budget=lambda: budget.hit("anonymous"))
+    assert spent.value.retry_after > 0
+    # No budget at all: GitHub is unavailable to us.
+    with pytest.raises(GitHubUnavailable):
+        _lookup(refused)
+
+
+def test_the_fake_answers_user_lookups_and_records_the_credentials(
+    fake: FakeGitHub,
+) -> None:
+    fake.add_user("acme-corp", account_type="Organization")
+    good = "Basic " + base64.b64encode(b"cid:csecret").decode("ascii")
+    bad = "Basic " + base64.b64encode(b"cid:wrong").decode("ascii")
+    with _client(fake) as client:
+        found = client.get(f"{WEB}/api/v3/users/BEN", headers={"authorization": good})
+        assert found.status_code == 200
+        assert {k: found.json()[k] for k in ("id", "login", "type")} == {
+            "id": 1001,
+            "login": "ben",
+            "type": "User",
+        }
+        assert client.get(f"{WEB}/api/v3/users/cy").status_code == 200
+        org = client.get(f"{WEB}/api/v3/users/acme-corp").json()
+        assert org["type"] == "Organization"
+        assert client.get(f"{WEB}/api/v3/users/nobody").status_code == 404
+        refused = client.get(f"{WEB}/api/v3/users/ben", headers={"authorization": bad})
+        assert refused.status_code == 401
+    assert fake.user_lookups == [
+        ("BEN", True),
+        ("cy", False),
+        ("acme-corp", False),
+        ("nobody", False),
+        ("ben", False),
+    ]

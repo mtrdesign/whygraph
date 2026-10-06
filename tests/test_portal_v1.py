@@ -66,7 +66,7 @@ from whygraph.portal import db as portal_db
 from whygraph.portal import orgs
 from whygraph.portal import policy, v1_routes
 from whygraph.portal.config_layers import load_layer, save_layer
-from whygraph.portal.models import Project, User
+from whygraph.portal.models import Organization, Project, User
 from whygraph.portal.v1_routes import GIT_BUDGET, MAX_BODY_BYTES, org_limit
 from whygraph.scan.git_crawler import GitCrawler
 from whygraph.services.git import GitError, Repository
@@ -749,6 +749,44 @@ def test_v1_backfill_describes_every_commit_by_default(
     body = {"target": target_body(), "hunks": hunks_of(v1)}
     assert call(v1, "POST", "/evidence", json=body).status_code == 200
     assert len(described) >= 2, described
+
+
+def test_a_viewer_never_generates_or_backfills(
+    v1: V1World,
+    generator: type[_Generator],
+    described: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A viewer's token: cached cards only, no budget charged (M2f-1 section 4.6)."""
+    charged: list[int] = []
+    before = v1_routes._before_generate
+
+    def counting(state, org_id: int) -> None:  # noqa: ANN001
+        charged.append(org_id)
+        before(state, org_id)
+
+    monkeypatch.setattr(v1_routes, "_before_generate", counting)
+    with portal_db.get_session() as session:
+        session.get(Organization, v1.org_id).default_project_role = "viewer"
+    viewer = _mint(v1.ids["cy"], v1.project_id)
+    card = {"target": target_body(name="sample.fn"), "hunks": []}
+
+    miss = call(v1, "POST", "/rationale", token=viewer, json=card)
+    assert miss.status_code == 403, miss.text
+    assert miss.json()["code"] == "generation_not_permitted"
+    body = {"target": target_body(), "hunks": hunks_of(v1)}
+    assert call(v1, "POST", "/evidence", token=viewer, json=body).status_code == 200
+    history = call(v1, "GET", "/history", token=viewer, params={"path": "sample.py"})
+    assert history.status_code == 200, history.text
+    assert (generator.calls, charged, described) == (0, [], [])
+
+    # The owner generates (and pays for) the card; the viewer is then served it.
+    assert call(v1, "POST", "/rationale", json=card).status_code == 200
+    assert (generator.calls, charged) == (1, [v1.org_id])
+    hit = call(v1, "POST", "/rationale", token=viewer, json=card)
+    assert hit.status_code == 200, hit.text
+    assert hit.json()["purpose"] == "Holds the sample lines."
+    assert (generator.calls, charged) == (1, [v1.org_id])
 
 
 def test_agent_limit_read_from_org_layer(v1: V1World) -> None:

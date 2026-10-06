@@ -17,6 +17,8 @@ as the MCP tool does. Passive viewing never calls an LLM.
 Public API
 ----------
 * :data:`whygraph.serve.routes.router` — the Explorer data routes.
+* :data:`whygraph.serve.routes.generate_router` — the Explorer's ``POST
+  /node/rationale`` (mounted with the chat action: an explicit LLM call).
 * :data:`whygraph.serve.chat.router` — the Chat routes (mounted at ``/chat``).
 """
 

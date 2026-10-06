@@ -322,7 +322,7 @@ describe("EstimateBody", () => {
     const onLater = vi.fn();
     const user = userEvent.setup();
     render(
-      <EstimateBody slug="a" estimate={estimate} onDescribe={onDescribe} onLater={onLater} />,
+      <EstimateBody slug="a" estimate={estimate} canDescribe canConfigure onDescribe={onDescribe} onLater={onLater} />,
     );
     const card = screen.getByTestId("scan-estimate");
     expect(card).toHaveTextContent("1,204 commits to describe");
@@ -338,7 +338,7 @@ describe("EstimateBody", () => {
 
   it("shows tokens only for an unpriced model", () => {
     render(
-      <EstimateBody slug="a" estimate={{ ...estimate, cost: null }} onDescribe={() => {}} onLater={() => {}} />,
+      <EstimateBody slug="a" estimate={{ ...estimate, cost: null }} canDescribe canConfigure onDescribe={() => {}} onLater={() => {}} />,
     );
     expect(screen.getByTestId("scan-estimate")).toHaveTextContent("tokens only");
   });
@@ -348,6 +348,8 @@ describe("EstimateBody", () => {
       <EstimateBody
         slug="a"
         estimate={{ ...estimate, missing_key: "anthropic" }}
+        canDescribe
+        canConfigure
         onDescribe={() => {}}
         onLater={() => {}}
       />,

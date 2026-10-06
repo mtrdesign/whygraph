@@ -122,9 +122,17 @@ when you open the project list. There is no background polling.
 | `ok` | The platform answered | Nothing |
 | `unreachable` | The platform did not answer | Your agent still gets your blame; try again later |
 | `revoked` | The platform refused the token. The reason is shown: you or an admin revoked it, you were removed from the organization or left it, your account was disabled, or the token went unused (90 days, or one hour if never used) | **Reconnect** or remove |
+| `revoked`, reason `project_access_removed` | You lost access to this project on the platform (it became Restricted, your role was removed or the organization default dropped) | Ask a project admin on the platform for access, or remove it; reconnecting cannot help |
 | `removed` | The project, or its organization, was deleted | Remove it from this machine |
 | `access_lost` | The platform can no longer read the repository, so its history may be out of date | An admin fixes it on the platform; nothing to do locally |
 | `update_required` | The platform needs a newer WhyGraph than this portal | Update with `whygraph up` |
+
+### Project roles
+
+What your agent can do through a linked project follows your **project role** on the platform (see
+[project roles](../deploy/production.md#project-roles)). A **viewer** can connect and read existing
+evidence and rationale cards, but nothing spends the organization's LLM keys on their behalf, so no new
+card is generated. Contributors and admins can generate cards.
 
 ### Reconnect
 

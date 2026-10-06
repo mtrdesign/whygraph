@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { PROJECT_ACTIONS } from "../lib/permissions";
 import { ApiError, type ProjectSummary, type ScanRunRow } from "../api";
 import { mcpSnippet } from "../lib/agents";
 import { projectProblem } from "../lib/errors";
@@ -146,6 +147,9 @@ describe("projectStatus with the last scan outcome", () => {
     created_at: "x",
     root_status: "ok",
     running_scan: null,
+    restricted: false,
+    my_role: "admin",
+    permissions: PROJECT_ACTIONS,
     last_scan_status: "ok",
     stale: null,
     source_supported: true,

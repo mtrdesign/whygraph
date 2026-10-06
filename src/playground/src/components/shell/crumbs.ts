@@ -38,6 +38,8 @@ export function buildCrumbs(pathname: string, projectName?: string): Crumb[] {
   }
   if (parts[0] === "projects" && parts[1] === "new") return [projects, { label: "Add project" }];
   if (parts[0] === "settings") return [{ label: "Settings" }];
+  if (parts[0] === "members") return [{ label: "Members" }];
+  if (parts[0] === "audit") return [{ label: "Audit log" }];
   if (parts[0] === "setup") return [{ label: "Setup" }];
   return [{ label: "Projects" }];
 }

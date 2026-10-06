@@ -3,7 +3,9 @@ import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { portalApi, projectKey } from "../api";
 import { isProduction, usePortalState } from "../lib/identity";
+import { can } from "../lib/permissions";
 import { useSlug } from "../lib/project";
+import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { ConfigForm } from "../components/portal/ConfigForm";
 import { FirstScanStep } from "../components/portal/FirstScanStep";
 import { InitializeStep } from "../components/portal/InitializeStep";
@@ -86,6 +88,7 @@ export function InitProjectPage() {
         <ConfigForm
           scope={{ kind: "project", slug }}
           submitLabel="Save and continue"
+          readOnly={!can(project.data, "project.configure")}
           onSaved={() => go(production ? "scan" : "initialize")}
           secondaryActions={
             <Button variant="ghost" render={<Link to="/" />}>
@@ -94,7 +97,15 @@ export function InitProjectPage() {
           }
         />
       )}
-      {step === "initialize" && <InitializeStep slug={slug} onDone={() => go("scan")} />}
+      {step === "initialize" &&
+        (can(project.data, "project.setup") ? (
+          <InitializeStep slug={slug} onDone={() => go("scan")} />
+        ) : (
+          <Alert data-testid="setup-needs-admin">
+            <AlertTitle>A project admin sets this project up</AlertTitle>
+            <AlertDescription>Your role cannot initialize the repository or its agent files.</AlertDescription>
+          </Alert>
+        ))}
       {step === "scan" && <FirstScanStep slug={slug} />}
     </div>
   );

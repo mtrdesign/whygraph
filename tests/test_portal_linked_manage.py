@@ -54,6 +54,8 @@ from test_portal_link import (  # noqa: F401 -- `fake` / `portal` are fixtures
     project_id,
 )
 from test_portal_runner import scanner  # noqa: F401 -- a fixture
+from whygraph.api_v1 import StatusOut
+from whygraph.core.remote import RemoteError
 from whygraph.portal import db as portal_db
 from whygraph.portal.linked import (
     REFRESH_AFTER_SEC,
@@ -380,6 +382,7 @@ def test_reconnect_replaces_a_revoked_link(
     )
     was = project_id(SLUG)
 
+    fake.projects[SLUG] = status_body(project_role="viewer")  # lowered meanwhile
     fresh = "wgc_" + "R" * 43
     started = connect(portal, fake)
     allow(fake, started, code="second", token=fresh)
@@ -395,6 +398,7 @@ def test_reconnect_replaces_a_revoked_link(
     assert row.token_hint == "…" + fresh[-4:]
     assert (row.status, row.status_reason) == ("ok", None)
     assert row.last_platform_head == status_body()["last_scanned_head"]
+    assert row.remote_project_role == "viewer"
     with portal_db.get_session() as session:
         assert len(session.exec(select(Project.id)).all()) == 1
     # The token it superseded stays unusable (the admin had already revoked it).
@@ -547,7 +551,7 @@ def test_pending_reports_no_reconnect_for_another_link_target(
 def test_summary_carries_the_link_block(
     portal: TestClient, fake: FakePlatform, env: SimpleNamespace
 ) -> None:
-    """``_summary.link`` is exactly the nine fields the SPA reads."""
+    """``_summary.link`` is exactly the ten fields the SPA reads."""
     linked_project(portal, fake, env)
     block = summary(portal)["link"]
     assert block == {
@@ -557,6 +561,7 @@ def test_summary_carries_the_link_block(
         "status": "ok",
         "status_reason": None,
         "last_platform_head": status_body()["last_scanned_head"],
+        "project_role": "contributor",
         "explorer_url": f"{HOME}/explorer",
         "chat_url": f"{HOME}/chat",
         "manage_url": HOME,
@@ -582,6 +587,7 @@ MAPPING: list[tuple[dict, tuple[str, str | None]]] = [
     ({"revoked": "member_left"}, ("revoked", "member_left")),
     ({"revoked": "user_disabled"}, ("revoked", "user_disabled")),
     ({"revoked": "idle"}, ("revoked", "idle")),
+    ({"revoked": "project_access_removed"}, ("revoked", "project_access_removed")),
     # 401 invalid_token: the platform does not know this token at all.
     ({"forget": True}, ("revoked", "invalid_token")),
     # A connection error, a timeout or a 5xx.
@@ -677,6 +683,46 @@ def test_link_status_follows_a_rename_on_the_platform(
     assert save_status(project_id(SLUG), "ok", None) is False
 
 
+def test_link_records_the_project_role_and_follows_it(
+    portal: TestClient, fake: FakePlatform, env: SimpleNamespace
+) -> None:
+    """The caller's role on the platform project is kept, and written when it moves."""
+    linked_project(portal, fake, env)
+    assert link_row(SLUG).remote_project_role == "contributor"  # from the exchange
+    fake.projects[SLUG] = status_body(project_role="viewer")
+    refresh_links(transport=transport_of(portal))
+    assert link_row(SLUG).remote_project_role == "viewer"
+    assert summary(portal)["link"]["project_role"] == "viewer"
+    same = StatusOut.model_validate(status_body(project_role="viewer"))
+    assert save_status(project_id(SLUG), "ok", None, same) is False
+    raised = StatusOut.model_validate(status_body(project_role="admin"))
+    assert save_status(project_id(SLUG), "ok", None, raised) is True
+    assert link_row(SLUG).remote_project_role == "admin"
+
+
+def test_lost_project_access_says_ask_an_admin_not_reconnect(
+    portal: TestClient, fake: FakePlatform, env: SimpleNamespace
+) -> None:
+    """``project_access_removed``: reconnecting cannot help, a project admin can."""
+    linked_project(portal, fake, env)
+    remote = portal.app.state.portal.contexts.get(project_id(SLUG)).remote
+    fake.revoke_token(TOKEN, "project_access_removed")
+    with pytest.raises(RemoteError) as caught:
+        remote.overview()
+    message = str(caught.value)
+    assert "ask a project admin" in message and "reconnect" not in message
+    assert (caught.value.status, caught.value.reason) == (
+        "revoked",
+        "project_access_removed",
+    )
+    row = link_row(SLUG)
+    assert (row.status, row.status_reason) == ("revoked", "project_access_removed")
+    # Any other revocation still says "reconnect".
+    fake.revoke_token(TOKEN, "admin_revoked")
+    with pytest.raises(RemoteError, match="reconnect"):
+        remote.overview()
+
+
 def test_status_refresh_never_blocks_listing(
     portal: TestClient, fake: FakePlatform, env: SimpleNamespace
 ) -> None:
@@ -752,6 +798,7 @@ def test_no_platform_content_in_portal_tables(
         row.clone_url,
         row.default_branch,
         row.last_platform_head,
+        row.remote_project_role,
     }
     # Whatever the platform said, only those values are stored.
     assert row.last_platform_head == "c" * 40

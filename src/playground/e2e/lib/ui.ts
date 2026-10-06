@@ -73,3 +73,13 @@ export async function firstScan(page: Page, fx: Fixture): Promise<void> {
   await page.getByRole("button", { name: "Open project" }).click();
   await expect(page).toHaveURL(new RegExp(`/p/${fx.slug}$`));
 }
+
+/**
+ * Start a quick rescan from the project's Rescan button: a menu for a project
+ * admin (the default, and what local mode always shows), a plain button for a
+ * contributor (`menu: false`).
+ */
+export async function quickRescan(page: Page, menu = true): Promise<void> {
+  await page.getByRole("button", { name: "Rescan", exact: true }).first().click();
+  if (menu) await page.getByRole("menuitem", { name: "Quick rescan" }).click();
+}

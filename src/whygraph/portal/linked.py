@@ -21,8 +21,8 @@ Two things live here rather than in :mod:`whygraph.mcp` on purpose:
   platform's name for the project or its head actually changed.
 
 Nothing of the platform's *content* is stored: the row carries the link's
-bookkeeping (status, reason, the project's name and its last scanned head)
-and nothing else, which is what keeps "no shared data on the laptop"
+bookkeeping (status, reason, the project's name, its last scanned head and
+the caller's role on it) and nothing else, which is what keeps "no shared data on the laptop"
 structural.
 
 Beside the per-call update, :func:`refresh_links` probes every link
@@ -78,6 +78,10 @@ _T = TypeVar("_T")
 
 NOT_FOUND_CODE = "not_found"
 """The platform's code for an object it does not hold."""
+
+PROJECT_ACCESS_REMOVED = "project_access_removed"
+"""The revocation reason of a token whose user lost access to the project
+(M2f-1): reconnecting cannot help, a project admin on the platform can."""
 
 REFRESH_AFTER_SEC = 300
 """How old a link's recorded status may be before ``GET /api/projects``
@@ -240,6 +244,11 @@ class LinkedProject:
             message = (
                 f"{where} was removed on the platform - remove it from this "
                 "machine in the WhyGraph portal"
+            )
+        elif status == "revoked" and reason == PROJECT_ACCESS_REMOVED:
+            message = (
+                f"your access to {where} was removed on the platform - ask a "
+                "project admin there for access, or remove it from this machine"
             )
         elif status == "revoked":
             named = f" ({reason})" if reason else ""
@@ -416,7 +425,9 @@ def link_block(row: PlatformLink) -> dict[str, Any]:
     -------
     dict
         ``platform_origin``, ``org``, ``remote_slug``, ``status``,
-        ``status_reason``, ``last_platform_head`` and the three deep links
+        ``status_reason``, ``last_platform_head``, ``project_role`` (the
+        caller's role on the platform project as last reported, or
+        ``None``; a ``viewer`` has no chat there) and the three deep links
         into the platform's SPA: ``manage_url`` (the project's home),
         ``explorer_url`` and ``chat_url``. All three live on the org host,
         because that is where the project is.
@@ -429,6 +440,7 @@ def link_block(row: PlatformLink) -> dict[str, Any]:
         "status": row.status,
         "status_reason": row.status_reason,
         "last_platform_head": row.last_platform_head,
+        "project_role": row.remote_project_role,
         "explorer_url": f"{home}/explorer",
         "chat_url": f"{home}/chat",
         "manage_url": home,
@@ -444,7 +456,8 @@ def save_status(
     """Record what a platform answer says about one link (plan section 4.11).
 
     The row is written **only** when the status, the platform's name for
-    the project or its last scanned head changed, so an agent's steady
+    the project, its last scanned head or the caller's role on it
+    (``remote_project_role``, M2f-1) changed, so an agent's steady
     stream of MCP calls does not write on every tool call. A rename on the
     platform renames the local project too: a linked project's name follows
     the platform's.
@@ -462,7 +475,8 @@ def save_status(
     reason : str or None
         The platform's reason, when it gave one.
     project : StatusOut or None, optional
-        The ``project`` block the answer carried, for the name and the head.
+        The ``project`` block the answer carried, for the name, the head and
+        the project role.
 
     Returns
     -------
@@ -489,6 +503,9 @@ def save_status(
                 changed = True
             if row.last_platform_head != project.last_scanned_head:
                 row.last_platform_head = project.last_scanned_head
+                changed = True
+            if row.remote_project_role != project.project_role:
+                row.remote_project_role = project.project_role
                 changed = True
         if changed:
             session.add(row)
@@ -739,6 +756,7 @@ def _refresh_one(row: PlatformLink, transport: Any) -> None:
 
 __all__ = [
     "NOT_FOUND_CODE",
+    "PROJECT_ACCESS_REMOVED",
     "REFRESH_AFTER_SEC",
     "LinkRefresh",
     "LinkedProject",

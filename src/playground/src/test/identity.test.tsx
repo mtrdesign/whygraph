@@ -1,4 +1,5 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
+import { PROJECT_ACTIONS, can } from "../lib/permissions";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
@@ -27,7 +28,7 @@ interface Fake {
   state: Record<string, unknown>;
   orgs: { slug: string; name: string; role: string; url: string }[];
   login: { status: number; body: unknown };
-  calls: { path: string; method: string; body: unknown }[];
+  calls: { path: string; method: string; body: unknown; search: string; headers: Record<string, string> }[];
   // Per-test routes, matched by exact path before the fixed ones.
   routes: Record<string, Handler>;
 }
@@ -60,6 +61,16 @@ function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
+const PERMISSIONS: Record<string, string[]> = {
+  admin: PROJECT_ACTIONS,
+  contributor: ["project.read", "project.chat", "project.scan"],
+  viewer: ["project.read"],
+};
+function myRole(): "admin" | "contributor" | "viewer" {
+  const role = (fake.state.org as { role?: string } | null)?.role;
+  return role === "member" ? "contributor" : role === "reader" ? "viewer" : "admin";
+}
+
 function project(slug: string) {
   return {
     slug,
@@ -73,6 +84,10 @@ function project(slug: string) {
     created_at: "2026-01-01T00:00:00Z",
     root_status: "ok",
     running_scan: null,
+    restricted: false,
+    // The project role follows the org role (as the server's `effective_project_role` does).
+    my_role: myRole(),
+    permissions: PERMISSIONS[myRole()],
     stale: null,
     agents: [],
     missing_key: null,
@@ -90,7 +105,13 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
   } catch {
     body = init?.body;
   }
-  fake.calls.push({ path, method: init?.method ?? "GET", body });
+  fake.calls.push({
+    path,
+    method: init?.method ?? "GET",
+    body,
+    search: url.search,
+    headers: (init?.headers ?? {}) as Record<string, string>,
+  });
   const route = fake.routes[path];
   if (route) return Promise.resolve(route(init?.method ?? "GET", body));
   if (path === "/api/portal/state") return Promise.resolve(json(fake.state));
@@ -552,14 +573,14 @@ describe("reader role (instance admin in a foreign org)", () => {
     await screen.findByTestId("reader-banner");
     expect(screen.getByText("Viewing as instance admin (read-only)")).toBeInTheDocument();
     await screen.findByRole("heading", { name: "Project alpha" });
-    expect(screen.queryByRole("button", { name: "Scan now" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Rescan" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Chat" })).toBeNull();
   });
 
-  it("a member sees Scan now and Chat", async () => {
+  it("a member sees one Rescan button and Chat", async () => {
     fake.state = orgState("member");
     mount("/p/alpha");
-    await screen.findByRole("button", { name: "Scan now" });
+    await screen.findByRole("button", { name: "Rescan" });
     expect(screen.getByRole("link", { name: "Chat" })).toBeInTheDocument();
     expect(screen.queryByTestId("reader-banner")).toBeNull();
   });
@@ -574,7 +595,7 @@ describe("reader role (instance admin in a foreign org)", () => {
     fake.state = orgState("reader", { user: adminAda });
     mount("/p/alpha/scans");
     await screen.findByRole("heading", { name: "Scans" });
-    expect(screen.queryByRole("button", { name: "Scan now" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Rescan" })).toBeNull();
   });
 
   function rationale(role: string) {
@@ -591,13 +612,105 @@ describe("reader role (instance admin in a foreign org)", () => {
 
   it("hides RationaleTab's Generate button", async () => {
     rationale("reader");
-    await screen.findByText(/No rationale has been generated/);
+    await screen.findByText(/A contributor or admin can generate one/);
     expect(screen.queryByRole("button", { name: "Generate rationale" })).toBeNull();
   });
 
   it("shows RationaleTab's Generate button to a member", async () => {
     rationale("member");
     await screen.findByRole("button", { name: "Generate rationale" });
+  });
+});
+
+// ---- project roles (M2f-1) -----------------------------------------------------------
+
+describe("project roles", () => {
+  const asViewer = () => {
+    fake.state = orgState("member");
+    const viewer = { ...project("alpha"), my_role: "viewer", permissions: PERMISSIONS.viewer };
+    fake.routes["/api/projects/alpha"] = () => json(viewer);
+    fake.routes["/api/projects"] = () => json({ projects: [viewer] });
+  };
+
+  it("a contributor has one Rescan button, no Rename and no Save settings", async () => {
+    fake.state = orgState("member");
+    fake.routes["/api/projects/alpha/config"] = () =>
+      json({ config: {}, secrets: { llm: {}, github_token: { set: false, hint: null } }, import: null });
+    fake.routes["/api/portal/defaults"] = () =>
+      json({ config: {}, secrets: { llm: {}, github_token: { set: false, hint: null } }, no_provider_key: false });
+    const router = mount("/p/alpha");
+    const rescan = await screen.findByRole("button", { name: "Rescan" });
+    await userEvent.setup().click(rescan);
+    // No menu: the click is the quick rescan.
+    expect(screen.queryByRole("menuitem", { name: "Full rescan" })).toBeNull();
+    await waitFor(() =>
+      expect(fake.calls.find((c) => c.method === "POST" && c.path === "/api/projects/alpha/scans")?.body).toEqual({
+        trigger: "manual",
+        analyze: false,
+      }),
+    );
+    void router;
+  });
+
+  it("a contributor sees no Rename, Save settings, Full rescan or Danger zone", async () => {
+    fake.state = orgState("member");
+    fake.routes["/api/projects/alpha/config"] = () =>
+      json({ config: {}, secrets: { llm: {}, github_token: { set: false, hint: null } }, import: null });
+    fake.routes["/api/portal/defaults"] = () =>
+      json({ config: {}, secrets: { llm: {}, github_token: { set: false, hint: null } }, no_provider_key: false });
+    mount("/p/alpha/settings");
+    await screen.findByRole("heading", { name: "Settings" });
+    expect(screen.queryByRole("button", { name: "Rename" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save settings" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Remove project" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Danger zone" })).toBeNull();
+  });
+
+  it("a project admin gets the Rescan menu with both choices", async () => {
+    fake.state = orgState("admin");
+    mount("/p/alpha");
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Rescan" }));
+    await screen.findByRole("menuitem", { name: "Quick rescan" });
+    expect(screen.getByRole("menuitem", { name: "Full rescan" })).toBeInTheDocument();
+  });
+
+  it("a viewer has no Rescan, no Chat link, and Chat never requests its sessions", async () => {
+    asViewer();
+    mount("/p/alpha");
+    await screen.findByRole("heading", { name: "Project alpha" });
+    expect(screen.queryByRole("button", { name: "Rescan" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Chat" })).toBeNull();
+  });
+
+  it("a viewer's Chat route shows the notice and requests no sessions", async () => {
+    asViewer();
+    mount("/p/alpha/chat");
+    const notice = await screen.findByTestId("chat-read-only");
+    expect(notice).toHaveTextContent("Chat needs the Contributor role");
+    expect(fake.calls.some((c) => c.path.includes("/chat/sessions"))).toBe(false);
+  });
+
+  it("a viewer's command palette has no Chat entry", async () => {
+    asViewer();
+    useUi.setState({ paletteOpen: true });
+    mount("/p/alpha");
+    await screen.findByText("Project settings");
+    await waitFor(() => expect(fake.calls.some((c) => c.path === "/api/projects")).toBe(true));
+    expect(screen.queryByText("Chat")).toBeNull();
+  });
+
+  it("a viewer sees the Restricted badge only on a restricted project", async () => {
+    fake.state = orgState("member");
+    fake.routes["/api/projects/alpha"] = () => json({ ...project("alpha"), restricted: true });
+    mount("/p/alpha");
+    await screen.findByTestId("restricted-badge");
+  });
+
+  it("can() denies on a project without permissions", () => {
+    expect(can(undefined, "project.read")).toBe(false);
+    expect(can({}, "project.read")).toBe(false);
+    expect(can({ permissions: ["project.read"] }, "project.chat")).toBe(false);
+    expect(can({ permissions: ["project.chat"] }, "project.chat")).toBe(true);
   });
 });
 
@@ -766,7 +879,7 @@ describe("members page", () => {
     const user = userEvent.setup();
     await user.type(await screen.findByLabelText("GitHub username"), "@dan");
     await user.selectOptions(screen.getByLabelText("Role"), "admin");
-    await user.click(screen.getByRole("button", { name: "Add member" }));
+    await user.click(screen.getByRole("button", { name: "Invite" }));
     await screen.findByTestId("member-u9");
     const post = fake.calls.find((c) => c.path === "/api/org/members" && c.method === "POST");
     expect(post?.body).toEqual({ github_login: "@dan", role: "admin" });
@@ -779,7 +892,7 @@ describe("members page", () => {
     serveMembers({ status: 404, body: { error: words, code: "no_such_user" } });
     const user = userEvent.setup();
     await user.type(await screen.findByLabelText("GitHub username"), "nobody");
-    await user.click(screen.getByRole("button", { name: "Add member" }));
+    await user.click(screen.getByRole("button", { name: "Invite" }));
     expect(await screen.findByTestId("add-member-error")).toHaveTextContent(words);
   });
 
@@ -963,5 +1076,308 @@ describe("org settings page", () => {
     await screen.findByTestId("config-form");
     expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
     expect(screen.getByTestId("settings-owner-only")).toBeInTheDocument();
+  });
+});
+
+// ---- invitations, org settings, project access, audit (M2f-1) -------------------------
+
+describe("invitations", () => {
+  const invitation = (uid: string, login: string, over: Record<string, unknown> = {}) => ({
+    uid,
+    github_login: login,
+    role: "member",
+    status: "open",
+    invited_by: { uid: "u1", display_name: "Ada", github_login: "ada" },
+    created_at: "2026-10-01T00:00:00Z",
+    expires_at: "2026-10-15T00:00:00Z",
+    redeemed_at: null,
+    revoked_at: null,
+    grants: [],
+    ...over,
+  });
+  let invitations: ReturnType<typeof invitation>[];
+
+  function visit(role = "admin") {
+    invitations = [];
+    fake.state = orgState(role);
+    fake.routes["/api/org/members"] = (method) => (method === "POST" ? json({}, 500) : json([]));
+    fake.routes["/api/org/invitations"] = () => json(invitations);
+    return mount("/members");
+  }
+
+  it("invites with a role and project grants, then shows the link to share", async () => {
+    visit();
+    fake.routes["/api/org/members"] = (method, body) => {
+      if (method !== "POST") return json([]);
+      const b = body as { github_login: string; role: string };
+      const created = invitation("i9", b.github_login, { role: b.role });
+      invitations.push(created);
+      return json({ ...created, pending: true }, 201);
+    };
+    const user = userEvent.setup();
+    await user.type(await screen.findByLabelText("GitHub username"), "dan");
+    expect(screen.queryByText(/must have signed in/i)).toBeNull();
+    expect(screen.getByTestId("role-help")).toHaveTextContent(/default project role/i);
+    await user.selectOptions(await screen.findByLabelText("Access to Project alpha"), "viewer");
+    await user.click(screen.getByRole("button", { name: "Invite" }));
+    const note = await screen.findByTestId("invite-pending");
+    expect(note).toHaveTextContent("No message is sent. Share this link with @dan");
+    expect(within(note).getByRole("button", { name: "Copy" })).toBeInTheDocument();
+    const post = fake.calls.find((c) => c.path === "/api/org/members" && c.method === "POST");
+    expect(post?.body).toEqual({ github_login: "dan", role: "member", grants: [{ project: "alpha", role: "viewer" }] });
+    // The new invitation shows up in the pending list.
+    expect(await screen.findByTestId("invitation-i9")).toHaveTextContent("@dan");
+  });
+
+  it("an owner and an admin see the grants only for the member role", async () => {
+    visit("owner");
+    const user = userEvent.setup();
+    await user.selectOptions(await screen.findByLabelText("Role"), "admin");
+    expect(screen.queryByTestId("invite-grants")).toBeNull();
+  });
+
+  it("lists pending invitations and revokes one after a confirm", async () => {
+    visit();
+    invitations.push(invitation("i1", "eve", { grants: [{ project: "alpha", role: "viewer" }] }));
+    fake.routes["/api/org/invitations/i1"] = () => new Response(null, { status: 204 });
+    const user = userEvent.setup();
+    const row = within(await screen.findByTestId("invitation-i1"));
+    expect(row.getByText("@eve")).toBeInTheDocument();
+    expect(row.getByText(/Invited by Ada/)).toBeInTheDocument();
+    await user.click(row.getByRole("button", { name: "Revoke" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Revoke" }));
+    await waitFor(() =>
+      expect(fake.calls.some((c) => c.path === "/api/org/invitations/i1" && c.method === "DELETE")).toBe(true),
+    );
+  });
+
+  it("only an owner can revoke an owner invitation", async () => {
+    visit("admin");
+    invitations.push(invitation("i2", "zed", { role: "owner" }));
+    const row = within(await screen.findByTestId("invitation-i2"));
+    expect(row.queryByRole("button", { name: "Revoke" })).toBeNull();
+  });
+});
+
+describe("org settings (general and ownership)", () => {
+  const owner = () =>
+    orgState("owner", {
+      org: { slug: "acme", name: "Acme", role: "owner", default_project_role: "contributor" },
+    });
+  beforeEach(() => {
+    fake.state = owner();
+    fake.routes["/api/portal/defaults"] = () => json({ config: {}, secrets: { llm: {} }, no_provider_key: false });
+    fake.routes["/api/org/members"] = () =>
+      json([
+        { uid: "u1", display_name: "Ada", github_login: "ada", avatar_url: null, role: "owner", joined_at: "2026-10-01T00:00:00Z", disabled: false },
+        { uid: "u2", display_name: "Meg", github_login: "meg", avatar_url: null, role: "member", joined_at: "2026-10-01T00:00:00Z", disabled: false },
+      ]);
+  });
+
+  it("renames the org and changes the default project role", async () => {
+    fake.routes["/api/org"] = () => json({ slug: "acme", name: "Acme Inc", default_project_role: "viewer" });
+    mount("/settings");
+    const general = within(await screen.findByTestId("org-general"));
+    const save = general.getByRole("button", { name: "Save organization" });
+    expect(save).toBeDisabled();
+    const user = userEvent.setup();
+    const name = general.getByLabelText("Organization name");
+    await user.clear(name);
+    await user.type(name, "Acme Inc");
+    await user.selectOptions(general.getByLabelText("Default project role"), "viewer");
+    await user.click(save);
+    await waitFor(() => expect(fake.calls.find((c) => c.path === "/api/org" && c.method === "PATCH")).toBeTruthy());
+    expect(fake.calls.find((c) => c.path === "/api/org" && c.method === "PATCH")?.body).toEqual({
+      name: "Acme Inc",
+      default_project_role: "viewer",
+    });
+  });
+
+  it("transfers ownership only after the slug is typed", async () => {
+    fake.routes["/api/org/transfer"] = () => json({ ok: true });
+    mount("/settings");
+    const ownership = within(await screen.findByTestId("org-ownership"));
+    const user = userEvent.setup();
+    // Ada is the caller: only Meg is offered.
+    const select = ownership.getByLabelText("New owner") as HTMLSelectElement;
+    await waitFor(() => expect(Array.from(select.options).map((o) => o.value)).toEqual(["", "u2"]));
+    await user.selectOptions(select, "u2");
+    await user.click(ownership.getByRole("button", { name: "Transfer ownership" }));
+    const dialog = within(await screen.findByTestId("transfer-dialog"));
+    const confirm = dialog.getByRole("button", { name: "Transfer ownership" });
+    expect(confirm).toBeDisabled();
+    await user.type(dialog.getByLabelText(/Type/), "acme");
+    expect(confirm).toBeEnabled();
+    await user.click(confirm);
+    await waitFor(() =>
+      expect(fake.calls.find((c) => c.path === "/api/org/transfer")?.body).toEqual({ user_uid: "u2", confirm_slug: "acme" }),
+    );
+  });
+
+  it("an admin sees neither section", async () => {
+    fake.state = orgState("admin");
+    mount("/settings");
+    await screen.findByTestId("config-form");
+    expect(screen.queryByTestId("org-general")).toBeNull();
+    expect(screen.queryByTestId("org-ownership")).toBeNull();
+  });
+});
+
+describe("project access section", () => {
+  const person = (uid: string, name: string, org_role: string, project_role: string | null, source: string) => ({
+    uid,
+    login: name.toLowerCase(),
+    name,
+    avatar: null,
+    org_role,
+    project_role,
+    source,
+  });
+  beforeEach(() => {
+    fake.state = orgState("admin");
+    fake.routes["/api/projects/alpha/access"] = (method) =>
+      method === "PATCH"
+        ? json({ restricted: true })
+        : json({
+            restricted: false,
+            org_default: "viewer",
+            people: [
+              person("u1", "Ada", "admin", "admin", "org_admin"),
+              person("u2", "Meg", "member", "contributor", "grant"),
+              person("u3", "Sam", "member", "viewer", "default"),
+            ],
+            invitations: [],
+          });
+  });
+
+  it("shows who holds which role and why, and flips Restricted", async () => {
+    mount("/p/alpha/settings");
+    const section = within(await screen.findByTestId("project-access"));
+    expect(await section.findByTestId("access-u1")).toHaveTextContent("as org admin");
+    expect(section.getByRole("combobox", { name: "Role for Meg" })).toHaveValue("contributor");
+    expect(section.getByTestId("access-default")).toHaveTextContent("Viewer (the organization's default)");
+    const user = userEvent.setup();
+    await user.click(section.getByRole("switch", { name: /Restricted/ }));
+    await waitFor(() =>
+      expect(fake.calls.find((c) => c.path === "/api/projects/alpha/access" && c.method === "PATCH")?.body).toEqual({
+        restricted: true,
+      }),
+    );
+  });
+
+  it("changes, adds and removes grants", async () => {
+    fake.routes["/api/projects/alpha/access/u2"] = (method) =>
+      method === "DELETE" ? new Response(null, { status: 204 }) : json({});
+    fake.routes["/api/projects/alpha/access/u3"] = () => json({});
+    mount("/p/alpha/settings");
+    const section = within(await screen.findByTestId("project-access"));
+    const user = userEvent.setup();
+    await user.selectOptions(await section.findByRole("combobox", { name: "Role for Meg" }), "admin");
+    await waitFor(() =>
+      expect(fake.calls.find((c) => c.path === "/api/projects/alpha/access/u2" && c.method === "PUT")?.body).toEqual({
+        role: "admin",
+      }),
+    );
+    await user.selectOptions(section.getByLabelText("Add person"), "u3");
+    await user.click(section.getByRole("button", { name: "Add" }));
+    await waitFor(() =>
+      expect(fake.calls.find((c) => c.path === "/api/projects/alpha/access/u3" && c.method === "PUT")?.body).toEqual({
+        role: "viewer",
+      }),
+    );
+    await user.click(section.getByTestId("access-u2").querySelector("button") as HTMLElement);
+    await waitFor(() =>
+      expect(fake.calls.some((c) => c.path === "/api/projects/alpha/access/u2" && c.method === "DELETE")).toBe(true),
+    );
+  });
+
+  it("is hidden without project.access", async () => {
+    fake.state = orgState("member");
+    mount("/p/alpha/settings");
+    await screen.findByRole("heading", { name: "Settings" });
+    expect(screen.queryByTestId("project-access")).toBeNull();
+    expect(fake.calls.some((c) => c.path === "/api/projects/alpha/access")).toBe(false);
+  });
+});
+
+describe("audit log", () => {
+  const event = (id: number, name: string) => ({
+    id,
+    created_at: "2026-10-05T10:00:00Z",
+    org: "acme",
+    actor: { uid: "u1", label: "@ada" },
+    event: name,
+    target: null,
+    ip: "127.0.0.1",
+    fields: { role: "admin" },
+  });
+
+  it("filters, pages with Load more and downloads the CSV through a header-carrying fetch", async () => {
+    fake.state = orgState("owner");
+    fake.routes["/api/org/audit"] = () => {
+      const call = fake.calls[fake.calls.length - 1];
+      return call.search.includes("before=2") ? json({ events: [event(1, "member_added")], next: null }) : json({ events: [event(3, "org_renamed"), event(2, "invitation_created")], next: 2 });
+    };
+    fake.routes["/api/org/audit.csv"] = () =>
+      new Response("id,event\n3,org_renamed\n", { status: 200, headers: { "content-type": "text/csv" } });
+    const created = vi.fn(() => "blob:csv");
+    const revoked = vi.fn();
+    vi.stubGlobal("URL", Object.assign(URL, { createObjectURL: created, revokeObjectURL: revoked }));
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+
+    mount("/audit");
+    expect(await screen.findByTestId("audit-3")).toHaveTextContent("org_renamed");
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Load more" }));
+    expect(await screen.findByTestId("audit-1")).toHaveTextContent("member_added");
+    expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+
+    await user.type(screen.getByLabelText("Event"), "org_renamed");
+    await user.type(screen.getByLabelText("Actor"), "@ada");
+    await user.click(screen.getByRole("button", { name: "Filter" }));
+    await waitFor(() =>
+      expect(fake.calls.some((c) => c.path === "/api/org/audit" && c.search.includes("event=org_renamed") && c.search.includes("actor=%40ada"))).toBe(true),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Download CSV" }));
+    await waitFor(() => expect(created).toHaveBeenCalled());
+    const csv = fake.calls.find((c) => c.path === "/api/org/audit.csv");
+    expect(csv?.headers["X-WhyGraph-Client"]).toBe("1");
+    expect(csv?.search).toContain("event=org_renamed");
+    expect(click).toHaveBeenCalled();
+    click.mockRestore();
+  });
+
+  it("is a page and a sidebar item for owners only", async () => {
+    fake.state = orgState("admin");
+    mount("/audit");
+    const nav = await screen.findByRole("navigation", { name: "Main" });
+    expect(within(nav).queryByRole("link", { name: "Audit log" })).toBeNull();
+    expect(screen.queryByTestId("audit-table")).toBeNull();
+  });
+
+  it("owners get the sidebar item", async () => {
+    fake.state = orgState("owner");
+    fake.routes["/api/org/audit"] = () => json({ events: [], next: null });
+    mount("/members");
+    fake.routes["/api/org/members"] = () => json([]);
+    const nav = await screen.findByRole("navigation", { name: "Main" });
+    expect(await within(nav).findByRole("link", { name: "Audit log" })).toHaveAttribute("href", "/audit");
+  });
+});
+
+describe("admin security events", () => {
+  it("lists the orgless events on the admin page", async () => {
+    fake.state = baseState({ user: adminAda });
+    fake.routes["/api/admin/settings"] = () => json({ base_url: BASE, warnings: [] });
+    fake.routes["/api/admin/users"] = () => json([]);
+    fake.routes["/api/admin/orgs"] = () => json([]);
+    fake.routes["/api/admin/audit"] = () =>
+      json({ events: [{ id: 5, created_at: "2026-10-05T10:00:00Z", org: null, actor: null, event: "github_signin", target: null, ip: null, fields: {} }], next: null });
+    mount("/admin");
+    const box = within(await screen.findByTestId("admin-audit"));
+    expect(await box.findByText("github_signin")).toBeInTheDocument();
+    expect(box.queryByRole("button", { name: "Download CSV" })).toBeNull();
   });
 });

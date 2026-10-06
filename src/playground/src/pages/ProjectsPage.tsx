@@ -2,9 +2,11 @@ import { useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { CloudIcon, FolderGit2Icon, GitBranchIcon, MoreHorizontalIcon, PlusIcon } from "lucide-react";
+import { CloudIcon, FolderGit2Icon, GitBranchIcon, LockIcon, MoreHorizontalIcon, PlusIcon } from "lucide-react";
 import { portalApi, portalKey, projectApi, type ProjectSummary } from "../api";
-import { canAdmin, isProduction, useReadOnly, usePortalState, useRole } from "../lib/identity";
+import { canAdmin, isProduction, usePortalState, useRole } from "../lib/identity";
+import { can } from "../lib/permissions";
+import type { ScanBody } from "../lib/scanActions";
 import { timeAgo } from "../lib/projectStatus";
 import { AccessLostNotice, UnsupportedSourceNotice } from "../components/portal/AccessLost";
 import { LinkNotice } from "../components/portal/LinkNotice";
@@ -33,14 +35,13 @@ function ProjectCard({ project }: { project: ProjectSummary }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const target = openTarget(project);
-  const readOnly = useReadOnly();
   const scanned = timeAgo(project.last_scan_at);
   const usable = project.initialized && project.root_status === "ok";
   const scannable = usable && !project.access_lost && project.source_supported !== false;
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: portalKey("projects") });
   const scan = useMutation({
-    mutationFn: () => projectApi(project.slug).requestScan({ trigger: "manual" }),
+    mutationFn: (body: ScanBody) => projectApi(project.slug).requestScan(body),
     onSuccess: ({ run_id }) => {
       toast.success(`Scan queued for ${project.name}`);
       void refresh();
@@ -69,6 +70,12 @@ function ProjectCard({ project }: { project: ProjectSummary }) {
             {project.remote_url ? project.remote_url.replace(/^https?:\/\//, "") : project.root}
           </span>
         </div>
+        {project.restricted && (
+          <Badge variant="outline" className="gap-1" data-testid="restricted-badge">
+            <LockIcon />
+            Restricted
+          </Badge>
+        )}
         <Badge variant="outline" className="gap-1">
           {project.source === "github" ? <GitBranchIcon /> : project.source === "platform" ? <CloudIcon /> : <FolderGit2Icon />}
           {project.source === "github" ? "GitHub" : project.source === "platform" ? "Platform" : "Local"}
@@ -81,9 +88,20 @@ function ProjectCard({ project }: { project: ProjectSummary }) {
             <MoreHorizontalIcon className="size-4" />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            {!readOnly && (
-              <DropdownMenuItem disabled={!scannable || scan.isPending} onClick={() => scan.mutate()}>
-                Scan now
+            {can(project, "project.scan") && (
+              <DropdownMenuItem
+                disabled={!scannable || scan.isPending}
+                onClick={() => scan.mutate({ trigger: "manual", analyze: false })}
+              >
+                Quick rescan
+              </DropdownMenuItem>
+            )}
+            {can(project, "project.scan_full") && project.source !== "platform" && (
+              <DropdownMenuItem
+                disabled={!scannable || scan.isPending}
+                onClick={() => scan.mutate({ trigger: "manual", analyze: true })}
+              >
+                Full rescan
               </DropdownMenuItem>
             )}
             <DropdownMenuItem

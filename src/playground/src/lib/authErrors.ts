@@ -39,6 +39,16 @@ export function authMessage(err: unknown): string {
     case "no_such_user":
       // The server's sentence is the instruction ("Ask them to sign in once, then add them.").
       return err.message;
+    case "no_such_github_user":
+    case "grants_for_org_admin":
+    case "github_rate_limited":
+      return err.message;
+    case "already_invited":
+      return "They already have an open invitation. Revoke it first to send a new one.";
+    case "already_owner":
+      return "They are already an owner.";
+    case "org_admin":
+      return "Org admins and owners already have every project role.";
     case "already_member":
       return "They are already a member of this organization.";
     case "user_disabled":
@@ -73,7 +83,7 @@ export function authMessage(err: unknown): string {
     case "tracked_whygraph_state":
       return "This repository tracks WhyGraph's own state (.whygraph/ or .codegraph/). Remove it from the repository to import it.";
     case "confirm_slug":
-      return "Type the organization's slug exactly to delete it.";
+      return "Type the organization's slug exactly to confirm.";
     case "busy":
       return "A sync is finishing - try again in a minute.";
   }

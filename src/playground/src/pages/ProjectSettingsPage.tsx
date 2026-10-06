@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { portalApi, portalKey, projectApi, projectKey } from "../api";
 import { canAdmin, isProduction, usePortalState, useReadOnly, useRole } from "../lib/identity";
+import { can } from "../lib/permissions";
 import { useSlug } from "../lib/project";
 import { LinkNotice } from "../components/portal/LinkNotice";
 import { PlatformButtons } from "../components/portal/LinkedActions";
@@ -12,6 +13,7 @@ import { ProjectConnectedPortals } from "../components/portal/ConnectedPortals";
 import { CopyButton } from "../components/portal/CopyButton";
 import { NotInitialized, ProjectUnavailable } from "../components/portal/EdgeStates";
 import { InitializeStep } from "../components/portal/InitializeStep";
+import { ProjectAccess } from "../components/portal/ProjectAccess";
 import { ProjectPortChangeNotice } from "../components/portal/PortChangeNotice";
 import { RemoveProjectDialog } from "../components/portal/RemoveProjectDialog";
 import { Button } from "../components/ui/button";
@@ -29,6 +31,7 @@ const SECTIONS = [
 const PRODUCTION_SECTIONS = [
   { id: "general", label: "General" },
   { id: "config", label: "Models and keys" },
+  { id: "access", label: "Access" },
   { id: "connections", label: "Connected portals" },
   { id: "danger", label: "Danger zone" },
 ] as const;
@@ -80,7 +83,7 @@ function General({ slug, production }: { slug: string; production: boolean }) {
     queryFn: () => portalApi.project(slug),
   });
   const [name, setName] = useState<string | null>(null);
-  const readOnly = useReadOnly();
+  const mayConfigure = can(project.data, "project.configure");
   const rename = useMutation({
     mutationFn: (value: string) => projectApi(slug).rename(value),
     onSuccess: () => {
@@ -142,7 +145,7 @@ function General({ slug, production }: { slug: string; production: boolean }) {
         </label>
         <div className="flex gap-2">
           <Input id="project-name" value={value} onChange={(e) => setName(e.target.value)} />
-          {!readOnly && (
+          {mayConfigure && (
             <Button type="submit" disabled={!dirty || rename.isPending}>
               Rename
             </Button>
@@ -210,7 +213,11 @@ export function ProjectSettingsPage() {
   const readOnly = useReadOnly();
   const production = isProduction(usePortalState().data);
   // Connected portals: production only, for the owners and admins who may revoke them.
-  const showConnections = production && canAdmin(useRole());
+  const role = useRole();
+  const showConnections = production && can(project.data, "project.configure");
+  const showAccess = production && can(project.data, "project.access");
+  // Removing a project is an org action (ORG_REMOVE_PROJECT), not a project one.
+  const showDanger = canAdmin(role);
   const [removing, setRemoving] = useState(false);
   const p = project.data;
   const linked = p?.source === "platform";
@@ -222,7 +229,7 @@ export function ProjectSettingsPage() {
     <div className="mx-auto flex w-full max-w-5xl gap-8 p-6 sm:p-8">
       <nav aria-label="Settings sections" className="sticky top-6 mt-11 hidden h-fit w-44 shrink-0 flex-col gap-0.5 md:flex">
         {sections
-          .filter((s) => s.id !== "connections" || showConnections)
+          .filter((s) => (s.id !== "connections" || showConnections) && (s.id !== "access" || showAccess) && (s.id !== "danger" || showDanger))
           .map((s) => (
           <button
             key={s.id}
@@ -252,9 +259,15 @@ export function ProjectSettingsPage() {
           </Section>
         ) : (
           <div id="settings-config" className="scroll-mt-4">
-            <ConfigForm scope={{ kind: "project", slug }} submitLabel="Save settings" />
+            <ConfigForm
+              scope={{ kind: "project", slug }}
+              submitLabel="Save settings"
+              readOnly={!can(p, "project.configure")}
+            />
           </div>
         )}
+
+        {showAccess && <ProjectAccess slug={slug} />}
 
         {showConnections && <ProjectConnectedPortals slug={slug} />}
 
@@ -266,7 +279,7 @@ export function ProjectSettingsPage() {
           >
             {!p && <Skeleton className="h-24" />}
             {p && !p.initialized && <NotInitialized slug={slug} />}
-            {p && p.initialized && p.root_status === "ok" && !readOnly && (
+            {p && p.initialized && p.root_status === "ok" && !readOnly && can(p, "project.setup") && (
               <InitializeStep
                 slug={slug}
                 mode="settings"
@@ -278,7 +291,7 @@ export function ProjectSettingsPage() {
           </Section>
         )}
 
-        {!readOnly && (
+        {showDanger && (
           <Section
             id="danger"
             title="Danger zone"

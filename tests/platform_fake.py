@@ -64,6 +64,7 @@ def status_body(slug: str = SLUG, **over: Any) -> dict:
         "last_scan_at": "2026-10-05T10:00:00Z",
         "access_lost": False,
         "role": "member",
+        "project_role": "contributor",
     }
     body.update(over)
     return body

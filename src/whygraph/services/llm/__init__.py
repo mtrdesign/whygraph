@@ -8,8 +8,7 @@ Public API
   :class:`CompletionResponse` — value objects exchanged across the port.
 * :class:`AnthropicAdapter`, :class:`OpenAIAdapter`,
   :class:`DeepSeekAdapter`, :class:`OpenRouterAdapter`,
-  :class:`OllamaAdapter`,
-  :class:`ClaudeCliAdapter` — concrete adapters. Each has a typed
+  :class:`OllamaAdapter` — concrete adapters. Each has a typed
   ``from_config(<provider>Config)`` classmethod that maps the
   matching ``[llm.<provider>]`` TOML section onto the constructor.
 * :class:`LlmClientFactory` — registry-backed factory for
@@ -61,7 +60,6 @@ from .chat import (
     fallback_models,
     make_chat_client,
 )
-from .claude_cli import ClaudeCliAdapter
 from .client import LlmClient
 from .deepseek import DeepSeekAdapter
 from .exceptions import LlmAuthError, LlmError
@@ -82,7 +80,6 @@ __all__ = [
     "ChatRequest",
     "ChatRole",
     "ChatStreamEvent",
-    "ClaudeCliAdapter",
     "CompletionRequest",
     "CompletionResponse",
     "DeepSeekAdapter",

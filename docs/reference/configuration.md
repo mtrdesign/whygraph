@@ -32,8 +32,9 @@ Two things differ from a `whygraph.toml`:
 - **Only some keys can be set.** Database paths are always `<repo>/.whygraph/whygraph.db` and
   `<repo>/.codegraph/codegraph.db`. Importing a repository's `whygraph.toml` takes models, the
   `[analyze]` / `[rationale]` / `[chat]` tuning keys, and `[scan].forge`, `remote`, `default_branch` and
-  `hooks`. It never takes endpoints, database paths, the log file or a Claude CLI profile directory,
-  and reports what it dropped. Endpoints are set in the UI.
+  `hooks`. It never takes endpoints, database paths or the log file, drops any setting for the removed
+  [`claude-cli` provider](llm-providers.md#claude-cli-removed), and reports what it dropped. Endpoints
+  are set in the UI.
 
 To reach an Ollama daemon or a gateway on your machine from the portal's container, use
 `host.docker.internal` - see [Adding projects](../portal/projects.md#ollama-and-gateways-on-your-machine).
@@ -128,16 +129,6 @@ timeout_sec = 60
 [llm.ollama]
 # host = "http://localhost:11434"
 timeout_sec = 120
-
-# `claude_cli` (Python attribute) and `claude-cli` (TOML idiom) both parse.
-[llm.claude_cli]
-# api_key = "sk-ant-..."        # default: subscription billing (strips the env var)
-timeout_sec = 120
-# config_dir = "~/.claude-work"  # Claude Code profile dir (sets CLAUDE_CONFIG_DIR);
-                                 # default: inherit the ambient one / ~/.claude
-# oauth_token = "sk-ant-oat01-..." # a `claude setup-token` subscription token (sets
-                                 # CLAUDE_CODE_OAUTH_TOKEN); the portal keeps it in its
-                                 # encrypted store and moves it there on import
 ```
 
 ## Section by section
@@ -152,7 +143,7 @@ timeout_sec = 120
 | `[chat]` | The [chat assistant](../guide/chat.md) - default provider and model for new sessions, plus the per-turn tool, generation, and context budgets. |
 | `whygraph_db` / `codegraph_db` | Override either database path. |
 | `[logging]` | An optional rotating file log, in addition to the always-on stderr log. |
-| `[llm.*]` | Per-provider **connection** settings - key, timeout, and `base_url` / `host` where relevant. Six adapters; only four can drive chat. See [LLM providers](llm-providers.md). |
+| `[llm.*]` | Per-provider **connection** settings - key, timeout, and `base_url` / `host` where relevant. Five adapters; only four can drive chat. See [LLM providers](llm-providers.md). |
 
 ## Agent limits (organization only)
 
@@ -203,8 +194,8 @@ For each role WhyGraph resolves one `(provider, model)` pair, highest precedence
 The provider comes from the role's `provider`, else the prefix of its `model`, else the provider of
 `[llm].model`, else `anthropic`.
 
-Chat needs a provider that can stream tool calls. If `[llm].model` names `ollama` or `claude-cli`,
-chat falls back to `anthropic`; naming one of those in `[chat]` itself is an error.
+Chat needs a provider that can stream tool calls. If `[llm].model` names `ollama`, chat falls back
+to `anthropic`; naming it in `[chat]` itself is an error.
 
 !!! note "Rationale cards follow the model"
     Cached rationale cards are keyed on the provider and the *pinned* model. Changing `[llm].model` or

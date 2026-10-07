@@ -1,7 +1,7 @@
 """Portal config policy: what an import, a project ``PUT`` and a defaults ``PUT`` may set.
 
 ``Config`` accepts keys that point somewhere - provider endpoints, DB
-paths, a log file, a Claude CLI profile dir. A committed ``whygraph.toml``
+paths, a log file. A committed ``whygraph.toml``
 with a ``base_url`` aimed at an attacker would receive the user's key on
 the first LLM call, and a ``whygraph_db`` aimed at another project's DB
 would be opened and migrated. So each way config reaches the portal DB
@@ -32,7 +32,8 @@ mode accepts.
 
 Layers are passed through :func:`whygraph.core.config.normalize_v2`
 before filtering, so a 1.x alias (``[scan].provider``,
-``[scan].max_workers``, ``[llm.claude-cli]``) is judged by its v2 key.
+``[scan].max_workers``) is judged by its v2 key, and a reference to a removed
+provider (``claude-cli``) is dropped with a warning.
 """
 
 from __future__ import annotations
@@ -69,7 +70,7 @@ PROVIDER_TABLES: dict[str, type] = {
     for f in fields(LlmConfig)
     if is_dataclass(getattr(_LLM_DEFAULTS, f.name))
 }
-"""``[llm.<table>]`` name -> its config dataclass (``claude_cli`` spelled with ``_``)."""
+"""``[llm.<table>]`` name -> its config dataclass."""
 
 CONNECTION_KEYS: tuple[str, ...] = ("base_url", "host", "timeout_sec")
 """Connection-only provider keys a ``PUT`` may set (rule 1b)."""
@@ -248,8 +249,6 @@ class ImportPreview:
         secret store. Never serialized to an API response.
     github_token : str or None
         ``[scan].token`` from the file, likewise moved.
-    claude_oauth_token : str or None
-        ``[llm.claude_cli].oauth_token`` from the file, likewise moved.
     secrets_moved : list[str]
         Dotted keys of the moved secrets - the lines the user should
         delete from the file.
@@ -267,7 +266,6 @@ class ImportPreview:
     layer: dict = field(default_factory=dict)
     llm_keys: dict[str, str] = field(default_factory=dict, repr=False)
     github_token: str | None = field(default=None, repr=False)
-    claude_oauth_token: str | None = field(default=None, repr=False)
     secrets_moved: list[str] = field(default_factory=list)
     dropped: list[dict] = field(default_factory=list)
     custom_db_paths: list[dict] = field(default_factory=list)
@@ -331,12 +329,6 @@ def preview_import(root: Path) -> ImportPreview:
                 preview.secrets_moved.append(f"llm.{name}.api_key")
                 if isinstance(value, str) and value.strip():
                     preview.llm_keys[tag] = value.strip()
-        claude = llm.get("claude_cli")
-        if isinstance(claude, dict) and "oauth_token" in claude:
-            value = claude.pop("oauth_token")
-            preview.secrets_moved.append("llm.claude_cli.oauth_token")
-            if isinstance(value, str) and value.strip():
-                preview.claude_oauth_token = value.strip()
     scan = layer.get("scan")
     if isinstance(scan, dict) and "token" in scan:
         value = scan.pop("token")

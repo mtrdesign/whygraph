@@ -111,11 +111,9 @@ class CompletionResponse:
         Model identifier reported by the provider, or echoed back from
         the request when the provider does not return it.
     provider : str
-        Provider identifier (e.g. ``"anthropic"``, ``"openai"``,
-        ``"claude-cli"``).
+        Provider identifier (e.g. ``"anthropic"``, ``"openai"``).
     input_tokens : int or None
-        Prompt-token usage; ``None`` if the provider does not report it
-        (e.g. the Claude CLI).
+        Prompt-token usage; ``None`` if the provider does not report it.
     output_tokens : int or None
         Completion-token usage; ``None`` if not reported.
     finish_reason : str or None

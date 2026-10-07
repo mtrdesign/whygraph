@@ -51,7 +51,6 @@ const noKey = { set: false, hint: null };
 const secrets = () => ({
   llm: { anthropic: noKey, openai: noKey, deepseek: noKey, openrouter: noKey },
   github_token: noKey,
-  claude_oauth_token: noKey,
 });
 
 function project(slug: string, over: Json = {}): Json {

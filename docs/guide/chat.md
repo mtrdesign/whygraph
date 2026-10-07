@@ -29,7 +29,7 @@ and clicking one jumps to that symbol in the Explorer - graph recentered, detail
 
 ## Providers
 
-Chat needs **streaming tool calls**, which not every adapter supports. Four of WhyGraph's six LLM
+Chat needs **streaming tool calls**, which not every adapter supports. Four of WhyGraph's five LLM
 providers can drive it:
 
 | Provider | Chat | Key |
@@ -39,10 +39,9 @@ providers can drive it:
 | `deepseek` | Yes | DeepSeek API key |
 | `openrouter` | Yes | OpenRouter API key |
 | `ollama` | No | - |
-| `claude-cli` | No | - |
 
-`ollama` is excluded because local models' tool-calling reliability varies too much to depend on;
-`claude-cli` disables tools outright. Both still work for `[analyze]` and `[rationale]`. See
+`ollama` is excluded because local models' tool-calling reliability varies too much to depend on. It
+still works for `[analyze]` and `[rationale]`. See
 [LLM providers](../reference/llm-providers.md).
 
 Providers you haven't configured still appear in the picker, greyed out, labelled with what they
@@ -69,8 +68,8 @@ model.
 ```
 
 Leave `[chat]` out and new sessions follow `[llm].model`, the default for every role. If that names a
-provider that cannot chat (`ollama`, `claude-cli`), chat falls back to `anthropic`; naming one of
-those in `[chat]` itself is refused.
+provider that cannot chat (`ollama`), chat falls back to `anthropic`; naming it in `[chat]` itself is
+refused.
 
 If OpenRouter is your provider, pin a tool-capable model rather than leaving `openrouter/auto` -
 automatic routing can land on a model that does not support tool calling.

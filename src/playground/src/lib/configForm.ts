@@ -6,10 +6,10 @@ import type { ConfigDict, SecretsPatch } from "../api";
 // only the keys the form owns; every other key (tuning, an imported `[scan]`
 // option, a deprecated `[llm.<p>].model`) survives a save untouched.
 
-export const PROVIDERS = ["anthropic", "openai", "openrouter", "deepseek", "ollama", "claude-cli"];
+export const PROVIDERS = ["anthropic", "openai", "openrouter", "deepseek", "ollama"];
 /** Providers that can drive chat (`CHAT_PROVIDERS` in `core/config.py`). */
 export const CHAT_PROVIDER_TAGS = ["anthropic", "openai", "deepseek", "openrouter"];
-/** Providers that need an API key; `claude-cli` and `ollama` are key-less. */
+/** Providers that need an API key; `ollama` is key-less. */
 export const KEYED_PROVIDERS = ["anthropic", "openai", "openrouter", "deepseek"];
 export const HOOK_NAMES = ["post-commit", "post-merge", "post-rewrite", "post-checkout"] as const;
 export type HookName = (typeof HOOK_NAMES)[number];
@@ -37,8 +37,6 @@ export interface ConfigFormValues {
   hooks: Record<HookName, boolean>;
   /** Write-only; blank leaves the stored token alone. */
   githubToken: string;
-  /** A new `claude setup-token` subscription token (blank = leave as stored). */
-  claudeToken: string;
   /** Write-only per provider; blank leaves the stored key alone. */
   keys: Record<string, string>;
   /** `[rationale].agent_generations_per_hour`, as typed (blank = the default). Org defaults only. */
@@ -109,7 +107,6 @@ export function layerToValues(layer: ConfigDict): ConfigFormValues {
     forge: forgeOn(layer),
     hooks: hooksFromLayer(layer),
     githubToken: "",
-    claudeToken: "",
     keys: Object.fromEntries(KEYED_PROVIDERS.map((p) => [p, ""])),
     agentGenerations: limitText(obj(layer.rationale).agent_generations_per_hour),
     agentDescriptions: limitText(obj(layer.analyze).agent_descriptions_per_hour),
@@ -191,9 +188,6 @@ export function valuesToLayer(
   return layer;
 }
 
-/** The staged-removal id of the Claude subscription token (the other ids are provider tags / `github`). */
-export const CLAUDE_TOKEN = "claude-token";
-
 /** The secrets part of a save: typed values set, staged removals delete, blanks are untouched. */
 export function secretsPatch(
   v: ConfigFormValues,
@@ -208,9 +202,6 @@ export function secretsPatch(
   }
   const patch: SecretsPatch = {};
   if (Object.keys(llm).length) patch.llm = llm;
-  const claude = v.claudeToken.trim();
-  if (claude) patch.claude_oauth_token = claude;
-  else if (removed.includes(CLAUDE_TOKEN)) patch.claude_oauth_token = null;
   if (opts.github) {
     const token = v.githubToken.trim();
     if (token) patch.github_token = token;
@@ -263,7 +254,6 @@ export const configFormSchema = z.object({
     "post-checkout": z.boolean(),
   }),
   githubToken: z.string(),
-  claudeToken: z.string(),
   keys: z.record(z.string(), z.string()),
   agentGenerations: agentLimit,
   agentDescriptions: agentLimit,

@@ -11,6 +11,7 @@ migration engines, the wait, the instance lock), and M2b's tenancy revision
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -233,7 +234,8 @@ GITHUB = "b7d2c9a41e63"
 PROJECTS = "73bf248ea6fd"
 CONNECTIONS = "c4e7a19b52d8"
 ACCESS = "d8a31f6c07e5"
-HEAD = ACCESS
+REMOVE_CLAUDE_CLI = "bd0a25e6df74"
+HEAD = REMOVE_CLAUDE_CLI
 
 
 def _seed_m2a(conn) -> dict[str, int]:  # noqa: ANN001
@@ -766,6 +768,91 @@ def test_access_downgrade_refuses_m2f1_data(
         assert conn.execute(
             text("SELECT version_num FROM alembic_version")
         ).scalar() == (HEAD)
+
+
+def test_remove_claude_cli_migration_clears_tokens_and_settings(
+    empty_portal_database: str,
+) -> None:
+    portal_db.ensure_initialized()
+    with portal_db.get_session() as s:
+        org = builtin_org_id(s)
+        s.commit()
+    portal_db._reset_engine()
+    command.downgrade(portal_db.alembic_config(), ACCESS)
+    portal_db._reset_engine()
+    with portal_db.get_engine().begin() as conn:
+        for kind, provider in (
+            ("claude_oauth_token", None),
+            ("llm_api_key", "claude-cli"),
+            ("llm_api_key", "anthropic"),
+            ("github_token", None),
+        ):
+            conn.execute(
+                text(
+                    "INSERT INTO secrets (org_id, kind, provider, ciphertext, hint, "
+                    "created_at) VALUES (:org, :kind, :provider, 'x', '...x', 'now')"
+                ),
+                {"org": org, "kind": kind, "provider": provider},
+            )
+        conn.execute(
+            text(
+                "INSERT INTO project_config (org_id, config, updated_at) "
+                "VALUES (:org, CAST(:config AS JSON), 'now')"
+            ),
+            {
+                "org": org,
+                "config": json.dumps(
+                    {
+                        "llm": {
+                            "model": "claude-cli/claude-opus-4-7",
+                            "claude_cli": {"timeout_sec": 300},
+                            "openai": {"timeout_sec": 30},
+                        },
+                        "analyze": {"provider": "claude-cli", "model": "opus"},
+                        "rationale": {"model": "claude_cli/opus"},
+                        "chat": {"model": "anthropic/claude-opus-4-7"},
+                    }
+                ),
+            },
+        )
+    portal_db._reset_engine()
+    command.upgrade(portal_db.alembic_config(), "head")
+    portal_db._reset_engine()
+    with portal_db.get_engine().connect() as conn:
+        kinds = conn.execute(
+            text("SELECT kind, provider FROM secrets ORDER BY kind")
+        ).all()
+        config = conn.execute(text("SELECT config FROM project_config")).scalar_one()
+        check = conn.execute(
+            text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = 'ck_secrets_kind'"
+            )
+        ).scalar_one()
+    assert [tuple(row) for row in kinds] == [
+        ("github_token", None),
+        ("llm_api_key", "anthropic"),
+    ]
+    assert config == {
+        "llm": {"openai": {"timeout_sec": 30}},
+        "analyze": {},
+        "rationale": {},
+        "chat": {"model": "anthropic/claude-opus-4-7"},
+    }
+    assert "claude_oauth_token" not in check
+    with pytest.raises(IntegrityError):
+        with portal_db.get_engine().begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO secrets (org_id, kind, ciphertext, hint, created_at) "
+                    "VALUES (:org, 'claude_oauth_token', 'x', '...x', 'now')"
+                ),
+                {"org": org},
+            )
+    portal_db._reset_engine()
+    command.downgrade(portal_db.alembic_config(), ACCESS)
+    portal_db._reset_engine()
+    command.upgrade(portal_db.alembic_config(), "head")
 
 
 # ---------------------------------------------------------------------------
@@ -1787,7 +1874,7 @@ def test_context_injects_secrets_in_memory_only(org: int) -> None:
         pw_secrets.put_secret(
             s,
             kind="llm_api_key",
-            provider="claude-cli",
+            provider="openai",
             value="sk-cli-2222",
             org_id=org,
         )
@@ -1796,7 +1883,7 @@ def test_context_injects_secrets_in_memory_only(org: int) -> None:
         ctx = _build(s, p)
         stored = [c.config for c in s.exec(select(ProjectConfig)).all()]
     assert ctx.config.llm.anthropic.api_key == "sk-glob-1111"
-    assert ctx.config.llm.claude_cli.api_key == "sk-cli-2222"
+    assert ctx.config.llm.openai.api_key == "sk-cli-2222"
     assert ctx.config.scan_token == "ghp_glob3333"
     assert stored == []
     for secret in ("sk-glob-1111", "sk-cli-2222", "ghp_glob3333"):
@@ -1962,35 +2049,3 @@ def test_config_repr_hides_secrets() -> None:
     )
     assert "ghp_visible" not in repr(cfg) and "sk-visible" not in repr(cfg)
     assert cfg.scan_token == "ghp_visible" and cfg.llm.openai.api_key == "sk-visible"
-
-
-def test_claude_oauth_token_is_a_providerless_secret_project_over_global(
-    org: int,
-) -> None:
-    with portal_db.get_session() as s:
-        pw_secrets.put_secret(
-            s, kind="claude_oauth_token", value="sk-ant-oat-glob1", org_id=org
-        )
-        a, b = _project(s, "a"), _project(s, "b")
-        pw_secrets.put_secret(
-            s,
-            kind="claude_oauth_token",
-            value="sk-ant-oat-proja",
-            project_id=a.id,
-            org_id=org,
-        )
-        ca, cb = _build(s, a), _build(s, b)
-        with pytest.raises(ValueError, match="has no provider"):
-            pw_secrets.put_secret(
-                s,
-                kind="claude_oauth_token",
-                provider="claude-cli",
-                value="x",
-                org_id=org,
-            )
-        stored = [c.config for c in s.exec(select(ProjectConfig)).all()]
-    assert ca.config.llm.claude_cli.oauth_token == "sk-ant-oat-proja"
-    assert cb.config.llm.claude_cli.oauth_token == "sk-ant-oat-glob1"
-    assert stored == []  # a secret never lands in a config layer
-    for secret in ("sk-ant-oat-glob1", "sk-ant-oat-proja"):
-        assert secret not in repr(ca.config) and secret not in repr(cb)

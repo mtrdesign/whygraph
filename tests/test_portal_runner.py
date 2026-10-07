@@ -1899,41 +1899,6 @@ def test_cancelling_a_full_run_needs_may_cancel_full(
     assert wait_run(portal, "demo", running)["status"] == "cancelled"
 
 
-def test_child_env_passes_the_claude_token_only_to_a_claude_cli_analyze_run(
-    tmp_path: Path,
-) -> None:
-    config = Config.from_dict(
-        {
-            "llm": {
-                "model": "claude-cli/claude-opus-4-7",
-                "claude_cli": {"oauth_token": "sk-ant-oat-child1"},
-            }
-        },
-        tmp_path,
-    )
-    env, secrets = child_env(config, {}, source="local", analyze=True, environ={})
-    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-child1"
-    assert secrets == ["sk-ant-oat-child1"]  # redacted from logs and events
-    assert "sk-ant-oat-child1" not in env["WHYGRAPH_CONFIG_JSON"]
-
-    structure_only, secrets = child_env(
-        config, {}, source="local", analyze=False, environ={}
-    )
-    assert "CLAUDE_CODE_OAUTH_TOKEN" not in structure_only and secrets == []
-
-    other = Config.from_dict(
-        {
-            "llm": {
-                "model": "anthropic/claude-opus-4-7",
-                "claude_cli": {"oauth_token": "sk-ant-oat-child1"},
-            }
-        },
-        tmp_path,
-    )
-    env, _ = child_env(other, {}, source="local", analyze=True, environ={})
-    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
-
-
 def test_a_failing_outcome_write_is_logged_and_the_job_still_ends(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

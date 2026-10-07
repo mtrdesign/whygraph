@@ -459,15 +459,12 @@ export interface SecretStatus {
 export interface SecretsView {
   llm: Record<string, SecretStatus>;
   github_token: SecretStatus;
-  /** A `claude setup-token` subscription token for the claude-cli provider. */
-  claude_oauth_token?: SecretStatus;
 }
 
 /** Write-only: a string sets, `null` deletes, an absent key leaves it alone. */
 export interface SecretsPatch {
   llm?: Record<string, string | null>;
   github_token?: string | null;
-  claude_oauth_token?: string | null;
 }
 
 export interface ConfigPut {

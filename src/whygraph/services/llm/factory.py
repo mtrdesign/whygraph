@@ -7,8 +7,8 @@ Construction-time inputs:
 * a registry of ``provider tag → (adapter class, bound config)``.
 
 Each factory instance owns its own registry copy, so calling
-:meth:`register` does not affect other factories. The six built-in
-adapters (anthropic, openai, deepseek, openrouter, ollama, claude-cli) are
+:meth:`register` does not affect other factories. The five built-in
+adapters (anthropic, openai, deepseek, openrouter, ollama) are
 pre-resolved against the bound :class:`LlmConfig` at construction time;
 third-party adapters added via :meth:`register` bring their own typed
 config instance instead.
@@ -23,7 +23,6 @@ from whygraph.core import get_config
 from whygraph.core.config import LlmConfig
 
 from .anthropic import AnthropicAdapter
-from .claude_cli import ClaudeCliAdapter
 from .client import LlmClient
 from .deepseek import DeepSeekAdapter
 from .exceptions import LlmError
@@ -40,7 +39,6 @@ _BUILTIN_DEFAULTS: dict[str, tuple[type[LlmClient], str]] = {
     DeepSeekAdapter.provider: (DeepSeekAdapter, "deepseek"),
     OpenRouterAdapter.provider: (OpenRouterAdapter, "openrouter"),
     OllamaAdapter.provider: (OllamaAdapter, "ollama"),
-    ClaudeCliAdapter.provider: (ClaudeCliAdapter, "claude_cli"),
 }
 
 

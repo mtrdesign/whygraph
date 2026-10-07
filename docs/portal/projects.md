@@ -73,22 +73,15 @@ Ollama daemon or an OpenAI-compatible gateway running on your machine, use **`ho
 The portal container is started with that name mapped to your host, on Linux as well as macOS and
 Windows.
 
-!!! note "`claude-cli` in the portal: your Claude subscription"
-    The image ships the `claude` CLI, but not your login (on macOS it lives in the Keychain). To bill
-    your Claude subscription, run `claude setup-token` once in a terminal on your machine, then paste
-    the token it prints under **Settings > Provider keys > Claude subscription token** (globally, or
-    for one project). The portal stores it encrypted and hands it only to `claude` itself. Until one
-    is set, a project whose model is `claude-cli` shows "no key for claude-cli", and a scan skips the
-    commit descriptions with that message.
-
 ### A `whygraph.toml` in the repository
 
 If the repository has a `whygraph.toml`, the portal offers its **settings** as the project's starting
 configuration - models, the tuning keys, `[scan].forge`, `remote`, `default_branch` and `hooks`. API
 keys and the GitHub token in it are moved into the portal's encrypted store, and the wizard lists the
 lines you can now delete from the file. Things the portal will not take from a repository file are
-reported and dropped: endpoints (`base_url`, `host`), database paths, the log file and similar. After
-the import the file is no longer read for this project.
+reported and dropped: endpoints (`base_url`, `host`), database paths, the log file and similar, and
+any setting for the removed [`claude-cli` provider](../reference/llm-providers.md#claude-cli-removed).
+After the import the file is no longer read for this project.
 
 ## Initialize
 

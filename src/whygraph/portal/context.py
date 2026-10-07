@@ -54,7 +54,6 @@ from .models import PlatformLink, Project, Secret
 from .paths import db_paths
 from .platform_client import PlatformHttp
 from .secrets import (
-    CLAUDE_OAUTH_TOKEN,
     GITHUB_TOKEN,
     LLM_API_KEY,
     LLM_KEY_PROVIDERS,
@@ -230,9 +229,8 @@ def _inject_secrets(
     """Write decrypted keys and tokens into ``merged`` (in memory).
 
     Only the project's own org's secrets are read: its org defaults
-    (the "global" scope below) and the project's. The Claude subscription
-    token, like the GitHub token, is a project secret when the project
-    has one, else the org default.
+    (the "global" scope below) and the project's. The GitHub token is a
+    project secret when the project has one, else the org default.
     """
     rows = session.exec(
         select(Secret).where(
@@ -277,13 +275,6 @@ def _inject_secrets(
         token = value(True, GITHUB_TOKEN, None)
     if token is not None:
         merged.setdefault("scan", {})["token"] = token
-
-    if (False, CLAUDE_OAUTH_TOKEN, None) in by_scope:
-        claude = value(False, CLAUDE_OAUTH_TOKEN, None)
-    else:
-        claude = value(True, CLAUDE_OAUTH_TOKEN, None)
-    if claude is not None:
-        llm.setdefault("claude_cli", {})["oauth_token"] = claude
 
 
 class ContextCache:

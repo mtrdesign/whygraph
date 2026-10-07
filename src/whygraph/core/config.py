@@ -57,7 +57,6 @@ KNOWN_PROVIDERS: tuple[str, ...] = (
     "deepseek",
     "openrouter",
     "ollama",
-    "claude-cli",
 )
 """Provider tags of the built-in LLM adapters.
 
@@ -77,21 +76,21 @@ TASKS: tuple[str, ...] = ("analyze", "rationale", "chat")
 _LEGACY_DEFAULT_PROVIDER = "anthropic"
 """The 1.x task-level ``provider`` default, applied **last** in v2."""
 
-# provider tag -> LlmConfig attribute. `claude_cli` is accepted as a
-# spelling of the `claude-cli` tag (the TOML section's idiom).
+REMOVED_PROVIDERS: tuple[str, ...] = ("claude-cli", "claude_cli")
+"""Provider tags that no longer exist; :func:`normalize_v2` drops every reference.
+
+``claude-cli`` ran ``claude --print`` on a Claude subscription token.
+Anthropic does not allow third-party tools to store subscription
+credentials or route requests through them, so it was removed."""
+
+# provider tag -> LlmConfig attribute.
 _PROVIDER_ATTRS: dict[str, str] = {
     "anthropic": "anthropic",
     "openai": "openai",
     "deepseek": "deepseek",
     "openrouter": "openrouter",
     "ollama": "ollama",
-    "claude-cli": "claude_cli",
 }
-
-
-def _canonical_provider(tag: str) -> str:
-    """Map the ``claude_cli`` spelling onto the ``claude-cli`` adapter tag."""
-    return "claude-cli" if tag == "claude_cli" else tag
 
 
 def _split_provider_model(value: str) -> tuple[str, str] | None:
@@ -99,7 +98,7 @@ def _split_provider_model(value: str) -> tuple[str, str] | None:
     head, sep, tail = value.partition("/")
     if not sep or not head or not tail:
         return None
-    return _canonical_provider(head), tail
+    return head, tail
 
 
 class ModelChoice(NamedTuple):
@@ -111,7 +110,7 @@ class ModelChoice(NamedTuple):
     Attributes
     ----------
     provider : str
-        Adapter tag, e.g. ``"anthropic"`` or ``"claude-cli"``.
+        Adapter tag, e.g. ``"anthropic"`` or ``"ollama"``.
     model : str or None
         Model identifier. ``None`` only for a provider that is not built
         in (a third-party adapter registered on the factory), whose own
@@ -254,41 +253,6 @@ class OllamaConfig:
     model: str = "llama3"
     host: str | None = None
     timeout_sec: int = 120
-
-
-@dataclass(frozen=True, slots=True)
-class ClaudeCliConfig:
-    """Configuration for :class:`ClaudeCliAdapter` (``claude --print``).
-
-    Attributes
-    ----------
-    model : str
-        Claude model identifier (e.g. ``"claude-opus-4-7"``).
-    api_key : str or None
-        ``None`` (default) strips ``ANTHROPIC_API_KEY`` from the
-        subprocess env so the CLI falls through to subscription billing.
-        Passing a value exports it as ``ANTHROPIC_API_KEY`` (API billing).
-    timeout_sec : int
-        Per-invocation timeout in seconds. Default ``120``.
-    config_dir : Path or None
-        Claude Code profile directory, exported to the subprocess as
-        ``CLAUDE_CONFIG_DIR``. ``None`` (default) inherits the ambient
-        ``CLAUDE_CONFIG_DIR`` (or the CLI's own ``~/.claude``). ``~`` and
-        ``$VARS`` are expanded; a relative path resolves against the
-        directory holding ``whygraph.toml``.
-    oauth_token : str or None
-        A long-lived Claude subscription token (``claude setup-token``),
-        exported as ``CLAUDE_CODE_OAUTH_TOKEN``: subscription billing
-        without a logged-in profile - how the portal's Docker image runs
-        the CLI. ``None`` (default) inherits an ambient
-        ``CLAUDE_CODE_OAUTH_TOKEN``, else the CLI's own login.
-    """
-
-    model: str = "claude-opus-4-7"
-    api_key: str | None = field(default=None, repr=False)
-    timeout_sec: int = 120
-    config_dir: Path | None = None
-    oauth_token: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -545,7 +509,7 @@ class LlmConfig:
         (split on the first ``/``, so ``"openrouter/openrouter/auto"`` is
         OpenRouter's ``openrouter/auto``). ``None`` (default) leaves the
         choice to the tasks and the provider defaults.
-    anthropic, openai, deepseek, openrouter, ollama, claude_cli
+    anthropic, openai, deepseek, openrouter, ollama
         Per-provider connection settings (key, endpoint, ``timeout_sec``).
         Their ``model`` field is the adapter default; setting it in
         ``[llm.<provider>]`` is deprecated in favour of ``model`` above.
@@ -556,7 +520,6 @@ class LlmConfig:
     deepseek: DeepSeekConfig = field(default_factory=DeepSeekConfig)
     openrouter: OpenRouterConfig = field(default_factory=OpenRouterConfig)
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
-    claude_cli: ClaudeCliConfig = field(default_factory=ClaudeCliConfig)
     model: str | None = None
 
     def __post_init__(self) -> None:
@@ -587,7 +550,7 @@ class LlmConfig:
         Parameters
         ----------
         provider : str
-            A provider tag (``"claude-cli"`` and ``"claude_cli"`` both work).
+            A provider tag.
 
         Returns
         -------
@@ -595,7 +558,7 @@ class LlmConfig:
             The provider's sub-config, or ``None`` for a tag that is not
             built in.
         """
-        attr = _PROVIDER_ATTRS.get(_canonical_provider(provider))
+        attr = _PROVIDER_ATTRS.get(provider)
         return getattr(self, attr) if attr is not None else None
 
     def default_model(self, provider: str) -> str | None:
@@ -621,7 +584,6 @@ class LlmConfig:
 
     def _default_model(self, provider: str) -> tuple[str | None, bool]:
         """``(model, pinned)`` for ``provider``; pinned means from ``[llm].model``."""
-        provider = _canonical_provider(provider)
         if self.model is not None:
             split = _split_provider_model(self.model)
             if split is not None and split[0] == provider:
@@ -638,11 +600,6 @@ _LLM_SECTIONS: tuple[tuple[str, str, type], ...] = (
     ("deepseek", "deepseek", DeepSeekConfig),
     ("openrouter", "openrouter", OpenRouterConfig),
     ("ollama", "ollama", OllamaConfig),
-    # `claude_cli` (Python attr) ↔ `claude-cli` (TOML section) — TOML
-    # idiomatically uses dashes; Python identifiers cannot, so we keep
-    # both forms and let either one parse.
-    ("claude_cli", "claude_cli", ClaudeCliConfig),
-    ("claude-cli", "claude_cli", ClaudeCliConfig),
 )
 
 
@@ -738,11 +695,7 @@ def _parse_hooks(value: object) -> bool | tuple[str, ...]:
 
 
 def _build_llm_config(raw: dict, base: Path) -> LlmConfig:
-    """Parse a raw ``[llm]`` dict into a typed :class:`LlmConfig`.
-
-    ``base`` is the directory containing the TOML file — a relative
-    ``[llm.claude_cli].config_dir`` resolves against it.
-    """
+    """Parse a raw ``[llm]`` dict into a typed :class:`LlmConfig`."""
     sections: dict[str, object] = {}
     known_attrs = {f.name for f in fields(LlmConfig)}
     for toml_name, attr_name, cls in _LLM_SECTIONS:
@@ -757,9 +710,6 @@ def _build_llm_config(raw: dict, base: Path) -> LlmConfig:
         for unknown in set(block) - known_fields:
             _log.warning("ignoring unknown key in [llm.%s]: %r", toml_name, unknown)
         accepted = {k: v for k, v in block.items() if k in known_fields}
-        if accepted.get("config_dir") is not None:
-            p = Path(os.path.expandvars(accepted["config_dir"])).expanduser()
-            accepted["config_dir"] = p if p.is_absolute() else (base / p).resolve()
         sections[attr_name] = cls(**accepted)
     if raw.get("model") is not None:
         sections["model"] = raw["model"]
@@ -808,13 +758,11 @@ def _build_chat_config(raw: dict) -> ChatConfig:
     return ChatConfig(**{k: v for k, v in raw.items() if k in known})
 
 
-def _resolve_path(value: object, base: Path, *, expand: bool = False) -> object:
+def _resolve_path(value: object, base: Path) -> object:
     """Resolve a relative path string against ``base``; leave anything else as-is."""
     if not isinstance(value, (str, os.PathLike)):
         return value
     p = Path(value)
-    if expand:
-        p = Path(os.path.expandvars(str(p))).expanduser()
     return str(p if p.is_absolute() else (base / p).resolve())
 
 
@@ -843,6 +791,50 @@ def _move_alias(
     )
 
 
+_REMOVED_PROVIDER_HINT = (
+    "the claude-cli provider was removed (Anthropic does not allow third-party "
+    'tools to use Claude subscription credentials); use "anthropic" with an API key'
+)
+
+
+def _names_removed_provider(value: object) -> bool:
+    """Whether ``value`` is a removed provider tag or a ``"<removed>/<model>"`` string."""
+    if not isinstance(value, str):
+        return False
+    return value in REMOVED_PROVIDERS or value.partition("/")[0] in REMOVED_PROVIDERS
+
+
+def _drop_removed_providers(data: dict, warnings: list[str]) -> None:
+    """Drop every reference to a :data:`REMOVED_PROVIDERS` tag, in place, with a warning."""
+    dropped: list[str] = []
+    llm = data.get("llm")
+    if isinstance(llm, dict):
+        for tag in REMOVED_PROVIDERS:
+            if tag in llm:
+                del llm[tag]
+                dropped.append(f"[llm.{tag}]")
+        if _names_removed_provider(llm.get("model")):
+            del llm["model"]
+            dropped.append("[llm].model")
+    for task in TASKS:
+        table = data.get(task)
+        if not isinstance(table, dict):
+            continue
+        if _names_removed_provider(table.get("provider")):
+            del table["provider"]
+            dropped.append(f"[{task}].provider")
+            if "model" in table:
+                del table["model"]
+                dropped.append(f"[{task}].model")
+        elif table.get("provider") is None and _names_removed_provider(
+            table.get("model")
+        ):
+            del table["model"]
+            dropped.append(f"[{task}].model")
+    if dropped:
+        warnings.append(f"{_REMOVED_PROVIDER_HINT}; ignored {', '.join(dropped)}")
+
+
 def _blank_model_to_none(table: dict) -> None:
     """Normalize an empty-string ``model`` to ``None`` in place."""
     if isinstance(table.get("model"), str) and not table["model"].strip():
@@ -864,13 +856,16 @@ def normalize_v2(raw: Mapping, base: Path) -> tuple[dict, list[str]]:
     * ``[scan].provider`` -> ``[scan].forge``, ``[scan].max_workers`` ->
       ``[analyze].max_workers``. When a layer sets both spellings, the
       v2 key wins and the alias is dropped (with a warning).
-    * ``[llm.claude-cli]`` -> ``[llm.claude_cli]`` (the 1.x loader let the
-      dashed table replace the underscored one; so does this).
+    * Every reference to a removed provider (:data:`REMOVED_PROVIDERS`) is
+      dropped with a warning: its ``[llm.<provider>]`` table, an
+      ``[llm].model`` naming it, and a task's ``provider`` (with that
+      task's ``model``) or a ``model`` prefixed with it. The task then
+      falls back to the next layer or the default provider.
     * A ``model`` in an ``[llm.<provider>]`` table and a task-level
       ``timeout_sec`` stay where they are - they still work - but warn.
     * An empty-string ``model`` becomes ``None``.
-    * ``whygraph_db``, ``codegraph_db``, ``[logging].file`` and
-      ``[llm.claude_cli].config_dir`` become absolute path strings
+    * ``whygraph_db``, ``codegraph_db`` and ``[logging].file`` become
+      absolute path strings
       (relative ones resolve against ``base``), so a merged dict carried
       to another process (``WHYGRAPH_CONFIG_JSON``) means the same thing.
 
@@ -915,10 +910,10 @@ def normalize_v2(raw: Mapping, base: Path) -> tuple[dict, list[str]]:
                     warnings,
                 )
 
+    _drop_removed_providers(data, warnings)
+
     llm = data.get("llm")
     if isinstance(llm, dict):
-        if "claude-cli" in llm:
-            llm["claude_cli"] = llm.pop("claude-cli")
         _blank_model_to_none(llm)
         for attr in _PROVIDER_ATTRS.values():
             block = llm.get(attr)
@@ -926,15 +921,10 @@ def normalize_v2(raw: Mapping, base: Path) -> tuple[dict, list[str]]:
                 continue
             _blank_model_to_none(block)
             if block.get("model") is not None:
-                tag = _canonical_provider(attr)
                 warnings.append(
                     f"[llm.{attr}].model is deprecated; set [llm].model = "
-                    f'"{tag}/<model>" or [<task>].model instead '
+                    f'"{attr}/<model>" or [<task>].model instead '
                     "(support ends in 3.0)"
-                )
-            if block.get("config_dir") is not None:
-                block["config_dir"] = _resolve_path(
-                    block["config_dir"], base, expand=True
                 )
 
     for task in TASKS:
@@ -1206,7 +1196,7 @@ class Config:
             The config tree, shaped like ``whygraph.toml``.
         base : Path
             Directory relative paths (``whygraph_db``, ``codegraph_db``,
-            ``[logging].file``, ``[llm.claude_cli].config_dir``) resolve
+            ``[logging].file``) resolve
             against - the project root.
 
         Returns
@@ -1319,7 +1309,7 @@ class Config:
     ) -> tuple[str, str | None, bool]:
         """``(provider, model, pinned)`` for ``task``; see :meth:`model_for`."""
         table = self._task_table(task)
-        own_provider = _canonical_provider(table.provider) if table.provider else None
+        own_provider = table.provider or None
         own_model = table.model or None
         if own_model is not None and own_provider is None:
             # Split only when the table names no provider and the prefix is
@@ -1336,13 +1326,13 @@ class Config:
             if own_provider is not None:
                 raise ConfigError(
                     f"[chat] names {task_provider!r}, which is not a chat provider; "
-                    f"use one of {CHAT_PROVIDERS} (ollama and claude-cli support "
-                    "analyze/rationale but not tool-calling chat)"
+                    f"use one of {CHAT_PROVIDERS} (ollama supports analyze/rationale "
+                    "but not tool-calling chat)"
                 )
             # Inherited from [llm].model: fall back to the legacy default.
             task_provider = CHAT_PROVIDERS[0]
 
-        resolved = _canonical_provider(provider) if provider else task_provider
+        resolved = provider or task_provider
         if task == "chat" and resolved not in CHAT_PROVIDERS:
             raise ConfigError(
                 f"{resolved!r} is not a chat provider; available: {CHAT_PROVIDERS}"

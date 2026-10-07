@@ -79,7 +79,7 @@ def endpoint_of(config: Mapping[str, Any], provider_attr: str) -> str | None:
     config : Mapping
         A (normalized or raw) layer.
     provider_attr : str
-        The table name, e.g. ``"openai"`` or ``"claude_cli"``.
+        The table name, e.g. ``"openai"`` or ``"ollama"``.
 
     Returns
     -------

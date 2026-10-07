@@ -79,7 +79,7 @@ LINK_STATUSES: tuple[str, ...] = (
     "update_required",
 )
 """What a local portal last saw of a linked project (``platform_links.status``)."""
-SECRET_KINDS: tuple[str, ...] = ("llm_api_key", "github_token", "claude_oauth_token")
+SECRET_KINDS: tuple[str, ...] = ("llm_api_key", "github_token")
 SCAN_KINDS: tuple[str, ...] = ("scan", "sync")
 SCAN_TRIGGERS: tuple[str, ...] = (
     "initial",
@@ -590,7 +590,7 @@ class Secret(PortalBase, table=True):
     -----
     Uniqueness is one ``UNIQUE (org_id, project_id, kind, provider) NULLS
     NOT DISTINCT`` constraint: ``project_id`` is NULL for an org-default
-    secret and ``provider`` is NULL for a GitHub or Claude OAuth token, and
+    secret and ``provider`` is NULL for a GitHub token, and
     each NULL must count as one value, not as distinct ones. The composite
     foreign key refuses a project secret filed under another org.
     """

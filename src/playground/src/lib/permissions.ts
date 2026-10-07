@@ -10,7 +10,8 @@ export type ProjectAction =
   | "project.scan_full"
   | "project.configure"
   | "project.setup"
-  | "project.access";
+  | "project.access"
+  | "project.usage";
 
 /** Every project action: what an admin holds (test fixtures use it as their default). */
 export const PROJECT_ACTIONS: ProjectAction[] = [
@@ -21,6 +22,7 @@ export const PROJECT_ACTIONS: ProjectAction[] = [
   "project.configure",
   "project.setup",
   "project.access",
+  "project.usage",
 ];
 
 /**

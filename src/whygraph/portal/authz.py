@@ -75,6 +75,12 @@ class Action(StrEnum):
     ORG_OWN = "org.own"
     ORG_AUDIT = "org.audit"
     """Read the org's audit log (owner only)."""
+    ORG_USAGE = "org.usage"
+    """Read the org's LLM usage and cost, every member's included (owner,
+    admin and the instance-admin reader)."""
+    ORG_BUDGETS = "org.budgets"
+    """Set and remove budgets and price overrides (admin and owner; the
+    self / owner limit is enforced in the route)."""
     PROJECT_READ = "project.read"
     PROJECT_CHAT = "project.chat"
     PROJECT_SCAN = "project.scan"
@@ -84,6 +90,8 @@ class Action(StrEnum):
     PROJECT_SETUP = "project.setup"
     PROJECT_ACCESS = "project.access"
     """Read and change who may use the project (project admin)."""
+    PROJECT_USAGE = "project.usage"
+    """Read the project's LLM usage and cost (project admin)."""
     USER_SELF = "user.self"
     """Any signed-in user acting on their own account (in no role's set)."""
     INSTANCE_ADMIN = "instance.admin"
@@ -91,17 +99,19 @@ class Action(StrEnum):
 
 
 _ORG_MEMBER = frozenset({Action.ORG_READ})
-_ORG_ADMIN = _ORG_MEMBER | {
+_ORG_READER = _ORG_MEMBER | {Action.ORG_USAGE}
+_ORG_ADMIN = _ORG_READER | {
     Action.ORG_ADD_PROJECT,
     Action.ORG_REMOVE_PROJECT,
     Action.ORG_MEMBERS,
+    Action.ORG_BUDGETS,
 }
 
 ROLE_ACTIONS: dict[Role, frozenset[Action]] = {
     Role.MEMBER: _ORG_MEMBER,
     Role.ADMIN: _ORG_ADMIN,
     Role.OWNER: _ORG_ADMIN | {Action.ORG_CONFIGURE, Action.ORG_OWN, Action.ORG_AUDIT},
-    Role.READER: _ORG_MEMBER,
+    Role.READER: _ORG_READER,
 }
 """The **org** actions each org role may perform (never a project action)."""
 
@@ -117,6 +127,7 @@ PROJECT_ROLE_ACTIONS: dict[ProjectRole, frozenset[Action]] = {
         Action.PROJECT_CONFIGURE,
         Action.PROJECT_SETUP,
         Action.PROJECT_ACCESS,
+        Action.PROJECT_USAGE,
     },
 }
 """The project actions each effective project role may perform."""

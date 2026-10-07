@@ -888,7 +888,7 @@ def test_the_catch_up_never_runs_in_production(
 # ---------------------------------------------------------------------------
 
 READER_ACTIONS = {str(action) for action in ROLE_ACTIONS[Role.READER]}
-"""``org.read``: the org actions a ``reader`` may do."""
+"""``org.read`` and ``org.usage``: the org actions a ``reader`` may do."""
 
 READER_PROJECT_ACTIONS = {
     str(action) for action in PROJECT_ROLE_ACTIONS[ProjectRole.VIEWER]
@@ -915,7 +915,7 @@ def _is_binding_404(response: httpx.Response) -> bool:
 
 
 def test_the_reader_route_split_is_the_planned_one() -> None:
-    assert READER_ACTIONS == {"org.read"}
+    assert READER_ACTIONS == {"org.read", "org.usage"}
     assert READER_PROJECT_ACTIONS == {"project.read"}
     # A reader lists an org's members, and changes nothing about them.
     assert ("GET", "/api/org/members") in READ_ROUTES

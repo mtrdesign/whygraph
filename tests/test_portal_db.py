@@ -86,6 +86,10 @@ PORTAL_TABLES = {
     "invitations",
     "invitation_grants",
     "audit_events",
+    "usage_events",
+    "budgets",
+    "budget_alerts",
+    "price_overrides",
 }
 
 
@@ -235,7 +239,8 @@ PROJECTS = "73bf248ea6fd"
 CONNECTIONS = "c4e7a19b52d8"
 ACCESS = "d8a31f6c07e5"
 REMOVE_CLAUDE_CLI = "bd0a25e6df74"
-HEAD = REMOVE_CLAUDE_CLI
+USAGE = "e46b50366a4c"
+HEAD = USAGE
 
 
 def _seed_m2a(conn) -> dict[str, int]:  # noqa: ANN001
@@ -853,6 +858,262 @@ def test_remove_claude_cli_migration_clears_tokens_and_settings(
     command.downgrade(portal_db.alembic_config(), ACCESS)
     portal_db._reset_engine()
     command.upgrade(portal_db.alembic_config(), "head")
+
+
+USAGE_TABLES = ("usage_events", "budgets", "budget_alerts", "price_overrides")
+
+
+def _seed_usage_org(conn) -> dict[str, int]:  # noqa: ANN001
+    """An org with a project and a member, as the usage rows reference them."""
+    org = conn.execute(
+        text(
+            "INSERT INTO organizations (uid, slug, name, created_at, "
+            "default_project_role) VALUES ('o-acme', 'acme', 'Acme', 'now', "
+            "'contributor') RETURNING id"
+        )
+    ).scalar_one()
+    user = conn.execute(
+        text(
+            "INSERT INTO users (uid, display_name, is_instance_admin, created_at) "
+            "VALUES ('u-cy', 'Cy', false, 'now') RETURNING id"
+        )
+    ).scalar_one()
+    conn.execute(
+        text(
+            "INSERT INTO memberships (org_id, user_id, role, created_at) "
+            "VALUES (:org, :user, 'member', 'now')"
+        ),
+        {"org": org, "user": user},
+    )
+    project = conn.execute(
+        text(
+            "INSERT INTO projects (org_id, slug, name, source, root, created_at, restricted) "
+            "VALUES (:org, 'api', 'API', 'local', '/r/api', 'now', false) RETURNING id"
+        ),
+        {"org": org},
+    ).scalar_one()
+    return {"org": org, "user": user, "project": project}
+
+
+def _usage_event(conn, ids: dict[str, int], **kw) -> int:  # noqa: ANN001, ANN003
+    """Insert one ledger row (a member's chat round unless ``kw`` says otherwise)."""
+    row = {
+        "org": ids["org"],
+        "project": ids["project"],
+        "user": ids["user"],
+        "actor_kind": "member",
+        "source": "chat",
+        "task": "chat",
+        "key_scope": "org",
+        "cost": "0.012345",
+        "cost_source": "estimated",
+        **kw,
+    }
+    return conn.execute(
+        text(
+            "INSERT INTO usage_events (org_id, project_id, project_slug, "
+            "project_name, actor_kind, user_id, actor_label, source, task, "
+            "provider, model_requested, key_scope, input_tokens, output_tokens, "
+            "cost_usd, cost_source, created_at) VALUES (:org, :project, 'api', "
+            "'API', :actor_kind, :user, 'Cy', :source, :task, 'anthropic', "
+            "'claude-sonnet-4-6', :key_scope, 1200, 300, :cost, :cost_source, "
+            "'2026-10-07T12:00:00+00:00') RETURNING id"
+        ),
+        row,
+    ).scalar_one()
+
+
+def test_usage_upgrade_creates_the_tables_and_constraints(
+    empty_portal_database: str,
+) -> None:
+    portal_db.ensure_initialized()
+    engine = portal_db.get_engine()
+    insp = inspect(engine)
+    assert set(USAGE_TABLES) <= set(insp.get_table_names())
+    assert {i["name"] for i in insp.get_indexes("usage_events")} == {
+        "ix_usage_events_org_time",
+        "ix_usage_events_org_user_time",
+        "ix_usage_events_org_project_time",
+        "ix_usage_events_project",
+        "ix_usage_events_user",
+        "ix_usage_events_scan_run",
+        "ix_usage_events_connection",
+    }
+    with engine.connect() as conn:
+        defs = dict(
+            conn.execute(
+                text(
+                    "SELECT indexname, indexdef FROM pg_indexes WHERE indexname IN "
+                    "('uq_budgets_target', 'uq_budget_alerts_once', "
+                    "'ix_usage_events_scan_run', 'ix_usage_events_connection')"
+                )
+            ).all()
+        )
+        cost_type = conn.execute(
+            text(
+                "SELECT numeric_precision, numeric_scale FROM information_schema.columns "
+                "WHERE table_name = 'usage_events' AND column_name = 'cost_usd'"
+            )
+        ).one()
+    assert "NULLS NOT DISTINCT" in defs["uq_budgets_target"]
+    assert "NULLS NOT DISTINCT" in defs["uq_budget_alerts_once"]
+    assert "WHERE (scan_run_id IS NOT NULL)" in defs["ix_usage_events_scan_run"]
+    assert "WHERE (connection_id IS NOT NULL)" in defs["ix_usage_events_connection"]
+    assert tuple(cost_type) == (14, 6)
+
+
+def test_usage_constraints_hold(empty_portal_database: str) -> None:
+    portal_db.ensure_initialized()
+    engine = portal_db.get_engine()
+    with engine.begin() as conn:
+        ids = _seed_usage_org(conn)
+        _usage_event(conn, ids)
+        _usage_event(conn, ids, user=None, actor_kind="system", source="scan")
+        conn.execute(
+            text(
+                "INSERT INTO budgets (org_id, scope, monthly_usd, hard_stop, updated_at) "
+                "VALUES (:org, 'org', 100, false, 'now')"
+            ),
+            ids,
+        )
+    bad = [
+        # The System actor never carries a user.
+        lambda c: _usage_event(c, ids, actor_kind="system"),
+        lambda c: _usage_event(c, ids, source="cli"),
+        lambda c: _usage_event(c, ids, key_scope="subscription"),
+        lambda c: _usage_event(c, ids, cost_source="guessed"),
+        # A second org budget (NULLS NOT DISTINCT).
+        lambda c: c.execute(
+            text(
+                "INSERT INTO budgets (org_id, scope, monthly_usd, hard_stop, "
+                "updated_at) VALUES (:org, 'org', 50, true, 'now')"
+            ),
+            ids,
+        ),
+        # A project budget without its project; an amount out of range.
+        lambda c: c.execute(
+            text(
+                "INSERT INTO budgets (org_id, scope, monthly_usd, hard_stop, "
+                "updated_at) VALUES (:org, 'project', 50, true, 'now')"
+            ),
+            ids,
+        ),
+        lambda c: c.execute(
+            text(
+                "INSERT INTO budgets (org_id, scope, project_id, monthly_usd, "
+                "hard_stop, updated_at) VALUES (:org, 'project', :project, 0, "
+                "true, 'now')"
+            ),
+            ids,
+        ),
+        # A member override for someone who is not a member of the org.
+        lambda c: c.execute(
+            text(
+                "INSERT INTO budgets (org_id, scope, user_id, monthly_usd, "
+                "hard_stop, updated_at) VALUES (:org, 'member', :user + 1000, 5, "
+                "true, 'now')"
+            ),
+            ids,
+        ),
+        lambda c: c.execute(
+            text(
+                "INSERT INTO price_overrides (org_id, provider, model, "
+                "input_per_mtok, output_per_mtok, cache_read_per_mtok, updated_at) "
+                "VALUES (:org, 'openai', 'gpt-5', 1, 2, -1, 'now')"
+            ),
+            ids,
+        ),
+    ]
+    for insert in bad:
+        with pytest.raises(IntegrityError), engine.begin() as conn:
+            insert(conn)
+    with engine.begin() as conn:
+        budget = conn.execute(
+            text(
+                "INSERT INTO budgets (org_id, scope, user_id, monthly_usd, hard_stop, "
+                "updated_at) VALUES (:org, 'member', :user, 5, true, 'now') "
+                "RETURNING id"
+            ),
+            ids,
+        ).scalar_one()
+        conn.execute(
+            text(
+                "INSERT INTO budget_alerts (budget_id, month, threshold, crossed_at, "
+                "spent_usd) VALUES (:b, '2026-10', 50, 'now', 2.5)"
+            ),
+            {"b": budget},
+        )
+    for threshold in (50, 60):  # once per month; 60 is not a threshold
+        with pytest.raises(IntegrityError), engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO budget_alerts (budget_id, month, threshold, "
+                    "crossed_at, spent_usd) VALUES (:b, '2026-10', :t, 'now', 3)"
+                ),
+                {"b": budget, "t": threshold},
+            )
+    # Removing the member takes their override (and its alerts) with it;
+    # deleting the project keeps its ledger rows with the snapshot.
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM memberships WHERE user_id = :user"), ids)
+        conn.execute(text("DELETE FROM projects WHERE id = :project"), ids)
+        assert conn.execute(text("SELECT count(*) FROM budget_alerts")).scalar() == 0
+        assert conn.execute(
+            text("SELECT scope FROM budgets ORDER BY id")
+        ).scalars().all() == ["org"]
+        assert conn.execute(
+            text("SELECT DISTINCT project_id, project_slug FROM usage_events")
+        ).all() == [(None, "api")]
+
+
+def test_usage_downgrade_drops_the_empty_tables(empty_portal_database: str) -> None:
+    portal_db.ensure_initialized()
+    portal_db._reset_engine()
+    command.downgrade(portal_db.alembic_config(), REMOVE_CLAUDE_CLI)
+    portal_db._reset_engine()
+    assert not set(USAGE_TABLES) & set(
+        inspect(portal_db.get_engine()).get_table_names()
+    )
+    portal_db._reset_engine()
+    command.upgrade(portal_db.alembic_config(), "head")
+    portal_db._reset_engine()
+    assert set(USAGE_TABLES) <= set(inspect(portal_db.get_engine()).get_table_names())
+
+
+@pytest.mark.parametrize(
+    ("seed", "match"),
+    [
+        ("usage_events", "usage events"),
+        (
+            "INSERT INTO budgets (org_id, scope, monthly_usd, hard_stop, updated_at) "
+            "VALUES (:org, 'org', 10, false, 'now')",
+            "budgets",
+        ),
+        (
+            "INSERT INTO price_overrides (org_id, provider, model, input_per_mtok, "
+            "output_per_mtok, updated_at) VALUES (:org, 'openai', 'gpt-5', 1, 2, 'now')",
+            "price overrides",
+        ),
+    ],
+)
+def test_usage_downgrade_refuses_m2f2_data(
+    empty_portal_database: str, seed: str, match: str
+) -> None:
+    portal_db.ensure_initialized()
+    with portal_db.get_engine().begin() as conn:
+        ids = _seed_usage_org(conn)
+        if seed == "usage_events":
+            _usage_event(conn, ids)
+        else:
+            conn.execute(text(seed), ids)
+    portal_db._reset_engine()
+    with pytest.raises(RuntimeError, match=f"usage revision.*{match}"):
+        command.downgrade(portal_db.alembic_config(), REMOVE_CLAUDE_CLI)
+    portal_db._reset_engine()
+    with portal_db.get_engine().connect() as conn:
+        assert conn.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar() == (HEAD)
 
 
 # ---------------------------------------------------------------------------

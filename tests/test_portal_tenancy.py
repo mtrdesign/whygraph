@@ -1659,6 +1659,7 @@ def test_the_org_default_sets_the_role_of_the_ungranted(two_orgs: World) -> None
         "project.configure",
         "project.setup",
         "project.access",
+        "project.usage",
     ]
 
 

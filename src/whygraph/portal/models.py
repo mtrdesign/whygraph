@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -39,7 +40,9 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     MetaData,
+    Numeric,
     PrimaryKeyConstraint,
+    SmallInteger,
     Text,
     UniqueConstraint,
     event,
@@ -99,6 +102,20 @@ SCAN_STATUSES: tuple[str, ...] = (
     "interrupted",
     "cancelled",
 )
+USAGE_SOURCES: tuple[str, ...] = ("scan", "explorer", "chat", "mcp", "agent")
+"""What caused an LLM call (``usage_events.source``); every source but
+``scan`` is interactive."""
+USAGE_TASKS: tuple[str, ...] = ("analyze", "rationale", "chat")
+"""The task an LLM call served (``usage_events.task``)."""
+KEY_SCOPES: tuple[str, ...] = ("project", "org", "environment", "none")
+"""Whose key paid for an LLM call (``usage_events.key_scope``)."""
+COST_SOURCES: tuple[str, ...] = ("provider", "estimated", "unpriced")
+"""Where a call's cost came from (``usage_events.cost_source``)."""
+BUDGET_SCOPES: tuple[str, ...] = ("org", "project", "member_default", "member")
+"""What a monthly budget caps (``budgets.scope``)."""
+BUDGET_THRESHOLDS: tuple[int, ...] = (50, 75, 100)
+"""The percentages of a budget at which an alert fires
+(``budget_alerts.threshold``)."""
 
 
 def _in(column: str, values: tuple[str, ...]) -> str:
@@ -1053,6 +1070,362 @@ class AuditEvent(PortalBase, table=True):
     fields: dict[str, Any] = Field(
         default_factory=dict, sa_column=Column(JSON, nullable=False)
     )
+
+
+class UsageEvent(PortalBase, table=True):
+    """One successful LLM provider round trip (M2f-2, the usage ledger).
+
+    Holds counts, cost, model, ids and a short subject - never prompt or
+    completion text, never chat content. The labels are snapshots, so a row
+    stays readable after its project, member or connection is gone.
+
+    Attributes
+    ----------
+    id : int
+        Serial ``BIGINT`` primary key.
+    org_id : int
+        The organization; the row goes with it.
+    project_id : int or None
+        The project; ``NULL`` once the project is deleted.
+    project_slug, project_name : str
+        Snapshots of the project's slug and name.
+    actor_kind : str
+        ``"member"`` or ``"system"``. A deleted member's rows keep
+        ``"member"`` with ``user_id`` ``NULL``.
+    user_id : int or None
+        ``users.id`` of the member who triggered the call; always ``NULL``
+        for ``"system"``.
+    actor_label : str
+        Snapshot: ``"Name (@login)"``, ``"Name"`` (local mode) or
+        ``"System"``.
+    source : str
+        One of :data:`USAGE_SOURCES`.
+    task : str
+        One of :data:`USAGE_TASKS`.
+    scan_run_id : int or None
+        The scan run that made the call, if any.
+    chat_session_id : int or None
+        The chat session's id in the project database (no foreign key;
+        always read with ``project_id``).
+    connection_id : int or None
+        The connection token of a linked portal's agent call.
+    client_name : str or None
+        Snapshot of the connection's ``client_name`` (the machine).
+    subject : str or None
+        The commit SHA, file path or qualified name the call was about
+        (at most 200 characters, redacted).
+    provider, model_requested : str
+        The provider and the model asked for.
+    model_served : str or None
+        The model the provider reported, when it did.
+    key_scope : str
+        One of :data:`KEY_SCOPES`.
+    input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens : int or None
+        What the provider reported; ``NULL`` = not reported. ``input_tokens``
+        counts every prompt token (cache reads and writes included);
+        ``cache_*`` are subsets of it and ``reasoning_tokens`` of the output.
+    cost_usd : Decimal or None
+        The cost, computed once at write time.
+    cost_source : str
+        One of :data:`COST_SOURCES`.
+    price_version : str or None
+        The price table the cost came from (``"bundled:<date>"`` or
+        ``"org:<updated_at>"``).
+    duration_ms : int or None
+        How long the provider call took.
+    created_at : str
+        ISO-8601 UTC timestamp, seconds.
+    """
+
+    __tablename__ = "usage_events"
+    __table_args__ = (
+        CheckConstraint(
+            "actor_kind IN ('member', 'system')", name="ck_usage_events_actor_kind"
+        ),
+        CheckConstraint(_in("source", USAGE_SOURCES), name="ck_usage_events_source"),
+        CheckConstraint(_in("task", USAGE_TASKS), name="ck_usage_events_task"),
+        CheckConstraint(_in("key_scope", KEY_SCOPES), name="ck_usage_events_key_scope"),
+        CheckConstraint(
+            _in("cost_source", COST_SOURCES), name="ck_usage_events_cost_source"
+        ),
+        CheckConstraint(
+            "actor_kind <> 'system' OR user_id IS NULL", name="ck_usage_events_actor"
+        ),
+        ForeignKeyConstraint(
+            ["org_id"],
+            ["organizations.id"],
+            name="fk_usage_events_org",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name="fk_usage_events_project",
+            ondelete="SET NULL",
+        ),
+        ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            name="fk_usage_events_user",
+            ondelete="SET NULL",
+        ),
+        ForeignKeyConstraint(
+            ["scan_run_id"],
+            ["scan_runs.id"],
+            name="fk_usage_events_scan_run",
+            ondelete="SET NULL",
+        ),
+        ForeignKeyConstraint(
+            ["connection_id"],
+            ["connection_tokens.id"],
+            name="fk_usage_events_connection",
+            ondelete="SET NULL",
+        ),
+        Index("ix_usage_events_org_time", "org_id", "created_at"),
+        Index("ix_usage_events_org_user_time", "org_id", "user_id", "created_at"),
+        Index("ix_usage_events_org_project_time", "org_id", "project_id", "created_at"),
+        Index("ix_usage_events_project", "project_id"),
+        Index("ix_usage_events_user", "user_id"),
+        Index(
+            "ix_usage_events_scan_run",
+            "scan_run_id",
+            postgresql_where=text("scan_run_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_usage_events_connection",
+            "connection_id",
+            postgresql_where=text("connection_id IS NOT NULL"),
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True, sa_type=BigInteger)
+    org_id: int = Field()
+    project_id: int | None = Field(default=None)
+    project_slug: str = Field(sa_type=Text)
+    project_name: str = Field(sa_type=Text)
+    actor_kind: str = Field(sa_type=Text)
+    user_id: int | None = Field(default=None)
+    actor_label: str = Field(sa_type=Text)
+    source: str = Field(sa_type=Text)
+    task: str = Field(sa_type=Text)
+    scan_run_id: int | None = Field(default=None)
+    chat_session_id: int | None = Field(default=None)
+    connection_id: int | None = Field(default=None, sa_type=BigInteger)
+    client_name: str | None = Field(default=None, sa_type=Text)
+    subject: str | None = Field(default=None, sa_type=Text)
+    provider: str = Field(sa_type=Text)
+    model_requested: str = Field(sa_type=Text)
+    model_served: str | None = Field(default=None, sa_type=Text)
+    key_scope: str = Field(sa_type=Text)
+    input_tokens: int | None = Field(default=None, sa_type=BigInteger)
+    output_tokens: int | None = Field(default=None, sa_type=BigInteger)
+    cache_read_tokens: int | None = Field(default=None, sa_type=BigInteger)
+    cache_write_tokens: int | None = Field(default=None, sa_type=BigInteger)
+    reasoning_tokens: int | None = Field(default=None, sa_type=BigInteger)
+    cost_usd: Decimal | None = Field(default=None, sa_type=Numeric(14, 6))
+    cost_source: str = Field(sa_type=Text)
+    price_version: str | None = Field(default=None, sa_type=Text)
+    duration_ms: int | None = Field(default=None)
+    created_at: str = Field(default_factory=_now, sa_type=Text)
+
+
+class Budget(PortalBase, table=True):
+    """A monthly LLM spend budget (M2f-2).
+
+    One row per target (``uq_budgets_target``, ``NULLS NOT DISTINCT``): the
+    org, a project, the org-wide member default, or one member's override.
+    A project budget goes with the project and a member override with the
+    membership (composite foreign keys).
+
+    Attributes
+    ----------
+    org_id : int
+        The organization.
+    scope : str
+        One of :data:`BUDGET_SCOPES`.
+    project_id : int or None
+        Set exactly when ``scope`` is ``"project"``.
+    user_id : int or None
+        Set exactly when ``scope`` is ``"member"``.
+    monthly_usd : Decimal
+        The budget, ``> 0`` and ``<= 1000000``, per calendar month (UTC).
+    hard_stop : bool
+        Whether an exhausted budget turns off LLM spend for the scope.
+    updated_by : int or None
+        ``users.id`` of the last writer; ``NULL`` when that user is gone.
+    updated_at : str
+        ISO-8601 UTC timestamp.
+    """
+
+    __tablename__ = "budgets"
+    __table_args__ = (
+        CheckConstraint(_in("scope", BUDGET_SCOPES), name="ck_budgets_scope"),
+        CheckConstraint(
+            "monthly_usd > 0 AND monthly_usd <= 1000000", name="ck_budgets_amount"
+        ),
+        CheckConstraint(
+            "(project_id IS NOT NULL) = (scope = 'project') "
+            "AND (user_id IS NOT NULL) = (scope = 'member')",
+            name="ck_budgets_shape",
+        ),
+        ForeignKeyConstraint(
+            ["org_id"],
+            ["organizations.id"],
+            name="fk_budgets_org",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["org_id", "project_id"],
+            ["projects.org_id", "projects.id"],
+            name="fk_budgets_project",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["org_id", "user_id"],
+            ["memberships.org_id", "memberships.user_id"],
+            name="fk_budgets_membership",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["updated_by"],
+            ["users.id"],
+            name="fk_budgets_updated_by",
+            ondelete="SET NULL",
+        ),
+        UniqueConstraint(
+            "org_id",
+            "scope",
+            "project_id",
+            "user_id",
+            name="uq_budgets_target",
+            postgresql_nulls_not_distinct=True,
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    org_id: int = Field()
+    scope: str = Field(sa_type=Text)
+    project_id: int | None = Field(default=None)
+    user_id: int | None = Field(default=None)
+    monthly_usd: Decimal = Field(sa_type=Numeric(12, 2))
+    hard_stop: bool = Field(default=False, sa_column=Column(Boolean, nullable=False))
+    updated_by: int | None = Field(default=None)
+    updated_at: str = Field(default_factory=_now, sa_type=Text)
+
+
+class BudgetAlert(PortalBase, table=True):
+    """A budget threshold crossed in one month (M2f-2).
+
+    Each threshold fires once per budget (and, for a ``member_default``
+    budget, per member) per month (``uq_budget_alerts_once``).
+
+    Attributes
+    ----------
+    id : int
+        Serial ``BIGINT`` primary key.
+    budget_id : int
+        The budget; the alert goes with it.
+    user_id : int or None
+        The member who crossed a ``member_default`` budget; ``NULL`` for
+        every other scope.
+    month : str
+        The calendar month (UTC), ``"2026-10"``.
+    threshold : int
+        One of :data:`BUDGET_THRESHOLDS`.
+    crossed_at : str
+        ISO-8601 UTC timestamp.
+    spent_usd : Decimal
+        The month-to-date spend when the threshold was crossed.
+    """
+
+    __tablename__ = "budget_alerts"
+    __table_args__ = (
+        CheckConstraint(
+            "threshold IN (50, 75, 100)", name="ck_budget_alerts_threshold"
+        ),
+        ForeignKeyConstraint(
+            ["budget_id"],
+            ["budgets.id"],
+            name="fk_budget_alerts_budget",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            name="fk_budget_alerts_user",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "budget_id",
+            "user_id",
+            "month",
+            "threshold",
+            name="uq_budget_alerts_once",
+            postgresql_nulls_not_distinct=True,
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True, sa_type=BigInteger)
+    budget_id: int = Field()
+    user_id: int | None = Field(default=None)
+    month: str = Field(sa_type=Text)
+    threshold: int = Field(sa_type=SmallInteger)
+    crossed_at: str = Field(default_factory=_now, sa_type=Text)
+    spent_usd: Decimal = Field(sa_type=Numeric(14, 6))
+
+
+class PriceOverride(PortalBase, table=True):
+    """An org's price for one model, on top of the bundled table (M2f-2).
+
+    Attributes
+    ----------
+    org_id : int
+        The organization.
+    provider, model : str
+        The model the price is for (with ``org_id``, the primary key).
+    input_per_mtok, output_per_mtok : Decimal
+        USD per million input / output tokens, ``>= 0``.
+    cache_read_per_mtok, cache_write_per_mtok : Decimal or None
+        USD per million cache-read / cache-write tokens, ``>= 0``; ``NULL``
+        means the input rate.
+    updated_by : int or None
+        ``users.id`` of the last writer; ``NULL`` when that user is gone.
+    updated_at : str
+        ISO-8601 UTC timestamp.
+    """
+
+    __tablename__ = "price_overrides"
+    __table_args__ = (
+        PrimaryKeyConstraint("org_id", "provider", "model", name="pk_price_overrides"),
+        CheckConstraint(
+            "input_per_mtok >= 0 AND output_per_mtok >= 0 "
+            "AND (cache_read_per_mtok IS NULL OR cache_read_per_mtok >= 0) "
+            "AND (cache_write_per_mtok IS NULL OR cache_write_per_mtok >= 0)",
+            name="ck_price_overrides_nonneg",
+        ),
+        ForeignKeyConstraint(
+            ["org_id"],
+            ["organizations.id"],
+            name="fk_price_overrides_org",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["updated_by"],
+            ["users.id"],
+            name="fk_price_overrides_updated_by",
+            ondelete="SET NULL",
+        ),
+    )
+
+    org_id: int = Field()
+    provider: str = Field(sa_type=Text)
+    model: str = Field(sa_type=Text)
+    input_per_mtok: Decimal = Field(sa_type=Numeric(12, 6))
+    output_per_mtok: Decimal = Field(sa_type=Numeric(12, 6))
+    cache_read_per_mtok: Decimal | None = Field(default=None, sa_type=Numeric(12, 6))
+    cache_write_per_mtok: Decimal | None = Field(default=None, sa_type=Numeric(12, 6))
+    updated_by: int | None = Field(default=None)
+    updated_at: str = Field(default_factory=_now, sa_type=Text)
 
 
 @event.listens_for(Project, "before_insert")

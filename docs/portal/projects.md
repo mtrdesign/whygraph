@@ -107,7 +107,10 @@ The last step runs the first scan, with live progress. The first scan reads git 
 the CodeGraph index; it **never calls an LLM**, so it costs nothing and finishes quickly.
 
 Afterwards the project shows how many commits a full scan would describe, with which model, and a
-token estimate (and a cost for known models). Choose **Describe now** to spend on per-commit
+token estimate and an estimated cost. The cost is priced for every provider that has a price (Anthropic
+and OpenAI out of the box, any other model once your organization adds a price), at the bundled
+prices or your organization's own; a model with no price shows tokens only. Spend after that is
+tracked on [Usage & cost](usage.md). Choose **Describe now** to spend on per-commit
 descriptions, or **Later** to let them backfill on demand. See [Scanning](../guide/scanning.md).
 
 ## After setup

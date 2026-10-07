@@ -5,6 +5,7 @@ import {
   ActivityIcon,
   ArrowLeftIcon,
   ChevronsUpDownIcon,
+  CircleDollarSignIcon,
   LayoutDashboardIcon,
   LayoutGridIcon,
   MessageSquareIcon,
@@ -14,7 +15,7 @@ import {
   ScrollTextIcon,
   UsersIcon,
 } from "lucide-react";
-import { portalApi, portalKey } from "../../api";
+import { portalApi, portalKey, type PortalState } from "../../api";
 import { baseHostOf, canOwn, isProduction, useSignOut } from "../../lib/identity";
 import { hardNavigate } from "../../lib/navigation";
 import { can } from "../../lib/permissions";
@@ -99,6 +100,16 @@ const MEMBERS_ITEM: NavItem = { label: "Members", icon: UsersIcon, to: "/members
 // Production, owners only (`org.audit`).
 const AUDIT_ITEM: NavItem = { label: "Audit log", icon: ScrollTextIcon, to: "/audit" };
 
+/**
+ * Usage & cost (M2f-2): the org's page for `org.usage` callers (owners, org admins,
+ * readers; local mode's user), else a production member's own usage, else none.
+ */
+function usageItem(state: PortalState | undefined): NavItem | null {
+  if (state?.usage?.org) return { label: "Usage & cost", icon: CircleDollarSignIcon, to: "/usage" };
+  if (state?.usage?.me) return { label: "Usage & cost", icon: CircleDollarSignIcon, to: "/usage/me" };
+  return null;
+}
+
 function ProjectSwitcher({ slug, name }: { slug?: string; name?: string }) {
   const navigate = useNavigate();
   const production = isProduction(useQuery({ queryKey: portalKey("state"), queryFn: portalApi.state }).data);
@@ -157,6 +168,7 @@ export function Sidebar({ slug, projectName }: { slug?: string; projectName?: st
   const canChat = can(current, "project.chat");
   const signOut = useSignOut();
   const base = state.data?.base_url?.replace(/\/$/, "") ?? "";
+  const usage = usageItem(state.data);
 
   return (
     <nav
@@ -192,10 +204,12 @@ export function Sidebar({ slug, projectName }: { slug?: string; projectName?: st
           </>
         ) : (
           <Section title="Portal">
-            {(production
-              ? [...PORTAL_ITEMS, MEMBERS_ITEM, ...(canOwn(state.data?.org?.role ?? undefined) ? [AUDIT_ITEM] : [])]
-              : PORTAL_ITEMS
-            ).map((item) => (
+            {[
+              ...(production
+                ? [...PORTAL_ITEMS, MEMBERS_ITEM, ...(canOwn(state.data?.org?.role ?? undefined) ? [AUDIT_ITEM] : [])]
+                : PORTAL_ITEMS),
+              ...(usage ? [usage] : []),
+            ].map((item) => (
               <NavLink key={item.label} item={item} />
             ))}
           </Section>

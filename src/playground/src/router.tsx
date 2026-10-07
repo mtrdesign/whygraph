@@ -37,6 +37,8 @@ import { SetupPage } from "./pages/SetupPage";
 import { GlobalSettingsPage } from "./pages/GlobalSettingsPage";
 import { AuditPage } from "./pages/AuditPage";
 import { MembersPage } from "./pages/MembersPage";
+import { MemberUsagePage } from "./pages/MemberUsagePage";
+import { UsagePage, validateRangeSearch, validateUsageSearch } from "./pages/UsagePage";
 import { ProjectSettingsPage } from "./pages/ProjectSettingsPage";
 import { ScansPage } from "./pages/ScansPage";
 import { ConnectPage, type ConnectSearch } from "./pages/ConnectPage";
@@ -71,7 +73,8 @@ import {
 //   /projects/new                        add-project wizard    │ (sidebar: Projects,
 //   /settings                            global settings       │  Settings, and
 //   /members                             org members           │  Members, and the
-//   /audit                               audit log (owners)    ┘  owners' Audit log, in production)
+//   /audit                               audit log (owners)    │  owners' Audit log, in production;
+//   /usage, /usage/me, /usage/members/$uid  Usage & cost       ┘  Usage & cost when state.usage allows)
 //   /p/$slug                             ProjectHome           ┐ project layout
 //   /p/$slug/explorer?node=&file=        Explorer              │ (sidebar: Overview,
 //   /p/$slug/chat/{-$id}                 Chat                  │  Explorer, Chat,
@@ -484,6 +487,51 @@ function AuditRoute() {
 }
 const auditRoute = createRoute({ getParentRoute: () => portalLayout, path: "/audit", component: AuditRoute });
 
+// Usage & cost (M2f-2). The org's page needs `org.usage` (`state.usage.org` is set:
+// owners, org admins, readers, local mode's user); a production member, who has
+// only their own usage, is sent to `/usage/me`.
+function UsageRoute() {
+  const state = usePortalState().data;
+  const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
+  const usage = (state ?? portal).usage;
+  if (usage?.org) return <UsagePage />;
+  if (usage?.me) return <Navigate to="/usage/me" replace />;
+  return <NotFoundPage />;
+}
+const usageRoute = createRoute({
+  getParentRoute: () => portalLayout,
+  path: "/usage",
+  validateSearch: validateUsageSearch,
+  component: UsageRoute,
+});
+// My usage: production memberships only (`state.usage.me`).
+function MyUsageRoute() {
+  const state = usePortalState().data;
+  const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
+  const current = state ?? portal;
+  return isProduction(current) && current.usage?.me ? <MemberUsagePage /> : <NotFoundPage />;
+}
+const myUsageRoute = createRoute({
+  getParentRoute: () => portalLayout,
+  path: "/usage/me",
+  validateSearch: validateRangeSearch,
+  component: MyUsageRoute,
+});
+// One member's drill-down: production, `org.usage`.
+function MemberUsageRoute() {
+  const state = usePortalState().data;
+  const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
+  const { uid } = useParams({ strict: false }) as { uid: string };
+  const current = state ?? portal;
+  return isProduction(current) && current.usage?.org ? <MemberUsagePage key={uid} uid={uid} /> : <NotFoundPage />;
+}
+const memberUsageRoute = createRoute({
+  getParentRoute: () => portalLayout,
+  path: "/usage/members/$uid",
+  validateSearch: validateRangeSearch,
+  component: MemberUsageRoute,
+});
+
 // ---- project layout ---------------------------------------------------------
 
 // Pages that read project data; on an unusable project they are replaced by an
@@ -667,6 +715,9 @@ const routeTree = rootRoute.addChildren([
     globalSettingsRoute,
     membersRoute,
     auditRoute,
+    usageRoute,
+    myUsageRoute,
+    memberUsageRoute,
   ]),
   projectRoute.addChildren([
     projectHomeRoute,

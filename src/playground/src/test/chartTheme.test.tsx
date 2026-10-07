@@ -1,11 +1,11 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChartPayload } from "../components/chat/chartSpec";
-import { CHART_COLORS } from "../components/chat/chartTheme";
+import type { ChartPayload } from "../components/charts/chartSpec";
+import { CHART_COLORS } from "../components/charts/chartTheme";
 import { STORAGE_KEY, ThemeProvider, useTheme } from "../theme";
 import { parseOklch } from "./oklch";
 
@@ -17,9 +17,9 @@ vi.mock("echarts-for-react/esm/core", () => ({
     return <div data-testid="echart" />;
   },
 }));
-vi.mock("../components/chat/echarts", () => ({ default: {} }));
+vi.mock("../components/charts/echarts", () => ({ default: {} }));
 
-const { ChartBlock, buildOption } = await import("../components/chat/ChartBlock");
+const { ChartBlock, buildOption } = await import("../components/charts/ChartBlock");
 
 const css = readFileSync(resolve(import.meta.dirname, "../styles/theme.css"), "utf8");
 const block = (selector: string) => {
@@ -120,6 +120,70 @@ describe("buildOption", () => {
     expect(dark).toContain(CHART_COLORS.dark.palette[0]);
     expect(dark).not.toContain(CHART_COLORS.light.palette[0]);
     expect(dark).not.toContain(CHART_COLORS.light.surface);
+  });
+});
+
+describe("buildOption value formats", () => {
+  type Fmt = (v: unknown) => string;
+  const axisLabel = (o: Record<string, unknown>) =>
+    (o.yAxis as { axisLabel: { formatter: (v: number) => string } }).axisLabel.formatter;
+  const tooltipText = (o: Record<string, unknown>, value: number) =>
+    (o.tooltip as { formatter: (p: unknown) => HTMLElement }).formatter([{ axisValueLabel: "Oct 1", value }])
+      .textContent;
+  const money: ChartPayload = { ...bar, rows: [["2026-10-01", 0.004], ["2026-10-02", 3.267], ["2026-10-03", 1234.4]] };
+
+  it("formats axis, peak label and tooltip as money with usd", () => {
+    const option = buildOption(money, CHART_COLORS.light, { valueFormat: "usd" });
+    expect(axisLabel(option)(1234)).toBe("$1,234");
+    expect(axisLabel(option)(2.5)).toBe("$2.50");
+    expect(tooltipText(option, 0.004)).toContain("<$0.01");
+    const data = (option.series as Array<{ data: Array<{ label?: { formatter: Fmt } } | number> }>)[0].data;
+    const peak = data.find((d) => typeof d === "object" && d !== null && "label" in d) as { label: { formatter: Fmt } };
+    expect(peak.label.formatter(undefined)).toBe("$1,234");
+  });
+
+  it("keeps plain numbers by default", () => {
+    const option = buildOption(money, CHART_COLORS.light);
+    expect(axisLabel(option)(1234)).toBe((1234).toLocaleString());
+    expect(tooltipText(option, 12)).toContain("12");
+    expect(tooltipText(option, 12)).not.toContain("$");
+  });
+
+  it("shows money in the Table view with usd", async () => {
+    render(
+      <ThemeProvider>
+        <ChartBlock payload={money} valueFormat="usd" />
+      </ThemeProvider>,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "table" }));
+    expect(screen.getByText("$3.27")).toBeInTheDocument();
+    expect(screen.getByText("2026-10-01")).toBeInTheDocument();
+  });
+});
+
+describe("the chart move (components/charts)", () => {
+  it("leaves no chart module under components/chat", () => {
+    for (const name of ["ChartBlock.tsx", "chartSpec.ts", "chartTheme.ts", "echarts.ts"]) {
+      expect(existsSync(resolve(import.meta.dirname, "../components/chat", name))).toBe(false);
+      expect(existsSync(resolve(import.meta.dirname, "../components/charts", name))).toBe(true);
+    }
+  });
+
+  it("keeps echarts behind the one chokepoint and out of the main bundle", () => {
+    const src = resolve(import.meta.dirname, "..");
+    const files = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+        e.isDirectory() ? files(resolve(dir, e.name)) : /\.tsx?$/.test(e.name) ? [resolve(dir, e.name)] : [],
+      );
+    const importers = files(src)
+      .filter((f) => !f.includes("/test/"))
+      .filter((f) => /from ["']echarts(\/|["'])/.test(readFileSync(f, "utf8")));
+    expect(importers.map((f) => f.slice(src.length + 1))).toEqual(["components/charts/echarts.ts"]);
+    // Only lazy imports reach ChartBlock (it pulls echarts in).
+    const eager = files(src)
+      .filter((f) => !f.includes("/test/"))
+      .filter((f) => /^import (?!type )[^;]*from ["'][^"']*\/ChartBlock["']/m.test(readFileSync(f, "utf8")));
+    expect(eager).toEqual([]);
   });
 });
 

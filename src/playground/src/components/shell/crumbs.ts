@@ -15,9 +15,10 @@ const PROJECT_PAGES: Record<string, string> = {
 /**
  * Breadcrumbs for a pathname, in the shape of the §4.12.4 header:
  * `Projects / whygraph / Explorer`. Pure, so the route grammar is testable
- * without rendering.
+ * without rendering. `memberName` labels a Usage & cost member drill-down
+ * (`/usage/members/<uid>`); without it the uid shows.
  */
-export function buildCrumbs(pathname: string, projectName?: string): Crumb[] {
+export function buildCrumbs(pathname: string, projectName?: string, memberName?: string): Crumb[] {
   const parts = pathname.split("/").filter(Boolean);
   const projects: Crumb = { label: "Projects", to: { to: "/" } };
 
@@ -40,6 +41,14 @@ export function buildCrumbs(pathname: string, projectName?: string): Crumb[] {
   if (parts[0] === "settings") return [{ label: "Settings" }];
   if (parts[0] === "members") return [{ label: "Members" }];
   if (parts[0] === "audit") return [{ label: "Audit log" }];
+  if (parts[0] === "usage") {
+    const usage: Crumb = { label: "Usage & cost", to: { to: "/usage" } };
+    if (parts[1] === "me") return [usage, { label: "My usage" }];
+    if (parts[1] === "members" && parts[2]) {
+      return [usage, { label: memberName ?? decodeURIComponent(parts[2]) }];
+    }
+    return [{ label: "Usage & cost" }];
+  }
   if (parts[0] === "setup") return [{ label: "Setup" }];
   return [{ label: "Projects" }];
 }

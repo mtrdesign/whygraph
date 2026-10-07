@@ -1,4 +1,4 @@
-import type { ToolActivity } from "./ToolCallCard";
+import type { ToolActivity } from "../chat/ToolCallCard";
 
 // The parse boundary, and the correlation step the two-step chart design needs.
 //

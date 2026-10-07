@@ -1,4 +1,28 @@
 import { ApiError } from "../api";
+import { formatUsd } from "./format";
+
+/** One entry of `409 budget_below_children`'s `children`. */
+interface BudgetChild {
+  scope: string;
+  monthly_usd: number;
+  slug?: string;
+  name?: string;
+  uid?: string;
+  label?: string;
+}
+
+function childName(child: BudgetChild): string {
+  const who = child.name ?? child.label ?? (child.scope === "member_default" ? "the member default" : child.slug ?? child.uid);
+  if (!who) return "";
+  return typeof child.monthly_usd === "number" ? `${who} (${formatUsd(child.monthly_usd)})` : who;
+}
+
+const PRICE_FIELDS: Record<string, string> = {
+  input_per_mtok: "The input price",
+  output_per_mtok: "The output price",
+  cache_read_per_mtok: "The cache read price",
+  cache_write_per_mtok: "The cache write price",
+};
 
 export const PASSWORD_HINT = "At least 15 characters - a passphrase works well.";
 
@@ -86,6 +110,44 @@ export function authMessage(err: unknown): string {
       return "Type the organization's slug exactly to confirm.";
     case "busy":
       return "A sync is finishing - try again in a minute.";
+    // Usage & cost: budgets and prices (M2f-2)
+    case "invalid_amount":
+      return "Enter a monthly budget greater than $0 and at most $1,000,000.";
+    case "budget_above_org": {
+      const org = err.extra.org_monthly_usd;
+      return typeof org === "number"
+        ? `A project or member budget must be at or below the organization's budget (${formatUsd(org)}).`
+        : "A project or member budget must be at or below the organization's budget.";
+    }
+    case "budget_below_children": {
+      const children = Array.isArray(err.extra.children) ? (err.extra.children as BudgetChild[]) : [];
+      const names = children.map(childName).filter(Boolean);
+      return names.length > 0
+        ? `The organization's budget cannot be lower than these budgets: ${names.join(", ")}. Lower them first.`
+        : "The organization's budget cannot be lower than a project or member budget. Lower those first.";
+    }
+    case "invalid_price":
+      return typeof err.extra.field === "string"
+        ? `${PRICE_FIELDS[err.extra.field] ?? err.extra.field} must be a price per million tokens from $0 to $10,000.`
+        : "Enter input and output prices per million tokens, from $0 to $10,000.";
+    case "bad_provider":
+      return "Pick one of the listed providers.";
+    case "bad_model":
+      return "Enter the model id as the provider names it.";
+    case "bad_date":
+      return "Dates are written YYYY-MM-DD.";
+    case "bad_range":
+      return "The start date must be before the end date.";
+    case "range_too_long":
+      return "Pick a range of at most 400 days (usage is kept for 400 days).";
+    case "bad_filter":
+    case "bad_group":
+    case "bad_sort":
+      return err.message;
+    case "bad_cursor":
+      return "The list changed while paging. Apply the filter again.";
+    case "usage_timeout":
+      return "That took too long to add up. Narrow the date range or add a filter.";
   }
   if (err.status === 429) return "Too many attempts. Wait a few minutes and try again.";
   return err.message;

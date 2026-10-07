@@ -5,15 +5,12 @@ import { useCanFor } from "../../lib/permissions";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { formatTokens, formatUsd } from "../../lib/format";
 
-/** `1_234_567` -> `1.2M`; small numbers stay exact. */
-export function compact(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
-  return String(Math.round(n));
+/** `prices_as_of` is the bundled table's date, or a label when the org's own prices applied. */
+function pricedWith(asOf: string): string {
+  return /^\d{4}-\d{2}-\d{2}$/.test(asOf) ? `prices as of ${asOf}` : `priced with ${asOf}`;
 }
-
-const usd = (n: number) => (n < 10 ? `$${n.toFixed(2)}` : `$${Math.round(n).toLocaleString("en-US")}`);
 
 /**
  * The §4.14 cost guard: what describing the waiting commits would cost, with
@@ -99,14 +96,14 @@ export function EstimateBody({
             <p className="mt-1 text-sm text-muted-foreground">
               Model <span className="font-mono text-foreground">{modelName}</span> · about{" "}
               <span data-testid="estimate-tokens">
-                {compact(tokens.input)} input and {compact(tokens.output)} output tokens
+                {formatTokens(tokens.input)} input and {formatTokens(tokens.output)} output tokens
               </span>
               {cost ? (
                 <>
                   {" "}
-                  · <span className="font-medium text-foreground">~{usd(cost.usd)}</span>{" "}
+                  · <span className="font-medium text-foreground">~{formatUsd(cost.usd)}</span>{" "}
                   <span className="text-xs">
-                    (range {usd(cost.low)} to {usd(cost.high)}, prices as of {cost.prices_as_of})
+                    (range {formatUsd(cost.low)} to {formatUsd(cost.high)}, {pricedWith(cost.prices_as_of)})
                   </span>
                 </>
               ) : (

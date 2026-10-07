@@ -1,5 +1,5 @@
 import { Suspense, lazy } from "react";
-import { parseChart } from "./chartSpec";
+import { parseChart } from "../charts/chartSpec";
 import { Skeleton } from "../ui/skeleton";
 import { Markdown } from "./Markdown";
 import { ToolCallCard, type ToolActivity } from "./ToolCallCard";
@@ -10,7 +10,7 @@ import { ToolCallCard, type ToolActivity } from "./ToolCallCard";
 // initial bundle grows by ~1 KB instead of ~575 KB. `chartSpec.ts` stays eager: it
 // decides *whether* there is a chart, and it imports nothing heavy.
 const ChartBlock = lazy(() =>
-  import("./ChartBlock").then((module) => ({ default: module.ChartBlock })),
+  import("../charts/ChartBlock").then((module) => ({ default: module.ChartBlock })),
 );
 
 /**

@@ -12,6 +12,10 @@ land in the recorded argv. Options (all before the runner's own flags):
 ``--codegraph-only``     accepted (the runner passes it for a linked project); like
                          every run it writes nothing but the events: no whygraph.db
 ``--ignore-term``        ignore SIGTERM (only SIGKILL stops it)
+``--usage JSON``         a JSON list of objects, each emitted as a ``usage`` event
+                         (``{"type": "usage", **obj}``) after the first phase and
+                         before any hold
+``--result-extra JSON``  a JSON object merged into the ``result`` event
 ``--token-check URL``    read the GitHub token (``github_token()``: the portal's
                          token file, else ``GH_TOKEN``), GET URL with it as git's
                          Basic password, wait ``--token-wait SEC`` (default 0),
@@ -86,6 +90,8 @@ def main() -> int:
     token_check = _take(args, "--token-check")
     token_wait = float(_take(args, "--token-wait") or 0)
     token_record = _take(args, "--token-record")
+    usage = json.loads(_take(args, "--usage") or "[]")
+    result_extra = json.loads(_take(args, "--result-extra") or "{}")
     if "--ignore-term" in args:
         args.remove("--ignore-term")
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -105,6 +111,8 @@ def main() -> int:
         sys.stderr.write(f"stderr value={value}\n")
         sys.stdout.write(f"plain stdout value={value}\n")
         sys.stdout.flush()
+    for event in usage:
+        _emit({"type": "usage", **event})
     while hold and os.path.exists(hold):
         time.sleep(0.02)
     if token_check:
@@ -125,6 +133,7 @@ def main() -> int:
             "phase_timings": {},
             "crawlers": [],
             "analyze_skipped": None,
+            **result_extra,
         }
     )
     return code

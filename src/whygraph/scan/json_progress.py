@@ -16,6 +16,15 @@ Event contract (one JSON object per line, ``type`` discriminates):
     ``{"type": "task", "name", "completed", "total", "description"}`` on
     task registration and on (throttled) progress updates. ``name`` is the
     crawler's stable label; ``description`` is its current status text.
+``usage``
+    Only in a scan the portal manages (``--managed-by-portal`` with
+    ``--progress json``; :class:`JsonUsageSink`): one per successful LLM
+    call, always before ``result``: ``{"type": "usage", "task",
+    "model_served", "input_tokens", "output_tokens", "cache_read_tokens",
+    "cache_write_tokens", "reasoning_tokens", "provider_cost_usd",
+    "subject", "duration_ms"}``. Counts only - the runner attributes and
+    prices the call from its own spec (provider, model, project, actor),
+    writes it to the usage ledger and keeps it out of the events file.
 ``result``
     Always the **last** event: outcome, timings and one entry per crawler.
 """
@@ -31,8 +40,13 @@ from typing import Any, TextIO
 from rich.console import Console
 from rich.progress import Progress, TaskID
 
+from whygraph.core.usage import UsageRecord, UsageScope
+
 _THROTTLE_SEC = 0.25
 """Minimum gap between two ``task`` events for the same task."""
+
+USAGE_TEXT_MAX = 200
+"""Longest ``subject`` / ``model_served`` a ``usage`` event carries (the runner refuses longer)."""
 
 
 class JsonProgress(Progress):
@@ -163,3 +177,67 @@ class JsonProgress(Progress):
                 "description": description,
             }
         )
+
+
+def _capped(text: str | None) -> str | None:
+    """``text`` cut to :data:`USAGE_TEXT_MAX` characters."""
+    return None if text is None else text[:USAGE_TEXT_MAX]
+
+
+class JsonUsageSink:
+    """A :class:`~whygraph.core.usage.UsageSink` that emits ``usage`` events.
+
+    Bound by ``whygraph scan`` only when the portal manages the scan
+    (``--managed-by-portal`` with ``--progress json``), before any crawler
+    is built, so every metered call of the scan child becomes one ``usage``
+    line on the progress stream. A headless scan binds nothing and records
+    nothing.
+
+    Parameters
+    ----------
+    progress : JsonProgress
+        The stream the events are written to (one line each, never
+        spliced with another thread's).
+
+    Attributes
+    ----------
+    scope : UsageScope
+        Always ``source="scan"``; unused by the child.
+    """
+
+    def __init__(self, progress: JsonProgress) -> None:
+        self.scope = UsageScope(source="scan")
+        self._progress = progress
+
+    def record(self, rec: UsageRecord) -> None:
+        """Emit one ``usage`` event (counts only; no provider or model requested).
+
+        Parameters
+        ----------
+        rec : UsageRecord
+            What the provider call reported.
+        """
+        self._progress.emit(
+            {
+                "type": "usage",
+                "task": rec.task,
+                "model_served": _capped(rec.model_served),
+                "input_tokens": rec.input_tokens,
+                "output_tokens": rec.output_tokens,
+                "cache_read_tokens": rec.cache_read_tokens,
+                "cache_write_tokens": rec.cache_write_tokens,
+                "reasoning_tokens": rec.reasoning_tokens,
+                "provider_cost_usd": rec.provider_cost_usd,
+                "subject": _capped(rec.subject),
+                "duration_ms": rec.duration_ms,
+            }
+        )
+
+    def blocked_scope(self) -> str | None:
+        """Always ``None``: the child never decides; the runner enforces budgets.
+
+        Returns
+        -------
+        None
+        """
+        return None

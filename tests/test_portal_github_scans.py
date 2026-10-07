@@ -69,7 +69,7 @@ from test_portal_runner import TERMINAL, FakeClock, scanner, wait_for  # noqa: F
 from whygraph.portal import db as portal_db
 from whygraph.portal import runner as runner_mod
 from whygraph.portal.app import create_portal_app
-from whygraph.portal.models import ScanRun
+from whygraph.portal.models import ScanRun, UsageEvent
 from whygraph.portal.runner import ScanRunner
 from whygraph.portal.secrets import hint_for
 from whygraph.services.git.credentials import TOKEN_ENV_VAR, TOKEN_FILE_ENV
@@ -496,6 +496,11 @@ def test_the_reconcile_syncs_only_when_the_remote_moved(
     (run, _first) = runs(w)
     run = wait_run(w, run["id"])
     assert (run["status"], run["kind"], run["trigger"]) == ("ok", "sync", "reconcile")
+    # A system run that spends nothing writes no usage (M2f-2 plan section 4.5).
+    assert run["summary"]["usage"]["calls"] == 0
+    assert w.state.usage_writer.flush()
+    with portal_db.get_session() as session:
+        assert session.exec(select(UsageEvent)).first() is None
     row = project_row(ORG, "api")
     assert row is not None and row.last_scanned_head == pushed
     reconcile(w)

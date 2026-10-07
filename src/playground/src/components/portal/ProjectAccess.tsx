@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { accessApi, portalKey, projectKey, type AccessPerson, type ProjectRole } from "../../api";
 import { authMessage } from "../../lib/authErrors";
+import { formatUsd } from "../../lib/format";
 import { UserAvatar } from "../auth/UserAvatar";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -106,6 +107,11 @@ export function ProjectAccess({ slug }: { slug: string }) {
                     {p.login ? `@${p.login}` : ""}
                   </span>
                 </div>
+                {typeof p.month_spend_usd === "number" && (
+                  <span className="text-xs text-muted-foreground" data-testid={`access-spend-${p.uid}`}>
+                    {formatUsd(p.month_spend_usd)} this month
+                  </span>
+                )}
                 {p.source === "org_admin" ? (
                   <>
                     <Badge variant="secondary">Admin</Badge>

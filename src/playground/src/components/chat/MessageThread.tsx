@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { ChatSession } from "../../api";
+import { ApiError, projectKey, type BudgetScope, type ChatSession } from "../../api";
+import { useLlmBlock } from "../../lib/permissions";
+import { useSlug } from "../../lib/project";
+import { BudgetNotice } from "../portal/BudgetNotice";
 import { useProjectApi, useProjectKey, useProjectQuery } from "../../lib/project";
 import { Loading } from "../Loading";
 import { Empty, EmptyDescription } from "../ui/empty";
@@ -44,6 +47,17 @@ export function MessageThread({
   const [streaming, setStreaming] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const slug = useSlug();
+  // A hard stop the page has not learned about yet (a live frame, or a 403 on send): the project
+  // payload's `llm_block` takes over once it is refetched.
+  const llm = useLlmBlock();
+  const [stopped, setStopped] = useState<{ scope: BudgetScope | null } | null>(null);
+  const blockedScope = llm.block === "budget_exceeded" ? llm.scope : (stopped?.scope ?? null);
+  const budgetBlocked = llm.block === "budget_exceeded" || stopped !== null;
+  const refreshProject = useCallback(
+    () => queryClient.invalidateQueries({ queryKey: projectKey(slug, "project") }),
+    [queryClient, slug],
+  );
 
   const transcript = useProjectQuery(["chat", "transcript", sessionId], (api) =>
     api.chatTranscript(sessionId),
@@ -63,6 +77,7 @@ export function MessageThread({
     abortRef.current = null;
     setLiveTurns([]);
     setStreaming(false);
+    setStopped(null);
   }, [sessionId]);
 
   // Abort an in-flight stream if the view unmounts mid-turn.
@@ -127,6 +142,14 @@ export function MessageThread({
               case "round_limit":
                 updateLive((t) => ({ ...t, roundLimit: event.rounds }));
                 break;
+              case "budget_exceeded":
+                updateLive((t) => ({
+                  ...settleActivities(t),
+                  budgetStop: { scope: event.scope, message: event.message },
+                }));
+                setStopped({ scope: event.scope });
+                void refreshProject();
+                break;
               case "error":
                 // In-band and terminal: HTTP status was committed before the
                 // first token, so a provider failure can only arrive this way.
@@ -146,7 +169,13 @@ export function MessageThread({
           controller.signal,
         );
       } catch (err) {
-        if ((err as Error).name === "AbortError") {
+        if (err instanceof ApiError && err.status === 403 && err.code === "budget_exceeded") {
+          // Refused before anything was written: show the notice, not an error on a turn.
+          const scope = typeof err.extra.scope === "string" ? (err.extra.scope as BudgetScope) : null;
+          setStopped({ scope });
+          void refreshProject();
+          updateLive((t) => ({ ...settleActivities(t), budgetStop: { scope } }));
+        } else if ((err as Error).name === "AbortError") {
           updateLive((t) => ({ ...settleActivities(t), error: "Stopped." }));
         } else {
           updateLive((t) => ({
@@ -186,7 +215,7 @@ export function MessageThread({
         queryClient.invalidateQueries({ queryKey: key("chat", "sessions") });
       }
     },
-    [api, key, queryClient, sessionId, updateLive],
+    [api, key, queryClient, refreshProject, sessionId, updateLive],
   );
 
   return (
@@ -245,11 +274,17 @@ export function MessageThread({
         </div>
       )}
 
-      <Composer
-        streaming={streaming}
-        onSend={send}
-        onStop={() => abortRef.current?.abort()}
-      />
+      {budgetBlocked && !streaming ? (
+        <div className="border-t border-border p-3">
+          <BudgetNotice scope={blockedScope} testId="chat-budget-notice" />
+        </div>
+      ) : (
+        <Composer
+          streaming={streaming}
+          onSend={send}
+          onStop={() => abortRef.current?.abort()}
+        />
+      )}
     </div>
   );
 }

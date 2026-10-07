@@ -216,6 +216,8 @@ export type ChatEvent =
   | { type: "tool_call"; id: string; name: string; arguments: Record<string, unknown> }
   | { type: "tool_result"; id: string; name: string; result: string }
   | { type: "round_limit"; rounds: number }
+  // A hard stop ended the turn (M2f-2); the terminal `done` frame follows it.
+  | { type: "budget_exceeded"; scope: BudgetScope | null; message_id: number | null; message: string }
   | {
       type: "done";
       message_id: number | null;

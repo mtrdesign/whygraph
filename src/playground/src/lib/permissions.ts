@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { portalApi, projectKey, type ProjectSummary } from "../api";
+import { portalApi, projectKey, type BudgetScope, type ProjectSummary } from "../api";
 import { useSlug } from "./project";
 
 /** The project actions a role may hold (`PROJECT_ACTIONS` in `portal/authz.py`). */
@@ -45,4 +45,17 @@ export function useCanFor(slug: string, action: ProjectAction): boolean {
 /** `can()` for the current project, read from the cached `project` query (the Explorer and Chat have only the slug). */
 export function useProjectCan(action: ProjectAction): boolean {
   return useCanFor(useSlug(), action);
+}
+
+/**
+ * Why the caller cannot spend LLM tokens on the current project (`llm_block`, M2f-2): their
+ * role, or an exhausted hard-stopped budget (`scope` names it). `block` is `null` when they can.
+ */
+export function useLlmBlock(): { block: "role" | "budget_exceeded" | null; scope: BudgetScope | null } {
+  const slug = useSlug();
+  const project = useQuery({
+    queryKey: projectKey(slug, "project"),
+    queryFn: () => portalApi.project(slug),
+  });
+  return { block: project.data?.llm_block ?? null, scope: project.data?.llm_block_scope ?? null };
 }

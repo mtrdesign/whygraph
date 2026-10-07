@@ -1,6 +1,8 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { RationaleCard } from "../api";
-import { useProjectCan } from "../lib/permissions";
+import { authMessage } from "../lib/authErrors";
+import { budgetNoticeText } from "../lib/budgetBanner";
+import { useLlmBlock, useProjectCan } from "../lib/permissions";
 import { useProjectApi, useProjectKey, useProjectQuery } from "../lib/project";
 import { Button } from "./ui/button";
 import { Empty, EmptyDescription } from "./ui/empty";
@@ -65,6 +67,9 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
   );
 
   const canGenerate = useProjectCan("project.chat");
+  const llm = useLlmBlock();
+  // A hard-stopped budget: the button stays, disabled, with the reason beside it.
+  const budgetBlocked = llm.block === "budget_exceeded";
   const generate = useMutation({
     mutationFn: () => api.rationaleGenerate(qualifiedName),
     onSuccess: (card) => queryClient.setQueryData(queryKey, card),
@@ -98,15 +103,21 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
           {canGenerate && (
             <Button
               className="mt-3"
-              disabled={noEvidence || generate.isPending}
+              disabled={noEvidence || generate.isPending || budgetBlocked}
+              title={budgetBlocked ? budgetNoticeText(llm.scope) : undefined}
               onClick={() => generate.mutate()}
             >
               Generate rationale
             </Button>
           )}
+          {canGenerate && budgetBlocked && (
+            <p className="mt-2 text-sm text-destructive" data-testid="generate-blocked">
+              {budgetNoticeText(llm.scope)}
+            </p>
+          )}
           {generate.isError && (
             <p className="mt-2 text-sm text-destructive">
-              {(generate.error as Error).message}
+              {authMessage(generate.error)}
             </p>
           )}
         </>

@@ -1,4 +1,5 @@
 import { ApiError } from "../api";
+import { budgetNoticeText } from "./budgetBanner";
 import { formatUsd } from "./format";
 
 /** One entry of `409 budget_below_children`'s `children`. */
@@ -126,6 +127,16 @@ export function authMessage(err: unknown): string {
         ? `The organization's budget cannot be lower than these budgets: ${names.join(", ")}. Lower them first.`
         : "The organization's budget cannot be lower than a project or member budget. Lower those first.";
     }
+    case "budget_exceeded":
+      return budgetNoticeText(typeof err.extra.scope === "string" ? err.extra.scope : null);
+    case "generation_limited":
+      return err.extra.scope === "member"
+        ? "You have reached your hourly limit for agent-triggered generations. Try again in a little while."
+        : "This organization has reached its hourly limit for agent-triggered generations. Try again in a little while.";
+    case "generation_disabled":
+      return err.extra.scope === "member"
+        ? "Agent-triggered generation is turned off for your account in this organization."
+        : "Agent-triggered generation is turned off for this organization.";
     case "invalid_price":
       return typeof err.extra.field === "string"
         ? `${PRICE_FIELDS[err.extra.field] ?? err.extra.field} must be a price per million tokens from $0 to $10,000.`

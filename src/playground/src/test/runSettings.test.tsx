@@ -352,6 +352,44 @@ describe("Scan run (screen 7)", () => {
     expect(screen.queryByTestId("cancel-run")).not.toBeInTheDocument();
   });
 
+  it("a budget hard stop says so, not that you cancelled", async () => {
+    handlers["GET /api/projects/alpha/scans"] = () => ({
+      runs: [run(6, { status: "cancelled", summary: { cancelled_by: "budget" } })],
+    });
+    handlers["GET /api/projects/alpha/scans/6/events"] = () =>
+      sse([
+        frame(1, { type: "start", phase_total: 2 }),
+        endFrame(2, "cancelled", { cancelled_by: "budget" }),
+      ]);
+    mount("/p/alpha/scans/6");
+    const result = await screen.findByTestId("run-result");
+    expect(result).toHaveTextContent("Stopped: monthly budget reached");
+    expect(result).not.toHaveTextContent("You cancelled this run");
+  });
+
+  it("an ok run shows its LLM usage only when it made calls, and a budget-skipped LLM phase", async () => {
+    const usage = { calls: 12, input_tokens: 1000, output_tokens: 100, cost_usd: 0.42, cost_source: "estimated" };
+    handlers["GET /api/projects/alpha/scans"] = () => ({ runs: [run(6, { summary: { usage } })] });
+    handlers["GET /api/projects/alpha/scans/6/events"] = () =>
+      sse([frame(1, { type: "start", phase_total: 2 }), endFrame(2, "ok", { elapsed_sec: 5, usage })]);
+    mount("/p/alpha/scans/6");
+    expect(await screen.findByTestId("run-usage")).toHaveTextContent("LLM usage: ~$0.42, 12 calls");
+  });
+
+  it("a zero-call run has no usage line; analyze_skipped budget is explained", async () => {
+    const usage = { calls: 0, input_tokens: 0, output_tokens: 0, cost_usd: 0, cost_source: null };
+    handlers["GET /api/projects/alpha/scans"] = () => ({ runs: [run(6)] });
+    handlers["GET /api/projects/alpha/scans/6/events"] = () =>
+      sse([
+        frame(1, { type: "start", phase_total: 2 }),
+        endFrame(2, "ok", { elapsed_sec: 5, usage, analyze_skipped: "budget" }),
+      ]);
+    mount("/p/alpha/scans/6");
+    const result = await screen.findByTestId("run-result");
+    expect(result).toHaveTextContent("LLM phase skipped: monthly budget reached");
+    expect(screen.queryByTestId("run-usage")).toBeNull();
+  });
+
   it("an unknown run id is reported, not retried forever", async () => {
     handlers["GET /api/projects/alpha/scans/99/events"] = () => ({
       status: 404,

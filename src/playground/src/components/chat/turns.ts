@@ -50,6 +50,11 @@ export function turnsFromMessages(messages: ChatMessage[]): Turn[] {
       // A persisted row is finished by definition — never show it thinking.
       // The first row's id becomes the turn's stable React key.
       if (!current) current = { ...emptyAssistantTurn(), thinking: false, id: message.id };
+      // The row a budget hard stop wrote (its content is the notice's line): a notice, not text.
+      if (message.error === "budget_exceeded") {
+        current.budgetStop = { message: message.content || undefined };
+        continue;
+      }
       // A new assistant row after tool activity opens the next segment - but
       // only when it brings text. Each provider round is its own row, so a
       // tool-only round (no text) keeps adding cards to the open group, the

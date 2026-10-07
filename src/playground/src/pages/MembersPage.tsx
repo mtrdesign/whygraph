@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -23,6 +24,7 @@ import { ConfirmDialog } from "../components/portal/ConfirmDialog";
 import { Input } from "../components/ui/input";
 import { Skeleton } from "../components/ui/skeleton";
 import { authMessage } from "../lib/authErrors";
+import { formatUsd } from "../lib/format";
 import { canAdmin, canOwn, usePortalState, useRole } from "../lib/identity";
 import { hardNavigate } from "../lib/navigation";
 
@@ -305,6 +307,18 @@ function MemberRow({
       </div>
       {member.disabled && <Badge variant="outline">disabled</Badge>}
       <span className="text-xs text-muted-foreground">Joined {joined(member.joined_at)}</span>
+      {typeof member.month_spend_usd === "number" && (
+        <Link
+          to="/usage/members/$uid"
+          params={{ uid: member.uid }}
+          className="text-xs text-primary-text hover:underline"
+          data-testid={`member-spend-${member.uid}`}
+          aria-label={`This month for ${name}`}
+          title="This month"
+        >
+          This month: {formatUsd(member.month_spend_usd)}
+        </Link>
+      )}
       {editable ? (
         <select
           aria-label={`Role for ${name}`}

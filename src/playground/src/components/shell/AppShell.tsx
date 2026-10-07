@@ -16,6 +16,7 @@ import {
 import { Sheet, SheetContent, SheetTitle } from "../ui/sheet";
 import { Sidebar } from "./Sidebar";
 import { buildCrumbs } from "./crumbs";
+import { BudgetBanner } from "./BudgetBanner";
 import { ReaderBanner } from "./ReaderBanner";
 
 /**
@@ -110,6 +111,7 @@ export function AppShell({
       </Sheet>
       <div className="flex min-w-0 flex-1 flex-col">
         <ReaderBanner />
+        <BudgetBanner />
         <PageHeader projectName={projectName} />
         <main className="flex min-h-0 flex-1 flex-col overflow-auto">{children}</main>
       </div>

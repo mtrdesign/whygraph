@@ -23,6 +23,7 @@ import { canAdmin, canOwn, isProduction, isSafeNext, signInUrl, usePortalState }
 import { hardNavigate } from "./lib/navigation";
 import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
 import { safeLinkNext } from "./lib/linkNext";
+import { BudgetNotice } from "./components/portal/BudgetNotice";
 import { LinkedElsewhere } from "./components/portal/LinkedActions";
 import { AppShell } from "./components/shell/AppShell";
 import { useGlobalShortcuts } from "./components/shell/shortcuts";
@@ -612,6 +613,12 @@ function ProjectLayout() {
   return (
     <ProjectProvider key={slug} slug={slug}>
       <AppShell slug={slug} projectName={project.data?.name}>
+        {/* A hard-stopped budget on every project page except Chat, which says it in place of its composer. */}
+        {project.data?.llm_block === "budget_exceeded" && page !== "chat" && (
+          <div className="shrink-0 px-4 pt-3">
+            <BudgetNotice scope={project.data.llm_block_scope} />
+          </div>
+        )}
         {body}
         <CommandPalette slug={slug} />
       </AppShell>

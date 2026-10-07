@@ -23,6 +23,9 @@ export const env = {
   // The fake GitHub (tests/github_fake.py) both production apps talk to; its
   // control routes (`POST /_fake/push`, ...) change state and send the webhook.
   githubUrl: need("WHYGRAPH_E2E_GITHUB_URL"),
+  // The fake OpenAI-compatible LLM (tests/llm_fake.py), as a `base_url` (ends in
+  // `/v1`). Only reachable from portals running natively, not from the image.
+  llmUrl: need("WHYGRAPH_E2E_LLM_URL"),
   // Where `run.sh` told the fake to create its bare fixture repositories
   // (`--repos`), so a spec can clone one without an installation token.
   githubRepos: path.join(root, "github-repos"),

@@ -18,6 +18,9 @@
 #   E2E_PORT           portal port (default: 18765)
 #   E2E_PROD_PORT      production-mode portal port (default: 18766)
 #   E2E_GITHUB_PORT    the fake GitHub's port (default: 18767); needs openssl
+#   E2E_LLM_PORT       the fake OpenAI-compatible LLM's port (default: 18768).
+#                      The usage specs need the portals to run natively (the
+#                      default), so they can reach it on loopback; not the image
 #                      (the fake GitHub App's key is generated per run)
 #   E2E_CHANNEL        browser channel, e.g. `chrome` to use the locally installed
 #                      Chrome; unset = Playwright's own Chromium (installed on demand)
@@ -43,6 +46,7 @@ if [ -z "$scan_python" ]; then
   fi
 fi
 github_port=${E2E_GITHUB_PORT:-18767}
+llm_port=${E2E_LLM_PORT:-18768}
 
 root=$(mktemp -d "${TMPDIR:-/tmp}/whygraph-e2e.XXXXXX")
 root=$(cd "$root" && pwd -P)
@@ -51,6 +55,7 @@ mkdir "$root/shared" "$root/data" "$root/control"
 portal_pid=
 prod_pid=
 fake_pid=
+llm_pid=
 pg_name=
 cleanup() {
   status=$?
@@ -65,6 +70,10 @@ cleanup() {
   if [ -n "$fake_pid" ]; then
     kill "$fake_pid" 2>/dev/null || true
     wait "$fake_pid" 2>/dev/null || true
+  fi
+  if [ -n "$llm_pid" ]; then
+    kill "$llm_pid" 2>/dev/null || true
+    wait "$llm_pid" 2>/dev/null || true
   fi
   if [ -n "$pg_name" ]; then
     docker rm -f "$pg_name" >/dev/null 2>&1 || true
@@ -186,6 +195,25 @@ until curl -sS --noproxy '*' -o /dev/null "http://127.0.0.1:$github_port/login/o
   sleep 0.5
 done
 
+# The fake OpenAI-compatible LLM (tests/llm_fake.py) the usage specs point both
+# portals' `[llm.openai].base_url` at.
+(
+  cd "$repo"
+  export NO_PROXY="$loopback${NO_PROXY:+,$NO_PROXY}" no_proxy="$loopback${no_proxy:+,$no_proxy}"
+  exec uv run --no-sync python tests/llm_fake.py --host 127.0.0.1 --port "$llm_port"
+) >"$root/llm-fake.log" 2>&1 &
+llm_pid=$!
+i=0
+until curl -sS --noproxy '*' -o /dev/null "http://127.0.0.1:$llm_port/v1/models" 2>/dev/null; do
+  i=$((i + 1))
+  if [ "$i" -gt 60 ] || ! kill -0 "$llm_pid" 2>/dev/null; then
+    echo "error: the fake LLM did not come up on port $llm_port" >&2
+    cat "$root/llm-fake.log" >&2 || true
+    exit 1
+  fi
+  sleep 0.5
+done
+
 # The production-mode portal: no shared folders, only the production variables,
 # both GitHub apps on the fake, and the fake scanner (with its own control dir;
 # it fails if the runner's token file is unreadable). It runs `--real-git`, so
@@ -241,6 +269,7 @@ done
 cd "$playground"
 export WHYGRAPH_E2E_PROD_URL="http://whygraph.localhost:$prod_port"
 export WHYGRAPH_E2E_GITHUB_URL="http://127.0.0.1:$github_port"
+export WHYGRAPH_E2E_LLM_URL="http://127.0.0.1:$llm_port/v1"
 export WHYGRAPH_E2E_PROD_LOG="$root/portal-prod.log"
 export WHYGRAPH_E2E_ROOT="$root"
 export WHYGRAPH_E2E_URL="$url"

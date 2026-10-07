@@ -208,6 +208,11 @@ ORG_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/projects/{slug}/access", "PATCH"),
         ("/api/projects/{slug}/access/{user_uid}", "PUT"),
         ("/api/projects/{slug}/access/{user_uid}", "DELETE"),
+        # Per-member budgets (M2f-2 section 4.11)
+        ("/api/budgets/member-default", "PUT"),
+        ("/api/budgets/member-default", "DELETE"),
+        ("/api/budgets/members/{uid}", "PUT"),
+        ("/api/budgets/members/{uid}", "DELETE"),
     }
 )
 """The members routes (M2d-1 section 4.5), the org's deletion (M2d-2 section

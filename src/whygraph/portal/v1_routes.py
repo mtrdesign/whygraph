@@ -57,6 +57,7 @@ from whygraph.analyze import AnalyzeError
 from whygraph.api_v1 import (
     MAX_LIMIT,
     MAX_PATH,
+    PLATFORM_BUDGET_MESSAGE,
     EvidenceIn,
     RationaleIn,
     RepoPath,
@@ -66,6 +67,7 @@ from whygraph.api_v1 import (
 )
 from whygraph.core import get_config
 from whygraph.core.config import AnalyzeConfig, RationaleConfig, is_agent_limit
+from whygraph.core.usage import BUDGET_EXCEEDED
 from whygraph.mcp.errors import WhyGraphError
 from whygraph.mcp.evidence import (
     _evidence_dict,
@@ -339,8 +341,17 @@ def _mapped_errors() -> Iterator[None]:
     except NoEvidenceError as exc:
         raise ApiError(404, str(exc), code="no_evidence") from None
     except GenerationNotPermitted as exc:
-        # A viewer's cache miss (M2f-1 plan section 4.6): ahead of the
-        # generic WhyGraphError below, which would answer 422.
+        # A viewer's cache miss (M2f-1 plan section 4.6) or an exhausted
+        # hard-stopped budget (M2f-2 plan section 4.7): ahead of the generic
+        # WhyGraphError below, which would answer 422. The budget message is
+        # scope-neutral: a connected portal shows it as it is.
+        if exc.reason == BUDGET_EXCEEDED:
+            raise ApiError(
+                403,
+                PLATFORM_BUDGET_MESSAGE,
+                code=BUDGET_EXCEEDED,
+                scope=exc.scope,
+            ) from None
         raise ApiError(403, str(exc), code="generation_not_permitted") from None
     except (RationaleGenerationError, AnalyzeError, LlmError):
         missing = _missing_key(get_config(), ("rationale",))

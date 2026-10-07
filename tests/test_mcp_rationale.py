@@ -414,3 +414,108 @@ def test_a_viewer_context_is_served_a_cached_card_and_never_generates(
         card = rationale_card(target, collect_evidence(target, limit=20))
     assert card["purpose"] == "Holds two sample lines."
     assert built == []
+
+
+class _BlockedSink:
+    """A usage sink reporting an exhausted hard-stopped budget (M2f-2)."""
+
+    def __init__(self, scope: str | None = "member", *, after: int = 0) -> None:
+        from whygraph.core.usage import UsageScope
+
+        self.scope = UsageScope(source="chat")
+        self.blocked = scope
+        self.after = after
+        self.checks = 0
+
+    def record(self, rec: object) -> None:
+        pass
+
+    def blocked_scope(self) -> str | None:
+        self.checks += 1
+        return self.blocked if self.checks > self.after else None
+
+
+def test_a_budget_context_refuses_a_card_with_its_scope(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``llm_block="budget_exceeded"`` names the reason and the scope."""
+    import dataclasses
+
+    from whygraph.core.context import use_project
+    from whygraph.mcp.evidence import collect_evidence
+    from whygraph.mcp.rationale import GenerationNotPermitted, rationale_card
+    from whygraph.mcp.targets import Target
+
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    built = _forbid_llm_factories(monkeypatch)
+    blocked = dataclasses.replace(
+        _viewer_ctx(temp_git_repo, whygraph_db_initialized),
+        llm_block="budget_exceeded",
+        llm_block_scope="project",
+    )
+    target = Target(path="sample.py", line_start=1, line_end=3, qualified_name=None)
+    with use_project(blocked):
+        evidence = collect_evidence(target, limit=20)
+        with pytest.raises(GenerationNotPermitted, match="this project") as caught:
+            rationale_card(target, evidence)
+    assert (caught.value.reason, caught.value.scope) == ("budget_exceeded", "project")
+    assert built == []
+
+
+def test_a_budget_spent_mid_request_refuses_the_next_card(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A chat tool's card after earlier rounds spent the budget: the sink knows."""
+    from whygraph.core.config import Config
+    from whygraph.core.context import ProjectContext, use_project
+    from whygraph.core.usage import use_usage_sink
+    from whygraph.mcp.evidence import collect_evidence
+    from whygraph.mcp.rationale import GenerationNotPermitted, rationale_card
+    from whygraph.mcp.targets import Target
+
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    built = _forbid_llm_factories(monkeypatch)
+    ctx = ProjectContext(
+        slug="p", root=temp_git_repo, config=Config(whygraph_db=whygraph_db_initialized)
+    )
+    target = Target(path="sample.py", line_start=1, line_end=3, qualified_name=None)
+    charged: list[bool] = []
+    with use_project(ctx), use_usage_sink(_BlockedSink("org")):
+        evidence = collect_evidence(target, limit=20)
+        with pytest.raises(GenerationNotPermitted) as caught:
+            rationale_card(
+                target, evidence, before_generate=lambda: charged.append(True)
+            )
+    assert (caught.value.reason, caught.value.scope) == ("budget_exceeded", "org")
+    assert (built, charged) == ([], [])
+
+
+def test_the_backfill_stops_before_the_commit_after_the_budget_is_spent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``backfill_all`` asks the sink before each commit (M2f-2 plan section 4.7)."""
+    from types import SimpleNamespace
+
+    from whygraph.analyze import backfill as backfill_mod
+    from whygraph.core.usage import use_usage_sink
+
+    described: list[str] = []
+
+    def fake_backfill(commit, *, repository, descriptor) -> bool:  # noqa: ANN001
+        described.append(commit.sha)
+        return True
+
+    monkeypatch.setattr(backfill_mod, "backfill_commit_description", fake_backfill)
+    commits = [SimpleNamespace(sha=c * 40) for c in "abc"]
+    # Open for the first check, spent from the second on.
+    with use_usage_sink(_BlockedSink("member", after=1)):
+        done = backfill_mod.backfill_all(commits, repository=None, descriptor=None)
+    assert (done, described) == (1, ["a" * 40])
+    described.clear()
+    assert backfill_mod.backfill_all(commits, repository=None, descriptor=None) == 3

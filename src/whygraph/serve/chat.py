@@ -43,6 +43,7 @@ from pydantic import BaseModel
 from sqlmodel import col, func, select
 
 from whygraph.chat.harness import (
+    BudgetStop,
     RoundLimit,
     RoundUsage,
     ToolCallStarted,
@@ -51,7 +52,8 @@ from whygraph.chat.harness import (
 )
 from whygraph.chat.tools import ToolRegistry
 from whygraph.core import ConfigError, get_config
-from whygraph.core.usage import set_scope_field
+from whygraph.core.context import current_project
+from whygraph.core.usage import BUDGET_EXCEEDED, UsageBlocked, set_scope_field
 from whygraph.db import get_session
 from whygraph.db.models import ChatMessage as ChatMessageRow
 from whygraph.db.models import ChatSession as ChatSessionRow
@@ -562,7 +564,14 @@ def _persist_tool_result(session_id: int, call: ToolCall, result: str) -> None:
         session.commit()
 
 
-_ROUND_FLUSH_EVENTS: tuple[type, ...] = (TextDelta, RoundUsage, RoundLimit)
+BUDGET_STOP_MESSAGE = (
+    "This chat has reached its monthly budget. You can still read everything "
+    "that's already generated."
+)
+"""The assistant row a :class:`~whygraph.chat.harness.BudgetStop` writes
+(``error = "budget_exceeded"``), so a refresh replays why the turn ended."""
+
+_ROUND_FLUSH_EVENTS: tuple[type, ...] = (TextDelta, RoundUsage, RoundLimit, BudgetStop)
 """Harness events that, once a round's :class:`RoundUsage` has arrived,
 start something new and so flush that round's buffer as its row. The turn's
 end flushes too. A new terminal or round-opening event joins this tuple."""
@@ -618,6 +627,7 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
     round_usage: RoundUsage | None = None
     last_done: TurnDone | None = None
     final_message_id: int | None = None
+    budget_stop: BudgetStop | None = None
 
     def _flush_round(error: str | None = None) -> int | None:
         """Persist the buffered round: assistant row, then its tool rows.
@@ -691,10 +701,25 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
             elif isinstance(event, RoundLimit):
                 yield _frame({"type": "round_limit", "rounds": event.rounds})
 
+            elif isinstance(event, BudgetStop):
+                # The previous round (if any) was flushed above; the budget
+                # row is written after the loop, as the turn's last row.
+                budget_stop = event
+
             else:  # TurnDone - the end-of-turn marker, carrying the total
                 last_done = event
 
         final_message_id = _flush_round()
+        if budget_stop is not None:
+            final_message_id = _persist_assistant_turn(
+                session_id,
+                text=BUDGET_STOP_MESSAGE,
+                calls=[],
+                usage=None,
+                provider=provider,
+                model=model,
+                error=BUDGET_EXCEEDED,
+            )
     except LlmError as exc:
         _log.warning("chat turn failed for session %s: %s", session_id, exc)
         # Whatever arrived before the failure is worth keeping — the user can
@@ -714,6 +739,15 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
         yield _frame({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
         return
 
+    if budget_stop is not None:
+        yield _frame(
+            {
+                "type": "budget_exceeded",
+                "scope": budget_stop.scope,
+                "message_id": final_message_id,
+                "message": BUDGET_STOP_MESSAGE,
+            }
+        )
     yield _frame(
         {
             "type": "done",
@@ -735,6 +769,11 @@ def send_message(
     starts, so the 404 for an unknown session and any config error still
     surface as real HTTP failures. Everything after the first frame is
     in-band — see the module docstring.
+
+    A project an exhausted hard-stopped budget blocks for the caller (the
+    bound context's ``llm_block``) is refused before anything is written:
+    :class:`~whygraph.core.usage.UsageBlocked`, which the portal answers
+    with ``403 budget_exceeded`` (M2f-2 plan section 4.7).
     """
     content = body.content.strip()
     if not content:
@@ -743,6 +782,10 @@ def send_message(
     with get_session() as session:
         row = _require_session(session, session_id, _owner_filter(request))
         provider, model = row.provider, row.model
+
+    ctx = current_project()
+    if ctx is not None and ctx.llm_block == BUDGET_EXCEEDED:
+        raise UsageBlocked(ctx.llm_block_scope)
 
     _persist_user_message(session_id, content)
 

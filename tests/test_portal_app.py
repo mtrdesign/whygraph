@@ -1226,6 +1226,17 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/projects/{slug}/access", "PATCH"): "project.access",
     ("/api/projects/{slug}/access/{user_uid}", "PUT"): "project.access",
     ("/api/projects/{slug}/access/{user_uid}", "DELETE"): "project.access",
+    # Monthly budgets (M2f-2 section 4.11): read with org.usage, written with
+    # org.budgets; the project budget is an org action on a bound project
+    ("/api/budgets", "GET"): "org.usage",
+    ("/api/budgets/org", "PUT"): "org.budgets",
+    ("/api/budgets/org", "DELETE"): "org.budgets",
+    ("/api/budgets/member-default", "PUT"): "org.budgets",
+    ("/api/budgets/member-default", "DELETE"): "org.budgets",
+    ("/api/budgets/members/{uid}", "PUT"): "org.budgets",
+    ("/api/budgets/members/{uid}", "DELETE"): "org.budgets",
+    ("/api/projects/{slug}/budget", "PUT"): "org.budgets",
+    ("/api/projects/{slug}/budget", "DELETE"): "org.budgets",
     # Deleting a production org: org_access(ORG_OWN) (M2d-2 section 4.8)
     ("/api/org", "DELETE"): "org.own",
     # Org settings, ownership transfer and the audit log (M2f-1 4.8, 4.9)
@@ -1436,11 +1447,15 @@ PRODUCTION_ORG_ROUTES = {
     ("/api/projects/{slug}/access", "PATCH"),
     ("/api/projects/{slug}/access/{user_uid}", "PUT"),
     ("/api/projects/{slug}/access/{user_uid}", "DELETE"),
+    ("/api/budgets/member-default", "PUT"),
+    ("/api/budgets/member-default", "DELETE"),
+    ("/api/budgets/members/{uid}", "PUT"),
+    ("/api/budgets/members/{uid}", "DELETE"),
 }
 """Org-scoped routes that exist only in production: the members page, the
-org's deletion, the GitHub App import page and a project's connected portals
-(``require_production`` before the org dependency, M2d-1 plan section 0.2
-#19)."""
+org's deletion, the GitHub App import page, a project's connected portals and
+the per-member budgets (``require_production`` before the org dependency,
+M2d-1 plan section 0.2 #19)."""
 
 PRODUCTION_ONLY_ROUTES = (
     PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES | PRODUCTION_ORG_ROUTES | V1_ROUTES

@@ -16,6 +16,7 @@ from whygraph.analyze import AnalyzeError, RationaleGenerator
 from whygraph.core import get_config
 from whygraph.core.context import current_project
 from whygraph.core.remote import RemoteError, RemoteProject, platform_block
+from whygraph.core.usage import BUDGET_EXCEEDED, budget_message, usage_blocked
 from whygraph.services.codegraph import CodeGraph, CodeGraphError, SymbolContext
 from whygraph.services.git import Repository
 from whygraph.services.llm import LlmError
@@ -96,19 +97,55 @@ class RationaleGenerationError(WhyGraphError):
     """The LLM could not generate a card; ``__cause__`` is the ``AnalyzeError`` / ``LlmError``."""
 
 
-class GenerationNotPermitted(WhyGraphError):
-    """A card is not cached and the caller may not generate one (a project viewer).
-
-    Raised by :func:`rationale_card` on a cache miss when the bound
-    project context has ``llm_allowed`` false (M2f-1 plan section 4.6),
-    before anything is spent or any budget is charged.
-    """
-
-
 _GENERATION_NOT_PERMITTED_MESSAGE = (
     "no rationale card is cached for this target, and your role on this "
     "project (viewer) cannot generate one; ask a contributor or admin"
 )
+
+
+class GenerationNotPermitted(WhyGraphError):
+    """A card is not cached and the caller may not generate one.
+
+    Raised by :func:`rationale_card` on a cache miss when the bound
+    project context has ``llm_allowed`` false - a project viewer (M2f-1
+    plan section 4.6) or an exhausted hard-stopped budget (M2f-2 plan
+    section 4.7) - or when the bound usage sink reports a budget exhausted
+    mid-request, before anything is spent or any budget is charged.
+
+    Parameters
+    ----------
+    message : str, optional
+        The message; each ``reason`` has its own default.
+    reason : str, optional
+        ``"role"`` (the default, a viewer) or ``"budget_exceeded"``.
+    scope : str, optional
+        With ``"budget_exceeded"``: ``"org"``, ``"project"`` or ``"member"``.
+
+    Attributes
+    ----------
+    reason : str
+        As passed.
+    scope : str or None
+        As passed.
+    """
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        reason: str = "role",
+        scope: str | None = None,
+    ) -> None:
+        if message is None:
+            message = (
+                "no rationale card is cached for this target, and "
+                + budget_message(scope)
+                if reason == BUDGET_EXCEEDED
+                else _GENERATION_NOT_PERMITTED_MESSAGE
+            )
+        super().__init__(message)
+        self.reason = reason
+        self.scope = scope
 
 
 _NO_EVIDENCE_MESSAGE = (
@@ -203,7 +240,10 @@ def rationale_card(
         ``evidence`` is empty.
     GenerationNotPermitted
         A cache miss while the bound project context has ``llm_allowed``
-        false - raised before ``before_generate``, so no budget is charged.
+        false (``reason`` from its ``llm_block``) or while the bound usage
+        sink reports an exhausted hard-stopped budget
+        (``reason="budget_exceeded"``) - raised before ``before_generate``,
+        so no budget is charged.
     RationaleGenerationError
         The generator failed.
     """
@@ -219,7 +259,14 @@ def rationale_card(
 
     ctx = current_project()
     if ctx is not None and not ctx.llm_allowed:
-        raise GenerationNotPermitted(_GENERATION_NOT_PERMITTED_MESSAGE)
+        raise GenerationNotPermitted(
+            reason=ctx.llm_block or "role", scope=ctx.llm_block_scope
+        )
+    # A budget exhausted during this request (a chat tool's card after the
+    # turn's earlier rounds spent it): the bound sink knows, the context not.
+    blocked = usage_blocked()
+    if blocked is not None:
+        raise GenerationNotPermitted(reason=BUDGET_EXCEEDED, scope=blocked)
     if before_generate is not None:
         before_generate()
     # Cache miss — lazily backfill any commit whose `llm_description` is

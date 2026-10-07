@@ -12,6 +12,8 @@ Composition (plan section 4.5.1)::
     /api/org, /api/org/transfer,  an owner's org settings, ownership transfer,
     /api/org/audit*               audit log and deletion (portal/org_routes.py;
                                   404 in local mode)
+    /api/budgets*,                monthly budgets (portal/budget_routes.py; the
+    /api/projects/{slug}/budget   member routes are production-only, M2f-2)
     /api/projects/*               management; each route names its action through
                                   org_access / project_access / project_db_access
     /api/projects/{slug}/...      serve.routes.router (project.read),
@@ -28,7 +30,7 @@ The lifespan waits for the portal database (an unreachable one raises
 :class:`~whygraph.portal.db.PortalDatabaseUnreachable`, and the CLI exits 3
 so the restart policy retries), takes the "one portal per database"
 advisory lock, migrates the portal DB and seeds the usage ledger's spend
-book and org prices (M2f-2) - a held lock or a failure in those steps
+book, org prices and budgets (M2f-2) - a held lock or a failure in those steps
 leaves a *degraded* app whose ``GET /api/portal/state`` reports
 ``{"error"}`` and whose other ``/api`` routes answer ``503`` - writes the
 ``settings`` row at first start and refuses to start when
@@ -77,6 +79,7 @@ from sqlmodel import col, select
 
 from whygraph.agents import DEFAULT_PORTAL_PORT
 from whygraph.core.context import set_strict
+from whygraph.core.usage import UsageBlocked
 from whygraph.mcp.errors import WhyGraphError
 from whygraph.serve.app import _mount_static
 from whygraph.serve.chat import router as chat_router
@@ -84,11 +87,12 @@ from whygraph.serve.errors import whygraph_error_handler
 from whygraph.serve.routes import generate_router
 from whygraph.serve.routes import router as data_router
 
-from . import audit_store, connections, usage_store
+from . import audit_store, budgets, connections, usage_store
 from . import db as portal_db
 from .access_routes import access_router
 from .audit import clear_writer, set_writer
 from .auth_routes import auth_router
+from .budget_routes import budget_member_router, budget_router
 from .connect_routes import connect_router
 from .authz import Action
 from .deps import (
@@ -256,6 +260,7 @@ def create_portal_app(
     app.add_middleware(PortalGuard, state=state)
 
     app.add_exception_handler(WhyGraphError, whygraph_error_handler)
+    app.add_exception_handler(UsageBlocked, _usage_blocked_handler)
     app.add_exception_handler(ApiError, _api_error_handler)
     app.add_exception_handler(RequestValidationError, _validation_error_handler)
 
@@ -267,6 +272,8 @@ def create_portal_app(
     app.include_router(github_app_router)  # production-only (M2d-2)
     app.include_router(connect_router)  # production-only: consent, exchange (M2e)
     app.include_router(v1_router)  # production-only: the /api/v1 data routes (M2e)
+    app.include_router(budget_router)  # both modes (M2f-2)
+    app.include_router(budget_member_router)  # production-only: member budgets
     app.include_router(portal_router)
     app.include_router(projects_router)
     app.include_router(platform_router)  # local-only: connect and link (M2e)
@@ -680,9 +687,10 @@ def _startup(state: PortalState) -> None:
 
 
 def _seed_usage(state: PortalState) -> None:
-    """Seed the spend book from this month's ledger and load the org prices."""
+    """Seed the spend book, load the org prices, the budgets and the fired alerts."""
     usage_store.seed_spend_book(state.spend)
     state.prices.replace_all(usage_store.load_price_overrides())
+    budgets.seed_budgets(state.budgets)
 
 
 def _production_base_url() -> BaseUrl:
@@ -750,6 +758,13 @@ def _reconcile_port(state: PortalState, agent_host: str) -> dict | None:
 
 def _api_error_handler(_: Request, exc: ApiError) -> JSONResponse:
     return exc.response()
+
+
+def _usage_blocked_handler(_: Request, exc: UsageBlocked) -> JSONResponse:
+    # One refusal for every spending surface (M2f-2 plan section 4.7).
+    return JSONResponse(
+        {"error": str(exc), "code": exc.reason, "scope": exc.scope}, status_code=403
+    )
 
 
 def _validation_error_handler(_: Request, exc: RequestValidationError) -> JSONResponse:

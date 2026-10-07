@@ -29,6 +29,7 @@ from sqlmodel import select
 from test_portal_app import env  # noqa: F401 -- `env` is a fixture
 from test_portal_serve_api import ScopedClient, portal_with_project, use_project_config
 from whygraph.chat.harness import (
+    BudgetStop,
     RoundLimit,
     RoundUsage,
     ToolCallStarted,
@@ -641,6 +642,50 @@ def test_round_limit_flushes_the_last_tool_round(chat_client, monkeypatch) -> No
         ("assistant", "Here is what I have."),
     ]
     assert [m["output_tokens"] for m in messages if m["role"] == "assistant"] == [1, 2]
+
+
+def test_a_budget_stop_writes_the_budget_row_as_the_turns_last(
+    chat_client, monkeypatch
+) -> None:
+    """The buffered round is flushed, then one budget row; a refresh replays it."""
+    call = ToolCall(id="c1", name="search_symbols", arguments={"query": "x"})
+    _stub_harness(
+        monkeypatch,
+        [
+            TextDelta(text="Searching."),
+            RoundUsage(input_tokens=10, output_tokens=1),
+            ToolCallStarted(call=call),
+            ToolResultReady(call=call, result="{}"),
+            BudgetStop(scope="project"),
+            TurnDone("tool_calls", 10, 1),
+        ],
+    )
+    session = _new_session(chat_client)
+    frames = _frames(
+        chat_client.post(
+            f"/api/chat/sessions/{session['id']}/messages", json={"content": "q"}
+        )
+    )
+    assert [f["type"] for f in frames] == [
+        "text_delta",
+        "tool_call",
+        "tool_result",
+        "budget_exceeded",
+        "done",
+    ]
+    assert frames[3]["scope"] == "project"
+    assert frames[3]["message"] == serve_chat.BUDGET_STOP_MESSAGE
+    messages = chat_client.get(f"/api/chat/sessions/{session['id']}").json()["messages"]
+    assert [(m["role"], m["content"], m["error"]) for m in messages] == [
+        ("user", "q", None),
+        ("assistant", "Searching.", None),
+        ("tool", "{}", None),
+        ("assistant", serve_chat.BUDGET_STOP_MESSAGE, "budget_exceeded"),
+    ]
+    assert messages[1]["input_tokens"] == 10
+    assert messages[3]["input_tokens"] is None
+    assert frames[3]["message_id"] == frames[-1]["message_id"] == messages[3]["id"]
+    assert (frames[-1]["input_tokens"], frames[-1]["output_tokens"]) == (10, 1)
 
 
 def test_a_round_that_reported_tokens_gets_a_row_even_without_text(

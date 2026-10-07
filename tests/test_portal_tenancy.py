@@ -688,6 +688,24 @@ def _owner_kept_check(body: dict, w: World, o: OrgWorld) -> None:
     assert (body["uid"], body["role"]) == (o.owner_uid, "owner")
 
 
+def _budgets_check(body: dict, w: World, o: OrgWorld) -> None:
+    assert set(body) == {
+        "month",
+        "resets_at",
+        "org",
+        "member_default",
+        "members",
+        "projects",
+        "alerts",
+        "unpriced_calls",
+    }
+    assert all(p["slug"] == "api" for p in body["projects"])
+
+
+def _budget_body(amount: int) -> Callable[[World, OrgWorld], dict]:
+    return lambda w, o: {"monthly_usd": amount, "hard_stop": False}
+
+
 ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     # Portal level
     ("GET", "/api/portal/repos"): Call(200, check=_repos_check, discovery=True),
@@ -745,6 +763,26 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         200, check=lambda body, w, o: _audit_check(body, o)
     ),
     ("GET", "/api/org/audit.csv"): Call(200, shows=lambda o: ["created_at"]),
+    # Monthly budgets (M2f-2 section 4.11; test_portal_budgets.py drives
+    # them). The owner may set any member's override, their own included;
+    # a DELETE is idempotent.
+    ("GET", "/api/budgets"): Call(200, check=_budgets_check),
+    ("PUT", "/api/budgets/org"): Call(
+        200, body=_budget_body(100), shows=lambda o: ["monthly_usd"]
+    ),
+    ("DELETE", "/api/budgets/org"): Call(204),
+    ("PUT", "/api/budgets/member-default"): Call(
+        200, body=_budget_body(10), shows=lambda o: ["monthly_usd"]
+    ),
+    ("DELETE", "/api/budgets/member-default"): Call(204),
+    ("PUT", "/api/budgets/members/{uid}"): Call(
+        200, body=_budget_body(10), shows=lambda o: [o.owner_uid]
+    ),
+    ("DELETE", "/api/budgets/members/{uid}"): Call(204),
+    ("PUT", "/api/projects/{slug}/budget"): Call(
+        200, body=_budget_body(5), shows=lambda o: [o.name]
+    ),
+    ("DELETE", "/api/projects/{slug}/budget"): Call(204),
     # Production's GitHub App import page (swept over prod_world, whose
     # owners have not connected GitHub; test_portal_github_import.py drives it)
     ("POST", "/api/github/app/authorize"): Call(
@@ -1217,7 +1255,14 @@ ORG_ADMIN_ROUTES = _routes_doing(ORG_ADMIN_ACTIONS - ORG_MEMBER_ACTIONS)
 PROJECT_ADMIN_ROUTES = _routes_doing(PROJECT_ADMIN_ACTIONS - CONTRIBUTOR_ACTIONS)
 ADMIN_ROUTES = sorted(
     ORG_ADMIN_ROUTES + PROJECT_ADMIN_ROUTES,
-    key=lambda route: (route[0] == "DELETE", route[1], route[0]),  # DELETE last
+    # DELETE last, and removing the project last of all (its budget's
+    # DELETE needs it).
+    key=lambda route: (
+        route[0] == "DELETE",
+        route == ("DELETE", _PROJECT_PATH),
+        route[1],
+        route[0],
+    ),
 )
 OWNER_ROUTES = sorted(
     route
@@ -1267,11 +1312,17 @@ def test_the_admin_routes_are_the_planned_ones() -> None:
     # Org settings and org-level keys are the owner's (M2d-1 plan section 0.1).
     assert OWNER_ROUTES == [("PUT", "/api/portal/defaults")]
     # The org admin's: adding and removing projects (removal is an org
-    # action, M2f-1 plan section 0.2 #7).
+    # action, M2f-1 plan section 0.2 #7), and the budgets (M2f-2 section
+    # 0.2 #12; the per-member ones are production's).
     assert set(ORG_ADMIN_ROUTES) == {
         ("POST", "/api/projects"),
         ("POST", "/api/portal/check-path"),
         ("DELETE", "/api/projects/{slug}"),
+        ("GET", "/api/budgets"),
+        ("PUT", "/api/budgets/org"),
+        ("DELETE", "/api/budgets/org"),
+        ("PUT", "/api/projects/{slug}/budget"),
+        ("DELETE", "/api/projects/{slug}/budget"),
         # Linking to a platform adds a project, so it is the admin's (M2e
         # section 4.8)
         ("POST", "/api/platform/connect"),

@@ -78,6 +78,7 @@ from whygraph.core.safe_paths import UnsafePathError
 from whygraph.core.usage import use_usage_sink
 
 from .audit import audit
+from .budgets import BudgetBook
 from .authz import (
     PROJECT_ACTIONS,
     Action,
@@ -509,6 +510,13 @@ class PortalState:
         Every org's price overrides, loaded at start-up; reload an org with
         :func:`whygraph.portal.usage_store.reload_org_prices` after its
         overrides change.
+    budgets : BudgetBook
+        Every org's monthly budgets and the alerts already fired, loaded at
+        start-up; reload an org with
+        :func:`whygraph.portal.budgets.reload_org_budgets` after its budgets,
+        members or projects change (M2f-2 plan section 4.7). It is the spend
+        book's add hook (threshold alerts) and records alerts on the usage
+        writer's thread.
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -568,6 +576,8 @@ class PortalState:
         self.usage_writer = UsageWriter()
         self.spend = SpendBook()
         self.prices = PriceBook()
+        self.budgets = BudgetBook(self.spend, defer=self.usage_writer.call)
+        self.spend.on_add = self.budgets.on_add
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0
@@ -962,9 +972,13 @@ async def bind_project(
     is built, so a refused request never reaches
     :meth:`ContextCache.get` (which decrypts the project's secrets).
     No binding and no initialized gate. A *viewer* gets a copy of the
-    cached context with ``llm_allowed=False`` (no lazy backfill, no
-    generation on a cache miss - M2f-1 plan section 4.6); everyone else
-    gets the cached object itself, which is never mutated.
+    cached context with ``llm_allowed=False`` and ``llm_block="role"`` (no
+    lazy backfill, no generation on a cache miss - M2f-1 plan section 4.6);
+    anyone else an exhausted hard-stopped budget covers gets a copy with
+    ``llm_allowed=False``, ``llm_block="budget_exceeded"`` and the budget's
+    ``llm_block_scope`` (M2f-2 plan section 4.7; the role wins when both
+    apply); everyone else gets the cached object itself, which is never
+    mutated.
 
     Parameters
     ----------
@@ -1014,7 +1028,20 @@ async def bind_project(
     except ConfigError as exc:
         raise ApiError(400, f"invalid project config: {exc}") from exc
     if role is ProjectRole.VIEWER:
-        ctx = dataclasses.replace(ctx, llm_allowed=False)
+        ctx = dataclasses.replace(ctx, llm_allowed=False, llm_block="role")
+    else:
+        # Re-read on every bind, so raising a budget (or a new month) lifts
+        # the stop on the next request (M2f-2 plan section 4.7).
+        blocked = state.budgets.blocked_scope(
+            project.org_id, project.id, access.user_id
+        )
+        if blocked is not None:
+            ctx = dataclasses.replace(
+                ctx,
+                llm_allowed=False,
+                llm_block="budget_exceeded",
+                llm_block_scope=blocked,
+            )
     return bound_from(project, ctx, role)
 
 

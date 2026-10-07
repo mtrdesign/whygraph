@@ -95,6 +95,7 @@ from whygraph.services.github import (
 
 from . import connections, sessions
 from .audit import audit
+from .budgets import reload_org_budgets
 from .authz import (
     PROJECT_ROLE_ACTIONS,
     Action,
@@ -183,6 +184,7 @@ from .runner import (
     RunNotFound,
     RunnerUnavailable,
     ManagedOnPlatform,
+    ScanBudgetExceeded,
     ScanForbidden,
     SourceNotAllowed,
     log_tail,
@@ -1880,6 +1882,8 @@ def delete_project(
             result = _remove_project(state, project, body)
     except ProjectBusy as exc:
         raise ApiError(409, str(exc)) from exc
+    # Its budget went with the row (FK cascade).
+    reload_org_budgets(state.budgets, project.org_id)
     audit(
         "project_removed",
         request,
@@ -2317,6 +2321,9 @@ async def post_scan(
     a body-less one, or ``describe`` - also needs ``project.scan_full``,
     checked by the runner under its lock (a first scan is structure-only,
     so it never is): ``403 forbidden`` with ``action: "project.scan_full"``.
+    Such a request is also refused while an exhausted hard-stopped budget
+    covers it (the caller's, the project's or the org's): ``403
+    budget_exceeded`` with its ``scope`` (M2f-2 plan section 4.7).
     """
     body = body or ScanBody()
     state = portal_state(request)
@@ -2334,6 +2341,8 @@ async def post_scan(
         )
     except ScanForbidden as exc:
         raise _scan_full_forbidden(project) from exc
+    except ScanBudgetExceeded as exc:
+        raise ApiError(403, str(exc), code="budget_exceeded", scope=exc.scope) from exc
     except RunnerUnavailable as exc:
         raise ApiError(501, str(exc)) from exc
     except ProjectBusy as exc:

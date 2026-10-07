@@ -21,6 +21,7 @@ import pytest
 from whygraph import core
 from whygraph.chat.harness import (
     ELIDED_MARKER,
+    BudgetStop,
     RoundLimit,
     RoundUsage,
     ToolCallStarted,
@@ -31,6 +32,7 @@ from whygraph.chat.harness import (
 )
 from whygraph.chat.tools import ToolRegistry
 from whygraph.core.config import ChatConfig, Config
+from whygraph.core.usage import UsageScope, use_usage_sink
 from whygraph.services.llm.chat import (
     ChatClient,
     ChatMessage,
@@ -580,6 +582,87 @@ def test_a_round_without_a_turn_done_still_reports_empty_usage() -> None:
     client = ScriptedClient([[TextDelta(text="cut")]])
     events = _run(client, StubRegistry())
     assert events == [TextDelta(text="cut"), RoundUsage(), TurnDone()]
+
+
+# ---------------------------------------------------------------------------
+# The budget stop (M2f-2 plan section 4.7)
+# ---------------------------------------------------------------------------
+
+
+class _BudgetSink:
+    """A usage sink whose budget is exhausted after ``allowed`` records."""
+
+    def __init__(self, allowed: int, scope: str = "member") -> None:
+        self.scope = UsageScope(source="chat")
+        self.allowed = allowed
+        self.records: list = []
+        self.blocked = scope
+
+    def record(self, rec) -> None:  # noqa: ANN001
+        self.records.append(rec)
+
+    def blocked_scope(self) -> str | None:
+        return self.blocked if len(self.records) >= self.allowed else None
+
+
+def _tool_round(call_id: str, inp: int) -> list:
+    return [
+        ToolCallMade(call=_call("search_symbols", call_id, query="x")),
+        _done("tool_calls", inp, 1),
+    ]
+
+
+def test_a_budget_spent_before_round_two_stops_the_turn() -> None:
+    client = ScriptedClient(
+        [_tool_round("c1", 10), [TextDelta(text="never"), _done("stop", 5, 5)]]
+    )
+    sink = _BudgetSink(allowed=1, scope="project")
+    with use_usage_sink(sink):
+        events = _run(client, StubRegistry())
+    assert len(client.requests) == 1  # round 2 was never sent
+    assert len(sink.records) == 1
+    kinds = [type(e).__name__ for e in events]
+    assert kinds == [
+        "RoundUsage",
+        "ToolCallStarted",
+        "ToolResultReady",
+        "BudgetStop",
+        "TurnDone",
+    ]
+    assert events[-2] == BudgetStop(scope="project")
+    assert events[-1] == TurnDone(
+        finish_reason="tool_calls", input_tokens=10, output_tokens=1
+    )
+
+
+def test_a_budget_spent_before_the_first_round_sends_nothing() -> None:
+    client = ScriptedClient([])
+    with use_usage_sink(_BudgetSink(allowed=0, scope="org")):
+        events = _run(client, StubRegistry())
+    assert client.requests == []
+    assert events == [BudgetStop(scope="org"), TurnDone()]
+
+
+def test_a_budget_spent_before_the_answer_round_skips_it() -> None:
+    client = ScriptedClient([_tool_round("c1", 10), _tool_round("c2", 20)])
+    with use_usage_sink(_BudgetSink(allowed=2)):
+        events = _run(client, StubRegistry(), max_tool_rounds=2)
+    assert len(client.requests) == 2
+    assert not any(isinstance(e, RoundLimit) for e in events)
+    assert events[-2:] == [
+        BudgetStop(scope="member"),
+        TurnDone(finish_reason="tool_calls", input_tokens=30, output_tokens=2),
+    ]
+
+
+def test_an_unbound_or_unblocked_sink_never_stops_a_turn() -> None:
+    client = ScriptedClient(
+        [_tool_round("c1", 10), [TextDelta(text="ok"), _done("stop")]]
+    )
+    with use_usage_sink(_BudgetSink(allowed=99)):
+        events = _run(client, StubRegistry())
+    assert not any(isinstance(e, BudgetStop) for e in events)
+    assert len(client.requests) == 2
 
 
 # ---------------------------------------------------------------------------

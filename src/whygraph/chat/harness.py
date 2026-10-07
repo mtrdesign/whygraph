@@ -40,7 +40,7 @@ from importlib import resources
 
 from whygraph.analyze.prompt import render as render_prompt
 from whygraph.core import get_config
-from whygraph.core.usage import record_usage
+from whygraph.core.usage import record_usage, usage_blocked
 from whygraph.mcp.targets import repo_root
 from whygraph.services.llm.chat import (
     ChatClient,
@@ -163,8 +163,33 @@ class RoundUsage:
     model: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class BudgetStop:
+    """The turn stops: an exhausted hard-stopped budget covers the caller.
+
+    Checked (:func:`~whygraph.core.usage.usage_blocked`) before every
+    provider call - each round and the post-limit answer round - so a
+    budget exhausted mid-turn ends it before the next call (M2f-2 plan
+    section 4.7). The final :class:`TurnDone` follows. The harness stays
+    persistence-free: the serve layer writes the budget row.
+
+    Attributes
+    ----------
+    scope : str
+        Which budget is exhausted: ``"org"``, ``"project"`` or ``"member"``.
+    """
+
+    scope: str
+
+
 HarnessEvent = (
-    TextDelta | ToolCallStarted | ToolResultReady | RoundUsage | RoundLimit | TurnDone
+    TextDelta
+    | ToolCallStarted
+    | ToolResultReady
+    | RoundUsage
+    | RoundLimit
+    | BudgetStop
+    | TurnDone
 )
 """What :func:`run_turn` yields."""
 
@@ -427,8 +452,9 @@ def run_turn(
     HarnessEvent
         Text deltas, one :class:`RoundUsage` per provider call (each
         before that round's tool start/result pairs), at most one
-        :class:`RoundLimit`, and one :class:`TurnDone` last, carrying the
-        turn's total usage.
+        :class:`RoundLimit`, a :class:`BudgetStop` when an exhausted
+        budget ends the turn before a provider call, and one
+        :class:`TurnDone` last, carrying the turn's total usage.
 
     Raises
     ------
@@ -458,6 +484,10 @@ def run_turn(
     # One TurnDone per provider call, in order; the turn total is their sum.
     rounds: list[TurnDone] = []
     for round_index in range(max_tool_rounds):
+        if (blocked := usage_blocked()) is not None:
+            yield BudgetStop(scope=blocked)
+            yield _turn_total(rounds)
+            return
         request = ChatRequest(
             messages=(system, *messages),
             tools=registry.specs,
@@ -516,6 +546,10 @@ def run_turn(
     # here ships tool cards and no answer. One more call with no tools offered
     # leaves the model nothing to do but write up what it already gathered.
     _log.info("chat turn hit the %d-round tool limit", max_tool_rounds)
+    if (blocked := usage_blocked()) is not None:
+        yield BudgetStop(scope=blocked)
+        yield _turn_total(rounds)
+        return
     yield RoundLimit(rounds=max_tool_rounds)
     done = TurnDone()
     started = time.monotonic()
@@ -542,6 +576,7 @@ def run_turn(
 
 
 __all__ = [
+    "BudgetStop",
     "ELIDED_MARKER",
     "HarnessEvent",
     "RoundLimit",

@@ -153,7 +153,7 @@ from sqlmodel import col, select
 
 from whygraph.core.config import Config, ConfigError
 from whygraph.core.safe_paths import UnsafePathError, check_inside
-from whygraph.core.usage import UsageRecord
+from whygraph.core.usage import UsageRecord, budget_message
 from whygraph.services.git import GitError, InvalidRepoUrlError, Repository
 from whygraph.services.git.credentials import (
     GITHUB_URL_ENV,
@@ -246,6 +246,14 @@ outlasts this wait.
 
 CANCELLED_BY_USER: dict[str, str] = {"cancelled_by": "user"}
 """The ``summary`` of a run the user cancelled (vs. a merged or orphaned one)."""
+
+CANCELLED_BY_BUDGET: dict[str, str] = {"cancelled_by": "budget"}
+"""The ``summary`` of a full run the runner cancelled because a covering
+hard-stopped budget was exhausted while it ran (M2f-2 plan section 4.7)."""
+
+ANALYZE_SKIPPED_BUDGET: dict[str, str] = {"analyze_skipped": "budget"}
+"""Added to the ``summary`` of a full run downgraded to structure-only at
+dispatch because a covering hard-stopped budget was exhausted (section 9.2 D6)."""
 
 TOKEN_REFRESH_MARGIN_SEC = 10 * 60
 """Seconds before an installation token expires that a child's token file is rewritten."""
@@ -354,6 +362,30 @@ class ScanForbidden(RuntimeError):
     first-scan forcing, so the refusal is about what would actually run
     (M2f-1 plan section 4.5).
     """
+
+
+class ScanBudgetExceeded(RuntimeError):
+    """A full run is refused: an exhausted hard-stopped budget covers it - HTTP 403 ``budget_exceeded``.
+
+    Raised under the runner lock, after the first-scan forcing (a first
+    scan is structure-only and never refused), when the requester's,
+    the project's or the org's budget is exhausted (M2f-2 plan section 4.7).
+    Quick scans and cancels are never refused for a budget.
+
+    Parameters
+    ----------
+    scope : str
+        ``"member"``, ``"project"`` or ``"org"``.
+
+    Attributes
+    ----------
+    scope : str
+        As passed.
+    """
+
+    def __init__(self, scope: str) -> None:
+        super().__init__(budget_message(scope))
+        self.scope = scope
 
 
 class ProjectAccessLost(RuntimeError):
@@ -878,6 +910,7 @@ class _Job:
     scanned: bool = False
     result: dict | None = None
     usage_total: _UsageTotal = field(default_factory=_UsageTotal)
+    stop_reason: str | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
     write_lock: threading.Lock = field(default_factory=threading.Lock)
     done: threading.Event = field(default_factory=threading.Event)
@@ -1499,6 +1532,7 @@ class ScanRunner:
                         kind, scan_requested = "sync", True
                 return await self._request_claimed(
                     project_id,
+                    org_id=None if gate is None else gate[3],
                     kind=kind,
                     trigger=trigger,
                     analyze=analyze,
@@ -1511,6 +1545,7 @@ class ScanRunner:
         self,
         project_id: int,
         *,
+        org_id: int | None = None,
         kind: str,
         trigger: str,
         analyze: bool,
@@ -1525,6 +1560,12 @@ class ScanRunner:
             if analyze and not may_spend:
                 # After the default and the forcing: what would really run.
                 raise ScanForbidden("this run would describe commits with the LLM")
+            if analyze and org_id is not None and self._state is not None:
+                blocked = self._state.budgets.blocked_scope(
+                    org_id, project_id, requested_by
+                )
+                if blocked is not None:
+                    raise ScanBudgetExceeded(blocked)
             pending = self._pending.get(project_id)
             if pending is None:
                 run_id = await anyio.to_thread.run_sync(
@@ -1813,7 +1854,12 @@ class ScanRunner:
         # A run that finished cleanly before the cancel reached it stays ok:
         # its writes all landed, and recording it cancelled would re-scan.
         if job.cancelled and status != "ok":
-            status, summary = "cancelled", {**summary, **CANCELLED_BY_USER}
+            by = (
+                CANCELLED_BY_BUDGET
+                if job.stop_reason == "budget"
+                else CANCELLED_BY_USER
+            )
+            status, summary = "cancelled", {**summary, **by}
         elif job.interrupted and status != "cancelled":
             status = "interrupted"
         # After the child's `result` merge, so a child cannot supply its own.
@@ -1992,7 +2038,22 @@ class ScanRunner:
                 return "failed", summary, redact
 
             job.head = git_head(root)
-            argv = scan_argv(spec.trigger, spec.analyze, source=source)
+            analyze, downgraded = spec.analyze, False
+            if analyze and who is not None:
+                # Re-checked at dispatch (queued, merged or recovered runs):
+                # a blocked full run still updates the structure (D6).
+                blocked = state.budgets.blocked_scope(who[0], spec.project_id, who[3])
+                if blocked is not None:
+                    analyze, usage_spec, downgraded = False, None, True
+                    env, _ = child_env(
+                        config,
+                        layer,
+                        source=source,
+                        analyze=False,
+                        token_file=token_path,
+                    )
+                    log(f"the {blocked} budget is spent: scanning structure only")
+            argv = scan_argv(spec.trigger, analyze, source=source)
             log(f"$ {shlex.join(argv)}")
             refresher: _TokenRefresher | None = None
             try:
@@ -2087,6 +2148,8 @@ class ScanRunner:
 
             if job.result is not None:
                 summary.update({k: v for k, v in job.result.items() if k != "type"})
+            if downgraded:  # after the child's own `analyze_skipped`
+                summary.update(ANALYZE_SKIPPED_BUDGET)
             summary["exit_code"] = code
             return ("ok" if code == 0 else "failed"), summary, redact
 
@@ -2172,12 +2235,22 @@ class ScanRunner:
         state.spend.add(row)
         state.usage_writer.submit(row)
         total.add(row)
-        # M2f-2 step 6: the hard stop goes here - when this row exhausts a
-        # covering hard-stopped budget (requester, project or org), set
-        # `job.stop_reason = "budget"`, call `job.cancel()` (thread-safe) and
-        # start a `threading.Timer(CANCEL_GRACE_SEC, ...)` SIGKILL (this is
-        # a plain thread: the anyio task group's `_kill_after_grace` is out
-        # of reach).
+        # The hard stop (M2f-2 plan section 4.7): a covering hard-stopped
+        # budget (requester, project or org) this row exhausted cancels the
+        # run. This is a plain thread, so the anyio task group's grace kill
+        # is out of reach: a timer sends the SIGKILL.
+        if job.stop_reason is None and state.budgets.blocked_scope(
+            usage_spec.org_id, usage_spec.project_id, usage_spec.user_id
+        ):
+            job.stop_reason = "budget"
+            _log.info("scan runner: run %s stopped: a budget is spent", run_id)
+            job.cancel()
+            timer = threading.Timer(
+                CANCEL_GRACE_SEC,
+                lambda: job.alive() and job.signal(signal.SIGKILL),
+            )
+            timer.daemon = True
+            timer.start()
 
     # ---- production GitHub projects --------------------------------------
 
@@ -3032,6 +3105,7 @@ __all__ = [
     "Redactor",
     "RunNotFound",
     "RunnerUnavailable",
+    "ScanBudgetExceeded",
     "ScanRunner",
     "SourceNotAllowed",
     "ManagedOnPlatform",

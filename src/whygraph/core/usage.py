@@ -144,6 +144,74 @@ class UsageSink(Protocol):
         ...
 
 
+BUDGET_EXCEEDED = "budget_exceeded"
+"""The refusal reason (and HTTP error code) of an exhausted hard-stopped budget."""
+
+
+class UsageBlocked(RuntimeError):
+    """LLM spend is refused: an exhausted hard-stopped budget covers the caller.
+
+    Raised before anything is spent (the chat route raises it before it
+    streams, M2f-2 plan section 4.7); the portal answers it with
+    ``403 {"error", "code": "budget_exceeded", "scope"}``.
+
+    Parameters
+    ----------
+    scope : str or None
+        Which budget is exhausted: ``"org"``, ``"project"`` or ``"member"``.
+    reason : str, optional
+        Why spend is refused (:data:`BUDGET_EXCEEDED`).
+    message : str, optional
+        The human-readable message; a default names the scope.
+
+    Attributes
+    ----------
+    scope : str or None
+        As passed.
+    reason : str
+        As passed.
+    """
+
+    def __init__(
+        self,
+        scope: str | None,
+        *,
+        reason: str = BUDGET_EXCEEDED,
+        message: str | None = None,
+    ) -> None:
+        super().__init__(message or budget_message(scope))
+        self.scope = scope
+        self.reason = reason
+
+
+_SCOPE_WORDS = {
+    "org": "this organization",
+    "project": "this project",
+    "member": "your account",
+}
+
+
+def budget_message(scope: str | None) -> str:
+    """The message of a budget refusal for ``scope``.
+
+    Parameters
+    ----------
+    scope : str or None
+        ``"org"``, ``"project"``, ``"member"`` or ``None``.
+
+    Returns
+    -------
+    str
+        E.g. "the monthly LLM budget of this project is reached; you can
+        still read everything that's already generated".
+    """
+    whose = _SCOPE_WORDS.get(scope or "", "this organization, project or account")
+    return (
+        f"the monthly LLM budget of {whose} is reached; you can still read "
+        "everything that's already generated"
+    )
+
+
 _sink: ContextVar[UsageSink | None] = ContextVar("whygraph_usage_sink", default=None)
 
 
@@ -290,9 +358,12 @@ def set_scope_field(**fields: object) -> None:
 
 
 __all__ = [
+    "BUDGET_EXCEEDED",
+    "UsageBlocked",
     "UsageRecord",
     "UsageScope",
     "UsageSink",
+    "budget_message",
     "current_usage_sink",
     "record_usage",
     "set_scope_field",

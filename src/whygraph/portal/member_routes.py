@@ -45,6 +45,7 @@ from sqlmodel import Session, col, delete, select
 from . import connections
 from .audit import audit
 from .authz import PROJECT_ROLES, ROLES, Action, OrgAccess, Role
+from .budgets import reload_org_budgets
 from .db import get_session
 from .deps import ApiError, current_user, org_access, portal_state, require_production
 from .github_auth import GitHubNoSuchUser, GitHubRateLimited, GitHubUnavailable
@@ -652,6 +653,8 @@ def delete_member(
         db.delete(membership)
         assert user.id is not None
         connections.revoke_for_member(db, access.org_id, user.id, "member_removed")
+    # Their member budget went with the membership (FK cascade).
+    reload_org_budgets(portal_state(request).budgets, access.org_id)
     audit(
         "member_removed",
         request,
@@ -696,6 +699,7 @@ def delete_membership(
         connections.revoke_for_member(
             db, access.org_id, principal.user_id, "member_left"
         )
+    reload_org_budgets(portal_state(request).budgets, access.org_id)
     audit(
         "member_left",
         request,

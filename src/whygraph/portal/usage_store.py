@@ -93,6 +93,14 @@ COUNTED_COST_SOURCES: tuple[str, ...] = ("provider", "estimated")
 
 _STOP = object()
 
+
+@dataclass(frozen=True)
+class _Call:
+    """A function queued to run on the writer thread (:meth:`UsageWriter.call`)."""
+
+    fn: Callable[[], None]
+
+
 __all__ = [
     "ALERT_RETENTION_MONTHS",
     "BATCH_SIZE",
@@ -413,6 +421,29 @@ class SpendBook:
             if user_id is not None:
                 return self._user.get((org_id, user_id), _ZERO)
             return self._org.get(org_id, _ZERO)
+
+    def spent_by_user(self, org_id: int) -> dict[int, Decimal]:
+        """Month-to-date spend of every member of an org who spent this month.
+
+        Parameters
+        ----------
+        org_id : int
+            The organization.
+
+        Returns
+        -------
+        dict[int, Decimal]
+            ``users.id`` -> spend; empty when the book holds a month that is
+            not the current UTC month.
+        """
+        with self._lock:
+            if self._month != current_month(self._clock()):
+                return {}
+            return {
+                user_id: amount
+                for (org, user_id), amount in self._user.items()
+                if org == org_id
+            }
 
 
 def seed_spend_book(book: SpendBook, *, now: datetime | None = None) -> None:
@@ -765,6 +796,31 @@ class UsageWriter:
             return False
         return True
 
+    def call(self, fn: Callable[[], None]) -> bool:
+        """Queue ``fn`` to run on the writer thread, after the rows before it.
+
+        The budget layer records its threshold alerts this way (a
+        ``budget_alerts`` insert and an audit event, M2f-2 plan section
+        4.8), off the request path. ``fn`` must not raise (it is logged
+        and swallowed if it does).
+
+        Parameters
+        ----------
+        fn : callable
+            Called with no arguments.
+
+        Returns
+        -------
+        bool
+            ``False`` when the queue was full and ``fn`` was dropped.
+        """
+        try:
+            self._queue.put_nowait(_Call(fn))
+        except queue.Full:
+            self._note_drop()
+            return False
+        return True
+
     def _note_drop(self) -> None:
         now = time.monotonic()
         with self._drop_lock:
@@ -794,6 +850,13 @@ class UsageWriter:
             if isinstance(item, threading.Event):
                 batch = self._write(batch)
                 item.set()
+                continue
+            if isinstance(item, _Call):
+                batch = self._write(batch)  # the rows that led to it first
+                try:
+                    item.fn()
+                except Exception:  # noqa: BLE001 -- the writer must survive anything
+                    _log.exception("usage writer: a queued call failed")
                 continue
             if not batch:
                 deadline = time.monotonic() + self._batch_wait

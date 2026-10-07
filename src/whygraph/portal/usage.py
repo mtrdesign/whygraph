@@ -40,6 +40,7 @@ from .prices import PriceOverrides, cost, has_custom_endpoint, price_for
 from .usage_store import PriceBook, SpendBook, UsageRow, UsageWriter
 
 if TYPE_CHECKING:
+    from .budgets import BudgetBook
     from .deps import BoundProject, PortalState
     from .security import Principal
 
@@ -230,6 +231,8 @@ class PortalUsageSink:
         Where spend is counted (before the write).
     prices : PriceBook
         The org price overrides, read per call.
+    budgets : BudgetBook, optional
+        The budget map :meth:`blocked_scope` reads; ``None`` blocks nothing.
     """
 
     def __init__(
@@ -239,12 +242,14 @@ class PortalUsageSink:
         writer: UsageWriter,
         book: SpendBook,
         prices: PriceBook,
+        budgets: BudgetBook | None = None,
     ) -> None:
         self.scope = scope
         self.attribution = attribution
         self._writer = writer
         self._book = book
         self._prices = prices
+        self._budgets = budgets
 
     def row_for(self, rec: UsageRecord) -> UsageRow:
         """Build (and price) the ledger row of one record.
@@ -312,13 +317,20 @@ class PortalUsageSink:
     def blocked_scope(self) -> str | None:
         """The exhausted hard-stopped budget scope covering this binding.
 
+        Read from the budget map on every call, so a budget exhausted by
+        an earlier call of the same request (a chat turn's previous round)
+        stops the next one (M2f-2 plan section 4.7).
+
         Returns
         -------
         str or None
-            Always ``None`` until budgets exist (M2f-2 step 6 reads the
-            budget map here).
+            ``"member"``, ``"project"`` or ``"org"``; ``None`` when spending
+            may continue.
         """
-        return None
+        if self._budgets is None:
+            return None
+        a = self.attribution
+        return self._budgets.blocked_scope(a.org_id, a.project_id, a.user_id)
 
 
 def usage_sink_for(
@@ -376,6 +388,7 @@ def usage_sink_for(
         state.usage_writer,
         state.spend,
         state.prices,
+        state.budgets,
     )
 
 

@@ -3,8 +3,9 @@
 The first scan of a project runs structure-only (``trigger=initial``,
 plan section 4.14). Afterwards ``GET /api/projects/{slug}/scan-estimate``
 tells the user how many commits a full scan would send to the LLM, with
-which model, and roughly how many tokens (and dollars, for models in the
-small built-in price table) - so *Describe now* is an informed choice.
+which model, and roughly how many tokens (and dollars, for any model the
+price table prices - :mod:`whygraph.portal.prices`) - so *Describe now* is
+an informed choice.
 
 The count mirrors what the analyze crawler would actually describe
 (``scan/analyze_crawler.py``): rows whose ``llm_description`` is NULL,
@@ -38,6 +39,15 @@ from whygraph.core.config import Config, ConfigError
 from whygraph.db import get_session
 from whygraph.db.models import Commit
 
+from .prices import (
+    BUNDLED_AS_OF,
+    NO_OVERRIDES,
+    PriceOverrides,
+    cost,
+    has_custom_endpoint,
+    price_for,
+)
+
 CHARS_PER_LINE = 60
 """Average characters per changed diff line (content plus the ``+`` / ``-``)."""
 
@@ -53,25 +63,8 @@ SYNTHESIS_INPUT_TOKENS = 1_500
 RANGE_FACTOR = 0.5
 """The estimate is reported as ``[x * (1 - f), x * (1 + f)]``."""
 
-PRICES_AS_OF = "2026-09-25"
-"""When :data:`PRICES` was last checked."""
-
-PRICES: dict[str, tuple[float, float]] = {
-    "claude-opus-5-5": (4.0, 20.0),
-    "claude-opus-5": (5.0, 25.0),
-    "claude-opus-4-8": (5.0, 25.0),
-    "claude-opus-4-7": (5.0, 25.0),
-    "claude-opus-4-6": (5.0, 25.0),
-    "claude-sonnet-5-5": (2.0, 10.0),
-    "claude-sonnet-5": (2.0, 10.0),
-    "claude-sonnet-4-6": (3.0, 15.0),
-    "claude-haiku-4-5": (1.0, 5.0),
-}
-"""USD per million ``(input, output)`` tokens, first-party API rates.
-
-Any other model gets a token estimate only. An OpenRouter-style
-``anthropic/<model>`` name is looked up without its prefix.
-"""
+ORG_PRICES_LABEL = "your organization's prices"
+"""``prices_as_of`` when an org price override priced the estimate."""
 
 
 @dataclass(frozen=True)
@@ -149,13 +142,6 @@ def estimate_tokens(
     )
 
 
-def price_for(model: str | None) -> tuple[float, float] | None:
-    """Return ``(input, output)`` USD per million tokens, or ``None`` if unknown."""
-    if not model:
-        return None
-    return PRICES.get(model) or PRICES.get(model.rsplit("/", 1)[-1])
-
-
 def _range(value: float) -> dict:
     return {
         "low": round(value * (1 - RANGE_FACTOR), 4),
@@ -164,7 +150,12 @@ def _range(value: float) -> dict:
 
 
 def render_estimate(
-    tokens: TokenEstimate, *, provider: str | None, model: str | None
+    tokens: TokenEstimate,
+    *,
+    provider: str | None,
+    model: str | None,
+    overrides: PriceOverrides = NO_OVERRIDES,
+    custom_endpoint: bool = False,
 ) -> dict:
     """Shape a :class:`TokenEstimate` for the API (tokens, optional cost, ranges).
 
@@ -174,14 +165,20 @@ def render_estimate(
         The arithmetic's result.
     provider, model : str or None
         The resolved analyze model.
+    overrides : PriceOverrides, optional
+        The org's price overrides (none by default).
+    custom_endpoint : bool, optional
+        Whether the provider's endpoint is overridden; the bundled table
+        then does not apply (:func:`~whygraph.portal.prices.price_for`).
 
     Returns
     -------
     dict
         ``commits``, ``upper_bound``, ``large_commits``, ``model``,
         ``tokens`` (``input`` / ``output`` point values plus a
-        ``low`` / ``high`` range each) and ``cost`` (``None`` for a model
-        outside the price table).
+        ``low`` / ``high`` range each) and ``cost`` (``None`` for an
+        unpriced model; ``prices_as_of`` is the bundled table's date, or
+        :data:`ORG_PRICES_LABEL` when an org override applied).
     """
     body: dict = {
         "commits": tokens.commits,
@@ -196,16 +193,17 @@ def render_estimate(
         },
         "cost": None,
     }
-    price = price_for(model) if provider in ("anthropic", "openrouter") else None
-    if price is not None:
-        usd = (
-            tokens.input_tokens * price[0] + tokens.output_tokens * price[1]
-        ) / 1_000_000
+    priced = price_for(provider, model, overrides, custom_endpoint=custom_endpoint)
+    if priced is not None:
+        price, version = priced
+        usd = float(cost(price, tokens))
         body["cost"] = {
             "usd": round(usd, 4),
             **_range(usd),
             "currency": "USD",
-            "prices_as_of": PRICES_AS_OF,
+            "prices_as_of": (
+                ORG_PRICES_LABEL if version.startswith("org:") else BUNDLED_AS_OF
+            ),
         }
     return body
 
@@ -229,13 +227,16 @@ def waiting_commit_sizes() -> list[CommitSize]:
     return [CommitSize(f, i, d) for f, i, d in rows]
 
 
-def scan_estimate(config: Config) -> dict:
+def scan_estimate(config: Config, *, overrides: PriceOverrides = NO_OVERRIDES) -> dict:
     """The ``scan-estimate`` body for the bound project (blocking).
 
     Parameters
     ----------
     config : Config
         The project's resolved config (analyze model and limits).
+    overrides : PriceOverrides, optional
+        The project's org price overrides (empty by default; the route
+        passes the org's once they are held in memory).
 
     Returns
     -------
@@ -253,21 +254,25 @@ def scan_estimate(config: Config) -> dict:
         max_diff_chars=config.analyze.max_diff_chars,
         large_commit_file_count=config.analyze.large_commit_file_count,
     )
-    return render_estimate(tokens, provider=provider, model=model)
+    return render_estimate(
+        tokens,
+        provider=provider,
+        model=model,
+        overrides=overrides,
+        custom_endpoint=has_custom_endpoint(config, provider),
+    )
 
 
 __all__ = [
     "CHARS_PER_LINE",
     "CHARS_PER_TOKEN",
+    "ORG_PRICES_LABEL",
     "OUTPUT_TOKENS_PER_COMMIT",
-    "PRICES",
-    "PRICES_AS_OF",
     "RANGE_FACTOR",
     "SYNTHESIS_INPUT_TOKENS",
     "CommitSize",
     "TokenEstimate",
     "estimate_tokens",
-    "price_for",
     "render_estimate",
     "scan_estimate",
     "waiting_commit_sizes",

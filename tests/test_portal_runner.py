@@ -66,6 +66,7 @@ from whygraph.portal.estimate import (
 from whygraph.portal import routes as routes_mod
 from whygraph.portal import runner as runner_mod
 from whygraph.portal.models import Project, ScanRun
+from whygraph.portal.prices import BUNDLED_AS_OF
 from whygraph.portal.runner import (
     LOG_TAIL_BYTES,
     MAX_EVENT_LINE,
@@ -493,6 +494,7 @@ def test_estimate_arithmetic() -> None:
     assert priced["cost"]["usd"] == round(usd, 4)
     assert priced["cost"]["low"] == round(usd * 0.5, 4)
     assert priced["cost"]["high"] == round(usd * 1.5, 4)
+    assert priced["cost"]["prices_as_of"] == BUNDLED_AS_OF
     assert priced["tokens"]["input_range"] == {"low": 22262.5, "high": 66787.5}
     assert priced["upper_bound"] is True
     unpriced = render_estimate(result, provider="ollama", model="llama3")

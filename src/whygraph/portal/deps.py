@@ -483,10 +483,10 @@ class PortalState:
         Evidence and rationale requests running at once, per org id: 2
         (``503 busy`` beyond it).
     agent_budget : Throttle
-        The org limits on agent LLM spend, per hour: keys ``card:<org_id>``
-        (``[rationale].agent_generations_per_hour``) and ``desc:<org_id>``
-        (``[analyze].agent_descriptions_per_hour``), each call passing the
-        org's limit.
+        The org and per-member limits on agent LLM spend, per hour: keys
+        ``card:<org_id>`` / ``card:<org_id>:<user_id>`` and ``desc:...``
+        likewise, each call passing the limit (``hit_all`` counts both or
+        neither).
     pending_connects : PendingConnects
         Local mode's started connects, keyed by OAuth ``state``, 10 min
         (M2e plan section 4.8).
@@ -568,7 +568,7 @@ class PortalState:
         self.v1_token = Throttle(600, 60)
         self.v1_heavy = Throttle(60, 60)
         self.v1_in_flight = InFlight(2)
-        self.agent_budget = Throttle(0, 60 * 60)
+        self.agent_budget = Throttle(0, 60 * 60, max_keys=100_000)
         self.pending_connects = PendingConnects()
         self.pending_links = PendingLinks()
         self.platform_transport: Any = None

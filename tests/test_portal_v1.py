@@ -698,6 +698,79 @@ def test_rationale_generation_disabled_at_zero(
     assert generator.calls == 0
 
 
+def _card_call(v1: V1World, start: int, token: str | None = None) -> httpx.Response:
+    return call(
+        v1,
+        "POST",
+        "/rationale",
+        token=token,
+        json={
+            "target": target_body(start=start, end=start + 1),
+            "hunks": hunks_of(v1, start, start + 1),
+        },
+    )
+
+
+def test_member_cap_refuses_without_consuming_the_org_counter(
+    v1: V1World, generator: type[_Generator]
+) -> None:
+    """The member cap refuses with scope member; the org counter is not charged."""
+    config = {
+        "rationale": {
+            "agent_generations_per_hour": 100,
+            "agent_generations_per_member_per_hour": 1,
+        }
+    }
+    assert set_defaults(v1, config).status_code == 200
+    assert _card_call(v1, 1).status_code == 200
+    refused = _card_call(v1, 2)
+    assert refused.status_code == 429, refused.text
+    assert refused.json()["code"] == "generation_limited"
+    assert refused.json()["scope"] == "member"
+    assert int(refused.headers["Retry-After"]) >= 1
+    org_key = f"card:{v1.org_id}"
+    assert v1.state.agent_budget.check(org_key, limit=1) is not None
+    assert v1.state.agent_budget.check(org_key, limit=2) is None
+    # Another member has a counter of their own.
+    cy = _mint(v1.ids["cy"], v1.project_id)
+    assert _card_call(v1, 2, token=cy).status_code == 200
+
+
+def test_org_cap_refuses_every_member(v1: V1World, generator: type[_Generator]) -> None:
+    """The org ceiling binds everyone, with scope org."""
+    config = {"rationale": {"agent_generations_per_hour": 1}}
+    assert set_defaults(v1, config).status_code == 200
+    assert _card_call(v1, 1).status_code == 200
+    cy = _mint(v1.ids["cy"], v1.project_id)
+    refused = _card_call(v1, 2, token=cy)
+    assert refused.status_code == 429, refused.text
+    assert refused.json()["scope"] == "org"
+
+
+def test_member_limit_zero_disables_generation(
+    v1: V1World, generator: type[_Generator]
+) -> None:
+    """A member limit of ``0`` answers ``403 generation_disabled`` (scope member)."""
+    config = {"rationale": {"agent_generations_per_member_per_hour": 0}}
+    assert set_defaults(v1, config).status_code == 200
+    response = _card_call(v1, 1)
+    assert response.status_code == 403, response.text
+    assert response.json()["code"] == "generation_disabled"
+    assert response.json()["scope"] == "member"
+    assert generator.calls == 0
+
+
+def test_member_description_cap_stops_the_backfill(
+    v1: V1World, described: list[str]
+) -> None:
+    """The member's description cap stops the backfill (no error answer)."""
+    config = {"analyze": {"agent_descriptions_per_member_per_hour": 1}}
+    assert set_defaults(v1, config).status_code == 200
+    body = {"target": target_body(), "hunks": hunks_of(v1)}
+    assert call(v1, "POST", "/evidence", json=body).status_code == 200
+    assert len(described) == 1, described
+
+
 class _Descriptor:
     @classmethod
     def from_config(cls, config: object) -> _Descriptor:
@@ -761,9 +834,9 @@ def test_a_viewer_never_generates_or_backfills(
     charged: list[int] = []
     before = v1_routes._before_generate
 
-    def counting(state, org_id: int) -> None:  # noqa: ANN001
+    def counting(state, org_id: int, user_id: int) -> None:  # noqa: ANN001
         charged.append(org_id)
-        before(state, org_id)
+        before(state, org_id, user_id)
 
     monkeypatch.setattr(v1_routes, "_before_generate", counting)
     with portal_db.get_session() as session:
@@ -793,6 +866,12 @@ def test_agent_limit_read_from_org_layer(v1: V1World) -> None:
     """The limits come from the org layer row; a project layer is never consulted."""
     assert org_limit(v1.org_id, "rationale", "agent_generations_per_hour") == 120
     assert org_limit(v1.org_id, "analyze", "agent_descriptions_per_hour") == 600
+    assert org_limit(
+        v1.org_id,
+        "rationale",
+        "agent_generations_per_hour",
+        "agent_generations_per_member_per_hour",
+    ) == (120, 30)
 
     with portal_db.get_session() as session:
         save_layer(
@@ -1007,3 +1086,16 @@ def test_v1_and_connect_routes_404_in_local_mode(env: Any) -> None:
             ("/api/v1/meta", "GET"),
         ):
             assert client.request(method, path).status_code == 404, path
+
+
+def test_member_limits_are_org_only_keys() -> None:
+    """The new keys are org-only: the defaults allowlist has them, a project PUT does not."""
+    from whygraph.portal import policy
+
+    for section, key in (
+        ("rationale", "agent_generations_per_member_per_hour"),
+        ("analyze", "agent_descriptions_per_member_per_hour"),
+    ):
+        assert key in policy.ORG_ONLY_KEYS[section]
+        assert policy.DEFAULTS_ALLOWLIST[section][key] is True
+        assert key not in policy.PUT_ALLOWLIST[section]

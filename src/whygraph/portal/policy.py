@@ -77,8 +77,14 @@ CONNECTION_KEYS: tuple[str, ...] = ("base_url", "host", "timeout_sec")
 
 
 ORG_ONLY_KEYS: dict[str, tuple[str, ...]] = {
-    "analyze": ("agent_descriptions_per_hour",),
-    "rationale": ("agent_generations_per_hour",),
+    "analyze": (
+        "agent_descriptions_per_hour",
+        "agent_descriptions_per_member_per_hour",
+    ),
+    "rationale": (
+        "agent_generations_per_hour",
+        "agent_generations_per_member_per_hour",
+    ),
 }
 """The org limits on agent LLM spend (M2e plan section 0.1 #7): set by an
 owner on the org defaults only - never imported from a repo (a repo is

@@ -38,7 +38,7 @@ let fake: Fake;
 
 const noKey = { set: false, hint: null };
 const emptySecrets = () => ({
-  llm: { anthropic: noKey, openai: noKey, deepseek: noKey, openrouter: noKey, "claude-cli": noKey },
+  llm: { anthropic: noKey, openai: noKey, deepseek: noKey, openrouter: noKey },
   github_token: noKey,
 });
 

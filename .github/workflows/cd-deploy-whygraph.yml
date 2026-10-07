@@ -55,7 +55,6 @@ concurrency:
 env:
   REGISTRY_IMAGE: ghcr.io/mtrdesign/whygraph
   CODEGRAPH_VERSION: '1.4.1'
-  CLAUDE_CODE_VERSION: '2.1.285'
 
 jobs:
   # --- 1. Pin gate — must pass before ANY push ------------------------------
@@ -182,7 +181,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             CODEGRAPH_VERSION=${{ env.CODEGRAPH_VERSION }}
-            CLAUDE_CODE_VERSION=${{ env.CLAUDE_CODE_VERSION }}
             WHYGRAPH_VERSION=${{ needs.verify.outputs.version }}
           # No `tags:` and no `push:` — `outputs` owns both. Setting `tags`
           # here conflicts with push-by-digest.
@@ -396,7 +394,6 @@ jobs:
           push: false
           build-args: |
             CODEGRAPH_VERSION=${{ env.CODEGRAPH_VERSION }}
-            CLAUDE_CODE_VERSION=${{ env.CLAUDE_CODE_VERSION }}
             WHYGRAPH_VERSION=pr-${{ github.event.pull_request.number }}
           # Read-only: a PR must never mutate the release cache.
           cache-from: type=registry,ref=${{ env.REGISTRY_IMAGE }}:buildcache-amd64

@@ -21,8 +21,8 @@ class Description:
         Provider tag (``"anthropic"``, ``"openai"``, …) from
         :attr:`CompletionResponse.provider`. Combined with :attr:`model`
         on persistence as ``f"{provider}:{model}"`` so downstream readers
-        can distinguish "claude-opus-4-7 via Anthropic SDK" from "via
-        the Claude CLI".
+        can distinguish "claude-opus-4-7 via Anthropic" from "via
+        OpenRouter".
     input_tokens : int or None
         Prompt-token count when the provider reports it.
     output_tokens : int or None

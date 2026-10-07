@@ -24,7 +24,6 @@ import {
   TASKS,
   configFormSchema,
   layerToValues,
-  CLAUDE_TOKEN,
   secretsPatch,
   valuesToLayer,
   type ConfigFormValues,
@@ -127,8 +126,6 @@ function KeyRow({
   onRemove,
   onUndo,
   inputProps,
-  placeholder = "API key",
-  testId,
 }: {
   provider: string;
   status: SecretStatus | undefined;
@@ -139,14 +136,11 @@ function KeyRow({
   onRemove: () => void;
   onUndo: () => void;
   inputProps: React.ComponentProps<"input">;
-  placeholder?: string;
-  testId?: string;
 }) {
-  const id = testId ?? `key-${provider}`;
   return (
-    <div className="flex flex-col gap-1.5" data-testid={id}>
+    <div className="flex flex-col gap-1.5" data-testid={`key-${provider}`}>
       <div className="flex flex-wrap items-center gap-2">
-        <Label htmlFor={id} className="w-28 font-mono text-[13px]">
+        <Label htmlFor={`key-${provider}`} className="w-28 font-mono text-[13px]">
           {provider}
         </Label>
         {status?.set ? (
@@ -173,10 +167,10 @@ function KeyRow({
           ))}
       </div>
       <Input
-        id={id}
+        id={`key-${provider}`}
         type="password"
         autoComplete="off"
-        placeholder={status?.set ? "Enter a new value to replace it" : placeholder}
+        placeholder={status?.set ? "Enter a new key to replace it" : "API key"}
         {...inputProps}
       />
     </div>
@@ -406,29 +400,9 @@ export function ConfigForm({
             />
           ))}
         </div>
-        <div className="flex flex-col gap-1.5 border-t border-border pt-4">
-          <KeyRow
-            provider="claude-cli"
-            testId="key-claude-token"
-            placeholder="Claude subscription token"
-            status={secrets.claude_oauth_token}
-            inherited={isProject ? globals.data?.secrets.claude_oauth_token : undefined}
-            missing={missingKey === "claude-cli"}
-            pendingRemoval={removed.includes(CLAUDE_TOKEN)}
-            onRemove={() => setRemoved((r) => [...r, CLAUDE_TOKEN])}
-            onUndo={() => setRemoved((r) => r.filter((x) => x !== CLAUDE_TOKEN))}
-            inputProps={register("claudeToken")}
-          />
-          <p className="text-xs text-muted-foreground">
-            <span className="font-mono">claude-cli</span> bills your Claude subscription. Run{" "}
-            <span className="font-mono">claude setup-token</span> in a terminal on your machine and paste
-            the token it prints here; it is handed only to the{" "}
-            <span className="font-mono">claude</span> CLI.
-          </p>
-        </div>
         <p className="text-xs text-muted-foreground">
-          <span className="font-mono">ollama</span> needs no key. Keys and tokens are stored encrypted and
-          never shown again.
+          <span className="font-mono">ollama</span> needs no API key. Keys are stored encrypted and never
+          shown again.
         </p>
       </Section>
 

@@ -648,7 +648,7 @@ def test_make_chat_client_model_override_and_empty_string_fallthrough() -> None:
     assert make_chat_client("openai", model="", config=config).model == "gpt-4o"
 
 
-@pytest.mark.parametrize("provider", ["ollama", "claude-cli", "nonesuch"])
+@pytest.mark.parametrize("provider", ["ollama", "nonesuch"])
 def test_make_chat_client_rejects_non_chat_providers(provider: str) -> None:
     with pytest.raises(LlmError, match="is not a chat provider"):
         make_chat_client(provider, config=LlmConfig())

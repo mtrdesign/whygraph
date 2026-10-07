@@ -30,10 +30,8 @@ Notes
 -----
 Only four providers can chat: ``anthropic``, ``openai``, ``deepseek``,
 ``openrouter``. ``ollama`` is excluded because local models' tool-calling
-reliability is unproven, and ``claude-cli`` because the CLI adapter
-disables tools outright (``claude_cli.py`` passes ``--tools ""``). Both
-raise :class:`LlmError` from :func:`make_chat_client` with a message
-naming the supported set.
+reliability is unproven; it raises :class:`LlmError` from
+:func:`make_chat_client` with a message naming the supported set.
 """
 
 from __future__ import annotations
@@ -452,9 +450,9 @@ def make_chat_client(
     Raises
     ------
     LlmError
-        If ``provider`` is not a chat provider. ``ollama`` and
-        ``claude-cli`` are rejected here by design (see the module
-        docstring), as is any unrecognized tag.
+        If ``provider`` is not a chat provider. ``ollama`` is rejected
+        here by design (see the module docstring), as is any
+        unrecognized tag.
     """
     # Imported lazily: the adapters import this module for its types, so
     # a module-level import would be circular.
@@ -466,8 +464,7 @@ def make_chat_client(
         raise LlmError(
             f"{provider!r} is not a chat provider; "
             f"available: {CHAT_PROVIDERS}. "
-            "(ollama and claude-cli support analyze/rationale but not "
-            "tool-calling chat.)"
+            "(ollama supports analyze/rationale but not tool-calling chat.)"
         )
 
     llm_config = config if config is not None else get_config().llm

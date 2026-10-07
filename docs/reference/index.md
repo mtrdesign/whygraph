@@ -34,7 +34,7 @@ against the running code, so it stays in step with what `whygraph` actually does
 
     ---
 
-    The six adapters, which roles each can fill, and which four can drive chat.
+    The five adapters, which roles each can fill, and which four can drive chat.
 
     [:octicons-arrow-right-24: LLM providers](llm-providers.md)
 

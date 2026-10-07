@@ -104,7 +104,7 @@ the checks change:
   metadata, pull requests, issues), valid for at most an hour. A scan receives it through a file in
   the data directory (`runs/<id>.token`, mode `0600`, written atomically), never its environment;
   the portal rewrites the file before the token expires and deletes it when the scan ends, and
-  leftovers are removed at start. CodeGraph and `claude` never see that file's name.
+  leftovers are removed at start. CodeGraph never sees that file's name.
 - **No personal access tokens.** Storing a GitHub token is refused in production; every GitHub call
   a project makes uses the app's token. The import page's user authorization (8 hours) is kept in
   memory for the session, never in the database or a response, and must belong to the GitHub

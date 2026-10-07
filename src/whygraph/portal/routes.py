@@ -191,7 +191,6 @@ from .runner import (
     stale_info,
 )
 from .secrets import (
-    CLAUDE_OAUTH_TOKEN,
     GITHUB_TOKEN,
     LLM_API_KEY,
     LLM_KEY_PROVIDERS,
@@ -212,7 +211,7 @@ projects_router = APIRouter(
 )
 
 KEYED_PROVIDERS: tuple[str, ...] = ("anthropic", "openai", "openrouter", "deepseek")
-"""Providers that need an API key (``claude-cli`` and ``ollama`` are key-less)."""
+"""Providers that need an API key (``ollama`` is key-less)."""
 
 
 def _now() -> str:
@@ -267,7 +266,6 @@ class SecretsBody(_Strict):
 
     llm: dict[str, str | None] = Field(default_factory=dict)
     github_token: str | None = None
-    claude_oauth_token: str | None = None
 
 
 class ConfigBody(_Strict):
@@ -413,9 +411,6 @@ def _secrets_view(session: Session, project_id: int | None, *, org_id: int) -> d
         "github_token": secret_status(
             session, kind=GITHUB_TOKEN, project_id=project_id, org_id=org_id
         ),
-        "claude_oauth_token": secret_status(
-            session, kind=CLAUDE_OAUTH_TOKEN, project_id=project_id, org_id=org_id
-        ),
     }
 
 
@@ -429,15 +424,6 @@ def _apply_secrets(
     if "github_token" in secrets.model_fields_set:
         _put_or_delete(
             session, GITHUB_TOKEN, None, secrets.github_token, project_id, org_id
-        )
-    if "claude_oauth_token" in secrets.model_fields_set:
-        _put_or_delete(
-            session,
-            CLAUDE_OAUTH_TOKEN,
-            None,
-            secrets.claude_oauth_token,
-            project_id,
-            org_id,
         )
 
 
@@ -614,16 +600,6 @@ def _missing_key(
         try:
             provider = config.model_for(task).provider
         except ConfigError:
-            continue
-        if provider == "claude-cli":
-            # Natively the CLI can use its own login; the image has none.
-            cli = config.llm.claude_cli
-            if (
-                os.environ.get("WHYGRAPH_IN_IMAGE") == "1"
-                and cli.config_dir is None
-                and not (cli.oauth_token or cli.api_key)
-            ):
-                return provider
             continue
         if provider not in KEYED_PROVIDERS:
             continue
@@ -1338,14 +1314,6 @@ def _add_local(
                     session,
                     kind=GITHUB_TOKEN,
                     value=github_token,
-                    project_id=project_id,
-                    org_id=org_id,
-                )
-            if preview.claude_oauth_token:
-                put_secret(
-                    session,
-                    kind=CLAUDE_OAUTH_TOKEN,
-                    value=preview.claude_oauth_token,
                     project_id=project_id,
                     org_id=org_id,
                 )

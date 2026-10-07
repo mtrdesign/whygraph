@@ -16,7 +16,6 @@ import pytest
 from whygraph.core.config import AnthropicConfig, LlmConfig
 from whygraph.services.llm import (
     AnthropicAdapter,
-    ClaudeCliAdapter,
     CompletionRequest,
     CompletionResponse,
     DeepSeekAdapter,
@@ -129,7 +128,6 @@ def test_factory_lists_builtin_providers() -> None:
         DeepSeekAdapter.provider,
         OpenRouterAdapter.provider,
         OllamaAdapter.provider,
-        ClaudeCliAdapter.provider,
     }
     assert set(factory.providers) == expected_tags
     assert set(LlmClientFactory.BUILTIN_PROVIDERS) == expected_tags

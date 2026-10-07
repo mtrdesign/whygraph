@@ -41,7 +41,7 @@ const endFrame = (id: number, status: string, summary: Json | null = null, run =
 
 const noKey = { set: false, hint: null };
 const emptySecrets = () => ({
-  llm: { anthropic: noKey, openai: noKey, deepseek: noKey, openrouter: noKey, "claude-cli": noKey },
+  llm: { anthropic: noKey, openai: noKey, deepseek: noKey, openrouter: noKey },
   github_token: noKey,
 });
 
@@ -788,25 +788,5 @@ describe("Global settings (screen 11)", () => {
     expect(cleared).toHaveTextContent("openai");
     expect(within(cleared).getByRole("link", { name: "alpha" })).toHaveAttribute("href", "/p/alpha/settings");
     expect(calls("PUT", "/api/portal/defaults")).toHaveLength(1);
-  });
-
-  it("saves a Claude subscription token write-only and shows only its hint", async () => {
-    handlers["GET /api/portal/defaults"] = () => ({ config: {}, secrets: emptySecrets(), no_provider_key: false });
-    handlers["PUT /api/portal/defaults"] = () => ({
-      config: {},
-      secrets: { ...emptySecrets(), claude_oauth_token: { set: true, hint: "…ab12" } },
-      no_provider_key: false,
-    });
-    const user = userEvent.setup();
-    mount("/settings");
-    const row = await screen.findByTestId("key-claude-token");
-    expect(row).toHaveTextContent("not set");
-    expect(screen.getByText(/claude setup-token/)).toBeInTheDocument();
-    await user.type(within(row).getByPlaceholderText("Claude subscription token"), "sk-ant-oat01-xyzab12");
-    await user.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(calls("PUT", "/api/portal/defaults")).toHaveLength(1));
-    expect(calls("PUT", "/api/portal/defaults")[0].body).toEqual({
-      secrets: { claude_oauth_token: "sk-ant-oat01-xyzab12" },
-    });
   });
 });

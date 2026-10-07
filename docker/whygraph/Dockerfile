@@ -71,18 +71,6 @@ RUN set -eux; \
     apt-get purge -y --auto-remove gnupg; \
     rm -rf /var/lib/apt/lists/*
 
-# The Claude Code CLI, for the `claude-cli` provider: subscription billing
-# through a `claude setup-token` token that the portal stores encrypted and
-# hands to `claude` only (as CLAUDE_CODE_OAUTH_TOKEN). Its own layer - it is
-# large (~240 MB) and moves on its own cadence; the publish workflow pins it.
-# The auto-updater stays off: the image's copy is the pinned one.
-ARG CLAUDE_CODE_VERSION=latest
-RUN set -eux; \
-    npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; \
-    npm cache clean --force; \
-    claude --version
-ENV DISABLE_AUTOUPDATER=1
-
 # WhyGraph's own version, baked so `whygraph install` can pin the generated
 # shims to a concrete release even when the image is pulled via `:latest`. The
 # publish workflow passes the release tag; `latest` is the local-build default.

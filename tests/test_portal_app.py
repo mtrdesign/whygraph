@@ -1710,7 +1710,6 @@ def test_put_config_enforces_the_allowlist(
     for bad in (
         {"whygraph_db": "/data/portal.db"},
         {"logging": {"file": "/tmp/x"}},
-        {"llm": {"claude_cli": {"config_dir": "/root"}}},
     ):
         response = ready.put("/api/projects/demo/config", json={"config": bad})
         assert response.status_code == 422, bad
@@ -2408,44 +2407,7 @@ def test_portal_cli_exits_3_when_the_database_stays_unreachable(
     assert "is the whygraph-portal-postgres container running?" in result.output
 
 
-def test_claude_subscription_token_through_the_api(
-    ready: TestClient, env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """In the image the CLI has no login of its own, so the token is the key."""
-    monkeypatch.setenv("WHYGRAPH_IN_IMAGE", "1")
-    add_local(ready, make_repo(env.shared, "demo"))
-    # Chat cannot use claude-cli (no tools), so it resolves to Anthropic.
-    ready.put(
-        "/api/portal/defaults", json={"secrets": {"llm": {"anthropic": "sk-a-0001"}}}
-    )
-    ready.put(
-        "/api/projects/demo/config",
-        json={"config": {"llm": {"model": "claude-cli/claude-opus-4-7"}}},
-    )
-    assert ready.get("/api/projects/demo").json()["missing_key"] == "claude-cli"
-
-    saved = ready.put(
-        "/api/portal/defaults",
-        json={"secrets": {"claude_oauth_token": "sk-ant-oat01-abcd1234"}},
-    )
-    assert saved.status_code == 200
-    assert saved.json()["secrets"]["claude_oauth_token"] == {
-        "set": True,
-        "hint": "…1234",
-    }
-    assert "sk-ant-oat01-abcd1234" not in saved.text
-    assert ready.get("/api/projects/demo").json()["missing_key"] is None
-    ctx = ready.app.state.portal.contexts.get(_project_id("demo"))
-    assert ctx.config.llm.claude_cli.oauth_token == "sk-ant-oat01-abcd1234"
-
-    ready.put("/api/portal/defaults", json={"secrets": {"claude_oauth_token": None}})
-    assert ready.get("/api/projects/demo").json()["missing_key"] == "claude-cli"
-    # Natively the CLI may use its own login: no token is not "missing".
-    monkeypatch.delenv("WHYGRAPH_IN_IMAGE")
-    assert ready.get("/api/projects/demo").json()["missing_key"] is None
-
-
-def test_import_moves_a_claude_oauth_token_into_the_store(
+def test_import_drops_claude_cli_settings_and_never_stores_the_token(
     ready: TestClient, env: SimpleNamespace
 ) -> None:
     root = make_repo(env.shared, "demo")
@@ -2456,7 +2418,25 @@ def test_import_moves_a_claude_oauth_token_into_the_store(
     response = ready.post("/api/projects", json={"source": "local", "path": str(root)})
     assert response.status_code == 201
     assert "sk-ant-oat01-imported77" not in response.text
-    assert response.json()["import"]["secrets_moved"] == ["llm.claude_cli.oauth_token"]
+    report = response.json()["import"]
+    assert report["secrets_moved"] == []
+    assert any("claude-cli provider was removed" in w for w in report["warnings"])
     config = ready.get("/api/projects/demo/config").json()
-    assert config["secrets"]["claude_oauth_token"] == {"set": True, "hint": "…ed77"}
-    assert "claude_cli" not in config["config"].get("llm", {})
+    assert "claude_oauth_token" not in config["secrets"]
+    assert config["config"].get("llm", {}) == {}
+
+
+def test_the_claude_oauth_token_secret_is_refused(
+    ready: TestClient, env: SimpleNamespace
+) -> None:
+    add_local(ready, make_repo(env.shared, "demo"))
+    for path in ("/api/portal/defaults", "/api/projects/demo/config"):
+        response = ready.put(
+            path, json={"secrets": {"claude_oauth_token": "sk-ant-oat01-abcd1234"}}
+        )
+        assert response.status_code == 422, path
+        assert "sk-ant-oat01-abcd1234" not in response.text
+    claude_key = ready.put(
+        "/api/portal/defaults", json={"secrets": {"llm": {"claude-cli": "sk-x"}}}
+    )
+    assert claude_key.status_code == 422

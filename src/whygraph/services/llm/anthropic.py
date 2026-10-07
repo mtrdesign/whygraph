@@ -1,8 +1,4 @@
-"""Anthropic Claude via the official ``anthropic`` Python SDK.
-
-For API-billed access. Use :class:`whygraph.services.llm.ClaudeCliAdapter`
-if you'd rather bill against a Claude Code subscription.
-"""
+"""Anthropic Claude via the official ``anthropic`` Python SDK (API-billed)."""
 
 from __future__ import annotations
 

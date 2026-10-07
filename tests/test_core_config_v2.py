@@ -82,9 +82,6 @@ model = "deepseek-reasoner"
 
 [llm.openrouter]
 timeout_sec = 90
-
-[llm.claude-cli]
-timeout_sec = 300
 """
 
 _V2 = """
@@ -110,9 +107,6 @@ timeout_sec = 30
 
 [llm.openrouter]
 timeout_sec = 90
-
-[llm.claude_cli]
-timeout_sec = 300
 """
 
 
@@ -146,7 +140,6 @@ def test_old_fixture_and_v2_translation_resolve_identically(tmp_path: Path) -> N
     assert old.scan_forge == new.scan_forge == "github"
     assert old.analyze.max_workers == new.analyze.max_workers == 4
     assert old.whygraph_db == new.whygraph_db == tmp_path / ".whygraph/custom.db"
-    assert old.llm.claude_cli.timeout_sec == new.llm.claude_cli.timeout_sec == 300
 
 
 def test_defaults_resolve_to_the_1x_pairs() -> None:
@@ -225,11 +218,43 @@ def test_llm_model_beats_deprecated_provider_table_model(tmp_path: Path) -> None
     assert cfg.model_for("analyze") == ("anthropic", "claude-sonnet-4-5")
 
 
-def test_claude_cli_spellings_canonicalize(tmp_path: Path) -> None:
-    cfg = _from('[llm]\nmodel = "claude_cli/claude-opus-4-7"\n', tmp_path)
+def test_removed_claude_cli_references_are_dropped_with_one_warning(
+    tmp_path: Path,
+) -> None:
+    raw = {
+        "llm": {
+            "model": "claude_cli/claude-opus-4-7",
+            "claude-cli": {"timeout_sec": 300},
+            "claude_cli": {"oauth_token": "sk-ant-oat01-x"},
+            "openai": {"timeout_sec": 30},
+        },
+        "analyze": {"provider": "claude-cli", "model": "claude-opus-4-7"},
+        "rationale": {"model": "claude-cli/claude-opus-4-7", "max_tokens": 900},
+        # An explicit provider owns the model string: not a claude-cli reference.
+        "chat": {"provider": "openrouter", "model": "claude-cli/x"},
+    }
 
-    assert cfg.model_for("analyze") == ("claude-cli", "claude-opus-4-7")
-    assert cfg.timeout_for("analyze") == 120
+    normalized, warnings = normalize_v2(raw, tmp_path)
+
+    assert normalized["llm"] == {"openai": {"timeout_sec": 30}}
+    assert normalized["analyze"] == {}
+    assert normalized["rationale"] == {"max_tokens": 900}
+    assert normalized["chat"] == {"provider": "openrouter", "model": "claude-cli/x"}
+    assert len(warnings) == 1
+    assert "claude-cli provider was removed" in warnings[0]
+    for key in ("[llm.claude-cli]", "[llm.claude_cli]", "[llm].model"):
+        assert key in warnings[0]
+
+
+def test_a_removed_provider_falls_back_to_the_default(tmp_path: Path) -> None:
+    cfg = _from(
+        '[llm]\nmodel = "claude-cli/claude-opus-4-7"\n'
+        '[rationale]\nprovider = "claude-cli"\n',
+        tmp_path,
+    )
+
+    assert cfg.model_for("analyze") == ("anthropic", "claude-opus-4-7")
+    assert cfg.model_for("rationale") == ("anthropic", "claude-opus-4-7")
 
 
 def test_llm_model_must_be_provider_slash_model(tmp_path: Path) -> None:
@@ -260,7 +285,7 @@ def test_task_timeout_still_wins_and_warns(
 
 
 def test_chat_refuses_an_explicit_non_chat_provider(tmp_path: Path) -> None:
-    for body in ('[chat]\nprovider = "ollama"\n', '[chat]\nmodel = "claude-cli/x"\n'):
+    for body in ('[chat]\nprovider = "ollama"\n', '[chat]\nmodel = "ollama/x"\n'):
         cfg = _from(body, tmp_path)
         with pytest.raises(ConfigError, match="not a chat provider"):
             cfg.model_for("chat")
@@ -319,11 +344,11 @@ def test_cache_identity_ignores_a_deprecated_provider_table_pin(tmp_path: Path) 
 
 def test_cache_identity_matches_1x_for_task_pins(tmp_path: Path) -> None:
     cfg = _from(
-        '[rationale]\nprovider = "claude-cli"\n[analyze]\nmodel = "claude-haiku-4-5"\n',
+        '[rationale]\nprovider = "ollama"\n[analyze]\nmodel = "claude-haiku-4-5"\n',
         tmp_path,
     )
 
-    assert cfg.cache_identity("rationale") == ("claude-cli", None)
+    assert cfg.cache_identity("rationale") == ("ollama", None)
     assert cfg.cache_identity("analyze") == ("anthropic", "claude-haiku-4-5")
 
 
@@ -359,7 +384,6 @@ def test_normalize_resolves_paths_against_base(tmp_path: Path) -> None:
         "whygraph_db": "db/w.db",
         "codegraph_db": "/abs/c.db",
         "logging": {"file": "logs/x.log"},
-        "llm": {"claude-cli": {"config_dir": "profile"}},
     }
 
     normalized, _ = normalize_v2(raw, tmp_path)
@@ -367,9 +391,6 @@ def test_normalize_resolves_paths_against_base(tmp_path: Path) -> None:
     assert normalized["whygraph_db"] == str((tmp_path / "db/w.db").resolve())
     assert normalized["codegraph_db"] == "/abs/c.db"
     assert normalized["logging"]["file"] == str((tmp_path / "logs/x.log").resolve())
-    assert normalized["llm"] == {
-        "claude_cli": {"config_dir": str((tmp_path / "profile").resolve())}
-    }
 
 
 def test_merge_rules(tmp_path: Path) -> None:
@@ -537,7 +558,7 @@ def test_from_toml_equals_from_dict_of_the_same_table(tmp_path: Path) -> None:
     text = (
         'log_level = "DEBUG"\n'
         "[analyze]\n"
-        'provider = "claude-cli"\n'
+        'provider = "ollama"\n'
         "[scan]\n"
         'hooks = ["post-commit", "post-merge"]\n'
     )
@@ -549,6 +570,6 @@ def test_from_toml_equals_from_dict_of_the_same_table(tmp_path: Path) -> None:
 
     assert from_file == from_mapping
     assert from_file.log_level == "DEBUG"
-    assert from_file.analyze.provider == "claude-cli"
+    assert from_file.analyze.provider == "ollama"
     assert from_file.scan_hooks == ("post-commit", "post-merge")
     assert Config.from_dict({}, tmp_path).scan_hooks is True

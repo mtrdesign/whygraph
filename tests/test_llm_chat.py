@@ -754,3 +754,287 @@ def test_fallback_models_cover_every_chat_provider() -> None:
         assert entries, f"no fallback models for {provider}"
         assert all(m.id and m.display_name for m in entries)
     assert fallback_models("nonesuch") == ()
+
+
+# ---------------------------------------------------------------------------
+# Usage capture (M2f-2 plan §4.2, §6.1 #1)
+# ---------------------------------------------------------------------------
+#
+# Real SDK event / chunk models, so untyped fields (OpenRouter's cost,
+# DeepSeek's prompt_cache_hit_tokens) arrive in pydantic's model_extra as they
+# do in production.
+
+
+def _an_message(model: str, usage: dict) -> dict:
+    return {
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": [],
+        "stop_reason": None,
+        "stop_sequence": None,
+        "usage": usage,
+    }
+
+
+def test_anthropic_stream_merges_usage_latest_non_null_and_final_model() -> None:
+    from anthropic.lib.streaming import ParsedMessageStopEvent
+    from anthropic.types import RawMessageDeltaEvent, RawMessageStartEvent
+
+    events = [
+        RawMessageStartEvent.model_validate(
+            {
+                "type": "message_start",
+                "message": _an_message(
+                    "claude-opus-5",
+                    {
+                        "input_tokens": 5,
+                        "output_tokens": 1,
+                        "cache_read_input_tokens": 100,
+                        "cache_creation_input_tokens": 20,
+                    },
+                ),
+            }
+        ),
+        _an_text_block_start(),
+        _an_text_delta("Hi."),
+        _an_block_stop(0),
+        # message_delta usage is cumulative and can carry final prompt-side
+        # counts; a null field must not wipe an earlier value.
+        RawMessageDeltaEvent.model_validate(
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                "usage": {
+                    "output_tokens": 50,
+                    "input_tokens": 7,
+                    "cache_read_input_tokens": None,
+                    "cache_creation_input_tokens": None,
+                },
+            }
+        ),
+        # The stream helper's final snapshot names the model actually served.
+        ParsedMessageStopEvent.model_validate(
+            {
+                "type": "message_stop",
+                "message": _an_message(
+                    "claude-opus-5-20261001",
+                    {
+                        "input_tokens": 7,
+                        "output_tokens": 50,
+                        "cache_read_input_tokens": 100,
+                        "cache_creation_input_tokens": 20,
+                    },
+                ),
+            }
+        ),
+    ]
+    adapter, _ = _anthropic_adapter(events)
+    done = list(adapter.stream_turn(_request()))[-1]
+
+    assert done == TurnDone(
+        finish_reason="end_turn",
+        input_tokens=7 + 100 + 20,
+        output_tokens=50,
+        cache_read_tokens=100,
+        cache_write_tokens=20,
+        reasoning_tokens=None,
+        cost_usd=None,
+        model="claude-opus-5-20261001",
+    )
+
+
+def test_anthropic_stream_model_from_message_start_without_a_stop_snapshot() -> None:
+    from anthropic.types import RawMessageStartEvent
+
+    adapter, _ = _anthropic_adapter(
+        [
+            RawMessageStartEvent.model_validate(
+                {
+                    "type": "message_start",
+                    "message": _an_message(
+                        "claude-haiku-4-5", {"input_tokens": 9, "output_tokens": 1}
+                    ),
+                }
+            ),
+            _an_message_delta(output_tokens=12),
+        ]
+    )
+    done = list(adapter.stream_turn(_request()))[-1]
+    assert (done.input_tokens, done.output_tokens) == (9, 12)
+    assert done.cache_read_tokens is None
+    assert done.model == "claude-haiku-4-5"
+
+
+def _oa_real_chunk(model: str, *, content=None, finish_reason=None, usage=None):
+    from openai.types.chat import ChatCompletionChunk
+
+    payload: dict = {
+        "id": "chunk-1",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": model,
+        "choices": [],
+    }
+    if content is not None or finish_reason is not None:
+        payload["choices"] = [
+            {
+                "index": 0,
+                "delta": {"content": content} if content is not None else {},
+                "finish_reason": finish_reason,
+            }
+        ]
+    if usage is not None:
+        payload["usage"] = usage
+    return ChatCompletionChunk.model_validate(payload)
+
+
+def _compat_adapter(provider: str, chunks) -> tuple[OpenAIChatAdapter, _FakeOpenAI]:
+    fake = _FakeOpenAI(chunks)
+    return OpenAIChatAdapter(provider=provider, model="requested", client=fake), fake
+
+
+def test_openai_stream_reads_final_usage_chunk_details_and_chunk_model() -> None:
+    adapter, _ = _compat_adapter(
+        "openai",
+        [
+            _oa_real_chunk("gpt-5-2026-08-01", content="Hi"),
+            _oa_real_chunk("gpt-5-2026-08-01", finish_reason="stop"),
+            _oa_real_chunk(
+                "gpt-5-2026-08-01",
+                usage={
+                    "prompt_tokens": 1000,
+                    "completion_tokens": 300,
+                    "total_tokens": 1300,
+                    "prompt_tokens_details": {"cached_tokens": 600},
+                    "completion_tokens_details": {"reasoning_tokens": 120},
+                },
+            ),
+        ],
+    )
+    done = list(adapter.stream_turn(_request()))[-1]
+    assert done == TurnDone(
+        finish_reason="stop",
+        input_tokens=1000,
+        output_tokens=300,
+        cache_read_tokens=600,
+        cache_write_tokens=None,
+        reasoning_tokens=120,
+        cost_usd=None,
+        model="gpt-5-2026-08-01",
+    )
+
+
+def test_openai_stream_without_details() -> None:
+    adapter, _ = _compat_adapter(
+        "openai",
+        [
+            _oa_real_chunk("m", content="Hi", finish_reason="stop"),
+            _oa_real_chunk(
+                "m",
+                usage={
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15,
+                    "prompt_tokens_details": None,
+                    "completion_tokens_details": None,
+                },
+            ),
+        ],
+    )
+    done = list(adapter.stream_turn(_request()))[-1]
+    assert (done.input_tokens, done.output_tokens) == (10, 5)
+    assert done.cache_read_tokens is None
+    assert done.reasoning_tokens is None
+
+
+def test_openrouter_stream_cost_byok_cache_write_and_no_usage_include() -> None:
+    adapter, fake = _compat_adapter(
+        "openrouter",
+        [
+            _oa_real_chunk("anthropic/claude-sonnet-5", content="Hi"),
+            _oa_real_chunk("anthropic/claude-sonnet-5", finish_reason="stop"),
+            _oa_real_chunk(
+                "anthropic/claude-sonnet-5",
+                usage={
+                    "prompt_tokens": 2000,
+                    "completion_tokens": 100,
+                    "total_tokens": 2100,
+                    "prompt_tokens_details": {
+                        "cached_tokens": 1500,
+                        "cache_write_tokens": 300,
+                    },
+                    "cost": 0.0012,
+                    "is_byok": True,
+                    "cost_details": {"upstream_inference_cost": 0.0345},
+                },
+            ),
+        ],
+    )
+    done = list(adapter.stream_turn(_request()))[-1]
+
+    assert done.model == "anthropic/claude-sonnet-5"
+    assert (done.input_tokens, done.output_tokens) == (2000, 100)
+    assert done.cache_read_tokens == 1500
+    assert done.cache_write_tokens == 300
+    assert done.cost_usd == pytest.approx(0.0012 + 0.0345)
+    # Usage is always returned by OpenRouter; the deprecated include flag
+    # is not sent (stream_options.include_usage is the standard OpenAI ask).
+    assert fake.last_kwargs is not None
+    assert "extra_body" not in fake.last_kwargs
+    assert "usage" not in fake.last_kwargs
+    assert fake.last_kwargs["stream_options"] == {"include_usage": True}
+
+
+def test_openai_stream_never_trusts_a_cost_outside_openrouter() -> None:
+    adapter, _ = _compat_adapter(
+        "openai",
+        [
+            _oa_real_chunk("m", content="Hi", finish_reason="stop"),
+            _oa_real_chunk(
+                "m",
+                usage={
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                    "cost": 5.0,
+                },
+            ),
+        ],
+    )
+    assert list(adapter.stream_turn(_request()))[-1].cost_usd is None
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        {
+            "prompt_tokens": 500,
+            "completion_tokens": 50,
+            "total_tokens": 550,
+            "prompt_tokens_details": {"cached_tokens": 320},
+        },
+        {
+            "prompt_tokens": 500,
+            "completion_tokens": 50,
+            "total_tokens": 550,
+            "prompt_cache_hit_tokens": 320,
+            "prompt_cache_miss_tokens": 180,
+        },
+    ],
+    ids=["prompt_tokens_details", "prompt_cache_hit_tokens"],
+)
+def test_deepseek_stream_reads_both_cache_hit_shapes(usage: dict) -> None:
+    adapter, _ = _compat_adapter(
+        "deepseek",
+        [
+            _oa_real_chunk("deepseek-chat", content="Hi", finish_reason="stop"),
+            _oa_real_chunk("deepseek-chat", usage=usage),
+        ],
+    )
+    done = list(adapter.stream_turn(_request()))[-1]
+    assert done.cache_read_tokens == 320
+    assert done.input_tokens == 500
+    assert done.cost_usd is None
+    assert done.model == "deepseek-chat"

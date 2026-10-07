@@ -22,6 +22,7 @@ from whygraph import core
 from whygraph.chat.harness import (
     ELIDED_MARKER,
     RoundLimit,
+    RoundUsage,
     ToolCallStarted,
     ToolResultReady,
     build_system_prompt,
@@ -155,6 +156,7 @@ def test_turn_with_no_tool_calls_ends_after_one_round() -> None:
     assert events == [
         TextDelta(text="Because "),
         TextDelta(text="history."),
+        RoundUsage(input_tokens=5, output_tokens=7),
         TurnDone(finish_reason="stop", input_tokens=5, output_tokens=7),
     ]
     assert len(client.requests) == 1
@@ -177,11 +179,15 @@ def test_tool_round_then_text_round() -> None:
     events = _run(client, registry)
 
     assert events[0] == TextDelta(text="Looking… ")
-    assert events[1] == ToolCallStarted(call=call)
-    assert isinstance(events[2], ToolResultReady)
-    assert events[2].call is call
-    assert events[3] == TextDelta(text="Found it.")
-    assert events[4] == TurnDone(finish_reason="stop", input_tokens=9, output_tokens=3)
+    # The round's usage closes its provider call, before its tools run.
+    assert events[1] == RoundUsage()
+    assert events[2] == ToolCallStarted(call=call)
+    assert isinstance(events[3], ToolResultReady)
+    assert events[3].call is call
+    assert events[4] == TextDelta(text="Found it.")
+    assert events[5] == RoundUsage(input_tokens=9, output_tokens=3)
+    assert events[6] == TurnDone(finish_reason="stop", input_tokens=9, output_tokens=3)
+    assert len(events) == 7
     assert registry.dispatched == [("search_symbols", {"query": "run_turn"})]
 
 
@@ -261,7 +267,9 @@ def test_max_tool_rounds_cuts_the_loop_off() -> None:
 
     assert len(client.requests) == 4
     assert len(registry.dispatched) == 3
-    assert events[-2] == RoundLimit(rounds=3)
+    # The answer round reports its usage like every other provider call.
+    assert events[-3] == RoundLimit(rounds=3)
+    assert isinstance(events[-2], RoundUsage)
     assert isinstance(events[-1], TurnDone)
 
 
@@ -360,7 +368,8 @@ def test_tool_error_result_is_recoverable_not_fatal() -> None:
 
     result_event = next(e for e in events if isinstance(e, ToolResultReady))
     assert json.loads(result_event.result) == {"error": "not found"}
-    assert events[-2] == TextDelta(text="That symbol does not exist.")
+    assert events[-3] == TextDelta(text="That symbol does not exist.")
+    assert isinstance(events[-2], RoundUsage)
     assert isinstance(events[-1], TurnDone)
 
 
@@ -417,7 +426,7 @@ def test_specs_and_bounds_come_from_config_by_default(
     )
     # Two tool rounds from config, plus the answer round.
     assert len(client.requests) == 3
-    assert events[-2] == RoundLimit(rounds=2)
+    assert events[-3] == RoundLimit(rounds=2)
 
 
 def test_registry_specs_are_offered_to_the_model() -> None:
@@ -433,6 +442,144 @@ def test_registry_specs_are_offered_to_the_model() -> None:
         )
     )
     assert len(client.requests[0].tools) == 17
+
+
+# ---------------------------------------------------------------------------
+# Usage: one RoundUsage per provider call, the turn total on TurnDone
+# ---------------------------------------------------------------------------
+
+
+def _done(reason, inp=None, out=None, **fields) -> TurnDone:
+    return TurnDone(finish_reason=reason, input_tokens=inp, output_tokens=out, **fields)
+
+
+def test_three_round_turn_reports_each_round_and_the_total() -> None:
+    """Every stream_turn yields one RoundUsage; TurnDone carries the sums."""
+    client = ScriptedClient(
+        [
+            [
+                ToolCallMade(call=_call("search_symbols", "c1", query="a")),
+                _done(
+                    "tool_calls",
+                    100,
+                    10,
+                    cache_read_tokens=80,
+                    cache_write_tokens=5,
+                    cost_usd=0.01,
+                    model="served-a",
+                ),
+            ],
+            [
+                ToolCallMade(call=_call("get_symbol", "c2", qualified_name="b")),
+                _done("tool_calls", 200, 20, reasoning_tokens=7, model="served-b"),
+            ],
+            [
+                TextDelta(text="Answer."),
+                _done("stop", 300, 30, cache_read_tokens=250, cost_usd=0.02),
+            ],
+        ]
+    )
+    events = _run(client, StubRegistry())
+
+    usages = [e for e in events if isinstance(e, RoundUsage)]
+    assert usages == [
+        RoundUsage(
+            input_tokens=100,
+            output_tokens=10,
+            cache_read_tokens=80,
+            cache_write_tokens=5,
+            model="served-a",
+        ),
+        RoundUsage(
+            input_tokens=200, output_tokens=20, reasoning_tokens=7, model="served-b"
+        ),
+        RoundUsage(input_tokens=300, output_tokens=30, cache_read_tokens=250),
+    ]
+    assert len(usages) == len(client.requests) == 3
+
+    total = events[-1]
+    assert total == TurnDone(
+        finish_reason="stop",
+        input_tokens=600,
+        output_tokens=60,
+        cache_read_tokens=330,
+        cache_write_tokens=5,
+        reasoning_tokens=7,
+        cost_usd=pytest.approx(0.03),
+        # The last model a round reported (round 3 did not say).
+        model="served-b",
+    )
+    # Exactly one TurnDone, and it is last.
+    assert sum(isinstance(e, TurnDone) for e in events) == 1
+
+
+def test_round_usage_precedes_that_rounds_tool_events() -> None:
+    """A round's tools run after its provider call, so they follow its usage."""
+    call = _call("search_symbols", query="x")
+    client = ScriptedClient(
+        [
+            [
+                TextDelta(text="Looking."),
+                ToolCallMade(call=call),
+                _done("tool_calls", 4, 2),
+            ],
+            [TextDelta(text="Done."), _done("stop", 6, 3)],
+        ]
+    )
+    kinds = [type(e).__name__ for e in _run(client, StubRegistry())]
+    assert kinds == [
+        "TextDelta",
+        "RoundUsage",
+        "ToolCallStarted",
+        "ToolResultReady",
+        "TextDelta",
+        "RoundUsage",
+        "TurnDone",
+    ]
+
+
+def test_post_limit_answer_round_reports_its_usage_and_joins_the_total() -> None:
+    forever = [
+        ToolCallMade(call=_call("search_symbols", query="x")),
+        _done("tool_calls", 10, 1),
+    ]
+    client = ScriptedClient(
+        [
+            list(forever),
+            list(forever),
+            [TextDelta(text="Summary."), _done("stop", 50, 5)],
+        ]
+    )
+    events = _run(client, StubRegistry(), max_tool_rounds=2)
+
+    kinds = [type(e).__name__ for e in events]
+    assert kinds.count("RoundUsage") == 3
+    limit = kinds.index("RoundLimit")
+    assert kinds[limit:] == ["RoundLimit", "TextDelta", "RoundUsage", "TurnDone"]
+    assert events[-2] == RoundUsage(input_tokens=50, output_tokens=5)
+    assert events[-1] == _done("stop", 70, 7)
+
+
+def test_turn_total_is_none_only_when_no_round_reported() -> None:
+    client = ScriptedClient(
+        [
+            [
+                ToolCallMade(call=_call("search_symbols", query="x")),
+                _done("tool_calls"),
+            ],
+            [TextDelta(text="ok"), _done("stop")],
+        ]
+    )
+    events = _run(client, StubRegistry())
+    assert events[-1] == TurnDone(finish_reason="stop")
+    assert [e for e in events if isinstance(e, RoundUsage)] == [RoundUsage()] * 2
+
+
+def test_a_round_without_a_turn_done_still_reports_empty_usage() -> None:
+    """A stream that ends without its TurnDone still closes the round."""
+    client = ScriptedClient([[TextDelta(text="cut")]])
+    events = _run(client, StubRegistry())
+    assert events == [TextDelta(text="cut"), RoundUsage(), TurnDone()]
 
 
 # ---------------------------------------------------------------------------

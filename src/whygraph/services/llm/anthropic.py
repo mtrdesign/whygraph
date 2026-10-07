@@ -11,6 +11,7 @@ from whygraph.core.config import AnthropicConfig
 from .client import LlmClient
 from .exceptions import LlmError
 from .types import CompletionRequest, CompletionResponse
+from .usage import anthropic_raw_usage, anthropic_usage_fields
 
 
 class AnthropicAdapter(LlmClient):
@@ -92,16 +93,16 @@ class AnthropicAdapter(LlmClient):
         text_blocks = [
             b.text for b in result.content if getattr(b, "type", None) == "text"
         ]
+        # Anthropic's input_tokens excludes cache reads / writes; the
+        # normalized value adds them back (see `usage.py`).
+        usage = anthropic_usage_fields(
+            anthropic_raw_usage(getattr(result, "usage", None))
+        )
         return CompletionResponse(
             text="".join(text_blocks),
             model=getattr(result, "model", self.model),
             provider=self.provider,
-            input_tokens=getattr(result.usage, "input_tokens", None)
-            if result.usage
-            else None,
-            output_tokens=getattr(result.usage, "output_tokens", None)
-            if result.usage
-            else None,
             finish_reason=getattr(result, "stop_reason", None),
             raw=result.model_dump() if hasattr(result, "model_dump") else None,
+            **usage,
         )

@@ -37,6 +37,7 @@ from .chat import (
     TurnDone,
 )
 from .exceptions import LlmError
+from .usage import UsageFields, openai_usage_fields
 
 
 @dataclass(slots=True)
@@ -274,17 +275,22 @@ class OpenAIChatAdapter(ChatClient):
 
         accumulators: dict[int, _CallAccumulator] = {}
         finish_reason: str | None = None
-        input_tokens: int | None = None
-        output_tokens: int | None = None
+        usage_fields: UsageFields = openai_usage_fields(None, provider=self.provider)
+        served_model: str | None = None
         flushed = False
 
         try:
             stream = self._client.chat.completions.create(**kwargs)
             for chunk in stream:
+                chunk_model = getattr(chunk, "model", None)
+                if isinstance(chunk_model, str) and chunk_model:
+                    served_model = chunk_model
                 usage = getattr(chunk, "usage", None)
                 if usage is not None:
-                    input_tokens = getattr(usage, "prompt_tokens", None)
-                    output_tokens = getattr(usage, "completion_tokens", None)
+                    # One `provider` branch covers the DeepSeek / OpenRouter
+                    # extras (OpenRouter's cost and cache writes ride the
+                    # SDK's untyped extra fields) - see `usage.py`.
+                    usage_fields = openai_usage_fields(usage, provider=self.provider)
 
                 choices = getattr(chunk, "choices", None) or []
                 if not choices:
@@ -319,11 +325,7 @@ class OpenAIChatAdapter(ChatClient):
             for index in sorted(accumulators):
                 yield ToolCallMade(call=accumulators[index].flush())
 
-        yield TurnDone(
-            finish_reason=finish_reason,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-        )
+        yield TurnDone(finish_reason=finish_reason, model=served_model, **usage_fields)
 
 
 __all__ = ["OpenAIChatAdapter"]

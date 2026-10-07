@@ -16,6 +16,7 @@ from whygraph.core.config import OpenAIConfig
 from .client import LlmClient
 from .exceptions import LlmError
 from .types import CompletionRequest, CompletionResponse
+from .usage import openai_usage_fields
 
 
 class OpenAIAdapter(LlmClient):
@@ -110,13 +111,16 @@ class OpenAIAdapter(LlmClient):
             raise LlmError(f"openai API error: {exc}") from exc
 
         choice = result.choices[0]
-        usage = result.usage
+        # The subclasses differ only in `provider`, which selects the
+        # DeepSeek / OpenRouter extras (see `usage.py`).
+        usage = openai_usage_fields(
+            getattr(result, "usage", None), provider=self.provider
+        )
         return CompletionResponse(
             text=choice.message.content or "",
             model=getattr(result, "model", self.model),
             provider=self.provider,
-            input_tokens=getattr(usage, "prompt_tokens", None) if usage else None,
-            output_tokens=getattr(usage, "completion_tokens", None) if usage else None,
             finish_reason=getattr(choice, "finish_reason", None),
             raw=result.model_dump() if hasattr(result, "model_dump") else None,
+            **usage,
         )

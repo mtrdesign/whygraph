@@ -242,14 +242,36 @@ class TurnDone:
         decide whether more tool rounds follow by looking at whether any
         :class:`ToolCallMade` was emitted, not at this string.
     input_tokens : int or None
-        Prompt-token usage, when the provider reports it.
+        Prompt-token usage, when the provider reports it. Same meaning as
+        :attr:`~whygraph.services.llm.types.CompletionResponse.input_tokens`:
+        every prompt token, cache reads and writes included.
     output_tokens : int or None
-        Completion-token usage, when the provider reports it.
+        Completion-token usage, when the provider reports it. Includes
+        reasoning tokens.
+    cache_read_tokens : int or None
+        Prompt tokens served from the prompt cache (a subset of
+        ``input_tokens``), when reported.
+    cache_write_tokens : int or None
+        Prompt tokens written to the prompt cache (a subset of
+        ``input_tokens``), when reported.
+    reasoning_tokens : int or None
+        Reasoning tokens (a subset of ``output_tokens``), when reported.
+    cost_usd : float or None
+        Provider-reported cost in USD. Only OpenRouter reports one.
+    model : str or None
+        The model the provider says it served, which can differ from the
+        requested one (an alias, a router such as ``openrouter/auto``, a
+        server-side fallback). ``None`` when the stream did not say.
     """
 
     finish_reason: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    cost_usd: float | None = None
+    model: str | None = None
 
 
 ChatStreamEvent = TextDelta | ToolCallMade | TurnDone

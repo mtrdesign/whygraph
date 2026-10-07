@@ -259,7 +259,7 @@ class _Generator:
     def from_config(cls, config: object) -> _Generator:
         return cls()
 
-    def generate(self, evidence, *, symbol_context=None) -> Rationale:  # noqa: ANN001
+    def generate(self, evidence, *, symbol_context=None, subject=None) -> Rationale:  # noqa: ANN001
         type(self).calls += 1
         return Rationale(
             purpose="Holds the sample lines.",

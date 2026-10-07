@@ -33,12 +33,14 @@ the **turn total**.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from importlib import resources
 
 from whygraph.analyze.prompt import render as render_prompt
 from whygraph.core import get_config
+from whygraph.core.usage import record_usage
 from whygraph.mcp.targets import repo_root
 from whygraph.services.llm.chat import (
     ChatClient,
@@ -465,6 +467,7 @@ def run_turn(
         text_parts: list[str] = []
         calls: list[ToolCall] = []
         done = TurnDone()
+        started = time.monotonic()
         for event in client.stream_turn(request):
             if isinstance(event, TextDelta):
                 text_parts.append(event.text)
@@ -474,9 +477,16 @@ def run_turn(
             else:  # TurnDone
                 done = event
 
-        # The provider call is over: report its usage (the per-call record
-        # belongs here too) before any of its tools run.
+        # The provider call is over: record and report its usage before any
+        # of its tools run. This round's TurnDone, never the turn total.
         rounds.append(done)
+        record_usage(
+            "chat",
+            done,
+            provider=client.provider,
+            model_requested=client.model,
+            started=started,
+        )
         yield _round_usage(done)
 
         if not calls:
@@ -508,6 +518,7 @@ def run_turn(
     _log.info("chat turn hit the %d-round tool limit", max_tool_rounds)
     yield RoundLimit(rounds=max_tool_rounds)
     done = TurnDone()
+    started = time.monotonic()
     for event in client.stream_turn(
         ChatRequest(messages=(system, *messages), tools=(), max_tokens=max_tokens)
     ):
@@ -519,6 +530,13 @@ def run_turn(
         # regardless, dropping it is correct — there is no round left to run it.
     # The answer round is a provider call like any other: report it.
     rounds.append(done)
+    record_usage(
+        "chat",
+        done,
+        provider=client.provider,
+        model_requested=client.model,
+        started=started,
+    )
     yield _round_usage(done)
     yield _turn_total(rounds)
 

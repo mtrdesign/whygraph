@@ -315,7 +315,7 @@ class _ContextProbeDescriptor:
         self._calls = 0
         self.seen: list[tuple[str | None, Config, str]] = []
 
-    def describe(self, diff: str) -> Description:
+    def describe(self, diff: str, *, subject: str | None = None) -> Description:
         with self._lock:
             call = self._calls
             self._calls += 1

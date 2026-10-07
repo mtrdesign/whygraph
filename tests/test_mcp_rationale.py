@@ -58,6 +58,7 @@ class _FakeGenerator:
         evidence: Sequence[CommitEvidence],
         *,
         symbol_context: SymbolContext | None = None,
+        subject: str | None = None,
     ) -> Rationale:
         return Rationale(
             purpose="Holds two sample lines.",
@@ -130,6 +131,7 @@ def test_rationale_brief_wraps_generator_failure(
             evidence: Sequence[CommitEvidence],
             *,
             symbol_context: SymbolContext | None = None,
+            subject: str | None = None,
         ) -> Rationale:
             raise AnalyzeError("model unavailable")
 
@@ -153,7 +155,7 @@ def _install_stub_descriptor(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         def from_config(cls, _cfg: object) -> "_StubDescriptor":
             return cls()
 
-        def describe(self, diff: str) -> Description:
+        def describe(self, diff: str, *, subject: str | None = None) -> Description:
             seen.append(diff)
             return Description(
                 text="backfilled summary",

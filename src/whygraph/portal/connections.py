@@ -109,6 +109,8 @@ class TokenPrincipal:
         Whether the user is an instance admin - informational only: a token
         principal is **never** an instance admin
         (:class:`whygraph.portal.deps.TokenIdentity` never copies it).
+    client_name : str or None
+        The token's ``client_name`` (the machine), for usage attribution.
     """
 
     token_id: int
@@ -124,6 +126,7 @@ class TokenPrincipal:
     avatar_url: str | None
     has_password: bool
     is_instance_admin: bool
+    client_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -539,6 +542,7 @@ def lookup(db: Session, raw: str) -> TokenPrincipal | Refusal:
         avatar_url=avatar,
         has_password=bool(has_password),
         is_instance_admin=bool(admin),
+        client_name=token.client_name,
     )
 
 

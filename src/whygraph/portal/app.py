@@ -27,15 +27,17 @@ Composition (plan section 4.5.1)::
 The lifespan waits for the portal database (an unreachable one raises
 :class:`~whygraph.portal.db.PortalDatabaseUnreachable`, and the CLI exits 3
 so the restart policy retries), takes the "one portal per database"
-advisory lock and migrates the portal DB - a held lock or a failure in
-those steps leaves a *degraded* app whose ``GET /api/portal/state`` reports
+advisory lock, migrates the portal DB and seeds the usage ledger's spend
+book and org prices (M2f-2) - a held lock or a failure in those steps
+leaves a *degraded* app whose ``GET /api/portal/state`` reports
 ``{"error"}`` and whose other ``/api`` routes answer ``503`` - writes the
 ``settings`` row at first start and refuses to start when
 ``WHYGRAPH_MODE`` contradicts it, seeds local mode's built-in org, builds
 the :class:`~whygraph.portal.security.PortalOrigins`, marks runs left
 ``running`` by a previous process ``interrupted``, follows a port change
 into the managed repos (:mod:`whygraph.portal.port_change`), starts the
-runner and
+usage writer (after production's audit writer), the runner, the daily
+ledger prune and
 this app's own MCP session manager and the lock's liveness check (a lost
 lock shuts the portal down), and turns strict project-context mode on. On
 exit it sets the shutdown event (open streams end), stops the runner, turns
@@ -82,7 +84,7 @@ from whygraph.serve.errors import whygraph_error_handler
 from whygraph.serve.routes import generate_router
 from whygraph.serve.routes import router as data_router
 
-from . import audit_store, connections
+from . import audit_store, connections, usage_store
 from . import db as portal_db
 from .access_routes import access_router
 from .audit import clear_writer, set_writer
@@ -142,6 +144,9 @@ CONNECTION_SWEEP_EVERY_SEC = 60 * 60
 
 AUDIT_PRUNE_EVERY_SEC = 24 * 60 * 60
 """How often production deletes audit rows past their retention (also at start)."""
+
+USAGE_PRUNE_EVERY_SEC = 24 * 60 * 60
+"""How often the usage ledger is pruned past its retention (also at start; both modes)."""
 
 LINK_REFRESH_POLL_SEC = 2.0
 """How often local mode drains the link-status refresh queue
@@ -275,7 +280,9 @@ def create_portal_app(
         dependencies=[
             Depends(
                 project_db_access(
-                    Action.PROJECT_READ, guard=linked_guard("the Explorer")
+                    Action.PROJECT_READ,
+                    guard=linked_guard("the Explorer"),
+                    usage_source="explorer",
                 )
             )
         ],
@@ -288,7 +295,9 @@ def create_portal_app(
         dependencies=[
             Depends(
                 project_db_access(
-                    Action.PROJECT_CHAT, guard=linked_guard("the Explorer")
+                    Action.PROJECT_CHAT,
+                    guard=linked_guard("the Explorer"),
+                    usage_source="explorer",
                 )
             )
         ],
@@ -297,7 +306,13 @@ def create_portal_app(
         chat_router,
         prefix="/api/projects/{slug}/chat",
         dependencies=[
-            Depends(project_db_access(Action.PROJECT_CHAT, guard=linked_guard("Chat")))
+            Depends(
+                project_db_access(
+                    Action.PROJECT_CHAT,
+                    guard=linked_guard("Chat"),
+                    usage_source="chat",
+                )
+            )
         ],
     )
     app.add_route("/mcp/{slug}", McpDispatcher(state), include_in_schema=False)
@@ -381,18 +396,24 @@ async def _serving(state: PortalState) -> AsyncIterator[None]:
         if state.github_app is not None:
             stack.callback(state.github_app.close)
         if not state.degraded:
-            await state.runner.start(state)
+            # Start order audit writer -> usage writer -> runner (it dispatches
+            # recovered runs at once, and they audit and spend). The runner is
+            # stopped in the finally below, before the stack unwinds LIFO: the
+            # usage writer flushes, then the audit writer.
             if state.mode == "production":
-                # After the runner (it audits), stopped and flushed after
-                # its shutdown: the stack unwinds after the finally below.
                 writer = audit_store.AuditWriter()
                 writer.start()
                 set_writer(writer)
                 stack.push_async_callback(_stop_audit_writer, writer)
+            state.usage_writer.start()
+            stack.push_async_callback(_stop_usage_writer, state.usage_writer)
+            await state.runner.start(state)
         watcher = anyio.create_task_group()
         await watcher.__aenter__()
         if not state.degraded and state.instance_lock is not None:
             watcher.start_soon(_watch_instance_lock, state)
+        if not state.degraded:
+            watcher.start_soon(_prune_usage_events)  # the ledger exists in both modes
         if state.mode == "production":
             watcher.start_soon(_check_base_url, state)
             if not state.degraded:
@@ -471,6 +492,24 @@ async def _prune_audit_events() -> None:
             if deleted:
                 _log.info("audit log pruning: %d row(s) deleted", deleted)
         await anyio.sleep(AUDIT_PRUNE_EVERY_SEC)
+
+
+async def _stop_usage_writer(writer: usage_store.UsageWriter) -> None:
+    """Write what the usage writer still holds, then end its thread."""
+    await anyio.to_thread.run_sync(writer.stop)
+
+
+async def _prune_usage_events() -> None:
+    """Delete ledger rows past their retention: at start, then daily; never fatal."""
+    while True:
+        try:
+            deleted = await anyio.to_thread.run_sync(usage_store.prune)
+        except Exception:  # noqa: BLE001 -- a failed prune is retried tomorrow
+            _log.exception("usage ledger pruning failed")
+        else:
+            if deleted:
+                _log.info("usage ledger pruning: %d row(s) deleted", deleted)
+        await anyio.sleep(USAGE_PRUNE_EVERY_SEC)
 
 
 async def _refresh_link_statuses(state: PortalState) -> None:
@@ -574,6 +613,13 @@ def _startup(state: PortalState) -> None:
         state.degraded = f"portal database migration failed: {exc}"
         return
 
+    try:
+        _seed_usage(state)
+    except Exception as exc:  # noqa: BLE001 -- fail closed: budgets need the book
+        _log.exception("could not read this month's LLM spend")
+        state.degraded = f"could not read this month's spend: {exc}"
+        return
+
     requested = (os.environ.get(MODE_ENV) or "").strip().lower() or None
     with portal_db.get_session() as session:
         setting = session.get(Setting, 1)
@@ -631,6 +677,12 @@ def _startup(state: PortalState) -> None:
         ).all():
             run.status = "interrupted"
             session.add(run)
+
+
+def _seed_usage(state: PortalState) -> None:
+    """Seed the spend book from this month's ledger and load the org prices."""
+    usage_store.seed_spend_book(state.spend)
+    state.prices.replace_all(usage_store.load_price_overrides())
 
 
 def _production_base_url() -> BaseUrl:

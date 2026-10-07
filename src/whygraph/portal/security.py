@@ -207,6 +207,9 @@ class Principal:
         admin.
     token_project_id : int or None
         The one ``projects.id`` that token reaches.
+    token_client_name : str or None
+        That token's ``client_name`` (the machine a linked portal named at
+        connect), copied for usage attribution (M2f-2).
 
     Notes
     -----
@@ -224,6 +227,7 @@ class Principal:
     has_password: bool = False
     token_id: int | None = None
     token_project_id: int | None = None
+    token_client_name: str | None = None
 
 
 _principal: ContextVar[Principal | None] = ContextVar(

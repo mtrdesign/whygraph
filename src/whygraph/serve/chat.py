@@ -51,6 +51,7 @@ from whygraph.chat.harness import (
 )
 from whygraph.chat.tools import ToolRegistry
 from whygraph.core import ConfigError, get_config
+from whygraph.core.usage import set_scope_field
 from whygraph.db import get_session
 from whygraph.db.models import ChatMessage as ChatMessageRow
 from whygraph.db.models import ChatSession as ChatSessionRow
@@ -578,6 +579,9 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
     to it, and the next of :data:`_ROUND_FLUSH_EVENTS` (or the turn's end)
     writes it.
     """
+    # The portal bound a usage sink in the request task; this body runs in
+    # fresh context copies, so the session goes on the shared scope object.
+    set_scope_field(chat_session_id=session_id)
     try:
         client = make_chat_client(provider, model=model)
     except LlmError as exc:

@@ -87,7 +87,7 @@ class _StubDescriptor:
         self._lock = Lock()
         self.seen: list[str] = []
 
-    def describe(self, diff: str) -> Description:
+    def describe(self, diff: str, *, subject: str | None = None) -> Description:
         with self._lock:
             self.seen.append(diff)
         if self._fail_on is not None and self._fail_on in diff:
@@ -356,7 +356,7 @@ def test_feature_branch_commits_are_still_described(
 class _RejectingDescriptor(_StubDescriptor):
     """Every call fails the way a rejected token does (wrapped, like the real one)."""
 
-    def describe(self, diff: str) -> Description:
+    def describe(self, diff: str, *, subject: str | None = None) -> Description:
         with self._lock:
             self.seen.append(diff)
         try:
@@ -381,3 +381,27 @@ def test_rejected_credentials_stop_the_phase_at_the_first_failure(
     # have picked up the next one when the first failure lands).
     assert len(descriptor.seen) < len(commits)
     assert all(v[0] is None for v in _descriptions().values())
+
+
+def test_usage_binding_reaches_the_analyze_pool(
+    isolated_db: Path, repo_path: Path
+) -> None:
+    """A sink bound before the crawler is built sees every pooled call (M2f-2).
+
+    The crawler snapshots the context at construction and the pool copies
+    it per submit, so each commit's real ``LlmDescriptor`` call records once,
+    with the commit SHA as its subject.
+    """
+    from test_core_usage import CollectingSink, StubClient
+
+    from whygraph.analyze import LlmDescriptor
+    from whygraph.core.usage import use_usage_sink
+
+    commits = _commits(repo_path)
+    _insert(commits)
+    sink = CollectingSink()
+    with use_usage_sink(sink):
+        crawler = _run(repo_path, LlmDescriptor(StubClient()), max_workers=3)
+    assert crawler.error is None
+    assert sorted(r.subject for r in sink.records) == sorted(c.sha for c in commits)
+    assert {r.task for r in sink.records} == {"analyze"}

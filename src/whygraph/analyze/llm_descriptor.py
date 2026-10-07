@@ -20,7 +20,10 @@ string, assert on the returned :class:`Description`.
 
 from __future__ import annotations
 
+import time
+
 from whygraph.core.config import Config
+from whygraph.core.usage import record_usage
 from whygraph.services.llm import (
     CompletionRequest,
     LlmClient,
@@ -186,7 +189,7 @@ class LlmDescriptor:
             timeout_sec=config.timeout_for("analyze"),
         )
 
-    def describe(self, diff: str) -> Description:
+    def describe(self, diff: str, *, subject: str | None = None) -> Description:
         """Generate a description for one diff.
 
         A diff within :attr:`max_diff_chars` is described in a single
@@ -199,6 +202,11 @@ class LlmDescriptor:
         diff : str
             Raw textual diff (e.g. from
             :meth:`whygraph.services.git.Repository.diff`).
+        subject : str, optional
+            What the diff is about (the commit SHA, or the file path of a
+            per-file description), reported with each provider call's
+            usage (:func:`whygraph.core.usage.record_usage`). Passed down
+            as an argument, never stored: one descriptor serves a pool.
 
         Returns
         -------
@@ -218,18 +226,18 @@ class LlmDescriptor:
             raise AnalyzeError("empty diff: nothing to describe")
 
         if len(diff) <= self._max_diff_chars:
-            return self._describe_one(diff)
+            return self._describe_one(diff, subject)
 
         chunks = split_into_chunks(diff, self._max_diff_chars)
         if len(chunks) == 1:
             # One file larger than the cap — nothing to synthesise; the
             # lone chunk is truncated and described on its own.
-            return self._describe_one(chunks[0])
+            return self._describe_one(chunks[0], subject)
 
-        parts = [self._describe_one(chunk) for chunk in chunks]
-        return self._synthesize(parts)
+        parts = [self._describe_one(chunk, subject) for chunk in chunks]
+        return self._synthesize(parts, subject)
 
-    def _describe_one(self, body: str) -> Description:
+    def _describe_one(self, body: str, subject: str | None = None) -> Description:
         """Describe one diff body — a whole diff or a single chunk.
 
         Truncates ``body`` to :attr:`max_diff_chars` if needed, renders
@@ -244,10 +252,19 @@ class LlmDescriptor:
             timeout_sec=self._timeout_sec,
         )
 
+        started = time.monotonic()
         try:
             response = self._client.complete(request)
         except LlmError as exc:
             raise AnalyzeError(f"LLM call failed: {exc}") from exc
+        record_usage(
+            "analyze",
+            response,
+            provider=self._client.provider,
+            model_requested=self._client.model,
+            subject=subject,
+            started=started,
+        )
 
         return Description(
             text=response.text.strip(),
@@ -258,7 +275,9 @@ class LlmDescriptor:
             truncated=truncated,
         )
 
-    def _synthesize(self, parts: list[Description]) -> Description:
+    def _synthesize(
+        self, parts: list[Description], subject: str | None = None
+    ) -> Description:
         """Merge per-chunk descriptions into one via a final LLM call.
 
         The chunk descriptions are joined, labelled, and fed through the
@@ -279,10 +298,19 @@ class LlmDescriptor:
             timeout_sec=self._timeout_sec,
         )
 
+        started = time.monotonic()
         try:
             response = self._client.complete(request)
         except LlmError as exc:
             raise AnalyzeError(f"LLM synthesis call failed: {exc}") from exc
+        record_usage(
+            "analyze",
+            response,
+            provider=self._client.provider,
+            model_requested=self._client.model,
+            subject=subject,
+            started=started,
+        )
 
         return Description(
             text=response.text.strip(),

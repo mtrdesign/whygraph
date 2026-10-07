@@ -83,7 +83,7 @@ class _StubDescriptor:
         self._lock = Lock()
         self.seen: list[str] = []
 
-    def describe(self, diff: str) -> Description:
+    def describe(self, diff: str, *, subject: str | None = None) -> Description:
         with self._lock:
             self.seen.append(diff)
         if self._fail_on is not None and self._fail_on in diff:

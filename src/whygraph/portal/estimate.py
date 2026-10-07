@@ -236,7 +236,8 @@ def scan_estimate(config: Config, *, overrides: PriceOverrides = NO_OVERRIDES) -
         The project's resolved config (analyze model and limits).
     overrides : PriceOverrides, optional
         The project's org price overrides (empty by default; the route
-        passes the org's once they are held in memory).
+        passes the org's from the portal's
+        :class:`~whygraph.portal.usage_store.PriceBook`).
 
     Returns
     -------

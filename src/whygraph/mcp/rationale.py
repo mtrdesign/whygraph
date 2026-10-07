@@ -234,7 +234,11 @@ def rationale_card(
 
     try:
         generator = RationaleGenerator.from_config(config)
-        rationale = generator.generate(evidence, symbol_context=_symbol_context(target))
+        rationale = generator.generate(
+            evidence,
+            symbol_context=_symbol_context(target),
+            subject=target.qualified_name or target.path,
+        )
     except (AnalyzeError, LlmError) as exc:
         raise RationaleGenerationError.wrap("rationale generation failed", exc)
 

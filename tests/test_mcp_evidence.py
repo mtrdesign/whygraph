@@ -228,7 +228,7 @@ def _install_stub_descriptor(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         def from_config(cls, _cfg: object) -> "_StubDescriptor":
             return cls()
 
-        def describe(self, diff: str) -> Description:
+        def describe(self, diff: str, *, subject: str | None = None) -> Description:
             seen.append(diff)
             return Description(
                 text="backfilled summary",

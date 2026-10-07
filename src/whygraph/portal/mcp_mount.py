@@ -41,6 +41,7 @@ from starlette.responses import JSONResponse
 from starlette.types import Receive, Scope, Send
 
 from whygraph.core.context import use_project
+from whygraph.core.usage import use_usage_sink
 from whygraph.mcp.server import mcp
 
 from .authz import Action
@@ -52,6 +53,7 @@ from .deps import (
     require_initialized,
 )
 from .security import PortalOrigins
+from .usage import usage_sink_for
 
 
 def build_session_manager(origins: PortalOrigins) -> StreamableHTTPSessionManager:
@@ -132,7 +134,15 @@ class McpDispatcher:
         except ApiError as exc:
             await exc.response()(scope, receive, send)
             return
-        with use_project(project.ctx):
+        sink = usage_sink_for(
+            self.state,
+            project,
+            source="mcp",
+            org_slug=access.org_slug,
+            principal=principal,
+            user_id=access.user_id,
+        )
+        with use_project(project.ctx), use_usage_sink(sink):
             await self.state.session_manager.handle_request(scope, receive, send)
 
 

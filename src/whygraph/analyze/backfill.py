@@ -133,7 +133,7 @@ def backfill_commit_description(
     if not diff.strip():
         return False
 
-    description = descriptor.describe(diff)
+    description = descriptor.describe(diff, subject=commit.sha)
     model_label = f"{description.provider}:{description.model}"
     with get_session() as session:
         row = session.get(CommitRow, commit.sha)
@@ -217,7 +217,7 @@ def backfill_file_description(
     if not diff.strip():
         return None
 
-    description = descriptor.describe(diff)
+    description = descriptor.describe(diff, subject=path)
     model_label = f"{description.provider}:{description.model}"
     with get_session() as session:
         row = _file_change_row(session, commit.sha, path)

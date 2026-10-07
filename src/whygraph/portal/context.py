@@ -35,6 +35,7 @@ does its database and Fernet work on a worker thread
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Any, Callable
@@ -119,15 +120,17 @@ def build_project_context(
     root = resolve_root(project)
     project_layer, merged = _merged_layer(session, project, root)
     remote = None
+    key_scopes: dict[str, str] = {}
     if project.source == "platform":  # a linked project reads no secrets
         remote = _linked_remote(session, project, transport)
     else:
-        _inject_secrets(session, project, project_layer, merged)
+        key_scopes = _inject_secrets(session, project, project_layer, merged)
     return ProjectContext(
         slug=project.slug,
         root=root,
         config=Config.from_dict(merged, root),
         remote=remote,
+        key_scopes=key_scopes,
     )
 
 
@@ -223,14 +226,23 @@ def _merged_layer(session: Session, project: Project, root: Path) -> tuple[dict,
     return project_layer, merged
 
 
+def _key_env_var(tag: str) -> str:
+    """The environment variable an adapter falls back to (``ANTHROPIC_API_KEY``)."""
+    return f"{tag.replace('-', '_').upper()}_API_KEY"
+
+
 def _inject_secrets(
     session: Session, project: Project, project_layer: dict, merged: dict
-) -> None:
+) -> dict[str, str]:
     """Write decrypted keys and tokens into ``merged`` (in memory).
 
     Only the project's own org's secrets are read: its org defaults
     (the "global" scope below) and the project's. The GitHub token is a
     project secret when the project has one, else the org default.
+
+    Returns the key decision per LLM provider (``project`` / ``org`` /
+    ``environment`` / ``none``): with no stored key injected, the adapter
+    falls back to its environment variable in this process.
     """
     rows = session.exec(
         select(Secret).where(
@@ -258,16 +270,20 @@ def _inject_secrets(
             return None
 
     llm = merged.setdefault("llm", {})
+    key_scopes: dict[str, str] = {}
     for tag in LLM_KEY_PROVIDERS:
         attr = tag.replace("-", "_")
         if (False, LLM_API_KEY, tag) in by_scope:
-            key = value(False, LLM_API_KEY, tag)
+            key, scope = value(False, LLM_API_KEY, tag), "project"
         elif endpoint_of(project_layer, attr) is not None:
-            key = None  # rule 3: the project overrides the endpoint
+            key, scope = None, "none"  # rule 3: the project overrides the endpoint
         else:
-            key = value(True, LLM_API_KEY, tag)
+            key, scope = value(True, LLM_API_KEY, tag), "org"
         if key is not None:
             llm.setdefault(attr, {})["api_key"] = key
+        else:
+            scope = "environment" if os.environ.get(_key_env_var(tag)) else "none"
+        key_scopes[tag] = scope
 
     if (False, GITHUB_TOKEN, None) in by_scope:
         token = value(False, GITHUB_TOKEN, None)
@@ -275,6 +291,7 @@ def _inject_secrets(
         token = value(True, GITHUB_TOKEN, None)
     if token is not None:
         merged.setdefault("scan", {})["token"] = token
+    return key_scopes
 
 
 class ContextCache:

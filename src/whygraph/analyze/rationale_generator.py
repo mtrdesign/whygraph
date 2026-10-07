@@ -20,10 +20,12 @@ trivially testable: feed a stub :class:`LlmClient` and a list of
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 from whygraph.core.config import Config, RationaleConfig
+from whygraph.core.usage import record_usage
 from whygraph.db.models import Commit, Issue, PullRequest
 from whygraph.services.codegraph import Relation, SymbolContext
 from whygraph.services.llm import (
@@ -493,6 +495,7 @@ class RationaleGenerator:
         evidence: Sequence[CommitEvidence],
         *,
         symbol_context: SymbolContext | None = None,
+        subject: str | None = None,
     ) -> Rationale:
         """Generate a rationale card for one evidence bundle.
 
@@ -508,6 +511,10 @@ class RationaleGenerator:
             ``CODE GRAPH CONTEXT`` section ahead of the change history, so the
             rationale is grounded in code structure as well as commit prose.
             ``None`` (default) omits the section.
+        subject : str, optional
+            What the card is about (the qualified name, else the path),
+            reported with the call's usage
+            (:func:`whygraph.core.usage.record_usage`).
 
         Returns
         -------
@@ -541,10 +548,20 @@ class RationaleGenerator:
             timeout_sec=self._timeout_sec,
         )
 
+        started = time.monotonic()
         try:
             response = self._client.complete(request)
         except LlmError as exc:
             raise AnalyzeError(f"LLM call failed: {exc}") from exc
+        # Before parsing: a reply that is not valid JSON was still billed.
+        record_usage(
+            "rationale",
+            response,
+            provider=self._client.provider,
+            model_requested=self._client.model,
+            subject=subject,
+            started=started,
+        )
 
         fields = _parse_rationale_json(response.text)
         return Rationale(

@@ -45,10 +45,11 @@ class LlmClient(abc.ABC):
         """Check, once and cheaply, that this client can run at all.
 
         Called by the analyze and rationale factories right after the
-        client is built, so a missing prerequisite (e.g. the ``claude``
-        binary) fails the whole phase once instead of every call. The
-        default is a no-op; network-backed adapters report their errors
-        per call.
+        client is built, so a missing local prerequisite fails the whole
+        phase once instead of every call. The default is a no-op; every
+        bundled adapter is network-backed and reports its errors per
+        call. It makes no provider call and spends nothing, so it is not
+        metered.
 
         Raises
         ------

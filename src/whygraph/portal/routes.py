@@ -2525,6 +2525,7 @@ def scan_log(
 
 @projects_router.get("/{slug}/scan-estimate")
 def get_scan_estimate(
+    request: Request,
     project: BoundProject = Depends(project_db_access(Action.PROJECT_READ)),
 ) -> dict:
     """First-scan cost guard: what describing the waiting commits would cost.
@@ -2536,7 +2537,8 @@ def get_scan_estimate(
     never describe anything - the platform pays for and owns the LLM work.
     """
     _refuse_linked(project, "estimating this project's describe cost")
-    body = _scan_estimate(project.ctx.config)
+    overrides = portal_state(request).prices.for_org(project.org_id)
+    body = _scan_estimate(project.ctx.config, overrides=overrides)
     body["missing_key"] = _missing_key(project.ctx.config, ("analyze",))
     return body
 

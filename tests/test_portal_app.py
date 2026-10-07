@@ -590,6 +590,8 @@ def test_setup_flow(client: TestClient, env: SimpleNamespace) -> None:
         "shared_folders": [str(env.shared)],
         "version": package_version("whygraph"),  # what `whygraph version` prints
         "port_change": None,
+        # The banners' spend figures (M2f-2 section 4.12): none before setup
+        "usage": None,
         # The machine name the platform link page prefills (M2e section 4.8)
         "hostname": default_client_name(),
     }
@@ -1237,6 +1239,20 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/budgets/members/{uid}", "DELETE"): "org.budgets",
     ("/api/projects/{slug}/budget", "PUT"): "org.budgets",
     ("/api/projects/{slug}/budget", "DELETE"): "org.budgets",
+    # Prices (M2f-2 section 4.11): everyone reads the table, owners and org
+    # admins override it
+    ("/api/prices", "GET"): "org.read",
+    ("/api/prices", "PUT"): "org.budgets",
+    ("/api/prices", "DELETE"): "org.budgets",
+    # The usage ledger (M2f-2 section 4.11): the org's with org.usage, a
+    # member's own (production) with org.read, a project's with project.usage
+    ("/api/usage", "GET"): "org.usage",
+    ("/api/usage/calls", "GET"): "org.usage",
+    ("/api/usage.csv", "GET"): "org.usage",
+    ("/api/usage/me", "GET"): "org.read",
+    ("/api/usage/me/calls", "GET"): "org.read",
+    ("/api/usage/me.csv", "GET"): "org.read",
+    ("/api/projects/{slug}/usage", "GET"): "project.usage",
     # Deleting a production org: org_access(ORG_OWN) (M2d-2 section 4.8)
     ("/api/org", "DELETE"): "org.own",
     # Org settings, ownership transfer and the audit log (M2f-1 4.8, 4.9)
@@ -1304,6 +1320,7 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/account", "PATCH"): "user.self",
     ("/api/account/password", "POST"): "user.self",
     ("/api/account/orgs", "GET"): "user.self",
+    ("/api/account/usage", "GET"): "user.self",
     ("/api/orgs", "POST"): "user.self",
     # The GitHub App's callback, on the base host (M2d-2 section 4.4)
     ("/api/github/app/callback", "POST"): "user.self",
@@ -1451,11 +1468,14 @@ PRODUCTION_ORG_ROUTES = {
     ("/api/budgets/member-default", "DELETE"),
     ("/api/budgets/members/{uid}", "PUT"),
     ("/api/budgets/members/{uid}", "DELETE"),
+    ("/api/usage/me", "GET"),
+    ("/api/usage/me/calls", "GET"),
+    ("/api/usage/me.csv", "GET"),
 }
 """Org-scoped routes that exist only in production: the members page, the
-org's deletion, the GitHub App import page, a project's connected portals and
-the per-member budgets (``require_production`` before the org dependency,
-M2d-1 plan section 0.2 #19)."""
+org's deletion, the GitHub App import page, a project's connected portals,
+the per-member budgets and a member's own usage (``require_production``
+before the org dependency, M2d-1 plan section 0.2 #19)."""
 
 PRODUCTION_ONLY_ROUTES = (
     PUBLIC_AUTH_ROUTES | NON_ORG_ROUTES | PRODUCTION_ORG_ROUTES | V1_ROUTES

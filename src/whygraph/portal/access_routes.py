@@ -48,6 +48,7 @@ from .models import (
     User,
 )
 from .security import Principal
+from .usage_routes import project_month_spend
 
 access_router = APIRouter(dependencies=[Depends(require_production)])
 """Every route of this module; included before the ``/api`` 404 catch-all."""
@@ -111,7 +112,11 @@ def get_access(
     project: BoundProject = Depends(project_access(Action.PROJECT_ACCESS)),
     access: OrgAccess = Depends(current_org),
 ) -> dict:
-    """The project's access list: Restricted flag, org default, people, invitations."""
+    """The project's access list: Restricted flag, org default, people, invitations.
+
+    Each person carries ``month_spend_usd``: their spend on this project
+    this month.
+    """
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with get_session() as db:
         restricted = bool(db.get(Project, project.id).restricted)  # type: ignore[union-attr]
@@ -141,11 +146,17 @@ def get_access(
             )
             .order_by(col(Invitation.created_at), col(Invitation.id))
         ).all()
+        # Each person's spend on this project this month (M2f-2 plan
+        # section 4.12; a project admin holds project.usage).
+        spend = project_month_spend(project.org_id, project.id)
         return {
             "restricted": restricted,
             "org_default": default,
             "people": [
-                _person(user, org_role, grant, default, restricted)
+                {
+                    **_person(user, org_role, grant, default, restricted),
+                    "month_spend_usd": spend.get(user.id, 0.0),
+                }
                 for user, org_role, grant in rows
             ],
             "invitations": [

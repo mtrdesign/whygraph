@@ -26,6 +26,14 @@ After a write the org's budget map is reloaded
 (:func:`~whygraph.portal.budgets.reload_org_budgets`) and, on a ``PUT``, its
 thresholds re-evaluated; ``budget_set`` / ``budget_removed`` are audited.
 A ``DELETE`` is idempotent (``204`` whether or not there was a budget).
+
+**Prices** (also on :data:`budget_router`): ``GET /api/prices``
+(``org.read``) merges the bundled table with the org's overrides; ``PUT
+/api/prices`` (a body: OpenRouter model ids contain ``/``) upserts an
+override and ``DELETE /api/prices?provider=&model=`` reverts one
+(``org.budgets``). After a write the org's
+:class:`~whygraph.portal.usage_store.PriceBook` entry is reloaded and
+``price_override_set`` / ``price_override_removed`` is audited.
 """
 
 from __future__ import annotations
@@ -34,10 +42,13 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request, Response
-from pydantic import BaseModel, ConfigDict
+from fastapi import APIRouter, Depends, Query, Request, Response
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func
-from sqlmodel import Session, col, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlmodel import Session, col, delete, select
+
+from whygraph.services.llm.factory import LlmClientFactory
 
 from .audit import audit
 from .authz import Action, OrgAccess, Role
@@ -63,13 +74,15 @@ from .models import (
     BudgetAlert,
     Membership,
     Organization,
+    PriceOverride,
     Project,
     UsageEvent,
     User,
 )
+from .prices import Price, bundled_prices
 from .security import Principal
 from .usage import actor_label
-from .usage_store import current_month
+from .usage_store import current_month, reload_org_prices
 
 budget_router = APIRouter()
 """The both-modes budget routes; included before the ``/api`` 404 catch-all."""
@@ -80,7 +93,16 @@ budget_member_router = APIRouter(dependencies=[Depends(require_production)])
 _CENTS = Decimal("0.01")
 _SIX_DP = Decimal("0.000001")
 
-__all__ = ["BudgetBody", "budget_member_router", "budget_router"]
+MAX_RATE_PER_MTOK = Decimal("10000")
+"""The highest price override, USD per million tokens (a typo guard)."""
+
+__all__ = [
+    "MAX_RATE_PER_MTOK",
+    "BudgetBody",
+    "PriceBody",
+    "budget_member_router",
+    "budget_router",
+]
 
 
 class BudgetBody(BaseModel):
@@ -644,5 +666,201 @@ def delete_member_budget(
             (access.org_id, access.org_slug),
             row,
             target=uid,
+        )
+    return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Prices (both modes)
+# ---------------------------------------------------------------------------
+
+
+class PriceBody(BaseModel):
+    """``PUT /api/prices`` body: one org override, USD per million tokens.
+
+    Attributes
+    ----------
+    provider : str
+        A built-in provider tag.
+    model : str
+        The model id exactly as configured or served (OpenRouter's
+        ``vendor/model`` included).
+    input_per_mtok, output_per_mtok : Decimal
+        Input and output rates, ``0 <= rate <= 10,000``.
+    cache_read_per_mtok, cache_write_per_mtok : Decimal or None
+        Cache rates; ``None`` means the input rate.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str = Field(max_length=40)
+    model: str = Field(max_length=200)
+    input_per_mtok: Decimal
+    output_per_mtok: Decimal
+    cache_read_per_mtok: Decimal | None = None
+    cache_write_per_mtok: Decimal | None = None
+
+
+def _rate(value: Decimal | None, name: str) -> Decimal | None:
+    """A validated rate, rounded to 6 places (``422 invalid_price`` otherwise)."""
+    if value is None:
+        return None
+    try:
+        rate = value.quantize(_SIX_DP)
+    except (InvalidOperation, ValueError):
+        rate = None
+    if rate is None or not rate.is_finite() or not 0 <= rate <= MAX_RATE_PER_MTOK:
+        raise ApiError(
+            422,
+            f"{name} is a price per million tokens from $0 to $10,000",
+            code="invalid_price",
+            field=name,
+        )
+    return rate
+
+
+def _price_target(provider: str, model: str) -> tuple[str, str]:
+    """A checked ``(provider, model)``; ``422 bad_provider`` / ``bad_model``."""
+    provider, model = provider.strip(), model.strip()
+    if provider not in LlmClientFactory.BUILTIN_PROVIDERS:
+        raise ApiError(
+            422,
+            "provider is one of " + ", ".join(LlmClientFactory.BUILTIN_PROVIDERS),
+            code="bad_provider",
+        )
+    if not model or any(ord(c) < 32 or ord(c) == 127 for c in model):
+        raise ApiError(422, "model must be a model id", code="bad_model")
+    return provider, model
+
+
+def _rate_out(value: Decimal | None) -> float | None:
+    return None if value is None else float(Decimal(value).quantize(_SIX_DP))
+
+
+def _price_row(
+    provider: str, model: str, price: Price, origin: str, updated_at: str | None
+) -> dict[str, Any]:
+    return {
+        "provider": provider,
+        "model": model,
+        "input_per_mtok": _rate_out(price.input),
+        "output_per_mtok": _rate_out(price.output),
+        "cache_read_per_mtok": _rate_out(price.cache_read),
+        "cache_write_per_mtok": _rate_out(price.cache_write),
+        "origin": origin,
+        "updated_at": updated_at,
+    }
+
+
+@budget_router.get("/api/prices")
+def get_prices(
+    request: Request,
+    access: OrgAccess = Depends(org_access(Action.ORG_READ)),
+) -> dict[str, Any]:
+    """The org's price table: the bundled rows with its overrides on top.
+
+    Returns
+    -------
+    dict
+        ``{as_of, rows: [{provider, model, input_per_mtok,
+        output_per_mtok, cache_read_per_mtok, cache_write_per_mtok,
+        origin: "bundled" | "override", updated_at}]}`` sorted by provider
+        and model; a bundled row's ``updated_at`` is ``null`` (``as_of``
+        dates the whole table).
+    """
+    state = portal_state(request)
+    table = bundled_prices()
+    rows = {
+        key: _price_row(*key, price, "bundled", None)
+        for key, price in table.rows.items()
+    }
+    for key, (price, updated_at) in state.prices.for_org(access.org_id).items():
+        rows[key] = _price_row(*key, price, "override", updated_at)
+    return {"as_of": table.as_of, "rows": [rows[key] for key in sorted(rows)]}
+
+
+@budget_router.put("/api/prices")
+def put_price(
+    body: PriceBody,
+    request: Request,
+    access: OrgAccess = Depends(org_access(Action.ORG_BUDGETS)),
+    principal: Principal = Depends(current_user),
+) -> dict[str, Any]:
+    """Set (or replace) the org's price of one model.
+
+    ``422 bad_provider`` / ``bad_model`` / ``invalid_price`` (with
+    ``field``). New calls are priced with it at once; recorded calls keep
+    the cost they were written with.
+    """
+    state = portal_state(request)
+    provider, model = _price_target(body.provider, body.model)
+    rates = {
+        name: _rate(getattr(body, name), name)
+        for name in (
+            "input_per_mtok",
+            "output_per_mtok",
+            "cache_read_per_mtok",
+            "cache_write_per_mtok",
+        )
+    }
+    if rates["input_per_mtok"] is None or rates["output_per_mtok"] is None:
+        raise ApiError(422, "input and output rates are required", code="invalid_price")
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    values = {**rates, "updated_by": principal.user_id, "updated_at": now}
+    with get_session() as db:
+        db.exec(  # type: ignore[call-overload]
+            pg_insert(PriceOverride)
+            .values(org_id=access.org_id, provider=provider, model=model, **values)
+            .on_conflict_do_update(constraint="pk_price_overrides", set_=values)
+        )
+    reload_org_prices(state.prices, access.org_id)
+    audit(
+        "price_override_set",
+        request,
+        uid=principal.uid,
+        org_id=access.org_id,
+        org=access.org_slug,
+        provider=provider,
+        model=model,
+        **{name: None if rate is None else str(rate) for name, rate in rates.items()},
+    )
+    price = Price(
+        input=rates["input_per_mtok"],
+        output=rates["output_per_mtok"],
+        cache_read=rates["cache_read_per_mtok"],
+        cache_write=rates["cache_write_per_mtok"],
+    )
+    return _price_row(provider, model, price, "override", now)
+
+
+@budget_router.delete("/api/prices", status_code=204)
+def delete_price(
+    request: Request,
+    provider: str = Query(max_length=40),
+    model: str = Query(max_length=200),
+    access: OrgAccess = Depends(org_access(Action.ORG_BUDGETS)),
+    principal: Principal = Depends(current_user),
+) -> Response:
+    """Revert one model to the bundled price (``204``, also when not overridden)."""
+    state = portal_state(request)
+    provider, model = provider.strip(), model.strip()
+    with get_session() as db:
+        removed = db.exec(  # type: ignore[call-overload]
+            delete(PriceOverride).where(
+                col(PriceOverride.org_id) == access.org_id,
+                col(PriceOverride.provider) == provider,
+                col(PriceOverride.model) == model,
+            )
+        ).rowcount
+    if removed:
+        reload_org_prices(state.prices, access.org_id)
+        audit(
+            "price_override_removed",
+            request,
+            uid=principal.uid,
+            org_id=access.org_id,
+            org=access.org_slug,
+            provider=provider,
+            model=model,
         )
     return Response(status_code=204)

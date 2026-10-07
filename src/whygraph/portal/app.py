@@ -12,8 +12,12 @@ Composition (plan section 4.5.1)::
     /api/org, /api/org/transfer,  an owner's org settings, ownership transfer,
     /api/org/audit*               audit log and deletion (portal/org_routes.py;
                                   404 in local mode)
-    /api/budgets*,                monthly budgets (portal/budget_routes.py; the
-    /api/projects/{slug}/budget   member routes are production-only, M2f-2)
+    /api/budgets*, /api/prices,   monthly budgets and price overrides
+    /api/projects/{slug}/budget   (portal/budget_routes.py; the member routes are
+                                  production-only, M2f-2)
+    /api/usage*,                  the usage ledger's reads and CSV
+    /api/projects/{slug}/usage    (portal/usage_routes.py; /api/usage/me* is
+                                  production-only)
     /api/projects/*               management; each route names its action through
                                   org_access / project_access / project_db_access
     /api/projects/{slug}/...      serve.routes.router (project.read),
@@ -132,6 +136,7 @@ from .security import (
     build_origins,
     build_production_origins,
 )
+from .usage_routes import usage_me_router, usage_router
 from .v1_routes import v1_router
 from .webhook import webhook_router
 
@@ -274,6 +279,8 @@ def create_portal_app(
     app.include_router(v1_router)  # production-only: the /api/v1 data routes (M2e)
     app.include_router(budget_router)  # both modes (M2f-2)
     app.include_router(budget_member_router)  # production-only: member budgets
+    app.include_router(usage_router)  # both modes: usage reads and CSV (M2f-2)
+    app.include_router(usage_me_router)  # production-only: a member's own usage
     app.include_router(portal_router)
     app.include_router(projects_router)
     app.include_router(platform_router)  # local-only: connect and link (M2e)

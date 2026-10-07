@@ -28,6 +28,8 @@ import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterator
@@ -73,13 +75,16 @@ from whygraph.portal.authz import Role
 from whygraph.portal.models import (
     Membership,
     Organization,
+    PriceOverride,
     Project,
     ProjectGrant,
     ScanRun,
     Setting,
+    UsageEvent,
     User,
 )
 from whygraph.portal.orgs import add_member, create_org
+from whygraph.portal.usage_store import reload_org_prices
 from whygraph.serve import chat as serve_chat
 from whygraph.services.llm import LlmError
 from whygraph.services.llm.chat import TextDelta, TurnDone
@@ -384,6 +389,68 @@ def _add_org_project(world: World, org: OrgWorld, defaults: dict) -> None:
         ).one()
 
 
+def seed_usage(client: TestClient, org: OrgWorld) -> None:
+    """Marked ledger rows and a price override for ``org`` (M2f-2 section 6.3 #3).
+
+    One chat call by the project's creator (the owner) and one scan call by
+    the System actor on ``org``'s ``api``, both on ``org.model`` with a
+    marked subject, plus an org price override for ``org.model`` - so a
+    usage, CSV or price answer that leaks the other org shows its mark.
+    """
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with portal_db.get_session() as session:
+        owner = session.get(User, session.get(Project, org.project_id).created_by)
+        common = {
+            "org_id": org.org_id,
+            "project_id": org.project_id,
+            "project_slug": "api",
+            "project_name": org.name,
+            "provider": "anthropic",
+            "model_requested": org.model,
+            "key_scope": "org",
+            "cost_source": "estimated",
+            "input_tokens": 1000,
+            "output_tokens": 100,
+            "created_at": now,
+        }
+        session.add(
+            UsageEvent(
+                **common,
+                actor_kind="member",
+                user_id=owner.id,
+                actor_label=owner.display_name,
+                source="chat",
+                task="chat",
+                chat_session_id=org.session_id,
+                subject=f"{org.mark}.py",
+                cost_usd=Decimal("0.25"),
+            )
+        )
+        session.add(
+            UsageEvent(
+                **common,
+                actor_kind="system",
+                actor_label="System",
+                source="scan",
+                task="analyze",
+                scan_run_id=org.run_id,
+                subject=org.marker_sha,
+                cost_usd=Decimal("0.5"),
+            )
+        )
+        session.add(
+            PriceOverride(
+                org_id=org.org_id,
+                provider="anthropic",
+                model=org.model,
+                input_per_mtok=Decimal("1"),
+                output_per_mtok=Decimal("2"),
+                updated_at=now,
+            )
+        )
+    reload_org_prices(client.app.state.portal.prices, org.org_id)
+
+
 def _seed_orgs(client: TestClient) -> tuple[OrgWorld, OrgWorld, dict]:
     """Setup (alice owns ``local``), ``beta`` owned by bob, carol, dave and erin."""
     setup = client.post("/api/portal/setup", json={"display_name": "Alice"})
@@ -456,6 +523,7 @@ def two_orgs(env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> Iterator[
         for org in (beta, local):
             (first,) = wait_idle(client, org.owner)
             assert first["status"] == "ok", first
+            seed_usage(client, org)
         yield world
         scanner.hold.unlink(missing_ok=True)
 
@@ -702,6 +770,37 @@ def _budgets_check(body: dict, w: World, o: OrgWorld) -> None:
     assert all(p["slug"] == "api" for p in body["projects"])
 
 
+def _usage_check(body: dict, w: World, o: OrgWorld) -> None:
+    assert set(body) == {"range", "totals", "split", "series", "groups"}
+    assert [(g["key"], g["label"]) for g in body["groups"]] == [("api", o.name)]
+
+
+def _project_usage_check(body: dict, w: World, o: OrgWorld) -> None:
+    assert set(body) == {"range", "totals", "split", "series", "members"}
+    assert body["totals"]["calls"] == 2
+    assert body["split"]["scans"]["calls"] == 1
+
+
+def _my_usage_check(body: dict, w: World, o: OrgWorld) -> None:
+    # The owner's own row only: never the System's scan call.
+    assert body["totals"]["calls"] == 1
+    assert body["split"]["scans"]["calls"] == 0
+
+
+def _prices_check(body: dict, w: World, o: OrgWorld) -> None:
+    overrides = [r for r in body["rows"] if r["origin"] == "override"]
+    assert [(r["provider"], r["model"]) for r in overrides] == [("anthropic", o.model)]
+
+
+def _price_body(w: World, o: OrgWorld) -> dict:
+    return {
+        "provider": "anthropic",
+        "model": o.model,
+        "input_per_mtok": 3,
+        "output_per_mtok": 15,
+    }
+
+
 def _budget_body(amount: int) -> Callable[[World, OrgWorld], dict]:
     return lambda w, o: {"monthly_usd": amount, "hard_stop": False}
 
@@ -783,6 +882,32 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         200, body=_budget_body(5), shows=lambda o: [o.name]
     ),
     ("DELETE", "/api/projects/{slug}/budget"): Call(204),
+    # Prices (M2f-2 section 4.11): each org's overrides on the bundled table
+    ("GET", "/api/prices"): Call(200, shows=lambda o: [o.model], check=_prices_check),
+    ("PUT", "/api/prices"): Call(200, body=_price_body, shows=lambda o: [o.model]),
+    ("DELETE", "/api/prices"): Call(
+        204, query=lambda o: {"provider": "anthropic", "model": o.model}
+    ),
+    # The usage ledger (M2f-2 section 4.11; test_portal_usage_routes.py
+    # drives it): every answer shows only its own org's marked rows
+    ("GET", "/api/usage"): Call(
+        200, query=lambda o: {"group": "project"}, check=_usage_check
+    ),
+    ("GET", "/api/usage/calls"): Call(
+        200, shows=lambda o: [o.model, f"{o.mark}.py", o.marker_sha]
+    ),
+    ("GET", "/api/usage.csv"): Call(
+        200, shows=lambda o: ["created_at", o.model, o.marker_sha]
+    ),
+    ("GET", "/api/usage/me"): Call(
+        200,
+        query=lambda o: {"group": "model"},
+        shows=lambda o: [o.model],
+        check=_my_usage_check,
+    ),
+    ("GET", "/api/usage/me/calls"): Call(200, shows=lambda o: [f"{o.mark}.py"]),
+    ("GET", "/api/usage/me.csv"): Call(200, shows=lambda o: [o.model]),
+    ("GET", "/api/projects/{slug}/usage"): Call(200, check=_project_usage_check),
     # Production's GitHub App import page (swept over prod_world, whose
     # owners have not connected GitHub; test_portal_github_import.py drives it)
     ("POST", "/api/github/app/authorize"): Call(
@@ -1323,6 +1448,13 @@ def test_the_admin_routes_are_the_planned_ones() -> None:
         ("DELETE", "/api/budgets/org"),
         ("PUT", "/api/projects/{slug}/budget"),
         ("DELETE", "/api/projects/{slug}/budget"),
+        # Usage and price overrides (M2f-2 section 0.2 #12, #13; a member's
+        # own usage is production's)
+        ("GET", "/api/usage"),
+        ("GET", "/api/usage/calls"),
+        ("GET", "/api/usage.csv"),
+        ("PUT", "/api/prices"),
+        ("DELETE", "/api/prices"),
         # Linking to a platform adds a project, so it is the admin's (M2e
         # section 4.8)
         ("POST", "/api/platform/connect"),
@@ -1336,7 +1468,10 @@ def test_the_admin_routes_are_the_planned_ones() -> None:
         ("PATCH", "/api/projects/{slug}"),
         ("PUT", "/api/projects/{slug}/config"),
         ("POST", "/api/projects/{slug}/init"),
+        ("GET", "/api/projects/{slug}/usage"),  # M2f-2 section 0.2 #13
     }
+    # Everyone reads the price table (it prices their own estimates).
+    assert ("GET", "/api/prices") in MEMBER_ROUTES
     # Generating a card spends: a contributor's, never a viewer's (section 4.6).
     assert ("POST", "/api/projects/{slug}/node/rationale") not in VIEWER_ROUTES
     assert ("POST", "/api/projects/{slug}/node/rationale") in MEMBER_ROUTES
@@ -1352,6 +1487,7 @@ def test_a_member_is_refused_every_admin_action_before_any_context(
         response = w.client.request(
             method,
             _url(path, w.local),
+            params=spec.query(w.local) if spec.query else None,
             json=spec.body(w, w.local) if spec.body else None,
             headers=w.as_("carol", "local"),
         )
@@ -1380,7 +1516,11 @@ def test_a_member_is_refused_every_admin_action_before_any_context(
         else:
             body = spec.body(w, w.local) if spec.body else None
         response = w.client.request(
-            method, _url(path, w.local), json=body, headers=w.as_("dave", "local")
+            method,
+            _url(path, w.local),
+            params=spec.query(w.local) if spec.query else None,
+            json=body,
+            headers=w.as_("dave", "local"),
         )
         assert response.status_code == spec.status, (method, path, response.text)
     assert w.local.project_id in context_calls  # the spy does see a context build

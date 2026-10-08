@@ -4,8 +4,8 @@ Revision ID: 86e839432e62
 Revises:
 Create Date: 2026-10-01 17:38:26.293883
 
-The single Postgres baseline of the portal chain (2.1). It replaces the two
-SQLite revisions 2.0 shipped (``a3f1c0d29b41``, ``c5e8a1d2b3f4``), which no
+The single Postgres baseline of the portal chain (2.0). It replaces the two
+SQLite revisions the portal had before it (``a3f1c0d29b41``, ``c5e8a1d2b3f4``), which no
 Postgres database ever ran.
 
 The two "one global row + one per project" rules are ``UNIQUE ... NULLS NOT

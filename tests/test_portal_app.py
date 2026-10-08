@@ -2403,7 +2403,7 @@ def test_portal_cli_needs_a_database_url(
             monkeypatch.setenv("WHYGRAPH_DATABASE_URL", value)
         refused = CliRunner().invoke(main, ["portal"])
         assert refused.exit_code == 2, refused.output
-        assert "Postgres since 2.1" in refused.output
+        assert "The portal stores its data in Postgres" in refused.output
         assert "whygraph up" in refused.output
     assert (
         "WHYGRAPH_DATABASE_URL is not set"

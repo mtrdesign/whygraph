@@ -13,7 +13,7 @@ mode has no login).
 2 before the app starts, as does a :class:`~whygraph.portal.app.PortalStartupError`
 (a refused production environment or a mode mismatch).
 
-The portal's own data lives in Postgres since 2.1: ``WHYGRAPH_DATABASE_URL``
+The portal's own data lives in Postgres: ``WHYGRAPH_DATABASE_URL``
 (plus an optional ``WHYGRAPH_DATABASE_PASSWORD_FILE``) must name it - the
 shim sets both - or the command exits 2. A database that stays unreachable
 through the start-up wait exits 3, so ``--restart unless-stopped`` retries.
@@ -109,7 +109,7 @@ def portal_cmd(host: str, port: int, data_dir: Path | None, dev_expose: bool) ->
         url = portal_db.database_url()
     except portal_db.PortalDatabaseNotConfigured as exc:
         click.echo(
-            f"error: {exc}. The portal stores its data in Postgres since 2.1; start "
+            f"error: {exc}. The portal stores its data in Postgres; start "
             "it with 'whygraph up' (which runs the database for you), or point "
             f"{portal_db.DATABASE_URL_ENV} at a Postgres database.",
             err=True,

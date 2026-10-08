@@ -1,5 +1,6 @@
 import { Suspense, lazy } from "react";
-import { parseChart } from "./chartSpec";
+import { BudgetNotice } from "../portal/BudgetNotice";
+import { parseChart } from "../charts/chartSpec";
 import { Skeleton } from "../ui/skeleton";
 import { Markdown } from "./Markdown";
 import { ToolCallCard, type ToolActivity } from "./ToolCallCard";
@@ -10,7 +11,7 @@ import { ToolCallCard, type ToolActivity } from "./ToolCallCard";
 // initial bundle grows by ~1 KB instead of ~575 KB. `chartSpec.ts` stays eager: it
 // decides *whether* there is a chart, and it imports nothing heavy.
 const ChartBlock = lazy(() =>
-  import("./ChartBlock").then((module) => ({ default: module.ChartBlock })),
+  import("../charts/ChartBlock").then((module) => ({ default: module.ChartBlock })),
 );
 
 /**
@@ -38,6 +39,8 @@ export interface AssistantTurn {
   /** Which model produced this turn — shown because it can differ per turn. */
   model?: string | null;
   error?: string;
+  /** The monthly budget's hard stop ended this turn (a live frame or a persisted row). */
+  budgetStop?: { scope?: string | null; message?: string };
   roundLimit?: number;
   /**
    * Transient: the model is working and has nothing on screen yet — the
@@ -78,6 +81,7 @@ function AssistantBubble({ turn }: { turn: AssistantTurn }) {
   const turnActivities = turn.activityGroups.flat();
   const isEmpty =
     !turn.error &&
+    !turn.budgetStop &&
     turn.segments.every((s) => !s) &&
     turn.activityGroups.every((g) => g.length === 0);
 
@@ -131,6 +135,15 @@ function AssistantBubble({ turn }: { turn: AssistantTurn }) {
             Reached the {turn.roundLimit}-round tool limit — the assistant answered
             with what it had gathered. Ask a narrower question to go further.
           </div>
+        )}
+
+        {turn.budgetStop && (
+          <BudgetNotice
+            testId="budget-stop-row"
+            scope={turn.budgetStop.scope}
+            message={turn.budgetStop.message}
+            className="mt-2 px-2 py-1 text-xs"
+          />
         )}
 
         {turn.error && (

@@ -26,6 +26,7 @@ from sqlmodel import Session, col, select
 from whygraph.analyze import CommitEvidence
 from whygraph.core.context import current_project
 from whygraph.core.remote import RemoteError, RemoteProject, platform_block
+from whygraph.core.usage import usage_blocked
 from whygraph.db import get_session
 from whygraph.db.models import Commit, CommitFileChange, Issue, PRIssueLink, PullRequest
 from whygraph.scan.refactor_score import BORING_THRESHOLD
@@ -714,6 +715,8 @@ def backfill_evidence_descriptions(
     Does nothing when the bound project context has ``llm_allowed`` false
     (a project viewer's portal request, M2f-1 plan section 4.6): a viewer
     never causes LLM spend, so commits keep whatever description they have.
+    Stops before the next describe once the bound usage sink reports an
+    exhausted hard-stopped budget (M2f-2 plan section 4.7).
     """
     ctx = current_project()
     if ctx is not None and not ctx.llm_allowed:
@@ -748,6 +751,10 @@ def backfill_evidence_descriptions(
         normal = [commit for commit in normal if allow()]
     repository = Repository(repo_root())
     for commit in bulk:
+        if usage_blocked() is not None:
+            # An exhausted hard-stopped budget (M2f-2 plan section 4.7):
+            # stop before the next describe; backfill_all checks the same.
+            break
         if (
             allow is not None
             and not _file_description_cached(commit.sha, target_path)

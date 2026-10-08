@@ -95,6 +95,7 @@ from whygraph.services.github import (
 
 from . import connections, sessions
 from .audit import audit
+from .budgets import reload_org_budgets
 from .authz import (
     PROJECT_ROLE_ACTIONS,
     Action,
@@ -183,6 +184,7 @@ from .runner import (
     RunNotFound,
     RunnerUnavailable,
     ManagedOnPlatform,
+    ScanBudgetExceeded,
     ScanForbidden,
     SourceNotAllowed,
     log_tail,
@@ -201,6 +203,7 @@ from .secrets import (
     secret_status,
 )
 from .security import Principal
+from .usage_routes import llm_block, project_usage, state_usage
 
 public_router = APIRouter(prefix="/api/portal")
 """``GET state`` and ``POST setup`` - the only routes usable before setup."""
@@ -698,9 +701,12 @@ def _summary(
     project: Project,
     root: Path,
     *,
-    mode: str | None,
+    state: PortalState,
     role: ProjectRole,
+    user_id: int | None,
 ) -> dict:
+    """One project as the list shows it; ``user_id=None`` leaves ``llm_block`` to the caller."""
+    mode = state.mode
     status = root_status(root)
     full_name = _github_full_name(project)
     stale = (
@@ -712,6 +718,15 @@ def _summary(
     if project.source == "platform":
         row = session.get(PlatformLink, project.id)
         link = None if row is None else link_block(row)
+    block = block_scope = None
+    if user_id is not None:
+        block, block_scope = llm_block(
+            state,
+            project.org_id,
+            project.id,  # type: ignore[arg-type]
+            role,
+            user_id,
+        )
     return {
         "slug": project.slug,
         "name": project.name,
@@ -750,6 +765,13 @@ def _summary(
         "restricted": project.restricted,
         "my_role": str(role),
         "permissions": _permissions(role),
+        # Why the caller cannot spend LLM money here ("role" /
+        # "budget_exceeded" / null) and the exhausted budget's scope; the
+        # month's spend against the project budget for project admins
+        # (M2f-2 plan section 4.12).
+        "llm_block": block,
+        "llm_block_scope": block_scope,
+        "usage": project_usage(state, project.org_id, project.id, role),  # type: ignore[arg-type]
     }
 
 
@@ -759,13 +781,23 @@ def _details(state: PortalState, project: BoundProject) -> dict:
         row = session.get(Project, project.id)
         if row is None:
             raise ApiError(404, f"project {project.slug!r} not found")
-        body = _summary(session, row, project.root, mode=state.mode, role=project.role)
+        body = _summary(
+            session,
+            row,
+            project.root,
+            state=state,
+            role=project.role,
+            user_id=None,
+        )
         body["agents"] = sorted(
             a.agent
             for a in session.exec(
                 select(ProjectAgent).where(ProjectAgent.project_id == project.id)
             ).all()
         )
+    # The bound context already carries the caller's block (bind_project).
+    body["llm_block"] = project.ctx.llm_block
+    body["llm_block_scope"] = project.ctx.llm_block_scope
     body["missing_key"] = _missing_key(project.ctx.config)
     # Production mounts no MCP endpoint (M2c plan section 4.11).
     body["mcp_url"] = (
@@ -926,6 +958,9 @@ def get_state(request: Request) -> dict:
         # What the start-up port reconcile did (markers / agent files) in
         # this org, or null.
         "port_change": _port_change_in(state, access),
+        # Month-to-date spend against the budgets, for the banners (M2f-2
+        # plan section 4.12); null before setup and without an org.
+        "usage": state_usage(state, access),
     }
     if state.mode == "local":
         # The machine name the link page prefills (M2e section 4.8).
@@ -1142,8 +1177,9 @@ def list_projects(
                         session,
                         project,
                         resolve_root(project),
-                        mode=state.mode,
+                        state=state,
                         role=role,
+                        user_id=access.user_id,
                     )
                 )
         body = {"projects": projects}
@@ -1880,6 +1916,8 @@ def delete_project(
             result = _remove_project(state, project, body)
     except ProjectBusy as exc:
         raise ApiError(409, str(exc)) from exc
+    # Its budget went with the row (FK cascade).
+    reload_org_budgets(state.budgets, project.org_id)
     audit(
         "project_removed",
         request,
@@ -2317,6 +2355,9 @@ async def post_scan(
     a body-less one, or ``describe`` - also needs ``project.scan_full``,
     checked by the runner under its lock (a first scan is structure-only,
     so it never is): ``403 forbidden`` with ``action: "project.scan_full"``.
+    Such a request is also refused while an exhausted hard-stopped budget
+    covers it (the caller's, the project's or the org's): ``403
+    budget_exceeded`` with its ``scope`` (M2f-2 plan section 4.7).
     """
     body = body or ScanBody()
     state = portal_state(request)
@@ -2334,6 +2375,8 @@ async def post_scan(
         )
     except ScanForbidden as exc:
         raise _scan_full_forbidden(project) from exc
+    except ScanBudgetExceeded as exc:
+        raise ApiError(403, str(exc), code="budget_exceeded", scope=exc.scope) from exc
     except RunnerUnavailable as exc:
         raise ApiError(501, str(exc)) from exc
     except ProjectBusy as exc:
@@ -2525,6 +2568,7 @@ def scan_log(
 
 @projects_router.get("/{slug}/scan-estimate")
 def get_scan_estimate(
+    request: Request,
     project: BoundProject = Depends(project_db_access(Action.PROJECT_READ)),
 ) -> dict:
     """First-scan cost guard: what describing the waiting commits would cost.
@@ -2536,7 +2580,8 @@ def get_scan_estimate(
     never describe anything - the platform pays for and owns the LLM work.
     """
     _refuse_linked(project, "estimating this project's describe cost")
-    body = _scan_estimate(project.ctx.config)
+    overrides = portal_state(request).prices.for_org(project.org_id)
+    body = _scan_estimate(project.ctx.config, overrides=overrides)
     body["missing_key"] = _missing_key(project.ctx.config, ("analyze",))
     return body
 

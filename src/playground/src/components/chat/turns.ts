@@ -16,6 +16,13 @@ export function emptyAssistantTurn(): AssistantTurn {
   return { kind: "assistant", segments: [""], activityGroups: [[]], thinking: true };
 }
 
+/** Sum two token counts; `null` only when neither side reported one. */
+function addTokens(a: number | null | undefined, b: number | null): number | null {
+  if (a == null) return b;
+  if (b == null) return a;
+  return a + b;
+}
+
 /**
  * Rebuild display turns from a persisted transcript.
  *
@@ -43,13 +50,23 @@ export function turnsFromMessages(messages: ChatMessage[]): Turn[] {
       // A persisted row is finished by definition — never show it thinking.
       // The first row's id becomes the turn's stable React key.
       if (!current) current = { ...emptyAssistantTurn(), thinking: false, id: message.id };
-      // A new assistant row after tool activity opens the next segment.
+      // The row a budget hard stop wrote (its content is the notice's line): a notice, not text.
+      if (message.error === "budget_exceeded") {
+        current.budgetStop = { message: message.content || undefined };
+        continue;
+      }
+      // A new assistant row after tool activity opens the next segment - but
+      // only when it brings text. Each provider round is its own row, so a
+      // tool-only round (no text) keeps adding cards to the open group, the
+      // same way the live stream renders it.
       const lastGroup = current.activityGroups[current.activityGroups.length - 1];
       if (lastGroup && lastGroup.length > 0) {
-        current.segments.push(message.content);
-        current.activityGroups.push([]);
+        if (message.content) {
+          current.segments.push(message.content);
+          current.activityGroups.push([]);
+        }
       } else {
-        current.segments[current.segments.length - 1] = message.content;
+        current.segments[current.segments.length - 1] += message.content;
       }
       for (const call of message.tool_calls) {
         current.activityGroups[current.activityGroups.length - 1].push({
@@ -59,10 +76,12 @@ export function turnsFromMessages(messages: ChatMessage[]): Turn[] {
           running: false,
         });
       }
+      // One row per provider round, so the turn's usage is the sum of its
+      // rows - the same total the live `done` frame showed.
       if (message.input_tokens || message.output_tokens) {
         current.usage = {
-          input: message.input_tokens,
-          output: message.output_tokens,
+          input: addTokens(current.usage?.input, message.input_tokens),
+          output: addTokens(current.usage?.output, message.output_tokens),
         };
       }
       // Attribution is per row, so a transcript spanning a mid-session model

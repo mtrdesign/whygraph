@@ -11,7 +11,7 @@ import math
 import threading
 import time
 from collections import OrderedDict, deque
-from collections.abc import Callable, Hashable, Mapping
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from typing import Any
 
 
@@ -114,6 +114,41 @@ class Throttle:
             else:
                 self._events.move_to_end(key)
             events.append(now)
+            return None
+
+    def hit_all(self, pairs: Sequence[tuple[Hashable, int]]) -> int | None:
+        """Check every ``(key, limit)`` pair and count all of them, or none.
+
+        Parameters
+        ----------
+        pairs : sequence of (Hashable, int)
+            Each key with its limit (as for :meth:`check`).
+
+        Returns
+        -------
+        int or None
+            ``None`` when every key had room (one event is then counted on
+            each); otherwise the longest wait among the refusing keys, with
+            nothing counted.
+        """
+        with self._lock:
+            now = self._clock()
+            lives = [self._live(key, now) for key, _ in pairs]
+            retries = [
+                retry
+                for (_, limit), events in zip(pairs, lives)
+                if (retry := self._retry_after(events, now, limit)) is not None
+            ]
+            if retries:
+                return max(retries)
+            for (key, _), events in zip(pairs, lives):
+                if events is None:
+                    events = self._events[key] = deque()
+                    while len(self._events) > self.max_keys:
+                        self._events.popitem(last=False)
+                else:
+                    self._events.move_to_end(key)
+                events.append(now)
             return None
 
 

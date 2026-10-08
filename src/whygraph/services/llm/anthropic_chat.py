@@ -44,6 +44,7 @@ from .chat import (
     TurnDone,
 )
 from .exceptions import LlmError
+from .usage import ANTHROPIC_USAGE_KEYS, anthropic_raw_usage, anthropic_usage_fields
 
 _ENV_VAR = "ANTHROPIC_API_KEY"
 
@@ -269,8 +270,28 @@ class AnthropicChatAdapter(ChatClient):
 
         blocks: dict[int, _BlockAccumulator] = {}
         finish_reason: str | None = None
-        input_tokens: int | None = None
-        output_tokens: int | None = None
+        # Usage arrives in pieces: `message_start` carries the prompt side,
+        # each `message_delta` a *cumulative* snapshot that can also carry
+        # final input / cache counts, and the SDK's `message_stop` the final
+        # message. The latest non-null value of each field wins.
+        raw_usage: dict[str, int | None] = dict.fromkeys(ANTHROPIC_USAGE_KEYS)
+        served_model: str | None = None
+
+        def _absorb(usage: Any) -> None:
+            if usage is None:
+                return
+            for key, value in anthropic_raw_usage(usage).items():
+                if value is not None:
+                    raw_usage[key] = value
+
+        def _absorb_message(message: Any) -> None:
+            nonlocal served_model
+            if message is None:
+                return
+            model = getattr(message, "model", None)
+            if isinstance(model, str) and model:
+                served_model = model
+            _absorb(getattr(message, "usage", None))
 
         try:
             with self._client.messages.stream(**kwargs) as stream:
@@ -313,16 +334,14 @@ class AnthropicChatAdapter(ChatClient):
                         reason = getattr(delta, "stop_reason", None)
                         if reason is not None:
                             finish_reason = reason
-                        usage = getattr(event, "usage", None)
-                        if usage is not None:
-                            output_tokens = getattr(usage, "output_tokens", None)
+                        _absorb(getattr(event, "usage", None))
                         continue
 
-                    if event_type == "message_start":
-                        message = getattr(event, "message", None)
-                        usage = getattr(message, "usage", None)
-                        if usage is not None:
-                            input_tokens = getattr(usage, "input_tokens", None)
+                    if event_type in ("message_start", "message_stop"):
+                        # `message_stop` from the SDK's stream helper carries
+                        # the final message snapshot: its model is the one
+                        # actually served (it can change after a fallback).
+                        _absorb_message(getattr(event, "message", None))
                         continue
         except LlmError:
             raise
@@ -336,8 +355,8 @@ class AnthropicChatAdapter(ChatClient):
 
         yield TurnDone(
             finish_reason=finish_reason,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
+            model=served_model,
+            **anthropic_usage_fields(raw_usage),
         )
 
 

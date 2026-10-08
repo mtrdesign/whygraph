@@ -74,6 +74,8 @@ MEMBER_FIELDS = {
     "joined_at",
     "disabled",
 }
+USAGE_FIELDS = {"month_spend_usd", "month_split"}
+"""What an ``org.usage`` caller's member rows add (``GET`` only)."""
 NEWCOMERS = ("cy", "dee", "eve", "finn")
 """GitHub accounts that signed in once and belong to no org."""
 
@@ -199,7 +201,9 @@ def test_an_owner_adds_lists_re_roles_and_removes(team: SimpleNamespace) -> None
         ("ben", "owner"),
         ("cy", "member"),
     ]
-    assert all(set(m) == MEMBER_FIELDS for m in body)  # never an email
+    # Never an email; an owner (org.usage) also sees each member's spend
+    # this month (M2f-2 section 4.12; test_portal_usage_routes.py).
+    assert all(set(m) == MEMBER_FIELDS | USAGE_FIELDS for m in body)
     changed = set_role(t, "cy", "admin")
     assert changed.status_code == 200 and changed.json()["role"] == "admin"
     assert remove(t, "cy").status_code == 204

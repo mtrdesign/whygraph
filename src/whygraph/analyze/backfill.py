@@ -27,6 +27,7 @@ from collections.abc import Iterable
 
 from sqlmodel import select
 
+from whygraph.core.usage import usage_blocked
 from whygraph.db import get_session
 from whygraph.db.models.commit import Commit as CommitRow
 from whygraph.db.models.commit_file_change import CommitFileChange
@@ -133,7 +134,7 @@ def backfill_commit_description(
     if not diff.strip():
         return False
 
-    description = descriptor.describe(diff)
+    description = descriptor.describe(diff, subject=commit.sha)
     model_label = f"{description.provider}:{description.model}"
     with get_session() as session:
         row = session.get(CommitRow, commit.sha)
@@ -217,7 +218,7 @@ def backfill_file_description(
     if not diff.strip():
         return None
 
-    description = descriptor.describe(diff)
+    description = descriptor.describe(diff, subject=path)
     model_label = f"{description.provider}:{description.model}"
     with get_session() as session:
         row = _file_change_row(session, commit.sha, path)
@@ -241,6 +242,11 @@ def backfill_all(
     is intentionally not mirrored — the crawler can afford to surface
     failures because it owns the whole scan; an MCP handler cannot.
 
+    Before each commit the bound usage sink is asked whether an exhausted
+    hard-stopped budget now covers the caller
+    (:func:`~whygraph.core.usage.usage_blocked`); the loop stops when one
+    does (M2f-2 plan section 4.7), leaving the rest undescribed.
+
     Returns
     -------
     int
@@ -248,6 +254,9 @@ def backfill_all(
     """
     succeeded = 0
     for commit in commits:
+        if usage_blocked() is not None:
+            _log.info("lazy LLM description backfill stopped: the budget is spent")
+            break
         try:
             if backfill_commit_description(
                 commit, repository=repository, descriptor=descriptor

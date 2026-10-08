@@ -49,6 +49,7 @@ the project (Codex), then ask why a function exists and WhyGraph answers from hi
 
 After the first scan, the project offers **Describe now**, with the commit count, the model and a cost
 estimate, to write the LLM description for each commit. Skip it and descriptions backfill on demand.
+What you spend, per project and model, is tracked under [Usage & cost](../portal/usage.md).
 See [Scanning your repo](../guide/scanning.md).
 
 ## Where to next

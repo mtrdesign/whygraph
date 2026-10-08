@@ -1,4 +1,17 @@
-import type { ScanRunRow, ScanRunStatus } from "../api";
+import type { ScanRunRow, ScanRunStatus, ScanRunSummary } from "../api";
+import { formatUsd } from "./format";
+
+/** What a hard stop's cancelled run says (history list and run page). */
+export const BUDGET_STOPPED = "Stopped: monthly budget reached";
+/** What a run that skipped its LLM phase on a hard stop says. */
+export const BUDGET_SKIPPED = "LLM phase skipped: monthly budget reached";
+
+/** "LLM usage: ~$0.42, 12 calls", only when the run made calls. */
+export function usageLine(summary: Pick<ScanRunSummary, "usage"> | null | undefined): string | null {
+  const u = summary?.usage;
+  if (!u || !(u.calls > 0)) return null;
+  return `LLM usage: ~${formatUsd(u.cost_usd)}, ${u.calls} ${u.calls === 1 ? "call" : "calls"}`;
+}
 
 /** `4.1` -> `4.1s`, `128` -> `2m 08s`, `3700` -> `1h 01m`. */
 export function formatSeconds(seconds: number): string {
@@ -57,6 +70,7 @@ export function runOutcome(run: ScanRunRow): string | null {
   if (!s) return null;
   if (typeof s.merged_into === "number") return `Merged into run #${s.merged_into}`;
   if (s.cancelled_by === "user") return "Cancelled by you";
+  if (s.cancelled_by === "budget") return BUDGET_STOPPED;
   if (run.status === "failed" || run.status === "interrupted") {
     if (typeof s.error === "string") return s.error;
     const failed = s.crawlers?.find((c) => c.status === "failed");
@@ -66,6 +80,7 @@ export function runOutcome(run: ScanRunRow): string | null {
   if (run.kind === "sync") return s.moved ? "Fetched new commits" : "Already up to date";
   // `--skip-analyze` is the requested structure-only scan; anything else is the
   // reason descriptions could not run (no key, unreachable endpoint).
+  if (s.analyze_skipped === "budget") return BUDGET_SKIPPED;
   if (s.analyze_skipped) return s.analyze_skipped === "--skip-analyze" ? "Structure only" : "Descriptions skipped";
   return run.analyze ? "With descriptions" : "Structure only";
 }

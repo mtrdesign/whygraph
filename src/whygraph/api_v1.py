@@ -56,6 +56,13 @@ MAX_QUALIFIED_NAME = 1024
 MAX_LIMIT = 50
 """Highest evidence ``limit``."""
 
+PLATFORM_BUDGET_MESSAGE = (
+    "the platform's monthly budget for this project, organization or your "
+    "account is reached"
+)
+"""The ``error`` of ``403 budget_exceeded`` (M2f-2): scope-neutral, because a
+connected portal shows the platform's message as it is; ``scope`` says which."""
+
 _SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 Source = Literal["blame", "pr-origin", "blame-walked", "predecessor-blame", "area"]
@@ -420,12 +427,16 @@ class ErrorOut(_Out):
         Why a token was refused (its revocation reason), when it was.
     retry_after : int or None
         Seconds to wait, on a ``429`` / ``503``.
+    scope : str or None
+        Which budget refused a ``403 budget_exceeded``: ``"org"``,
+        ``"project"`` or ``"member"`` (additive, M2f-2).
     """
 
     error: str
     code: str
     reason: str | None = None
     retry_after: int | None = None
+    scope: str | None = None
 
 
 class MetaOut(_Out):
@@ -557,6 +568,7 @@ __all__ = [
     "MAX_ORIGINS",
     "MAX_PATH",
     "MAX_QUALIFIED_NAME",
+    "PLATFORM_BUDGET_MESSAGE",
     "CommitOut",
     "ErrorOut",
     "EvidenceCountOut",

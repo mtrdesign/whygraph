@@ -126,6 +126,33 @@ jobs:
             fail "docs/ or docker/production/ pins a version other than $want (see the list above)"
           fi
 
+      # The bundled price table (src/whygraph/portal/prices.json) estimates
+      # what every LLM call costs, so a release must not ship it stale: the
+      # release date may be at most 120 days after its `as_of`. Re-check the
+      # providers' pricing pages, update the rows and `as_of`, and re-run.
+      - name: Verify the price table is fresh
+        if: github.event_name == 'release'
+        env:
+          RELEASED_AT: ${{ github.event.release.published_at }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys
+          from datetime import date
+          as_of = date.fromisoformat(
+              json.load(open("src/whygraph/portal/prices.json"))["as_of"]
+          )
+          released = date.fromisoformat(os.environ["RELEASED_AT"][:10])
+          age = (released - as_of).days
+          print(f"prices.json as_of {as_of}, release {released}: {age} days")
+          if age > 120:
+              print(
+                  f"::error::src/whygraph/portal/prices.json is {age} days older "
+                  "than this release (limit 120) - re-check the providers' "
+                  "prices, bump as_of and re-run."
+              )
+              sys.exit(1)
+          EOF
+
   # --- 2. One native runner per arch, pushed BY DIGEST (no tags yet) --------
   build:
     name: Build ${{ matrix.platform }}

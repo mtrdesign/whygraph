@@ -13,7 +13,15 @@ editor sees.
 !!! warning "It costs money and it writes to your database"
     Unlike the Explorer, the assistant is not read-only. Every turn calls an LLM under your chat
     provider, and every message, tool call, and session is stored in the project's WhyGraph database.
+    Each model round is recorded, with its tokens and an estimated cost, on the portal's
+    [Usage & cost](../portal/usage.md) page (counts and cost only, never the chat itself).
     The portal is loopback-only with no login in local mode (see [Localhost only](playground.md#open-it)).
+
+If an organization, project or member [budget](../portal/usage.md#budgets-and-the-hard-stop) has the
+hard stop on and is used up, the composer is replaced by a notice and a turn already running ends
+with "This chat has reached its monthly budget. You can still read everything that's already
+generated." Earlier conversations stay readable. The stop lifts when the budget is raised or the
+month (UTC) rolls over.
 
 ## Getting started
 

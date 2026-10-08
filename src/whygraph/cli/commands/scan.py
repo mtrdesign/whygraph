@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import time
 from pathlib import Path
@@ -157,8 +158,10 @@ def scan_cmd(
     from whygraph.analyze import LlmDescriptor
     from whygraph.core import get_config
     from whygraph.core.logger import scan_log_redirect
+    from whygraph.core.usage import use_usage_sink
     from whygraph.db import ensure_initialized
     from whygraph.scan import AnalyzeCrawler
+    from whygraph.scan.json_progress import JsonUsageSink
     from whygraph.services.git import Repository
     from whygraph.services.llm import LlmError
 
@@ -241,9 +244,19 @@ def scan_cmd(
             console=console,
         )
     )
+    # A scan the portal manages reports each LLM call as a `usage` event
+    # (the runner writes the ledger); bound before any crawler is built,
+    # because crawler threads snapshot the context at construction. A
+    # headless scan binds nothing and records nothing.
+    usage_ctx = (
+        use_usage_sink(JsonUsageSink(progress_ctx))
+        if isinstance(progress_ctx, JsonProgress) and managed_by_portal
+        else contextlib.nullcontext()
+    )
     with (
         scan_log_redirect(scan_log_path),
         progress_ctx as progress,
+        usage_ctx,
     ):
         if isinstance(progress, JsonProgress):
             progress.start_event(phase_total)

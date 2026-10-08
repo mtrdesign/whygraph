@@ -144,3 +144,23 @@ def test_audit_record(records):
 def test_audit_accepts_a_bare_scope(records):
     audit("logout", {"client": ("::1", 1), "headers": []})
     assert records[0].audit["ip"] == "::1"
+
+
+def test_hit_all_counts_all_or_none_and_returns_max_retry():
+    t, clock = make()
+    assert t.hit_all([("org", 2), ("me", 1)]) is None
+    clock.now += 10
+    # "me" is full (retry 50); "org" has room: nothing is counted for it.
+    assert t.hit_all([("org", 2), ("me", 1)]) == 50
+    assert t.check("org", limit=2) is None
+    assert t.hit_all([("org", 2), ("you", 5)]) is None
+    clock.now += 5
+    # Both full now: the longer wait wins (org: 1000+60-1015=45; me: 45).
+    assert t.hit_all([("org", 2), ("me", 1)]) == 45
+    assert t.hit_all([("org", 2), ("x", 0)]) == 60
+
+
+def test_hit_all_shares_the_lru():
+    t, _ = make(max_keys=2)
+    assert t.hit_all([("a", 1), ("b", 1), ("c", 1)]) is None
+    assert t.check("a", limit=1) is None  # the oldest key was evicted

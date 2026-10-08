@@ -57,6 +57,7 @@ from whygraph.analyze import AnalyzeError
 from whygraph.api_v1 import (
     MAX_LIMIT,
     MAX_PATH,
+    PLATFORM_BUDGET_MESSAGE,
     EvidenceIn,
     RationaleIn,
     RepoPath,
@@ -66,6 +67,7 @@ from whygraph.api_v1 import (
 )
 from whygraph.core import get_config
 from whygraph.core.config import AnalyzeConfig, RationaleConfig, is_agent_limit
+from whygraph.core.usage import BUDGET_EXCEEDED
 from whygraph.mcp.errors import WhyGraphError
 from whygraph.mcp.evidence import (
     _evidence_dict,
@@ -173,31 +175,38 @@ def _heavy_slot(state: PortalState, org_id: int) -> Iterator[None]:
         state.v1_in_flight.release(org_id)
 
 
-def org_limit(org_id: int, section: str, key: str) -> int:
-    """An ``agent_*_per_hour`` limit from the org layer row (its default when unset).
+def org_limit(org_id: int, section: str, *keys: str) -> int | tuple[int, ...]:
+    """``agent_*_per_hour`` limits from the org layer row (defaults when unset).
+
+    The layer is read once for all ``keys``.
 
     Parameters
     ----------
     org_id : int
         The organization.
-    section, key : str
-        ``"rationale"`` / ``"agent_generations_per_hour"`` or ``"analyze"`` /
-        ``"agent_descriptions_per_hour"``.
+    section : str
+        ``"rationale"`` or ``"analyze"``.
+    *keys : str
+        The limit keys of that section, e.g. ``"agent_generations_per_hour"``
+        and ``"agent_generations_per_member_per_hour"``.
 
     Returns
     -------
-    int
-        The stored value, or the dataclass default when the org layer does
-        not set a valid one. A project layer is never consulted.
+    int or tuple of int
+        One value per key (a bare ``int`` for a single key): the stored
+        value, or the dataclass default when the org layer does not set a
+        valid one. A project layer is never consulted.
     """
     with portal_session() as db:
         layer = load_layer(db, None, org_id=org_id)
     table = layer.get(section)
-    value = table.get(key) if isinstance(table, dict) else None
-    if is_agent_limit(value):
-        return value  # type: ignore[return-value] -- checked by is_agent_limit
-    defaults = {"rationale": RationaleConfig(), "analyze": AnalyzeConfig()}
-    return getattr(defaults[section], key)
+    table = table if isinstance(table, dict) else {}
+    defaults = {"rationale": RationaleConfig(), "analyze": AnalyzeConfig()}[section]
+    values = tuple(
+        table[key] if is_agent_limit(table.get(key)) else getattr(defaults, key)
+        for key in keys
+    )
+    return values[0] if len(keys) == 1 else values
 
 
 def _no_llm_key(provider: str) -> ApiError:
@@ -209,56 +218,84 @@ def _no_llm_key(provider: str) -> ApiError:
     )
 
 
-def _before_generate(state: PortalState, org_id: int) -> None:
+def _before_generate(state: PortalState, org_id: int, user_id: int) -> None:
     """What a cache miss must pass before an LLM call is made.
 
     The key first (nothing is spent on a card that cannot be generated),
-    then the org's hourly card budget. A cache **hit** never runs this, so
-    an org without a key still gets the cards it already paid for.
+    then the org's and the member's hourly card budgets. A cache **hit**
+    never runs this, so an org without a key still gets the cards it
+    already paid for.
 
     Raises
     ------
     ApiError
         ``409 no_llm_key``, ``403 generation_disabled`` or
-        ``429 generation_limited``.
+        ``429 generation_limited`` (the last two with ``scope``).
     """
     missing = _missing_key(get_config(), ("rationale",))
     if missing is not None:
         raise _no_llm_key(missing)
-    _spend_card(state, org_id)
+    _spend_card(state, org_id, user_id)
 
 
-def _spend_card(state: PortalState, org_id: int) -> None:
-    """Count one generated card against the org's budget, or refuse."""
-    limit = org_limit(org_id, "rationale", "agent_generations_per_hour")
-    if limit == 0:
-        raise ApiError(
-            403,
-            "this organization does not let agents generate rationale cards; "
-            "only cached cards are served",
-            code="generation_disabled",
-        )
-    retry = state.agent_budget.hit(f"card:{org_id}", limit=limit)
+def _spend_card(state: PortalState, org_id: int, user_id: int) -> None:
+    """Count one generated card against the org's and the member's budgets, or refuse."""
+    org, member = org_limit(
+        org_id,
+        "rationale",
+        "agent_generations_per_hour",
+        "agent_generations_per_member_per_hour",
+    )
+    for scope, limit in (("org", org), ("member", member)):
+        if limit == 0:
+            who = "this organization does" if scope == "org" else "you do"
+            raise ApiError(
+                403,
+                f"{who} not let agents generate rationale cards; "
+                "only cached cards are served",
+                code="generation_disabled",
+                scope=scope,
+            )
+    org_key = f"card:{org_id}"
+    retry = state.agent_budget.hit_all(
+        [(org_key, org), (f"{org_key}:{user_id}", member)]
+    )
     if retry is not None:
+        scope = "org" if state.agent_budget.check(org_key, limit=org) else "member"
+        which = "this organization's" if scope == "org" else "your"
         raise ApiError(
             429,
-            "this organization's hourly limit of generated rationale cards is "
-            "reached; cached cards are still served",
+            f"{which} hourly limit of generated rationale cards is reached; "
+            "cached cards are still served",
             code="generation_limited",
+            scope=scope,
             headers={"Retry-After": str(retry)},
             retry_after=retry,
         )
 
 
-def _description_budget(state: PortalState, org_id: int) -> Callable[[], bool]:
-    """The backfill's ``allow``: one ``desc:<org_id>`` event per described commit."""
-    limit: int | None = None
+def _description_budget(
+    state: PortalState, org_id: int, user_id: int
+) -> Callable[[], bool]:
+    """The backfill's ``allow``: one org and one member event per described commit."""
+    limits: tuple[int, int] | None = None
 
     def allow() -> bool:
-        nonlocal limit
-        if limit is None:
-            limit = org_limit(org_id, "analyze", "agent_descriptions_per_hour")
-        return state.agent_budget.hit(f"desc:{org_id}", limit=limit) is None
+        nonlocal limits
+        if limits is None:
+            limits = org_limit(
+                org_id,
+                "analyze",
+                "agent_descriptions_per_hour",
+                "agent_descriptions_per_member_per_hour",
+            )  # type: ignore[assignment]
+        org_key = f"desc:{org_id}"
+        return (
+            state.agent_budget.hit_all(
+                [(org_key, limits[0]), (f"{org_key}:{user_id}", limits[1])]
+            )
+            is None
+        )
 
     return allow
 
@@ -339,8 +376,17 @@ def _mapped_errors() -> Iterator[None]:
     except NoEvidenceError as exc:
         raise ApiError(404, str(exc), code="no_evidence") from None
     except GenerationNotPermitted as exc:
-        # A viewer's cache miss (M2f-1 plan section 4.6): ahead of the
-        # generic WhyGraphError below, which would answer 422.
+        # A viewer's cache miss (M2f-1 plan section 4.6) or an exhausted
+        # hard-stopped budget (M2f-2 plan section 4.7): ahead of the generic
+        # WhyGraphError below, which would answer 422. The budget message is
+        # scope-neutral: a connected portal shows it as it is.
+        if exc.reason == BUDGET_EXCEEDED:
+            raise ApiError(
+                403,
+                PLATFORM_BUDGET_MESSAGE,
+                code=BUDGET_EXCEEDED,
+                scope=exc.scope,
+            ) from None
         raise ApiError(403, str(exc), code="generation_not_permitted") from None
     except (RationaleGenerationError, AnalyzeError, LlmError):
         missing = _missing_key(get_config(), ("rationale",))
@@ -423,7 +469,7 @@ def post_evidence(
         backfill_evidence_descriptions(
             result.evidence,
             target_path=target.path,
-            allow=_description_budget(state, project.org_id),
+            allow=_description_budget(state, project.org_id, principal.user_id),
         )
     return {
         "evidence": [_evidence_dict(item) for item in result.evidence],
@@ -461,8 +507,12 @@ def post_rationale(
         card = rationale_card(
             target,
             evidence,
-            before_generate=lambda: _before_generate(state, project.org_id),
-            allow_description=_description_budget(state, project.org_id),
+            before_generate=lambda: _before_generate(
+                state, project.org_id, principal.user_id
+            ),
+            allow_description=_description_budget(
+                state, project.org_id, principal.user_id
+            ),
         )
     return {**card, "project": status}
 
@@ -484,7 +534,9 @@ def get_history(
     with _mapped_errors():
         items = area_history_commits(path, limit=limit, include_renames=include_renames)
         backfill_evidence_descriptions(
-            items, target_path=path, allow=_description_budget(state, project.org_id)
+            items,
+            target_path=path,
+            allow=_description_budget(state, project.org_id, principal.user_id),
         )
     return {
         "path": path,

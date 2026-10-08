@@ -77,6 +77,7 @@ max_workers = 2               # parallel LLM calls in the diff-analyzer crawler
 # large_commit_file_count = 30  # commits touching more files are described per-file on demand
 # pr_origin_min_commits = 5   # recover a squash-merged PR's original commits past this size
 # agent_descriptions_per_hour = 600  # org setting only, see "Agent limits" below
+# agent_descriptions_per_member_per_hour = 150  # org setting only, one member's share
 
 [rationale]
 # provider = "anthropic"      # which [llm.*] adapter writes the rationale card
@@ -85,6 +86,7 @@ max_workers = 2               # parallel LLM calls in the diff-analyzer crawler
 # pr_discussion_max_comments = 20 # PR comments shown per PR in the prompt
 # pr_comment_max_chars = 500      # each PR comment clipped to this length
 # agent_generations_per_hour = 120  # org setting only, see "Agent limits" below
+# agent_generations_per_member_per_hour = 30  # org setting only, one member's share
 
 [chat]
 # The chat assistant. Provider/model are DEFAULTS for new sessions only -
@@ -147,16 +149,24 @@ timeout_sec = 120
 
 ## Agent limits (organization only)
 
-Two keys bound the LLM spend that agents on [connected portals](../portal/platform-projects.md) can
-cause on a [production](../deploy/production.md) portal. They are different from every other key:
+Four keys bound the LLM spend that agents on [connected portals](../portal/platform-projects.md) can
+cause on a [production](../deploy/production.md) portal: an organization-wide limit and a per-member
+limit for each of the two kinds of work. They are different from every other key:
 
 | Key | Default | Range | Bounds |
 |---|---|---|---|
 | `[rationale].agent_generations_per_hour` | `120` | `0` to `10000` | Uncached rationale cards generated for agents, per hour, across the organization |
 | `[analyze].agent_descriptions_per_hour` | `600` | `0` to `10000` | Commits described by the lazy backfill for agents' evidence, per hour, across the organization |
+| `[rationale].agent_generations_per_member_per_hour` | `30` | `0` to `10000` | The same cards, per hour, for **one member's** agents |
+| `[analyze].agent_descriptions_per_member_per_hour` | `150` | `0` to `10000` | The same descriptions, per hour, for **one member's** agents |
+
+Both limits of a kind apply to every call: the organization key is the ceiling for everyone together,
+the per-member key stops one person using the whole allowance. A member value above the organization
+value is harmless, because both are enforced. The defaults are a quarter of the organization's.
 
 `0` gives agents only what exists: cached cards, and descriptions already written. Cached cards are
-always served.
+always served. A refusal says which limit it was (`scope` is `org` or `member`). The limits are about
+agents only; Explorer and Chat spend is bounded by [budgets](../portal/usage.md#budgets-and-the-hard-stop).
 
 - **Organization defaults only.** They are set by an **owner**, in the organization's **Settings**
   under **Agent limits** (or `PUT /api/portal/defaults`). An admin cannot set them.

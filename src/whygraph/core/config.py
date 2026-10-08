@@ -381,6 +381,10 @@ class AnalyzeConfig:
         (``/api/v1``) may describe per hour across the org. ``0`` gives
         agents only the descriptions that exist. Read from the org layer,
         never from a project's; ``0`` to ``10000``. Default ``600``.
+    agent_descriptions_per_member_per_hour : int
+        The same limit per connected-portal member (enforced next to the org
+        one, so the lower of the two binds). Org setting; ``0`` to
+        ``10000``. Default ``150``.
     """
 
     provider: str | None = None
@@ -391,6 +395,7 @@ class AnalyzeConfig:
     pr_origin_min_commits: int = 5
     max_workers: int = 2
     agent_descriptions_per_hour: int = 600
+    agent_descriptions_per_member_per_hour: int = 150
 
 
 @dataclass(frozen=True, slots=True)
@@ -438,6 +443,10 @@ class RationaleConfig:
         generate per hour across the org. ``0`` gives agents only cached
         cards. Read from the org layer, never from a project's; ``0`` to
         ``10000``. Default ``120``.
+    agent_generations_per_member_per_hour : int
+        The same limit per connected-portal member (enforced next to the org
+        one, so the lower of the two binds). Org setting; ``0`` to
+        ``10000``. Default ``30``.
     """
 
     provider: str | None = None
@@ -447,6 +456,7 @@ class RationaleConfig:
     pr_discussion_max_comments: int = 20
     pr_comment_max_chars: int = 500
     agent_generations_per_hour: int = 120
+    agent_generations_per_member_per_hour: int = 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -1151,8 +1161,16 @@ class Config:
                 self.analyze.agent_descriptions_per_hour,
             ),
             (
+                "analyze.agent_descriptions_per_member_per_hour",
+                self.analyze.agent_descriptions_per_member_per_hour,
+            ),
+            (
                 "rationale.agent_generations_per_hour",
                 self.rationale.agent_generations_per_hour,
+            ),
+            (
+                "rationale.agent_generations_per_member_per_hour",
+                self.rationale.agent_generations_per_member_per_hour,
             ),
         ):
             if not is_agent_limit(value):

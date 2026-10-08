@@ -90,6 +90,7 @@ from test_portal_tenancy import (
     _url,
     assert_no_leak,
     newcomer_github_id,
+    seed_usage,
     wait_for,
 )
 from whygraph.core.context import use_project
@@ -179,6 +180,7 @@ ANY_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/account", "PATCH"),
         ("/api/account/password", "POST"),
         ("/api/account/orgs", "GET"),
+        ("/api/account/usage", "GET"),  # M2f-2 section 4.11
         ("/api/v1/meta", "GET"),  # public: a connected portal's version check
     }
 )
@@ -208,6 +210,15 @@ ORG_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/projects/{slug}/access", "PATCH"),
         ("/api/projects/{slug}/access/{user_uid}", "PUT"),
         ("/api/projects/{slug}/access/{user_uid}", "DELETE"),
+        # Per-member budgets (M2f-2 section 4.11)
+        ("/api/budgets/member-default", "PUT"),
+        ("/api/budgets/member-default", "DELETE"),
+        ("/api/budgets/members/{uid}", "PUT"),
+        ("/api/budgets/members/{uid}", "DELETE"),
+        # A member's own usage (M2f-2 section 4.11)
+        ("/api/usage/me", "GET"),
+        ("/api/usage/me/calls", "GET"),
+        ("/api/usage/me.csv", "GET"),
     }
 )
 """The members routes (M2d-1 section 4.5), the org's deletion (M2d-2 section
@@ -528,6 +539,7 @@ def prod_world(
         for org in (narwhal, quokka):
             (first,) = _wait_idle(world, org)
             assert first["status"] == "ok", first
+            seed_usage(client, org)
         world.sign_out()
         yield world
         scanner.hold.unlink(missing_ok=True)
@@ -888,7 +900,7 @@ def test_the_catch_up_never_runs_in_production(
 # ---------------------------------------------------------------------------
 
 READER_ACTIONS = {str(action) for action in ROLE_ACTIONS[Role.READER]}
-"""``org.read``: the org actions a ``reader`` may do."""
+"""``org.read`` and ``org.usage``: the org actions a ``reader`` may do."""
 
 READER_PROJECT_ACTIONS = {
     str(action) for action in PROJECT_ROLE_ACTIONS[ProjectRole.VIEWER]
@@ -915,7 +927,7 @@ def _is_binding_404(response: httpx.Response) -> bool:
 
 
 def test_the_reader_route_split_is_the_planned_one() -> None:
-    assert READER_ACTIONS == {"org.read"}
+    assert READER_ACTIONS == {"org.read", "org.usage"}
     assert READER_PROJECT_ACTIONS == {"project.read"}
     # A reader lists an org's members, and changes nothing about them.
     assert ("GET", "/api/org/members") in READ_ROUTES
@@ -930,6 +942,22 @@ def test_the_reader_route_split_is_the_planned_one() -> None:
     } <= set(OTHER_ROUTES)
     assert ("POST", "/api/projects/{slug}/node/rationale") in OTHER_ROUTES
     assert ("GET", "/api/projects/{slug}/node/rationale") in READ_ROUTES
+    # A reader reads the org's usage and budgets (M2f-2 section 9.2 D2), not
+    # a project's usage (a project admin's) and changes no budget or price.
+    assert {
+        ("GET", "/api/usage"),
+        ("GET", "/api/usage/calls"),
+        ("GET", "/api/usage.csv"),
+        ("GET", "/api/usage/me"),
+        ("GET", "/api/budgets"),
+        ("GET", "/api/prices"),
+    } <= set(READ_ROUTES)
+    assert {
+        ("GET", "/api/projects/{slug}/usage"),
+        ("PUT", "/api/prices"),
+        ("DELETE", "/api/prices"),
+        ("PUT", "/api/budgets/org"),
+    } <= set(OTHER_ROUTES)
     assert len(READ_ROUTES) > 10 and len(OTHER_ROUTES) > 10
 
 

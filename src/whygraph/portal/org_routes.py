@@ -249,6 +249,7 @@ async def delete_org(
             await anyio.to_thread.run_sync(_clean_up, state, access.org_slug, deleted)
     except ProjectBusy as exc:
         raise ApiError(409, str(exc), code="busy") from exc
+    state.budgets.set_org(access.org_id, None)  # its budgets went with the org
     audit(
         "org_deleted",
         request,

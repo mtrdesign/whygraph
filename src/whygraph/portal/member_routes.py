@@ -44,7 +44,8 @@ from sqlmodel import Session, col, delete, select
 
 from . import connections
 from .audit import audit
-from .authz import PROJECT_ROLES, ROLES, Action, OrgAccess, Role
+from .authz import PROJECT_ROLES, ROLES, Action, OrgAccess, Role, allowed
+from .budgets import reload_org_budgets
 from .db import get_session
 from .deps import ApiError, current_user, org_access, portal_state, require_production
 from .github_auth import GitHubNoSuchUser, GitHubRateLimited, GitHubUnavailable
@@ -59,6 +60,7 @@ from .models import (
 )
 from .orgs import add_member
 from .security import Principal
+from .usage_routes import member_month_spend, member_spend_fields
 
 logger = logging.getLogger(__name__)
 
@@ -325,7 +327,17 @@ def _open_invitation(github_id: int, now: str) -> list:
 
 @members_router.get("/api/org/members")
 def get_members(access: OrgAccess = Depends(org_access(Action.ORG_READ))) -> list[dict]:
-    """The org's members, oldest membership first (a ``reader`` sees them too)."""
+    """The org's members, oldest membership first (a ``reader`` sees them too).
+
+    For an ``org.usage`` caller each row also carries ``month_spend_usd``
+    and ``month_split: {interactive, scans}`` (M2f-2 plan section 4.12),
+    from one grouped query.
+    """
+    spend = (
+        member_month_spend(access.org_id)
+        if allowed(access.role, Action.ORG_USAGE)
+        else None
+    )
     with get_session() as db:
         rows = db.exec(
             select(User, Membership.role, Membership.created_at)
@@ -333,7 +345,13 @@ def get_members(access: OrgAccess = Depends(org_access(Action.ORG_READ))) -> lis
             .where(Membership.org_id == access.org_id)
             .order_by(col(Membership.created_at), col(User.id))
         ).all()
-        return [_member_row(user, role, joined) for user, role, joined in rows]
+        members = []
+        for user, role, joined in rows:
+            row = _member_row(user, role, joined)
+            if spend is not None:
+                row.update(member_spend_fields(spend, user.id))  # type: ignore[arg-type]
+            members.append(row)
+        return members
 
 
 @members_router.post("/api/org/members", status_code=201)
@@ -652,6 +670,8 @@ def delete_member(
         db.delete(membership)
         assert user.id is not None
         connections.revoke_for_member(db, access.org_id, user.id, "member_removed")
+    # Their member budget went with the membership (FK cascade).
+    reload_org_budgets(portal_state(request).budgets, access.org_id)
     audit(
         "member_removed",
         request,
@@ -696,6 +716,7 @@ def delete_membership(
         connections.revoke_for_member(
             db, access.org_id, principal.user_id, "member_left"
         )
+    reload_org_budgets(portal_state(request).budgets, access.org_id)
     audit(
         "member_left",
         request,

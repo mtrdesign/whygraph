@@ -37,6 +37,7 @@ flowchart LR
 |---|---|
 | Portal settings, project list, API keys and GitHub tokens (encrypted), scan history | The portal database: Postgres in the `whygraph-portal-postgres` container, its files in `postgres/` under the portal's data directory, `~/.local/share/whygraph` on your host |
 | The encryption key for those keys and tokens, and database backups | The data directory, as `secret.key` and `backups/` |
+| The [usage ledger](usage.md): one row per LLM call (counts, cost, model, who and which project - never prompt or chat text), budgets, and price overrides | The portal database, kept 400 days |
 | A project's evidence, descriptions, rationale cache and chat history | The repository itself, in `.whygraph/whygraph.db` |
 | A project's CodeGraph index | The repository itself, in `.codegraph/` |
 | A [platform project](platform-projects.md)'s history, descriptions and rationale | The platform, never your machine. Your portal keeps only the link: the platform's address, the project's name and a **connection token**, encrypted |
@@ -90,6 +91,14 @@ never deletes your history, and a 1.x repository keeps the data it already has. 
     The MCP entry each agent gets, and what to know about ports and approval prompts.
 
     [:octicons-arrow-right-24: Connecting agents](agents.md)
+
+-   :material-cash-multiple:{ .lg .middle } __Usage & cost__
+
+    ---
+
+    What your LLM calls cost, per project, model and member, and the budgets that cap them.
+
+    [:octicons-arrow-right-24: Usage & cost](usage.md)
 
 -   :material-shield-lock-outline:{ .lg .middle } __Security model__
 

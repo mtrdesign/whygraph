@@ -47,6 +47,7 @@ chat ``StreamingResponse`` generator by Starlette's threadpool helpers.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import threading
 from dataclasses import dataclass
@@ -58,6 +59,7 @@ from typing import (
     AsyncIterator,
     Awaitable,
     Callable,
+    ContextManager,
     Literal,
     Protocol,
 )
@@ -73,8 +75,10 @@ from starlette.types import Scope
 from whygraph.core.config import ConfigError
 from whygraph.core.context import ProjectContext, use_project
 from whygraph.core.safe_paths import UnsafePathError
+from whygraph.core.usage import use_usage_sink
 
 from .audit import audit
+from .budgets import BudgetBook
 from .authz import (
     PROJECT_ACTIONS,
     Action,
@@ -100,6 +104,8 @@ from .repos import DiscoveryCache
 from .runner import ScanRunner
 from .security import PortalOrigins, Principal, _is_under
 from .throttle import InFlight, Throttle, ip_key
+from .usage import usage_sink_for
+from .usage_store import PriceBook, SpendBook, UsageWriter
 from .webhook import DeliveryIds
 
 if TYPE_CHECKING:
@@ -334,6 +340,7 @@ class TokenIdentity(SessionIdentity):
                     has_password=found.has_password,
                     token_id=found.token_id,
                     token_project_id=found.project_id,
+                    token_client_name=found.client_name,
                 )
             refusal = found
             key = ip_key(scope)
@@ -476,10 +483,10 @@ class PortalState:
         Evidence and rationale requests running at once, per org id: 2
         (``503 busy`` beyond it).
     agent_budget : Throttle
-        The org limits on agent LLM spend, per hour: keys ``card:<org_id>``
-        (``[rationale].agent_generations_per_hour``) and ``desc:<org_id>``
-        (``[analyze].agent_descriptions_per_hour``), each call passing the
-        org's limit.
+        The org and per-member limits on agent LLM spend, per hour: keys
+        ``card:<org_id>`` / ``card:<org_id>:<user_id>`` and ``desc:...``
+        likewise, each call passing the limit (``hit_all`` counts both or
+        neither).
     pending_connects : PendingConnects
         Local mode's started connects, keyed by OAuth ``state``, 10 min
         (M2e plan section 4.8).
@@ -493,6 +500,23 @@ class PortalState:
     link_refresh : LinkRefresh
         The link statuses ``GET /api/projects`` asked to have refreshed; the
         lifespan's status task drains it (M2e plan section 4.11).
+    usage_writer : UsageWriter
+        The usage ledger's writer thread; the lifespan starts it before the
+        runner and stops it after (M2f-2 plan section 4.6).
+    spend : SpendBook
+        Month-to-date LLM spend per org / project / member, seeded at
+        start-up and incremented by every recorded call.
+    prices : PriceBook
+        Every org's price overrides, loaded at start-up; reload an org with
+        :func:`whygraph.portal.usage_store.reload_org_prices` after its
+        overrides change.
+    budgets : BudgetBook
+        Every org's monthly budgets and the alerts already fired, loaded at
+        start-up; reload an org with
+        :func:`whygraph.portal.budgets.reload_org_budgets` after its budgets,
+        members or projects change (M2f-2 plan section 4.7). It is the spend
+        book's add hook (threshold alerts) and records alerts on the usage
+        writer's thread.
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -544,11 +568,16 @@ class PortalState:
         self.v1_token = Throttle(600, 60)
         self.v1_heavy = Throttle(60, 60)
         self.v1_in_flight = InFlight(2)
-        self.agent_budget = Throttle(0, 60 * 60)
+        self.agent_budget = Throttle(0, 60 * 60, max_keys=100_000)
         self.pending_connects = PendingConnects()
         self.pending_links = PendingLinks()
         self.platform_transport: Any = None
         self.link_refresh = LinkRefresh()
+        self.usage_writer = UsageWriter()
+        self.spend = SpendBook()
+        self.prices = PriceBook()
+        self.budgets = BudgetBook(self.spend, defer=self.usage_writer.call)
+        self.spend.on_add = self.budgets.on_add
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0
@@ -943,9 +972,13 @@ async def bind_project(
     is built, so a refused request never reaches
     :meth:`ContextCache.get` (which decrypts the project's secrets).
     No binding and no initialized gate. A *viewer* gets a copy of the
-    cached context with ``llm_allowed=False`` (no lazy backfill, no
-    generation on a cache miss - M2f-1 plan section 4.6); everyone else
-    gets the cached object itself, which is never mutated.
+    cached context with ``llm_allowed=False`` and ``llm_block="role"`` (no
+    lazy backfill, no generation on a cache miss - M2f-1 plan section 4.6);
+    anyone else an exhausted hard-stopped budget covers gets a copy with
+    ``llm_allowed=False``, ``llm_block="budget_exceeded"`` and the budget's
+    ``llm_block_scope`` (M2f-2 plan section 4.7; the role wins when both
+    apply); everyone else gets the cached object itself, which is never
+    mutated.
 
     Parameters
     ----------
@@ -995,7 +1028,20 @@ async def bind_project(
     except ConfigError as exc:
         raise ApiError(400, f"invalid project config: {exc}") from exc
     if role is ProjectRole.VIEWER:
-        ctx = dataclasses.replace(ctx, llm_allowed=False)
+        ctx = dataclasses.replace(ctx, llm_allowed=False, llm_block="role")
+    else:
+        # Re-read on every bind, so raising a budget (or a new month) lifts
+        # the stop on the next request (M2f-2 plan section 4.7).
+        blocked = state.budgets.blocked_scope(
+            project.org_id, project.id, access.user_id
+        )
+        if blocked is not None:
+            ctx = dataclasses.replace(
+                ctx,
+                llm_allowed=False,
+                llm_block="budget_exceeded",
+                llm_block_scope=blocked,
+            )
     return bound_from(project, ctx, role)
 
 
@@ -1080,8 +1126,36 @@ async def require_initialized(state: PortalState, project: BoundProject) -> None
         raise unsafe_path_error(exc) from exc
 
 
+def _usage_binding(
+    request: Request,
+    project: BoundProject,
+    source: str | None,
+    *,
+    org_slug: str,
+    user_id: int,
+    connection_id: int | None = None,
+    client_name: str | None = None,
+) -> ContextManager[Any]:
+    """The usage sink binding of a request (nothing when ``source`` is ``None``)."""
+    if source is None:
+        return contextlib.nullcontext()
+    principal = request.scope.get("state", {}).get("principal")
+    return use_usage_sink(
+        usage_sink_for(
+            portal_state(request),
+            project,
+            source=source,
+            org_slug=org_slug,
+            principal=principal,
+            user_id=user_id,
+            connection_id=connection_id,
+            client_name=client_name,
+        )
+    )
+
+
 def project_access(
-    action: Action,
+    action: Action, *, usage_source: str | None = None
 ) -> Callable[..., AsyncIterator[BoundProject]]:
     """Build the dependency that binds ``{slug}`` for a route doing ``action``.
 
@@ -1090,6 +1164,11 @@ def project_access(
     action : Action
         The route's action (also stored as ``whygraph_action`` on the
         returned function, for the route-inventory test).
+    usage_source : str, optional
+        Bind a usage-ledger sink with this source (``"explorer"``,
+        ``"chat"``) beside the project, charging the caller for any LLM
+        call the route makes (M2f-2 plan section 4.5). ``None`` (the
+        default) binds none: the route does not spend.
 
     Returns
     -------
@@ -1103,7 +1182,14 @@ def project_access(
         slug: str, request: Request, access: OrgAccess = Depends(current_org)
     ) -> AsyncIterator[BoundProject]:
         project = await bind_project(portal_state(request), access, slug, action)
-        with use_project(project.ctx):
+        usage = _usage_binding(
+            request,
+            project,
+            usage_source,
+            org_slug=access.org_slug,
+            user_id=access.user_id,
+        )
+        with use_project(project.ctx), usage:
             yield project
 
     dependency.whygraph_action = action  # type: ignore[attr-defined]
@@ -1111,7 +1197,10 @@ def project_access(
 
 
 def project_db_access(
-    action: Action, *, guard: Callable[[BoundProject], None] | None = None
+    action: Action,
+    *,
+    guard: Callable[[BoundProject], None] | None = None,
+    usage_source: str | None = None,
 ) -> Callable[..., AsyncIterator[BoundProject]]:
     """:func:`project_access` plus the initialized gate and the migration.
 
@@ -1129,6 +1218,9 @@ def project_db_access(
         :func:`whygraph.portal.routes.linked_guard` here, because a linked
         project's Explorer and Chat live on its platform (M2e plan
         section 4.11).
+    usage_source : str, optional
+        As for :func:`project_access`: the Explorer data and Generate
+        mounts pass ``"explorer"``, the Chat mount ``"chat"``.
 
     Returns
     -------
@@ -1143,7 +1235,14 @@ def project_db_access(
     ) -> AsyncIterator[BoundProject]:
         state = portal_state(request)
         project = await bind_project(state, access, slug, action)
-        with use_project(project.ctx):
+        usage = _usage_binding(
+            request,
+            project,
+            usage_source,
+            org_slug=access.org_slug,
+            user_id=access.user_id,
+        )
+        with use_project(project.ctx), usage:
             if guard is not None:
                 guard(project)
             await require_initialized(state, project)
@@ -1203,6 +1302,21 @@ async def bind_v1_project(
     )
 
 
+def _v1_usage(
+    request: Request, project: BoundProject, principal: Principal
+) -> ContextManager[Any]:
+    """The ``/api/v1`` usage binding: source ``agent``, the token's owner and machine."""
+    return _usage_binding(
+        request,
+        project,
+        "agent",
+        org_slug=request.scope.get("state", {}).get("org_slug") or "",
+        user_id=principal.user_id,
+        connection_id=principal.token_id,
+        client_name=principal.token_client_name,
+    )
+
+
 def v1_project_access(
     action: Action,
 ) -> Callable[..., AsyncIterator[BoundProject]]:
@@ -1219,7 +1333,9 @@ def v1_project_access(
         An ``async`` generator dependency yielding the
         :class:`BoundProject`, its context bound until the request ends:
         ``401`` / ``429`` as :func:`v1_user`, then ``404`` / ``403`` /
-        ``400`` as :func:`bind_v1_project`. No initialized gate.
+        ``400`` as :func:`bind_v1_project`. No initialized gate. A
+        usage-ledger sink (source ``agent``, the connection and its
+        machine) is bound beside the project.
     """
 
     async def dependency(
@@ -1229,7 +1345,7 @@ def v1_project_access(
         project = await bind_v1_project(
             portal_state(request), principal, org_slug, slug, action
         )
-        with use_project(project.ctx):
+        with use_project(project.ctx), _v1_usage(request, project, principal):
             yield project
 
     dependency.whygraph_action = action  # type: ignore[attr-defined]
@@ -1264,7 +1380,7 @@ def v1_project_db_access(
         state = portal_state(request)
         org_slug = request.scope.get("state", {}).get("org_slug")
         project = await bind_v1_project(state, principal, org_slug, slug, action)
-        with use_project(project.ctx):
+        with use_project(project.ctx), _v1_usage(request, project, principal):
             await require_initialized(state, project)
             yield project
 

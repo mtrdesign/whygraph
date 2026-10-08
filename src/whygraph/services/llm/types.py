@@ -114,14 +114,30 @@ class CompletionResponse:
         Provider identifier (e.g. ``"anthropic"``, ``"openai"``).
     input_tokens : int or None
         Prompt-token usage; ``None`` if the provider does not report it.
+        Normalized across providers to mean **every** prompt token, cache
+        reads and cache writes included (Anthropic reports them apart, so
+        its adapter adds them back).
     output_tokens : int or None
-        Completion-token usage; ``None`` if not reported.
+        Completion-token usage; ``None`` if not reported. Includes
+        reasoning tokens.
     finish_reason : str or None
         Raw provider value (``"stop"``, ``"length"``, ``"tool_use"``,
         ``"end_turn"``, …). Not normalized across providers.
     raw : dict or None
         Provider-specific raw response, when available. Escape hatch
         for callers that need detail the normalized shape drops.
+    cache_read_tokens : int or None
+        Prompt tokens served from the provider's prompt cache; a subset
+        of ``input_tokens``. ``None`` if not reported.
+    cache_write_tokens : int or None
+        Prompt tokens written to the provider's prompt cache; a subset
+        of ``input_tokens``. ``None`` if not reported.
+    reasoning_tokens : int or None
+        Reasoning ("thinking") tokens; a subset of ``output_tokens``.
+        ``None`` if not reported.
+    cost_usd : float or None
+        The cost the provider itself reported for the call, in USD.
+        Only OpenRouter reports one; ``None`` everywhere else.
     """
 
     text: str
@@ -131,3 +147,7 @@ class CompletionResponse:
     output_tokens: int | None = None
     finish_reason: str | None = None
     raw: dict | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    cost_usd: float | None = None

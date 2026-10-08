@@ -9,6 +9,7 @@ over a checkout's ``whygraph.toml``.
 
 from __future__ import annotations
 
+import contextvars
 import io
 import json
 import os
@@ -26,9 +27,11 @@ from whygraph.cli import main as whygraph_main
 from whygraph.cli.commands import scan as scan_mod
 from whygraph.cli.console import console
 from whygraph.core.config import Config, ConfigError
+from whygraph.core.usage import record_usage
 from whygraph.db import ensure_initialized
 from whygraph.db import engine as db_engine
 from whygraph.scan import JsonProgress
+from whygraph.services.llm.types import CompletionResponse
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -377,6 +380,99 @@ def test_managed_by_portal_is_accepted_and_hidden(
     )
     assert result.exit_code == 0, result.output
     assert _events(result.stdout)[0]["type"] == "start"
+
+
+class _MeteredAnalyze:
+    """An ``AnalyzeCrawler`` stand-in that makes one metered call per commit.
+
+    Like the real crawler, its thread runs in the context captured at
+    construction (where ``whygraph scan`` binds the usage sink).
+    """
+
+    SHAS = ("a" * 40, "b" * 40)
+
+    def __init__(self, progress: object, **_kwargs: object) -> None:
+        self.name = "analyze"
+        self.error: BaseException | None = None
+        self.warning = None
+        self.summary = "2 described"
+        self._context = contextvars.copy_context()
+        self._thread: threading.Thread | None = None
+
+    def _work(self) -> None:
+        for sha in self.SHAS:
+            record_usage(
+                "analyze",
+                CompletionResponse(
+                    text="d",
+                    model="claude-served",
+                    provider="anthropic",
+                    input_tokens=100,
+                    output_tokens=20,
+                    cache_read_tokens=10,
+                ),
+                provider="anthropic",
+                model_requested="claude-asked",
+                subject=sha,
+            )
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._context.run, args=(self._work,))
+        self._thread.start()
+
+    def join(self, timeout: float | None = None) -> None:
+        assert self._thread is not None
+        self._thread.join(timeout)
+
+
+def _metered_scan(monkeypatch: pytest.MonkeyPatch, *flags: str) -> list[dict]:
+    _patch_crawlers(monkeypatch)
+    monkeypatch.setattr("whygraph.scan.AnalyzeCrawler", _MeteredAnalyze)
+    monkeypatch.setattr("whygraph.analyze.LlmDescriptor", _DummyDescriptor)
+    result = CliRunner().invoke(whygraph_main, ["scan", "--no-remote", *flags])
+    assert result.exit_code == 0, result.output
+    if "--progress" not in flags:
+        assert result.stdout.strip() == ""
+        return []
+    return _events(result.stdout)
+
+
+def test_a_managed_scan_reports_each_llm_call_as_a_usage_event(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = _metered_scan(monkeypatch, "--progress", "json", "--managed-by-portal")
+
+    usage = [e for e in events if e["type"] == "usage"]
+    assert [e["subject"] for e in usage] == list(_MeteredAnalyze.SHAS)
+    assert usage[0] == {
+        "type": "usage",
+        "task": "analyze",
+        "model_served": "claude-served",
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cache_read_tokens": 10,
+        "cache_write_tokens": None,
+        "reasoning_tokens": None,
+        "provider_cost_usd": None,
+        "subject": "a" * 40,
+        "duration_ms": None,
+    }
+    # Counts only: the runner, not the child, names the provider and model.
+    assert "provider" not in usage[0] and "model_requested" not in usage[0]
+    types = [e["type"] for e in events]
+    assert types[-1] == "result"
+    assert max(i for i, t in enumerate(types) if t == "usage") < len(types) - 1
+
+
+def test_an_unmanaged_scan_records_no_usage(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = _metered_scan(monkeypatch, "--progress", "json")
+
+    assert events[-1]["type"] == "result"
+    assert not [e for e in events if e["type"] == "usage"]
+    # A headless (non-JSON) scan has no sink either; nothing reaches stdout.
+    _metered_scan(monkeypatch)
 
 
 # --------------------------------------------------------------------------- #

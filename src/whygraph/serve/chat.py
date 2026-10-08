@@ -43,13 +43,17 @@ from pydantic import BaseModel
 from sqlmodel import col, func, select
 
 from whygraph.chat.harness import (
+    BudgetStop,
     RoundLimit,
+    RoundUsage,
     ToolCallStarted,
     ToolResultReady,
     run_turn,
 )
 from whygraph.chat.tools import ToolRegistry
 from whygraph.core import ConfigError, get_config
+from whygraph.core.context import current_project
+from whygraph.core.usage import BUDGET_EXCEEDED, UsageBlocked, set_scope_field
 from whygraph.db import get_session
 from whygraph.db.models import ChatMessage as ChatMessageRow
 from whygraph.db.models import ChatSession as ChatSessionRow
@@ -497,19 +501,24 @@ def _persist_assistant_turn(
     *,
     text: str,
     calls: list[ToolCall],
-    done: TurnDone | None,
+    usage: RoundUsage | None,
     provider: str,
     model: str,
     error: str | None = None,
 ) -> int:
-    """Write one completed assistant turn and return its row id.
+    """Write one assistant row (one provider round) and return its row id.
 
     ``provider`` / ``model`` are recorded on the row rather than read back
     from the session later: the session's pair can change between turns, so
-    only the value in force *at this turn* is a truthful attribution.
+    only the value in force *at this turn* is a truthful attribution. When
+    the round reported the model it actually served, that wins over the
+    requested ``model``.
 
     Parameters
     ----------
+    usage : RoundUsage or None
+        The round's usage; ``None`` for a round that never finished (an
+        error or an abort), whose row then carries no tokens.
     error : str or None, optional
         Why the turn failed, if it did. Stored alongside whatever text did
         arrive, so a refresh replays the failure instead of showing a user
@@ -527,10 +536,10 @@ def _persist_assistant_turn(
             tool_calls=json.dumps(
                 [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in calls]
             ),
-            input_tokens=done.input_tokens if done else None,
-            output_tokens=done.output_tokens if done else None,
+            input_tokens=usage.input_tokens if usage else None,
+            output_tokens=usage.output_tokens if usage else None,
             provider=provider,
-            model=model,
+            model=(usage.model if usage and usage.model else model),
             error=error,
             created_at=now,
         )
@@ -555,13 +564,33 @@ def _persist_tool_result(session_id: int, call: ToolCall, result: str) -> None:
         session.commit()
 
 
+BUDGET_STOP_MESSAGE = (
+    "This chat has reached its monthly budget. You can still read everything "
+    "that's already generated."
+)
+"""The assistant row a :class:`~whygraph.chat.harness.BudgetStop` writes
+(``error = "budget_exceeded"``), so a refresh replays why the turn ended."""
+
+_ROUND_FLUSH_EVENTS: tuple[type, ...] = (TextDelta, RoundUsage, RoundLimit, BudgetStop)
+"""Harness events that, once a round's :class:`RoundUsage` has arrived,
+start something new and so flush that round's buffer as its row. The turn's
+end flushes too. A new terminal or round-opening event joins this tuple."""
+
+
 def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
     """Run one turn, yielding SSE frames and persisting rows as they land.
 
-    Text between tool rounds is accumulated and flushed as one assistant row
-    per round, so the stored transcript has the same shape the harness saw:
-    assistant(+calls) → tool results → assistant(+calls) → … → assistant.
+    Each provider round is flushed as **one** assistant row (plus its tool
+    rows), so the stored transcript has the shape the harness saw:
+    assistant(+calls) → tool results → assistant(+calls) → … → assistant,
+    with every row carrying its own round's tokens and served model. A round
+    ends at its :class:`RoundUsage`; the tool events after it still belong
+    to it, and the next of :data:`_ROUND_FLUSH_EVENTS` (or the turn's end)
+    writes it.
     """
+    # The portal bound a usage sink in the request task; this body runs in
+    # fresh context copies, so the session goes on the shared scope object.
+    set_scope_field(chat_session_id=session_id)
     try:
         client = make_chat_client(provider, model=model)
     except LlmError as exc:
@@ -578,7 +607,7 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
             session_id,
             text="",
             calls=[],
-            done=None,
+            usage=None,
             provider=provider,
             model=model,
             error=message,
@@ -589,30 +618,37 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
     registry = ToolRegistry()
     history = _load_history(session_id)
 
-    # One round's worth of buffered state. A round is complete once its tool
-    # results are in and the *next* round's text begins (or the stream ends),
-    # which is when it gets flushed to rows.
+    # One round's worth of buffered state. `round_usage` is set when the
+    # round's provider call ends; its tool events still follow, and the next
+    # flushing event (or the end of the turn) writes it as rows.
     text_parts: list[str] = []
     round_calls: list[ToolCall] = []
     round_results: list[tuple[ToolCall, str]] = []
+    round_usage: RoundUsage | None = None
     last_done: TurnDone | None = None
     final_message_id: int | None = None
+    budget_stop: BudgetStop | None = None
 
     def _flush_round(error: str | None = None) -> int | None:
         """Persist the buffered round: assistant row, then its tool rows.
 
         An ``error`` forces a row even with nothing buffered — a provider
         failure before the first token would otherwise leave the user
-        message with no reply at all.
+        message with no reply at all. So does a finished round that
+        reported tokens, so the rows add up to the turn's total.
         """
-        nonlocal text_parts, round_calls, round_results
-        if not (text_parts or round_calls or error):
+        nonlocal text_parts, round_calls, round_results, round_usage
+        reported = round_usage is not None and (
+            round_usage.input_tokens or round_usage.output_tokens
+        )
+        if not (text_parts or round_calls or error or reported):
+            round_usage = None
             return None
         message_id = _persist_assistant_turn(
             session_id,
             text="".join(text_parts),
             calls=round_calls,
-            done=last_done,
+            usage=round_usage,
             provider=provider,
             model=model,
             error=error,
@@ -622,15 +658,16 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
         text_parts = []
         round_calls = []
         round_results = []
+        round_usage = None
         return message_id
 
     try:
         for event in run_turn(client=client, history=history, registry=registry):
+            if round_usage is not None and isinstance(event, _ROUND_FLUSH_EVENTS):
+                # The previous round is finished and something new starts.
+                _flush_round()
+
             if isinstance(event, TextDelta):
-                # Text arriving after a completed tool round means the model
-                # started a new assistant turn — flush the previous one.
-                if round_calls:
-                    _flush_round()
                 text_parts.append(event.text)
                 yield _frame({"type": "text_delta", "text": event.text})
 
@@ -656,13 +693,33 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
                     }
                 )
 
+            elif isinstance(event, RoundUsage):
+                # Closes the current round; not a frame of its own (the turn
+                # total rides `done`).
+                round_usage = event
+
             elif isinstance(event, RoundLimit):
                 yield _frame({"type": "round_limit", "rounds": event.rounds})
 
-            else:  # TurnDone
+            elif isinstance(event, BudgetStop):
+                # The previous round (if any) was flushed above; the budget
+                # row is written after the loop, as the turn's last row.
+                budget_stop = event
+
+            else:  # TurnDone - the end-of-turn marker, carrying the total
                 last_done = event
 
         final_message_id = _flush_round()
+        if budget_stop is not None:
+            final_message_id = _persist_assistant_turn(
+                session_id,
+                text=BUDGET_STOP_MESSAGE,
+                calls=[],
+                usage=None,
+                provider=provider,
+                model=model,
+                error=BUDGET_EXCEEDED,
+            )
     except LlmError as exc:
         _log.warning("chat turn failed for session %s: %s", session_id, exc)
         # Whatever arrived before the failure is worth keeping — the user can
@@ -682,6 +739,15 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
         yield _frame({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
         return
 
+    if budget_stop is not None:
+        yield _frame(
+            {
+                "type": "budget_exceeded",
+                "scope": budget_stop.scope,
+                "message_id": final_message_id,
+                "message": BUDGET_STOP_MESSAGE,
+            }
+        )
     yield _frame(
         {
             "type": "done",
@@ -703,6 +769,11 @@ def send_message(
     starts, so the 404 for an unknown session and any config error still
     surface as real HTTP failures. Everything after the first frame is
     in-band — see the module docstring.
+
+    A project an exhausted hard-stopped budget blocks for the caller (the
+    bound context's ``llm_block``) is refused before anything is written:
+    :class:`~whygraph.core.usage.UsageBlocked`, which the portal answers
+    with ``403 budget_exceeded`` (M2f-2 plan section 4.7).
     """
     content = body.content.strip()
     if not content:
@@ -711,6 +782,10 @@ def send_message(
     with get_session() as session:
         row = _require_session(session, session_id, _owner_filter(request))
         provider, model = row.provider, row.model
+
+    ctx = current_project()
+    if ctx is not None and ctx.llm_block == BUDGET_EXCEEDED:
+        raise UsageBlocked(ctx.llm_block_scope)
 
     _persist_user_message(session_id, content)
 

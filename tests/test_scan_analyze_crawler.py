@@ -9,6 +9,8 @@ the diffs it is handed and returns a canned :class:`Description`.
 
 from __future__ import annotations
 
+import io
+import json
 import subprocess
 from pathlib import Path
 from threading import Lock
@@ -21,10 +23,12 @@ from sqlmodel import select
 from whygraph import core
 from whygraph.analyze import AnalyzeError, Description
 from whygraph.core.config import Config
+from whygraph.core.usage import current_usage_sink, record_usage, use_usage_sink
 from whygraph.db import engine as db_engine
 from whygraph.db import ensure_initialized, get_session
 from whygraph.db.models.commit import Commit as CommitRow
-from whygraph.scan import AnalyzeCrawler
+from whygraph.scan import AnalyzeCrawler, JsonProgress
+from whygraph.scan.json_progress import JsonUsageSink
 from whygraph.services.git import Repository
 from whygraph.services.git.commits import Commits
 from whygraph.services.llm import LlmAuthError
@@ -87,7 +91,7 @@ class _StubDescriptor:
         self._lock = Lock()
         self.seen: list[str] = []
 
-    def describe(self, diff: str) -> Description:
+    def describe(self, diff: str, *, subject: str | None = None) -> Description:
         with self._lock:
             self.seen.append(diff)
         if self._fail_on is not None and self._fail_on in diff:
@@ -356,7 +360,7 @@ def test_feature_branch_commits_are_still_described(
 class _RejectingDescriptor(_StubDescriptor):
     """Every call fails the way a rejected token does (wrapped, like the real one)."""
 
-    def describe(self, diff: str) -> Description:
+    def describe(self, diff: str, *, subject: str | None = None) -> Description:
         with self._lock:
             self.seen.append(diff)
         try:
@@ -381,3 +385,75 @@ def test_rejected_credentials_stop_the_phase_at_the_first_failure(
     # have picked up the next one when the first failure lands).
     assert len(descriptor.seen) < len(commits)
     assert all(v[0] is None for v in _descriptions().values())
+
+
+def test_usage_binding_reaches_the_analyze_pool(
+    isolated_db: Path, repo_path: Path
+) -> None:
+    """A sink bound before the crawler is built sees every pooled call (M2f-2).
+
+    The crawler snapshots the context at construction and the pool copies
+    it per submit, so each commit's real ``LlmDescriptor`` call records once,
+    with the commit SHA as its subject.
+    """
+    from test_core_usage import CollectingSink, StubClient
+
+    from whygraph.analyze import LlmDescriptor
+    from whygraph.core.usage import use_usage_sink
+
+    commits = _commits(repo_path)
+    _insert(commits)
+    sink = CollectingSink()
+    with use_usage_sink(sink):
+        crawler = _run(repo_path, LlmDescriptor(StubClient()), max_workers=3)
+    assert crawler.error is None
+    assert sorted(r.subject for r in sink.records) == sorted(c.sha for c in commits)
+    assert {r.task for r in sink.records} == {"analyze"}
+
+
+class _MeteredDescriptor(_StubDescriptor):
+    """A stub that, like ``LlmDescriptor``, records each call with its subject."""
+
+    def describe(self, diff: str, *, subject: str | None = None) -> Description:
+        description = super().describe(diff, subject=subject)
+        record_usage(
+            "analyze",
+            description,
+            provider=description.provider,
+            model_requested=description.model,
+            subject=subject,
+        )
+        return description
+
+
+def test_a_bound_json_usage_sink_emits_one_event_per_commit(
+    isolated_db: Path, repo_path: Path
+) -> None:
+    commits = _commits(repo_path)
+    _insert(commits)
+    stream = io.StringIO()
+
+    # Bound before the crawler is built: its pool runs in copies of this context.
+    with use_usage_sink(JsonUsageSink(JsonProgress(stream=stream))):
+        crawler = _run(repo_path, _MeteredDescriptor(), max_workers=2)
+
+    assert crawler.error is None
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    assert {e["type"] for e in events} == {"usage"}
+    assert sorted(e["subject"] for e in events) == sorted(c.sha for c in commits)
+    assert {(e["task"], e["model_served"]) for e in events} == {
+        ("analyze", "stub-model")
+    }
+    assert {(e["input_tokens"], e["output_tokens"]) for e in events} == {(1, 2)}
+
+
+def test_without_a_sink_the_crawler_records_nothing(
+    isolated_db: Path, repo_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _insert(_commits(repo_path))
+
+    crawler = _run(repo_path, _MeteredDescriptor())
+
+    assert crawler.error is None
+    assert current_usage_sink() is None
+    assert '"usage"' not in capsys.readouterr().out

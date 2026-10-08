@@ -13,7 +13,7 @@ import { ApiError, portalApi, projectApi, projectKey, type ScanRunRow, type Scan
 import { can } from "../../lib/permissions";
 import { projectProblem } from "../../lib/errors";
 import { useScanActions } from "../../lib/scanActions";
-import { formatSeconds, runSeconds, triggerLabel } from "../../lib/scanFormat";
+import { BUDGET_SKIPPED, BUDGET_STOPPED, formatSeconds, runSeconds, triggerLabel, usageLine } from "../../lib/scanFormat";
 import {
   codegraphRow,
   crawlerLabel,
@@ -237,13 +237,16 @@ function Outcome({ slug, state, row }: { slug: string; state: ScanRunState; row:
             : `Finished${typeof elapsed === "number" ? ` in ${formatSeconds(elapsed)}` : ""}`}
         </AlertTitle>
         <AlertDescription>
-          {summary?.analyze_skipped && summary.analyze_skipped !== "--skip-analyze" ? (
+          {summary?.analyze_skipped === "budget" ? (
+            <p>{BUDGET_SKIPPED}</p>
+          ) : summary?.analyze_skipped && summary.analyze_skipped !== "--skip-analyze" ? (
             <p>Commit descriptions were skipped: {summary.analyze_skipped}</p>
           ) : summary?.analyze_skipped || (row && !row.analyze) ? (
             <p>Structure only: git history and code structure, no LLM calls.</p>
           ) : (
             <p>Git history, code structure and commit descriptions are up to date.</p>
           )}
+          {usageLine(summary) && <p data-testid="run-usage">{usageLine(summary)}</p>}
         </AlertDescription>
       </Alert>
     );
@@ -282,7 +285,13 @@ function Outcome({ slug, state, row }: { slug: string; state: ScanRunState; row:
   }
   return (
     <Alert data-testid="run-result">
-      <AlertTitle>Cancelled</AlertTitle>
+      <AlertTitle>{summary?.cancelled_by === "budget" ? BUDGET_STOPPED : "Cancelled"}</AlertTitle>
+      {summary?.cancelled_by === "budget" && (
+        <AlertDescription>
+          The monthly budget ran out, so the run was stopped. Commits it had already described are kept; run
+          another scan once the budget is raised or next month.
+        </AlertDescription>
+      )}
       {summary?.cancelled_by === "user" && (
         <AlertDescription>
           You cancelled this run. Commits it had already described are kept; run another scan to finish the

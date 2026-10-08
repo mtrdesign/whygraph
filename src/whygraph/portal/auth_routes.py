@@ -76,6 +76,7 @@ from .sessions import (
     set_cookie,
 )
 from .throttle import ip_key
+from .usage_routes import account_usage
 
 RESET_LINK_LIFETIME = timedelta(hours=24)
 """How long an admin-issued reset link works."""
@@ -870,6 +871,29 @@ def get_account_orgs(
         {"slug": slug, "name": name, "role": role, "url": base.org_origin(slug)}
         for slug, name, role in rows
     ]
+
+
+@auth_router.get("/api/account/usage")
+def get_account_usage(
+    request: Request, principal: Principal = Depends(user_access())
+) -> dict:
+    """The caller's LLM spend this month in each org they are a member of.
+
+    Memberships only (an instance admin's ``reader`` access is not one);
+    the numbers come from the spend book (M2f-2 plan section 4.11). The SPA
+    links each org to ``url + "/usage/me"``.
+    """
+    state = portal_state(request)
+    base = _base(state)
+    with get_session() as db:
+        rows = db.exec(
+            select(Organization.id, Organization.slug, Organization.name)
+            .join(Membership, col(Membership.org_id) == col(Organization.id))
+            .where(Membership.user_id == principal.user_id)
+            .order_by(Organization.name, Organization.slug)
+        ).all()
+    orgs = [(org_id, slug, name, base.org_origin(slug)) for org_id, slug, name in rows]
+    return account_usage(state, principal.user_id, orgs)  # type: ignore[arg-type]
 
 
 @auth_router.post("/api/orgs", status_code=201)

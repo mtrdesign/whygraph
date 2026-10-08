@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { auditApi, type AuditEventRow, type AuditFilters } from "../../api";
+import { saveBlob } from "../../lib/download";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Skeleton } from "../ui/skeleton";
@@ -18,18 +19,6 @@ function details(fields: Record<string, unknown>): string {
   return Object.entries(fields)
     .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
     .join(" ");
-}
-
-/** Save a Blob under `name` through a temporary object URL (never a plain link: the API needs a header). */
-export function saveBlob(blob: Blob, name: string): void {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
 }
 
 /**

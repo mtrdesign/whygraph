@@ -11,8 +11,11 @@ process:
   **first** request, so every coalesced request gets the same ``run_id``;
   it records the highest-precedence trigger
   (``describe > manual > initial > sync > poll > hook``) and keeps the
-  first explicit ``requested_by``. A project with no completed (``ok``)
-  scan records every request as ``initial`` (structure-only, section 4.14).
+  first explicit ``requested_by`` - unless a later request is the first
+  to ask for analysis, whose requester then takes over (attribution
+  follows the spend, M2f-2 plan section 0.2 #7). A project with no
+  completed (``ok``) scan records every request as ``initial``
+  (structure-only, section 4.14).
 * **Global cap** of :data:`MAX_CONCURRENT` running jobs across projects.
 * **Jobs.** ``kind=scan`` spawns the child scanner. ``kind=sync`` (the
   server clone of a production GitHub project) syncs the clone inside the
@@ -44,7 +47,11 @@ process:
   next sync re-checks, and clears it once the repository is fixed).
 * **Child I/O.** stdout JSON lines go to ``<data>/runs/<id>.jsonl``, stderr
   to ``<data>/runs/<id>.log``; both pipes are drained by their own thread
-  so a flood never deadlocks the child. Every injected secret value is
+  so a flood never deadlocks the child. A ``usage`` event (one per LLM
+  call of an analyzing run) is never written to the events file: it is
+  validated, attributed and priced from the runner's own spec and goes to
+  the usage ledger, and the run's total lands in ``summary["usage"]`` on
+  every outcome (M2f-2 plan section 4.5). Every injected secret value is
   replaced by its hint, and anything shaped like a GitHub token by its
   prefix (:func:`~whygraph.services.git.credentials.redact_tokens`),
   before a line is written. Children run in their own session (process
@@ -135,6 +142,7 @@ from collections.abc import (
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
@@ -145,6 +153,7 @@ from sqlmodel import col, select
 
 from whygraph.core.config import Config, ConfigError
 from whygraph.core.safe_paths import UnsafePathError, check_inside
+from whygraph.core.usage import UsageRecord, budget_message
 from whygraph.services.git import GitError, InvalidRepoUrlError, Repository
 from whygraph.services.git.credentials import (
     GITHUB_URL_ENV,
@@ -160,11 +169,13 @@ from .context import resolve_root, resolved_layer
 from .db import data_dir, get_session
 from .github_app import GitHubAccessLost, InstallationToken
 from .github_auth import GitHubUnavailable
-from .models import Project, ScanRun
+from .models import Project, ScanRun, User
 from .paths import TRACKED_STATE_PATHS, check_project_paths
 from .policy import allowed_sources
 from .repos import root_status
 from .secrets import hint_for
+from .usage import SYSTEM_LABEL, actor_label, price_usage
+from .usage_store import COUNTED_COST_SOURCES, UsageRow
 
 if TYPE_CHECKING:  # pragma: no cover
     from .deps import BoundProject, PortalState
@@ -236,6 +247,14 @@ outlasts this wait.
 CANCELLED_BY_USER: dict[str, str] = {"cancelled_by": "user"}
 """The ``summary`` of a run the user cancelled (vs. a merged or orphaned one)."""
 
+CANCELLED_BY_BUDGET: dict[str, str] = {"cancelled_by": "budget"}
+"""The ``summary`` of a full run the runner cancelled because a covering
+hard-stopped budget was exhausted while it ran (M2f-2 plan section 4.7)."""
+
+ANALYZE_SKIPPED_BUDGET: dict[str, str] = {"analyze_skipped": "budget"}
+"""Added to the ``summary`` of a full run downgraded to structure-only at
+dispatch because a covering hard-stopped budget was exhausted (section 9.2 D6)."""
+
 TOKEN_REFRESH_MARGIN_SEC = 10 * 60
 """Seconds before an installation token expires that a child's token file is rewritten."""
 
@@ -267,6 +286,40 @@ _GIT_ACCESS_DENIED = re.compile(
 """git's words for a token that cannot read the repository."""
 
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+USAGE_EVENTS_PER_RUN = 100_000
+"""Most ``usage`` events one run may report; later ones are dropped (logged once)."""
+
+USAGE_MAX_INPUT_TOKENS = 4_000_000
+"""Upper bound of a ``usage`` event's ``input_tokens`` / ``cache_*_tokens``."""
+
+USAGE_MAX_OUTPUT_TOKENS = 400_000
+"""Upper bound of a ``usage`` event's ``output_tokens`` / ``reasoning_tokens``."""
+
+USAGE_MAX_COST_USD = Decimal(25)
+"""Most one scan ``usage`` event may cost, reported or computed (M2f-2 plan section 5)."""
+
+USAGE_MAX_TEXT = 200
+"""Longest ``subject`` / ``model_served`` a ``usage`` event may carry."""
+
+_USAGE_KEYS = frozenset(
+    {
+        "type",
+        "task",
+        "model_served",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+        "provider_cost_usd",
+        "subject",
+        "duration_ms",
+    }
+)
+_USAGE_INPUT_KEYS = ("input_tokens", "cache_read_tokens", "cache_write_tokens")
+_USAGE_OUTPUT_KEYS = ("output_tokens", "reasoning_tokens")
+
 _READ_CHUNK = 256 * 1024
 
 MAX_EVENT_LINE = _READ_CHUNK - 1
@@ -309,6 +362,30 @@ class ScanForbidden(RuntimeError):
     first-scan forcing, so the refusal is about what would actually run
     (M2f-1 plan section 4.5).
     """
+
+
+class ScanBudgetExceeded(RuntimeError):
+    """A full run is refused: an exhausted hard-stopped budget covers it - HTTP 403 ``budget_exceeded``.
+
+    Raised under the runner lock, after the first-scan forcing (a first
+    scan is structure-only and never refused), when the requester's,
+    the project's or the org's budget is exhausted (M2f-2 plan section 4.7).
+    Quick scans and cancels are never refused for a budget.
+
+    Parameters
+    ----------
+    scope : str
+        ``"member"``, ``"project"`` or ``"org"``.
+
+    Attributes
+    ----------
+    scope : str
+        As passed.
+    """
+
+    def __init__(self, scope: str) -> None:
+        super().__init__(budget_message(scope))
+        self.scope = scope
 
 
 class ProjectAccessLost(RuntimeError):
@@ -666,10 +743,159 @@ class _Pending:
         if kind == "sync":
             self.kind = "sync"
         self.trigger = merge_trigger(self.trigger, trigger)
-        self.analyze = self.analyze or analyze
-        if self.requested_by is None:
+        # Attribution follows the spend: the first requester who asked for
+        # analysis becomes the requester (M2f-2 plan section 0.2 #7), else
+        # the first non-null one.
+        if analyze and not self.analyze and requested_by is not None:
             self.requested_by = requested_by
+        elif self.requested_by is None:
+            self.requested_by = requested_by
+        self.analyze = self.analyze or analyze
         self.scan_requested = self.scan_requested or scan_requested
+
+
+def _int_in(value: Any, high: int) -> bool:
+    """Whether ``value`` is ``None`` or an int (not a bool) in ``0..high``."""
+    if value is None:
+        return True
+    return type(value) is int and 0 <= value <= high
+
+
+def parse_usage_event(
+    obj: Mapping[str, Any], *, provider: str, model_requested: str
+) -> UsageRecord | None:
+    """Validate a scan child's ``usage`` event (M2f-2 plan section 4.5).
+
+    The child is not trusted to attribute or price: an event carries counts
+    only, and the provider and requested model come from the caller (the
+    run's own resolved analyze config). Strict: unknown keys, a ``task``
+    other than ``analyze``, a count out of range or of the wrong type, an
+    over-long string or a provider cost outside ``0..25`` rejects the event.
+
+    Parameters
+    ----------
+    obj : Mapping[str, Any]
+        The decoded JSON line (``type == "usage"``).
+    provider, model_requested : str
+        From the runner's spec, never from the event.
+
+    Returns
+    -------
+    UsageRecord or None
+        The record, or ``None`` when the event is malformed.
+    """
+    if set(obj) - _USAGE_KEYS or obj.get("type") != "usage":
+        return None
+    if obj.get("task") != "analyze":
+        return None
+    if not all(_int_in(obj.get(k), USAGE_MAX_INPUT_TOKENS) for k in _USAGE_INPUT_KEYS):
+        return None
+    if not all(
+        _int_in(obj.get(k), USAGE_MAX_OUTPUT_TOKENS) for k in _USAGE_OUTPUT_KEYS
+    ):
+        return None
+    duration = obj.get("duration_ms")
+    if duration is not None and (type(duration) is not int or duration < 0):
+        return None
+    texts = (obj.get("subject"), obj.get("model_served"))
+    if any(
+        t is not None and (not isinstance(t, str) or len(t) > USAGE_MAX_TEXT)
+        for t in texts
+    ):
+        return None
+    cost = obj.get("provider_cost_usd")
+    if cost is not None:
+        if type(cost) not in (int, float) or not (
+            0 <= cost <= float(USAGE_MAX_COST_USD)
+        ):
+            return None  # NaN and infinity fail the float range check too
+        cost = float(cost)
+    return UsageRecord(
+        task="analyze",
+        provider=provider,
+        model_requested=model_requested,
+        model_served=obj.get("model_served"),
+        input_tokens=obj.get("input_tokens"),
+        output_tokens=obj.get("output_tokens"),
+        cache_read_tokens=obj.get("cache_read_tokens"),
+        cache_write_tokens=obj.get("cache_write_tokens"),
+        reasoning_tokens=obj.get("reasoning_tokens"),
+        provider_cost_usd=cost,
+        subject=obj.get("subject"),
+        duration_ms=duration,
+    )
+
+
+@dataclass(frozen=True)
+class _UsageSpec:
+    """Who and what a run's ``usage`` events are charged to (from the runner, never the child)."""
+
+    org_id: int
+    project_id: int
+    project_slug: str
+    project_name: str
+    user_id: int | None
+    actor_label: str
+    provider: str
+    model_requested: str
+    key_scope: str
+    config: Config
+
+
+@dataclass
+class _UsageTotal:
+    """A run's running usage total (the drain thread adds, :meth:`ScanRunner._execute` reads)."""
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    events: int = 0
+    calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: Decimal = Decimal(0)
+    sources: set[str] = field(default_factory=set)
+    rejected_logged: bool = False
+    capped_logged: bool = False
+
+    def admit(self) -> bool:
+        """Count one ``usage`` event; ``False`` past :data:`USAGE_EVENTS_PER_RUN`."""
+        with self.lock:
+            self.events += 1
+            return self.events <= USAGE_EVENTS_PER_RUN
+
+    def first(self, flag: str) -> bool:
+        """``True`` the first time ``flag`` is raised (log once per run)."""
+        with self.lock:
+            if getattr(self, flag):
+                return False
+            setattr(self, flag, True)
+            return True
+
+    def add(self, row: UsageRow) -> None:
+        """Add one recorded row."""
+        with self.lock:
+            self.calls += 1
+            self.input_tokens += row.input_tokens or 0
+            self.output_tokens += row.output_tokens or 0
+            if row.cost_usd is not None and row.cost_source in COUNTED_COST_SOURCES:
+                self.cost_usd += row.cost_usd
+            self.sources.add(row.cost_source)
+
+    def summary(self) -> dict[str, Any]:
+        """``summary["usage"]``: calls, tokens, cost and its source."""
+        with self.lock:
+            if not self.sources:
+                source = None
+            elif len(self.sources) == 1:
+                source = next(iter(self.sources))
+            else:
+                source = "estimated"
+            return {
+                "calls": self.calls,
+                "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens,
+                "cost_usd": float(self.cost_usd),
+                "cost_source": source,
+            }
 
 
 @dataclass
@@ -683,6 +909,8 @@ class _Job:
     head: str | None = None
     scanned: bool = False
     result: dict | None = None
+    usage_total: _UsageTotal = field(default_factory=_UsageTotal)
+    stop_reason: str | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
     write_lock: threading.Lock = field(default_factory=threading.Lock)
     done: threading.Event = field(default_factory=threading.Event)
@@ -1304,6 +1532,7 @@ class ScanRunner:
                         kind, scan_requested = "sync", True
                 return await self._request_claimed(
                     project_id,
+                    org_id=None if gate is None else gate[3],
                     kind=kind,
                     trigger=trigger,
                     analyze=analyze,
@@ -1316,6 +1545,7 @@ class ScanRunner:
         self,
         project_id: int,
         *,
+        org_id: int | None = None,
         kind: str,
         trigger: str,
         analyze: bool,
@@ -1330,6 +1560,12 @@ class ScanRunner:
             if analyze and not may_spend:
                 # After the default and the forcing: what would really run.
                 raise ScanForbidden("this run would describe commits with the LLM")
+            if analyze and org_id is not None and self._state is not None:
+                blocked = self._state.budgets.blocked_scope(
+                    org_id, project_id, requested_by
+                )
+                if blocked is not None:
+                    raise ScanBudgetExceeded(blocked)
             pending = self._pending.get(project_id)
             if pending is None:
                 run_id = await anyio.to_thread.run_sync(
@@ -1618,9 +1854,16 @@ class ScanRunner:
         # A run that finished cleanly before the cancel reached it stays ok:
         # its writes all landed, and recording it cancelled would re-scan.
         if job.cancelled and status != "ok":
-            status, summary = "cancelled", {**summary, **CANCELLED_BY_USER}
+            by = (
+                CANCELLED_BY_BUDGET
+                if job.stop_reason == "budget"
+                else CANCELLED_BY_USER
+            )
+            status, summary = "cancelled", {**summary, **by}
         elif job.interrupted and status != "cancelled":
             status = "interrupted"
+        # After the child's `result` merge, so a child cannot supply its own.
+        summary = {**summary, "usage": job.usage_total.summary()}
         try:
             _finish_run(job, status, summary)
         except Exception:  # noqa: BLE001 -- e.g. the database is gone
@@ -1682,6 +1925,32 @@ class ScanRunner:
             layer = resolved_layer(session, project)
             root = resolve_root(project)
             source = project.source
+            # The usage attribution of an analyzing run: the requester (one
+            # User lookup per run, so a mid-run rename keeps one label),
+            # else the system actor (M2f-2 plan section 4.5).
+            who: tuple[int, str, str, int | None, str] | None = None
+            if spec.analyze:
+                requester = (
+                    session.get(User, run.requested_by)
+                    if run.requested_by is not None
+                    else None
+                )
+                label = (
+                    SYSTEM_LABEL
+                    if run.requested_by is None
+                    # duck-typed: a User has display_name / github_login too
+                    else actor_label(
+                        requester,  # type: ignore[arg-type]
+                        production=state.mode == "production",
+                    )
+                )
+                who = (
+                    project.org_id,
+                    project.slug,
+                    project.name,
+                    run.requested_by,
+                    label,
+                )
             run.status = "running"
             run.started_at = _now()
             run.kind = spec.kind
@@ -1691,6 +1960,7 @@ class ScanRunner:
             events_rel, log_rel = run.events_path, run.log_path
         ctx = state.contexts.get(spec.project_id)
         config = ctx.config
+        usage_spec = _usage_spec(spec.project_id, who, ctx.key_scopes, config)
         base = data_dir()
         token_path = base / "runs" / f"{spec.run_id}.token" if github else None
         env, secrets = child_env(
@@ -1768,7 +2038,22 @@ class ScanRunner:
                 return "failed", summary, redact
 
             job.head = git_head(root)
-            argv = scan_argv(spec.trigger, spec.analyze, source=source)
+            analyze, downgraded = spec.analyze, False
+            if analyze and who is not None:
+                # Re-checked at dispatch (queued, merged or recovered runs):
+                # a blocked full run still updates the structure (D6).
+                blocked = state.budgets.blocked_scope(who[0], spec.project_id, who[3])
+                if blocked is not None:
+                    analyze, usage_spec, downgraded = False, None, True
+                    env, _ = child_env(
+                        config,
+                        layer,
+                        source=source,
+                        analyze=False,
+                        token_file=token_path,
+                    )
+                    log(f"the {blocked} budget is spent: scanning structure only")
+            argv = scan_argv(spec.trigger, analyze, source=source)
             log(f"$ {shlex.join(argv)}")
             refresher: _TokenRefresher | None = None
             try:
@@ -1819,7 +2104,11 @@ class ScanRunner:
                             obj = json.loads(text)
                         except ValueError:
                             obj = None
-                        if isinstance(obj, dict):
+                        if isinstance(obj, dict) and obj.get("type") == "usage":
+                            # Never written to the events file (so never to
+                            # SSE): it goes to the usage ledger only.
+                            self._take_usage(job, usage_spec, obj)
+                        elif isinstance(obj, dict):
                             with job.write_lock:
                                 events_fh.write(_event_line(text, obj))
                                 events_fh.flush()
@@ -1859,8 +2148,109 @@ class ScanRunner:
 
             if job.result is not None:
                 summary.update({k: v for k, v in job.result.items() if k != "type"})
+            if downgraded:  # after the child's own `analyze_skipped`
+                summary.update(ANALYZE_SKIPPED_BUDGET)
             summary["exit_code"] = code
             return ("ok" if code == 0 else "failed"), summary, redact
+
+    def _take_usage(
+        self, job: _Job, usage_spec: _UsageSpec | None, obj: dict[str, Any]
+    ) -> None:
+        """Record one ``usage`` event of a running child (its drain thread).
+
+        Validated (:func:`parse_usage_event`), capped per run
+        (:data:`USAGE_EVENTS_PER_RUN`) and per event (:data:`USAGE_MAX_COST_USD`),
+        attributed and priced from the runner's own ``usage_spec``, then
+        counted in the spend book, queued for the ledger and added to the
+        run's total. A run that does not analyze reports nothing (its child
+        has no API key): its events are dropped.
+        """
+        state = self._state
+        assert state is not None
+        total = job.usage_total
+        run_id = job.spec.run_id
+        if not total.admit():
+            if total.first("capped_logged"):
+                _log.warning(
+                    "scan runner: run %s reported more than %d usage events; "
+                    "dropping the rest",
+                    run_id,
+                    USAGE_EVENTS_PER_RUN,
+                )
+            return
+        rec = (
+            None
+            if usage_spec is None
+            else parse_usage_event(
+                obj,
+                provider=usage_spec.provider,
+                model_requested=usage_spec.model_requested,
+            )
+        )
+        if rec is None or usage_spec is None:
+            if total.first("rejected_logged"):
+                _log.warning(
+                    "scan runner: run %s reported a usage event that is malformed "
+                    "or not expected (structure-only run); dropped",
+                    run_id,
+                )
+            return
+        priced = price_usage(
+            rec,
+            provider=usage_spec.provider,
+            model_requested=usage_spec.model_requested,
+            overrides=state.prices.for_org(usage_spec.org_id),
+            config=usage_spec.config,
+        )
+        cost = priced.cost_usd
+        if cost is not None and cost > USAGE_MAX_COST_USD:
+            cost = USAGE_MAX_COST_USD
+        row = UsageRow(
+            org_id=usage_spec.org_id,
+            project_id=usage_spec.project_id,
+            project_slug=usage_spec.project_slug,
+            project_name=usage_spec.project_name,
+            actor_kind="system" if usage_spec.user_id is None else "member",
+            user_id=usage_spec.user_id,
+            actor_label=usage_spec.actor_label,
+            source="scan",
+            task="analyze",
+            provider=usage_spec.provider,
+            model_requested=usage_spec.model_requested,
+            key_scope=usage_spec.key_scope,
+            cost_source=priced.cost_source,
+            created_at=_now(),
+            scan_run_id=run_id,
+            subject=rec.subject,
+            model_served=rec.model_served,
+            input_tokens=rec.input_tokens,
+            output_tokens=rec.output_tokens,
+            cache_read_tokens=rec.cache_read_tokens,
+            cache_write_tokens=rec.cache_write_tokens,
+            reasoning_tokens=rec.reasoning_tokens,
+            cost_usd=cost,
+            price_version=priced.price_version,
+            duration_ms=rec.duration_ms,
+        )
+        state.spend.add(row)
+        state.usage_writer.submit(row)
+        total.add(row)
+        # The hard stop (M2f-2 plan section 4.7): a covering hard-stopped
+        # budget (requester, project or org) this row exhausted cancels the
+        # run. This is a plain thread, so the anyio task group's grace kill
+        # is out of reach: a timer sends the SIGKILL.
+        if job.stop_reason is None and state.budgets.blocked_scope(
+            usage_spec.org_id, usage_spec.project_id, usage_spec.user_id
+        ):
+            job.stop_reason = "budget"
+            _log.info("scan runner: run %s stopped: a budget is spent", run_id)
+            job.cancel()
+            timer = threading.Timer(
+                CANCEL_GRACE_SEC,
+                lambda: job.alive() and job.signal(signal.SIGKILL),
+            )
+            timer.daemon = True
+            timer.start()
 
     # ---- production GitHub projects --------------------------------------
 
@@ -2125,6 +2515,40 @@ class ScanRunner:
 # ---------------------------------------------------------------------------
 # Blocking DB / file helpers (worker threads)
 # ---------------------------------------------------------------------------
+
+
+def _usage_spec(
+    project_id: int,
+    who: tuple[int, str, str, int | None, str] | None,
+    key_scopes: Mapping[str, str],
+    config: Config,
+) -> _UsageSpec | None:
+    """A run's usage attribution, or ``None`` for a run that does not analyze.
+
+    The provider and requested model are the run's resolved analyze config
+    (as :func:`child_env` picks the key). A child only ever gets a project or
+    an org key, so any other key scope is recorded as ``"none"``.
+    """
+    if who is None:
+        return None
+    try:
+        provider, model = config.model_for("analyze")
+    except ConfigError:
+        return None
+    scope = key_scopes.get(provider, "none")
+    org_id, slug, name, user_id, label = who
+    return _UsageSpec(
+        org_id=org_id,
+        project_id=project_id,
+        project_slug=slug,
+        project_name=name,
+        user_id=user_id,
+        actor_label=label,
+        provider=provider,
+        model_requested=model or "",
+        key_scope=scope if scope in ("project", "org") else "none",
+        config=config,
+    )
 
 
 def _error_chain(exc: BaseException) -> str:
@@ -2681,6 +3105,7 @@ __all__ = [
     "Redactor",
     "RunNotFound",
     "RunnerUnavailable",
+    "ScanBudgetExceeded",
     "ScanRunner",
     "SourceNotAllowed",
     "ManagedOnPlatform",

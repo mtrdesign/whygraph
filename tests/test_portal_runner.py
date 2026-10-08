@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from decimal import Decimal
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -65,7 +66,10 @@ from whygraph.portal.estimate import (
 )
 from whygraph.portal import routes as routes_mod
 from whygraph.portal import runner as runner_mod
-from whygraph.portal.models import Project, ScanRun
+from whygraph.portal.models import Project, ScanRun, UsageEvent, User
+from whygraph.portal.prices import BUNDLED_AS_OF
+from whygraph.portal.secrets import LLM_API_KEY, put_secret
+from whygraph.portal.usage_store import UsageRow
 from whygraph.portal.runner import (
     LOG_TAIL_BYTES,
     MAX_EVENT_LINE,
@@ -82,6 +86,7 @@ from whygraph.portal.runner import (
     _update_queued,
     child_env,
     merge_trigger,
+    parse_usage_event,
     redactor,
     resolve_analyze,
     scan_argv,
@@ -493,6 +498,7 @@ def test_estimate_arithmetic() -> None:
     assert priced["cost"]["usd"] == round(usd, 4)
     assert priced["cost"]["low"] == round(usd * 0.5, 4)
     assert priced["cost"]["high"] == round(usd * 1.5, 4)
+    assert priced["cost"]["prices_as_of"] == BUNDLED_AS_OF
     assert priced["tokens"]["input_range"] == {"low": 22262.5, "high": 66787.5}
     assert priced["upper_bound"] is True
     unpriced = render_estimate(result, provider="ollama", model="llama3")
@@ -1928,3 +1934,377 @@ def test_a_failing_outcome_write_is_logged_and_the_job_still_ends(
         runner._execute(job)
     assert job.done.is_set()
     assert "could not record run 7" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Usage from the scan child (M2f-2 plan sections 0.2 #6, #7 and 4.5)
+# ---------------------------------------------------------------------------
+
+
+def _pending(requested_by: int | None, analyze: bool) -> _Pending:
+    return _Pending(
+        run_id=1,
+        project_id=1,
+        kind="scan",
+        trigger="manual" if analyze else "hook",
+        analyze=analyze,
+        requested_by=requested_by,
+        scan_requested=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [
+        ((5, False), (7, True), 7),  # a contributor's quick + an admin's describe
+        ((5, False), (6, False), 5),  # two quick: the first requester
+        ((None, False), (7, True), 7),  # system + full: the full requester
+        ((7, True), (5, False), 7),  # the full run's requester stays
+        ((7, True), (8, True), 7),  # two full: the first
+        ((None, False), (6, False), 6),  # system + quick: first non-null
+        ((5, False), (None, True), 5),  # a system full keeps the requester
+    ],
+)
+def test_merge_attributes_the_run_to_the_first_requester_who_asked_for_analysis(
+    first: tuple[int | None, bool],
+    second: tuple[int | None, bool],
+    expected: int,
+) -> None:
+    pending = _pending(*first)
+    pending.merge(
+        kind="scan",
+        trigger="manual",
+        analyze=second[1],
+        requested_by=second[0],
+        scan_requested=True,
+    )
+    assert pending.requested_by == expected
+    assert pending.analyze is (first[1] or second[1])
+
+
+GOOD_USAGE: dict[str, Any] = {
+    "type": "usage",
+    "task": "analyze",
+    "model_served": "claude-opus-4-7",
+    "input_tokens": 1000,
+    "output_tokens": 100,
+    "cache_read_tokens": None,
+    "cache_write_tokens": None,
+    "reasoning_tokens": None,
+    "provider_cost_usd": None,
+    "subject": "a" * 40,
+    "duration_ms": 12,
+}
+
+
+def test_a_usage_event_takes_provider_and_model_from_the_runner() -> None:
+    rec = parse_usage_event(
+        {**GOOD_USAGE, "provider_cost_usd": 0.5},
+        provider="openrouter",
+        model_requested="anthropic/claude-opus-4-7",
+    )
+    assert rec is not None
+    assert (rec.provider, rec.model_requested) == (
+        "openrouter",
+        "anthropic/claude-opus-4-7",
+    )
+    assert (rec.task, rec.subject, rec.provider_cost_usd) == ("analyze", "a" * 40, 0.5)
+    # Every count may be null; only `type` and `task` are required.
+    assert (
+        parse_usage_event(
+            {"type": "usage", "task": "analyze"}, provider="p", model_requested="m"
+        )
+        is not None
+    )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"provider": "anthropic"},  # attribution and pricing come from the runner
+        {"model_requested": "x"},
+        {"project_id": 2},
+        {"user_id": 2},
+        {"org_id": 2},
+        {"cost_usd": 0.1},
+        {"task": "chat"},
+        {"task": None},
+        {"input_tokens": -1},
+        {"input_tokens": 4_000_001},
+        {"input_tokens": "100"},
+        {"input_tokens": True},
+        {"input_tokens": 1.5},
+        {"cache_read_tokens": 4_000_001},
+        {"cache_write_tokens": -5},
+        {"output_tokens": 400_001},
+        {"reasoning_tokens": 400_001},
+        {"subject": "s" * 201},
+        {"subject": 5},
+        {"model_served": "m" * 201},
+        {"provider_cost_usd": 25.01},
+        {"provider_cost_usd": -0.01},
+        {"provider_cost_usd": "1"},
+        {"provider_cost_usd": True},
+        {"provider_cost_usd": float("nan")},
+        {"provider_cost_usd": float("inf")},
+        {"duration_ms": -1},
+        {"duration_ms": "5"},
+    ],
+)
+def test_a_malformed_usage_event_is_rejected(bad: dict[str, Any]) -> None:
+    assert (
+        parse_usage_event({**GOOD_USAGE, **bad}, provider="p", model_requested="m")
+        is None
+    )
+
+
+def test_the_run_usage_total_and_its_cost_source() -> None:
+    def row(source: str, cost: str | None) -> UsageRow:
+        return UsageRow(
+            org_id=1,
+            project_id=1,
+            project_slug="demo",
+            project_name="demo",
+            actor_kind="system",
+            user_id=None,
+            actor_label="System",
+            source="scan",
+            task="analyze",
+            provider="anthropic",
+            model_requested="m",
+            key_scope="none",
+            cost_source=source,
+            created_at="2026-10-07T00:00:00+00:00",
+            input_tokens=10,
+            output_tokens=None,
+            cost_usd=None if cost is None else Decimal(cost),
+        )
+
+    total = runner_mod._UsageTotal()
+    assert total.summary() == {
+        "calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cost_usd": 0.0,
+        "cost_source": None,
+    }
+    total.add(row("estimated", "0.25"))
+    total.add(row("estimated", "0.5"))
+    assert total.summary()["cost_source"] == "estimated"
+    total.add(row("unpriced", None))
+    assert total.summary() == {
+        "calls": 3,
+        "input_tokens": 30,
+        "output_tokens": 0,
+        "cost_usd": 0.75,
+        "cost_source": "estimated",  # mixed sources
+    }
+    only_provider = runner_mod._UsageTotal()
+    only_provider.add(row("provider", "0.1"))
+    assert only_provider.summary()["cost_source"] == "provider"
+
+
+def _scan_rows(state: Any, run_id: int | None = None) -> list[UsageEvent]:
+    assert state.usage_writer.flush()
+    with portal_db.get_session() as session:
+        query = select(UsageEvent).order_by(UsageEvent.id)
+        if run_id is not None:
+            query = query.where(UsageEvent.scan_run_id == run_id)
+        rows = session.exec(query).all()
+        for row in rows:
+            session.expunge(row)
+        return list(rows)
+
+
+def _ids(slug: str = "demo") -> SimpleNamespace:
+    with portal_db.get_session() as session:
+        project = session.exec(select(Project).where(Project.slug == slug)).one()
+        tess = session.exec(select(User).where(User.display_name == "Tess")).one()
+        return SimpleNamespace(
+            project_id=project.id, org_id=project.org_id, tess=tess.id
+        )
+
+
+def _usage_events(*subjects: str, **extra: Any) -> str:
+    return json.dumps(
+        [{**GOOD_USAGE, "subject": s, **extra} for s in subjects], separators=(",", ":")
+    )
+
+
+def test_scan_usage_is_attributed_to_the_requester_and_kept_out_of_events(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    local_project(portal, env, "demo")
+    ids = _ids()
+    with portal_db.get_session() as session:
+        put_secret(
+            session,
+            kind=LLM_API_KEY,
+            value="sk-test-key",
+            provider="anthropic",
+            org_id=ids.org_id,
+        )
+    state = portal.app.state.portal
+    state.contexts.invalidate()
+    first_scan(portal, "demo")
+
+    # A structure-only run's child has no key, so its events are dropped.
+    scanner.configure(usage=_usage_events("h" * 40))
+    scanner.hold.touch()
+    running = scan(portal, "demo", trigger="hook")
+    wait_for(lambda: len(scanner.calls()) == 2)
+    # The follow-up: a system (hook) request, then a member's full one.
+    scanner.configure(
+        usage=_usage_events("a" * 40, "b" * 40),
+        result_extra=json.dumps({"usage": {"calls": 999, "cost_usd": 0}}),
+    )
+    pending = scan(portal, "demo", trigger="hook")
+    assert scan(portal, "demo", trigger="manual") == pending
+    assert run_by_id(portal, "demo", pending)["requested_by"] == ids.tess
+    scanner.hold.unlink()
+    hook_run = wait_run(portal, "demo", running)
+    run = wait_run(portal, "demo", pending)
+    assert run["status"] == "ok"
+
+    assert _scan_rows(state, running) == []  # spending nothing writes nothing
+    assert hook_run["summary"]["usage"]["calls"] == 0
+    rows = _scan_rows(state, pending)
+    assert [r.subject for r in rows] == ["a" * 40, "b" * 40]
+    provider, model = Config().model_for("analyze")
+    for row in rows:
+        assert (row.org_id, row.project_id, row.project_slug) == (
+            ids.org_id,
+            ids.project_id,
+            "demo",
+        )
+        assert (row.actor_kind, row.user_id, row.actor_label) == (
+            "member",
+            ids.tess,
+            "Tess",
+        )
+        assert (row.source, row.task, row.scan_run_id) == ("scan", "analyze", pending)
+        assert (row.provider, row.model_requested) == (provider, model)
+        assert (row.key_scope, row.cost_source) == ("org", "estimated")
+        assert row.cost_usd == Decimal("0.0075")  # 1000 in x $5 + 100 out x $25
+    # The child's own `usage` in its result is overwritten by the runner's total.
+    assert run["summary"]["usage"] == {
+        "calls": 2,
+        "input_tokens": 2000,
+        "output_tokens": 200,
+        "cost_usd": 0.015,
+        "cost_source": "estimated",
+    }
+    assert state.spend.spent(ids.org_id, user_id=ids.tess) == Decimal("0.015")
+
+    # Never in the events file, so never in the SSE stream.
+    for run_id in (running, pending):
+        lines = (env.data / "runs" / f"{run_id}.jsonl").read_text().splitlines()
+        assert lines and all(json.loads(line)["type"] != "usage" for line in lines)
+    response = portal.get(f"/api/projects/demo/scans/{pending}/events")
+    data = [
+        json.loads(f["data"])["type"]
+        for f in _frames(response.text)
+        if f.get("event") is None
+    ]
+    assert "usage" not in data and data[-1] == "result"
+
+
+def test_scan_usage_lands_in_the_summary_of_failed_and_cancelled_runs(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    local_project(portal, env, "demo")
+    state = portal.app.state.portal
+    first_scan(portal, "demo")
+
+    scanner.configure(usage=_usage_events("a" * 40), exit=1)
+    failed = wait_run(portal, "demo", scan(portal, "demo", trigger="manual"))
+    assert failed["status"] == "failed"
+    assert failed["summary"]["usage"]["calls"] == 1
+    assert failed["summary"]["usage"]["cost_source"] == "estimated"
+
+    scanner.configure(usage=_usage_events("b" * 40, "c" * 40))
+    scanner.hold.touch()
+    running = scan(portal, "demo", trigger="manual")
+    wait_for(lambda: len(_scan_rows(state, running)) == 2)
+    assert cancel(portal, "demo", running).status_code == 202
+    cancelled = wait_run(portal, "demo", running)
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["summary"]["cancelled_by"] == "user"
+    assert cancelled["summary"]["usage"]["calls"] == 2
+    assert cancelled["summary"]["usage"]["input_tokens"] == 2000
+
+
+def test_scan_usage_is_capped_per_run_and_per_event(
+    portal: TestClient,
+    env: SimpleNamespace,
+    scanner: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    local_project(portal, env, "demo")
+    state = portal.app.state.portal
+    first_scan(portal, "demo")
+    monkeypatch.setattr(runner_mod, "USAGE_EVENTS_PER_RUN", 2)
+    monkeypatch.setattr(runner_mod, "USAGE_MAX_COST_USD", Decimal("0.001"))
+    monkeypatch.setattr(logging.getLogger("whygraph"), "propagate", True)
+    bad = {**GOOD_USAGE, "provider": "openai"}
+    scanner.configure(
+        usage=json.dumps([bad, bad, *[{**GOOD_USAGE, "subject": s} for s in "xyz"]])
+    )
+
+    with caplog.at_level("WARNING", logger=runner_mod.__name__):
+        run = wait_run(portal, "demo", scan(portal, "demo", trigger="manual"))
+
+    rows = _scan_rows(state, run["id"])
+    # Two malformed events count toward the cap too: nothing past it is taken.
+    assert rows == []
+    assert run["summary"]["usage"]["calls"] == 0
+    assert caplog.text.count("malformed") == 1  # logged once per run
+    assert caplog.text.count("more than 2 usage events") == 1
+
+    caplog.clear()
+    scanner.configure(usage=_usage_events("x" * 40, "y" * 40, "z" * 40))
+    with caplog.at_level("WARNING", logger=runner_mod.__name__):
+        run = wait_run(portal, "demo", scan(portal, "demo", trigger="manual"))
+    rows = _scan_rows(state, run["id"])
+    assert [r.subject for r in rows] == ["x" * 40, "y" * 40]
+    assert {r.cost_usd for r in rows} == {Decimal("0.001")}  # 0.0075 capped
+    assert run["summary"]["usage"]["cost_usd"] == 0.002
+    assert caplog.text.count("more than 2 usage events") == 1
+
+
+def test_a_recovered_merged_run_is_attributed_to_the_full_requester(
+    env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    with client_for() as client:
+        client.post("/api/portal/setup", json={"display_name": "Tess"})
+        local_project(client, env, "demo")
+        first_scan(client, "demo")
+    ids = _ids()
+    with portal_db.get_session() as session:
+        ada = User(display_name="Ada")
+        session.add(ada)
+        session.flush()
+        ada_id = ada.id
+    quick = _insert_run(ids.project_id, "scan", "manual", False, ada_id)
+    full = _insert_run(ids.project_id, "scan", "describe", True, ids.tess)
+
+    (spec,) = _recover_queued()
+    assert (spec.run_id, spec.requested_by, spec.analyze) == (quick, ids.tess, True)
+    with portal_db.get_session() as session:
+        assert session.get(ScanRun, quick).requested_by == ids.tess
+        assert session.get(ScanRun, full).status == "cancelled"
+        # Back to queued, so the next start recovers it and runs it.
+        session.get(ScanRun, quick).status = "queued"
+
+    scanner.configure(usage=_usage_events("a" * 40))
+    with client_for() as client:
+        run = wait_run(client, "demo", quick)
+        assert run["status"] == "ok"
+        (row,) = _scan_rows(client.app.state.portal, quick)
+    assert (row.user_id, row.actor_label, row.actor_kind) == (
+        ids.tess,
+        "Tess",
+        "member",
+    )
+    assert run["summary"]["usage"]["calls"] == 1

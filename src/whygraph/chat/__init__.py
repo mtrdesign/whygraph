@@ -32,6 +32,7 @@ from __future__ import annotations
 from .harness import (
     HarnessEvent,
     RoundLimit,
+    RoundUsage,
     ToolCallStarted,
     ToolResultReady,
     build_system_prompt,
@@ -43,6 +44,7 @@ from .tools import ToolRegistry
 __all__ = [
     "HarnessEvent",
     "RoundLimit",
+    "RoundUsage",
     "ToolCallStarted",
     "ToolRegistry",
     "ToolResultReady",

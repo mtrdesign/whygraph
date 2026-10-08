@@ -35,8 +35,9 @@ True
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Mapping
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
@@ -83,7 +84,24 @@ class ProjectContext:
         generation on a cache miss. ``True`` (the default) everywhere but
         a portal request by a project *viewer*, whose bound context is a
         ``dataclasses.replace`` copy with ``False`` (M2f-1 plan section
-        4.6) - never a mutation of the cached context.
+        4.6) - never a mutation of the cached context - and a portal
+        request an exhausted hard-stopped budget covers (M2f-2).
+    llm_block : str or None
+        Why ``llm_allowed`` is false, when the portal turned it off:
+        ``"role"`` (a project viewer) or ``"budget_exceeded"`` (an
+        exhausted hard-stopped budget). ``None`` otherwise. Set only on a
+        ``dataclasses.replace`` copy (M2f-2 plan section 4.7).
+    llm_block_scope : str or None
+        With ``llm_block="budget_exceeded"``: which budget is exhausted,
+        ``"org"``, ``"project"`` or ``"member"``.
+    key_scopes : Mapping[str, str]
+        Where each LLM provider's API key comes from, per provider tag:
+        ``"project"`` (the project's own key), ``"org"`` (its org's
+        default), ``"environment"`` (no stored key, but the provider's
+        environment variable is set in this process) or ``"none"``. Filled
+        by the portal when it builds the context (usage attribution, M2f-2
+        plan section 0.2 #8); empty elsewhere. Per project, so safe to
+        cache; never mutated.
     """
 
     slug: str
@@ -91,6 +109,9 @@ class ProjectContext:
     config: Config
     remote: RemoteProject | None = None
     llm_allowed: bool = True
+    llm_block: str | None = None
+    llm_block_scope: str | None = None
+    key_scopes: Mapping[str, str] = field(default_factory=dict, hash=False)
 
 
 _current: ContextVar[ProjectContext | None] = ContextVar(

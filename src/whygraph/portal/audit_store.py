@@ -27,8 +27,6 @@ the lifespan runs once a day.
 
 from __future__ import annotations
 
-import csv
-import io
 import json
 import logging
 import queue
@@ -45,6 +43,8 @@ from sqlmodel import col, select
 
 from whygraph.services.git.credentials import redact_tokens
 
+from .csv_export import csv_cell
+from .csv_export import csv_line as _csv_line
 from .db import get_session
 from .models import AuditEvent, Organization, User
 
@@ -89,9 +89,6 @@ CSV_COLUMNS = (
     "fields",
 )
 """The CSV export's header row."""
-
-_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
-"""First characters a spreadsheet reads as a formula (CSV injection)."""
 
 _STOP = object()
 
@@ -618,37 +615,6 @@ def query_events(
         events = [_row(event, uid) for event, uid in rows[:limit]]
     more = len(rows) > limit
     return events, (events[-1]["id"] if more and events else None)
-
-
-def csv_cell(value: Any) -> str:
-    """One CSV cell, escaped against formula injection.
-
-    A string whose first character is ``=``, ``+``, ``-``, ``@``, a tab or
-    a carriage return is prefixed with ``'``; ``None`` is empty.
-
-    Parameters
-    ----------
-    value : object
-        The cell's value.
-
-    Returns
-    -------
-    str
-        The cell text (``csv.writer`` quotes it).
-    """
-    if value is None:
-        return ""
-    if not isinstance(value, str):
-        return str(value)
-    if value.startswith(_FORMULA_PREFIXES):
-        return "'" + value
-    return value
-
-
-def _csv_line(cells: list[Any]) -> str:
-    buffer = io.StringIO()
-    csv.writer(buffer).writerow([csv_cell(c) for c in cells])
-    return buffer.getvalue()
 
 
 def iter_csv(

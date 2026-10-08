@@ -2,7 +2,7 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { PROJECT_ACTIONS } from "../lib/permissions";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
+import { RouterProvider, createMemoryHistory, useSearch } from "@tanstack/react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, portalKey, projectApi, projectKey } from "../api";
 import { buildCrumbs } from "../components/shell/crumbs";
@@ -28,6 +28,13 @@ vi.mock("../pages/ExplorerPage", () => ({
         <span data-testid="hit">{hit.data?.results[0]?.name ?? "-"}</span>
       </div>
     );
+  },
+}));
+vi.mock("../pages/UsagePage", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../pages/UsagePage")>()),
+  UsagePage: function UsageProbe() {
+    const search = useSearch({ strict: false });
+    return <div data-testid="usage">{JSON.stringify(search)}</div>;
   },
 }));
 vi.mock("../components/chat/ChatView", () => ({
@@ -94,6 +101,15 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
         user: fake.setupComplete ? { uid: "u1", display_name: "Tsvetoslav", role: "owner" } : null,
         port: 8765,
         shared_folders: [],
+        usage: fake.setupComplete
+          ? {
+              month: "2026-10",
+              resets_at: "2026-11-01T00:00:00+00:00",
+              me: null,
+              org: { spent_usd: 1, budget_usd: null, pct: null, hard_stop: false, blocked: false },
+              projects_over: [],
+            }
+          : null,
       }),
     );
   }
@@ -198,6 +214,14 @@ describe("breadcrumbs", () => {
     ]);
     expect(buildCrumbs("/projects/new").map((c) => c.label)).toEqual(["Projects", "Add project"]);
   });
+
+  it("names the Usage & cost pages", () => {
+    expect(buildCrumbs("/usage").map((c) => c.label)).toEqual(["Usage & cost"]);
+    expect(buildCrumbs("/usage/me").map((c) => c.label)).toEqual(["Usage & cost", "My usage"]);
+    expect(buildCrumbs("/usage/me")[0].to).toEqual({ to: "/usage" });
+    expect(buildCrumbs("/usage/members/u7", undefined, "Ben").map((c) => c.label)).toEqual(["Usage & cost", "Ben"]);
+    expect(buildCrumbs("/usage/members/u7").map((c) => c.label)).toEqual(["Usage & cost", "u7"]);
+  });
 });
 
 // ---- routes ----------------------------------------------------------------------
@@ -275,6 +299,22 @@ describe("portal routes", () => {
     expect(within(nav).getByRole("link", { name: "Settings" })).toHaveAttribute("href", "/settings");
     expect(within(nav).queryByRole("link", { name: "Explorer" })).toBeNull();
     expect(await screen.findByText("Tsvetoslav")).toBeInTheDocument();
+  });
+
+  it("serves /usage with its validated search, and a sidebar item", async () => {
+    const { router } = mount("/usage?tab=calls&project=alpha&scan_run=7&sort=bogus");
+    const probe = await screen.findByTestId("usage");
+    expect(JSON.parse(probe.textContent ?? "{}")).toEqual({ tab: "calls", project: "alpha", scan_run: "7" });
+    // The router rewrites the address to the validated search.
+    await waitFor(() => expect(here(router)).toBe("/usage?tab=calls&project=alpha&scan_run=7"));
+    const nav = screen.getByRole("navigation", { name: "Main" });
+    expect(within(nav).getByRole("link", { name: "Usage & cost" })).toHaveAttribute("href", "/usage");
+  });
+
+  it.each(["/usage/me", "/usage/members/u2"])("keeps the production-only %s not found locally", async (path) => {
+    mount(path);
+    expect(await screen.findByText("Page not found")).toBeInTheDocument();
+    expect(screen.queryByTestId("usage")).toBeNull();
   });
 
   it.each(["/projects/new", "/settings"])("serves %s", async (path) => {

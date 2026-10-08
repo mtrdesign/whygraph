@@ -115,6 +115,33 @@ one.
 
 Timeouts default higher than the hosted providers because local inference is slower.
 
+## What each provider reports
+
+The portal records every successful call in its [usage ledger](../portal/usage.md): the tokens the
+provider reported, and a cost. What a provider reports decides how that cost is made.
+
+| Provider | Tokens recorded | Cost |
+|---|---|---|
+| `anthropic` | Input (cache reads and cache writes included), output, and the cache read and write counts | **Estimated** from the price table |
+| `openai` | Input, output, cached input, and reasoning tokens when the model reports them | **Estimated** from the price table |
+| `deepseek` | Input, output, cache hits, and reasoning tokens when reported | **Unpriced** unless your organization adds a price: the bundled table has no DeepSeek rows, because its model names are retired and reused |
+| `openrouter` | Input, output, cache reads and writes, reasoning tokens | **Provider-reported**: the `cost` OpenRouter charged. On a BYOK request OpenRouter's own charge excludes the upstream provider's, so WhyGraph adds the upstream inference cost to it |
+| `ollama` | Input and output tokens only | **Unpriced**: a local model has no bill |
+
+Three rules sit on top of that:
+
+- **A cost the provider reports wins.** Only OpenRouter reports one. Every other priced call is
+  `estimated`: its tokens times the price for that model, with cache reads and writes at their own
+  rates (a missing cache rate falls back to the input rate).
+- **A model with no price is `unpriced`.** Its tokens still count, its cost does not, and it is
+  not counted toward [budgets](../portal/usage.md#budgets-and-the-hard-stop). An organization can add a
+  price for it on the Usage & cost page's Prices tab.
+- **A custom endpoint is never priced from the bundled table.** If a provider's `base_url` or `host`
+  is changed (an OpenAI-compatible gateway, an Ollama daemon, a proxy), the other end may be a
+  different service with different rates, so only an organization's own price override applies. An
+  OpenRouter id such as `anthropic/claude-sonnet-4` is priced by the model behind it when no cost was
+  reported.
+
 ## When a provider is misconfigured
 
 It depends on the role:

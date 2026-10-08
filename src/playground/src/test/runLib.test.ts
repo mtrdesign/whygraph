@@ -117,6 +117,12 @@ describe("scan formatting", () => {
     expect(triggerLabel(row({ trigger: "reconcile" }))).toBe("Reconcile");
     expect(runOutcome(row({ status: "failed", summary: { error: "boom" } }))).toBe("boom");
     expect(runOutcome(row({ status: "failed", summary: { exit_code: 2 } }))).toBe("Exit code 2");
+    expect(runOutcome(row({ status: "cancelled", summary: { cancelled_by: "budget" } }))).toBe(
+      "Stopped: monthly budget reached",
+    );
+    expect(runOutcome(row({ summary: { analyze_skipped: "budget" } }))).toBe(
+      "LLM phase skipped: monthly budget reached",
+    );
     expect(runOutcome(row({ status: "cancelled", summary: { merged_into: 9 } }))).toBe("Merged into run #9");
     expect(runOutcome(row({ status: "cancelled", summary: { cancelled_by: "user" } }))).toBe("Cancelled by you");
     expect(runOutcome(row({ kind: "sync", summary: { moved: true } }))).toBe("Fetched new commits");

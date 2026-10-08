@@ -48,7 +48,15 @@ export default defineConfig({
     // logged bootstrap secret. Independent of the local-mode projects above.
     {
       name: "production",
-      testMatch: /production\.spec\.ts/,
+      testMatch: /(^|\/)production\.spec\.ts/,
+      use: { baseURL: env.prodUrl, colorScheme: "light" },
+    },
+    // Usage & cost on the production portal (M2f-2): its own organization, after
+    // the claimed instance. One project, so its member budget never collides.
+    {
+      name: "production-usage",
+      testMatch: /usage-production\.spec\.ts/,
+      dependencies: ["production"],
       use: { baseURL: env.prodUrl, colorScheme: "light" },
     },
     // A project linked to the platform (M2e): it drives both portals, so its

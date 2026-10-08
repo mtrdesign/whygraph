@@ -47,6 +47,7 @@ ALL_PERMISSIONS = [
     "project.configure",
     "project.setup",
     "project.access",
+    "project.usage",
 ]
 CONTRIBUTOR_PERMISSIONS = ["project.read", "project.chat", "project.scan"]
 

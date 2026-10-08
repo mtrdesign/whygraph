@@ -263,9 +263,9 @@ GitHub username exists". Adding is throttled to 60 per hour per organization.
 
 | Who | Can |
 |---|---|
-| **Member** | Read the organization. What a member can do on each project comes from their [project role](#project-roles). |
-| **Admin** | Everything a member can, plus import and remove projects, manage people (add members and admins, change their roles, remove them), and administer every project. Cannot make or touch an owner. |
-| **Owner** | Everything an admin can, plus make or demote an owner, remove an owner, change the organization's settings and organization-level keys, read the [audit page](#the-security-event-log), transfer ownership and [delete the organization](#deleting-an-organization). |
+| **Member** | Read the organization. See **their own** [usage](../portal/usage.md#who-triggered-a-call) and budget, and nobody else's. What a member can do on each project comes from their [project role](#project-roles). |
+| **Admin** | Everything a member can, plus import and remove projects, manage people (add members and admins, change their roles, remove them), and administer every project. See the organization's **Usage & cost**, everyone's spend included, and set [budgets](../portal/usage.md#budgets-and-the-hard-stop) and the price table. Cannot make or touch an owner, and cannot set or remove their own or an owner's per-member budget. |
+| **Owner** | Everything an admin can, plus make or demote an owner, remove an owner, change the organization's settings and organization-level keys, read the [audit page](#the-security-event-log), transfer ownership and [delete the organization](#deleting-an-organization). Owners can set anyone's per-member budget. |
 
 Admins and owners are admins of every project in the organization, always, and cannot be Restricted out
 of one.
@@ -285,9 +285,34 @@ A member's role on a project is the one granted to them on it, or else the organ
 | Quick rescan (git and CodeGraph, no LLM) | - | yes | yes |
 | Full rescan and Describe now (LLM) | - | - | yes |
 | Settings, keys and the project's access list | - | - | yes |
+| The project's **usage** and its budget: this month's spend, each person's share, the project budget | - | - | yes |
 
 A viewer never causes LLM spend: no chat, no new rationale card and no lazy description backfill,
 whether they use the Explorer, a connected portal or an agent.
+
+### Usage and budgets
+
+Every LLM call the portal makes is recorded with who triggered it, so an organization can see what it
+spends and cap it. The full picture is on [Usage & cost](../portal/usage.md); what matters for roles
+is this:
+
+- **Owners and admins see everyone.** The organization's Usage & cost page has a Members tab, a
+  drill-down per person and a "this month" figure beside each person on the Members page and in a
+  project's Access section. **A member sees only their own** spend, on **My usage** (Account page
+  and the Usage & cost item). The portal never returns chat content or prompt text through any of it:
+  counts, cost and a short subject such as a commit hash or a file path.
+- **A project admin sees that project's usage** in its Settings, under **Usage**: the month's spend,
+  its budget and each person's share of it.
+- **Instance admins** reading an organization see its usage too, read-only, like everything else
+  they read.
+- **Budgets** can be set per organization, per project, per member (an organization-wide default plus
+  personal overrides) and every one must be at or below the organization's budget. With the **hard
+  stop** on, a used-up budget makes whoever it covers behave like a Viewer for LLM spend until the
+  month resets or the budget is raised: no chat, no new rationale card, no full scan. A member's
+  budget covers that member everywhere; a project's covers everyone on that project; the
+  organization's covers everyone, owners included. Reading and quick scans keep working.
+- A **Viewer** and a member whose hard stop engaged are different: the role is permanent, the stop
+  lifts itself. When both apply, the role is what the notice says.
 
 ### Restricted projects and the default
 
@@ -490,10 +515,22 @@ the lazy description of commits that have none. Both spend the organization's ow
 | `[rationale].agent_generations_per_hour` | `120` | Rationale cards generated for agents, per hour, across the organization |
 | `[analyze].agent_descriptions_per_hour` | `600` | Commits described for agents' evidence, per hour, across the organization |
 
+Each also has a **per-member** limit, so one person's agents cannot use the whole allowance:
+
+| Setting | Default | Counts |
+|---|---|---|
+| `[rationale].agent_generations_per_member_per_hour` | `30` | Rationale cards generated for **one member's** agents, per hour |
+| `[analyze].agent_descriptions_per_member_per_hour` | `150` | Commits described for **one member's** agents, per hour |
+
+Every call must fit under both its member limit and the organization limit, which stays the ceiling
+for everyone together.
+
 `0` means agents get only what already exists: cached cards and existing descriptions. A card
 already in the cache is always served, and it is shared by every member and by the Explorer, so each
-is paid for once. When the limit is reached an agent is told so (`429 generation_limited`, or `403
-generation_disabled` for `0`); a missing rationale key is `409 no_llm_key`. These two keys exist
+is paid for once. When a limit is reached an agent is told so (`429 generation_limited`, or `403
+generation_disabled` for `0`), and the answer carries a `scope` of `org` or `member` saying which
+limit it was; a missing rationale key is `409 no_llm_key`. A [budget](../portal/usage.md#budgets-and-the-hard-stop)
+that is used up with the hard stop on answers `403 budget_exceeded`, also with a `scope`. These four keys exist
 **only** as organization defaults: they are never set per project and never imported from a
 repository. See [Configuration](../reference/configuration.md#agent-limits-organization-only).
 
@@ -505,8 +542,8 @@ bounded amount of `git` work.
 
 An **owner** deletes an organization from its **Settings** page (the danger zone), by typing the
 organization's slug. It is **immediate**, with no grace period and no undo: running scans are
-cancelled, then the projects, their server copies and scan files, the memberships, the settings and
-the keys go in one operation. **The slug is retired forever** - nobody can create an organization
+cancelled, then the projects, their server copies and scan files, the memberships, the settings, the
+keys and the [usage history and budgets](../portal/usage.md#retention-and-deletion) go in one operation. **The slug is retired forever** - nobody can create an organization
 with it again. Members keep their accounts and sessions, and the organization's address stops
 answering.
 
@@ -540,6 +577,10 @@ plus these GitHub, member, project and organization events:
 | `project_access_lost`, `project_access_restored` | A project lost its GitHub access (with the reason), or got it back. |
 | `webhook_rejected` | A webhook delivery had a missing or wrong signature. |
 | `org_deleted` | An owner deleted an organization (with its project count). |
+| `budget_threshold_crossed` | A budget passed 50, 75 or 100% of its month, once per threshold per month (with the `scope` - `org`, `project` or `member` - the `threshold`, the spend and the budget, and the member or project it names). |
+| `budget_hard_stop_engaged` | A budget with the hard stop reached 100% (same fields): LLM spend it covers is off until the month resets or the budget is raised. |
+| `budget_set`, `budget_removed` | An owner or admin set or removed a budget (with its scope, amount and hard-stop flag, and the member or project). |
+| `price_override_set`, `price_override_removed` | An owner or admin set or reverted an organization price for a provider and model. |
 
 Each carries the event, the user, the target user, the client address and the host. A password
 sign-in failure shows only the first 3 characters of the email and its domain. No token, code, state,

@@ -48,7 +48,8 @@ import httpx
 import pytest
 
 from conftest import build_fake_codegraph_db
-from platform_fake import ORG, PLATFORM_ORIGIN, SLUG, TOKEN, FakePlatform
+from platform_fake import ORG, PLATFORM_ORIGIN, SLUG, TOKEN, FakePlatform, error_body
+from whygraph.api_v1 import PLATFORM_BUDGET_MESSAGE
 from whygraph.core.config import Config
 from whygraph.core.context import ProjectContext, ProjectContextError, use_project
 from whygraph.db import get_engine, get_session
@@ -435,6 +436,23 @@ def test_mcp_linked_rationale_sends_the_same_reduced_target(
     assert "limit" not in body
     assert card["purpose"] == "p"
     assert card["platform"] == {"status": "ok", "url": API_ORIGIN}
+
+
+def test_mcp_linked_rationale_shows_the_platforms_budget_refusal(
+    linked: ProjectContext, repo: SimpleNamespace, fake: FakePlatform
+) -> None:
+    """A platform's ``403 budget_exceeded`` (M2f-2): its scope-neutral message."""
+    fake.responses["rationale"] = (
+        403,
+        error_body("budget_exceeded", PLATFORM_BUDGET_MESSAGE, scope="org"),
+    )
+    with use_project(linked), pytest.raises(WhyGraphError) as caught:
+        whygraph_rationale_brief(qualified_name="pkg.mixed")
+    assert PLATFORM_BUDGET_MESSAGE in str(caught.value)
+    # An answer about one request, not about the link: the link stays ok.
+    with use_project(linked):
+        payload = whygraph_evidence_for(path="a.py", line_start=1, line_end=6)
+    assert payload["platform"]["status"] == "ok"
 
 
 # ---------------------------------------------------------------------------

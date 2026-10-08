@@ -87,6 +87,7 @@ nav:
       - Adding projects: portal/projects.md
       - Projects from a platform: portal/platform-projects.md
       - Connecting agents: portal/agents.md
+      - Usage & cost: portal/usage.md
       - Security model: portal/security.md
       - Backup and restore: portal/backup.md
       - Upgrading: portal/upgrading.md

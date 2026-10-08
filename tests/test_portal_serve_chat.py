@@ -28,7 +28,13 @@ from sqlmodel import select
 
 from test_portal_app import env  # noqa: F401 -- `env` is a fixture
 from test_portal_serve_api import ScopedClient, portal_with_project, use_project_config
-from whygraph.chat.harness import RoundLimit, ToolCallStarted, ToolResultReady
+from whygraph.chat.harness import (
+    BudgetStop,
+    RoundLimit,
+    RoundUsage,
+    ToolCallStarted,
+    ToolResultReady,
+)
 from whygraph.core.config import ChatConfig, Config, LlmConfig, OpenAIConfig
 from whygraph.core.context import use_project
 from whygraph.db import get_session as project_session
@@ -36,7 +42,13 @@ from whygraph.db.models import ChatSession as ChatSessionRow
 from whygraph.portal import db as portal_db
 from whygraph.portal.models import User
 from whygraph.serve import chat as serve_chat
-from whygraph.services.llm.chat import ModelInfo, TextDelta, ToolCall, TurnDone
+from whygraph.services.llm.chat import (
+    ModelInfo,
+    TextDelta,
+    ToolCall,
+    ToolCallMade,
+    TurnDone,
+)
 from whygraph.services.llm.exceptions import LlmError
 
 
@@ -366,6 +378,7 @@ def test_text_only_turn_streams_and_persists(chat_client, monkeypatch) -> None:
         [
             TextDelta(text="Because "),
             TextDelta(text="history."),
+            RoundUsage(input_tokens=11, output_tokens=22),
             TurnDone("stop", 11, 22),
         ],
     )
@@ -398,10 +411,12 @@ def test_tool_round_frames_and_rows(chat_client, monkeypatch) -> None:
         monkeypatch,
         [
             TextDelta(text="Looking… "),
+            RoundUsage(input_tokens=3, output_tokens=4),
             ToolCallStarted(call=call),
             ToolResultReady(call=call, result=json.dumps({"count": 1})),
             TextDelta(text="Found it."),
-            TurnDone("stop", 5, 6),
+            RoundUsage(input_tokens=5, output_tokens=6),
+            TurnDone("stop", 8, 10),
         ],
     )
     session = _new_session(chat_client)
@@ -433,7 +448,10 @@ def test_tool_round_frames_and_rows(chat_client, monkeypatch) -> None:
     # …and the final prose is its own row, with the usage attached.
     assert messages[3]["content"] == "Found it."
     assert messages[3]["tool_calls"] == []
-    assert messages[3]["output_tokens"] == 6
+    # Each round's row carries that round's tokens; `done` the turn total.
+    assert (messages[1]["input_tokens"], messages[1]["output_tokens"]) == (3, 4)
+    assert (messages[3]["input_tokens"], messages[3]["output_tokens"]) == (5, 6)
+    assert (frames[-1]["input_tokens"], frames[-1]["output_tokens"]) == (8, 10)
 
 
 def test_tool_result_is_truncated_for_display_only(chat_client, monkeypatch) -> None:
@@ -443,9 +461,11 @@ def test_tool_result_is_truncated_for_display_only(chat_client, monkeypatch) -> 
     _stub_harness(
         monkeypatch,
         [
+            RoundUsage(),
             ToolCallStarted(call=call),
             ToolResultReady(call=call, result=big),
             TextDelta(text="done"),
+            RoundUsage(),
             TurnDone("stop"),
         ],
     )
@@ -467,9 +487,11 @@ def test_round_limit_emits_its_own_frame(chat_client, monkeypatch) -> None:
     _stub_harness(
         monkeypatch,
         [
+            RoundUsage(),
             ToolCallStarted(call=call),
             ToolResultReady(call=call, result="{}"),
             RoundLimit(rounds=3),
+            RoundUsage(),
             TurnDone("tool_calls"),
         ],
     )
@@ -480,6 +502,246 @@ def test_round_limit_emits_its_own_frame(chat_client, monkeypatch) -> None:
     types = [f["type"] for f in _frames(response)]
     assert "round_limit" in types
     assert types[-1] == "done"  # never a hung stream
+
+
+def test_tool_only_rounds_are_separate_rows_with_their_own_usage(
+    chat_client, monkeypatch
+) -> None:
+    """One assistant row per provider round; tool-only rounds no longer merge."""
+    a = ToolCall(id="a", name="search_symbols", arguments={"query": "a"})
+    b = ToolCall(id="b", name="get_symbol", arguments={"qualified_name": "b"})
+    _stub_harness(
+        monkeypatch,
+        [
+            RoundUsage(input_tokens=100, output_tokens=10, model="served-1"),
+            ToolCallStarted(call=a),
+            ToolResultReady(call=a, result='{"a": 1}'),
+            RoundUsage(input_tokens=200, output_tokens=20),
+            ToolCallStarted(call=b),
+            ToolResultReady(call=b, result='{"b": 2}'),
+            TextDelta(text="Answer."),
+            RoundUsage(input_tokens=300, output_tokens=30, model="served-3"),
+            TurnDone("stop", 600, 60, model="served-3"),
+        ],
+    )
+    session = _new_session(chat_client, provider="openrouter", model="openrouter/auto")
+    frames = _frames(
+        chat_client.post(
+            f"/api/chat/sessions/{session['id']}/messages", json={"content": "q"}
+        )
+    )
+    # RoundUsage is not a frame of its own.
+    assert [f["type"] for f in frames] == [
+        "tool_call",
+        "tool_result",
+        "tool_call",
+        "tool_result",
+        "text_delta",
+        "done",
+    ]
+
+    messages = chat_client.get(f"/api/chat/sessions/{session['id']}").json()["messages"]
+    assert [m["role"] for m in messages] == [
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+        "tool",
+        "assistant",
+    ]
+    rounds = [m for m in messages if m["role"] == "assistant"]
+    assert [[c["id"] for c in m["tool_calls"]] for m in rounds] == [["a"], ["b"], []]
+    assert [(m["input_tokens"], m["output_tokens"]) for m in rounds] == [
+        (100, 10),
+        (200, 20),
+        (300, 30),
+    ]
+    # The served model wins where the round reported one; the session's
+    # requested model otherwise. The provider is always the session's.
+    assert [m["model"] for m in rounds] == ["served-1", "openrouter/auto", "served-3"]
+    assert all(m["provider"] == "openrouter" for m in rounds)
+    # Each tool row follows the round that called it.
+    assert messages[2]["tool_call_id"] == "a"
+    assert messages[4]["tool_call_id"] == "b"
+
+    done = frames[-1]
+    assert (done["input_tokens"], done["output_tokens"]) == (600, 60)
+    assert done["message_id"] == rounds[-1]["id"]
+
+
+class _TwoRoundClient:
+    """A port-shaped client: a tool-only round, then an answer round."""
+
+    provider = "openai"
+    model = "gpt-4o"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def stream_turn(self, request):
+        self.calls += 1
+        if self.calls == 1:
+            yield ToolCallMade(
+                call=ToolCall(id="u1", name="no_such_tool", arguments={})
+            )
+            yield TurnDone("tool_calls", 40, 4, model="gpt-4o-2026-01-01")
+        else:
+            yield TextDelta(text="Done.")
+            yield TurnDone("stop", 60, 6, model="gpt-4o-2026-01-01")
+
+
+def test_real_harness_rows_match_its_rounds(chat_client, monkeypatch) -> None:
+    """The real ``run_turn`` and the serve layer agree on round boundaries."""
+    monkeypatch.setattr(
+        serve_chat, "make_chat_client", lambda *a, **k: _TwoRoundClient()
+    )
+    session = _new_session(chat_client, provider="openai", model="gpt-4o")
+    frames = _frames(
+        chat_client.post(
+            f"/api/chat/sessions/{session['id']}/messages", json={"content": "q"}
+        )
+    )
+    assert frames[-1]["type"] == "done"
+    assert (frames[-1]["input_tokens"], frames[-1]["output_tokens"]) == (100, 10)
+
+    messages = chat_client.get(f"/api/chat/sessions/{session['id']}").json()["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant", "tool", "assistant"]
+    rounds = [m for m in messages if m["role"] == "assistant"]
+    assert [(m["input_tokens"], m["output_tokens"]) for m in rounds] == [
+        (40, 4),
+        (60, 6),
+    ]
+    assert {m["model"] for m in rounds} == {"gpt-4o-2026-01-01"}
+
+
+def test_round_limit_flushes_the_last_tool_round(chat_client, monkeypatch) -> None:
+    call = ToolCall(id="c1", name="search_symbols", arguments={"query": "x"})
+    _stub_harness(
+        monkeypatch,
+        [
+            TextDelta(text="Searching."),
+            RoundUsage(input_tokens=10, output_tokens=1),
+            ToolCallStarted(call=call),
+            ToolResultReady(call=call, result="{}"),
+            RoundLimit(rounds=1),
+            TextDelta(text="Here is what I have."),
+            RoundUsage(input_tokens=20, output_tokens=2),
+            TurnDone("stop", 30, 3),
+        ],
+    )
+    session = _new_session(chat_client)
+    chat_client.post(
+        f"/api/chat/sessions/{session['id']}/messages", json={"content": "q"}
+    )
+
+    messages = chat_client.get(f"/api/chat/sessions/{session['id']}").json()["messages"]
+    assert [(m["role"], m["content"]) for m in messages] == [
+        ("user", "q"),
+        ("assistant", "Searching."),
+        ("tool", "{}"),
+        ("assistant", "Here is what I have."),
+    ]
+    assert [m["output_tokens"] for m in messages if m["role"] == "assistant"] == [1, 2]
+
+
+def test_a_budget_stop_writes_the_budget_row_as_the_turns_last(
+    chat_client, monkeypatch
+) -> None:
+    """The buffered round is flushed, then one budget row; a refresh replays it."""
+    call = ToolCall(id="c1", name="search_symbols", arguments={"query": "x"})
+    _stub_harness(
+        monkeypatch,
+        [
+            TextDelta(text="Searching."),
+            RoundUsage(input_tokens=10, output_tokens=1),
+            ToolCallStarted(call=call),
+            ToolResultReady(call=call, result="{}"),
+            BudgetStop(scope="project"),
+            TurnDone("tool_calls", 10, 1),
+        ],
+    )
+    session = _new_session(chat_client)
+    frames = _frames(
+        chat_client.post(
+            f"/api/chat/sessions/{session['id']}/messages", json={"content": "q"}
+        )
+    )
+    assert [f["type"] for f in frames] == [
+        "text_delta",
+        "tool_call",
+        "tool_result",
+        "budget_exceeded",
+        "done",
+    ]
+    assert frames[3]["scope"] == "project"
+    assert frames[3]["message"] == serve_chat.BUDGET_STOP_MESSAGE
+    messages = chat_client.get(f"/api/chat/sessions/{session['id']}").json()["messages"]
+    assert [(m["role"], m["content"], m["error"]) for m in messages] == [
+        ("user", "q", None),
+        ("assistant", "Searching.", None),
+        ("tool", "{}", None),
+        ("assistant", serve_chat.BUDGET_STOP_MESSAGE, "budget_exceeded"),
+    ]
+    assert messages[1]["input_tokens"] == 10
+    assert messages[3]["input_tokens"] is None
+    assert frames[3]["message_id"] == frames[-1]["message_id"] == messages[3]["id"]
+    assert (frames[-1]["input_tokens"], frames[-1]["output_tokens"]) == (10, 1)
+
+
+def test_a_round_that_reported_tokens_gets_a_row_even_without_text(
+    chat_client, monkeypatch
+) -> None:
+    """The rows of a turn add up to its total, even for an empty answer."""
+    call = ToolCall(id="c1", name="search_symbols", arguments={"query": "x"})
+    _stub_harness(
+        monkeypatch,
+        [
+            RoundUsage(input_tokens=10, output_tokens=1),
+            ToolCallStarted(call=call),
+            ToolResultReady(call=call, result="{}"),
+            RoundUsage(input_tokens=12, output_tokens=0),
+            TurnDone("stop", 22, 1),
+        ],
+    )
+    session = _new_session(chat_client)
+    frames = _frames(
+        chat_client.post(
+            f"/api/chat/sessions/{session['id']}/messages", json={"content": "q"}
+        )
+    )
+    messages = chat_client.get(f"/api/chat/sessions/{session['id']}").json()["messages"]
+    rounds = [m for m in messages if m["role"] == "assistant"]
+    assert [(m["content"], m["input_tokens"]) for m in rounds] == [("", 10), ("", 12)]
+    assert sum(m["input_tokens"] for m in rounds) == frames[-1]["input_tokens"]
+
+
+def test_an_error_after_a_finished_round_keeps_that_rounds_usage(
+    chat_client, monkeypatch
+) -> None:
+    call = ToolCall(id="c1", name="search_symbols", arguments={"query": "x"})
+
+    def _fails_in_round_two(*, client, history, registry=None, **kwargs):
+        yield RoundUsage(input_tokens=10, output_tokens=1, model="served")
+        yield ToolCallStarted(call=call)
+        yield ToolResultReady(call=call, result="{}")
+        yield TextDelta(text="Partial")
+        raise LlmError("connection reset")
+
+    monkeypatch.setattr(serve_chat, "make_chat_client", lambda *a, **k: object())
+    monkeypatch.setattr(serve_chat, "run_turn", _fails_in_round_two)
+    session = _new_session(chat_client, provider="openai", model="gpt-4o")
+    chat_client.post(
+        f"/api/chat/sessions/{session['id']}/messages", json={"content": "q"}
+    )
+
+    messages = chat_client.get(f"/api/chat/sessions/{session['id']}").json()["messages"]
+    rounds = [m for m in messages if m["role"] == "assistant"]
+    # Round 1 was flushed whole when round 2's text began; round 2 never
+    # finished, so its row has the error and no tokens.
+    assert [(m["input_tokens"], m["model"], m["error"]) for m in rounds] == [
+        (10, "served", None),
+        (None, "gpt-4o", "connection reset"),
+    ]
 
 
 def test_history_is_passed_to_the_harness_and_accumulates(
@@ -510,9 +772,11 @@ def test_history_round_trips_tool_calls(chat_client, monkeypatch) -> None:
     _stub_harness(
         monkeypatch,
         [
+            RoundUsage(),
             ToolCallStarted(call=call),
             ToolResultReady(call=call, result="{}"),
             TextDelta(text="answer"),
+            RoundUsage(),
             TurnDone("stop"),
         ],
     )

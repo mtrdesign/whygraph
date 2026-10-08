@@ -93,6 +93,7 @@ class _CountingGenerator:
         evidence: Sequence[CommitEvidence],
         *,
         symbol_context: SymbolContext | None = None,
+        subject: str | None = None,
     ) -> Rationale:
         type(self).calls += 1
         return Rationale(

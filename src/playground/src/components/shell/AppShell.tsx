@@ -1,6 +1,8 @@
 import { Fragment, type ReactNode } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
 import { MenuIcon } from "lucide-react";
+import { membersApi, portalKey } from "../../api";
 import { useUi } from "../../store";
 import { Button } from "../ui/button";
 import {
@@ -14,6 +16,7 @@ import {
 import { Sheet, SheetContent, SheetTitle } from "../ui/sheet";
 import { Sidebar } from "./Sidebar";
 import { buildCrumbs } from "./crumbs";
+import { BudgetBanner } from "./BudgetBanner";
 import { ReaderBanner } from "./ReaderBanner";
 
 /**
@@ -30,7 +33,17 @@ export function PageHeader({
 }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const setNavOpen = useUi((s) => s.setNavOpen);
-  const crumbs = buildCrumbs(pathname, projectName);
+  // A member drill-down names the member (the page loads the same list).
+  const memberUid = /^\/usage\/members\/([^/]+)/.exec(pathname)?.[1];
+  const members = useQuery({
+    queryKey: portalKey("members"),
+    queryFn: membersApi.list,
+    enabled: !!memberUid,
+  });
+  const memberName = memberUid
+    ? members.data?.find((m) => m.uid === decodeURIComponent(memberUid))?.display_name
+    : undefined;
+  const crumbs = buildCrumbs(pathname, projectName, memberName);
   return (
     <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-4">
       <Button
@@ -98,6 +111,7 @@ export function AppShell({
       </Sheet>
       <div className="flex min-w-0 flex-1 flex-col">
         <ReaderBanner />
+        <BudgetBanner />
         <PageHeader projectName={projectName} />
         <main className="flex min-h-0 flex-1 flex-col overflow-auto">{children}</main>
       </div>

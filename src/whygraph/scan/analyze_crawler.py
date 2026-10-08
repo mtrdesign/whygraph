@@ -183,7 +183,7 @@ class AnalyzeCrawler(Crawler):
         diff = self._repository.diff(commit)
         if not diff.strip():
             return "empty"
-        description = self._descriptor.describe(diff)
+        description = self._descriptor.describe(diff, subject=commit.sha)
         with get_session() as session:
             row = session.get(CommitRow, commit.sha)
             if row is not None:

@@ -1,6 +1,7 @@
 import ReactEChartsCore from "echarts-for-react/esm/core";
 import { useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
+import { formatUsd } from "@/lib/format";
 import type { ChartPayload } from "./chartSpec";
 import { useChartColors, type ChartColors } from "./chartTheme";
 import echarts from "./echarts";
@@ -20,6 +21,16 @@ const ROW_HEIGHT = 22;
 // but a grep cannot tell the difference — so the option is typed structurally here
 // and `echarts.ts` stays the only file that reaches into the library.
 type Option = Record<string, unknown>;
+
+/** How the measure reads: a plain count, or a USD amount (the Usage & cost page). */
+export type ValueFormat = "number" | "usd";
+
+/** The label formatter for a {@link ValueFormat}. */
+function valueFormatter(format: ValueFormat): (value: unknown) => string {
+  return format === "usd"
+    ? (value) => (typeof value === "number" ? formatUsd(value) : "—")
+    : formatValue;
+}
 
 /** Compact a number for a label: 1,284 / 12.9K / 3.4M. */
 export function formatValue(value: unknown): string {
@@ -51,7 +62,11 @@ function slugify(title: string): string {
  * The swatch colour comes from our own palette by index, never from the params, so
  * even the one styled attribute here is not data-derived.
  */
-function tooltipFormatter(colors: ChartColors, params: unknown): HTMLElement {
+function tooltipFormatter(
+  colors: ChartColors,
+  params: unknown,
+  format: (value: unknown) => string = formatValue,
+): HTMLElement {
   const items = (Array.isArray(params) ? params : [params]) as Array<{
     axisValueLabel?: unknown;
     name?: unknown;
@@ -86,7 +101,7 @@ function tooltipFormatter(colors: ChartColors, params: unknown): HTMLElement {
     }
 
     const value = document.createElement("span");
-    value.textContent = formatValue(item.value);
+    value.textContent = format(item.value);
     value.style.cssText = `color:${colors.fg};font-variant-numeric:tabular-nums;`;
     row.append(value);
 
@@ -106,7 +121,12 @@ function tickInterval(count: number): number {
  * Kept pure and separate from the component so the spec is readable in one place
  * and a rendering question is answered by reading it rather than by tracing state.
  */
-export function buildOption(payload: ChartPayload, colors: ChartColors): Option {
+export function buildOption(
+  payload: ChartPayload,
+  colors: ChartColors,
+  { valueFormat = "number" }: { valueFormat?: ValueFormat } = {},
+): Option {
+  const format = valueFormatter(valueFormat);
   const { palette } = colors;
   const mark = palette[0];
   const { kind, rows, xIndex, yIndex, yLabel, stack } = payload;
@@ -166,7 +186,7 @@ export function buildOption(payload: ChartPayload, colors: ChartColors): Option 
           // the canvas rather than parsed, so this is not a sink — but keeping
           // every formatter in this file a function means "is any formatter a
           // string?" stays a one-line answer.
-          formatter: (params: { value?: unknown }) => formatValue(params.value),
+          formatter: (params: { value?: unknown }) => format(params.value),
         },
       },
     ];
@@ -197,7 +217,7 @@ export function buildOption(payload: ChartPayload, colors: ChartColors): Option 
                   position: horizontal ? "right" : "top",
                   color: colors.muted,
                   fontSize: 11,
-                  formatter: () => formatValue(value),
+                  formatter: () => format(value),
                 },
               }
             : (value ?? null),
@@ -234,7 +254,8 @@ export function buildOption(payload: ChartPayload, colors: ChartColors): Option 
     axisLabel: {
       color: colors.muted,
       fontSize: 11,
-      formatter: (value: number) => value.toLocaleString(),
+      formatter: (value: number) =>
+        valueFormat === "usd" ? formatUsd(value) : value.toLocaleString(),
     },
     axisLine: { show: false },
     axisTick: { show: false },
@@ -283,7 +304,7 @@ export function buildOption(payload: ChartPayload, colors: ChartColors): Option 
       borderColor: colors.grid,
       textStyle: { color: colors.fg, fontSize: 12 },
       extraCssText: "box-shadow:none;",
-      formatter: (params: unknown) => tooltipFormatter(colors, params),
+      formatter: (params: unknown) => tooltipFormatter(colors, params, format),
     },
     xAxis: horizontal ? valueAxis : categoryAxis,
     yAxis: horizontal ? categoryAxis : valueAxis,
@@ -301,11 +322,11 @@ export function buildOption(payload: ChartPayload, colors: ChartColors): Option 
  * does not already say. Proportional figures, not `tabular-nums`: equal-width
  * digits make a large standalone number look loose.
  */
-function StatTile({ payload }: { payload: ChartPayload }) {
+function StatTile({ payload, valueFormat }: { payload: ChartPayload; valueFormat: ValueFormat }) {
   const value = payload.rows[0]?.[payload.yIndex];
   return (
     <div className="px-3 py-4">
-      <div className="text-2xl text-foreground">{formatValue(value)}</div>
+      <div className="text-2xl text-foreground">{valueFormatter(valueFormat)(value)}</div>
       <div className="mt-0.5 text-xs text-muted-foreground">
         {payload.yLabel ?? payload.columns[payload.yIndex]}
       </div>
@@ -321,7 +342,7 @@ function StatTile({ payload }: { payload: ChartPayload }) {
  * numbers that is, and it is drawn from the same rows the chart plots, so the two
  * cannot disagree. If it is ever dropped, the renderer choice has to be revisited.
  */
-function TableView({ payload }: { payload: ChartPayload }) {
+function TableView({ payload, valueFormat }: { payload: ChartPayload; valueFormat: ValueFormat }) {
   return (
     <div className="max-h-72 overflow-auto">
       <table className="w-full text-xs">
@@ -350,7 +371,9 @@ function TableView({ payload }: { payload: ChartPayload }) {
                 >
                   {row[cell] === null || row[cell] === undefined
                     ? "—"
-                    : String(row[cell])}
+                    : valueFormat === "usd" && cell === payload.yIndex
+                      ? valueFormatter("usd")(row[cell])
+                      : String(row[cell])}
                 </td>
               ))}
             </tr>
@@ -361,12 +384,22 @@ function TableView({ payload }: { payload: ChartPayload }) {
   );
 }
 
-export function ChartBlock({ payload }: { payload: ChartPayload }) {
+export function ChartBlock({
+  payload,
+  valueFormat = "number",
+}: {
+  payload: ChartPayload;
+  /** `usd` formats the measure as money (axis, labels, tooltip, Table view). */
+  valueFormat?: ValueFormat;
+}) {
   const [view, setView] = useState<"chart" | "table">("chart");
   const instance = useRef<ReactEChartsCore>(null);
   const colors = useChartColors();
   // Rebuilt when the resolved theme flips, so a live toggle repaints the canvas.
-  const option = useMemo(() => buildOption(payload, colors), [payload, colors]);
+  const option = useMemo(
+    () => buildOption(payload, colors, { valueFormat }),
+    [payload, colors, valueFormat],
+  );
 
   const statTile = payload.rows.length === 1 && !payload.stack;
   const horizontal = payload.kind === "bar_h" || payload.kind === "bar_h_stacked";
@@ -453,9 +486,9 @@ export function ChartBlock({ payload }: { payload: ChartPayload }) {
       </div>
 
       {statTile ? (
-        <StatTile payload={payload} />
+        <StatTile payload={payload} valueFormat={valueFormat} />
       ) : view === "table" ? (
-        <TableView payload={payload} />
+        <TableView payload={payload} valueFormat={valueFormat} />
       ) : (
         <div
           role="img"

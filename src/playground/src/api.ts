@@ -216,6 +216,8 @@ export type ChatEvent =
   | { type: "tool_call"; id: string; name: string; arguments: Record<string, unknown> }
   | { type: "tool_result"; id: string; name: string; result: string }
   | { type: "round_limit"; rounds: number }
+  // A hard stop ended the turn (M2f-2); the terminal `done` frame follows it.
+  | { type: "budget_exceeded"; scope: BudgetScope | null; message_id: number | null; message: string }
   | {
       type: "done";
       message_id: number | null;
@@ -261,7 +263,32 @@ export interface PortalState {
   bootstrap_required?: boolean;
   // Local mode: this machine's name, the prefilled name a platform shows for the connection.
   hostname?: string;
+  // Usage & cost (M2f-2): `null` before setup or without an org.
+  usage?: StateUsage | null;
   error?: string;
+}
+
+/** One scope's spend this month against its budget (`state.usage.me` / `.org`). */
+export interface UsageGauge {
+  spent_usd: number;
+  budget_usd: number | null;
+  pct: number | null;
+  hard_stop: boolean;
+  /** The budget is spent and its hard stop is on: no new LLM spend for this scope. */
+  blocked: boolean;
+}
+
+/** `GET /api/portal/state`'s `usage`: everything the sidebar and banners need. */
+export interface StateUsage {
+  /** `YYYY-MM`, UTC. */
+  month: string;
+  resets_at: string;
+  /** The caller's own budget: production memberships only (`null` in local mode and for a reader). */
+  me: UsageGauge | null;
+  /** The org's spend: `org.usage` callers only (owners, org admins, readers; local mode's user). */
+  org: UsageGauge | null;
+  /** Projects at or over 50% of their budget, highest first (`org.usage` only). */
+  projects_over: { slug: string; name: string; pct: number }[] | null;
 }
 
 export interface PortalOrg {
@@ -340,6 +367,22 @@ export interface ProjectSummary {
   installation_account: string | null;
   // A `platform` project's link to its platform project (local mode, M2e); absent otherwise.
   link?: ProjectLink | null;
+  // Why the caller cannot spend LLM tokens here (M2f-2): their role, or an exhausted
+  // hard-stopped budget (`llm_block_scope` names it); the role wins when both apply.
+  llm_block?: "role" | "budget_exceeded" | null;
+  llm_block_scope?: BudgetScope | null;
+  // This month's spend on the project: `project.usage` callers only.
+  usage?: ProjectUsageBlock | null;
+}
+
+/** What a budget caps, as refusals and alerts name it. */
+export type BudgetScope = "org" | "project" | "member";
+
+/** A project payload's `usage` block. */
+export interface ProjectUsageBlock {
+  month_spend_usd: number;
+  budget: { monthly_usd: number; hard_stop: boolean } | null;
+  pct: number | null;
 }
 
 /** How a linked project's connection to its platform stands (plan section 4.11). */
@@ -566,9 +609,20 @@ export interface ScanRunSummary {
   moved?: boolean;
   error?: string;
   merged_into?: number;
-  /** `"user"` when someone cancelled the run (vs. a merged or orphaned one). */
+  /** `"user"` when someone cancelled the run, `"budget"` when a hard stop did (vs. a merged or orphaned one). */
   cancelled_by?: string;
+  /** What the run's LLM calls cost (M2f-2); a zero block when it made none. */
+  usage?: ScanRunUsage;
   [k: string]: unknown;
+}
+
+/** `summary.usage` of a scan run. */
+export interface ScanRunUsage {
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+  cost_source: CostSource | null;
 }
 
 /** `GET .../scans/{id}/log`: the tail (at most 64 KiB) of a run's log. */
@@ -779,6 +833,9 @@ export interface Member {
   role: MemberRole;
   joined_at: string;
   disabled: boolean;
+  // This month's spend (M2f-2): `GET /api/org/members` for `org.usage` callers only.
+  month_spend_usd?: number;
+  month_split?: { interactive: number; scans: number };
 }
 
 export interface AdminOrg {
@@ -815,6 +872,8 @@ export const accountApi = {
   password: (body: { current: string; new: string }) =>
     send<unknown>("POST", "/account/password", body),
   orgs: () => get<OrgEntry[]>("/account/orgs"),
+  // Production, base host (M2f-2).
+  usage: () => get<AccountUsage>("/account/usage"),
 };
 
 // ---- connected portals (portal/connect_routes.py, production only) ----------------
@@ -1068,6 +1127,8 @@ export interface AccessPerson {
   org_role: MemberRole;
   project_role: ProjectRole | null;
   source: "org_admin" | "grant" | "default";
+  // Their spend on this project this month (M2f-2).
+  month_spend_usd?: number;
 }
 
 export interface ProjectAccessData {
@@ -1127,6 +1188,297 @@ export const auditApi = {
     return res.blob();
   },
 };
+
+// ---- usage & cost (portal/usage_routes.py, portal/budget_routes.py; M2f-2) ------
+//
+// Money is a JSON number (costs to 6 places, budgets to cents); a token sum is
+// `null` when no row in it reported that kind of token.
+
+export type UsageGroup = "project" | "member" | "task" | "model" | "source" | "machine" | "day";
+export type UsageTask = "analyze" | "rationale" | "chat";
+export type UsageSource = "scan" | "explorer" | "chat" | "mcp" | "agent";
+export type CostSource = "provider" | "estimated" | "unpriced";
+export type KeyScope = "project" | "org" | "environment" | "none";
+
+/** The query of every usage route. `from` is inclusive, `to` exclusive (UTC days); both default to this month. */
+export interface UsageQuery {
+  from?: string;
+  to?: string;
+  project?: string;
+  /** A member's uid, or `"system"`. */
+  member?: string;
+  task?: UsageTask | string;
+  source?: UsageSource | string;
+  /** The served model (else the requested one). */
+  model?: string;
+  scan_run?: number;
+  /** A chat session id: needs `project` (ids are per project). */
+  chat_session?: number;
+  group?: UsageGroup;
+  sort?: "time" | "cost";
+  /** The previous page's `next`. */
+  before?: string;
+}
+
+export interface UsageTotals {
+  calls: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_write_tokens: number | null;
+  reasoning_tokens: number | null;
+  cost_usd: number;
+  /** Calls with no price: their tokens count, their cost does not. */
+  unpriced_calls: number;
+}
+
+/** Interactive (chat, generate, agent calls, backfill) vs. scans started. */
+export interface UsageSplit {
+  interactive: { calls: number; cost_usd: number };
+  scans: { calls: number; cost_usd: number };
+}
+
+export interface UsageDay {
+  day: string;
+  calls: number;
+  cost_usd: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+/**
+ * One row of a `group=` breakdown, sorted costliest first (`day` by date).
+ * `key` is the filter value: a project slug, a member uid, a connection id, or the
+ * task / source / model itself; `null` for System, a deleted member, and the
+ * machine buckets "Portal" / "Unknown machine".
+ */
+export interface UsageGroupRow extends UsageTotals, UsageSplit {
+  key: string | number | null;
+  label: string;
+  /** `group=member` only. */
+  top_project?: { slug: string; name: string; cost_usd: number } | null;
+}
+
+export interface UsageReport {
+  range: { from: string; to: string };
+  totals: UsageTotals;
+  split: UsageSplit;
+  /** One entry per day of the range, empty days included. */
+  series: UsageDay[];
+  /** Empty without `group`. */
+  groups: UsageGroupRow[];
+}
+
+/** One LLM call (`GET /api/usage/calls`). */
+export interface UsageCall {
+  id: number;
+  created_at: string;
+  project_slug: string | null;
+  project_name: string | null;
+  actor_label: string | null;
+  user_uid: string | null;
+  source: UsageSource | string;
+  task: UsageTask | string;
+  provider: string;
+  model_requested: string | null;
+  model_served: string | null;
+  key_scope: KeyScope | string;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_write_tokens: number | null;
+  reasoning_tokens: number | null;
+  cost_usd: number | null;
+  cost_source: CostSource | string;
+  price_version: string | null;
+  scan_run_id: number | null;
+  chat_session_id: number | null;
+  /** The linked portal's machine name, for an agent call. */
+  client_name: string | null;
+  /** A commit SHA, a file path or a qualified name; never prompt text. */
+  subject: string | null;
+}
+
+export interface UsageCallsPage {
+  items: UsageCall[];
+  /** Pass as `before` for the next page; `null` on the last. */
+  next: string | null;
+}
+
+/** `GET /api/projects/{slug}/usage`: one project, with its members' spend (production). */
+export interface ProjectUsageReport extends Omit<UsageReport, "groups"> {
+  members: UsageGroupRow[];
+}
+
+/** A downloaded CSV, and whether the server cut it at 50,000 rows. */
+export interface UsageCsv {
+  blob: Blob;
+  filename: string;
+  truncated: boolean;
+}
+
+export interface Budget {
+  monthly_usd: number;
+  hard_stop: boolean;
+  /** `null` for the member default (it caps each member separately). */
+  spent_usd: number | null;
+  pct: number | null;
+}
+
+export interface BudgetAlert {
+  scope: BudgetScope;
+  label: string | null;
+  threshold: 50 | 75 | 100 | number;
+  crossed_at: string;
+  spent_usd: number | null;
+}
+
+/** `GET /api/budgets`. Local mode has no member parts. */
+export interface BudgetsView {
+  month: string;
+  resets_at: string;
+  org: Budget | null;
+  member_default: Budget | null;
+  members: (Budget & { uid: string; label: string | null })[];
+  projects: (Budget & { slug: string; name: string })[];
+  /** This month's threshold crossings. */
+  alerts: BudgetAlert[];
+  /** This month's calls with no price, which no money budget counts. */
+  unpriced_calls: number;
+}
+
+export interface BudgetBody {
+  monthly_usd: number;
+  hard_stop: boolean;
+}
+
+/** A budget write's target. */
+export type BudgetTarget =
+  | { scope: "org" }
+  | { scope: "member_default" }
+  | { scope: "member"; uid: string }
+  | { scope: "project"; slug: string };
+
+/** One row of the merged price table (USD per million tokens). */
+export interface PriceRow {
+  provider: string;
+  model: string;
+  input_per_mtok: number | null;
+  output_per_mtok: number | null;
+  cache_read_per_mtok: number | null;
+  cache_write_per_mtok: number | null;
+  origin: "bundled" | "override";
+  /** An override's last change; `null` for a bundled row (`as_of` dates those). */
+  updated_at: string | null;
+}
+
+export interface PricesView {
+  as_of: string;
+  rows: PriceRow[];
+}
+
+export interface PriceBody {
+  provider: string;
+  model: string;
+  input_per_mtok: number;
+  output_per_mtok: number;
+  cache_read_per_mtok?: number | null;
+  cache_write_per_mtok?: number | null;
+}
+
+/** `GET /api/account/usage` (base host, production): the caller's spend this month in each org. */
+export interface AccountUsage {
+  month: string;
+  resets_at: string;
+  orgs: {
+    slug: string;
+    name: string;
+    /** The org's origin; its My usage page is `url + "/usage/me"`. */
+    url: string;
+    spent_usd: number;
+    calls: number;
+    budget_usd: number | null;
+    pct: number | null;
+    hard_stop: boolean;
+  }[];
+}
+
+function usageQuery(f: UsageQuery): string {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(f)) if (v !== undefined && v !== null && v !== "") params.set(k, String(v));
+  const qs = params.toString();
+  return qs ? `?${qs}` : "";
+}
+
+/** The file name a `Content-Disposition` header names, or `fallback`. */
+function attachmentName(res: Response, fallback: string): string {
+  const header = res.headers.get("content-disposition") ?? "";
+  const match = /filename="?([^";]+)"?/i.exec(header);
+  return match?.[1] ?? fallback;
+}
+
+async function fetchCsv(path: string, fallback: string): Promise<UsageCsv> {
+  const res = await fetch(`/api${path}`, init("GET"));
+  if (!res.ok) throw await failure(res);
+  return {
+    blob: await res.blob(),
+    filename: attachmentName(res, fallback),
+    truncated: res.headers.get("x-whygraph-truncated") === "1",
+  };
+}
+
+/**
+ * The usage read routes for one viewpoint: `org` (`/api/usage*`, `org.usage`) or
+ * `me` (`/api/usage/me*`, production; the server forces the caller and ignores
+ * `member`). Both answer the same shapes.
+ */
+export function usageApi(scope: "org" | "me") {
+  const base = scope === "me" ? "/usage/me" : "/usage";
+  return {
+    report: (f: UsageQuery = {}) => get<UsageReport>(`${base}${usageQuery(f)}`),
+    calls: (f: UsageQuery = {}) => get<UsageCallsPage>(`${base}/calls${usageQuery(f)}`),
+    // A fetch, not a link: the `X-WhyGraph-Client` header is required. `before` is not a CSV filter.
+    csv: (f: UsageQuery = {}) => {
+      const { before: _before, sort: _sort, ...rest } = f;
+      return fetchCsv(`${base}.csv${usageQuery(rest)}`, scope === "me" ? "whygraph-my-usage.csv" : "whygraph-usage.csv");
+    },
+  };
+}
+
+/** Where a budget target is written. */
+function budgetPath(target: BudgetTarget): string {
+  switch (target.scope) {
+    case "org":
+      return "/budgets/org";
+    case "member_default":
+      return "/budgets/member-default";
+    case "member":
+      return `/budgets/members/${encodeURIComponent(target.uid)}`;
+    case "project":
+      return `/projects/${encodeURIComponent(target.slug)}/budget`;
+  }
+}
+
+export const budgetsApi = {
+  get: () => get<BudgetsView>("/budgets"),
+  /** `422 invalid_amount` / `budget_above_org`, `409 budget_below_children`, `403 forbidden`, `404 not_member`. */
+  put: (target: BudgetTarget, body: BudgetBody) => send<Budget>("PUT", budgetPath(target), body),
+  remove: (target: BudgetTarget) => sendEmpty("DELETE", budgetPath(target)),
+};
+
+export const pricesApi = {
+  get: () => get<PricesView>("/prices"),
+  /** `422 bad_provider` / `bad_model` / `invalid_price` (with `field`). */
+  put: (body: PriceBody) => send<PriceRow>("PUT", "/prices", body),
+  // By query, not path: OpenRouter model ids contain `/`.
+  revert: (provider: string, model: string) =>
+    sendEmpty("DELETE", `/prices?${new URLSearchParams({ provider, model })}`),
+};
+
+export const projectUsageApi = (slug: string) => ({
+  report: (f: Omit<UsageQuery, "project" | "group" | "sort" | "before"> = {}) =>
+    get<ProjectUsageReport>(`/projects/${encodeURIComponent(slug)}/usage${usageQuery(f)}`),
+});
 
 // ---- project-scoped calls ---------------------------------------------------
 

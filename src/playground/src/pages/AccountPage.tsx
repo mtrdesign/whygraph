@@ -4,12 +4,61 @@ import { toast } from "sonner";
 import { ApiError, accountApi, portalKey } from "../api";
 import { UserAvatar } from "../components/auth/UserAvatar";
 import { MyConnectedPortals } from "../components/portal/ConnectedPortals";
+import { SpendBar, UsageSection } from "../components/usage/parts";
 import { Field } from "../components/portal/Field";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { PASSWORD_HINT, authMessage } from "../lib/authErrors";
+import { formatUsd } from "../lib/format";
 import { useSignOut } from "../lib/identity";
+import { formatResetsAt } from "../lib/usageRange";
+import { safeHref } from "../lib/platformLink";
+
+/** My usage (production): what the caller spent this month in each org, against their budget there. */
+function MyUsage() {
+  const usage = useQuery({ queryKey: ["@account", "usage"], queryFn: accountApi.usage });
+  const orgs = usage.data?.orgs ?? [];
+  if (usage.isLoading || usage.isError || orgs.length === 0) return null;
+  return (
+    <UsageSection
+      title="My usage"
+      description={`Estimated LLM spend this month. Resets ${formatResetsAt(usage.data?.resets_at ?? "")}.`}
+      testId="account-usage"
+    >
+      <ul className="divide-y divide-border">
+        {orgs.map((o) => {
+          const href = safeHref(`${o.url.replace(/\/$/, "")}/usage/me`);
+          return (
+            <li key={o.slug} className="flex flex-col gap-1.5 py-3" data-testid={`account-usage-${o.slug}`}>
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <span className="font-medium">{o.name}</span>
+                <span className="text-sm tabular-nums">
+                  {formatUsd(o.spent_usd)}
+                  {o.budget_usd !== null && (
+                    <span className="text-muted-foreground"> of {formatUsd(o.budget_usd)}</span>
+                  )}
+                </span>
+              </div>
+              <SpendBar pct={o.pct} label={`${o.name} budget used`} />
+              <div className="flex flex-wrap items-center gap-x-3 text-xs text-muted-foreground">
+                <span>
+                  {o.calls.toLocaleString("en-US")} {o.calls === 1 ? "call" : "calls"}
+                </span>
+                {o.hard_stop && o.budget_usd !== null && <span>Hard stop on</span>}
+                {href && (
+                  <a href={href} className="text-primary-text hover:underline">
+                    Open my usage
+                  </a>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </UsageSection>
+  );
+}
 
 /**
  * `/account`: display name, password and sign out. Lives on the base host. A
@@ -155,6 +204,8 @@ export function AccountPage() {
           </div>
         </form>
       )}
+
+      <MyUsage />
 
       <MyConnectedPortals />
 

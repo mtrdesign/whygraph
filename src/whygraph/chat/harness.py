@@ -23,17 +23,24 @@ a tool finished, the round bound was reached — because the UI shows tool
 activity as first-class cards, not as narrated text. ``ToolCallMade`` is
 translated into :class:`ToolCallStarted` rather than forwarded, so a
 consumer never has to know which layer produced an event.
+
+Usage is reported per provider call: each round's ``TurnDone`` becomes a
+:class:`RoundUsage` (yielded as soon as that round's stream ends, before
+its tools run), and the one ``TurnDone`` the harness yields last carries
+the **turn total**.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from importlib import resources
 
 from whygraph.analyze.prompt import render as render_prompt
 from whygraph.core import get_config
+from whygraph.core.usage import record_usage, usage_blocked
 from whygraph.mcp.targets import repo_root
 from whygraph.services.llm.chat import (
     ChatClient,
@@ -120,8 +127,112 @@ class RoundLimit:
     rounds: int
 
 
-HarnessEvent = TextDelta | ToolCallStarted | ToolResultReady | RoundLimit | TurnDone
+@dataclass(frozen=True, slots=True)
+class RoundUsage:
+    """One provider call (one round) finished; what it reported.
+
+    Yielded once per :meth:`~whygraph.services.llm.chat.ChatClient.stream_turn`
+    - every tool round and the post-limit answer round - right after that
+    stream ends and **before** the round's tools are dispatched, so the
+    round's :class:`ToolCallStarted` / :class:`ToolResultReady` events follow
+    it. The serve layer uses it to close the round's buffer and to attribute
+    tokens and the served model per row. Token fields follow
+    :class:`~whygraph.services.llm.chat.TurnDone`'s meaning.
+
+    Attributes
+    ----------
+    input_tokens : int or None
+        Every prompt token of the call, cache reads and writes included.
+    output_tokens : int or None
+        Every completion token, reasoning included.
+    cache_read_tokens : int or None
+        The cached-read subset of ``input_tokens``.
+    cache_write_tokens : int or None
+        The cache-write subset of ``input_tokens``.
+    reasoning_tokens : int or None
+        The reasoning subset of ``output_tokens``.
+    model : str or None
+        The model the provider served, when it said.
+    """
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    model: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BudgetStop:
+    """The turn stops: an exhausted hard-stopped budget covers the caller.
+
+    Checked (:func:`~whygraph.core.usage.usage_blocked`) before every
+    provider call - each round and the post-limit answer round - so a
+    budget exhausted mid-turn ends it before the next call (M2f-2 plan
+    section 4.7). The final :class:`TurnDone` follows. The harness stays
+    persistence-free: the serve layer writes the budget row.
+
+    Attributes
+    ----------
+    scope : str
+        Which budget is exhausted: ``"org"``, ``"project"`` or ``"member"``.
+    """
+
+    scope: str
+
+
+HarnessEvent = (
+    TextDelta
+    | ToolCallStarted
+    | ToolResultReady
+    | RoundUsage
+    | RoundLimit
+    | BudgetStop
+    | TurnDone
+)
 """What :func:`run_turn` yields."""
+
+_TOTALLED_FIELDS: tuple[str, ...] = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "cost_usd",
+)
+"""The :class:`TurnDone` fields summed into the turn total."""
+
+
+def _round_usage(done: TurnDone) -> RoundUsage:
+    """The :class:`RoundUsage` event for one round's ``TurnDone``."""
+    return RoundUsage(
+        input_tokens=done.input_tokens,
+        output_tokens=done.output_tokens,
+        cache_read_tokens=done.cache_read_tokens,
+        cache_write_tokens=done.cache_write_tokens,
+        reasoning_tokens=done.reasoning_tokens,
+        model=done.model,
+    )
+
+
+def _turn_total(rounds: Sequence[TurnDone]) -> TurnDone:
+    """Sum the rounds' usage into the final ``TurnDone``.
+
+    Each field is the sum of the rounds that reported it, ``None`` only when
+    none did. ``finish_reason`` and ``model`` are the last round's (the last
+    reported model, for ``model``).
+    """
+    totals: dict = {}
+    for name in _TOTALLED_FIELDS:
+        values = [getattr(d, name) for d in rounds if getattr(d, name) is not None]
+        totals[name] = sum(values) if values else None
+    models = [d.model for d in rounds if d.model]
+    return TurnDone(
+        finish_reason=rounds[-1].finish_reason if rounds else None,
+        model=models[-1] if models else None,
+        **totals,
+    )
 
 
 def _packaged_prompt_text() -> str:
@@ -339,8 +450,11 @@ def run_turn(
     Yields
     ------
     HarnessEvent
-        Text deltas, tool start/result pairs, at most one
-        :class:`RoundLimit`, and one :class:`TurnDone` last.
+        Text deltas, one :class:`RoundUsage` per provider call (each
+        before that round's tool start/result pairs), at most one
+        :class:`RoundLimit`, a :class:`BudgetStop` when an exhausted
+        budget ends the turn before a provider call, and one
+        :class:`TurnDone` last, carrying the turn's total usage.
 
     Raises
     ------
@@ -367,8 +481,13 @@ def run_turn(
         build_window(history, token_budget=context_token_budget)
     )
 
-    last_done = TurnDone()
+    # One TurnDone per provider call, in order; the turn total is their sum.
+    rounds: list[TurnDone] = []
     for round_index in range(max_tool_rounds):
+        if (blocked := usage_blocked()) is not None:
+            yield BudgetStop(scope=blocked)
+            yield _turn_total(rounds)
+            return
         request = ChatRequest(
             messages=(system, *messages),
             tools=registry.specs,
@@ -377,6 +496,8 @@ def run_turn(
 
         text_parts: list[str] = []
         calls: list[ToolCall] = []
+        done = TurnDone()
+        started = time.monotonic()
         for event in client.stream_turn(request):
             if isinstance(event, TextDelta):
                 text_parts.append(event.text)
@@ -384,10 +505,22 @@ def run_turn(
             elif isinstance(event, ToolCallMade):
                 calls.append(event.call)
             else:  # TurnDone
-                last_done = event
+                done = event
+
+        # The provider call is over: record and report its usage before any
+        # of its tools run. This round's TurnDone, never the turn total.
+        rounds.append(done)
+        record_usage(
+            "chat",
+            done,
+            provider=client.provider,
+            model_requested=client.model,
+            started=started,
+        )
+        yield _round_usage(done)
 
         if not calls:
-            yield last_done
+            yield _turn_total(rounds)
             return
 
         messages.append(
@@ -413,23 +546,41 @@ def run_turn(
     # here ships tool cards and no answer. One more call with no tools offered
     # leaves the model nothing to do but write up what it already gathered.
     _log.info("chat turn hit the %d-round tool limit", max_tool_rounds)
+    if (blocked := usage_blocked()) is not None:
+        yield BudgetStop(scope=blocked)
+        yield _turn_total(rounds)
+        return
     yield RoundLimit(rounds=max_tool_rounds)
+    done = TurnDone()
+    started = time.monotonic()
     for event in client.stream_turn(
         ChatRequest(messages=(system, *messages), tools=(), max_tokens=max_tokens)
     ):
         if isinstance(event, TextDelta):
             yield event
         elif isinstance(event, TurnDone):
-            last_done = event
+            done = event
         # A ToolCallMade cannot arrive with `tools=()`; if a provider sends one
         # regardless, dropping it is correct — there is no round left to run it.
-    yield last_done
+    # The answer round is a provider call like any other: report it.
+    rounds.append(done)
+    record_usage(
+        "chat",
+        done,
+        provider=client.provider,
+        model_requested=client.model,
+        started=started,
+    )
+    yield _round_usage(done)
+    yield _turn_total(rounds)
 
 
 __all__ = [
+    "BudgetStop",
     "ELIDED_MARKER",
     "HarnessEvent",
     "RoundLimit",
+    "RoundUsage",
     "ToolCallStarted",
     "ToolResultReady",
     "build_system_prompt",

@@ -101,7 +101,14 @@ def test_add_member_refuses_the_reader_role():
 def test_role_actions_match_table():
     # Org roles hold org actions only (M2f-1 plan section 4.2).
     member = {"org.read"}
-    admin = member | {"org.add_project", "org.remove_project", "org.members"}
+    # An instance-admin reader reads usage too (M2f-2 plan section 4.9).
+    reader = member | {"org.usage"}
+    admin = reader | {
+        "org.add_project",
+        "org.remove_project",
+        "org.members",
+        "org.budgets",
+    }
     # Only an owner changes the org settings (and org-level keys): M2d-1
     # moved org.configure from admin to owner (plan section 0.1).
     owner = admin | {"org.configure", "org.own", "org.audit"}
@@ -109,7 +116,7 @@ def test_role_actions_match_table():
         Role.MEMBER: member,
         Role.ADMIN: admin,
         Role.OWNER: owner,
-        Role.READER: {"org.read"},
+        Role.READER: reader,
     }
     viewer = {"project.read"}
     contributor = viewer | {"project.chat", "project.scan"}
@@ -118,6 +125,7 @@ def test_role_actions_match_table():
         "project.configure",
         "project.setup",
         "project.access",
+        "project.usage",
     }
     assert {r: {a.value for a in s} for r, s in PROJECT_ROLE_ACTIONS.items()} == {
         ProjectRole.VIEWER: viewer,
@@ -156,6 +164,10 @@ def test_allowed():
     assert allowed(Role.OWNER, Action.ORG_CONFIGURE)
     assert not allowed(Role.ADMIN, Action.ORG_AUDIT)
     assert allowed(Role.OWNER, Action.ORG_AUDIT)
+    assert allowed(Role.READER, Action.ORG_USAGE)
+    assert not allowed(Role.MEMBER, Action.ORG_USAGE)
+    assert allowed(Role.ADMIN, Action.ORG_BUDGETS)
+    assert not allowed(Role.READER, Action.ORG_BUDGETS)
     # A project action is never an org role's.
     assert not allowed(Role.OWNER, Action.PROJECT_READ)
 
@@ -166,6 +178,8 @@ def test_project_allowed():
     assert project_allowed(ProjectRole.CONTRIBUTOR, Action.PROJECT_SCAN)
     assert not project_allowed(ProjectRole.CONTRIBUTOR, Action.PROJECT_SCAN_FULL)
     assert project_allowed(ProjectRole.ADMIN, Action.PROJECT_ACCESS)
+    assert project_allowed(ProjectRole.ADMIN, Action.PROJECT_USAGE)
+    assert not project_allowed(ProjectRole.CONTRIBUTOR, Action.PROJECT_USAGE)
     assert not project_allowed(ProjectRole.ADMIN, Action.ORG_READ)
 
 

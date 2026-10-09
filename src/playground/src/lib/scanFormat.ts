@@ -34,21 +34,7 @@ export function runSeconds(run: Pick<ScanRunRow, "started_at" | "finished_at" | 
   return Number.isNaN(ms) || ms < 0 ? null : ms / 1000;
 }
 
-const TRIGGER: Record<string, string> = {
-  initial: "Initial",
-  manual: "Manual",
-  describe: "Describe",
-  hook: "Git hook",
-  poll: "Poll",
-  sync: "Sync",
-  push: "Push",
-  reconcile: "Reconcile",
-};
-
-/** `Initial` / `Manual` / `Git hook` ... for a run. */
-export function triggerLabel(run: Pick<ScanRunRow, "trigger" | "kind">): string {
-  return TRIGGER[run.trigger] ?? (run.kind === "sync" ? "Sync" : run.trigger);
-}
+export { triggerLabel } from "./labels";
 
 export type RunTone = "ok" | "busy" | "warn" | "error" | "idle";
 

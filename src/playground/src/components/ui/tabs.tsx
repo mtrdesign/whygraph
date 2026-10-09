@@ -1,3 +1,4 @@
+import * as React from "react"
 import { Tabs as TabsPrimitive } from "@base-ui/react/tabs"
 import { cva, type VariantProps } from "class-variance-authority"
 import { cn } from "cn"
@@ -27,6 +28,8 @@ const tabsListVariants = cva(
       variant: {
         default: "bg-muted",
         line: "gap-1 bg-transparent",
+        scrollable:
+          "w-full min-w-0 justify-start gap-1 overflow-x-auto bg-muted [&>*]:flex-none",
       },
     },
     defaultVariants: {
@@ -35,16 +38,60 @@ const tabsListVariants = cva(
   }
 )
 
+const FADE = 24
+
 function TabsList({
   className,
   variant = "default",
+  style,
   ...props
 }: TabsPrimitive.List.Props & VariantProps<typeof tabsListVariants>) {
+  const ref = React.useRef<HTMLDivElement>(null)
+  const [fade, setFade] = React.useState({ start: false, end: false })
+  const scrollable = variant === "scrollable"
+
+  React.useEffect(() => {
+    const el = ref.current
+    if (!scrollable || !el) return
+    const update = () =>
+      setFade({
+        start: el.scrollLeft > 1,
+        end: el.scrollLeft + el.clientWidth < el.scrollWidth - 1,
+      })
+    const reveal = () => {
+      el.querySelector<HTMLElement>("[data-active]")?.scrollIntoView({
+        inline: "nearest",
+        block: "nearest",
+      })
+      update()
+    }
+    reveal()
+    el.addEventListener("scroll", update, { passive: true })
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    const mo = new MutationObserver(reveal)
+    mo.observe(el, { attributes: true, subtree: true, attributeFilter: ["data-active"] })
+    return () => {
+      el.removeEventListener("scroll", update)
+      ro.disconnect()
+      mo.disconnect()
+    }
+  }, [scrollable])
+
+  const mask =
+    scrollable && (fade.start || fade.end)
+      ? `linear-gradient(to right, ${fade.start ? "transparent 0" : "black 0"}, black ${FADE}px, black calc(100% - ${FADE}px), ${fade.end ? "transparent 100%" : "black 100%"})`
+      : undefined
   return (
     <TabsPrimitive.List
+      ref={ref}
       data-slot="tabs-list"
       data-variant={variant}
+      {...(scrollable ? { "data-scroll-x": "" } : {})}
+      data-fade-start={fade.start || undefined}
+      data-fade-end={fade.end || undefined}
       className={cn(tabsListVariants({ variant }), className)}
+      style={mask ? { ...style, maskImage: mask, WebkitMaskImage: mask } : style}
       {...props}
     />
   )

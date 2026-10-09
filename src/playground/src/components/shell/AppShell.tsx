@@ -18,6 +18,7 @@ import { Sidebar } from "./Sidebar";
 import { buildCrumbs } from "./crumbs";
 import { BudgetBanner } from "./BudgetBanner";
 import { ReaderBanner } from "./ReaderBanner";
+import { LiveRegion } from "./LiveRegion";
 
 /**
  * The page header: breadcrumbs on the left, an optional actions slot on the right
@@ -104,7 +105,11 @@ export function AppShell({
         <Sidebar slug={slug} projectName={projectName} />
       </div>
       <Sheet open={navOpen} onOpenChange={setNavOpen}>
-        <SheetContent side="left" showCloseButton={false} className="w-60 gap-0 p-0 sm:max-w-60">
+        <SheetContent
+          side="left"
+          showCloseButton
+          className="w-60 gap-0 p-0 data-[side=left]:w-60 data-[side=left]:sm:max-w-60 sm:max-w-60"
+        >
           <SheetTitle className="sr-only">Navigation</SheetTitle>
           <Sidebar slug={slug} projectName={projectName} />
         </SheetContent>
@@ -115,6 +120,7 @@ export function AppShell({
         <PageHeader projectName={projectName} />
         <main className="flex min-h-0 flex-1 flex-col overflow-auto">{children}</main>
       </div>
+      <LiveRegion />
     </div>
   );
 }

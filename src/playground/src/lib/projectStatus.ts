@@ -46,18 +46,4 @@ export function projectStatus(p: ProjectSummary): ProjectStatus {
   return { key: "ready", label: "Ready", tone: "ready" };
 }
 
-/** `2026-09-30T12:00:00+00:00` -> `12 min ago`. Falls back to the date beyond a month. */
-export function timeAgo(iso: string | null, now: number = Date.now()): string | null {
-  if (!iso) return null;
-  const then = Date.parse(iso);
-  if (Number.isNaN(then)) return null;
-  const sec = Math.max(0, Math.round((now - then) / 1000));
-  if (sec < 60) return "just now";
-  const min = Math.round(sec / 60);
-  if (min < 60) return `${min} min ago`;
-  const hours = Math.round(min / 60);
-  if (hours < 24) return `${hours} h ago`;
-  const days = Math.round(hours / 24);
-  if (days < 31) return `${days} d ago`;
-  return new Date(then).toLocaleDateString();
-}
+export { timeAgo } from "./format";

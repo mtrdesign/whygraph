@@ -25,10 +25,12 @@ month (UTC) rolls over.
 
 ## Getting started
 
-Start the portal (`whygraph up`), open a project, and switch to **Chat** in the sidebar. You need a
-key for at least one of the providers below, entered under **Settings** in the portal.
+Start the portal (`whygraph up`), open a project, and press **+** next to **Chats** in the sidebar
+(or press `g` then `c`, or pick **New chat** in the command menu). You need a key for at least one of
+the providers below, entered under **Settings** in the portal.
 
-Pick a provider and model in the composer, type a question, and send. The first thing to know is that
+Pick a provider and model above the composer, type a question (or pick one of the starter questions
+on the empty page), and send. The first thing to know is that
 answers are grounded: when the assistant makes a claim it shows the tool calls behind it, and you can
 expand any of them to see what came back.
 
@@ -84,12 +86,24 @@ automatic routing can land on a model that does not support tool calling.
 
 ## Sessions
 
-The left pane is your session list. Sessions are stored in the WhyGraph database alongside the
-evidence, so they survive restarts and are per-repo, not global.
+Your conversations are listed in the sidebar's **Chats** section, below **All projects**, newest
+activity first, each with how long ago it was last used. The 20 most recent show first; **Show more**
+adds the next 20. On a phone the list is in the navigation sheet, and tapping a chat closes the sheet.
 
-- A new session is **auto-titled** from your first message.
+- **+** opens a new chat. Nothing is saved until you send the first message: the session is created
+  then, so opening a new chat and leaving never leaves an empty "New chat" behind.
+- A new session is **auto-titled** from your first message; the title shows in the list while the
+  first answer is still streaming, and a chat whose answer is streaming shows a small spinner.
+- The **...** menu on each chat has **Rename** (edit the title in place; Enter saves, Escape cancels)
+  and **Delete** (asks first; it removes the chat's messages for good).
 - Sessions are deep-linkable at `/p/<slug>/chat/<id>` - copy the URL to come back to a conversation.
-- Rename and delete are in the session list.
+- Sessions are stored in the project's WhyGraph database alongside the evidence, so they survive
+  restarts and are per-repo, not global. In production each person sees only their own chats.
+
+The Chats section appears only where you can chat: not for the Viewer role, not for a
+[linked project](../portal/platform-projects.md) (its chat lives on the platform), and not for a
+project that is not set up yet. When a hard-stopped budget is used up, **+** is disabled with the
+reason, and earlier chats stay readable.
 
 ## What it can look at
 

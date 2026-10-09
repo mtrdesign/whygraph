@@ -121,6 +121,7 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
   if (path === "/api/projects") return Promise.resolve(json({ projects: [project("alpha")] }));
   if (path === "/api/projects/alpha") return Promise.resolve(json(project("alpha")));
   if (path === "/api/projects/alpha/scans") return Promise.resolve(json({ runs: [] }));
+  if (path === "/api/projects/alpha/chat/sessions") return Promise.resolve(json([]));
   if (path === "/api/projects/alpha/node/rationale") return Promise.resolve(json({ status: "missing" }));
   return Promise.resolve(json({ error: "unhandled" }, 500));
 }
@@ -574,21 +575,28 @@ describe("reader role (instance admin in a foreign org)", () => {
     expect(screen.getByText("Viewing as instance admin (read-only)")).toBeInTheDocument();
     await screen.findByRole("heading", { name: "Project alpha" });
     expect(screen.queryByRole("button", { name: "Rescan" })).toBeNull();
-    expect(screen.queryByRole("link", { name: "Chat" })).toBeNull();
+    expect(screen.queryByTestId("chats-section")).toBeNull();
+    expect(fake.calls.some((c) => c.path.includes("/chat/sessions"))).toBe(false);
   });
 
-  it("a member sees one Rescan button and Chat", async () => {
+  it("a member sees one Rescan button and the Chats section", async () => {
     fake.state = orgState("member");
     mount("/p/alpha");
     await screen.findByRole("button", { name: "Rescan" });
-    expect(screen.getByRole("link", { name: "Chat" })).toBeInTheDocument();
+    const chats = await screen.findByTestId("chats-section");
+    expect(within(chats).getByRole("button", { name: "New chat" })).toBeEnabled();
+    await within(chats).findByText("No chats yet");
     expect(screen.queryByTestId("reader-banner")).toBeNull();
   });
 
-  it("the Chat route shows a read-only notice", async () => {
+  it("the Chat route tells the reader why there is no chat (no role to ask for)", async () => {
     fake.state = orgState("reader", { user: adminAda });
     mount("/p/alpha/chat");
-    await screen.findByTestId("chat-read-only");
+    const notice = await screen.findByTestId("chat-read-only");
+    expect(notice).toHaveTextContent(
+      "You're viewing this organization as an instance administrator. Chat is read-only access, so it is not available.",
+    );
+    expect(notice).not.toHaveTextContent("Contributor");
   });
 
   it("hides the scan buttons on the Scans page", async () => {
@@ -674,29 +682,31 @@ describe("project roles", () => {
     expect(screen.getByRole("menuitem", { name: "Full rescan" })).toBeInTheDocument();
   });
 
-  it("a viewer has no Rescan, no Chat link, and Chat never requests its sessions", async () => {
+  it("a viewer has no Rescan, no Chats section, and never requests the sessions", async () => {
     asViewer();
     mount("/p/alpha");
     await screen.findByRole("heading", { name: "Project alpha" });
     expect(screen.queryByRole("button", { name: "Rescan" })).toBeNull();
-    expect(screen.queryByRole("link", { name: "Chat" })).toBeNull();
+    expect(screen.queryByTestId("chats-section")).toBeNull();
+    expect(fake.calls.some((c) => c.path.includes("/chat/sessions"))).toBe(false);
   });
 
   it("a viewer's Chat route shows the notice and requests no sessions", async () => {
     asViewer();
     mount("/p/alpha/chat");
     const notice = await screen.findByTestId("chat-read-only");
-    expect(notice).toHaveTextContent("Chat needs the Contributor role");
+    expect(notice).toHaveTextContent("Chat needs the Contributor role. Ask a project admin to change your role.");
     expect(fake.calls.some((c) => c.path.includes("/chat/sessions"))).toBe(false);
   });
 
-  it("a viewer's command palette has no Chat entry", async () => {
+  it("a viewer's command palette has no New chat entry", async () => {
     asViewer();
     useUi.setState({ paletteOpen: true });
     mount("/p/alpha");
     await screen.findByText("Project settings");
     await waitFor(() => expect(fake.calls.some((c) => c.path === "/api/projects")).toBe(true));
-    expect(screen.queryByText("Chat")).toBeNull();
+    expect(screen.getByRole("option", { name: "Explorer" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "New chat" })).toBeNull();
   });
 
   it("a viewer sees the Restricted badge only on a restricted project", async () => {

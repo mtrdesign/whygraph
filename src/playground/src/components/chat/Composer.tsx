@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
 
@@ -11,15 +11,24 @@ import { Textarea } from "../ui/textarea";
  */
 export function Composer({
   streaming,
+  fill,
   onSend,
   onStop,
 }: {
   streaming: boolean;
+  /** Text to put in the box (a starter prompt); `n` changes on every request, so the same text can be picked twice. */
+  fill?: { text: string; n: number } | null;
   onSend: (content: string) => void;
   onStop: () => void;
 }) {
   const [value, setValue] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (!fill) return;
+    setValue(fill.text);
+    ref.current?.focus();
+  }, [fill]);
 
   const submit = () => {
     const content = value.trim();

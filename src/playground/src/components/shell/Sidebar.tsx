@@ -8,19 +8,20 @@ import {
   CircleDollarSignIcon,
   LayoutDashboardIcon,
   LayoutGridIcon,
-  MessageSquareIcon,
   NetworkIcon,
   SearchIcon,
   SlidersHorizontalIcon,
+  WrenchIcon,
   ScrollTextIcon,
   UsersIcon,
 } from "lucide-react";
-import { portalApi, portalKey, type PortalState } from "../../api";
+import { portalApi, portalKey, projectKey, type PortalState, type ProjectSummary } from "../../api";
 import { baseHostOf, canOwn, isProduction, useSignOut } from "../../lib/identity";
 import { hardNavigate } from "../../lib/navigation";
 import { can } from "../../lib/permissions";
 import { useUi } from "../../store";
 import { ThemeToggle } from "../ThemeToggle";
+import { ChatsSection } from "./ChatsSection";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -32,10 +33,13 @@ import {
 } from "../ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 
-// The app-shell sidebar (§4.12.4). Two scopes: portal (Projects, Settings, and
-// Members in production) and project (Overview, Explorer, Chat, Scans,
-// Settings), with the project switcher on top and ⌘K / theme / user / version
-// at the bottom.
+// The app-shell sidebar (§4.12.4, M2f-3 §4.6). Two scopes: portal (Projects,
+// Settings, and Members in production) and project (Overview, Explorer, Scans,
+// Settings, then the Chats section), with the project switcher on top and ⌘K /
+// theme / user / version at the bottom. Four stacked blocks: the fixed top, the
+// fixed nav, the Chats section (the only part that scrolls) and the footer; when
+// the fixed blocks leave the Chats section less than four rows (a short window, a
+// landscape phone) the whole sidebar scrolls instead, so the nav is never clipped.
 
 interface NavItem {
   label: string;
@@ -75,17 +79,30 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-// A linked project (M2e) has no local data, so no Explorer or Chat here: they live on the platform.
-function projectItems(slug: string, canChat: boolean, linked: boolean): NavItem[] {
+/**
+ * The project nav. A linked project (M2e) has no local data, so no Explorer here
+ * (its Explorer and Chat live on the platform). A project that is not set up yet
+ * lists only "Continue setup" (the wizard) and Settings (NAV-6); one still being
+ * imported lists Overview, Scans (the clone streams there) and Settings. Chat is
+ * not an item: the Chats section below the nav is its entry point.
+ */
+function projectItems(
+  slug: string,
+  { linked, initialized, importing }: { linked: boolean; initialized: boolean; importing: boolean },
+): NavItem[] {
   const params = { slug };
+  const overview: NavItem = { label: "Overview", icon: LayoutDashboardIcon, to: "/p/$slug", params, exact: true };
+  const scans: NavItem = { label: "Scans", icon: ActivityIcon, to: "/p/$slug/scans/{-$runId}", params };
+  const settings: NavItem = { label: "Settings", icon: SlidersHorizontalIcon, to: "/p/$slug/settings", params };
+  if (importing) return [overview, scans, settings];
+  if (!initialized) {
+    return [{ label: "Continue setup", icon: WrenchIcon, to: "/p/$slug/init", params }, settings];
+  }
   return [
-    { label: "Overview", icon: LayoutDashboardIcon, to: "/p/$slug", params, exact: true },
+    overview,
     ...(linked ? [] : [{ label: "Explorer", icon: NetworkIcon, to: "/p/$slug/explorer", params } as NavItem]),
-    ...(!canChat || linked
-      ? []
-      : [{ label: "Chat", icon: MessageSquareIcon, to: "/p/$slug/chat/{-$id}", params } as NavItem]),
-    { label: "Scans", icon: ActivityIcon, to: "/p/$slug/scans/{-$runId}", params },
-    { label: "Settings", icon: SlidersHorizontalIcon, to: "/p/$slug/settings", params },
+    scans,
+    settings,
   ];
 }
 
@@ -163,9 +180,19 @@ export function Sidebar({ slug, projectName }: { slug?: string; projectName?: st
   const version = state.data?.version;
   const production = isProduction(state.data);
   const projects = useQuery({ queryKey: portalKey("projects"), queryFn: portalApi.projects });
-  const current = projects.data?.projects.find((p) => p.slug === slug);
+  const listed = projects.data?.projects.find((p) => p.slug === slug);
+  // The project layout's own query (fresher: a chat's budget stop refetches it), else the list row.
+  const details = useQuery({
+    queryKey: projectKey(slug ?? "", "project"),
+    queryFn: () => portalApi.project(slug ?? ""),
+    enabled: false,
+  });
+  const current: ProjectSummary | undefined = (slug && details.data) || listed;
   const linked = current?.source === "platform";
+  const initialized = !!current?.initialized;
+  const importing = !!current?.importing;
   const canChat = can(current, "project.chat");
+  const showChats = !!slug && canChat && !linked && initialized && !importing;
   const signOut = useSignOut();
   const base = state.data?.base_url?.replace(/\/$/, "") ?? "";
   const usage = usageItem(state.data);
@@ -173,9 +200,9 @@ export function Sidebar({ slug, projectName }: { slug?: string; projectName?: st
   return (
     <nav
       aria-label="Main"
-      className="flex h-full w-60 shrink-0 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground"
+      className="flex h-full w-60 shrink-0 flex-col overflow-y-auto border-r border-sidebar-border bg-sidebar text-sidebar-foreground"
     >
-      <div className="flex flex-col gap-3 px-3 pb-3 pt-4">
+      <div className="flex shrink-0 flex-col gap-3 px-3 pb-3 pt-4">
         <div className="flex items-center gap-2 px-1.5">
           <div className="flex size-[22px] items-center justify-center rounded-md bg-primary">
             <NetworkIcon className="size-3.5 text-primary-foreground" aria-hidden />
@@ -188,11 +215,11 @@ export function Sidebar({ slug, projectName }: { slug?: string; projectName?: st
         <ProjectSwitcher slug={slug} name={projectName} />
       </div>
 
-      <div className="flex flex-1 flex-col gap-0.5 overflow-y-auto px-3 py-1">
+      <div className="flex shrink-0 flex-col gap-0.5 px-3 py-1">
         {slug ? (
           <>
             <Section title="Project">
-              {projectItems(slug, canChat, linked).map((item) => (
+              {projectItems(slug, { linked, initialized, importing }).map((item) => (
                 <NavLink key={item.label} item={item} />
               ))}
             </Section>
@@ -216,7 +243,13 @@ export function Sidebar({ slug, projectName }: { slug?: string; projectName?: st
         )}
       </div>
 
-      <div className="flex flex-col gap-1 border-t border-sidebar-border p-3">
+      {showChats ? (
+        <ChatsSection slug={slug} budgetStopped={current?.llm_block === "budget_exceeded"} />
+      ) : (
+        <div className="flex-1" />
+      )}
+
+      <div className="flex shrink-0 flex-col gap-1 border-t border-sidebar-border p-3">
         <button
           type="button"
           onClick={() => setPaletteOpen(true)}

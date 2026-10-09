@@ -33,8 +33,9 @@ test("a chat message shows on Usage & cost, then a hard-stopped project budget c
     hard_stop: true,
   });
   await page.goto(`/p/${notes.slug}/chat`);
-  await page.getByRole("button", { name: "New chat" }).click();
   await expect(page.getByTestId("chat-budget-notice")).toBeVisible();
+  // The Chats section's "+" is disabled with the reason (USE-4).
+  await expect(page.getByTestId("chats-section").getByRole("button", { name: "New chat" })).toBeDisabled();
   await expect(page.getByPlaceholder("Ask about this repository…")).toHaveCount(0);
 
   // Leave the project usable for any spec that follows.

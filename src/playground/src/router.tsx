@@ -29,7 +29,7 @@ import { projectProblem } from "./lib/errors";
 import { can } from "./lib/permissions";
 import { getLastProject, setLastProject } from "./lib/lastProject";
 import { ProjectProvider } from "./lib/project";
-import { canAdmin, canOwn, isProduction, isSafeNext, signInUrl, usePortalState } from "./lib/identity";
+import { canAdmin, canOwn, isProduction, isSafeNext, signInUrl, usePortalState, useReadOnly } from "./lib/identity";
 import { hardNavigate } from "./lib/navigation";
 import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
 import { safeLinkNext } from "./lib/linkNext";
@@ -568,6 +568,7 @@ const DATA_PAGES = new Set(["explorer", "chat", "scans"]);
 
 function ProjectLayout() {
   const { slug } = useParams({ strict: false }) as { slug: string };
+  const readOnly = useReadOnly();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const page = pathname.split("/")[3];
   const project = useQuery({
@@ -616,13 +617,15 @@ function ProjectLayout() {
       return notice(<LinkedElsewhere project={data} />);
     }
     if (page === "chat" && !can(data, "project.chat")) {
-      // ChatView never mounts, so no chat request fires for a viewer.
+      // ChatView never mounts, so no chat request fires for a viewer (SET-5: the
+      // instance-admin reader is not a member, so there is no role to ask for).
       return notice(
         <Alert data-testid="chat-read-only">
-          <AlertTitle>Chat needs the Contributor role</AlertTitle>
+          <AlertTitle>{readOnly ? "Chat is not available" : "Chat needs the Contributor role"}</AlertTitle>
           <AlertDescription>
-            Ask a project admin for the Contributor role to chat. You can still browse the Explorer and the
-            existing rationale cards.
+            {readOnly
+              ? "You're viewing this organization as an instance administrator. Chat is read-only access, so it is not available."
+              : "Chat needs the Contributor role. Ask a project admin to change your role."}
           </AlertDescription>
         </Alert>,
       );

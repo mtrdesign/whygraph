@@ -155,6 +155,7 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     }
     if (!rest) return Promise.resolve(json(details(slug)));
     if (rest === "/scans") return Promise.resolve(json({ runs: [] }));
+    if (rest === "/chat/sessions") return Promise.resolve(json([]));
     if (rest === "/search") {
       return Promise.resolve(
         json({ query: "q", results: [{ name: `hit-from-${slug}`, id: slug, analyzed: true }] }),
@@ -302,9 +303,12 @@ describe("project routes", () => {
       "href",
       "/p/alpha/explorer",
     );
-    for (const label of ["Overview", "Chat", "Scans", "Settings"]) {
+    for (const label of ["Overview", "Scans", "Settings"]) {
       expect(within(nav).getByRole("link", { name: label })).toBeInTheDocument();
     }
+    // Chat is the Chats section below the nav, not a nav item (§4.6).
+    expect(within(nav).queryByRole("link", { name: "Chat" })).toBeNull();
+    expect(within(nav).getByTestId("chats-section")).toBeInTheDocument();
     expect(within(nav).getByRole("link", { name: "Explorer" })).toHaveAttribute(
       "aria-current",
       "page",

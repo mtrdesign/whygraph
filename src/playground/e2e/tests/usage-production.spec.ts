@@ -75,8 +75,9 @@ test("member usage: the owner sees who spent, a member sees only their own, a me
   // A hard-stopped member budget on cy: his composer is replaced, dee's is not.
   await call(ben.request, "PUT", `${org}/api/budgets/members/${uid("cy")}`, { monthly_usd: 0.01, hard_stop: true });
   await cy.goto(`${org}/p/demo/chat`);
-  await cy.getByRole("button", { name: "New chat" }).click();
   await expect(cy.getByTestId("chat-budget-notice")).toBeVisible();
+  // The Chats section's "+" is disabled with the reason (USE-4).
+  await expect(cy.getByTestId("chats-section").getByRole("button", { name: "New chat" })).toBeDisabled();
   await chatOnce(dee, `${org}/p/demo`, "hello from dee");
 
   await benContext.close();

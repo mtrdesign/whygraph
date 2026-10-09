@@ -231,14 +231,14 @@ test("project access: Restricted projects, an invited user's grants, roles and a
   await expect(ben.getByTestId("invitations")).toContainText("demo (viewer)");
 
   // Dee signs in and is a member at once: she sees demo, not notes; she may
-  // look but not rescan, and has no Chat.
+  // look but not rescan, and has no Chats section.
   const { c: deeContext, page: dee } = await context("dee");
   await dee.goto(`${orgUrl("comet")}/`);
   await expect(dee.getByTestId("project-demo")).toBeVisible();
   await expect(dee.getByTestId("project-notes")).toHaveCount(0);
   await dee.goto(`${orgUrl("comet")}/p/demo`);
   await expect(sidebarLink(dee, "Scans")).toBeVisible();
-  await expect(sidebarLink(dee, "Chat")).toHaveCount(0);
+  await expect(dee.getByTestId("chats-section")).toHaveCount(0);
   await expect(rescan(dee)).toHaveCount(0);
   // The restricted project she holds no grant on answers as if it did not exist.
   const notes = await dee.request.get(`${orgUrl("comet")}/api/projects/notes`, { headers: { "X-WhyGraph-Client": "1" } });
@@ -252,7 +252,7 @@ test("project access: Restricted projects, an invited user's grants, roles and a
   await expect(person.getByRole("combobox")).toHaveValue("contributor");
   await dee.reload();
   await expect(rescan(dee).first()).toBeVisible();
-  await expect(sidebarLink(dee, "Chat")).toBeVisible();
+  await expect(dee.getByTestId("chats-section").first()).toBeVisible();
   await rescan(dee).first().click();
   await expect(dee.getByRole("menuitem")).toHaveCount(0);
   await expect(dee.getByText("Full rescan")).toHaveCount(0);

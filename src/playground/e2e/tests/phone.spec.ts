@@ -23,8 +23,6 @@ const KNOWN_OVERFLOW: Record<string, string> = {
   "local /usage": "PH-6: the Usage tab strip overflows",
   "local project overview": "PH-4: unbreakable mono paths and MCP URL set the width",
   "local explorer": "PH-1: three fixed panes; and no h1",
-  "local chat (new)": "PH-2: no h1 on Chat",
-  "local chat (session)": "PH-2: the 288px session column; and no h1",
   "local scans": "PH-5: the scan history table scrolls inside",
   "local project settings": "PH-4: unbreakable mono paths (settings General)",
   "local wizard (configure)": "PH-7: the wizard stepper does not fit",

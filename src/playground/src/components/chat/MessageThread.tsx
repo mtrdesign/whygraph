@@ -1,12 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ApiError, projectKey, type BudgetScope, type ChatSession } from "../../api";
+import { useNavigate } from "@tanstack/react-router";
+import { ApiError, projectKey, type BudgetScope, type ChatSession, type ChatTranscript } from "../../api";
+import { chatSessionsKey } from "../../lib/chatSessions";
+import { useUi } from "../../store";
 import { useLlmBlock } from "../../lib/permissions";
 import { useSlug } from "../../lib/project";
 import { BudgetNotice } from "../portal/BudgetNotice";
 import { useProjectApi, useProjectKey, useProjectQuery } from "../../lib/project";
 import { Loading } from "../Loading";
-import { Empty, EmptyDescription } from "../ui/empty";
+import { ErrorState } from "../state/ErrorState";
+import { Button } from "../ui/button";
+import { errorMessage } from "../../lib/apiErrors";
 import { MessageBubble, type AssistantTurn, type Turn } from "./MessageBubble";
 import { Composer } from "./Composer";
 import { ModelSelect } from "./ModelSelect";
@@ -18,6 +23,13 @@ import {
   settleActivities,
   turnsFromMessages,
 } from "./turns";
+
+/** The empty thread's starter questions; a click puts one in the composer (ER-9). */
+export const STARTER_PROMPTS = [
+  "What changed most in the last month?",
+  "Explain how this project is structured",
+  "Which areas have no rationale yet?",
+];
 
 /**
  * The thread column: transcript, live streaming, and the composer.
@@ -31,23 +43,42 @@ import {
  * The provider/model dropdowns live here rather than in the view header because
  * only this component knows whether a turn is in flight — switching models
  * mid-stream would repoint the session row under the running turn.
+ *
+ * `sessionId: null` is a draft (M2f-3 EXC-3): the dropdowns edit a local
+ * `{provider, model}`, and the first Send creates the session with it, then posts
+ * the message and streams under the new id. `onCreated` tells the view, which
+ * keeps this thread mounted when the route moves to `/chat/<id>` (replace), so the
+ * stream is never aborted; the reset effect below skips that one transition.
  */
 export function MessageThread({
   sessionId,
   session,
+  onCreated,
 }: {
-  sessionId: number;
+  /** The open session, or `null` for a new chat that has no session yet. */
+  sessionId: number | null;
   /** The session row, for the composer dropdowns. Absent while the list loads. */
   session?: ChatSession;
+  /** Called with the id of the session this thread created on its first send. */
+  onCreated?: (id: number) => void;
 }) {
   const queryClient = useQueryClient();
   const api = useProjectApi();
   const key = useProjectKey();
+  const navigate = useNavigate();
   const [liveTurns, setLiveTurns] = useState<Turn[]>([]);
   const [streaming, setStreaming] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const slug = useSlug();
+  const setStreamingSessionId = useUi((s) => s.setStreamingSessionId);
+  // The session this thread created (its draft became it), and the draft's own choice.
+  const [createdId, setCreatedId] = useState<number | null>(null);
+  const createdRef = useRef<number | null>(null);
+  const [draft, setDraft] = useState<{ provider: string; model: string } | null>(null);
+  const [createError, setCreateError] = useState<unknown>(null);
+  const [starter, setStarter] = useState<{ text: string; n: number } | null>(null);
+  const currentId = sessionId ?? createdId;
   // A hard stop the page has not learned about yet (a live frame, or a 403 on send): the project
   // payload's `llm_block` takes over once it is refetched.
   const llm = useLlmBlock();
@@ -59,20 +90,35 @@ export function MessageThread({
     [queryClient, slug],
   );
 
-  const transcript = useProjectQuery(["chat", "transcript", sessionId], (api) =>
-    api.chatTranscript(sessionId),
+  // A draft has no transcript; the session it becomes starts with a seeded empty one
+  // (see `send`), so no request lands mid-turn to double the live turn.
+  const transcript = useProjectQuery(
+    ["chat", "transcript", currentId],
+    (api) => api.chatTranscript(currentId as number),
+    { enabled: currentId !== null },
   );
+
+  // The draft's pickers start on the first configured provider and its default model.
+  const providers = useProjectQuery(["chat", "providers"], (api) => api.chatProviders());
+  const defaultProvider = providers.data?.find((p) => p.configured) ?? providers.data?.[0];
+  const draftChoice =
+    draft ?? (defaultProvider ? { provider: defaultProvider.provider, model: defaultProvider.default_model } : null);
+  // An existing session shows its own pair once the list has it; the draft (and the
+  // session it just became, until the list catches up) shows the draft's.
+  const choice = session ?? (currentId === null || createdId !== null ? draftChoice : null);
 
   const update = useMutation({
     mutationFn: (vars: { provider?: string; model?: string }) =>
-      api.chatUpdateSession(sessionId, vars),
+      api.chatUpdateSession(currentId as number, vars),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: key("chat", "sessions") });
+      queryClient.invalidateQueries({ queryKey: chatSessionsKey(slug) });
     },
   });
 
-  // Switching sessions must not carry another session's in-flight turn across.
+  // Switching sessions must not carry another session's in-flight turn across. The
+  // move from the draft to the session this thread just created is not a switch.
   useEffect(() => {
+    if (sessionId !== null && sessionId === createdRef.current) return;
     abortRef.current?.abort();
     abortRef.current = null;
     setLiveTurns([]);
@@ -113,16 +159,58 @@ export function MessageThread({
       const controller = new AbortController();
       abortRef.current = controller;
       setStreaming(true);
+      setCreateError(null);
       setLiveTurns([
         { kind: "user", content },
         emptyAssistantTurn(),
       ]);
 
+      // A draft becomes a session now, on its first message (never on a click).
+      let id = currentId;
+      if (id === null) {
+        try {
+          const created = await api.chatCreateSession({
+            provider: choice?.provider || undefined,
+            model: choice?.model || undefined,
+          });
+          id = created.id;
+        } catch (err) {
+          setLiveTurns([]);
+          setStreaming(false);
+          abortRef.current = null;
+          setCreateError(err);
+          return;
+        }
+        // Seeded so the transcript query has rows to show without a request mid-turn.
+        queryClient.setQueryData<ChatTranscript>(key("chat", "transcript", id), {
+          id,
+          title: "",
+          provider: choice?.provider ?? "",
+          model: choice?.model ?? "",
+          created_at: "",
+          updated_at: "",
+          messages: [],
+        });
+        createdRef.current = id;
+        setCreatedId(id);
+        onCreated?.(id);
+        void navigate({ to: "/p/$slug/chat/{-$id}", params: { slug, id: String(id) }, replace: true });
+      }
+      const sid = id;
+      setStreamingSessionId(sid);
+      let listed = false;
+
       try {
         await api.streamChat(
-          sessionId,
+          sid,
           content,
           (event) => {
+            // The first frame means the server stored the message and titled the
+            // session from it: refresh the list so the title shows during the turn.
+            if (!listed) {
+              listed = true;
+              void queryClient.invalidateQueries({ queryKey: chatSessionsKey(slug) });
+            }
             switch (event.type) {
               case "text_delta":
                 updateLive((t) => applyTextDelta(t, event.text));
@@ -185,13 +273,14 @@ export function MessageThread({
         }
       } finally {
         setStreaming(false);
-        abortRef.current = null;
+        if (abortRef.current === controller) abortRef.current = null;
+        if (useUi.getState().streamingSessionId === sid) setStreamingSessionId(null);
         // Refetch so the persisted rows replace the local turn — the server
         // persisted as it went, including on abort, so this is authoritative.
         const fresh = await queryClient
           .fetchQuery({
-            queryKey: key("chat", "transcript", sessionId),
-            queryFn: () => api.chatTranscript(sessionId),
+            queryKey: key("chat", "transcript", sid),
+            queryFn: () => api.chatTranscript(sid),
             // The turn just wrote rows. Without this the app-wide 30s
             // staleTime makes fetchQuery resolve from cache with the *pre-send*
             // transcript, and clearing liveTurns below then erases the reply
@@ -211,11 +300,11 @@ export function MessageThread({
               t.error ?? "Couldn't refresh the transcript — showing the streamed copy.",
           }));
         }
-        // The sidebar shows titles and message counts, both of which just moved.
-        queryClient.invalidateQueries({ queryKey: key("chat", "sessions") });
+        // The sidebar shows titles and dates, both of which just moved.
+        queryClient.invalidateQueries({ queryKey: chatSessionsKey(slug) });
       }
     },
-    [api, key, queryClient, refreshProject, sessionId, updateLive],
+    [api, choice, currentId, key, navigate, onCreated, queryClient, refreshProject, setStreamingSessionId, slug, updateLive],
   );
 
   return (
@@ -223,18 +312,35 @@ export function MessageThread({
       <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-auto p-4">
         {transcript.isLoading && <Loading label="Loading transcript…" />}
         {transcript.isError && (
-          <div className="text-sm text-destructive">
-            {(transcript.error as Error).message}
-          </div>
+          <ErrorState
+            error={transcript.error}
+            context="chat"
+            title="Couldn't load this chat"
+            onRetry={() => void transcript.refetch()}
+          />
         )}
-        {!transcript.isLoading && turns.length === 0 && (
-          <Empty className="p-4">
-            <EmptyDescription>
-              Ask why a module is shaped the way it is, what changed around an area
-              recently, or for a walk through a symbol's callers. The assistant reads
-              CodeGraph, the WhyGraph history, and the source to answer.
-            </EmptyDescription>
-          </Empty>
+        {!transcript.isLoading && !transcript.isError && turns.length === 0 && (
+          <div className="mx-auto flex max-w-xl flex-col items-center gap-4 py-10 text-center" data-testid="chat-empty">
+            <div className="flex flex-col gap-1">
+              <p className="text-base font-medium text-foreground">Ask about this codebase</p>
+              <p className="text-sm text-muted-foreground">
+                The assistant reads CodeGraph, the WhyGraph history and the source to answer, and shows the
+                tool calls behind each claim.
+              </p>
+            </div>
+            <div className="flex w-full flex-col gap-2">
+              {STARTER_PROMPTS.map((text) => (
+                <Button
+                  key={text}
+                  variant="outline"
+                  className="h-auto justify-start whitespace-normal py-2 text-left"
+                  onClick={() => setStarter((prev) => ({ text, n: (prev?.n ?? 0) + 1 }))}
+                >
+                  {text}
+                </Button>
+              ))}
+            </div>
+          </div>
         )}
         {/* Persisted turns key on their first row's id; the two live turns key
             on their kind (there is only ever one of each). Index keys would
@@ -247,28 +353,39 @@ export function MessageThread({
         ))}
       </div>
 
-      {session && (
+      {createError !== null && (
+        <div className="border-t border-border px-4 py-2">
+          <ErrorState size="inline" context="chat" error={createError} className="text-xs" />
+        </div>
+      )}
+
+      {choice && (
         <div className="border-t border-border px-4 py-2">
           <ModelSelect
             compact
-            provider={session.provider}
-            model={session.model}
+            provider={choice.provider}
+            model={choice.model}
             // Streaming is part of this: repointing the session mid-turn would
             // change the row the in-flight turn is attributed to.
             disabled={update.isPending || streaming}
-            onChange={(next) =>
+            onChange={(next) => {
+              if (currentId === null) {
+                // A draft: nothing to save yet, the first Send creates the session with it.
+                const fallback = providers.data?.find((p) => p.provider === next.provider)?.default_model ?? "";
+                setDraft({ provider: next.provider, model: next.model || fallback });
+                return;
+              }
               update.mutate({
                 // Send provider only when it actually changed, so the server
                 // doesn't reset the model on a model-only switch.
-                provider:
-                  next.provider === session.provider ? undefined : next.provider,
+                provider: next.provider === choice.provider ? undefined : next.provider,
                 model: next.model || undefined,
-              })
-            }
+              });
+            }}
           />
           {update.isError && (
             <div className="mt-1 text-xs text-destructive">
-              {(update.error as Error).message}
+              {errorMessage(update.error, "chat")}
             </div>
           )}
         </div>
@@ -281,6 +398,7 @@ export function MessageThread({
       ) : (
         <Composer
           streaming={streaming}
+          fill={starter}
           onSend={send}
           onStop={() => abortRef.current?.abort()}
         />

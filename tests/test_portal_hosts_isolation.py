@@ -1201,7 +1201,10 @@ def test_each_member_sees_and_touches_only_their_own_chat_sessions(
                 refused = w.client.request(method, f"{chat}/{other}{suffix}", json=body)
                 where = (name, method, suffix, other)
                 assert refused.status_code == 404, (where, refused.text)
-                assert refused.json() == {"detail": f"session {other} not found"}
+                assert refused.json() == {
+                    "error": f"session {other} not found",
+                    "code": "not_found",
+                }
     assert seen == {"bob": [bobs], "ann": [w.quokka.session_id]}
     # Nothing the refused calls aimed at changed.
     anns = _ok(w.client.get(f"{chat}/{w.quokka.session_id}"))

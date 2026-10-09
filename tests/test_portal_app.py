@@ -595,7 +595,10 @@ def test_setup_flow(client: TestClient, env: SimpleNamespace) -> None:
         # The machine name the platform link page prefills (M2e section 4.8)
         "hostname": default_client_name(),
     }
-    assert client.get("/api/projects").json() == {"error": "setup required"}
+    assert client.get("/api/projects").json() == {
+        "error": "setup required",
+        "code": "setup_required",
+    }
 
     assert (
         client.post("/api/portal/setup", json={"display_name": " "}).status_code == 422
@@ -974,7 +977,10 @@ def test_current_org_answers_setup_required_before_not_found(
     with portal_client() as client:  # LocalIdentity, before setup
         _add_org_probe(client)
         assert client.get("/api/test/org").status_code == 409
-        assert client.get("/api/test/org").json() == {"error": "setup required"}
+        assert client.get("/api/test/org").json() == {
+            "error": "setup required",
+            "code": "setup_required",
+        }
     orgs = _seed_two_orgs()
     with portal_client(identity=HeaderIdentity()) as client:
         _add_org_probe(client)
@@ -985,7 +991,10 @@ def test_current_org_answers_setup_required_before_not_found(
         ):
             response = client.get("/api/test/org", headers=headers)
             assert response.status_code == 409, headers
-            assert response.json() == {"error": "setup required"}
+            assert response.json() == {
+                "error": "setup required",
+                "code": "setup_required",
+            }
         alice = {"x-test-user": orgs.uids["alice"]}
         erin = {"x-test-user": orgs.uids["erin"]}
         for headers in (
@@ -1499,7 +1508,10 @@ def test_every_api_route_answers_setup_required_before_setup(
                 continue
             response = client.request(method, url, json={})
             assert response.status_code == 409, (method, url, response.text)
-            assert response.json() == {"error": "setup required"}, (method, url)
+            assert response.json() == {
+                "error": "setup required",
+                "code": "setup_required",
+            }, (method, url)
             checked += 1
     assert checked > 30
 
@@ -1870,7 +1882,10 @@ def test_uninitialized_project_gates_data_routes_and_creates_no_db(
     for path in ("/api/projects/demo/tree", "/api/projects/demo/chat/sessions"):
         response = ready.get(path)
         assert response.status_code == 409
-        assert response.json() == {"error": "not initialized"}
+        assert response.json() == {
+            "error": "not initialized",
+            "code": "not_initialized",
+        }
     mcp = ready.post(
         "/mcp/demo",
         json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},

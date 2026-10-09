@@ -235,7 +235,7 @@ describe("connect callback page", () => {
   it("renders a refusal with the shared message", async () => {
     fake.routes["POST /api/platform/callback"] = () => json({ detail: "x", code: "issuer_mismatch" }, 422);
     mount(CB);
-    expect(await screen.findByTestId("callback-error")).toHaveTextContent("did not come from the platform");
+    expect(await screen.findByTestId("callback-error")).toHaveTextContent("came from an unexpected server");
     expect(screen.getByRole("link", { name: "Start again" })).toBeInTheDocument();
   });
 

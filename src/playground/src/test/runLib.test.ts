@@ -189,8 +189,9 @@ describe("projectProblem", () => {
     expect(p.message).toContain("Replace the link with a real file or folder");
   });
 
-  it("passes other errors through", () => {
-    expect(projectProblem(new Error("nope"))).toMatchObject({ kind: "other", message: "nope" });
+  it("words other errors through the registry", () => {
+    expect(projectProblem(new Error("nope"))).toMatchObject({ kind: "other", title: "Something went wrong" });
+    expect(projectProblem(new Error("nope")).message).not.toContain("nope");
   });
 });
 

@@ -225,7 +225,9 @@ export type ChatEvent =
       output_tokens: number | null;
       finish_reason: string | null;
     }
-  | { type: "error"; message: string };
+  // `code` (M2f-3): `no_llm_key` (with `provider`), `llm_unavailable` or `provider_error`;
+  // `message` is the server's own text, kept for older clients and "Show details".
+  | { type: "error"; message: string; code?: string; provider?: string };
 
 // ---- portal (portal/routes.py) --------------------------------------------
 
@@ -689,7 +691,25 @@ export type ScanEvent =
 
 // ---- transport --------------------------------------------------------------
 
+/** One invalid field of a `422 invalid_request` (FastAPI's validation `detail`). */
+export interface FieldError {
+  /** Where, without the `body` / `query` / `path` prefix: `"title"`, `"grants.0.role"`. */
+  path: string;
+  msg: string;
+}
+
+/**
+ * A failed API call. `status` is `0` when the portal could not be reached at all
+ * (`code: "portal_unreachable"`). Never render `message` directly: the error
+ * registry (`lib/apiErrors.ts`) words every code; the server's own text stays
+ * in `serverMessage` for the "Show details" disclosure.
+ */
 export class ApiError extends Error {
+  /** The server's own text (or the transport's), for "Show details". */
+  readonly serverMessage: string;
+  /** The invalid fields of a `422 invalid_request`; `undefined` otherwise. */
+  readonly fields?: FieldError[];
+
   constructor(
     public status: number,
     message: string,
@@ -699,6 +719,8 @@ export class ApiError extends Error {
     public extra: Record<string, unknown> = {},
   ) {
     super(message);
+    this.serverMessage = message;
+    if (Array.isArray(extra.fields)) this.fields = extra.fields as FieldError[];
   }
 }
 
@@ -726,9 +748,28 @@ export function setBaseUrl(url: string | null): void {
   baseUrl = url;
 }
 
+export type ErrorMode = "local" | "production";
+
+// The portal's mode, for the error registry's mode-aware wording. Set once by the
+// root gate when `GET /api/portal/state` lands (the QueryClient is module-local
+// to main.tsx, so the registry cannot read the state from it).
+let errorMode: ErrorMode = "local";
+
+/** Tell the error registry which portal it words errors for. */
+export function setErrorMode(mode: ErrorMode): void {
+  errorMode = mode;
+}
+
+/** The mode {@link setErrorMode} last set (`"local"` until then). */
+export function getErrorMode(): ErrorMode {
+  return errorMode;
+}
+
 // An org host without a session answers `401 login_required`: send the browser to
 // the base host's sign-in with a way back. `bad_credentials` (also 401) never gets
-// here, and the base host's own /signin never redirects to itself.
+// here, and the base host's own /signin never redirects to itself. `reauth=1` tells
+// the sign-in page the org host sent the person back (a session that ended, or a
+// cookie the org host never received).
 function redirectToSignIn(): void {
   if (!baseUrl) return;
   let base: URL;
@@ -738,14 +779,60 @@ function redirectToSignIn(): void {
     return;
   }
   if (window.location.origin === base.origin && window.location.pathname === "/signin") return;
-  hardNavigate(`${base.origin}/signin?next=${encodeURIComponent(window.location.href)}`);
+  hardNavigate(`${base.origin}/signin?next=${encodeURIComponent(window.location.href)}&reauth=1`);
+}
+
+// FastAPI's validation `loc` starts with where the value came from; the rest is the field.
+const LOC_SOURCES = new Set(["body", "query", "path", "header", "cookie"]);
+
+function fieldErrors(detail: unknown[]): FieldError[] {
+  return detail.map((item) => {
+    const entry = (item ?? {}) as { loc?: unknown; msg?: unknown };
+    const loc = Array.isArray(entry.loc) ? entry.loc.map(String) : [];
+    const path = (LOC_SOURCES.has(loc[0]) ? loc.slice(1) : loc).join(".");
+    return { path, msg: typeof entry.msg === "string" ? entry.msg : "is not valid" };
+  });
 }
 
 async function failure(res: Response): Promise<ApiError> {
-  const body = await res.json().catch(() => ({}));
-  const { detail, error, code, ...extra } = body;
-  if (res.status === 401 && code === "login_required") redirectToSignIn();
-  return new ApiError(res.status, detail ?? error ?? res.statusText, code, extra);
+  const body: unknown = await res.json().catch(() => null);
+  const fallback = res.statusText || `HTTP ${res.status}`;
+  if (!body || typeof body !== "object" || Array.isArray(body)) return new ApiError(res.status, fallback);
+  const { detail, error, code, ...extra } = body as Record<string, unknown>;
+  const retryAfter = Number(res.headers?.get?.("Retry-After"));
+  if (Number.isFinite(retryAfter) && retryAfter > 0 && extra.retry_after === undefined) {
+    extra.retry_after = retryAfter;
+  }
+  const serverCode = typeof code === "string" ? code : undefined;
+  if (res.status === 401 && serverCode === "login_required") redirectToSignIn();
+  if (Array.isArray(detail)) {
+    // A 422 from request validation: `detail` is a list of {loc, msg, type}.
+    const fields = fieldErrors(detail);
+    const text = fields.map((f) => (f.path ? `${f.path}: ${f.msg}` : f.msg)).join("; ");
+    return new ApiError(res.status, text || (typeof error === "string" ? error : fallback), serverCode ?? "invalid_request", {
+      ...extra,
+      fields,
+    });
+  }
+  const message = typeof detail === "string" ? detail : typeof error === "string" ? error : fallback;
+  return new ApiError(res.status, message, serverCode, extra);
+}
+
+/**
+ * `fetch`, with a network failure turned into `ApiError(0, ..., "portal_unreachable")`.
+ * An `AbortError` (the chat's Stop, a cancelled query) is rethrown unchanged, so a
+ * deliberate stop never reads as "portal unreachable".
+ */
+async function request(input: string, options: RequestInit): Promise<Response> {
+  try {
+    return await fetch(input, options);
+  } catch (err) {
+    if ((err as { name?: unknown } | null)?.name === "AbortError") throw err;
+    if (err instanceof TypeError) {
+      throw new ApiError(0, err.message || "the portal could not be reached", "portal_unreachable");
+    }
+    throw err;
+  }
 }
 
 // Turn a Response into JSON, with clear errors. A non-JSON body on a 200 (e.g. an
@@ -762,7 +849,7 @@ async function parse<T>(res: Response): Promise<T> {
 // The Explorer endpoints take everything in the query string; the chat and
 // portal endpoints take JSON bodies.
 async function send<T>(method: string, path: string, body?: unknown): Promise<T> {
-  return parse<T>(await fetch(`/api${path}`, init(method, body)));
+  return parse<T>(await request(`/api${path}`, init(method, body)));
 }
 
 const get = <T>(path: string) => send<T>("GET", path);
@@ -1066,7 +1153,7 @@ export const adminApi = {
 
 // A call answered with `204 No Content` (no JSON body to parse).
 async function sendEmpty(method: string, path: string): Promise<void> {
-  const res = await fetch(`/api${path}`, init(method));
+  const res = await request(`/api${path}`, init(method));
   if (!res.ok) throw await failure(res);
 }
 
@@ -1183,7 +1270,7 @@ export const auditApi = {
   // A fetch (the `X-WhyGraph-Client` header is required, so a plain link would be refused).
   csv: async (f: AuditFilters = {}): Promise<Blob> => {
     const { before: _before, ...rest } = f;
-    const res = await fetch(`/api/org/audit.csv${auditQuery(rest)}`, init("GET"));
+    const res = await request(`/api/org/audit.csv${auditQuery(rest)}`, init("GET"));
     if (!res.ok) throw await failure(res);
     return res.blob();
   },
@@ -1418,7 +1505,7 @@ function attachmentName(res: Response, fallback: string): string {
 }
 
 async function fetchCsv(path: string, fallback: string): Promise<UsageCsv> {
-  const res = await fetch(`/api${path}`, init("GET"));
+  const res = await request(`/api${path}`, init("GET"));
   if (!res.ok) throw await failure(res);
   return {
     blob: await res.blob(),
@@ -1553,7 +1640,7 @@ export function projectApi(slug: string) {
       body: { title?: string; provider?: string; model?: string },
     ) => send<ChatSession>("PATCH", `${base}/chat/sessions/${id}`, body),
     chatDeleteSession: async (id: number): Promise<void> => {
-      const res = await fetch(`/api${base}/chat/sessions/${id}`, init("DELETE"));
+      const res = await request(`/api${base}/chat/sessions/${id}`, init("DELETE"));
       if (!res.ok) throw await failure(res);
     },
     streamChat: (
@@ -1598,7 +1685,7 @@ async function streamChat(
   onEvent: (event: ChatEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const res = await fetch(`/api${path}`, init("POST", { content }, signal));
+  const res = await request(`/api${path}`, init("POST", { content }, signal));
   if (!res.ok) throw await failure(res);
   if (!res.body) throw new ApiError(res.status, "streaming is unsupported here");
 
@@ -1648,7 +1735,7 @@ async function streamScanEvents(
 ): Promise<string | null> {
   const headers: Record<string, string> = { ...CLIENT_HEADERS, Accept: "text/event-stream" };
   if (opts.lastEventId) headers["Last-Event-ID"] = opts.lastEventId;
-  const res = await fetch(`/api${path}`, { method: "GET", headers, signal: opts.signal });
+  const res = await request(`/api${path}`, { method: "GET", headers, signal: opts.signal });
   if (!res.ok) throw await failure(res);
   if (!res.body) throw new ApiError(res.status, "streaming is unsupported here");
 

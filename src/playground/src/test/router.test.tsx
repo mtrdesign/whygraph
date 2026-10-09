@@ -282,7 +282,7 @@ describe("project routes", () => {
 
   it("shows not-found for an unknown slug and does not remember it", async () => {
     mount("/p/ghost/explorer");
-    expect(await screen.findByText("Page not found")).toBeInTheDocument();
+    expect(await screen.findByText("Project not found")).toBeInTheDocument();
     expect(screen.queryByTestId("explorer")).toBeNull();
     expect(window.localStorage.getItem(LAST_PROJECT_KEY)).toBeNull();
     // No project data call was ever made for the dead slug.
@@ -313,7 +313,7 @@ describe("portal routes", () => {
 
   it.each(["/usage/me", "/usage/members/u2"])("keeps the production-only %s not found locally", async (path) => {
     mount(path);
-    expect(await screen.findByText("Page not found")).toBeInTheDocument();
+    expect(await screen.findByText("Only on a team portal")).toBeInTheDocument();
     expect(screen.queryByTestId("usage")).toBeNull();
   });
 
@@ -345,8 +345,8 @@ describe("first-run gate", () => {
       vi.fn(async () => json({ error: "migration failed: boom" })),
     );
     mount("/");
-    expect(await screen.findByText("WhyGraph could not start")).toBeInTheDocument();
-    expect(screen.getByText(/migration failed: boom/)).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "WhyGraph hit an unexpected error" })).toBeInTheDocument();
+    expect(screen.getByTestId("error-details")).toHaveTextContent("migration failed: boom");
   });
 });
 

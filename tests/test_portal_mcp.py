@@ -261,7 +261,7 @@ def test_mcp_unknown_slug_and_setup_gate(env: SimpleNamespace) -> None:  # noqa:
     with portal_client() as client:
         before = client.post("/mcp/demo", json=_rpc("tools/list"), headers=MCP_HEADERS)
         assert before.status_code == 409
-        assert before.json() == {"error": "setup required"}
+        assert before.json() == {"error": "setup required", "code": "setup_required"}
         client.post("/api/portal/setup", json={"display_name": "Tess"})
         unknown = client.post("/mcp/nope", json=_rpc("tools/list"), headers=MCP_HEADERS)
         assert unknown.status_code == 404

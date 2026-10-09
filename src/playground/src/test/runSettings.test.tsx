@@ -478,7 +478,10 @@ describe("Scan history (screen 8)", () => {
   });
 
   it("a symlinked project answers 409 unsafe_path with the instruction", async () => {
-    handlers["GET /api/projects/alpha/scans"] = () => ({
+    // `stats: null` makes the project layout probe the project DB through the
+    // estimate route (the run routes no longer open it).
+    handlers["GET /api/projects/alpha"] = () => details("alpha", { stats: null });
+    handlers["GET /api/projects/alpha/scan-estimate"] = () => ({
       status: 409,
       body: {
         error: "refusing to use /repos/alpha/.whygraph is a symbolic link: WhyGraph never follows a symbolic link out of the repository",
@@ -487,8 +490,7 @@ describe("Scan history (screen 8)", () => {
       },
     });
     mount("/p/alpha/scans");
-    // The project layout reads the same cached error and shows the instruction
-    // in place of the page.
+    // The project layout shows the instruction in place of the page.
     const err = await screen.findByTestId("problem-unsafe_path");
     expect(err).toHaveTextContent("A symbolic link is in the way");
     expect(err).toHaveTextContent("Replace the link with a real file or folder");
@@ -604,7 +606,7 @@ describe("Edge states (screen 12)", () => {
 
   it("a symlink in the way is explained on Explorer, not shown as a bare error", async () => {
     handlers["GET /api/projects/alpha"] = () => details("alpha", { stats: null });
-    handlers["GET /api/projects/alpha/scans"] = () => ({
+    handlers["GET /api/projects/alpha/scan-estimate"] = () => ({
       status: 409,
       body: {
         error: "refusing to use /repos/alpha/.codegraph is a symbolic link: WhyGraph never follows a symbolic link out of the repository",
@@ -621,7 +623,7 @@ describe("Edge states (screen 12)", () => {
   it("the degraded portal page explains the failure", async () => {
     handlers["GET /api/portal/state"] = () => ({ error: "alembic: no such table" });
     mount("/");
-    const page = await screen.findByTestId("degraded-page");
+    const page = await screen.findByTestId("portal-error");
     expect(page).toHaveTextContent("alembic: no such table");
     expect(page).toHaveTextContent("whygraph logs");
   });

@@ -21,7 +21,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Iterator
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Query
 
 from whygraph.core import get_config
 from whygraph.mcp.area_history import whygraph_area_history
@@ -33,6 +33,7 @@ from whygraph.mcp.targets import repo_root, resolve_target, target_dict
 from whygraph.services.codegraph import CodeGraph, CodeGraphError
 
 from . import graphdata
+from .errors import ServeError
 
 router = APIRouter()
 generate_router = APIRouter()
@@ -52,12 +53,11 @@ def _open_graph() -> Iterator[CodeGraph]:
             repo_root(), codegraph_db=get_config().codegraph_db
         )
     except CodeGraphError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "CodeGraph index unavailable — scan from the WhyGraph portal "
-                f"(or run `whygraph scan` outside it): {exc}"
-            ),
+        raise ServeError(
+            503,
+            "CodeGraph index unavailable - scan from the WhyGraph portal "
+            f"(or run `whygraph scan` outside it): {exc}",
+            code="not_indexed",
         ) from exc
     try:
         yield graph
@@ -142,7 +142,9 @@ def graph_ego(
     with _open_graph() as graph:
         symbol = graph.symbol(qualified_name)
         if symbol is None:
-            raise HTTPException(status_code=404, detail=f"{qualified_name!r} not found")
+            raise ServeError(
+                404, f"{qualified_name!r} not found", code="symbol_not_found"
+            )
         return graphdata.ego_graph(graph, symbol)
 
 
@@ -161,7 +163,9 @@ def node_detail(qualified_name: str = Query(...)) -> dict:
     with _open_graph() as graph:
         symbol = graph.symbol(qualified_name)
         if symbol is None:
-            raise HTTPException(status_code=404, detail=f"{qualified_name!r} not found")
+            raise ServeError(
+                404, f"{qualified_name!r} not found", code="symbol_not_found"
+            )
         return {
             "symbol": graphdata._symbol_dict(symbol),
             "analyzed": _coverage_flag(

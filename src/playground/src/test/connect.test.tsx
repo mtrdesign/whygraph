@@ -493,9 +493,9 @@ describe("link error messages", () => {
       expect(message, code).not.toContain("_");
     }
   });
-  it("falls back to the server's own message for an unknown code", () => {
-    expect(linkError(new ApiError(500, "boom", "weird"))).toBe("boom");
-    expect(linkError(new ApiError(500, "boom", "constructor"))).toBe("boom");
+  it("falls back to the status's sentence for an unknown code, never the server's text", () => {
+    expect(linkError(new ApiError(500, "boom", "weird"))).toMatch(/WhyGraph hit an error/);
+    expect(linkError(new ApiError(500, "boom", "constructor"))).toMatch(/WhyGraph hit an error/);
   });
   it("labels every revocation reason", () => {
     for (const r of ["user_revoked", "admin_revoked", "removed_locally", "member_removed", "member_left", "user_disabled", "project_deleted", "org_deleted", "idle", "project_access_removed"]) {

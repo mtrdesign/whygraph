@@ -6,36 +6,14 @@ import type { ProjectProblem } from "../../lib/errors";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
 import { CopyButton } from "./CopyButton";
+import { NotFoundState, type NotFoundKind } from "../state/NotFoundState";
 
 // Screen 12: the states a project (or the portal) can be in where the normal page
 // cannot render. Each one says what is wrong and what fixes it.
 
-/** Portal database failed to open or migrate (`GET state` answers `{error}`). */
-export function DegradedPage({ message }: { message: string }) {
-  return (
-    <div className="mx-auto max-w-xl p-8" data-testid="degraded-page">
-      <h1 className="text-lg font-semibold">WhyGraph could not start</h1>
-      <p className="mt-2 text-sm text-muted-foreground">
-        The portal database failed to open or migrate, so nothing else can load. Your repositories
-        are untouched. Read the portal log with <span className="font-mono">whygraph logs</span>, fix
-        the cause, then start again with <span className="font-mono">whygraph up</span>.
-      </p>
-      <pre className="mt-3 overflow-auto rounded-md bg-muted p-3 text-xs">{message}</pre>
-    </div>
-  );
-}
-
-export function NotFoundPage() {
-  return (
-    <div className="mx-auto w-full max-w-3xl p-6">
-      <h1 className="text-lg font-semibold tracking-tight">Page not found</h1>
-      <p className="mt-1 text-sm text-muted-foreground">
-        <Link to="/" className="text-primary-text underline-offset-4 hover:underline">
-          Back to projects
-        </Link>
-      </p>
-    </div>
-  );
+/** A page that is not there; `kind` says which (a thin wrapper over `NotFoundState`). */
+export function NotFoundPage({ kind = "page" }: { kind?: NotFoundKind }) {
+  return <NotFoundState kind={kind} />;
 }
 
 /**

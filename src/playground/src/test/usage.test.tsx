@@ -436,7 +436,7 @@ describe("Usage page tabs by role and mode", () => {
   it("local mode has no My usage page", async () => {
     fake.state = localState();
     mount("/usage/me");
-    expect(await screen.findByText("Page not found")).toBeInTheDocument();
+    expect(await screen.findByText("Only on a team portal")).toBeInTheDocument();
   });
 });
 

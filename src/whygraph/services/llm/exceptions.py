@@ -16,3 +16,12 @@ class LlmAuthError(LlmError):
     same way, so a batch (the analyze phase) stops at the first one
     instead of failing every commit.
     """
+
+
+class LlmKeyMissing(LlmError):
+    """No API key is configured for the provider, so no call was made.
+
+    Raised by the chat adapters before they build an SDK client. The chat
+    route answers it with an ``error`` frame whose ``code`` is
+    ``no_llm_key``, which the playground words for the portal's mode.
+    """

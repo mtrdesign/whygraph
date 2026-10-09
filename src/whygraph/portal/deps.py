@@ -13,7 +13,7 @@ carries the action as ``whygraph_action``:
   request. **No** initialized gate: ``POST init``, ``GET/PUT config`` and
   the project details use it, so an uninitialized project can be set up.
 * :func:`project_db_access` - the same, plus the initialized gate
-  (``409 {"error": "not initialized"}`` until ``projects.initialized_at``
+  (``409 {"code": "not_initialized"}`` until ``projects.initialized_at``
   is set **and** the DB file exists, so nothing creates an empty
   ``.whygraph/whygraph.db`` in the user's repo) plus the memoized
   migration (:mod:`whygraph.portal.migrate`). The data routers and the
@@ -649,7 +649,8 @@ async def current_user(request: Request) -> Principal:
     Raises
     ------
     ApiError
-        ``409`` when no user exists yet (local mode);
+        ``409 {"code": "setup_required"}`` when no user exists yet (local
+        mode);
         ``401 {"code": "login_required"}`` without a session (production),
         or for a token principal.
     """
@@ -659,7 +660,7 @@ async def current_user(request: Request) -> Principal:
     if principal is None:
         if portal_state(request).mode == "production":
             raise ApiError(401, "sign-in required", code="login_required")
-        raise ApiError(409, "setup required")
+        raise ApiError(409, "setup required", code="setup_required")
     return principal
 
 
@@ -1106,7 +1107,7 @@ async def require_initialized(state: PortalState, project: BoundProject) -> None
     Raises
     ------
     ApiError
-        ``409 {"error": "not initialized"}`` when ``initialized_at`` is
+        ``409 {"code": "not_initialized"}`` when ``initialized_at`` is
         unset or the DB file is missing - the DB is then never created;
         ``409 {"code": "unsafe_path"}`` when a DB path is a symlink
         (checked first, before anything follows it).
@@ -1116,10 +1117,10 @@ async def require_initialized(state: PortalState, project: BoundProject) -> None
         # A linked project has no local WhyGraph DB: only Initialize gates it,
         # and a leftover whygraph.db is neither required nor migrated.
         if project.initialized_at is None:
-            raise ApiError(409, "not initialized")
+            raise ApiError(409, "not initialized", code="not_initialized")
         return
     if project.initialized_at is None or not project.db_path.is_file():
-        raise ApiError(409, "not initialized")
+        raise ApiError(409, "not initialized", code="not_initialized")
     try:
         await anyio.to_thread.run_sync(state.migrations.ensure, project.ctx)
     except UnsafePathError as exc:

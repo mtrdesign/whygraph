@@ -1,0 +1,36 @@
+import { Link } from "@tanstack/react-router";
+import { Button } from "../ui/button";
+
+export type NotFoundKind = "project" | "run" | "page" | "team-only";
+
+const COPY: Record<NotFoundKind, { title: string; body: string }> = {
+  project: {
+    title: "Project not found",
+    body: "This project may have been removed, or it is restricted and you have no access to it.",
+  },
+  run: {
+    title: "Scan run not found",
+    body: "This scan run doesn't exist in this project. It may belong to another project, or the address is wrong.",
+  },
+  page: { title: "Page not found", body: "There is nothing at this address." },
+  "team-only": {
+    title: "Only on a team portal",
+    body: "This page exists on a team WhyGraph portal. A local portal has one user, so it has no such page.",
+  },
+};
+
+/** A specific "not found": what is missing, why that can happen, one way back. */
+export function NotFoundState({ kind = "page" }: { kind?: NotFoundKind }) {
+  const copy = COPY[kind];
+  return (
+    <div className="mx-auto w-full max-w-3xl p-6" data-testid="not-found" data-kind={kind}>
+      <h1 className="text-lg font-semibold tracking-tight">{copy.title}</h1>
+      <p className="mt-1 text-sm text-muted-foreground">{copy.body}</p>
+      <div className="mt-3">
+        <Button size="sm" variant="outline" render={<Link to="/" />}>
+          Back to projects
+        </Button>
+      </div>
+    </div>
+  );
+}

@@ -14,7 +14,17 @@ import {
   type RouterHistory,
 } from "@tanstack/react-router";
 import { useQuery, type QueryClient } from "@tanstack/react-query";
-import { ApiError, portalApi, portalKey, projectApi, projectKey, setBaseUrl, type PortalState } from "./api";
+import {
+  ApiError,
+  portalApi,
+  portalKey,
+  projectApi,
+  projectKey,
+  setBaseUrl,
+  setErrorMode,
+  type PortalState,
+  type ProjectDetails,
+} from "./api";
 import { projectProblem } from "./lib/errors";
 import { can } from "./lib/permissions";
 import { getLastProject, setLastProject } from "./lib/lastProject";
@@ -56,13 +66,10 @@ import { OrgPickerPage } from "./pages/OrgPickerPage";
 import { ResetPasswordPage } from "./pages/ResetPasswordPage";
 import { SessionNotReceivedPage } from "./pages/SessionNotReceivedPage";
 import { SignInPage } from "./pages/SignInPage";
-import {
-  DegradedPage,
-  NotFoundPage,
-  NotInitialized,
-  ProblemAlert,
-  ProjectUnavailable,
-} from "./components/portal/EdgeStates";
+import { NotFoundPage, NotInitialized, ProblemAlert, ProjectUnavailable } from "./components/portal/EdgeStates";
+import { PortalErrorPage } from "./components/state/PortalErrorPage";
+import { QueryState } from "./components/state/QueryState";
+import { PageSkeleton } from "./components/state/Skeletons";
 
 // The route tree for §4.9, code-based (a generated `routeTree.gen.ts` would not
 // exist yet when `tsc --noEmit` runs ahead of `vite build`).
@@ -147,22 +154,6 @@ export async function resolveLastProject(queryClient: QueryClient): Promise<stri
 
 // ---- root -------------------------------------------------------------------
 
-function RootError({ error, reset }: { error: Error; reset: () => void }) {
-  return (
-    <div className="mx-auto max-w-xl p-8">
-      <h1 className="text-lg font-semibold">Something went wrong</h1>
-      <pre className="mt-3 overflow-auto rounded-md bg-muted p-3 text-xs">{error.message}</pre>
-      <button
-        type="button"
-        onClick={reset}
-        className="mt-3 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-accent"
-      >
-        Try again
-      </button>
-    </div>
-  );
-}
-
 // ---- production identity gate (M2c section 4.10) ----------------------------
 
 // What the base host serves (everything else is the org tree, which lives on an
@@ -232,7 +223,8 @@ export function baseHostRedirect(portal: PortalState, pathname: string, href?: s
 function RootLayout() {
   const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
   useGlobalShortcuts();
-  if (portal.error) return <DegradedPage message={portal.error} />;
+  // The portal's own database failed to open or migrate: nothing else can load.
+  if (portal.error) return <PortalErrorPage error={portal.error} />;
   if (portal.mode === "production" && portal.host_kind === "org" && portal.user && !portal.org) {
     return <NoOrgAccessPage />;
   }
@@ -261,6 +253,7 @@ const rootRoute = createRootRouteWithContext<RouterContext>()({
       staleTime: 30_000,
     });
     const kind = portal.mode === "production" ? portal.host_kind : undefined;
+    setErrorMode(portal.mode === "production" ? "production" : "local");
     setBaseUrl(!portal.error && kind && kind !== "local" ? (portal.base_url ?? null) : null);
     if (!portal.error && kind === "base") {
       const href = new URL(location.href, window.location.origin).href;
@@ -282,7 +275,7 @@ const rootRoute = createRootRouteWithContext<RouterContext>()({
     return { portal };
   },
   component: RootLayout,
-  errorComponent: ({ error, reset }) => <RootError error={error as Error} reset={reset} />,
+  errorComponent: ({ error, reset }) => <PortalErrorPage error={error} reset={reset} />,
   notFoundComponent: RootNotFound,
 });
 
@@ -475,7 +468,7 @@ const globalSettingsRoute = createRoute({
 // Org members exist only in production; local mode has one implicit user.
 function MembersRoute() {
   const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
-  return isProduction(portal) ? <MembersPage /> : <NotFoundPage />;
+  return isProduction(portal) ? <MembersPage /> : <NotFoundPage kind="team-only" />;
 }
 const membersRoute = createRoute({ getParentRoute: () => portalLayout, path: "/members", component: MembersRoute });
 
@@ -510,7 +503,8 @@ function MyUsageRoute() {
   const state = usePortalState().data;
   const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
   const current = state ?? portal;
-  return isProduction(current) && current.usage?.me ? <MemberUsagePage /> : <NotFoundPage />;
+  if (!isProduction(current)) return <NotFoundPage kind="team-only" />;
+  return current.usage?.me ? <MemberUsagePage /> : <NotFoundPage />;
 }
 const myUsageRoute = createRoute({
   getParentRoute: () => portalLayout,
@@ -524,7 +518,8 @@ function MemberUsageRoute() {
   const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
   const { uid } = useParams({ strict: false }) as { uid: string };
   const current = state ?? portal;
-  return isProduction(current) && current.usage?.org ? <MemberUsagePage key={uid} uid={uid} /> : <NotFoundPage />;
+  if (!isProduction(current)) return <NotFoundPage kind="team-only" />;
+  return current.usage?.org ? <MemberUsagePage key={uid} uid={uid} /> : <NotFoundPage />;
 }
 const memberUsageRoute = createRoute({
   getParentRoute: () => portalLayout,
@@ -549,14 +544,16 @@ function ProjectLayout() {
     retry: false,
   });
   // `stats: null` on a usable project means the backend refused to open its data
-  // (a symlink in the way, `409 unsafe_path`). One cheap data call tells which
-  // problem it is, so Explorer and Chat show the instruction instead of a bare error.
+  // (a symlink in the way, `409 unsafe_path`). One cheap data call that opens the
+  // project DB tells which problem it is, so Explorer and Chat show the instruction
+  // instead of a bare error. The estimate route keeps the initialized gate (the run
+  // routes do not), and its key is the one `ScanEstimateCard` reads.
   const usable =
     !!project.data && project.data.initialized && project.data.root_status === "ok" && project.data.source !== "platform";
   const probeWanted = usable && DATA_PAGES.has(page) && project.data?.stats === null;
   const probe = useQuery({
-    queryKey: projectKey(slug, "scans"),
-    queryFn: () => projectApi(slug).scans(),
+    queryKey: projectKey(slug, "scan-estimate"),
+    queryFn: () => projectApi(slug).scanEstimate(),
     enabled: probeWanted,
     retry: false,
   });
@@ -569,44 +566,52 @@ function ProjectLayout() {
   if (notFound) {
     return (
       <AppShell>
-        <NotFoundPage />
+        <NotFoundPage kind="project" />
         <CommandPalette />
       </AppShell>
     );
   }
 
   const notice = (node: React.ReactNode) => <div className="mx-auto w-full max-w-3xl p-6">{node}</div>;
-  let body: React.ReactNode = <Outlet />;
-  if (project.isLoading) {
-    body = <p className="p-6 text-sm text-muted-foreground">Loading…</p>;
-  } else if (project.isError) {
-    body = <p className="p-6 text-sm text-destructive">Failed to load project: {project.error.message}</p>;
-  } else if (project.data && DATA_PAGES.has(page) && project.data.source === "platform" && page !== "scans") {
-    // No local Explorer or Chat for a linked project: the data routes refuse it (M2e).
-    body = notice(<LinkedElsewhere project={project.data} />);
-  } else if (project.data && page === "chat" && !can(project.data, "project.chat")) {
-    // ChatView never mounts, so no chat request fires for a viewer.
-    body = notice(
-      <Alert data-testid="chat-read-only">
-        <AlertTitle>Chat needs the Contributor role</AlertTitle>
-        <AlertDescription>
-          Ask a project admin for the Contributor role to chat. You can still browse the Explorer and the
-          existing rationale cards.
-        </AlertDescription>
-      </Alert>,
-    );
-  } else if (project.data && DATA_PAGES.has(page)) {
-    if (project.data.root_status === "ok" && project.data.initialized && probeWanted && probe.isLoading) {
-      // Hold the page back until the probe says its data can be opened.
-      body = <p className="p-6 text-sm text-muted-foreground">Loading…</p>;
-    } else if (project.data.root_status !== "ok") {
-      body = notice(<ProjectUnavailable project={project.data} />);
-    } else if (!project.data.initialized) {
-      body = notice(<NotInitialized slug={slug} />);
-    } else if (probe.isError && projectProblem(probe.error).kind === "unsafe_path") {
-      body = notice(<ProblemAlert problem={projectProblem(probe.error)} />);
+  const pageBody = (data: ProjectDetails): React.ReactNode => {
+    if (DATA_PAGES.has(page) && data.source === "platform" && page !== "scans") {
+      // No local Explorer or Chat for a linked project: the data routes refuse it (M2e).
+      return notice(<LinkedElsewhere project={data} />);
     }
-  }
+    if (page === "chat" && !can(data, "project.chat")) {
+      // ChatView never mounts, so no chat request fires for a viewer.
+      return notice(
+        <Alert data-testid="chat-read-only">
+          <AlertTitle>Chat needs the Contributor role</AlertTitle>
+          <AlertDescription>
+            Ask a project admin for the Contributor role to chat. You can still browse the Explorer and the
+            existing rationale cards.
+          </AlertDescription>
+        </Alert>,
+      );
+    }
+    if (DATA_PAGES.has(page)) {
+      // Hold the page back until the probe says its data can be opened.
+      if (data.root_status === "ok" && data.initialized && probeWanted && probe.isLoading) return <PageSkeleton />;
+      if (data.root_status !== "ok") return notice(<ProjectUnavailable project={data} />);
+      if (!data.initialized) return notice(<NotInitialized slug={slug} />);
+      if (probe.isError && projectProblem(probe.error).kind === "unsafe_path") {
+        return notice(<ProblemAlert problem={projectProblem(probe.error)} />);
+      }
+    }
+    return <Outlet />;
+  };
+  const body = (
+    <QueryState
+      query={project}
+      loading={<PageSkeleton />}
+      errorTitle="Couldn't load this project"
+      forbidden={{ what: "this project", grant: "project-admin" }}
+      notFound="project"
+    >
+      {pageBody}
+    </QueryState>
+  );
 
   // `key={slug}` remounts the whole subtree on a project switch, so component
   // state (tree expansion, open tab, a half-typed chat draft) cannot carry over.

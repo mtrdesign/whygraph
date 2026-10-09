@@ -734,10 +734,7 @@ describe("identity helpers", () => {
     );
   });
 
-  it("authMessage shows no_such_user verbatim and maps the new codes", () => {
-    const words =
-      "No one with that GitHub username has signed in to WhyGraph yet. Ask them to sign in once, then add them.";
-    expect(authMessage(new ApiError(404, words, "no_such_user"))).toBe(words);
+  it("authMessage maps the new codes", () => {
     for (const code of [
       "oauth_state",
       "github_auth_failed",
@@ -885,15 +882,13 @@ describe("members page", () => {
     expect(post?.body).toEqual({ github_login: "@dan", role: "admin" });
   });
 
-  it("shows no_such_user verbatim", async () => {
-    const words =
-      "No one with that GitHub username has signed in to WhyGraph yet. Ask them to sign in once, then add them.";
+  it("words no_such_github_user from the registry", async () => {
     visit("owner");
-    serveMembers({ status: 404, body: { error: words, code: "no_such_user" } });
+    serveMembers({ status: 404, body: { error: "GitHub has no user with that username.", code: "no_such_github_user" } });
     const user = userEvent.setup();
     await user.type(await screen.findByLabelText("GitHub username"), "nobody");
     await user.click(screen.getByRole("button", { name: "Invite" }));
-    expect(await screen.findByTestId("add-member-error")).toHaveTextContent(words);
+    expect(await screen.findByTestId("add-member-error")).toHaveTextContent("GitHub has no user with that username.");
   });
 
   it("changes a role with PATCH and removes with DELETE after a confirm", async () => {
@@ -955,7 +950,7 @@ describe("local mode has no members", () => {
   it("/members is not a page", async () => {
     fake.state = local;
     mount("/members");
-    await screen.findByRole("heading", { name: "Page not found" });
+    await screen.findByRole("heading", { name: "Only on a team portal" });
     expect(screen.queryByTestId("member-list")).toBeNull();
     expect(fake.calls.some((c) => c.path === "/api/org/members")).toBe(false);
   });

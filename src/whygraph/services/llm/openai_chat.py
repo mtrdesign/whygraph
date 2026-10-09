@@ -36,7 +36,7 @@ from .chat import (
     ToolSpec,
     TurnDone,
 )
-from .exceptions import LlmError
+from .exceptions import LlmError, LlmKeyMissing
 from .usage import UsageFields, openai_usage_fields
 
 
@@ -219,7 +219,7 @@ class OpenAIChatAdapter(ChatClient):
             # generic "Missing credentials" surface — the provider tag is
             # what the user needs to act on.
             if not key:
-                raise LlmError(
+                raise LlmKeyMissing(
                     f"{self.provider} is not configured — set {self._env_var} or "
                     f"[llm.{self.provider}].api_key in whygraph.toml"
                 )

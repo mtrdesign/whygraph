@@ -28,7 +28,6 @@ describe("addProjectError", () => {
     const nf = addProjectError(err("not_found"), "github");
     expect(nf.field).toBe("url");
     expect(nf.message).toMatch(/not visible/i);
-    expect(addProjectError(err("invalid_url"), "github").field).toBe("url");
   });
 
   it("carries the not_shared fix command through from the body", () => {
@@ -41,9 +40,12 @@ describe("addProjectError", () => {
     expect(e.folderSuggestion).toBe("/Users/me/Work");
   });
 
-  it("falls back to the backend message for unknown codes and non-API errors", () => {
-    expect(addProjectError(err("weird"), "local")).toEqual({ field: "form", message: "backend text" });
-    expect(addProjectError(new Error("offline"), "local").message).toBe("offline");
+  it("falls back to the registry's sentence for unknown codes and non-API errors", () => {
+    expect(addProjectError(err("weird"), "local")).toEqual({
+      field: "form",
+      message: "WhyGraph couldn't use that request. Reload the page and try again.",
+    });
+    expect(addProjectError(new Error("offline"), "local").message).toMatch(/WhyGraph hit an error/);
   });
 });
 

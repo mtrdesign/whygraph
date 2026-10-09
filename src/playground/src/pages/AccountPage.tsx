@@ -11,7 +11,6 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { PASSWORD_HINT, authMessage } from "../lib/authErrors";
 import { formatUsd } from "../lib/format";
-import { useSignOut } from "../lib/identity";
 import { formatResetsAt } from "../lib/usageRange";
 import { safeHref } from "../lib/platformLink";
 
@@ -61,12 +60,12 @@ function MyUsage() {
 }
 
 /**
- * `/account`: display name, password and sign out. Lives on the base host. A
- * GitHub account shows its avatar and `@login` and has no password section.
+ * `/account`: display name and password. Lives on the base host, in its chrome
+ * (which has the one Sign out, in the avatar menu). A GitHub account shows its
+ * avatar and `@login` and has no password section.
  */
 export function AccountPage() {
   const queryClient = useQueryClient();
-  const signOut = useSignOut();
   const account = useQuery({ queryKey: ["@account", "me"], queryFn: accountApi.get });
   const [name, setName] = useState("");
   const [current, setCurrent] = useState("");
@@ -208,12 +207,6 @@ export function AccountPage() {
       <MyUsage />
 
       <MyConnectedPortals />
-
-      <div>
-        <Button variant="outline" onClick={() => void signOut()}>
-          Sign out
-        </Button>
-      </div>
     </div>
   );
 }

@@ -25,8 +25,12 @@ test("switching project shows the other project's data and none of the first's",
   await openMainSymbol(page, billing);
   await expect(page.getByText(notes.mainSymbol)).toHaveCount(0);
 
-  // Switch to notes through the sidebar's project switcher.
+  // Switch to notes through the sidebar's project switcher: "All projects" once at
+  // the top and the current project marked (NAV-5).
   await page.getByRole("button", { name: "Switch project" }).click();
+  await expect(page.getByRole("menuitem").first()).toHaveText("All projects");
+  await expect(page.getByRole("menuitem", { name: "All projects" })).toHaveCount(1);
+  await expect(page.getByRole("menuitem", { name: billing.name })).toHaveAttribute("aria-current", "true");
   await page.getByRole("menuitem", { name: notes.name }).click();
   await expect(page).toHaveURL(new RegExp(`/p/${notes.slug}$`));
   await expect(page.getByTestId("mcp-url")).toContainText(`/mcp/${notes.slug}`);

@@ -5,7 +5,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory, useSearch } from "@tanstack/react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, portalKey, projectApi, projectKey } from "../api";
-import { buildCrumbs } from "../components/shell/crumbs";
+import { buildCrumbs, pageTitle, scanRunKey } from "../components/shell/crumbs";
+import { documentTitle } from "../lib/useDocumentTitle";
 import { useExplorerSearch, useActiveSessionId } from "../lib/nav";
 import { useProjectQuery, useSlug } from "../lib/project";
 import { LAST_PROJECT_KEY } from "../lib/lastProject";
@@ -59,6 +60,8 @@ interface Fake {
   production?: boolean;
   /** Per-slug overrides of the project details (an importing project, ...). */
   over?: Record<string, Record<string, unknown>>;
+  /** The chat sessions every project lists. */
+  sessions?: unknown[];
 }
 
 let fake: Fake;
@@ -155,7 +158,7 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     }
     if (!rest) return Promise.resolve(json(details(slug)));
     if (rest === "/scans") return Promise.resolve(json({ runs: [] }));
-    if (rest === "/chat/sessions") return Promise.resolve(json([]));
+    if (rest === "/chat/sessions") return Promise.resolve(json(fake.sessions ?? []));
     if (rest === "/search") {
       return Promise.resolve(
         json({ query: "q", results: [{ name: `hit-from-${slug}`, id: slug, analyzed: true }] }),
@@ -231,29 +234,68 @@ describe("search params", () => {
 });
 
 describe("breadcrumbs", () => {
+  const labels = (path: string, ctx?: Parameters<typeof buildCrumbs>[1]) => buildCrumbs(path, ctx).map((c) => c.label);
+
   it("follows the project route grammar", () => {
-    expect(buildCrumbs("/", undefined).map((c) => c.label)).toEqual(["Projects"]);
-    expect(buildCrumbs("/p/alpha", "Alpha").map((c) => c.label)).toEqual(["Projects", "Alpha"]);
-    expect(buildCrumbs("/p/alpha/explorer", "Alpha").map((c) => c.label)).toEqual([
-      "Projects",
-      "Alpha",
-      "Explorer",
-    ]);
-    expect(buildCrumbs("/p/alpha/scans/7", "Alpha").map((c) => c.label)).toEqual([
+    expect(labels("/")).toEqual(["Projects"]);
+    expect(labels("/p/alpha", { projectName: "Alpha" })).toEqual(["Projects", "Alpha"]);
+    expect(labels("/p/alpha/explorer", { projectName: "Alpha" })).toEqual(["Projects", "Alpha", "Explorer"]);
+    expect(labels("/projects/new")).toEqual(["Projects", "Add project"]);
+  });
+
+  it("names a run by its title, never by its id", () => {
+    expect(labels("/p/alpha/scans/7", { projectName: "Alpha" })).toEqual(["Projects", "Alpha", "Scans", "Scan run"]);
+    expect(labels("/p/alpha/scans/7", { projectName: "Alpha", runTitle: "Manual scan - 9 Oct 2026, 14:02" })).toEqual([
       "Projects",
       "Alpha",
       "Scans",
-      "Run #7",
+      "Manual scan - 9 Oct 2026, 14:02",
     ]);
-    expect(buildCrumbs("/projects/new").map((c) => c.label)).toEqual(["Projects", "Add project"]);
+    expect(buildCrumbs("/p/alpha/scans/7")[2].to).toEqual({ to: "/p/$slug/scans/{-$runId}", params: { slug: "alpha" } });
+  });
+
+  it("carries the chat session's title", () => {
+    expect(labels("/p/alpha/chat/3", { projectName: "Alpha", chatTitle: "Why the cache" })).toEqual([
+      "Projects",
+      "Alpha",
+      "Chat",
+      "Why the cache",
+    ]);
+    // "Chat" would start a new chat: plain text, not a link.
+    expect(buildCrumbs("/p/alpha/chat/3", { chatTitle: "x" })[2].to).toBeUndefined();
+    expect(labels("/p/alpha/chat/3")).toEqual(["Projects", "alpha", "Chat"]);
+    expect(labels("/p/alpha/chat")).toEqual(["Projects", "alpha", "Chat"]);
+  });
+
+  it("names the wizard step as the page title does", () => {
+    expect(labels("/p/alpha/init", { wizardStep: "configure" })).toEqual(["Projects", "Add project", "Configure"]);
+    expect(labels("/p/alpha/init", { wizardStep: "setup" })).toEqual(["Projects", "Add project", "Set up"]);
+    expect(labels("/p/alpha/init")).toEqual(["Projects", "Add project"]);
+  });
+
+  it("names /link, /connect/callback and unknown routes", () => {
+    expect(labels("/link")).toEqual(["Projects", "Link a project"]);
+    expect(labels("/connect/callback")).toEqual(["Connect"]);
+    expect(labels("/no-such-page")).toEqual(["Not found"]);
+    expect(labels("/p/alpha/nope", { projectName: "Alpha" })).toEqual(["Projects", "Alpha", "Not found"]);
   });
 
   it("names the Usage & cost pages", () => {
-    expect(buildCrumbs("/usage").map((c) => c.label)).toEqual(["Usage & cost"]);
-    expect(buildCrumbs("/usage/me").map((c) => c.label)).toEqual(["Usage & cost", "My usage"]);
-    expect(buildCrumbs("/usage/me")[0].to).toEqual({ to: "/usage" });
-    expect(buildCrumbs("/usage/members/u7", undefined, "Ben").map((c) => c.label)).toEqual(["Usage & cost", "Ben"]);
-    expect(buildCrumbs("/usage/members/u7").map((c) => c.label)).toEqual(["Usage & cost", "u7"]);
+    expect(labels("/usage")).toEqual(["Usage & cost"]);
+    expect(labels("/usage/me")).toEqual(["Usage & cost", "My usage"]);
+    // A member's /usage only redirects back to /usage/me: plain text (BUG-19).
+    expect(buildCrumbs("/usage/me")[0].to).toBeUndefined();
+    expect(buildCrumbs("/usage/me", { orgUsage: true })[0].to).toEqual({ to: "/usage" });
+    expect(labels("/usage/members/u7", { memberName: "Ben", orgUsage: true })).toEqual(["Usage & cost", "Ben"]);
+    expect(labels("/usage/members/u7")).toEqual(["Usage & cost", "u7"]);
+  });
+
+  it("titles a project's own page Overview", () => {
+    expect(pageTitle(buildCrumbs("/p/alpha", { projectName: "Alpha" }), "/p/alpha")).toBe("Overview");
+    expect(pageTitle(buildCrumbs("/p/alpha/scans"), "/p/alpha/scans")).toBe("Scans");
+    expect(documentTitle("Scans", "Alpha")).toBe("Scans · Alpha · WhyGraph");
+    expect(documentTitle("Projects")).toBe("Projects · WhyGraph");
+    expect(documentTitle("Alpha", "Alpha")).toBe("Alpha · WhyGraph");
   });
 });
 
@@ -714,5 +756,124 @@ describe("projectApi", () => {
   it("namespaces portal keys away from slugs", () => {
     expect(portalKey("state")[0]).toBe("@portal");
     expect(projectKey("a", "tree")).toEqual(["a", "tree"]);
+  });
+});
+
+// ---- the shell: keyboard, titles, the project switcher (S14) --------------------------
+
+describe("shell keyboard and titles", () => {
+  it("starts with a skip link that moves focus to the main region", async () => {
+    const user = userEvent.setup();
+    mount("/");
+    await screen.findByRole("heading", { name: "Projects" });
+    const skip = screen.getByRole("link", { name: "Skip to content" });
+    await user.tab();
+    expect(skip).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(document.getElementById("main")).toHaveFocus();
+  });
+
+  it("moves focus to the new page's h1 and announces it on a path change", async () => {
+    const { router } = mount("/p/alpha/explorer");
+    await screen.findByTestId("explorer");
+    await act(async () => {
+      await router.navigate({ to: "/" });
+    });
+    const heading = await screen.findByRole("heading", { level: 1, name: "Projects" });
+    await waitFor(() => expect(heading).toHaveFocus());
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Projects"));
+  });
+
+  it("falls back to the main region on a page without an h1, and ignores search-only changes", async () => {
+    const { router } = mount("/");
+    await screen.findByRole("heading", { name: "Projects" });
+    await act(async () => {
+      await router.navigate({ to: "/p/$slug/explorer", params: { slug: "alpha" } });
+    });
+    await screen.findByTestId("explorer");
+    await waitFor(() => expect(document.getElementById("main")).toHaveFocus(), { timeout: 2000 });
+
+    // A selection (search only) leaves focus where the person put it.
+    const button = screen.getByRole("button", { name: "Switch project" });
+    button.focus();
+    await act(async () => {
+      await router.navigate({ to: "/p/$slug/explorer", params: { slug: "alpha" }, search: { node: "a.b" } });
+    });
+    await waitFor(() => expect(screen.getByTestId("node")).toHaveTextContent("a.b"));
+    await new Promise((r) => setTimeout(r, 700));
+    expect(button).toHaveFocus();
+  });
+
+  it("titles the document '<page> · <project> · WhyGraph'", async () => {
+    const { router } = mount("/p/alpha/explorer");
+    await screen.findByTestId("explorer");
+    await waitFor(() => expect(document.title).toBe("Explorer · Project alpha · WhyGraph"));
+    await act(async () => {
+      await router.navigate({ to: "/" });
+    });
+    await waitFor(() => expect(document.title).toBe("Projects · WhyGraph"));
+  });
+
+  it("names the open chat session and the open run in the crumbs, from the query cache", async () => {
+    fake.sessions = [
+      { id: 12, title: "Why the cache", provider: "openai", model: "m", created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-01T00:00:00Z" },
+    ];
+    mount("/p/alpha/chat/12");
+    const crumbs = await screen.findByRole("navigation", { name: "breadcrumb" });
+    await waitFor(() => expect(crumbs).toHaveTextContent("Why the cache"));
+    await waitFor(() => expect(document.title).toBe("Why the cache · Project alpha · WhyGraph"));
+    document.body.innerHTML = "";
+
+    const { queryClient } = mount("/p/alpha/scans/5");
+    const runCrumbs = await screen.findByRole("navigation", { name: "breadcrumb" });
+    expect(runCrumbs).toHaveTextContent("Scan run");
+    expect(runCrumbs).not.toHaveTextContent("#5");
+    act(() => {
+      queryClient.setQueryData(scanRunKey("alpha", 5), {
+        id: 5,
+        kind: "scan",
+        trigger: "manual",
+        analyze: true,
+        status: "ok",
+        queued_at: "2026-10-09T14:02:00Z",
+        requested_by: null,
+        started_at: null,
+        finished_at: null,
+        summary: null,
+      });
+    });
+    await waitFor(() => expect(runCrumbs).toHaveTextContent(/Manual scan - /));
+  });
+
+  it("names an unknown route 'Not found' in the crumbs and the page", async () => {
+    mount("/no-such-page");
+    expect(await screen.findByRole("heading", { name: "Page not found" })).toBeInTheDocument();
+    const crumbs = screen.getByRole("navigation", { name: "breadcrumb" });
+    expect(crumbs).toHaveTextContent("Not found");
+    expect(crumbs).not.toHaveTextContent("Projects");
+  });
+
+  it("shows a static Local label instead of the org switcher in local mode", async () => {
+    mount("/");
+    expect(await screen.findByTestId("org-label")).toHaveTextContent("Local");
+    expect(screen.queryByTestId("org-switcher")).toBeNull();
+  });
+});
+
+describe("project switcher (NAV-5)", () => {
+  it("lists All projects once at the top, every project with its status, and Add project", async () => {
+    const user = userEvent.setup();
+    mount("/p/alpha/explorer");
+    await screen.findByTestId("explorer");
+    await user.click(screen.getByRole("button", { name: "Switch project" }));
+    const items = await screen.findAllByRole("menuitem");
+    expect(items[0]).toHaveTextContent("All projects");
+    expect(items.filter((i) => i.textContent?.includes("All projects"))).toHaveLength(1);
+    const alpha = screen.getByRole("menuitem", { name: /Project alpha/ });
+    expect(alpha).toHaveAttribute("aria-current", "true");
+    expect(alpha).toHaveTextContent("Not scanned yet");
+    expect(screen.getByRole("menuitem", { name: /Project beta/ })).not.toHaveAttribute("aria-current");
+    expect(screen.getByRole("menuitem", { name: "Add project" })).toBeInTheDocument();
+    expect(screen.queryByText("•")).toBeNull();
   });
 });

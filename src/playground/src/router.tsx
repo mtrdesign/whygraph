@@ -1,6 +1,5 @@
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import {
-  Link,
   Navigate,
   Outlet,
   createRootRouteWithContext,
@@ -36,6 +35,8 @@ import { safeLinkNext } from "./lib/linkNext";
 import { BudgetNotice } from "./components/portal/BudgetNotice";
 import { LinkedElsewhere } from "./components/portal/LinkedActions";
 import { AppShell } from "./components/shell/AppShell";
+import { BaseChrome } from "./components/shell/BaseChrome";
+import { RouteFocus } from "./components/shell/RouteFocus";
 import { useGlobalShortcuts } from "./components/shell/shortcuts";
 import { CommandPalette } from "./components/CommandPalette";
 import { ChatView } from "./components/chat/ChatView";
@@ -73,10 +74,13 @@ import {
   ProblemAlert,
   ProjectUnavailable,
 } from "./components/portal/EdgeStates";
+import { ForbiddenState } from "./components/state/ForbiddenState";
+import { NotFoundState } from "./components/state/NotFoundState";
 import { PortalErrorPage } from "./components/state/PortalErrorPage";
 import { QueryState } from "./components/state/QueryState";
 import { PageSkeleton } from "./components/state/Skeletons";
 import {
+  type BaseSearch,
   validateBaseSearch,
   validateInitSearch,
   validateOrgSettingsSearch,
@@ -186,6 +190,8 @@ const BASE_PATHS = new Set([
   "/connect",
 ]);
 const SIGNED_OUT_PATHS = new Set(["/signin", "/auth/github", "/reset"]);
+// The org tree's paths, which a base host hands to the org picker instead of a not-found page.
+const ORG_TREE = /^\/(p|explorer|chat|projects|link|connect\/callback|settings|members|audit|usage)(\/|$)/;
 
 /** A redirect target that may carry a query (`/signin?next=...`) as TanStack's `to` + `search`. */
 function redirectTo(target: string) {
@@ -215,8 +221,8 @@ export function setupRedirect(
 /**
  * Where the base host sends this request instead of rendering it, or `null` to
  * render. `/signin` with a valid `next` while signed in is *not* redirected: the
- * route renders the "session not received" page there, which breaks the loop
- * org host (no cookie) -> sign-in -> picker -> org host.
+ * route decides there (`SignInRoute`), which breaks the loop org host (no cookie)
+ * -> sign-in -> picker -> org host.
  */
 export function baseHostRedirect(portal: PortalState, pathname: string, href?: string): string | null {
   const path = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
@@ -230,7 +236,9 @@ export function baseHostRedirect(portal: PortalState, pathname: string, href?: s
     return "/signin";
   }
   if (path === "/") return "/orgs";
-  if (!BASE_PATHS.has(path)) return "/";
+  // The org tree (and its legacy links) lives on an org host: the picker leads there.
+  // Any other unknown address renders "Page not found" in the base chrome (NAV-7).
+  if (ORG_TREE.test(path)) return "/";
   if (path === "/admin" && !portal.user.is_instance_admin) return "/orgs";
   return null;
 }
@@ -243,13 +251,25 @@ function RootLayout() {
   if (portal.mode === "production" && portal.host_kind === "org" && portal.user && !portal.org) {
     return <NoOrgAccessPage />;
   }
-  return <Outlet />;
+  return (
+    <>
+      <RouteFocus />
+      <Outlet />
+    </>
+  );
 }
 
 function RootNotFound() {
   const state = usePortalState();
-  // The shell's sidebar calls /api/projects, which is a 404 on the base host.
-  if (isProduction(state.data) && state.data?.host_kind === "base") return <NotFoundPage />;
+  // The shell's sidebar calls /api/projects, which is a 404 on the base host: the
+  // base chrome instead, with a way back to the organizations.
+  if (isProduction(state.data) && state.data?.host_kind === "base") {
+    return (
+      <BaseChrome title="Not found">
+        <NotFoundState kind="page" back={{ label: "Your organizations", to: "/orgs" }} />
+      </BaseChrome>
+    );
+  }
   return (
     <AppShell>
       <NotFoundPage />
@@ -312,38 +332,60 @@ const setupRoute = createRoute({
 const validateNext = validateBaseSearch;
 
 function BaseLayout() {
-  const state = usePortalState();
-  const user = state.data?.user;
-  if (!user) return <Outlet />;
   return (
-    <>
-      <nav aria-label="Account" className="flex items-center gap-4 border-b border-border px-6 py-2 text-sm">
-        <Link to="/orgs" className="font-medium hover:underline">
-          Organizations
-        </Link>
-        {user.is_instance_admin && (
-          <Link to="/admin" className="hover:underline">
-            Administration
-          </Link>
-        )}
-        <Link to="/account" className="ml-auto hover:underline">
-          {user.display_name}
-        </Link>
-      </nav>
+    <BaseChrome>
       <Outlet />
-    </>
+    </BaseChrome>
   );
+}
+
+// `/signin` also reads `reauth=1`: the org host sent the person back after a
+// `401 login_required` (api.ts `redirectToSignIn`).
+function validateSignInSearch(search: Record<string, unknown>): BaseSearch & { reauth?: boolean } {
+  return { ...validateBaseSearch(search), reauth: search.reauth === "1" || search.reauth === true || undefined };
+}
+
+// Signed in, `/signin?next=<org host>` without `reauth` means the org host loaded
+// without the session (its gate sent the browser here). Go back once; if the same
+// address bounces back within this window, the cookie is not reaching it.
+const BOUNCE_KEY = "whygraph.signin-bounce";
+const BOUNCE_MS = 30_000;
+
+/** True when `next` already bounced back here moments ago (or storage is blocked: never risk a loop). */
+function bouncedBack(next: string): boolean {
+  try {
+    const raw = window.sessionStorage.getItem(BOUNCE_KEY);
+    const last = raw ? (JSON.parse(raw) as { next?: string; at?: number }) : null;
+    return last?.next === next && typeof last.at === "number" && Date.now() - last.at < BOUNCE_MS;
+  } catch {
+    return true;
+  }
+}
+
+function ReturnTo({ next }: { next: string }) {
+  const bounced = useMemo(() => bouncedBack(next), [next]);
+  useEffect(() => {
+    if (bounced) return;
+    try {
+      window.sessionStorage.setItem(BOUNCE_KEY, JSON.stringify({ next, at: Date.now() }));
+    } catch {
+      // Unreachable: `bouncedBack` already read the storage.
+    }
+    void hardNavigate(next);
+  }, [bounced, next]);
+  return bounced ? <SessionNotReceivedPage /> : null;
 }
 
 function SignInRoute() {
   const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
-  const { next } = useSearch({ strict: false }) as { next?: string };
+  const { next, reauth } = useSearch({ strict: false }) as { next?: string; reauth?: boolean };
   const state = usePortalState().data ?? portal;
   if (state.user) {
-    // Signed in: no `next` goes to the picker; a valid `next` means that address
-    // did not receive the cookie, so say so instead of looping.
-    if (isSafeNext(next, state.base_url)) return <SessionNotReceivedPage />;
-    return <Navigate to="/orgs" replace />;
+    // Signed in: no `next` goes to the picker. With a valid `next`, `reauth` means
+    // the org host refused this session (the cookie problem); without it, go back
+    // once and say so only if it bounces (ER-7).
+    if (!isSafeNext(next, state.base_url)) return <Navigate to="/orgs" replace />;
+    return reauth ? <SessionNotReceivedPage /> : <ReturnTo next={next!} />;
   }
   return <SignInPage />;
 }
@@ -352,7 +394,7 @@ const baseLayout = createRoute({ getParentRoute: () => rootRoute, id: "base", co
 const signInRoute = createRoute({
   getParentRoute: () => baseLayout,
   path: "/signin",
-  validateSearch: validateNext,
+  validateSearch: validateSignInSearch,
   component: SignInRoute,
 });
 // GitHub's return address (M2d-1); a signed-in visitor may land here too (a new
@@ -509,7 +551,14 @@ function AuditRoute() {
   const state = usePortalState().data;
   const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
   const current = state ?? portal;
-  return isProduction(current) && canOwn(current.org?.role ?? undefined) ? <AuditPage /> : <NotFoundPage />;
+  if (!isProduction(current)) return <NotFoundPage kind="team-only" />;
+  if (canOwn(current.org?.role ?? undefined)) return <AuditPage />;
+  return (
+    <div className="mx-auto w-full max-w-3xl p-6">
+      <h1 className="sr-only">Audit log</h1>
+      <ForbiddenState what="the audit log" grant="owner" />
+    </div>
+  );
 }
 const auditRoute = createRoute({ getParentRoute: () => portalLayout, path: "/audit", component: AuditRoute });
 

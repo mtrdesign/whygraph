@@ -4,11 +4,13 @@ import { useQuery } from "@tanstack/react-query";
 import {
   ActivityIcon,
   ArrowLeftIcon,
+  CheckIcon,
   ChevronsUpDownIcon,
   CircleDollarSignIcon,
   LayoutDashboardIcon,
   LayoutGridIcon,
   NetworkIcon,
+  PlusIcon,
   SearchIcon,
   SlidersHorizontalIcon,
   WrenchIcon,
@@ -16,12 +18,14 @@ import {
   UsersIcon,
 } from "lucide-react";
 import { portalApi, portalKey, projectKey, type PortalState, type ProjectSummary } from "../../api";
-import { baseHostOf, canOwn, isProduction, useSignOut } from "../../lib/identity";
+import { canAdmin, canOwn, isProduction, signedInAs, useSignOut } from "../../lib/identity";
+import { projectStatus, type StatusTone } from "../../lib/projectStatus";
 import { hardNavigate } from "../../lib/navigation";
 import { can } from "../../lib/permissions";
 import { useUi } from "../../store";
 import { ThemeToggle } from "../ThemeToggle";
 import { ChatsSection } from "./ChatsSection";
+import { OrgSwitcher, orgRoleText } from "./OrgSwitcher";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -35,8 +39,8 @@ import { cn } from "@/lib/utils";
 
 // The app-shell sidebar (§4.12.4, M2f-3 §4.6). Two scopes: portal (Projects,
 // Settings, and Members in production) and project (Overview, Explorer, Scans,
-// Settings, then the Chats section), with the project switcher on top and ⌘K /
-// theme / user / version at the bottom. Four stacked blocks: the fixed top, the
+// Settings, then the Chats section), with the org switcher and the project
+// switcher on top and ⌘K / theme / the account menu at the bottom. Four stacked blocks: the fixed top, the
 // fixed nav, the Chats section (the only part that scrolls) and the footer; when
 // the fixed blocks leave the Chats section less than four rows (a short window, a
 // landscape phone) the whole sidebar scrolls instead, so the nav is never clipped.
@@ -127,9 +131,38 @@ function usageItem(state: PortalState | undefined): NavItem | null {
   return null;
 }
 
+const DOT: Record<StatusTone, string> = {
+  ready: "bg-success",
+  busy: "bg-primary-text",
+  warn: "bg-warning",
+  error: "bg-destructive",
+  idle: "bg-muted-foreground/60",
+};
+
+/** One project row of the switcher: its status dot (`projectStatus`), its name, a check on the current one. */
+function ProjectRow({ project, current, onSelect }: { project: ProjectSummary; current: boolean; onSelect: () => void }) {
+  const status = projectStatus(project);
+  return (
+    <DropdownMenuItem
+      onClick={onSelect}
+      aria-current={current ? "true" : undefined}
+      className={cn(current && "bg-primary-soft text-primary-text")}
+      data-testid={`switch-${project.slug}`}
+    >
+      <span aria-hidden title={status.label} className={cn("size-2 shrink-0 rounded-full", DOT[status.tone])} />
+      <span className="min-w-0 flex-1 truncate">{project.name}</span>
+      <span className="sr-only">, {status.label}</span>
+      {current && <CheckIcon className="size-3.5" aria-hidden />}
+    </DropdownMenuItem>
+  );
+}
+
 function ProjectSwitcher({ slug, name }: { slug?: string; name?: string }) {
   const navigate = useNavigate();
-  const production = isProduction(useQuery({ queryKey: portalKey("state"), queryFn: portalApi.state }).data);
+  const state = useQuery({ queryKey: portalKey("state"), queryFn: portalApi.state }).data;
+  const production = isProduction(state);
+  // Local mode's user may always add; in production `org.add_project` is the org's owners and admins.
+  const canAdd = !production || canAdmin(state?.org?.role ?? undefined);
   const projects = useQuery({ queryKey: portalKey("projects"), queryFn: portalApi.projects });
   const label = slug ? (name ?? slug) : "All projects";
   return (
@@ -139,33 +172,44 @@ function ProjectSwitcher({ slug, name }: { slug?: string; name?: string }) {
         className="flex h-9 w-full items-center gap-2 rounded-lg border border-border bg-background px-2 text-left text-[13px] outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
       >
         <span className="flex size-[18px] shrink-0 items-center justify-center rounded bg-muted text-[11px] font-semibold">
-          {slug ? label.charAt(0).toUpperCase() : "*"}
+          {slug ? label.charAt(0).toUpperCase() : <LayoutGridIcon className="size-3" aria-hidden />}
         </span>
         <span className="min-w-0 flex-1 truncate font-medium">{label}</span>
         <ChevronsUpDownIcon className="size-3.5 shrink-0 text-muted-foreground" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="min-w-56">
+        <DropdownMenuItem
+          onClick={() => navigate({ to: "/" })}
+          aria-current={slug ? undefined : "true"}
+          className={cn(!slug && "bg-primary-soft text-primary-text")}
+        >
+          <LayoutGridIcon className="size-3.5" aria-hidden />
+          <span className="flex-1">All projects</span>
+          {!slug && <CheckIcon className="size-3.5" aria-hidden />}
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
         <DropdownMenuGroup>
           <DropdownMenuLabel>Projects</DropdownMenuLabel>
           {projects.data?.projects.map((p) => (
-            <DropdownMenuItem
+            <ProjectRow
               key={p.slug}
-              onClick={() => navigate({ to: "/p/$slug", params: { slug: p.slug } })}
-            >
-              <span className="flex-1 truncate">{p.name}</span>
-              {p.slug === slug && <span className="text-xs text-muted-foreground">current</span>}
-            </DropdownMenuItem>
+              project={p}
+              current={p.slug === slug}
+              onSelect={() => navigate({ to: "/p/$slug", params: { slug: p.slug } })}
+            />
           ))}
           {projects.isSuccess && projects.data.projects.length === 0 && (
             <div className="px-1.5 py-1 text-xs text-muted-foreground">No projects yet</div>
           )}
         </DropdownMenuGroup>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onClick={() => navigate({ to: "/" })}>All projects</DropdownMenuItem>
-        {!production && (
-          <DropdownMenuItem onClick={() => navigate({ to: "/projects/new" })}>
-            Add project
-          </DropdownMenuItem>
+        {canAdd && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => navigate({ to: "/projects/new" })}>
+              <PlusIcon className="size-3.5" aria-hidden />
+              {production ? "Import a repository" : "Add project"}
+            </DropdownMenuItem>
+          </>
         )}
       </DropdownMenuContent>
     </DropdownMenu>
@@ -195,6 +239,8 @@ export function Sidebar({ slug, projectName }: { slug?: string; projectName?: st
   const showChats = !!slug && canChat && !linked && initialized && !importing;
   const signOut = useSignOut();
   const base = state.data?.base_url?.replace(/\/$/, "") ?? "";
+  // The base host's pages offer "Back to <org>" when they know where you came from.
+  const fromOrg = state.data?.org?.slug ? `?from=${encodeURIComponent(state.data.org.slug)}` : "";
   const usage = usageItem(state.data);
 
   return (
@@ -208,9 +254,7 @@ export function Sidebar({ slug, projectName }: { slug?: string; projectName?: st
             <NetworkIcon className="size-3.5 text-primary-foreground" aria-hidden />
           </div>
           <span className="font-semibold tracking-tight">WhyGraph</span>
-          <span className="ml-auto rounded border border-border px-1.5 py-px text-[11px] text-muted-foreground">
-            {production ? (state.data?.org?.name ?? baseHostOf(state.data?.base_url)) : (state.data?.mode ?? "local")}
-          </span>
+          <OrgSwitcher state={state.data} />
         </div>
         <ProjectSwitcher slug={slug} name={projectName} />
       </div>
@@ -273,20 +317,25 @@ export function Sidebar({ slug, projectName }: { slug?: string; projectName?: st
               </span>
               <div className="flex min-w-0 flex-1 flex-col leading-tight">
                 <span className="truncate text-[13px] font-medium">{user?.display_name}</span>
-                {version && <span className="font-mono text-[11px] text-muted-foreground">v{version}</span>}
+                <span className="truncate text-[11px] text-muted-foreground" data-testid="account-who">
+                  {[user?.github_login ? `@${user.github_login}` : signedInAs(user), orgRoleText(state.data?.org?.role)]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </span>
               </div>
               <ChevronsUpDownIcon className="size-3.5 shrink-0 text-muted-foreground" />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="min-w-56">
-              <DropdownMenuItem onClick={() => void hardNavigate(`${base}/account`)}>Account</DropdownMenuItem>
-              <DropdownMenuItem onClick={() => void hardNavigate(`${base}/orgs`)}>
-                Switch organization
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => void hardNavigate(`${base}/orgs/new`)}>
-                Create organization
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => void hardNavigate(`${base}/account${fromOrg}`)}>Account</DropdownMenuItem>
               <DropdownMenuItem onClick={() => void signOut()}>Sign out</DropdownMenuItem>
+              {version && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuGroup>
+                    <DropdownMenuLabel className="font-mono font-normal">WhyGraph {version}</DropdownMenuLabel>
+                  </DropdownMenuGroup>
+                </>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
         ) : (

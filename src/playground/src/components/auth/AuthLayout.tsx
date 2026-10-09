@@ -1,5 +1,8 @@
-import type { ReactNode } from "react";
+import { createContext, useContext, type ReactNode } from "react";
 import { NetworkIcon } from "lucide-react";
+
+/** True inside the base host's chrome, which already shows the logo (so the card does not repeat it). */
+export const InBaseChrome = createContext(false);
 
 /** The centred card the sign-in, GitHub callback, bootstrap and reset pages share. */
 export function AuthLayout({
@@ -13,16 +16,19 @@ export function AuthLayout({
   children: ReactNode;
   footer?: ReactNode;
 }) {
+  const inChrome = useContext(InBaseChrome);
   return (
     <div className="flex min-h-[70vh] items-center justify-center bg-background p-6">
       <div className="flex w-full max-w-md flex-col gap-6">
         <div className="flex flex-col gap-1.5">
-          <div className="mb-2 flex items-center gap-2">
-            <div className="flex size-[22px] items-center justify-center rounded-md bg-primary">
-              <NetworkIcon className="size-3.5 text-primary-foreground" aria-hidden />
+          {!inChrome && (
+            <div className="mb-2 flex items-center gap-2">
+              <div className="flex size-[22px] items-center justify-center rounded-md bg-primary">
+                <NetworkIcon className="size-3.5 text-primary-foreground" aria-hidden />
+              </div>
+              <span className="font-semibold tracking-tight">WhyGraph</span>
             </div>
-            <span className="font-semibold tracking-tight">WhyGraph</span>
-          </div>
+          )}
           <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
           {description && <p className="text-sm text-muted-foreground">{description}</p>}
         </div>

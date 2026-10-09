@@ -50,11 +50,26 @@ test("bootstrap, organizations on their own hosts, sign-in hand-off and reader a
   await createOrg(page, "Acme", "acme");
   await expect(page.getByTestId("reader-banner")).toHaveCount(0);
 
+  // The org switcher names the org; "All organizations" lists it on the base host
+  // even though it is her only one (`?stay=1`), with a way back (NAV-2, NAV-7).
+  await page.getByTestId("org-switcher").click();
+  await expect(page.getByTestId("org-current")).toContainText("Acme");
+  await page.getByRole("menuitem", { name: "All organizations" }).click();
+  await expect(page).toHaveURL(new RegExp(`^${base.origin}/orgs\\?stay=1&from=acme$`));
+  await expect(page.getByTestId("org-list")).toContainText("Acme");
+  await page.getByTestId("back-to-org").click();
+  await expect(page).toHaveURL(new RegExp(`^${orgUrl("acme")}/`));
+  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+
   // Ben (a second browser context, so his cookies are his own) signs in with
   // GitHub and creates bravo (the plan says beta, which is a reserved slug).
   const benContext = await browser.newContext({ baseURL: env.prodUrl });
   const ben = await benContext.newPage();
   await githubSignIn(ben, "ben");
+  // No organization yet: the picker says so (no redirect) and offers to create one.
+  await expect(ben.getByRole("heading", { name: "You're not in an organization yet" })).toBeVisible();
+  await expect(ben.getByTestId("join-hint")).toContainText("@ben");
+  await ben.getByRole("link", { name: "Create organization" }).click();
   await expect(ben).toHaveURL(/\/orgs\/new$/);
   await createOrg(ben, "Bravo", "bravo");
 
@@ -92,12 +107,21 @@ test("bootstrap, organizations on their own hosts, sign-in hand-off and reader a
   await expect(nofa.getByTestId("github-callback-error")).toContainText("two-factor authentication");
   await nofaContext.close();
 
+  // The account menu shows who and in which role, the version inside it, and no
+  // "Switch organization" (the org switcher took that over).
+  await expect(page.getByTestId("account-who")).toContainText("ada@example.com · Owner");
+  await page.getByRole("button", { name: "Account menu" }).click();
+  await expect(page.getByText(/^WhyGraph \d/)).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Switch organization" })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+
   await signOut(page);
 
   // Signed out, acme's host sends the browser to the base host's sign-in.
   await page.goto(`${orgUrl("acme")}/`);
   await expect(page).toHaveURL(new RegExp(`^${base.origin}/signin\\?next=`));
   expect(new URL(page.url()).searchParams.get("next")).toContain(orgUrl("acme"));
+  await expect(page.getByText(`Sign in to continue to ${new URL(orgUrl("acme")).host}.`)).toBeVisible();
 
   // Signing in as Ada hands her back to acme.
   await signIn(page, "ada@example.com");

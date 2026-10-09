@@ -26,7 +26,7 @@ type Handler = (method: string, body: unknown) => Response;
 
 interface Fake {
   state: Record<string, unknown>;
-  orgs: { slug: string; name: string; role: string; url: string }[];
+  orgs: { slug: string; name: string; role: string; url: string; new?: boolean }[];
   login: { status: number; body: unknown };
   calls: { path: string; method: string; body: unknown; search: string; headers: Record<string, string> }[];
   // Per-test routes, matched by exact path before the fixed ones.
@@ -201,14 +201,18 @@ describe("router gate - production base host", () => {
     await waitFor(() => expect(where(router)).toBe("/orgs"));
   });
 
-  it("has no /register any more (signed out: sign-in; signed in: the picker)", async () => {
+  it("has no /register any more (signed out: sign-in; signed in: not found in the base chrome)", async () => {
     fake.state = baseState({ user: null });
     const out = mount("/register");
     await waitFor(() => expect(where(out)).toBe("/signin"));
     document.body.innerHTML = "";
     fake.state = baseState();
     const signedIn = mount("/register");
-    await waitFor(() => expect(where(signedIn)).toBe("/orgs"));
+    await screen.findByRole("heading", { name: "Page not found" });
+    expect(where(signedIn)).toBe("/register");
+    expect(screen.getByRole("link", { name: "Your organizations" })).toHaveAttribute("href", "/orgs");
+    expect(screen.getByRole("navigation", { name: "Account" })).toBeInTheDocument();
+    expect(fake.calls.some((c) => c.path === "/api/projects")).toBe(false);
   });
 
   it("keeps /admin for instance admins", async () => {
@@ -235,8 +239,8 @@ describe("router gate - production base host", () => {
     await waitFor(() => expect(where(router)).toBe("/orgs"));
   });
 
-  it("signed in on /signin with a valid next shows the session-not-received page (no loop)", async () => {
-    const router = mount(`/signin?next=${encodeURIComponent(`${ORG}/p/alpha`)}`);
+  it("signed in on /signin with a valid next and reauth shows the session-not-received page (no loop)", async () => {
+    const router = mount(`/signin?next=${encodeURIComponent(`${ORG}/p/alpha`)}&reauth=1`);
     await screen.findByRole("heading", { name: "Session not received" });
     expect(where(router)).toBe("/signin");
     expect(screen.getByText("ada@example.com")).toBeInTheDocument();
@@ -245,6 +249,21 @@ describe("router gate - production base host", () => {
       `${ORG}/p/alpha`,
     );
     expect(hard).not.toHaveBeenCalled();
+  });
+
+  it("signed in with a valid next and no reauth goes back once, then says the session did not arrive", async () => {
+    window.sessionStorage.clear();
+    const next = `${ORG}/p/alpha`;
+    mount(`/signin?next=${encodeURIComponent(next)}`);
+    await waitFor(() => expect(hard).toHaveBeenCalledWith(next));
+    expect(screen.queryByRole("heading", { name: "Session not received" })).toBeNull();
+    document.body.innerHTML = "";
+    hard.mockClear();
+    // The org host sent the browser straight back: the cookie is not reaching it.
+    mount(`/signin?next=${encodeURIComponent(next)}`);
+    await screen.findByRole("heading", { name: "Session not received" });
+    expect(hard).not.toHaveBeenCalled();
+    window.sessionStorage.clear();
   });
 
   it("an unsafe next is ignored (picker, not the page)", async () => {
@@ -517,9 +536,24 @@ describe("org picker", () => {
   const acme = { slug: "acme", name: "Acme", role: "owner", url: ORG };
   const beta = { slug: "beta", name: "Beta", role: "member", url: "http://beta.whygraph.localhost:8765" };
 
-  it("0 orgs goes to Create organization", async () => {
+  it("0 orgs says so and offers Create organization, without redirecting (BUG-19)", async () => {
+    fake.state = baseState({ user: { ...ada, github_login: "ada" } });
     const router = mount("/orgs");
-    await waitFor(() => expect(where(router)).toBe("/orgs/new"));
+    await screen.findByRole("heading", { name: "You're not in an organization yet" });
+    expect(where(router)).toBe("/orgs");
+    expect(screen.getByRole("link", { name: "Create organization" })).toHaveAttribute("href", "/orgs/new");
+    expect(screen.getByTestId("join-hint")).toHaveTextContent("Joining a team? Ask an owner to add your GitHub username @ada.");
+    expect(screen.queryByRole("link", { name: /Back to your organizations/ })).toBeNull();
+    expect(hard).not.toHaveBeenCalled();
+  });
+
+  it("1 org with ?stay=1 shows the list (the switcher's All organizations)", async () => {
+    fake.orgs = [{ ...acme, new: true }];
+    mount("/orgs?stay=1");
+    const list = await screen.findByTestId("org-list");
+    expect(list).toHaveTextContent("Acme");
+    expect(within(list).getByTestId("org-new")).toHaveTextContent("New");
+    expect(within(list).getByText("Owner")).toBeInTheDocument();
     expect(hard).not.toHaveBeenCalled();
   });
 
@@ -620,7 +654,7 @@ describe("reader role (instance admin in a foreign org)", () => {
 
   it("hides RationaleTab's Generate button", async () => {
     rationale("reader");
-    await screen.findByText(/A contributor or admin can generate one/);
+    await screen.findByText(/Viewers can read cards but not generate them/);
     expect(screen.queryByRole("button", { name: "Generate rationale" })).toBeNull();
   });
 
@@ -1384,5 +1418,152 @@ describe("admin security events", () => {
     const box = within(await screen.findByTestId("admin-audit"));
     expect(await box.findByText("github_signin")).toBeInTheDocument();
     expect(box.queryByRole("button", { name: "Download CSV" })).toBeNull();
+  });
+});
+
+// ---- the shell in production (S14: NAV-2, NAV-7, NAV-8, ER-7, ER-8, MEM-2, MEM-6) --------
+
+describe("sign-in copy", () => {
+  it("names where a valid next lands", async () => {
+    fake.state = baseState({ user: null });
+    mount(`/signin?next=${encodeURIComponent(`${ORG}/p/alpha`)}`);
+    expect(await screen.findByText("Sign in to continue to acme.whygraph.localhost:8765/p/alpha.")).toBeInTheDocument();
+  });
+
+  it("says a local portal's connect is waiting", async () => {
+    fake.state = baseState({ user: null });
+    mount(`/signin?next=${encodeURIComponent(`${BASE}/connect?state=s&client_name=laptop`)}`);
+    expect(await screen.findByText("Sign in to connect your local portal.")).toBeInTheDocument();
+  });
+
+  it("says the session ended when an org host sent the person back", async () => {
+    fake.state = baseState({ user: null });
+    mount(`/signin?next=${encodeURIComponent(`${ORG}/p/alpha`)}&reauth=1`);
+    expect(await screen.findByText("Your session ended. Sign in to continue.")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Session not received" })).toBeNull();
+  });
+
+  it("keeps the plain copy without a next or with an unsafe one", async () => {
+    fake.state = baseState({ user: null });
+    mount(`/signin?next=${encodeURIComponent("https://evil.example/")}`);
+    expect(await screen.findByText("Sign in to WhyGraph.")).toBeInTheDocument();
+  });
+});
+
+describe("base-host chrome", () => {
+  const acme = { slug: "acme", name: "Acme", role: "owner", url: ORG };
+
+  it("has the logo, Organizations, an avatar menu and Back to <org> for one of the caller's orgs", async () => {
+    fake.orgs = [acme];
+    mount("/orgs?stay=1&from=acme");
+    const back = await screen.findByTestId("back-to-org");
+    expect(back).toHaveTextContent("Back to Acme");
+    expect(back).toHaveAttribute("href", ORG);
+    const nav = screen.getByRole("navigation", { name: "Account" });
+    expect(within(nav).getByRole("link", { name: "Organizations" })).toHaveAttribute("href", "/orgs?stay=1&from=acme");
+    expect(within(nav).queryByRole("link", { name: "Administration" })).toBeNull();
+    const user = userEvent.setup();
+    await user.click(within(nav).getByRole("button", { name: "Account menu" }));
+    expect(await screen.findByRole("menuitem", { name: "Account" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Sign out" })).toBeInTheDocument();
+    // The chrome has the logo: the card does not repeat it.
+    expect(screen.getAllByText("WhyGraph")).toHaveLength(1);
+    expect(document.title).toBe("Organizations · WhyGraph");
+  });
+
+  it("ignores a from that is not one of the caller's orgs", async () => {
+    fake.orgs = [acme];
+    mount("/orgs?stay=1&from=evil");
+    await screen.findByTestId("org-list");
+    expect(screen.queryByTestId("back-to-org")).toBeNull();
+  });
+
+  it("offers Administration to instance admins", async () => {
+    fake.state = baseState({ user: adminAda });
+    fake.orgs = [acme, { ...acme, slug: "beta", name: "Beta" }];
+    mount("/orgs");
+    const nav = await screen.findByRole("navigation", { name: "Account" });
+    expect(within(nav).getByRole("link", { name: "Administration" })).toHaveAttribute("href", "/admin");
+  });
+
+  it("puts the Account page in the same chrome, with the one Sign out in the avatar menu", async () => {
+    fake.routes["/api/account"] = () =>
+      json({ uid: "u1", email: null, display_name: "Ada", is_instance_admin: false, github_login: "ada", avatar_url: null, has_password: false });
+    mount("/account");
+    await screen.findByTestId("account-identity");
+    expect(screen.getByRole("navigation", { name: "Account" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sign out" })).toBeNull();
+  });
+});
+
+describe("org switcher and account menu (org host)", () => {
+  const acme = { slug: "acme", name: "Acme", role: "owner", url: ORG };
+  const beta = { slug: "beta", name: "Beta", role: "member", url: "http://beta.whygraph.localhost:8765", new: true };
+
+  it("lists who is signed in, the current org, the other orgs with a New dot, and the base links", async () => {
+    fake.state = orgState("owner", { version: "2.0.0", user: { ...ada, github_login: "ada" } });
+    fake.orgs = [acme, beta];
+    mount("/");
+    const trigger = await screen.findByTestId("org-switcher");
+    expect(trigger).toHaveTextContent("Acme");
+    // Fetched on first open only.
+    expect(fake.calls.some((c) => c.path === "/api/account/orgs")).toBe(false);
+    const user = userEvent.setup();
+    await user.click(trigger);
+    expect(await screen.findByText("Signed in as ada@example.com")).toBeInTheDocument();
+    expect(screen.getByTestId("org-current")).toHaveTextContent("Acme");
+    expect(screen.getByTestId("org-current")).toHaveTextContent("Owner");
+    const other = await screen.findByTestId("org-beta");
+    expect(other).toHaveTextContent("Beta");
+    expect(within(other).getByTestId("org-new")).toBeInTheDocument();
+    expect(screen.queryByTestId("org-acme")).toBeNull();
+    await user.click(screen.getByRole("menuitem", { name: "All organizations" }));
+    await waitFor(() => expect(hard).toHaveBeenCalledWith(`${BASE}/orgs?stay=1&from=acme`));
+  });
+
+  it("goes to another org's host and to Create organization", async () => {
+    fake.state = orgState("owner");
+    fake.orgs = [acme, beta];
+    mount("/");
+    const user = userEvent.setup();
+    await user.click(await screen.findByTestId("org-switcher"));
+    await user.click(await screen.findByTestId("org-beta"));
+    await waitFor(() => expect(hard).toHaveBeenCalledWith(beta.url));
+    await user.click(await screen.findByTestId("org-switcher"));
+    await user.click(await screen.findByRole("menuitem", { name: "Create organization" }));
+    await waitFor(() => expect(hard).toHaveBeenCalledWith(`${BASE}/orgs/new`));
+  });
+
+  it("shows the login and role on the account menu, with the version inside it and no Switch organization", async () => {
+    fake.state = orgState("member", { version: "2.0.0", user: { ...ada, github_login: "ada" } });
+    mount("/");
+    expect(await screen.findByTestId("account-who")).toHaveTextContent("@ada · Member");
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Account menu" }));
+    expect(await screen.findByText("WhyGraph 2.0.0")).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Switch organization" })).toBeNull();
+    await user.click(screen.getByRole("menuitem", { name: "Account" }));
+    await waitFor(() => expect(hard).toHaveBeenCalledWith(`${BASE}/account?from=acme`));
+  });
+
+  it("offers Import a repository in the project switcher to owners and admins only", async () => {
+    fake.state = orgState("admin");
+    mount("/");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Switch project" }));
+    expect(await screen.findByRole("menuitem", { name: "Import a repository" })).toBeInTheDocument();
+    document.body.innerHTML = "";
+    fake.state = orgState("member");
+    mount("/");
+    await user.click(await screen.findByRole("button", { name: "Switch project" }));
+    await screen.findByRole("menuitem", { name: /Project alpha/ });
+    expect(screen.queryByRole("menuitem", { name: "Import a repository" })).toBeNull();
+  });
+
+  it("tells a non-owner who can open the audit log (ER-8)", async () => {
+    fake.state = orgState("admin");
+    mount("/audit");
+    expect(await screen.findByText("You don't have access to the audit log. An organization owner can give you access.")).toBeInTheDocument();
+    expect(fake.calls.some((c) => c.path === "/api/org/audit")).toBe(false);
   });
 });

@@ -250,6 +250,26 @@ be the account's email or its local part. There are no composition rules; a pass
 Passwords are hashed with argon2, and repeated failed sign-ins are throttled per account and address.
 A GitHub account has no password: the password form, change and reset link do not apply to it.
 
+## Switching organizations
+
+A person can belong to several organizations, each on its own host. The **organization switcher** at
+the top of the sidebar names the organization you are in. Open it to see who you are signed in as,
+your role here and your other organizations, with a **New** marker on one you have not opened yet.
+Picking one opens its host without a new sign-in (the session cookie covers every subdomain).
+**All organizations** opens the list on the base host, and it stays there even when you belong to
+only one; **Create organization** starts a new one. The account menu at the bottom of the sidebar
+shows your name, GitHub username and role, and holds **Account**, **Sign out** and the WhyGraph
+version.
+
+The base host's pages (the organization list, your account, administration) share one header:
+**Organizations**, **Administration** for instance admins, and your avatar menu with **Account** and
+**Sign out**. Opened from an organization, they also offer **Back to** that organization.
+
+Someone who belongs to no organization yet sees "You're not in an organization yet" after signing in,
+with **Create organization** and the GitHub username an owner needs to add them. When an
+organization's address sends you to sign in, the sign-in page says where you will land; when your
+session ended, it says that instead.
+
 ## Members
 
 An organization's people are its **members**, each an `owner`, `admin` or `member`. People are added by

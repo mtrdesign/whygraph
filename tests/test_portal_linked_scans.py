@@ -148,7 +148,11 @@ def test_codegraph_only_scan_creates_no_whygraph_db(
     assert result.exit_code == 0, result.output
     assert calls == [repo]
     events = _events(result.stdout)
-    assert events[0] == {"type": "start", "phase_total": 1}
+    assert events[0] == {
+        "type": "start",
+        "phase_total": 1,
+        "phases": ["Code index"],
+    }
     assert events[-1]["type"] == "result" and events[-1]["status"] == "ok"
     assert [c["name"] for c in events[-1]["crawlers"]] == ["codegraph"]
     assert (repo / ".whygraph" / "scan.log").is_file()

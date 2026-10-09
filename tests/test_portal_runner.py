@@ -433,6 +433,22 @@ def test_the_redactor_learns_new_values() -> None:
     assert out == "…1111 …2222 …9876"
 
 
+def test_redactor_learn_path_rewrites_on_a_path_boundary_root_first() -> None:
+    redact = redactor([])
+    redact.learn_path("/data", "<data>")
+    redact.learn_path("/data/repos/acme/api", ".")
+    text = (
+        "cd /data/repos/acme/api && ls /data/repos/acme/api/src "
+        "'/data/repos/acme/api' /data/runs/1.log /data/repos/acme/api-v2/x "
+        "/data/repos/acme/api"
+    )
+    assert redact(text) == (
+        "cd . && ls ./src '.' <data>/runs/1.log <data>/repos/acme/api-v2/x ."
+    )
+    assert redact('{"m": "/data/repos/acme/api"}') == '{"m": "."}'
+    assert redact("/mnt/data/x") == "/mnt/data/x"
+
+
 def test_token_file_is_0600_and_never_read_torn(tmp_path: Path) -> None:
     path = tmp_path / "runs" / "3.token"
     path.parent.mkdir()
@@ -516,7 +532,13 @@ def test_read_frames_skips_a_line_longer_than_a_chunk(tmp_path: Path) -> None:
     big = json.dumps(
         {"type": "result", "crawlers": [{"name": "git", "error": "x" * 300_000}]}
     )
-    start = json.dumps({"type": "start", "phase_total": 2})
+    start = json.dumps(
+        {
+            "type": "start",
+            "phase_total": 2,
+            "phases": ["Structural crawl", "Author identity"],
+        }
+    )
     phase = json.dumps({"type": "phase", "phase": 2})
     path.write_text(f"{start}\n{big}\n{phase}\n")
 

@@ -601,7 +601,35 @@ class Redactor:
 
     def __init__(self, secrets: list[str] | tuple[str, ...] = ()) -> None:
         self._pairs: tuple[tuple[str, str], ...] = ()
+        self._paths: tuple[tuple[re.Pattern[str], str], ...] = ()
         self.learn(*secrets)
+
+    def learn_path(self, path: str | os.PathLike[str], label: str) -> None:
+        """Rewrite ``path`` to ``label`` in every line from now on.
+
+        Only where the path is a whole path prefix: not preceded by a path
+        character, and followed by ``/``, a quote, whitespace or the end of
+        the text - so a sibling ``<path>-v2`` is left alone. Longer paths
+        are tried first (a clone root before the data dir that holds it).
+
+        Parameters
+        ----------
+        path : str or path-like
+            An absolute path (a trailing ``/`` is ignored).
+        label : str
+            What to print instead (``.`` for the project root, ``<data>``).
+        """
+        text = os.fspath(path).rstrip("/")
+        if not text:
+            return
+        pattern = re.compile(
+            r"(?<![A-Za-z0-9_.\-/])" + re.escape(text) + r"(?=$|[/\s\"'\\])"
+        )
+        known = {p.pattern: (p, lab) for p, lab in self._paths}
+        known[pattern.pattern] = (pattern, label)
+        self._paths = tuple(
+            sorted(known.values(), key=lambda pl: len(pl[0].pattern), reverse=True)
+        )
 
     def learn(self, *values: str) -> None:
         """Add values to redact from now on (e.g. a refreshed installation token).
@@ -618,6 +646,8 @@ class Redactor:
         for value, hint in self._pairs:
             if value in text:
                 text = text.replace(value, hint)
+        for pattern, label in self._paths:
+            text = pattern.sub(lambda _m, label=label: label, text)
         return redact_tokens(text)
 
 
@@ -1934,6 +1964,9 @@ class ScanRunner:
         # After the child's `result` merge (and a sync's own summary), so a
         # child cannot supply any of these: drop what it sent, then set ours.
         summary = {k: v for k, v in summary.items() if k not in PORTAL_SUMMARY_KEYS}
+        if isinstance(summary.get("error"), str):
+            # The Overview's last_failure reads this: no path, no secret.
+            summary["error"] = redact(summary["error"])
         summary["usage"] = job.usage_total.summary()
         if job.spec.estimate is not None:
             summary["estimate"] = job.spec.estimate
@@ -2063,6 +2096,13 @@ class ScanRunner:
             config, layer, source=source, analyze=spec.analyze, token_file=token_path
         )
         redact = redactor(secrets)
+        production = state.mode == "production"
+        if production:
+            # MODE-2: the root first (it is the longer path), then the data dir.
+            for form in {str(root), str(root.resolve())}:
+                redact.learn_path(form, ".")
+            for form in {str(base), str(base.resolve())}:
+                redact.learn_path(form, "<data>")
         events_path, log_path = base / str(events_rel), base / str(log_rel)
         events_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -2082,7 +2122,11 @@ class ScanRunner:
             def refused() -> str | None:
                 """Why the job must not touch ``root`` (logged + evented), or ``None``."""
                 if root_status(root) != "ok":
-                    message = f"project root {root} is missing or not a git repository"
+                    message = (
+                        "the repository's server copy is missing"
+                        if production
+                        else f"project root {root} is missing or not a git repository"
+                    )
                 else:
                     try:
                         check_project_paths(root)
@@ -2150,7 +2194,14 @@ class ScanRunner:
                     )
                     log(f"the {blocked} budget is spent: scanning structure only")
             argv = scan_argv(spec.trigger, analyze, source=source)
-            log(f"$ {shlex.join(argv)}")
+            if production:
+                _log.debug(
+                    "scan runner: run %s argv %s", spec.run_id, redact(shlex.join(argv))
+                )
+                flags = scan_flags(spec.trigger, analyze, source)
+                log(" ".join(["$ whygraph scan", *flags]))
+            else:
+                log(f"$ {shlex.join(argv)}")
             refresher: _TokenRefresher | None = None
             try:
                 if github is not None:

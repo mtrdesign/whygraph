@@ -23,6 +23,8 @@ import, a scan and a refresh (acceptance criterion 9).
 
 from __future__ import annotations
 
+import json
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -649,3 +651,32 @@ def test_no_github_credential_lands_in_the_db_a_run_file_or_a_response(
         response = w.client.get(url)
         assert response.status_code == 200, (url, response.text)
         assert not TOKEN_SHAPE.search(response.text), url
+
+
+def test_the_production_log_is_path_free_and_starts_with_the_flags(
+    world: World, scanner: SimpleNamespace
+) -> None:
+    """MODE-2: no data dir or clone path in the log; the argv line is the flags."""
+    w = world
+    root = imported(w)
+    run_id = scan(w)
+    run = wait_run(w, run_id)
+    assert run["status"] == "ok", run
+    text = run_log(w, run_id)
+    assert str(w.env.data) not in text and str(root) not in text
+    assert "$ whygraph scan --skip-analyze" in text
+    assert "--managed-by-portal" not in text and "-m whygraph" not in text
+
+
+def test_a_missing_clone_is_reported_without_its_path(
+    world: World, scanner: SimpleNamespace
+) -> None:
+    w = world
+    root = imported(w)
+    shutil.rmtree(root / ".git")
+    run_id = scan(w)
+    run = wait_run(w, run_id)
+    assert run["status"] == "failed", run
+    assert str(w.env.data) not in json.dumps(run)
+    assert "server copy is missing" in run["summary"]["error"]
+    assert "server copy is missing" in run_log(w, run_id)

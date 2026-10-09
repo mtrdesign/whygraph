@@ -589,6 +589,13 @@ def test_failure_message_scrubs_a_partly_masked_token(tmp_path: Path):
         ("ghp_short and ghx_abcdefghij stay", "ghp_short and ghx_abcdefghij stay"),
         ("bearer wgc_Ab-9_xYz0123456789 sent", "bearer wgc_*** sent"),
         ("wgc_short and wgcx_abcdefghij stay", "wgc_short and wgcx_abcdefghij stay"),
+        ("key sk-ant-api03-AbCdEfGh1234567890xyz in", "key sk-*** in"),
+        ("key=sk-proj-AbCdEfGh1234567890_xyzABC", "key=sk-***"),
+        ("sk-or-v1-0123456789abcdef0123456789abcdef!", "sk-***!"),
+        (
+            "risk-assessment-template-v2-final task-runner-0123456789abcdef0123 sk-short",
+            "risk-assessment-template-v2-final task-runner-0123456789abcdef0123 sk-short",
+        ),
     ],
 )
 def test_redact_tokens_matches_the_token_pattern(text: str, expected: str):

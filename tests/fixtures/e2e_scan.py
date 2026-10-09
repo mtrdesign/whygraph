@@ -140,9 +140,18 @@ def seed_codegraph(root: Path) -> None:
         conn.close()
 
 
+PHASES = [
+    "Structural crawl",
+    "PR-origin recovery",
+    "Author identity",
+    "LLM descriptions",
+]
+"""Phase titles, in order, for the ``start`` event's ``phases`` list."""
+
+
 def codegraph_only(fail: bool, delay: float) -> int:
     """The ``--codegraph-only`` run: one phase, only the CodeGraph index."""
-    emit({"type": "start", "phase_total": 1})
+    emit({"type": "start", "phase_total": 1, "phases": ["Code index"]})
     emit({"type": "phase", "phase": 1, "title": "CodeGraph"})
     emit({"type": "task", "name": "codegraph", "description": "indexing"})
     time.sleep(delay)
@@ -190,7 +199,7 @@ def forwarded(args: list[str]) -> list[str]:
 def real_git(args: list[str], fail: bool) -> int:
     """The ``--real-git`` run: the CodeGraph seed, then the real git crawl."""
     if fail:
-        emit({"type": "start", "phase_total": 1})
+        emit({"type": "start", "phase_total": 1, "phases": ["Code index"]})
         sys.stderr.write("scan failed: simulated git error\n")
         emit(
             {
@@ -238,7 +247,7 @@ def main() -> int:
             problem = "WHYGRAPH_GITHUB_TOKEN_FILE is empty"
         if not token:
             sys.stderr.write(f"scan failed: {problem}\n")
-            emit({"type": "start", "phase_total": 3})
+            emit({"type": "start", "phase_total": 3, "phases": PHASES[:3]})
             emit(
                 {
                     "type": "result",
@@ -257,7 +266,13 @@ def main() -> int:
     if "--real-git" in args:
         return real_git(args, fail)
 
-    emit({"type": "start", "phase_total": 4 if analyze else 3})
+    emit(
+        {
+            "type": "start",
+            "phase_total": 4 if analyze else 3,
+            "phases": PHASES if analyze else PHASES[:3],
+        }
+    )
     emit({"type": "phase", "phase": 1, "title": "Structural crawl"})
     for i in range(11):
         emit(

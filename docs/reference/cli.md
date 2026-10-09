@@ -91,7 +91,7 @@ carries one JSON object per line, each written whole, so a reader can parse line
 
 | `type` | When | Fields |
 |---|---|---|
-| `start` | Always first | `phase_total` - the number of phases this run executes (2 to 4, depending on `--skip-analyze`, `--no-remote`, `--pr-origins` and whether an LLM is configured) |
+| `start` | Always first | `phase_total` - the number of phases this run executes (2 to 4, depending on `--skip-analyze`, `--no-remote`, `--pr-origins` and whether an LLM is configured); `phases` - their titles in order (`["Code index"]` for `--codegraph-only`), so a reader can name every phase before it begins. Optional: events recorded by older runs lack it |
 | `phase` | Each phase begins | `phase` (1-based), `title` |
 | `task` | A crawler registers, and as it progresses (throttled; a finished task is always sent) | `name` (stable crawler label), `completed`, `total` (`null` while unknown), `description` (current status text) |
 | `result` | Always last | `status` (`ok` or `failed`), `elapsed_sec`, `phase_timings`, `crawlers` (per crawler: `name`, `status`, `summary`, and `error` / `warning` when set), `analyze_skipped` (why the LLM phase was skipped, else `null`) |

@@ -1,11 +1,16 @@
+import type { ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { RationaleCard } from "../api";
-import { authMessage } from "../lib/authErrors";
+import { Link } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
+import { portalApi, projectKey, type RationaleCard } from "../api";
+import { isProduction, usePortalState } from "../lib/identity";
+import { providerLabel } from "../lib/labels";
+import { useSlug } from "../lib/project";
 import { budgetNoticeText } from "../lib/budgetBanner";
 import { useLlmBlock, useProjectCan } from "../lib/permissions";
 import { useProjectApi, useProjectKey, useProjectQuery } from "../lib/project";
 import { Button } from "./ui/button";
-import { Empty, EmptyDescription } from "./ui/empty";
+import { ErrorState } from "./state/ErrorState";
 import { Loading } from "./Loading";
 
 // The Rationale tab (the resolved Q3 design): on open it does a CACHE-ONLY read
@@ -57,19 +62,39 @@ function Card({ card }: { card: RationaleCard }) {
   );
 }
 
+/** The one line under "no rationale yet": what to do to get history in. */
+function RescanHint({ production }: { production: boolean }) {
+  return (
+    <p className="mt-2 text-xs text-muted-foreground" data-testid="rationale-scan-hint">
+      Rescan after new commits from the project Overview
+      {production ? "." : (
+        <>
+          {" "}
+          (or run <code className="font-mono text-foreground">whygraph scan</code> outside the portal).
+        </>
+      )}
+    </p>
+  );
+}
+
 export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
   const queryClient = useQueryClient();
   const api = useProjectApi();
+  const slug = useSlug();
   const queryKey = useProjectKey()("rationale", qualifiedName);
 
-  const { data, isLoading, isError, error } = useProjectQuery(["rationale", qualifiedName], (api) =>
+  const { data, isLoading, isError, error, refetch } = useProjectQuery(["rationale", qualifiedName], (api) =>
     api.rationaleRead(qualifiedName),
   );
 
   const canGenerate = useProjectCan("project.chat");
+  const canConfigure = useProjectCan("project.configure");
+  const project = useQuery({ queryKey: projectKey(slug, "project"), queryFn: () => portalApi.project(slug) });
+  const production = isProduction(usePortalState().data);
   const llm = useLlmBlock();
   // A hard-stopped budget: the button stays, disabled, with the reason beside it.
   const budgetBlocked = llm.block === "budget_exceeded";
+  const missingKey = project.data?.missing_key ?? null;
   const generate = useMutation({
     mutationFn: () => api.rationaleGenerate(qualifiedName),
     onSuccess: (card) => queryClient.setQueryData(queryKey, card),
@@ -78,49 +103,84 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
   if (isLoading) return <div className="p-4"><Loading label="Checking cache…" /></div>;
   if (isError)
     return (
-      <Empty className="p-4">
-        <EmptyDescription>Failed to load rationale: {(error as Error).message}</EmptyDescription>
-      </Empty>
+      <ErrorState
+        className="p-3"
+        title="Couldn't load the rationale"
+        error={error}
+        onRetry={() => void refetch()}
+      />
     );
 
   if (data?.status === "cached") return <Card card={data} />;
+  if (generate.isPending)
+    return (
+      <div className="p-4">
+        <Loading label="Generating rationale (calling the model)…" />
+      </div>
+    );
 
-  const noEvidence = data?.status === "no_evidence";
+  // One state at a time (EXC-1), in this order: no history, a viewer, a hard stop, no key, ready.
+  let state: ReactNode;
+  if (data?.status === "no_evidence") {
+    state = (
+      <>
+        <p className="text-sm text-muted-foreground" data-testid="rationale-no-evidence">
+          No history to explain yet: this symbol has no commits in the scanned history.
+        </p>
+        <RescanHint production={production} />
+      </>
+    );
+  } else if (!canGenerate) {
+    state = (
+      <p className="text-sm text-muted-foreground" data-testid="rationale-viewer">
+        Viewers can read cards but not generate them.
+      </p>
+    );
+  } else if (budgetBlocked) {
+    state = (
+      <>
+        <Button className="mt-0" disabled title={budgetNoticeText(llm.scope)}>
+          Generate rationale
+        </Button>
+        <p className="mt-2 text-sm text-destructive" data-testid="generate-blocked">
+          {budgetNoticeText(llm.scope)}
+        </p>
+      </>
+    );
+  } else if (missingKey) {
+    state = (
+      <p className="text-sm text-muted-foreground" data-testid="rationale-no-key">
+        Add a {providerLabel(missingKey)} key to generate rationale.{" "}
+        {canConfigure ? (
+          <Link
+            to="/p/$slug/settings"
+            params={{ slug }}
+            search={{ section: "models" }}
+            className="text-primary-text underline-offset-4 hover:underline"
+          >
+            Open Settings
+          </Link>
+        ) : (
+          "Ask a project admin to add a key."
+        )}
+      </p>
+    );
+  } else {
+    state = (
+      <>
+        <p className="text-sm text-muted-foreground">No rationale has been generated for this symbol yet.</p>
+        <Button className="mt-3" onClick={() => generate.mutate()}>
+          Generate rationale
+        </Button>
+      </>
+    );
+  }
 
   return (
     <div className="p-4">
-      {generate.isPending ? (
-        <Loading label="Generating rationale (calling the model)…" />
-      ) : (
-        <>
-          <p className="text-sm text-muted-foreground">
-            {noEvidence
-              ? "No historical evidence maps to this symbol, so a rationale can't be generated. Scan from the WhyGraph portal (or run `whygraph scan` outside it) to populate history."
-              : canGenerate
-                ? "No rationale has been generated for this symbol yet."
-                : "No rationale yet. A contributor or admin can generate one."}
-          </p>
-          {canGenerate && (
-            <Button
-              className="mt-3"
-              disabled={noEvidence || generate.isPending || budgetBlocked}
-              title={budgetBlocked ? budgetNoticeText(llm.scope) : undefined}
-              onClick={() => generate.mutate()}
-            >
-              Generate rationale
-            </Button>
-          )}
-          {canGenerate && budgetBlocked && (
-            <p className="mt-2 text-sm text-destructive" data-testid="generate-blocked">
-              {budgetNoticeText(llm.scope)}
-            </p>
-          )}
-          {generate.isError && (
-            <p className="mt-2 text-sm text-destructive">
-              {authMessage(generate.error)}
-            </p>
-          )}
-        </>
+      {state}
+      {generate.isError && (
+        <ErrorState className="mt-3" size="inline" context="chat" error={generate.error} />
       )}
     </div>
   );

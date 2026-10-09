@@ -22,7 +22,6 @@ const KNOWN_OVERFLOW: Record<string, string> = {
   "local /projects/new": "PH-7: the wizard stepper does not fit (main scrolls 419px)",
   "local /usage": "PH-6: the Usage tab strip overflows",
   "local project overview": "PH-4: unbreakable mono paths and MCP URL set the width",
-  "local explorer": "PH-1: three fixed panes; and no h1",
   "local scans": "PH-5: the scan history table scrolls inside",
   "local project settings": "PH-4: unbreakable mono paths (settings General)",
   "local wizard (configure)": "PH-7: the wizard stepper does not fit",

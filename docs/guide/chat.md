@@ -58,6 +58,13 @@ Providers you haven't configured still appear in the picker, greyed out, labelle
 need - so a missing key looks like a missing key rather than a missing feature. Keys come from the
 portal's Settings; variables in your shell do not reach the portal.
 
+If the chosen provider has no key, a notice under the message box says so (with a link to Settings,
+or "Ask an owner to add one" when you are not allowed to add keys) and the box is disabled until you
+pick a provider that has one. The model pickers are also disabled while a monthly budget is hard-stopped.
+
+The chat header shows what the session has cost so far ("This chat: ~$0.84") when you are allowed to
+see usage, and each reply ends with its token counts ("31,500 in · 2,250 out").
+
 !!! note "The model list may fall back"
     The picker asks your provider for its live model list. If your API key is scoped narrowly it can
     work for chat but return `401` on the models endpoint - in that case WhyGraph shows a short

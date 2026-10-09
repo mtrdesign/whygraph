@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { ApiError, projectKey, type BudgetScope, type ChatSession, type ChatTranscript } from "../../api";
 import { chatSessionsKey } from "../../lib/chatSessions";
 import { useUi } from "../../store";
@@ -11,7 +11,9 @@ import { useProjectApi, useProjectKey, useProjectQuery } from "../../lib/project
 import { Loading } from "../Loading";
 import { ErrorState } from "../state/ErrorState";
 import { Button } from "../ui/button";
-import { errorMessage } from "../../lib/apiErrors";
+import { errorInfo, errorMessage } from "../../lib/apiErrors";
+import { isProduction, usePortalState, useRole } from "../../lib/identity";
+import { providerLabel } from "../../lib/labels";
 import { MessageBubble, type AssistantTurn, type Turn } from "./MessageBubble";
 import { Composer } from "./Composer";
 import { ModelSelect } from "./ModelSelect";
@@ -77,6 +79,9 @@ export function MessageThread({
   const createdRef = useRef<number | null>(null);
   const [draft, setDraft] = useState<{ provider: string; model: string } | null>(null);
   const [createError, setCreateError] = useState<unknown>(null);
+  // A failed turn is persisted with the provider's raw text; this remembers how the live frame worded
+  // it, so the reply does not change wording when the transcript replaces the live copy.
+  const [worded, setWorded] = useState<{ raw: string; message: string } | null>(null);
   const [starter, setStarter] = useState<{ text: string; n: number } | null>(null);
   const currentId = sessionId ?? createdId;
   // A hard stop the page has not learned about yet (a live frame, or a 403 on send): the project
@@ -85,6 +90,8 @@ export function MessageThread({
   const [stopped, setStopped] = useState<{ scope: BudgetScope | null } | null>(null);
   const blockedScope = llm.block === "budget_exceeded" ? llm.scope : (stopped?.scope ?? null);
   const budgetBlocked = llm.block === "budget_exceeded" || stopped !== null;
+  const production = isProduction(usePortalState().data);
+  const isOwner = useRole() === "owner";
   const refreshProject = useCallback(
     () => queryClient.invalidateQueries({ queryKey: projectKey(slug, "project") }),
     [queryClient, slug],
@@ -106,6 +113,27 @@ export function MessageThread({
   // An existing session shows its own pair once the list has it; the draft (and the
   // session it just became, until the list catches up) shows the draft's.
   const choice = session ?? (currentId === null || createdId !== null ? draftChoice : null);
+
+  // The chosen provider has no key (EXC-2, MODE-4): the composer is dead and says why.
+  const noKeyProvider = choice
+    ? (providers.data?.find((p) => p.provider === choice.provider && !p.configured)?.provider ?? null)
+    : null;
+  const noKeyNotice = noKeyProvider ? (
+    <>
+      No {providerLabel(noKeyProvider)} key.{" "}
+      {production && !isOwner ? (
+        "Ask an owner to add one."
+      ) : (
+        <>
+          Add one in{" "}
+          <Link to="/settings" className="text-primary-text underline-offset-4 hover:underline">
+            Settings &gt; Models and keys
+          </Link>
+          .
+        </>
+      )}
+    </>
+  ) : null;
 
   const update = useMutation({
     mutationFn: (vars: { provider?: string; model?: string }) =>
@@ -129,7 +157,11 @@ export function MessageThread({
   // Abort an in-flight stream if the view unmounts mid-turn.
   useEffect(() => () => abortRef.current?.abort(), []);
 
-  const persisted = transcript.data ? turnsFromMessages(transcript.data.messages) : [];
+  const persisted = (transcript.data ? turnsFromMessages(transcript.data.messages) : []).map((t) =>
+    worded && t.kind === "assistant" && t.error === worded.raw
+      ? { ...t, error: worded.message, errorDetail: worded.raw }
+      : t,
+  );
   const turns = [...persisted, ...liveTurns];
 
   // Stick to the bottom as content grows. `turns.length` alone isn't enough —
@@ -160,6 +192,7 @@ export function MessageThread({
       abortRef.current = controller;
       setStreaming(true);
       setCreateError(null);
+      setWorded(null);
       setLiveTurns([
         { kind: "user", content },
         emptyAssistantTurn(),
@@ -241,7 +274,18 @@ export function MessageThread({
               case "error":
                 // In-band and terminal: HTTP status was committed before the
                 // first token, so a provider failure can only arrive this way.
-                updateLive((t) => ({ ...settleActivities(t), error: event.message }));
+                {
+                  const info = errorInfo(
+                    new ApiError(502, event.message, event.code, event.provider ? { provider: event.provider } : {}),
+                    "chat",
+                  );
+                  if (info.detail) setWorded({ raw: info.detail, message: info.message });
+                  updateLive((t) => ({
+                    ...settleActivities(t),
+                    error: info.message,
+                    errorDetail: info.detail ?? undefined,
+                  }));
+                }
                 break;
               case "done":
                 updateLive((t) => ({
@@ -266,9 +310,11 @@ export function MessageThread({
         } else if ((err as Error).name === "AbortError") {
           updateLive((t) => ({ ...settleActivities(t), error: "Stopped." }));
         } else {
+          const info = errorInfo(err, "chat");
           updateLive((t) => ({
             ...settleActivities(t),
-            error: (err as Error).message,
+            error: info.message,
+            errorDetail: info.detail ?? undefined,
           }));
         }
       } finally {
@@ -297,7 +343,7 @@ export function MessageThread({
           updateLive((t) => ({
             ...settleActivities(t),
             error:
-              t.error ?? "Couldn't refresh the transcript — showing the streamed copy.",
+              t.error ?? "Couldn't refresh the transcript - showing the streamed copy.",
           }));
         }
         // The sidebar shows titles and dates, both of which just moved.
@@ -367,7 +413,7 @@ export function MessageThread({
             model={choice.model}
             // Streaming is part of this: repointing the session mid-turn would
             // change the row the in-flight turn is attributed to.
-            disabled={update.isPending || streaming}
+            disabled={update.isPending || streaming || budgetBlocked}
             onChange={(next) => {
               if (currentId === null) {
                 // A draft: nothing to save yet, the first Send creates the session with it.
@@ -399,6 +445,8 @@ export function MessageThread({
         <Composer
           streaming={streaming}
           fill={starter}
+          disabled={noKeyProvider !== null}
+          notice={noKeyNotice}
           onSend={send}
           onStop={() => abortRef.current?.abort()}
         />

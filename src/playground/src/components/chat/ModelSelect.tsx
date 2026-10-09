@@ -64,7 +64,7 @@ export function ModelSelect({
 
   const providerItems = (providers.data ?? []).map((p) => ({
     value: p.provider,
-    label: p.configured ? p.provider : `${p.provider} — set ${p.env_var}`,
+    label: p.configured ? p.provider : `${p.provider} (set ${p.env_var})`,
     disabled: !p.configured,
   }));
   const modelItems = [
@@ -154,6 +154,7 @@ export function ModelSelect({
         <span
           title={`Couldn't list models: ${models.data.error ?? "unknown error"}`}
           className="shrink-0 text-[11px] text-warning"
+          role="img"
           aria-label="Model list unavailable; showing defaults"
         >
           ⚠

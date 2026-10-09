@@ -2,6 +2,7 @@ import { Suspense, lazy } from "react";
 import { BudgetNotice } from "../portal/BudgetNotice";
 import { parseChart } from "../charts/chartSpec";
 import { Skeleton } from "../ui/skeleton";
+import { formatNumber } from "../../lib/format";
 import { Markdown } from "./Markdown";
 import { ToolCallCard, type ToolActivity } from "./ToolCallCard";
 
@@ -39,6 +40,8 @@ export interface AssistantTurn {
   /** Which model produced this turn — shown because it can differ per turn. */
   model?: string | null;
   error?: string;
+  /** The provider's or server's own text behind `error`, for "Show details" (ER-3). */
+  errorDetail?: string;
   /** The monthly budget's hard stop ended this turn (a live frame or a persisted row). */
   budgetStop?: { scope?: string | null; message?: string };
   roundLimit?: number;
@@ -132,7 +135,7 @@ function AssistantBubble({ turn }: { turn: AssistantTurn }) {
 
         {turn.roundLimit !== undefined && (
           <div className="mt-2 rounded-sm border border-warning/30 bg-warning/10 px-2 py-1 text-xs text-warning">
-            Reached the {turn.roundLimit}-round tool limit — the assistant answered
+            Reached the {turn.roundLimit}-round tool limit - the assistant answered
             with what it had gathered. Ask a narrower question to go further.
           </div>
         )}
@@ -149,15 +152,24 @@ function AssistantBubble({ turn }: { turn: AssistantTurn }) {
         {turn.error && (
           <div className="mt-2 rounded-sm border border-destructive/30 bg-destructive/10 px-2 py-1 text-xs text-destructive">
             {turn.error}
+            {turn.errorDetail && turn.errorDetail !== turn.error && (
+              <details className="mt-1 text-muted-foreground" data-testid="error-details">
+                <summary className="cursor-pointer select-none hover:text-foreground">Show details</summary>
+                <p className="mt-1 break-words whitespace-pre-wrap">{turn.errorDetail}</p>
+              </details>
+            )}
           </div>
         )}
 
         {(turn.model || (turn.usage && (turn.usage.input || turn.usage.output))) && (
           <div className="mt-2 flex items-center gap-2 text-[10px] text-muted-foreground">
             {turn.model && <span className="font-mono">{turn.model}</span>}
+            {turn.model && turn.usage && (turn.usage.input || turn.usage.output) && <span aria-hidden>·</span>}
             {turn.usage && (turn.usage.input || turn.usage.output) && (
-              <span>
-                {turn.usage.input ?? "?"} in / {turn.usage.output ?? "?"} out tokens
+              <span data-testid="turn-tokens">
+                {turn.usage.input == null ? "?" : formatNumber(turn.usage.input)} in
+                {" · "}
+                {turn.usage.output == null ? "?" : formatNumber(turn.usage.output)} out
               </span>
             )}
           </div>

@@ -42,8 +42,13 @@ function OverviewNodeInner({ data }: NodeProps) {
         )}
         <span className="truncate text-sm font-medium text-foreground">{d.label}</span>
       </div>
-      <div className="mt-2 flex items-center gap-2">
-        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-border">
+      <div
+        className="mt-2 flex items-center gap-2"
+        role="img"
+        aria-label={`Explained: ${analyzed} of ${total} symbols`}
+        title={`Explained: ${analyzed} of ${total} symbols`}
+      >
+        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-track">
           <div
             className={cn("h-full", coverageColor(fraction, total))}
             style={{ width: `${total ? Math.max(fraction * 100, 3) : 0}%` }}

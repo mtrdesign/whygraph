@@ -195,13 +195,14 @@ The portal's HTTP API exposes the same run data the web UI shows:
 
 | Endpoint | Returns |
 |---|---|
-| `GET /api/projects/<slug>/scans` | The project's 50 most recent runs, newest first |
+| `GET /api/projects/<slug>/scans` | The project's runs, newest first, 50 per page: `{runs, next}`. Filters: `status` and `trigger` (comma lists), `type` (`full`, `quick` or `sync`), `requester` (a user id or `system`); `limit` (1-100) and `before=<next>` page through |
+| `GET /api/projects/<slug>/scans/<id>` | One run: its trigger, status, times, who requested or cancelled it, and its summary. Cost and the estimate are shown to project admins only |
 | `GET /api/projects/<slug>/scans/<id>/events` | The run's progress as a server-sent event stream (resumable with `Last-Event-ID`) |
 | `GET /api/projects/<slug>/scans/<id>/log` | The end of the run's log, at most the last 64 KiB, starting at a line boundary: `{run_id, text, size, truncated}`. Keys are already masked. |
 | `GET /api/portal/state` | Portal status, including the installed `version` (what `whygraph version` prints) |
 
-Every `/api` call needs the `X-WhyGraph-Client: 1` header, and the scans endpoints answer `409`
-until the project is initialized.
+Every `/api` call needs the `X-WhyGraph-Client: 1` header, and starting a scan
+(`POST /api/projects/<slug>/scans`) answers `409` until the project is initialized.
 
 ## Removed commands
 

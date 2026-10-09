@@ -594,7 +594,8 @@ def test_first_scan_is_initial_and_argv_per_trigger(
     ]:
         run = wait_run(portal, "demo", scan(portal, "demo", **body))
         assert (run["status"], run["trigger"]) == ("ok", trigger)
-        assert run["requested_by"] == (None if trigger == "hook" else 1)
+        by = run["requested_by"]
+        assert (by["label"] if by else None) == (None if trigger == "hook" else "Tess")
     calls = scanner.calls()
     assert [runner_flags(c) for c in calls] == [
         ["--progress", "json", "--managed-by-portal", *flags]
@@ -650,7 +651,7 @@ def test_single_flight_and_union_coalescing(
         "manual",
         True,
     )
-    assert queued["requested_by"] == 1  # first explicit requester kept
+    assert queued["requested_by"]["label"] == "Tess"  # first explicit requester kept
     assert len(scanner.calls()) == 2  # single-flight: only the held run started
 
     scanner.hold.unlink()
@@ -1787,8 +1788,13 @@ def test_cancel_a_queued_scan_drops_it_from_the_queue(
     assert response.status_code == 200, response.text
     assert response.json() == {"run_id": queued, "was": "queued"}
     row = run_by_id(portal, "demo", queued)
-    assert (row["status"], row["summary"]) == ("cancelled", {"cancelled_by": "user"})
-    assert row["finished_at"]
+    # A manual request is a full run: it keeps the estimate it was queued with.
+    assert row["status"] == "cancelled" and row["finished_at"]
+    assert row["summary"] == {
+        "cancelled_by": "user",
+        "estimate": row["summary"]["estimate"],
+    }
+    assert row["cancelled_by"]["label"] == "Tess"
     scanner.hold.unlink()
     assert wait_run(portal, "demo", running)["status"] == "ok"
     wait_idle(portal, "demo")
@@ -2155,6 +2161,13 @@ def _ids(slug: str = "demo") -> SimpleNamespace:
         )
 
 
+def _uid(user_id: int) -> str:
+    with portal_db.get_session() as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        return user.uid
+
+
 def _usage_events(*subjects: str, **extra: Any) -> str:
     return json.dumps(
         [{**GOOD_USAGE, "subject": s, **extra} for s in subjects], separators=(",", ":")
@@ -2190,7 +2203,7 @@ def test_scan_usage_is_attributed_to_the_requester_and_kept_out_of_events(
     )
     pending = scan(portal, "demo", trigger="hook")
     assert scan(portal, "demo", trigger="manual") == pending
-    assert run_by_id(portal, "demo", pending)["requested_by"] == ids.tess
+    assert run_by_id(portal, "demo", pending)["requested_by"]["label"] == "Tess"
     scanner.hold.unlink()
     hook_run = wait_run(portal, "demo", running)
     run = wait_run(portal, "demo", pending)
@@ -2506,13 +2519,24 @@ def test_cancel_records_the_canceller_and_keeps_the_estimate(
     assert run["summary"]["estimate"] == EST
     assert _row(running).cancelled_by == tess
 
-    # Without a canceller (the route, until it passes one) the column stays NULL.
+    # The route records the caller; the run routes return it as a person.
     scanner.hold.touch()
     held = _request(portal, "demo", trigger="hook", analyze=None, may_spend=False)
     wait_for(lambda: len(scanner.calls()) == 3)
     assert cancel(portal, "demo", held).status_code == 202
     scanner.hold.unlink()
     assert wait_run(portal, "demo", held)["status"] == "cancelled"
+    assert _row(held).cancelled_by == tess
+    by = portal.get(f"/api/projects/demo/scans/{held}").json()["cancelled_by"]
+    assert by == {"uid": _uid(tess), "label": "Tess"}
+
+    # Without a canceller the column stays NULL (and the payload says System).
+    scanner.hold.touch()
+    held = _request(portal, "demo", trigger="hook", analyze=None, may_spend=False)
+    wait_for(lambda: len(scanner.calls()) == 4)
+    assert _cancel(portal, "demo", held, may_cancel_full=True) == "running"
+    scanner.hold.unlink()
+    assert wait_run(portal, "demo", held)["cancelled_by"] is None
     assert _row(held).cancelled_by is None
 
 
@@ -2646,3 +2670,199 @@ def test_execute_sets_portal_keys_after_the_sync_summary(
     assert (
         "coverage" not in summary and "cloned" not in summary
     )  # no state: no snapshot
+
+
+# ---------------------------------------------------------------------------
+# The run routes and the history API (M2f-3 plan sections 4.11, 6.2 #3)
+# ---------------------------------------------------------------------------
+
+
+def _add_run(
+    project_id: int,
+    *,
+    kind: str = "scan",
+    trigger: str = "manual",
+    analyze: bool = False,
+    status: str = "ok",
+    by: int | None = None,
+    cancelled_by: int | None = None,
+    summary: str | dict | None = None,
+) -> int:
+    """Insert a finished run row directly (the runner never sees it)."""
+    with portal_db.get_session() as session:
+        run = ScanRun(
+            project_id=project_id,
+            kind=kind,
+            trigger=trigger,
+            analyze=analyze,
+            status=status,
+            requested_by=by,
+            cancelled_by=cancelled_by,
+            queued_at="2026-10-09T10:00:00+00:00",
+            started_at="2026-10-09T10:00:01+00:00",
+            finished_at="2026-10-09T10:01:00+00:00",
+            summary=summary if not isinstance(summary, dict) else json.dumps(summary),
+        )
+        session.add(run)
+        session.flush()
+        assert run.id is not None
+        return run.id
+
+
+def test_run_history_filters_pages_and_shapes(
+    portal: TestClient, env: SimpleNamespace
+) -> None:
+    local_project(portal, env, "demo")
+    local_project(portal, env, "other")
+    ids = _ids()
+    tess = {"uid": _uid(ids.tess), "label": "Tess"}
+    usage = {"calls": 2, "cost_usd": 0.4, "cost_source": "provider"}
+    full = _add_run(
+        ids.project_id,
+        analyze=True,
+        by=ids.tess,
+        summary={"status": "ok", "usage": usage, "estimate": EST},
+    )
+    hook = _add_run(ids.project_id, trigger="hook", status="failed")
+    fetched = _add_run(ids.project_id, kind="sync", trigger="sync", summary={})
+    synced = _add_run(
+        ids.project_id, kind="sync", trigger="push", summary={"scanned": True}
+    )
+    broken = _add_run(
+        ids.project_id,
+        kind="sync",
+        trigger="reconcile",
+        status="cancelled",
+        summary="not json {",
+    )
+    stopped = _add_run(
+        ids.project_id,
+        trigger="describe",
+        analyze=True,
+        status="cancelled",
+        by=ids.tess,
+        cancelled_by=ids.tess,
+        summary={"cancelled_by": "user"},
+    )
+    mine = [stopped, broken, synced, fetched, hook, full]
+    base = "/api/projects/demo/scans"
+
+    def listed(**query: Any) -> list[int]:
+        response = portal.get(base, params=query)
+        assert response.status_code == 200, response.text
+        return [r["id"] for r in response.json()["runs"] if r["id"] in mine]
+
+    assert listed() == mine  # newest first
+    assert listed(status="failed") == [hook]
+    assert listed(status="ok,failed") == [synced, fetched, hook, full]
+    assert listed(trigger="sync,push") == [synced, fetched]
+    assert listed(type="full") == [stopped, full]
+    # A sync that only fetched (a non-JSON summary counts as not scanned) ...
+    assert listed(type="sync") == [broken, fetched]
+    # ... and one that went on to scan is quick, like any structure-only scan.
+    assert listed(type="quick") == [synced, hook]
+    assert listed(requester=tess["uid"]) == [stopped, full]
+    assert listed(requester="system") == [broken, synced, fetched, hook]
+    assert listed(requester="no-such-uid") == []
+    assert listed(type="full", status="cancelled", requester=tess["uid"]) == [stopped]
+
+    # The Run shape: people as {uid, label}, System as null; cost for an admin.
+    rows = {r["id"]: r for r in portal.get(base).json()["runs"]}
+    assert rows[full]["requested_by"] == tess
+    assert rows[full]["cancelled_by"] is None
+    assert rows[full]["queued_at"] == "2026-10-09T10:00:00+00:00"
+    assert (rows[full]["cost_usd"], rows[full]["estimate_usd"]) == (0.4, 0.5)
+    assert rows[full]["summary"]["usage"] == usage
+    assert rows[full]["summary"]["estimate"] == EST
+    assert rows[stopped]["cancelled_by"] == tess
+    assert (rows[stopped]["cost_usd"], rows[stopped]["estimate_usd"]) == (None, None)
+    assert rows[hook]["requested_by"] is None
+    assert rows[broken]["summary"] is None
+    # GET /scans/{id}: the same Run; another project's run is not found.
+    assert portal.get(f"{base}/{full}").json() == rows[full]
+    missing = portal.get(f"/api/projects/other/scans/{full}")
+    assert missing.status_code == 404
+    assert missing.json() == {"error": f"run {full} not found"}
+
+    # Paging: `next` is the next page's `before`, null on the last page.
+    paged = [
+        _add_run(ids.project_id, trigger="poll", status="interrupted") for _ in range(5)
+    ]
+    query = {"status": "interrupted", "limit": "2"}
+    first = portal.get(base, params=query).json()
+    assert [r["id"] for r in first["runs"]] == [paged[4], paged[3]]
+    assert first["next"] == paged[3]
+    second = portal.get(base, params={**query, "before": first["next"]}).json()
+    assert [r["id"] for r in second["runs"]] == [paged[2], paged[1]]
+    last = portal.get(base, params={**query, "before": second["next"]}).json()
+    assert ([r["id"] for r in last["runs"]], last["next"]) == ([paged[0]], None)
+    # The default page is 50 runs.
+    for _ in range(50):
+        _add_run(ids.project_id, trigger="poll", status="interrupted")
+    page = portal.get(base, params={"status": "interrupted"}).json()
+    assert len(page["runs"]) == 50 and page["next"] is not None
+
+    for query, code in [
+        ({"limit": "0"}, "bad_filter"),
+        ({"limit": "101"}, "bad_filter"),
+        ({"limit": "ten"}, "bad_filter"),
+        ({"status": "done"}, "bad_filter"),
+        ({"status": "ok,done"}, "bad_filter"),
+        ({"trigger": "cron"}, "bad_filter"),
+        ({"type": "scan"}, "bad_filter"),  # `type` is not the `kind` field
+        ({"requester": "x" * 500}, "bad_filter"),
+        ({"before": "abc"}, "bad_cursor"),
+        ({"before": "0"}, "bad_cursor"),
+        ({"before": "-3"}, "bad_cursor"),
+        ({"before": "²"}, "bad_cursor"),
+    ]:
+        response = portal.get(base, params=query)
+        assert response.status_code == 422, (query, response.text)
+        assert response.json()["code"] == code, query
+
+
+def test_post_scan_stores_the_describe_estimate(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    local_project(portal, env, "demo")
+    # The first scan is forced structure-only: no estimate on it.
+    assert "estimate" not in first_scan(portal, "demo")["summary"]
+    for body in ({}, {"trigger": "describe"}, {"trigger": "manual", "analyze": True}):
+        run = wait_run(portal, "demo", scan(portal, "demo", **body))
+        estimate = run["summary"]["estimate"]
+        assert set(estimate) == {
+            "commits",
+            "model",
+            "cost_usd",
+            "cost_low_usd",
+            "cost_high_usd",
+            "prices_as_of",
+            "missing_key",
+        }, body
+        assert estimate["model"]["provider"] == "anthropic"
+        assert estimate["missing_key"] == "anthropic"
+        assert run["estimate_usd"] == estimate["cost_usd"]
+    for body in ({"trigger": "manual", "analyze": False}, {"trigger": "hook"}):
+        run = wait_run(portal, "demo", scan(portal, "demo", **body))
+        assert "estimate" not in run["summary"], body
+        assert run["estimate_usd"] is None
+
+
+def test_run_routes_answer_for_an_uninitialized_project(
+    portal: TestClient, env: SimpleNamespace
+) -> None:
+    root = make_repo(env.shared, "fresh")
+    assert add_local(portal, root)["project"]["slug"] == "fresh"
+    base = "/api/projects/fresh/scans"
+    assert portal.get(base).json() == {"runs": [], "next": None}
+    for response in (
+        portal.get(f"{base}/1"),
+        portal.get(f"{base}/1/events"),
+        portal.get(f"{base}/1/log"),
+        portal.post(f"{base}/1/cancel"),
+    ):
+        assert response.status_code == 404, response.text
+    refused = portal.post(base)
+    assert refused.status_code == 409
+    assert refused.json()["code"] == "not_initialized"
+    assert not (root / ".whygraph" / "whygraph.db").exists()

@@ -272,6 +272,10 @@ PORTAL_SUMMARY_KEYS: tuple[str, ...] = (
 a sync's own summary) put there, then sets its own after that merge, so a
 hostile repository cannot chart its own coverage or claim an estimate."""
 
+COST_SUMMARY_KEYS: tuple[str, ...] = ("usage", "estimate")
+"""``summary`` keys that carry cost: sent only to ``project.usage`` holders
+(M2f-3 plan decision R1) - by the run routes and in a stream's ``end`` frame."""
+
 TOKEN_REFRESH_MARGIN_SEC = 10 * 60
 """Seconds before an installation token expires that a child's token file is rewritten."""
 
@@ -2561,6 +2565,7 @@ class ScanRunner:
         shutdown: anyio.Event,
         offset: int = 0,
         still_allowed: Callable[[], bool] | None = None,
+        hide_cost: bool = False,
     ) -> StreamingResponse:
         """Return the SSE response streaming a run's events.
 
@@ -2581,6 +2586,9 @@ class ScanRunner:
             it returns ``False`` the stream sends a terminal ``end`` frame
             with ``reason: "access_revoked"`` and closes. ``None`` (local
             mode) never re-checks.
+        hide_cost : bool
+            Drop :data:`COST_SUMMARY_KEYS` from the ``summary`` of the
+            terminal ``end`` frame (a caller without ``project.usage``).
 
         Returns
         -------
@@ -2600,7 +2608,9 @@ class ScanRunner:
             raise RunNotFound(run_id)
         path = data_dir() / events_rel
         return StreamingResponse(
-            self._stream(run_id, path, max(0, offset), shutdown, still_allowed),
+            self._stream(
+                run_id, path, max(0, offset), shutdown, still_allowed, hide_cost
+            ),
             media_type="text/event-stream",
             headers=dict(_SSE_HEADERS),
         )
@@ -2612,6 +2622,7 @@ class ScanRunner:
         offset: int,
         shutdown: anyio.Event,
         still_allowed: Callable[[], bool] | None = None,
+        hide_cost: bool = False,
     ) -> AsyncIterator[str]:
         pos = offset
         last_sent = last_checked = time.monotonic()
@@ -2644,6 +2655,10 @@ class ScanRunner:
                 continue
             if finished:
                 status, summary = await anyio.to_thread.run_sync(_run_status, run_id)
+                if hide_cost and isinstance(summary, dict):
+                    summary = {
+                        k: v for k, v in summary.items() if k not in COST_SUMMARY_KEYS
+                    }
                 end = {
                     "type": "end",
                     "run_id": run_id,
@@ -3271,6 +3286,7 @@ def _read_frames(path: Path, pos: int) -> tuple[list[str], int]:
 
 
 __all__ = [
+    "COST_SUMMARY_KEYS",
     "EXPLICIT_TRIGGERS",
     "LOG_TAIL_BYTES",
     "MAX_CONCURRENT",

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 import re
 import secrets as secrets_mod
@@ -42,8 +43,11 @@ from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
+import anyio
 from fastapi import APIRouter, Body, Depends, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import and_, case, cast, false, func, not_
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
@@ -119,6 +123,7 @@ from .deps import (
     project_access,
     project_db_access,
     project_role_for,
+    require_initialized,
     unsafe_path_error,
 )
 from .github_app import (
@@ -137,6 +142,8 @@ from .github_app_routes import (
 from .github_auth import GitHubUnavailable
 from .linked import due_for_refresh, link_block, revoke_token
 from .models import (
+    SCAN_STATUSES,
+    SCAN_TRIGGERS,
     Organization,
     PlatformLink,
     Project,
@@ -172,8 +179,10 @@ from .repos import (
     detect_existing,
     root_status,
 )
+from .estimate import compact_estimate
 from .estimate import scan_estimate as _scan_estimate
 from .runner import (
+    COST_SUMMARY_KEYS,
     ProjectAccessLost,
     ProjectBusy,
     RunFinished,
@@ -185,6 +194,7 @@ from .runner import (
     SourceNotAllowed,
     log_tail,
     remove_run_files,
+    resolve_analyze,
     run_files,
     stale_info,
 )
@@ -200,7 +210,10 @@ from .secrets import (
 )
 from .security import Principal
 from .stats import project_counts
+from .usage import actor_label
 from .usage_routes import llm_block, project_usage, state_usage
+
+_log = logging.getLogger(__name__)
 
 public_router = APIRouter(prefix="/api/portal")
 """``GET state`` and ``POST setup`` - the only routes usable before setup."""
@@ -2311,11 +2324,16 @@ def _init_production(state: PortalState, project: BoundProject, body: InitBody) 
 @projects_router.post("/{slug}/scans", status_code=202)
 async def post_scan(
     request: Request,
-    project: BoundProject = Depends(project_db_access(Action.PROJECT_SCAN)),
+    project: BoundProject = Depends(project_access(Action.PROJECT_SCAN)),
     principal: Principal = Depends(current_user),
     body: ScanBody | None = Body(default=None),
 ) -> dict:
     """Queue (or coalesce into) a scan; returns the pending run's id.
+
+    The project must be initialized (``409 not_initialized`` /
+    ``unsafe_path``, :func:`~whygraph.portal.deps.require_initialized`):
+    the route binds with :func:`project_access` and checks that itself
+    (M2f-3 plan section 0.3 #6).
 
     A ``hook`` scan (the credential-less git-hook ``curl``) exists only in
     local mode: elsewhere it is a ``403 {"code": "hook_local_only"}``. A
@@ -2331,21 +2349,32 @@ async def post_scan(
     so it never is): ``403 forbidden`` with ``action: "project.scan_full"``.
     Such a request is also refused while an exhausted hard-stopped budget
     covers it (the caller's, the project's or the org's): ``403
-    budget_exceeded`` with its ``scope`` (M2f-2 plan section 4.7).
+    budget_exceeded`` with its ``scope`` (M2f-2 plan section 4.7). It
+    carries the describe estimate the requester would see, stored on the
+    run as ``summary.estimate`` (M2f-3 plan section 0.3 #10).
     """
     body = body or ScanBody()
     state = portal_state(request)
+    # TODO(S7): an importing project's Retry re-queues its import here.
+    await require_initialized(state, project)
     if body.trigger == "hook" and state.mode != "local":
         raise ApiError(
             403, "hook scans exist only in local mode", code="hook_local_only"
         )
+    may_spend = project_allowed(project.role, Action.PROJECT_SCAN_FULL)
+    estimate = None
+    if may_spend and resolve_analyze(
+        body.trigger or "manual", body.analyze, project.source
+    ):
+        estimate = await anyio.to_thread.run_sync(_describe_estimate, state, project)
     try:
         run_id = await state.runner.request_scan(
             project,
             trigger=body.trigger,
             analyze=body.analyze,
             principal=principal,
-            may_spend=project_allowed(project.role, Action.PROJECT_SCAN_FULL),
+            may_spend=may_spend,
+            estimate=estimate,
         )
     except ScanForbidden as exc:
         raise _scan_full_forbidden(project) from exc
@@ -2388,34 +2417,291 @@ def _scan_full_forbidden(project: BoundProject) -> ApiError:
     )
 
 
+def _describe_estimate(state: PortalState, project: BoundProject) -> dict | None:
+    """The compact describe estimate a full run stores (blocking; ``None`` on failure)."""
+    try:
+        with use_project(project.ctx):
+            body = _scan_estimate(
+                project.ctx.config, overrides=state.prices.for_org(project.org_id)
+            )
+    except Exception:  # best-effort: an estimate never blocks a scan
+        _log.warning(
+            "could not estimate the describe cost of project %s",
+            project.slug,
+            exc_info=True,
+        )
+        return None
+    return compact_estimate(body, _missing_key(project.ctx.config, ("analyze",)))
+
+
+SCAN_PAGE_SIZE = 50
+"""The default number of runs ``GET .../scans`` returns."""
+
+SCAN_PAGE_MAX = 100
+"""The most runs one ``GET .../scans`` page may return (``limit``)."""
+
+SCAN_TYPES: tuple[str, ...] = ("full", "quick", "sync")
+"""The ``type`` filter's buckets of ``GET .../scans`` (M2f-3 plan section 4.11)."""
+
+_SCAN_QUERY_MAX = 400
+"""The longest query value ``GET .../scans`` reads."""
+
+
+def _bad_filter(message: str) -> ApiError:
+    return ApiError(422, message, code="bad_filter")
+
+
+def _query_value(raw: str | None, name: str) -> str | None:
+    """A query value, refused (``422 bad_filter``) when absurdly long."""
+    if raw is not None and len(raw) > _SCAN_QUERY_MAX:
+        raise _bad_filter(f"{name} is too long")
+    return raw
+
+
+def _list_filter(raw: str | None, allowed: tuple[str, ...], name: str) -> list[str]:
+    """Parse a comma list whose every item is one of ``allowed`` (``422 bad_filter``)."""
+    raw = _query_value(raw, name)
+    values = [v.strip() for v in (raw or "").split(",") if v.strip()]
+    if any(v not in allowed for v in values):
+        raise _bad_filter(f"{name} is a comma list of {', '.join(allowed)}")
+    return values
+
+
+def _positive_int(raw: str) -> int | None:
+    """``raw`` as a positive integer, or ``None``."""
+    raw = raw.strip()
+    # isascii: str.isdigit() also accepts "²", which int() rejects.
+    if not (raw.isascii() and raw.isdigit()) or len(raw) > 18:
+        return None
+    value = int(raw)
+    return value if value >= 1 else None
+
+
+def _summary_scanned() -> Any:
+    """SQL: whether a run's ``summary`` says the sync went on to scan.
+
+    ``pg_input_is_valid`` keeps a row whose ``summary`` is not JSON from
+    failing the query (it then counts as not scanned).
+    """
+    summary = col(ScanRun.summary)
+    return case(
+        (
+            func.pg_input_is_valid(summary, "jsonb"),
+            cast(summary, JSONB).contains({"scanned": True}),
+        ),
+        else_=false(),
+    )
+
+
+def _type_condition(kind: str) -> Any:
+    """SQL for one ``type`` bucket (M2f-3 plan section 4.11).
+
+    ``full`` describes commits; ``sync`` is a sync that only fetched (not
+    ``analyze``, no ``summary.scanned``); ``quick`` is every other
+    structure-only run, a sync that went on to scan included.
+    """
+    analyze = col(ScanRun.analyze)
+    if kind == "full":
+        return analyze.is_(True)
+    sync_only = and_(col(ScanRun.kind) == "sync", not_(_summary_scanned()))
+    if kind == "sync":
+        return and_(analyze.is_(False), sync_only)
+    return and_(analyze.is_(False), not_(sync_only))
+
+
+def _load_summary(raw: str | None) -> Any:
+    """A run's ``summary`` decoded, or ``None`` (absent or not JSON)."""
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
+
+
+def _summary_cost(summary: Any, key: str) -> float | None:
+    """``summary[key].cost_usd`` when it is a number, else ``None``."""
+    block = summary.get(key) if isinstance(summary, dict) else None
+    value = block.get("cost_usd") if isinstance(block, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+def _run_people(
+    session: Session, runs: list[ScanRun], *, production: bool
+) -> dict[int, dict]:
+    """``{users.id: {uid, label}}`` for a page's requesters and cancellers (one query)."""
+    ids = {
+        user_id
+        for run in runs
+        for user_id in (run.requested_by, run.cancelled_by)
+        if user_id is not None
+    }
+    if not ids:
+        return {}
+    users = session.exec(select(User).where(col(User.id).in_(ids))).all()
+    return {
+        user.id: {
+            "uid": user.uid,
+            "label": actor_label(user, production=production),  # type: ignore[arg-type]
+        }
+        for user in users
+        if user.id is not None
+    }
+
+
+def _run_dict(run: ScanRun, people: dict[int, dict], *, show_cost: bool) -> dict:
+    """A run as the scan routes return it (M2f-3 plan section 4.11).
+
+    ``requested_by`` / ``cancelled_by`` are ``{uid, label}`` (``None``:
+    System). Without ``show_cost`` (the caller lacks ``project.usage``,
+    decision R1) the ``cost_usd`` / ``estimate_usd`` keys are left out and
+    :data:`~whygraph.portal.runner.COST_SUMMARY_KEYS` are dropped from the
+    ``summary``.
+    """
+    summary = _load_summary(run.summary)
+    body: dict[str, Any] = {
+        "id": run.id,
+        "kind": run.kind,
+        "trigger": run.trigger,
+        "analyze": run.analyze,
+        "status": run.status,
+        "queued_at": run.queued_at,
+        "started_at": run.started_at,
+        "finished_at": run.finished_at,
+        "requested_by": (
+            None if run.requested_by is None else people.get(run.requested_by)
+        ),
+        "cancelled_by": (
+            None if run.cancelled_by is None else people.get(run.cancelled_by)
+        ),
+        "summary": summary,
+    }
+    if show_cost:
+        body["cost_usd"] = _summary_cost(summary, "usage")
+        body["estimate_usd"] = _summary_cost(summary, "estimate")
+    elif isinstance(summary, dict):
+        body["summary"] = {
+            k: v for k, v in summary.items() if k not in COST_SUMMARY_KEYS
+        }
+    return body
+
+
 @projects_router.get("/{slug}/scans")
 def list_scans(
-    project: BoundProject = Depends(project_db_access(Action.PROJECT_READ)),
+    request: Request,
+    project: BoundProject = Depends(project_access(Action.PROJECT_READ)),
+    before: str | None = None,
+    limit: str | None = None,
+    status: str | None = None,
+    trigger: str | None = None,
+    type: str | None = None,  # noqa: A002 -- the query parameter's name
+    requester: str | None = None,
 ) -> dict:
-    """The project's recent scan / sync runs, newest first."""
+    """The project's scan / sync runs, newest first, a page at a time.
+
+    Parameters
+    ----------
+    before : str, optional
+        A run id: only older runs (the previous page's ``next``); ``422
+        bad_cursor`` unless a positive integer.
+    limit : str, optional
+        The page size, 1 to :data:`SCAN_PAGE_MAX` (default
+        :data:`SCAN_PAGE_SIZE`).
+    status, trigger : str, optional
+        Comma lists of :data:`~whygraph.portal.models.SCAN_STATUSES` /
+        :data:`~whygraph.portal.models.SCAN_TRIGGERS`.
+    type : str, optional
+        One of :data:`SCAN_TYPES` (see :func:`_type_condition`).
+    requester : str, optional
+        A user's ``uid``, or ``system`` for runs nobody requested.
+
+    Returns
+    -------
+    dict
+        ``{runs: [Run], next}``: ``next`` is the ``before`` of the next
+        page, ``null`` on the last one. A filter outside its values is a
+        ``422 bad_filter``. Reads only the portal DB, so it answers for a
+        project that is not initialized.
+    """
+    conditions: list[Any] = [col(ScanRun.project_id) == project.id]
+    if _query_value(before, "before") is not None:
+        cursor = _positive_int(before)  # type: ignore[arg-type]
+        if cursor is None:
+            raise ApiError(
+                422, "before is not a cursor of this listing", code="bad_cursor"
+            )
+        conditions.append(col(ScanRun.id) < cursor)
+    size = SCAN_PAGE_SIZE
+    if _query_value(limit, "limit") is not None:
+        parsed = _positive_int(limit)  # type: ignore[arg-type]
+        if parsed is None or parsed > SCAN_PAGE_MAX:
+            raise _bad_filter(f"limit is a number from 1 to {SCAN_PAGE_MAX}")
+        size = parsed
+    statuses = _list_filter(status, SCAN_STATUSES, "status")
+    if statuses:
+        conditions.append(col(ScanRun.status).in_(statuses))
+    triggers = _list_filter(trigger, SCAN_TRIGGERS, "trigger")
+    if triggers:
+        conditions.append(col(ScanRun.trigger).in_(triggers))
+    kind = _query_value(type, "type")
+    if kind:
+        if kind not in SCAN_TYPES:
+            raise _bad_filter(f"type is one of {', '.join(SCAN_TYPES)}")
+        conditions.append(_type_condition(kind))
+    production = portal_state(request).mode == "production"
     with get_session() as session:
-        runs = session.exec(
-            select(ScanRun)
-            .where(ScanRun.project_id == project.id)
-            .order_by(col(ScanRun.id).desc())
-            .limit(50)
-        ).all()
+        who = _query_value(requester, "requester")
+        if who == "system":
+            conditions.append(col(ScanRun.requested_by).is_(None))
+        elif who:
+            found = session.exec(select(User.id).where(User.uid == who)).first()
+            conditions.append(
+                false() if found is None else col(ScanRun.requested_by) == found
+            )
+        rows = list(
+            session.exec(
+                select(ScanRun)
+                .where(*conditions)
+                .order_by(col(ScanRun.id).desc())
+                .limit(size + 1)
+            ).all()
+        )
+        page = rows[:size]
+        people = _run_people(session, page, production=production)
+        show_cost = project_allowed(project.role, Action.PROJECT_USAGE)
         return {
-            "runs": [
-                {
-                    "id": r.id,
-                    "kind": r.kind,
-                    "trigger": r.trigger,
-                    "analyze": r.analyze,
-                    "status": r.status,
-                    "requested_by": r.requested_by,
-                    "started_at": r.started_at,
-                    "finished_at": r.finished_at,
-                    "summary": json.loads(r.summary) if r.summary else None,
-                }
-                for r in runs
-            ]
+            "runs": [_run_dict(r, people, show_cost=show_cost) for r in page],
+            "next": page[-1].id if len(rows) > size else None,
         }
+
+
+@projects_router.get("/{slug}/scans/{run_id}")
+def get_scan(
+    run_id: int,
+    request: Request,
+    project: BoundProject = Depends(project_access(Action.PROJECT_READ)),
+) -> dict:
+    """One run of the project, shaped as in :func:`list_scans`.
+
+    ``404`` for an unknown run or another project's.
+    """
+    production = portal_state(request).mode == "production"
+    with get_session() as session:
+        run = session.exec(
+            select(ScanRun).where(
+                ScanRun.id == run_id, ScanRun.project_id == project.id
+            )
+        ).first()
+        if run is None:
+            raise ApiError(404, f"run {run_id} not found")
+        people = _run_people(session, [run], production=production)
+        return _run_dict(
+            run,
+            people,
+            show_cost=project_allowed(project.role, Action.PROJECT_USAGE),
+        )
 
 
 def _stream_access(
@@ -2463,12 +2749,14 @@ def _stream_access(
 async def scan_events(
     run_id: int,
     request: Request,
-    project: BoundProject = Depends(project_db_access(Action.PROJECT_READ)),
+    project: BoundProject = Depends(project_access(Action.PROJECT_READ)),
 ) -> Any:
     """SSE: replay a run's events file, then follow it until the run ends.
 
     Each frame's ``id:`` is the byte offset after it; a reconnect sends it
-    back as ``Last-Event-ID`` and the replay resumes there.
+    back as ``Last-Event-ID`` and the replay resumes there. The terminal
+    ``end`` frame's ``summary`` carries no cost for a caller without
+    ``project.usage`` (decision R1).
     """
     state = portal_state(request)
     assert state.shutdown_event is not None
@@ -2482,6 +2770,7 @@ async def scan_events(
             shutdown=state.shutdown_event,
             offset=offset,
             still_allowed=_stream_access(request, project),
+            hide_cost=not project_allowed(project.role, Action.PROJECT_USAGE),
         )
     except RunNotFound as exc:
         raise ApiError(404, f"run {run_id} not found") from exc
@@ -2494,7 +2783,8 @@ async def cancel_scan(
     run_id: int,
     request: Request,
     response: Response,
-    project: BoundProject = Depends(project_db_access(Action.PROJECT_SCAN)),
+    project: BoundProject = Depends(project_access(Action.PROJECT_SCAN)),
+    principal: Principal = Depends(current_user),
 ) -> dict:
     """Cancel a queued (``200``) or running (``202``) scan / sync run.
 
@@ -2504,12 +2794,14 @@ async def cancel_scan(
     Cancelling a full (LLM-spending) run needs ``project.scan_full``, the
     action that would start one - decided by the runner under its lock, so
     a full request merged into a queued run counts (``403 forbidden``).
+    The caller is recorded as the run's ``cancelled_by``.
     """
     try:
         was = await portal_state(request).runner.cancel(
             project.id,
             run_id,
             may_cancel_full=project_allowed(project.role, Action.PROJECT_SCAN_FULL),
+            by=principal.user_id,
         )
     except ScanForbidden as exc:
         raise _scan_full_forbidden(project) from exc
@@ -2526,7 +2818,7 @@ async def cancel_scan(
 
 @projects_router.get("/{slug}/scans/{run_id}/log")
 def scan_log(
-    run_id: int, project: BoundProject = Depends(project_db_access(Action.PROJECT_READ))
+    run_id: int, project: BoundProject = Depends(project_access(Action.PROJECT_READ))
 ) -> dict:
     """The tail of a run's log: ``{run_id, text, size, truncated}``.
 
@@ -2552,11 +2844,18 @@ def get_scan_estimate(
 
     Refused for a linked project (``403 managed_on_platform``): its scans
     never describe anything - the platform pays for and owns the LLM work.
+
+    A caller without ``project.usage`` gets ``cost: null``, ``tokens:
+    null`` and ``cost_hidden: true`` (tokens times a public price table
+    give the cost back); the commit counts, the model and ``missing_key``
+    stay (M2f-3 plan section 0.3 #46).
     """
     _refuse_linked(project, "estimating this project's describe cost")
     overrides = portal_state(request).prices.for_org(project.org_id)
     body = _scan_estimate(project.ctx.config, overrides=overrides)
     body["missing_key"] = _missing_key(project.ctx.config, ("analyze",))
+    if not project_allowed(project.role, Action.PROJECT_USAGE):
+        body.update(cost=None, tokens=None, cost_hidden=True)
     return body
 
 

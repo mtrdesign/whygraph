@@ -1297,12 +1297,15 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     (f"{_P}/config", "PUT"): _CONFIGURE,
     (_P, "DELETE"): "org.remove_project",
     (f"{_P}/init", "POST"): _SETUP,
-    # Scans: project_db_access(...)
+    # Scans: project_access(...) - they read only the portal DB and run
+    # files; POST checks the initialized gate itself (M2f-3 section 0.3 #6)
     (f"{_P}/scans", "POST"): _SCAN,
     (f"{_P}/scans/{{run_id}}/cancel", "POST"): _SCAN,
     (f"{_P}/scans", "GET"): _READ,
+    (f"{_P}/scans/{{run_id}}", "GET"): _READ,
     (f"{_P}/scans/{{run_id}}/events", "GET"): _READ,
     (f"{_P}/scans/{{run_id}}/log", "GET"): _READ,
+    # The describe estimate: project_db_access(...) (the unsafe-path probe)
     (f"{_P}/scan-estimate", "GET"): _READ,
     # The Explorer router: include_router(..., project_db_access(PROJECT_READ))
     (f"{_P}/search", "GET"): _READ,
@@ -2275,7 +2278,8 @@ def test_remove_never_rmtrees_outside_the_repos_dir(
 def test_scan_endpoints_without_runs(ready: TestClient, env: SimpleNamespace) -> None:
     # Scanning itself is covered by tests/test_portal_runner.py.
     initialized_repo(ready, env, "demo")
-    assert ready.get("/api/projects/demo/scans").json() == {"runs": []}
+    assert ready.get("/api/projects/demo/scans").json() == {"runs": [], "next": None}
+    assert ready.get("/api/projects/demo/scans/1").status_code == 404
     assert ready.get("/api/projects/demo/scans/1/events").status_code == 404
 
 

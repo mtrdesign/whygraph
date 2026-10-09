@@ -1004,6 +1004,9 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         check=_new_run_check,
     ),
     ("GET", "/api/projects/{slug}/scans"): Call(200, check=_runs_check),
+    ("GET", "/api/projects/{slug}/scans/{run_id}"): Call(
+        200, shows=lambda o: [f'"id":{o.run_id}']
+    ),
     ("POST", "/api/projects/{slug}/scans/{run_id}/cancel"): Call(
         409, shows=lambda o: [f"run {o.run_id} already ended"]
     ),
@@ -1160,6 +1163,7 @@ def test_another_orgs_run_ids_are_not_found_under_the_same_slug(
         run_id = w.other(org).run_id
         base = f"/api/projects/api/scans/{run_id}"
         for response in (
+            w.client.get(base, headers=org.owner),
             w.client.get(f"{base}/events", headers=org.owner),
             w.client.get(f"{base}/log", headers=org.owner),
             w.client.post(f"{base}/cancel", headers=org.owner),
@@ -1691,6 +1695,75 @@ def _set_local(w: World, *, restricted: bool | None = None, default: str | None 
             db.get(Project, w.local.project_id).restricted = restricted
         if default is not None:
             db.get(Organization, w.local.org_id).default_project_role = default
+
+
+def _end_frame(text: str) -> dict:
+    """The terminal ``end`` frame of a finished run's event stream."""
+    frames = [
+        line[len("data: ") :] for line in text.splitlines() if line.startswith("data: ")
+    ]
+    end = json.loads(frames[-1])
+    assert end["type"] == "end", end
+    return end
+
+
+def test_run_cost_and_the_estimate_price_are_project_admin_only(
+    two_orgs: World,
+) -> None:
+    """R1 and R6 (M2f-3 plan sections 0.3 #39, #46 and 6.2 #3), per role.
+
+    Every reader sees the run, its requester and its outcome; only a
+    ``project.usage`` holder (an owner, an org admin, a project admin) sees
+    what it cost or was expected to cost, and the describe estimate's price.
+    """
+    w = two_orgs
+    usage = {"calls": 3, "cost_usd": 0.42, "cost_source": "provider"}
+    estimate = {"commits": 4, "model": {}, "cost_usd": 0.6, "missing_key": None}
+    with portal_db.get_session() as db:
+        run = db.get(ScanRun, w.local.run_id)
+        summary = {**json.loads(run.summary), "usage": usage, "estimate": estimate}
+        run.summary = json.dumps(summary)
+        db.add(run)
+    alice = {"uid": w.users["alice"]["x-test-user"], "label": "Alice"}
+    base = f"/api/projects/api/scans/{w.local.run_id}"
+    for user, grant, sees_cost in (
+        ("alice", None, True),  # the owner
+        ("dave", None, True),  # an org admin
+        ("carol", "admin", True),  # a project admin
+        ("carol", None, False),  # a contributor (the org default)
+        ("carol", "viewer", False),
+    ):
+        _grant_carol(w, grant)
+        headers = w.as_(user, "local")
+        where = (user, grant)
+        (listed,) = [r for r in runs(w.client, headers) if r["id"] == w.local.run_id]
+        one = _ok(w.client.get(base, headers=headers))
+        assert one == listed, where
+        assert one["requested_by"] == alice, where
+        assert one["status"] == "ok", where
+        stream = w.client.get(f"{base}/events", headers=headers)
+        assert stream.status_code == 200, stream.text
+        end = _end_frame(stream.text)
+        assert (end["status"], end["summary"] is not None) == ("ok", True), where
+        est = _ok(w.client.get("/api/projects/api/scan-estimate", headers=headers))
+        assert {"commits", "upper_bound", "large_commits", "model"} <= set(est)
+        assert "missing_key" in est, where
+        if sees_cost:
+            assert (one["cost_usd"], one["estimate_usd"]) == (0.42, 0.6), where
+            assert one["summary"]["usage"] == usage, where
+            assert one["summary"]["estimate"] == estimate, where
+            assert end["summary"]["usage"] == usage, where
+            assert "cost_hidden" not in est, where
+            assert est["tokens"] is not None, where
+        else:
+            assert "cost_usd" not in one and "estimate_usd" not in one, where
+            assert "usage" not in one["summary"], where
+            assert "estimate" not in one["summary"], where
+            assert "usage" not in end["summary"], where
+            assert "estimate" not in end["summary"], where
+            assert est["cost_hidden"] is True, where
+            assert (est["cost"], est["tokens"]) == (None, None), where
+    _grant_carol(w, None)
 
 
 def _sweep_call(w: World, user: str, method: str, path: str) -> httpx.Response:

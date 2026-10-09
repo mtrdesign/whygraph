@@ -1262,6 +1262,9 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/usage/me/calls", "GET"): "org.read",
     ("/api/usage/me.csv", "GET"): "org.read",
     ("/api/projects/{slug}/usage", "GET"): "project.usage",
+    # A project's Overview (M2f-3 section 4.10): every reader; usage, people
+    # and connections inside it are gated by action
+    ("/api/projects/{slug}/overview", "GET"): "project.read",
     # Deleting a production org: org_access(ORG_OWN) (M2d-2 section 4.8)
     ("/api/org", "DELETE"): "org.own",
     # Org settings, ownership transfer and the audit log (M2f-1 4.8, 4.9)

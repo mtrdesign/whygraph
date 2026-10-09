@@ -942,6 +942,8 @@ def test_the_reader_route_split_is_the_planned_one() -> None:
     } <= set(OTHER_ROUTES)
     assert ("POST", "/api/projects/{slug}/node/rationale") in OTHER_ROUTES
     assert ("GET", "/api/projects/{slug}/node/rationale") in READ_ROUTES
+    # A reader reads a project's Overview (M2f-3 section 4.10) as a viewer.
+    assert ("GET", "/api/projects/{slug}/overview") in READ_ROUTES
     # A reader reads the org's usage and budgets (M2f-2 section 9.2 D2), not
     # a project's usage (a project admin's) and changes no budget or price.
     assert {

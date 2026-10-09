@@ -77,6 +77,7 @@ from whygraph.core.context import ProjectContext, use_project
 from whygraph.core.safe_paths import UnsafePathError
 from whygraph.core.usage import use_usage_sink
 
+from .agent_calls import AgentCallBook
 from .audit import audit
 from .budgets import BudgetBook
 from .authz import (
@@ -517,6 +518,9 @@ class PortalState:
         members or projects change (M2f-2 plan section 4.7). It is the spend
         book's add hook (threshold alerts) and records alerts on the usage
         writer's thread.
+    agent_calls : AgentCallBook
+        The agent-call counters (every MCP and ``/api/v1`` data call), flushed
+        to ``agent_call_days`` by the lifespan (M2f-3 plan section 4.10).
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -578,6 +582,7 @@ class PortalState:
         self.prices = PriceBook()
         self.budgets = BudgetBook(self.spend, defer=self.usage_writer.call)
         self.spend.on_add = self.budgets.on_add
+        self.agent_calls = AgentCallBook()
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0

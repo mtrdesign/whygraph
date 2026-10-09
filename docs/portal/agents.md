@@ -85,6 +85,27 @@ of the two entries.
 **Codex** loads `.codex/config.toml` only for projects you have marked as trusted. Trust the project
 in Codex for the server to load.
 
+## Agent activity
+
+The portal counts how often agents call WhyGraph, per project, so the project's **Overview** can show
+whether an agent is actually connected and what it asks for. What is counted:
+
+- every MCP **tool call**, **resource read** and **prompt** on a project's `/mcp/<slug>` endpoint,
+  under the tool, resource or prompt name (for example `whygraph_evidence_for` or `whygraph_commit`);
+- on a production portal, every **data call** a [connected portal](platform-projects.md) makes for one
+  of its agents (evidence, rationale, area history, a commit, a pull request, an issue, the repository
+  overview).
+
+A call counts even when the answer came from the cache. Protocol chatter (listing tools, resources or
+prompts), the linked-project **status check** a local portal makes, a call refused by a rate limit,
+and the Explorer and Chat views are not agent activity and are not counted.
+
+The counter stores **counts only**: the project, the UTC day, the source (MCP or a connected portal),
+who made the call and through which connection, the call's name, and how many calls. Never a path, a
+symbol name, an argument or anything from the answer. Counts are written to the portal database
+every 30 seconds, so a crash can lose at most the last 30 seconds of counts, and they are kept 400
+days. A call that made an LLM request is also in the [usage ledger](usage.md), with its cost.
+
 ## Removing or changing agents
 
 In the project's **Settings**, the Agents section reconfigures which agents are connected. Removing a

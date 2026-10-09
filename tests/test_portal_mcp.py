@@ -190,7 +190,7 @@ def test_offload_runs_the_body_in_a_worker_thread_with_the_context() -> None:
         ctx = current_project()
         return x + y, threading.current_thread() is threading.main_thread(), ctx
 
-    wrapped = mcp_server.offload(body)
+    wrapped = mcp_server.offload(body, kind="body")
     assert wrapped.__wrapped__ is body
 
     ctx = ProjectContext(slug="t", root=Path("/r"), config=None)  # type: ignore[arg-type]

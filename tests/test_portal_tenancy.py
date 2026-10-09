@@ -781,6 +781,16 @@ def _project_usage_check(body: dict, w: World, o: OrgWorld) -> None:
     assert body["split"]["scans"]["calls"] == 1
 
 
+def _overview_check(body: dict, w: World, o: OrgWorld) -> None:
+    assert set(body) == {"coverage", "events", "last_failure", "usage", "agents"}
+    assert {e["run_id"] for e in body["events"]} <= {o.run_id}
+    assert sum(t["calls"] for t in body["usage"]["by_task"]) == 2
+    # No agent calls and no tokens in either world: no person or machine
+    # (the lists are production's, null locally).
+    assert body["agents"]["people"] in (None, [])
+    assert body["agents"]["connections"] in (None, [])
+
+
 def _my_usage_check(body: dict, w: World, o: OrgWorld) -> None:
     # The owner's own row only: never the System's scan call.
     assert body["totals"]["calls"] == 1
@@ -908,6 +918,8 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     ("GET", "/api/usage/me/calls"): Call(200, shows=lambda o: [f"{o.mark}.py"]),
     ("GET", "/api/usage/me.csv"): Call(200, shows=lambda o: [o.model]),
     ("GET", "/api/projects/{slug}/usage"): Call(200, check=_project_usage_check),
+    # The project Overview (M2f-3 section 4.10): only its own runs and ledger
+    ("GET", "/api/projects/{slug}/overview"): Call(200, check=_overview_check),
     # Production's GitHub App import page (swept over prod_world, whose
     # owners have not connected GitHub; test_portal_github_import.py drives it)
     ("POST", "/api/github/app/authorize"): Call(

@@ -89,7 +89,7 @@ describe("chart colour tables", () => {
       ["dark", ".dark"],
     ] as const) {
       const colors = CHART_COLORS[theme];
-      expect(colors.surface).toBe(resolve(selector, "--muted"));
+      expect(colors.surface).toBe(resolve(selector, "--card"));
       expect(colors.tooltip).toBe(resolve(selector, "--popover"));
       expect(colors.muted).toBe(resolve(selector, "--muted-foreground"));
       expect(colors.fg).toBe(resolve(selector, "--foreground"));

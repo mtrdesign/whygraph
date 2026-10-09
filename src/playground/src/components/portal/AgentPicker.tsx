@@ -39,7 +39,7 @@ export function AgentPicker({
             htmlFor={inputId}
             className={cn(
               "flex cursor-pointer items-start gap-3 rounded-lg border border-border p-3 transition-colors hover:bg-muted/40",
-              checked && "border-primary/60 bg-primary/5",
+              checked && "border-primary/60 bg-primary-soft text-primary-text",
               stripped && "cursor-not-allowed opacity-60",
             )}
           >

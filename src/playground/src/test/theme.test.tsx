@@ -193,10 +193,36 @@ describe("design tokens", () => {
   });
 
   it("uses OKLCH for colours", () => {
-    const literals = [...block(":root").matchAll(/^\s*--[\w-]+:\s*([^;]+);/gm)]
-      .map(([, v]) => v.trim())
-      .filter((v) => !v.startsWith("var(") && !v.endsWith("rem") && v !== "light");
-    expect(literals.every((v) => v.startsWith("oklch("))).toBe(true);
+    // `--card-shadow` is a raw box-shadow, not a colour (its colours are OKLCH inside).
+    for (const selector of [":root", ".dark"]) {
+      const literals = [...block(selector).matchAll(/^\s*(--[\w-]+):\s*([^;]+);/gm)]
+        .filter(([, name]) => name !== "--card-shadow")
+        .map(([, , v]) => v.trim())
+        .filter((v) => !v.startsWith("var(") && !v.endsWith("rem") && v !== "light" && v !== "dark");
+      expect(literals.every((v) => v.startsWith("oklch("))).toBe(true);
+    }
+    expect(block(":root")).toContain("--card-shadow: ");
+    expect(block(".dark")).toContain("--card-shadow: ");
+  });
+
+  it("defines the status, soft, info and track tokens in both themes", () => {
+    for (const selector of [":root", ".dark"]) {
+      const defined = names(block(selector), false);
+      for (const token of [
+        "--primary-soft",
+        "--success-soft",
+        "--warning-soft",
+        "--destructive-soft",
+        "--info",
+        "--info-soft",
+        "--info-foreground",
+        "--track",
+      ]) {
+        expect(defined).toContain(token);
+      }
+    }
+    expect(css).toContain("--shadow-card: var(--card-shadow)");
+    expect(css).toContain("@utility row-wrap");
   });
 
   it("has no legacy alias layer left", () => {

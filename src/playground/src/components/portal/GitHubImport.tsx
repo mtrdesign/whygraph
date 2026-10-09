@@ -234,7 +234,7 @@ export function GitHubImport({ onImported }: { onImported: (result: AddProjectRe
                 onClick={() => setPicked(i.id)}
                 className={cn(
                   "flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-sm",
-                  i.id === current?.id ? "border-primary bg-primary/10" : "border-border hover:bg-muted",
+                  i.id === current?.id ? "border-primary bg-primary-soft text-primary-text" : "border-border hover:bg-muted",
                 )}
               >
                 {i.avatar_url && <img src={i.avatar_url} alt="" className="size-5 rounded-full" />}

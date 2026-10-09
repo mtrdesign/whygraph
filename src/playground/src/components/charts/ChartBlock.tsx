@@ -448,7 +448,7 @@ export function ChartBlock({
   }
 
   return (
-    <div className="my-1.5 overflow-hidden rounded-md border border-border bg-muted">
+    <div className="my-1.5 overflow-hidden rounded-md border border-border bg-card">
       <div className="flex items-center gap-2 px-2.5 py-1.5">
         <div className="min-w-0 flex-1 truncate text-xs text-foreground">{payload.title}</div>
         {!statTile && (
@@ -463,7 +463,7 @@ export function ChartBlock({
                   className={cn(
                     "px-1.5 py-0.5 text-[10px] capitalize transition-colors",
                     view === option
-                      ? "bg-primary/20 text-foreground"
+                      ? "bg-primary-soft text-primary-text"
                       : "text-muted-foreground hover:bg-accent",
                   )}
                 >

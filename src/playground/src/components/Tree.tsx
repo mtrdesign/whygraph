@@ -98,7 +98,7 @@ function TreeRow({
         style={{ paddingLeft: depth * 14 + 8 }}
         className={cn(
           "flex cursor-pointer items-center gap-1.5 py-1 pr-2 text-sm hover:bg-accent",
-          isSelected && "bg-primary/20 text-foreground",
+          isSelected && "bg-primary-soft text-primary-text",
         )}
       >
         {entry.has_children ? (

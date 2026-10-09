@@ -1,22 +1,17 @@
-import { cn } from "@/lib/utils";
 import type { ProjectSummary } from "../../api";
 import { projectStatus, type StatusTone } from "../../lib/projectStatus";
+import { StatusPill, type StatusPillTone } from "../ui/status-pill";
 
-const TONE: Record<StatusTone, string> = {
-  ready: "bg-success",
-  busy: "bg-primary animate-pulse",
-  warn: "bg-warning",
-  error: "bg-destructive",
-  idle: "bg-muted-foreground/50",
+const TONE: Record<StatusTone, StatusPillTone> = {
+  ready: "ok",
+  busy: "busy",
+  warn: "warn",
+  error: "error",
+  idle: "idle",
 };
 
-/** The project's status as a dot and a label (`Ready`, `Stale, 3 commits behind` ...). */
+/** The project's status as a soft pill (`Ready`, `Stale, 3 commits behind` ...). */
 export function ProjectStatusBadge({ project }: { project: ProjectSummary }) {
   const s = projectStatus(project);
-  return (
-    <span className="flex items-center gap-1.5 text-xs" data-status={s.key}>
-      <span className={cn("size-2 rounded-full", TONE[s.tone])} aria-hidden />
-      {s.label}
-    </span>
-  );
+  return <StatusPill tone={TONE[s.tone]} label={s.label} data-status={s.key} />;
 }

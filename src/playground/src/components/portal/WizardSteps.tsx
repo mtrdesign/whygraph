@@ -43,7 +43,7 @@ export function WizardSteps({
           <span
             className={cn(
               "flex size-[22px] shrink-0 items-center justify-center rounded-full text-xs",
-              state === "current" && "bg-primary text-primary-foreground",
+              state === "current" && "bg-primary-soft text-primary-text ring-1 ring-primary/40",
               state === "done" && "bg-primary/15 text-primary-text",
               state === "todo" && "border border-border text-muted-foreground",
             )}

@@ -93,7 +93,7 @@ function run(id: number, over: Json = {}): Json {
     trigger: "manual",
     analyze: true,
     status: "ok",
-    requested_by: 1,
+    requested_by: { uid: "u1", label: "Test User" },
     started_at: "2026-09-30T11:00:00+00:00",
     finished_at: "2026-09-30T11:01:08+00:00",
     summary: { status: "ok", elapsed_sec: 68.2 },

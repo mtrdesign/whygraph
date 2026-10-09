@@ -66,8 +66,8 @@ function ProjectCard({ project }: { project: ProjectSummary }) {
           >
             {project.name}
           </Link>
-          <span className="truncate font-mono text-xs text-muted-foreground" title={project.remote_url ?? project.root}>
-            {project.remote_url ? project.remote_url.replace(/^https?:\/\//, "") : project.root}
+          <span className="truncate font-mono text-xs text-muted-foreground" title={project.remote_url ?? project.root ?? undefined}>
+            {project.remote_url ? project.remote_url.replace(/^https?:\/\//, "") : (project.root ?? "")}
           </span>
         </div>
         {project.restricted && (
@@ -143,7 +143,7 @@ export function ProjectsPage() {
   const list = projects.data?.projects ?? [];
   const needle = filter.trim().toLowerCase();
   const shown = needle
-    ? list.filter((p) => `${p.name} ${p.remote_url ?? ""} ${p.root}`.toLowerCase().includes(needle))
+    ? list.filter((p) => `${p.name} ${p.remote_url ?? ""} ${p.root ?? ""}`.toLowerCase().includes(needle))
     : list;
 
   return (

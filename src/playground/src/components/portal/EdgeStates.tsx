@@ -28,8 +28,8 @@ export function ProjectUnavailable({ project }: { project: ProjectDetails }) {
   const local = project.source === "local";
   const check = useQuery({
     queryKey: projectKey(slug, "root-check", project.root),
-    queryFn: () => portalApi.checkPath(project.root),
-    enabled: local && project.root_status === "missing",
+    queryFn: () => portalApi.checkPath(project.root ?? ""),
+    enabled: local && project.root !== null && project.root_status === "missing",
     retry: false,
   });
   const recheck = () => {

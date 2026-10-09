@@ -96,7 +96,9 @@ export function EstimateBody({
             <p className="mt-1 text-sm text-muted-foreground">
               Model <span className="font-mono text-foreground">{modelName}</span> · about{" "}
               <span data-testid="estimate-tokens">
-                {formatTokens(tokens.input)} input and {formatTokens(tokens.output)} output tokens
+                {tokens
+                  ? `${formatTokens(tokens.input)} input and ${formatTokens(tokens.output)} output tokens`
+                  : "tokens hidden"}
               </span>
               {cost ? (
                 <>

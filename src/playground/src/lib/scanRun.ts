@@ -26,7 +26,7 @@ export interface ScanRunState {
   /** Every phase seen so far, in the order the stream announced them. */
   phases: { phase: number; title: string }[];
   tasks: TaskState[];
-  sync: { status: "fetching" | "ok" | "failed"; moved?: boolean; error?: string } | null;
+  sync: { status: "cloning" | "fetching" | "ok" | "failed"; moved?: boolean; error?: string } | null;
   /** A runner-level failure (`{"type":"error"}`), e.g. the repo root is gone. */
   error: string | null;
   /** The child's `result` event. */

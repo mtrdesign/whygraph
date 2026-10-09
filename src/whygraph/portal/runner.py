@@ -143,6 +143,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
@@ -174,10 +175,13 @@ from .paths import TRACKED_STATE_PATHS, check_project_paths
 from .policy import allowed_sources
 from .repos import root_status
 from .secrets import hint_for
+from .stats import project_counts
 from .usage import SYSTEM_LABEL, actor_label, price_usage
 from .usage_store import COUNTED_COST_SOURCES, UsageRow
 
 if TYPE_CHECKING:  # pragma: no cover
+    from whygraph.core.context import ProjectContext
+
     from .deps import BoundProject, PortalState
     from .security import Principal
 
@@ -254,6 +258,19 @@ hard-stopped budget was exhausted while it ran (M2f-2 plan section 4.7)."""
 ANALYZE_SKIPPED_BUDGET: dict[str, str] = {"analyze_skipped": "budget"}
 """Added to the ``summary`` of a full run downgraded to structure-only at
 dispatch because a covering hard-stopped budget was exhausted (section 9.2 D6)."""
+
+PORTAL_SUMMARY_KEYS: tuple[str, ...] = (
+    "usage",
+    "estimate",
+    "coverage",
+    "scanned",
+    "cloned",
+)
+"""``summary`` keys only the portal writes (M2f-3 plan section 4.1).
+
+:meth:`ScanRunner._execute` drops them from what the child's ``result`` (and
+a sync's own summary) put there, then sets its own after that merge, so a
+hostile repository cannot chart its own coverage or claim an estimate."""
 
 TOKEN_REFRESH_MARGIN_SEC = 10 * 60
 """Seconds before an installation token expires that a child's token file is rewritten."""
@@ -730,6 +747,8 @@ class _Pending:
     analyze: bool
     requested_by: int | None
     scan_requested: bool
+    estimate: dict | None = None
+    """The compact describe estimate the requester saw (full runs only)."""
 
     def merge(
         self,
@@ -739,9 +758,16 @@ class _Pending:
         analyze: bool,
         requested_by: int | None,
         scan_requested: bool,
+        estimate: dict | None = None,
     ) -> None:
         if kind == "sync":
             self.kind = "sync"
+        # One estimate per run, never recomputed (M2f-3 plan section 0.3
+        # #10): a request that turns the run into a full one brings its
+        # estimate; a quick request merged into a full run keeps the full
+        # run's; a full run that had none takes the first one offered.
+        if analyze and (not self.analyze or self.estimate is None):
+            self.estimate = estimate
         self.trigger = merge_trigger(self.trigger, trigger)
         # Attribution follows the spend: the first requester who asked for
         # analysis becomes the requester (M2f-2 plan section 0.2 #7), else
@@ -908,6 +934,8 @@ class _Job:
     cancelled: bool = False
     head: str | None = None
     scanned: bool = False
+    cancelled_by: int | None = None
+    ctx: ProjectContext | None = None
     result: dict | None = None
     usage_total: _UsageTotal = field(default_factory=_UsageTotal)
     stop_reason: str | None = None
@@ -1339,7 +1367,9 @@ class ScanRunner:
                 if self._tg is not None:
                     self._tg.start_soon(self._kill_after_grace, job)
             for pending in dropped:
-                await anyio.to_thread.run_sync(_mark_cancelled, pending.run_id)
+                await anyio.to_thread.run_sync(
+                    _mark_cancelled, pending.run_id, None, pending.estimate
+                )
                 self._live.discard(pending.run_id)
         return jobs
 
@@ -1386,6 +1416,7 @@ class ScanRunner:
         analyze: bool | None,
         principal: Principal | None,
         may_spend: bool,
+        estimate: dict | None = None,
     ) -> int:
         """Queue (or coalesce into) a scan and return its ``scan_runs.id``.
 
@@ -1402,6 +1433,13 @@ class ScanRunner:
         may_spend : bool
             Whether the caller may start an LLM-spending (full) run - the
             ``project.scan_full`` action.
+        estimate : dict or None
+            The compact describe estimate the requester saw, stored in the
+            run's ``summary.estimate`` when the run describes commits
+            (M2f-3 plan section 0.3 #10). Dropped when the request turns
+            out structure-only (the first-scan forcing); a request merged
+            into a run keeps that run's estimate unless it makes the run a
+            full one.
 
         Returns
         -------
@@ -1443,6 +1481,7 @@ class ScanRunner:
             requested_by=user,
             scan_requested=True,
             may_spend=may_spend,
+            estimate=estimate,
         )
 
     async def request_sync(
@@ -1512,6 +1551,7 @@ class ScanRunner:
         requested_by: int | None,
         scan_requested: bool,
         may_spend: bool,
+        estimate: dict | None = None,
     ) -> int:
         if self._tg is None or self._lock is None or self._stopping:
             raise RunnerUnavailable("the scan runner is not running")
@@ -1539,6 +1579,7 @@ class ScanRunner:
                     requested_by=requested_by,
                     scan_requested=scan_requested,
                     may_spend=may_spend,
+                    estimate=estimate,
                 )
 
     async def _request_claimed(
@@ -1552,11 +1593,14 @@ class ScanRunner:
         requested_by: int | None,
         scan_requested: bool,
         may_spend: bool,
+        estimate: dict | None = None,
     ) -> int:
         assert self._lock is not None
         async with self._lock:
             if not await anyio.to_thread.run_sync(_has_ok_scan, project_id):
                 trigger, analyze = "initial", False
+            if not analyze:
+                estimate = None  # only a run that describes carries one
             if analyze and not may_spend:
                 # After the default and the forcing: what would really run.
                 raise ScanForbidden("this run would describe commits with the LLM")
@@ -1568,18 +1612,29 @@ class ScanRunner:
                     raise ScanBudgetExceeded(blocked)
             pending = self._pending.get(project_id)
             if pending is None:
-                run_id = await anyio.to_thread.run_sync(
-                    _insert_run, project_id, kind, trigger, analyze, requested_by
-                )
-                self._pending[project_id] = _Pending(
-                    run_id=run_id,
+                pending = _Pending(
+                    run_id=0,  # set below, once the row exists
                     project_id=project_id,
                     kind=kind,
                     trigger=trigger,
                     analyze=analyze,
                     requested_by=requested_by,
                     scan_requested=scan_requested,
+                    estimate=estimate,
                 )
+                run_id = await anyio.to_thread.run_sync(
+                    partial(
+                        _insert_run,
+                        project_id,
+                        kind,
+                        trigger,
+                        analyze,
+                        requested_by,
+                        summary=_queued_summary(pending),
+                    )
+                )
+                pending.run_id = run_id
+                self._pending[project_id] = pending
                 self._live.add(run_id)
             else:
                 pending.merge(
@@ -1588,6 +1643,7 @@ class ScanRunner:
                     analyze=analyze,
                     requested_by=requested_by,
                     scan_requested=scan_requested,
+                    estimate=estimate,
                 )
                 run_id = pending.run_id
                 await anyio.to_thread.run_sync(_update_queued, pending)
@@ -1595,15 +1651,21 @@ class ScanRunner:
             return run_id
 
     async def cancel(
-        self, project_id: int, run_id: int, *, may_cancel_full: bool
+        self,
+        project_id: int,
+        run_id: int,
+        *,
+        may_cancel_full: bool,
+        by: int | None = None,
     ) -> str:
         """Cancel a queued or running run of a project.
 
         A queued run is dropped from the queue and recorded ``cancelled``.
         A running one gets SIGTERM (SIGKILL after :data:`CANCEL_GRACE_SEC`)
         and is recorded ``cancelled`` when its child exits. Either way the
-        summary is :data:`CANCELLED_BY_USER`, and the next request for the
-        project queues a fresh run.
+        summary is :data:`CANCELLED_BY_USER` (plus the run's ``estimate``,
+        when it has one), ``scan_runs.cancelled_by`` is ``by``, and the next
+        request for the project queues a fresh run.
 
         Parameters
         ----------
@@ -1614,6 +1676,9 @@ class ScanRunner:
         may_cancel_full : bool
             Whether the caller may cancel an LLM-spending (full) run - the
             ``project.scan_full`` action that would start one.
+        by : int or None
+            The cancelling user's ``users.id``, recorded in
+            ``scan_runs.cancelled_by``; ``None`` records no canceller.
 
         Returns
         -------
@@ -1645,13 +1710,17 @@ class ScanRunner:
                 del self._pending[project_id]
                 # The row first: a stream that sees the run leave `_live`
                 # reads its final status next, which must not be "queued".
-                await anyio.to_thread.run_sync(_mark_cancelled, run_id)
+                await anyio.to_thread.run_sync(
+                    _mark_cancelled, run_id, by, pending.estimate
+                )
                 self._live.discard(run_id)
                 return "queued"
             job = self._running.get(project_id)
             if job is not None and job.spec.run_id == run_id:
                 if job.spec.analyze and not may_cancel_full:
                     raise ScanForbidden("this run describes commits with the LLM")
+                with job.lock:
+                    job.cancelled_by = by
                 job.cancel()
                 self._tg.start_soon(self._kill_after_grace, job)
                 return "running"
@@ -1862,10 +1931,19 @@ class ScanRunner:
             status, summary = "cancelled", {**summary, **by}
         elif job.interrupted and status != "cancelled":
             status = "interrupted"
-        # After the child's `result` merge, so a child cannot supply its own.
-        summary = {**summary, "usage": job.usage_total.summary()}
+        # After the child's `result` merge (and a sync's own summary), so a
+        # child cannot supply any of these: drop what it sent, then set ours.
+        summary = {k: v for k, v in summary.items() if k not in PORTAL_SUMMARY_KEYS}
+        summary["usage"] = job.usage_total.summary()
+        if job.spec.estimate is not None:
+            summary["estimate"] = job.spec.estimate
+        if job.spec.kind == "sync" and job.scanned:
+            summary["scanned"] = True
+        finished_at = _now()
+        if job.scanned and (coverage := self._coverage(job)) is not None:
+            summary["coverage"] = {**coverage, "at": finished_at}
         try:
-            _finish_run(job, status, summary)
+            _finish_run(job, status, summary, finished_at)
         except Exception:  # noqa: BLE001 -- e.g. the database is gone
             # The row stays "running"; the next start marks it interrupted.
             _log.exception(
@@ -1873,6 +1951,23 @@ class ScanRunner:
             )
         finally:
             job.done.set()
+
+    def _coverage(self, job: _Job) -> dict | None:
+        """The project's coverage counts after a run that scanned, or ``None``.
+
+        Best effort: a failure is logged and the snapshot omitted. A linked
+        project has no local DB, so it gets none (:func:`project_counts`).
+        """
+        state, ctx = self._state, job.ctx
+        if state is None or ctx is None:
+            return None
+        try:
+            return project_counts(state, ctx, migrate=False)
+        except Exception:  # noqa: BLE001 -- a snapshot must never fail a run
+            _log.exception(
+                "scan runner: no coverage snapshot for run %s", job.spec.run_id
+            )
+            return None
 
     def _execute_inner(
         self, job: _Job
@@ -1959,6 +2054,7 @@ class ScanRunner:
             session.add(run)
             events_rel, log_rel = run.events_path, run.log_path
         ctx = state.contexts.get(spec.project_id)
+        job.ctx = ctx
         config = ctx.config
         usage_spec = _usage_spec(spec.project_id, who, ctx.key_scopes, config)
         base = data_dir()
@@ -2749,8 +2845,15 @@ def _has_ok_scan(project_id: int) -> bool:
 
 
 def _insert_run(
-    project_id: int, kind: str, trigger: str, analyze: bool, requested_by: int | None
+    project_id: int,
+    kind: str,
+    trigger: str,
+    analyze: bool,
+    requested_by: int | None,
+    *,
+    summary: str | None = None,
 ) -> int:
+    """Insert a ``queued`` run (with its queue time and queued summary); its id."""
     with get_session() as session:
         run = ScanRun(
             project_id=project_id,
@@ -2759,6 +2862,8 @@ def _insert_run(
             analyze=analyze,
             requested_by=requested_by,
             status="queued",
+            queued_at=_now(),
+            summary=summary,
         )
         session.add(run)
         session.flush()
@@ -2770,27 +2875,44 @@ def _insert_run(
 
 
 def _queued_summary(pending: _Pending) -> str | None:
-    """The ``summary`` a queued row carries: whether a sync must also scan.
+    """The ``summary`` a queued row carries: a sync's scan flag and the estimate.
 
     A scan merged into a pending ``sync`` is not visible from ``kind`` /
     ``trigger`` (a never-scanned project's trigger is ``initial``), so it is
-    persisted for :func:`_recover_queued`. ``_finish_run`` overwrites it.
+    persisted for :func:`_recover_queued`, as is the describe estimate of a
+    full run. ``_finish_run`` overwrites it (keeping the estimate).
     """
+    out: dict[str, Any] = {}
     if pending.kind == "sync" and pending.scan_requested:
-        return json.dumps({"scan_requested": True})
-    return None
+        out["scan_requested"] = True
+    if pending.estimate is not None:
+        out["estimate"] = pending.estimate
+    return json.dumps(out) if out else None
+
+
+def _queued_json(run: ScanRun) -> dict | None:
+    """A queued row's ``summary`` as a dict, or ``None``."""
+    try:
+        summary = json.loads(run.summary) if run.summary else None
+    except ValueError:
+        return None
+    return summary if isinstance(summary, dict) else None
 
 
 def _queued_scan_requested(run: ScanRun) -> bool:
     """Whether a queued row asked for a scan: the persisted flag, else inferred."""
-    try:
-        summary = json.loads(run.summary) if run.summary else None
-    except ValueError:
-        summary = None
-    if isinstance(summary, dict) and "scan_requested" in summary:
+    summary = _queued_json(run)
+    if summary is not None and "scan_requested" in summary:
         return bool(summary["scan_requested"])
     # Rows queued before the flag was persisted.
     return run.kind == "scan" or run.trigger in ("manual", "describe", "hook")
+
+
+def _queued_estimate(run: ScanRun) -> dict | None:
+    """A queued full run's persisted describe estimate, or ``None``."""
+    summary = _queued_json(run)
+    estimate = None if summary is None else summary.get("estimate")
+    return estimate if run.analyze and isinstance(estimate, dict) else None
 
 
 def _update_queued(pending: _Pending) -> None:
@@ -2806,8 +2928,11 @@ def _update_queued(pending: _Pending) -> None:
         session.add(run)
 
 
-def _finish_run(job: _Job, status: str, summary: dict[str, Any]) -> None:
-    now = _now()
+def _finish_run(
+    job: _Job, status: str, summary: dict[str, Any], now: str | None = None
+) -> None:
+    """Record a job's outcome; ``cancelled_by`` only for a user's cancel."""
+    now = now or _now()
     with get_session() as session:
         run = session.get(ScanRun, job.spec.run_id)
         if run is None:
@@ -2815,6 +2940,8 @@ def _finish_run(job: _Job, status: str, summary: dict[str, Any]) -> None:
         run.status = status
         run.finished_at = now
         run.summary = json.dumps(summary, default=str) if summary else None
+        if status == "cancelled" and job.stop_reason != "budget":
+            run.cancelled_by = job.cancelled_by
         session.add(run)
         if status == "ok" and job.scanned:
             project = session.get(Project, job.spec.project_id)
@@ -2825,14 +2952,20 @@ def _finish_run(job: _Job, status: str, summary: dict[str, Any]) -> None:
                 session.add(project)
 
 
-def _mark_cancelled(run_id: int) -> None:
-    """Record a still-queued run as cancelled by the user."""
+def _mark_cancelled(
+    run_id: int, by: int | None = None, estimate: dict | None = None
+) -> None:
+    """Record a still-queued run as cancelled by the user ``by``, keeping its estimate."""
     with get_session() as session:
         run = session.get(ScanRun, run_id)
         if run is not None and run.status == "queued":
             run.status = "cancelled"
             run.finished_at = _now()
-            run.summary = json.dumps(CANCELLED_BY_USER)
+            summary: dict[str, Any] = dict(CANCELLED_BY_USER)
+            if estimate is not None:
+                summary["estimate"] = estimate
+            run.summary = json.dumps(summary)
+            run.cancelled_by = by
             session.add(run)
 
 
@@ -2882,6 +3015,7 @@ def _recover_queued() -> list[_Pending]:
                         analyze=run.analyze,
                         requested_by=run.requested_by,
                         scan_requested=_queued_scan_requested(run),
+                        estimate=_queued_estimate(run),
                     )
                     run.summary = json.dumps({"merged_into": existing.run_id})
                 session.add(run)
@@ -2894,6 +3028,7 @@ def _recover_queued() -> list[_Pending]:
                 analyze=run.analyze,
                 requested_by=run.requested_by,
                 scan_requested=_queued_scan_requested(run),
+                estimate=_queued_estimate(run),
             )
             kept[run.project_id] = run
         # Fold merged rows into the kept one, in this same session (a second

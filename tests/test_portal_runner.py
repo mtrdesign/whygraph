@@ -1841,7 +1841,14 @@ def _request(client: TestClient, slug: str, **kwargs: Any) -> int:
     )
 
 
-def _cancel(client: TestClient, slug: str, run_id: int, *, may_cancel_full: bool):  # noqa: ANN202
+def _cancel(  # noqa: ANN202
+    client: TestClient,
+    slug: str,
+    run_id: int,
+    *,
+    may_cancel_full: bool,
+    by: int | None = None,
+):
     runner = client.app.state.portal.runner
     return client.portal.call(
         partial(
@@ -1849,6 +1856,7 @@ def _cancel(client: TestClient, slug: str, run_id: int, *, may_cancel_full: bool
             _project_ref(slug).id,
             run_id,
             may_cancel_full=may_cancel_full,
+            by=by,
         )
     )
 
@@ -2308,3 +2316,311 @@ def test_a_recovered_merged_run_is_attributed_to_the_full_requester(
         "member",
     )
     assert run["summary"]["usage"]["calls"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Run state: queue time, canceller, the estimate and coverage snapshots
+# (M2f-3 plan sections 0.3 #10-#13, 4.10, 4.11)
+# ---------------------------------------------------------------------------
+
+EST = {
+    "commits": 3,
+    "model": {"provider": "anthropic", "model": "claude-test"},
+    "cost_usd": 0.5,
+    "cost_low_usd": 0.25,
+    "cost_high_usd": 0.75,
+    "prices_as_of": "2026-10-01",
+    "missing_key": False,
+}
+OTHER_EST = {**EST, "commits": 9, "cost_usd": 1.5}
+
+
+def _row(run_id: int) -> ScanRun:
+    with portal_db.get_session() as session:
+        run = session.get(ScanRun, run_id)
+        assert run is not None
+        session.expunge(run)
+        return run
+
+
+def _queued(run_id: int) -> dict | None:
+    summary = _row(run_id).summary
+    return json.loads(summary) if summary else None
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [
+        ((False, None), (True, EST), EST),  # a full request makes it full: takes it
+        ((True, EST), (False, OTHER_EST), EST),  # a quick one merged in: kept
+        ((True, EST), (True, OTHER_EST), EST),  # never recomputed
+        ((True, None), (True, EST), EST),  # a full run without one takes one
+        ((False, None), (False, EST), None),  # quick + quick: none
+    ],
+)
+def test_merge_keeps_or_takes_the_estimate(
+    first: tuple[bool, dict | None],
+    second: tuple[bool, dict | None],
+    expected: dict | None,
+) -> None:
+    pending = _pending(None, first[0])
+    pending.estimate = first[1]
+    pending.merge(
+        kind="scan",
+        trigger="manual",
+        analyze=second[0],
+        requested_by=None,
+        scan_requested=True,
+        estimate=second[1],
+    )
+    assert pending.estimate == expected
+
+
+def test_a_full_run_stores_its_estimate_at_enqueue_and_keeps_it(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    local_project(portal, env, "demo")
+    # The first-scan forcing turns the request structure-only: no estimate.
+    forced = _request(
+        portal, "demo", trigger=None, analyze=None, may_spend=True, estimate=EST
+    )
+    run = wait_run(portal, "demo", forced)
+    assert (run["trigger"], run["analyze"]) == ("initial", False)
+    assert "estimate" not in run["summary"]
+    assert _row(forced).queued_at is not None
+
+    # Body-less (a manual run is full), explicit and describe: all keep it.
+    for trigger, analyze in ((None, None), ("manual", True), ("describe", None)):
+        run_id = _request(
+            portal,
+            "demo",
+            trigger=trigger,
+            analyze=analyze,
+            may_spend=True,
+            estimate=EST,
+        )
+        run = wait_run(portal, "demo", run_id)
+        assert run["status"] == "ok" and run["analyze"] is True
+        assert run["summary"]["estimate"] == EST
+    # A quick request carries none.
+    quick = _request(
+        portal, "demo", trigger="manual", analyze=False, may_spend=True, estimate=EST
+    )
+    assert "estimate" not in wait_run(portal, "demo", quick)["summary"]
+
+    # Queued behind a held run: stored on the queued row, merged as section 0.3 #10.
+    running = _queue_behind_a_held_scan(portal, scanner, "demo")
+    quick = _request(portal, "demo", trigger="manual", analyze=False, may_spend=True)
+    assert _queued(quick) is None
+    full = _request(
+        portal, "demo", trigger="manual", analyze=True, may_spend=True, estimate=EST
+    )
+    assert full == quick and _queued(full) == {
+        "estimate": EST
+    }  # taken when it turns full
+    again = _request(
+        portal,
+        "demo",
+        trigger="describe",
+        analyze=None,
+        may_spend=True,
+        estimate=OTHER_EST,
+    )
+    later_quick = _request(
+        portal, "demo", trigger="hook", analyze=None, may_spend=False
+    )
+    assert again == later_quick == full
+    assert _queued(full) == {"estimate": EST}  # never recomputed
+    queued_row = _row(full)
+    assert queued_row.queued_at is not None and queued_row.started_at is None
+    scanner.hold.unlink()
+    assert wait_run(portal, "demo", running)["status"] == "ok"
+    done = wait_run(portal, "demo", full)
+    assert done["status"] == "ok" and done["summary"]["estimate"] == EST
+
+    # A failed full run keeps it too.
+    scanner.configure(exit=1)
+    failed = _request(
+        portal, "demo", trigger="describe", analyze=None, may_spend=True, estimate=EST
+    )
+    run = wait_run(portal, "demo", failed)
+    assert run["status"] == "failed" and run["summary"]["estimate"] == EST
+
+
+def test_cancel_records_the_canceller_and_keeps_the_estimate(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    local_project(portal, env, "demo")
+    first_scan(portal, "demo")
+    tess = _ids().tess
+    scanner.hold.touch()
+    running = _request(
+        portal, "demo", trigger="manual", analyze=None, may_spend=True, estimate=EST
+    )
+    wait_for(lambda: len(scanner.calls()) == 2)
+    queued = _request(portal, "demo", trigger="hook", analyze=None, may_spend=False)
+    full = _request(
+        portal,
+        "demo",
+        trigger="describe",
+        analyze=None,
+        may_spend=True,
+        estimate=OTHER_EST,
+    )
+    assert full == queued
+
+    # Cancelled while queued: the summary keeps the estimate, the column the user.
+    assert _cancel(portal, "demo", queued, may_cancel_full=True, by=tess) == "queued"
+    row = _row(queued)
+    assert row.status == "cancelled" and row.cancelled_by == tess
+    assert json.loads(row.summary) == {"cancelled_by": "user", "estimate": OTHER_EST}
+
+    # Cancelled while running: the same, written when the child exits.
+    assert _cancel(portal, "demo", running, may_cancel_full=True, by=tess) == "running"
+    scanner.hold.unlink()
+    run = wait_run(portal, "demo", running)
+    assert run["status"] == "cancelled"
+    assert run["summary"]["cancelled_by"] == "user"
+    assert run["summary"]["estimate"] == EST
+    assert _row(running).cancelled_by == tess
+
+    # Without a canceller (the route, until it passes one) the column stays NULL.
+    scanner.hold.touch()
+    held = _request(portal, "demo", trigger="hook", analyze=None, may_spend=False)
+    wait_for(lambda: len(scanner.calls()) == 3)
+    assert cancel(portal, "demo", held).status_code == 202
+    scanner.hold.unlink()
+    assert wait_run(portal, "demo", held)["status"] == "cancelled"
+    assert _row(held).cancelled_by is None
+
+
+def test_a_budget_stop_records_no_canceller(env: SimpleNamespace) -> None:
+    with client_for() as client:
+        client.post("/api/portal/setup", json={"display_name": "Tess"})
+        project_id = legacy_github_project(env, "demo")
+    tess = _ids().tess
+    for stop_reason, expected in (("budget", None), (None, tess)):
+        run_id = _insert_run(project_id, "scan", "manual", True, tess)
+        job = runner_mod._Job(spec=_pending(tess, True))
+        job.spec.run_id = run_id
+        job.cancelled, job.cancelled_by, job.stop_reason = True, tess, stop_reason
+        runner_mod._finish_run(
+            job, "cancelled", {"cancelled_by": "x"}, "2026-10-09T00:00:00+00:00"
+        )
+        row = _row(run_id)
+        assert (row.status, row.cancelled_by) == ("cancelled", expected)
+        assert row.finished_at == "2026-10-09T00:00:00+00:00"
+
+
+def test_recover_queued_restores_the_estimate(
+    env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    with client_for() as client:
+        client.post("/api/portal/setup", json={"display_name": "Tess"})
+        local_project(client, env, "demo")
+        local_project(client, env, "other")
+        first_scan(client, "demo")
+        first_scan(client, "other")
+    ids, other = _ids(), _ids("other")
+    # One queued full run with its estimate.
+    full = _insert_run(
+        ids.project_id,
+        "scan",
+        "describe",
+        True,
+        ids.tess,
+        summary=json.dumps({"estimate": EST}),
+    )
+    # A quick run with a full one folded into it at recovery: it takes the estimate.
+    quick = _insert_run(other.project_id, "scan", "hook", False, None)
+    folded = _insert_run(
+        other.project_id,
+        "scan",
+        "manual",
+        True,
+        ids.tess,
+        summary=json.dumps({"estimate": OTHER_EST}),
+    )
+    specs = {spec.run_id: spec for spec in _recover_queued()}
+    assert specs[full].estimate == EST
+    assert specs[quick].estimate == OTHER_EST and specs[quick].analyze is True
+    assert _queued(full) == {"estimate": EST}
+    assert _queued(quick) == {"estimate": OTHER_EST}
+    assert _row(folded).status == "cancelled"
+    assert _row(full).queued_at is not None
+    # A quick row cannot carry one, whatever its summary says.
+    quick_row = ScanRun(
+        project_id=ids.project_id,
+        trigger="hook",
+        analyze=False,
+        summary=json.dumps({"estimate": EST}),
+    )
+    assert runner_mod._queued_estimate(quick_row) is None
+
+
+def test_portal_summary_keys_cannot_come_from_the_child(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    local_project(portal, env, "demo")
+    first = first_scan(portal, "demo")
+    # The first scan's coverage snapshot: the project's live counts at its end.
+    assert first["summary"]["coverage"] == {
+        **portal.get("/api/projects/demo").json()["stats"],
+        "at": first["finished_at"],
+    }
+    forged = {
+        "coverage": {"commits": 999},
+        "estimate": {"cost_usd": 0},
+        "cloned": True,
+        "scanned": True,
+        "usage": {"calls": 999},
+    }
+    scanner.configure(result_extra=json.dumps(forged))
+    run = wait_run(portal, "demo", scan(portal, "demo", trigger="hook"))
+    summary = run["summary"]
+    assert summary["status"] == "ok"  # the rest of the child's result is kept
+    assert (
+        summary["coverage"]["commits"] == 0
+        and summary["coverage"]["at"] == run["finished_at"]
+    )
+    assert summary["usage"]["calls"] == 0
+    for key in ("estimate", "cloned", "scanned"):
+        assert key not in summary
+
+
+def test_execute_sets_portal_keys_after_the_sync_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sync's own summary is merged before the child's: it cannot set them either."""
+    spec = runner_mod._Pending(
+        run_id=7,
+        project_id=1,
+        kind="sync",
+        trigger="manual",
+        analyze=True,
+        requested_by=None,
+        scan_requested=True,
+        estimate=EST,
+    )
+    runner = ScanRunner()
+    recorded: list[tuple[str, dict]] = []
+
+    def inner(job: Any) -> tuple[str, dict, Any]:
+        job.scanned = True
+        forged = {"moved": True, "estimate": OTHER_EST, "coverage": {}, "cloned": True}
+        return "ok", {**forged, "scanned": False}, runner_mod.redactor([])
+
+    monkeypatch.setattr(runner, "_execute_inner", inner)
+    monkeypatch.setattr(
+        runner_mod,
+        "_finish_run",
+        lambda job, status, summary, now=None: recorded.append((status, summary)),
+    )
+    runner._execute(runner_mod._Job(spec=spec))
+    ((status, summary),) = recorded
+    assert status == "ok"
+    assert summary["moved"] is True and summary["scanned"] is True
+    assert summary["estimate"] == EST
+    assert (
+        "coverage" not in summary and "cloned" not in summary
+    )  # no state: no snapshot

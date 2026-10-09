@@ -45,7 +45,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Body, Depends, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, col, func, select
+from sqlmodel import Session, col, select
 
 from whygraph.agents import AGENTS as AGENT_TARGETS
 from whygraph.agents import (
@@ -57,9 +57,7 @@ from whygraph.agents import (
 from whygraph.core.config import Config, ConfigError, normalize_v2
 from whygraph.core.context import ProjectContext, use_project
 from whygraph.core.safe_paths import UnsafePathError, check_inside
-from whygraph.db import get_session as project_session
 from whygraph.db.engine import dispose_engine
-from whygraph.db.models import RationaleCache
 from whygraph.hooks import (
     LEGACY_HELPER_RELPATH,
     HooksError,
@@ -67,8 +65,6 @@ from whygraph.hooks import (
     resolve_hook_names,
     sync_hooks,
 )
-from whygraph.mcp.errors import WhyGraphError
-from whygraph.mcp.resources import _repo_overview_resource
 from whygraph.project_setup import (
     PORTAL_ENV,
     PORTAL_JSON,
@@ -203,6 +199,7 @@ from .secrets import (
     secret_status,
 )
 from .security import Principal
+from .stats import project_counts
 from .usage_routes import llm_block, project_usage, state_usage
 
 public_router = APIRouter(prefix="/api/portal")
@@ -618,34 +615,11 @@ def _project_stats(state: PortalState, project: BoundProject) -> dict | None:
     Also ``None`` when a DB path is a symlink (nothing is opened); the data
     routes answer ``409 unsafe_path`` for such a project. A linked
     (``platform``) project has no local DB: ``None``, the file untouched.
+    The counts are :func:`whygraph.portal.stats.project_counts`.
     """
-    if project.source == "platform":
+    if project.source == "platform" or project.initialized_at is None:
         return None
-    try:
-        check_project_paths(project.root)
-    except UnsafePathError:
-        return None
-    if project.initialized_at is None or not project.db_path.is_file():
-        return None
-    try:
-        state.migrations.ensure(project.ctx)
-    except UnsafePathError:
-        return None
-    try:
-        overview = _repo_overview_resource()
-        with project_session() as session:
-            cards = session.exec(select(func.count()).select_from(RationaleCache)).one()
-    except WhyGraphError:
-        return None
-    coverage = overview["llm_description_coverage"]
-    return {
-        "commits": overview["counts"]["commits"],
-        "described": coverage["described"],
-        "described_pct": round(coverage["fraction"] * 100, 1),
-        "pull_requests": overview["counts"]["pull_requests"],
-        "issues": overview["counts"]["issues"],
-        "rationale_cards": cards,
-    }
+    return project_counts(state, project.ctx)
 
 
 def _active_run(session: Session, project_id: int) -> dict | None:

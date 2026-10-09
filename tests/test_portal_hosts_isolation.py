@@ -1140,8 +1140,9 @@ def test_memberships_cannot_store_the_reader_role(prod_world: ProdWorld) -> None
         with portal_db.get_engine().begin() as conn:
             conn.execute(
                 text(
-                    "INSERT INTO memberships (org_id, user_id, role, created_at) "
-                    "VALUES (:org, :user, 'reader', '2026-10-03T00:00:00+00:00')"
+                    "INSERT INTO memberships (org_id, user_id, role, created_at, "
+                    "welcome_pending) VALUES (:org, :user, 'reader', "
+                    "'2026-10-03T00:00:00+00:00', false)"
                 ),
                 {"org": w.narwhal.org_id, "user": w.ids["ada"]},
             )

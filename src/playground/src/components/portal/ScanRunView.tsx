@@ -13,7 +13,7 @@ import { ApiError, portalApi, projectApi, projectKey, type ScanRunRow, type Scan
 import { can } from "../../lib/permissions";
 import { projectProblem } from "../../lib/errors";
 import { useScanActions } from "../../lib/scanActions";
-import { BUDGET_SKIPPED, BUDGET_STOPPED, formatSeconds, runSeconds, triggerLabel, usageLine } from "../../lib/scanFormat";
+import { BUDGET_SKIPPED, BUDGET_STOPPED, CODE_INDEX_REFRESHED, formatSeconds, runSeconds, triggerLabel, usageLine } from "../../lib/scanFormat";
 import {
   codegraphRow,
   crawlerLabel,
@@ -239,6 +239,8 @@ function Outcome({ slug, state, row }: { slug: string; state: ScanRunState; row:
         <AlertDescription>
           {summary?.analyze_skipped === "budget" ? (
             <p>{BUDGET_SKIPPED}</p>
+          ) : summary?.analyze_skipped === "--codegraph-only" ? (
+            <p>{CODE_INDEX_REFRESHED}. The history is on the platform.</p>
           ) : summary?.analyze_skipped && summary.analyze_skipped !== "--skip-analyze" ? (
             <p>Commit descriptions were skipped: {summary.analyze_skipped}</p>
           ) : summary?.analyze_skipped || (row && !row.analyze) ? (
@@ -337,6 +339,11 @@ export function ScanRunView({ slug, runId }: { slug: string; runId: number }) {
   const mayCancel =
     can(project.data, "project.scan_full") || (can(project.data, "project.scan") && row?.analyze === false);
   const now = useNow(1000, status === "running");
+  // The follow-up notice holds only while this run is active and the follow-up is
+  // still waiting behind it (BUG-4); a row not listed yet counts as queued.
+  const followUpRow = followUp === null ? null : (runs.data?.runs.find((r) => r.id === followUp) ?? null);
+  const showFollowUp =
+    active && followUp !== null && followUp !== runId && (followUpRow === null || followUpRow.status === "queued");
 
   // The list row is stale the moment the stream ends: refresh it (and the project
   // card's badge) once.
@@ -413,7 +420,7 @@ export function ScanRunView({ slug, runId }: { slug: string; runId: number }) {
         </div>
       </div>
 
-      {followUp !== null && followUp !== runId && (
+      {showFollowUp && (
         <Alert data-testid="followup">
           <AlertTitle>Another scan is queued</AlertTitle>
           <AlertDescription>

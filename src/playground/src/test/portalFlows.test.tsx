@@ -198,7 +198,7 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     if (!rest) return reply(details(slug, proj));
     if (rest === "/config" && method === "GET") {
       return reply({
-        ...fake.config[slug],
+        ...(fake.config[slug] ?? { config: {}, secrets: emptySecrets() }),
         import: fake.importReport ?? {
           found: false,
           error: null,
@@ -459,14 +459,14 @@ describe("resuming the wizard", () => {
   it("an added-but-uninitialized project resumes at Initialize", async () => {
     fake.projects = [summary("alpha", { initialized: false, initialized_at: null, last_scan_at: null })];
     const { router } = mount("/p/alpha/init");
-    await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=initialize"));
+    await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=setup"));
     expect(await screen.findByRole("heading", { name: /Initialize/ })).toBeInTheDocument();
   });
 
   it("an initialized project resumes at the first scan", async () => {
     fake.projects = [summary("alpha", { last_scan_at: null })];
     const { router } = mount("/p/alpha/init");
-    await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=scan"));
+    await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=configure"));
     expect(await screen.findByRole("button", { name: "Start first scan" })).toBeInTheDocument();
   });
 });
@@ -543,7 +543,7 @@ describe("Configure (screen 5)", () => {
     await user.type(screen.getByLabelText("anthropic", { selector: "input" }), "sk-ant-1234");
     await user.click(screen.getByRole("button", { name: "Save and continue" }));
 
-    await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=initialize"));
+    await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=setup"));
     const put = fake.log.find((c) => c.method === "PUT" && c.path === "/api/projects/alpha/config")!;
     expect(put.body).toEqual({
       config: {
@@ -562,7 +562,7 @@ describe("Configure (screen 5)", () => {
     const { router } = mount("/p/alpha/init?step=configure");
     await screen.findByTestId("config-form");
     await user.click(screen.getByRole("button", { name: "Save and continue" }));
-    await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=initialize"));
+    await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=setup"));
     expect(fake.log.some((c) => c.method === "PUT")).toBe(false);
   });
 
@@ -659,7 +659,7 @@ describe("Initialize (screen 6)", () => {
     const { router } = mount("/p/alpha/init?step=initialize");
     await user.click(await screen.findByRole("button", { name: "Initialize" }));
     await user.click(await screen.findByRole("button", { name: "Continue to first scan" }));
-    await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=scan"));
+    await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=configure"));
   });
 });
 

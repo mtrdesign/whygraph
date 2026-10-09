@@ -424,6 +424,27 @@ describe("Scan run (screen 7)", () => {
     ]);
   });
 
+  it("drops the follow-up notice once the follow-up is no longer queued (BUG-4)", async () => {
+    let followUp = "queued";
+    handlers["POST /api/projects/alpha/scans"] = () => ({ status: 202, body: { run_id: 7 } });
+    handlers["GET /api/projects/alpha/scans"] = () => ({
+      runs: [
+        run(7, { status: followUp, started_at: null, finished_at: null, summary: null }),
+        run(6, { status: "running", finished_at: null, summary: null }),
+      ],
+    });
+    const user = userEvent.setup();
+    mount("/p/alpha/scans/6");
+    await screen.findByTestId("phase-3");
+    await quickRescan(user);
+    expect(await screen.findByTestId("followup")).toHaveTextContent("run #7");
+
+    // The follow-up started (here: run 6 handed over); asking again refreshes the list.
+    followUp = "running";
+    await quickRescan(user);
+    await waitFor(() => expect(screen.queryByTestId("followup")).toBeNull());
+  });
+
   it("Scan again after a finished run opens the new run", async () => {
     handlers["GET /api/projects/alpha/scans"] = () => ({ runs: [run(6)] });
     handlers["GET /api/projects/alpha/scans/6/events"] = () => sse([endFrame(1, "ok", { elapsed_sec: 1 })]);

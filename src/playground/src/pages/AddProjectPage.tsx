@@ -36,7 +36,7 @@ export function AddProjectPage() {
     void queryClient.invalidateQueries({ queryKey: portalKey("github") });
     toast.success(`${production ? "Imported" : platform ? "Linked" : "Added"} ${name}`);
     // A linked project's config belongs to the platform: Configure is skipped.
-    void navigate({ to: "/p/$slug/init", params: { slug }, search: { step: platform ? "initialize" : "configure" } });
+    void navigate({ to: "/p/$slug/init", params: { slug }, search: { step: platform ? "setup" : "configure" } });
   };
 
   return (

@@ -15,7 +15,7 @@ import { LinkNotice } from "../components/portal/LinkNotice";
 import { PlatformButtons } from "../components/portal/LinkedActions";
 import { UseWithAgent } from "../components/portal/UseWithAgent";
 import { ConnectAgent } from "../components/portal/ConnectAgent";
-import { NotInitialized, ProblemAlert, ProjectUnavailable } from "../components/portal/EdgeStates";
+import { ImportingNotice, NotInitialized, ProblemAlert, ProjectUnavailable } from "../components/portal/EdgeStates";
 import { ProjectPortChangeNotice } from "../components/portal/PortChangeNotice";
 import { ProjectStatusBadge } from "../components/portal/ProjectStatusBadge";
 import { RunStatusBadge } from "../components/portal/RunStatusBadge";
@@ -151,9 +151,10 @@ export function ProjectHome() {
           <PlatformButtons project={p} />
         </section>
       )}
-      {p.root_status !== "ok" && <ProjectUnavailable project={p} />}
+      {/* An import has no folder until its clone lands: not a missing folder. */}
+      {p.importing ? <ImportingNotice project={p} /> : p.root_status !== "ok" && <ProjectUnavailable project={p} />}
       <ProjectPortChangeNotice slug={slug} change={p.port_change} />
-      {p.root_status === "ok" && !p.initialized && <NotInitialized slug={slug} />}
+      {p.root_status === "ok" && !p.initialized && !p.importing && <NotInitialized slug={slug} />}
       {problem?.kind === "unsafe_path" && <ProblemAlert problem={problem} />}
 
       {ready && stale && (can(p, "project.scan") || can(p, "project.scan_full")) && (

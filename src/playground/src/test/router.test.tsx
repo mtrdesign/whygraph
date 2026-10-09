@@ -10,6 +10,12 @@ import { useExplorerSearch, useActiveSessionId } from "../lib/nav";
 import { useProjectQuery, useSlug } from "../lib/project";
 import { LAST_PROJECT_KEY } from "../lib/lastProject";
 import { createAppRouter, parseSearch, stringifySearch } from "../router";
+import {
+  validateBaseSearch,
+  validateInitSearch,
+  validateProjectsSearch,
+  validateScansSearch,
+} from "../lib/routeSearch";
 import { useUi } from "../store";
 import { ThemeProvider } from "../theme";
 
@@ -49,6 +55,10 @@ vi.mock("../components/chat/ChatView", () => ({
 interface Fake {
   setupComplete: boolean;
   slugs: string[];
+  /** Serve a production org host (`acme`) instead of the local portal. */
+  production?: boolean;
+  /** Per-slug overrides of the project details (an importing project, ...). */
+  over?: Record<string, Record<string, unknown>>;
 }
 
 let fake: Fake;
@@ -62,6 +72,13 @@ function json(body: unknown, status = 200) {
 }
 
 function details(slug: string) {
+  return {
+    ...baseDetails(slug),
+    ...(fake.over?.[slug] ?? {}),
+  };
+}
+
+function baseDetails(slug: string) {
   return {
     slug,
     name: `Project ${slug}`,
@@ -93,6 +110,20 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     method: init?.method ?? "GET",
   });
   const path = url.pathname;
+  if (path === "/api/portal/state" && fake.production) {
+    return Promise.resolve(
+      json({
+        mode: "production",
+        host_kind: "org",
+        base_url: "http://whygraph.localhost:8765",
+        setup_complete: true,
+        bootstrap_required: false,
+        user: { uid: "u1", display_name: "Ada", email: null, role: null, is_instance_admin: false, github_login: "ada" },
+        org: { slug: "acme", name: "Acme", role: "owner" },
+      }),
+    );
+  }
+  if (path === "/api/github/installations") return Promise.resolve(json({ installations: [] }));
   if (path === "/api/portal/state") {
     return Promise.resolve(
       json({
@@ -123,6 +154,7 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
       return Promise.resolve(json({ error: "project not found", code: "not_found" }, 404));
     }
     if (!rest) return Promise.resolve(json(details(slug)));
+    if (rest === "/scans") return Promise.resolve(json({ runs: [] }));
     if (rest === "/search") {
       return Promise.resolve(
         json({ query: "q", results: [{ name: `hit-from-${slug}`, id: slug, analyzed: true }] }),
@@ -462,6 +494,174 @@ describe("keyboard", () => {
     });
     await user.keyboard("ge");
     await waitFor(() => expect(here(router)).toBe("/p/alpha/explorer"));
+  });
+});
+
+// ---- M2f-3 route plumbing (S12) -----------------------------------------------------
+
+describe("local /account (BUG-10)", () => {
+  it("goes to the portal's settings: local mode has no account", async () => {
+    const { router } = mount("/account");
+    await screen.findByRole("navigation", { name: "Main" });
+    await waitFor(() => expect(here(router)).toBe("/settings"));
+    expect(screen.queryByText("Organizations")).toBeNull();
+  });
+});
+
+describe("wizard steps", () => {
+  it("validates step and run, mapping the old step names", () => {
+    expect(validateInitSearch({ step: "setup", run: "12" })).toEqual({ step: "setup", run: 12 });
+    expect(validateInitSearch({ step: "initialize" })).toEqual({ step: "setup", run: undefined });
+    expect(validateInitSearch({ step: "scan", run: 5 })).toEqual({ step: "configure", run: 5 });
+    expect(validateInitSearch({ step: "bogus", run: "-1" })).toEqual({ step: undefined, run: undefined });
+    expect(validateInitSearch({ run: "0" })).toEqual({ step: undefined, run: undefined });
+  });
+
+  it.each([
+    ["/p/alpha/init?step=initialize", "/p/alpha/init?step=setup"],
+    ["/p/alpha/init?step=scan&run=7", "/p/alpha/init?step=configure&run=7"],
+    ["/p/alpha/init?step=configure&run=x", "/p/alpha/init?step=configure"],
+  ])("redirects %s to %s", async (from, to) => {
+    const { router } = mount(from);
+    await waitFor(() => expect(here(router)).toBe(to));
+  });
+});
+
+describe("search params for the M2f-3 pages", () => {
+  it("keeps the Projects list's q and a known sort", async () => {
+    expect(validateProjectsSearch({ q: "api", sort: "status" })).toEqual({ q: "api", sort: "status" });
+    expect(validateProjectsSearch({ q: "", sort: "bogus" })).toEqual({ q: undefined, sort: undefined });
+    const { router } = mount("/?q=api&sort=bogus");
+    await screen.findByRole("heading", { name: "Projects" });
+    await waitFor(() => expect(here(router)).toBe("/?q=api"));
+  });
+
+  it("keeps the scan history's filters, dropping unknown values", async () => {
+    expect(
+      validateScansSearch({ status: "ok,bogus,failed,ok", trigger: ["manual", "nope"], type: "full", requester: "system" }),
+    ).toEqual({ status: ["ok", "failed"], trigger: ["manual"], type: "full", requester: "system" });
+    expect(validateScansSearch({ status: "", type: "kind", requester: "a b" })).toEqual({
+      status: undefined,
+      trigger: undefined,
+      type: undefined,
+      requester: undefined,
+    });
+    const { router } = mount("/p/alpha/scans?status=ok%2Cbogus&trigger=hook&type=sync&requester=u7");
+    await screen.findByRole("heading", { name: "Scans" });
+    await waitFor(() => expect(here(router)).toBe("/p/alpha/scans?status=ok&trigger=hook&type=sync&requester=u7"));
+    const kept = mount("/p/alpha/scans?type=bogus&requester=u7");
+    await waitFor(() => expect(here(kept.router)).toBe("/p/alpha/scans?requester=u7"));
+    // A list round-trips through the address as one comma-joined value.
+    expect(stringifySearch({ status: ["ok", "failed"] })).toBe("?status=ok%2Cfailed");
+    expect(validateScansSearch(parseSearch("?status=ok%2Cfailed")).status).toEqual(["ok", "failed"]);
+  });
+
+  it("keeps a settings section the page has", async () => {
+    const project = mount("/p/alpha/settings?section=danger");
+    await waitFor(() => expect(here(project.router)).toBe("/p/alpha/settings?section=danger"));
+  });
+
+  it("drops a section global settings does not have", async () => {
+    const global = mount("/settings?section=danger");
+    await waitFor(() => expect(here(global.router)).toBe("/settings"));
+  });
+
+  it("validates the base routes' next, stay and from", () => {
+    expect(validateBaseSearch({ next: "/x", stay: "1", from: "acme" })).toEqual({ next: "/x", stay: true, from: "acme" });
+    expect(validateBaseSearch({ stay: "0", from: "Not A Slug" })).toEqual({
+      next: undefined,
+      stay: undefined,
+      from: undefined,
+    });
+    // `stay` is written back as `?stay=1`, never `?stay=true`.
+    expect(stringifySearch({ stay: true, from: "acme" })).toBe("?stay=1&from=acme");
+    expect(stringifySearch({ stay: false })).toBe("");
+  });
+});
+
+describe("an importing project", () => {
+  const importing = {
+    source: "github",
+    root: null,
+    importing: true,
+    initialized: false,
+    initialized_at: null,
+    root_status: "missing",
+    github_full_name: "acme/alpha",
+    running_scan: { id: 5, status: "running", trigger: "initial" },
+  };
+
+  it.each(["explorer", "chat"])("shows the importing notice on %s instead of the page", async (page) => {
+    fake.over = { alpha: importing };
+    mount(`/p/alpha/${page}`);
+    const notice = await screen.findByTestId("importing-notice");
+    expect(notice).toHaveTextContent("Importing acme/alpha");
+    expect(within(notice).getByRole("link", { name: "Follow the import" })).toHaveAttribute("href", "/p/alpha/scans/5");
+    expect(screen.queryByTestId(page)).toBeNull();
+    expect(screen.queryByTestId("project-unavailable")).toBeNull();
+    expect(screen.queryByTestId("not-initialized")).toBeNull();
+  });
+
+  it("says the import did not finish when nothing is running", async () => {
+    fake.over = { alpha: { ...importing, running_scan: null } };
+    mount("/p/alpha/explorer");
+    const notice = await screen.findByTestId("importing-notice");
+    expect(notice).toHaveTextContent("The import did not finish");
+    expect(within(notice).getByRole("link", { name: "Open scans" })).toHaveAttribute("href", "/p/alpha/scans");
+  });
+
+  it("is not a missing folder on the Overview", async () => {
+    fake.over = { alpha: importing };
+    mount("/p/alpha/");
+    expect(await screen.findByTestId("importing-notice")).toBeInTheDocument();
+    expect(screen.queryByTestId("project-unavailable")).toBeNull();
+    expect(screen.queryByTestId("not-initialized")).toBeNull();
+  });
+
+  it("renders the scans history and the run page", async () => {
+    fake.over = { alpha: importing };
+    mount("/p/alpha/scans");
+    expect(await screen.findByRole("heading", { name: "Scans" })).toBeInTheDocument();
+    expect(screen.queryByTestId("project-unavailable")).toBeNull();
+    expect(screen.queryByTestId("not-initialized")).toBeNull();
+    expect(screen.queryByTestId("importing-notice")).toBeNull();
+  });
+
+  it("renders the run page", async () => {
+    fake.over = { alpha: importing };
+    mount("/p/alpha/scans/5");
+    await waitFor(() =>
+      expect(screen.queryByTestId("run-view") ?? screen.queryByTestId("run-unavailable")).not.toBeNull(),
+    );
+    expect(screen.queryByTestId("project-unavailable")).toBeNull();
+    expect(screen.queryByTestId("not-initialized")).toBeNull();
+  });
+});
+
+describe("the GitHub installations query (BUG-23)", () => {
+  const installationCalls = () => calls.filter((c) => c.url.startsWith("/api/github/installations")).length;
+
+  it("is never asked for by the project Overview, also after the import page", async () => {
+    fake.production = true;
+    const { router } = mount("/p/alpha/");
+    await screen.findByRole("navigation", { name: "Main" });
+    await waitFor(() => expect(calls.some((c) => c.url === "/api/projects/alpha")).toBe(true));
+    expect(installationCalls()).toBe(0);
+
+    await act(async () => {
+      await router.navigate({ to: "/projects/new" });
+    });
+    await waitFor(() => expect(installationCalls()).toBe(1));
+
+    await act(async () => {
+      await router.navigate({ to: "/p/$slug", params: { slug: "alpha" } });
+    });
+    await waitFor(() => expect(here(router)).toBe("/p/alpha"));
+    // Let any late query settle, then check nothing new was asked.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    expect(installationCalls()).toBe(1);
   });
 });
 

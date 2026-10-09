@@ -6,6 +6,7 @@ import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { formatTokens, formatUsd } from "../../lib/format";
+import { plural } from "../../lib/plural";
 
 /** `prices_as_of` is the bundled table's date, or a label when the org's own prices applied. */
 function pricedWith(asOf: string): string {
@@ -90,7 +91,7 @@ export function EstimateBody({
         <>
           <div>
             <p className="text-sm font-medium">
-              {commits.toLocaleString("en-US")} commits to describe{" "}
+              {plural(commits, "commit")} to describe{" "}
               <span className="font-normal text-muted-foreground">(upper bound)</span>
             </p>
             <p className="mt-1 text-sm text-muted-foreground">

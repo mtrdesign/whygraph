@@ -13,6 +13,17 @@ import {
 import { initialScanRunState, reduceScanRun, phasePercent } from "../lib/scanRun";
 import { projectStatus, timeAgo } from "../lib/projectStatus";
 import { selectionNotes } from "../lib/agents";
+import { plural } from "../lib/plural";
+
+describe("plural (BUG-15)", () => {
+  it("agrees the noun with the count and groups thousands", () => {
+    expect(plural(1, "message")).toBe("1 message");
+    expect(plural(0, "message")).toBe("0 messages");
+    expect(plural(3, "warning")).toBe("3 warnings");
+    expect(plural(1240, "commit")).toBe("1,240 commits");
+    expect(plural(2, "entry", "entries")).toBe("2 entries");
+  });
+});
 
 // ---- add-project error mapping ------------------------------------------------
 

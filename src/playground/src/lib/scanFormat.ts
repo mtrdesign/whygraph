@@ -5,6 +5,8 @@ import { formatUsd } from "./format";
 export const BUDGET_STOPPED = "Stopped: monthly budget reached";
 /** What a run that skipped its LLM phase on a hard stop says. */
 export const BUDGET_SKIPPED = "LLM phase skipped: monthly budget reached";
+/** A linked project's run (`--codegraph-only`): only the code index, its history is on the platform. */
+export const CODE_INDEX_REFRESHED = "Code index refreshed";
 
 /** "LLM usage: ~$0.42, 12 calls", only when the run made calls. */
 export function usageLine(summary: Pick<ScanRunSummary, "usage"> | null | undefined): string | null {
@@ -67,6 +69,7 @@ export function runOutcome(run: ScanRunRow): string | null {
   // `--skip-analyze` is the requested structure-only scan; anything else is the
   // reason descriptions could not run (no key, unreachable endpoint).
   if (s.analyze_skipped === "budget") return BUDGET_SKIPPED;
+  if (s.analyze_skipped === "--codegraph-only") return CODE_INDEX_REFRESHED;
   if (s.analyze_skipped) return s.analyze_skipped === "--skip-analyze" ? "Structure only" : "Descriptions skipped";
   return run.analyze ? "With descriptions" : "Structure only";
 }

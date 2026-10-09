@@ -26,6 +26,7 @@ import {
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { DiffView } from "./InitPreview";
+import { plural } from "../../lib/plural";
 
 /**
  * "Remove project": says exactly what is and is not deleted, offers to strip the
@@ -69,7 +70,7 @@ export function RemoveProjectDialog({
       setError(null);
       setResult(r);
       void queryClient.invalidateQueries({ queryKey: portalKey("projects") });
-      if (r.warnings.length > 0) toast.warning(`Removed with ${r.warnings.length} warning(s)`);
+      if (r.warnings.length > 0) toast.warning(`Removed with ${plural(r.warnings.length, "warning")}`);
       else toast.success(`${project.name} removed`);
     },
     onError: (err) => {

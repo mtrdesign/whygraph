@@ -43,7 +43,7 @@ import { ExplorerPage } from "./pages/ExplorerPage";
 import { ProjectHome } from "./pages/ProjectHome";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { AddProjectPage, type NewProjectSearch } from "./pages/AddProjectPage";
-import { InitProjectPage, type InitStep } from "./pages/InitProjectPage";
+import { InitProjectPage } from "./pages/InitProjectPage";
 import { SetupPage } from "./pages/SetupPage";
 import { GlobalSettingsPage } from "./pages/GlobalSettingsPage";
 import { AuditPage } from "./pages/AuditPage";
@@ -66,10 +66,24 @@ import { OrgPickerPage } from "./pages/OrgPickerPage";
 import { ResetPasswordPage } from "./pages/ResetPasswordPage";
 import { SessionNotReceivedPage } from "./pages/SessionNotReceivedPage";
 import { SignInPage } from "./pages/SignInPage";
-import { NotFoundPage, NotInitialized, ProblemAlert, ProjectUnavailable } from "./components/portal/EdgeStates";
+import {
+  ImportingNotice,
+  NotFoundPage,
+  NotInitialized,
+  ProblemAlert,
+  ProjectUnavailable,
+} from "./components/portal/EdgeStates";
 import { PortalErrorPage } from "./components/state/PortalErrorPage";
 import { QueryState } from "./components/state/QueryState";
 import { PageSkeleton } from "./components/state/Skeletons";
+import {
+  validateBaseSearch,
+  validateInitSearch,
+  validateOrgSettingsSearch,
+  validateProjectSettingsSearch,
+  validateProjectsSearch,
+  validateScansSearch,
+} from "./lib/routeSearch";
 
 // The route tree for §4.9, code-based (a generated `routeTree.gen.ts` would not
 // exist yet when `tsc --noEmit` runs ahead of `vite build`).
@@ -113,8 +127,9 @@ export function parseSearch(search: string): Record<string, string> {
 export function stringifySearch(search: Record<string, unknown>): string {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(search)) {
-    if (value === undefined || value === null || value === "") continue;
-    params.set(key, String(value));
+    if (value === undefined || value === null || value === "" || value === false) continue;
+    // A flag is written `?stay=1`; an array (a filter list) joins with commas.
+    params.set(key, value === true ? "1" : String(value));
   }
   const qs = params.toString();
   return qs ? `?${qs}` : "";
@@ -293,7 +308,8 @@ const setupRoute = createRoute({
 
 // ---- base-host pages (production; no AppShell) ----------------------------------
 
-const validateNext = (search: Record<string, unknown>): { next?: string } => ({ next: text(search.next) });
+// `next`, `stay` and `from` (lib/routeSearch.ts) on every base route that reads them.
+const validateNext = validateBaseSearch;
 
 function BaseLayout() {
   const state = usePortalState();
@@ -375,7 +391,17 @@ const orgsRoute = createRoute({
 });
 const newOrgRoute = createRoute({ getParentRoute: () => baseLayout, path: "/orgs/new", component: CreateOrgPage });
 const adminRoute = createRoute({ getParentRoute: () => baseLayout, path: "/admin", component: AdminPage });
-const accountRoute = createRoute({ getParentRoute: () => baseLayout, path: "/account", component: AccountPage });
+// Local mode has no account (one implicit user): its settings are the portal's (BUG-10).
+const accountRoute = createRoute({
+  getParentRoute: () => baseLayout,
+  path: "/account",
+  validateSearch: validateNext,
+  beforeLoad: ({ context }) => {
+    const { portal } = context as { portal?: PortalState };
+    if (portal && !portal.error && portal.mode !== "production") throw redirect({ to: "/settings", replace: true });
+  },
+  component: AccountPage,
+});
 // A local portal's consent request (M2e): signed-out visitors are sent to sign in
 // first, with this whole address as `next`.
 const connectRoute = createRoute({
@@ -405,7 +431,12 @@ function PortalLayout() {
 }
 
 const portalLayout = createRoute({ getParentRoute: () => rootRoute, id: "portal", component: PortalLayout });
-const projectsRoute = createRoute({ getParentRoute: () => portalLayout, path: "/", component: ProjectsPage });
+const projectsRoute = createRoute({
+  getParentRoute: () => portalLayout,
+  path: "/",
+  validateSearch: validateProjectsSearch,
+  component: ProjectsPage,
+});
 // Local mode's single user may always add; in production only an org's owners
 // and admins may (`org.add_project`), everyone else goes back to Projects.
 function NewProjectRoute() {
@@ -462,6 +493,7 @@ const connectCallbackRoute = createRoute({
 const globalSettingsRoute = createRoute({
   getParentRoute: () => portalLayout,
   path: "/settings",
+  validateSearch: validateOrgSettingsSearch,
   component: GlobalSettingsPage,
 });
 
@@ -574,6 +606,11 @@ function ProjectLayout() {
 
   const notice = (node: React.ReactNode) => <div className="mx-auto w-full max-w-3xl p-6">{node}</div>;
   const pageBody = (data: ProjectDetails): React.ReactNode => {
+    // A production import still cloning (or whose clone failed) has no folder and no
+    // project DB yet: its scans and run pages stream the clone; Explorer and Chat wait.
+    if (data.importing && DATA_PAGES.has(page)) {
+      return page === "scans" ? <Outlet /> : notice(<ImportingNotice project={data} />);
+    }
     if (DATA_PAGES.has(page) && data.source === "platform" && page !== "scans") {
       // No local Explorer or Chat for a linked project: the data routes refuse it (M2e).
       return notice(<LinkedElsewhere project={data} />);
@@ -656,22 +693,28 @@ function ScansRoute() {
 const scansRoute = createRoute({
   getParentRoute: () => projectRoute,
   path: "scans/{-$runId}",
+  validateSearch: validateScansSearch,
   component: ScansRoute,
 });
 const projectSettingsRoute = createRoute({
   getParentRoute: () => projectRoute,
   path: "settings",
+  validateSearch: validateProjectSettingsSearch,
   component: ProjectSettingsPage,
 });
-const INIT_STEPS: readonly InitStep[] = ["configure", "initialize", "scan"];
-
 const initRoute = createRoute({
   getParentRoute: () => projectRoute,
   path: "init",
-  // `?step=` picks the wizard step; absent, the page chooses from the project's state.
-  validateSearch: (search: Record<string, unknown>): { step?: InitStep } => ({
-    step: INIT_STEPS.find((s) => s === search.step),
-  }),
+  // `?step=setup|configure` picks the wizard step (absent, the page chooses from the
+  // project's state); `?run=` is the first scan's run. The old `initialize` / `scan`
+  // are redirected to `setup` / `configure`, keeping `run`.
+  validateSearch: validateInitSearch,
+  beforeLoad: ({ params, search, location }) => {
+    const raw = parseSearch(location.searchStr ?? "").step;
+    if (raw !== undefined && raw !== search.step) {
+      throw redirect({ to: "/p/$slug/init", params: { slug: params.slug }, search, replace: true });
+    }
+  },
   component: InitProjectPage,
 });
 

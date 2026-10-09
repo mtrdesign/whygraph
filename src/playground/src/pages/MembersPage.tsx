@@ -16,7 +16,7 @@ import {
 } from "../api";
 import { UserAvatar } from "../components/auth/UserAvatar";
 import { CopyButton } from "../components/portal/CopyButton";
-import { Field, nativeSelectClass } from "../components/portal/Field";
+import { Field, nativeSelect, nativeSelectClass } from "../components/portal/Field";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -148,7 +148,7 @@ function InviteMember({ viewerIsOwner }: { viewerIsOwner: boolean }) {
               <span className="min-w-0 flex-1 truncate text-sm">{proj.name}</span>
               <select
                 aria-label={`Access to ${proj.name}`}
-                className={`${nativeSelectClass} w-36`}
+                className={nativeSelect("w-36 shrink-0")}
                 value={grants[proj.slug] ?? ""}
                 onChange={(e) =>
                   setGrants((g) => {
@@ -319,10 +319,10 @@ function MemberRow({
           This month: {formatUsd(member.month_spend_usd)}
         </Link>
       )}
-      {editable ? (
+      {editable && !isMe ? (
         <select
           aria-label={`Role for ${name}`}
-          className={`${nativeSelectClass} w-28`}
+          className={nativeSelect("w-28")}
           value={member.role}
           disabled={setRole.isPending}
           onChange={(e) => setRole.mutate(e.target.value as MemberRole)}
@@ -334,7 +334,15 @@ function MemberRow({
           ))}
         </select>
       ) : (
-        <Badge variant={member.role === "member" ? "outline" : "secondary"}>{member.role}</Badge>
+        <>
+          <Badge variant={member.role === "member" ? "outline" : "secondary"}>{member.role}</Badge>
+          {/* The server refuses a self re-role too; say so instead of offering it (BUG-25). */}
+          {editable && isMe && (
+            <span className="text-xs text-muted-foreground" data-testid="own-role-note">
+              You can't change your own role
+            </span>
+          )}
+        </>
       )}
       {editable && !isMe && (
         <Button

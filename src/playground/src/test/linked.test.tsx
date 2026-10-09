@@ -287,7 +287,7 @@ describe("platform source", () => {
     await user.click(screen.getByRole("radio", { name: /alpha/ }));
     await user.click(submit);
     await waitFor(() => expect(router.state.location.pathname).toBe("/p/alpha/init"));
-    expect(router.state.location.search).toMatchObject({ step: "initialize" });
+    expect(router.state.location.search).toMatchObject({ step: "setup" });
     expect(mutations().find((c) => c.path === "/api/projects")?.body).toEqual({
       source: "platform",
       link_id: "L1",

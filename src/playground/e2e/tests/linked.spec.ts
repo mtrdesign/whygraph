@@ -185,7 +185,7 @@ test("a linked project: connect, evidence over MCP, revocation, removal", async 
 
   // Configure is skipped (the platform owns the config): Initialize, then the
   // first scan, which indexes the code structure only.
-  await expect(page).toHaveURL(new RegExp(`/p/${SLUG}/init\\?step=initialize`));
+  await expect(page).toHaveURL(new RegExp(`/p/${SLUG}/init\\?step=setup`));
   await page.getByRole("checkbox", { name: /Claude Code/ }).check();
   await expect(page.getByTestId("init-preview")).toBeVisible();
   await page.getByRole("button", { name: "Initialize", exact: true }).click();

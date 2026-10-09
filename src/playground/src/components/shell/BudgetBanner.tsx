@@ -9,7 +9,7 @@ import {
   thresholdOf,
   type Threshold,
 } from "../../lib/budgetBanner";
-import { formatUsd } from "../../lib/format";
+import { formatPct, formatUsd } from "../../lib/format";
 import { usePortalState } from "../../lib/identity";
 import { formatResetsAt } from "../../lib/usageRange";
 import { cn } from "@/lib/utils";
@@ -73,7 +73,7 @@ function MemberBanner({ me, usage }: { me: UsageGauge; usage: StateUsage }) {
         </>
       ) : (
         <>
-          You've used {threshold}% of your monthly budget ({formatUsd(me.spent_usd)} of{" "}
+          You've used {formatPct(me.pct)} of your monthly budget ({formatUsd(me.spent_usd)} of{" "}
           {formatUsd(me.budget_usd)}). Resets {formatResetsAt(usage.resets_at)}.
         </>
       )}
@@ -95,13 +95,13 @@ function OrgBanner({ usage, orgName }: { usage: StateUsage; orgName: string }) {
     <Bar scope="org" month={usage.month} threshold={top}>
       {orgThreshold !== null && org.budget_usd !== null && (
         <span data-testid="budget-banner-org-line">
-          {orgName} is at {orgThreshold}% of its monthly budget ({formatUsd(org.spent_usd)} of{" "}
+          {orgName} is at {formatPct(org.pct)} of its monthly budget ({formatUsd(org.spent_usd)} of{" "}
           {formatUsd(org.budget_usd)}).{" "}
         </span>
       )}
       {projects.length > 0 && (
         <span data-testid="budget-banner-projects-line">
-          Projects at or over 50%: {projects.map((p) => `${p.name} (${p.threshold}%)`).join(", ")}.
+          Projects at or over 50%: {projects.map((p) => `${p.name} (${formatPct(p.pct)})`).join(", ")}.
         </span>
       )}
     </Bar>

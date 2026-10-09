@@ -11,25 +11,31 @@ import { FirstScanStep } from "../components/portal/FirstScanStep";
 import { InitializeStep } from "../components/portal/InitializeStep";
 import { WizardSteps, type WizardStep } from "../components/portal/WizardSteps";
 import { Button } from "../components/ui/button";
+import type { InitSearch, InitStep } from "../lib/routeSearch";
 
-export type InitStep = "configure" | "initialize" | "scan";
+export type { InitStep };
+
+/** The screen a step shows until S17b's wizard order (the stepper's ids). */
+type Screen = Exclude<WizardStep, "source">;
 
 /**
  * Steps 2-4 of the add wizard for an existing project, at `/p/<slug>/init`. The
- * step lives in `?step=`, so each is reachable on its own and a project that was
- * added but not initialized resumes here: with no `step`, an uninitialized project
- * lands on Initialize and an initialized one on the first scan.
+ * step lives in `?step=setup|configure` (the router redirects the old `initialize`
+ * / `scan`), so each is reachable on its own and a project that was added but not
+ * initialized resumes here: with no `step`, an uninitialized project lands on Set
+ * up and an initialized one on the first scan.
  *
- * In production the steps are Source -> Configure -> First scan: the import ran
- * the Initialize already (no agent picker, file preview or hooks on a server
- * copy), so `?step=initialize` goes to the first scan.
+ * Until the wizard's new order lands (M2f-3 S17b), the screens are the old ones:
+ * locally `configure` before Initialize is the settings form and `configure` after
+ * it the first scan (with the settings below it); `setup` is Initialize. In
+ * production `configure` is the first scan plus the settings: the import ran the
+ * Initialize already (no agent picker, file preview or hooks on a server copy),
+ * so `?step=setup` goes to Configure.
  */
 export function InitProjectPage() {
   const slug = useSlug();
   const navigate = useNavigate();
-  const search = useSearch({ from: "/p/$slug/init", shouldThrow: false }) as
-    | { step?: InitStep }
-    | undefined;
+  const search = useSearch({ from: "/p/$slug/init", shouldThrow: false }) as InitSearch | undefined;
   const project = useQuery({
     queryKey: projectKey(slug, "project"),
     queryFn: () => portalApi.project(slug),
@@ -37,25 +43,35 @@ export function InitProjectPage() {
 
   const production = isProduction(usePortalState().data);
   const linked = project.data?.source === "platform";
-  const step = search?.step;
-  // Production has no Initialize; a linked project has no Configure (the platform owns it).
-  const misplaced = (production && step === "initialize") || (linked && step === "configure");
+  const initialized = !!project.data?.initialized;
+  // The screen a step shows (see above): before Initialize, a local `configure` is the settings form.
+  const screen: Screen | undefined =
+    search?.step === "setup"
+      ? "initialize"
+      : search?.step === "configure"
+        ? production || (!linked && !initialized)
+          ? "configure"
+          : "scan"
+        : undefined;
+  // Production has no Set up; a linked project has no settings form, so it sets up first.
+  const misplaced = (production && screen === "initialize") || (linked && !initialized && screen === "scan");
   useEffect(() => {
-    if ((step && !misplaced) || !project.data) return;
+    if ((search?.step && !misplaced) || !project.data) return;
     void navigate({
       to: "/p/$slug/init",
       params: { slug },
-      search: { step: production || project.data.initialized ? "scan" : "initialize" },
+      search: { step: production || project.data.initialized ? "configure" : "setup" },
       replace: true,
     });
-  }, [step, misplaced, production, project.data, navigate, slug]);
+  }, [search?.step, misplaced, production, project.data, navigate, slug]);
 
   const go = (next: InitStep) =>
     void navigate({ to: "/p/$slug/init", params: { slug }, search: { step: next } });
 
-  if (!step || misplaced) return <p className="p-6 text-sm text-muted-foreground">Loading…</p>;
+  if (!screen || misplaced || !project.data) return <p className="p-6 text-sm text-muted-foreground">Loading…</p>;
+  const step = screen;
 
-  const titles: Record<InitStep, { title: string; blurb: string }> = {
+  const titles: Record<Screen, { title: string; blurb: string }> = {
     configure: {
       title: "Configure",
       blurb: "Choose the models and keys WhyGraph uses for this project. You can change all of this later in Settings.",
@@ -82,24 +98,27 @@ export function InitProjectPage() {
         </h1>
         <p className="text-[13px] text-muted-foreground">{titles[step].blurb}</p>
       </div>
-      <WizardSteps current={step as WizardStep} slug={slug} production={production} linked={linked} />
+      <WizardSteps current={step} slug={slug} production={production} linked={linked} />
 
+      {step === "configure" && production && <FirstScanStep slug={slug} />}
       {step === "configure" && (
         <ConfigForm
           scope={{ kind: "project", slug }}
-          submitLabel="Save and continue"
+          submitLabel={production ? "Save" : "Save and continue"}
           readOnly={!can(project.data, "project.configure")}
-          onSaved={() => go(production ? "scan" : "initialize")}
+          onSaved={production ? undefined : () => go("setup")}
           secondaryActions={
-            <Button variant="ghost" render={<Link to="/" />}>
-              Finish later
-            </Button>
+            production ? undefined : (
+              <Button variant="ghost" render={<Link to="/" />}>
+                Finish later
+              </Button>
+            )
           }
         />
       )}
       {step === "initialize" &&
         (can(project.data, "project.setup") ? (
-          <InitializeStep slug={slug} onDone={() => go("scan")} />
+          <InitializeStep slug={slug} onDone={() => go("configure")} />
         ) : (
           <Alert data-testid="setup-needs-admin">
             <AlertTitle>A project admin sets this project up</AlertTitle>
@@ -107,6 +126,12 @@ export function InitProjectPage() {
           </Alert>
         ))}
       {step === "scan" && <FirstScanStep slug={slug} />}
+      {step === "scan" && !linked && (
+        <ConfigForm
+          scope={{ kind: "project", slug }}
+          readOnly={!can(project.data, "project.configure")}
+        />
+      )}
     </div>
   );
 }

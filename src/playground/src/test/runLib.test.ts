@@ -128,6 +128,16 @@ describe("scan formatting", () => {
     expect(runOutcome(row({ kind: "sync", summary: { moved: true } }))).toBe("Fetched new commits");
     expect(runOutcome(row({ analyze: false, summary: { status: "ok" } }))).toBe("Structure only");
   });
+
+  it("says a linked project's --codegraph-only run refreshed the code index (BUG-13)", () => {
+    expect(runOutcome(row({ analyze: false, summary: { status: "ok", analyze_skipped: "--codegraph-only" } }))).toBe(
+      "Code index refreshed",
+    );
+    // A missing key is still a skip of the descriptions.
+    expect(runOutcome(row({ summary: { status: "ok", analyze_skipped: "no key for anthropic" } }))).toBe(
+      "Descriptions skipped",
+    );
+  });
 });
 
 describe("reducer failure", () => {

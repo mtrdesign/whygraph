@@ -9,7 +9,7 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Skeleton } from "../ui/skeleton";
 import { Switch } from "../ui/switch";
-import { nativeSelectClass } from "./Field";
+import { nativeSelect, nativeSelectClass } from "./Field";
 
 const ROLES: ProjectRole[] = ["viewer", "contributor", "admin"];
 
@@ -121,7 +121,7 @@ export function ProjectAccess({ slug }: { slug: string }) {
                   <>
                     <select
                       aria-label={`Role for ${personName(p)}`}
-                      className={`${nativeSelectClass} w-32`}
+                      className={nativeSelect("w-32")}
                       value={p.project_role ?? "viewer"}
                       disabled={setGrant.isPending}
                       onChange={(e) => setGrant.mutate({ uid: p.uid, role: e.target.value as ProjectRole })}
@@ -171,7 +171,7 @@ export function ProjectAccess({ slug }: { slug: string }) {
               </select>
               <select
                 aria-label="Role for the new person"
-                className={`${nativeSelectClass} sm:w-36`}
+                className={nativeSelect("sm:w-36")}
                 value={addRole}
                 onChange={(e) => setAddRole(e.target.value as ProjectRole)}
               >

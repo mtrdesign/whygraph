@@ -217,6 +217,15 @@ describe("BudgetBanner", () => {
     expect(screen.getAllByTestId("budget-banner-me")[0]).toHaveAttribute("data-threshold", "75");
   });
 
+  it("prints the member's actual spend, not the threshold it crossed (BUG-3)", async () => {
+    fake.state = memberAt(78.4);
+    mount("/members");
+    const banner = await screen.findByTestId("budget-banner-me");
+    expect(banner).toHaveTextContent("You've used 78.4% of your monthly budget");
+    expect(banner).not.toHaveTextContent("75%");
+    expect(banner).toHaveAttribute("data-threshold", "75");
+  });
+
   it("a member at 100% with a hard stop gets the roadmap line and no dismiss", async () => {
     fake.state = memberAt(100, { hard_stop: true, blocked: true });
     mount("/members");
@@ -236,8 +245,9 @@ describe("BudgetBanner", () => {
     );
     mount("/");
     const banner = await screen.findByTestId("budget-banner-org");
-    expect(banner).toHaveTextContent("Acme is at 75% of its monthly budget");
-    expect(banner).toHaveTextContent("Project alpha (100%), Project beta (50%)");
+    // The spend itself is printed; the crossed threshold only picks the tone (BUG-3).
+    expect(banner).toHaveTextContent("Acme is at 80% of its monthly budget");
+    expect(banner).toHaveTextContent("Project alpha (100%), Project beta (55%)");
     expect(banner).toHaveAttribute("data-threshold", "100");
     expect(within(banner).queryByRole("button")).toBeNull();
   });
@@ -259,7 +269,7 @@ describe("BudgetBanner", () => {
       usage: usageBlock(null, gauge({ pct: 76, spent_usd: 76 })),
     };
     mount("/");
-    expect(await screen.findByTestId("budget-banner-org")).toHaveTextContent("75%");
+    expect(await screen.findByTestId("budget-banner-org")).toHaveTextContent("at 76% of its monthly budget");
   });
 });
 

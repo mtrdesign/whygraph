@@ -1,6 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { FolderXIcon, LinkIcon, PlayIcon } from "lucide-react";
+import { DownloadIcon, FolderXIcon, LinkIcon, PlayIcon } from "lucide-react";
 import { portalApi, portalKey, projectKey, type ProjectDetails } from "../../api";
 import type { ProjectProblem } from "../../lib/errors";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
@@ -110,6 +110,44 @@ export function NotInitialized({ slug }: { slug: string }) {
           <Button size="sm" render={<Link to="/p/$slug/init" params={{ slug }} />}>
             Finish setup
           </Button>
+        </div>
+      </AlertDescription>
+    </Alert>
+  );
+}
+
+/**
+ * A production import that has not finished (`project.importing`): the clone and
+ * its first scan run in the background, so Explorer and Chat have nothing to read
+ * yet. With no run in flight the import did not finish; its run says why.
+ */
+export function ImportingNotice({ project }: { project: ProjectDetails }) {
+  const slug = project.slug;
+  const run = project.running_scan;
+  const repo = project.github_full_name ?? project.name;
+  return (
+    <Alert data-testid="importing-notice">
+      <DownloadIcon />
+      <AlertTitle>{run ? `Importing ${repo}` : "The import did not finish"}</AlertTitle>
+      <AlertDescription>
+        <p>
+          {run
+            ? "WhyGraph is copying the repository and running its first scan. The Explorer and Chat open when it is done."
+            : "The Explorer and Chat open once the repository is imported. The import's last run says what went wrong."}
+        </p>
+        <div className="mt-2">
+          {run ? (
+            <Button
+              size="sm"
+              render={<Link to="/p/$slug/scans/{-$runId}" params={{ slug, runId: String(run.id) }} />}
+            >
+              Follow the import
+            </Button>
+          ) : (
+            <Button size="sm" render={<Link to="/p/$slug/scans/{-$runId}" params={{ slug }} />}>
+              Open scans
+            </Button>
+          )}
         </div>
       </AlertDescription>
     </Alert>

@@ -15,7 +15,8 @@ const STEPS: { id: WizardStep; label: string }[] = [
 /**
  * The add wizard's stepper (§4.12.1: import is a full-page flow, not a modal).
  * With a `slug`, earlier steps link back to their own page - each step is also
- * reachable on its own at `/p/<slug>/init?step=...`. In production there is no
+ * reachable on its own at `/p/<slug>/init?step=setup|configure` (Initialize is
+ * `setup`; Configure and First scan are both `configure`). In production there is no
  * Initialize step: the import already did it, and there are no agent files or
  * hooks to write on a server copy.
  */
@@ -68,7 +69,7 @@ export function WizardSteps({
                 <Link
                   to="/p/$slug/init"
                   params={{ slug }}
-                  search={{ step: step.id as "configure" | "initialize" | "scan" }}
+                  search={{ step: step.id === "initialize" ? "setup" : "configure" }}
                   className="flex items-center gap-2 hover:underline"
                 >
                   {content}

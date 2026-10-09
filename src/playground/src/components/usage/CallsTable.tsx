@@ -152,7 +152,9 @@ export function CallsTable({
               ))}
             </tbody>
           </table>
-          <p className="mt-2 text-[11px] text-muted-foreground">* cost reported by the provider.</p>
+          {rows.some((c) => c.cost_source === "provider") && (
+            <p className="mt-2 text-[11px] text-muted-foreground">* cost reported by the provider.</p>
+          )}
         </div>
       )}
       {calls.hasNextPage && (

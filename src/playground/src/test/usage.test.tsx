@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
@@ -514,6 +514,18 @@ describe("breakdowns, drill-down and calls", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: "Load more" }));
     await waitFor(() => expect(fake.calls.some((c) => c.search.includes("before=cursor-2"))).toBe(true));
+  });
+
+  it("shows the provider-cost footnote only when a row is starred (BUG-24)", async () => {
+    fake.routes["/api/usage/calls"] = () => json({ items: [call(1)], next: null });
+    mount("/usage?tab=calls");
+    await screen.findByTestId("call-1");
+    expect(screen.queryByText("* cost reported by the provider.")).toBeNull();
+    cleanup();
+    fake.routes["/api/usage/calls"] = () => json({ items: [call(1), call(2, { cost_source: "provider" })], next: null });
+    mount("/usage?tab=calls");
+    expect(await screen.findByTestId("call-2")).toHaveTextContent("*");
+    expect(screen.getByText("* cost reported by the provider.")).toBeInTheDocument();
   });
 
   it("shows one member's drill-down to an org admin", async () => {

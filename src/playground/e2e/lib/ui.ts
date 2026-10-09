@@ -34,14 +34,14 @@ export async function addLocalProject(page: Page, fx: Fixture, by: "list" | "pat
 /** Configure (keep the defaults) and Initialize with Claude Code, ending on the first-scan step. */
 export async function configureAndInitialize(page: Page, fx: Fixture): Promise<void> {
   await page.getByRole("button", { name: "Save and continue" }).click();
-  await expect(page).toHaveURL(new RegExp(`/p/${fx.slug}/init\\?step=initialize`));
+  await expect(page).toHaveURL(new RegExp(`/p/${fx.slug}/init\\?step=setup`));
 
   await page.getByRole("checkbox", { name: /Claude Code/ }).check();
   await expect(page.getByTestId("init-preview")).toBeVisible();
   await page.getByRole("button", { name: "Initialize", exact: true }).click();
   await expect(page.getByTestId("init-done")).toBeVisible();
   await page.getByRole("button", { name: "Continue to first scan" }).click();
-  await expect(page).toHaveURL(new RegExp(`/p/${fx.slug}/init\\?step=scan`));
+  await expect(page).toHaveURL(new RegExp(`/p/${fx.slug}/init\\?step=configure`));
 }
 
 /** A link in the sidebar (project pages also carry same-named buttons in their bodies). */

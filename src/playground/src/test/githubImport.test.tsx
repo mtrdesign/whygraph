@@ -438,7 +438,7 @@ describe("production project pages", () => {
     });
   });
 
-  it("Configure has no hooks and no GitHub token, keeps the forge toggle, and continues to the first scan", async () => {
+  it("Configure has no hooks and no GitHub token, keeps the forge toggle, and sits below the first scan", async () => {
     const user = userEvent.setup();
     const router = mount("/p/api/init?step=configure");
     const form = await screen.findByTestId("config-form");
@@ -449,15 +449,18 @@ describe("production project pages", () => {
     expect(forge).toBeChecked();
 
     await user.type(within(form).getByLabelText("anthropic"), "sk-ant-1234");
-    await user.click(within(form).getByRole("button", { name: "Save and continue" }));
-    await waitFor(() => expect(here(router)).toBe("/p/api/init?step=scan"));
+    // The project has scanned already, so the first-scan card above the form says so.
+    expect(await screen.findByRole("heading", { name: "First scan complete" })).toBeInTheDocument();
+    await user.click(within(form).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("PUT", "/api/projects/api/config")).toHaveLength(1));
+    expect(here(router)).toBe("/p/api/init?step=configure");
     const put = calls("PUT", "/api/projects/api/config")[0].body!;
     expect(put.secrets).toEqual({ llm: { anthropic: "sk-ant-1234" } });
   });
 
-  it("sends ?step=initialize on to the first scan", async () => {
+  it("sends ?step=initialize (now setup) on to Configure", async () => {
     const router = mount("/p/api/init?step=initialize");
-    await waitFor(() => expect(here(router)).toBe("/p/api/init?step=scan"));
+    await waitFor(() => expect(here(router)).toBe("/p/api/init?step=configure"));
     expect(calls("POST", "/api/projects/api/init")).toHaveLength(0);
   });
 

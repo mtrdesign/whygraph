@@ -26,16 +26,17 @@ async function addAndInit(page: Page, slug: string): Promise<void> {
   await page.getByRole("button", { name: "Add project" }).click();
   await expect(page).toHaveURL(new RegExp(`/p/${slug}/init\\?step=configure`));
   await page.getByRole("button", { name: "Save and continue" }).click();
+  await expect(page).toHaveURL(new RegExp(`/p/${slug}/init\\?step=setup`));
   await page.getByRole("checkbox", { name: /Claude Code/ }).check();
   await expect(page.getByTestId("init-preview")).toBeVisible();
   await page.getByRole("button", { name: "Initialize", exact: true }).click();
   await expect(page.getByTestId("init-done")).toBeVisible();
   await page.getByRole("button", { name: "Continue to first scan" }).click();
-  await expect(page).toHaveURL(new RegExp(`/p/${slug}/init\\?step=scan`));
+  await expect(page).toHaveURL(new RegExp(`/p/${slug}/init\\?step=configure`));
 }
 
 async function firstScanDone(page: Page, slug: string): Promise<void> {
-  await page.getByRole("button", { name: "Start first scan" }).click();
+  // The first Initialize queued the first scan: no "Start first scan" click.
   await expect(page.getByText("First scan complete")).toBeVisible({ timeout: 60_000 });
   await page.getByRole("button", { name: "Open project" }).click();
   await expect(page).toHaveURL(new RegExp(`/p/${slug}$`));
@@ -163,25 +164,25 @@ test("local mode: every screen", async ({ page }) => {
     await page.waitForTimeout(800);
     await snap(page, wizard, "step-configure", "default", "Wizard step 1, Configure (/p/notes/init?step=configure) right after Add project");
     await page.getByRole("button", { name: "Save and continue" }).click();
-    await expect(page).toHaveURL(/step=initialize/);
+    await expect(page).toHaveURL(/step=setup/);
     await page.waitForTimeout(800);
     await snap(page, wizard, "step-initialize", "no-agent", "Wizard step 2, Initialize: no agent ticked yet");
     await page.getByRole("checkbox", { name: /Claude Code/ }).check();
     await expect(page.getByTestId("init-preview")).toBeVisible();
     await page.waitForTimeout(500);
     await snap(page, wizard, "step-initialize", "preview", "Wizard step 2 with Claude Code ticked: the per-file init preview");
+    // Initialize queues the first scan: slow the fake scanner so it is still running on the next step.
+    ctl.delay(2.5);
     await page.getByRole("button", { name: "Initialize", exact: true }).click();
     await expect(page.getByTestId("init-done")).toBeVisible();
     await snap(page, wizard, "step-initialize", "done", "Wizard step 2 after Initialize: what was written");
     await page.getByRole("button", { name: "Continue to first scan" }).click();
-    await expect(page).toHaveURL(/step=scan/);
+    await expect(page).toHaveURL(/step=configure/);
     await page.waitForTimeout(800);
-    await snap(page, wizard, "step-scan", "ready", "Wizard step 3, first scan: before Start first scan (estimate)");
+    await snap(page, wizard, "step-scan", "ready", "Wizard first-scan step (?step=configure after Initialize): the first scan queued automatically by Initialize, settings below");
   });
   await attempt(page, at(wizard, "step-scan", "running"), async () => {
-    if (!/step=scan/.test(page.url())) await page.goto("/p/notes/init?step=scan");
-    ctl.delay(2.5);
-    await page.getByRole("button", { name: "Start first scan" }).click();
+    if (!/step=configure/.test(page.url())) await page.goto("/p/notes/init?step=configure");
     await expect(page.getByTestId("scan-progress")).toBeVisible();
     await page.waitForTimeout(3000);
     await snap(page, wizard, "step-scan", "running", "Wizard step 3 mid-run: live first-scan progress (fake scanner slowed to 2.5 s / tick)", { viewportOnly: true });
@@ -425,11 +426,13 @@ test("local mode: every screen", async ({ page }) => {
   });
   await attempt(page, at("chat", "session-actions", "hover"), async () => {
     await page.goto("/p/notes/chat");
-    const rename = page.getByRole("button", { name: "Rename" }).first();
-    await rename.hover({ force: true });
+    // Sessions live in the sidebar: a row's "..." menu holds Rename / Delete.
+    const row = page.getByTestId("chat-row").first();
+    await row.hover();
     await page.waitForTimeout(400);
-    await snap(page, "chat", "session-actions", "hover", "A chat session row hovered: its Rename / Delete actions", { widths: ["desktop"], viewportOnly: true, before: async (p) => { await p.getByRole("button", { name: "Rename" }).first().hover({ force: true }); } });
-    await rename.click({ force: true });
+    await snap(page, "chat", "session-actions", "hover", "A sidebar chat row hovered: its '...' actions button", { widths: ["desktop"], viewportOnly: true, before: async (p) => { await p.getByTestId("chat-row").first().hover(); } });
+    await row.getByRole("button", { name: /^Actions for/ }).click();
+    await page.getByRole("menuitem", { name: "Rename" }).click();
     await page.waitForTimeout(300);
     await snap(page, "chat", "session-actions", "renaming", "Inline rename of a chat session", { widths: ["desktop"], viewportOnly: true });
     await page.keyboard.press("Escape");
@@ -476,7 +479,7 @@ test("local mode: every screen", async ({ page }) => {
   await attempt(page, at("budgets", "chat", "budget-stopped"), async () => {
     await api(page.request, "PUT", `${env.baseUrl}/api/projects/notes/budget`, { monthly_usd: 0.01, hard_stop: true });
     await page.goto("/p/notes/chat");
-    await page.getByRole("button", { name: "New chat", exact: true }).first().click();
+    // A hard stop disables the sidebar's "New chat"; /chat already shows the notice.
     await expect(page.getByTestId("chat-budget-notice")).toBeVisible();
     await snap(page, "budgets", "chat", "budget-stopped", "Chat of notes with a hard-stopped $0.01 project budget: the composer is replaced by the budget notice");
     await page.goto("/p/notes");
@@ -506,7 +509,6 @@ test("local mode: every screen", async ({ page }) => {
     await page.waitForTimeout(1500);
     await snap(page, "budgets", "projects", "org-banner-100", "Projects page with the org budget exceeded and hard-stopped");
     await page.goto("/p/billing/chat");
-    await page.getByRole("button", { name: "New chat", exact: true }).first().click();
     await page.waitForTimeout(1200);
     await snap(page, "budgets", "chat", "org-stopped", "Chat with the organization's budget hard-stopped");
     await api(page.request, "DELETE", `${env.baseUrl}/api/budgets/org`);

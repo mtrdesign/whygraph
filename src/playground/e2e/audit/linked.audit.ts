@@ -121,14 +121,13 @@ test("linked project: both portals", async ({ page, browser, request }) => {
       .getByRole("radio")
       .check();
     await page.getByRole("button", { name: "Link this checkout" }).click();
-    await expect(page).toHaveURL(new RegExp(`/p/${SLUG}/init\\?step=initialize`));
+    await expect(page).toHaveURL(new RegExp(`/p/${SLUG}/init\\?step=setup`));
     await settle(page, 800);
     await snap(page, "local", "linked", "wizard-initialize", "default", "A linked project's wizard: Configure skipped (the platform owns config), Initialize");
     await page.getByRole("checkbox", { name: /Claude Code/ }).check();
     await page.getByRole("button", { name: "Initialize", exact: true }).click();
     await expect(page.getByTestId("init-done")).toBeVisible();
     await page.getByRole("button", { name: "Continue to first scan" }).click();
-    await page.getByRole("button", { name: "Start first scan" }).click();
     await expect(page.getByText("First scan complete")).toBeVisible({ timeout: 60_000 });
     await settle(page, 600);
     await snap(page, "local", "linked", "wizard-scan", "done", "A linked project's first scan done (CodeGraph only)");

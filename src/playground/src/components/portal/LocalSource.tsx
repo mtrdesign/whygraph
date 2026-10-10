@@ -3,27 +3,39 @@ import { Link } from "@tanstack/react-router";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { CheckCircle2Icon, GitBranchIcon } from "lucide-react";
 import {
+  ApiError,
   portalApi,
   portalKey,
   type AddProjectResult,
   type CheckPathResult,
   type RepoEntry,
 } from "../../api";
+import { errorMessage } from "../../lib/apiErrors";
 import { addProjectError, type AddError } from "../../lib/errors";
+import { usePortalState } from "../../lib/identity";
+import { PathText, displayPath } from "../layout/PathText";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Field } from "./Field";
 import { NotSharedAlert } from "./NotSharedAlert";
 
+/** `check-path`'s answer; `exists` (M2f-3) is not in the shared type yet. */
+type CheckResult = CheckPathResult & { exists?: boolean };
+
+/** The registry's sentence for a check-path refusal the answer implies (no request failed). */
+const refusal = (code: string) => errorMessage(new ApiError(400, "", code), "add-project");
+
 function RepoRow({
   repo,
   selected,
   onSelect,
+  base,
 }: {
   repo: RepoEntry;
   selected: boolean;
   onSelect: () => void;
+  base?: string[];
 }) {
   return (
     <label
@@ -41,10 +53,13 @@ function RepoRow({
         onChange={onSelect}
       />
       <span className="flex min-w-0 flex-1 flex-col">
-        <span className="font-medium">{repo.name}</span>
-        <span className="truncate font-mono text-xs text-muted-foreground" title={repo.path}>
-          {repo.path}
-        </span>
+        <span className="font-medium break-words">{repo.name}</span>
+        {/* Relative to its shared folder, unless that only repeats the name: then the whole path. */}
+        <PathText
+          path={repo.path}
+          base={displayPath(repo.path, base).toLowerCase() === repo.name.toLowerCase() ? undefined : base}
+          className="text-xs text-muted-foreground"
+        />
       </span>
       {repo.registered && <span className="text-xs text-muted-foreground">Already added</span>}
     </label>
@@ -60,7 +75,8 @@ export function LocalSource({ onAdded }: { onAdded: (result: AddProjectResult) =
   const [search, setSearch] = useState("");
   const deferred = useDeferredValue(search);
   const [path, setPath] = useState("");
-  const [check, setCheck] = useState<CheckPathResult | null>(null);
+  const [check, setCheck] = useState<CheckResult | null>(null);
+  const shared = usePortalState().data?.shared_folders;
   const [token, setToken] = useState("");
   const [error, setError] = useState<AddError | null>(null);
 
@@ -99,16 +115,18 @@ export function LocalSource({ onAdded }: { onAdded: (result: AddProjectResult) =
     checkPath.mutate(p);
   };
 
-  const ok = check && check.shared && check.is_git && !check.protected;
+  const ok = check && check.shared && check.exists !== false && check.is_git && !check.protected;
   const notShared = check && !check.shared;
   const pathError =
     error?.field === "path" && error.message
       ? error
-      : check && check.shared && !check.is_git
-        ? ({ field: "path", message: "This folder is not a git repository." } as AddError)
-        : check?.protected
-          ? ({ field: "path", message: "This path overlaps the portal's own data folder." } as AddError)
-          : null;
+      : check?.protected
+        ? ({ field: "path", message: refusal("protected") } as AddError)
+        : check && check.shared && check.exists === false
+          ? ({ field: "path", message: refusal("path_missing") } as AddError)
+          : check && check.shared && !check.is_git
+            ? ({ field: "path", message: refusal("not_git") } as AddError)
+            : null;
 
   return (
     <div className="flex flex-col gap-4 p-5">
@@ -117,7 +135,7 @@ export function LocalSource({ onAdded }: { onAdded: (result: AddProjectResult) =
           <Input
             {...p}
             type="search"
-            placeholder="Search by name"
+            placeholder="Search by name or path"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -135,11 +153,11 @@ export function LocalSource({ onAdded }: { onAdded: (result: AddProjectResult) =
           </p>
         )}
         {repos.data?.repos.map((r) => (
-          <RepoRow key={r.path} repo={r} selected={path === r.path} onSelect={() => pick(r.path)} />
+          <RepoRow key={r.path} repo={r} base={shared} selected={path === r.path} onSelect={() => pick(r.path)} />
         ))}
         {repos.data?.truncated && (
-          <p className="border-t border-border p-2.5 text-xs text-muted-foreground">
-            Showing the first repositories found; search to narrow the list.
+          <p className="border-t border-border p-2.5 text-xs text-muted-foreground" data-testid="repos-capped">
+            Showing the first {repos.data.repos.length} matches - refine the search.
           </p>
         )}
       </div>
@@ -185,9 +203,10 @@ export function LocalSource({ onAdded }: { onAdded: (result: AddProjectResult) =
 
       {ok && (
         <div className="flex flex-col gap-3">
-          <p className="flex items-center gap-2 text-sm text-foreground">
-            <CheckCircle2Icon className="size-4 text-success" />
-            Ready to add <span className="font-mono text-xs text-muted-foreground">{check.path}</span>
+          <p className="row-wrap items-center gap-x-2 gap-y-1 text-sm text-foreground">
+            <CheckCircle2Icon className="size-4 shrink-0 text-success" />
+            <span className="shrink-0">Ready to add</span>
+            <PathText path={check.path} base={shared} className="min-w-0 flex-1 text-xs text-muted-foreground" />
           </p>
           {check.github && (
             <Field

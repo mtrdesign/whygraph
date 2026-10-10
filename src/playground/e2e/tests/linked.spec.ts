@@ -183,16 +183,18 @@ test("a linked project: connect, evidence over MCP, revocation, removal", async 
     .check();
   await page.getByRole("button", { name: "Link this checkout" }).click();
 
-  // Configure is skipped (the platform owns the config): Initialize, then the
-  // first scan, which indexes the code structure only.
+  // A linked project's wizard is Source -> Set up (the platform owns the config).
+  // With no agent ticked it warns; Set up queues the first scan, which indexes
+  // the code structure only, and the done panel follows it.
   await expect(page).toHaveURL(new RegExp(`/p/${SLUG}/init\\?step=setup`));
+  await expect(page.getByTestId("no-agent-warning")).toBeVisible();
   await page.getByRole("checkbox", { name: /Claude Code/ }).check();
+  await expect(page.getByTestId("no-agent-warning")).toHaveCount(0);
   await expect(page.getByTestId("init-preview")).toBeVisible();
-  await page.getByRole("button", { name: "Initialize", exact: true }).click();
-  await expect(page.getByTestId("init-done")).toBeVisible();
-  await page.getByRole("button", { name: "Continue to first scan" }).click();
-  // The first Initialize queued the first scan: the step follows it.
+  await page.getByRole("button", { name: "Finish", exact: true }).click();
+  await expect(page.getByTestId("init-done")).toContainText("Project linked");
   await expect(page.getByText("First scan complete")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("connect-agent")).toBeVisible();
   await page.getByRole("button", { name: "Open project", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/p/${SLUG}$`));
   await expect(page.getByTestId("link-notice")).toHaveAttribute("data-status", "ok");
@@ -246,9 +248,9 @@ test("a linked project: connect, evidence over MCP, revocation, removal", async 
   const dialog = page.getByTestId("remove-dialog");
   await dialog.getByRole("button", { name: "Remove from this machine" }).click();
   await expect(page.getByTestId("remove-done")).toBeVisible();
-  // The token was already revoked there, so giving it up now cannot succeed:
-  // the dialog says so and points at the platform's account page.
-  await expect(page.getByTestId("revoke-failed")).toBeVisible();
+  // The token was already revoked there (`token_revoke_result: already_revoked`),
+  // so nothing is left to revoke and the dialog warns about nothing (BUG-7).
+  await expect(page.getByTestId("revoke-failed")).toHaveCount(0);
   await page.getByRole("button", { name: "Back to projects" }).click();
   await expect(page.getByTestId(`project-${SLUG}`)).toHaveCount(0);
   // The checkout itself is untouched; only the portal's markers are gone.

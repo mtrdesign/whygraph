@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 import { themeRepos } from "../lib/fixtures";
 import {
   addLocalProject,
-  configureAndInitialize,
+  setUpProject,
   firstScan,
   openMainSymbol,
   sidebarLink,
@@ -17,7 +17,7 @@ test("switching project shows the other project's data and none of the first's",
 
   // The second project goes through the wizard too, this time by typing its path.
   await addLocalProject(page, billing, "path");
-  await configureAndInitialize(page, billing);
+  await setUpProject(page, billing);
   await firstScan(page, billing);
 
   // billing's Explorer, with one of its symbols selected.

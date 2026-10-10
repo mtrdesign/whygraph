@@ -16,7 +16,7 @@ import { platformHost } from "../../lib/platformLink";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { CopyButton } from "./CopyButton";
+import { CommandBlock } from "../layout/CommandBlock";
 import { Field } from "./Field";
 
 /**
@@ -217,15 +217,12 @@ function Picker({
           {none && (
             <div className="flex flex-col gap-2 p-3.5 text-sm" data-testid="no-candidates">
               <p className="text-muted-foreground">
-                No checkout in your shared folders has this project's repository as its origin. Clone it
-                into a shared folder, then check again; it shows up under Other repositories:
+                No checkout of {pending.project.name} found under your shared folders.{" "}
+                {pending.other_repos.length > 0
+                  ? "If one of the other repositories below is a checkout of it, pick it there. Otherwise clone it into a shared folder, then check again:"
+                  : "Clone it into a shared folder, then check again:"}
               </p>
-              <div className="flex items-center gap-2">
-                <code className="min-w-0 flex-1 truncate rounded-md bg-muted px-2 py-1 font-mono text-xs">
-                  {pending.clone_command}
-                </code>
-                <CopyButton text={pending.clone_command} />
-              </div>
+              <CommandBlock command={pending.clone_command} />
               <div>
                 <Button variant="outline" size="sm" onClick={onRefresh} disabled={refreshing}>
                   {refreshing ? "Checking…" : "Check again"}
@@ -240,8 +237,8 @@ function Picker({
         <div className="flex flex-col gap-2">
           <h2 className="text-sm font-semibold">Other repositories</h2>
           <p className="text-xs text-muted-foreground">
-            Their origin does not match. One is accepted only if it contains the project's latest
-            scanned commit.
+            Their origin does not match. One is accepted only if it contains the commit the platform last
+            scanned.
           </p>
           <div className="flex max-h-56 flex-col overflow-y-auto rounded-lg border border-border" role="radiogroup" aria-label="Other repositories">
             {pending.other_repos.map((c) => (

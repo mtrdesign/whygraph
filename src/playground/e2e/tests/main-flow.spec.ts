@@ -4,7 +4,7 @@ import { expect, test } from "@playwright/test";
 import { themeRepos } from "../lib/fixtures";
 import {
   addLocalProject,
-  configureAndInitialize,
+  setUpProject,
   expectScheme,
   firstScan,
   openMainSymbol,
@@ -12,13 +12,14 @@ import {
   themeOf,
 } from "../lib/ui";
 
-// The main flow of a new project: add a local repo, configure, initialize, run
-// the first scan (the fake scanner), and open the Explorer on what it indexed.
+// The main flow of a new project: add a local repo, set it up (which queues the
+// first scan), follow that scan on Configure (the fake scanner), and open the
+// Explorer on what it indexed.
 // Steps share one portal and build on each other, so they run in order.
 test.describe.configure({ mode: "serial" });
 
 test.describe("main flow", () => {
-  test("add a repo from the shared-folder list, configure and initialize it", async ({ page }, testInfo) => {
+  test("add a repo from the shared-folder list and set it up", async ({ page }, testInfo) => {
     const theme = themeOf(testInfo);
     const { notes } = themeRepos(theme);
 
@@ -26,10 +27,14 @@ test.describe("main flow", () => {
     await expectScheme(page, theme);
 
     await addLocalProject(page, notes, "list");
+    await expect(page.getByRole("heading", { name: `${notes.name}: Set up` })).toBeVisible();
+    await setUpProject(page, notes);
+    // Configure follows the queued first scan with one bar and its steps.
     await expect(page.getByRole("heading", { name: `${notes.name}: Configure` })).toBeVisible();
-    await configureAndInitialize(page, notes);
+    await expect(page.getByTestId("scan-progress")).toBeVisible();
+    await expect(page.getByRole("link", { name: "More settings (chat model, hooks, limits)" })).toBeVisible();
 
-    // Initialize wrote the repo-side wiring: the marker, the MCP entry, hooks.
+    // Set up wrote the repo-side wiring: the marker, the MCP entry, hooks.
     const marker = JSON.parse(fs.readFileSync(path.join(notes.path, ".whygraph", "portal.json"), "utf8"));
     expect(marker.slug).toBe(notes.slug);
     const mcp = JSON.parse(fs.readFileSync(path.join(notes.path, ".mcp.json"), "utf8"));
@@ -37,7 +42,7 @@ test.describe("main flow", () => {
     expect(fs.readFileSync(path.join(notes.path, ".git", "hooks", "post-commit"), "utf8")).toContain("whygraph managed");
   });
 
-  test("the first scan shows live progress and ends on the cost card", async ({ page }, testInfo) => {
+  test("Configure follows the first scan after a reload and ends on the estimate", async ({ page }, testInfo) => {
     const { notes } = themeRepos(themeOf(testInfo));
     await page.goto(`/p/${notes.slug}/init?step=scan`);
     await firstScan(page, notes);

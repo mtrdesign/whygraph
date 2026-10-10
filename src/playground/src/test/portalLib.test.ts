@@ -10,7 +10,7 @@ import {
   valuesToLayer,
   configFormSchema,
 } from "../lib/configForm";
-import { initialScanRunState, reduceScanRun, phasePercent } from "../lib/scanRun";
+import { initialScanRunState, reduceScanRun } from "../lib/scanRun";
 import { projectStatus, timeAgo } from "../lib/projectStatus";
 import { selectionNotes } from "../lib/agents";
 import { plural } from "../lib/plural";
@@ -171,13 +171,12 @@ describe("scan run reducer", () => {
     expect(s.phaseTotal).toBe(4);
     expect(s.phaseTitle).toBe("Git history");
     expect(s.tasks).toEqual([{ name: "git", completed: 10, total: 10, description: "done" }]);
-    expect(phasePercent(s)).toBe(25);
     s = reduceScanRun(s, {
       type: "event",
       event: { type: "end", run_id: 1, status: "ok", summary: null },
     });
     expect(s.finished).toBe("ok");
-    expect(phasePercent(s)).toBe(100);
+    expect(s.maxPercent).toBe(100);
   });
 });
 

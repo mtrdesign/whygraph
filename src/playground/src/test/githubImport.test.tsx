@@ -516,24 +516,55 @@ describe("production project pages", () => {
     });
   });
 
-  it("Configure has no hooks and no GitHub token, keeps the forge toggle, and sits below the first scan", async () => {
+  it("Configure is one screen: no settings form, no hooks, no GitHub token row, the production settings link", async () => {
+    handlers["GET /api/projects/api/scan-estimate"] = () => ({
+      commits: 12,
+      upper_bound: true,
+      large_commits: 0,
+      model: { provider: "anthropic", model: "claude-haiku-4-5" },
+      tokens: null,
+      cost: null,
+      cost_hidden: true,
+      missing_key: null,
+    });
     const user = userEvent.setup();
     const router = mount("/p/api/init?step=configure");
-    const form = await screen.findByTestId("config-form");
-    expect(within(form).queryByRole("heading", { name: "Git hooks" })).toBeNull();
-    expect(within(form).queryByLabelText("GitHub token")).toBeNull();
-    expect(within(form).queryByText(/syncs it on a schedule/)).toBeNull();
-    const forge = within(form).getByRole("switch", { name: "Fetch pull requests and issues from GitHub" });
-    expect(forge).toBeChecked();
+    expect(await screen.findByRole("heading", { name: "Api: Configure" })).toBeInTheDocument();
+    expect(screen.queryByTestId("config-form")).toBeNull();
+    expect(screen.queryByTestId("github-token-row")).toBeNull();
+    expect(screen.queryByText(/Git hooks/)).toBeNull();
+    // Production: Source -> Configure.
+    const steps = within(screen.getByRole("list", { name: "Steps" }));
+    expect(steps.queryByText("Set up")).toBeNull();
+    expect(screen.getByRole("link", { name: "More settings (chat model, limits)" })).toHaveAttribute(
+      "href",
+      "/p/api/settings",
+    );
+    // R6: the count without a price.
+    expect(await screen.findByTestId("scan-estimate")).toHaveTextContent("12 commits are waiting for descriptions.");
+    expect(screen.getByTestId("scan-estimate")).not.toHaveTextContent("tokens hidden");
+    await user.click(screen.getByRole("button", { name: "Open project" }));
+    await waitFor(() => expect(here(router)).toBe("/p/api"));
+  });
 
-    await user.type(within(form).getByLabelText("anthropic"), "sk-ant-1234");
-    // The project has scanned already, so the first-scan card above the form says so.
-    expect(await screen.findByRole("heading", { name: "First scan complete" })).toBeInTheDocument();
-    await user.click(within(form).getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(calls("PUT", "/api/projects/api/config")).toHaveLength(1));
-    expect(here(router)).toBe("/p/api/init?step=configure");
-    const put = calls("PUT", "/api/projects/api/config")[0].body!;
-    expect(put.secrets).toEqual({ llm: { anthropic: "sk-ant-1234" } });
+  it("tells a member without the key that an owner adds it in Organization settings (IMP-6)", async () => {
+    handlers["GET /api/projects/api"] = () =>
+      project("api", { my_role: "viewer", permissions: ["project.read"], last_scan_at: null });
+    handlers["GET /api/projects/api/config"] = () => ({
+      config: {},
+      secrets: secrets(),
+      read_only: true,
+      effective_keys: { anthropic: "none", openai: "none", openrouter: "none", deepseek: "none" },
+      import: { found: false, error: null, secrets_moved: [], dropped: [], custom_db_paths: [], warnings: [] },
+    });
+    mount("/p/api/init?step=configure");
+    const missing = await screen.findByTestId("key-missing");
+    expect(missing).toHaveTextContent("Your organization has no Anthropic key. An owner can add one in Organization settings.");
+    expect(within(missing).getByRole("link", { name: "Organization settings" })).toHaveAttribute(
+      "href",
+      "/settings?section=models",
+    );
+    expect(within(missing).queryByRole("textbox")).toBeNull();
   });
 
   it("sends ?step=initialize (now setup) on to Configure", async () => {

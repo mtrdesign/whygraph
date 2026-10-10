@@ -1,7 +1,7 @@
 # Connecting agents
 
 Each project has its own MCP endpoint on the portal, `http://127.0.0.1:<port>/mcp/<slug>`. When you
-[initialize a project](projects.md#initialize) and select agents, the portal writes a config entry
+[set up a project](projects.md#set-up) and select agents, the portal writes a config entry
 named `whygraph` into each agent's project file, pointing at that endpoint over HTTP. Your agent then
 has the same [tools, resources and prompts](../reference/mcp.md) it always had; the server name is
 unchanged, so `mcp__whygraph__*` tool names still work.

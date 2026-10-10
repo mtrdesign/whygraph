@@ -24,7 +24,7 @@ See [Start the portal](../portal/start.md) for the port, the other host commands
 
 !!! note "Scan first"
     The panel reads the CodeGraph index and the WhyGraph evidence database. A project's first scan
-    (the last step of [adding it](../portal/projects.md#first-scan)) fills them - until then there's no
+    (started when you [set it up](../portal/projects.md#set-up)) fills them - until then there's no
     graph to draw, and every symbol's rationale shows *"no evidence"* (see
     [Rationale on demand](#rationale-on-demand)).
 

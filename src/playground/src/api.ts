@@ -456,6 +456,8 @@ export interface RepoEntry {
 
 export interface CheckPathResult {
   path: string;
+  /** Whether the path exists (BUG-9: a missing folder answers `path_missing`). */
+  exists?: boolean;
   shared: boolean;
   is_git: boolean;
   protected: boolean;

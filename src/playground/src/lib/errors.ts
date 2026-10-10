@@ -16,6 +16,7 @@ const ADD_FIELDS: Record<string, AddError["field"]> = {
   no_access: "token",
   not_linked: "token",
   not_shared: "path",
+  path_missing: "path",
   not_git: "path",
   protected: "path",
 };

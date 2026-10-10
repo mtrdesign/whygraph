@@ -21,12 +21,16 @@ interface Fake {
   shared: boolean;
   github: { slug: string; remote_url: string } | null;
   projects: Json[];
-  config: Record<string, { config: Json; secrets: Json }>;
+  config: Record<string, { config: Json; secrets: Json; [k: string]: unknown }>;
   defaults: Json;
   addError: { status: number; body: Json } | null;
-  init: { needsConfirmation: boolean };
+  init: { needsConfirmation: boolean; scanError?: string };
   events: string[];
   estimate: Json;
+  /** `port` of `GET /api/portal/state` (else the port change's, else 8765). */
+  port?: number;
+  /** `GET .../scans/{id}`: the run's row (its trigger names the wizard's card). */
+  runRow: Json | null;
   /** `port_change` of `GET /api/portal/state`. */
   portChange: Json | null;
   /** `import` of `GET .../config` (the whygraph.toml import report). */
@@ -124,6 +128,12 @@ function initResult(body: Json) {
     marker_written: !dry && pending.length === 0,
     initialized: !dry && pending.length === 0,
     custom_db_paths: [],
+    // The first non-dry Set up queues the first scan (or the runner refuses it).
+    ...(!dry && pending.length === 0
+      ? fake.init.scanError
+        ? { initial_run_id: null, scan_error: fake.init.scanError }
+        : { initial_run_id: 7 }
+      : {}),
   };
 }
 
@@ -140,7 +150,7 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
       mode: "local",
       setup_complete: fake.setupComplete,
       user: fake.setupComplete ? { uid: "u1", display_name: "Ada", role: "owner" } : null,
-      port: (fake.portChange?.port as number | undefined) ?? 8765,
+      port: fake.port ?? (fake.portChange?.port as number | undefined) ?? 8765,
       shared_folders: ["/repos"],
       port_change: fake.portChange,
     });
@@ -162,7 +172,8 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     const p = String(body?.path);
     return reply({
       path: p,
-      shared: fake.shared || p === "/repos/web",
+      exists: !p.endsWith("/gone"),
+      shared: fake.shared || p === "/repos/web" || p.startsWith("/repos/"),
       is_git: true,
       protected: false,
       folder_suggestion: "/elsewhere",
@@ -211,14 +222,21 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     }
     if (rest === "/config" && method === "PUT") {
       const prev = fake.config[slug];
-      const secrets = (body?.secrets ?? {}) as { llm?: Record<string, string | null> };
+      const secrets = (body?.secrets ?? {}) as { llm?: Record<string, string | null>; github_token?: string | null };
       const llm = { ...(prev.secrets.llm as Json) };
       for (const [k, v] of Object.entries(secrets.llm ?? {})) {
         llm[k] = v === null ? noKey : { set: true, hint: `...${String(v).slice(-4)}` };
       }
       fake.config[slug] = {
+        ...prev,
         config: (body?.config as Json) ?? prev.config,
-        secrets: { ...prev.secrets, llm },
+        secrets: {
+          ...prev.secrets,
+          llm,
+          ...(secrets.github_token !== undefined && {
+            github_token: secrets.github_token === null ? noKey : { set: true, hint: "...cret" },
+          }),
+        },
       };
       return reply({
         ...fake.config[slug],
@@ -233,6 +251,23 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
       return reply(result);
     }
     if (rest === "/scans" && method === "POST") return reply({ run_id: body?.trigger === "describe" ? 8 : 7 }, 202);
+    if (rest === "/scans" && method === "GET") return reply({ runs: [], next: null });
+    const run = /^\/scans\/(\d+)$/.exec(rest);
+    if (run && method === "GET") {
+      return reply(
+        fake.runRow ?? {
+          id: Number(run[1]),
+          kind: "scan",
+          trigger: "initial",
+          analyze: false,
+          status: "running",
+          requested_by: null,
+          started_at: null,
+          finished_at: null,
+          summary: null,
+        },
+      );
+    }
     if (rest === "/scan-estimate") return reply(fake.estimate);
     if (rest.startsWith("/scans/") && rest.endsWith("/events")) return Promise.resolve(sse(fake.events));
   }
@@ -276,6 +311,7 @@ beforeEach(() => {
     init: { needsConfirmation: false },
     events: [],
     estimate: {},
+    runRow: null,
     portChange: null,
     importReport: null,
     log: [],
@@ -387,7 +423,7 @@ describe("Add project - local repo", () => {
     expect(screen.getByRole("radio", { name: /web/ })).toBeEnabled();
   });
 
-  it("walks the not-shared alert: command, Check again, then adds and continues to Configure", async () => {
+  it("walks the not-shared alert: command, Check again, then adds and continues to Set up", async () => {
     const user = userEvent.setup();
     const { router } = mount("/projects/new");
     await screen.findByText("web");
@@ -407,9 +443,9 @@ describe("Add project - local repo", () => {
     expect(await screen.findByText(/Ready to add/)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Add project" }));
-    await waitFor(() => expect(here(router)).toBe("/p/web/init?step=configure"));
+    await waitFor(() => expect(here(router)).toBe("/p/web/init?step=setup"));
     expect(posts("/api/projects")[0].body).toEqual({ source: "local", path: "/elsewhere/billing" });
-    expect(await screen.findByRole("heading", { name: /Configure/ })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Web: Set up" })).toBeInTheDocument();
   });
 
   it("offers the optional token for a GitHub-linked repo and sends it", async () => {
@@ -426,6 +462,17 @@ describe("Add project - local repo", () => {
       path: "/repos/web",
       token: "ghp_secret",
     });
+  });
+
+  it("says a missing folder does not exist, not that it is no git repository (BUG-9)", async () => {
+    const user = userEvent.setup();
+    mount("/projects/new");
+    expect(await screen.findByPlaceholderText("Search by name or path")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Or enter a path"), "/repos/gone");
+    await user.click(screen.getByRole("button", { name: "Check" }));
+    expect(await screen.findByText("This folder does not exist. Check the path.")).toBeInTheDocument();
+    expect(screen.queryByText("This folder is not a git repository.")).toBeNull();
+    expect(screen.getByRole("button", { name: "Add project" })).toBeDisabled();
   });
 
   it("shows a failed add inline", async () => {
@@ -448,34 +495,63 @@ describe("Add project - local mode has no GitHub source", () => {
     expect(screen.queryByLabelText("Repository URL")).toBeNull();
     expect(screen.queryByText(/Import from GitHub/)).toBeNull();
     expect(fake.log.some((c) => c.path.startsWith("/api/github"))).toBe(false);
-    // All four steps, Initialize included.
-    expect(within(screen.getByRole("list", { name: "Steps" })).getByText("Initialize")).toBeInTheDocument();
+    // One title and two fixed tabs; the local wizard is Source, Set up, Configure.
+    expect(screen.getByRole("heading", { name: "Add a project" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "This computer" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "From a platform" })).toBeInTheDocument();
+    const steps = within(screen.getByRole("list", { name: "Steps" }));
+    expect(steps.getAllByRole("listitem").map((li) => li.textContent).filter(Boolean)).toEqual([
+      "1Source",
+      "2Set up",
+      "3Configure",
+    ]);
+    expect(screen.getByTestId("wizard-step-compact")).toHaveTextContent("Step 1 of 3 - Source");
   });
 });
 
 // ---- resume -----------------------------------------------------------------------------------------
 
 describe("resuming the wizard", () => {
-  it("an added-but-uninitialized project resumes at Initialize", async () => {
+  it("an added-but-uninitialized project resumes at Set up", async () => {
     fake.projects = [summary("alpha", { initialized: false, initialized_at: null, last_scan_at: null })];
     const { router } = mount("/p/alpha/init");
     await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=setup"));
-    expect(await screen.findByRole("heading", { name: /Initialize/ })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Alpha: Set up" })).toBeInTheDocument();
   });
 
-  it("an initialized project resumes at the first scan", async () => {
+  it("an initialized project without a scan resumes at Configure, offering the first scan", async () => {
     fake.projects = [summary("alpha", { last_scan_at: null })];
     const { router } = mount("/p/alpha/init");
     await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=configure"));
-    expect(await screen.findByRole("button", { name: "Start first scan" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Alpha: Configure" })).toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Start the first scan" }));
+    await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=configure&run=7"));
+    expect(posts("/api/projects/alpha/scans")[0].body).toEqual({ trigger: "manual", analyze: false });
+  });
+
+  it("Configure before Set up goes back to Set up", async () => {
+    fake.projects = [summary("alpha", { initialized: false, initialized_at: null, last_scan_at: null })];
+    const { router } = mount("/p/alpha/init?step=configure");
+    await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=setup"));
+  });
+
+  it("re-attaches to the running scan after a reload and pins it in the address", async () => {
+    fake.projects = [summary("alpha", { last_scan_at: null, running_scan: { id: 7, status: "running", trigger: "initial" } })];
+    fake.events = ['id: 1\ndata: {"type":"start","phase_total":2}\n\n'];
+    const { router } = mount("/p/alpha/init?step=configure");
+    await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=configure&run=7"));
+    expect(await screen.findByTestId("scan-progress")).toBeInTheDocument();
   });
 });
 
-// ---- Configure ----------------------------------------------------------------------------------------
+// ---- the config form (project settings) -------------------------------------------------------------
+// The wizard's Configure step no longer embeds the full form (IMP-3); the form
+// itself is the project settings' Models and keys section.
 
-describe("Configure (screen 5)", () => {
+describe("ConfigForm (project settings)", () => {
   beforeEach(() => {
-    fake.projects = [summary("alpha", { initialized: false, initialized_at: null, last_scan_at: null })];
+    fake.projects = [summary("alpha")];
     fake.config.alpha = {
       config: { analyze: { max_diff_chars: 5000 }, scan: { forge: "auto", hooks: ["post-commit"] } },
       secrets: emptySecrets(),
@@ -483,10 +559,8 @@ describe("Configure (screen 5)", () => {
   });
 
   it("shows the no-key badge for the resolved provider and the four hooks, imported list preserved", async () => {
-    fake.projects = [
-      summary("alpha", { initialized: false, initialized_at: null, last_scan_at: null, missing_key: "anthropic" }),
-    ];
-    mount("/p/alpha/init?step=configure");
+    fake.projects = [summary("alpha", { missing_key: "anthropic" })];
+    mount("/p/alpha/settings");
     const row = await screen.findByTestId("key-anthropic");
     expect(within(row).getByText("no key for anthropic")).toBeInTheDocument();
     expect(within(screen.getByTestId("key-openai")).queryByText(/no key for/)).toBeNull();
@@ -511,7 +585,7 @@ describe("Configure (screen 5)", () => {
       custom_db_paths: [],
       warnings: [],
     };
-    mount("/p/alpha/init?step=configure");
+    mount("/p/alpha/settings");
     const report = (await screen.findByText("Imported from whygraph.toml")).closest("[role=alert]")!;
     const r = within(report as HTMLElement);
     expect(r.getByText("llm.anthropic.api_key")).toBeInTheDocument();
@@ -524,8 +598,8 @@ describe("Configure (screen 5)", () => {
   });
 
   it("hides the hooks for a GitHub clone, with no scheduled-sync note", async () => {
-    fake.projects = [summary("alpha", { source: "github", initialized: false, initialized_at: null })];
-    mount("/p/alpha/init?step=configure");
+    fake.projects = [summary("alpha", { source: "github" })];
+    mount("/p/alpha/settings");
     await screen.findByTestId("config-form");
     expect(screen.queryByRole("heading", { name: "Git hooks" })).toBeNull();
     expect(screen.queryByText(/syncs it on a schedule/)).toBeNull();
@@ -533,17 +607,17 @@ describe("Configure (screen 5)", () => {
     expect(screen.getByLabelText("GitHub token")).toBeInTheDocument();
   });
 
-  it("saves the whole layer (unknown keys kept) and secrets write-only, then moves to Initialize", async () => {
+  it("saves the whole layer (unknown keys kept) and secrets write-only", async () => {
     const user = userEvent.setup();
-    const { router } = mount("/p/alpha/init?step=configure");
+    mount("/p/alpha/settings");
     await screen.findByTestId("config-form");
 
     await user.selectOptions(screen.getByLabelText("Default model provider"), "anthropic");
     await user.type(screen.getByLabelText("Default model model"), "claude-sonnet-4-5");
     await user.type(screen.getByLabelText("anthropic", { selector: "input" }), "sk-ant-1234");
-    await user.click(screen.getByRole("button", { name: "Save and continue" }));
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
 
-    await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=setup"));
+    await waitFor(() => expect(fake.log.some((c) => c.method === "PUT")).toBe(true));
     const put = fake.log.find((c) => c.method === "PUT" && c.path === "/api/projects/alpha/config")!;
     expect(put.body).toEqual({
       config: {
@@ -557,12 +631,11 @@ describe("Configure (screen 5)", () => {
     expect(JSON.stringify(put.body!.config)).not.toContain("sk-ant");
   });
 
-  it("continues without a request when nothing changed", async () => {
+  it("sends nothing when nothing changed", async () => {
     const user = userEvent.setup();
-    const { router } = mount("/p/alpha/init?step=configure");
+    mount("/p/alpha/settings");
     await screen.findByTestId("config-form");
-    await user.click(screen.getByRole("button", { name: "Save and continue" }));
-    await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=setup"));
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
     expect(fake.log.some((c) => c.method === "PUT")).toBe(false);
   });
 
@@ -572,20 +645,20 @@ describe("Configure (screen 5)", () => {
       llm: { ...(emptySecrets().llm as Json), openai: { set: true, hint: "...a1b2" } },
     };
     const user = userEvent.setup();
-    mount("/p/alpha/init?step=configure");
+    mount("/p/alpha/settings");
     const row = await screen.findByTestId("key-openai");
     expect(within(row).getByText("set ...a1b2")).toBeInTheDocument();
     expect(within(row).getByLabelText("openai", { selector: "input" })).toHaveValue("");
 
     await user.type(screen.getByLabelText("OpenAI-compatible base URL"), "nonsense");
-    await user.click(screen.getByRole("button", { name: "Save and continue" }));
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
     expect(await screen.findByText("Enter an http(s) URL")).toBeInTheDocument();
   });
 });
 
-// ---- Initialize ---------------------------------------------------------------------------------------------
+// ---- Set up (Initialize) -------------------------------------------------------------------------------------
 
-describe("Initialize (screen 6)", () => {
+describe("Set up (Initialize)", () => {
   const detected = {
     existing_db: true,
     managed_hooks: ["post-commit"],
@@ -602,9 +675,9 @@ describe("Initialize (screen 6)", () => {
     window.sessionStorage.setItem("whygraph:detected:alpha", JSON.stringify(detected));
   });
 
-  it("pre-selects detected agents, previews each file, and gates Initialize on the tracked-file confirm", async () => {
+  it("pre-selects detected agents, previews each file, gates Set up on the tracked-file confirm, then moves to Configure with the run", async () => {
     const user = userEvent.setup();
-    mount("/p/alpha/init?step=initialize");
+    const { router } = mount("/p/alpha/init?step=setup");
 
     expect(await screen.findByTestId("detected-panel")).toHaveTextContent("Existing database");
     expect(screen.getByRole("checkbox", { name: /Claude Code/ })).toBeChecked();
@@ -614,16 +687,20 @@ describe("Initialize (screen 6)", () => {
     const tracked = await screen.findByTestId("file-.mcp.json");
     expect(within(tracked).getByTestId("diff")).toHaveTextContent('"type": "http"');
     expect(within(screen.getByTestId("file-.vscode/mcp.json")).getByText("Update")).toBeInTheDocument();
+    // With agents ticked the preview still lists what every Set up writes (BUG-16).
+    expect(screen.getByTestId("setup-gitignore")).toBeInTheDocument();
+    expect(screen.getByTestId("setup-hooks")).toBeInTheDocument();
 
-    const initialize = screen.getByRole("button", { name: "Initialize" });
-    expect(initialize).toBeDisabled();
+    const setUp = screen.getByRole("button", { name: "Set up project" });
+    expect(setUp).toBeDisabled();
     expect(screen.getByTestId("confirm-hint")).toBeInTheDocument();
 
     await user.click(within(tracked).getByRole("checkbox"));
-    await waitFor(() => expect(initialize).toBeEnabled());
-    await user.click(initialize);
+    await waitFor(() => expect(setUp).toBeEnabled());
+    await user.click(setUp);
 
-    expect(await screen.findByTestId("init-done")).toHaveTextContent("Project initialized");
+    // The first Set up queued the first scan: straight on to Configure, following it.
+    await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=configure&run=7"));
     const call = posts("/api/projects/alpha/init").find((c) => c.body?.dry_run !== true)!;
     expect(call.body).toEqual({
       agents: ["claude", "vscode"],
@@ -635,7 +712,7 @@ describe("Initialize (screen 6)", () => {
   it("removing a detected entry deselects its agent and sends the remove action", async () => {
     fake.init.needsConfirmation = false;
     const user = userEvent.setup();
-    mount("/p/alpha/init?step=initialize");
+    mount("/p/alpha/init?step=setup");
     const vscode = await screen.findByRole("group", { name: "VS Code / Copilot entry" });
     await user.click(within(vscode).getByRole("button", { name: "Remove entry" }));
     expect(screen.getByRole("checkbox", { name: /VS Code/ })).not.toBeChecked();
@@ -647,27 +724,58 @@ describe("Initialize (screen 6)", () => {
         agent_actions: { vscode: "remove" },
       });
     });
-    await user.click(screen.getByRole("button", { name: "Initialize" }));
-    await screen.findByTestId("init-done");
+    await user.click(screen.getByRole("button", { name: "Set up project" }));
+    await waitFor(() => expect(posts("/api/projects/alpha/init").some((c) => c.body?.dry_run !== true)).toBe(true));
     const call = posts("/api/projects/alpha/init").find((c) => c.body?.dry_run !== true)!;
     expect(call.body).toMatchObject({ agents: ["claude"], agent_actions: { vscode: "remove" } });
   });
 
-  it("continues from the done panel to the first scan", async () => {
+  it("names the portal's real port on the agent cards, in plain words (BUG-16, IMP-10)", async () => {
+    fake.port = 18765;
+    mount("/p/alpha/init?step=setup");
+    const claude = (await screen.findByRole("checkbox", { name: /Claude Code/ })).closest("label")!;
+    expect(claude).toHaveTextContent("Adds .mcp.json and .claude/ for Claude Code.");
+    expect(claude).toHaveTextContent("Connects on port 18765");
+    expect(screen.queryByText(/8765\b(?!.)/)).toBeNull();
+    expect(screen.queryByText(/unset variable/)).toBeNull();
+  });
+
+  it("a refused first scan stays on the done panel with the registry message and Start the first scan", async () => {
     fake.init.needsConfirmation = false;
+    fake.init.scanError = "runner_unavailable";
     const user = userEvent.setup();
-    const { router } = mount("/p/alpha/init?step=initialize");
-    await user.click(await screen.findByRole("button", { name: "Initialize" }));
-    await user.click(await screen.findByRole("button", { name: "Continue to first scan" }));
-    await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=configure"));
+    const { router } = mount("/p/alpha/init?step=setup");
+    await user.click(await screen.findByRole("button", { name: "Set up project" }));
+    const refused = await screen.findByTestId("scan-error");
+    expect(refused).toHaveTextContent("The scan queue isn't running right now.");
+    await user.click(within(refused).getByRole("button", { name: "Start the first scan" }));
+    await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=configure&run=7"));
+    expect(posts("/api/projects/alpha/scans")[0].body).toEqual({ trigger: "manual", analyze: false });
   });
 });
 
-// ---- First scan -------------------------------------------------------------------------------------------------
+// ---- Configure ---------------------------------------------------------------------------------------------------
 
-describe("First scan", () => {
+describe("Configure", () => {
+  const RUNNING = [
+    'id: 1\ndata: {"type":"start","phase_total":2,"phases":["Structural crawl","Author identity"]}\n\n',
+    'id: 2\ndata: {"type":"phase","phase":1,"title":"Structural crawl"}\n\n',
+    'id: 3\ndata: {"type":"task","name":"git","completed":1240,"total":5300,"description":"git"}\n\n',
+  ];
+  const DONE = [
+    ...RUNNING,
+    'id: 4\ndata: {"type":"result","status":"ok"}\n\n',
+    'id: 5\nevent: end\ndata: {"type":"end","run_id":7,"status":"ok","summary":{"coverage":{"commits":5300,"described":0,"described_pct":0,"rationale_cards":0}}}\n\n',
+  ];
+
   beforeEach(() => {
     fake.projects = [summary("alpha", { last_scan_at: null })];
+    fake.config.alpha = {
+      config: {},
+      secrets: emptySecrets(),
+      effective_keys: { anthropic: "org", openai: "none", openrouter: "none", deepseek: "none" },
+      github: { remote: null, token: "none" },
+    };
     fake.estimate = {
       commits: 120,
       upper_bound: true,
@@ -682,42 +790,55 @@ describe("First scan", () => {
       cost: { usd: 1.2, low: 0.6, high: 1.8, currency: "USD", prices_as_of: "2026-09-01" },
       missing_key: null,
     };
-    fake.events = [
-      'id: 1\ndata: {"type":"start","phase_total":2}\n\n',
-      'id: 2\ndata: {"type":"phase","phase":1,"title":"Structural crawl"}\n\n',
-      'id: 3\ndata: {"type":"result","status":"ok"}\n\n',
-      'id: 4\nevent: end\ndata: {"type":"end","run_id":7,"status":"ok","summary":null}\n\n',
-    ];
+    fake.events = DONE;
   });
 
-  it("runs structure-only, streams progress, then offers Describe now / Later with the estimate", async () => {
+  it("follows the run in ?run=, then shows the estimate and Describe N commits (~$X)", async () => {
     const user = userEvent.setup();
-    mount("/p/alpha/init?step=scan");
-    await user.click(await screen.findByRole("button", { name: "Start first scan" }));
-
-    // The first scan is a plain manual request; the backend records it as `initial`.
-    await waitFor(() => expect(posts("/api/projects/alpha/scans")).toHaveLength(1));
-    expect(posts("/api/projects/alpha/scans")[0].body).toEqual({ trigger: "manual", analyze: false });
-    const eventsCall = fake.log.find((c) => c.path === "/api/projects/alpha/scans/7/events");
-    expect(eventsCall).toBeTruthy();
+    const { router } = mount("/p/alpha/init?step=configure&run=7");
+    expect(await screen.findByRole("heading", { name: "First scan complete" })).toBeInTheDocument();
+    expect(fake.log.some((c) => c.path === "/api/projects/alpha/scans/7/events")).toBe(true);
+    // The stepper ticks Configure once the first scan finished (BUG-14).
+    const steps = within(screen.getByRole("list", { name: "Steps" }));
+    expect(steps.getByText("Configure").closest("li")).toHaveAttribute("data-state", "done");
 
     const card = await screen.findByTestId("scan-estimate");
     expect(card).toHaveTextContent("120 commits to describe");
     expect(card).toHaveTextContent("anthropic/claude-haiku-4-5");
     expect(card).toHaveTextContent("~$1.20");
+    // The choices live in the footer, not the card.
+    expect(within(card).queryByRole("button")).toBeNull();
+    expect(screen.getByTestId("key-ready")).toHaveTextContent("Uses the Anthropic key from Portal defaults.");
 
-    await user.click(screen.getByRole("button", { name: "Describe now" }));
-    await waitFor(() => expect(posts("/api/projects/alpha/scans")).toHaveLength(2));
-    expect(posts("/api/projects/alpha/scans")[1].body).toEqual({ trigger: "describe" });
+    await user.click(screen.getByRole("button", { name: "Describe 120 commits (~$1.20)" }));
+    await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=configure&run=8"));
+    expect(posts("/api/projects/alpha/scans")[0].body).toEqual({ trigger: "describe" });
   });
 
-  it("Later leaves for the project home without queuing anything", async () => {
+  it("while the scan runs: one bar with a status line, the estimate placeholder, Describe disabled", async () => {
+    fake.events = RUNNING;
+    mount("/p/alpha/init?step=configure&run=7");
+    expect(await screen.findByText("Reading git history - 1,240 of 5,300 commits")).toBeInTheDocument();
+    const steps = within(screen.getByTestId("scan-steps"));
+    expect(steps.getByText("Git history and GitHub")).toBeInTheDocument();
+    expect(steps.getByText("Author identities")).toBeInTheDocument();
+    expect(screen.queryByText("git")).toBeNull();
+    expect(screen.getByRole("link", { name: "Show details" })).toHaveAttribute("href", "/p/alpha/scans/7");
+    expect(screen.getByTestId("estimate-pending")).toHaveTextContent(
+      "Estimating once the first scan has read the history",
+    );
+    expect(screen.getByRole("button", { name: "Describe commits" })).toBeDisabled();
+    expect(fake.log.some((c) => c.path === "/api/projects/alpha/scan-estimate")).toBe(false);
+    // Open project is always there: the scan carries on.
+    expect(screen.getByRole("button", { name: "Open project" })).toBeEnabled();
+  });
+
+  it("Open project leaves without queuing anything", async () => {
     const user = userEvent.setup();
-    const { router } = mount("/p/alpha/init?step=scan");
-    await user.click(await screen.findByRole("button", { name: "Start first scan" }));
-    await user.click(await screen.findByRole("button", { name: "Later" }));
+    const { router } = mount("/p/alpha/init?step=configure&run=7");
+    await user.click(await screen.findByRole("button", { name: "Open project" }));
     await waitFor(() => expect(here(router)).toBe("/p/alpha"));
-    expect(posts("/api/projects/alpha/scans")).toHaveLength(1);
+    expect(posts("/api/projects/alpha/scans")).toHaveLength(0);
   });
 
   it("reports a failed scan with a retry", async () => {
@@ -726,11 +847,79 @@ describe("First scan", () => {
       'id: 2\nevent: end\ndata: {"type":"end","run_id":7,"status":"failed","summary":{"error":"codegraph crashed"}}\n\n',
     ];
     const user = userEvent.setup();
-    mount("/p/alpha/init?step=scan");
-    await user.click(await screen.findByRole("button", { name: "Start first scan" }));
+    const { router } = mount("/p/alpha/init?step=configure&run=7");
     const failed = await screen.findByTestId("scan-failed");
     expect(failed).toHaveTextContent("codegraph crashed");
-    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=configure&run=7"));
+    expect(posts("/api/projects/alpha/scans")[0].body).toEqual({ trigger: "manual", analyze: false });
+  });
+
+  it("titles a describe run from its row after a reload (BUG-22)", async () => {
+    fake.projects = [summary("alpha")];
+    fake.runRow = { id: 8, kind: "scan", trigger: "describe", analyze: true, status: "running" };
+    fake.events = ['id: 1\ndata: {"type":"start","phase_total":4}\n\n'];
+    mount("/p/alpha/init?step=configure&run=8");
+    expect(await screen.findByRole("heading", { name: "Writing descriptions" })).toBeInTheDocument();
+  });
+
+  it("says No commits yet for an empty history (BUG-14)", async () => {
+    fake.estimate = { ...fake.estimate, commits: 0 };
+    fake.events = [
+      'id: 1\ndata: {"type":"start","phase_total":1}\n\n',
+      'id: 2\nevent: end\ndata: {"type":"end","run_id":7,"status":"ok","summary":{"coverage":{"commits":0,"described":0,"described_pct":0,"rationale_cards":0}}}\n\n',
+    ];
+    mount("/p/alpha/init?step=configure&run=7");
+    expect(await screen.findByText("No commits yet. Push some history, then rescan.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Describe/ })).toBeNull();
+  });
+
+  it("a missing describe key is information, with an inline key field that saves a project key", async () => {
+    fake.config.alpha.effective_keys = { anthropic: "none", openai: "none", openrouter: "none", deepseek: "none" };
+    fake.estimate = { ...fake.estimate, missing_key: "anthropic" };
+    const user = userEvent.setup();
+    mount("/p/alpha/init?step=configure&run=7");
+    const missing = await screen.findByTestId("key-missing");
+    expect(missing).toHaveTextContent("No Anthropic key yet");
+    expect(missing).toHaveTextContent("Descriptions can wait; add one now or later.");
+    expect(missing.className).toMatch(/bg-info-soft/);
+    await user.type(within(missing).getByLabelText("Anthropic API key"), "sk-ant-9999");
+    await user.click(within(missing).getByRole("button", { name: "Save key" }));
+    await waitFor(() => expect(fake.log.some((c) => c.method === "PUT")).toBe(true));
+    const put = fake.log.find((c) => c.method === "PUT")!;
+    expect(put.body).toEqual({ secrets: { llm: { anthropic: "sk-ant-9999" } } });
+  });
+
+  it("the GitHub token row saves the token and queues a quick rescan (R2)", async () => {
+    fake.config.alpha.github = { remote: "acme/alpha", token: "none" };
+    fake.events = RUNNING;
+    const user = userEvent.setup();
+    mount("/p/alpha/init?step=configure&run=7");
+    const row = await screen.findByTestId("github-token-row");
+    expect(row).toHaveTextContent("PRs and issues need a GitHub token.");
+    await user.type(within(row).getByLabelText("GitHub token"), "ghp_secret");
+    await user.click(within(row).getByRole("button", { name: "Save token" }));
+    expect(await screen.findByTestId("github-token-saved")).toHaveTextContent(
+      "WhyGraph fetches pull requests and issues right after the first scan.",
+    );
+    const put = fake.log.find((c) => c.method === "PUT")!;
+    expect(put.body).toEqual({ secrets: { github_token: "ghp_secret" } });
+    expect(posts("/api/projects/alpha/scans").at(-1)!.body).toEqual({ trigger: "manual", analyze: false });
+  });
+
+  it("the GitHub token row has nothing to do when the portal default token applies", async () => {
+    fake.config.alpha.github = { remote: "acme/alpha", token: "org" };
+    mount("/p/alpha/init?step=configure&run=7");
+    expect(await screen.findByTestId("github-token-row")).toHaveTextContent("Using the portal default token");
+    expect(screen.queryByLabelText("GitHub token")).toBeNull();
+  });
+
+  it("links More settings with the local list", async () => {
+    mount("/p/alpha/init?step=configure&run=7");
+    expect(await screen.findByRole("link", { name: "More settings (chat model, hooks, limits)" })).toHaveAttribute(
+      "href",
+      "/p/alpha/settings",
+    );
   });
 });
 

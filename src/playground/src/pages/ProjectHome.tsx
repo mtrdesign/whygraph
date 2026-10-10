@@ -619,26 +619,16 @@ export function ProjectHome() {
           <h2 id="estimate-title" className="text-sm font-semibold">
             Commits waiting for a description
           </h2>
-          {estimate.data.cost_hidden ? (
-            // R6: no price for a caller without project.usage, only the count.
-            <p className="text-sm" data-testid="scan-estimate">
-              {plural(estimate.data.commits, "commit")} {estimate.data.commits === 1 ? "is" : "are"} waiting for
-              descriptions.{" "}
-              {can(p, "project.scan_full")
-                ? "Describe them from the rescan menu."
-                : "Ask a project admin to describe them."}
-            </p>
-          ) : (
-            <EstimateBody
-              slug={slug}
-              estimate={estimate.data}
-              canDescribe={can(p, "project.scan_full") && p.llm_block !== "budget_exceeded"}
-              canConfigure={can(p, "project.configure")}
-              busy={scanPending}
-              onDescribe={() => scanNow({ trigger: "describe" })}
-              onLater={() => setDismissed(true)}
-            />
-          )}
+          {/* R6: a caller without project.usage gets the count without a price (cost_hidden). */}
+          <EstimateBody
+            slug={slug}
+            estimate={estimate.data}
+            canDescribe={can(p, "project.scan_full") && p.llm_block !== "budget_exceeded"}
+            canConfigure={can(p, "project.configure")}
+            busy={scanPending}
+            onDescribe={() => scanNow({ trigger: "describe" })}
+            onLater={() => setDismissed(true)}
+          />
         </section>
       )}
 

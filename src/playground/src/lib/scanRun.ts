@@ -1,9 +1,12 @@
 import { useEffect, useReducer } from "react";
 import { ApiError, projectApi, type ScanEvent, type ScanRunStatus, type ScanRunSummary } from "../api";
+import { PHASE_TASKS, rawPercent } from "./scanProgress";
 
-// Live state of one scan run, folded from the events stream. The first-scan step
-// renders a simple view of it; step 13's full scan-run screen reuses the same
-// hook and reducer.
+export { crawlerLabel } from "./scanProgress";
+
+// Live state of one scan run, folded from the events stream. The wizard's
+// progress card (`ScanProgress`, through `progressModel`) and the scan-run page
+// read the same hook and reducer.
 
 export interface TaskState {
   name: string;
@@ -25,8 +28,25 @@ export interface ScanRunState {
   phaseTitle: string | null;
   /** Every phase seen so far, in the order the stream announced them. */
   phases: { phase: number; title: string }[];
+  /**
+   * The titles the `start` event announced for every phase that will run, in
+   * order (`null` for an older run whose `start` has none). Kept apart from
+   * `phases`, which only holds the phases the stream has reached.
+   */
+  plannedPhases: string[] | null;
   tasks: TaskState[];
-  sync: { status: "cloning" | "fetching" | "ok" | "failed"; moved?: boolean; error?: string } | null;
+  /**
+   * The runner's sync frames of a production GitHub project: `cloning` (an
+   * import's first clone, with the repository's `full_name`) or `fetching`, then
+   * `ok` / `failed`; `cloned` is set on the `ok` frame of a clone.
+   */
+  sync: {
+    status: "cloning" | "fetching" | "ok" | "failed";
+    moved?: boolean;
+    error?: string;
+    fullName?: string;
+    cloned?: boolean;
+  } | null;
   /** A runner-level failure (`{"type":"error"}`), e.g. the repo root is gone. */
   error: string | null;
   /** The child's `result` event. */
@@ -36,6 +56,11 @@ export interface ScanRunState {
   summary: ScanRunSummary | null;
   /** Set when the stream was refused with a 4xx; the hook stops retrying. */
   failure: StreamFailure | null;
+  /**
+   * The highest overall percentage reached so far (`progressModel`'s weights), so
+   * the bar never moves backwards when a later task announces its total.
+   */
+  maxPercent: number | null;
 }
 
 export const initialScanRunState: ScanRunState = {
@@ -43,6 +68,7 @@ export const initialScanRunState: ScanRunState = {
   phase: null,
   phaseTitle: null,
   phases: [],
+  plannedPhases: null,
   tasks: [],
   sync: null,
   error: null,
@@ -50,6 +76,7 @@ export const initialScanRunState: ScanRunState = {
   finished: null,
   summary: null,
   failure: null,
+  maxPercent: null,
 };
 
 type Action =
@@ -60,10 +87,22 @@ type Action =
 export function reduceScanRun(state: ScanRunState, action: Action): ScanRunState {
   if (action.type === "reset") return initialScanRunState;
   if (action.type === "failure") return { ...state, failure: action.failure };
-  const e = action.event;
+  const next = foldEvent(state, action.event);
+  if (next === state) return state;
+  // The high-water mark: a later task's total can lower the pure ratio.
+  const raw = rawPercent(next);
+  const maxPercent = raw === null ? state.maxPercent : Math.max(state.maxPercent ?? 0, raw);
+  return maxPercent === next.maxPercent ? next : { ...next, maxPercent };
+}
+
+function foldEvent(state: ScanRunState, e: ScanEvent): ScanRunState {
   switch (e.type) {
     case "start":
-      return { ...state, phaseTotal: e.phase_total };
+      return {
+        ...state,
+        phaseTotal: e.phase_total,
+        plannedPhases: Array.isArray(e.phases) ? e.phases.filter((t) => typeof t === "string") : state.plannedPhases,
+      };
     case "phase": {
       const phases = state.phases.filter((p) => p.phase !== e.phase);
       phases.push({ phase: e.phase, title: e.title });
@@ -84,7 +123,17 @@ export function reduceScanRun(state: ScanRunState, action: Action): ScanRunState
       return { ...state, tasks };
     }
     case "sync":
-      return { ...state, sync: { status: e.status, moved: e.moved, error: e.error } };
+      return {
+        ...state,
+        sync: {
+          status: e.status,
+          moved: e.moved,
+          error: e.error,
+          // The `ok` frame of a clone carries no name: keep the `cloning` frame's.
+          fullName: e.full_name ?? state.sync?.fullName,
+          cloned: e.cloned ?? state.sync?.cloned,
+        },
+      };
     case "error":
       return { ...state, error: e.message };
     case "result":
@@ -153,33 +202,6 @@ export function useScanRun(slug: string, runId: number | null): ScanRunState {
 
   return state;
 }
-
-/** Overall progress 0-100 from the phase counter, for a coarse bar. */
-export function phasePercent(state: ScanRunState): number | null {
-  if (state.finished === "ok") return 100;
-  if (state.phaseTotal === null || state.phase === null) return null;
-  return Math.round(((state.phase - 1) / state.phaseTotal) * 100);
-}
-
-/** The crawler (task) names that belong to each phase, by the phase's title. */
-const PHASE_TASKS: Record<string, string[]> = {
-  "Structural crawl": ["git", "github"],
-  "PR-origin recovery": ["pr-origins"],
-  "Author identity": ["authors"],
-  "LLM descriptions": ["analyze"],
-};
-
-/** Friendly names for the crawler task labels the scan emits. */
-const CRAWLER_LABEL: Record<string, string> = {
-  git: "Git history",
-  github: "GitHub pull requests and issues",
-  "pr-origins": "PR-origin recovery",
-  authors: "Author identities",
-  analyze: "LLM descriptions",
-  codegraph: "CodeGraph index",
-};
-
-export const crawlerLabel = (name: string) => CRAWLER_LABEL[name] ?? name;
 
 export type PhaseStatus = "pending" | "running" | "done" | "failed" | "skipped";
 

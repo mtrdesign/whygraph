@@ -390,6 +390,96 @@ describe("platform source", () => {
 
 // ---- the project card ----------------------------------------------------------------
 
+describe("linked project Set up", () => {
+  const initBody = (body: Json | null) => {
+    const dry = body?.dry_run === true;
+    return json({
+      dry_run: dry,
+      gitignore_added: dry ? [] : [".whygraph/"],
+      hooks: dry ? null : { installed: ["post-commit"], removed: [], actions: {} },
+      hooks_error: null,
+      agent_files: ((body?.agents as string[]) ?? []).map((a) => ({
+        file: a === "claude" ? ".mcp.json" : `.${a}/mcp.json`,
+        status: "write",
+        agent: a,
+        reason: null,
+        snippet: null,
+        diff: null,
+      })),
+      asset_files: [],
+      configured_agents: dry ? [] : (body?.agents ?? []),
+      needs_confirmation: [],
+      refused: [],
+      marker_written: !dry,
+      initialized: !dry,
+      custom_db_paths: [],
+      ...(dry ? {} : { initial_run_id: 5 }),
+    });
+  };
+  const sse = (frames: string[]) => {
+    const enc = new TextEncoder();
+    return new Response(
+      new ReadableStream({
+        start(c) {
+          for (const f of frames) c.enqueue(enc.encode(f));
+          c.close();
+        },
+      }),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  };
+
+  beforeEach(() => {
+    fake.projects = [project({ initialized: false, initialized_at: null, last_scan_at: null })];
+    fake.routes["POST /api/projects/alpha/init"] = initBody;
+    fake.routes["GET /api/projects/alpha/scans/5"] = () =>
+      json({ id: 5, kind: "scan", trigger: "initial", analyze: false, status: "ok", requested_by: null, started_at: null, finished_at: null, summary: null });
+    fake.routes["GET /api/projects/alpha/scans/5/events"] = () =>
+      sse([
+        'id: 1\ndata: {"type":"start","phase_total":1,"phases":["Code index"]}\n\n',
+        'id: 2\ndata: {"type":"phase","phase":1,"title":"CodeGraph"}\n\n',
+        'id: 3\nevent: end\ndata: {"type":"end","run_id":5,"status":"ok","summary":null}\n\n',
+      ]);
+  });
+
+  it("is Source -> Set up; with no agent it warns, and Finish asks once more", async () => {
+    const user = userEvent.setup();
+    const router = mount("/p/alpha/init");
+    await waitFor(() => expect(router.state.location.search).toMatchObject({ step: "setup" }));
+    const steps = within(await screen.findByRole("list", { name: "Steps" }));
+    expect(steps.getAllByRole("listitem").map((li) => li.textContent).filter(Boolean)).toEqual(["Source", "2Set up"]);
+    expect(await screen.findByTestId("no-agent-warning")).toHaveTextContent(
+      "Pick at least one agent - without one, nothing on this machine uses the link.",
+    );
+    await user.click(await screen.findByRole("button", { name: "Finish" }));
+    expect(mutations().some((c) => c.path === "/api/projects/alpha/init" && c.body?.dry_run !== true)).toBe(false);
+    await user.click(screen.getByRole("button", { name: "Finish without an agent" }));
+    expect(await screen.findByTestId("init-done")).toHaveTextContent("Project linked");
+  });
+
+  it("preselects the agents the checkout has, then ends on its first scan and Connect your agent", async () => {
+    window.sessionStorage.setItem(
+      "whygraph:detected:alpha",
+      JSON.stringify({
+        existing_db: false,
+        managed_hooks: [],
+        detected_agents: [{ agent: "claude", file: ".mcp.json", key: "mcpServers.whygraph", shape: "http", stale: false, tracked: false }],
+        custom_db_paths: [],
+      }),
+    );
+    const user = userEvent.setup();
+    const router = mount("/p/alpha/init?step=setup");
+    expect(await screen.findByRole("checkbox", { name: /Claude Code/ })).toBeChecked();
+    expect(screen.queryByTestId("no-agent-warning")).toBeNull();
+    await user.click(await screen.findByRole("button", { name: "Finish" }));
+    expect(await screen.findByRole("heading", { name: "First scan complete" })).toBeInTheDocument();
+    expect(screen.getByTestId("connect-agent")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Open project" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/p/alpha"));
+    window.sessionStorage.clear();
+  });
+});
+
 describe("linked project card", () => {
   const cases: [LinkStatus, string | null, string][] = [
     ["ok", null, "Linked to acme/alpha on whygraph.example.com"],

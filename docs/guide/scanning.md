@@ -5,7 +5,7 @@ picks up new commits and backfills what's missing.
 
 **In the portal you don't run it by hand.** The [portal](../portal/index.md) runs every scan itself, as
 a `whygraph scan` child process in the project's folder: the first scan during
-[project setup](../portal/projects.md#first-scan), then **Scan now**, the git hooks, and a periodic
+[project setup](../portal/projects.md#configure), then **Scan now**, the git hooks, and a periodic
 catch-up (in [production mode](../deploy/production.md#keeping-projects-current), GitHub's push
 webhooks and an hourly check instead). Progress and the log of each run are on the project's
 **Scans** page. How runs are triggered, queued and coalesced is in the

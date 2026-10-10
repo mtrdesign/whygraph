@@ -1,7 +1,7 @@
 import { TriangleAlertIcon } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
-import { CopyButton } from "./CopyButton";
+import { CommandBlock } from "../layout/CommandBlock";
 
 /**
  * Screen 3's alert for a folder the portal cannot see. The command comes from the
@@ -28,24 +28,13 @@ export function NotSharedAlert({
           Share the folder, then check again. The portal restarts in a few seconds and keeps your
           projects.
         </p>
-        {command && (
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <code className="min-w-0 flex-1 overflow-x-auto rounded-md bg-muted px-2 py-1 font-mono text-xs text-foreground">
-              {command}
-            </code>
-            <CopyButton text={command} />
-            <Button type="button" size="sm" variant="outline" onClick={onCheckAgain} disabled={checking}>
-              {checking ? "Checking…" : "Check again"}
-            </Button>
-          </div>
-        )}
-        {!command && (
-          <div className="mt-2">
-            <Button type="button" size="sm" variant="outline" onClick={onCheckAgain} disabled={checking}>
-              {checking ? "Checking…" : "Check again"}
-            </Button>
-          </div>
-        )}
+        {/* The command wraps instead of widening the page, and what shows is what Copy copies (PH-4). */}
+        {command && <CommandBlock command={command} className="mt-2 text-foreground" />}
+        <div className="mt-2">
+          <Button type="button" size="sm" variant="outline" onClick={onCheckAgain} disabled={checking}>
+            {checking ? "Checking…" : "Check again"}
+          </Button>
+        </div>
       </AlertDescription>
     </Alert>
   );

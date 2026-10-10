@@ -1,42 +1,51 @@
-// The four agents the portal can wire (`agents.py`), with what the Initialize
-// step tells the user about each one (plan section 4.4.1).
+// The four agents the portal can wire (`agents.py`), with what the Set up step
+// tells the user about each one (M2f-3 plan section 4.9: plain words, the real port).
 
 export interface AgentInfo {
   id: "claude" | "cursor" | "vscode" | "codex";
   label: string;
   /** The MCP config file the portal writes, relative to the repo root. */
   file: string;
-  /** How the entry behaves when the file is committed. */
-  commit: string;
+  /** Everything Initialize adds for the agent, in plain words (IMP-10). */
+  adds: string;
+  /** How the entry finds the portal, for the portal's real `port` (BUG-16). */
+  portNote: (port: number | string) => string;
   /** A caveat worth seeing before initializing, if any. */
   note?: string;
 }
+
+/** What a teammate whose portal runs on another port does with a literal port. */
+const OTHER_PORT = "A teammate whose portal runs on another port changes it in their copy.";
 
 export const AGENTS: AgentInfo[] = [
   {
     id: "claude",
     label: "Claude Code",
     file: ".mcp.json",
-    commit: "Commit-safe: the URL reads the port from ${WHYGRAPH_PORT:-8765}.",
+    adds: "Adds .mcp.json and .claude/ for Claude Code.",
+    portNote: (port) => `Connects on port ${port}. Safe to commit: each teammate's portal port is used.`,
     note: "Claude Code asks you to approve the project's MCP server the first time it opens the repo.",
   },
   {
     id: "cursor",
     label: "Cursor",
     file: ".cursor/mcp.json",
-    commit: "Writes the port literally (Cursor has no default for an unset variable).",
+    adds: "Adds .cursor/mcp.json and .cursor/ for Cursor.",
+    portNote: (port) => `Connects on port ${port}. ${OTHER_PORT}`,
   },
   {
     id: "vscode",
     label: "VS Code / Copilot",
     file: ".vscode/mcp.json",
-    commit: "Commit-safe: VS Code prompts for the port (default 8765).",
+    adds: "Adds .vscode/mcp.json and .github/ for VS Code and Copilot.",
+    portNote: (port) => `VS Code asks for the port once (${port} here). Safe to commit.`,
   },
   {
     id: "codex",
     label: "Codex",
     file: ".codex/config.toml",
-    commit: "Writes the port literally (Codex documents no interpolation in url).",
+    adds: "Adds .codex/config.toml, AGENTS.md and .codex/agents/ for Codex.",
+    portNote: (port) => `Connects on port ${port}. ${OTHER_PORT}`,
     note: "Codex loads .codex/config.toml for trusted projects only - trust this project in Codex for the server to load.",
   },
 ];

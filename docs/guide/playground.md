@@ -24,7 +24,7 @@ See [Start the portal](../portal/start.md) for the port, the other host commands
 
 !!! note "Scan first"
     The panel reads the CodeGraph index and the WhyGraph evidence database. A project's first scan
-    (the last step of [adding it](../portal/projects.md#first-scan)) fills them - until then there's no
+    (started when you [set it up](../portal/projects.md#set-up)) fills them - until then there's no
     graph to draw, and every symbol's rationale shows *"no evidence"* (see
     [Rationale on demand](#rationale-on-demand)).
 
@@ -70,6 +70,14 @@ See [Start the portal](../portal/start.md) for the port, the other host commands
 
 </div>
 
+### On a phone
+
+Below the `md` breakpoint (about 768 px) the three panes become one: scrollable **Tree**, **Graph**
+and **Details** tabs share a single full-height pane. Pick a symbol in the tree (or tap a node in the
+graph, or open a link) and the view jumps to **Details**; **Back to graph** returns to the graph. The
+open symbol stays in the address (`?node=...&file=...`), so a link works the same on a desktop. A link
+that has only `?node=` still finds the symbol's file and opens the tree down to it.
+
 Every symbol reference in the panel - a search hit, a graph node, a relationship row - opens the same
 way, so you can navigate the codebase by following edges. A `whygraph://symbol/...` link in a
 [chat](chat.md) answer opens a symbol here too.
@@ -89,9 +97,19 @@ Generating a rationale card calls an LLM, so the panel never does it behind your
 button. Click it, watch the loading state, and the card renders - and is cached, exactly as if the
 MCP tool had produced it.
 
-The button is **disabled** when the symbol has no historical evidence to reason from - most commonly
-because the repo hasn't been scanned, or the code isn't committed yet. Run `whygraph scan` and the
-button lights up. The **Evidence** and **History** tabs never call an LLM, so they always work.
+The tab shows one state at a time:
+
+- **Generate rationale** - the symbol has history and you can generate.
+- **No history to explain yet** - the symbol has no commits in the scanned history, so there is no
+  button to press. Rescan from the project Overview after new commits (locally you can also run
+  `whygraph scan`).
+- **Add a provider key** - the rationale model's provider has no key. People who can change the
+  project's settings get a link to them; everyone else is told to ask a project admin.
+- **Viewers can read cards but not generate them** - for the viewer role.
+- **A monthly budget message** with the button disabled - when a hard-stopped budget is reached.
+
+The **Evidence** and **History** tabs never call an LLM, so they always work; when they are empty they
+say to rescan after new commits.
 
 Generation uses the rationale model configured for the project - the **rationale** override or the
 default model, with the provider key from Settings - the same provider and model the MCP tool uses.
@@ -101,7 +119,8 @@ If that provider has no key yet, add one under Settings first. See
 ### Coverage heatmap
 
 Because rationale cards are generated lazily, the overview colors each directory and file by how much
-of it has been analyzed - a quick map of where you've already asked "why?" and where you haven't.
+of it has been explained - a quick map of where you've already asked "why?" and where you haven't.
+Hover a bar (or read it with a screen reader) for "Explained: 0 of 2 symbols".
 
 ## Develop the UI
 

@@ -27,6 +27,11 @@ that project's context. Every answer carries ``project`` - the
 * ``GET /history``, ``/commits/{sha}``, ``/prs/{number}``,
   ``/issues/{number}``, ``/overview`` - the MCP resource bodies.
 
+Each of the seven data routes counts one agent call (``v1:evidence``,
+``v1:rationale``, ``v1:history``, ``v1:commit``, ``v1:pr``, ``v1:issue``,
+``v1:overview``) once it passed its rate limit; the status route ``GET ""``,
+which a local portal polls, is not agent activity and is not counted.
+
 Limits (on :class:`~whygraph.portal.deps.PortalState`): ``v1_token`` per
 token for the reads, ``v1_heavy`` per token for evidence and rationale,
 ``v1_in_flight`` per org for the heavy pair (``503 busy`` without waiting),
@@ -67,7 +72,7 @@ from whygraph.api_v1 import (
 )
 from whygraph.core import get_config
 from whygraph.core.config import AnalyzeConfig, RationaleConfig, is_agent_limit
-from whygraph.core.usage import BUDGET_EXCEEDED
+from whygraph.core.usage import BUDGET_EXCEEDED, count_agent_call
 from whygraph.mcp.errors import WhyGraphError
 from whygraph.mcp.evidence import (
     _evidence_dict,
@@ -156,6 +161,21 @@ def _rate(name: str) -> Callable[..., Awaitable[None]]:
 
 _light = _rate("v1_token")
 _heavy = _rate("v1_heavy")
+
+
+def _counted(kind: str) -> Callable[[], Awaitable[None]]:
+    """The dependency that counts a data call as agent activity (M2f-3).
+
+    Declared after the route's throttle (and body) dependencies, which
+    FastAPI resolves in signature order, so a refused (``429``) call is
+    never counted. The usage sink the project binding put up carries the
+    attribution (:meth:`~whygraph.portal.usage.PortalUsageSink.count_call`).
+    """
+
+    async def dependency() -> None:
+        count_agent_call(kind)
+
+    return dependency
 
 
 @contextmanager
@@ -453,6 +473,7 @@ def post_evidence(
     principal: Principal = Depends(v1_user),
     _limit: None = Depends(_heavy),
     body: EvidenceIn = Depends(_json_body(EvidenceIn)),
+    _count: None = Depends(_counted("v1:evidence")),
 ) -> dict:
     """Evidence for a target's pushed hunks, from the server clone and its DB."""
     state = portal_state(request)
@@ -485,6 +506,7 @@ def post_rationale(
     principal: Principal = Depends(v1_user),
     _limit: None = Depends(_heavy),
     body: RationaleIn = Depends(_json_body(RationaleIn)),
+    _count: None = Depends(_counted("v1:rationale")),
 ) -> dict:
     """A rationale card: the platform's own symbol range when it knows the name."""
     state = portal_state(request)
@@ -523,6 +545,7 @@ def get_history(
     project: BoundProject = Depends(_PROJECT),
     principal: Principal = Depends(v1_user),
     _limit: None = Depends(_light),
+    _count: None = Depends(_counted("v1:history")),
     path: str = Query(..., max_length=MAX_PATH),
     limit: int = Query(20, ge=1, le=MAX_LIMIT),
     include_renames: bool = Query(True),
@@ -561,6 +584,7 @@ def get_commit(
     project: BoundProject = Depends(_PROJECT),
     principal: Principal = Depends(v1_user),
     _limit: None = Depends(_light),
+    _count: None = Depends(_counted("v1:commit")),
 ) -> dict:
     """A scanned commit and the PRs that contain it."""
     sha = _checked(_SHA, sha)
@@ -573,6 +597,7 @@ def get_pr(
     project: BoundProject = Depends(_PROJECT),
     principal: Principal = Depends(v1_user),
     _limit: None = Depends(_light),
+    _count: None = Depends(_counted("v1:pr")),
 ) -> dict:
     """A pull request and the issues it closes."""
     return _resource(project, principal, lambda: _pr_resource(number))
@@ -584,6 +609,7 @@ def get_issue(
     project: BoundProject = Depends(_PROJECT),
     principal: Principal = Depends(v1_user),
     _limit: None = Depends(_light),
+    _count: None = Depends(_counted("v1:issue")),
 ) -> dict:
     """An issue and the PRs that close it."""
     return _resource(project, principal, lambda: _issue_resource(number))
@@ -594,6 +620,7 @@ def get_overview(
     project: BoundProject = Depends(_PROJECT),
     principal: Principal = Depends(v1_user),
     _limit: None = Depends(_light),
+    _count: None = Depends(_counted("v1:overview")),
 ) -> dict:
     """Repository-level counts, freshness and top contributors."""
     return _resource(project, principal, _repo_overview_resource)

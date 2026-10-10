@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import type { UsageGroup, UsageGroupRow } from "../../api";
-import { formatTokens, formatUsd } from "../../lib/format";
+import { formatNumber, formatTokens, formatUsd } from "../../lib/format";
+import { ResponsiveTable, type Column } from "../layout/ResponsiveTable";
 
 const KEY_HEADINGS: Record<UsageGroup, string> = {
   project: "Project",
@@ -16,7 +17,7 @@ const KEY_HEADINGS: Record<UsageGroup, string> = {
  * One `group=` breakdown as a table: calls, tokens, the interactive / scans split
  * and the estimated cost, costliest first (the server's order). `link` turns a
  * row's label into a link (a filtered Calls view, a member drill-down) or returns
- * `null` to leave it as text.
+ * `null` to leave it as text. Below `sm` each row stacks (PH-5).
  */
 export function BreakdownTable({
   group,
@@ -37,55 +38,64 @@ export function BreakdownTable({
   if (shown.length === 0) {
     return <p className="text-sm text-muted-foreground">No LLM calls in this range.</p>;
   }
+  const muted = "text-muted-foreground";
+  const columns: Column<UsageGroupRow>[] = [
+    {
+      key: "key",
+      header: KEY_HEADINGS[group],
+      primary: true,
+      cell: (row) => <span title={row.label}>{link?.(row) ?? row.label}</span>,
+    },
+    { key: "calls", header: "Calls", align: "right", cell: (row) => formatNumber(row.calls) },
+  ];
+  if (!compact) {
+    columns.push(
+      { key: "in", header: "Tokens in", align: "right", cell: (row) => formatTokens(row.input_tokens) },
+      { key: "out", header: "Tokens out", align: "right", cell: (row) => formatTokens(row.output_tokens) },
+      {
+        key: "interactive",
+        header: "Interactive",
+        align: "right",
+        cell: (row) => <span className={muted}>{formatUsd(row.interactive.cost_usd)}</span>,
+      },
+      {
+        key: "scans",
+        header: "Scans",
+        align: "right",
+        cell: (row) => <span className={muted}>{formatUsd(row.scans.cost_usd)}</span>,
+      },
+    );
+    if (group === "member") {
+      columns.push({
+        key: "top",
+        header: "Top project",
+        cell: (row) => (
+          <span className={muted}>
+            {row.top_project ? `${row.top_project.name} (${formatUsd(row.top_project.cost_usd)})` : "-"}
+          </span>
+        ),
+      });
+    }
+  }
+  columns.push({
+    key: "cost",
+    header: "Est. cost",
+    align: "right",
+    cell: (row) => (
+      <>
+        {formatUsd(row.cost_usd)}
+        {row.unpriced_calls > 0 && <span className="block text-[11px] text-warning">{row.unpriced_calls} unpriced</span>}
+      </>
+    ),
+  });
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-left text-xs" data-testid={`breakdown-${group}`}>
-        <thead className="text-muted-foreground">
-          <tr>
-            <th className="py-1.5 pr-3 font-medium">{KEY_HEADINGS[group]}</th>
-            <th className="py-1.5 pr-3 text-right font-medium">Calls</th>
-            {!compact && <th className="py-1.5 pr-3 text-right font-medium">Tokens in</th>}
-            {!compact && <th className="py-1.5 pr-3 text-right font-medium">Tokens out</th>}
-            {!compact && <th className="py-1.5 pr-3 text-right font-medium">Interactive</th>}
-            {!compact && <th className="py-1.5 pr-3 text-right font-medium">Scans</th>}
-            {group === "member" && !compact && <th className="py-1.5 pr-3 font-medium">Top project</th>}
-            <th className="py-1.5 text-right font-medium">Est. cost</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-border">
-          {shown.map((row, i) => (
-            <tr key={`${row.key ?? "null"}:${row.label}:${i}`} data-testid={`breakdown-row-${row.key ?? row.label}`}>
-              <td className="max-w-[18rem] truncate py-1.5 pr-3" title={row.label}>
-                {link?.(row) ?? row.label}
-              </td>
-              <td className="py-1.5 pr-3 text-right tabular-nums">{row.calls.toLocaleString("en-US")}</td>
-              {!compact && <td className="py-1.5 pr-3 text-right tabular-nums">{formatTokens(row.input_tokens)}</td>}
-              {!compact && <td className="py-1.5 pr-3 text-right tabular-nums">{formatTokens(row.output_tokens)}</td>}
-              {!compact && (
-                <td className="py-1.5 pr-3 text-right tabular-nums text-muted-foreground">
-                  {formatUsd(row.interactive.cost_usd)}
-                </td>
-              )}
-              {!compact && (
-                <td className="py-1.5 pr-3 text-right tabular-nums text-muted-foreground">
-                  {formatUsd(row.scans.cost_usd)}
-                </td>
-              )}
-              {group === "member" && !compact && (
-                <td className="max-w-[12rem] truncate py-1.5 pr-3 text-muted-foreground">
-                  {row.top_project ? `${row.top_project.name} (${formatUsd(row.top_project.cost_usd)})` : "-"}
-                </td>
-              )}
-              <td className="py-1.5 text-right tabular-nums">
-                {formatUsd(row.cost_usd)}
-                {row.unpriced_calls > 0 && (
-                  <span className="block text-[11px] text-warning">{row.unpriced_calls} unpriced</span>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div data-testid={`breakdown-${group}`}>
+      <ResponsiveTable
+        columns={columns}
+        rows={shown}
+        rowKey={(row) => `${row.key ?? "null"}:${row.label}`}
+        rowTestId={(row) => `breakdown-row-${row.key ?? row.label}`}
+      />
     </div>
   );
 }

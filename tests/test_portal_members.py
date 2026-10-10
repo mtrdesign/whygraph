@@ -203,7 +203,7 @@ def test_an_owner_adds_lists_re_roles_and_removes(team: SimpleNamespace) -> None
     ]
     # Never an email; an owner (org.usage) also sees each member's spend
     # this month (M2f-2 section 4.12; test_portal_usage_routes.py).
-    assert all(set(m) == MEMBER_FIELDS | USAGE_FIELDS for m in body)
+    assert all(set(m) == MEMBER_FIELDS | USAGE_FIELDS | {"grants"} for m in body)
     changed = set_role(t, "cy", "admin")
     assert changed.status_code == 200 and changed.json()["role"] == "admin"
     assert remove(t, "cy").status_code == 204

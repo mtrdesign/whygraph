@@ -235,7 +235,7 @@ describe("connect callback page", () => {
   it("renders a refusal with the shared message", async () => {
     fake.routes["POST /api/platform/callback"] = () => json({ detail: "x", code: "issuer_mismatch" }, 422);
     mount(CB);
-    expect(await screen.findByTestId("callback-error")).toHaveTextContent("did not come from the platform");
+    expect(await screen.findByTestId("callback-error")).toHaveTextContent("came from an unexpected server");
     expect(screen.getByRole("link", { name: "Start again" })).toBeInTheDocument();
   });
 
@@ -282,12 +282,20 @@ describe("platform source", () => {
     expect(within(picker).getByRole("radiogroup", { name: "Checkout" })).toHaveTextContent("/repos/alpha");
     expect(within(picker).getByRole("radiogroup", { name: "Other repositories" })).toHaveTextContent("/repos/other");
     expect(screen.queryByTestId("no-candidates")).toBeNull();
+    // PH-8: candidate paths keep their tail (a start-truncating PathText); the
+    // "Connected to" line wraps, its icon never squeezed.
+    const row = within(picker).getByTitle("/repos/alpha");
+    expect(row).toHaveAttribute("data-slot", "path-text");
+    const connected = screen.getByTestId("platform-connected");
+    expect(connected.className).not.toContain("items-center");
+    expect(connected.querySelector("svg")?.getAttribute("class")).toContain("shrink-0");
+    expect(connected.querySelector("span")?.className).toContain("min-w-0");
     const submit = screen.getByRole("button", { name: "Link this checkout" });
     expect(submit).toBeDisabled();
     await user.click(screen.getByRole("radio", { name: /alpha/ }));
-    await user.click(submit);
+    await user.click(screen.getByRole("button", { name: "Link this checkout" }));
     await waitFor(() => expect(router.state.location.pathname).toBe("/p/alpha/init"));
-    expect(router.state.location.search).toMatchObject({ step: "initialize" });
+    expect(router.state.location.search).toMatchObject({ step: "setup" });
     expect(mutations().find((c) => c.path === "/api/projects")?.body).toEqual({
       source: "platform",
       link_id: "L1",
@@ -390,6 +398,96 @@ describe("platform source", () => {
 
 // ---- the project card ----------------------------------------------------------------
 
+describe("linked project Set up", () => {
+  const initBody = (body: Json | null) => {
+    const dry = body?.dry_run === true;
+    return json({
+      dry_run: dry,
+      gitignore_added: dry ? [] : [".whygraph/"],
+      hooks: dry ? null : { installed: ["post-commit"], removed: [], actions: {} },
+      hooks_error: null,
+      agent_files: ((body?.agents as string[]) ?? []).map((a) => ({
+        file: a === "claude" ? ".mcp.json" : `.${a}/mcp.json`,
+        status: "write",
+        agent: a,
+        reason: null,
+        snippet: null,
+        diff: null,
+      })),
+      asset_files: [],
+      configured_agents: dry ? [] : (body?.agents ?? []),
+      needs_confirmation: [],
+      refused: [],
+      marker_written: !dry,
+      initialized: !dry,
+      custom_db_paths: [],
+      ...(dry ? {} : { initial_run_id: 5 }),
+    });
+  };
+  const sse = (frames: string[]) => {
+    const enc = new TextEncoder();
+    return new Response(
+      new ReadableStream({
+        start(c) {
+          for (const f of frames) c.enqueue(enc.encode(f));
+          c.close();
+        },
+      }),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  };
+
+  beforeEach(() => {
+    fake.projects = [project({ initialized: false, initialized_at: null, last_scan_at: null })];
+    fake.routes["POST /api/projects/alpha/init"] = initBody;
+    fake.routes["GET /api/projects/alpha/scans/5"] = () =>
+      json({ id: 5, kind: "scan", trigger: "initial", analyze: false, status: "ok", requested_by: null, started_at: null, finished_at: null, summary: null });
+    fake.routes["GET /api/projects/alpha/scans/5/events"] = () =>
+      sse([
+        'id: 1\ndata: {"type":"start","phase_total":1,"phases":["Code index"]}\n\n',
+        'id: 2\ndata: {"type":"phase","phase":1,"title":"CodeGraph"}\n\n',
+        'id: 3\nevent: end\ndata: {"type":"end","run_id":5,"status":"ok","summary":null}\n\n',
+      ]);
+  });
+
+  it("is Source -> Set up; with no agent it warns, and Finish asks once more", async () => {
+    const user = userEvent.setup();
+    const router = mount("/p/alpha/init");
+    await waitFor(() => expect(router.state.location.search).toMatchObject({ step: "setup" }));
+    const steps = within(await screen.findByRole("list", { name: "Steps" }));
+    expect(steps.getAllByRole("listitem").map((li) => li.textContent).filter(Boolean)).toEqual(["Source", "2Set up"]);
+    expect(await screen.findByTestId("no-agent-warning")).toHaveTextContent(
+      "Pick at least one agent - without one, nothing on this machine uses the link.",
+    );
+    await user.click(await screen.findByRole("button", { name: "Finish" }));
+    expect(mutations().some((c) => c.path === "/api/projects/alpha/init" && c.body?.dry_run !== true)).toBe(false);
+    await user.click(screen.getByRole("button", { name: "Finish without an agent" }));
+    expect(await screen.findByTestId("init-done")).toHaveTextContent("Project linked");
+  });
+
+  it("preselects the agents the checkout has, then ends on its first scan and Connect your agent", async () => {
+    window.sessionStorage.setItem(
+      "whygraph:detected:alpha",
+      JSON.stringify({
+        existing_db: false,
+        managed_hooks: [],
+        detected_agents: [{ agent: "claude", file: ".mcp.json", key: "mcpServers.whygraph", shape: "http", stale: false, tracked: false }],
+        custom_db_paths: [],
+      }),
+    );
+    const user = userEvent.setup();
+    const router = mount("/p/alpha/init?step=setup");
+    expect(await screen.findByRole("checkbox", { name: /Claude Code/ })).toBeChecked();
+    expect(screen.queryByTestId("no-agent-warning")).toBeNull();
+    await user.click(await screen.findByRole("button", { name: "Finish" }));
+    expect(await screen.findByRole("heading", { name: "First scan complete" })).toBeInTheDocument();
+    expect(screen.getByTestId("connect-agent")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Open project" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/p/alpha"));
+    window.sessionStorage.clear();
+  });
+});
+
 describe("linked project card", () => {
   const cases: [LinkStatus, string | null, string][] = [
     ["ok", null, "Linked to acme/alpha on whygraph.example.com"],
@@ -451,6 +549,33 @@ describe("linked project pages", () => {
     expect(fake.calls.some((c) => c.path.endsWith("/scan-estimate"))).toBe(false);
   });
 
+  it("a revoked link offers Reconnect only: no Rescan, no Manage, no Connect your agent (OVW-3)", async () => {
+    fake.projects = [project({ link: link({ status: "revoked", status_reason: "idle" }) })];
+    mount("/p/alpha");
+    const health = await screen.findByTestId("health-panel");
+    expect(health).toHaveAttribute("data-status", "link_revoked");
+    expect(screen.getByTestId("health-link")).toHaveTextContent("Access revoked");
+    // The notice once (the health item, not again in the linked card) and Reconnect once (the header).
+    const reconnect = screen.getAllByRole("link", { name: "Reconnect" });
+    expect(reconnect).toHaveLength(1);
+    expect(reconnect[0].getAttribute("href")).toContain("/link?");
+    expect(within(screen.getByTestId("health-link")).getByText(/Access revoked/)).toBeInTheDocument();
+    expect(within(screen.getByTestId("linked-panel")).queryByText(/Access revoked/)).toBeNull();
+    expect(within(screen.getByTestId("linked-panel")).queryByTestId("link-notice")).toBeNull();
+    expect(within(screen.getByTestId("health-link")).getByRole("link", { name: "Remove from this machine" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Rescan" })).toBeNull();
+    expect(within(screen.getByTestId("linked-panel")).queryByRole("link", { name: /Manage on platform/ })).toBeNull();
+    expect(screen.queryByTestId("connect-agent")).toBeNull();
+    expect(screen.getByText("Link revoked")).toBeInTheDocument();
+  });
+
+  it("a healthy linked project offers a plain Rescan, never a full one", async () => {
+    mount("/p/alpha");
+    await screen.findByTestId("linked-panel");
+    expect(screen.getByRole("button", { name: "Rescan" })).toBeEnabled();
+    expect(screen.queryByRole("menuitem", { name: "Full rescan" })).toBeNull();
+  });
+
   it("a viewer on the platform sees the role and no chat link", async () => {
     fake.projects = [project({ link: link({ project_role: "viewer" }) })];
     mount("/p/alpha");
@@ -481,8 +606,18 @@ describe("linked project pages", () => {
     expect(await screen.findByTestId("linked-name")).toHaveTextContent("Alpha");
     expect(screen.queryByRole("button", { name: "Rename" })).toBeNull();
     expect(screen.queryByText("Models and keys")).toBeNull();
+    // The platform owns the rest, and says so (SET-4, plan section 0.3 #42).
+    expect(screen.getByTestId("settings-managed")).toHaveTextContent("Change its settings there.");
+    const nav = screen.getByRole("navigation", { name: "Settings sections" });
+    expect(within(nav).getAllByRole("button").map((b) => b.textContent)).toEqual([
+      "General",
+      "Agents",
+      "Git hooks",
+      "Danger zone",
+    ]);
+    expect(screen.queryByTestId("key-anthropic")).toBeNull();
     await user.click(await screen.findByRole("checkbox", { name: "post-commit" }));
-    await user.click(screen.getByRole("button", { name: "Save hooks" }));
+    await user.click(within(screen.getByRole("region", { name: "Git hooks" })).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(mutations().some((c) => c.method === "PUT")).toBe(true));
     // Nothing but [scan].hooks goes back: the seeded scan.forge is a key a
     // linked project's PUT allowlist does not hold, and the portal refuses a
@@ -496,7 +631,15 @@ describe("linked project pages", () => {
   it("removing says when the token could not be revoked and links the account page", async () => {
     const user = userEvent.setup();
     fake.routes["DELETE /api/projects/alpha"] = () =>
-      json({ removed: "alpha", hooks: null, agent_files: [], checkout_deleted: false, warnings: [], token_revoked: false });
+      json({
+        removed: "alpha",
+        hooks: null,
+        agent_files: [],
+        checkout_deleted: false,
+        warnings: [],
+        token_revoked: false,
+        token_revoke_result: "unreachable",
+      });
     mount("/p/alpha/settings");
     await user.click(await screen.findByRole("button", { name: "Remove from this machine" }));
     const dialog = await screen.findByTestId("remove-dialog");
@@ -505,10 +648,18 @@ describe("linked project pages", () => {
     expect(within(failed).getByRole("link")).toHaveAttribute("href", "https://whygraph.example.com/account");
   });
 
-  it("a revoked token that did revoke shows no warning", async () => {
+  it("a token the platform had already revoked shows no warning (BUG-7)", async () => {
     const user = userEvent.setup();
     fake.routes["DELETE /api/projects/alpha"] = () =>
-      json({ removed: "alpha", hooks: null, agent_files: [], checkout_deleted: false, warnings: [], token_revoked: true });
+      json({
+        removed: "alpha",
+        hooks: null,
+        agent_files: [],
+        checkout_deleted: false,
+        warnings: [],
+        token_revoked: false,
+        token_revoke_result: "already_revoked",
+      });
     mount("/p/alpha/settings");
     await user.click(await screen.findByRole("button", { name: "Remove from this machine" }));
     const dialog = await screen.findByTestId("remove-dialog");

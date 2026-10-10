@@ -1,9 +1,9 @@
 import ReactEChartsCore from "echarts-for-react/esm/core";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { formatUsd } from "@/lib/format";
-import type { ChartPayload } from "./chartSpec";
-import { useChartColors, type ChartColors } from "./chartTheme";
+import { formatPct, formatUsd } from "@/lib/format";
+import type { ChartMarker, ChartPayload } from "./chartSpec";
+import { markerColor, useChartColors, type ChartColors } from "./chartTheme";
 import echarts from "./echarts";
 
 // The chart card: header, the plot, the mandatory Table twin, and PNG export.
@@ -14,6 +14,9 @@ import echarts from "./echarts";
 // resolved theme changes.
 
 const MAX_X_TICKS = 12;
+/** Below this width (px) a time axis draws at most `NARROW_X_TICKS` labels. */
+const NARROW_WIDTH = 480;
+const NARROW_X_TICKS = 6;
 const ROW_HEIGHT = 22;
 
 // `EChartsOption` would have to come from the package root, and the tree-shaking
@@ -22,19 +25,24 @@ const ROW_HEIGHT = 22;
 // and `echarts.ts` stays the only file that reaches into the library.
 type Option = Record<string, unknown>;
 
-/** How the measure reads: a plain count, or a USD amount (the Usage & cost page). */
-export type ValueFormat = "number" | "usd";
+/** How the measure reads: a plain count, a USD amount (the Usage & cost page), or a 0-100 percentage. */
+export type ValueFormat = "number" | "usd" | "pct";
 
 /** The label formatter for a {@link ValueFormat}. */
 function valueFormatter(format: ValueFormat): (value: unknown) => string {
-  return format === "usd"
-    ? (value) => (typeof value === "number" ? formatUsd(value) : "—")
-    : formatValue;
+  if (format === "usd") return (value) => (typeof value === "number" ? formatUsd(value) : "-");
+  if (format === "pct") return (value) => (typeof value === "number" ? formatPct(value) : "-");
+  return formatValue;
 }
+
+/** The series that carries the markers; the tooltip lists its events, not its values. */
+const MARKER_SERIES = "__markers";
+
+const SEVERITY: Record<ChartMarker["tone"], number> = { info: 0, ok: 1, warn: 2, error: 3 };
 
 /** Compact a number for a label: 1,284 / 12.9K / 3.4M. */
 export function formatValue(value: unknown): string {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
   const magnitude = Math.abs(value);
   if (magnitude >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
   if (magnitude >= 10_000) return `${(value / 1000).toFixed(1)}K`;
@@ -66,20 +74,23 @@ function tooltipFormatter(
   colors: ChartColors,
   params: unknown,
   format: (value: unknown) => string = formatValue,
+  markersAt?: Map<string, ChartMarker[]>,
 ): HTMLElement {
-  const items = (Array.isArray(params) ? params : [params]) as Array<{
+  const all = (Array.isArray(params) ? params : [params]) as Array<{
     axisValueLabel?: unknown;
     name?: unknown;
     seriesName?: unknown;
     seriesIndex?: number;
     value?: unknown;
   }>;
+  const items = all.filter((item) => item.seriesName !== MARKER_SERIES);
+  const category = String(all[0]?.axisValueLabel ?? all[0]?.name ?? "");
 
   const root = document.createElement("div");
   root.style.cssText = "font-size:12px;line-height:1.5;";
 
   const heading = document.createElement("div");
-  heading.textContent = String(items[0]?.axisValueLabel ?? items[0]?.name ?? "");
+  heading.textContent = category;
   heading.style.cssText = `color:${colors.muted};margin-bottom:2px;`;
   root.append(heading);
 
@@ -107,12 +118,28 @@ function tooltipFormatter(
 
     root.append(row);
   }
+
+  // The events at this category, each behind a dot of its marker's colour.
+  for (const marker of markersAt?.get(category) ?? []) {
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;gap:6px;";
+    const dot = document.createElement("span");
+    dot.style.cssText =
+      `width:8px;height:8px;border-radius:9999px;flex:0 0 auto;` + `background:${markerColor(colors, marker.tone)};`;
+    row.append(dot);
+    const label = document.createElement("span");
+    label.textContent = marker.label;
+    label.style.cssText = `color:${colors.fg};`;
+    row.append(label);
+    root.append(row);
+  }
   return root;
 }
 
-/** How many category labels to skip so at most `MAX_X_TICKS` are drawn. */
-function tickInterval(count: number): number {
-  return Math.max(0, Math.ceil(count / MAX_X_TICKS) - 1);
+/** How many category labels to skip so at most `MAX_X_TICKS` (6 on a narrow chart) are drawn. */
+function tickInterval(count: number, width?: number): number {
+  const max = width !== undefined && width < NARROW_WIDTH ? NARROW_X_TICKS : MAX_X_TICKS;
+  return Math.max(0, Math.ceil(count / max) - 1);
 }
 
 /**
@@ -124,7 +151,7 @@ function tickInterval(count: number): number {
 export function buildOption(
   payload: ChartPayload,
   colors: ChartColors,
-  { valueFormat = "number" }: { valueFormat?: ValueFormat } = {},
+  { valueFormat = "number", width }: { valueFormat?: ValueFormat; width?: number } = {},
 ): Option {
   const format = valueFormatter(valueFormat);
   const { palette } = colors;
@@ -226,6 +253,38 @@ export function buildOption(
     ];
   }
 
+  // Markers sit on the measured value of their category, as dots on an invisible
+  // line (no extra ECharts component to register); the tooltip names them.
+  const markersAt = new Map<string, ChartMarker[]>();
+  if (!stacked && !horizontal) {
+    const known = new Set(categories);
+    for (const marker of payload.markers ?? []) {
+      if (!known.has(marker.x)) continue;
+      markersAt.set(marker.x, [...(markersAt.get(marker.x) ?? []), marker]);
+    }
+  }
+  if (markersAt.size > 0) {
+    series.push({
+      name: MARKER_SERIES,
+      type: "line",
+      z: 3,
+      symbol: "circle",
+      symbolSize: 10,
+      showSymbol: true,
+      connectNulls: false,
+      lineStyle: { opacity: 0 },
+      data: categories.map((category, index) => {
+        const here = markersAt.get(category);
+        if (!here) return null;
+        const worst = here.reduce((a, b) => (SEVERITY[b.tone] > SEVERITY[a.tone] ? b : a));
+        return {
+          value: rows[index]?.[yIndex] ?? null,
+          itemStyle: { color: markerColor(colors, worst.tone), borderColor: colors.surface, borderWidth: 2 },
+        };
+      }),
+    });
+  }
+
   const categoryAxis: Option = {
     type: "category",
     data: categories,
@@ -236,7 +295,9 @@ export function buildOption(
       // horizontal chart every category label is shown, since long labels are the
       // reason that kind was chosen.
       rotate: 0,
-      interval: horizontal ? 0 : tickInterval(categories.length),
+      interval: horizontal ? 0 : tickInterval(categories.length, width),
+      // Long labels on a narrow chart (a phone) drop out rather than overprint.
+      hideOverlap: !horizontal,
     },
     axisLine: { lineStyle: { color: colors.grid } },
     axisTick: { show: false },
@@ -251,11 +312,13 @@ export function buildOption(
     name: yLabel,
     nameTextStyle: { color: colors.muted, fontSize: 11 },
     splitNumber: 4,
+    // A share reads on quarter ticks: 0 / 25 / 50 / 75 / 100 %.
+    ...(valueFormat === "pct" ? { min: 0, max: 100, interval: 25 } : {}),
     axisLabel: {
       color: colors.muted,
       fontSize: 11,
       formatter: (value: number) =>
-        valueFormat === "usd" ? formatUsd(value) : value.toLocaleString(),
+        valueFormat === "usd" ? formatUsd(value) : valueFormat === "pct" ? `${value}%` : value.toLocaleString(),
     },
     axisLine: { show: false },
     axisTick: { show: false },
@@ -304,7 +367,7 @@ export function buildOption(
       borderColor: colors.grid,
       textStyle: { color: colors.fg, fontSize: 12 },
       extraCssText: "box-shadow:none;",
-      formatter: (params: unknown) => tooltipFormatter(colors, params, format),
+      formatter: (params: unknown) => tooltipFormatter(colors, params, format, markersAt),
     },
     xAxis: horizontal ? valueAxis : categoryAxis,
     yAxis: horizontal ? categoryAxis : valueAxis,
@@ -370,9 +433,9 @@ function TableView({ payload, valueFormat }: { payload: ChartPayload; valueForma
                   )}
                 >
                   {row[cell] === null || row[cell] === undefined
-                    ? "—"
-                    : valueFormat === "usd" && cell === payload.yIndex
-                      ? valueFormatter("usd")(row[cell])
+                    ? "-"
+                    : valueFormat !== "number" && cell === payload.yIndex
+                      ? valueFormatter(valueFormat)(row[cell])
                       : String(row[cell])}
                 </td>
               ))}
@@ -389,16 +452,28 @@ export function ChartBlock({
   valueFormat = "number",
 }: {
   payload: ChartPayload;
-  /** `usd` formats the measure as money (axis, labels, tooltip, Table view). */
+  /** `usd` formats the measure as money, `pct` as a percentage (axis, labels, tooltip, Table view). */
   valueFormat?: ValueFormat;
 }) {
   const [view, setView] = useState<"chart" | "table">("chart");
   const instance = useRef<ReactEChartsCore>(null);
   const colors = useChartColors();
   // Rebuilt when the resolved theme flips, so a live toggle repaints the canvas.
+  // The card's width, so a phone-width axis thins its labels (PH-9).
+  const plot = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState<number | undefined>(undefined);
+  useEffect(() => {
+    const node = plot.current;
+    if (!node) return;
+    setWidth(Math.round(node.getBoundingClientRect().width) || undefined);
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(([entry]) => setWidth(Math.round(entry.contentRect.width) || undefined));
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [view]);
   const option = useMemo(
-    () => buildOption(payload, colors, { valueFormat }),
-    [payload, colors, valueFormat],
+    () => buildOption(payload, colors, { valueFormat, width }),
+    [payload, colors, valueFormat, width],
   );
 
   const statTile = payload.rows.length === 1 && !payload.stack;
@@ -448,7 +523,7 @@ export function ChartBlock({
   }
 
   return (
-    <div className="my-1.5 overflow-hidden rounded-md border border-border bg-muted">
+    <div className="my-1.5 overflow-hidden rounded-md border border-border bg-card">
       <div className="flex items-center gap-2 px-2.5 py-1.5">
         <div className="min-w-0 flex-1 truncate text-xs text-foreground">{payload.title}</div>
         {!statTile && (
@@ -463,7 +538,7 @@ export function ChartBlock({
                   className={cn(
                     "px-1.5 py-0.5 text-[10px] capitalize transition-colors",
                     view === option
-                      ? "bg-primary/20 text-foreground"
+                      ? "bg-primary-soft text-primary-text"
                       : "text-muted-foreground hover:bg-accent",
                   )}
                 >
@@ -491,8 +566,9 @@ export function ChartBlock({
         <TableView payload={payload} valueFormat={valueFormat} />
       ) : (
         <div
+          ref={plot}
           role="img"
-          aria-label={`${payload.title} — ${payload.kind} chart, ${categoryCount} categories. Use the Table toggle for the values.`}
+          aria-label={`${payload.title}: ${payload.kind} chart, ${categoryCount} categories. Use the Table toggle for the values.`}
         >
           <ReactEChartsCore
             ref={instance}

@@ -45,6 +45,15 @@ process:
   tracks WhyGraph's state fails the run and marks the project with reason
   ``tracked_whygraph_state``; that mark does not refuse requests (the
   next sync re-checks, and clears it once the repository is fixed).
+* **Imports** (M2f-3 plan section 4.8). An imported project's row exists
+  before its clone (``initialized_at`` unset): its first run
+  (:meth:`ScanRunner.request_import`, also Retry) clones into a
+  ``repos/<org>/.clone-*`` temp folder, refuses tracked state as a sync
+  does, renames the clone into place, runs the production Initialize, sets
+  ``initialized_at`` and then scans. A failure, cancel or interruption
+  removes the temp folder (a cancel takes effect when the ``git clone``
+  returns); leftovers of a crash are swept at start. At most one importing
+  run per org runs at a time, and a queued import survives a restart.
 * **Child I/O.** stdout JSON lines go to ``<data>/runs/<id>.jsonl``, stderr
   to ``<data>/runs/<id>.log``; both pipes are drained by their own thread
   so a flood never deadlocks the child. A ``usage`` event (one per LLM
@@ -131,6 +140,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import (
     AsyncIterator,
     Awaitable,
@@ -143,12 +153,14 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
 import anyio
 import anyio.to_thread
 from fastapi.responses import StreamingResponse
+from sqlalchemy import update
 from sqlmodel import col, select
 
 from whygraph.core.config import Config, ConfigError
@@ -165,19 +177,30 @@ from whygraph.services.git.credentials import (
 )
 
 from .audit import audit
+from .clones import (
+    clone_dir_is_safe,
+    discard_clone,
+    production_initialize,
+    remove_clone,
+    sweep_clone_dirs,
+    temp_clone_dir,
+)
 from .context import resolve_root, resolved_layer
 from .db import data_dir, get_session
-from .github_app import GitHubAccessLost, InstallationToken
+from .github_app import GitHubAccessLost, GitHubRepo, InstallationToken
 from .github_auth import GitHubUnavailable
 from .models import Project, ScanRun, User
 from .paths import TRACKED_STATE_PATHS, check_project_paths
 from .policy import allowed_sources
 from .repos import root_status
 from .secrets import hint_for
+from .stats import project_counts
 from .usage import SYSTEM_LABEL, actor_label, price_usage
 from .usage_store import COUNTED_COST_SOURCES, UsageRow
 
 if TYPE_CHECKING:  # pragma: no cover
+    from whygraph.core.context import ProjectContext
+
     from .deps import BoundProject, PortalState
     from .security import Principal
 
@@ -254,6 +277,23 @@ hard-stopped budget was exhausted while it ran (M2f-2 plan section 4.7)."""
 ANALYZE_SKIPPED_BUDGET: dict[str, str] = {"analyze_skipped": "budget"}
 """Added to the ``summary`` of a full run downgraded to structure-only at
 dispatch because a covering hard-stopped budget was exhausted (section 9.2 D6)."""
+
+PORTAL_SUMMARY_KEYS: tuple[str, ...] = (
+    "usage",
+    "estimate",
+    "coverage",
+    "scanned",
+    "cloned",
+)
+"""``summary`` keys only the portal writes (M2f-3 plan section 4.1).
+
+:meth:`ScanRunner._execute` drops them from what the child's ``result`` (and
+a sync's own summary) put there, then sets its own after that merge, so a
+hostile repository cannot chart its own coverage or claim an estimate."""
+
+COST_SUMMARY_KEYS: tuple[str, ...] = ("usage", "estimate")
+"""``summary`` keys that carry cost: sent only to ``project.usage`` holders
+(M2f-3 plan decision R1) - by the run routes and in a stream's ``end`` frame."""
 
 TOKEN_REFRESH_MARGIN_SEC = 10 * 60
 """Seconds before an installation token expires that a child's token file is rewritten."""
@@ -584,7 +624,35 @@ class Redactor:
 
     def __init__(self, secrets: list[str] | tuple[str, ...] = ()) -> None:
         self._pairs: tuple[tuple[str, str], ...] = ()
+        self._paths: tuple[tuple[re.Pattern[str], str], ...] = ()
         self.learn(*secrets)
+
+    def learn_path(self, path: str | os.PathLike[str], label: str) -> None:
+        """Rewrite ``path`` to ``label`` in every line from now on.
+
+        Only where the path is a whole path prefix: not preceded by a path
+        character, and followed by ``/``, a quote, whitespace or the end of
+        the text - so a sibling ``<path>-v2`` is left alone. Longer paths
+        are tried first (a clone root before the data dir that holds it).
+
+        Parameters
+        ----------
+        path : str or path-like
+            An absolute path (a trailing ``/`` is ignored).
+        label : str
+            What to print instead (``.`` for the project root, ``<data>``).
+        """
+        text = os.fspath(path).rstrip("/")
+        if not text:
+            return
+        pattern = re.compile(
+            r"(?<![A-Za-z0-9_.\-/])" + re.escape(text) + r"(?=$|[/\s\"'\\])"
+        )
+        known = {p.pattern: (p, lab) for p, lab in self._paths}
+        known[pattern.pattern] = (pattern, label)
+        self._paths = tuple(
+            sorted(known.values(), key=lambda pl: len(pl[0].pattern), reverse=True)
+        )
 
     def learn(self, *values: str) -> None:
         """Add values to redact from now on (e.g. a refreshed installation token).
@@ -601,6 +669,8 @@ class Redactor:
         for value, hint in self._pairs:
             if value in text:
                 text = text.replace(value, hint)
+        for pattern, label in self._paths:
+            text = pattern.sub(lambda _m, label=label: label, text)
         return redact_tokens(text)
 
 
@@ -696,6 +766,123 @@ def stale_info(root: Path, last_scanned_head: str | None) -> dict | None:
     return {"commits_behind": commits_behind(root, last_scanned_head)}
 
 
+STALE_HEAD_TTL_SEC = 10.0
+"""Seconds :class:`StaleCache` reuses a project's ``git rev-parse HEAD``."""
+
+STALE_BEHIND_MAX = 1_000
+"""Commits-behind answers :class:`StaleCache` keeps (least recently used out)."""
+
+
+class StaleCache:
+    """The projects list's ``stale`` block, cached (M2f-3 plan section 0.3 #3).
+
+    The list is polled every 3 s while a scan runs; without a cache every
+    poll ran two ``git`` subprocesses per project. HEAD is memoised per
+    project for ``head_ttl`` seconds; the commits-behind count per
+    ``(project, HEAD, last_scanned_head)`` (it cannot change while the
+    three stay the same), at most ``max_behind`` entries, least recently
+    used out. :meth:`drop` forgets a project when one of its runs ends
+    (``ScanRunner._run_job``), because a sync moves HEAD and a scan moves
+    ``last_scanned_head``.
+
+    Thread-safe: the list handler runs in FastAPI's threadpool. The ``git``
+    calls run outside the lock.
+
+    Parameters
+    ----------
+    head_ttl : float
+        Seconds a HEAD answer is reused (:data:`STALE_HEAD_TTL_SEC`).
+    max_behind : int
+        Commits-behind entries kept (:data:`STALE_BEHIND_MAX`).
+    clock : callable, optional
+        A monotonic clock; tests inject a fake one.
+    """
+
+    def __init__(
+        self,
+        *,
+        head_ttl: float = STALE_HEAD_TTL_SEC,
+        max_behind: int = STALE_BEHIND_MAX,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.head_ttl = head_ttl
+        self.max_behind = max_behind
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._heads: dict[int, tuple[float, str | None]] = {}
+        self._behind: OrderedDict[tuple[int, str, str], int | None] = OrderedDict()
+
+    def head(self, project_id: int, root: Path) -> str | None:
+        """``root``'s HEAD, from the memo while it is younger than ``head_ttl``.
+
+        Parameters
+        ----------
+        project_id : int
+            The project (the memo key).
+        root : Path
+            Its mounted repository root.
+
+        Returns
+        -------
+        str or None
+            As :func:`git_head`.
+        """
+        now = self._clock()
+        with self._lock:
+            hit = self._heads.get(project_id)
+            if hit is not None and now - hit[0] < self.head_ttl:
+                return hit[1]
+        head = git_head(root)
+        with self._lock:
+            self._heads[project_id] = (self._clock(), head)
+        return head
+
+    def info(
+        self, project_id: int, root: Path, last_scanned_head: str | None
+    ) -> dict | None:
+        """:func:`stale_info` through the cache.
+
+        Parameters
+        ----------
+        project_id : int
+            The project.
+        root : Path
+            Its mounted repository root.
+        last_scanned_head : str or None
+            ``projects.last_scanned_head``; ``None`` (never scanned) is
+            not "stale" and runs no ``git``.
+
+        Returns
+        -------
+        dict or None
+            ``{"commits_behind": n}`` while HEAD differs, else ``None``.
+        """
+        if not last_scanned_head:
+            return None
+        head = self.head(project_id, root)
+        if head is None or head == last_scanned_head:
+            return None
+        key = (project_id, head, last_scanned_head)
+        with self._lock:
+            if key in self._behind:
+                self._behind.move_to_end(key)
+                return {"commits_behind": self._behind[key]}
+        behind = commits_behind(root, last_scanned_head)
+        with self._lock:
+            self._behind[key] = behind
+            self._behind.move_to_end(key)
+            while len(self._behind) > self.max_behind:
+                self._behind.popitem(last=False)
+        return {"commits_behind": behind}
+
+    def drop(self, project_id: int) -> None:
+        """Forget every entry of ``project_id`` (its HEAD and its counts)."""
+        with self._lock:
+            self._heads.pop(project_id, None)
+            for key in [k for k in self._behind if k[0] == project_id]:
+                del self._behind[key]
+
+
 def _git_out(root: Path, *args: str) -> str | None:
     try:
         result = subprocess.run(
@@ -730,6 +917,12 @@ class _Pending:
     analyze: bool
     requested_by: int | None
     scan_requested: bool
+    estimate: dict | None = None
+    """The compact describe estimate the requester saw (full runs only)."""
+    org_id: int | None = None
+    """The project's org (per-org import fairness in ``_dispatch``)."""
+    importing: bool = False
+    """Whether the run clones the project first (an import, M2f-3 plan section 4.8)."""
 
     def merge(
         self,
@@ -739,9 +932,16 @@ class _Pending:
         analyze: bool,
         requested_by: int | None,
         scan_requested: bool,
+        estimate: dict | None = None,
     ) -> None:
         if kind == "sync":
             self.kind = "sync"
+        # One estimate per run, never recomputed (M2f-3 plan section 0.3
+        # #10): a request that turns the run into a full one brings its
+        # estimate; a quick request merged into a full run keeps the full
+        # run's; a full run that had none takes the first one offered.
+        if analyze and (not self.analyze or self.estimate is None):
+            self.estimate = estimate
         self.trigger = merge_trigger(self.trigger, trigger)
         # Attribution follows the spend: the first requester who asked for
         # analysis becomes the requester (M2f-2 plan section 0.2 #7), else
@@ -908,6 +1108,9 @@ class _Job:
     cancelled: bool = False
     head: str | None = None
     scanned: bool = False
+    cloned: bool = False
+    cancelled_by: int | None = None
+    ctx: ProjectContext | None = None
     result: dict | None = None
     usage_total: _UsageTotal = field(default_factory=_UsageTotal)
     stop_reason: str | None = None
@@ -1083,6 +1286,9 @@ class ScanRunner:
     org_delete_wait : float
         Seconds :meth:`reserve_projects` waits for an org's runs to end
         (:data:`ORG_DELETE_WAIT_SEC`; tests shorten it).
+    stale : StaleCache
+        The projects list's ``stale`` block; a project's entries are
+        dropped when one of its runs ends.
     """
 
     def __init__(
@@ -1118,11 +1324,13 @@ class ScanRunner:
         # Org deletion: orgs being deleted, and requests past the org check.
         self._deleting_orgs: set[int] = set()
         self._org_requests: dict[int, int] = {}
+        # The projects list's `stale` block (M2f-3 plan section 0.3 #3).
+        self.stale = StaleCache()
 
     # ---- lifecycle ------------------------------------------------------
 
     async def start(self, state: PortalState) -> None:
-        """Start the queue: sweep token files, requeue ``queued`` rows, catch up, poll.
+        """Start the queue: sweep token files and clones, requeue ``queued`` rows, catch up, poll.
 
         Called by the lifespan after the portal DB is migrated and stale
         ``running`` rows were marked ``interrupted``. Local mode then polls
@@ -1145,6 +1353,8 @@ class ScanRunner:
         try:
             # A previous process's children are gone: so is any use of their tokens.
             await anyio.to_thread.run_sync(sweep_token_files, data_dir())
+            # Only the runner clones, and this is the one portal process.
+            await anyio.to_thread.run_sync(sweep_clone_dirs, data_dir())
             await self._requeue()
             await self.catch_up()
         except Exception:  # noqa: BLE001 -- never fail the portal start
@@ -1339,7 +1549,9 @@ class ScanRunner:
                 if self._tg is not None:
                     self._tg.start_soon(self._kill_after_grace, job)
             for pending in dropped:
-                await anyio.to_thread.run_sync(_mark_cancelled, pending.run_id)
+                await anyio.to_thread.run_sync(
+                    _mark_cancelled, pending.run_id, None, pending.estimate
+                )
                 self._live.discard(pending.run_id)
         return jobs
 
@@ -1386,6 +1598,7 @@ class ScanRunner:
         analyze: bool | None,
         principal: Principal | None,
         may_spend: bool,
+        estimate: dict | None = None,
     ) -> int:
         """Queue (or coalesce into) a scan and return its ``scan_runs.id``.
 
@@ -1402,6 +1615,13 @@ class ScanRunner:
         may_spend : bool
             Whether the caller may start an LLM-spending (full) run - the
             ``project.scan_full`` action.
+        estimate : dict or None
+            The compact describe estimate the requester saw, stored in the
+            run's ``summary.estimate`` when the run describes commits
+            (M2f-3 plan section 0.3 #10). Dropped when the request turns
+            out structure-only (the first-scan forcing); a request merged
+            into a run keeps that run's estimate unless it makes the run a
+            full one.
 
         Returns
         -------
@@ -1443,6 +1663,7 @@ class ScanRunner:
             requested_by=user,
             scan_requested=True,
             may_spend=may_spend,
+            estimate=estimate,
         )
 
     async def request_sync(
@@ -1502,6 +1723,44 @@ class ScanRunner:
             may_spend=False,  # a sync never describes
         )
 
+    async def request_import(
+        self, project_id: int, *, principal: Principal | None = None
+    ) -> int:
+        """Queue (or coalesce into) an imported project's first run: clone, then scan.
+
+        A ``sync`` that scans (``trigger=initial``, structure-only, as every
+        first run). While the project is not initialized the run clones it
+        first (see the module docstring); on an initialized project it is an
+        ordinary sync. Used by the import (``POST /api/projects``) and its
+        Retry (``POST .../scans``).
+
+        Parameters
+        ----------
+        project_id : int
+            ``projects.id`` of a production GitHub project.
+        principal : Principal or None
+            Recorded as ``requested_by``.
+
+        Returns
+        -------
+        int
+            The pending run's id.
+
+        Raises
+        ------
+        RunnerUnavailable, ProjectBusy, SourceNotAllowed, ProjectAccessLost
+            As for :meth:`request_sync`.
+        """
+        return await self._request(
+            project_id,
+            kind="sync",
+            trigger="initial",
+            analyze=False,
+            requested_by=principal.user_id if principal else None,
+            scan_requested=True,
+            may_spend=False,  # a first run never describes
+        )
+
     async def _request(
         self,
         project_id: int,
@@ -1512,14 +1771,16 @@ class ScanRunner:
         requested_by: int | None,
         scan_requested: bool,
         may_spend: bool,
+        estimate: dict | None = None,
     ) -> int:
         if self._tg is None or self._lock is None or self._stopping:
             raise RunnerUnavailable("the scan runner is not running")
         with self._claim_request(project_id):
             gate = await anyio.to_thread.run_sync(_project_gate, project_id)
+            importing = False
             with self._claim_org(None if gate is None else gate[3]):
                 if gate is not None:
-                    source, lost, reason, _org_id = gate
+                    source, lost, reason, _org_id, initialized = gate
                     if source not in allowed_sources(self._mode()):
                         raise SourceNotAllowed(_unsupported_source(source))
                     if lost and reason != REASON_TRACKED_STATE:
@@ -1530,6 +1791,8 @@ class ScanRunner:
                     if github and kind == "scan":
                         # Scan now fetches first (M2d-2 plan section 0.2 #23).
                         kind, scan_requested = "sync", True
+                    # Not initialized yet: the run clones first (an import).
+                    importing = github and not initialized
                 return await self._request_claimed(
                     project_id,
                     org_id=None if gate is None else gate[3],
@@ -1539,6 +1802,8 @@ class ScanRunner:
                     requested_by=requested_by,
                     scan_requested=scan_requested,
                     may_spend=may_spend,
+                    estimate=estimate,
+                    importing=importing,
                 )
 
     async def _request_claimed(
@@ -1552,11 +1817,15 @@ class ScanRunner:
         requested_by: int | None,
         scan_requested: bool,
         may_spend: bool,
+        estimate: dict | None = None,
+        importing: bool = False,
     ) -> int:
         assert self._lock is not None
         async with self._lock:
             if not await anyio.to_thread.run_sync(_has_ok_scan, project_id):
                 trigger, analyze = "initial", False
+            if not analyze:
+                estimate = None  # only a run that describes carries one
             if analyze and not may_spend:
                 # After the default and the forcing: what would really run.
                 raise ScanForbidden("this run would describe commits with the LLM")
@@ -1568,18 +1837,31 @@ class ScanRunner:
                     raise ScanBudgetExceeded(blocked)
             pending = self._pending.get(project_id)
             if pending is None:
-                run_id = await anyio.to_thread.run_sync(
-                    _insert_run, project_id, kind, trigger, analyze, requested_by
-                )
-                self._pending[project_id] = _Pending(
-                    run_id=run_id,
+                pending = _Pending(
+                    run_id=0,  # set below, once the row exists
                     project_id=project_id,
                     kind=kind,
                     trigger=trigger,
                     analyze=analyze,
                     requested_by=requested_by,
                     scan_requested=scan_requested,
+                    estimate=estimate,
+                    org_id=org_id,
+                    importing=importing,
                 )
+                run_id = await anyio.to_thread.run_sync(
+                    partial(
+                        _insert_run,
+                        project_id,
+                        kind,
+                        trigger,
+                        analyze,
+                        requested_by,
+                        summary=_queued_summary(pending),
+                    )
+                )
+                pending.run_id = run_id
+                self._pending[project_id] = pending
                 self._live.add(run_id)
             else:
                 pending.merge(
@@ -1588,22 +1870,30 @@ class ScanRunner:
                     analyze=analyze,
                     requested_by=requested_by,
                     scan_requested=scan_requested,
+                    estimate=estimate,
                 )
+                pending.importing = pending.importing or importing
                 run_id = pending.run_id
                 await anyio.to_thread.run_sync(_update_queued, pending)
             self._dispatch()
             return run_id
 
     async def cancel(
-        self, project_id: int, run_id: int, *, may_cancel_full: bool
+        self,
+        project_id: int,
+        run_id: int,
+        *,
+        may_cancel_full: bool,
+        by: int | None = None,
     ) -> str:
         """Cancel a queued or running run of a project.
 
         A queued run is dropped from the queue and recorded ``cancelled``.
         A running one gets SIGTERM (SIGKILL after :data:`CANCEL_GRACE_SEC`)
         and is recorded ``cancelled`` when its child exits. Either way the
-        summary is :data:`CANCELLED_BY_USER`, and the next request for the
-        project queues a fresh run.
+        summary is :data:`CANCELLED_BY_USER` (plus the run's ``estimate``,
+        when it has one), ``scan_runs.cancelled_by`` is ``by``, and the next
+        request for the project queues a fresh run.
 
         Parameters
         ----------
@@ -1614,6 +1904,9 @@ class ScanRunner:
         may_cancel_full : bool
             Whether the caller may cancel an LLM-spending (full) run - the
             ``project.scan_full`` action that would start one.
+        by : int or None
+            The cancelling user's ``users.id``, recorded in
+            ``scan_runs.cancelled_by``; ``None`` records no canceller.
 
         Returns
         -------
@@ -1645,13 +1938,17 @@ class ScanRunner:
                 del self._pending[project_id]
                 # The row first: a stream that sees the run leave `_live`
                 # reads its final status next, which must not be "queued".
-                await anyio.to_thread.run_sync(_mark_cancelled, run_id)
+                await anyio.to_thread.run_sync(
+                    _mark_cancelled, run_id, by, pending.estimate
+                )
                 self._live.discard(run_id)
                 return "queued"
             job = self._running.get(project_id)
             if job is not None and job.spec.run_id == run_id:
                 if job.spec.analyze and not may_cancel_full:
                     raise ScanForbidden("this run describes commits with the LLM")
+                with job.lock:
+                    job.cancelled_by = by
                 job.cancel()
                 self._tg.start_soon(self._kill_after_grace, job)
                 return "running"
@@ -1814,12 +2111,23 @@ class ScanRunner:
     # ---- dispatch + execution -------------------------------------------
 
     def _dispatch(self) -> None:
-        """Start pending jobs (oldest first) while under the cap. Loop-thread only."""
+        """Start pending jobs (oldest first) while under the cap. Loop-thread only.
+
+        An import waits while another import of its org runs (M2f-3 plan
+        decision 0.3 #41), so one org's multi-repo import clones one
+        repository at a time and never holds every slot.
+        """
         while not self._stopping and self._tg is not None:
             if len(self._running) >= self.max_concurrent:
                 return
+            cloning = {
+                j.spec.org_id for j in self._running.values() if j.spec.importing
+            }
             waiting = [
-                p for pid, p in self._pending.items() if pid not in self._running
+                p
+                for pid, p in self._pending.items()
+                if pid not in self._running
+                and not (p.importing and p.org_id in cloning)
             ]
             if not waiting:
                 return
@@ -1840,6 +2148,8 @@ class ScanRunner:
             if self._running.get(job.spec.project_id) is job:
                 del self._running[job.spec.project_id]
             self._live.discard(job.spec.run_id)
+            # A sync moved HEAD, a scan moved last_scanned_head.
+            self.stale.drop(job.spec.project_id)
             self._dispatch()
 
     def _execute(self, job: _Job) -> None:
@@ -1862,10 +2172,24 @@ class ScanRunner:
             status, summary = "cancelled", {**summary, **by}
         elif job.interrupted and status != "cancelled":
             status = "interrupted"
-        # After the child's `result` merge, so a child cannot supply its own.
-        summary = {**summary, "usage": job.usage_total.summary()}
+        # After the child's `result` merge (and a sync's own summary), so a
+        # child cannot supply any of these: drop what it sent, then set ours.
+        summary = {k: v for k, v in summary.items() if k not in PORTAL_SUMMARY_KEYS}
+        if isinstance(summary.get("error"), str):
+            # The Overview's last_failure reads this: no path, no secret.
+            summary["error"] = redact(summary["error"])
+        summary["usage"] = job.usage_total.summary()
+        if job.spec.estimate is not None:
+            summary["estimate"] = job.spec.estimate
+        if job.spec.kind == "sync" and job.scanned:
+            summary["scanned"] = True
+        if job.cloned:
+            summary["cloned"] = True
+        finished_at = _now()
+        if job.scanned and (coverage := self._coverage(job)) is not None:
+            summary["coverage"] = {**coverage, "at": finished_at}
         try:
-            _finish_run(job, status, summary)
+            _finish_run(job, status, summary, finished_at)
         except Exception:  # noqa: BLE001 -- e.g. the database is gone
             # The row stays "running"; the next start marks it interrupted.
             _log.exception(
@@ -1874,6 +2198,23 @@ class ScanRunner:
         finally:
             job.done.set()
 
+    def _coverage(self, job: _Job) -> dict | None:
+        """The project's coverage counts after a run that scanned, or ``None``.
+
+        Best effort: a failure is logged and the snapshot omitted. A linked
+        project has no local DB, so it gets none (:func:`project_counts`).
+        """
+        state, ctx = self._state, job.ctx
+        if state is None or ctx is None:
+            return None
+        try:
+            return project_counts(state, ctx, migrate=False)
+        except Exception:  # noqa: BLE001 -- a snapshot must never fail a run
+            _log.exception(
+                "scan runner: no coverage snapshot for run %s", job.spec.run_id
+            )
+            return None
+
     def _execute_inner(
         self, job: _Job
     ) -> tuple[str, dict[str, Any], Callable[[str], str]]:
@@ -1881,6 +2222,7 @@ class ScanRunner:
         assert state is not None
         spec = job.spec
         github: _GitHubProject | None = None
+        importing = False
         with get_session() as session:
             project = session.get(Project, spec.project_id)
             run = session.get(ScanRun, spec.run_id)
@@ -1922,6 +2264,8 @@ class ScanRunner:
                     default_branch=project.default_branch,
                     last_scanned_head=project.last_scanned_head,
                 )
+                # An import: the clone is this run's first phase.
+                importing = project.initialized_at is None
             layer = resolved_layer(session, project)
             root = resolve_root(project)
             source = project.source
@@ -1959,6 +2303,7 @@ class ScanRunner:
             session.add(run)
             events_rel, log_rel = run.events_path, run.log_path
         ctx = state.contexts.get(spec.project_id)
+        job.ctx = ctx
         config = ctx.config
         usage_spec = _usage_spec(spec.project_id, who, ctx.key_scopes, config)
         base = data_dir()
@@ -1967,6 +2312,13 @@ class ScanRunner:
             config, layer, source=source, analyze=spec.analyze, token_file=token_path
         )
         redact = redactor(secrets)
+        production = state.mode == "production"
+        if production:
+            # MODE-2: the root first (it is the longer path), then the data dir.
+            for form in {str(root), str(root.resolve())}:
+                redact.learn_path(form, ".")
+            for form in {str(base), str(base.resolve())}:
+                redact.learn_path(form, "<data>")
         events_path, log_path = base / str(events_rel), base / str(log_rel)
         events_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -1986,7 +2338,11 @@ class ScanRunner:
             def refused() -> str | None:
                 """Why the job must not touch ``root`` (logged + evented), or ``None``."""
                 if root_status(root) != "ok":
-                    message = f"project root {root} is missing or not a git repository"
+                    message = (
+                        "the repository's server copy is missing"
+                        if production
+                        else f"project root {root} is missing or not a git repository"
+                    )
                 else:
                     try:
                         check_project_paths(root)
@@ -2000,7 +2356,11 @@ class ScanRunner:
                 event({"type": "error", "message": message})
                 return message
 
-            if (message := refused()) is not None:
+            # An import has no clone yet: the sync below makes it.
+            if (
+                not (importing and spec.kind == "sync")
+                and (message := refused()) is not None
+            ):
                 return "failed", {"error": message}, redact
 
             summary: dict[str, Any] = {}
@@ -2011,17 +2371,22 @@ class ScanRunner:
                     log(message)
                     event({"type": "error", "message": message})
                     return "failed", {"error": message}, redact
-                event({"type": "sync", "status": "fetching"})
+                if not importing:
+                    event({"type": "sync", "status": "fetching"})
                 try:
-                    synced = self._github_sync(job, github, root, redact)
+                    synced = self._github_sync(
+                        job, github, root, redact, clone=importing, event=event
+                    )
                 except _SyncFailed as exc:
                     message = redact(str(exc))
-                    log(f"sync failed: {message}")
+                    log(f"{'clone' if importing else 'sync'} failed: {message}")
                     event({"type": "sync", "status": "failed", "error": message})
                     return "failed", {"error": message}, redact
                 if synced is None:
-                    # Cancelled after the fetch: the tree did not move.
-                    return "cancelled", summary, redact
+                    # Cancelled (or interrupted) after the fetch or the clone:
+                    # the tree did not move, and no clone was kept.
+                    status = "cancelled" if job.cancelled else "interrupted"
+                    return status, summary, redact
                 token, synced_summary = synced
                 summary.update(synced_summary)
                 event({"type": "sync", "status": "ok", **synced_summary})
@@ -2054,7 +2419,14 @@ class ScanRunner:
                     )
                     log(f"the {blocked} budget is spent: scanning structure only")
             argv = scan_argv(spec.trigger, analyze, source=source)
-            log(f"$ {shlex.join(argv)}")
+            if production:
+                _log.debug(
+                    "scan runner: run %s argv %s", spec.run_id, redact(shlex.join(argv))
+                )
+                flags = scan_flags(spec.trigger, analyze, source)
+                log(" ".join(["$ whygraph scan", *flags]))
+            else:
+                log(f"$ {shlex.join(argv)}")
             refresher: _TokenRefresher | None = None
             try:
                 if github is not None:
@@ -2319,16 +2691,27 @@ class ScanRunner:
         return token
 
     def _github_sync(
-        self, job: _Job, github: _GitHubProject, root: Path, redact: Redactor
+        self,
+        job: _Job,
+        github: _GitHubProject,
+        root: Path,
+        redact: Redactor,
+        *,
+        clone: bool = False,
+        event: Callable[[dict], None] | None = None,
     ) -> tuple[InstallationToken, dict[str, Any]] | None:
         """Sync a production clone (worker thread): see the module docstring.
+
+        With ``clone`` (an import) the repository is cloned instead
+        (:meth:`_github_clone`).
 
         Returns
         -------
         tuple or None
             The token it minted and the summary fields (``moved``, plus
-            ``history_rewritten`` / ``default_branch`` when they apply);
-            ``None`` when the job was cancelled after the fetch.
+            ``history_rewritten`` / ``default_branch`` when they apply; a
+            clone's ``cloned``); ``None`` when the job was cancelled after
+            the fetch (or the clone).
 
         Raises
         ------
@@ -2351,6 +2734,8 @@ class ScanRunner:
             raise _SyncFailed(f"GitHub is unavailable: {exc}") from exc
         if info.id != github.repo_id:
             raise _SyncFailed("GitHub answered for another repository")
+        if clone:
+            return self._github_clone(job, info, token, root, redact, event)
         branch = info.default_branch
         repo = Repository(root)
         try:
@@ -2395,9 +2780,109 @@ class ScanRunner:
             summary["default_branch"] = branch
         return token, summary
 
+    def _github_clone(
+        self,
+        job: _Job,
+        info: GitHubRepo,
+        token: InstallationToken,
+        root: Path,
+        redact: Redactor,
+        event: Callable[[dict], None] | None,
+    ) -> tuple[InstallationToken, dict[str, Any]] | None:
+        """An import's first phase (worker thread): clone, refuse, move, Initialize.
+
+        Clones ``info`` into a ``repos/<org>/.clone-*`` temp folder with the
+        repo-scoped token, refuses a repository that tracks ``.whygraph/``
+        / ``.codegraph/`` (marked like a sync), renames the clone onto
+        ``root`` (never into an existing folder), runs the production
+        Initialize, sets ``initialized_at`` (only if still unset) and drops
+        the project's cached context. The temp folder is gone however this
+        ends; the ``git clone`` itself cannot be interrupted, so a cancel
+        takes effect when it returns.
+
+        Returns
+        -------
+        tuple or None
+            The token and ``{"cloned": True}``; ``None`` when the job was
+            cancelled (or interrupted) during the clone.
+
+        Raises
+        ------
+        _SyncFailed
+            Any failure.
+        """
+        state = self._state
+        assert state is not None and state.github_app is not None
+        project_id = job.spec.project_id
+        base = state.data_dir
+        if event is not None:
+            event({"type": "sync", "status": "cloning", "full_name": info.full_name})
+        _update_github_repo(
+            project_id,
+            remote_url=f"{state.github_app.config.web_url}/{info.full_name}",
+            default_branch=info.default_branch,
+        )
+        tmp = temp_clone_dir(root)
+        try:
+            root.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        except OSError as exc:
+            raise _SyncFailed(f"could not create the server folder: {exc}") from exc
+        if not clone_dir_is_safe(tmp, base, depth=2):
+            raise _SyncFailed("refusing to clone outside the portal's repos folder")
+        for form in {str(tmp), os.path.realpath(tmp)}:
+            redact.learn_path(form, ".")
+        url = f"{github_git_host().url}/{info.full_name}.git"
+        try:
+            try:
+                Repository.clone(url, tmp, env=git_env(token.token))
+            except GitError as exc:
+                if _GIT_ACCESS_DENIED.search(_error_chain(exc)):
+                    _mark_access_lost(project_id, REASON_GIT_DENIED)
+                raise
+            if job.cancelled or job.interrupted:
+                return None
+            repo = Repository(tmp)
+            tracked = repo.tracked_paths("HEAD", *TRACKED_STATE_PATHS)
+            if tracked:
+                _mark_access_lost(project_id, REASON_TRACKED_STATE)
+                raise _SyncFailed(
+                    f"{info.full_name} tracks WhyGraph's own state "
+                    f"({', '.join(tracked[:5])}); remove .whygraph/ and "
+                    ".codegraph/ from the repository to import it"
+                )
+            repo.set_remote_head(info.default_branch)
+            try:
+                os.rename(tmp, root)  # fails on a non-empty root; never merges
+            except OSError as exc:
+                raise _SyncFailed(
+                    "a folder for this project already exists on the server; "
+                    "remove the project and import it again"
+                ) from exc
+        except (GitError, InvalidRepoUrlError) as exc:
+            raise _SyncFailed(_error_chain(exc)) from exc
+        finally:
+            remove_clone(tmp, base, depth=2)  # nothing left after the rename
+        try:
+            production_initialize(state.migrations, state.contexts.get(project_id))
+        except Exception as exc:  # noqa: BLE001 -- a failed import keeps no folder
+            discard_clone(root, base, state.migrations)
+            if isinstance(exc, UnsafePathError):
+                raise _SyncFailed(
+                    f"refusing to initialize: {exc} (WhyGraph never follows a "
+                    "symbolic link out of the repository)"
+                ) from exc
+            raise _SyncFailed(f"could not initialize the project: {exc}") from exc
+        _mark_initialized(project_id)
+        state.contexts.invalidate(project_id)
+        _clear_access_lost(project_id)
+        job.cloned = True
+        return token, {"cloned": True}
+
     async def _requeue(self) -> None:
         """Turn ``queued`` rows left by a previous process back into pending jobs."""
-        specs = await anyio.to_thread.run_sync(_recover_queued)
+        specs = await anyio.to_thread.run_sync(
+            _recover_queued, self._mode() == "production"
+        )
         async with self._lock:  # type: ignore[union-attr]
             for spec in specs:
                 self._pending[spec.project_id] = spec
@@ -2414,6 +2899,7 @@ class ScanRunner:
         shutdown: anyio.Event,
         offset: int = 0,
         still_allowed: Callable[[], bool] | None = None,
+        hide_cost: bool = False,
     ) -> StreamingResponse:
         """Return the SSE response streaming a run's events.
 
@@ -2434,6 +2920,9 @@ class ScanRunner:
             it returns ``False`` the stream sends a terminal ``end`` frame
             with ``reason: "access_revoked"`` and closes. ``None`` (local
             mode) never re-checks.
+        hide_cost : bool
+            Drop :data:`COST_SUMMARY_KEYS` from the ``summary`` of the
+            terminal ``end`` frame (a caller without ``project.usage``).
 
         Returns
         -------
@@ -2453,7 +2942,9 @@ class ScanRunner:
             raise RunNotFound(run_id)
         path = data_dir() / events_rel
         return StreamingResponse(
-            self._stream(run_id, path, max(0, offset), shutdown, still_allowed),
+            self._stream(
+                run_id, path, max(0, offset), shutdown, still_allowed, hide_cost
+            ),
             media_type="text/event-stream",
             headers=dict(_SSE_HEADERS),
         )
@@ -2465,6 +2956,7 @@ class ScanRunner:
         offset: int,
         shutdown: anyio.Event,
         still_allowed: Callable[[], bool] | None = None,
+        hide_cost: bool = False,
     ) -> AsyncIterator[str]:
         pos = offset
         last_sent = last_checked = time.monotonic()
@@ -2497,6 +2989,10 @@ class ScanRunner:
                 continue
             if finished:
                 status, summary = await anyio.to_thread.run_sync(_run_status, run_id)
+                if hide_cost and isinstance(summary, dict):
+                    summary = {
+                        k: v for k, v in summary.items() if k not in COST_SUMMARY_KEYS
+                    }
                 end = {
                     "type": "end",
                     "run_id": run_id,
@@ -2560,8 +3056,10 @@ def _error_chain(exc: BaseException) -> str:
     return ": ".join(p for p in parts if p)
 
 
-def _project_gate(project_id: int) -> tuple[str, bool, str | None, int] | None:
-    """``(source, access lost?, access_lost_reason, org_id)``, or ``None`` for a missing project."""
+def _project_gate(
+    project_id: int,
+) -> tuple[str, bool, str | None, int, bool] | None:
+    """``(source, access lost?, access_lost_reason, org_id, initialized?)``, or ``None`` if missing."""
     with get_session() as session:
         project = session.get(Project, project_id)
         if project is None:
@@ -2571,6 +3069,7 @@ def _project_gate(project_id: int) -> tuple[str, bool, str | None, int] | None:
             project.access_lost_at is not None,
             project.access_lost_reason,
             project.org_id,
+            project.initialized_at is not None,
         )
 
 
@@ -2733,6 +3232,17 @@ def _update_github_repo(
         session.add(project)
 
 
+def _mark_initialized(project_id: int) -> None:
+    """Set an imported project's ``initialized_at`` - only if still unset."""
+    with get_session() as session:
+        session.exec(
+            update(Project)
+            .where(col(Project.id) == project_id)
+            .where(col(Project.initialized_at).is_(None))
+            .values(initialized_at=_now())
+        )
+
+
 def _unsupported_source(source: str) -> str:
     """The refusal message for a project whose ``source`` the mode does not accept."""
     if source == "github":
@@ -2749,8 +3259,15 @@ def _has_ok_scan(project_id: int) -> bool:
 
 
 def _insert_run(
-    project_id: int, kind: str, trigger: str, analyze: bool, requested_by: int | None
+    project_id: int,
+    kind: str,
+    trigger: str,
+    analyze: bool,
+    requested_by: int | None,
+    *,
+    summary: str | None = None,
 ) -> int:
+    """Insert a ``queued`` run (with its queue time and queued summary); its id."""
     with get_session() as session:
         run = ScanRun(
             project_id=project_id,
@@ -2759,6 +3276,8 @@ def _insert_run(
             analyze=analyze,
             requested_by=requested_by,
             status="queued",
+            queued_at=_now(),
+            summary=summary,
         )
         session.add(run)
         session.flush()
@@ -2770,27 +3289,44 @@ def _insert_run(
 
 
 def _queued_summary(pending: _Pending) -> str | None:
-    """The ``summary`` a queued row carries: whether a sync must also scan.
+    """The ``summary`` a queued row carries: a sync's scan flag and the estimate.
 
     A scan merged into a pending ``sync`` is not visible from ``kind`` /
     ``trigger`` (a never-scanned project's trigger is ``initial``), so it is
-    persisted for :func:`_recover_queued`. ``_finish_run`` overwrites it.
+    persisted for :func:`_recover_queued`, as is the describe estimate of a
+    full run. ``_finish_run`` overwrites it (keeping the estimate).
     """
+    out: dict[str, Any] = {}
     if pending.kind == "sync" and pending.scan_requested:
-        return json.dumps({"scan_requested": True})
-    return None
+        out["scan_requested"] = True
+    if pending.estimate is not None:
+        out["estimate"] = pending.estimate
+    return json.dumps(out) if out else None
+
+
+def _queued_json(run: ScanRun) -> dict | None:
+    """A queued row's ``summary`` as a dict, or ``None``."""
+    try:
+        summary = json.loads(run.summary) if run.summary else None
+    except ValueError:
+        return None
+    return summary if isinstance(summary, dict) else None
 
 
 def _queued_scan_requested(run: ScanRun) -> bool:
     """Whether a queued row asked for a scan: the persisted flag, else inferred."""
-    try:
-        summary = json.loads(run.summary) if run.summary else None
-    except ValueError:
-        summary = None
-    if isinstance(summary, dict) and "scan_requested" in summary:
+    summary = _queued_json(run)
+    if summary is not None and "scan_requested" in summary:
         return bool(summary["scan_requested"])
     # Rows queued before the flag was persisted.
     return run.kind == "scan" or run.trigger in ("manual", "describe", "hook")
+
+
+def _queued_estimate(run: ScanRun) -> dict | None:
+    """A queued full run's persisted describe estimate, or ``None``."""
+    summary = _queued_json(run)
+    estimate = None if summary is None else summary.get("estimate")
+    return estimate if run.analyze and isinstance(estimate, dict) else None
 
 
 def _update_queued(pending: _Pending) -> None:
@@ -2806,8 +3342,11 @@ def _update_queued(pending: _Pending) -> None:
         session.add(run)
 
 
-def _finish_run(job: _Job, status: str, summary: dict[str, Any]) -> None:
-    now = _now()
+def _finish_run(
+    job: _Job, status: str, summary: dict[str, Any], now: str | None = None
+) -> None:
+    """Record a job's outcome; ``cancelled_by`` only for a user's cancel."""
+    now = now or _now()
     with get_session() as session:
         run = session.get(ScanRun, job.spec.run_id)
         if run is None:
@@ -2815,6 +3354,8 @@ def _finish_run(job: _Job, status: str, summary: dict[str, Any]) -> None:
         run.status = status
         run.finished_at = now
         run.summary = json.dumps(summary, default=str) if summary else None
+        if status == "cancelled" and job.stop_reason != "budget":
+            run.cancelled_by = job.cancelled_by
         session.add(run)
         if status == "ok" and job.scanned:
             project = session.get(Project, job.spec.project_id)
@@ -2825,14 +3366,20 @@ def _finish_run(job: _Job, status: str, summary: dict[str, Any]) -> None:
                 session.add(project)
 
 
-def _mark_cancelled(run_id: int) -> None:
-    """Record a still-queued run as cancelled by the user."""
+def _mark_cancelled(
+    run_id: int, by: int | None = None, estimate: dict | None = None
+) -> None:
+    """Record a still-queued run as cancelled by the user ``by``, keeping its estimate."""
     with get_session() as session:
         run = session.get(ScanRun, run_id)
         if run is not None and run.status == "queued":
             run.status = "cancelled"
             run.finished_at = _now()
-            run.summary = json.dumps(CANCELLED_BY_USER)
+            summary: dict[str, Any] = dict(CANCELLED_BY_USER)
+            if estimate is not None:
+                summary["estimate"] = estimate
+            run.summary = json.dumps(summary)
+            run.cancelled_by = by
             session.add(run)
 
 
@@ -2855,8 +3402,13 @@ def _mark_interrupted(run_ids: list[int]) -> None:
                 session.add(run)
 
 
-def _recover_queued() -> list[_Pending]:
-    """Requeue ``queued`` rows (one pending job per project); cancel the rest."""
+def _recover_queued(production: bool = False) -> list[_Pending]:
+    """Requeue ``queued`` rows (one pending job per project); cancel the rest.
+
+    A row whose project is gone, not initialized or without its root is
+    cancelled - except a production import's (a GitHub project not
+    initialized yet), whose run makes the clone (M2f-3 plan section 4.8).
+    """
     specs: dict[int, _Pending] = {}
     kept: dict[int, ScanRun] = {}
     with get_session() as session:
@@ -2866,10 +3418,18 @@ def _recover_queued() -> list[_Pending]:
         for run in rows:
             assert run.id is not None
             project = session.get(Project, run.project_id)
-            gone = (
-                project is None
-                or project.initialized_at is None
-                or root_status(resolve_root(project)) != "ok"
+            importing = (
+                production
+                and project is not None
+                and project.source == "github"
+                and project.initialized_at is None
+            )
+            gone = project is None or (
+                not importing
+                and (
+                    project.initialized_at is None
+                    or root_status(resolve_root(project)) != "ok"
+                )
             )
             existing = specs.get(run.project_id)
             if gone or existing is not None:
@@ -2882,6 +3442,7 @@ def _recover_queued() -> list[_Pending]:
                         analyze=run.analyze,
                         requested_by=run.requested_by,
                         scan_requested=_queued_scan_requested(run),
+                        estimate=_queued_estimate(run),
                     )
                     run.summary = json.dumps({"merged_into": existing.run_id})
                 session.add(run)
@@ -2894,6 +3455,9 @@ def _recover_queued() -> list[_Pending]:
                 analyze=run.analyze,
                 requested_by=run.requested_by,
                 scan_requested=_queued_scan_requested(run),
+                estimate=_queued_estimate(run),
+                org_id=None if project is None else project.org_id,
+                importing=importing,
             )
             kept[run.project_id] = run
         # Fold merged rows into the kept one, in this same session (a second
@@ -3085,6 +3649,7 @@ def _read_frames(path: Path, pos: int) -> tuple[list[str], int]:
 
 
 __all__ = [
+    "COST_SUMMARY_KEYS",
     "EXPLICIT_TRIGGERS",
     "LOG_TAIL_BYTES",
     "MAX_CONCURRENT",
@@ -3098,6 +3663,8 @@ __all__ = [
     "RECONCILE_INTERVAL_SEC",
     "REASON_TRACKED_STATE",
     "SCAN_CMD_ENV",
+    "STALE_BEHIND_MAX",
+    "STALE_HEAD_TTL_SEC",
     "TOKEN_REFRESH_MARGIN_SEC",
     "TRIGGER_PRECEDENCE",
     "ProjectAccessLost",
@@ -3108,6 +3675,7 @@ __all__ = [
     "ScanBudgetExceeded",
     "ScanRunner",
     "SourceNotAllowed",
+    "StaleCache",
     "ManagedOnPlatform",
     "child_env",
     "commits_behind",

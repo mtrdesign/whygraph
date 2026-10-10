@@ -34,13 +34,13 @@ export default defineConfig({
     { name: "setup", testMatch: /setup\.spec\.ts/, use: { colorScheme: "light" } },
     {
       name: "light",
-      testIgnore: /(setup|production|linked)\.spec\.ts/,
+      testIgnore: /(setup|production|linked|phone)\.spec\.ts/,
       dependencies: ["setup"],
       use: { colorScheme: "light" },
     },
     {
       name: "dark",
-      testIgnore: /(setup|production|linked)\.spec\.ts/,
+      testIgnore: /(setup|production|linked|phone)\.spec\.ts/,
       dependencies: ["light"],
       use: { colorScheme: "dark" },
     },
@@ -51,11 +51,28 @@ export default defineConfig({
       testMatch: /(^|\/)production\.spec\.ts/,
       use: { baseURL: env.prodUrl, colorScheme: "light" },
     },
+    // The main routes of both portals at a phone's width (M2f-3): no horizontal
+    // overflow and an h1 on each. After `light` (its projects) and `production`
+    // (its claimed instance and the `comet` organization).
+    {
+      name: "phone",
+      testMatch: /phone\.spec\.ts/,
+      dependencies: ["light", "production"],
+      use: { baseURL: env.baseUrl, viewport: { width: 390, height: 844 }, colorScheme: "light" },
+    },
     // Usage & cost on the production portal (M2f-2): its own organization, after
     // the claimed instance. One project, so its member budget never collides.
     {
       name: "production-usage",
       testMatch: /usage-production\.spec\.ts/,
+      dependencies: ["production"],
+      use: { baseURL: env.prodUrl, colorScheme: "light" },
+    },
+    // Onboarding on the production portal (M2f-3): its own organization, after
+    // the claimed instance (ben, dee and the fake GitHub's installation).
+    {
+      name: "production-onboarding",
+      testMatch: /onboarding-production\.spec\.ts/,
       dependencies: ["production"],
       use: { baseURL: env.prodUrl, colorScheme: "light" },
     },

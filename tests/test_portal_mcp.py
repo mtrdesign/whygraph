@@ -190,7 +190,7 @@ def test_offload_runs_the_body_in_a_worker_thread_with_the_context() -> None:
         ctx = current_project()
         return x + y, threading.current_thread() is threading.main_thread(), ctx
 
-    wrapped = mcp_server.offload(body)
+    wrapped = mcp_server.offload(body, kind="body")
     assert wrapped.__wrapped__ is body
 
     ctx = ProjectContext(slug="t", root=Path("/r"), config=None)  # type: ignore[arg-type]
@@ -261,7 +261,7 @@ def test_mcp_unknown_slug_and_setup_gate(env: SimpleNamespace) -> None:  # noqa:
     with portal_client() as client:
         before = client.post("/mcp/demo", json=_rpc("tools/list"), headers=MCP_HEADERS)
         assert before.status_code == 409
-        assert before.json() == {"error": "setup required"}
+        assert before.json() == {"error": "setup required", "code": "setup_required"}
         client.post("/api/portal/setup", json={"display_name": "Tess"})
         unknown = client.post("/mcp/nope", json=_rpc("tools/list"), headers=MCP_HEADERS)
         assert unknown.status_code == 404

@@ -91,7 +91,7 @@ carries one JSON object per line, each written whole, so a reader can parse line
 
 | `type` | When | Fields |
 |---|---|---|
-| `start` | Always first | `phase_total` - the number of phases this run executes (2 to 4, depending on `--skip-analyze`, `--no-remote`, `--pr-origins` and whether an LLM is configured) |
+| `start` | Always first | `phase_total` - the number of phases this run executes (2 to 4, depending on `--skip-analyze`, `--no-remote`, `--pr-origins` and whether an LLM is configured); `phases` - their titles in order (`["Code index"]` for `--codegraph-only`), so a reader can name every phase before it begins. Optional: events recorded by older runs lack it |
 | `phase` | Each phase begins | `phase` (1-based), `title` |
 | `task` | A crawler registers, and as it progresses (throttled; a finished task is always sent) | `name` (stable crawler label), `completed`, `total` (`null` while unknown), `description` (current status text) |
 | `result` | Always last | `status` (`ok` or `failed`), `elapsed_sec`, `phase_timings`, `crawlers` (per crawler: `name`, `status`, `summary`, and `error` / `warning` when set), `analyze_skipped` (why the LLM phase was skipped, else `null`) |
@@ -195,13 +195,14 @@ The portal's HTTP API exposes the same run data the web UI shows:
 
 | Endpoint | Returns |
 |---|---|
-| `GET /api/projects/<slug>/scans` | The project's 50 most recent runs, newest first |
+| `GET /api/projects/<slug>/scans` | The project's runs, newest first, 50 per page: `{runs, next}`. Filters: `status` and `trigger` (comma lists), `type` (`full`, `quick` or `sync`), `requester` (a user id or `system`); `limit` (1-100) and `before=<next>` page through |
+| `GET /api/projects/<slug>/scans/<id>` | One run: its trigger, status, times, who requested or cancelled it, and its summary. Cost and the estimate are shown to project admins only |
 | `GET /api/projects/<slug>/scans/<id>/events` | The run's progress as a server-sent event stream (resumable with `Last-Event-ID`) |
 | `GET /api/projects/<slug>/scans/<id>/log` | The end of the run's log, at most the last 64 KiB, starting at a line boundary: `{run_id, text, size, truncated}`. Keys are already masked. |
 | `GET /api/portal/state` | Portal status, including the installed `version` (what `whygraph version` prints) |
 
-Every `/api` call needs the `X-WhyGraph-Client: 1` header, and the scans endpoints answer `409`
-until the project is initialized.
+Every `/api` call needs the `X-WhyGraph-Client: 1` header, and starting a scan
+(`POST /api/projects/<slug>/scans`) answers `409` until the project is initialized.
 
 ## Removed commands
 

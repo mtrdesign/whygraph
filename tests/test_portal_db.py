@@ -90,6 +90,7 @@ PORTAL_TABLES = {
     "budgets",
     "budget_alerts",
     "price_overrides",
+    "agent_call_days",
 }
 
 
@@ -240,7 +241,8 @@ CONNECTIONS = "c4e7a19b52d8"
 ACCESS = "d8a31f6c07e5"
 REMOVE_CLAUDE_CLI = "bd0a25e6df74"
 USAGE = "e46b50366a4c"
-HEAD = USAGE
+UX = "a7c3e91f5b20"
+HEAD = UX
 
 
 def _seed_m2a(conn) -> dict[str, int]:  # noqa: ANN001
@@ -880,8 +882,8 @@ def _seed_usage_org(conn) -> dict[str, int]:  # noqa: ANN001
     ).scalar_one()
     conn.execute(
         text(
-            "INSERT INTO memberships (org_id, user_id, role, created_at) "
-            "VALUES (:org, :user, 'member', 'now')"
+            "INSERT INTO memberships (org_id, user_id, role, created_at, "
+            "welcome_pending) VALUES (:org, :user, 'member', 'now', false)"
         ),
         {"org": org, "user": user},
     )
@@ -938,6 +940,7 @@ def test_usage_upgrade_creates_the_tables_and_constraints(
         "ix_usage_events_user",
         "ix_usage_events_scan_run",
         "ix_usage_events_connection",
+        "ix_usage_events_key_last_used",
     }
     with engine.connect() as conn:
         defs = dict(
@@ -1109,6 +1112,114 @@ def test_usage_downgrade_refuses_m2f2_data(
     portal_db._reset_engine()
     with pytest.raises(RuntimeError, match=f"usage revision.*{match}"):
         command.downgrade(portal_db.alembic_config(), REMOVE_CLAUDE_CLI)
+    portal_db._reset_engine()
+    with portal_db.get_engine().connect() as conn:
+        assert conn.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar() == (HEAD)
+
+
+UX_COLUMNS = (
+    ("scan_runs", "queued_at"),
+    ("scan_runs", "cancelled_by"),
+    ("memberships", "welcome_pending"),
+)
+
+
+def test_ux_upgrade_creates_the_schema(empty_portal_database: str) -> None:
+    portal_db.ensure_initialized()
+    insp = inspect(portal_db.get_engine())
+    assert "agent_call_days" in insp.get_table_names()
+    for table, column in UX_COLUMNS:
+        assert column in {c["name"] for c in insp.get_columns(table)}
+    assert "ix_agent_call_days_org_day" in {
+        i["name"] for i in insp.get_indexes("agent_call_days")
+    }
+    assert "ix_usage_events_key_last_used" in {
+        i["name"] for i in insp.get_indexes("usage_events")
+    }
+    with portal_db.get_engine().connect() as conn:
+        defs = dict(
+            conn.execute(
+                text(
+                    "SELECT indexname, indexdef FROM pg_indexes "
+                    "WHERE indexname = 'uq_agent_call_days_key'"
+                )
+            ).all()
+        )
+        default = conn.execute(
+            text(
+                "SELECT column_default FROM information_schema.columns "
+                "WHERE table_name = 'memberships' AND column_name = 'welcome_pending'"
+            )
+        ).scalar()
+    assert "NULLS NOT DISTINCT" in defs["uq_agent_call_days_key"]
+    assert default is None
+
+
+def _agent_call(conn, ids: dict[str, int], **kw) -> None:  # noqa: ANN001, ANN003
+    row = {
+        "org": ids["org"],
+        "project": ids["project"],
+        "day": "2026-10-09",
+        "source": "mcp",
+        "kind": "evidence",
+        "calls": 1,
+        **kw,
+    }
+    conn.execute(
+        text(
+            "INSERT INTO agent_call_days (org_id, project_id, day, source, "
+            "kind, calls) VALUES (:org, :project, :day, :source, :kind, :calls)"
+        ),
+        row,
+    )
+
+
+def test_ux_constraints_hold(empty_portal_database: str) -> None:
+    portal_db.ensure_initialized()
+    with portal_db.get_engine().begin() as conn:
+        ids = _seed_usage_org(conn)
+        _agent_call(conn, ids)
+        assert (
+            conn.execute(text("SELECT welcome_pending FROM memberships")).scalar()
+            is not None
+        )
+    for bad in (
+        {"day": "2026-10-9"},
+        {"source": "chat"},
+        {"kind": ""},
+        {"kind": "k" * 65},
+        {"calls": 0},
+        {},  # the unique key (NULL user and connection collide)
+    ):
+        with pytest.raises(IntegrityError), portal_db.get_engine().begin() as conn:
+            _agent_call(conn, ids, **bad)
+
+
+def test_ux_downgrade_drops_what_it_added(empty_portal_database: str) -> None:
+    portal_db.ensure_initialized()
+    portal_db._reset_engine()
+    command.downgrade(portal_db.alembic_config(), USAGE)
+    portal_db._reset_engine()
+    insp = inspect(portal_db.get_engine())
+    assert "agent_call_days" not in insp.get_table_names()
+    for table, column in UX_COLUMNS:
+        assert column not in {c["name"] for c in insp.get_columns(table)}
+    assert "ix_usage_events_key_last_used" not in {
+        i["name"] for i in insp.get_indexes("usage_events")
+    }
+    portal_db._reset_engine()
+    command.upgrade(portal_db.alembic_config(), "head")
+
+
+def test_ux_downgrade_refuses_counter_rows(empty_portal_database: str) -> None:
+    portal_db.ensure_initialized()
+    with portal_db.get_engine().begin() as conn:
+        _agent_call(conn, _seed_usage_org(conn))
+    portal_db._reset_engine()
+    with pytest.raises(RuntimeError, match="ux revision.*agent call counter"):
+        command.downgrade(portal_db.alembic_config(), USAGE)
     portal_db._reset_engine()
     with portal_db.get_engine().connect() as conn:
         assert conn.execute(

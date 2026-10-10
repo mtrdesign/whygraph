@@ -11,6 +11,7 @@ import {
   type ProjectDetails,
 } from "../../api";
 import { agentInfo } from "../../lib/agents";
+import { errorMessage } from "../../lib/apiErrors";
 import { isProduction, usePortalState } from "../../lib/identity";
 import { accountUrl, platformHost, safeHref } from "../../lib/platformLink";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
@@ -26,6 +27,7 @@ import {
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { DiffView } from "./InitPreview";
+import { plural } from "../../lib/plural";
 
 /**
  * "Remove project": says exactly what is and is not deleted, offers to strip the
@@ -34,7 +36,9 @@ import { DiffView } from "./InitPreview";
  * comes back from the backend (`needs_confirmation`) with its diff and is
  * confirmed in place. Removal is refused while a scan runs. In production a
  * project is a server copy of a GitHub repository with no hooks or agent
- * files, so the dialog says only that the copy and its scans go.
+ * files, so the dialog says only that the copy and its scans go (never where
+ * the copy lives on the server). A linked project's unreachable platform is
+ * the one revoke outcome that warns (`token_revoke_result`, BUG-7).
  */
 export function RemoveProjectDialog({
   project,
@@ -69,7 +73,7 @@ export function RemoveProjectDialog({
       setError(null);
       setResult(r);
       void queryClient.invalidateQueries({ queryKey: portalKey("projects") });
-      if (r.warnings.length > 0) toast.warning(`Removed with ${r.warnings.length} warning(s)`);
+      if (r.warnings.length > 0) toast.warning(`Removed with ${plural(r.warnings.length, "warning")}`);
       else toast.success(`${project.name} removed`);
     },
     onError: (err) => {
@@ -78,7 +82,7 @@ export function RemoveProjectDialog({
         setError(null);
         return;
       }
-      setError(err.message);
+      setError(errorMessage(err));
     },
   });
 
@@ -94,8 +98,9 @@ export function RemoveProjectDialog({
   };
 
   if (result) {
-    // The token revoke on the platform is best effort: say so when it failed.
-    const revokeFailed = linked && result.token_revoked === false;
+    // The token revoke on the platform is best effort: say so only when the
+    // platform could not be reached (BUG-7) - an already revoked token is fine.
+    const revokeFailed = linked && result.token_revoke_result === "unreachable";
     const account = safeHref(accountUrl(project.link?.platform_origin));
     return (
       <Dialog open={open} onOpenChange={(o) => (o ? onOpenChange(o) : leave())}>
@@ -170,9 +175,7 @@ export function RemoveProjectDialog({
                 <p className="font-medium">Removed</p>
                 <ul className="list-disc pl-5 text-muted-foreground">
                   <li>The project's settings, keys and scan history.</li>
-                  <li>
-                    The server copy of the repository at <span className="font-mono">{project.root}</span>.
-                  </li>
+                  <li>The server copy of the repository.</li>
                 </ul>
               </div>
               <div>
@@ -208,13 +211,14 @@ export function RemoveProjectDialog({
               <div>
                 <p className="font-medium">Kept</p>
                 <ul className="list-disc pl-5 text-muted-foreground">
-                  {!github && (
+                  {!github && !linked && (
                     <li>
-                      Your repository, including its <span className="font-mono">.whygraph/</span> and{" "}
-                      <span className="font-mono">.codegraph/</span> data. <span className="font-mono">whygraph scan</span>{" "}
-                      works in it again.
+                      Your repository stays as it is. Its WhyGraph history (
+                      <span className="font-mono">.whygraph/</span>) stays in the folder, so adding it again later
+                      picks it up.
                     </li>
                   )}
+                  {linked && <li>Your repository stays as it is.</li>}
                   {github && <li>The repository on GitHub; nothing is changed there.</li>}
                   {linked && <li>The project on the platform, its history and its other members' connections.</li>}
                   <li>The agents' MCP entries, unless you tick the box below.</li>

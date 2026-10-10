@@ -1,3 +1,4 @@
+import { DisabledReason } from "../state/DisabledReason";
 import { useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -16,7 +17,8 @@ import { platformHost } from "../../lib/platformLink";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { CopyButton } from "./CopyButton";
+import { CommandBlock } from "../layout/CommandBlock";
+import { PathText } from "../layout/PathText";
 import { Field } from "./Field";
 
 /**
@@ -119,8 +121,9 @@ function PathRow({
             </span>
           )}
         </span>
-        <span className="truncate font-mono text-xs text-muted-foreground" title={path}>
-          {path}
+        {/* Truncated from the start, so the distinguishing tail stays (PH-8). */}
+        <span className="flex min-w-0 text-muted-foreground">
+          <PathText path={path} />
         </span>
       </span>
     </label>
@@ -160,13 +163,16 @@ function Picker({
 
   return (
     <div className="flex flex-col gap-4" data-testid="platform-picker">
-      <p className="flex items-center gap-2 text-sm">
-        <CheckCircle2Icon className="size-4 text-success" />
-        Connected to{" "}
-        <span className="font-medium">
-          {pending.org}/{pending.project.name}
-        </span>{" "}
-        on {platformHost(pending.platform_origin)}
+      <p className="flex items-start gap-2 text-sm" data-testid="platform-connected">
+        <CheckCircle2Icon className="mt-0.5 size-4 shrink-0 text-success" />
+        {/* One sentence that wraps at phone width, not three squeezed columns. */}
+        <span className="min-w-0 wrap-break-word">
+          Connected to{" "}
+          <span className="font-medium">
+            {pending.org}/{pending.project.name}
+          </span>{" "}
+          on {platformHost(pending.platform_origin)}
+        </span>
       </p>
       {blocked && (
         <Alert variant="destructive" data-testid="slug-taken">
@@ -217,15 +223,12 @@ function Picker({
           {none && (
             <div className="flex flex-col gap-2 p-3.5 text-sm" data-testid="no-candidates">
               <p className="text-muted-foreground">
-                No checkout in your shared folders has this project's repository as its origin. Clone it
-                into a shared folder, then check again; it shows up under Other repositories:
+                No checkout of {pending.project.name} found under your shared folders.{" "}
+                {pending.other_repos.length > 0
+                  ? "If one of the other repositories below is a checkout of it, pick it there. Otherwise clone it into a shared folder, then check again:"
+                  : "Clone it into a shared folder, then check again:"}
               </p>
-              <div className="flex items-center gap-2">
-                <code className="min-w-0 flex-1 truncate rounded-md bg-muted px-2 py-1 font-mono text-xs">
-                  {pending.clone_command}
-                </code>
-                <CopyButton text={pending.clone_command} />
-              </div>
+              <CommandBlock command={pending.clone_command} />
               <div>
                 <Button variant="outline" size="sm" onClick={onRefresh} disabled={refreshing}>
                   {refreshing ? "Checking…" : "Check again"}
@@ -240,8 +243,8 @@ function Picker({
         <div className="flex flex-col gap-2">
           <h2 className="text-sm font-semibold">Other repositories</h2>
           <p className="text-xs text-muted-foreground">
-            Their origin does not match. One is accepted only if it contains the project's latest
-            scanned commit.
+            Their origin does not match. One is accepted only if it contains the commit the platform last
+            scanned.
           </p>
           <div className="flex max-h-56 flex-col overflow-y-auto rounded-lg border border-border" role="radiogroup" aria-label="Other repositories">
             {pending.other_repos.map((c) => (
@@ -281,15 +284,24 @@ function Picker({
         <Button variant="ghost" onClick={() => abandon.mutate()} disabled={abandon.isPending}>
           Cancel
         </Button>
-        <Button onClick={() => add.mutate()} disabled={!chosen || blocked || add.isPending}>
-          {add.isPending
+        {(() => {
+          const label = add.isPending
             ? reconnecting
               ? "Reconnecting…"
               : "Linking…"
             : reconnecting
               ? "Reconnect this checkout"
-              : "Link this checkout"}
-        </Button>
+              : "Link this checkout";
+          return chosen || add.isPending ? (
+            <Button onClick={() => add.mutate()} disabled={!chosen || blocked || add.isPending}>
+              {label}
+            </Button>
+          ) : (
+            <DisabledReason reason="Choose a checkout from the list, or enter a path to one.">
+              <Button disabled>{label}</Button>
+            </DisabledReason>
+          );
+        })()}
       </div>
     </div>
   );

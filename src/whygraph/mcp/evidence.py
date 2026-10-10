@@ -229,7 +229,7 @@ def collect_evidence(target: Target, *, limit: int = 20) -> list[CommitEvidence]
         try:
             initial = repo.blame(target.path, target.line_start, target.line_end)
         except GitError as exc:
-            raise WhyGraphError.wrap("git blame failed", exc)
+            raise WhyGraphError.wrap("git blame failed", exc, code="blame_failed")
         return evidence_from_hunks(repo, target, initial, limit=limit).evidence
     except OperationalError as exc:
         raise WhyGraphError(
@@ -1215,7 +1215,7 @@ def blame_target(repo: Repository, target: Target) -> tuple[BlameHunk, ...]:
     try:
         return repo.blame(target.path, target.line_start, target.line_end)
     except GitError as exc:
-        raise WhyGraphError.wrap("git blame failed", exc)
+        raise WhyGraphError.wrap("git blame failed", exc, code="blame_failed")
 
 
 def linked_evidence(remote: RemoteProject, target: Target, *, limit: int) -> dict:

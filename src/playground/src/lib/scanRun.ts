@@ -1,9 +1,12 @@
 import { useEffect, useReducer } from "react";
 import { ApiError, projectApi, type ScanEvent, type ScanRunStatus, type ScanRunSummary } from "../api";
+import { PHASE_TASKS, phaseLabel, rawPercent } from "./scanProgress";
 
-// Live state of one scan run, folded from the events stream. The first-scan step
-// renders a simple view of it; step 13's full scan-run screen reuses the same
-// hook and reducer.
+export { crawlerLabel } from "./scanProgress";
+
+// Live state of one scan run, folded from the events stream. The wizard's
+// progress card (`ScanProgress`, through `progressModel`) and the scan-run page
+// read the same hook and reducer.
 
 export interface TaskState {
   name: string;
@@ -25,8 +28,25 @@ export interface ScanRunState {
   phaseTitle: string | null;
   /** Every phase seen so far, in the order the stream announced them. */
   phases: { phase: number; title: string }[];
+  /**
+   * The titles the `start` event announced for every phase that will run, in
+   * order (`null` for an older run whose `start` has none). Kept apart from
+   * `phases`, which only holds the phases the stream has reached.
+   */
+  plannedPhases: string[] | null;
   tasks: TaskState[];
-  sync: { status: "fetching" | "ok" | "failed"; moved?: boolean; error?: string } | null;
+  /**
+   * The runner's sync frames of a production GitHub project: `cloning` (an
+   * import's first clone, with the repository's `full_name`) or `fetching`, then
+   * `ok` / `failed`; `cloned` is set on the `ok` frame of a clone.
+   */
+  sync: {
+    status: "cloning" | "fetching" | "ok" | "failed";
+    moved?: boolean;
+    error?: string;
+    fullName?: string;
+    cloned?: boolean;
+  } | null;
   /** A runner-level failure (`{"type":"error"}`), e.g. the repo root is gone. */
   error: string | null;
   /** The child's `result` event. */
@@ -36,6 +56,11 @@ export interface ScanRunState {
   summary: ScanRunSummary | null;
   /** Set when the stream was refused with a 4xx; the hook stops retrying. */
   failure: StreamFailure | null;
+  /**
+   * The highest overall percentage reached so far (`progressModel`'s weights), so
+   * the bar never moves backwards when a later task announces its total.
+   */
+  maxPercent: number | null;
 }
 
 export const initialScanRunState: ScanRunState = {
@@ -43,6 +68,7 @@ export const initialScanRunState: ScanRunState = {
   phase: null,
   phaseTitle: null,
   phases: [],
+  plannedPhases: null,
   tasks: [],
   sync: null,
   error: null,
@@ -50,6 +76,7 @@ export const initialScanRunState: ScanRunState = {
   finished: null,
   summary: null,
   failure: null,
+  maxPercent: null,
 };
 
 type Action =
@@ -60,10 +87,22 @@ type Action =
 export function reduceScanRun(state: ScanRunState, action: Action): ScanRunState {
   if (action.type === "reset") return initialScanRunState;
   if (action.type === "failure") return { ...state, failure: action.failure };
-  const e = action.event;
+  const next = foldEvent(state, action.event);
+  if (next === state) return state;
+  // The high-water mark: a later task's total can lower the pure ratio.
+  const raw = rawPercent(next);
+  const maxPercent = raw === null ? state.maxPercent : Math.max(state.maxPercent ?? 0, raw);
+  return maxPercent === next.maxPercent ? next : { ...next, maxPercent };
+}
+
+function foldEvent(state: ScanRunState, e: ScanEvent): ScanRunState {
   switch (e.type) {
     case "start":
-      return { ...state, phaseTotal: e.phase_total };
+      return {
+        ...state,
+        phaseTotal: e.phase_total,
+        plannedPhases: Array.isArray(e.phases) ? e.phases.filter((t) => typeof t === "string") : state.plannedPhases,
+      };
     case "phase": {
       const phases = state.phases.filter((p) => p.phase !== e.phase);
       phases.push({ phase: e.phase, title: e.title });
@@ -84,7 +123,17 @@ export function reduceScanRun(state: ScanRunState, action: Action): ScanRunState
       return { ...state, tasks };
     }
     case "sync":
-      return { ...state, sync: { status: e.status, moved: e.moved, error: e.error } };
+      return {
+        ...state,
+        sync: {
+          status: e.status,
+          moved: e.moved,
+          error: e.error,
+          // The `ok` frame of a clone carries no name: keep the `cloning` frame's.
+          fullName: e.full_name ?? state.sync?.fullName,
+          cloned: e.cloned ?? state.sync?.cloned,
+        },
+      };
     case "error":
       return { ...state, error: e.message };
     case "result":
@@ -154,38 +203,14 @@ export function useScanRun(slug: string, runId: number | null): ScanRunState {
   return state;
 }
 
-/** Overall progress 0-100 from the phase counter, for a coarse bar. */
-export function phasePercent(state: ScanRunState): number | null {
-  if (state.finished === "ok") return 100;
-  if (state.phaseTotal === null || state.phase === null) return null;
-  return Math.round(((state.phase - 1) / state.phaseTotal) * 100);
-}
-
-/** The crawler (task) names that belong to each phase, by the phase's title. */
-const PHASE_TASKS: Record<string, string[]> = {
-  "Structural crawl": ["git", "github"],
-  "PR-origin recovery": ["pr-origins"],
-  "Author identity": ["authors"],
-  "LLM descriptions": ["analyze"],
-};
-
-/** Friendly names for the crawler task labels the scan emits. */
-const CRAWLER_LABEL: Record<string, string> = {
-  git: "Git history",
-  github: "GitHub pull requests and issues",
-  "pr-origins": "PR-origin recovery",
-  authors: "Author identities",
-  analyze: "LLM descriptions",
-  codegraph: "CodeGraph index",
-};
-
-export const crawlerLabel = (name: string) => CRAWLER_LABEL[name] ?? name;
-
-export type PhaseStatus = "pending" | "running" | "done" | "failed" | "skipped";
+export type PhaseStatus = "pending" | "running" | "done" | "failed" | "skipped" | "cancelled";
 
 export interface PhaseRow {
   phase: number;
+  /** The checklist label (`phaseLabel`): "Git history and GitHub". */
   title: string;
+  /** The title the scan announced ("Structural crawl"). */
+  rawTitle: string;
   status: PhaseStatus;
   /** Seconds, known once the scan's `result` event arrived. */
   seconds: number | null;
@@ -203,14 +228,17 @@ export interface CrawlerResult {
 }
 
 /**
- * The phase timeline of a run. Titles come from the `phase` events; a phase the
- * stream has not reached yet is listed as pending up to the announced
- * `phase_total` (or skipped, once the run has ended without reaching it). A phase
- * is done once a later one started or the run ended, and `failed` when a crawler
- * of the phase reported failure in the `result` event.
+ * The phase timeline of a run. Every phase is named up front from `plannedPhases`
+ * (the `start` event's titles, through `phaseLabel`; "Step n" only for an older
+ * run without them). A phase the stream has not reached is pending, or skipped once
+ * the run has ended without reaching it (after a failure, a cancel). A phase is
+ * done once a later one started or the run ended, `failed` when a crawler of the
+ * phase reported failure in the `result` event or the run died in it, and
+ * `cancelled` when the run was cancelled while it was running. A failed run always
+ * shows one failed phase.
  */
 export function phaseRows(state: ScanRunState): PhaseRow[] {
-  const total = Math.max(state.phaseTotal ?? 0, state.phases.at(-1)?.phase ?? 0);
+  const total = Math.max(state.phaseTotal ?? 0, state.plannedPhases?.length ?? 0, state.phases.at(-1)?.phase ?? 0);
   const source = state.result ?? state.summary;
   const timings = (source?.phase_timings ?? {}) as Record<string, number>;
   const crawlers: CrawlerResult[] = source?.crawlers ?? [];
@@ -218,24 +246,34 @@ export function phaseRows(state: ScanRunState): PhaseRow[] {
   const rows: PhaseRow[] = [];
   for (let n = 1; n <= total; n++) {
     const seen = state.phases.find((p) => p.phase === n);
-    const title = seen?.title ?? `Step ${n}`;
-    const names = PHASE_TASKS[title] ?? [];
+    const rawTitle = seen?.title ?? state.plannedPhases?.[n - 1] ?? `Step ${n}`;
+    const names = PHASE_TASKS[rawTitle] ?? [];
     const failed = crawlers.some((c) => names.includes(c.name) && c.status === "failed");
     let status: PhaseStatus;
     if (!seen) status = ended ? "skipped" : "pending";
     else if (failed) status = "failed";
+    else if (state.finished === "cancelled" && !state.result && n === state.phase) status = "cancelled";
     // A run that ended without a `result` died in the phase it was in.
     else if (ended && state.finished !== "ok" && !state.result && n === state.phase) status = "failed";
     else if (ended || (state.phase ?? 0) > n) status = "done";
     else status = "running";
     rows.push({
       phase: n,
-      title,
+      title: phaseLabel(rawTitle),
+      rawTitle,
       status,
-      seconds: typeof timings[title] === "number" ? timings[title] : null,
+      seconds: typeof timings[rawTitle] === "number" ? timings[rawTitle] : null,
       tasks: state.tasks.filter((t) => names.includes(t.name)),
       crawlers: crawlers.filter((c) => names.includes(c.name)),
     });
+  }
+  // A failure always belongs to a phase (BUG-6): a failed run whose failed crawler
+  // (or runner error) names no phase fails the phase it was in, or the first one
+  // when it never reached any; the phases after it stay skipped. A failed sync
+  // owns its own failure, so the phases are left skipped.
+  if (state.finished === "failed" && state.sync?.status !== "failed" && !rows.some((r) => r.status === "failed")) {
+    const at = rows.find((r) => r.phase === state.phase) ?? rows[0];
+    if (at) at.status = "failed";
   }
   return rows;
 }
@@ -247,4 +285,19 @@ export function codegraphRow(state: ScanRunState): { task: TaskState | null; res
     task: state.tasks.find((t) => t.name === "codegraph") ?? null,
     result: source?.crawlers?.find((c) => c.name === "codegraph") ?? null,
   };
+}
+
+/** The CodeGraph row's sentence: what the index did, never the crawler's raw words (SCN-5). */
+export function codegraphText(
+  cg: { task: TaskState | null; result: Pick<CrawlerResult, "status"> | null },
+  finished: ScanRunStatus | null,
+): string {
+  if (cg.result) {
+    return cg.result.status === "failed"
+      ? "The code index did not update. The error is under Show details."
+      : "The code index was refreshed alongside the other phases.";
+  }
+  if (finished === "cancelled") return "Stopped with the run.";
+  if (finished) return "The code index was not refreshed.";
+  return "Refreshing the code index alongside the other phases.";
 }

@@ -43,6 +43,7 @@ from test_portal_github_import import (  # noqa: F401 -- fixtures
     github_app_key,
     github_git_server,
     import_repo,
+    wait_import,
     production_env,
     project_row,
     world,
@@ -106,9 +107,9 @@ def team(w: World) -> None:
 
 
 def imported(w: World, org: str = "acme") -> int:
-    """Import ``acme/api`` into ``org`` (GitHub already connected); its project id."""
-    response = import_repo(w, API_REPO, org=org)
-    assert response.status_code == 201, response.text
+    """Import ``acme/api`` into ``org`` (GitHub already connected), its first run ended; its id."""
+    run = wait_import(w, import_repo(w, API_REPO, org=org), org)
+    assert run["status"] == "ok", run
     row = project_row(org, "api")
     assert row is not None and row.id is not None
     return row.id
@@ -340,7 +341,7 @@ def test_a_running_scan_is_cancelled(world: World, scanner: SimpleNamespace) -> 
     project_id = imported(w)
     scanner.hold.touch()
     scan(w)
-    wait_for(scanner.calls)
+    wait_for(lambda: len(scanner.calls()) == 2)  # after the import's own scan
     job = wait_for(lambda: w.state.runner._running.get(project_id))
     assert job.alive()
 
@@ -388,7 +389,7 @@ def test_a_sync_still_fetching_is_busy_and_releases_everything(
     finish.set()
     # The cancel reached the sync: it stops after the fetch, without a scan.
     assert wait_run(w, run_id)["status"] == "cancelled"
-    assert scanner.calls() == []
+    assert len(scanner.calls()) == 1  # only the import's own scan
     # The org keeps working, and a second attempt goes through.
     assert wait_run(w, scan(w))["status"] == "ok"
     assert delete_org(w).status_code == 200
@@ -421,30 +422,29 @@ def test_a_scan_request_during_the_deletion_is_refused(
     assert refused.status_code == 409, refused.text
     assert (second.status_code, second.json()["code"]) == (409, "busy")
     assert deleted[0].status_code == 200, deleted[0].text
-    assert scanner.calls() == []
+    assert len(scanner.calls()) == 1  # only the import's own scan
     assert runner_released(w)
 
 
 def test_an_import_racing_the_deletion_leaves_no_row_and_no_clone(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The import has cloned and is about to insert when the org goes."""
+    """The import passed its checks and is about to insert when the org goes."""
     w = world
     connected(w)
     entered, release = threading.Event(), threading.Event()
-    real = routes_mod._insert_imported
+    real = routes_mod._insert_import_row
 
     def paused_insert(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
         entered.set()
         release.wait(30)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(routes_mod, "_insert_imported", paused_insert)
+    monkeypatch.setattr(routes_mod, "_insert_import_row", paused_insert)
     answers: list[httpx.Response] = []
     importer = threading.Thread(target=lambda: answers.append(import_repo(w, API_REPO)))
     importer.start()
     assert entered.wait(30)
-    assert (w.repos / "acme" / "api" / ".git").is_dir()  # cloned, not inserted
 
     response = delete_org(w)
     release.set()
@@ -456,6 +456,7 @@ def test_an_import_racing_the_deletion_leaves_no_row_and_no_clone(
     assert not (w.repos / "acme").exists()
     with portal_db.get_session() as session:
         assert session.exec(select(Project)).all() == []
+        assert session.exec(select(ScanRun)).all() == []  # no import run either
 
 
 # ---------------------------------------------------------------------------

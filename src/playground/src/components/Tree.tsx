@@ -4,6 +4,7 @@ import type { TreeEntry } from "../api";
 import { useExplorerSearch, useOpenNode } from "../lib/nav";
 import { useProjectQuery } from "../lib/project";
 import { KindBadge } from "./KindBadge";
+import { ErrorState } from "./state/ErrorState";
 import { ScrollArea } from "./ui/scroll-area";
 import { cn } from "@/lib/utils";
 
@@ -29,7 +30,7 @@ interface LevelProps {
 }
 
 function TreeLevel({ dir, node, depth, expanded, onToggle }: LevelProps) {
-  const { data, isLoading, isError } = useProjectQuery(["tree", { dir, node }], (api) =>
+  const { data, isLoading, isError, error, refetch } = useProjectQuery(["tree", { dir, node }], (api) =>
     api.tree({ dir, node }),
   );
 
@@ -37,12 +38,18 @@ function TreeLevel({ dir, node, depth, expanded, onToggle }: LevelProps) {
     return <div style={{ paddingLeft: depth * 14 + 22 }} className="py-1 text-xs text-muted-foreground">…</div>;
   if (isError)
     return (
-      <div style={{ paddingLeft: depth * 14 + 22 }} className="py-1 text-xs text-destructive">
-        failed to load
+      <div style={{ paddingLeft: depth * 14 + 22 }} className="py-1 pr-2">
+        <ErrorState size="inline" error={error} onRetry={() => void refetch()} className="text-xs" />
       </div>
     );
 
   const entries = data?.entries ?? [];
+  if (entries.length === 0 && depth === 0)
+    return (
+      <div className="px-3 py-2 text-xs text-muted-foreground">
+        Nothing indexed yet. Run a scan from the project Overview to fill the tree.
+      </div>
+    );
   if (entries.length === 0)
     return (
       <div style={{ paddingLeft: depth * 14 + 22 }} className="py-1 text-xs text-muted-foreground/60">
@@ -97,8 +104,9 @@ function TreeRow({
         onClick={handleClick}
         style={{ paddingLeft: depth * 14 + 8 }}
         className={cn(
-          "flex cursor-pointer items-center gap-1.5 py-1 pr-2 text-sm hover:bg-accent",
-          isSelected && "bg-primary/20 text-foreground",
+          "flex cursor-pointer items-center gap-1.5 py-1 pr-2 text-sm",
+          // The selected row keeps its tint under the pointer; only the others take the hover grey.
+          isSelected ? "bg-primary-soft text-primary-text" : "hover:bg-accent",
         )}
       >
         {entry.has_children ? (
@@ -108,7 +116,9 @@ function TreeRow({
         ) : (
           <span className="inline-block w-3 shrink-0" />
         )}
-        <span className="truncate">{entry.label}</span>
+        <span className="min-w-0 truncate" title={entry.label}>
+          {entry.label}
+        </span>
         {!isDir && <KindBadge kind={entry.kind} />}
       </div>
       {isOpen && entry.has_children && (
@@ -126,7 +136,11 @@ function TreeRow({
 
 export function Tree() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const selectedFilePath = useExplorerSearch().file;
+  const { node, file } = useExplorerSearch();
+  // BUG-17: `?node=` without `&file=` (a pasted link) resolves the file from the node's own
+  // payload (the query the detail panel shares), so the tree still expands to it.
+  const resolved = useProjectQuery(["node", node], (api) => api.node(node!), { enabled: !!node && !file });
+  const selectedFilePath = file ?? resolved.data?.symbol.file_path;
 
   const onToggle = (id: string) =>
     setExpanded((prev) => {

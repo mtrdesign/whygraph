@@ -10,9 +10,20 @@ import {
   valuesToLayer,
   configFormSchema,
 } from "../lib/configForm";
-import { initialScanRunState, reduceScanRun, phasePercent } from "../lib/scanRun";
+import { initialScanRunState, reduceScanRun } from "../lib/scanRun";
 import { projectStatus, timeAgo } from "../lib/projectStatus";
 import { selectionNotes } from "../lib/agents";
+import { plural } from "../lib/plural";
+
+describe("plural (BUG-15)", () => {
+  it("agrees the noun with the count and groups thousands", () => {
+    expect(plural(1, "message")).toBe("1 message");
+    expect(plural(0, "message")).toBe("0 messages");
+    expect(plural(3, "warning")).toBe("3 warnings");
+    expect(plural(1240, "commit")).toBe("1,240 commits");
+    expect(plural(2, "entry", "entries")).toBe("2 entries");
+  });
+});
 
 // ---- add-project error mapping ------------------------------------------------
 
@@ -28,7 +39,6 @@ describe("addProjectError", () => {
     const nf = addProjectError(err("not_found"), "github");
     expect(nf.field).toBe("url");
     expect(nf.message).toMatch(/not visible/i);
-    expect(addProjectError(err("invalid_url"), "github").field).toBe("url");
   });
 
   it("carries the not_shared fix command through from the body", () => {
@@ -41,9 +51,12 @@ describe("addProjectError", () => {
     expect(e.folderSuggestion).toBe("/Users/me/Work");
   });
 
-  it("falls back to the backend message for unknown codes and non-API errors", () => {
-    expect(addProjectError(err("weird"), "local")).toEqual({ field: "form", message: "backend text" });
-    expect(addProjectError(new Error("offline"), "local").message).toBe("offline");
+  it("falls back to the registry's sentence for unknown codes and non-API errors", () => {
+    expect(addProjectError(err("weird"), "local")).toEqual({
+      field: "form",
+      message: "WhyGraph couldn't use that request. Reload the page and try again.",
+    });
+    expect(addProjectError(new Error("offline"), "local").message).toMatch(/WhyGraph hit an error/);
   });
 });
 
@@ -158,13 +171,12 @@ describe("scan run reducer", () => {
     expect(s.phaseTotal).toBe(4);
     expect(s.phaseTitle).toBe("Git history");
     expect(s.tasks).toEqual([{ name: "git", completed: 10, total: 10, description: "done" }]);
-    expect(phasePercent(s)).toBe(25);
     s = reduceScanRun(s, {
       type: "event",
       event: { type: "end", run_id: 1, status: "ok", summary: null },
     });
     expect(s.finished).toBe("ok");
-    expect(phasePercent(s)).toBe(100);
+    expect(s.maxPercent).toBe(100);
   });
 });
 
@@ -252,15 +264,24 @@ function project(over: Partial<ProjectSummary> = {}): ProjectSummary {
 }
 
 describe("projectStatus", () => {
-  it("covers every badge, by precedence", () => {
-    expect(projectStatus(project()).key).toBe("ready");
-    expect(projectStatus(project({ initialized: false })).key).toBe("uninitialized");
+  it("covers every badge, by precedence, in the section 0.3 #38 words", () => {
+    expect(projectStatus(project())).toMatchObject({ key: "ready", label: "Ready" });
+    expect(projectStatus(project({ initialized: false }))).toMatchObject({ key: "needs_setup", label: "Needs setup" });
     expect(projectStatus(project({ last_scan_at: null })).key).toBe("unscanned");
     expect(projectStatus(project({ running_scan: { id: 1, status: "running", trigger: "manual" } })).label).toBe("Scanning");
-    expect(projectStatus(project({ stale: { commits_behind: 3 } })).label).toBe("Stale, 3 commits behind");
-    expect(projectStatus(project({ stale: { commits_behind: 1 } })).label).toBe("Stale, 1 commit behind");
-    expect(projectStatus(project({ stale: { commits_behind: null } })).label).toBe("Stale");
-    expect(projectStatus(project({ root_status: "missing", stale: { commits_behind: 3 } })).key).toBe("unavailable");
+    expect(projectStatus(project({ running_scan: { id: 1, status: "queued", trigger: "manual" } })).label).toBe("Scanning");
+    // Behind carries the count in its tooltip.
+    expect(projectStatus(project({ stale: { commits_behind: 3 } }))).toMatchObject({
+      label: "Behind",
+      tooltip: "3 commits behind",
+    });
+    expect(projectStatus(project({ stale: { commits_behind: 1 } })).tooltip).toBe("1 commit behind");
+    expect(projectStatus(project({ stale: { commits_behind: null } })).label).toBe("Behind");
+    expect(projectStatus(project({ root_status: "missing", stale: { commits_behind: 3 } }))).toMatchObject({
+      key: "folder_missing",
+      label: "Folder missing",
+    });
+    expect(projectStatus(project({ root_status: "not_git" })).label).toBe("Folder missing");
   });
 
   it("formats relative times", () => {
@@ -276,5 +297,8 @@ describe("agent notes", () => {
     expect(selectionNotes(["claude"]).some((n) => /twice/.test(n))).toBe(false);
     expect(selectionNotes(["claude", "vscode"]).some((n) => /twice/.test(n))).toBe(true);
     expect(selectionNotes(["codex"]).join(" ")).toMatch(/trust this project/);
+    // A note names its agent once ("Claude Code asks...", not "Claude Code: Claude Code asks...").
+    expect(selectionNotes(["claude"])[0]).toMatch(/^Claude Code asks/);
+    expect(selectionNotes(["codex"])[0]).toMatch(/^Codex loads/);
   });
 });

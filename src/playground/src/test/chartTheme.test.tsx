@@ -89,10 +89,11 @@ describe("chart colour tables", () => {
       ["dark", ".dark"],
     ] as const) {
       const colors = CHART_COLORS[theme];
-      expect(colors.surface).toBe(resolve(selector, "--muted"));
+      expect(colors.surface).toBe(resolve(selector, "--card"));
       expect(colors.tooltip).toBe(resolve(selector, "--popover"));
       expect(colors.muted).toBe(resolve(selector, "--muted-foreground"));
       expect(colors.fg).toBe(resolve(selector, "--foreground"));
+      expect(colors.info).toBe(resolve(selector, "--info"));
     }
   });
 });
@@ -120,6 +121,25 @@ describe("buildOption", () => {
     expect(dark).toContain(CHART_COLORS.dark.palette[0]);
     expect(dark).not.toContain(CHART_COLORS.light.palette[0]);
     expect(dark).not.toContain(CHART_COLORS.light.surface);
+  });
+});
+
+describe("buildOption x-axis thinning (PH-9)", () => {
+  const days = {
+    ...bar,
+    rows: Array.from({ length: 30 }, (_, i) => [`Oct ${i + 1}`, i, 1]),
+  };
+  const axis = (width?: number) =>
+    buildOption(days, CHART_COLORS.light, { width }).xAxis as { axisLabel: { interval: number; hideOverlap: boolean } };
+
+  it("draws at most 6 labels below 480 px and 12 otherwise, always dropping overlaps", () => {
+    const narrow = axis(390).axisLabel;
+    expect(Math.ceil(30 / (narrow.interval + 1))).toBeLessThanOrEqual(6);
+    expect(narrow.hideOverlap).toBe(true);
+    const wide = axis(900).axisLabel;
+    expect(Math.ceil(30 / (wide.interval + 1))).toBeLessThanOrEqual(12);
+    expect(wide.interval).toBeLessThan(narrow.interval);
+    expect(axis(undefined).axisLabel.interval).toBe(wide.interval);
   });
 });
 
@@ -158,6 +178,85 @@ describe("buildOption value formats", () => {
     await userEvent.click(screen.getByRole("button", { name: "table" }));
     expect(screen.getByText("$3.27")).toBeInTheDocument();
     expect(screen.getByText("2026-10-01")).toBeInTheDocument();
+  });
+});
+
+describe("buildOption markers and pct (M2f-3 S16)", () => {
+  const line: ChartPayload = {
+    kind: "line",
+    title: "Commits described",
+    xIndex: 0,
+    yIndex: 1,
+    columns: ["Scan", "Commits described"],
+    rows: [
+      ["1 Oct", 10],
+      ["3 Oct", 42.5],
+      ["5 Oct", 60],
+    ],
+    nullRows: 0,
+    markers: [
+      { x: "3 Oct", label: "Full scan", tone: "ok" },
+      { x: "3 Oct", label: "Failed run", tone: "error" },
+      { x: "9 Oct", label: "Not on the axis", tone: "warn" },
+    ],
+  };
+
+  it("draws a marker on its category's value, coloured by the worst tone, and skips unknown ones", () => {
+    const option = buildOption(line, CHART_COLORS.light, { valueFormat: "pct" });
+    const series = option.series as Array<{ name?: string; data: unknown[]; lineStyle?: { opacity: number } }>;
+    expect(series).toHaveLength(2);
+    const markers = series[1];
+    expect(markers.lineStyle?.opacity).toBe(0);
+    expect(markers.data[0]).toBeNull();
+    expect(markers.data[2]).toBeNull();
+    expect(markers.data[1]).toMatchObject({ value: 42.5, itemStyle: { color: CHART_COLORS.light.palette[1] } });
+    expect(JSON.stringify(option)).not.toMatch(/oklch|var\(/i);
+  });
+
+  it("lists the events at a point in the tooltip, not the marker series' value", () => {
+    const option = buildOption(line, CHART_COLORS.dark, { valueFormat: "pct" });
+    const tooltip = (option.tooltip as { formatter: (p: unknown) => HTMLElement }).formatter([
+      { axisValueLabel: "3 Oct", seriesName: undefined, seriesIndex: 0, value: 42.5 },
+      { axisValueLabel: "3 Oct", seriesName: "__markers", seriesIndex: 1, value: 42.5 },
+    ]);
+    expect(tooltip.textContent).toBe("3 Oct42.5%Full scanFailed run");
+    expect(tooltip.outerHTML).not.toMatch(/oklch|var\(/i);
+  });
+
+  it("formats pct on the axis (0 to 100) and in the Table view", async () => {
+    const option = buildOption(line, CHART_COLORS.light, { valueFormat: "pct" });
+    const axis = option.yAxis as {
+      min: number;
+      max: number;
+      interval: number;
+      axisLabel: { formatter: (v: number) => string };
+    };
+    // Quarter ticks: 0 / 25 / 50 / 75 / 100 %, never a cramped 90-100 pair.
+    expect([axis.min, axis.max, axis.interval]).toEqual([0, 100, 25]);
+    expect(axis.axisLabel.formatter(50)).toBe("50%");
+    render(
+      <ThemeProvider>
+        <ChartBlock payload={line} valueFormat="pct" />
+      </ThemeProvider>,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "table" }));
+    expect(screen.getByText("42.5%")).toBeInTheDocument();
+  });
+
+  it("colours an info marker with the info token, not the muted grey", () => {
+    const option = buildOption(
+      { ...line, markers: [{ x: "3 Oct", label: "First scan", tone: "info" }] },
+      CHART_COLORS.dark,
+      { valueFormat: "pct" },
+    );
+    const markers = (option.series as Array<{ data: unknown[] }>)[1];
+    expect(markers.data[1]).toMatchObject({ itemStyle: { color: CHART_COLORS.dark.info } });
+    expect(CHART_COLORS.dark.info).not.toBe(CHART_COLORS.dark.muted);
+  });
+
+  it("ignores markers on a stacked chart", () => {
+    const option = buildOption({ ...stacked, markers: [{ x: "Jun", label: "x", tone: "info" }] }, CHART_COLORS.light);
+    expect((option.series as unknown[]).length).toBe(2);
   });
 });
 

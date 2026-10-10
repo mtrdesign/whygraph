@@ -37,7 +37,7 @@ import os
 from collections.abc import Iterator
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import col, func, select
@@ -57,7 +57,7 @@ from whygraph.core.usage import BUDGET_EXCEEDED, UsageBlocked, set_scope_field
 from whygraph.db import get_session
 from whygraph.db.models import ChatMessage as ChatMessageRow
 from whygraph.db.models import ChatSession as ChatSessionRow
-from whygraph.services.llm import LlmError
+from whygraph.services.llm import LlmError, LlmKeyMissing
 from whygraph.services.llm.chat import (
     CHAT_PROVIDERS,
     ChatMessage,
@@ -69,6 +69,8 @@ from whygraph.services.llm.chat import (
     fallback_models,
     make_chat_client,
 )
+
+from .errors import ServeError
 
 _log = logging.getLogger(__name__)
 
@@ -222,9 +224,10 @@ def models(provider: str = Query(...)) -> dict:
     never empty and the UI can say why it looks short.
     """
     if provider not in CHAT_PROVIDERS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{provider!r} is not a chat provider; available: {CHAT_PROVIDERS}",
+        raise ServeError(
+            400,
+            f"{provider!r} is not a chat provider; available: {CHAT_PROVIDERS}",
+            code="bad_provider",
         )
 
     configured_model = get_config().model_for("chat", provider=provider).model
@@ -303,18 +306,17 @@ def create_session(request: Request, body: CreateSessionBody | None = None) -> d
     """
     body = body or CreateSessionBody()
     if body.provider and body.provider not in CHAT_PROVIDERS:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"{body.provider!r} is not a chat provider; available: {CHAT_PROVIDERS}"
-            ),
+        raise ServeError(
+            400,
+            f"{body.provider!r} is not a chat provider; available: {CHAT_PROVIDERS}",
+            code="bad_provider",
         )
     try:
         provider, default_model = get_config().model_for(
             "chat", provider=body.provider or None
         )
     except ConfigError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise ServeError(400, str(exc), code="bad_config") from exc
     model = body.model or default_model
 
     now = _now_iso()
@@ -339,7 +341,7 @@ def _require_session(
     """Fetch a session row or raise 404 - also when ``owner`` is set and differs."""
     row = session.get(ChatSessionRow, session_id)
     if row is None or (owner is not None and row.owner_uid != owner):
-        raise HTTPException(status_code=404, detail=f"session {session_id} not found")
+        raise ServeError(404, f"session {session_id} not found", code="not_found")
     return row
 
 
@@ -369,11 +371,10 @@ def update_session(session_id: int, body: UpdateSessionBody, request: Request) -
     rewrites history.
     """
     if body.provider is not None and body.provider not in CHAT_PROVIDERS:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"{body.provider!r} is not a chat provider; available: {CHAT_PROVIDERS}"
-            ),
+        raise ServeError(
+            400,
+            f"{body.provider!r} is not a chat provider; available: {CHAT_PROVIDERS}",
+            code="bad_provider",
         )
 
     with get_session() as session:
@@ -382,7 +383,7 @@ def update_session(session_id: int, body: UpdateSessionBody, request: Request) -
         if body.title is not None:
             title = body.title.strip()
             if not title:
-                raise HTTPException(status_code=400, detail="title must not be empty")
+                raise ServeError(400, "title must not be empty", code="bad_title")
             row.title = title[:TITLE_MAX_CHARS]
 
         if body.provider is not None and body.provider != row.provider:
@@ -395,7 +396,7 @@ def update_session(session_id: int, body: UpdateSessionBody, request: Request) -
         if body.model is not None:
             model = body.model.strip()
             if not model:
-                raise HTTPException(status_code=400, detail="model must not be empty")
+                raise ServeError(400, "model must not be empty", code="bad_model")
             row.model = model
 
         row.updated_at = _now_iso()
@@ -577,6 +578,45 @@ start something new and so flush that round's buffer as its row. The turn's
 end flushes too. A new terminal or round-opening event joins this tuple."""
 
 
+_UNREACHABLE_CAUSES = frozenset({"APIConnectionError", "APITimeoutError"})
+"""The SDK exceptions (``anthropic`` and ``openai`` name them alike) that mean
+the provider could not be reached, rather than that it answered with an error."""
+
+
+def _sse_error_code(exc: BaseException) -> str:
+    """The ``code`` of an in-band ``error`` frame for a failed turn.
+
+    ``no_llm_key`` when the adapter found no key for the provider,
+    ``llm_unavailable`` when the provider could not be reached, else
+    ``provider_error``. ``tests/test_error_codes.py`` reads the literals
+    returned here.
+    """
+    if isinstance(exc, LlmKeyMissing):
+        return "no_llm_key"
+    cause: BaseException | None = exc
+    while cause is not None:
+        if type(cause).__name__ in _UNREACHABLE_CAUSES:
+            return "llm_unavailable"
+        cause = cause.__cause__
+    return "provider_error"
+
+
+def _error_frame(exc: BaseException, provider: str, message: str) -> tuple[str, str]:
+    """The ``error`` frame for a failed turn and the text its row keeps.
+
+    A missing key gets a neutral sentence instead of the adapter's, which
+    names environment variables and ``whygraph.toml`` keys; the playground
+    words it from ``code`` and ``provider`` (and the portal's mode).
+    """
+    code = _sse_error_code(exc)
+    frame: dict[str, str] = {"type": "error", "code": code}
+    if code == "no_llm_key":
+        message = f"no API key is set for {provider}"
+        frame["provider"] = provider
+    frame["message"] = message
+    return _frame(frame), message
+
+
 def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
     """Run one turn, yielding SSE frames and persisting rows as they land.
 
@@ -594,13 +634,7 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
     try:
         client = make_chat_client(provider, model=model)
     except LlmError as exc:
-        env_var = chat_provider_env_var(provider)
-        hint = (
-            f" — set {env_var} or [llm.{provider}].api_key in whygraph.toml"
-            if env_var
-            else ""
-        )
-        message = f"{exc}{hint}"
+        frame, message = _error_frame(exc, provider, str(exc))
         # Same contract as the mid-turn handlers below: the failure is a row,
         # not just a frame, so a refresh still shows why nothing was answered.
         _persist_assistant_turn(
@@ -612,7 +646,7 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
             model=model,
             error=message,
         )
-        yield _frame({"type": "error", "message": message})
+        yield frame
         return
 
     registry = ToolRegistry()
@@ -725,8 +759,9 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
         # Whatever arrived before the failure is worth keeping — the user can
         # see how far the model got, and the retry re-sends cleanly. The error
         # rides the same row so a refresh replays it.
-        _flush_round(error=str(exc))
-        yield _frame({"type": "error", "message": str(exc)})
+        frame, message = _error_frame(exc, provider, str(exc))
+        _flush_round(error=message)
+        yield frame
         return
     except GeneratorExit:
         # Client disconnected (Stop button, closed tab). Persist what we have
@@ -735,8 +770,9 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
         raise
     except Exception as exc:  # noqa: BLE001 -- must not surface as a hung stream
         _log.exception("chat turn crashed for session %s", session_id)
-        _flush_round(error=f"{type(exc).__name__}: {exc}")
-        yield _frame({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+        message = f"{type(exc).__name__}: {exc}"
+        _flush_round(error=message)
+        yield _frame({"type": "error", "code": "provider_error", "message": message})
         return
 
     if budget_stop is not None:
@@ -777,7 +813,7 @@ def send_message(
     """
     content = body.content.strip()
     if not content:
-        raise HTTPException(status_code=400, detail="content must not be empty")
+        raise ServeError(400, "content must not be empty", code="bad_content")
 
     with get_session() as session:
         row = _require_session(session, session_id, _owner_filter(request))

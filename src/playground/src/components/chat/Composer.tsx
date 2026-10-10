@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
 
@@ -11,19 +11,37 @@ import { Textarea } from "../ui/textarea";
  */
 export function Composer({
   streaming,
+  fill,
+  disabled,
+  notice,
+  disabledPlaceholder = "Add a key to start chatting",
   onSend,
   onStop,
 }: {
   streaming: boolean;
+  /** Text to put in the box (a starter prompt); `n` changes on every request, so the same text can be picked twice. */
+  fill?: { text: string; n: number } | null;
+  /** Nothing can be sent (no key for the chosen provider): the box is dead and `notice` says why. */
+  disabled?: boolean;
+  /** The reason under the box; replaces the keyboard hint. */
+  notice?: ReactNode;
+  /** The box's placeholder while it is disabled (default: no key). */
+  disabledPlaceholder?: string;
   onSend: (content: string) => void;
   onStop: () => void;
 }) {
   const [value, setValue] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
 
+  useEffect(() => {
+    if (!fill) return;
+    setValue(fill.text);
+    ref.current?.focus();
+  }, [fill]);
+
   const submit = () => {
     const content = value.trim();
-    if (!content || streaming) return;
+    if (!content || streaming || disabled) return;
     setValue("");
     onSend(content);
     ref.current?.focus();
@@ -37,9 +55,14 @@ export function Composer({
           rows={2}
           className="max-h-40 min-h-0 resize-none"
           value={value}
-          disabled={streaming}
+          disabled={streaming || disabled}
+          aria-describedby={disabled && notice ? "composer-notice" : undefined}
           placeholder={
-            streaming ? "Waiting for the assistant…" : "Ask about this repository…"
+            streaming
+              ? "Waiting for the assistant…"
+              : disabled
+                ? disabledPlaceholder
+                : "Ask about this repository…"
           }
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => {
@@ -54,14 +77,18 @@ export function Composer({
             Stop
           </Button>
         ) : (
-          <Button onClick={submit} disabled={!value.trim()} className="shrink-0">
+          <Button onClick={submit} disabled={disabled || !value.trim()} className="shrink-0">
             Send
           </Button>
         )}
       </div>
-      <div className="mt-1.5 text-[10px] text-muted-foreground">
-        Enter to send · Shift-Enter for a newline
-      </div>
+      {notice ? (
+        <div id="composer-notice" className="mt-1.5 text-xs text-muted-foreground" data-testid="chat-no-key">
+          {notice}
+        </div>
+      ) : (
+        <div className="mt-1.5 text-[10px] text-muted-foreground">Enter to send · Shift-Enter for a newline</div>
+      )}
     </div>
   );
 }

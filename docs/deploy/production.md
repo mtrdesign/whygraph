@@ -221,7 +221,7 @@ First-time setup: open https://whygraph.example.com/setup and enter the bootstra
 Bootstrap secret: <24 characters>
 ```
 
-Open `<your base URL>/setup`, enter the secret, an email, a name and a password. That creates the
+The setup page says the same: the secret is in the portal's log, and shows this command. Open `<your base URL>/setup`, enter the secret, an email, a name and a password. That creates the
 first **instance admin** and signs you in; you land on "Create organization". The secret exists only in
 the portal's memory, is regenerated on every start until an admin exists, and the route is inert once
 one does. Until it is used, sign-in answers that the instance is not claimed yet, so nobody can grab
@@ -250,6 +250,52 @@ be the account's email or its local part. There are no composition rules; a pass
 Passwords are hashed with argon2, and repeated failed sign-ins are throttled per account and address.
 A GitHub account has no password: the password form, change and reset link do not apply to it.
 
+## Switching organizations
+
+A person can belong to several organizations, each on its own host. The **organization switcher** at
+the top of the sidebar names the organization you are in. Open it to see who you are signed in as,
+your role here and your other organizations, with a **New** marker on one you have not opened yet.
+Picking one opens its host without a new sign-in (the session cookie covers every subdomain).
+**All organizations** opens the list on the base host, and it stays there even when you belong to
+only one; **Create organization** starts a new one. The account menu at the bottom of the sidebar
+shows your name, GitHub username and role, and holds **Account**, **Sign out** and the WhyGraph
+version.
+
+The base host's pages (the organization list, your account, administration) share one header:
+**Organizations**, **Administration** for instance admins, and your avatar menu with **Account** and
+**Sign out**. Opened from an organization, they also offer **Back to** that organization.
+
+Someone who belongs to no organization yet sees "You're not in an organization yet" after signing in,
+with **Create organization** and the GitHub username an owner needs to add them. The create page says
+the same ("Joining a team? You don't need your own organization") for a first-time GitHub user, and an
+organization's address that the account is not a member of names that organization and carries the
+hint too. When an
+organization's address sends you to sign in, the sign-in page says where you will land; when your
+session ended, it says that instead.
+
+## The first visit
+
+**Creating an organization.** The URL name is checked as you type (after a short pause): the form
+says "acme.whygraph.example.com is available", or that the name is reserved or already taken -
+including the names of deleted organizations, which are never reused. The server still decides when
+you submit.
+
+**The checklist.** An owner or admin of an organization with no projects sees five steps on the
+Projects page instead of an empty list: **Connect GitHub** (a bootstrap admin, who signs in with a
+password, is asked to sign in with GitHub to import repositories; anyone else is offered **Install the
+WhyGraph GitHub App** when it is not yet installed for them), **Import a repository**, **Add an LLM
+key** (an admin who cannot change organization keys sees "Ask an owner"), **Invite your team** and
+**Connect your agent**. Steps tick themselves off, **Dismiss** hides the list in that browser for that
+person and organization, **Getting started** in the header brings it back, and it is gone once every
+step is done. When every project is linked from a local portal, the key step is left out - such
+projects use the platform's keys.
+
+**The welcome banner.** A person added to an organization (by an invitation they redeemed or by being
+added directly) sees "You've been added to Acme as a Member." once, with **Connect your agent** and
+**Dismiss**. If the dismissal could not be saved, the next page load retries it without showing the
+banner again. A person in several organizations also sees a **New** marker on that organization in the
+picker and the switcher until they dismiss that banner.
+
 ## Members
 
 An organization's people are its **members**, each an `owner`, `admin` or `member`. People are added by
@@ -258,6 +304,13 @@ this instance, they are added at once and see the organization in their picker. 
 **invitation** instead, and the organization shows them as pending (see [Invitations](#invitations)).
 A username that is not a GitHub user (an organization's login counts) is refused with "No one with that
 GitHub username exists". Adding is throttled to 60 per hour per organization.
+
+The members page heads its list with the count ("Members (12)"). Owners and admins also see each
+person's **project access** as chips ("api: Contributor"): the grants made to them on individual
+projects, on top of the organization's default project role. Plain members see the list without the
+chips. After a direct add, the page says "@ben is now a member. They'll see a welcome note the next
+time they open Acme." with a link to the new row; the person sees a one-time welcome banner on
+their next visit. Your own row shows your role as text: nobody changes their own role.
 
 ### Organization roles
 
@@ -334,6 +387,13 @@ applied. An invitation is valid for 14 days and there is one open invitation per
 organization. Admins can revoke it from the members page, and only owners can revoke an owner
 invitation.
 
+After you invite someone, the page keeps a notice ("No message is sent. Share this link with @dee")
+with a copy button until you dismiss it; inviting the next person adds a second notice instead of
+replacing the first. The **Invitations** list shows every **open** and **expired** invitation with
+its role, who invited, the project access it carries and when it expires, and Revoke on each.
+Invitations that closed in the last 30 days (accepted or revoked) are listed too, collapsed under
+"Show closed invitations".
+
 ### Ownership transfer and renaming
 
 - **Transfer.** An owner can make another member the owner and become an admin in one step, by typing
@@ -359,6 +419,11 @@ invitation.
 
 An instance admin manages the instance from `/admin` on the base host: users, who is an admin, the
 list of organizations and the [self-check](#the-self-check).
+
+- **Settings check.** A card at the top shows the base URL and what the self-check found: "no
+  problems", the missing DNS records it names, or "not run yet".
+- **Users.** **Make admin** / **Remove admin** change who administers the instance. **Disable** asks
+  for a confirmation first (it ends the person's sessions at once); **Enable** restores the account.
 
 - **Keep two admins.** The last admin can't be demoted, and there is no recovery path for a locked-out
   admin in this release.
@@ -395,15 +460,33 @@ the project up, and a server copy gets no agent files, git hooks or marker files
 2. **Pick an installation.** The page lists the app's installations you can see on GitHub. **Install
    / configure on GitHub** installs the app on another account or organization, or changes which
    repositories an installation covers, and brings you back.
-3. **Pick a repository.** Repositories load 100 at a time (**Load more**), with a filter over the
-   loaded ones; those already in this organization are disabled.
+3. **Pick repositories.** Each installation shows with its avatar. The search box filters on the
+   server (a substring of `owner/name`, after a short pause) and the page says how many repositories
+   match; **Refresh** reloads the list from GitHub, and **Load more** pages through the matches.
+   Tick as many repositories as you like. Those already in this organization link to their project
+   and cannot be ticked. The page says "You can import N more this hour" and stops you ticking more
+   than that (see the limit below).
+4. **Import.** **Import N repositories** (the sticky footer) imports them one at a time and shows
+   each row as Waiting, Starting and Started, or the reason it failed. The request returns at once:
+   the portal clones the repository in the background as the first phase of the project's first
+   run, and then scans it (structure only, no LLM) without you asking. If the hourly limit is
+   reached, the rest of the selection is reported as not started. One repository takes you straight
+   to **Configure**; several show a summary with a **Configure** link for each and **Go to
+   projects**.
+
+A project is **Importing** until its clone finishes. If the clone or the first scan fails, the
+project reads **Import failed** with **Retry** (which counts against the hourly limit like the first
+attempt) and **Remove**; Retry clones again. Importing projects list only Overview, Scans and
+Settings until they are ready.
 
 An import succeeds only if, at that moment, **you** can see the installation and read the
 repository on GitHub, and the installation covers it. An installation is not tied to one WhyGraph
 organization: whoever can see a repository through it can import it into an organization they
 administer, and the same repository can be a project in two organizations, each with its own copy.
 Within one organization a repository can be imported once. Imports are throttled to 30 an hour per
-organization. The bootstrap admin signs in with a password, not GitHub, so it cannot import.
+organization, one per repository. The bootstrap admin signs in with a password, not GitHub, so it
+cannot import: the page offers **Sign in with GitHub** and **Open Members** (make a GitHub user an
+owner there).
 
 A production project's settings show its repository and installation account read-only. Its
 remote, default branch and hooks cannot be changed, and a personal access token is refused (the
@@ -429,6 +512,9 @@ default branch, and a force-push: the copy is reset to GitHub's branch, and the 
 history was rewritten.
 
 An instance that GitHub cannot reach still works, at the pace of the hourly check plus **Scan now**.
+
+A run's log starts with the command as you would type it (`$ whygraph scan <flags>`) and never names
+a server path: the project's copy reads as `.` and the data directory as `<data>`.
 
 ### When access is lost
 
@@ -581,6 +667,7 @@ plus these GitHub, member, project and organization events:
 | `budget_hard_stop_engaged` | A budget with the hard stop reached 100% (same fields): LLM spend it covers is off until the month resets or the budget is raised. |
 | `budget_set`, `budget_removed` | An owner or admin set or removed a budget (with its scope, amount and hard-stop flag, and the member or project). |
 | `price_override_set`, `price_override_removed` | An owner or admin set or reverted an organization price for a provider and model. |
+| `key_tested` | Someone pressed **Test key** on an LLM key (with the `scope`, the `provider` and the `result`; never any key material). |
 
 Each carries the event, the user, the target user, the client address and the host. A password
 sign-in failure shows only the first 3 characters of the email and its domain. No token, code, state,
@@ -590,7 +677,11 @@ They go to the portal's normal log (`docker compose logs portal`) and, in produc
 portal's database**, where they are kept for **400 days** and then deleted.
 
 - **The audit page.** Owners see an **Audit** page for their organization, filterable by event, person
-  and date, 50 events to a page. **Download CSV** exports the same filter (at most 50,000 rows). A cell
+  and date, 50 events to a page. Each event has a plain label ("Member added", "API key tested"),
+  and the **Event** filter groups them as Members, Projects, Budgets, Security and Organization. A
+  row names the person or project it concerns, shows its details as label / value pairs, and reads
+  "System" where no one acted (a sign-in refusal, a webhook, a budget threshold). The event names in
+  the table above are what the log lines and the CSV carry. **Download CSV** exports the same filter (at most 50,000 rows). A cell
   that starts with `=`, `+`, `-` or `@` is prefixed with `'` so a spreadsheet does not run it.
 - **Instance admins** have the same list on `/admin` for events that belong to no organization and for
   organizations that were deleted.

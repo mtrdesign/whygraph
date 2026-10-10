@@ -1,3 +1,4 @@
+import { withSegmentBreaks } from "../layout/CommandBlock";
 import { AGENTS, mcpSnippet } from "../../lib/agents";
 import { Badge } from "../ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
@@ -10,7 +11,7 @@ import { CopyButton } from "./CopyButton";
  */
 export function ConnectAgent({ mcpUrl, configured }: { mcpUrl: string; configured: readonly string[] }) {
   return (
-    <section className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5" data-testid="connect-agent">
+    <section className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5 shadow-card" data-testid="connect-agent">
       <div>
         <h2 className="text-sm font-semibold">Connect your agent</h2>
         <p className="text-xs text-muted-foreground">
@@ -21,14 +22,14 @@ export function ConnectAgent({ mcpUrl, configured }: { mcpUrl: string; configure
       <div className="flex flex-wrap items-center gap-2">
         <code
           data-testid="mcp-url"
-          className="min-w-0 flex-1 overflow-x-auto rounded-md bg-muted px-2 py-1.5 font-mono text-xs"
+          className="min-w-0 flex-1 rounded-md bg-muted px-2 py-1.5 font-mono text-xs wrap-anywhere"
         >
-          {mcpUrl}
+          {withSegmentBreaks(mcpUrl)}
         </code>
         <CopyButton text={mcpUrl} />
       </div>
       <Tabs defaultValue={configured[0] ?? AGENTS[0].id}>
-        <TabsList>
+        <TabsList variant="scrollable" className="max-w-full">
           {AGENTS.map((a) => (
             <TabsTrigger key={a.id} value={a.id}>
               {a.label}
@@ -47,7 +48,9 @@ export function ConnectAgent({ mcpUrl, configured }: { mcpUrl: string; configure
                   <Badge variant="outline">not configured</Badge>
                 )}
               </div>
-              <pre className="max-h-56 overflow-auto rounded-md bg-muted p-3 font-mono text-xs">{snippet}</pre>
+              <pre data-scroll-x className="max-h-56 overflow-auto rounded-md bg-muted p-3 font-mono text-xs">
+                {snippet}
+              </pre>
               <div>
                 <CopyButton text={snippet} label="Copy snippet" />
               </div>

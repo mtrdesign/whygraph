@@ -225,7 +225,9 @@ export type ChatEvent =
       output_tokens: number | null;
       finish_reason: string | null;
     }
-  | { type: "error"; message: string };
+  // `code` (M2f-3): `no_llm_key` (with `provider`), `llm_unavailable` or `provider_error`;
+  // `message` is the server's own text, kept for older clients and "Show details".
+  | { type: "error"; message: string; code?: string; provider?: string };
 
 // ---- portal (portal/routes.py) --------------------------------------------
 
@@ -254,6 +256,9 @@ export interface PortalState {
   version?: string | null;
   // What the portal did when it started on a new port (computed once at start).
   port_change?: PortChange | null;
+  // Production, org host: set while the caller's membership in this org still shows
+  // the first-visit banner (M2f-3); cleared by `DELETE /api/org/welcome`.
+  welcome?: { org_name: string; role: MemberRole } | null;
   // The organization the request is in (M2b); null before setup. `reader` is an
   // instance admin looking at an org they are not a member of (read-only).
   org?: PortalOrg | null;
@@ -340,7 +345,8 @@ export interface ProjectSummary {
   slug: string;
   name: string;
   source: "local" | "github" | "platform";
-  root: string;
+  // `null` for a production GitHub project: the server path is never sent there.
+  root: string | null;
   remote_url: string | null;
   initialized: boolean;
   initialized_at: string | null;
@@ -373,6 +379,18 @@ export interface ProjectSummary {
   llm_block_scope?: BudgetScope | null;
   // This month's spend on the project: `project.usage` callers only.
   usage?: ProjectUsageBlock | null;
+  // A GitHub import whose clone is still running (M2f-3).
+  importing?: boolean;
+  // Counts from the newest finished scan; `null` before the first one.
+  last_scan_stats?: LastScanStats | null;
+}
+
+/** `ProjectSummary.last_scan_stats`: the coverage snapshot of the newest finished scan. */
+export interface LastScanStats {
+  commits: number;
+  described_pct: number;
+  rationale_cards: number;
+  as_of: string;
 }
 
 /** What a budget caps, as refusals and alerts name it. */
@@ -438,6 +456,8 @@ export interface RepoEntry {
 
 export interface CheckPathResult {
   path: string;
+  /** Whether the path exists (BUG-9: a missing folder answers `path_missing`). */
+  exists?: boolean;
   shared: boolean;
   is_git: boolean;
   protected: boolean;
@@ -483,6 +503,9 @@ export interface AddProjectResult {
   project: ProjectDetails;
   detected: Detected;
   import: ImportReport;
+  // The scan queued for the new project; `null` when none was (`scan_error` says why).
+  initial_run_id?: number | null;
+  scan_error?: string;
 }
 
 export type AddProjectBody =
@@ -515,22 +538,56 @@ export interface ConfigPut {
   secrets?: SecretsPatch;
 }
 
-export interface ProjectConfigView {
+/** Fields both the project config and the portal defaults payloads gain (M2f-3). */
+export interface ConfigViewExtras {
+  // The caller cannot change anything here.
+  read_only?: boolean;
+  // The caller may test keys (`project.configure`, not linked).
+  can_test_keys?: boolean;
+  // Configurers only: when each key was last used.
+  key_last_used?: { llm: Record<string, string | null>; github_token: string | null };
+}
+
+export interface ProjectConfigView extends ConfigViewExtras {
   config: ConfigDict;
   secrets: SecretsView;
   import: ImportReport;
+  // A linked project: the platform owns its settings.
+  managed_on_platform?: boolean;
+  effective_keys?: Record<string, KeyScope>;
+  // Whether the organization layer has a key per provider (no hint).
+  inherited?: Record<string, { set: boolean }>;
+  // The GitHub remote and where the token for it comes from.
+  github?: { remote: string | null; token: "project" | "org" | "none" };
   // Present on a PUT response only.
   hooks?: unknown;
   hooks_error?: string | null;
 }
 
-export interface DefaultsView {
+export interface DefaultsView extends ConfigViewExtras {
   config: ConfigDict;
   secrets: SecretsView;
   no_provider_key: boolean;
   // Present on a PUT response only: projects whose own key for a provider was
   // cleared because the global endpoint they inherit changed.
   cleared_project_keys?: { slug: string; provider: string }[];
+}
+
+/** The outcome words of a key test. */
+export type KeyTestResult =
+  | "ok"
+  | "rejected"
+  | "rate_limited"
+  | "unreachable"
+  | "no_repo_access"
+  | "unexpected";
+
+/** `POST .../keys/{provider}/test` and `.../github-token/test`. */
+export interface KeyTestResponse {
+  ok: boolean;
+  result: KeyTestResult;
+  scope_tested: string;
+  checked_at: string;
 }
 
 export type FileStatus = "write" | "overwrite" | "skip" | "refused" | "needs_confirmation";
@@ -567,6 +624,9 @@ export interface InitResult {
   custom_db_paths: CustomDbPath[];
   // A linked project's leftover `.whygraph/whygraph.db`, which is never opened.
   ignored_db?: string | null;
+  // The scan queued after the initialization; `null` when none was (`scan_error` says why).
+  initial_run_id?: number | null;
+  scan_error?: string;
 }
 
 export interface ScanEstimate {
@@ -574,12 +634,14 @@ export interface ScanEstimate {
   upper_bound: boolean;
   large_commits: number;
   model: { provider: string | null; model: string | null };
+  // `tokens` and `cost` are `null` when `cost_hidden` is set (the caller lacks `project.usage`).
   tokens: {
     input: number;
     output: number;
     input_range: { low: number; high: number };
     output_range: { low: number; high: number };
-  };
+  } | null;
+  cost_hidden?: true;
   cost: {
     usd: number;
     low: number;
@@ -613,6 +675,21 @@ export interface ScanRunSummary {
   cancelled_by?: string;
   /** What the run's LLM calls cost (M2f-2); a zero block when it made none. */
   usage?: ScanRunUsage;
+  /** What the run was expected to cost (M2f-3); `project.usage` callers only. */
+  estimate?: ScanRunEstimate;
+  /** The coverage snapshot taken at the end of the run. */
+  coverage?: { commits: number; described: number; described_pct: number; rationale_cards: number };
+  /** A production GitHub project: whether the sync cloned the repository. */
+  cloned?: boolean;
+  /** Whether a sync went on to scan. */
+  scanned?: boolean;
+  [k: string]: unknown;
+}
+
+/** `summary.estimate` of a scan run: the cost guard's figure when it was queued. */
+export interface ScanRunEstimate {
+  commits: number;
+  cost_usd: number | null;
   [k: string]: unknown;
 }
 
@@ -647,6 +724,8 @@ export interface DeleteProjectResult {
   warnings: string[];
   // A removed linked project (M2e): whether this machine's token was revoked on the platform.
   token_revoked?: boolean;
+  // Why the token was or was not revoked (M2f-3); `token_revoked` stays for older readers.
+  token_revoke_result?: string;
 }
 
 export interface ScanRunRow {
@@ -655,16 +734,40 @@ export interface ScanRunRow {
   trigger: string;
   analyze: boolean;
   status: ScanRunStatus;
-  requested_by: number | null;
+  queued_at?: string | null;
+  requested_by: RunPerson | null;
+  cancelled_by?: RunPerson | null;
   started_at: string | null;
   finished_at: string | null;
   summary: ScanRunSummary | null;
+  // `project.usage` callers only.
+  cost_usd?: number | null;
+  estimate_usd?: number | null;
+}
+
+/** A scan run's requester or canceller; `null` where it is typed means System. */
+export interface RunPerson {
+  uid: string;
+  label: string;
+}
+
+/** One run, as the scan routes return it. */
+export type ScanRun = ScanRunRow;
+
+/** `GET .../scans` query filters (M2f-3). */
+export interface ScanFilters {
+  before?: number;
+  limit?: number;
+  status?: string[];
+  trigger?: string[];
+  type?: "full" | "quick" | "sync";
+  requester?: string;
 }
 
 // The scan events stream (`portal/runner.py`): the child's JSONL events plus the
 // runner's own `sync` / `error` / `end` / `shutdown` frames.
 export type ScanEvent =
-  | { type: "start"; phase_total: number }
+  | { type: "start"; phase_total: number; phases?: string[] }
   | { type: "phase"; phase: number; title: string }
   | {
       type: "task";
@@ -680,7 +783,14 @@ export type ScanEvent =
       crawlers?: { name: string; status: string; summary?: string; error?: string }[];
       [k: string]: unknown;
     }
-  | { type: "sync"; status: "fetching" | "ok" | "failed"; moved?: boolean; error?: string }
+  | {
+      type: "sync";
+      status: "cloning" | "fetching" | "ok" | "failed";
+      moved?: boolean;
+      error?: string;
+      full_name?: string;
+      cloned?: boolean;
+    }
   | { type: "error"; message: string }
   | { type: "end"; run_id: number; status: ScanRunStatus; summary: ScanRunSummary | null }
   /** The stream was cut because the viewer lost access (signed out, removed, disabled); the run goes on. */
@@ -689,7 +799,25 @@ export type ScanEvent =
 
 // ---- transport --------------------------------------------------------------
 
+/** One invalid field of a `422 invalid_request` (FastAPI's validation `detail`). */
+export interface FieldError {
+  /** Where, without the `body` / `query` / `path` prefix: `"title"`, `"grants.0.role"`. */
+  path: string;
+  msg: string;
+}
+
+/**
+ * A failed API call. `status` is `0` when the portal could not be reached at all
+ * (`code: "portal_unreachable"`). Never render `message` directly: the error
+ * registry (`lib/apiErrors.ts`) words every code; the server's own text stays
+ * in `serverMessage` for the "Show details" disclosure.
+ */
 export class ApiError extends Error {
+  /** The server's own text (or the transport's), for "Show details". */
+  readonly serverMessage: string;
+  /** The invalid fields of a `422 invalid_request`; `undefined` otherwise. */
+  readonly fields?: FieldError[];
+
   constructor(
     public status: number,
     message: string,
@@ -699,6 +827,8 @@ export class ApiError extends Error {
     public extra: Record<string, unknown> = {},
   ) {
     super(message);
+    this.serverMessage = message;
+    if (Array.isArray(extra.fields)) this.fields = extra.fields as FieldError[];
   }
 }
 
@@ -726,9 +856,28 @@ export function setBaseUrl(url: string | null): void {
   baseUrl = url;
 }
 
+export type ErrorMode = "local" | "production";
+
+// The portal's mode, for the error registry's mode-aware wording. Set once by the
+// root gate when `GET /api/portal/state` lands (the QueryClient is module-local
+// to main.tsx, so the registry cannot read the state from it).
+let errorMode: ErrorMode = "local";
+
+/** Tell the error registry which portal it words errors for. */
+export function setErrorMode(mode: ErrorMode): void {
+  errorMode = mode;
+}
+
+/** The mode {@link setErrorMode} last set (`"local"` until then). */
+export function getErrorMode(): ErrorMode {
+  return errorMode;
+}
+
 // An org host without a session answers `401 login_required`: send the browser to
 // the base host's sign-in with a way back. `bad_credentials` (also 401) never gets
-// here, and the base host's own /signin never redirects to itself.
+// here, and the base host's own /signin never redirects to itself. `reauth=1` tells
+// the sign-in page the org host sent the person back (a session that ended, or a
+// cookie the org host never received).
 function redirectToSignIn(): void {
   if (!baseUrl) return;
   let base: URL;
@@ -738,14 +887,60 @@ function redirectToSignIn(): void {
     return;
   }
   if (window.location.origin === base.origin && window.location.pathname === "/signin") return;
-  hardNavigate(`${base.origin}/signin?next=${encodeURIComponent(window.location.href)}`);
+  hardNavigate(`${base.origin}/signin?next=${encodeURIComponent(window.location.href)}&reauth=1`);
+}
+
+// FastAPI's validation `loc` starts with where the value came from; the rest is the field.
+const LOC_SOURCES = new Set(["body", "query", "path", "header", "cookie"]);
+
+function fieldErrors(detail: unknown[]): FieldError[] {
+  return detail.map((item) => {
+    const entry = (item ?? {}) as { loc?: unknown; msg?: unknown };
+    const loc = Array.isArray(entry.loc) ? entry.loc.map(String) : [];
+    const path = (LOC_SOURCES.has(loc[0]) ? loc.slice(1) : loc).join(".");
+    return { path, msg: typeof entry.msg === "string" ? entry.msg : "is not valid" };
+  });
 }
 
 async function failure(res: Response): Promise<ApiError> {
-  const body = await res.json().catch(() => ({}));
-  const { detail, error, code, ...extra } = body;
-  if (res.status === 401 && code === "login_required") redirectToSignIn();
-  return new ApiError(res.status, detail ?? error ?? res.statusText, code, extra);
+  const body: unknown = await res.json().catch(() => null);
+  const fallback = res.statusText || `HTTP ${res.status}`;
+  if (!body || typeof body !== "object" || Array.isArray(body)) return new ApiError(res.status, fallback);
+  const { detail, error, code, ...extra } = body as Record<string, unknown>;
+  const retryAfter = Number(res.headers?.get?.("Retry-After"));
+  if (Number.isFinite(retryAfter) && retryAfter > 0 && extra.retry_after === undefined) {
+    extra.retry_after = retryAfter;
+  }
+  const serverCode = typeof code === "string" ? code : undefined;
+  if (res.status === 401 && serverCode === "login_required") redirectToSignIn();
+  if (Array.isArray(detail)) {
+    // A 422 from request validation: `detail` is a list of {loc, msg, type}.
+    const fields = fieldErrors(detail);
+    const text = fields.map((f) => (f.path ? `${f.path}: ${f.msg}` : f.msg)).join("; ");
+    return new ApiError(res.status, text || (typeof error === "string" ? error : fallback), serverCode ?? "invalid_request", {
+      ...extra,
+      fields,
+    });
+  }
+  const message = typeof detail === "string" ? detail : typeof error === "string" ? error : fallback;
+  return new ApiError(res.status, message, serverCode, extra);
+}
+
+/**
+ * `fetch`, with a network failure turned into `ApiError(0, ..., "portal_unreachable")`.
+ * An `AbortError` (the chat's Stop, a cancelled query) is rethrown unchanged, so a
+ * deliberate stop never reads as "portal unreachable".
+ */
+async function request(input: string, options: RequestInit): Promise<Response> {
+  try {
+    return await fetch(input, options);
+  } catch (err) {
+    if ((err as { name?: unknown } | null)?.name === "AbortError") throw err;
+    if (err instanceof TypeError) {
+      throw new ApiError(0, err.message || "the portal could not be reached", "portal_unreachable");
+    }
+    throw err;
+  }
 }
 
 // Turn a Response into JSON, with clear errors. A non-JSON body on a 200 (e.g. an
@@ -762,7 +957,7 @@ async function parse<T>(res: Response): Promise<T> {
 // The Explorer endpoints take everything in the query string; the chat and
 // portal endpoints take JSON bodies.
 async function send<T>(method: string, path: string, body?: unknown): Promise<T> {
-  return parse<T>(await fetch(`/api${path}`, init(method, body)));
+  return parse<T>(await request(`/api${path}`, init(method, body)));
 }
 
 const get = <T>(path: string) => send<T>("GET", path);
@@ -781,6 +976,9 @@ export const portalApi = {
     get<{ repos: RepoEntry[]; truncated: boolean }>(`/portal/repos?q=${encodeURIComponent(query)}`),
   checkPath: (path: string) => send<CheckPathResult>("POST", "/portal/check-path", { path }),
   defaults: () => get<DefaultsView>("/portal/defaults"),
+  // Tests the organization layer's (local: the portal default) key for a provider.
+  defaultsKeyTest: (provider: string) =>
+    send<KeyTestResponse>("POST", `/portal/defaults/keys/${encodeURIComponent(provider)}/test`),
   putDefaults: (body: ConfigPut) => send<DefaultsView>("PUT", "/portal/defaults", body),
   addProject: (body: AddProjectBody) => send<AddProjectResult>("POST", "/projects", body),
 };
@@ -807,6 +1005,8 @@ export interface OrgEntry {
   name: string;
   role: string;
   url: string;
+  // The caller's first visit to this org (the welcome flag).
+  new?: boolean;
 }
 
 export interface AdminUser {
@@ -836,6 +1036,15 @@ export interface Member {
   // This month's spend (M2f-2): `GET /api/org/members` for `org.usage` callers only.
   month_spend_usd?: number;
   month_split?: { interactive: number; scans: number };
+  // `org.members` holders only.
+  grants?: MemberGrant[];
+}
+
+/** One project a member has a grant on (`project` is the slug). */
+export interface MemberGrant {
+  project: string;
+  name: string;
+  role: ProjectRole;
 }
 
 export interface AdminOrg {
@@ -943,7 +1152,13 @@ export interface ProjectConnection {
   client_name: string;
   created_at: string;
   last_used_at: string | null;
+  // Present with `include=revoked`.
+  revoked_at?: string | null;
+  revoked_reason?: RevokedReason | null;
 }
+
+/** The plan's name for a project's connection row. */
+export type ConnectionRow = ProjectConnection;
 
 export const connectApi = {
   validate: (body: ConnectRequest) => send<ConnectValidated>("POST", "/connect/validate", body),
@@ -952,8 +1167,10 @@ export const connectApi = {
     send<{ redirect: string; access_lost: boolean }>("POST", "/connect/authorize", body),
   tokens: () => get<MyConnection[]>("/connect/tokens"),
   revokeToken: (uid: string) => sendEmpty("DELETE", `/connect/tokens/${encodeURIComponent(uid)}`),
-  projectConnections: (slug: string) =>
-    get<ProjectConnection[]>(`/projects/${encodeURIComponent(slug)}/connections`),
+  projectConnections: (slug: string, opts: { includeRevoked?: boolean } = {}) =>
+    get<ProjectConnection[]>(
+      `/projects/${encodeURIComponent(slug)}/connections${opts.includeRevoked ? "?include=revoked" : ""}`,
+    ),
   revokeProjectConnection: (slug: string, uid: string) =>
     sendEmpty("DELETE", `/projects/${encodeURIComponent(slug)}/connections/${encodeURIComponent(uid)}`),
 };
@@ -1030,6 +1247,24 @@ export interface GitHubRepo {
   imported: boolean;
 }
 
+/** Query of `GET /api/github/installations/{id}/repos`. */
+export interface InstallationReposQuery {
+  q?: string;
+  refresh?: boolean;
+  page?: number;
+}
+
+/** Its answer; `total_count` is the filtered count. */
+export interface InstallationRepos {
+  repos: GitHubRepo[];
+  total_count: number;
+  page: number;
+  per_page?: number;
+  truncated?: boolean;
+  // How many more repositories this org may import this hour.
+  imports_left?: number;
+}
+
 /** GitHub's redirect query, as `/auth/github-app` received it (minus `error`). */
 export interface GitHubAppCallbackBody {
   code?: string;
@@ -1046,10 +1281,14 @@ export const githubApi = {
   callback: (body: GitHubAppCallbackBody) =>
     send<{ return_to: string | null; requested?: boolean }>("POST", "/github/app/callback", body),
   installations: () => get<{ installations: GitHubInstallation[] }>("/github/installations"),
-  repos: (installationId: number, page = 1) =>
-    get<{ repos: GitHubRepo[]; total_count: number; page: number }>(
-      `/github/installations/${installationId}/repos?page=${page}`,
-    ),
+  // A bare number is the page (the form older callers use).
+  repos: (installationId: number, opts: number | InstallationReposQuery = {}) => {
+    const o = typeof opts === "number" ? { page: opts } : opts;
+    const params = new URLSearchParams({ page: String(o.page ?? 1) });
+    if (o.q) params.set("q", o.q);
+    if (o.refresh) params.set("refresh", "1");
+    return get<InstallationRepos>(`/github/installations/${installationId}/repos?${params}`);
+  },
 };
 
 export const adminApi = {
@@ -1066,7 +1305,7 @@ export const adminApi = {
 
 // A call answered with `204 No Content` (no JSON body to parse).
 async function sendEmpty(method: string, path: string): Promise<void> {
-  const res = await fetch(`/api${path}`, init(method));
+  const res = await request(`/api${path}`, init(method));
   if (!res.ok) throw await failure(res);
 }
 
@@ -1156,6 +1395,8 @@ export interface AuditEventRow {
   actor: { uid: string | null; label: string | null } | null;
   event: string;
   target: string | null;
+  // A user uid as "Name (@login)", a project slug as its name.
+  target_label?: string | null;
   ip: string | null;
   fields: Record<string, unknown>;
 }
@@ -1183,7 +1424,7 @@ export const auditApi = {
   // A fetch (the `X-WhyGraph-Client` header is required, so a plain link would be refused).
   csv: async (f: AuditFilters = {}): Promise<Blob> => {
     const { before: _before, ...rest } = f;
-    const res = await fetch(`/api/org/audit.csv${auditQuery(rest)}`, init("GET"));
+    const res = await request(`/api/org/audit.csv${auditQuery(rest)}`, init("GET"));
     if (!res.ok) throw await failure(res);
     return res.blob();
   },
@@ -1418,7 +1659,7 @@ function attachmentName(res: Response, fallback: string): string {
 }
 
 async function fetchCsv(path: string, fallback: string): Promise<UsageCsv> {
-  const res = await fetch(`/api${path}`, init("GET"));
+  const res = await request(`/api${path}`, init("GET"));
   if (!res.ok) throw await failure(res);
   return {
     blob: await res.blob(),
@@ -1480,6 +1721,70 @@ export const projectUsageApi = (slug: string) => ({
     get<ProjectUsageReport>(`/projects/${encodeURIComponent(slug)}/usage${usageQuery(f)}`),
 });
 
+// ---- project overview (portal/overview_routes.py; M2f-3) ----------------------
+
+export interface OverviewCoveragePoint {
+  run_id: number;
+  at: string;
+  commits: number;
+  described: number;
+  described_pct: number;
+  rationale_cards: number;
+}
+
+export type OverviewEventKind = "import" | "first_scan" | "full_scan" | "describe" | "failed" | "budget_stop";
+
+/** `GET /api/projects/{slug}/overview`. */
+export interface ProjectOverview {
+  coverage: { points: OverviewCoveragePoint[] };
+  events: { run_id: number; at: string; kind: OverviewEventKind }[];
+  last_failure: { run_id: number; at: string; message: string } | null;
+  // `project.usage` callers only.
+  usage: {
+    month: string;
+    spent_usd: number;
+    budget_usd: number | null;
+    pct: number | null;
+    by_task: { task: string; calls: number; cost_usd: number }[];
+  } | null;
+  agents: {
+    days: { day: string; mcp: number; agent: number }[];
+    total_calls: number;
+    llm_calls: number;
+    // `null` without `project.usage`.
+    llm_cost_usd: number | null;
+    by_kind: { kind: string; calls: number }[];
+    // Production, `project.usage` only.
+    people: { label: string; calls: number; last_day: string | null }[] | null;
+    // Production, `project.configure` only.
+    connections: { client_name: string; user_label: string | null; last_used_at: string | null }[] | null;
+    last_call_day: string | null;
+  };
+}
+
+// ---- onboarding (portal/onboarding_routes.py; M2f-3) ---------------------------
+
+export type OnboardingItemId = "llm_key" | "project" | "agent" | "github" | "invite";
+
+/** `GET /api/onboarding`: an item that does not apply is omitted. */
+export interface Onboarding {
+  items: { id: OnboardingItemId; done: boolean; can_act: boolean }[];
+}
+
+/** `GET /api/orgs/slug-check?slug=` (production, base host). */
+export interface SlugCheck {
+  slug: string;
+  available: boolean;
+  reason: "invalid" | "reserved" | "taken" | null;
+}
+
+export const onboardingApi = {
+  onboarding: () => get<Onboarding>("/onboarding"),
+  // Clears the caller's own welcome flag in the request's org (production, org host).
+  dismissWelcome: () => sendEmpty("DELETE", "/org/welcome"),
+  slugCheck: (slug: string) => get<SlugCheck>(`/orgs/slug-check?slug=${encodeURIComponent(slug)}`),
+};
+
 // ---- project-scoped calls ---------------------------------------------------
 
 /**
@@ -1497,7 +1802,25 @@ export function projectApi(slug: string) {
     init: (body: InitBody) => send<InitResult>("POST", `${base}/init`, body),
     requestScan: (body: { trigger?: "manual" | "hook" | "describe"; analyze?: boolean } = {}) =>
       send<{ run_id: number }>("POST", `${base}/scans`, body),
-    scans: () => get<{ runs: ScanRunRow[] }>(`${base}/scans`),
+    scans: (f: ScanFilters = {}) => {
+      const params = new URLSearchParams();
+      if (f.before !== undefined) params.set("before", String(f.before));
+      if (f.limit !== undefined) params.set("limit", String(f.limit));
+      if (f.status?.length) params.set("status", f.status.join(","));
+      if (f.trigger?.length) params.set("trigger", f.trigger.join(","));
+      if (f.type) params.set("type", f.type);
+      if (f.requester) params.set("requester", f.requester);
+      const qs = params.toString();
+      return get<{ runs: ScanRunRow[]; next?: number | null }>(`${base}/scans${qs ? `?${qs}` : ""}`);
+    },
+    scan: (runId: number) => get<ScanRun>(`${base}/scans/${runId}`),
+    // Named apart from the graph `overview(expanded)` below.
+    projectOverview: () => get<ProjectOverview>(`${base}/overview`),
+    // Tests the key the project would use for a provider.
+    keyTest: (provider: string) =>
+      send<KeyTestResponse>("POST", `${base}/keys/${encodeURIComponent(provider)}/test`),
+    // Local mode only: tests the effective GitHub token against the project's remote.
+    githubTokenTest: () => send<KeyTestResponse>("POST", `${base}/github-token/test`),
     scanLog: (runId: number) => get<ScanLog>(`${base}/scans/${runId}/log`),
     cancelScan: (runId: number) =>
       send<{ run_id: number; was: "queued" | "running" }>("POST", `${base}/scans/${runId}/cancel`),
@@ -1553,7 +1876,7 @@ export function projectApi(slug: string) {
       body: { title?: string; provider?: string; model?: string },
     ) => send<ChatSession>("PATCH", `${base}/chat/sessions/${id}`, body),
     chatDeleteSession: async (id: number): Promise<void> => {
-      const res = await fetch(`/api${base}/chat/sessions/${id}`, init("DELETE"));
+      const res = await request(`/api${base}/chat/sessions/${id}`, init("DELETE"));
       if (!res.ok) throw await failure(res);
     },
     streamChat: (
@@ -1598,7 +1921,7 @@ async function streamChat(
   onEvent: (event: ChatEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const res = await fetch(`/api${path}`, init("POST", { content }, signal));
+  const res = await request(`/api${path}`, init("POST", { content }, signal));
   if (!res.ok) throw await failure(res);
   if (!res.body) throw new ApiError(res.status, "streaming is unsupported here");
 
@@ -1648,7 +1971,7 @@ async function streamScanEvents(
 ): Promise<string | null> {
   const headers: Record<string, string> = { ...CLIENT_HEADERS, Accept: "text/event-stream" };
   if (opts.lastEventId) headers["Last-Event-ID"] = opts.lastEventId;
-  const res = await fetch(`/api${path}`, { method: "GET", headers, signal: opts.signal });
+  const res = await request(`/api${path}`, { method: "GET", headers, signal: opts.signal });
   if (!res.ok) throw await failure(res);
   if (!res.body) throw new ApiError(res.status, "streaming is unsupported here");
 

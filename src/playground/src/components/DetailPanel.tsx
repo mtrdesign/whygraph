@@ -6,6 +6,7 @@ import { Loading } from "./Loading";
 import { Empty, EmptyDescription } from "./ui/empty";
 import { ScrollArea } from "./ui/scroll-area";
 import { Skeleton } from "./ui/skeleton";
+import { ErrorState } from "./state/ErrorState";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { RelationshipsTab } from "./RelationshipsTab";
 import { RationaleTab } from "./RationaleTab";
@@ -24,7 +25,7 @@ export function DetailPanel() {
   const selectedQn = useExplorerSearch().node;
   const [tab, setTab] = useState<TabKey>("relationships");
 
-  const { data, isLoading, isError, error } = useProjectQuery(
+  const { data, isLoading, isError, error, refetch } = useProjectQuery(
     ["node", selectedQn],
     (api) => api.node(selectedQn!),
     { enabled: !!selectedQn },
@@ -47,7 +48,7 @@ export function DetailPanel() {
             <Skeleton className="h-3.5 w-56" />
           </div>
         )}
-        {isError && <div className="text-sm text-destructive">{(error as Error).message}</div>}
+        {isError && <ErrorState size="inline" error={error} onRetry={() => void refetch()} />}
         {data && (
           <>
             <div className="flex items-center gap-2">
@@ -71,7 +72,7 @@ export function DetailPanel() {
         onValueChange={(value) => setTab(value as TabKey)}
         className="min-h-0 flex-1 gap-0"
       >
-        <TabsList variant="line" className="h-9 w-full shrink-0 justify-start border-b border-border px-2">
+        <TabsList variant="scrollable" className="shrink-0 rounded-none">
           {TABS.map((t) => (
             <TabsTrigger key={t.key} value={t.key} className="text-xs">
               {t.label}

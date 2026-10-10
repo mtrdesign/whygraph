@@ -29,6 +29,17 @@ export interface ChartStack {
   filledCells: number;
 }
 
+/**
+ * An event drawn on the plot at one category (the Overview's coverage chart marks
+ * imports, full scans, describes, failed runs and budget stops). `x` is a value
+ * of the category axis; a marker whose `x` is not on it is not drawn.
+ */
+export interface ChartMarker {
+  x: string;
+  label: string;
+  tone: "info" | "ok" | "warn" | "error";
+}
+
 export interface ChartPayload {
   kind: "line" | "bar" | "bar_h" | "bar_stacked" | "bar_h_stacked";
   title: string;
@@ -43,6 +54,8 @@ export interface ChartPayload {
    * never pivots and the chart and the Table view cannot disagree.
    */
   stack?: ChartStack;
+  /** Unstacked vertical kinds only; listed in the tooltip at their category. */
+  markers?: ChartMarker[];
 }
 
 const KINDS = new Set(["line", "bar", "bar_h", "bar_stacked", "bar_h_stacked"]);

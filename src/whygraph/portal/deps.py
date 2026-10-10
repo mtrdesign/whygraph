@@ -13,7 +13,7 @@ carries the action as ``whygraph_action``:
   request. **No** initialized gate: ``POST init``, ``GET/PUT config`` and
   the project details use it, so an uninitialized project can be set up.
 * :func:`project_db_access` - the same, plus the initialized gate
-  (``409 {"error": "not initialized"}`` until ``projects.initialized_at``
+  (``409 {"code": "not_initialized"}`` until ``projects.initialized_at``
   is set **and** the DB file exists, so nothing creates an empty
   ``.whygraph/whygraph.db`` in the user's repo) plus the memoized
   migration (:mod:`whygraph.portal.migrate`). The data routers and the
@@ -77,6 +77,7 @@ from whygraph.core.context import ProjectContext, use_project
 from whygraph.core.safe_paths import UnsafePathError
 from whygraph.core.usage import use_usage_sink
 
+from .agent_calls import AgentCallBook
 from .audit import audit
 from .budgets import BudgetBook
 from .authz import (
@@ -100,6 +101,7 @@ from .orgs import is_valid_org_slug
 from .paths import check_project_paths
 from .platform_pending import PendingConnects, PendingLinks
 from .projects import is_valid_slug
+from .repo_cache import RepoListCache
 from .repos import DiscoveryCache
 from .runner import ScanRunner
 from .security import PortalOrigins, Principal, _is_under
@@ -517,6 +519,20 @@ class PortalState:
         members or projects change (M2f-2 plan section 4.7). It is the spend
         book's add hook (threshold alerts) and records alerts on the usage
         writer's thread.
+    agent_calls : AgentCallBook
+        The agent-call counters (every MCP and ``/api/v1`` data call), flushed
+        to ``agent_call_days`` by the lifespan (M2f-3 plan section 4.10).
+    repo_cache : RepoListCache
+        Each ``(user, installation)``'s GitHub repository list for the
+        import's repo search, a minute at a time (M2f-3 plan section 4.8).
+    key_test : Throttle
+        Key and token tests (M2f-3 plan section 4.13), one hour window, per
+        key limits through ``hit_all``: ``("u", org_id, user_id)`` 10 and
+        ``("o", org_id)`` 60.
+    key_test_transport : httpx.BaseTransport or None
+        Replaces the network of the LLM key probe
+        (:func:`whygraph.portal.key_test.probe_llm_key`; tests plug an
+        ``httpx.MockTransport`` in); ``None`` in a real run.
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -578,6 +594,12 @@ class PortalState:
         self.prices = PriceBook()
         self.budgets = BudgetBook(self.spend, defer=self.usage_writer.call)
         self.spend.on_add = self.budgets.on_add
+        self.agent_calls = AgentCallBook()
+        self.repo_cache = RepoListCache()
+        self.key_test = Throttle(60, 60 * 60)
+        self.slug_check = Throttle(60, 60)
+        self.github_listing: dict[int, tuple[float, bool]] = {}
+        self.key_test_transport: Any = None
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0
@@ -649,7 +671,8 @@ async def current_user(request: Request) -> Principal:
     Raises
     ------
     ApiError
-        ``409`` when no user exists yet (local mode);
+        ``409 {"code": "setup_required"}`` when no user exists yet (local
+        mode);
         ``401 {"code": "login_required"}`` without a session (production),
         or for a token principal.
     """
@@ -659,7 +682,7 @@ async def current_user(request: Request) -> Principal:
     if principal is None:
         if portal_state(request).mode == "production":
             raise ApiError(401, "sign-in required", code="login_required")
-        raise ApiError(409, "setup required")
+        raise ApiError(409, "setup required", code="setup_required")
     return principal
 
 
@@ -762,6 +785,7 @@ def load_org_access(
                 Organization.name,
                 Organization.default_project_role,
                 Membership.role,
+                Membership.welcome_pending,
             )
             .join(Membership, Membership.org_id == Organization.id)
             .where(Organization.slug == org_slug, Membership.user_id == user_id)
@@ -776,10 +800,10 @@ def load_org_access(
                 ).where(Organization.slug == org_slug)
             ).first()
             if org is not None:
-                row = (*org, Role.READER.value)
+                row = (*org, Role.READER.value, False)
     if row is None:
         return None
-    org_id, slug, name, default_project_role, role = row
+    org_id, slug, name, default_project_role, role, welcome_pending = row
     return OrgAccess(
         org_id=org_id,
         org_slug=slug,
@@ -787,6 +811,7 @@ def load_org_access(
         role=Role(role),
         user_id=user_id,
         default_project_role=default_project_role,
+        welcome_pending=bool(welcome_pending),
     )
 
 
@@ -1106,7 +1131,7 @@ async def require_initialized(state: PortalState, project: BoundProject) -> None
     Raises
     ------
     ApiError
-        ``409 {"error": "not initialized"}`` when ``initialized_at`` is
+        ``409 {"code": "not_initialized"}`` when ``initialized_at`` is
         unset or the DB file is missing - the DB is then never created;
         ``409 {"code": "unsafe_path"}`` when a DB path is a symlink
         (checked first, before anything follows it).
@@ -1116,10 +1141,10 @@ async def require_initialized(state: PortalState, project: BoundProject) -> None
         # A linked project has no local WhyGraph DB: only Initialize gates it,
         # and a leftover whygraph.db is neither required nor migrated.
         if project.initialized_at is None:
-            raise ApiError(409, "not initialized")
+            raise ApiError(409, "not initialized", code="not_initialized")
         return
     if project.initialized_at is None or not project.db_path.is_file():
-        raise ApiError(409, "not initialized")
+        raise ApiError(409, "not initialized", code="not_initialized")
     try:
         await anyio.to_thread.run_sync(state.migrations.ensure, project.ctx)
     except UnsafePathError as exc:

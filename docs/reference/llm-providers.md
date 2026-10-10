@@ -56,7 +56,12 @@ provider, with `provider = "..."` or a `"provider/model"` value. The full preced
     `[llm.<provider>]`.
 
 In the portal, keys are entered under Settings and stored encrypted; they are write-only in the UI and
-never written into your repository. For headless `whygraph scan`, omit `api_key` and the adapter reads
+never written into your repository. Each provider has a key card there: project admins (and owners, on
+the defaults) see when the key was last used and can **Test** it. A test asks the provider whether the
+stored key works without spending tokens - Anthropic's, OpenAI's and DeepSeek's model listings, and
+OpenRouter's key endpoint (its model listing needs no key, so it would prove nothing); a custom base
+URL is tested at that URL. `ollama` has no key to test. Tests are limited to 10 per person and 60 per
+organization an hour. For headless `whygraph scan`, omit `api_key` and the adapter reads
 the conventional environment variable - the recommended setup there, since keys in the environment
 cannot leak into a commit at all. **Variables in your shell do not reach the portal.**
 

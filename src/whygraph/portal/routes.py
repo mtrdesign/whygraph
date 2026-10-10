@@ -30,22 +30,25 @@ from __future__ import annotations
 
 import copy
 import json
-import os
+import logging
 import re
-import secrets as secrets_mod
-import shutil
-from collections.abc import Callable
-from dataclasses import asdict
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from functools import partial
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
+import anyio
+import anyio.from_thread
 from fastapi import APIRouter, Body, Depends, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import and_, case, cast, false, func, not_, or_
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, col, func, select
+from sqlmodel import Session, col, select
 
 from whygraph.agents import AGENTS as AGENT_TARGETS
 from whygraph.agents import (
@@ -55,11 +58,9 @@ from whygraph.agents import (
     resolve_agent,
 )
 from whygraph.core.config import Config, ConfigError, normalize_v2
-from whygraph.core.context import ProjectContext, use_project
+from whygraph.core.context import use_project
 from whygraph.core.safe_paths import UnsafePathError, check_inside
-from whygraph.db import get_session as project_session
 from whygraph.db.engine import dispose_engine
-from whygraph.db.models import RationaleCache
 from whygraph.hooks import (
     LEGACY_HELPER_RELPATH,
     HooksError,
@@ -67,8 +68,6 @@ from whygraph.hooks import (
     resolve_hook_names,
     sync_hooks,
 )
-from whygraph.mcp.errors import WhyGraphError
-from whygraph.mcp.resources import _repo_overview_resource
 from whygraph.project_setup import (
     PORTAL_ENV,
     PORTAL_JSON,
@@ -78,14 +77,10 @@ from whygraph.project_setup import (
     initialize_project,
 )
 from whygraph.services.git import (
-    GitError,
-    InvalidRepoUrlError,
     Repository,
-    git_env,
     redact_tokens,
     strip_userinfo,
 )
-from whygraph.services.git.credentials import github_git_host
 from whygraph.services.github import (
     GitHubError,
     RepoAccessError,
@@ -96,17 +91,25 @@ from whygraph.services.github import (
 from . import connections, sessions
 from .audit import audit
 from .budgets import reload_org_budgets
+from .clones import production_initialize, remove_clone
 from .authz import (
     PROJECT_ROLE_ACTIONS,
     Action,
     OrgAccess,
     ProjectRole,
     Role,
+    allowed,
     authorize,
     effective_project_role,
     project_allowed,
 )
-from .config_layers import ConfigPolicyError, find_secret_paths, load_layer, save_layer
+from .config_layers import (
+    ConfigPolicyError,
+    endpoint_of,
+    find_secret_paths,
+    load_layer,
+    save_layer,
+)
 from .context import build_project_context, resolve_root
 from .db import get_session
 from .deps import (
@@ -123,6 +126,7 @@ from .deps import (
     project_access,
     project_db_access,
     project_role_for,
+    require_initialized,
     unsafe_path_error,
 )
 from .github_app import (
@@ -139,8 +143,10 @@ from .github_app_routes import (
     user_token,
 )
 from .github_auth import GitHubUnavailable
-from .linked import due_for_refresh, link_block, revoke_token
+from .linked import due_for_refresh, link_block, revoke_token, revoke_token_outcome
 from .models import (
+    SCAN_STATUSES,
+    SCAN_TRIGGERS,
     Organization,
     PlatformLink,
     Project,
@@ -148,10 +154,11 @@ from .models import (
     ProjectGrant,
     ScanRun,
     Secret,
+    UsageEvent,
     User,
 )
 from .orgs import add_member
-from .paths import BACKUPS_DIR, TRACKED_STATE_PATHS, check_project_paths
+from .paths import BACKUPS_DIR
 from .platform_pending import PendingLink
 from .platform_routes import (
     default_client_name,
@@ -169,15 +176,18 @@ from .policy import (
     preview_import,
     put_allowlist,
 )
-from .projects import slugify, unique_slug
+from .projects import unique_slug
 from .repos import (
     DISCOVERY_LIMIT,
     check_path,
     detect_existing,
+    github_link,
     root_status,
 )
+from .estimate import compact_estimate
 from .estimate import scan_estimate as _scan_estimate
 from .runner import (
+    COST_SUMMARY_KEYS,
     ProjectAccessLost,
     ProjectBusy,
     RunFinished,
@@ -189,8 +199,8 @@ from .runner import (
     SourceNotAllowed,
     log_tail,
     remove_run_files,
+    resolve_analyze,
     run_files,
-    stale_info,
 )
 from .secrets import (
     GITHUB_TOKEN,
@@ -203,7 +213,11 @@ from .secrets import (
     secret_status,
 )
 from .security import Principal
+from .stats import project_counts
+from .usage import actor_label
 from .usage_routes import llm_block, project_usage, state_usage
+
+_log = logging.getLogger(__name__)
 
 public_router = APIRouter(prefix="/api/portal")
 """``GET state`` and ``POST setup`` - the only routes usable before setup."""
@@ -399,22 +413,202 @@ def _port_change_in(state: PortalState, access: OrgAccess | None) -> dict | None
     }
 
 
-def _secrets_view(session: Session, project_id: int | None, *, org_id: int) -> dict:
+def _secrets_view(
+    session: Session, project_id: int | None, *, org_id: int, hints: bool = True
+) -> dict:
+    """Each secret's ``{set, hint, unreadable?}``; ``hint`` is ``None`` without ``hints``.
+
+    ``hints`` is whether the caller may change these keys (M2f-3 plan
+    section 0.3 #20): everyone else gets the same shape with no tail.
+    """
+
+    def status(**scope: Any) -> dict:
+        found = secret_status(session, project_id=project_id, org_id=org_id, **scope)
+        return found if hints else {**found, "hint": None}
+
     return {
         "llm": {
-            tag: secret_status(
-                session,
-                kind=LLM_API_KEY,
-                provider=tag,
-                project_id=project_id,
-                org_id=org_id,
-            )
-            for tag in LLM_KEY_PROVIDERS
+            tag: status(kind=LLM_API_KEY, provider=tag) for tag in LLM_KEY_PROVIDERS
         },
-        "github_token": secret_status(
-            session, kind=GITHUB_TOKEN, project_id=project_id, org_id=org_id
+        "github_token": status(kind=GITHUB_TOKEN),
+    }
+
+
+GITHUB_RUN_TRIGGERS: tuple[str, ...] = ("initial", "manual", "describe")
+"""Triggers whose scans fetch from GitHub (a hook scan is ``--no-remote``):
+an ``ok`` one is the GitHub token's "last used" (M2f-3 plan section 0.3 #18)."""
+
+
+def _org_secret_set(session: Session, org_id: int) -> set[tuple[str, str | None]]:
+    """``(kind, provider)`` of every org-level secret of ``org_id``."""
+    rows = session.exec(
+        select(Secret.kind, Secret.provider).where(
+            Secret.org_id == org_id,
+            col(Secret.project_id).is_(None),
+        )
+    ).all()
+    return {(kind, provider) for kind, provider in rows}
+
+
+def github_token_scope(session: Session, project_id: int, org_id: int) -> str:
+    """Where a project's GitHub token comes from: ``project``, ``org`` or ``none``.
+
+    The project's own secret wins (even an unreadable one: the context
+    never falls back to the org's then), else the org default.
+
+    Parameters
+    ----------
+    session : Session
+        A portal DB session.
+    project_id, org_id : int
+        The project and its org.
+
+    Returns
+    -------
+    str
+        ``"project"``, ``"org"`` or ``"none"``.
+    """
+    rows = session.exec(
+        select(Secret.project_id).where(
+            Secret.org_id == org_id,
+            Secret.kind == GITHUB_TOKEN,
+            or_(  # type: ignore[arg-type]
+                col(Secret.project_id).is_(None), Secret.project_id == project_id
+            ),
+        )
+    ).all()
+    if project_id in rows:
+        return "project"
+    return "org" if None in rows else "none"
+
+
+def github_remote(project: Project, root: Path) -> str | None:
+    """``owner/name`` of a project's GitHub remote, or ``None``.
+
+    A production import names it in ``remote_url``
+    (:func:`_github_full_name`); a local folder's comes from its ``origin``
+    on github.com, parsed as the add-project probe does
+    (:func:`~whygraph.portal.repos.github_link`). A linked project has none
+    here (its platform owns it).
+
+    Parameters
+    ----------
+    project : Project
+        The project row.
+    root : Path
+        Its absolute root.
+
+    Returns
+    -------
+    str or None
+        ``owner/name``.
+    """
+    if project.source == "platform":
+        return None
+    full_name = _github_full_name(project)
+    if full_name is not None:
+        return full_name
+    if not root.is_dir():
+        return None
+    link = github_link(root)
+    return link["slug"] if link is not None else None
+
+
+def _llm_last_used(
+    session: Session, org_id: int, scopes: dict[str, str], project_id: int | None
+) -> dict[str, str | None]:
+    """Each provider's newest ledger row for the key in effect (M2f-3 section 0.3 #19).
+
+    ``scopes`` maps a provider to the key scope in effect: ``org`` reads the
+    org key's calls across the org, ``project`` the project key's calls in
+    ``project_id``; any other scope has no stored key, so ``None``.
+    """
+    rows = session.exec(
+        select(
+            UsageEvent.provider,
+            UsageEvent.key_scope,
+            func.max(UsageEvent.created_at),
+        )
+        .where(
+            UsageEvent.org_id == org_id,
+            col(UsageEvent.provider).in_(tuple(scopes)),
+            or_(  # type: ignore[arg-type]
+                UsageEvent.key_scope == "org",
+                and_(
+                    UsageEvent.key_scope == "project",
+                    UsageEvent.project_id == project_id,
+                ),
+            ),
+        )
+        .group_by(UsageEvent.provider, UsageEvent.key_scope)
+    ).all()
+    newest = {(provider, scope): at for provider, scope, at in rows}
+    return {
+        tag: (newest.get((tag, scope)) if scope in ("org", "project") else None)
+        for tag, scope in scopes.items()
+    }
+
+
+def _github_last_used(session: Session, project_ids: list[int]) -> str | None:
+    """The newest ``ok`` GitHub-fetching scan of ``project_ids`` (its end time)."""
+    if not project_ids:
+        return None
+    return session.exec(
+        select(func.max(ScanRun.finished_at)).where(
+            col(ScanRun.project_id).in_(project_ids),
+            ScanRun.kind == "scan",
+            ScanRun.status == "ok",
+            col(ScanRun.trigger).in_(GITHUB_RUN_TRIGGERS),
+        )
+    ).one()
+
+
+def _project_key_last_used(
+    session: Session,
+    project: BoundProject,
+    scopes: dict[str, str],
+    github_scope: str,
+) -> dict:
+    """``key_last_used`` of a project's config payload (configurers only)."""
+    return {
+        "llm": _llm_last_used(session, project.org_id, scopes, project.id),
+        "github_token": (
+            None if github_scope == "none" else _github_last_used(session, [project.id])
         ),
     }
+
+
+def _org_key_last_used(session: Session, org_id: int, org_secrets: set) -> dict:
+    """``key_last_used`` of the defaults payload (``org.configure`` holders only).
+
+    The org GitHub token's last use is the newest GitHub-fetching scan of a
+    local project that has no token of its own.
+    """
+    llm = _llm_last_used(
+        session,
+        org_id,
+        {
+            tag: ("org" if (LLM_API_KEY, tag) in org_secrets else "none")
+            for tag in LLM_KEY_PROVIDERS
+        },
+        None,
+    )
+    github: str | None = None
+    if (GITHUB_TOKEN, None) in org_secrets:
+        own = select(Secret.project_id).where(
+            Secret.org_id == org_id,
+            Secret.kind == GITHUB_TOKEN,
+            col(Secret.project_id).is_not(None),
+        )
+        inheriting = session.exec(
+            select(Project.id).where(
+                Project.org_id == org_id,
+                Project.source == "local",
+                col(Project.id).not_in(own),
+            )
+        ).all()
+        github = _github_last_used(session, list(inheriting))
+    return {"llm": llm, "github_token": github}
 
 
 def _apply_secrets(
@@ -618,64 +812,99 @@ def _project_stats(state: PortalState, project: BoundProject) -> dict | None:
     Also ``None`` when a DB path is a symlink (nothing is opened); the data
     routes answer ``409 unsafe_path`` for such a project. A linked
     (``platform``) project has no local DB: ``None``, the file untouched.
+    The counts are :func:`whygraph.portal.stats.project_counts`.
     """
-    if project.source == "platform":
+    if project.source == "platform" or project.initialized_at is None:
         return None
-    try:
-        check_project_paths(project.root)
-    except UnsafePathError:
-        return None
-    if project.initialized_at is None or not project.db_path.is_file():
-        return None
-    try:
-        state.migrations.ensure(project.ctx)
-    except UnsafePathError:
-        return None
-    try:
-        overview = _repo_overview_resource()
-        with project_session() as session:
-            cards = session.exec(select(func.count()).select_from(RationaleCache)).one()
-    except WhyGraphError:
-        return None
-    coverage = overview["llm_description_coverage"]
-    return {
-        "commits": overview["counts"]["commits"],
-        "described": coverage["described"],
-        "described_pct": round(coverage["fraction"] * 100, 1),
-        "pull_requests": overview["counts"]["pull_requests"],
-        "issues": overview["counts"]["issues"],
-        "rationale_cards": cards,
-    }
-
-
-def _active_run(session: Session, project_id: int) -> dict | None:
-    run = session.exec(
-        select(ScanRun)
-        .where(ScanRun.project_id == project_id)
-        .where(col(ScanRun.status).in_(("queued", "running")))
-        .order_by(col(ScanRun.id).desc())
-    ).first()
-    if run is None:
-        return None
-    return {
-        "id": run.id,
-        "status": run.status,
-        "trigger": run.trigger,
-        "analyze": run.analyze,
-    }
+    return project_counts(state, project.ctx)
 
 
 FINISHED_STATUSES: tuple[str, ...] = ("ok", "failed", "interrupted", "cancelled")
 """``scan_runs.status`` values of a run that has ended."""
 
 
-def _last_scan_status(session: Session, project_id: int) -> str | None:
-    return session.exec(
-        select(ScanRun.status)
-        .where(ScanRun.project_id == project_id)
-        .where(col(ScanRun.status).in_(FINISHED_STATUSES))
-        .order_by(col(ScanRun.id).desc())
-    ).first()
+@dataclass(frozen=True)
+class _ListData:
+    """What :func:`_summary` reads from the portal DB, for a set of projects.
+
+    One query each (M2f-3 plan section 4.10, PRJ-4), so the projects list
+    costs the same number of statements for one project and for a hundred.
+    """
+
+    running: dict[int, dict]
+    last_status: dict[int, str]
+    last_stats: dict[int, dict]
+    links: dict[int, PlatformLink]
+
+
+def _last_scan_stats(raw: str | None) -> dict | None:
+    """``last_scan_stats`` from a run's ``summary`` text, or ``None`` (unparsable)."""
+    summary = _load_summary(raw)
+    coverage = summary.get("coverage") if isinstance(summary, dict) else None
+    if not isinstance(coverage, dict):
+        return None
+    return {
+        "commits": coverage.get("commits"),
+        "described_pct": coverage.get("described_pct"),
+        "rationale_cards": coverage.get("rationale_cards"),
+        "as_of": coverage.get("at"),
+    }
+
+
+def _list_data(session: Session, projects: list[Project]) -> _ListData:
+    """Prefetch :class:`_ListData` for ``projects`` in four queries (none when empty)."""
+    ids = [p.id for p in projects if p.id is not None]
+    if not ids:
+        return _ListData({}, {}, {}, {})
+    in_ids = col(ScanRun.project_id).in_(ids)
+    # DISTINCT ON (project_id) ... ORDER BY project_id, id DESC: the newest row each.
+    running = {
+        run.project_id: {
+            "id": run.id,
+            "status": run.status,
+            "trigger": run.trigger,
+            "analyze": run.analyze,
+        }
+        for run in session.exec(
+            select(ScanRun)
+            .where(in_ids, col(ScanRun.status).in_(("queued", "running")))
+            .distinct(col(ScanRun.project_id))
+            .order_by(col(ScanRun.project_id), col(ScanRun.id).desc())
+        ).all()
+    }
+    last_status = {
+        project_id: status
+        for project_id, status in session.exec(
+            select(ScanRun.project_id, ScanRun.status)
+            .where(in_ids, col(ScanRun.status).in_(FINISHED_STATUSES))
+            .distinct(col(ScanRun.project_id))
+            .order_by(col(ScanRun.project_id), col(ScanRun.id).desc())
+        ).all()
+    }
+    # `summary` is TEXT: a LIKE pre-filter and a parse in Python, so one
+    # non-JSON row is skipped rather than failing the whole list on a cast.
+    last_stats: dict[int, dict] = {}
+    for project_id, raw in session.exec(
+        select(ScanRun.project_id, ScanRun.summary)
+        .where(in_ids, col(ScanRun.summary).like('%"coverage"%'))
+        .distinct(col(ScanRun.project_id))
+        .order_by(col(ScanRun.project_id), col(ScanRun.id).desc())
+    ).all():
+        stats = _last_scan_stats(raw)
+        if stats is not None:
+            last_stats[project_id] = stats
+    linked = [p.id for p in projects if p.source == "platform"]
+    links = (
+        {
+            row.project_id: row
+            for row in session.exec(
+                select(PlatformLink).where(col(PlatformLink.project_id).in_(linked))
+            ).all()
+        }
+        if linked
+        else {}
+    )
+    return _ListData(running, last_status, last_stats, links)
 
 
 def _github_full_name(project: Project) -> str | None:
@@ -697,7 +926,7 @@ def _permissions(role: ProjectRole) -> list[str]:
 
 
 def _summary(
-    session: Session,
+    data: _ListData,
     project: Project,
     root: Path,
     *,
@@ -705,18 +934,23 @@ def _summary(
     role: ProjectRole,
     user_id: int | None,
 ) -> dict:
-    """One project as the list shows it; ``user_id=None`` leaves ``llm_block`` to the caller."""
+    """One project as the list shows it; ``user_id=None`` leaves ``llm_block`` to the caller.
+
+    Reads the portal DB only through ``data`` (:func:`_list_data`), and
+    ``stale`` through the runner's :class:`~whygraph.portal.runner.StaleCache`.
+    """
     mode = state.mode
+    project_id: int = project.id  # type: ignore[assignment]
     status = root_status(root)
     full_name = _github_full_name(project)
     stale = (
-        stale_info(root, project.last_scanned_head)
+        state.runner.stale.info(project_id, root, project.last_scanned_head)
         if status == "ok" and project.initialized_at is not None
         else None
     )
     link = None
     if project.source == "platform":
-        row = session.get(PlatformLink, project.id)
+        row = data.links.get(project_id)
         link = None if row is None else link_block(row)
     block = block_scope = None
     if user_id is not None:
@@ -734,16 +968,26 @@ def _summary(
         # False for a local-mode GitHub clone of an older build: list it,
         # refuse its scans, let it be removed.
         "source_supported": project.source in allowed_sources(mode),
-        "root": str(root),
+        # Never a server path to org users (MODE-1): a production clone
+        # lives under the portal's data dir.
+        "root": None
+        if mode == "production" and project.source == "github"
+        else str(root),
         "remote_url": project.remote_url,
         "initialized": project.initialized_at is not None,
+        # An import whose clone (the first run) has not set it up yet.
+        "importing": project.source == "github" and project.initialized_at is None,
         "initialized_at": project.initialized_at,
         "last_scan_at": project.last_scan_at,
         "created_at": project.created_at,
         "root_status": status,
-        "running_scan": _active_run(session, project.id),  # type: ignore[arg-type]
+        "running_scan": data.running.get(project_id),
         # The newest ended run's status, for a "scan failed" badge.
-        "last_scan_status": _last_scan_status(session, project.id),  # type: ignore[arg-type]
+        "last_scan_status": data.last_status.get(project_id),
+        # The newest run's coverage snapshot (`summary.coverage`, written
+        # by the runner): the list's stats "as of the last scan", without
+        # opening each project's DB. `stats` on the details is the live one.
+        "last_scan_stats": data.last_stats.get(project_id),
         # HEAD vs last_scanned_head (the runner's catch-up check, section 4.6).
         "stale": stale,
         # A production project GitHub no longer lets the app read (M2d-2 plan
@@ -782,7 +1026,7 @@ def _details(state: PortalState, project: BoundProject) -> dict:
         if row is None:
             raise ApiError(404, f"project {project.slug!r} not found")
         body = _summary(
-            session,
+            _list_data(session, [row]),
             row,
             project.root,
             state=state,
@@ -874,26 +1118,6 @@ def _unsafe_reason(root: Path, *paths: Path) -> str | None:
     return None
 
 
-def _clone_dir_is_safe(root: Path, data_dir: Path, *, depth: int) -> bool:
-    """Whether ``root`` sits exactly ``depth`` levels under ``<data dir>/repos`` (rmtree guard).
-
-    ``depth`` is 2 for production's ``repos/<org slug>/<slug>`` (and its
-    ``repos/<org slug>/.clone-*`` temp dirs), 1 for a local GitHub clone of
-    an earlier build (``repos/<slug>``). Neither ``root`` nor any directory
-    between it and ``repos`` may be a symlink, and its real path's parent
-    chain must reach ``realpath(<data dir>/repos)``. Works for a path that
-    does not exist yet.
-    """
-    repos = Path(os.path.realpath(data_dir / "repos"))
-    real = Path(os.path.realpath(root))
-    path = Path(root)
-    for _ in range(depth):
-        if path.is_symlink():
-            return False
-        path, real = path.parent, real.parent
-    return real == repos and Path(os.path.realpath(path)) == repos
-
-
 def _probe(owner: str, name: str, token: str | None) -> None:
     try:
         check_repo_access(owner, name, token)
@@ -979,6 +1203,13 @@ def get_state(request: Request) -> dict:
             body["user"]["github_login"] = principal.github_login
             body["user"]["avatar_url"] = principal.avatar_url
             body["user"]["has_password"] = principal.has_password
+        # The welcome banner (M2f-3 section 4.12): this org only, this
+        # caller's own membership flag.
+        body["welcome"] = (
+            {"org_name": access.org_name, "role": access.role.value}
+            if access is not None and access.welcome_pending
+            else None
+        )
     return body
 
 
@@ -1029,6 +1260,9 @@ def get_repos(
 ) -> dict:
     """Git repositories discovered under the shared folders (cached 60 s).
 
+    ``q`` (a case-insensitive substring of the path, so of the name too)
+    filters while the folders are walked, and ``truncated`` means the
+    search hit :data:`~whygraph.portal.repos.DISCOVERY_LIMIT` *matches*.
     ``registered`` reflects only the request's org (a local or a linked
     project over that checkout). ``404`` in production
     (local folders only).
@@ -1036,7 +1270,8 @@ def get_repos(
     state = portal_state(request)
     _refuse_local_flow_in_production(state)
     org_id = access.org_id
-    found = state.discovery.get(state.shared_folders)
+    needle = q.strip().lower()
+    found = state.discovery.get(state.shared_folders, needle)
     with get_session() as session:
         registered = set(
             session.exec(
@@ -1046,12 +1281,10 @@ def get_repos(
                 )
             ).all()
         )
-    needle = q.strip().lower()
     return {
         "repos": [
             {"path": str(p), "name": p.name, "registered": str(p) in registered}
             for p in found
-            if needle in str(p).lower()
         ],
         "truncated": len(found) >= DISCOVERY_LIMIT,
     }
@@ -1073,22 +1306,43 @@ def post_check_path(body: PathBody, request: Request) -> dict:
         raise ApiError(422, str(exc)) from exc
 
 
-def _defaults_view(session: Session, org_id: int) -> dict:
+def _defaults_view(session: Session, org_id: int, *, configurer: bool) -> dict:
+    """The defaults payload; ``configurer`` = the caller holds ``org.configure``.
+
+    Without it the payload is ``read_only``, carries no key tails
+    (``hint: null``) and no ``key_last_used`` (M2f-3 plan section 4.13).
+    """
     any_key = session.exec(
         select(Secret.id).where(Secret.org_id == org_id, Secret.kind == LLM_API_KEY)
     ).first()
-    return {
+    view = {
         "config": load_layer(session, None, org_id=org_id),
-        "secrets": _secrets_view(session, None, org_id=org_id),
+        "secrets": _secrets_view(session, None, org_id=org_id, hints=configurer),
         "no_provider_key": any_key is None,
+        "read_only": not configurer,
+        "can_test_keys": configurer,
     }
+    if configurer:
+        view["key_last_used"] = _org_key_last_used(
+            session, org_id, _org_secret_set(session, org_id)
+        )
+    return view
 
 
 @portal_router.get("/defaults")
 def get_defaults(access: OrgAccess = Depends(org_access(Action.ORG_READ))) -> dict:
-    """The org default config (rule 6) and the org secrets' status."""
+    """The org default config (rule 6) and the org secrets' status.
+
+    Key tails, ``key_last_used`` and ``can_test_keys`` are for
+    ``org.configure`` holders (owners) only; everyone else reads a
+    ``read_only`` payload with ``hint: null``.
+    """
     with get_session() as session:
-        return _defaults_view(session, access.org_id)
+        return _defaults_view(
+            session,
+            access.org_id,
+            configurer=allowed(access.role, Action.ORG_CONFIGURE),
+        )
 
 
 @portal_router.put("/defaults")
@@ -1127,7 +1381,7 @@ def put_defaults(
             _apply_secrets(session, body.secrets, None, org_id=org_id)
     state.contexts.invalidate(None)
     with get_session() as session:
-        view = _defaults_view(session, org_id)
+        view = _defaults_view(session, org_id, configurer=True)
     view["cleared_project_keys"] = cleared
     return view
 
@@ -1163,7 +1417,7 @@ def list_projects(
             .where(Project.org_id == access.org_id)
             .order_by(Project.name)
         ).all()
-        projects = []
+        visible: list[tuple[Project, ProjectRole]] = []
         for project, grant in rows:
             role = effective_project_role(
                 access.role,
@@ -1172,16 +1426,19 @@ def list_projects(
                 None if grant is None else ProjectRole(grant),
             )
             if role is not None:
-                projects.append(
-                    _summary(
-                        session,
-                        project,
-                        resolve_root(project),
-                        state=state,
-                        role=role,
-                        user_id=access.user_id,
-                    )
-                )
+                visible.append((project, role))
+        data = _list_data(session, [project for project, _ in visible])
+        projects = [
+            _summary(
+                data,
+                project,
+                resolve_root(project),
+                state=state,
+                role=role,
+                user_id=access.user_id,
+            )
+            for project, role in visible
+        ]
         body = {"projects": projects}
         for project_id in due_for_refresh(session, access.org_id):
             state.link_refresh.schedule(project_id)
@@ -1204,14 +1461,23 @@ def add_project(
     ``protected``, ``github_error``). The source policy
     (:func:`~whygraph.portal.policy.allowed_sources`) answers ``403
     source_not_allowed`` for ``github`` in local mode and ``local`` in
-    production. A production import is :func:`_import_github`; a link to a
-    platform project (local mode, M2e) is :func:`_add_platform`.
+    production. A production import is :func:`_import_github`, which
+    answers at once (the clone is its first run): the body then also
+    carries ``initial_run_id`` - ``null``, with a ``scan_error`` code, when
+    the runner refused it. A link to a platform project (local mode, M2e)
+    is :func:`_add_platform`.
     """
     state = portal_state(request)
     _refuse_source(state, body.source)
+    queued: dict[str, Any] = {}
     if isinstance(body, GitHubProjectBody):
-        project_id = _import_github(state, body, principal, access, request)
+        project_id, run_id, scan_error = _import_github(
+            state, body, principal, access, request
+        )
         detected, preview = None, ImportPreview()
+        queued["initial_run_id"] = run_id
+        if scan_error is not None:
+            queued["scan_error"] = scan_error
     elif isinstance(body, PlatformProjectBody):
         project_id = _add_platform(state, body, principal, access.org_id)
         detected, preview = None, ImportPreview()
@@ -1231,7 +1497,12 @@ def add_project(
         details = _details(state, project)
     if detected is None:
         detected = details["detected"]
-    return {"project": details, "detected": detected, "import": preview.report()}
+    return {
+        "project": details,
+        "detected": detected,
+        "import": preview.report(),
+        **queued,
+    }
 
 
 def _insert_project(
@@ -1267,7 +1538,7 @@ def _checked_path(state: PortalState, path: str) -> dict:
     ------
     ApiError
         ``422`` (no or a relative path), ``400 protected`` / ``not_shared`` /
-        ``not_git``.
+        ``path_missing`` / ``not_git``.
     """
     if not path:
         raise ApiError(422, "path is required for a local project")
@@ -1287,6 +1558,8 @@ def _checked_path(state: PortalState, path: str) -> dict:
             folder_suggestion=check["folder_suggestion"],
             command=check["command"],
         )
+    if not check["exists"]:
+        raise ApiError(400, "the path does not exist", code="path_missing")
     if not check["is_git"]:
         raise ApiError(400, "the path is not a git repository", code="not_git")
     return check
@@ -1633,83 +1906,131 @@ def _check_import_access(
     return repo, minted.token
 
 
-def _production_initialize(state: PortalState, ctx: ProjectContext) -> None:
-    """A production project's Initialize: checked DB paths, then the migration.
-
-    No agent files, hooks or markers (M2d-2 plan section 0.2 #12); the
-    caller sets ``initialized_at``. Idempotent.
-
-    Raises
-    ------
-    ApiError
-        ``409 unsafe_path`` when a DB path is a symlink.
-    """
+def _folder_names(folder: Path) -> set[str]:
+    """The names in ``folder`` (none when it is missing): slugs an import avoids."""
     try:
-        check_project_paths(ctx.root)
-        state.migrations.ensure(ctx)
-    except UnsafePathError as exc:
-        raise unsafe_path_error(exc) from exc
+        return {p.name for p in folder.iterdir()} if folder.is_dir() else set()
+    except OSError:
+        return set()
 
 
-def _discard_clone(state: PortalState, path: Path) -> None:
-    """Remove an import's clone (and forget its DB) after a failed import."""
-    db_path = path / ".whygraph" / "whygraph.db"
-    dispose_engine(db_path)
-    state.migrations.forget(db_path)
-    _remove_clone(path, state.data_dir, depth=2)
-
-
-def _insert_imported(
+def _insert_import_row(
     state: PortalState,
     *,
     access: OrgAccess,
     principal: Principal,
-    slug: str,
     name: str,
     repo: GitHubRepo,
     installation_id: int,
 ) -> int:
-    """Step 7 of the import: one transaction, the row, the forge layer, Initialize.
+    """Step 3 of the import: the row (not initialized) and the forge layer, one transaction.
+
+    The org row is locked ``FOR SHARE`` first, so an org deletion cannot
+    interleave. The slug avoids every name already present in
+    ``repos/<org>/`` (a leftover folder never collides with the clone the
+    runner makes); a concurrent import that commits the same slug first
+    (``uq_projects_org_slug``) makes it try the next one, up to
+    :data:`IMPORT_SLUG_ATTEMPTS` times.
+
+    Returns
+    -------
+    int
+        The new project's id.
 
     Raises
     ------
     ApiError
-        ``404`` when the org was deleted meanwhile (its row is locked
-        ``FOR SHARE`` first, so a deletion cannot interleave).
-    IntegrityError
-        A duplicate repo or slug in the org (the caller tells which).
+        ``404`` when the org was deleted meanwhile; ``409 duplicate`` when
+        a concurrent import of the repository won
+        (``uq_projects_org_github_repo``); ``409 busy`` when no slug held.
     """
     web = require_github_app(state).config.web_url
-    with get_session() as session:
-        org = session.exec(
-            select(Organization.id)
-            .where(Organization.id == access.org_id)
-            .with_for_update(read=True)
-        ).first()
-        if org is None:
-            raise ApiError(404, "not found")
-        project = Project(
-            org_id=access.org_id,
-            slug=slug,
-            name=name,
-            source="github",
-            root=f"repos/{access.org_slug}/{slug}",
-            remote_url=f"{web}/{repo.full_name}",
-            created_by=principal.user_id,
-            github_repo_id=repo.id,
-            github_installation_id=installation_id,
-            default_branch=repo.default_branch,
-        )
-        session.add(project)
-        session.flush()
-        assert project.id is not None
-        save_layer(
-            session, project.id, {"scan": {"forge": "auto"}}, org_id=access.org_id
-        )
-        _production_initialize(state, build_project_context(session, project))
-        project.initialized_at = _now()
-        session.add(project)
-        return project.id
+    org_dir = state.data_dir / "repos" / access.org_slug
+    tried: set[str] = set()
+    for _ in range(IMPORT_SLUG_ATTEMPTS):
+        try:
+            with get_session() as session:
+                org = session.exec(
+                    select(Organization.id)
+                    .where(Organization.id == access.org_id)
+                    .with_for_update(read=True)
+                ).first()
+                if org is None:
+                    raise ApiError(404, "not found")
+                slug = unique_slug(
+                    session,
+                    name,
+                    org_id=access.org_id,
+                    exclude=tried | _folder_names(org_dir),
+                )
+                tried.add(slug)
+                project = Project(
+                    org_id=access.org_id,
+                    slug=slug,
+                    name=name,
+                    source="github",
+                    root=f"repos/{access.org_slug}/{slug}",
+                    remote_url=f"{web}/{repo.full_name}",
+                    created_by=principal.user_id,
+                    github_repo_id=repo.id,
+                    github_installation_id=installation_id,
+                    default_branch=repo.default_branch,
+                )
+                session.add(project)
+                session.flush()
+                assert project.id is not None
+                save_layer(
+                    session,
+                    project.id,
+                    {"scan": {"forge": "auto"}},
+                    org_id=access.org_id,
+                )
+                return project.id
+        except IntegrityError as exc:
+            if _constraint(exc) == "uq_projects_org_slug":
+                continue
+            raise ApiError(
+                409, "this repository is already a project here", code="duplicate"
+            ) from exc
+    raise ApiError(
+        409, "could not find a free slug for this project; try again", code="busy"
+    )
+
+
+SCAN_REFUSAL_CODES: tuple[tuple[type[Exception], str], ...] = (
+    (RunnerUnavailable, "runner_unavailable"),
+    (ProjectBusy, "busy"),
+    (SourceNotAllowed, "source_not_allowed"),
+    (ProjectAccessLost, "github_access_lost"),
+    (ManagedOnPlatform, "managed_on_platform"),
+    (ScanForbidden, "forbidden"),
+    (ScanBudgetExceeded, "budget_exceeded"),
+)
+"""The runner's refusals of a scan request a route makes on its own, as ``scan_error`` codes."""
+
+
+def _queue_initial_run(
+    request_run: Callable[[], Awaitable[int]],
+) -> tuple[int | None, str | None]:
+    """Ask the runner for a project's first run from a sync handler's worker thread.
+
+    The runner's request methods are ``async``; a sync handler runs in an
+    anyio worker thread, so it calls them through
+    :func:`anyio.from_thread.run`. A refusal never fails the caller's own
+    work (the import row or the Initialize is already committed).
+
+    Returns
+    -------
+    tuple of (int or None, str or None)
+        The run id and ``None``, or ``None`` and the refusal's code
+        (:data:`SCAN_REFUSAL_CODES`).
+    """
+    try:
+        return anyio.from_thread.run(request_run), None
+    except tuple(kind for kind, _ in SCAN_REFUSAL_CODES) as exc:
+        code = next(c for kind, c in SCAN_REFUSAL_CODES if isinstance(exc, kind))
+        _log.warning("the first run was not queued: %s (%s)", exc, code)
+        return None, code
 
 
 def _import_github(
@@ -1718,28 +2039,26 @@ def _import_github(
     principal: Principal,
     access: OrgAccess,
     request: Request,
-) -> int:
-    """Import a repository through the GitHub App (M2d-2 plan section 4.5).
+) -> tuple[int, int | None, str | None]:
+    """Import a repository through the GitHub App (M2d-2 plan section 4.5, M2f-3 section 4.8).
 
     The user must see the installation and read the repository with their
     user token, and the installation must cover it (one ``404 no_access``
     otherwise); ``409 duplicate`` when it is already a project of this
-    org; ``429`` past 30 imports per org per hour. The clone, made with a
-    repo-scoped installation token, lands in ``repos/<org>/.clone-*`` and
-    is refused (``422 tracked_whygraph_state``) when it tracks
-    ``.whygraph/`` or ``.codegraph/``; it then moves to
-    ``repos/<org>/<slug>`` and the row, the forge layer and the production
-    Initialize commit together. Every failure removes the clone.
+    org; ``429`` past 30 imports per org per hour. Nothing is cloned here:
+    the row is inserted with ``initialized_at`` unset and the runner's
+    import run (:meth:`~whygraph.portal.runner.ScanRunner.request_import`)
+    clones, refuses a repository that tracks ``.whygraph/`` /
+    ``.codegraph/``, initializes, then scans. A runner refusal after the
+    row is committed does not undo the import.
 
     Returns
     -------
-    int
-        The new project's id.
+    tuple of (int, int or None, str or None)
+        The new project's id, its import run's id (``None`` when the runner
+        refused) and the refusal's code.
     """
-    repo, token = _check_import_access(state, body, principal)
-    duplicate = ApiError(
-        409, "this repository is already a project here", code="duplicate"
-    )
+    repo, _token = _check_import_access(state, body, principal)
     with get_session() as session:
         if session.exec(
             select(Project.id).where(
@@ -1747,7 +2066,9 @@ def _import_github(
                 Project.github_repo_id == body.repo_id,
             )
         ).first():
-            raise duplicate
+            raise ApiError(
+                409, "this repository is already a project here", code="duplicate"
+            )
     retry_after = state.import_org.hit(access.org_id)
     if retry_after is not None:
         raise ApiError(
@@ -1757,93 +2078,29 @@ def _import_github(
             headers={"Retry-After": str(retry_after)},
         )
     name = (body.name or "").strip() or repo.full_name.split("/", 1)[1]
-
-    org_dir = state.data_dir / "repos" / access.org_slug
-    org_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    # A dot-name is never a slug, so the temp dir cannot collide with a
-    # project; only this request knows it, so only this request removes it.
-    tmp = org_dir / f".clone-{slugify(name)}-{secrets_mod.token_hex(6)}"
-    if not _clone_dir_is_safe(tmp, state.data_dir, depth=2):
-        raise ApiError(500, f"refusing to clone into {org_dir}: not a portal folder")
-    url = f"{github_git_host().url}/{repo.full_name}.git"
-    try:
-        Repository.clone(url, tmp, env=git_env(token))
-        tracked = Repository(tmp).tracked_paths("HEAD", *TRACKED_STATE_PATHS)
-    except (GitError, InvalidRepoUrlError) as exc:
-        _remove_clone(tmp, state.data_dir, depth=2)
-        raise ApiError(
-            502, redact_tokens(str(exc)).replace(token, "***"), code="clone_failed"
-        ) from exc
-    if tracked:
-        _remove_clone(tmp, state.data_dir, depth=2)
-        raise ApiError(
-            422,
-            "this repository tracks WhyGraph's own state (.whygraph/ or "
-            ".codegraph/); remove it from the repository to import it",
-            code="tracked_whygraph_state",
-            paths=list(tracked[:20]),
-        )
-
-    tried: set[str] = set()
-    for _ in range(IMPORT_SLUG_ATTEMPTS):
-        with get_session() as session:
-            slug = unique_slug(session, name, org_id=access.org_id, exclude=tried)
-        tried.add(slug)
-        dest = org_dir / slug
-        try:
-            os.rename(tmp, dest)  # fails on a non-empty dest; never merges into it
-        except OSError:
-            continue  # a concurrent import holds this slug's folder
-        try:
-            project_id = _insert_imported(
-                state,
-                access=access,
-                principal=principal,
-                slug=slug,
-                name=name,
-                repo=repo,
-                installation_id=body.installation_id,
-            )
-        except IntegrityError as exc:
-            if _constraint(exc) == "uq_projects_org_slug":
-                db_path = dest / ".whygraph" / "whygraph.db"
-                dispose_engine(db_path)
-                state.migrations.forget(db_path)
-                os.rename(dest, tmp)
-                continue
-            _discard_clone(state, dest)
-            raise duplicate from exc
-        except BaseException as exc:
-            _discard_clone(state, dest)
-            if isinstance(exc, ApiError) and exc.status == 404:
-                # The org was deleted meanwhile: leave no empty repos/<org>/.
-                try:
-                    org_dir.rmdir()
-                except OSError:
-                    pass
-            raise
-        state.contexts.invalidate(project_id)
-        audit(
-            "project_imported",
-            request,
-            uid=principal.uid,
-            org_id=access.org_id,
-            org=access.org_slug,
-            repo_id=repo.id,
-            full_name=repo.full_name,
-        )
-        return project_id
-    _remove_clone(tmp, state.data_dir, depth=2)
-    raise ApiError(
-        409, "could not find a free slug for this project; try again", code="busy"
+    project_id = _insert_import_row(
+        state,
+        access=access,
+        principal=principal,
+        name=name,
+        repo=repo,
+        installation_id=body.installation_id,
     )
-
-
-def _remove_clone(path: Path, data_dir: Path, *, depth: int) -> bool:
-    if path.exists() and _clone_dir_is_safe(path, data_dir, depth=depth):
-        shutil.rmtree(path)
-        return True
-    return False
+    state.contexts.invalidate(project_id)
+    state.repo_cache.drop((principal.user_id, body.installation_id))
+    audit(
+        "project_imported",
+        request,
+        uid=principal.uid,
+        org_id=access.org_id,
+        org=access.org_slug,
+        repo_id=repo.id,
+        full_name=repo.full_name,
+    )
+    run_id, scan_error = _queue_initial_run(
+        partial(state.runner.request_import, project_id, principal=principal)
+    )
+    return project_id, run_id, scan_error
 
 
 @projects_router.get("/{slug}")
@@ -1935,12 +2192,16 @@ def _remove_project(
     state: PortalState, project: BoundProject, body: DeleteProjectBody
 ) -> dict:
     """The body of :func:`delete_project`, run under the runner's removal reservation."""
+    production = state.mode == "production"
     if project.source == "github" and body.confirm_name != project.name:
+        # Production never names the server clone's path (MODE-1).
         raise ApiError(
             409,
-            f"type the project name to delete the checkout at {project.root}",
+            "type the project name to delete its server copy"
+            if production
+            else f"type the project name to delete the checkout at {project.root}",
             code="confirm_name",
-            folder=str(project.root),
+            **({} if production else {"folder": str(project.root)}),
         )
 
     with get_session() as session:
@@ -1956,13 +2217,15 @@ def _remove_project(
 
     # First, before anything local changes: give up this machine's access.
     token_revoked = True
+    token_revoke_result: str | None = None
     if project.source == "platform":
         link = _link_of(project.id)
-        failure = (
-            "this project has no link row"
-            if link is None
-            else revoke_token(link, transport=state.platform_transport)
-        )
+        if link is None:
+            failure: str | None = "this project has no link row"
+        else:
+            token_revoke_result, failure = revoke_token_outcome(
+                link, transport=state.platform_transport
+            )
         token_revoked = failure is None
         if failure is not None:
             origin = link.platform_origin if link is not None else "the platform"
@@ -2021,7 +2284,7 @@ def _remove_project(
                 warnings.append(f"left {marker}: {unsafe}")
             else:
                 (project.root / marker).unlink(missing_ok=True)
-    else:
+    elif state.mode != "production":  # production installs no hooks or markers
         warnings.append(f"{project.root} is not mounted; hooks and markers were left")
 
     runs = run_files([project.id])
@@ -2038,9 +2301,10 @@ def _remove_project(
         # Production clones live at repos/<org>/<slug>; a local-mode row is
         # an earlier build's repos/<slug> (M2d-2 plan section 0.2 #3).
         depth = 2 if state.mode == "production" else 1
-        checkout_deleted = _remove_clone(project.root, state.data_dir, depth=depth)
+        checkout_deleted = remove_clone(project.root, state.data_dir, depth=depth)
         if not checkout_deleted and project.root.exists():
-            warnings.append(f"refused to delete {project.root}: not a portal clone")
+            where = "the server copy" if production else str(project.root)
+            warnings.append(f"refused to delete {where}: not a portal clone")
     return {
         "removed": project.slug,
         "hooks": hooks,
@@ -2049,8 +2313,67 @@ def _remove_project(
         # Whether this machine holds no connection token for the project any
         # more: the platform confirmed the revoke, or there never was one.
         "token_revoked": token_revoked,
+        # How giving the token up went (BUG-7): revoked / already_revoked /
+        # unreachable, or None when there was no token (not linked).
+        "token_revoke_result": token_revoke_result,
         "warnings": warnings,
     }
+
+
+def _config_view(
+    session: Session, project: BoundProject, key_scopes: Mapping[str, str]
+) -> dict:
+    """The config payload's ``config``, ``secrets`` and the M2f-3 key fields.
+
+    Plan section 4.13: ``read_only`` (no ``project.configure``, or linked),
+    ``managed_on_platform``, ``can_test_keys``; for a project that is not
+    linked ``effective_keys`` (``key_scopes``), ``inherited`` (whether the
+    org key would take over a removed project key - never its tail),
+    ``github`` (the remote and the token's scope) and, for configurers,
+    ``key_last_used``. Key tails are only for configurers; an org key's tail
+    is never here. A linked project reads no secret, so ``secrets`` is
+    ``None``.
+    """
+    linked = project.source == "platform"
+    configurer = project_allowed(project.role, Action.PROJECT_CONFIGURE)
+    view: dict[str, Any] = {
+        "config": load_layer(session, project.id, org_id=project.org_id),
+        "secrets": (
+            None
+            if linked
+            else _secrets_view(
+                session, project.id, org_id=project.org_id, hints=configurer
+            )
+        ),
+        "read_only": linked or not configurer,
+        "managed_on_platform": linked,
+        "can_test_keys": configurer and not linked,
+    }
+    if linked:
+        return view
+    row = session.get(Project, project.id)
+    layer = view["config"]
+    org_secrets = _org_secret_set(session, project.org_id)
+    github_scope = github_token_scope(session, project.id, project.org_id)
+    scopes = {tag: key_scopes.get(tag, "none") for tag in LLM_KEY_PROVIDERS}
+    view["effective_keys"] = scopes
+    view["inherited"] = {
+        tag: {
+            # Rule 3: an org key never reaches a project overriding the endpoint.
+            "set": (LLM_API_KEY, tag) in org_secrets
+            and endpoint_of(layer, tag.replace("-", "_")) is None
+        }
+        for tag in LLM_KEY_PROVIDERS
+    }
+    view["github"] = {
+        "remote": github_remote(row, project.root) if row is not None else None,
+        "token": github_scope,
+    }
+    if configurer:
+        view["key_last_used"] = _project_key_last_used(
+            session, project, scopes, github_scope
+        )
+    return view
 
 
 @projects_router.get("/{slug}/config")
@@ -2066,17 +2389,11 @@ def get_project_config(
     Allowed for a linked project, which is what its hooks checkboxes read -
     but read-only (``PUT`` is refused except ``[scan].hooks``) and without
     the secrets block: a linked project reads no secret at all, so there is
-    nothing to report (plan sections 4.9, 4.11).
+    nothing to report (plan sections 4.9, 4.11). The key fields of M2f-3
+    (:func:`_config_view`) depend on the caller's role.
     """
     with get_session() as session:
-        body = {
-            "config": load_layer(session, project.id, org_id=project.org_id),
-            "secrets": (
-                None
-                if project.source == "platform"
-                else _secrets_view(session, project.id, org_id=project.org_id)
-            ),
-        }
+        body = _config_view(session, project, project.ctx.key_scopes)
     preview = (
         preview_import(project.root) if project.source == "local" else ImportPreview()
     )
@@ -2153,10 +2470,8 @@ def put_project_config(
             hooks_error = str(exc)
 
     with get_session() as session:
-        view = {
-            "config": load_layer(session, project.id, org_id=project.org_id),
-            "secrets": _secrets_view(session, project.id, org_id=project.org_id),
-        }
+        # A linked project's secrets stay null, as on GET (BUG-21).
+        view = _config_view(session, project, new_ctx.key_scopes)
     view["hooks"] = hooks
     view["hooks_error"] = hooks_error
     return view
@@ -2183,6 +2498,7 @@ def init_project(
     body: InitBody,
     request: Request,
     project: BoundProject = Depends(project_access(Action.PROJECT_SETUP)),
+    principal: Principal = Depends(current_user),
 ) -> dict:
     """Initialize the repo: gitignore, hooks, agent MCP entries + assets, markers.
 
@@ -2196,10 +2512,17 @@ def init_project(
     and writes nothing; ``force`` is "Update agent files". ``409
     source_not_allowed`` for a local-mode GitHub clone of an older build.
     In production it is :func:`_init_production`.
+
+    The call that sets ``initialized_at`` (the first, non-dry-run
+    Initialize) also queues the project's first, structure-only scan (a
+    linked project's ``--codegraph-only`` one) and returns its
+    ``initial_run_id``; a runner refusal returns ``null`` with a
+    ``scan_error`` code and never fails the Initialize. Dry runs and a
+    re-Initialize ("Update agent files") queue nothing (``null``).
     """
     state = portal_state(request)
     if state.mode == "production":
-        return _init_production(state, project, body)
+        return _init_production(state, project, body, principal)
     if project.source not in allowed_sources(state.mode):
         raise ApiError(
             409,
@@ -2239,6 +2562,7 @@ def init_project(
         raise ApiError(500, f"initialize failed: {exc}") from exc
 
     initialized = project.initialized_at is not None
+    first = False
     if not result.dry_run:
         removed = {
             f.agent
@@ -2269,6 +2593,7 @@ def init_project(
                 if row is not None and row.initialized_at is None:
                     row.initialized_at = _now()
                     session.add(row)
+                    first = True
                 initialized = True
 
     response = _init_dict(result)
@@ -2285,10 +2610,39 @@ def init_project(
         and (project.root / ".whygraph" / "whygraph.db").is_file()
         else None
     )
+    response.update(_first_scan(state, project, principal, first))
     return response
 
 
-def _init_production(state: PortalState, project: BoundProject, body: InitBody) -> dict:
+def _first_scan(
+    state: PortalState, project: BoundProject, principal: Principal, first: bool
+) -> dict:
+    """``initial_run_id`` (and ``scan_error``) of an Initialize: the first one queues a scan.
+
+    Only the call that set ``initialized_at`` asks the runner (M2f-3 plan
+    decision 0.3 #9); the runner's first-run forcing makes it the
+    structure-only ``initial`` run. Everything else answers ``null``.
+    """
+    if not first:
+        return {"initial_run_id": None}
+    run_id, scan_error = _queue_initial_run(
+        partial(
+            state.runner.request_scan,
+            project,
+            trigger="manual",
+            analyze=False,
+            principal=principal,
+            may_spend=False,
+        )
+    )
+    if scan_error is not None:
+        return {"initial_run_id": None, "scan_error": scan_error}
+    return {"initial_run_id": run_id}
+
+
+def _init_production(
+    state: PortalState, project: BoundProject, body: InitBody, principal: Principal
+) -> dict:
     """Production's Initialize: re-run the import's (idempotent).
 
     Checked DB paths and the migration, then ``initialized_at`` (M2d-2 plan
@@ -2308,13 +2662,18 @@ def _init_production(state: PortalState, project: BoundProject, body: InitBody) 
         )
     if root_status(project.root) != "ok":
         raise ApiError(409, f"{project.root} is not available", code="root_missing")
+    first = False
     if not body.dry_run:
-        _production_initialize(state, project.ctx)
+        try:
+            production_initialize(state.migrations, project.ctx)
+        except UnsafePathError as exc:
+            raise unsafe_path_error(exc) from exc
         with get_session() as session:
             row = session.get(Project, project.id)
             if row is not None and row.initialized_at is None:
                 row.initialized_at = _now()
                 session.add(row)
+                first = True
     return {
         "dry_run": body.dry_run,
         "gitignore_added": [],
@@ -2328,6 +2687,7 @@ def _init_production(state: PortalState, project: BoundProject, body: InitBody) 
         "marker_written": False,
         "initialized": not body.dry_run or project.initialized_at is not None,
         "custom_db_paths": [],
+        **_first_scan(state, project, principal, first),
     }
 
 
@@ -2337,11 +2697,16 @@ def _init_production(state: PortalState, project: BoundProject, body: InitBody) 
 @projects_router.post("/{slug}/scans", status_code=202)
 async def post_scan(
     request: Request,
-    project: BoundProject = Depends(project_db_access(Action.PROJECT_SCAN)),
+    project: BoundProject = Depends(project_access(Action.PROJECT_SCAN)),
     principal: Principal = Depends(current_user),
     body: ScanBody | None = Body(default=None),
 ) -> dict:
     """Queue (or coalesce into) a scan; returns the pending run's id.
+
+    The project must be initialized (``409 not_initialized`` /
+    ``unsafe_path``, :func:`~whygraph.portal.deps.require_initialized`):
+    the route binds with :func:`project_access` and checks that itself
+    (M2f-3 plan section 0.3 #6).
 
     A ``hook`` scan (the credential-less git-hook ``curl``) exists only in
     local mode: elsewhere it is a ``403 {"code": "hook_local_only"}``. A
@@ -2357,28 +2722,44 @@ async def post_scan(
     so it never is): ``403 forbidden`` with ``action: "project.scan_full"``.
     Such a request is also refused while an exhausted hard-stopped budget
     covers it (the caller's, the project's or the org's): ``403
-    budget_exceeded`` with its ``scope`` (M2f-2 plan section 4.7).
+    budget_exceeded`` with its ``scope`` (M2f-2 plan section 4.7). It
+    carries the describe estimate the requester would see, stored on the
+    run as ``summary.estimate`` (M2f-3 plan section 0.3 #10).
+
+    On an **importing** project (production, GitHub, not initialized yet:
+    its clone failed, was cancelled or never started) this is Retry: the
+    import run is queued again (:func:`_retry_import`), whatever the body.
     """
     body = body or ScanBody()
     state = portal_state(request)
+    if _importing(state, project):
+        return {"run_id": await _retry_import(state, project, principal)}
+    await require_initialized(state, project)
     if body.trigger == "hook" and state.mode != "local":
         raise ApiError(
             403, "hook scans exist only in local mode", code="hook_local_only"
         )
+    may_spend = project_allowed(project.role, Action.PROJECT_SCAN_FULL)
+    estimate = None
+    if may_spend and resolve_analyze(
+        body.trigger or "manual", body.analyze, project.source
+    ):
+        estimate = await anyio.to_thread.run_sync(_describe_estimate, state, project)
     try:
         run_id = await state.runner.request_scan(
             project,
             trigger=body.trigger,
             analyze=body.analyze,
             principal=principal,
-            may_spend=project_allowed(project.role, Action.PROJECT_SCAN_FULL),
+            may_spend=may_spend,
+            estimate=estimate,
         )
     except ScanForbidden as exc:
         raise _scan_full_forbidden(project) from exc
     except ScanBudgetExceeded as exc:
         raise ApiError(403, str(exc), code="budget_exceeded", scope=exc.scope) from exc
     except RunnerUnavailable as exc:
-        raise ApiError(501, str(exc)) from exc
+        raise ApiError(501, str(exc), code="runner_unavailable") from exc
     except ProjectBusy as exc:
         raise ApiError(409, str(exc)) from exc
     except SourceNotAllowed as exc:
@@ -2403,6 +2784,52 @@ async def post_scan(
     return {"run_id": run_id}
 
 
+def _importing(state: PortalState, project: BoundProject) -> bool:
+    """Whether the project is a production import still waiting for its clone."""
+    return (
+        state.mode == "production"
+        and project.source == "github"
+        and project.initialized_at is None
+    )
+
+
+async def _retry_import(
+    state: PortalState, project: BoundProject, principal: Principal
+) -> int:
+    """Queue an importing project's import run again (Retry, M2f-3 plan section 4.8).
+
+    A Retry is a clone, so it counts against the org's import throttle like
+    the first attempt (``429 throttled``). It first mints the installation
+    token once (:meth:`~whygraph.portal.runner.ScanRunner.check_access`),
+    so an import whose mint was refused is cleared once GitHub mints again
+    instead of answering ``409 github_access_lost`` forever.
+    """
+    retry_after = state.import_org.hit(project.org_id)
+    if retry_after is not None:
+        raise ApiError(
+            429,
+            "too many imports; try again later",
+            code="throttled",
+            headers={"Retry-After": str(retry_after)},
+        )
+    try:
+        await anyio.to_thread.run_sync(state.runner.check_access, project.id)
+    except GitHubUnavailable:
+        pass  # the run's own mint reports it
+    try:
+        return await state.runner.request_import(project.id, principal=principal)
+    except RunnerUnavailable as exc:
+        raise ApiError(501, str(exc), code="runner_unavailable") from exc
+    except ProjectBusy as exc:
+        raise ApiError(409, str(exc)) from exc
+    except SourceNotAllowed as exc:
+        raise ApiError(409, str(exc), code="source_not_allowed") from exc
+    except ProjectAccessLost as exc:
+        raise ApiError(
+            409, str(exc), code="github_access_lost", reason=exc.reason
+        ) from exc
+
+
 def _scan_full_forbidden(project: BoundProject) -> ApiError:
     """The ``403`` for a full (LLM-spending) run the caller's role cannot start or cancel."""
     action = Action.PROJECT_SCAN_FULL
@@ -2414,34 +2841,291 @@ def _scan_full_forbidden(project: BoundProject) -> ApiError:
     )
 
 
+def _describe_estimate(state: PortalState, project: BoundProject) -> dict | None:
+    """The compact describe estimate a full run stores (blocking; ``None`` on failure)."""
+    try:
+        with use_project(project.ctx):
+            body = _scan_estimate(
+                project.ctx.config, overrides=state.prices.for_org(project.org_id)
+            )
+    except Exception:  # best-effort: an estimate never blocks a scan
+        _log.warning(
+            "could not estimate the describe cost of project %s",
+            project.slug,
+            exc_info=True,
+        )
+        return None
+    return compact_estimate(body, _missing_key(project.ctx.config, ("analyze",)))
+
+
+SCAN_PAGE_SIZE = 50
+"""The default number of runs ``GET .../scans`` returns."""
+
+SCAN_PAGE_MAX = 100
+"""The most runs one ``GET .../scans`` page may return (``limit``)."""
+
+SCAN_TYPES: tuple[str, ...] = ("full", "quick", "sync")
+"""The ``type`` filter's buckets of ``GET .../scans`` (M2f-3 plan section 4.11)."""
+
+_SCAN_QUERY_MAX = 400
+"""The longest query value ``GET .../scans`` reads."""
+
+
+def _bad_filter(message: str) -> ApiError:
+    return ApiError(422, message, code="bad_filter")
+
+
+def _query_value(raw: str | None, name: str) -> str | None:
+    """A query value, refused (``422 bad_filter``) when absurdly long."""
+    if raw is not None and len(raw) > _SCAN_QUERY_MAX:
+        raise _bad_filter(f"{name} is too long")
+    return raw
+
+
+def _list_filter(raw: str | None, allowed: tuple[str, ...], name: str) -> list[str]:
+    """Parse a comma list whose every item is one of ``allowed`` (``422 bad_filter``)."""
+    raw = _query_value(raw, name)
+    values = [v.strip() for v in (raw or "").split(",") if v.strip()]
+    if any(v not in allowed for v in values):
+        raise _bad_filter(f"{name} is a comma list of {', '.join(allowed)}")
+    return values
+
+
+def _positive_int(raw: str) -> int | None:
+    """``raw`` as a positive integer, or ``None``."""
+    raw = raw.strip()
+    # isascii: str.isdigit() also accepts "²", which int() rejects.
+    if not (raw.isascii() and raw.isdigit()) or len(raw) > 18:
+        return None
+    value = int(raw)
+    return value if value >= 1 else None
+
+
+def _summary_scanned() -> Any:
+    """SQL: whether a run's ``summary`` says the sync went on to scan.
+
+    ``pg_input_is_valid`` keeps a row whose ``summary`` is not JSON from
+    failing the query (it then counts as not scanned).
+    """
+    summary = col(ScanRun.summary)
+    return case(
+        (
+            func.pg_input_is_valid(summary, "jsonb"),
+            cast(summary, JSONB).contains({"scanned": True}),
+        ),
+        else_=false(),
+    )
+
+
+def _type_condition(kind: str) -> Any:
+    """SQL for one ``type`` bucket (M2f-3 plan section 4.11).
+
+    ``full`` describes commits; ``sync`` is a sync that only fetched (not
+    ``analyze``, no ``summary.scanned``); ``quick`` is every other
+    structure-only run, a sync that went on to scan included.
+    """
+    analyze = col(ScanRun.analyze)
+    if kind == "full":
+        return analyze.is_(True)
+    sync_only = and_(col(ScanRun.kind) == "sync", not_(_summary_scanned()))
+    if kind == "sync":
+        return and_(analyze.is_(False), sync_only)
+    return and_(analyze.is_(False), not_(sync_only))
+
+
+def _load_summary(raw: str | None) -> Any:
+    """A run's ``summary`` decoded, or ``None`` (absent or not JSON)."""
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
+
+
+def _summary_cost(summary: Any, key: str) -> float | None:
+    """``summary[key].cost_usd`` when it is a number, else ``None``."""
+    block = summary.get(key) if isinstance(summary, dict) else None
+    value = block.get("cost_usd") if isinstance(block, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+def _run_people(
+    session: Session, runs: list[ScanRun], *, production: bool
+) -> dict[int, dict]:
+    """``{users.id: {uid, label}}`` for a page's requesters and cancellers (one query)."""
+    ids = {
+        user_id
+        for run in runs
+        for user_id in (run.requested_by, run.cancelled_by)
+        if user_id is not None
+    }
+    if not ids:
+        return {}
+    users = session.exec(select(User).where(col(User.id).in_(ids))).all()
+    return {
+        user.id: {
+            "uid": user.uid,
+            "label": actor_label(user, production=production),  # type: ignore[arg-type]
+        }
+        for user in users
+        if user.id is not None
+    }
+
+
+def _run_dict(run: ScanRun, people: dict[int, dict], *, show_cost: bool) -> dict:
+    """A run as the scan routes return it (M2f-3 plan section 4.11).
+
+    ``requested_by`` / ``cancelled_by`` are ``{uid, label}`` (``None``:
+    System). Without ``show_cost`` (the caller lacks ``project.usage``,
+    decision R1) the ``cost_usd`` / ``estimate_usd`` keys are left out and
+    :data:`~whygraph.portal.runner.COST_SUMMARY_KEYS` are dropped from the
+    ``summary``.
+    """
+    summary = _load_summary(run.summary)
+    body: dict[str, Any] = {
+        "id": run.id,
+        "kind": run.kind,
+        "trigger": run.trigger,
+        "analyze": run.analyze,
+        "status": run.status,
+        "queued_at": run.queued_at,
+        "started_at": run.started_at,
+        "finished_at": run.finished_at,
+        "requested_by": (
+            None if run.requested_by is None else people.get(run.requested_by)
+        ),
+        "cancelled_by": (
+            None if run.cancelled_by is None else people.get(run.cancelled_by)
+        ),
+        "summary": summary,
+    }
+    if show_cost:
+        body["cost_usd"] = _summary_cost(summary, "usage")
+        body["estimate_usd"] = _summary_cost(summary, "estimate")
+    elif isinstance(summary, dict):
+        body["summary"] = {
+            k: v for k, v in summary.items() if k not in COST_SUMMARY_KEYS
+        }
+    return body
+
+
 @projects_router.get("/{slug}/scans")
 def list_scans(
-    project: BoundProject = Depends(project_db_access(Action.PROJECT_READ)),
+    request: Request,
+    project: BoundProject = Depends(project_access(Action.PROJECT_READ)),
+    before: str | None = None,
+    limit: str | None = None,
+    status: str | None = None,
+    trigger: str | None = None,
+    type: str | None = None,  # noqa: A002 -- the query parameter's name
+    requester: str | None = None,
 ) -> dict:
-    """The project's recent scan / sync runs, newest first."""
+    """The project's scan / sync runs, newest first, a page at a time.
+
+    Parameters
+    ----------
+    before : str, optional
+        A run id: only older runs (the previous page's ``next``); ``422
+        bad_cursor`` unless a positive integer.
+    limit : str, optional
+        The page size, 1 to :data:`SCAN_PAGE_MAX` (default
+        :data:`SCAN_PAGE_SIZE`).
+    status, trigger : str, optional
+        Comma lists of :data:`~whygraph.portal.models.SCAN_STATUSES` /
+        :data:`~whygraph.portal.models.SCAN_TRIGGERS`.
+    type : str, optional
+        One of :data:`SCAN_TYPES` (see :func:`_type_condition`).
+    requester : str, optional
+        A user's ``uid``, or ``system`` for runs nobody requested.
+
+    Returns
+    -------
+    dict
+        ``{runs: [Run], next}``: ``next`` is the ``before`` of the next
+        page, ``null`` on the last one. A filter outside its values is a
+        ``422 bad_filter``. Reads only the portal DB, so it answers for a
+        project that is not initialized.
+    """
+    conditions: list[Any] = [col(ScanRun.project_id) == project.id]
+    if _query_value(before, "before") is not None:
+        cursor = _positive_int(before)  # type: ignore[arg-type]
+        if cursor is None:
+            raise ApiError(
+                422, "before is not a cursor of this listing", code="bad_cursor"
+            )
+        conditions.append(col(ScanRun.id) < cursor)
+    size = SCAN_PAGE_SIZE
+    if _query_value(limit, "limit") is not None:
+        parsed = _positive_int(limit)  # type: ignore[arg-type]
+        if parsed is None or parsed > SCAN_PAGE_MAX:
+            raise _bad_filter(f"limit is a number from 1 to {SCAN_PAGE_MAX}")
+        size = parsed
+    statuses = _list_filter(status, SCAN_STATUSES, "status")
+    if statuses:
+        conditions.append(col(ScanRun.status).in_(statuses))
+    triggers = _list_filter(trigger, SCAN_TRIGGERS, "trigger")
+    if triggers:
+        conditions.append(col(ScanRun.trigger).in_(triggers))
+    kind = _query_value(type, "type")
+    if kind:
+        if kind not in SCAN_TYPES:
+            raise _bad_filter(f"type is one of {', '.join(SCAN_TYPES)}")
+        conditions.append(_type_condition(kind))
+    production = portal_state(request).mode == "production"
     with get_session() as session:
-        runs = session.exec(
-            select(ScanRun)
-            .where(ScanRun.project_id == project.id)
-            .order_by(col(ScanRun.id).desc())
-            .limit(50)
-        ).all()
+        who = _query_value(requester, "requester")
+        if who == "system":
+            conditions.append(col(ScanRun.requested_by).is_(None))
+        elif who:
+            found = session.exec(select(User.id).where(User.uid == who)).first()
+            conditions.append(
+                false() if found is None else col(ScanRun.requested_by) == found
+            )
+        rows = list(
+            session.exec(
+                select(ScanRun)
+                .where(*conditions)
+                .order_by(col(ScanRun.id).desc())
+                .limit(size + 1)
+            ).all()
+        )
+        page = rows[:size]
+        people = _run_people(session, page, production=production)
+        show_cost = project_allowed(project.role, Action.PROJECT_USAGE)
         return {
-            "runs": [
-                {
-                    "id": r.id,
-                    "kind": r.kind,
-                    "trigger": r.trigger,
-                    "analyze": r.analyze,
-                    "status": r.status,
-                    "requested_by": r.requested_by,
-                    "started_at": r.started_at,
-                    "finished_at": r.finished_at,
-                    "summary": json.loads(r.summary) if r.summary else None,
-                }
-                for r in runs
-            ]
+            "runs": [_run_dict(r, people, show_cost=show_cost) for r in page],
+            "next": page[-1].id if len(rows) > size else None,
         }
+
+
+@projects_router.get("/{slug}/scans/{run_id}")
+def get_scan(
+    run_id: int,
+    request: Request,
+    project: BoundProject = Depends(project_access(Action.PROJECT_READ)),
+) -> dict:
+    """One run of the project, shaped as in :func:`list_scans`.
+
+    ``404`` for an unknown run or another project's.
+    """
+    production = portal_state(request).mode == "production"
+    with get_session() as session:
+        run = session.exec(
+            select(ScanRun).where(
+                ScanRun.id == run_id, ScanRun.project_id == project.id
+            )
+        ).first()
+        if run is None:
+            raise ApiError(404, f"run {run_id} not found")
+        people = _run_people(session, [run], production=production)
+        return _run_dict(
+            run,
+            people,
+            show_cost=project_allowed(project.role, Action.PROJECT_USAGE),
+        )
 
 
 def _stream_access(
@@ -2489,12 +3173,14 @@ def _stream_access(
 async def scan_events(
     run_id: int,
     request: Request,
-    project: BoundProject = Depends(project_db_access(Action.PROJECT_READ)),
+    project: BoundProject = Depends(project_access(Action.PROJECT_READ)),
 ) -> Any:
     """SSE: replay a run's events file, then follow it until the run ends.
 
     Each frame's ``id:`` is the byte offset after it; a reconnect sends it
-    back as ``Last-Event-ID`` and the replay resumes there.
+    back as ``Last-Event-ID`` and the replay resumes there. The terminal
+    ``end`` frame's ``summary`` carries no cost for a caller without
+    ``project.usage`` (decision R1).
     """
     state = portal_state(request)
     assert state.shutdown_event is not None
@@ -2508,6 +3194,7 @@ async def scan_events(
             shutdown=state.shutdown_event,
             offset=offset,
             still_allowed=_stream_access(request, project),
+            hide_cost=not project_allowed(project.role, Action.PROJECT_USAGE),
         )
     except RunNotFound as exc:
         raise ApiError(404, f"run {run_id} not found") from exc
@@ -2520,7 +3207,8 @@ async def cancel_scan(
     run_id: int,
     request: Request,
     response: Response,
-    project: BoundProject = Depends(project_db_access(Action.PROJECT_SCAN)),
+    project: BoundProject = Depends(project_access(Action.PROJECT_SCAN)),
+    principal: Principal = Depends(current_user),
 ) -> dict:
     """Cancel a queued (``200``) or running (``202``) scan / sync run.
 
@@ -2530,12 +3218,14 @@ async def cancel_scan(
     Cancelling a full (LLM-spending) run needs ``project.scan_full``, the
     action that would start one - decided by the runner under its lock, so
     a full request merged into a queued run counts (``403 forbidden``).
+    The caller is recorded as the run's ``cancelled_by``.
     """
     try:
         was = await portal_state(request).runner.cancel(
             project.id,
             run_id,
             may_cancel_full=project_allowed(project.role, Action.PROJECT_SCAN_FULL),
+            by=principal.user_id,
         )
     except ScanForbidden as exc:
         raise _scan_full_forbidden(project) from exc
@@ -2552,7 +3242,7 @@ async def cancel_scan(
 
 @projects_router.get("/{slug}/scans/{run_id}/log")
 def scan_log(
-    run_id: int, project: BoundProject = Depends(project_db_access(Action.PROJECT_READ))
+    run_id: int, project: BoundProject = Depends(project_access(Action.PROJECT_READ))
 ) -> dict:
     """The tail of a run's log: ``{run_id, text, size, truncated}``.
 
@@ -2578,11 +3268,18 @@ def get_scan_estimate(
 
     Refused for a linked project (``403 managed_on_platform``): its scans
     never describe anything - the platform pays for and owns the LLM work.
+
+    A caller without ``project.usage`` gets ``cost: null``, ``tokens:
+    null`` and ``cost_hidden: true`` (tokens times a public price table
+    give the cost back); the commit counts, the model and ``missing_key``
+    stay (M2f-3 plan section 0.3 #46).
     """
     _refuse_linked(project, "estimating this project's describe cost")
     overrides = portal_state(request).prices.for_org(project.org_id)
     body = _scan_estimate(project.ctx.config, overrides=overrides)
     body["missing_key"] = _missing_key(project.ctx.config, ("analyze",))
+    if not project_allowed(project.role, Action.PROJECT_USAGE):
+        body.update(cost=None, tokens=None, cost_hidden=True)
     return body
 
 

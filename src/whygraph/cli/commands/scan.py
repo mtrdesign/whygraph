@@ -224,6 +224,12 @@ def scan_cmd(
     # Author resolution always runs: local-only, no network, no token, so it
     # is valid under --no-remote and inside the auto-rescan git hooks.
     phase_total = 1 + int(run_pr_origins) + 1 + int(run_analyze)  # Phase 1 always runs
+    phase_titles = [
+        "Structural crawl",
+        *(["PR-origin recovery"] if run_pr_origins else []),
+        "Author identity",
+        *(["LLM descriptions"] if run_analyze else []),
+    ]
 
     scan_log_path = db_path.parent / "scan.log"
     phase_timings: dict[str, float] = {}
@@ -259,7 +265,7 @@ def scan_cmd(
         usage_ctx,
     ):
         if isinstance(progress, JsonProgress):
-            progress.start_event(phase_total)
+            progress.start_event(phase_total, phase_titles)
 
         # CodeGraph refresh — a background crawler. It writes .codegraph/
         # and has no data dependency on the WhyGraph DB, so it overlaps the
@@ -436,7 +442,7 @@ def _scan_codegraph_only(json_mode: bool, codegraph_image: str | None) -> None:
     )
     with scan_log_redirect(scan_log_path), progress_ctx as progress:
         if isinstance(progress, JsonProgress):
-            progress.start_event(1)
+            progress.start_event(1, ["Code index"])
         _emit_phase(progress, 1, "CodeGraph")
         crawler = CodeGraphCrawler(
             progress, project_root=root, image=codegraph_image, strict=True

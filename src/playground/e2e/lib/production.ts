@@ -33,6 +33,8 @@ export async function signedIn(page: Page): Promise<void> {
   );
   await page.waitForLoadState();
   await expect(page.getByRole("heading").first()).toBeVisible();
+  // Let a trailing client redirect finish, so the next goto() does not abort it (ERR_ABORTED).
+  await page.waitForLoadState("networkidle");
 }
 
 /** Fill the organization-creation form (the page is already on it) and wait for the new org's host. */
@@ -42,7 +44,7 @@ export async function createOrg(page: Page, name: string, slug: string): Promise
   await expect(page.getByTestId("slug-preview")).toHaveText(`${slug}.${base.host}`);
   await page.getByRole("button", { name: "Create organization" }).click();
   await expect(page).toHaveURL(new RegExp(`^${orgUrl(slug)}/`));
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
 }
 
 /**
@@ -74,14 +76,24 @@ export async function importRepo(page: Page, org: string, repo: string): Promise
     await page.getByRole("link", { name: `Continue as ${owner}` }).click();
     await expect(page).toHaveURL(new RegExp(`^${orgUrl(org)}/projects/new`));
   }
-  await page.getByTestId(`repo-${repo}`).getByRole("button", { name: `Import ${repo}` }).click();
+  await page.getByRole("checkbox", { name: `Select ${repo}` }).click();
+  await page.getByRole("button", { name: "Import 1 repository" }).click();
 
-  // The import cloned it: configure, then the first scan completes.
-  await expect(page).toHaveURL(new RegExp(`/p/${slug}/init\\?step=configure`));
-  await page.getByRole("button", { name: "Save and continue" }).click();
-  await expect(page).toHaveURL(new RegExp(`/p/${slug}/init\\?step=scan`));
-  await page.getByRole("button", { name: "Start first scan" }).click();
+  // The request only queues the run: it clones, then scans, and Configure follows it.
+  await expect(page).toHaveURL(new RegExp(`/p/${slug}/init\\?step=configure&run=\\d+`));
   await expect(page.getByText("First scan complete")).toBeVisible({ timeout: 30_000 });
   await openAfterFirstScan(page);
   await expect(page).toHaveURL(new RegExp(`/p/${slug}$`));
+}
+
+/**
+ * Production never leaks the server's layout or secrets into a page: none of
+ * these strings may appear in the visible text of the page it is on.
+ */
+export async function expectNoServerText(page: Page): Promise<void> {
+  await page.waitForLoadState("networkidle").catch(() => undefined);
+  const text = await page.locator("body").innerText();
+  for (const needle of ["host.docker.internal", "_API_KEY", "whygraph.toml", "/data/", "repos/"]) {
+    expect(text, `"${needle}" on ${page.url()}`).not.toContain(needle);
+  }
 }

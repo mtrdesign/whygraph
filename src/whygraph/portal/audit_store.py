@@ -39,14 +39,14 @@ from typing import Any
 
 from sqlalchemy import JSON, Integer, Text, bindparam, delete, func, or_
 from sqlalchemy import insert as sa_insert
-from sqlmodel import col, select
+from sqlmodel import Session, col, select
 
 from whygraph.services.git.credentials import redact_tokens
 
 from .csv_export import csv_cell
 from .csv_export import csv_line as _csv_line
 from .db import get_session
-from .models import AuditEvent, Organization, User
+from .models import AuditEvent, Organization, Project, User
 
 _log = logging.getLogger(__name__)
 
@@ -564,7 +564,36 @@ def _conditions(f: AuditFilter) -> list:
     return conditions
 
 
-def _row(event: AuditEvent, actor_uid: str | None) -> dict[str, Any]:
+def _target_labels(db: Session, events: list[AuditEvent], org_id: int | None) -> dict:
+    """``target`` -> label for the users and projects the events name.
+
+    A user ``uid`` becomes ``Name (@login)`` (``Name`` without a login),
+    a project slug of the event's org its name; anything else is absent.
+    """
+    targets = {e.target for e in events if e.target}
+    if not targets:
+        return {}
+    labels: dict[str, str] = {}
+    for uid, name, login in db.exec(
+        select(User.uid, User.display_name, User.github_login).where(
+            col(User.uid).in_(targets)
+        )
+    ).all():
+        labels[uid] = f"{name} (@{login})" if login else name
+    wanted = targets - labels.keys()
+    if wanted and org_id is not None:
+        for slug, name in db.exec(
+            select(Project.slug, Project.name).where(
+                Project.org_id == org_id, col(Project.slug).in_(wanted)
+            )
+        ).all():
+            labels[slug] = name
+    return labels
+
+
+def _row(
+    event: AuditEvent, actor_uid: str | None, labels: dict | None = None
+) -> dict[str, Any]:
     return {
         "id": event.id,
         "created_at": event.created_at,
@@ -576,6 +605,7 @@ def _row(event: AuditEvent, actor_uid: str | None) -> dict[str, Any]:
         ),
         "event": event.event,
         "target": event.target,
+        "target_label": (labels or {}).get(event.target) if event.target else None,
         "ip": event.ip,
         "fields": event.fields,
     }
@@ -612,7 +642,9 @@ def query_events(
             .order_by(col(AuditEvent.id).desc())
             .limit(limit + 1)
         ).all()
-        events = [_row(event, uid) for event, uid in rows[:limit]]
+        page = rows[:limit]
+        labels = _target_labels(db, [e for e, _ in page], f.org_id)
+        events = [_row(event, uid, labels) for event, uid in page]
     more = len(rows) > limit
     return events, (events[-1]["id"] if more and events else None)
 

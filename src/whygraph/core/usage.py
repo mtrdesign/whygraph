@@ -30,6 +30,12 @@ its session id with :func:`set_scope_field`, which every copy sees.
 Recording never raises into the metered code: a sink error is logged and
 swallowed, the way the audit log's ``audit()`` behaves.
 
+Agent activity is counted through the same binding: every MCP body and every
+``/api/v1`` data route calls :func:`count_agent_call` with its kind (M2f-3),
+which reaches the bound sink's optional ``count_call`` method. It is not part
+of the :class:`UsageSink` protocol, so a sink without it (a scan child's, a
+test fake) simply counts nothing.
+
 Examples
 --------
 >>> started = time.monotonic()                                  # doctest: +SKIP
@@ -328,6 +334,32 @@ def usage_blocked() -> str | None:
         return None
 
 
+def count_agent_call(kind: str) -> None:
+    """Count one agent call of ``kind`` on the bound sink, if it counts calls.
+
+    Calls the bound sink's ``count_call(kind)`` when it has one. A no-op when
+    no sink is bound or the sink has no such method; never raises (a sink
+    error is logged and swallowed).
+
+    Parameters
+    ----------
+    kind : str
+        A code-defined call name: an MCP tool, resource or prompt's
+        registered name, or a fixed ``/api/v1`` route name such as
+        ``"v1:evidence"``. Never a URI, an argument or a path.
+    """
+    sink = _sink.get()
+    if sink is None:
+        return
+    count = getattr(sink, "count_call", None)
+    if count is None:
+        return
+    try:
+        count(kind)
+    except Exception:  # noqa: BLE001 -- counting must never fail the call
+        _log.exception("could not count an agent call of kind %s", kind)
+
+
 _SCOPE_FIELDS = frozenset(f.name for f in dataclasses.fields(UsageScope))
 
 
@@ -364,6 +396,7 @@ __all__ = [
     "UsageScope",
     "UsageSink",
     "budget_message",
+    "count_agent_call",
     "current_usage_sink",
     "record_usage",
     "set_scope_field",

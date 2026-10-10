@@ -90,7 +90,10 @@ export function CommandPalette({ slug }: { slug?: string }) {
     enabled: open,
   });
 
-  const canChat = can(projects.data?.projects.find((p) => p.slug === slug), "project.chat");
+  const current = projects.data?.projects.find((p) => p.slug === slug);
+  // A linked project's Explorer and Chat live on its platform (BUG-18); a viewer cannot chat.
+  const linked = current?.source === "platform";
+  const canChat = can(current, "project.chat") && !linked;
 
   const close = () => {
     setOpen(false);
@@ -105,8 +108,10 @@ export function CommandPalette({ slug }: { slug?: string }) {
   const pages: { label: string; run: () => void }[] = slug
     ? [
         { label: "Overview", run: () => navigate({ to: "/p/$slug", params: { slug } }) },
-        { label: "Explorer", run: () => navigate({ to: "/p/$slug/explorer", params: { slug } }) },
-        ...(!canChat ? [] : [{ label: "Chat", run: () => navigate({ to: "/p/$slug/chat/{-$id}", params: { slug } }) }]),
+        ...(linked ? [] : [{ label: "Explorer", run: () => navigate({ to: "/p/$slug/explorer", params: { slug } }) }]),
+        ...(!canChat
+          ? []
+          : [{ label: "New chat", run: () => navigate({ to: "/p/$slug/chat/{-$id}", params: { slug, id: undefined } }) }]),
         { label: "Scans", run: () => navigate({ to: "/p/$slug/scans/{-$runId}", params: { slug } }) },
         { label: "Project settings", run: () => navigate({ to: "/p/$slug/settings", params: { slug } }) },
         { label: "All projects", run: () => navigate({ to: "/" }) },

@@ -11,8 +11,11 @@ from __future__ import annotations
 import functools
 import json
 import os
+import shlex
 import subprocess
+import sys
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from http.server import ThreadingHTTPServer
@@ -74,6 +77,7 @@ from whygraph.services.llm.chat import TextDelta, TurnDone
 PORT = 8765
 BASE_URL = f"http://127.0.0.1:{PORT}"
 CLIENT_HEADER = {"X-WhyGraph-Client": "1"}
+FAKE_SCAN = Path(__file__).parent / "fixtures" / "fake_scan.py"
 
 _NODES = [
     {
@@ -174,6 +178,12 @@ def env(
     ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr("whygraph.serve.app._STATIC_DIR", tmp_path / "nostatic")
+    # A scan the portal queues on its own (a first Initialize's, an
+    # import's) runs the fake scanner, never the real one; the runner tests'
+    # `scanner` fixture replaces it with a recording one.
+    monkeypatch.setenv(
+        "WHYGRAPH_SCAN_CMD", shlex.join([sys.executable, str(FAKE_SCAN)])
+    )
     portal_db._reset_engine()
     return SimpleNamespace(
         data=data, shared=Path(os.path.realpath(shared)), tmp=tmp_path
@@ -561,9 +571,31 @@ def add_local(client: TestClient, root: Path, **extra) -> dict:
 
 
 def init_project(client: TestClient, slug: str, **body) -> dict:
+    """``POST /init`` (asserted ``200``); waits for the first scan it queued, if any."""
     response = client.post(f"/api/projects/{slug}/init", json={"agents": [], **body})
     assert response.status_code == 200, response.text
-    return response.json()
+    out = response.json()
+    if out.get("initial_run_id") is not None:
+        wait_scan(client, f"/api/projects/{slug}", out["initial_run_id"])
+    return out
+
+
+RUN_ENDED = frozenset({"ok", "failed", "cancelled", "interrupted"})
+
+
+def wait_scan(
+    client: TestClient, project_url: str, run_id: int, timeout: float = 30.0
+) -> dict:
+    """Poll ``GET <project_url>/scans/<run_id>`` until the run ended; the run."""
+    deadline = time.monotonic() + timeout
+    while True:
+        response = client.get(f"{project_url}/scans/{run_id}")
+        assert response.status_code == 200, response.text
+        run = response.json()
+        if run["status"] in RUN_ENDED:
+            return run
+        assert time.monotonic() < deadline, f"run {run_id} did not end: {run}"
+        time.sleep(0.03)
 
 
 def initialized_repo(client: TestClient, env: SimpleNamespace, name: str) -> Path:
@@ -595,7 +627,10 @@ def test_setup_flow(client: TestClient, env: SimpleNamespace) -> None:
         # The machine name the platform link page prefills (M2e section 4.8)
         "hostname": default_client_name(),
     }
-    assert client.get("/api/projects").json() == {"error": "setup required"}
+    assert client.get("/api/projects").json() == {
+        "error": "setup required",
+        "code": "setup_required",
+    }
 
     assert (
         client.post("/api/portal/setup", json={"display_name": " "}).status_code == 422
@@ -974,7 +1009,10 @@ def test_current_org_answers_setup_required_before_not_found(
     with portal_client() as client:  # LocalIdentity, before setup
         _add_org_probe(client)
         assert client.get("/api/test/org").status_code == 409
-        assert client.get("/api/test/org").json() == {"error": "setup required"}
+        assert client.get("/api/test/org").json() == {
+            "error": "setup required",
+            "code": "setup_required",
+        }
     orgs = _seed_two_orgs()
     with portal_client(identity=HeaderIdentity()) as client:
         _add_org_probe(client)
@@ -985,7 +1023,10 @@ def test_current_org_answers_setup_required_before_not_found(
         ):
             response = client.get("/api/test/org", headers=headers)
             assert response.status_code == 409, headers
-            assert response.json() == {"error": "setup required"}
+            assert response.json() == {
+                "error": "setup required",
+                "code": "setup_required",
+            }
         alice = {"x-test-user": orgs.uids["alice"]}
         erin = {"x-test-user": orgs.uids["erin"]}
         for headers in (
@@ -1212,6 +1253,11 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/portal/check-path", "POST"): "org.add_project",
     ("/api/portal/defaults", "GET"): "org.read",
     ("/api/portal/defaults", "PUT"): "org.configure",
+    # Key tests (M2f-3 section 4.13): the org key is the owner's, a project's
+    # keys its admins'; the GitHub token test is local-only
+    ("/api/portal/defaults/keys/{provider}/test", "POST"): "org.configure",
+    (f"{_P}/keys/{{provider}}/test", "POST"): _CONFIGURE,
+    (f"{_P}/github-token/test", "POST"): _CONFIGURE,
     ("/api/projects", "GET"): "org.read",
     ("/api/projects", "POST"): "org.add_project",
     # Production's members page: org_access(...) (M2d-1 section 4.5)
@@ -1253,6 +1299,9 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/usage/me/calls", "GET"): "org.read",
     ("/api/usage/me.csv", "GET"): "org.read",
     ("/api/projects/{slug}/usage", "GET"): "project.usage",
+    # A project's Overview (M2f-3 section 4.10): every reader; usage, people
+    # and connections inside it are gated by action
+    ("/api/projects/{slug}/overview", "GET"): "project.read",
     # Deleting a production org: org_access(ORG_OWN) (M2d-2 section 4.8)
     ("/api/org", "DELETE"): "org.own",
     # Org settings, ownership transfer and the audit log (M2f-1 4.8, 4.9)
@@ -1260,6 +1309,10 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/org/transfer", "POST"): "org.own",
     ("/api/org/audit", "GET"): "org.audit",
     ("/api/org/audit.csv", "GET"): "org.audit",
+    # Onboarding and the welcome flag (M2f-3 section 4.12)
+    ("/api/onboarding", "GET"): "org.add_project",
+    ("/api/org/welcome", "DELETE"): "org.read",
+    ("/api/orgs/slug-check", "GET"): "user.self",
     # Production's GitHub App import page: org_access(...) (M2d-2 section 4.4)
     ("/api/github/app/authorize", "POST"): "org.add_project",
     ("/api/github/installations", "GET"): "org.add_project",
@@ -1285,12 +1338,15 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     (f"{_P}/config", "PUT"): _CONFIGURE,
     (_P, "DELETE"): "org.remove_project",
     (f"{_P}/init", "POST"): _SETUP,
-    # Scans: project_db_access(...)
+    # Scans: project_access(...) - they read only the portal DB and run
+    # files; POST checks the initialized gate itself (M2f-3 section 0.3 #6)
     (f"{_P}/scans", "POST"): _SCAN,
     (f"{_P}/scans/{{run_id}}/cancel", "POST"): _SCAN,
     (f"{_P}/scans", "GET"): _READ,
+    (f"{_P}/scans/{{run_id}}", "GET"): _READ,
     (f"{_P}/scans/{{run_id}}/events", "GET"): _READ,
     (f"{_P}/scans/{{run_id}}/log", "GET"): _READ,
+    # The describe estimate: project_db_access(...) (the unsafe-path probe)
     (f"{_P}/scan-estimate", "GET"): _READ,
     # The Explorer router: include_router(..., project_db_access(PROJECT_READ))
     (f"{_P}/search", "GET"): _READ,
@@ -1357,6 +1413,8 @@ LOCAL_ONLY_ROUTES = {
     ("/api/platform/callback", "POST"),
     ("/api/platform/pending/{link_id}", "GET"),
     ("/api/platform/pending/{link_id}", "DELETE"),
+    # The GitHub token test (M2f-3 section 4.13): production has no PATs
+    ("/api/projects/{slug}/github-token/test", "POST"),
 }
 """Local mode's own routes (M2e plan section 4.8): org-scoped, but gated by
 :func:`~whygraph.portal.deps.require_local`, so production answers ``404`` on
@@ -1432,6 +1490,7 @@ _FILL = {
     "{user_uid}": "someone",
     "{installation_id}": "7",
     "{link_id}": "nolink",
+    "{provider}": "openrouter",
 }
 
 
@@ -1455,6 +1514,7 @@ PRODUCTION_ORG_ROUTES = {
     ("/api/org/transfer", "POST"),
     ("/api/org/audit", "GET"),
     ("/api/org/audit.csv", "GET"),
+    ("/api/org/welcome", "DELETE"),
     ("/api/github/app/authorize", "POST"),
     ("/api/github/installations", "GET"),
     ("/api/github/installations/{installation_id}/repos", "GET"),
@@ -1499,7 +1559,10 @@ def test_every_api_route_answers_setup_required_before_setup(
                 continue
             response = client.request(method, url, json={})
             assert response.status_code == 409, (method, url, response.text)
-            assert response.json() == {"error": "setup required"}, (method, url)
+            assert response.json() == {
+                "error": "setup required",
+                "code": "setup_required",
+            }, (method, url)
             checked += 1
     assert checked > 30
 
@@ -1870,7 +1933,10 @@ def test_uninitialized_project_gates_data_routes_and_creates_no_db(
     for path in ("/api/projects/demo/tree", "/api/projects/demo/chat/sessions"):
         response = ready.get(path)
         assert response.status_code == 409
-        assert response.json() == {"error": "not initialized"}
+        assert response.json() == {
+            "error": "not initialized",
+            "code": "not_initialized",
+        }
     mcp = ready.post(
         "/mcp/demo",
         json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
@@ -2220,7 +2286,15 @@ def test_a_local_github_row_is_listed_unsupported_unscannable_and_removable(
     assert init.status_code == 409 and init.json()["code"] == "source_not_allowed"
     assert ready.post("/api/projects/legacy/sync").status_code == 404  # route gone
     with portal_db.get_session() as session:
-        assert session.exec(select(ScanRun.id)).all() == []
+        # Only demo's first scan, queued by its Initialize.
+        assert (
+            session.exec(
+                select(ScanRun.id)
+                .join(Project, Project.id == ScanRun.project_id)
+                .where(Project.slug == "legacy")
+            ).all()
+            == []
+        )
 
     refused = ready.delete("/api/projects/legacy")
     assert refused.status_code == 409 and refused.json()["code"] == "confirm_name"
@@ -2255,9 +2329,11 @@ def test_remove_never_rmtrees_outside_the_repos_dir(
 
 
 def test_scan_endpoints_without_runs(ready: TestClient, env: SimpleNamespace) -> None:
-    # Scanning itself is covered by tests/test_portal_runner.py.
-    initialized_repo(ready, env, "demo")
-    assert ready.get("/api/projects/demo/scans").json() == {"runs": []}
+    # Scanning itself is covered by tests/test_portal_runner.py. Not
+    # initialized: the first Initialize would queue the first scan.
+    add_local(ready, make_repo(env.shared, "demo"))
+    assert ready.get("/api/projects/demo/scans").json() == {"runs": [], "next": None}
+    assert ready.get("/api/projects/demo/scans/1").status_code == 404
     assert ready.get("/api/projects/demo/scans/1/events").status_code == 404
 
 

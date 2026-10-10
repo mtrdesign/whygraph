@@ -8,8 +8,9 @@ import { Badge } from "../ui/badge";
 import { Checkbox } from "../ui/checkbox";
 import { CopyButton } from "./CopyButton";
 
-const STATUS: Record<FileStatus, { label: string; variant: "default" | "secondary" | "outline" | "destructive" }> = {
-  write: { label: "Create", variant: "default" },
+// Soft badges only (§4.2): "Create" in the brand tint, never the solid primary.
+const STATUS: Record<FileStatus, { label: string; variant: "brand" | "secondary" | "outline" | "destructive" }> = {
+  write: { label: "Create", variant: "brand" },
   overwrite: { label: "Update", variant: "secondary" },
   skip: { label: "Up to date", variant: "outline" },
   refused: { label: "Paste manually", variant: "destructive" },
@@ -63,9 +64,12 @@ function AgentFileRow({
   return (
     <li className="flex flex-col gap-2 py-3" data-testid={`file-${file.file}`}>
       <div className="flex flex-wrap items-center gap-2">
-        <span className="font-mono text-sm">{file.file}</span>
+        <span className="font-mono text-sm break-all">{file.file}</span>
         <StatusBadge status={file.status} />
-        {file.reason && <span className="text-xs text-muted-foreground">{file.reason}</span>}
+        {/* "Up to date" once: the badge already says what an "already up to date" reason would (SET-8). */}
+        {file.reason && !(file.status === "skip" && /up to date/i.test(file.reason)) && (
+          <span className="text-xs text-muted-foreground">{file.reason}</span>
+        )}
       </div>
 
       {file.status === "refused" && (
@@ -147,34 +151,63 @@ function AssetSummary({ files }: { files: FileOutcome[] }) {
   );
 }
 
+/** A repository-wide change Set up always makes, whatever the agents (BUG-16). */
+function SetupRow({ id, label, children }: { id: string; label: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <li className="flex flex-col gap-1 py-3" data-testid={`setup-${id}`}>
+      <span className="text-sm">{label}</span>
+      <span className="text-xs text-muted-foreground">{children}</span>
+    </li>
+  );
+}
+
 /**
  * Screen 6's per-file preview, from a dry-run `POST init`. Every status of §4.4.1
  * has its own rendering: `write` / `overwrite` / `skip` as a badge (an overwrite
  * expands to its diff), `refused` with the entry to paste (copyable), and
  * `needs_confirmation` (a git-tracked file) with its diff and a confirm checkbox.
- * The notes below it depend on the selected agents.
+ * `setupRows` lists the `.gitignore` entries and the git hooks first, which the
+ * dry run does not report but every Set up writes. The notes below depend on the
+ * selected agents.
  */
 export function InitPreview({
   result,
   selectedAgents,
   confirmed,
   onConfirmChange,
+  setupRows = true,
 }: {
   result: InitResult;
   selectedAgents: readonly string[];
   confirmed: ReadonlySet<string>;
   onConfirmChange: (file: string, on: boolean) => void;
+  /** Show the `.gitignore` and hooks rows (the wizard; settings leaves them out). */
+  setupRows?: boolean;
 }) {
   const notes = selectionNotes(selectedAgents);
+  const none = result.agent_files.length === 0 && result.asset_files.length === 0;
   return (
     <div className="flex flex-col gap-3" data-testid="init-preview">
-      {result.agent_files.length === 0 && result.asset_files.length === 0 ? (
+      {none && (
         <p className="text-sm text-muted-foreground">
           No agent selected: only the repository's <span className="font-mono">.gitignore</span> and git
           hooks are set up.
         </p>
-      ) : (
+      )}
+      {(setupRows || !none) && (
         <ul className="flex flex-col divide-y divide-border">
+          {setupRows && (
+            <>
+              <SetupRow id="gitignore" label={<span className="font-mono">.gitignore</span>}>
+                Keeps WhyGraph's local files out of git: <span className="font-mono">whygraph.toml</span>,{" "}
+                <span className="font-mono">.whygraph/</span> and <span className="font-mono">.codegraph/</span>.
+              </SetupRow>
+              <SetupRow id="hooks" label="Git hooks">
+                After a commit, merge, rebase or checkout, the portal rescans the project in the background.
+                Choose which in Settings.
+              </SetupRow>
+            </>
+          )}
           {result.agent_files.map((f) => (
             <AgentFileRow
               key={f.file}

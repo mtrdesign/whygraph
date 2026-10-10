@@ -1,28 +1,51 @@
-import { useState, type FormEvent } from "react";
+import { errorMessage } from "../../lib/apiErrors";
+import { Fragment, useState, type FormEvent } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { auditApi, type AuditEventRow, type AuditFilters } from "../../api";
+import {
+  AUDIT_GROUPS,
+  auditDetails,
+  auditEventsIn,
+  auditLabel,
+  auditTarget,
+  type AuditDetail,
+} from "../../lib/auditEvents";
 import { saveBlob } from "../../lib/download";
+import { formatDateTime } from "../../lib/format";
+import { ResponsiveTable, type Column } from "../layout/ResponsiveTable";
+import { ErrorState } from "../state/ErrorState";
+import { TableSkeleton } from "../state/Skeletons";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { Skeleton } from "../ui/skeleton";
-import { Field } from "./Field";
+import { Field, nativeSelectClass } from "./Field";
 
 type Page = { events: AuditEventRow[]; next: number | null };
 
-function when(at: string): string {
-  const d = new Date(at);
-  return Number.isNaN(d.getTime()) ? at : d.toLocaleString();
-}
-
-/** The `fields` object as `key=value` pairs, for a one-line detail cell. */
-function details(fields: Record<string, unknown>): string {
-  return Object.entries(fields)
-    .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
-    .join(" ");
+/**
+ * A details value that wraps between words and segments (after `@`, `.`, `/`,
+ * `_` and `-`) before it would split one (only a segment wider than the whole
+ * cell splits); an id is short, muted and mono, with the whole value in its title.
+ */
+function DetailValue({ detail }: { detail: Omit<AuditDetail, "label"> }) {
+  const parts = detail.value.split(/(?<=[@./_-])/);
+  return (
+    <span
+      title={detail.title}
+      className={detail.mono ? "font-mono text-muted-foreground" : undefined}
+      data-testid="audit-value"
+    >
+      {parts.map((part, i) => (
+        <Fragment key={i}>
+          {i > 0 && <wbr />}
+          {part}
+        </Fragment>
+      ))}
+    </span>
+  );
 }
 
 /**
- * Security events, newest first, with event / actor / date filters and "Load more"
+ * Security events, newest first, with a grouped event select and actor / date filters and "Load more"
  * (keyset paging on the server's `next`). `scope` picks the endpoint: the org's log
  * (with a CSV download) or the instance admin's log of events that belong to no org.
  */
@@ -50,28 +73,86 @@ export function AuditTable({ scope, filename = "whygraph-audit.csv" }: { scope: 
     try {
       saveBlob(await auditApi.csv(applied), filename);
     } catch (err) {
-      setCsvError(err instanceof Error ? err.message : "The download failed");
+      setCsvError(errorMessage(err));
     } finally {
       setDownloading(false);
     }
   };
 
   const rows = events.data?.pages.flatMap((p) => p.events) ?? [];
+  const columns: Column<AuditEventRow>[] = [
+    {
+      key: "event",
+      header: "Event",
+      primary: true,
+      cell: (r) => <span title={r.event}>{auditLabel(r.event)}</span>,
+    },
+    {
+      key: "when",
+      header: "When",
+      cell: (r) => <span className="whitespace-nowrap text-muted-foreground">{formatDateTime(r.created_at)}</span>,
+    },
+    { key: "actor", header: "Actor", cell: (r) => r.actor?.label ?? r.actor?.uid ?? "System" },
+    {
+      key: "target",
+      header: "Target",
+      cell: (r) => {
+        const target = auditTarget(r);
+        return target ? <DetailValue detail={target} /> : null;
+      },
+    },
+    {
+      key: "details",
+      header: "Details",
+      cell: (r) => {
+        const pairs = auditDetails(r, scope === "admin");
+        if (pairs.length === 0) return null;
+        return (
+          <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-xs">
+            {pairs.map((d) => (
+              <div key={d.label} className="contents">
+                <dt className="text-muted-foreground">{d.label}</dt>
+                <dd className="min-w-0 break-words">
+                  <DetailValue detail={d} />
+                </dd>
+              </div>
+            ))}
+          </dl>
+        );
+      },
+    },
+  ];
   return (
     <div className="flex flex-col gap-4" data-testid="audit-table">
       <form onSubmit={apply} className="flex flex-wrap items-end gap-3" data-testid="audit-filters">
-        <Field label="Event" className="w-44">
+        <Field label="Event" className="w-full sm:w-56">
           {(p) => (
-            <Input {...p} placeholder="member_added" value={draft.event} onChange={(e) => setDraft({ ...draft, event: e.target.value })} />
+            <select
+              {...p}
+              className={nativeSelectClass}
+              value={draft.event}
+              onChange={(e) => setDraft({ ...draft, event: e.target.value })}
+            >
+              <option value="">All events</option>
+              {AUDIT_GROUPS.map((group) => (
+                <optgroup key={group} label={group}>
+                  {auditEventsIn(group).map((e) => (
+                    <option key={e.event} value={e.event}>
+                      {e.label}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
           )}
         </Field>
-        <Field label="Actor" className="w-40">
+        <Field label="Actor" className="w-full sm:w-40">
           {(p) => <Input {...p} placeholder="@ben" value={draft.actor} onChange={(e) => setDraft({ ...draft, actor: e.target.value })} />}
         </Field>
-        <Field label="From" className="w-40">
+        <Field label="From" className="w-full sm:w-40">
           {(p) => <Input {...p} type="date" value={draft.from} onChange={(e) => setDraft({ ...draft, from: e.target.value })} />}
         </Field>
-        <Field label="To" className="w-40">
+        <Field label="To" className="w-full sm:w-40">
           {(p) => <Input {...p} type="date" value={draft.to} onChange={(e) => setDraft({ ...draft, to: e.target.value })} />}
         </Field>
         <Button type="submit" variant="outline">
@@ -88,36 +169,13 @@ export function AuditTable({ scope, filename = "whygraph-audit.csv" }: { scope: 
           {csvError}
         </p>
       )}
-      {events.isLoading && <Skeleton className="h-24" />}
-      {events.isError && <p className="text-sm text-destructive">Failed to load: {events.error.message}</p>}
+      {events.isLoading && <TableSkeleton rows={4} cols={4} label="Loading events" />}
+      {events.isError && (
+        <ErrorState error={events.error} title="Couldn't load the audit log" onRetry={() => void events.refetch()} />
+      )}
       {events.data && rows.length === 0 && <p className="text-sm text-muted-foreground">No events match.</p>}
       {rows.length > 0 && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="text-muted-foreground">
-              <tr>
-                <th className="py-1.5 pr-3 font-medium">When</th>
-                <th className="py-1.5 pr-3 font-medium">Actor</th>
-                <th className="py-1.5 pr-3 font-medium">Event</th>
-                <th className="py-1.5 pr-3 font-medium">Target</th>
-                <th className="py-1.5 font-medium">Details</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {rows.map((r) => (
-                <tr key={r.id} data-testid={`audit-${r.id}`}>
-                  <td className="whitespace-nowrap py-1.5 pr-3 text-muted-foreground">{when(r.created_at)}</td>
-                  <td className="py-1.5 pr-3">{r.actor?.label ?? r.actor?.uid ?? "-"}</td>
-                  <td className="py-1.5 pr-3 font-mono">{r.event}</td>
-                  <td className="py-1.5 pr-3 font-mono">{r.target ?? ""}</td>
-                  <td className="break-all py-1.5 font-mono text-muted-foreground">
-                    {[r.org && scope === "admin" ? `org=${r.org}` : "", details(r.fields)].filter(Boolean).join(" ")}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <ResponsiveTable columns={columns} rows={rows} rowKey={(r) => String(r.id)} rowTestId={(r) => `audit-${r.id}`} />
       )}
       {events.hasNextPage && (
         <div>

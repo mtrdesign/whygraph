@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 import anyio.to_thread
+import httpx
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL, Engine, make_url
@@ -65,6 +66,62 @@ def _reset_process_globals() -> Iterator[None]:
     set_strict(False)
     db_engine._reset_engine()
     portal_db._reset_engine()
+
+
+class KeyTestNetwork:
+    """The network every portal's key tests see in a test: never the real one.
+
+    Attributes
+    ----------
+    requests : list[httpx.Request]
+        What :func:`whygraph.portal.key_test.probe_llm_key` sent.
+    respond : callable
+        ``request -> httpx.Response`` (default ``200 {}``); raise an
+        ``httpx`` exception from it to simulate a network failure.
+    repo_calls : list[tuple[str, str, str]]
+        ``(owner, name, token)`` of each GitHub repository probe.
+    repo : callable
+        ``(owner, name, token) -> None``, raising as
+        :func:`whygraph.services.github.check_repo_access` does (default:
+        the token reads the repository).
+    """
+
+    def __init__(self) -> None:
+        self.requests: list[httpx.Request] = []
+        self.respond = lambda request: httpx.Response(200, json={})
+        self.repo_calls: list[tuple[str, str, str]] = []
+        self.repo = lambda owner, name, token: None
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        return self.respond(request)
+
+    def check_repo(self, owner: str, name: str, token: str, **_: object) -> None:
+        self.repo_calls.append((owner, name, token))
+        return self.repo(owner, name, token)
+
+
+@pytest.fixture(autouse=True)
+def key_test_network(monkeypatch: pytest.MonkeyPatch) -> KeyTestNetwork:
+    """Plug :class:`KeyTestNetwork` into every portal built in a test (M2f-3 4.13).
+
+    Each ``PortalState`` gets an ``httpx.MockTransport`` as its
+    ``key_test_transport``, and the GitHub token test's repository probe is
+    replaced, so no test - the tenancy sweeps store real-looking keys -
+    reaches a provider or GitHub.
+    """
+    from whygraph.portal import deps as portal_deps
+
+    net = KeyTestNetwork()
+    original = portal_deps.PortalState.__init__
+
+    def init(self, *args, **kwargs) -> None:  # noqa: ANN001, ANN002, ANN003
+        original(self, *args, **kwargs)
+        self.key_test_transport = httpx.MockTransport(net.handle)
+
+    monkeypatch.setattr(portal_deps.PortalState, "__init__", init)
+    monkeypatch.setattr("whygraph.portal.key_routes.check_repo_access", net.check_repo)
+    return net
 
 
 # An edge fixture row: (source, target, kind), or (source, target, kind, line)

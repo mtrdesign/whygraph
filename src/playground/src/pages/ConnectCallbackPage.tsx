@@ -1,3 +1,4 @@
+import { PageContainer } from "../components/layout/PageContainer";
 import { useEffect, useRef } from "react";
 import { Link, useRouter, useSearch } from "@tanstack/react-router";
 import { useMutation } from "@tanstack/react-query";
@@ -43,7 +44,7 @@ export function ConnectCallbackPage() {
   }, []);
 
   return (
-    <div className="mx-auto flex w-full max-w-[640px] flex-col gap-4 p-6 sm:p-8">
+    <PageContainer width="narrow" className="flex flex-col gap-4">
       {!search.state ? (
         <Alert variant="destructive" data-testid="callback-invalid">
           <AlertTitle>Nothing to finish</AlertTitle>
@@ -66,6 +67,6 @@ export function ConnectCallbackPage() {
           </Button>
         </div>
       )}
-    </div>
+    </PageContainer>
   );
 }

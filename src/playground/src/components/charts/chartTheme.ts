@@ -7,8 +7,7 @@ import { useTheme, type ResolvedTheme } from "../../theme";
 // an option - `chartTheme.test.ts` guards that, and guards that the surface and
 // text colours here are still the hex form of the `theme.css` tokens they mirror.
 //
-// SURFACE is the assistant bubble (`--muted`), because that is what the chart card
-// sits on. The categorical palette was run through the dataviz validator against
+// SURFACE mirrors `--card` (the chart frame), TOOLTIP mirrors `--popover`. The categorical palette was run through the dataviz validator against
 // its own theme's surface (adjacent-pair CVD separation, normal-vision floor, 3:1
 // contrast): the dark table is the original palette, the light table re-steps the
 // hues that dropped below 3:1 on the light surface (yellow, mainly). Slot 1 is the
@@ -26,25 +25,29 @@ export interface ChartColors {
   muted: string;
   /** Values and tooltip text. */
   fg: string;
+  /** The info tone's marker (imports, first scans): mirrors `--info`. */
+  info: string;
   /** Six fixed categorical slots; slot 0 is the brand accent. */
   palette: readonly string[];
 }
 
 export const CHART_COLORS: Record<ResolvedTheme, ChartColors> = {
   light: {
-    surface: "#f2f2ef", // --muted
-    tooltip: "#fcfcfa", // --popover
-    grid: "#d9d7d4",
+    surface: "#ffffff", // --card
+    tooltip: "#ffffff", // --popover
+    grid: "#d7d7da",
     muted: "#626369", // --muted-foreground
     fg: "#18181b", // --foreground
+    info: "#0062a1", // --info
     palette: ["#5959e8", "#d95926", "#199e70", "#b07800", "#d55181", "#008300"],
   },
   dark: {
-    surface: "#18181b", // --muted
-    tooltip: "#131316", // --popover
+    surface: "#151517", // --card
+    tooltip: "#19191c", // --popover
     grid: "#2d2d31",
     muted: "#a4a4ab", // --muted-foreground
     fg: "#ebebee", // --foreground
+    info: "#78bff9", // --info
     palette: ["#6366f1", "#d95926", "#199e70", "#c98500", "#d55181", "#008300"],
   },
 };
@@ -52,4 +55,18 @@ export const CHART_COLORS: Record<ResolvedTheme, ChartColors> = {
 /** The chart colour table for the theme that is actually painted. */
 export function useChartColors(): ChartColors {
   return CHART_COLORS[useTheme().resolvedTheme];
+}
+
+/** A marker's colour by tone, from the table's own slots (never a new hex). */
+export function markerColor(colors: ChartColors, tone: "info" | "ok" | "warn" | "error"): string {
+  switch (tone) {
+    case "error":
+      return colors.palette[1];
+    case "ok":
+      return colors.palette[2];
+    case "warn":
+      return colors.palette[3];
+    default:
+      return colors.info;
+  }
 }

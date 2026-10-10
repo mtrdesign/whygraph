@@ -46,13 +46,16 @@ export async function configureStubLlm(request: APIRequestContext, origin: strin
   });
 }
 
-/** Open a new chat on the project's Chat page, send `text` and wait for the stub's reply. */
+/**
+ * Open a new chat (`/chat` is an empty thread), send `text` and wait for the stub's
+ * reply. The session is created by the first message, and the URL moves to it.
+ */
 export async function chatOnce(page: Page, projectUrl: string, text: string): Promise<void> {
   await page.goto(`${projectUrl}/chat`);
-  await page.getByRole("button", { name: "New chat" }).click();
   await page.getByPlaceholder("Ask about this repository…").fill(text);
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByText(STUB_REPLY).first()).toBeVisible();
+  await expect(page).toHaveURL(/\/chat\/\d+$/);
 }
 
 /**

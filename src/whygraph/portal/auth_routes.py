@@ -57,8 +57,15 @@ from .github_auth import (
 )
 from .hosts import BaseUrl, safe_redirect
 from .member_routes import Redeemed, redeem_invitations
-from .models import Membership, Organization, PasswordReset, User
-from .orgs import OrgSlugTaken, add_member, create_org, validate_org_slug
+from .models import Membership, Organization, PasswordReset, RetiredOrgSlug, User
+from .orgs import (
+    RESERVED_ORG_SLUGS,
+    OrgSlugTaken,
+    add_member,
+    create_org,
+    is_valid_org_slug,
+    validate_org_slug,
+)
 from .passwords import (
     hash_password,
     normalize_email,
@@ -862,14 +869,25 @@ def get_account_orgs(
     base = _base(portal_state(request))
     with get_session() as db:
         rows = db.exec(
-            select(Organization.slug, Organization.name, Membership.role)
+            select(
+                Organization.slug,
+                Organization.name,
+                Membership.role,
+                Membership.welcome_pending,
+            )
             .join(Membership, col(Membership.org_id) == col(Organization.id))
             .where(Membership.user_id == principal.user_id)
             .order_by(Organization.name, Organization.slug)
         ).all()
     return [
-        {"slug": slug, "name": name, "role": role, "url": base.org_origin(slug)}
-        for slug, name, role in rows
+        {
+            "slug": slug,
+            "name": name,
+            "role": role,
+            "url": base.org_origin(slug),
+            "new": bool(new),
+        }
+        for slug, name, role, new in rows
     ]
 
 
@@ -894,6 +912,45 @@ def get_account_usage(
         ).all()
     orgs = [(org_id, slug, name, base.org_origin(slug)) for org_id, slug, name in rows]
     return account_usage(state, principal.user_id, orgs)  # type: ignore[arg-type]
+
+
+@auth_router.get("/api/orgs/slug-check")
+def get_slug_check(
+    request: Request,
+    slug: str = Query(default="", max_length=100),
+    principal: Principal = Depends(user_access("base")),
+) -> dict:
+    """Whether ``slug`` could be used for a new org (the create form's live check).
+
+    Answers ``{slug, available, reason}`` with ``reason`` one of ``null``,
+    ``"invalid"`` (the format), ``"reserved"`` or ``"taken"`` (a live org
+    or a retired slug - one word, so a deletion is not disclosed). Base
+    host only; 60 checks a minute per user (``429 throttled``).
+    """
+    retry_after = portal_state(request).slug_check.hit(principal.user_id)
+    if retry_after is not None:
+        raise ApiError(
+            429,
+            "too many checks; try again in a moment",
+            code="throttled",
+            headers={"Retry-After": str(retry_after)},
+        )
+    reason: str | None = None
+    if not is_valid_org_slug(slug) or slug[2:4] == "--":
+        reason = "invalid"
+    elif slug in RESERVED_ORG_SLUGS:
+        reason = "reserved"
+    else:
+        with get_session() as db:
+            if (
+                db.exec(
+                    select(Organization.id).where(Organization.slug == slug)
+                ).first()
+                is not None
+                or db.get(RetiredOrgSlug, slug) is not None
+            ):
+                reason = "taken"
+    return {"slug": slug, "available": reason is None, "reason": reason}
 
 
 @auth_router.post("/api/orgs", status_code=201)

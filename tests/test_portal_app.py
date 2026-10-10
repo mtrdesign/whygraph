@@ -1309,6 +1309,10 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/org/transfer", "POST"): "org.own",
     ("/api/org/audit", "GET"): "org.audit",
     ("/api/org/audit.csv", "GET"): "org.audit",
+    # Onboarding and the welcome flag (M2f-3 section 4.12)
+    ("/api/onboarding", "GET"): "org.add_project",
+    ("/api/org/welcome", "DELETE"): "org.read",
+    ("/api/orgs/slug-check", "GET"): "user.self",
     # Production's GitHub App import page: org_access(...) (M2d-2 section 4.4)
     ("/api/github/app/authorize", "POST"): "org.add_project",
     ("/api/github/installations", "GET"): "org.add_project",
@@ -1510,6 +1514,7 @@ PRODUCTION_ORG_ROUTES = {
     ("/api/org/transfer", "POST"),
     ("/api/org/audit", "GET"),
     ("/api/org/audit.csv", "GET"),
+    ("/api/org/welcome", "DELETE"),
     ("/api/github/app/authorize", "POST"),
     ("/api/github/installations", "GET"),
     ("/api/github/installations/{installation_id}/repos", "GET"),

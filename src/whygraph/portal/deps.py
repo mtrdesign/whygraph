@@ -597,6 +597,8 @@ class PortalState:
         self.agent_calls = AgentCallBook()
         self.repo_cache = RepoListCache()
         self.key_test = Throttle(60, 60 * 60)
+        self.slug_check = Throttle(60, 60)
+        self.github_listing: dict[int, tuple[float, bool]] = {}
         self.key_test_transport: Any = None
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
@@ -783,6 +785,7 @@ def load_org_access(
                 Organization.name,
                 Organization.default_project_role,
                 Membership.role,
+                Membership.welcome_pending,
             )
             .join(Membership, Membership.org_id == Organization.id)
             .where(Organization.slug == org_slug, Membership.user_id == user_id)
@@ -797,10 +800,10 @@ def load_org_access(
                 ).where(Organization.slug == org_slug)
             ).first()
             if org is not None:
-                row = (*org, Role.READER.value)
+                row = (*org, Role.READER.value, False)
     if row is None:
         return None
-    org_id, slug, name, default_project_role, role = row
+    org_id, slug, name, default_project_role, role, welcome_pending = row
     return OrgAccess(
         org_id=org_id,
         org_slug=slug,
@@ -808,6 +811,7 @@ def load_org_access(
         role=Role(role),
         user_id=user_id,
         default_project_role=default_project_role,
+        welcome_pending=bool(welcome_pending),
     )
 
 

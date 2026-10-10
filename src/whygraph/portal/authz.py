@@ -155,6 +155,9 @@ class OrgAccess:
     default_project_role : str
         The org's default project role, one of
         :data:`DEFAULT_PROJECT_ROLES`.
+    welcome_pending : bool
+        Whether the caller's membership still carries the welcome flag
+        (``False`` for an instance admin's synthesized ``reader`` access).
     """
 
     org_id: int
@@ -163,6 +166,7 @@ class OrgAccess:
     role: Role
     user_id: int
     default_project_role: str
+    welcome_pending: bool = False
 
 
 def allowed(role: Role, action: Action) -> bool:

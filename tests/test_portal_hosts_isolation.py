@@ -154,6 +154,7 @@ BASE_ONLY_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/auth/login", "POST"),
         ("/api/auth/reset", "POST"),
         ("/api/orgs", "POST"),
+        ("/api/orgs/slug-check", "GET"),  # M2f-3 section 4.12
         ("/api/github/app/callback", "POST"),
         ("/api/admin/settings", "GET"),
         ("/api/admin/orgs", "GET"),
@@ -201,6 +202,7 @@ ORG_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/org/transfer", "POST"),
         ("/api/org/audit", "GET"),
         ("/api/org/audit.csv", "GET"),
+        ("/api/org/welcome", "DELETE"),  # M2f-3 section 4.12
         ("/api/github/app/authorize", "POST"),
         ("/api/github/installations", "GET"),
         ("/api/github/installations/{installation_id}/repos", "GET"),
@@ -1103,6 +1105,24 @@ def test_an_orgs_member_list_is_invisible_on_another_orgs_host(
     w.sign_in("bob")  # in both orgs: each host lists only its own
     narwhal = _ok(w.client.get(at("narwhal") + "/api/org/members"))
     assert [(m["github_login"], m["role"]) for m in narwhal] == [("bob", "owner")]
+
+
+def test_a_member_and_a_reader_get_no_grants_in_the_member_list(
+    prod_world: ProdWorld,
+) -> None:
+    """``grants`` is for ``org.members`` holders; no other answer carries it (T-31)."""
+    w = prod_world
+    w.sign_in("ann")  # owner of quokka
+    owner = _ok(w.client.get(at("quokka") + "/api/org/members"))
+    assert owner and all("grants" in m for m in owner)
+    w.sign_in("bob")  # a plain member of quokka, the owner of narwhal
+    member = _ok(w.client.get(at("quokka") + "/api/org/members"))
+    assert member and all("grants" not in m for m in member)
+    assert "grants" not in w.client.get(at("quokka") + "/api/org/members").text
+    w.client.cookies.clear()
+    w.sign_in("ada")  # an instance admin reads quokka as a reader
+    reader = _ok(w.client.get(at("quokka") + "/api/org/members"))
+    assert reader and all("grants" not in m for m in reader)
 
 
 def test_another_orgs_member_cannot_be_changed_through_this_orgs_host(

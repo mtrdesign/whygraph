@@ -782,6 +782,11 @@ def _project_usage_check(body: dict, w: World, o: OrgWorld) -> None:
     assert body["split"]["scans"]["calls"] == 1
 
 
+def _onboarding_check(body: dict) -> None:
+    assert [i["id"] for i in body["items"]][-1] == "agent"
+    assert all(set(i) == {"id", "done", "can_act"} for i in body["items"])
+
+
 def _overview_check(body: dict, w: World, o: OrgWorld) -> None:
     assert set(body) == {"coverage", "events", "last_failure", "usage", "agents"}
     assert {e["run_id"] for e in body["events"]} <= {o.run_id}
@@ -885,6 +890,11 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         200, check=lambda body, w, o: _audit_check(body, o)
     ),
     ("GET", "/api/org/audit.csv"): Call(200, shows=lambda o: ["created_at"]),
+    # Onboarding (M2f-3 section 4.12): booleans only, no org data to leak
+    ("GET", "/api/onboarding"): Call(
+        200, check=lambda body, w, o: _onboarding_check(body)
+    ),
+    ("DELETE", "/api/org/welcome"): Call(204),
     # Monthly budgets (M2f-2 section 4.11; test_portal_budgets.py drives
     # them). The owner may set any member's override, their own included;
     # a DELETE is idempotent.
@@ -1495,6 +1505,8 @@ def test_the_admin_routes_are_the_planned_ones() -> None:
         ("POST", "/api/platform/callback"),
         ("GET", "/api/platform/pending/{link_id}"),
         ("DELETE", "/api/platform/pending/{link_id}"),
+        # The first-run checklist (M2f-3 section 4.12)
+        ("GET", "/api/onboarding"),
     }
     # The project admin's (local mode; the connections routes are
     # production's).

@@ -129,6 +129,7 @@ from .migrate import MIGRATION_LOCK
 from .models import ScanRun, Setting, User
 from .org_routes import org_router
 from .orgs import ensure_builtin_org
+from .onboarding_routes import onboarding_router, welcome_router
 from .overview_routes import overview_router
 from .platform_routes import platform_router
 from .port_change import reconcile_port
@@ -290,6 +291,8 @@ def create_portal_app(
     app.include_router(overview_router)  # both modes: a project's Overview (M2f-3)
     app.include_router(key_router)  # both modes: the LLM key tests (M2f-3)
     app.include_router(key_local_router)  # local-only: the GitHub token test
+    app.include_router(onboarding_router)  # both modes: first-run checklist (M2f-3)
+    app.include_router(welcome_router)  # production-only: DELETE /api/org/welcome
     app.include_router(portal_router)
     app.include_router(projects_router)
     app.include_router(platform_router)  # local-only: connect and link (M2e)

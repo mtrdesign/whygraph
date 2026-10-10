@@ -1203,6 +1203,13 @@ def get_state(request: Request) -> dict:
             body["user"]["github_login"] = principal.github_login
             body["user"]["avatar_url"] = principal.avatar_url
             body["user"]["has_password"] = principal.has_password
+        # The welcome banner (M2f-3 section 4.12): this org only, this
+        # caller's own membership flag.
+        body["welcome"] = (
+            {"org_name": access.org_name, "role": access.role.value}
+            if access is not None and access.welcome_pending
+            else None
+        )
     return body
 
 

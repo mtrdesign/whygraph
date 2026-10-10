@@ -14,12 +14,6 @@ import { call, configureStubLlm, STUB_REPLY } from "../lib/usage";
 // production - ben signed in with GitHub, organization `comet` and its project
 // `demo` (imported by `production.spec.ts`), and the base host.
 //
-// A page that is not fixed yet is listed in KNOWN_OVERFLOW and runs as an expected
-// failure (`test.fail()`), so fixing it turns the run red until its entry is removed.
-// The main session maintains the list between steps; the last step empties it.
-const KNOWN_OVERFLOW: Record<string, string> = {
-};
-
 const PHONE = { width: 390, height: 844 };
 const { notes } = themeRepos("light");
 const project = `/p/${notes.slug}`;
@@ -40,8 +34,6 @@ async function problems(page: Page): Promise<string[]> {
 }
 
 async function check(page: Page, name: string, url: string): Promise<void> {
-  const known = KNOWN_OVERFLOW[name];
-  if (known) test.fail(true, known);
   await page.goto(url);
   expect(await problems(page), `${name} at ${url}`).toEqual([]);
 }
@@ -89,8 +81,6 @@ test.describe("local portal at 390px", () => {
   }
 
   test("local navigation sheet is 240px wide", async ({ page }) => {
-    const name = "local navigation sheet";
-    if (KNOWN_OVERFLOW[name]) test.fail(true, KNOWN_OVERFLOW[name]);
     await page.goto("/");
     await page.getByRole("button", { name: "Open navigation" }).click();
     const sheet = page.locator('[data-slot="sheet-content"]');

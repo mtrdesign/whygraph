@@ -77,5 +77,33 @@ export async function firstScan(page: Page, fx: Fixture): Promise<void> {
  */
 export async function quickRescan(page: Page, menu = true): Promise<void> {
   await page.getByRole("button", { name: "Rescan", exact: true }).first().click();
-  if (menu) await page.getByRole("menuitem", { name: "Quick rescan" }).click();
+  if (menu) {
+    // The menu opens at the button, but the page can scroll under it while the project's
+    // charts and cards settle, which leaves the popup outside the viewport and unclickable
+    // (a flake seen twice). A keyboard activation does not care where the popup is.
+    const item = page.getByRole("menuitem", { name: "Quick rescan" });
+    await expect(item).toBeAttached();
+    await item.focus();
+    await page.keyboard.press("Enter");
+  }
+}
+
+/**
+ * Press Tab until `target` has focus (at most `max` presses), proving a keyboard
+ * user reaches it. Starts from wherever focus is.
+ */
+export async function tabUntil(page: Page, target: Locator, max = 80): Promise<void> {
+  for (let i = 0; i < max; i++) {
+    if (await target.evaluate((el) => el === document.activeElement)) return;
+    await page.keyboard.press("Tab");
+  }
+  await expect(target).toBeFocused();
+}
+
+/** The skip link is the first stop of a fresh page and moves focus to `<main>`. */
+export async function expectSkipLink(page: Page): Promise<void> {
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("link", { name: "Skip to content" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#main")).toBeFocused();
 }

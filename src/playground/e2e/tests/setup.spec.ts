@@ -16,6 +16,12 @@ test("first run: the portal asks for a name, then shows an empty projects page",
   await expect(page.getByText("No projects yet")).toBeVisible();
   const checklist = page.getByTestId("first-run-checklist");
   await expect(checklist.getByTestId("first-run-list").getByRole("listitem")).toHaveCount(3);
+  // In this order: key, project, agent; none done on a fresh portal.
+  const items = checklist.getByTestId("first-run-list").getByRole("listitem");
+  await expect(items.nth(0)).toContainText("Add an LLM key");
+  await expect(items.nth(1)).toContainText("Add a project");
+  await expect(items.nth(2)).toContainText("Connect your agent");
+  await expect(checklist.locator('[data-done="true"]')).toHaveCount(0);
   await expect(checklist.getByRole("link", { name: "Add a key" })).toBeVisible();
   await expect(checklist.getByRole("link", { name: "Add project" })).toBeVisible();
   await expect(checklist.getByTestId("first-run-agent")).toContainText("Connect your agent");

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import { expect, test, type Page } from "@playwright/test";
 import { env } from "../env";
 import { sidebarLink } from "../lib/ui";
-import { base, createOrg, githubSignIn, importRepo, orgUrl, signedIn } from "../lib/production";
+import { base, createOrg, expectNoServerText, githubSignIn, importRepo, orgUrl, signedIn } from "../lib/production";
 
 // Production mode (M2c): the bootstrap secret, organizations on their own hosts,
 // the shared session cookie and the instance admin's read-only access. Runs
@@ -161,6 +161,12 @@ test("projects from GitHub: connect, import, scan, members, a push, deleting the
   await expect(ben.getByTestId("first-run-invite")).toContainText("Invite your team");
   await importRepo(ben, "rocket", "ben/demo");
   expect((await runs(ben, "demo")).map((r) => r.status)).toEqual(["ok"]);
+  // No server path, key variable or config file name shows on the pages visited (text scan).
+  for (const url of ["/", "/p/demo", "/p/demo/scans", "/p/demo/settings", "/settings", "/members", "/usage"]) {
+    await ben.goto(`${orgUrl("rocket")}${url}`);
+    await expect(ben.getByRole("heading").first()).toBeVisible();
+    await expectNoServerText(ben);
+  }
 
   // Ada, the instance administrator, signs in with a password: she cannot
   // import from GitHub, not even into her own organization.
@@ -328,6 +334,7 @@ test("project access: Restricted projects, an invited user's grants, roles and a
     )
     .toEqual([]);
   await expect(table).toContainText("@ben");
+  await expectNoServerText(cy);
   await cyContext.close();
   await benContext.close();
 });

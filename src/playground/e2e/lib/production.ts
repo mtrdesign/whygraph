@@ -85,3 +85,15 @@ export async function importRepo(page: Page, org: string, repo: string): Promise
   await openAfterFirstScan(page);
   await expect(page).toHaveURL(new RegExp(`/p/${slug}$`));
 }
+
+/**
+ * Production never leaks the server's layout or secrets into a page: none of
+ * these strings may appear in the visible text of the page it is on.
+ */
+export async function expectNoServerText(page: Page): Promise<void> {
+  await page.waitForLoadState("networkidle").catch(() => undefined);
+  const text = await page.locator("body").innerText();
+  for (const needle of ["host.docker.internal", "_API_KEY", "whygraph.toml", "/data/", "repos/"]) {
+    expect(text, `"${needle}" on ${page.url()}`).not.toContain(needle);
+  }
+}

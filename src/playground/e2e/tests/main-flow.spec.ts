@@ -32,6 +32,8 @@ test.describe("main flow", () => {
     // Configure follows the queued first scan with one bar and its steps.
     await expect(page.getByRole("heading", { name: `${notes.name}: Configure` })).toBeVisible();
     await expect(page.getByTestId("scan-progress")).toBeVisible();
+    // The fixture repo has no github.com origin, so the wizard offers no GitHub token row.
+    await expect(page.getByTestId("github-token-row")).toHaveCount(0);
     await expect(page.getByRole("link", { name: "More settings (chat model, hooks, limits)" })).toBeVisible();
 
     // Set up wrote the repo-side wiring: the marker, the MCP entry, hooks.

@@ -60,6 +60,7 @@ const DATE_TIME = new Intl.DateTimeFormat(undefined, {
   minute: "2-digit",
 });
 const CLOCK = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+const MONTH = new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
 const NUMBER = new Intl.NumberFormat(undefined);
 
 /** `9 Oct 2026` (the viewer's locale); `-` for a missing or invalid value. */
@@ -111,10 +112,20 @@ export function formatDateTimeUtc(value: When): string {
   return d ? `${DATE_TIME_UTC.format(d)} UTC` : "-";
 }
 
-/** A USD price that may be a fraction of a cent (`$0.075`, up to six places); `-` when not a number. */
-export function formatUsdPrecise(value: number | null | undefined): string {
+/**
+ * A USD price that may be a fraction of a cent (`$0.075`, up to six places); `-` when not a number.
+ * `minFractionDigits` pads a round price (`2`: `$3.00`).
+ */
+export function formatUsdPrecise(value: number | null | undefined, minFractionDigits = 0): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "-";
-  return `$${value.toLocaleString("en-US", { maximumFractionDigits: 6 })}`;
+  return `$${value.toLocaleString("en-US", { minimumFractionDigits: minFractionDigits, maximumFractionDigits: 6 })}`;
+}
+
+/** `2026-10` as a month name in the viewer's locale (`October 2026`); the input unchanged when it is not `YYYY-MM`. */
+export function formatMonth(value: string): string {
+  const m = /^(\d{4})-(\d{2})$/.exec(value);
+  if (!m || +m[2] < 1 || +m[2] > 12) return value;
+  return MONTH.format(new Date(Date.UTC(+m[1], +m[2] - 1, 1)));
 }
 
 /** A whole-number-friendly count in the viewer's locale (`1,234`); `-` when not a number. */

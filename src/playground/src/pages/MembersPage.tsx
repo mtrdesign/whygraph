@@ -440,10 +440,10 @@ function MemberRow({
   });
 
   return (
-    <li className="row-wrap py-3" id={`member-${member.uid}`} data-testid={`member-${member.uid}`}>
+    <li className="row-wrap py-3 sm:flex-nowrap sm:[&>*:not([data-testid=member-identity])]:shrink-0" id={`member-${member.uid}`} data-testid={`member-${member.uid}`}>
       {/* The identity takes the whole first line on a phone (the details and
           actions wrap under it), never squeezed beside them. */}
-      <div className="flex min-w-0 basis-full items-center gap-3 sm:basis-48 sm:flex-1" data-testid="member-identity">
+      <div className="flex min-w-0 basis-full items-center gap-3 sm:basis-0 sm:flex-1" data-testid="member-identity">
         <UserAvatar name={name} url={member.avatar_url} />
         <div className="flex min-w-0 flex-1 flex-col leading-tight">
           <span className="truncate font-medium">

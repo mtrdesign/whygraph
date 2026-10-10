@@ -467,6 +467,7 @@ export function MessageThread({
           fill={starter}
           disabled={noKeyProvider !== null || providersFailed}
           notice={composerNotice}
+          disabledPlaceholder={providersFailed ? "Chat providers couldn't load" : undefined}
           onSend={send}
           onStop={() => abortRef.current?.abort()}
         />

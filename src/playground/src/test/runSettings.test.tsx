@@ -606,9 +606,8 @@ describe("Scan run (screen 7)", () => {
 
     await quickRescan(user);
     const followup = await screen.findByTestId("followup");
-    // The run id is only in a URL: the toast offers "Open run", never "#7" (SCN-4).
-    expect(success).toHaveBeenCalledWith("Scan queued", expect.objectContaining({ action: expect.objectContaining({ label: "Open run" }) }));
-    expect(success.mock.calls.flat().join(" ")).not.toContain("#7");
+    // R4: the page already says it, so no toast over the run's buttons (and none names "#7").
+    expect(success).not.toHaveBeenCalled();
     success.mockRestore();
     expect(followup).toHaveTextContent("Another request joined this run");
     expect(followup).not.toHaveTextContent("folds into");
@@ -616,8 +615,11 @@ describe("Scan run (screen 7)", () => {
     // The live view of the running run is not abandoned.
     expect(here(router)).toBe("/p/alpha/scans/6");
 
+    const info = vi.spyOn(toast, "info");
     await quickRescan(user);
     await waitFor(() => expect(calls("POST", "/api/projects/alpha/scans")).toHaveLength(2));
+    expect(info).not.toHaveBeenCalled();
+    info.mockRestore();
     // Same id both times: still exactly one follow-up notice, still on run 6.
     expect(screen.getAllByTestId("followup")).toHaveLength(1);
     expect(here(router)).toBe("/p/alpha/scans/6");
@@ -807,6 +809,9 @@ describe("Project overview (screen 9a)", () => {
     expect(within(recent).queryByText("Manual")).toBeNull();
 
     expect(screen.getByTestId("mcp-url")).toHaveTextContent("http://127.0.0.1:8765/mcp/alpha");
+    // N6: breaks between segments, never inside one (no break-all).
+    expect(screen.getByTestId("mcp-url").className).not.toContain("break-all");
+    expect(screen.getByTestId("mcp-url").querySelectorAll("wbr").length).toBeGreaterThan(0);
     // Claude Code is configured, so its tab is open with the interpolated port form.
     expect(await screen.findByText(/\$\{WHYGRAPH_PORT:-8765\}/)).toBeInTheDocument();
     await user.click(screen.getByRole("tab", { name: "Codex" }));

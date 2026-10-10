@@ -704,6 +704,8 @@ describe("prices", () => {
     expect(await screen.findByTestId("prices-as-of")).toHaveTextContent("2026-09-25");
     const bundled = screen.getByTestId("price-anthropic-claude-sonnet-4-5");
     expect(bundled).toHaveTextContent("bundled");
+    // R6: the provider reads as its name, like the Add form.
+    expect(bundled).toHaveTextContent("Anthropic");
     expect(within(bundled).queryByRole("button", { name: "Revert" })).toBeNull();
     await userEvent.click(within(bundled).getByRole("button", { name: "Override" }));
     const form = await screen.findByTestId("price-form-anthropic-claude-sonnet-4-5");

@@ -78,6 +78,9 @@ describe("audit details (MEM-1)", () => {
     expect(value({ monthly_usd: "25.00" })).toBe("$25");
     expect(value({ output_per_mtok: "15.000000" })).toBe("$15.00 per million tokens");
     expect(value({ threshold: 80 })).toBe("80%");
+    // R5: a month in words (the viewer's locale), not "2026-10".
+    expect(value({ month: "2026-10" })).toBe(new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(Date.UTC(2026, 9, 1))));
+    expect(value({ month: "2026-10" })).not.toContain("2026-10");
     expect(auditDetails(row({ github_login: "ada" }))[0]).toMatchObject({ label: "GitHub login", value: "@ada" });
   });
 

@@ -275,7 +275,7 @@ export function PricesTab({ canEdit }: { canEdit: boolean }) {
   const editingRow = prices.data.rows.find((r) => keyOf(r) === editing);
   const right = (v: number | null) => <span className="whitespace-nowrap">{rate(v)}</span>;
   const columns: Column<PriceRow>[] = [
-    { key: "provider", header: "Provider", cell: (r) => <span className="text-muted-foreground">{r.provider}</span> },
+    { key: "provider", header: "Provider", cell: (r) => <span className="text-muted-foreground">{providerLabel(r.provider)}</span> },
     {
       key: "model",
       header: "Model",

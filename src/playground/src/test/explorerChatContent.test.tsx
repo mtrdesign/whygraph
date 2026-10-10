@@ -481,6 +481,8 @@ describe("Chat content", () => {
     mount("/p/alpha/chat");
     expect(await screen.findByText("Couldn't load the chat providers")).toBeInTheDocument();
     expect(screen.getByRole("textbox")).toBeDisabled();
+    // R3: the placeholder gives the real reason, not "Add a key".
+    expect(screen.getByRole("textbox")).toHaveAttribute("placeholder", "Chat providers couldn't load");
     expect(screen.getByTestId("chat-no-key")).toHaveTextContent("Chat can't send until the provider list loads");
     for (const text of ["What changed most in the last month?", "Explain how this project is structured"]) {
       expect(screen.getByRole("button", { name: text })).toBeDisabled();

@@ -4,7 +4,7 @@
 // event in docs/deploy/production.md's security event table has one.
 
 import type { AuditEventRow } from "../api";
-import { formatUsd } from "./format";
+import { formatMonth, formatUsd, formatUsdPrecise } from "./format";
 import { providerLabel, sourceLabel } from "./labels";
 
 export type AuditGroup = "Members" | "Projects" | "Budgets" | "Security" | "Organization";
@@ -213,7 +213,7 @@ export function shortId(id: string): { value: string; title: string; mono: true 
 
 /** A per-million-token rate as money: `3.000000` -> `$3.00 per million tokens`. */
 function rateText(n: number): string {
-  return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 6 })} per million tokens`;
+  return `${formatUsdPrecise(n, 2)} per million tokens`;
 }
 
 function fieldValue(key: string, value: unknown): Omit<AuditDetail, "label"> | null {
@@ -226,6 +226,7 @@ function fieldValue(key: string, value: unknown): Omit<AuditDetail, "label"> | n
   if (typeof value === "number") return { value: key === "threshold" ? `${value}%` : String(value) };
   if (typeof value !== "string") return { value: JSON.stringify(value) };
   if (UUID.test(value)) return shortId(value);
+  if (key === "month" && /^\d{4}-\d{2}$/.test(value)) return { value: formatMonth(value), title: value };
   const known = (table: Record<string, string>) => (Object.prototype.hasOwnProperty.call(table, value) ? table[value] : undefined);
   let worded: string | undefined;
   if (key === "reason") worded = known(REASONS);

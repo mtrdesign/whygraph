@@ -872,6 +872,13 @@ describe("shell keyboard and titles", () => {
     expect(last.className).toContain("max-w-[70%]");
     expect(last.querySelector('[data-slot="breadcrumb-page"]')?.className).toContain("truncate");
     for (const middle of Array.from(items).slice(0, -1)) expect(middle.className).toContain("min-w-0");
+    // R1: on a phone the middle crumbs collapse into one "..." item; the first and last stay.
+    const collapsed = within(list).getByTestId("crumbs-collapsed");
+    expect(collapsed).toHaveTextContent("...");
+    expect(collapsed.className).toContain("sm:hidden");
+    expect(items[0].className).not.toContain("max-sm:hidden");
+    expect(items[items.length - 1].className).not.toContain("max-sm:hidden");
+    expect(Array.from(items).filter((i) => i.className.includes("max-sm:hidden")).length).toBeGreaterThan(0);
     await waitFor(() => expect(document.title).toBe("Why the cache · Project alpha · WhyGraph"));
     document.body.innerHTML = "";
 

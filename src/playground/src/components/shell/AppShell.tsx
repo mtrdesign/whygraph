@@ -2,6 +2,7 @@ import { Fragment, useSyncExternalStore, type MouseEvent, type ReactNode } from 
 import { Link, useRouterState } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { MenuIcon } from "lucide-react";
+import { cn } from "cn";
 import { membersApi, portalKey, type ChatSession, type ScanRun } from "../../api";
 import { chatSessionsKey } from "../../lib/chatSessions";
 import { usePortalState } from "../../lib/identity";
@@ -99,10 +100,25 @@ export function PageHeader({
         <BreadcrumbList className="flex-nowrap overflow-hidden" data-testid="breadcrumbs">
           {crumbs.map((crumb, i) => {
             const last = i === crumbs.length - 1;
+            // On a phone the crumbs between the first and the last collapse into
+            // one "..." item; from `sm` they show in full.
+            const middle = i > 0 && !last;
             return (
               <Fragment key={`${i}:${crumb.label}`}>
+                {i === 1 && !last && (
+                  <>
+                    <BreadcrumbItem className="min-w-0 shrink-0 sm:hidden" data-testid="crumbs-collapsed">
+                      <span aria-label="Earlier pages hidden">...</span>
+                    </BreadcrumbItem>
+                    <BreadcrumbSeparator className="shrink-0 sm:hidden" />
+                  </>
+                )}
                 <BreadcrumbItem
-                  className={last ? "min-w-0 max-w-[70%] shrink-0" : "min-w-0 shrink"}
+                  className={cn(
+                    last ? "min-w-0 max-w-[70%] shrink-0" : "min-w-0 shrink",
+                    i === 0 && !last && "max-w-[40%]",
+                    middle && "max-sm:hidden",
+                  )}
                   title={crumb.label}
                 >
                   {last ? (
@@ -118,7 +134,7 @@ export function PageHeader({
                     <span className="truncate">{crumb.label}</span>
                   )}
                 </BreadcrumbItem>
-                {!last && <BreadcrumbSeparator className="shrink-0" />}
+                {!last && <BreadcrumbSeparator className={cn("shrink-0", middle && "max-sm:hidden")} />}
               </Fragment>
             );
           })}

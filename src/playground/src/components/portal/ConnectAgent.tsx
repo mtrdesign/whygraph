@@ -1,3 +1,4 @@
+import { withSegmentBreaks } from "../layout/CommandBlock";
 import { AGENTS, mcpSnippet } from "../../lib/agents";
 import { Badge } from "../ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
@@ -21,9 +22,9 @@ export function ConnectAgent({ mcpUrl, configured }: { mcpUrl: string; configure
       <div className="flex flex-wrap items-center gap-2">
         <code
           data-testid="mcp-url"
-          className="min-w-0 flex-1 rounded-md bg-muted px-2 py-1.5 font-mono text-xs break-all"
+          className="min-w-0 flex-1 rounded-md bg-muted px-2 py-1.5 font-mono text-xs wrap-anywhere"
         >
-          {mcpUrl}
+          {withSegmentBreaks(mcpUrl)}
         </code>
         <CopyButton text={mcpUrl} />
       </div>

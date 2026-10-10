@@ -14,6 +14,7 @@ export function Composer({
   fill,
   disabled,
   notice,
+  disabledPlaceholder = "Add a key to start chatting",
   onSend,
   onStop,
 }: {
@@ -24,6 +25,8 @@ export function Composer({
   disabled?: boolean;
   /** The reason under the box; replaces the keyboard hint. */
   notice?: ReactNode;
+  /** The box's placeholder while it is disabled (default: no key). */
+  disabledPlaceholder?: string;
   onSend: (content: string) => void;
   onStop: () => void;
 }) {
@@ -58,7 +61,7 @@ export function Composer({
             streaming
               ? "Waiting for the assistant…"
               : disabled
-                ? "Add a key to start chatting"
+                ? disabledPlaceholder
                 : "Ask about this repository…"
           }
           onChange={(e) => setValue(e.target.value)}

@@ -926,6 +926,8 @@ describe("members page", () => {
     for (const identity of screen.getAllByTestId("member-identity")) {
       expect(identity.className).toContain("basis-full");
       expect(identity.parentElement?.className).toContain("row-wrap");
+      // R2: from sm up the row is one line, not a ragged wrap.
+      expect(identity.parentElement?.className).toContain("sm:flex-nowrap");
     }
   });
 

@@ -8,8 +8,8 @@ too:
 - ``coverage.points`` - the ``summary.coverage`` snapshots the runner writes
   after each run that scanned, last :data:`COVERAGE_DAYS` days, oldest first,
   thinned evenly to at most :data:`MAX_POINTS`;
-- ``events`` - the runs the coverage chart marks (imports, full scans,
-  describes, failures, budget stops), same window;
+- ``events`` - the runs the coverage chart marks (imports, first scans,
+  full scans, describes, failures, budget stops), same window;
 - ``last_failure`` - the newest failed / interrupted run after the last ok
   one (its message as the runner stored it);
 - ``usage`` - this month's spend, budget and task split, only with
@@ -110,8 +110,11 @@ def _event_kind(run: ScanRun, summary: dict[str, Any]) -> str | None:
         return "failed"
     if run.status != "ok":
         return None
-    if summary.get("cloned") is True or run.trigger == "initial":
+    # Only a clone is an import (production GitHub); a local first scan is not.
+    if summary.get("cloned") is True:
         return "import"
+    if run.trigger == "initial":
+        return "first_scan"
     if run.trigger == "describe":
         return "describe"
     if run.analyze and run.kind == "scan":

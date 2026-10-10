@@ -182,8 +182,8 @@ Five tiles count **Commits**, **Commits described** (with an LLM description; th
 Explorer's coverage map shows them). Each has a one-line definition; a zero says why, for example "No
 GitHub data: add a GitHub token" for a local project whose remote is on GitHub.
 
-**Coverage over time** draws the share of described commits after each scan, with markers for imports,
-full scans, descriptions, failed runs and budget stops. The history starts with this release, so a
+**Coverage over time** draws the share of described commits after each scan, with markers for imports
+(production), first scans (local), full scans, descriptions, failed runs and budget stops. The history starts with this release, so a
 project shows "History starts with the next scan" until it has two scans to compare.
 
 When commits are waiting for a description, the Overview shows how many, with the estimated cost and

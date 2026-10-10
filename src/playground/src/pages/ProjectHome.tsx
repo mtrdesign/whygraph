@@ -25,7 +25,7 @@ import { useScanActions } from "../lib/scanActions";
 import { formatSeconds, runSeconds, triggerLabel } from "../lib/scanFormat";
 import { markerColor, useChartColors } from "../components/charts/chartTheme";
 import { PageContainer } from "../components/layout/PageContainer";
-import { PathText } from "../components/layout/PathText";
+import { PathText, pathRepeatsName } from "../components/layout/PathText";
 import { ResponsiveTable, type Column } from "../components/layout/ResponsiveTable";
 import { ConnectAgent } from "../components/portal/ConnectAgent";
 import { HealthPanel } from "../components/portal/HealthPanel";
@@ -43,6 +43,7 @@ import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Skeleton } from "../components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
+import { cn } from "../lib/utils";
 
 // ECharts stays out of the main bundle: the chart is loaded with the card.
 const ChartBlock = lazy(() => import("../components/charts/ChartBlock").then((m) => ({ default: m.ChartBlock })));
@@ -56,6 +57,7 @@ function Tile({
   hint,
   info,
   testId,
+  className,
   children,
 }: {
   label: string;
@@ -63,15 +65,26 @@ function Tile({
   hint?: ReactNode;
   info: string;
   testId: string;
+  className?: string;
   children?: ReactNode;
 }) {
   return (
-    <div className="flex min-w-0 flex-col gap-1 rounded-xl bg-card p-4 shadow-card" data-testid={`stat-${testId}`}>
-      <span className="flex items-center gap-1 text-xs text-muted-foreground">
+    <div
+      className={cn("flex min-w-0 flex-col gap-1 rounded-xl bg-card p-4 shadow-card", className)}
+      data-testid={`stat-${testId}`}
+    >
+      {/* Two label lines are reserved at lg, where five tiles share the row and a long
+          label wraps, so every value sits on the same line; the icon follows the text. */}
+      <span className="text-xs text-muted-foreground lg:min-h-8">
         {label}
         <Tooltip>
           <TooltipTrigger
-            render={<button type="button" className="inline-flex rounded-sm text-muted-foreground hover:text-foreground" />}
+            render={
+              <button
+                type="button"
+                className="ml-1 inline-flex rounded-sm align-[-1px] text-muted-foreground hover:text-foreground"
+              />
+            }
             aria-label={`About ${label}`}
           >
             <InfoIcon className="size-3" aria-hidden />
@@ -136,6 +149,8 @@ function Tiles({ project, production }: { project: ProjectDetails; production: b
         value={formatNumber(stats.rationale_cards)}
         info="Symbols with a rationale card: the why behind the code, as the Explorer's coverage map shows it."
         hint={zero(stats.rationale_cards)}
+        // The fifth tile spans both phone columns instead of sitting alone.
+        className="col-span-2 sm:col-span-1"
       >
         <Link to="/p/$slug/explorer" params={{ slug }} className="text-xs text-primary-text hover:underline">
           Open the coverage map
@@ -416,6 +431,16 @@ function RecentScans({
   );
 }
 
+/**
+ * False when the subtitle would only repeat the name: a local repo directly in a
+ * shared folder prints as its folder name, which is usually the project's name.
+ */
+function hasSubtitle(project: ProjectDetails, shared?: string[]): boolean {
+  if (project.source === "platform") return !!project.link;
+  if (project.github_full_name && (project.root === null || project.source === "github")) return true;
+  return !!project.root && !pathRepeatsName(project.root, shared, project);
+}
+
 /** Where the project lives: GitHub in production, the folder locally, the platform for a linked project. */
 function Subtitle({ project, shared }: { project: ProjectDetails; shared?: string[] }) {
   if (project.source === "platform") {
@@ -488,7 +513,7 @@ export function ProjectHome() {
   const production = isProduction(portal);
   const [dismissed, setDismissed] = useState(false);
 
-  if (project.isLoading) return <PageSkeleton label="Loading the project" />;
+  if (project.isLoading) return <PageSkeleton label="Loading the project" width="narrow" className="sm:py-8" />;
   if (!p) return null;
 
   const unsafe = estimate.isError && projectProblem(estimate.error).kind === "unsafe_path" ? projectProblem(estimate.error) : null;
@@ -532,7 +557,8 @@ export function ProjectHome() {
   return (
     <PageContainer width="narrow" className="flex flex-col gap-5 sm:py-8">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+        {/* Below sm the title column takes the row and the actions wrap under it. */}
+        <div className="flex min-w-0 basis-full flex-col gap-1.5 sm:flex-1 sm:basis-0">
           <h1 className="text-[22px] font-semibold tracking-tight break-words">{p.name}</h1>
           <div className="row-wrap text-xs text-muted-foreground">
             <ProjectStatusBadge project={p} />
@@ -549,9 +575,11 @@ export function ProjectHome() {
             {role && <span data-testid="my-role">Your role: {role}</span>}
             {showScannedAgo(p) && <span>scanned {timeAgo(p.last_scan_at)}</span>}
           </div>
-          <div className="flex min-w-0 text-xs text-muted-foreground" data-testid="overview-subtitle">
-            <Subtitle project={p} shared={portal?.shared_folders} />
-          </div>
+          {hasSubtitle(p, portal?.shared_folders) && (
+            <div className="flex min-w-0 text-xs text-muted-foreground" data-testid="overview-subtitle">
+              <Subtitle project={p} shared={portal?.shared_folders} />
+            </div>
+          )}
         </div>
         <div className="flex flex-wrap items-start gap-2">{actions}</div>
       </div>

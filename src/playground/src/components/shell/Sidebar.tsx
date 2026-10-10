@@ -17,7 +17,7 @@ import {
   ScrollTextIcon,
   UsersIcon,
 } from "lucide-react";
-import { portalApi, portalKey, projectKey, type PortalState, type ProjectSummary } from "../../api";
+import { ApiError, portalApi, portalKey, projectApi, projectKey, type PortalState, type ProjectSummary } from "../../api";
 import { canAdmin, canOwn, isProduction, signedInAs, useSignOut } from "../../lib/identity";
 import { projectStatus, type StatusTone } from "../../lib/projectStatus";
 import { hardNavigate } from "../../lib/navigation";
@@ -216,7 +216,16 @@ function ProjectSwitcher({ slug, name }: { slug?: string; name?: string }) {
   );
 }
 
-export function Sidebar({ slug, projectName }: { slug?: string; projectName?: string }) {
+export function Sidebar({
+  slug,
+  projectName,
+  inSheet = false,
+}: {
+  slug?: string;
+  projectName?: string;
+  /** In the phone sheet: the logo row leaves room for the sheet's close button (top right). */
+  inSheet?: boolean;
+}) {
   const setPaletteOpen = useUi((s) => s.setPaletteOpen);
   const setNavOpen = useUi((s) => s.setNavOpen);
   const state = useQuery({ queryKey: portalKey("state"), queryFn: portalApi.state });
@@ -236,7 +245,18 @@ export function Sidebar({ slug, projectName }: { slug?: string; projectName?: st
   const initialized = !!current?.initialized;
   const importing = !!current?.importing;
   const canChat = can(current, "project.chat");
-  const showChats = !!slug && canChat && !linked && initialized && !importing;
+  // The project layout's unsafe-path probe (and the Overview's estimate) share this key.
+  const probe = useQuery({
+    queryKey: projectKey(slug ?? "", "scan-estimate"),
+    queryFn: () => projectApi(slug ?? "").scanEstimate(),
+    enabled: false,
+  });
+  const unsafe = probe.isError && probe.error instanceof ApiError && probe.error.code === "unsafe_path";
+  // Only a project whose data can be opened gets a Chats block (and so a sessions
+  // request), as for one that is not set up: not with the folder missing or not a
+  // repository, nor with a symlink in the way.
+  const openable = current?.root_status === "ok" && !unsafe;
+  const showChats = !!slug && canChat && !linked && initialized && !importing && openable;
   const signOut = useSignOut();
   const base = state.data?.base_url?.replace(/\/$/, "") ?? "";
   // The base host's pages offer "Back to <org>" when they know where you came from.
@@ -249,7 +269,7 @@ export function Sidebar({ slug, projectName }: { slug?: string; projectName?: st
       className="flex h-full w-60 shrink-0 flex-col overflow-y-auto border-r border-sidebar-border bg-sidebar text-sidebar-foreground"
     >
       <div className="flex shrink-0 flex-col gap-3 px-3 pb-3 pt-4">
-        <div className="flex items-center gap-2 px-1.5">
+        <div className={cn("flex items-center gap-2 px-1.5", inSheet && "pr-9")}>
           <div className="flex size-[22px] items-center justify-center rounded-md bg-primary">
             <NetworkIcon className="size-3.5 text-primary-foreground" aria-hidden />
           </div>

@@ -19,7 +19,7 @@ import { PortChangeBanner } from "../components/portal/PortChangeNotice";
 import { ProjectStatusBadge as StatusBadge } from "../components/portal/ProjectStatusBadge";
 import { ScanMenuItems } from "../components/portal/ScanMenu";
 import { PageContainer } from "../components/layout/PageContainer";
-import { PathText } from "../components/layout/PathText";
+import { PathText, pathRepeatsName } from "../components/layout/PathText";
 import { EmptyState } from "../components/state/EmptyState";
 import { ErrorState } from "../components/state/ErrorState";
 import { CardGridSkeleton } from "../components/state/Skeletons";
@@ -93,7 +93,8 @@ function Subtitle({ project, production, shared }: { project: ProjectSummary; pr
       </span>
     );
   }
-  return project.root ? (
+  // A repo directly in a shared folder would print its own name again: no subtitle.
+  return project.root && !pathRepeatsName(project.root, shared, project) ? (
     <span className="flex min-w-0 text-muted-foreground" data-testid="card-subtitle">
       <PathText path={project.root} base={shared} />
     </span>
@@ -225,7 +226,8 @@ function ProjectCard({
           {formatNumber(stats.rationale_cards)} {stats.rationale_cards === 1 ? "symbol" : "symbols"} explained
         </p>
       )}
-      {project.usage && <CostLine usage={project.usage} />}
+      {/* No "$0.00 this month" on a project with nothing spent and no budget to measure against. */}
+      {project.usage && (project.usage.month_spend_usd > 0 || project.usage.budget) && <CostLine usage={project.usage} />}
     </li>
   );
 }
@@ -348,7 +350,7 @@ export function ProjectsPage() {
         </div>
       )}
 
-      {projects.isLoading && <CardGridSkeleton count={4} label="Loading projects" />}
+      {projects.isLoading && <CardGridSkeleton count={4} cols={2} cardClassName="h-40" label="Loading projects" />}
       {projects.isError && (
         <ErrorState error={projects.error} title="Couldn't load projects" onRetry={() => void projects.refetch()} />
       )}

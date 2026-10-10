@@ -32,6 +32,7 @@ export function agentKindLabel(kind: string): string {
 
 export const EVENT_LABEL: Record<OverviewEventKind, string> = {
   import: "Import",
+  first_scan: "First scan",
   full_scan: "Full scan",
   describe: "Descriptions",
   failed: "Failed run",
@@ -40,6 +41,7 @@ export const EVENT_LABEL: Record<OverviewEventKind, string> = {
 
 export const EVENT_TONE: Record<OverviewEventKind, ChartMarker["tone"]> = {
   import: "info",
+  first_scan: "info",
   full_scan: "ok",
   describe: "ok",
   failed: "error",
@@ -55,19 +57,34 @@ const DAY_MONTH_TIME = new Intl.DateTimeFormat(undefined, {
   hour: "numeric",
   minute: "2-digit",
 });
+const DAY_MONTH_SECONDS = new Intl.DateTimeFormat(undefined, {
+  day: "numeric",
+  month: "short",
+  hour: "numeric",
+  minute: "2-digit",
+  second: "2-digit",
+});
 
-/** `9 Oct`, with the time when two scans share a day, so every category is unique. */
+/** Each label, refined with `finer` wherever two labels collide. */
+function refine(labels: string[], ats: string[], finer: Intl.DateTimeFormat): string[] {
+  const count = new Map<string, number>();
+  for (const l of labels) count.set(l, (count.get(l) ?? 0) + 1);
+  return labels.map((l, i) => ((count.get(l) ?? 0) > 1 ? finer.format(new Date(ats[i])) : l));
+}
+
+/**
+ * `9 Oct`, with the time when two scans share a day and the seconds when they
+ * share a minute, so every category reads as a distinct moment. Runs in the same
+ * second get an invisible suffix: a category axis needs unique values.
+ */
 function pointLabels(ats: string[]): string[] {
   const days = ats.map((at) => DAY_MONTH.format(new Date(at)));
-  const count = new Map<string, number>();
-  for (const d of days) count.set(d, (count.get(d) ?? 0) + 1);
-  const labels = ats.map((at, i) => ((count.get(days[i]) ?? 0) > 1 ? DAY_MONTH_TIME.format(new Date(at)) : days[i]));
-  // Two scans in the same minute: number the repeats.
+  const labels = refine(refine(days, ats, DAY_MONTH_TIME), ats, DAY_MONTH_SECONDS);
   const seen = new Map<string, number>();
   return labels.map((l) => {
-    const n = (seen.get(l) ?? 0) + 1;
-    seen.set(l, n);
-    return n > 1 ? `${l} (${n})` : l;
+    const n = seen.get(l) ?? 0;
+    seen.set(l, n + 1);
+    return l + "\u200b".repeat(n);
   });
 }
 

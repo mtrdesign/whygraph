@@ -216,6 +216,7 @@ def test_coverage_points_and_events(local: SimpleNamespace) -> None:
     )
     _run(pid, status="cancelled", summary={"cancelled_by": "user"}, days_ago=5)
     described = _run(pid, trigger="describe", analyze=True, days_ago=4)
+    cloned = _run(pid, trigger="initial", summary={"cloned": True}, days_ago=3.5)
     failed = _run(pid, status="failed", summary={"error": "boom"}, days_ago=3)
     with portal_db.get_session() as session:  # queued / running: never charted
         session.add(ScanRun(project_id=pid, trigger="manual", status="queued"))
@@ -247,10 +248,11 @@ def test_coverage_points_and_events(local: SimpleNamespace) -> None:
         },
     ]
     assert [(e["run_id"], e["kind"]) for e in body["events"]] == [
-        (imported, "import"),
+        (imported, "first_scan"),
         (full, "full_scan"),
         (stopped, "budget_stop"),
         (described, "describe"),
+        (cloned, "import"),
         (failed, "failed"),
     ]
     assert body["events"][0]["at"] == _stamp(9)

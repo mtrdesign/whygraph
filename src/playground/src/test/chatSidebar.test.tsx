@@ -109,6 +109,9 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
         json({ provider: "openai", source: "live", default_model: "gpt-x", models: [{ id: "gpt-x", display_name: "GPT X" }] }),
       );
     }
+    if (rest === "/scan-estimate" && slug === "unsafe") {
+      return Promise.resolve(json({ error: "a symlink is in the way", code: "unsafe_path", path: ".whygraph" }, 409));
+    }
     if (rest === "/chat/sessions" && method === "GET") return Promise.resolve(json(fake.sessions));
     if (rest === "/chat/sessions" && method === "POST") {
       const b = (body ?? {}) as { provider?: string; model?: string };
@@ -172,6 +175,8 @@ beforeEach(() => {
       alpha: project("alpha"),
       linked: project("linked", { source: "platform", link: { status: "ok" } }),
       fresh: project("fresh", { initialized: false, initialized_at: null }),
+      legacy: project("legacy", { root_status: "missing", stats: null }),
+      notgit: project("notgit", { root_status: "not_git", stats: null }),
     },
     sessions: [],
     calls: [],
@@ -218,6 +223,25 @@ describe("the Chats section", () => {
     expect(within(freshNav).queryByRole("link", { name: "Scans" })).toBeNull();
     expect(screen.queryByTestId("chats-section")).toBeNull();
     expect(sessionCalls()).toHaveLength(0);
+  });
+
+  it.each(["legacy", "notgit"])(
+    "is absent, with no sessions request, when the project folder cannot be opened (%s)",
+    async (slug) => {
+      mount(`/p/${slug}/settings`);
+      const nav = await screen.findByRole("navigation", { name: "Main" });
+      await waitFor(() => expect(fake.calls.some((c) => c.path === `/api/projects/${slug}`)).toBe(true));
+      await within(nav).findByRole("link", { name: "Settings" });
+      expect(screen.queryByTestId("chats-section")).toBeNull();
+      expect(sessionCalls()).toHaveLength(0);
+    },
+  );
+
+  it("goes away once the probe finds a symlink in the way", async () => {
+    fake.projects.unsafe = project("unsafe", { stats: null });
+    mount("/p/unsafe/explorer");
+    expect(await screen.findByTestId("problem-unsafe_path")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByTestId("chats-section")).toBeNull());
   });
 
   it("lists 20 sessions with a relative date, then 20 more on Show more", async () => {

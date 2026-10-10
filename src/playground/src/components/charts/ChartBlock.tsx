@@ -308,7 +308,8 @@ export function buildOption(
     name: yLabel,
     nameTextStyle: { color: colors.muted, fontSize: 11 },
     splitNumber: 4,
-    ...(valueFormat === "pct" ? { min: 0, max: 100 } : {}),
+    // A share reads on quarter ticks: 0 / 25 / 50 / 75 / 100 %.
+    ...(valueFormat === "pct" ? { min: 0, max: 100, interval: 25 } : {}),
     axisLabel: {
       color: colors.muted,
       fontSize: 11,

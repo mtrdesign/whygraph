@@ -31,9 +31,13 @@ describe("PathText", () => {
     expect(el).toHaveAttribute("title", "/a/b/c");
     expect(el).toHaveTextContent("b/c");
   });
-  it("wraps in block variant", () => {
+  it("wraps in block variant between segments, never with break-all", () => {
     render(<PathText path="/a/b" variant="block" />);
-    expect(screen.getByLabelText("/a/b").className).toContain("break-all");
+    const el = screen.getByLabelText("/a/b");
+    expect(el.className).toContain("wrap-anywhere");
+    expect(el.className).not.toContain("break-all");
+    expect(el.textContent).toBe("/a/b");
+    expect(el.querySelectorAll("wbr")).toHaveLength(2);
   });
 });
 

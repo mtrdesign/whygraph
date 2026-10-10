@@ -270,7 +270,9 @@ export function projectHealth(
     if (scope !== "member") pill({ key: "stopped", label: "Stopped", tone: "warn", tooltip: "Monthly budget reached" });
   }
 
-  // 8. No key for the describe / rationale / chat model.
+  // 8. No key for the describe / rationale / chat model. The payload names only the
+  // provider (the first task without a key), not which tasks use it, so the detail
+  // names no task: Chat may well run on another provider that has a key.
   const missingKey = "missing_key" in p ? p.missing_key : null;
   if (!linked && usable && missingKey) {
     const provider = providerLabel(missingKey);
@@ -279,7 +281,7 @@ export function projectHealth(
       id: "missing_key",
       tone: "warn",
       title: `No ${provider} key`,
-      detail: `Commit descriptions, rationale cards and Chat need a ${provider} API key.${
+      detail: `A model this project uses runs on ${provider}, and no ${provider} API key is set, so the features on that model cannot run.${
         canConfigure ? "" : " Ask a project admin to add one."
       }`,
       actions: canConfigure ? [{ kind: "add_key", label: "Add a key" }] : [],

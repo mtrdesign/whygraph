@@ -161,6 +161,12 @@ describe("projectHealth precedence (plan section 4.10)", () => {
     });
     expect(busy.items.map((i) => i.id)).toEqual(["missing_key", "failed", "waiting"]);
     expect(busy.items[0].title).toBe("No Anthropic key");
+    // The payload names the provider, not the tasks: no task is named (Chat may run
+    // on another provider), and no "a Anthropic".
+    expect(busy.items[0].detail).toBe(
+      "A model this project uses runs on Anthropic, and no Anthropic API key is set, so the features on that model cannot run.",
+    );
+    expect(busy.items[0].detail).not.toMatch(/Chat|\ba Anthropic/);
     expect(busy.items[1]).toMatchObject({ detail: "git fetch failed" });
     expect(busy.items[1].actions.map((a) => a.label)).toEqual(["Retry", "Open log"]);
     expect(busy.items[1].actions[1].runId).toBe(9);
@@ -235,6 +241,45 @@ describe("Overview chart data", () => {
       [chart.rows[1][0], "Failed run", "error"],
     ]);
     expect(coverageChart({ coverage: { points: [] }, events: [] })).toBeNull();
+  });
+
+  it("calls a local first scan a first scan, not an import, with the info tone", () => {
+    const point = (run_id: number, at: string) => ({ run_id, at, commits: 4, described: 0, described_pct: 0, rationale_cards: 0 });
+    const chart = coverageChart({
+      coverage: { points: [point(1, "2026-10-01T10:00:00Z"), point(2, "2026-10-02T10:00:00Z")] },
+      events: [
+        { run_id: 1, at: "2026-10-01T10:00:00Z", kind: "first_scan" },
+        { run_id: 2, at: "2026-10-02T10:00:00Z", kind: "import" },
+      ],
+    })!;
+    expect(chart.markers?.map((m) => [m.label, m.tone])).toEqual([
+      ["First scan", "info"],
+      ["Import", "info"],
+    ]);
+  });
+
+  it("labels same-minute scans by their seconds, never with a numbered repeat", () => {
+    const point = (run_id: number, at: string) => ({ run_id, at, commits: 4, described: 0, described_pct: 0, rationale_cards: 0 });
+    const chart = coverageChart({
+      coverage: {
+        points: [
+          point(1, "2026-10-09T09:00:00Z"),
+          point(2, "2026-10-10T13:17:05Z"),
+          point(3, "2026-10-10T13:17:40Z"),
+          point(4, "2026-10-10T13:17:40Z"),
+        ],
+      },
+      events: [],
+    })!;
+    const labels = chart.rows.map((r) => String(r[0]));
+    expect(new Set(labels).size).toBe(4);
+    expect(labels.some((l) => /\(\d\)/.test(l))).toBe(false);
+    // A different day keeps the bare date; the same minute shows its seconds.
+    expect(labels[0]).not.toMatch(/\d:\d\d/);
+    expect(labels[1]).toMatch(/:05/);
+    expect(labels[2]).toMatch(/:40/);
+    // The same second reads the same: only an invisible suffix tells them apart.
+    expect(labels[3].replace(/\u200b/g, "")).toBe(labels[2]);
   });
 
   it("draws one agent series per mode, and labels call kinds", () => {
@@ -359,20 +404,37 @@ describe("Projects list", () => {
         last_scan_stats: { commits: 1240, described_pct: 38.2, rationale_cards: 52, as_of: OLD },
         usage: { month_spend_usd: 12.4, budget: { monthly_usd: 50, hard_stop: false }, pct: 24.8 },
       }),
-      summary({ slug: "beta", name: "Beta", my_role: "contributor", permissions: CONTRIBUTOR }),
+      summary({ slug: "beta", name: "Beta", root: "/repos/team/beta", my_role: "contributor", permissions: CONTRIBUTOR }),
     ];
     mount("/");
     const alpha = await screen.findByTestId("project-alpha");
     expect(within(alpha).getByTestId("card-stats")).toHaveTextContent("1,240 commits · 38% described · 52 symbols explained");
     expect(within(alpha).getByTestId("card-cost")).toHaveTextContent("$12 this month of $50");
     expect(within(alpha).getByRole("meter")).toHaveAttribute("aria-valuenow", "25");
-    expect(within(alpha).getByTestId("card-subtitle")).toHaveTextContent("alpha");
+    // A repo directly in the shared folder would only repeat its name: no subtitle;
+    // a nested one shows the path relative to the shared folder.
+    expect(within(alpha).queryByTestId("card-subtitle")).toBeNull();
+    expect(within(screen.getByTestId("project-beta")).getByTestId("card-subtitle")).toHaveTextContent("team/beta");
     expect(within(alpha).queryByTestId("role-badge")).toBeNull();
     expect(within(screen.getByTestId("project-beta")).getByTestId("role-badge")).toHaveTextContent("Contributor");
     expect(screen.queryByTestId("source-badge")).toBeNull();
     expect(screen.getByTestId("projects-count")).toHaveTextContent("2 projects");
     // New project stays in the header.
     expect(screen.getByRole("link", { name: "New project" })).toHaveAttribute("href", "/projects/new");
+  });
+
+  it("shows no cost on a card with nothing spent and no budget (a project that needs setup)", async () => {
+    fake.projects = [
+      summary({ initialized: false, initialized_at: null, last_scan_at: null, usage: { month_spend_usd: 0, budget: null, pct: null } }),
+      summary({ slug: "beta", name: "Beta", usage: { month_spend_usd: 0, budget: { monthly_usd: 20, hard_stop: false }, pct: 0 } }),
+      summary({ slug: "gamma", name: "Gamma", usage: { month_spend_usd: 1.25, budget: null, pct: null } }),
+    ];
+    mount("/");
+    const alpha = await screen.findByTestId("project-alpha");
+    expect(within(alpha).queryByTestId("card-cost")).toBeNull();
+    expect(alpha).not.toHaveTextContent("this month");
+    expect(within(screen.getByTestId("project-beta")).getByTestId("card-cost")).toHaveTextContent("$0.00 this month of $20");
+    expect(within(screen.getByTestId("project-gamma")).getByTestId("card-cost")).toHaveTextContent("$1.25 this month");
   });
 
   it("hides Scanned on a scanning card and shows the pill instead", async () => {
@@ -482,6 +544,10 @@ describe("Overview", () => {
     expect(within(stats).getByTestId("stat-described")).toHaveTextContent("471 of 1,240");
     expect(within(stats).getByTestId("stat-pull-requests")).toHaveTextContent("No GitHub data: add a GitHub token");
     expect(within(stats).getByTestId("stat-explained")).toHaveTextContent("52");
+    // The fifth tile spans both phone columns.
+    expect(within(stats).getByTestId("stat-explained")).toHaveClass("col-span-2");
+    // A repo directly in the shared folder: the subtitle would only repeat the name.
+    expect(screen.queryByTestId("overview-subtitle")).toBeNull();
     expect(screen.getByRole("button", { name: "About Symbols explained" })).toBeInTheDocument();
     // A contributor gets a plain Rescan; no Full rescan to offer.
     expect(screen.getByRole("button", { name: "Rescan" })).toBeEnabled();

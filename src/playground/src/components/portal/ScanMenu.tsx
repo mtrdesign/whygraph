@@ -68,9 +68,11 @@ function ScanItem({
       onClick={onClick}
       aria-labelledby={`${id}-label`}
       aria-describedby={`${id}-desc`}
+      // The item stays opaque so the reason line keeps its contrast; the label carries
+      // the disabled look (muted and faded) with the menu's not-allowed cursor.
       className="flex-col items-start gap-0.5 py-1.5 data-disabled:opacity-100"
     >
-      <span id={`${id}-label`} className={avail.allowed ? "font-medium" : "font-medium text-muted-foreground"}>
+      <span id={`${id}-label`} className={avail.allowed ? "font-medium" : "font-medium text-muted-foreground opacity-60"}>
         {label}
       </span>
       <span id={`${id}-desc`} className="text-xs text-muted-foreground">

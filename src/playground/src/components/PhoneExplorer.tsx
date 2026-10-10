@@ -35,7 +35,7 @@ export function PhoneExplorer() {
 
   return (
     <Tabs value={pane} onValueChange={(v) => setPane(v as PaneKey)} className="min-h-0 flex-1 gap-0" data-testid="phone-explorer">
-      <TabsList variant="scrollable" aria-label="Explorer panes" className="shrink-0 rounded-none">
+      <TabsList variant="scrollable" aria-label="Explorer panes" className="shrink-0 rounded-none px-4">
         {PANES.map((p) => (
           <TabsTrigger key={p.key} value={p.key} className="text-sm">
             {p.label}

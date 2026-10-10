@@ -1730,7 +1730,7 @@ export interface OverviewCoveragePoint {
   rationale_cards: number;
 }
 
-export type OverviewEventKind = "import" | "full_scan" | "describe" | "failed" | "budget_stop";
+export type OverviewEventKind = "import" | "first_scan" | "full_scan" | "describe" | "failed" | "budget_stop";
 
 /** `GET /api/projects/{slug}/overview`. */
 export interface ProjectOverview {

@@ -25,6 +25,8 @@ export interface ChartColors {
   muted: string;
   /** Values and tooltip text. */
   fg: string;
+  /** The info tone's marker (imports, first scans): mirrors `--info`. */
+  info: string;
   /** Six fixed categorical slots; slot 0 is the brand accent. */
   palette: readonly string[];
 }
@@ -36,6 +38,7 @@ export const CHART_COLORS: Record<ResolvedTheme, ChartColors> = {
     grid: "#d7d7da",
     muted: "#626369", // --muted-foreground
     fg: "#18181b", // --foreground
+    info: "#0062a1", // --info
     palette: ["#5959e8", "#d95926", "#199e70", "#b07800", "#d55181", "#008300"],
   },
   dark: {
@@ -44,6 +47,7 @@ export const CHART_COLORS: Record<ResolvedTheme, ChartColors> = {
     grid: "#2d2d31",
     muted: "#a4a4ab", // --muted-foreground
     fg: "#ebebee", // --foreground
+    info: "#78bff9", // --info
     palette: ["#6366f1", "#d95926", "#199e70", "#c98500", "#d55181", "#008300"],
   },
 };
@@ -63,6 +67,6 @@ export function markerColor(colors: ChartColors, tone: "info" | "ok" | "warn" | 
     case "warn":
       return colors.palette[3];
     default:
-      return colors.muted;
+      return colors.info;
   }
 }

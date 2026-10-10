@@ -1,3 +1,5 @@
+import { cn } from "cn";
+import { PageContainer } from "../layout/PageContainer";
 import { Skeleton } from "../ui/skeleton";
 
 // Loading placeholders in the shape of what lands, so nothing shifts when the data
@@ -12,24 +14,53 @@ function Busy({ label = "Loading", className, children }: { label?: string; clas
   );
 }
 
-/** A page: a title line, a sub line and two blocks. */
-export function PageSkeleton({ label }: { label?: string }) {
+/**
+ * A page: a title line, a sub line and two blocks, inside the `PageContainer` of
+ * the page it stands for (`width`, `className`), so nothing jumps when it lands.
+ */
+export function PageSkeleton({
+  label,
+  width,
+  className,
+}: {
+  label?: string;
+  width?: React.ComponentProps<typeof PageContainer>["width"];
+  className?: string;
+}) {
   return (
-    <Busy label={label} className="mx-auto flex w-full max-w-5xl flex-col gap-4 p-6">
-      <Skeleton className="h-7 w-48" />
-      <Skeleton className="h-4 w-72 max-w-full" />
-      <Skeleton className="h-32 w-full" />
-      <Skeleton className="h-48 w-full" />
-    </Busy>
+    <PageContainer width={width} className={cn("flex flex-col gap-4", className)}>
+      <Busy label={label} className="flex flex-col gap-4">
+        <Skeleton className="h-7 w-48" />
+        <Skeleton className="h-4 w-72 max-w-full" />
+        <Skeleton className="h-32 w-full" />
+        <Skeleton className="h-48 w-full" />
+      </Busy>
+    </PageContainer>
   );
 }
 
-/** A grid of cards (the projects list, tiles). */
-export function CardGridSkeleton({ count = 6, label }: { count?: number; label?: string }) {
+/**
+ * A grid of cards (the projects list, tiles): `cols` is the grid's widest column
+ * count and `cardClassName` a card's height, both as in the grid that lands.
+ */
+export function CardGridSkeleton({
+  count = 6,
+  cols = 3,
+  cardClassName = "h-28",
+  label,
+}: {
+  count?: number;
+  cols?: 2 | 3;
+  cardClassName?: string;
+  label?: string;
+}) {
   return (
-    <Busy label={label} className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+    <Busy
+      label={label}
+      className={cn("grid grid-cols-1 gap-3 sm:grid-cols-2", cols === 3 && "lg:grid-cols-3")}
+    >
       {Array.from({ length: count }, (_, i) => (
-        <Skeleton key={i} className="h-28 w-full rounded-xl" />
+        <Skeleton key={i} className={cn("w-full rounded-xl", cardClassName)} />
       ))}
     </Busy>
   );

@@ -78,6 +78,7 @@ import { ForbiddenState } from "./components/state/ForbiddenState";
 import { NotFoundState } from "./components/state/NotFoundState";
 import { PortalErrorPage } from "./components/state/PortalErrorPage";
 import { QueryState } from "./components/state/QueryState";
+import { PageContainer } from "./components/layout/PageContainer";
 import { PageSkeleton } from "./components/state/Skeletons";
 import {
   type BaseSearch,
@@ -615,6 +616,15 @@ const memberUsageRoute = createRoute({
 // edge-state notice (screen 12) instead of firing requests that can only fail.
 const DATA_PAGES = new Set(["explorer", "chat", "scans"]);
 
+// The width of each project page's `PageContainer`, so the layout's loading and
+// error states sit where the page will (PH-11, ER-5). The Overview, the wizard and
+// the scan pages are narrow; Settings the default; Explorer and Chat full.
+const PAGE_WIDTH: Record<string, React.ComponentProps<typeof PageContainer>["width"]> = {
+  explorer: "full",
+  chat: "full",
+  settings: "default",
+};
+
 function ProjectLayout() {
   const { slug } = useParams({ strict: false }) as { slug: string };
   const readOnly = useReadOnly();
@@ -654,7 +664,8 @@ function ProjectLayout() {
     );
   }
 
-  const notice = (node: React.ReactNode) => <div className="mx-auto w-full max-w-3xl p-6">{node}</div>;
+  const width = PAGE_WIDTH[page ?? ""] ?? "narrow";
+  const notice = (node: React.ReactNode) => <PageContainer width="narrow">{node}</PageContainer>;
   const pageBody = (data: ProjectDetails): React.ReactNode => {
     // A production import still cloning (or whose clone failed) has no folder and no
     // project DB yet: its scans and run pages stream the clone; Explorer and Chat wait.
@@ -681,7 +692,7 @@ function ProjectLayout() {
     }
     if (DATA_PAGES.has(page)) {
       // Hold the page back until the probe says its data can be opened.
-      if (data.root_status === "ok" && data.initialized && probeWanted && probe.isLoading) return <PageSkeleton />;
+      if (data.root_status === "ok" && data.initialized && probeWanted && probe.isLoading) return <PageSkeleton width={width} />;
       if (data.root_status !== "ok") return notice(<ProjectUnavailable project={data} />);
       if (!data.initialized) return notice(<NotInitialized slug={slug} />);
       if (probe.isError && projectProblem(probe.error).kind === "unsafe_path") {
@@ -690,10 +701,10 @@ function ProjectLayout() {
     }
     return <Outlet />;
   };
-  const body = (
+  const gate = (
     <QueryState
       query={project}
-      loading={<PageSkeleton />}
+      loading={<PageSkeleton width={width} className={page ? undefined : "sm:py-8"} />}
       errorTitle="Couldn't load this project"
       forbidden={{ what: "this project", grant: "project-admin" }}
       notFound="project"
@@ -701,6 +712,10 @@ function ProjectLayout() {
       {pageBody}
     </QueryState>
   );
+  // The error, forbidden and not-found states get the page's container (the
+  // skeleton brings its own); a loaded project's page renders its own.
+  const body =
+    project.data === undefined && project.isError ? <PageContainer width={width}>{gate}</PageContainer> : gate;
 
   // `key={slug}` remounts the whole subtree on a project switch, so component
   // state (tree expansion, open tab, a half-typed chat draft) cannot carry over.

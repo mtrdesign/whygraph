@@ -93,6 +93,7 @@ describe("chart colour tables", () => {
       expect(colors.tooltip).toBe(resolve(selector, "--popover"));
       expect(colors.muted).toBe(resolve(selector, "--muted-foreground"));
       expect(colors.fg).toBe(resolve(selector, "--foreground"));
+      expect(colors.info).toBe(resolve(selector, "--info"));
     }
   });
 });
@@ -205,8 +206,14 @@ describe("buildOption markers and pct (M2f-3 S16)", () => {
 
   it("formats pct on the axis (0 to 100) and in the Table view", async () => {
     const option = buildOption(line, CHART_COLORS.light, { valueFormat: "pct" });
-    const axis = option.yAxis as { min: number; max: number; axisLabel: { formatter: (v: number) => string } };
-    expect([axis.min, axis.max]).toEqual([0, 100]);
+    const axis = option.yAxis as {
+      min: number;
+      max: number;
+      interval: number;
+      axisLabel: { formatter: (v: number) => string };
+    };
+    // Quarter ticks: 0 / 25 / 50 / 75 / 100 %, never a cramped 90-100 pair.
+    expect([axis.min, axis.max, axis.interval]).toEqual([0, 100, 25]);
     expect(axis.axisLabel.formatter(50)).toBe("50%");
     render(
       <ThemeProvider>
@@ -215,6 +222,17 @@ describe("buildOption markers and pct (M2f-3 S16)", () => {
     );
     await userEvent.click(screen.getByRole("button", { name: "table" }));
     expect(screen.getByText("42.5%")).toBeInTheDocument();
+  });
+
+  it("colours an info marker with the info token, not the muted grey", () => {
+    const option = buildOption(
+      { ...line, markers: [{ x: "3 Oct", label: "First scan", tone: "info" }] },
+      CHART_COLORS.dark,
+      { valueFormat: "pct" },
+    );
+    const markers = (option.series as Array<{ data: unknown[] }>)[1];
+    expect(markers.data[1]).toMatchObject({ itemStyle: { color: CHART_COLORS.dark.info } });
+    expect(CHART_COLORS.dark.info).not.toBe(CHART_COLORS.dark.muted);
   });
 
   it("ignores markers on a stacked chart", () => {

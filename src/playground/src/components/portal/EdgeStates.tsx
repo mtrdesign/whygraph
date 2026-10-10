@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { DownloadIcon, FolderXIcon, LinkIcon, PlayIcon } from "lucide-react";
 import { portalApi, portalKey, projectKey, type ProjectDetails } from "../../api";
 import type { ProjectProblem } from "../../lib/errors";
+import { usePortalState } from "../../lib/identity";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
 import { CommandBlock } from "../layout/CommandBlock";
@@ -38,6 +39,7 @@ export function ProjectUnavailable({ project }: { project: ProjectDetails }) {
     void queryClient.invalidateQueries({ queryKey: portalKey("projects") });
     void queryClient.invalidateQueries({ queryKey: projectKey(slug, "root-check") });
   };
+  const shared = usePortalState().data?.shared_folders;
   const notGit = project.root_status === "not_git";
   const unshared = local && check.data && !check.data.shared ? check.data : null;
 
@@ -48,7 +50,14 @@ export function ProjectUnavailable({ project }: { project: ProjectDetails }) {
         {notGit ? "This folder is no longer a git repository" : "The project folder is not available"}
       </AlertTitle>
       <AlertDescription>
-        {project.root && <PathText path={project.root} variant="block" className="text-foreground" />}
+        {project.root && <PathText
+            path={project.root}
+            // Relative to its shared folder, unless that folder is no longer shared:
+            // then the whole path is what to share again.
+            base={unshared ? undefined : shared}
+            variant="block"
+            className="text-foreground"
+          />}
         {notGit ? (
           <p className="mt-1">
             The <span className="font-mono">.git</span> folder is gone. Restore it, or remove the

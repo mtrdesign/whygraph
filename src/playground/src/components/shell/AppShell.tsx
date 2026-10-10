@@ -172,7 +172,8 @@ export function AppShell({
           className="w-60 gap-0 p-0 data-[side=left]:w-60 data-[side=left]:sm:max-w-60 sm:max-w-60"
         >
           <SheetTitle className="sr-only">Navigation</SheetTitle>
-          <Sidebar slug={slug} projectName={projectName} />
+          {/* `inSheet` keeps the header row clear of the sheet's own close button. */}
+          <Sidebar slug={slug} projectName={projectName} inSheet />
         </SheetContent>
       </Sheet>
       <div className="flex min-w-0 flex-1 flex-col">

@@ -363,6 +363,10 @@ describe("Chat content", () => {
     expect(box).toBeDisabled();
     expect(box).toHaveAttribute("aria-describedby", "composer-notice");
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    // The provider select names the provider and that it has no key, never an env var.
+    const provider = screen.getByRole("combobox", { name: "Provider" });
+    await waitFor(() => expect(provider).toHaveTextContent("OpenAI (no key)"));
+    expect(document.body).not.toHaveTextContent("OPENAI_API_KEY");
   });
 
   it("asks a non-owner in production to ask an owner", async () => {

@@ -353,8 +353,8 @@ describe("Projects", () => {
         (_, el) => el?.getAttribute("data-status") !== null && el !== null,
       );
     expect(status("ready")).toHaveTextContent("Ready");
-    expect(status("behind")).toHaveTextContent("Stale, 4 commits behind");
-    expect(status("fresh")).toHaveTextContent("Not initialized");
+    expect(status("behind")).toHaveTextContent("Behind");
+    expect(status("fresh")).toHaveTextContent("Needs setup");
     expect(status("busy")).toHaveTextContent("Scanning");
     expect(status("gone")).toHaveTextContent("Folder missing");
     expect(screen.getByTestId("project-hub")).toHaveTextContent("github.com/acme/hub");

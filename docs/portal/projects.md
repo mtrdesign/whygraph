@@ -113,6 +113,93 @@ prices or your organization's own; a model with no price shows tokens only. Spen
 tracked on [Usage & cost](usage.md). Choose **Describe now** to spend on per-commit
 descriptions, or **Later** to let them backfill on demand. See [Scanning](../guide/scanning.md).
 
+## The Projects list
+
+The **Projects** page lists every project you can see, as cards. Each card shows:
+
+- the project's name and where it lives: the folder (relative to its shared folder) locally, the
+  GitHub repository in production, the platform and project for a linked one;
+- a **status** pill (the same one the project's Overview shows, see [Health](#health)): **Ready**,
+  **Scanning**, **Importing**, **Needs setup**, **Behind**, **Scan failed**, **Import failed**,
+  **Folder missing**, **No access**, **Link revoked**, **Stopped** (the monthly budget is reached) or
+  **Not supported**, and when it was last scanned (hidden while a scan runs, an import runs, or the
+  folder is missing);
+- the counts as of the last scan, for example "1,240 commits · 38% described · 52 symbols explained";
+- this month's spend with a thin bar against the project's budget, for people who can see the
+  project's usage;
+- a grey **Viewer** or **Contributor** badge when that is your role, **Restricted** for a restricted
+  project, and the source (**Local**, **GitHub**, **Platform**) only when the organization mixes
+  sources.
+
+From two projects up, a search box filters by name or repository, and **Sort** orders the cards by
+Name, Last scanned, Status (problems first) or Cost (when costs are shown). Both stay in the address,
+so a link keeps them. The page shows 60 cards, then **Show more**. **New project** (locally) or
+**Import** (in production) stays in the header whenever you may add one.
+
+The card's **...** menu holds **Quick rescan**, **Full rescan** (project admins) and **Settings**.
+Each rescan says what it does - a quick rescan reads git history and the code index with no LLM cost,
+a full rescan also describes new commits, with the estimated cost when the menu opens - and a rescan
+that cannot run says why instead (for example "Monthly budget reached", "No Anthropic key" or "Finish
+setting up this project first").
+
+With no projects yet, owners and admins (and the local user) see how to add the first one; a member
+sees that nobody has shared a project with them yet, and an instance administrator viewing an
+organization sees that it has none.
+
+## The Overview
+
+A project's **Overview** is its home page. The header names the status, your role when you are not a
+project admin ("Your role: Contributor"), and where the project lives - the GitHub repository (a link)
+in production, the folder locally. Its buttons follow the project's state: **Open Explorer** and the
+rescan menu when it is healthy, **Reconnect** only for a linked project whose link was revoked, and a
+disabled control always says why it is disabled.
+
+### Health
+
+The health panel lists what needs attention, most important first, each with what fixes it:
+
+| Item | What you can do |
+|---|---|
+| A linked project's link was revoked or removed, or the platform is unreachable | **Reconnect**, or remove it from this machine |
+| GitHub no longer lets WhyGraph read the repository (production) | **Reinstall the GitHub App** or **Check repository access** (owners and admins) |
+| The import is running, or did not finish | **Follow the import**; **Retry import** and **Open log** |
+| The folder is not available, or is no longer a git repository | Share the folder again (the command is shown), or remove the project |
+| A symbolic link where a real file belongs | See the [security model](security.md#symbolic-links) |
+| **Setup not finished** | **Finish setup** resumes the wizard |
+| The monthly budget is reached and its hard stop is on | See usage and budgets |
+| No key for the model that describes commits, writes rationale cards or chats | **Add a key** (project admins) |
+| The last scan failed | **Retry** and **Open log** |
+| The checkout is ahead of the last scan | **Rescan** |
+| Commits have no description yet | **Describe** (project admins); they also fill in as you browse |
+
+With nothing to report it says **Healthy**. An import ranks above "folder missing", because an
+imported repository has no folder until its clone lands.
+
+### Tiles, coverage and usage
+
+Five tiles count **Commits**, **Commits described** (with an LLM description; the share and "N of M"),
+**Pull requests**, **Issues** and **Symbols explained** (symbols with a rationale card, as the
+Explorer's coverage map shows them). Each has a one-line definition; a zero says why, for example "No
+GitHub data: add a GitHub token" for a local project whose remote is on GitHub.
+
+**Coverage over time** draws the share of described commits after each scan, with markers for imports,
+full scans, descriptions, failed runs and budget stops. The history starts with this release, so a
+project shows "History starts with the next scan" until it has two scans to compare.
+
+When commits are waiting for a description, the Overview shows how many, with the estimated cost and
+**Describe now** for project admins; everyone else sees the count without a price. People who can see
+the project's usage also get **Usage this month**: the spend against the budget, split by task, with a
+link to the project's usage and budgets.
+
+### Agent activity
+
+**Agent activity** counts the calls agents made to this project over the last 30 days: MCP calls
+locally, calls from linked portals in production. It says how many used the LLM (and what they cost,
+for people who see usage), which kinds of call they were ("Evidence lookups", "Rationale cards",
+"Area history", ...), when the last one was and, in production, who made them and through which
+connected portal. With no call in 30 days the section shows **Connect your agent** instead; see
+[Agent activity](agents.md#agent-activity).
+
 ## After setup
 
 | Where | What you do |
@@ -135,13 +222,3 @@ scan picks up where it stopped.
 Removing a project offers to strip what the portal wrote: the git hooks, the markers, and the `whygraph`
 entries in agent config files it created. It never deletes your repository, its `.whygraph/` data, or
 (for a local repo) anything else.
-
-## When something is wrong
-
-The project page explains these states instead of failing quietly:
-
-- **The folder is not available** - not shared any more, moved, or deleted. Share it again or remove
-  the project.
-- **No longer a git repository** - the `.git` folder is gone.
-- **Not set up yet** - added but never initialized; **Finish setup** resumes the wizard.
-- **A symbolic link where a real file belongs** - see the [security model](security.md#symbolic-links).

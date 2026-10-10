@@ -451,6 +451,27 @@ describe("linked project pages", () => {
     expect(fake.calls.some((c) => c.path.endsWith("/scan-estimate"))).toBe(false);
   });
 
+  it("a revoked link offers Reconnect only: no Rescan, no Manage, no Connect your agent (OVW-3)", async () => {
+    fake.projects = [project({ link: link({ status: "revoked", status_reason: "idle" }) })];
+    mount("/p/alpha");
+    const health = await screen.findByTestId("health-panel");
+    expect(health).toHaveAttribute("data-status", "link_revoked");
+    expect(screen.getByTestId("health-link")).toHaveTextContent("Access revoked");
+    const reconnect = screen.getAllByRole("link", { name: "Reconnect" });
+    expect(reconnect[0].getAttribute("href")).toContain("/link?");
+    expect(screen.queryByRole("button", { name: "Rescan" })).toBeNull();
+    expect(within(screen.getByTestId("linked-panel")).queryByRole("link", { name: /Manage on platform/ })).toBeNull();
+    expect(screen.queryByTestId("connect-agent")).toBeNull();
+    expect(screen.getByText("Link revoked")).toBeInTheDocument();
+  });
+
+  it("a healthy linked project offers a plain Rescan, never a full one", async () => {
+    mount("/p/alpha");
+    await screen.findByTestId("linked-panel");
+    expect(screen.getByRole("button", { name: "Rescan" })).toBeEnabled();
+    expect(screen.queryByRole("menuitem", { name: "Full rescan" })).toBeNull();
+  });
+
   it("a viewer on the platform sees the role and no chat link", async () => {
     fake.projects = [project({ link: link({ project_role: "viewer" }) })];
     mount("/p/alpha");

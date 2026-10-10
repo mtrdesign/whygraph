@@ -3,6 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { portalKey, projectApi, projectKey } from "../api";
+import { errorInfo } from "./apiErrors";
 
 /** What a scan request carries; every call site says what it wants (no default). */
 export type ScanBody = { trigger: "manual" | "describe"; analyze?: boolean };
@@ -47,7 +48,11 @@ export function useScanActions(slug: string, current?: { id: number; active: boo
   const scan = useMutation({
     mutationFn: (body: ScanBody) => projectApi(slug).requestScan(body),
     onSuccess: ({ run_id }) => landed(run_id, "Scan"),
-    onError: (err) => toast.error(err.message),
+    // A refusal (`budget_exceeded`, `forbidden`, ...) reads as the registry words it.
+    onError: (err) => {
+      const info = errorInfo(err);
+      toast.error(info.title, { description: info.message });
+    },
   });
 
   return {

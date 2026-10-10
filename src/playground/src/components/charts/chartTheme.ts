@@ -52,3 +52,17 @@ export const CHART_COLORS: Record<ResolvedTheme, ChartColors> = {
 export function useChartColors(): ChartColors {
   return CHART_COLORS[useTheme().resolvedTheme];
 }
+
+/** A marker's colour by tone, from the table's own slots (never a new hex). */
+export function markerColor(colors: ChartColors, tone: "info" | "ok" | "warn" | "error"): string {
+  switch (tone) {
+    case "error":
+      return colors.palette[1];
+    case "ok":
+      return colors.palette[2];
+    case "warn":
+      return colors.palette[3];
+    default:
+      return colors.muted;
+  }
+}

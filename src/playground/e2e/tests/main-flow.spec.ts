@@ -42,7 +42,11 @@ test.describe("main flow", () => {
     await page.goto(`/p/${notes.slug}/init?step=scan`);
     await firstScan(page, notes);
 
-    // The project overview knows it was scanned.
+    // The project overview knows it was scanned: its health, the tiles, coverage
+    // history starting with the next scan, and (no agent call yet) the setup card.
+    await expect(page.getByTestId("health-panel")).toBeVisible();
+    await expect(page.getByTestId("stat-described")).toContainText("Commits described");
+    await expect(page.getByTestId("coverage-card")).toBeVisible();
     await expect(page.getByTestId("connect-agent")).toBeVisible();
     await expect(page.getByTestId("mcp-url")).toContainText(`/mcp/${notes.slug}`);
     await page.goto("/");

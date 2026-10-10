@@ -5,7 +5,8 @@ import { portalApi, portalKey, projectKey, type ProjectDetails } from "../../api
 import type { ProjectProblem } from "../../lib/errors";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
-import { CopyButton } from "./CopyButton";
+import { CommandBlock } from "../layout/CommandBlock";
+import { PathText } from "../layout/PathText";
 import { NotFoundState, type NotFoundKind } from "../state/NotFoundState";
 
 // Screen 12: the states a project (or the portal) can be in where the normal page
@@ -47,7 +48,7 @@ export function ProjectUnavailable({ project }: { project: ProjectDetails }) {
         {notGit ? "This folder is no longer a git repository" : "The project folder is not available"}
       </AlertTitle>
       <AlertDescription>
-        <p className="font-mono text-xs text-foreground">{project.root}</p>
+        {project.root && <PathText path={project.root} variant="block" className="text-foreground" />}
         {notGit ? (
           <p className="mt-1">
             The <span className="font-mono">.git</span> folder is gone. Restore it, or remove the
@@ -65,14 +66,7 @@ export function ProjectUnavailable({ project }: { project: ProjectDetails }) {
               not shared any more (it was unshared, or the repository moved). Share it again, then
               check again:
             </p>
-            {unshared.command && (
-              <div className="flex flex-wrap items-center gap-2">
-                <code className="min-w-0 flex-1 overflow-x-auto rounded-md bg-muted px-2 py-1 font-mono text-xs text-foreground">
-                  {unshared.command}
-                </code>
-                <CopyButton text={unshared.command} />
-              </div>
-            )}
+            {unshared.command && <CommandBlock command={unshared.command} className="text-foreground" />}
           </div>
         ) : (
           <p className="mt-1">

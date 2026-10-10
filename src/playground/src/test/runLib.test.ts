@@ -178,8 +178,9 @@ describe("projectStatus with the last scan outcome", () => {
 
   it("shows a failed or interrupted last scan before staleness, and a running scan before both", () => {
     expect(projectStatus(project({ last_scan_status: "failed" }))).toMatchObject({ label: "Scan failed", tone: "error" });
+    // An interrupted run is a failed scan in the pill's vocabulary (plan section 0.3 #38).
     expect(projectStatus(project({ last_scan_status: "interrupted", stale: { commits_behind: 2 } })).label).toBe(
-      "Scan interrupted",
+      "Scan failed",
     );
     expect(
       projectStatus(project({ last_scan_status: "failed", running_scan: { id: 1, status: "running", trigger: "manual" } }))

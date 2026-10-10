@@ -18,17 +18,12 @@ import { call, configureStubLlm, STUB_REPLY } from "../lib/usage";
 // failure (`test.fail()`), so fixing it turns the run red until its entry is removed.
 // The main session maintains the list between steps; the last step empties it.
 const KNOWN_OVERFLOW: Record<string, string> = {
-  "local /": "PH-3: project cards overflow (main scrolls 913px)",
   "local /projects/new": "PH-7: the wizard stepper does not fit (main scrolls 419px)",
   "local /usage": "PH-6: the Usage tab strip overflows",
-  "local project overview": "PH-4: unbreakable mono paths and MCP URL set the width",
   "local scans": "PH-5: the scan history table scrolls inside",
   "local project settings": "PH-4: unbreakable mono paths (settings General)",
   "local wizard (configure)": "PH-7: the wizard stepper does not fit",
-  "local navigation sheet": "PH-10: the nav sheet is 293px, not 240px",
-  "production /": "PH-3: project cards overflow",
   "production /usage": "PH-6: the Usage tab strip overflows",
-  "production project overview": "PH-4 / MODE-1: the server clone path sets the width",
 };
 
 const PHONE = { width: 390, height: 844 };

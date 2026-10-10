@@ -161,6 +161,68 @@ describe("buildOption value formats", () => {
   });
 });
 
+describe("buildOption markers and pct (M2f-3 S16)", () => {
+  const line: ChartPayload = {
+    kind: "line",
+    title: "Commits described",
+    xIndex: 0,
+    yIndex: 1,
+    columns: ["Scan", "Commits described"],
+    rows: [
+      ["1 Oct", 10],
+      ["3 Oct", 42.5],
+      ["5 Oct", 60],
+    ],
+    nullRows: 0,
+    markers: [
+      { x: "3 Oct", label: "Full scan", tone: "ok" },
+      { x: "3 Oct", label: "Failed run", tone: "error" },
+      { x: "9 Oct", label: "Not on the axis", tone: "warn" },
+    ],
+  };
+
+  it("draws a marker on its category's value, coloured by the worst tone, and skips unknown ones", () => {
+    const option = buildOption(line, CHART_COLORS.light, { valueFormat: "pct" });
+    const series = option.series as Array<{ name?: string; data: unknown[]; lineStyle?: { opacity: number } }>;
+    expect(series).toHaveLength(2);
+    const markers = series[1];
+    expect(markers.lineStyle?.opacity).toBe(0);
+    expect(markers.data[0]).toBeNull();
+    expect(markers.data[2]).toBeNull();
+    expect(markers.data[1]).toMatchObject({ value: 42.5, itemStyle: { color: CHART_COLORS.light.palette[1] } });
+    expect(JSON.stringify(option)).not.toMatch(/oklch|var\(/i);
+  });
+
+  it("lists the events at a point in the tooltip, not the marker series' value", () => {
+    const option = buildOption(line, CHART_COLORS.dark, { valueFormat: "pct" });
+    const tooltip = (option.tooltip as { formatter: (p: unknown) => HTMLElement }).formatter([
+      { axisValueLabel: "3 Oct", seriesName: undefined, seriesIndex: 0, value: 42.5 },
+      { axisValueLabel: "3 Oct", seriesName: "__markers", seriesIndex: 1, value: 42.5 },
+    ]);
+    expect(tooltip.textContent).toBe("3 Oct42.5%Full scanFailed run");
+    expect(tooltip.outerHTML).not.toMatch(/oklch|var\(/i);
+  });
+
+  it("formats pct on the axis (0 to 100) and in the Table view", async () => {
+    const option = buildOption(line, CHART_COLORS.light, { valueFormat: "pct" });
+    const axis = option.yAxis as { min: number; max: number; axisLabel: { formatter: (v: number) => string } };
+    expect([axis.min, axis.max]).toEqual([0, 100]);
+    expect(axis.axisLabel.formatter(50)).toBe("50%");
+    render(
+      <ThemeProvider>
+        <ChartBlock payload={line} valueFormat="pct" />
+      </ThemeProvider>,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "table" }));
+    expect(screen.getByText("42.5%")).toBeInTheDocument();
+  });
+
+  it("ignores markers on a stacked chart", () => {
+    const option = buildOption({ ...stacked, markers: [{ x: "Jun", label: "x", tone: "info" }] }, CHART_COLORS.light);
+    expect((option.series as unknown[]).length).toBe(2);
+  });
+});
+
 describe("the chart move (components/charts)", () => {
   it("leaves no chart module under components/chat", () => {
     for (const name of ["ChartBlock.tsx", "chartSpec.ts", "chartTheme.ts", "echarts.ts"]) {

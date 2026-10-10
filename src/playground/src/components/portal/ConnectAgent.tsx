@@ -21,14 +21,14 @@ export function ConnectAgent({ mcpUrl, configured }: { mcpUrl: string; configure
       <div className="flex flex-wrap items-center gap-2">
         <code
           data-testid="mcp-url"
-          className="min-w-0 flex-1 overflow-x-auto rounded-md bg-muted px-2 py-1.5 font-mono text-xs"
+          className="min-w-0 flex-1 rounded-md bg-muted px-2 py-1.5 font-mono text-xs break-all"
         >
           {mcpUrl}
         </code>
         <CopyButton text={mcpUrl} />
       </div>
       <Tabs defaultValue={configured[0] ?? AGENTS[0].id}>
-        <TabsList>
+        <TabsList variant="scrollable" className="max-w-full">
           {AGENTS.map((a) => (
             <TabsTrigger key={a.id} value={a.id}>
               {a.label}
@@ -47,7 +47,9 @@ export function ConnectAgent({ mcpUrl, configured }: { mcpUrl: string; configure
                   <Badge variant="outline">not configured</Badge>
                 )}
               </div>
-              <pre className="max-h-56 overflow-auto rounded-md bg-muted p-3 font-mono text-xs">{snippet}</pre>
+              <pre data-scroll-x className="max-h-56 overflow-auto rounded-md bg-muted p-3 font-mono text-xs">
+                {snippet}
+              </pre>
               <div>
                 <CopyButton text={snippet} label="Copy snippet" />
               </div>

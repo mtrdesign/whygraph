@@ -265,15 +265,24 @@ function project(over: Partial<ProjectSummary> = {}): ProjectSummary {
 }
 
 describe("projectStatus", () => {
-  it("covers every badge, by precedence", () => {
-    expect(projectStatus(project()).key).toBe("ready");
-    expect(projectStatus(project({ initialized: false })).key).toBe("uninitialized");
+  it("covers every badge, by precedence, in the section 0.3 #38 words", () => {
+    expect(projectStatus(project())).toMatchObject({ key: "ready", label: "Ready" });
+    expect(projectStatus(project({ initialized: false }))).toMatchObject({ key: "needs_setup", label: "Needs setup" });
     expect(projectStatus(project({ last_scan_at: null })).key).toBe("unscanned");
     expect(projectStatus(project({ running_scan: { id: 1, status: "running", trigger: "manual" } })).label).toBe("Scanning");
-    expect(projectStatus(project({ stale: { commits_behind: 3 } })).label).toBe("Stale, 3 commits behind");
-    expect(projectStatus(project({ stale: { commits_behind: 1 } })).label).toBe("Stale, 1 commit behind");
-    expect(projectStatus(project({ stale: { commits_behind: null } })).label).toBe("Stale");
-    expect(projectStatus(project({ root_status: "missing", stale: { commits_behind: 3 } })).key).toBe("unavailable");
+    expect(projectStatus(project({ running_scan: { id: 1, status: "queued", trigger: "manual" } })).label).toBe("Scanning");
+    // Behind carries the count in its tooltip.
+    expect(projectStatus(project({ stale: { commits_behind: 3 } }))).toMatchObject({
+      label: "Behind",
+      tooltip: "3 commits behind",
+    });
+    expect(projectStatus(project({ stale: { commits_behind: 1 } })).tooltip).toBe("1 commit behind");
+    expect(projectStatus(project({ stale: { commits_behind: null } })).label).toBe("Behind");
+    expect(projectStatus(project({ root_status: "missing", stale: { commits_behind: 3 } }))).toMatchObject({
+      key: "folder_missing",
+      label: "Folder missing",
+    });
+    expect(projectStatus(project({ root_status: "not_git" })).label).toBe("Folder missing");
   });
 
   it("formats relative times", () => {

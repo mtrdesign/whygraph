@@ -529,10 +529,13 @@ describe("Project overview (screen 9a)", () => {
     const stats = await screen.findByTestId("stats");
     expect(stats).toHaveTextContent("240");
     expect(stats).toHaveTextContent("74%");
-    expect(stats).toHaveTextContent("50 · 12");
+    // Pull requests and issues are two tiles (M2f-3 S16, OVW-1).
+    expect(within(stats).getByTestId("stat-pull-requests")).toHaveTextContent("50");
+    expect(within(stats).getByTestId("stat-issues")).toHaveTextContent("12");
     expect(stats).toHaveTextContent("31");
     const recent = await screen.findByTestId("recent-scans");
-    expect(within(recent).getByText("Git hook")).toBeInTheDocument();
+    // ResponsiveTable renders the table and the phone list; either shows the trigger.
+    expect(within(recent).getAllByText("Git hook")[0]).toBeInTheDocument();
 
     expect(screen.getByTestId("mcp-url")).toHaveTextContent("http://127.0.0.1:8765/mcp/alpha");
     // Claude Code is configured, so its tab is open with the interpolated port form.

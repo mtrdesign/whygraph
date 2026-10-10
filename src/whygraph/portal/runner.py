@@ -131,6 +131,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import (
     AsyncIterator,
     Awaitable,
@@ -747,6 +748,123 @@ def stale_info(root: Path, last_scanned_head: str | None) -> dict | None:
     return {"commits_behind": commits_behind(root, last_scanned_head)}
 
 
+STALE_HEAD_TTL_SEC = 10.0
+"""Seconds :class:`StaleCache` reuses a project's ``git rev-parse HEAD``."""
+
+STALE_BEHIND_MAX = 1_000
+"""Commits-behind answers :class:`StaleCache` keeps (least recently used out)."""
+
+
+class StaleCache:
+    """The projects list's ``stale`` block, cached (M2f-3 plan section 0.3 #3).
+
+    The list is polled every 3 s while a scan runs; without a cache every
+    poll ran two ``git`` subprocesses per project. HEAD is memoised per
+    project for ``head_ttl`` seconds; the commits-behind count per
+    ``(project, HEAD, last_scanned_head)`` (it cannot change while the
+    three stay the same), at most ``max_behind`` entries, least recently
+    used out. :meth:`drop` forgets a project when one of its runs ends
+    (``ScanRunner._run_job``), because a sync moves HEAD and a scan moves
+    ``last_scanned_head``.
+
+    Thread-safe: the list handler runs in FastAPI's threadpool. The ``git``
+    calls run outside the lock.
+
+    Parameters
+    ----------
+    head_ttl : float
+        Seconds a HEAD answer is reused (:data:`STALE_HEAD_TTL_SEC`).
+    max_behind : int
+        Commits-behind entries kept (:data:`STALE_BEHIND_MAX`).
+    clock : callable, optional
+        A monotonic clock; tests inject a fake one.
+    """
+
+    def __init__(
+        self,
+        *,
+        head_ttl: float = STALE_HEAD_TTL_SEC,
+        max_behind: int = STALE_BEHIND_MAX,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.head_ttl = head_ttl
+        self.max_behind = max_behind
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._heads: dict[int, tuple[float, str | None]] = {}
+        self._behind: OrderedDict[tuple[int, str, str], int | None] = OrderedDict()
+
+    def head(self, project_id: int, root: Path) -> str | None:
+        """``root``'s HEAD, from the memo while it is younger than ``head_ttl``.
+
+        Parameters
+        ----------
+        project_id : int
+            The project (the memo key).
+        root : Path
+            Its mounted repository root.
+
+        Returns
+        -------
+        str or None
+            As :func:`git_head`.
+        """
+        now = self._clock()
+        with self._lock:
+            hit = self._heads.get(project_id)
+            if hit is not None and now - hit[0] < self.head_ttl:
+                return hit[1]
+        head = git_head(root)
+        with self._lock:
+            self._heads[project_id] = (self._clock(), head)
+        return head
+
+    def info(
+        self, project_id: int, root: Path, last_scanned_head: str | None
+    ) -> dict | None:
+        """:func:`stale_info` through the cache.
+
+        Parameters
+        ----------
+        project_id : int
+            The project.
+        root : Path
+            Its mounted repository root.
+        last_scanned_head : str or None
+            ``projects.last_scanned_head``; ``None`` (never scanned) is
+            not "stale" and runs no ``git``.
+
+        Returns
+        -------
+        dict or None
+            ``{"commits_behind": n}`` while HEAD differs, else ``None``.
+        """
+        if not last_scanned_head:
+            return None
+        head = self.head(project_id, root)
+        if head is None or head == last_scanned_head:
+            return None
+        key = (project_id, head, last_scanned_head)
+        with self._lock:
+            if key in self._behind:
+                self._behind.move_to_end(key)
+                return {"commits_behind": self._behind[key]}
+        behind = commits_behind(root, last_scanned_head)
+        with self._lock:
+            self._behind[key] = behind
+            self._behind.move_to_end(key)
+            while len(self._behind) > self.max_behind:
+                self._behind.popitem(last=False)
+        return {"commits_behind": behind}
+
+    def drop(self, project_id: int) -> None:
+        """Forget every entry of ``project_id`` (its HEAD and its counts)."""
+        with self._lock:
+            self._heads.pop(project_id, None)
+            for key in [k for k in self._behind if k[0] == project_id]:
+                del self._behind[key]
+
+
 def _git_out(root: Path, *args: str) -> str | None:
     try:
         result = subprocess.run(
@@ -1145,6 +1263,9 @@ class ScanRunner:
     org_delete_wait : float
         Seconds :meth:`reserve_projects` waits for an org's runs to end
         (:data:`ORG_DELETE_WAIT_SEC`; tests shorten it).
+    stale : StaleCache
+        The projects list's ``stale`` block; a project's entries are
+        dropped when one of its runs ends.
     """
 
     def __init__(
@@ -1180,6 +1301,8 @@ class ScanRunner:
         # Org deletion: orgs being deleted, and requests past the org check.
         self._deleting_orgs: set[int] = set()
         self._org_requests: dict[int, int] = {}
+        # The projects list's `stale` block (M2f-3 plan section 0.3 #3).
+        self.stale = StaleCache()
 
     # ---- lifecycle ------------------------------------------------------
 
@@ -1943,6 +2066,8 @@ class ScanRunner:
             if self._running.get(job.spec.project_id) is job:
                 del self._running[job.spec.project_id]
             self._live.discard(job.spec.run_id)
+            # A sync moved HEAD, a scan moved last_scanned_head.
+            self.stale.drop(job.spec.project_id)
             self._dispatch()
 
     def _execute(self, job: _Job) -> None:
@@ -3300,6 +3425,8 @@ __all__ = [
     "RECONCILE_INTERVAL_SEC",
     "REASON_TRACKED_STATE",
     "SCAN_CMD_ENV",
+    "STALE_BEHIND_MAX",
+    "STALE_HEAD_TTL_SEC",
     "TOKEN_REFRESH_MARGIN_SEC",
     "TRIGGER_PRECEDENCE",
     "ProjectAccessLost",
@@ -3310,6 +3437,7 @@ __all__ = [
     "ScanBudgetExceeded",
     "ScanRunner",
     "SourceNotAllowed",
+    "StaleCache",
     "ManagedOnPlatform",
     "child_env",
     "commits_behind",

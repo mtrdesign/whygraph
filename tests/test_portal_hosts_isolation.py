@@ -558,7 +558,8 @@ def test_the_fixture_is_two_marked_orgs_over_real_sessions(
     for org in (w.quokka, w.narwhal):
         w.sign_in(w.owner_of(org))
         body = _ok(w.client.get(at(org.slug) + "/api/projects/api"))
-        assert (body["name"], body["root"]) == (org.name, str(org.root))
+        # Production never sends the server clone path (MODE-1).
+        assert (body["name"], body["root"]) == (org.name, None)
         # M2d-2's summary fields carry the org's mark, so the sweeps'
         # assert_no_leak covers them on every route that shows them.
         assert body["github_full_name"].startswith(f"{org.slug}/api")

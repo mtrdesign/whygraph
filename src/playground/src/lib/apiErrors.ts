@@ -220,6 +220,7 @@ export const MESSAGES: Record<string, Resolver> = {
 
   // Adding and importing projects
   not_shared: "This folder is not shared with the portal.",
+  path_missing: "This folder does not exist. Check the path.",
   not_git: "This folder is not a git repository.",
   protected: "This path overlaps the portal's own data folder.",
   not_linked: (_err, ctx) =>

@@ -681,11 +681,14 @@ def test_import_clones_initializes_and_saves_the_forge_layer(
         body["project"]["installation_account"],
     ) == ("acme/api", "acme")
     listed = w.client.get(at("acme") + "/api/projects").json()["projects"]
-    assert [(p["github_full_name"], p["installation_account"]) for p in listed] == [
-        ("acme/api", "acme")
-    ]
+    assert [
+        (p["github_full_name"], p["installation_account"], p["root"], p["importing"])
+        for p in listed
+    ] == [("acme/api", "acme", None, False)]
     root = w.repos / "acme" / "api"
-    assert body["project"]["root"] == str(root)
+    # Production never sends the server clone path (MODE-1).
+    assert body["project"]["root"] is None
+    assert project_row("acme", "api").root == "repos/acme/api"
     assert (root / "README.md").read_text() == "api\n"
     assert (root / ".whygraph" / "whygraph.db").is_file()
     assert clone_dirs(w) == ["api"]  # no .clone-* left behind
@@ -779,7 +782,7 @@ def test_a_repo_imports_once_per_org_and_into_two_orgs(world: World) -> None:
     other = import_repo(w, API_REPO, org="bravo")
     assert other.status_code == 201, other.text
     assert other.json()["project"]["slug"] == "api"
-    assert other.json()["project"]["root"] == str(w.repos / "bravo" / "api")
+    assert other.json()["project"]["root"] is None
     assert clone_dirs(w, "acme") == ["api"] and clone_dirs(w, "bravo") == ["api"]
     assert project_row("bravo", "api").root == "repos/bravo/api"
 

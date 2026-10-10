@@ -453,7 +453,7 @@ def test_the_same_repo_in_two_orgs_stays_apart_after_a_push(
     listed = w.client.get(at("bravo") + "/api/projects").json()["projects"]
     assert [
         (p["slug"], p["github_full_name"], p["access_lost"], p["root"]) for p in listed
-    ] == [("api", "acme/api", False, str(w.repos / "bravo" / "api"))]
+    ] == [("api", "acme/api", False, None)]
     assert [r["id"] for r in org_runs(w, "bravo")] == ids["bravo"]
     for method, suffix in (("GET", "/log"), ("GET", "/events"), ("POST", "/cancel")):
         other = w.client.request(

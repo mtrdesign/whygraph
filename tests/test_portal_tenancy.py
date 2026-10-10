@@ -978,7 +978,9 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         410, shows=lambda o: ["link_expired"]
     ),
     # Project management
-    ("GET", "/api/projects/{slug}"): Call(200, shows=lambda o: [o.name, str(o.root)]),
+    # (the root only by name: production sends `root: null`, MODE-1; the
+    # local root is asserted in test_projects_carry_their_org_root)
+    ("GET", "/api/projects/{slug}"): Call(200, shows=lambda o: [o.name]),
     ("PATCH", "/api/projects/{slug}"): Call(
         200, body=lambda w, o: {"name": o.name}, shows=lambda o: [o.name]
     ),

@@ -36,7 +36,7 @@ import re
 import secrets as secrets_mod
 import shutil
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
@@ -196,7 +196,6 @@ from .runner import (
     remove_run_files,
     resolve_analyze,
     run_files,
-    stale_info,
 )
 from .secrets import (
     GITHUB_TOKEN,
@@ -635,34 +634,92 @@ def _project_stats(state: PortalState, project: BoundProject) -> dict | None:
     return project_counts(state, project.ctx)
 
 
-def _active_run(session: Session, project_id: int) -> dict | None:
-    run = session.exec(
-        select(ScanRun)
-        .where(ScanRun.project_id == project_id)
-        .where(col(ScanRun.status).in_(("queued", "running")))
-        .order_by(col(ScanRun.id).desc())
-    ).first()
-    if run is None:
-        return None
-    return {
-        "id": run.id,
-        "status": run.status,
-        "trigger": run.trigger,
-        "analyze": run.analyze,
-    }
-
-
 FINISHED_STATUSES: tuple[str, ...] = ("ok", "failed", "interrupted", "cancelled")
 """``scan_runs.status`` values of a run that has ended."""
 
 
-def _last_scan_status(session: Session, project_id: int) -> str | None:
-    return session.exec(
-        select(ScanRun.status)
-        .where(ScanRun.project_id == project_id)
-        .where(col(ScanRun.status).in_(FINISHED_STATUSES))
-        .order_by(col(ScanRun.id).desc())
-    ).first()
+@dataclass(frozen=True)
+class _ListData:
+    """What :func:`_summary` reads from the portal DB, for a set of projects.
+
+    One query each (M2f-3 plan section 4.10, PRJ-4), so the projects list
+    costs the same number of statements for one project and for a hundred.
+    """
+
+    running: dict[int, dict]
+    last_status: dict[int, str]
+    last_stats: dict[int, dict]
+    links: dict[int, PlatformLink]
+
+
+def _last_scan_stats(raw: str | None) -> dict | None:
+    """``last_scan_stats`` from a run's ``summary`` text, or ``None`` (unparsable)."""
+    summary = _load_summary(raw)
+    coverage = summary.get("coverage") if isinstance(summary, dict) else None
+    if not isinstance(coverage, dict):
+        return None
+    return {
+        "commits": coverage.get("commits"),
+        "described_pct": coverage.get("described_pct"),
+        "rationale_cards": coverage.get("rationale_cards"),
+        "as_of": coverage.get("at"),
+    }
+
+
+def _list_data(session: Session, projects: list[Project]) -> _ListData:
+    """Prefetch :class:`_ListData` for ``projects`` in four queries (none when empty)."""
+    ids = [p.id for p in projects if p.id is not None]
+    if not ids:
+        return _ListData({}, {}, {}, {})
+    in_ids = col(ScanRun.project_id).in_(ids)
+    # DISTINCT ON (project_id) ... ORDER BY project_id, id DESC: the newest row each.
+    running = {
+        run.project_id: {
+            "id": run.id,
+            "status": run.status,
+            "trigger": run.trigger,
+            "analyze": run.analyze,
+        }
+        for run in session.exec(
+            select(ScanRun)
+            .where(in_ids, col(ScanRun.status).in_(("queued", "running")))
+            .distinct(col(ScanRun.project_id))
+            .order_by(col(ScanRun.project_id), col(ScanRun.id).desc())
+        ).all()
+    }
+    last_status = {
+        project_id: status
+        for project_id, status in session.exec(
+            select(ScanRun.project_id, ScanRun.status)
+            .where(in_ids, col(ScanRun.status).in_(FINISHED_STATUSES))
+            .distinct(col(ScanRun.project_id))
+            .order_by(col(ScanRun.project_id), col(ScanRun.id).desc())
+        ).all()
+    }
+    # `summary` is TEXT: a LIKE pre-filter and a parse in Python, so one
+    # non-JSON row is skipped rather than failing the whole list on a cast.
+    last_stats: dict[int, dict] = {}
+    for project_id, raw in session.exec(
+        select(ScanRun.project_id, ScanRun.summary)
+        .where(in_ids, col(ScanRun.summary).like('%"coverage"%'))
+        .distinct(col(ScanRun.project_id))
+        .order_by(col(ScanRun.project_id), col(ScanRun.id).desc())
+    ).all():
+        stats = _last_scan_stats(raw)
+        if stats is not None:
+            last_stats[project_id] = stats
+    linked = [p.id for p in projects if p.source == "platform"]
+    links = (
+        {
+            row.project_id: row
+            for row in session.exec(
+                select(PlatformLink).where(col(PlatformLink.project_id).in_(linked))
+            ).all()
+        }
+        if linked
+        else {}
+    )
+    return _ListData(running, last_status, last_stats, links)
 
 
 def _github_full_name(project: Project) -> str | None:
@@ -684,7 +741,7 @@ def _permissions(role: ProjectRole) -> list[str]:
 
 
 def _summary(
-    session: Session,
+    data: _ListData,
     project: Project,
     root: Path,
     *,
@@ -692,18 +749,23 @@ def _summary(
     role: ProjectRole,
     user_id: int | None,
 ) -> dict:
-    """One project as the list shows it; ``user_id=None`` leaves ``llm_block`` to the caller."""
+    """One project as the list shows it; ``user_id=None`` leaves ``llm_block`` to the caller.
+
+    Reads the portal DB only through ``data`` (:func:`_list_data`), and
+    ``stale`` through the runner's :class:`~whygraph.portal.runner.StaleCache`.
+    """
     mode = state.mode
+    project_id: int = project.id  # type: ignore[assignment]
     status = root_status(root)
     full_name = _github_full_name(project)
     stale = (
-        stale_info(root, project.last_scanned_head)
+        state.runner.stale.info(project_id, root, project.last_scanned_head)
         if status == "ok" and project.initialized_at is not None
         else None
     )
     link = None
     if project.source == "platform":
-        row = session.get(PlatformLink, project.id)
+        row = data.links.get(project_id)
         link = None if row is None else link_block(row)
     block = block_scope = None
     if user_id is not None:
@@ -721,16 +783,26 @@ def _summary(
         # False for a local-mode GitHub clone of an older build: list it,
         # refuse its scans, let it be removed.
         "source_supported": project.source in allowed_sources(mode),
-        "root": str(root),
+        # Never a server path to org users (MODE-1): a production clone
+        # lives under the portal's data dir.
+        "root": None
+        if mode == "production" and project.source == "github"
+        else str(root),
         "remote_url": project.remote_url,
         "initialized": project.initialized_at is not None,
+        # An import whose clone (the first run) has not set it up yet.
+        "importing": project.source == "github" and project.initialized_at is None,
         "initialized_at": project.initialized_at,
         "last_scan_at": project.last_scan_at,
         "created_at": project.created_at,
         "root_status": status,
-        "running_scan": _active_run(session, project.id),  # type: ignore[arg-type]
+        "running_scan": data.running.get(project_id),
         # The newest ended run's status, for a "scan failed" badge.
-        "last_scan_status": _last_scan_status(session, project.id),  # type: ignore[arg-type]
+        "last_scan_status": data.last_status.get(project_id),
+        # The newest run's coverage snapshot (`summary.coverage`, written
+        # by the runner): the list's stats "as of the last scan", without
+        # opening each project's DB. `stats` on the details is the live one.
+        "last_scan_stats": data.last_stats.get(project_id),
         # HEAD vs last_scanned_head (the runner's catch-up check, section 4.6).
         "stale": stale,
         # A production project GitHub no longer lets the app read (M2d-2 plan
@@ -769,7 +841,7 @@ def _details(state: PortalState, project: BoundProject) -> dict:
         if row is None:
             raise ApiError(404, f"project {project.slug!r} not found")
         body = _summary(
-            session,
+            _list_data(session, [row]),
             row,
             project.root,
             state=state,
@@ -1016,6 +1088,9 @@ def get_repos(
 ) -> dict:
     """Git repositories discovered under the shared folders (cached 60 s).
 
+    ``q`` (a case-insensitive substring of the path, so of the name too)
+    filters while the folders are walked, and ``truncated`` means the
+    search hit :data:`~whygraph.portal.repos.DISCOVERY_LIMIT` *matches*.
     ``registered`` reflects only the request's org (a local or a linked
     project over that checkout). ``404`` in production
     (local folders only).
@@ -1023,7 +1098,8 @@ def get_repos(
     state = portal_state(request)
     _refuse_local_flow_in_production(state)
     org_id = access.org_id
-    found = state.discovery.get(state.shared_folders)
+    needle = q.strip().lower()
+    found = state.discovery.get(state.shared_folders, needle)
     with get_session() as session:
         registered = set(
             session.exec(
@@ -1033,12 +1109,10 @@ def get_repos(
                 )
             ).all()
         )
-    needle = q.strip().lower()
     return {
         "repos": [
             {"path": str(p), "name": p.name, "registered": str(p) in registered}
             for p in found
-            if needle in str(p).lower()
         ],
         "truncated": len(found) >= DISCOVERY_LIMIT,
     }
@@ -1150,7 +1224,7 @@ def list_projects(
             .where(Project.org_id == access.org_id)
             .order_by(Project.name)
         ).all()
-        projects = []
+        visible: list[tuple[Project, ProjectRole]] = []
         for project, grant in rows:
             role = effective_project_role(
                 access.role,
@@ -1159,16 +1233,19 @@ def list_projects(
                 None if grant is None else ProjectRole(grant),
             )
             if role is not None:
-                projects.append(
-                    _summary(
-                        session,
-                        project,
-                        resolve_root(project),
-                        state=state,
-                        role=role,
-                        user_id=access.user_id,
-                    )
-                )
+                visible.append((project, role))
+        data = _list_data(session, [project for project, _ in visible])
+        projects = [
+            _summary(
+                data,
+                project,
+                resolve_root(project),
+                state=state,
+                role=role,
+                user_id=access.user_id,
+            )
+            for project, role in visible
+        ]
         body = {"projects": projects}
         for project_id in due_for_refresh(session, access.org_id):
             state.link_refresh.schedule(project_id)
@@ -1254,7 +1331,7 @@ def _checked_path(state: PortalState, path: str) -> dict:
     ------
     ApiError
         ``422`` (no or a relative path), ``400 protected`` / ``not_shared`` /
-        ``not_git``.
+        ``path_missing`` / ``not_git``.
     """
     if not path:
         raise ApiError(422, "path is required for a local project")
@@ -1274,6 +1351,8 @@ def _checked_path(state: PortalState, path: str) -> dict:
             folder_suggestion=check["folder_suggestion"],
             command=check["command"],
         )
+    if not check["exists"]:
+        raise ApiError(400, "the path does not exist", code="path_missing")
     if not check["is_git"]:
         raise ApiError(400, "the path is not a git repository", code="not_git")
     return check

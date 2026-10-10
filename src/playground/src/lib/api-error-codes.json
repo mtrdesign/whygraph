@@ -95,6 +95,7 @@
   "org_admin",
   "origin_mismatch",
   "owner_required",
+  "path_missing",
   "platform_unreachable",
   "protected",
   "provider_error",

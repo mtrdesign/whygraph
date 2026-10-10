@@ -5,6 +5,7 @@ import { expect, test, type APIRequestContext, type Page } from "@playwright/tes
 import { env } from "../env";
 import { base, createOrg, githubSignIn, importRepo, orgUrl, signedIn } from "../lib/production";
 import { attempt, gap, shoot, watch, type Mode, type ShotMeta } from "./lib/shoot";
+import { seedAgentCalls } from "./lib/seed";
 
 // The linked-project screens (M2e), across both portals: the platform's consent
 // page, the local checkout picker, a linked project's pages in both link states
@@ -123,20 +124,32 @@ test("linked project: both portals", async ({ page, browser, request }) => {
     await page.getByRole("button", { name: "Link this checkout" }).click();
     await expect(page).toHaveURL(new RegExp(`/p/${SLUG}/init\\?step=setup`));
     await settle(page, 800);
-    await snap(page, "local", "linked", "wizard-initialize", "default", "A linked project's wizard: Configure skipped (the platform owns config), Initialize");
+    await expect(page.getByTestId("no-agent-warning")).toBeVisible();
+    await snap(page, "local", "linked", "wizard-setup", "no-agent", "A linked project's wizard: Source -> Set up (the platform owns the config), no agent ticked: the warning");
     await page.getByRole("checkbox", { name: /Claude Code/ }).check();
-    await page.getByRole("button", { name: "Initialize", exact: true }).click();
-    await expect(page.getByTestId("init-done")).toBeVisible();
-    await page.getByRole("button", { name: "Continue to first scan" }).click();
+    await expect(page.getByTestId("init-preview")).toBeVisible();
+    await snap(page, "local", "linked", "wizard-setup", "preview", "A linked project's Set up step with Claude Code ticked: the per-file preview and Finish");
+    await page.getByRole("button", { name: "Finish", exact: true }).click();
+    await expect(page.getByTestId("init-done")).toContainText("Project linked");
     await expect(page.getByText("First scan complete")).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByTestId("connect-agent")).toBeVisible();
     await settle(page, 600);
-    await snap(page, "local", "linked", "wizard-scan", "done", "A linked project's first scan done (CodeGraph only)");
+    await snap(page, "local", "linked", "wizard-scan", "done", "A linked project's first scan done (CodeGraph only) and the Connect your agent card");
     await page.getByRole("button", { name: "Open project", exact: true }).click();
     await expect(page.getByTestId("link-notice")).toHaveAttribute("data-status", "ok");
     linked = true;
   });
 
   if (linked) {
+    // A coding agent asks the linked project a few questions: the local portal counts the
+    // calls, and the platform counts the evidence / history requests it answers.
+    await seedAgentCalls(request, env.baseUrl, SLUG);
+    await attempt(ben, at("production", "linked", "platform-overview-agents"), async () => {
+      await ben.goto(`${orgUrl(ORG)}/p/${SLUG}`);
+      await expect(ben.getByTestId("agent-activity")).toBeVisible();
+      await settle(ben, 1200);
+      await snap(ben, "production", "linked", "overview-agent-activity", "default", "Platform project Overview after a connected local portal's agent asked a few questions: Agent activity by kind and by connection");
+    });
     const pages: [string, string, string][] = [
       ["", "overview", "Linked project Overview (/p/demo): the link notice 'Linked to orbit/demo', platform panel"],
       ["/explorer", "explorer", "Linked project Explorer (local CodeGraph, evidence from the platform)"],
@@ -174,9 +187,13 @@ test("linked project: both portals", async ({ page, browser, request }) => {
       const row = ben.getByTestId("project-connections").getByTestId("connection-row").filter({ hasText: MACHINE });
       await ben.goto(`${orgUrl(ORG)}/p/${SLUG}/settings`);
       await row.getByRole("button", { name: "Revoke" }).click();
+      await expect(ben.getByRole("dialog")).toBeVisible();
+      await snap(ben, "production", "linked", "revoke-dialog", "open", "Revoking asks first: the confirmation dialog naming the machine", { viewportOnly: true });
+      await ben.getByRole("dialog").getByRole("button", { name: "Revoke" }).click();
       await expect(ben.getByTestId("project-connections")).toContainText("No local portal is connected to this project.");
+      await expect(ben.getByTestId("revoked-connections")).toContainText(MACHINE);
       await settle(ben, 600);
-      await snap(ben, "production", "linked", "project-settings-connections", "revoked", "Platform project settings after the admin revoked the connection");
+      await snap(ben, "production", "linked", "project-settings-connections", "revoked", "Platform project settings after the admin revoked the connection: none live, the revoked token listed with its reason");
     });
     await askEvidence(request).catch(() => undefined);
     await attempt(page, at("local", "linked", "revoked"), async () => {
@@ -188,6 +205,7 @@ test("linked project: both portals", async ({ page, browser, request }) => {
       await settle(page, 1200);
       await snap(page, "local", "linked", "overview", "link-revoked", "Linked project Overview after revocation");
       await page.goto(`/p/${SLUG}/settings`);
+      await expect(page.getByTestId("settings-managed")).toBeVisible();
       await page.getByRole("button", { name: "Remove from this machine" }).click();
       await expect(page.getByTestId("remove-dialog")).toBeVisible();
       await snap(page, "local", "linked", "remove-dialog", "open", "'Remove from this machine' dialog of a linked project", { viewportOnly: true });
@@ -199,8 +217,6 @@ test("linked project: both portals", async ({ page, browser, request }) => {
   } else {
     gap("local", "linked", "linked project pages", "all", "the connect round trip failed, so no linked project exists");
   }
-  gap("local", "linked", "link states", "unreachable / update_required / removed / access_lost", "not simulated: only ok and revoked are reachable with the harness");
-  gap("local", "linked", "/link deep link", "default", "the platform's 'Use with your agent' deep link (/link?platform=...) was not followed; the source-platform form covers the same connect");
 
   // Last: the GitHub App loses ben/demo, so every org that imported it shows access lost.
   await attempt(ben, at("production", "projects", "access-lost"), async () => {

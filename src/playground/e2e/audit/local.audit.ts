@@ -2,8 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { env } from "../env";
-import { attempt, gap, keepShell, shoot, variants, watch, type ShotMeta } from "./lib/shoot";
-import { api, chat, COMPOSER, configureAuditLlm, scanControl } from "./lib/seed";
+import { attempt, expectAnswers, failAllRequests500, keepShell, shoot, variants, watch, type ShotMeta } from "./lib/shoot";
+import { api, chat, COMPOSER, configureAuditLlm, scanControl, seedAgentCalls } from "./lib/seed";
 
 // The local-mode half of the screenshot audit: the first run, the add-project
 // wizard, several projects in different states, a project's pages, Chat with a
@@ -13,6 +13,7 @@ import { api, chat, COMPOSER, configureAuditLlm, scanControl } from "./lib/seed"
 
 const M = "local" as const;
 const ctl = scanControl();
+let notesRun = 0;
 const repo = (slug: string) => path.join(env.shared, slug);
 const at = (area: string, name: string, state = "default") => ({ mode: M, area, name, state });
 const snap = (page: Page, area: string, name: string, state: string, desc: string, opts?: Parameters<typeof shoot>[2]) =>
@@ -70,17 +71,18 @@ test("local mode: every screen", async ({ page }) => {
     await page.getByLabel("Your name").fill("Ada Lovelace");
     await page.getByRole("button", { name: "Continue" }).click();
   }
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
 
   await attempt(page, at("projects", "projects", "empty"), async () => {
-    await expect(page.getByText("No projects yet")).toBeVisible();
-    await snap(page, "projects", "projects", "empty", "Projects page right after setup: no projects yet");
+    await expect(page.getByTestId("first-run-checklist")).toBeVisible();
+    await snap(page, "projects", "projects", "empty", "Projects page right after setup: no projects yet (the first-run checklist is the empty state)");
+    await snap(page, "onboarding", "first-run-checklist", "local-empty", "The first-run checklist on a fresh local portal: Add an LLM key, Add a project, Connect your agent, none done", { widths: ["desktop", "phone"] });
   });
   await variants(page, "/", { mode: M, area: "projects", name: "projects", what: "Projects page (/)" }, { states: ["loading", "error", "forbidden"] });
 
   await attempt(page, at("phone-nav", "projects", "nav-open"), async () => {
     await page.goto("/");
-    await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
     await snap(page, "phone-nav", "projects", "nav-open", "Phone width: the navigation sheet opened with the header's menu button", {
       widths: ["phone"],
       viewportOnly: true,
@@ -143,12 +145,14 @@ test("local mode: every screen", async ({ page }) => {
     await snap(page, "add-project", "source-platform", "empty", "Add project, 'From a platform' source (/projects/new?source=platform): the connect form, empty");
   });
   await attempt(page, at("add-project", "source-platform", "unreachable"), async () => {
+    const expected = expectAnswers(page, /^POST \/api\/platform\/connect 502$/);
     await page.goto("/projects/new?source=platform");
     await page.getByLabel("Platform address").fill("https://unreachable.invalid");
     await page.getByLabel("Machine name").fill("audit-laptop");
     await page.getByRole("button", { name: "Connect" }).click();
     await page.waitForTimeout(4000);
     await snap(page, "add-project", "source-platform", "unreachable", "'From a platform' with an address that does not resolve, after Connect");
+    expected();
   });
 
   const wizard = "add-project";
@@ -220,10 +224,16 @@ test("local mode: every screen", async ({ page }) => {
     await expect(page).toHaveURL(/\/p\/docs-site\/init\?step=setup/);
   });
 
+  await variants(page, "/p/docs-site/init?step=setup", { mode: M, area: "add-project", name: "step-setup", what: "The wizard's Set up step (/p/docs-site/init?step=setup)" }, {
+    match: keepShell([/^\/api\/projects$/]),
+    states: ["loading", "error", "forbidden"],
+  });
+  await variants(page, "/projects/new", { mode: M, area: "add-project", name: "source-local", what: "Add project (/projects/new)" });
+
   // ---- scans: running (with a follow-up), ok, failed, cancelled -----------
   await attempt(page, at("scans", "scan-run", "running"), async () => {
     ctl.delay(2.5);
-    await rescan(page, "notes");
+    notesRun = await rescan(page, "notes");
     await expect(page.getByTestId("phase-1")).toHaveAttribute("data-status", "running");
     await page.waitForTimeout(2500);
     await snap(page, "scans", "scan-run", "running", "Scan run page (/p/notes/scans/<id>) while a quick rescan runs: phases and task bars", { viewportOnly: true });
@@ -255,13 +265,13 @@ test("local mode: every screen", async ({ page }) => {
   ctl.fail(false);
   await attempt(page, at("scans", "scan-run", "cancelled"), async () => {
     ctl.delay(2.5);
-    const run = await rescan(page, "web");
+    await rescan(page, "web");
     await expect(page.getByTestId("phase-1")).toHaveAttribute("data-status", "running");
     await page.getByTestId("cancel-run").click();
-    await expect(page.getByTestId("cancel-run-dialog")).toContainText(`Cancel scan #${run}?`);
+    await expect(page.getByTestId("cancel-run-dialog")).toContainText("Stop this scan?");
     await snap(page, "scans", "cancel-dialog", "open", "The Cancel scan confirmation dialog over a running run", { viewportOnly: true });
-    await page.getByTestId("cancel-run-dialog").getByRole("button", { name: "Cancel scan" }).click();
-    await waitRunEnd(page, "You cancelled this run");
+    await page.getByTestId("cancel-run-dialog").getByRole("button", { name: "Stop scan" }).click();
+    await waitRunEnd(page, "Cancelled by you");
     ctl.delay(null);
     await snap(page, "scans", "scan-run", "cancelled", "Scan run page of a run cancelled by the user");
   });
@@ -296,13 +306,62 @@ test("local mode: every screen", async ({ page }) => {
     await expect(page.getByTestId("scan-history")).toBeVisible();
     await snap(page, "scans", "scan-history", "with-cancelled", "Scan history of web: a cancelled run");
   });
+  await attempt(page, at("scans", "scan-history", "filters"), async () => {
+    await page.goto("/p/billing/scans");
+    await expect(page.getByTestId("scan-filters")).toBeVisible();
+    await page.getByTestId("filter-status").selectOption("failed");
+    await expect(page).toHaveURL(/status=failed/);
+    await page.waitForTimeout(800);
+    await snap(page, "scans", "scan-history", "filter-failed", "Scan history of billing filtered to Status: Failed (the filters live in the URL)");
+    await page.getByTestId("filter-status").selectOption("cancelled");
+    await page.waitForTimeout(800);
+    await snap(page, "scans", "scan-history", "filter-empty", "Scan history of billing filtered to a status with no runs: the empty filtered state with Clear filters");
+    await page.getByRole("button", { name: "Clear filters" }).first().click();
+    await page.getByTestId("filter-type").selectOption("quick");
+    await page.waitForTimeout(800);
+    await snap(page, "scans", "scan-history", "filter-quick", "Scan history of billing filtered to Type: Quick");
+  });
+  await attempt(page, at("scans", "scan-history", "paging"), async () => {
+    // The page size is 50: shrink it to 2 on the way to the real API, so Load more appears.
+    const small = async (route: import("@playwright/test").Route) => {
+      const url = new URL(route.request().url());
+      url.searchParams.set("limit", "2");
+      await route.continue({ url: url.toString() });
+    };
+    await page.route(/\/api\/projects\/notes\/scans(\?.*)?$/, small);
+    try {
+      await page.goto("/p/notes/scans");
+      await expect(page.getByTestId("scans-load-more")).toBeVisible();
+      await snap(page, "scans", "scan-history", "paged-first", "Scan history of notes with a page size of 2 (route intercept on the limit): the first page and Load more");
+      await page.getByTestId("scans-load-more").click();
+      await page.waitForTimeout(1000);
+      await snap(page, "scans", "scan-history", "paged-more", "The same list after Load more: the next page appended");
+    } finally {
+      await page.unroute(/\/api\/projects\/notes\/scans(\?.*)?$/, small);
+    }
+  });
+  await attempt(page, at("scans", "scan-run", "old-run"), async () => {
+    await page.goto("/p/notes/scans");
+    await expect(page.getByTestId("scan-history")).toBeVisible();
+    await page.locator('[data-testid^="run-"]:visible').last().click();
+    await expect(page).toHaveURL(/\/p\/notes\/scans\/\d+$/);
+    await expect(page.getByTestId("run-result")).toBeVisible();
+    await page.waitForTimeout(800);
+    await snap(page, "scans", "scan-run", "old-run", "An old run's page, opened from the history (notes' first scan): title, result, phases and log");
+  });
   await variants(page, "/p/notes/scans", { mode: M, area: "scans", name: "scan-history", what: "Scan history (/p/notes/scans)" }, {
     match: keepShell([/^\/api\/projects\/notes$/, /^\/api\/projects$/]),
   });
+  await variants(page, `/p/notes/scans/${notesRun || 1}`, { mode: M, area: "scans", name: "scan-run", what: "A scan run's page" }, {
+    match: keepShell([/^\/api\/projects\/notes$/, /^\/api\/projects$/]),
+    states: ["loading", "error", "forbidden"],
+  });
   await attempt(page, at("scans", "scan-run", "not-found"), async () => {
+    const expected = expectAnswers(page, /^GET \/api\/projects\/notes\/scans\/99999(\/events)? 404$/);
     await page.goto("/p/notes/scans/99999");
     await page.waitForTimeout(2500);
     await snap(page, "scans", "scan-run", "not-found", "A scan run id that does not exist (/p/notes/scans/99999)");
+    expected();
   });
 
   // The legacy checkout disappears from disk: the project is "missing".
@@ -316,6 +375,11 @@ test("local mode: every screen", async ({ page }) => {
     await expect(page.getByTestId("project-billing")).toContainText("Scan failed");
     await page.waitForTimeout(1500);
     await snap(page, "projects", "projects", "several", "Projects page with 5 projects: notes ok, billing last scan failed, web scanning, legacy folder missing, docs-site not initialized", { viewportOnly: false });
+    await expect(page.getByTestId("first-run-checklist")).toBeVisible();
+    await snap(page, "onboarding", "first-run-checklist", "local-partial", "The first-run checklist as 'Getting started' once projects exist: Add a project done, the LLM key and Connect your agent left", { viewportOnly: true });
+    await page.getByTestId("first-run-checklist").getByRole("button", { name: "Dismiss" }).click();
+    await expect(page.getByTestId("getting-started-link")).toBeVisible();
+    await snap(page, "onboarding", "first-run-checklist", "local-dismissed", "The checklist dismissed: only the 'Getting started' link under the page heading remains", { viewportOnly: true });
   });
   ctl.delay(null);
   await attempt(page, at("projects", "project-switcher", "open"), async () => {
@@ -345,11 +409,24 @@ test("local mode: every screen", async ({ page }) => {
   });
 
   // ---- a project's pages (notes) -------------------------------------------
+  // A coding agent asks a few questions over notes' MCP endpoint, so Agent activity has data.
+  await seedAgentCalls(page.request, env.baseUrl, "notes");
   await attempt(page, at("project", "overview"), async () => {
     await page.goto("/p/notes");
-    await expect(page.getByTestId("mcp-url")).toBeVisible();
+    // With agent calls on record, Agent activity replaces the "Use with your agent" setup card.
+    await expect(page.getByTestId("agent-activity")).toBeVisible();
     await page.waitForTimeout(800);
-    await snap(page, "project", "overview", "default", "Project Overview of notes after several scans");
+    await snap(page, "project", "overview", "default", "Project Overview of notes after several scans: stats, health, coverage history, Agent activity (seeded MCP calls), recent scans");
+    await page.getByTestId("coverage-card").scrollIntoViewIfNeeded();
+    await snap(page, "project", "overview-coverage", "default", "The Overview's coverage history chart (and its empty state when there is not enough history)", { viewportOnly: true });
+    await page.getByTestId("agent-activity").scrollIntoViewIfNeeded();
+    await snap(page, "project", "overview-agent-activity", "default", "The Overview's Agent activity card: calls per day, top call kinds", { viewportOnly: true });
+  });
+  await attempt(page, at("project", "overview", "health-failed"), async () => {
+    await page.goto("/p/billing");
+    await expect(page.getByTestId("health-panel")).toBeVisible();
+    await page.waitForTimeout(600);
+    await snap(page, "project", "overview", "health-failed", "Overview of billing: the health panel names the failed scan and offers its fix");
   });
   await variants(page, "/p/notes", { mode: M, area: "project", name: "overview", what: "Project Overview (/p/notes)" }, {
     match: keepShell([/^\/api\/projects$/]),
@@ -443,7 +520,10 @@ test("local mode: every screen", async ({ page }) => {
     await row.hover();
     await page.waitForTimeout(400);
     await snap(page, "chat", "session-actions", "hover", "A sidebar chat row hovered: its '...' actions button", { widths: ["desktop"], viewportOnly: true, before: async (p) => { await p.getByTestId("chat-row").first().hover(); } });
+    await snap(page, "chat", "chats-sidebar", "rows", "The sidebar's Chats block with this project's sessions (the scripted chats above)", { widths: ["desktop"], viewportOnly: true });
     await row.getByRole("button", { name: /^Actions for/ }).click();
+    await expect(page.getByRole("menuitem", { name: "Rename" })).toBeVisible();
+    await snap(page, "chat", "chats-sidebar", "menu-open", "A chat row's '...' menu open: Rename, Delete", { widths: ["desktop"], viewportOnly: true });
     await page.getByRole("menuitem", { name: "Rename" }).click();
     await page.waitForTimeout(300);
     await snap(page, "chat", "session-actions", "renaming", "Inline rename of a chat session", { widths: ["desktop"], viewportOnly: true });
@@ -465,7 +545,7 @@ test("local mode: every screen", async ({ page }) => {
     await snap(page, "explorer", "node-detail", "rationale-can-generate", "Rationale tab with an LLM configured: the Generate rationale button");
     const generate = page.getByRole("button", { name: "Generate rationale" });
     if (!(await generate.isVisible()) || !(await generate.isEnabled())) {
-      gap(M, "explorer", "node-detail", "rationale-after-generate", "no enabled Generate rationale button on the Rationale tab");
+      // Known: the fake scan records no commits, so the button stays disabled (known-gaps.md).
       return;
     }
     await generate.click();
@@ -537,6 +617,27 @@ test("local mode: every screen", async ({ page }) => {
     await snap(page, "settings", "remove-project-dialog", "open", "Danger zone: the Remove project dialog", { viewportOnly: true });
     await page.keyboard.press("Escape");
   });
+  await attempt(page, at("settings", "project-settings", "section-save"), async () => {
+    await page.goto("/p/notes/settings?section=hooks");
+    const hooks = page.getByRole("region", { name: "Git hooks" });
+    await expect(hooks).toBeVisible();
+    await page.waitForTimeout(800);
+    await snap(page, "settings", "project-settings", "section-nav-hooks", "Project settings opened on ?section=hooks: the section list beside the sections, Git hooks in view", { viewportOnly: true });
+    await hooks.getByRole("checkbox").first().click();
+    await snap(page, "settings", "project-settings", "section-dirty", "A section edited but not saved: its footer enables Save and Discard", { viewportOnly: true });
+    await hooks.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(hooks.getByTestId("section-saved")).toBeVisible();
+    await snap(page, "settings", "project-settings", "section-saved", "The same section after Save: 'Saved' in place, no toast", { viewportOnly: true });
+    await hooks.getByRole("checkbox").first().click();
+    await hooks.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(hooks.getByTestId("section-saved")).toBeVisible();
+  });
+  await attempt(page, at("settings", "project-settings", "usage-section"), async () => {
+    await page.goto("/p/notes/settings?section=budgets");
+    await expect(page.getByTestId("project-budget")).toBeVisible();
+    await page.waitForTimeout(800);
+    await snap(page, "settings", "project-settings", "usage-section", "Project settings, the Usage and budget section: this month's spend, the project budget form, spend by member (production)", { viewportOnly: true });
+  });
   await variants(page, "/p/notes/settings", { mode: M, area: "settings", name: "project-settings", what: "Project settings (/p/notes/settings)" }, {
     match: keepShell([/^\/api\/projects\/notes$/, /^\/api\/projects$/]),
   });
@@ -550,6 +651,10 @@ test("local mode: every screen", async ({ page }) => {
     await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
     await page.waitForTimeout(1000);
     await snap(page, "settings", "global-settings", "with-keys", "Global Settings after an OpenAI key, a custom base URL and the chat model were set");
+    await page.getByRole("button", { name: "Test", exact: true }).first().click();
+    await expect(page.getByTestId("key-test-result").first()).toBeVisible();
+    await page.waitForTimeout(400);
+    await snap(page, "settings", "global-settings", "key-test-result", "A key card after Test: the free probe's one-word result next to the key");
   });
   await variants(page, "/settings", { mode: M, area: "settings", name: "global-settings", what: "Global Settings (/settings)" });
 
@@ -563,15 +668,17 @@ test("local mode: every screen", async ({ page }) => {
     await page.goto("/no-such-page");
     await page.waitForTimeout(1200);
     await snap(page, "edge", "not-found", "unknown-route", "An unknown route (/no-such-page)");
+    const expected = expectAnswers(page, /^GET \/api\/projects\/no-such-project 404$/);
     await page.goto("/p/no-such-project");
     await page.waitForTimeout(2000);
     await snap(page, "edge", "not-found", "unknown-project", "An unknown project slug (/p/no-such-project)");
+    expected();
     await page.goto("/members");
     await page.waitForTimeout(1200);
     await snap(page, "edge", "not-found", "members-local", "/members in local mode (production only)");
   });
   await attempt(page, at("edge", "api-down"), async () => {
-    const restore = await failRequests500All(page);
+    const restore = await failAllRequests500(page);
     try {
       await page.goto("/");
       await page.waitForTimeout(4000);
@@ -589,14 +696,3 @@ test("local mode: every screen", async ({ page }) => {
   });
 });
 
-async function failRequests500All(page: Page): Promise<() => Promise<void>> {
-  const handler = (route: import("@playwright/test").Route) =>
-    route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ detail: "Internal Server Error" }) });
-  await page.route("**/api/**", handler);
-  return () => page.unroute("**/api/**", handler);
-}
-
-// Things this spec knows it cannot reach in local mode.
-test.afterAll(() => {
-  gap(M, "members/audit/org", "members, audit, org settings", "all", "production only: local mode has one implicit user and no organization pages (captured under production/)");
-});

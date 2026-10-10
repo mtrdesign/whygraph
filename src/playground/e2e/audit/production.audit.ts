@@ -1,8 +1,9 @@
 import fs from "node:fs";
+import path from "node:path";
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { env } from "../env";
-import { base, createOrg, githubSignIn, importRepo, openAfterFirstScan, orgUrl, signedIn } from "../lib/production";
-import { attempt, gap, keepShell, shoot, variants, watch, type ShotMeta } from "./lib/shoot";
+import { base, createOrg, githubSignIn, openAfterFirstScan, orgUrl, signedIn } from "../lib/production";
+import { attempt, expectAnswers, gap, keepShell, shoot, variants, watch, type ShotMeta } from "./lib/shoot";
 import { api, chat, configureAuditLlm, prodControl } from "./lib/seed";
 
 // The production-mode half of the screenshot audit: bootstrap, sign-in, orgs,
@@ -15,6 +16,8 @@ const M = "production" as const;
 const PASSWORD = "correct horse battery staple";
 const ROCKET = orgUrl("rocket");
 const ctl = prodControl();
+let failedRun = 0;
+const PROD_DELAY = path.join(env.root, "prod-control", "delay");
 const at = (area: string, name: string, state = "default") => ({ mode: M, area, name, state });
 const snap = (page: Page, area: string, name: string, state: string, desc: string, opts?: Parameters<typeof shoot>[2]) =>
   shoot(page, { mode: M, area, name, state, desc } satisfies ShotMeta, opts);
@@ -25,10 +28,24 @@ function bootstrapSecret(): string {
   return m[1];
 }
 
+/**
+ * Answers the walk provokes on purpose (wrong secret, bad password, a refused GitHub
+ * login, an unknown invitee, an unknown or hidden project) plus the known fixture
+ * limit (Explorer evidence / rationale answer 400, see known-gaps.md).
+ */
+const DELIBERATE: RegExp[] = [
+  /^POST \/api\/auth\/(bootstrap|login|github\/callback) (401|403)$/,
+  /^GET \/api\/github\/installations 403$/,
+  /^POST \/api\/org\/members 404$/,
+  /^GET \/api\/projects\/[a-z-]+\/node\/(rationale|evidence)\?\S* 400$/,
+  /^GET \/api\/projects\/(notes|no-such-project) 404$/,
+];
+
 async function person(browser: Browser, login: string | null): Promise<{ c: BrowserContext; page: Page }> {
   const c = await browser.newContext({ baseURL: env.prodUrl });
   const page = await c.newPage();
   watch(page);
+  expectAnswers(page, ...DELIBERATE);
   if (login) {
     await githubSignIn(page, login);
     await signedIn(page);
@@ -49,6 +66,7 @@ async function settle(page: Page, ms = 1200): Promise<void> {
 test("production mode: every screen", async ({ page: ada, browser }) => {
   test.setTimeout(90 * 60_000);
   watch(ada);
+  expectAnswers(ada, ...DELIBERATE);
 
   // ---- bootstrap (Ada, the instance administrator) --------------------------
   await attempt(ada, at("onboarding", "bootstrap", "empty"), async () => {
@@ -78,19 +96,24 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
     await snap(ada, "orgs", "create-org", "empty", "Create organization (/orgs/new): the claimed admin has no organization yet");
     await ada.getByLabel("Organization name").fill("Acme Corp");
     await ada.getByLabel("URL name").fill("acme");
-    await ada.waitForTimeout(500);
-    await snap(ada, "orgs", "create-org", "filled", "Create organization with name and URL name typed: the host preview");
+    await expect(ada.getByTestId("slug-status")).toContainText("is available");
+    await snap(ada, "orgs", "create-org", "filled", "Create organization with name and URL name typed: the host preview and the slug check's 'is available'");
     await ada.getByLabel("URL name").fill("beta");
-    await ada.waitForTimeout(500);
-    await snap(ada, "orgs", "create-org", "reserved-slug", "Create organization with a reserved URL name (beta)");
+    await expect(ada.getByTestId("slug-status")).toBeVisible();
+    await snap(ada, "orgs", "create-org", "reserved-slug", "Create organization with a reserved URL name (beta): the slug check says so before submitting");
+    await ada.getByLabel("URL name").fill("a");
+    await ada.waitForTimeout(600);
+    await snap(ada, "orgs", "create-org", "invalid-slug", "Create organization with a URL name that breaks the rules (one character)");
   });
   await ada.goto(`${base.origin}/orgs/new`);
   await createOrg(ada, "Acme Corp", "acme");
   await attempt(ada, at("projects", "projects", "empty-password-owner"), async () => {
     await settle(ada);
     await snap(ada, "projects", "projects", "empty-password-owner", "acme's empty Projects page, owner signed in with a password");
+    await expect(ada.getByTestId("first-run-checklist")).toBeVisible();
+    await snap(ada, "onboarding", "first-run-checklist", "production-password-owner", "The first-run checklist of a new org for a password account: GitHub is not done and says 'Sign in with GitHub to import repositories'");
     await ada.goto(`${orgUrl("acme")}/projects/new`);
-    await expect(ada.getByTestId("github-error")).toBeVisible();
+    await expect(ada.getByTestId("github-required")).toBeVisible();
     await settle(ada, 500);
     await snap(ada, "import", "github-import", "github-required", "Import page for a password account: 'needs an account that signs in with GitHub'");
   });
@@ -137,15 +160,23 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
   // ---- Ben: his orgs, the GitHub import --------------------------------------
   const { c: benC, page: ben } = await person(browser, "ben");
   await attempt(ben, at("orgs", "create-org", "github-user"), async () => {
-    await expect(ben).toHaveURL(/\/orgs\/new$/);
+    await expect(ben.getByRole("heading", { name: "You're not in an organization yet" })).toBeVisible();
     await settle(ben, 500);
-    await snap(ben, "orgs", "create-org", "first-sign-in", "A GitHub user's first sign-in lands on Create organization (no orgs)");
+    await snap(ben, "orgs", "org-picker", "no-orgs", "A GitHub user's first sign-in: the picker says they are not in an organization yet (/orgs, no redirect) and offers Create organization");
+    await ben.getByRole("link", { name: "Create organization" }).click();
+    await expect(ben).toHaveURL(/\/orgs\/new$/);
+    await ben.getByLabel("Organization name").fill("Acme Too");
+    await ben.getByLabel("URL name").fill("acme");
+    await expect(ben.getByTestId("slug-status")).toContainText("already taken");
+    await snap(ben, "orgs", "create-org", "slug-taken", "Create organization with a URL name another org already uses: 'not available' under the field");
   });
   await ben.goto(`${base.origin}/orgs/new`);
   await createOrg(ben, "Rocket Labs", "rocket");
   await attempt(ben, at("projects", "projects", "empty-owner"), async () => {
     await settle(ben);
     await snap(ben, "projects", "projects", "empty-github-owner", "rocket's empty Projects page, owner signed in with GitHub");
+    await expect(ben.getByTestId("first-run-checklist")).toBeVisible();
+    await snap(ben, "onboarding", "first-run-checklist", "production-empty", "The first-run checklist of a new org: five items, GitHub done (he signed in with it), the rest to do", { viewportOnly: true });
   });
   await attempt(ben, at("import", "github-import"), async () => {
     await ben.goto(`${ROCKET}/projects/new`);
@@ -158,32 +189,49 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
     await expect(ben).toHaveURL(new RegExp(`^${ROCKET}/projects/new`));
     await expect(ben.getByTestId("repo-ben/demo")).toBeVisible();
     await settle(ben, 600);
-    await snap(ben, "import", "github-import", "repo-list", "Import page after connecting: the installation's repositories (ben/demo, ben/notes)");
-    await ben.getByTestId("repo-ben/demo").getByRole("button", { name: "Import ben/demo" }).click();
-    await expect(ben).toHaveURL(/\/p\/demo\/init\?step=configure/);
-    await settle(ben, 800);
-    await snap(ben, "import", "wizard-configure", "default", "Imported ben/demo: wizard Configure step (production, models and keys only)");
-    await ben.getByRole("button", { name: "Save and continue" }).click();
-    await expect(ben).toHaveURL(/\/p\/demo\/init\?step=scan/);
-    await settle(ben, 800);
-    await snap(ben, "import", "wizard-scan", "ready", "Wizard first-scan step before Start first scan (production: no Initialize step)");
-    await ben.getByRole("button", { name: "Start first scan" }).click();
-    await ben.waitForTimeout(600);
-    if (!(await ben.getByText("First scan complete").isVisible())) {
-      await snap(ben, "import", "wizard-scan", "running", "Wizard first scan mid-run (production real-git scan, captured as fast as possible)", { widths: ["desktop"], themes: ["light"], viewportOnly: true });
-    } else {
-      gap(M, "import", "wizard-scan", "running", "the production first scan finished before the capture");
+    await snap(ben, "import", "github-import", "repo-list", "Import page after connecting: the installation's repositories as a checklist (ben/demo, ben/notes)");
+    await ben.getByRole("checkbox", { name: "Select ben/demo" }).click();
+    await ben.getByRole("checkbox", { name: "Select ben/notes" }).click();
+    await expect(ben.getByRole("button", { name: "Import 2 repositories" })).toBeVisible();
+    await snap(ben, "import", "github-import", "multi-selected", "Both repositories ticked: the sticky footer reads 'Import 2 repositories'");
+    // Hold the production fake scanner on each phase so the imports are still running below.
+    fs.writeFileSync(PROD_DELAY, "0.7\n");
+    try {
+      await ben.getByRole("button", { name: "Import 2 repositories" }).click();
+      const results = ben.getByTestId("import-results");
+      await expect(results.getByTestId("import-ben/demo")).toContainText("Started");
+      await expect(results.getByTestId("import-ben/notes")).toContainText("Started");
+      await snap(ben, "import", "github-import", "import-results", "Per-row import results: each repository is Started and links to its Configure step");
+      await ben.goto(`${ROCKET}/`);
+      await expect(ben.getByTestId("project-demo").or(ben.getByTestId("project-notes")).first()).toBeVisible();
+      await settle(ben, 500);
+      await snap(ben, "projects", "projects", "importing", "rocket's Projects page while both imports run: the cards say Importing", { viewportOnly: true });
+      await ben.goto(`${ROCKET}/p/demo/init?step=configure`);
+      await expect(ben.getByTestId("scan-progress")).toBeVisible();
+      await settle(ben, 500);
+      await snap(ben, "import", "wizard-configure", "running", "Imported ben/demo: Configure following the clone and the first scan (the production scanner held on each phase)", { viewportOnly: true });
+    } finally {
+      fs.rmSync(PROD_DELAY, { force: true });
     }
-    await expect(ben.getByText("First scan complete")).toBeVisible({ timeout: 60_000 });
+    await expect(ben.getByText("First scan complete")).toBeVisible({ timeout: 90_000 });
     await settle(ben, 800);
-    await snap(ben, "import", "wizard-scan", "done-cost-card", "First scan complete with the cost card: commits waiting for a description, Describe now / Later");
+    await snap(ben, "import", "wizard-configure", "done-cost-card", "Configure after the first scan: First scan complete, the cost card with commits waiting for a description, Describe now / Later");
     await openAfterFirstScan(ben);
     await expect(ben).toHaveURL(/\/p\/demo$/);
     await settle(ben);
     await snap(ben, "project", "overview", "first-visit", "Project Overview of demo right after the import wizard (commits waiting for a description)");
   });
   await attempt(ben, at("import", "seed-notes"), async () => {
-    await importRepo(ben, "rocket", "ben/notes");
+    // notes was imported together with demo: wait for its first scan to end.
+    await expect
+      .poll(
+        async () => {
+          const p = await api<{ importing?: boolean; running_scan: unknown }>(ben.request, "GET", `${ROCKET}/api/projects/notes`);
+          return !p.importing && !p.running_scan;
+        },
+        { timeout: 90_000 },
+      )
+      .toBe(true);
   });
   await attempt(ben, at("import", "github-import", "all-imported"), async () => {
     await ben.goto(`${ROCKET}/projects/new`);
@@ -212,16 +260,21 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
   });
   await attempt(ben, at("orgs", "org-switcher"), async () => {
     await ben.goto(`${ROCKET}/`);
+    await settle(ben, 500);
+    await ben.getByTestId("org-switcher").click();
+    await expect(ben.getByTestId("org-current")).toBeVisible();
+    await snap(ben, "orgs", "org-switcher", "open", "The sidebar's org switcher open: the current org, the other organizations, All organizations", { widths: ["desktop"], viewportOnly: true });
+    await ben.keyboard.press("Escape");
     await ben.getByRole("button", { name: "Account menu" }).click();
     await ben.waitForTimeout(400);
-    await snap(ben, "orgs", "account-menu", "open", "The sidebar's account menu open (Switch organization, Account, Sign out)", { widths: ["desktop"], viewportOnly: true });
+    await snap(ben, "orgs", "account-menu", "open", "The sidebar's account menu open (who and role, Account, Sign out; org switching moved to the switcher)", { widths: ["desktop"], viewportOnly: true });
     await ben.keyboard.press("Escape");
   });
 
   // ---- members and invitations ----------------------------------------------
   await attempt(ben, at("members", "members", "owner-only"), async () => {
     await ben.goto(`${ROCKET}/members`);
-    await expect(ben.getByRole("heading", { name: "Members" })).toBeVisible();
+    await expect(ben.getByRole("heading", { name: "Members", exact: true, level: 1 })).toBeVisible();
     await settle(ben);
     await snap(ben, "members", "members", "owner-only", "Members (/members) with only the owner, invite form empty");
   });
@@ -253,6 +306,19 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
     await ben.waitForTimeout(1500);
     await snap(ben, "members", "members", "unknown-login", "Inviting a GitHub login that does not exist: the add-member error; two invitations pending");
   });
+  // Cy was added directly: his first page in the org carries the one-time welcome banner.
+  await attempt(cy, at("onboarding", "welcome-banner"), async () => {
+    await cy.goto(`${ROCKET}/`);
+    const banner = cy.getByTestId("welcome-banner");
+    await expect(banner).toBeVisible();
+    await settle(cy, 500);
+    await snap(cy, "onboarding", "welcome-banner", "member", "@cy's first visit to rocket after being added: the welcome banner (You've been added to Rocket Labs as a Member) with Connect your agent and Dismiss");
+    await banner.getByRole("button", { name: "Connect your agent" }).click();
+    await expect(cy.getByTestId("connect-agent-dialog")).toBeVisible();
+    await cy.waitForTimeout(600);
+    await snap(cy, "onboarding", "connect-agent-dialog", "open", "The Connect your agent dialog opened from the banner", { viewportOnly: true });
+    await cy.keyboard.press("Escape");
+  });
   // Dee signs in: her invitation is redeemed.
   const { c: deeC, page: dee } = await person(browser, "dee");
   await attempt(ben, at("members", "members", "full"), async () => {
@@ -265,11 +331,16 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
     await snap(ben, "members", "remove-member-dialog", "open", "Remove member confirmation for @dee", { viewportOnly: true });
     await ben.keyboard.press("Escape");
   });
-  await variants(ben, `${ROCKET}/members`, { mode: M, area: "members", name: "members", what: "Members (/members)" });
+  await variants(ben, `${ROCKET}/members`, { mode: M, area: "members", name: "members", what: "Members (/members)" }, { states: ["loading", "error", "forbidden"] });
   await attempt(dee, at("members", "joined"), async () => {
     await dee.goto(`${base.origin}/orgs`);
     await settle(dee, 800);
-    await snap(dee, "orgs", "org-picker", "after-invitation", "Dee's org picker after her invitation was redeemed at sign-in");
+    await snap(dee, "orgs", "org-picker", "after-invitation", "Dee's org picker after her invitation was redeemed at sign-in (the org row is marked new)");
+    await dee.goto(`${ROCKET}/`);
+    await expect(dee.getByTestId("welcome-banner")).toBeVisible();
+    await snap(dee, "onboarding", "welcome-banner", "viewer", "Dee's first visit to rocket after her invitation was redeemed: the welcome banner (as a Member)", { viewportOnly: true });
+    await dee.getByTestId("welcome-banner").getByRole("button", { name: "Dismiss" }).click();
+    await expect(dee.getByTestId("welcome-banner")).toHaveCount(0);
   });
 
   // ---- project access: restricted notes, grants on demo ------------------
@@ -294,6 +365,9 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
     await expect(ben.getByTestId("project-demo")).toBeVisible();
     await settle(ben);
     await snap(ben, "projects", "projects", "with-projects", "rocket's Projects page: demo, and notes with the Restricted badge");
+    if (await ben.getByTestId("first-run-checklist").isVisible().catch(() => false)) {
+      await snap(ben, "onboarding", "first-run-checklist", "production-partial", "The checklist as 'Getting started' once repositories are imported and members invited: GitHub, project, invite done", { viewportOnly: true });
+    }
     await ben.goto(`${ROCKET}/p/notes`);
     await settle(ben);
     await snap(ben, "access", "overview", "restricted", "Overview of the Restricted project notes (owner's view)");
@@ -317,6 +391,16 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
     await chat(ben, `${ROCKET}/p/notes`, "What is in notes?", "This repository is small");
     await chat(cy, `${ROCKET}/p/demo`, "Hello from cy", "This repository is small");
     await chat(cy, `${ROCKET}/p/demo`, "Chart it [[chart]]", "The chart above shows lines per symbol.");
+  });
+  await attempt(ben, at("chat", "chats-sidebar", "menu-open"), async () => {
+    await ben.goto(`${ROCKET}/p/demo/chat`);
+    const row = ben.getByTestId("chat-row").first();
+    await expect(row).toBeVisible();
+    await snap(ben, "chat", "chats-sidebar", "rows", "The sidebar's Chats block with the owner's sessions on demo", { widths: ["desktop"], viewportOnly: true });
+    await row.getByRole("button", { name: /^Actions for/ }).click();
+    await expect(ben.getByRole("menuitem", { name: "Rename" })).toBeVisible();
+    await snap(ben, "chat", "chats-sidebar", "menu-open", "A chat row's '...' menu open: Rename, Delete", { widths: ["desktop"], viewportOnly: true });
+    await ben.keyboard.press("Escape");
   });
   await attempt(cy, at("chat", "chat", "member-sessions"), async () => {
     await cy.goto(`${ROCKET}/p/demo/chat`);
@@ -363,6 +447,7 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
     await ben.getByRole("menuitem", { name: "Quick rescan" }).click();
     await ben.waitForURL("**/p/demo/scans/*");
     await expect(ben.getByTestId("run-result")).toContainText("The scan failed", { timeout: 60_000 });
+    failedRun = Number(new URL(ben.url()).pathname.split("/").pop());
     await settle(ben, 800);
     await snap(ben, "scans", "scan-run", "failed", "A failed production scan run (control/fail) with its log");
     ctl.fail(false);
@@ -370,10 +455,47 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
     await expect(ben.getByTestId("scan-history")).toBeVisible();
     await settle(ben);
     await snap(ben, "scans", "scan-history", "import-push-failed", "Scan history of demo: the import's first scan, a push-triggered sync and a failed rescan");
-    const first = ben.getByTestId("scan-history").getByRole("link").last();
-    await first.click();
+    await ben.getByTestId("filter-status").selectOption("failed");
+    await expect(ben).toHaveURL(/status=failed/);
+    await settle(ben, 600);
+    await snap(ben, "scans", "scan-history", "filter-failed", "Scan history of demo filtered to Status: Failed");
+    await ben.getByTestId("filter-requester").selectOption({ index: 1 });
+    await settle(ben, 600);
+    await snap(ben, "scans", "scan-history", "filter-requester", "Scan history of demo with a Requested by filter added (a person from the project's runs)");
+    await ben.getByRole("button", { name: "Clear filters" }).first().click();
+    await settle(ben, 400);
+    await ben.locator('[data-testid^="run-"]:visible').last().click();
+    await expect(ben).toHaveURL(/\/p\/demo\/scans\/\d+$/);
     await settle(ben, 1000);
-    await snap(ben, "scans", "scan-run", "ok", "The first scan's run page (ok)");
+    await snap(ben, "scans", "scan-run", "ok", "The import's first scan, opened from the history: an old run's page (ok)");
+  });
+  await attempt(ben, at("scans", "scan-history", "paging"), async () => {
+    const small = async (route: import("@playwright/test").Route) => {
+      const url = new URL(route.request().url());
+      url.searchParams.set("limit", "2");
+      await route.continue({ url: url.toString() });
+    };
+    const pattern = /\/api\/projects\/demo\/scans(\?.*)?$/;
+    await ben.route(pattern, small);
+    try {
+      await ben.goto(`${ROCKET}/p/demo/scans`);
+      await expect(ben.getByTestId("scans-load-more")).toBeVisible();
+      await settle(ben, 400);
+      await snap(ben, "scans", "scan-history", "paged-first", "Scan history of demo with a page size of 2 (route intercept on the limit): Load more under the first page");
+      await ben.getByTestId("scans-load-more").click();
+      await settle(ben, 800);
+      await snap(ben, "scans", "scan-history", "paged-more", "The same list after Load more");
+    } finally {
+      await ben.unroute(pattern, small);
+    }
+  });
+  await variants(ben, `${ROCKET}/p/demo/scans/${failedRun || 1}`, { mode: M, area: "scans", name: "scan-run", what: "A scan run's page" }, {
+    match: keepShell([/^\/api\/projects\/demo$/, /^\/api\/projects$/]),
+    states: ["loading", "error", "forbidden"],
+  });
+  await variants(ben, `${ROCKET}/p/demo/init?step=configure`, { mode: M, area: "import", name: "wizard-configure", what: "The wizard's Configure step (/p/demo/init?step=configure)" }, {
+    match: keepShell([/^\/api\/projects$/]),
+    states: ["loading", "error", "forbidden"],
   });
   ctl.fail(false);
 
@@ -395,8 +517,9 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
     await settle(dee, 800);
     await snap(dee, "viewer", "explorer-rationale", "viewer", "Explorer Rationale tab as a Viewer (no Generate)");
     await dee.goto(`${ROCKET}/p/demo/settings`);
+    await expect(dee.getByTestId("settings-read-only")).toBeVisible();
     await settle(dee, 1200);
-    await snap(dee, "viewer", "project-settings", "viewer", "Project settings as a Viewer");
+    await snap(dee, "viewer", "project-settings", "viewer", "Project settings as a Viewer: read-only, the notice on top and every field disabled (no key tails)");
     await dee.goto(`${ROCKET}/p/notes`);
     await settle(dee, 1500);
     await snap(dee, "viewer", "overview", "restricted-no-grant", "The Restricted project notes opened by URL without a grant (answers as not found)");
@@ -416,7 +539,7 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
       await snap(ben, "usage", `usage-${tab}`, "with-data", `Usage & cost, ${tab} tab, as the owner, after chats by @ben and @cy`);
     });
   }
-  await variants(ben, `${ROCKET}/usage`, { mode: M, area: "usage", name: "usage-overview", what: "Usage & cost (/usage)" });
+  await variants(ben, `${ROCKET}/usage`, { mode: M, area: "usage", name: "usage-overview", what: "Usage & cost (/usage)" }, { states: ["loading", "error", "forbidden"] });
   await attempt(ben, at("usage", "member-drilldown"), async () => {
     await ben.goto(`${ROCKET}/usage/members/${uid("cy")}`);
     await expect(ben.getByTestId("member-usage-page")).toBeVisible();
@@ -449,14 +572,23 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
       await cy.goto(`${ROCKET}/`);
       await settle(cy, 1200);
       await snap(cy, "budgets", "projects-member-banner", state, `@cy's Projects page with his member budget at ${pct}%${hard ? " and hard-stopped" : ""} ($${budget})`);
+      if (pct === 75) {
+        // Cy has not dismissed his welcome banner: the stack shows both.
+        const welcome = cy.getByTestId("welcome-banner");
+        if (await welcome.isVisible().catch(() => false)) {
+          await snap(cy, "budgets", "banner-stack", "welcome-and-budget-75", "The banner stack on @cy's Projects page: the welcome banner and the member budget at 75%, one under the other", { viewportOnly: true });
+          await welcome.getByRole("button", { name: "Dismiss" }).click();
+          await expect(welcome).toHaveCount(0);
+        }
+      }
       if (pct === 100) {
         await cy.goto(`${ROCKET}/usage/me`);
         await settle(cy, 1200);
         await snap(cy, "budgets", "my-usage-member-banner", state, `My usage with the member budget at ${pct}%${hard ? " (hard stop)" : ""}`);
       }
       if (hard) {
+        // A hard stop disables the sidebar's "New chat"; /chat already shows the notice.
         await cy.goto(`${ROCKET}/p/demo/chat`);
-        await cy.getByRole("button", { name: "New chat", exact: true }).first().click();
         await expect(cy.getByTestId("chat-budget-notice")).toBeVisible();
         await snap(cy, "budgets", "chat", "member-hard-stop", "@cy's chat with his member budget hard-stopped: the composer is replaced");
       }
@@ -478,12 +610,23 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
     await snap(ben, "budgets", "usage-overview", "org-75", "Usage overview with the org budget gauge and banner");
   });
 
+  await attempt(ben, at("budgets", "project-settings", "usage-section"), async () => {
+    await ben.goto(`${ROCKET}/p/demo/settings?section=budgets`);
+    await expect(ben.getByTestId("project-budget")).toBeVisible();
+    await settle(ben, 1000);
+    await snap(ben, "budgets", "project-settings", "usage-section", "Project settings, the Usage and budget section of demo: spend this month, the project budget, spend by member");
+  });
+
   // ---- org settings, audit -------------------------------------------------
   await attempt(ben, at("org", "org-settings"), async () => {
     await ben.goto(`${ROCKET}/settings`);
     await expect(ben.getByTestId("org-general")).toBeVisible();
     await settle(ben, 1000);
     await snap(ben, "org", "org-settings", "owner", "Org settings (/settings) as the owner: General (models, keys), Ownership, Danger zone");
+    await ben.getByRole("region", { name: "Models and keys" }).getByRole("button", { name: "Test", exact: true }).first().click();
+    await expect(ben.getByTestId("key-test-result").first()).toBeVisible();
+    await ben.waitForTimeout(400);
+    await snap(ben, "org", "org-settings", "key-test-result", "Org settings after Test on the OpenAI key: the one-word result of the free probe");
     const ownership = ben.getByTestId("org-ownership");
     await ownership.getByLabel("New owner").selectOption({ label: "Cy" });
     await ownership.getByRole("button", { name: "Transfer ownership" }).click();
@@ -495,11 +638,12 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
     await snap(ben, "org", "delete-org-dialog", "open", "Delete organization: the typed-slug confirmation dialog", { viewportOnly: true });
     await ben.keyboard.press("Escape");
   });
-  await variants(ben, `${ROCKET}/settings`, { mode: M, area: "org", name: "org-settings", what: "Org settings (/settings)" });
+  await variants(ben, `${ROCKET}/settings`, { mode: M, area: "org", name: "org-settings", what: "Org settings (/settings)" }, { states: ["loading", "error", "forbidden"] });
   await attempt(cy, at("org", "org-settings", "member"), async () => {
     await cy.goto(`${ROCKET}/settings`);
     await settle(cy, 1200);
-    await snap(cy, "org", "org-settings", "member", "Org settings as a member (owner-only notice)");
+    await expect(cy.getByTestId("settings-owner-only")).toBeVisible();
+    await snap(cy, "org", "org-settings", "member", "Org settings as a member: read-only, the 'Only owners can change organization settings' notice");
   });
   await attempt(ben, at("org", "audit"), async () => {
     await ben.goto(`${ROCKET}/audit`);
@@ -507,7 +651,7 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
     await settle(ben, 1500);
     await snap(ben, "org", "audit", "with-events", "Audit log (/audit) as the owner: invitations, grants, restriction, budgets");
   });
-  await variants(ben, `${ROCKET}/audit`, { mode: M, area: "org", name: "audit", what: "Audit log (/audit)" });
+  await variants(ben, `${ROCKET}/audit`, { mode: M, area: "org", name: "audit", what: "Audit log (/audit)" }, { states: ["loading", "error", "forbidden"] });
   await attempt(cy, at("org", "audit", "member"), async () => {
     await cy.goto(`${ROCKET}/audit`);
     await settle(cy, 1200);
@@ -523,8 +667,17 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
       await p.goto(`${base.origin}/account`);
       await settle(p, 1500);
       await snap(p, "account", "account", who, `Account page (/account) of ${who === "owner" ? "@ben (owner of two orgs)" : "@cy (member, budget hard-stopped)"}`);
+      if (who === "owner") {
+        await p.getByTestId("no-connections").getByRole("button", { name: "Connect your agent" }).click();
+        await expect(p.getByTestId("connect-agent-dialog")).toBeVisible();
+        await p.waitForTimeout(600);
+        await snap(p, "account", "connect-agent-dialog", "account", "The Connect your agent dialog opened from the Account page's Connected portals", { viewportOnly: true });
+        await p.keyboard.press("Escape");
+      }
     });
   }
+
+  await variants(ben, `${base.origin}/account`, { mode: M, area: "account", name: "account", what: "Account page (/account)" }, { states: ["loading", "error", "forbidden"] });
 
   // ---- the instance administrator: admin page, reader view --------------
   await attempt(ada, at("admin", "admin"), async () => {
@@ -532,6 +685,7 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
     await settle(ada, 1500);
     await snap(ada, "admin", "admin", "default", "Instance admin page (/admin): settings check, orgs, users, admin audit");
   });
+  await variants(ada, `${base.origin}/admin`, { mode: M, area: "admin", name: "admin", what: "Instance admin page (/admin)" }, { states: ["loading", "error", "forbidden"] });
   await attempt(ada, at("admin", "account"), async () => {
     await ada.goto(`${base.origin}/account`);
     await settle(ada, 1200);
@@ -555,14 +709,20 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
     await settle(ada, 1500);
     await snap(ada, "reader", "usage", "reader", "Usage & cost in reader mode");
     await ada.goto(`${ROCKET}/settings`);
+    await expect(ada.getByTestId("settings-reader")).toBeVisible();
     await settle(ada, 1200);
-    await snap(ada, "reader", "org-settings", "reader", "Org settings in reader mode");
+    await snap(ada, "reader", "org-settings", "reader", "Org settings in reader mode: the 'viewing as an instance administrator' notice, read-only");
+    await ada.goto(`${ROCKET}/p/demo/settings`);
+    await expect(ada.getByTestId("settings-reader")).toBeVisible();
+    await settle(ada, 1200);
+    await snap(ada, "reader", "project-settings", "reader", "Project settings in reader mode: read-only for the instance administrator");
   });
   await attempt(ada, at("orgs", "org-picker", "admin"), async () => {
     await ada.goto(`${base.origin}/orgs`);
     await settle(ada, 1500);
     await snap(ada, "orgs", "org-picker", "instance-admin", "Org picker as the instance admin (member of acme only)");
   });
+  await variants(ada, `${base.origin}/orgs`, { mode: M, area: "orgs", name: "org-picker", what: "Org picker (/orgs)" }, { states: ["loading", "error", "forbidden"] });
   await attempt(ben, at("edge", "not-found"), async () => {
     await ben.goto(`${ROCKET}/no-such-page`);
     await settle(ben, 1000);

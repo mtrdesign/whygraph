@@ -282,6 +282,21 @@ export async function holdRequests(page: Page, match: (req: Request) => boolean)
   };
 }
 
+/**
+ * Answer every API request (including the shell's own) with a 500, for the root error
+ * boundary; registers the answers as expected. Returns the undo function.
+ */
+export async function failAllRequests500(page: Page): Promise<() => Promise<void>> {
+  const stop = expectAnswers(page, /^[A-Z]+ \S+ 500$/);
+  const handler = (route: Route) =>
+    route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ detail: "Internal Server Error" }) });
+  await page.route("**/api/**", handler);
+  return async () => {
+    stop();
+    await page.unroute("**/api/**", handler);
+  };
+}
+
 /** Answer every request `match` accepts with `status` and a portal-shaped error body. */
 export async function failRequests(
   page: Page,

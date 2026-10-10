@@ -63,3 +63,30 @@ export function scanControl(dir = env.control) {
 }
 
 export const prodControl = () => scanControl(path.join(env.root, "prod-control"));
+
+/**
+ * A few agent calls over a local portal's HTTP MCP endpoint (`/mcp/<slug>`), exactly as
+ * a coding agent makes them, so the Overview's agent activity has data. Counting happens
+ * when a tool body is entered, so a tool that answers with an error still counts.
+ */
+export async function seedAgentCalls(request: APIRequestContext, origin: string, slug: string, rounds = 3): Promise<void> {
+  const calls: [string, Record<string, unknown>][] = [
+    ["whygraph_evidence_for", { path: "README.md", line_start: 1, line_end: 3 }],
+    ["whygraph_area_history", { path: "README.md" }],
+    ["whygraph_evidence_for", { path: "src/notes.py", line_start: 1, line_end: 5 }],
+  ];
+  let id = 1;
+  let ok = 0;
+  let last = "";
+  for (let i = 0; i < rounds; i++) {
+    for (const [name, args] of calls) {
+      const res = await request.post(`${origin}/mcp/${slug}`, {
+        headers: { Accept: "application/json, text/event-stream", "Content-Type": "application/json" },
+        data: { jsonrpc: "2.0", id: id++, method: "tools/call", params: { name, arguments: args } },
+      });
+      if (res.status() === 200) ok++;
+      else last = `${res.status()} ${(await res.text()).slice(0, 200)}`;
+    }
+  }
+  if (!ok) throw new Error(`no MCP call to /mcp/${slug} answered 200 (${last})`);
+}

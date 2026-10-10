@@ -40,7 +40,7 @@ const EMPTY: Detected = {
 function Block({ flat, children, testId }: { flat: boolean; children: React.ReactNode; testId?: string }) {
   return (
     <section
-      className={cn("flex flex-col gap-3", !flat && "rounded-xl border border-border bg-card p-5")}
+      className={cn("flex flex-col gap-3", !flat && "rounded-xl border border-border bg-card p-5 shadow-card")}
       data-testid={testId}
     >
       {children}

@@ -1,3 +1,4 @@
+import { PageContainer } from "../components/layout/PageContainer";
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
@@ -92,7 +93,7 @@ export function InitProjectPage() {
           : "The first scan runs in the background. Meanwhile, check what commit descriptions need. You can change all of this later in Settings.";
 
   return (
-    <div className="mx-auto flex w-full max-w-[760px] flex-col gap-5 p-4 sm:p-8">
+    <PageContainer className="flex flex-col gap-5 max-w-[760px]">
       <div className="flex flex-col gap-1">
         <h1 className="text-[22px] font-semibold tracking-tight break-words">
           {p.name}: {TITLE[step]}
@@ -122,6 +123,6 @@ export function InitProjectPage() {
           onFinished={onFinished}
         />
       )}
-    </div>
+    </PageContainer>
   );
 }

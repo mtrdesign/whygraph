@@ -1,3 +1,4 @@
+import { DisabledReason } from "../state/DisabledReason";
 import { useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -278,15 +279,24 @@ function Picker({
         <Button variant="ghost" onClick={() => abandon.mutate()} disabled={abandon.isPending}>
           Cancel
         </Button>
-        <Button onClick={() => add.mutate()} disabled={!chosen || blocked || add.isPending}>
-          {add.isPending
+        {(() => {
+          const label = add.isPending
             ? reconnecting
               ? "Reconnecting…"
               : "Linking…"
             : reconnecting
               ? "Reconnect this checkout"
-              : "Link this checkout"}
-        </Button>
+              : "Link this checkout";
+          return chosen || add.isPending ? (
+            <Button onClick={() => add.mutate()} disabled={!chosen || blocked || add.isPending}>
+              {label}
+            </Button>
+          ) : (
+            <DisabledReason reason="Choose a checkout from the list, or enter a path to one.">
+              <Button disabled>{label}</Button>
+            </DisabledReason>
+          );
+        })()}
       </div>
     </div>
   );

@@ -1,3 +1,4 @@
+import { errorInfo } from "../lib/apiErrors";
 import { useEffect, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -57,7 +58,7 @@ function Refused({ error }: { error: unknown }) {
   // The server's words; for a refused request there is no URL to go back to.
   const message =
     error instanceof ApiError && error.code === "bad_connect_request"
-      ? `${linkError(error)} (${error.message})`
+      ? [linkError(error), errorInfo(error, "link").detail].filter(Boolean).join(" ")
       : linkError(error);
   return (
     <AuthLayout title="Connection request refused">

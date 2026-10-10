@@ -16,13 +16,15 @@ export function PageContainer({
   width = "default",
   className,
   children,
+  "data-testid": testId,
 }: {
   width?: keyof typeof WIDTH;
   className?: string;
   children: ReactNode;
+  "data-testid"?: string;
 }) {
   return (
-    <div className={cn("mx-auto w-full px-4 py-5 sm:px-6", WIDTH[width], className)}>
+    <div className={cn("mx-auto w-full px-4 py-5 sm:px-6", WIDTH[width], className)} data-testid={testId}>
       {children}
     </div>
   );

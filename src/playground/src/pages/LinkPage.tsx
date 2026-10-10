@@ -1,3 +1,4 @@
+import { PageContainer } from "../components/layout/PageContainer";
 import { useState } from "react";
 import { Link, useSearch } from "@tanstack/react-router";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -52,7 +53,7 @@ export function LinkPage() {
   });
 
   return (
-    <div className="mx-auto flex w-full max-w-[640px] flex-col gap-5 p-6 sm:p-8">
+    <PageContainer className="flex flex-col gap-5 max-w-[640px]">
       <div className="flex flex-col gap-1">
         <h1 className="text-[22px] font-semibold tracking-tight">Link a checkout to a platform project</h1>
         <p className="text-[13px] text-muted-foreground">
@@ -73,7 +74,7 @@ export function LinkPage() {
         </Alert>
       ) : (
         <form
-          className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5"
+          className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5 shadow-card"
           onSubmit={(e) => {
             e.preventDefault();
             connect.mutate();
@@ -120,6 +121,6 @@ export function LinkPage() {
           </div>
         </form>
       )}
-    </div>
+    </PageContainer>
   );
 }

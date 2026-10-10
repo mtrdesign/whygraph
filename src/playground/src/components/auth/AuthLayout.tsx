@@ -32,7 +32,7 @@ export function AuthLayout({
           <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
           {description && <p className="text-sm text-muted-foreground">{description}</p>}
         </div>
-        <div className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5">{children}</div>
+        <div className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5 shadow-card">{children}</div>
         {footer && <div className="text-sm text-muted-foreground">{footer}</div>}
       </div>
     </div>

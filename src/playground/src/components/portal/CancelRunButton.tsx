@@ -1,3 +1,4 @@
+import { errorMessage } from "../../lib/apiErrors";
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -46,7 +47,7 @@ export function CancelRunButton({
       void queryClient.invalidateQueries({ queryKey: projectKey(slug, "scans") });
       void queryClient.invalidateQueries({ queryKey: projectKey(slug, "project") });
     },
-    onError: (err) => setError(err.message),
+    onError: (err) => setError(errorMessage(err)),
   });
 
   return (

@@ -1,5 +1,6 @@
 import { Suspense, lazy, useMemo } from "react";
 import type { UsageDay } from "../../api";
+import { formatUtc } from "../../lib/format";
 import type { ChartPayload } from "../charts/chartSpec";
 import { Skeleton } from "../ui/skeleton";
 
@@ -12,7 +13,7 @@ function shortDay(day: string): string {
   const d = new Date(`${day}T00:00:00Z`);
   return Number.isNaN(d.getTime())
     ? day
-    : d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+    : formatUtc(d, { month: "short", day: "numeric" });
 }
 
 /** A daily series as the chart card's payload: one bar per UTC day. */

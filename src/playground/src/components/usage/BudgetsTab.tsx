@@ -1,6 +1,6 @@
+import { DisabledReason } from "../state/DisabledReason";
 import { useId, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
 import {
   budgetsApi,
   membersApi,
@@ -95,7 +95,6 @@ export function BudgetEditor({
     mutationFn: (monthly_usd: number) => budgetsApi.put(target, { monthly_usd, hard_stop: hardStop }),
     onSuccess: async () => {
       setError(null);
-      toast.success("Budget saved");
       await written(target);
     },
     onError: (err) => setError(authMessage(err)),
@@ -106,7 +105,6 @@ export function BudgetEditor({
       setError(null);
       setAmount("");
       setHardStop(false);
-      toast.success("Budget removed");
       await written(target);
     },
     onError: (err) => setError(authMessage(err)),
@@ -125,7 +123,7 @@ export function BudgetEditor({
   const busy = save.isPending || remove.isPending;
 
   return (
-    <div className="flex flex-col gap-2 rounded-lg border border-border bg-card p-3 shadow-card" data-testid={testId}>
+    <div className="flex flex-col gap-2 rounded-lg bg-muted/40 p-3" data-testid={testId}>
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
         <span className="font-medium">{title}</span>
         {description && <span className="text-xs text-muted-foreground">{description}</span>}
@@ -203,7 +201,6 @@ function AddBudget({
       setAmount("");
       setHardStop(false);
       setError(null);
-      toast.success("Budget saved");
       await written(target);
     },
     onError: (err) => setError(authMessage(err)),
@@ -253,9 +250,17 @@ function AddBudget({
           Hard stop
         </Label>
       </div>
-      <Button type="submit" size="sm" disabled={add.isPending || !choice || amount.trim() === ""}>
-        Add budget
-      </Button>
+      {add.isPending || (choice && amount.trim() !== "") ? (
+        <Button type="submit" size="sm" disabled={add.isPending}>
+          Add budget
+        </Button>
+      ) : (
+        <DisabledReason reason="Choose who the budget is for and enter an amount.">
+          <Button type="submit" size="sm" disabled>
+            Add budget
+          </Button>
+        </DisabledReason>
+      )}
     </form>
   );
 }

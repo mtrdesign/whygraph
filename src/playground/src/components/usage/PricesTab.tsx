@@ -1,6 +1,5 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
 import { portalKey, pricesApi, type PriceBody, type PriceRow } from "../../api";
 import { authMessage } from "../../lib/authErrors";
 import { formatDateTime, formatUsd } from "../../lib/format";
@@ -97,9 +96,8 @@ function useSavePrice(onDone: () => void, setError: (e: string | null) => void) 
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (body: PriceBody) => pricesApi.put(body),
-    onSuccess: async (row) => {
+    onSuccess: async () => {
       setError(null);
-      toast.success(`Price of ${row.model} saved`);
       onDone();
       await queryClient.invalidateQueries({ queryKey: PRICES_KEY });
     },
@@ -121,7 +119,7 @@ function OverrideForm({ row, onClose }: { row: PriceRow; onClose: () => void }) 
   return (
     <form
       onSubmit={submit}
-      className="flex flex-col gap-2 rounded-lg border border-border bg-card p-3 shadow-card"
+      className="flex flex-col gap-2 rounded-lg bg-muted/40 p-3"
       data-testid={`price-form-${row.provider}-${row.model}`}
       noValidate
     >
@@ -207,9 +205,8 @@ export function PricesTab({ canEdit }: { canEdit: boolean }) {
   const [revertError, setRevertError] = useState<string | null>(null);
   const revert = useMutation({
     mutationFn: (row: PriceRow) => pricesApi.revert(row.provider, row.model),
-    onSuccess: async (_, row) => {
+    onSuccess: async () => {
       setRevertError(null);
-      toast.success(`Override of ${row.model} removed`);
       await queryClient.invalidateQueries({ queryKey: PRICES_KEY });
     },
     onError: (err) => setRevertError(authMessage(err)),

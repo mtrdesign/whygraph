@@ -41,7 +41,7 @@ export function ResponsiveTable<T>({
   const clickable = onRowClick ? "cursor-pointer hover:bg-muted/50" : "";
   return (
     <>
-      <div className="hidden overflow-hidden rounded-xl border border-border bg-card sm:block">
+      <div className="hidden overflow-hidden rounded-xl border border-border bg-card sm:block shadow-card">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-border text-left text-xs text-muted-foreground">

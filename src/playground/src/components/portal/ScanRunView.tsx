@@ -14,7 +14,7 @@ import { ApiError, portalApi, projectApi, projectKey, type ScanRunRow, type Scan
 import { usePortalState } from "../../lib/identity";
 import { can } from "../../lib/permissions";
 import { projectProblem } from "../../lib/errors";
-import { formatUsd } from "../../lib/format";
+import { formatClock, formatNumber, formatUsd } from "../../lib/format";
 import { useScanActions } from "../../lib/scanActions";
 import { scanAvailability } from "../../lib/scanAvailability";
 import {
@@ -22,7 +22,6 @@ import {
   CODE_INDEX_REFRESHED,
   cancelledLabel,
   failureSummary,
-  formatClock,
   formatSeconds,
   requesterLabel,
   runSeconds,
@@ -84,7 +83,7 @@ function TaskLine({ task, showLabel = true }: { task: TaskState; showLabel?: boo
           {task.description}
           {task.total ? (
             <span className="ml-2 tabular-nums text-foreground">
-              {task.completed.toLocaleString("en-US")} / {task.total.toLocaleString("en-US")}
+              {formatNumber(task.completed)} / {formatNumber(task.total)}
             </span>
           ) : null}
         </span>
@@ -200,7 +199,7 @@ function RunLog({
   }, [text]);
 
   return (
-    <section className="rounded-xl border border-border bg-card" data-testid="run-log">
+    <section className="rounded-xl border border-border bg-card shadow-card" data-testid="run-log">
       <button
         type="button"
         aria-expanded={open}
@@ -213,12 +212,12 @@ function RunLog({
       {open && (
         <div className="flex flex-col gap-2 border-t border-border px-5 py-3">
           {log.isLoading && <p className="text-xs text-muted-foreground">Loading the log…</p>}
-          {log.isError && <p className="text-xs text-destructive">Could not read the log: {log.error.message}</p>}
+          {log.isError && <ErrorState error={log.error} size="inline" onRetry={() => void log.refetch()} />}
           {log.data && (
             <>
               {log.data.truncated && (
                 <p className="text-xs text-muted-foreground">
-                  Showing the end of the log ({Math.round(log.data.size / 1024).toLocaleString("en-US")} KiB in
+                  Showing the end of the log ({formatNumber(Math.round(log.data.size / 1024))} KiB in
                   all). Keys are redacted.
                 </p>
               )}
@@ -616,7 +615,7 @@ export function ScanRunView({ slug, runId }: { slug: string; runId: number }) {
         onOpenLog={openLog}
       />
 
-      <section className="rounded-xl border border-border bg-card px-5 py-1" aria-label="Phases">
+      <section className="rounded-xl border border-border bg-card px-5 py-1 shadow-card" aria-label="Phases">
         {waiting ? (
           <p className="py-4 text-sm text-muted-foreground" data-testid="run-waiting">
             <CircleDashedIcon className="mr-2 inline size-4 align-text-bottom" />

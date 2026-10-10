@@ -1,3 +1,4 @@
+import { PageContainer } from "../components/layout/PageContainer";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { membersApi, portalKey, usageApi, type UsageGroup, type UsageGroupRow, type UsageQuery } from "../api";
@@ -16,8 +17,8 @@ import {
 } from "../components/usage/parts";
 import { Badge } from "../components/ui/badge";
 import { Skeleton } from "../components/ui/skeleton";
-import { authMessage } from "../lib/authErrors";
-import { formatPct, formatTokens, formatUsd } from "../lib/format";
+import { ErrorState } from "../components/state/ErrorState";
+import { formatNumber, formatPct, formatTokens, formatUsd } from "../lib/format";
 import { usePortalState } from "../lib/identity";
 import { formatMonth, formatRange, formatResetsAt, type UsageRange } from "../lib/usageRange";
 import { useOpenableProjects, usageKeyLabel, type RangeSearch } from "./UsagePage";
@@ -41,7 +42,7 @@ function Breakdown({
   return (
     <UsageSection title={title}>
       {report.isLoading && <Skeleton className="h-20" />}
-      {report.isError && <p className="text-sm text-destructive">Failed to load: {authMessage(report.error)}</p>}
+      {report.isError && <ErrorState error={report.error} context="usage" onRetry={() => void report.refetch()} />}
       {report.data && (
         <BreakdownTable group={group} rows={report.data.groups} compact link={group === "task" ? pretty : undefined} />
       )}
@@ -113,7 +114,7 @@ export function MemberUsagePage({ uid }: { uid?: string }) {
   const title = uid ? (member?.display_name ?? member?.github_login ?? uid) : "My usage";
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-col gap-6 p-6 sm:p-8" data-testid="member-usage-page">
+    <PageContainer width="default" className="flex flex-col gap-6" data-testid="member-usage-page">
       <div className="flex flex-wrap items-start gap-3">
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <h1 className="text-[22px] font-semibold tracking-tight">
@@ -149,7 +150,7 @@ export function MemberUsagePage({ uid }: { uid?: string }) {
       </div>
 
       {report.isLoading && <Skeleton className="h-40" />}
-      {report.isError && <p className="text-sm text-destructive">Failed to load: {authMessage(report.error)}</p>}
+      {report.isError && <ErrorState error={report.error} context="usage" onRetry={() => void report.refetch()} />}
       {report.data && (
         <>
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
@@ -163,7 +164,7 @@ export function MemberUsagePage({ uid }: { uid?: string }) {
               value={formatUsd(report.data.totals.cost_usd)}
               detail={formatRange(report.data.range)}
             />
-            <StatTile label="Calls" value={report.data.totals.calls.toLocaleString("en-US")} />
+            <StatTile label="Calls" value={formatNumber(report.data.totals.calls)} />
             <StatTile label="Tokens in" value={formatTokens(report.data.totals.input_tokens)} />
             <StatTile label="Tokens out" value={formatTokens(report.data.totals.output_tokens)} />
           </div>
@@ -196,6 +197,6 @@ export function MemberUsagePage({ uid }: { uid?: string }) {
           showWho={false}
         />
       </UsageSection>
-    </div>
+    </PageContainer>
   );
 }

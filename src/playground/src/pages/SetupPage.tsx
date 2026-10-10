@@ -1,3 +1,4 @@
+import { errorMessage } from "../lib/apiErrors";
 import { useNavigate, useRouter, useSearch } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
@@ -57,7 +58,7 @@ export function SetupPage() {
 
         <form
           noValidate
-          className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5"
+          className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5 shadow-card"
           onSubmit={form.handleSubmit((v) => setup.mutate(v))}
         >
           <Field label="Your name" error={form.formState.errors.display_name?.message}>
@@ -84,7 +85,7 @@ export function SetupPage() {
           {setup.isError && (
             <Alert variant="destructive">
               <AlertTitle>Setup failed</AlertTitle>
-              <AlertDescription>{setup.error.message}</AlertDescription>
+              <AlertDescription>{errorMessage(setup.error)}</AlertDescription>
             </Alert>
           )}
 

@@ -2,7 +2,7 @@ import { useId, type ReactElement } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDownIcon } from "lucide-react";
 import { projectApi, projectKey, type ProjectSummary, type ScanEstimate } from "../../api";
-import { formatUsd } from "../../lib/format";
+import { formatNumber, formatUsd } from "../../lib/format";
 import { can } from "../../lib/permissions";
 import type { ScanBody } from "../../lib/scanActions";
 import { scanAvailability, type Avail } from "../../lib/scanAvailability";
@@ -44,7 +44,7 @@ function fullDescription(estimate: ScanEstimate | undefined): string {
   if (!estimate) return `${base}, at a cost`;
   if (estimate.commits === 0) return `${base} (none waiting now)`;
   if (estimate.cost) return `${base} (~${formatUsd(estimate.cost.usd)})`;
-  return `${base} (${estimate.commits.toLocaleString("en-US")} waiting)`;
+  return `${base} (${formatNumber(estimate.commits)} waiting)`;
 }
 
 /** One rescan item: its label, a one-line description, and why it is disabled. */

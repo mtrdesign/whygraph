@@ -30,8 +30,8 @@ export type ValueFormat = "number" | "usd" | "pct";
 
 /** The label formatter for a {@link ValueFormat}. */
 function valueFormatter(format: ValueFormat): (value: unknown) => string {
-  if (format === "usd") return (value) => (typeof value === "number" ? formatUsd(value) : "—");
-  if (format === "pct") return (value) => (typeof value === "number" ? formatPct(value) : "—");
+  if (format === "usd") return (value) => (typeof value === "number" ? formatUsd(value) : "-");
+  if (format === "pct") return (value) => (typeof value === "number" ? formatPct(value) : "-");
   return formatValue;
 }
 
@@ -42,7 +42,7 @@ const SEVERITY: Record<ChartMarker["tone"], number> = { info: 0, ok: 1, warn: 2,
 
 /** Compact a number for a label: 1,284 / 12.9K / 3.4M. */
 export function formatValue(value: unknown): string {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
   const magnitude = Math.abs(value);
   if (magnitude >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
   if (magnitude >= 10_000) return `${(value / 1000).toFixed(1)}K`;
@@ -433,7 +433,7 @@ function TableView({ payload, valueFormat }: { payload: ChartPayload; valueForma
                   )}
                 >
                   {row[cell] === null || row[cell] === undefined
-                    ? "—"
+                    ? "-"
                     : valueFormat !== "number" && cell === payload.yIndex
                       ? valueFormatter(valueFormat)(row[cell])
                       : String(row[cell])}
@@ -568,7 +568,7 @@ export function ChartBlock({
         <div
           ref={plot}
           role="img"
-          aria-label={`${payload.title} — ${payload.kind} chart, ${categoryCount} categories. Use the Table toggle for the values.`}
+          aria-label={`${payload.title}: ${payload.kind} chart, ${categoryCount} categories. Use the Table toggle for the values.`}
         >
           <ReactEChartsCore
             ref={instance}

@@ -2,7 +2,7 @@ import { useId, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { budgetsApi, projectKey, projectUsageApi, type Budget, type ProjectSummary } from "../../api";
 import { errorMessage } from "../../lib/apiErrors";
-import { formatPct, formatTokens, formatUsd } from "../../lib/format";
+import { formatNumber, formatPct, formatTokens, formatUsd } from "../../lib/format";
 import { canAdmin, usePortalState, useRole } from "../../lib/identity";
 import { formatResetsAt } from "../../lib/usageRange";
 import { Field } from "../portal/Field";
@@ -168,7 +168,7 @@ export function ProjectUsageSection({ slug, project }: { slug: string; project: 
               testId="project-usage-spend"
               label="This month"
               value={formatUsd(data.totals.cost_usd)}
-              detail={`${data.totals.calls.toLocaleString("en-US")} calls`}
+              detail={`${formatNumber(data.totals.calls)} calls`}
             />
             <StatTile
               label="Tokens in / out"

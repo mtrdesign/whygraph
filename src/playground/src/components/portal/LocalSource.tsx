@@ -1,3 +1,5 @@
+import { DisabledReason } from "../state/DisabledReason";
+import { ErrorState } from "../state/ErrorState";
 import { useDeferredValue, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -153,7 +155,9 @@ export function LocalSource({ onAdded }: { onAdded: (result: AddProjectResult) =
 
       <div className="flex flex-col rounded-lg border border-border" role="radiogroup" aria-label="Repository">
         {repos.isLoading && <p className="p-3.5 text-sm text-muted-foreground">Looking for repositories…</p>}
-        {repos.isError && <p className="p-3.5 text-sm text-destructive">{repos.error.message}</p>}
+        {repos.isError && (
+          <ErrorState error={repos.error} size="inline" onRetry={() => void repos.refetch()} className="p-3.5" />
+        )}
         {repos.data?.repos.length === 0 && (
           <p className="p-3.5 text-sm text-muted-foreground">
             {deferred
@@ -227,9 +231,17 @@ export function LocalSource({ onAdded }: { onAdded: (result: AddProjectResult) =
         <Button variant="ghost" render={<Link to="/" />}>
           Cancel
         </Button>
-        <Button type="button" disabled={!ok || add.isPending} onClick={() => add.mutate()}>
-          {add.isPending ? "Adding…" : "Add project"}
-        </Button>
+        {ok || add.isPending ? (
+          <Button type="button" disabled={!ok || add.isPending} onClick={() => add.mutate()}>
+            {add.isPending ? "Adding…" : "Add project"}
+          </Button>
+        ) : (
+          <DisabledReason reason="Choose a repository from the list, or enter a path to one.">
+            <Button type="button" disabled>
+              Add project
+            </Button>
+          </DisabledReason>
+        )}
       </div>
     </div>
   );

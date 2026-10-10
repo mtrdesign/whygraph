@@ -1,3 +1,4 @@
+import { PageContainer } from "../components/layout/PageContainer";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -158,7 +159,7 @@ export function AdminPage() {
   ];
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-6 sm:p-8">
+    <PageContainer width="narrow" className="flex flex-col gap-6">
       <div>
         <h1 className="text-[22px] font-semibold tracking-tight">Administration</h1>
         {settings.data && (
@@ -236,6 +237,6 @@ export function AdminPage() {
         </div>
         <AuditTable scope="admin" />
       </section>
-    </div>
+    </PageContainer>
   );
 }

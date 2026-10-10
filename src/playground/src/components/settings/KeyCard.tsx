@@ -87,7 +87,7 @@ export function KeyCard({
 
   return (
     <div
-      className="flex min-w-0 flex-col gap-2 rounded-lg border border-border p-3"
+      className="flex min-w-0 flex-col gap-2 rounded-lg bg-muted/40 p-3"
       data-testid={testId}
     >
       <div className="row-wrap gap-y-1.5">

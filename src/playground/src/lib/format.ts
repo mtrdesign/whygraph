@@ -59,6 +59,7 @@ const DATE_TIME = new Intl.DateTimeFormat(undefined, {
   hour: "numeric",
   minute: "2-digit",
 });
+const CLOCK = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
 const NUMBER = new Intl.NumberFormat(undefined);
 
 /** `9 Oct 2026` (the viewer's locale); `-` for a missing or invalid value. */
@@ -71,6 +72,21 @@ export function formatDate(value: When): string {
 export function formatDateTime(value: When): string {
   const d = toDate(value);
   return d ? DATE_TIME.format(d) : "-";
+}
+
+/** `14:02` (the viewer's locale); `-` for a missing or invalid value. */
+export function formatClock(value: When): string {
+  const d = toDate(value);
+  return d ? CLOCK.format(d) : "-";
+}
+
+/**
+ * A date part in UTC, for the usage pages that bucket by UTC day and month
+ * (`{ month: "short", day: "numeric" }` -> `Oct 7`). `locale` pins the spelling the caller wants.
+ */
+export function formatUtc(value: When, options: Intl.DateTimeFormatOptions, locale = "en-US"): string {
+  const d = toDate(value);
+  return d ? new Intl.DateTimeFormat(locale, { ...options, timeZone: "UTC" }).format(d) : "-";
 }
 
 /** A whole-number-friendly count in the viewer's locale (`1,234`); `-` when not a number. */

@@ -1,3 +1,4 @@
+import { PageContainer } from "../components/layout/PageContainer";
 import { useState, type FormEvent } from "react";
 import { Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -135,7 +136,7 @@ function InviteMember({ viewerIsOwner }: { viewerIsOwner: boolean }) {
             >
               {rolesFor(viewerIsOwner).map((r) => (
                 <option key={r} value={r}>
-                  {r}
+                  {orgRoleLabel(r)}
                 </option>
               ))}
             </select>
@@ -165,7 +166,7 @@ function InviteMember({ viewerIsOwner }: { viewerIsOwner: boolean }) {
                 <option value="">Organization default</option>
                 {GRANT_ROLES.map((r) => (
                   <option key={r} value={r}>
-                    {r}
+                    {projectRoleLabel(r)}
                   </option>
                 ))}
               </select>
@@ -398,7 +399,6 @@ function MemberRow({
     mutationFn: () => membersApi.remove(member.uid),
     onSuccess: async () => {
       setConfirm(false);
-      toast.success(`Removed ${name}`);
       await queryClient.invalidateQueries({ queryKey: MEMBERS });
     },
     onError: (err) => setRemoveError(authMessage(err)),
@@ -449,7 +449,7 @@ function MemberRow({
         >
           {rolesFor(viewerIsOwner).map((r) => (
             <option key={r} value={r}>
-              {r}
+              {orgRoleLabel(r)}
             </option>
           ))}
         </select>
@@ -526,7 +526,7 @@ export function MembersPage() {
   });
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-6 sm:p-8">
+    <PageContainer width="narrow" className="flex flex-col gap-6">
       <div className="flex flex-col gap-1">
         <h1 className="text-[22px] font-semibold tracking-tight">Members</h1>
         <p className="text-[13px] text-muted-foreground">
@@ -583,6 +583,6 @@ export function MembersPage() {
           />
         </div>
       )}
-    </div>
+    </PageContainer>
   );
 }

@@ -1,3 +1,4 @@
+import { errorMessage } from "../../lib/apiErrors";
 import { useState, type FormEvent } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { auditApi, type AuditEventRow, type AuditFilters } from "../../api";
@@ -42,7 +43,7 @@ export function AuditTable({ scope, filename = "whygraph-audit.csv" }: { scope: 
     try {
       saveBlob(await auditApi.csv(applied), filename);
     } catch (err) {
-      setCsvError(err instanceof Error ? err.message : "The download failed");
+      setCsvError(errorMessage(err));
     } finally {
       setDownloading(false);
     }

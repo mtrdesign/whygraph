@@ -1,3 +1,4 @@
+import { PageContainer } from "../components/layout/PageContainer";
 import { useEffect, useState, type FormEvent } from "react";
 import { Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -17,7 +18,7 @@ import { Button } from "../components/ui/button";
 import { Skeleton } from "../components/ui/skeleton";
 import { Input } from "../components/ui/input";
 import { PASSWORD_HINT, authMessage } from "../lib/authErrors";
-import { formatUsd } from "../lib/format";
+import { formatNumber, formatUsd } from "../lib/format";
 import { formatResetsAt } from "../lib/usageRange";
 import { safeHref } from "../lib/platformLink";
 
@@ -59,7 +60,7 @@ function MyUsage() {
               )}
               <div className="flex flex-wrap items-center gap-x-3 text-xs text-muted-foreground">
                 <span>
-                  {o.calls.toLocaleString("en-US")} {o.calls === 1 ? "call" : "calls"}
+                  {formatNumber(o.calls)} {o.calls === 1 ? "call" : "calls"}
                 </span>
                 {o.hard_stop && o.budget_usd !== null && <span>Hard stop on</span>}
                 {href && (
@@ -137,11 +138,9 @@ export function AccountPage() {
   const rename = useMutation({
     mutationFn: () => accountApi.update(name.trim()),
     onSuccess: async () => {
-      toast.success("Name updated");
       await queryClient.invalidateQueries({ queryKey: ["@account", "me"] });
       await queryClient.invalidateQueries({ queryKey: portalKey("state") });
     },
-    onError: (err) => toast.error(err.message),
   });
   const password = useMutation({
     mutationFn: () => accountApi.password({ current, new: next }),
@@ -165,7 +164,7 @@ export function AccountPage() {
   };
 
   return (
-    <div className="mx-auto flex w-full max-w-xl flex-col gap-6 p-6 sm:p-8">
+    <PageContainer className="flex flex-col gap-6 max-w-xl">
       <div className="flex items-center gap-3">
         {account.data && (
           <UserAvatar name={account.data.display_name} url={account.data.avatar_url} className="size-10 text-sm" />
@@ -196,7 +195,13 @@ export function AccountPage() {
           >
             Save name
           </Button>
+          {rename.isSuccess && !rename.isPending && name.trim() === account.data?.display_name && (
+            <span role="status" className="ml-3 text-xs text-success" data-testid="name-saved">
+              Name saved
+            </span>
+          )}
         </div>
+        {rename.isError && <ErrorState error={rename.error} size="inline" context="auth" />}
       </form>
 
       {account.data?.has_password && (
@@ -267,6 +272,6 @@ export function AccountPage() {
       <MyUsage />
 
       <MyConnectedPortals />
-    </div>
+    </PageContainer>
   );
 }

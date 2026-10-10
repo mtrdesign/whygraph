@@ -66,7 +66,7 @@ export type Turn = UserTurn | AssistantTurn;
 function UserBubble({ content }: { content: string }) {
   return (
     <div className="flex justify-end">
-      <div className="max-w-[80%] whitespace-pre-wrap rounded-lg bg-primary/20 px-3 py-2 text-sm text-foreground">
+      <div className="max-w-[80%] whitespace-pre-wrap rounded-lg bg-primary-soft px-3 py-2 text-sm text-primary-text">
         {content}
       </div>
     </div>

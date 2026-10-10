@@ -179,7 +179,7 @@ export function SettingsLayout({
                     onClick={() => go(s.id)}
                     className={cn(
                       "w-full rounded-md px-2 py-1.5 text-left text-sm whitespace-nowrap text-muted-foreground hover:bg-muted hover:text-foreground",
-                      active === s.id && "bg-accent font-medium text-foreground",
+                      active === s.id && "bg-primary-soft font-medium text-primary-text",
                     )}
                   >
                     {s.label}

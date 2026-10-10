@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { GitBranchIcon, LockIcon, RefreshCwIcon } from "lucide-react";
-import { toast } from "sonner";
 import {
   ApiError,
   authApi,
@@ -315,7 +314,6 @@ function Repos({ installation, onInstallMore }: { installation: GitHubInstallati
     setDone(true);
     if (queue.length === 1 && results.length === 1) {
       const { result } = results[0];
-      toast.success(`Imported ${result.project.name}`);
       void navigate({
         to: "/p/$slug/init",
         params: { slug: result.project.slug },
@@ -484,9 +482,17 @@ function Footer({ count, onImport }: { count: number; onImport: (() => void) | n
         Cancel
       </Button>
       {onImport && (
-        <Button type="button" disabled={count === 0} onClick={onImport}>
-          {count === 0 ? "Import" : `Import ${plural(count, "repository", "repositories")}`}
-        </Button>
+        count === 0 ? (
+          <DisabledReason reason="Choose at least one repository to import.">
+            <Button type="button" disabled>
+              Import
+            </Button>
+          </DisabledReason>
+        ) : (
+          <Button type="button" onClick={onImport}>
+            {`Import ${plural(count, "repository", "repositories")}`}
+          </Button>
+        )
       )}
     </div>
   );

@@ -80,13 +80,6 @@ export function runTitle(run: Pick<ScanRunRow, "trigger" | "kind" | "analyze" | 
   return when ? `${runLabel(run)} - ${formatDateTime(when)}` : runLabel(run);
 }
 
-/** `14:02` in the viewer's locale; `-` for a missing value. */
-export function formatClock(iso: string | null | undefined): string {
-  if (!iso) return "-";
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? "-" : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-}
-
 /** "System" (no requester), "You" (the viewer) or the requester's name. */
 export function requesterLabel(run: Pick<ScanRunRow, "requested_by">, viewerUid?: string | null): string {
   const who = run.requested_by;

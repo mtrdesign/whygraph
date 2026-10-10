@@ -285,7 +285,7 @@ describe("platform source", () => {
     const submit = screen.getByRole("button", { name: "Link this checkout" });
     expect(submit).toBeDisabled();
     await user.click(screen.getByRole("radio", { name: /alpha/ }));
-    await user.click(submit);
+    await user.click(screen.getByRole("button", { name: "Link this checkout" }));
     await waitFor(() => expect(router.state.location.pathname).toBe("/p/alpha/init"));
     expect(router.state.location.search).toMatchObject({ step: "setup" });
     expect(mutations().find((c) => c.path === "/api/projects")?.body).toEqual({

@@ -2,6 +2,8 @@
 // `from` inclusive and `to` exclusive, so every range here is a pair of UTC
 // `YYYY-MM-DD` strings in that convention.
 
+import { formatUtc } from "./format";
+
 export interface UsageRange {
   from: string;
   to: string;
@@ -63,7 +65,7 @@ export function matchPreset(range: Partial<UsageRange>, now: Date = new Date()):
 export function formatMonth(month: string): string {
   const d = new Date(`${month}-01T00:00:00Z`);
   if (Number.isNaN(d.getTime())) return month;
-  return d.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
+  return formatUtc(d, { month: "long", year: "numeric" });
 }
 
 /** A reset instant as the budget UI says it: `1 Nov, 00:00 UTC`. */
@@ -71,7 +73,7 @@ export function formatResetsAt(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   const day = d.getUTCDate();
-  const month = d.toLocaleDateString("en-US", { month: "short", timeZone: "UTC" });
+  const month = formatUtc(d, { month: "short" });
   const hh = String(d.getUTCHours()).padStart(2, "0");
   const mm = String(d.getUTCMinutes()).padStart(2, "0");
   return `${day} ${month}, ${hh}:${mm} UTC`;
@@ -81,18 +83,13 @@ export function formatResetsAt(iso: string): string {
 export function formatResetsOn(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return `${d.getUTCDate()} ${d.toLocaleDateString("en-US", { month: "short", timeZone: "UTC" })}`;
+  return `${d.getUTCDate()} ${formatUtc(d, { month: "short" })}`;
 }
 
 /** A range for a caption: `1 Oct 2026 - 31 Oct 2026` (the exclusive end shown as the last day). */
 export function formatRange(range: UsageRange): string {
   const show = (day: string) =>
-    new Date(`${day}T00:00:00Z`).toLocaleDateString("en-GB", {
-      day: "numeric",
-      month: "short",
-      year: "numeric",
-      timeZone: "UTC",
-    });
+    formatUtc(`${day}T00:00:00Z`, { day: "numeric", month: "short", year: "numeric" }, "en-GB");
   const last = addDays(range.to, -1);
   return last === range.from ? show(range.from) : `${show(range.from)} - ${show(last)}`;
 }

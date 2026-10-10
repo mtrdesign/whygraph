@@ -1,3 +1,4 @@
+import { PageContainer } from "../components/layout/PageContainer";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
@@ -265,7 +266,7 @@ function Overview({ toCalls }: { toCalls: (filter: UsageSearch) => UsageSearch }
 const GROUP_INTRO: Partial<Record<UsageGroup, string>> = {
   project: "What each project's calls cost. A removed project keeps its rows under its old slug.",
   member:
-    "Who triggered the spend: interactive is chat, Explorer Generate, agent calls and on-demand descriptions; scans are the full scans they started. Triggered is not benefited, so this is not a ranking. System covers webhook, reconcile and hook scans.",
+    "Who triggered the spend: interactive is chat, Explorer Generate, agent calls and on-demand descriptions; scans are the full scans they started. This shows who started the spend, not who gained from it, so it is not a ranking. System covers webhook, reconcile and hook scans.",
   model: "Spend per model, as the provider served it.",
   machine:
     "Agent calls through a linked portal, per machine. Everything made in this portal itself is under Portal.",
@@ -507,7 +508,7 @@ export function UsagePage() {
   };
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-col gap-6 p-6 sm:p-8" data-testid="usage-page">
+    <PageContainer width="default" className="flex flex-col gap-6" data-testid="usage-page">
       <div className="flex flex-wrap items-start gap-3">
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <h1 className="text-[22px] font-semibold tracking-tight">Usage & cost</h1>
@@ -577,6 +578,6 @@ export function UsagePage() {
         </TabsContent>
         <TabsContent value="prices">{tab === "prices" && <PricesTab canEdit={canAdmin(role)} />}</TabsContent>
       </Tabs>
-    </div>
+    </PageContainer>
   );
 }

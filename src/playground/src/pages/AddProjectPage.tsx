@@ -1,3 +1,4 @@
+import { PageContainer } from "../components/layout/PageContainer";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, githubApi, portalKey, projectKey, type AddProjectResult } from "../api";
@@ -50,7 +51,7 @@ export function AddProjectPage() {
   };
 
   return (
-    <div className="mx-auto flex w-full max-w-[760px] flex-col gap-5 p-4 sm:p-8">
+    <PageContainer className="flex flex-col gap-5 max-w-[760px]">
       <div className="flex flex-col gap-1">
         <h1 className="text-[22px] font-semibold tracking-tight">Add a project</h1>
         <p className="text-[13px] text-muted-foreground">
@@ -85,7 +86,7 @@ export function AddProjectPage() {
       {!githubRequired && (
         <WizardSteps current="source" mode={production ? "production" : platform ? "linked" : "local"} />
       )}
-      <div className="rounded-xl border border-border bg-card">
+      <div className="rounded-xl border border-border bg-card shadow-card">
         {production ? (
           <GitHubImport />
         ) : platform ? (
@@ -100,6 +101,6 @@ export function AddProjectPage() {
           <LocalSource onAdded={onAdded} />
         )}
       </div>
-    </div>
+    </PageContainer>
   );
 }

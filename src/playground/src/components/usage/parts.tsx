@@ -3,7 +3,7 @@ import { DownloadIcon } from "lucide-react";
 import type { UsageCsv, UsageSplit } from "../../api";
 import { authMessage } from "../../lib/authErrors";
 import { saveBlob } from "../../lib/download";
-import { formatPct, formatUsd } from "../../lib/format";
+import { formatNumber, formatPct, formatUsd } from "../../lib/format";
 import {
   RANGE_PRESETS,
   addDays,
@@ -93,7 +93,7 @@ export function UnpricedNote({ calls, budgets = false }: { calls: number; budget
   if (calls <= 0) return null;
   return (
     <p className="text-xs text-warning" data-testid="unpriced-note">
-      {calls.toLocaleString("en-US")} {calls === 1 ? "call" : "calls"} had no price and{" "}
+      {formatNumber(calls)} {calls === 1 ? "call" : "calls"} had no price and{" "}
       {budgets ? "are not counted toward budgets" : "are not in the cost figures"}. Add a price on the Prices tab
       to count calls like {calls === 1 ? "it" : "them"} from now on.
     </p>
@@ -105,9 +105,9 @@ export function SplitLine({ split }: { split: UsageSplit }) {
   return (
     <p className="text-xs text-muted-foreground" data-testid="usage-split">
       <span className="text-foreground">Interactive</span> {formatUsd(split.interactive.cost_usd)} (
-      {split.interactive.calls.toLocaleString("en-US")} calls) ·{" "}
+      {formatNumber(split.interactive.calls)} calls) ·{" "}
       <span className="text-foreground">Scans</span> {formatUsd(split.scans.cost_usd)} (
-      {split.scans.calls.toLocaleString("en-US")} calls)
+      {formatNumber(split.scans.calls)} calls)
     </p>
   );
 }

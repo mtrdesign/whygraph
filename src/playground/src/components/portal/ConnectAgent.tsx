@@ -10,7 +10,7 @@ import { CopyButton } from "./CopyButton";
  */
 export function ConnectAgent({ mcpUrl, configured }: { mcpUrl: string; configured: readonly string[] }) {
   return (
-    <section className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5" data-testid="connect-agent">
+    <section className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5 shadow-card" data-testid="connect-agent">
       <div>
         <h2 className="text-sm font-semibold">Connect your agent</h2>
         <p className="text-xs text-muted-foreground">

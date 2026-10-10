@@ -12,6 +12,9 @@ import {
   type RangePreset,
   type UsageRange,
 } from "../../lib/usageRange";
+import { ApiError } from "../../api";
+import { ErrorState } from "../state/ErrorState";
+import { ForbiddenState } from "../state/ForbiddenState";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Field, nativeSelectClass } from "../portal/Field";
@@ -39,7 +42,7 @@ export function UsageSection({
   return (
     <section
       data-testid={testId}
-      className={cn("flex flex-col gap-4 rounded-xl border border-border bg-card p-5", className)}
+      className={cn("flex flex-col gap-4 rounded-xl border border-border bg-card p-4 shadow-card sm:p-5", className)}
     >
       <div className="flex flex-wrap items-start gap-3">
         <div className="min-w-0 flex-1">
@@ -66,7 +69,7 @@ export function StatTile({
   testId?: string;
 }) {
   return (
-    <div className="flex min-w-0 flex-col gap-0.5 rounded-lg border border-border px-3 py-2.5" data-testid={testId}>
+    <div className="flex min-w-0 flex-col gap-0.5 rounded-lg border border-border bg-card px-3 py-2.5 shadow-card" data-testid={testId}>
       <span className="text-xs text-muted-foreground">{label}</span>
       <span className="text-xl font-semibold tabular-nums tracking-tight">{value}</span>
       {detail && <span className="text-xs text-muted-foreground">{detail}</span>}
@@ -254,4 +257,24 @@ export function RangePicker({
       )}
     </form>
   );
+}
+
+/**
+ * A usage load that failed: a `403` is the "No access" state (ER-8), anything else the
+ * registry's wording with **Retry**.
+ */
+export function UsageError({
+  error,
+  what,
+  title,
+  onRetry,
+}: {
+  error: unknown;
+  /** What the caller may not see: "this usage report". */
+  what: string;
+  title: string;
+  onRetry?: () => void;
+}) {
+  if (error instanceof ApiError && error.status === 403) return <ForbiddenState what={what} error={error} />;
+  return <ErrorState error={error} title={title} onRetry={onRetry} />;
 }

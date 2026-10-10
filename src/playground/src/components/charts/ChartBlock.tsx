@@ -1,5 +1,5 @@
 import ReactEChartsCore from "echarts-for-react/esm/core";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { formatPct, formatUsd } from "@/lib/format";
 import type { ChartMarker, ChartPayload } from "./chartSpec";
@@ -14,6 +14,9 @@ import echarts from "./echarts";
 // resolved theme changes.
 
 const MAX_X_TICKS = 12;
+/** Below this width (px) a time axis draws at most `NARROW_X_TICKS` labels. */
+const NARROW_WIDTH = 480;
+const NARROW_X_TICKS = 6;
 const ROW_HEIGHT = 22;
 
 // `EChartsOption` would have to come from the package root, and the tree-shaking
@@ -133,9 +136,10 @@ function tooltipFormatter(
   return root;
 }
 
-/** How many category labels to skip so at most `MAX_X_TICKS` are drawn. */
-function tickInterval(count: number): number {
-  return Math.max(0, Math.ceil(count / MAX_X_TICKS) - 1);
+/** How many category labels to skip so at most `MAX_X_TICKS` (6 on a narrow chart) are drawn. */
+function tickInterval(count: number, width?: number): number {
+  const max = width !== undefined && width < NARROW_WIDTH ? NARROW_X_TICKS : MAX_X_TICKS;
+  return Math.max(0, Math.ceil(count / max) - 1);
 }
 
 /**
@@ -147,7 +151,7 @@ function tickInterval(count: number): number {
 export function buildOption(
   payload: ChartPayload,
   colors: ChartColors,
-  { valueFormat = "number" }: { valueFormat?: ValueFormat } = {},
+  { valueFormat = "number", width }: { valueFormat?: ValueFormat; width?: number } = {},
 ): Option {
   const format = valueFormatter(valueFormat);
   const { palette } = colors;
@@ -291,7 +295,7 @@ export function buildOption(
       // horizontal chart every category label is shown, since long labels are the
       // reason that kind was chosen.
       rotate: 0,
-      interval: horizontal ? 0 : tickInterval(categories.length),
+      interval: horizontal ? 0 : tickInterval(categories.length, width),
       // Long labels on a narrow chart (a phone) drop out rather than overprint.
       hideOverlap: !horizontal,
     },
@@ -455,9 +459,21 @@ export function ChartBlock({
   const instance = useRef<ReactEChartsCore>(null);
   const colors = useChartColors();
   // Rebuilt when the resolved theme flips, so a live toggle repaints the canvas.
+  // The card's width, so a phone-width axis thins its labels (PH-9).
+  const plot = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState<number | undefined>(undefined);
+  useEffect(() => {
+    const node = plot.current;
+    if (!node) return;
+    setWidth(Math.round(node.getBoundingClientRect().width) || undefined);
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(([entry]) => setWidth(Math.round(entry.contentRect.width) || undefined));
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [view]);
   const option = useMemo(
-    () => buildOption(payload, colors, { valueFormat }),
-    [payload, colors, valueFormat],
+    () => buildOption(payload, colors, { valueFormat, width }),
+    [payload, colors, valueFormat, width],
   );
 
   const statTile = payload.rows.length === 1 && !payload.stack;
@@ -550,6 +566,7 @@ export function ChartBlock({
         <TableView payload={payload} valueFormat={valueFormat} />
       ) : (
         <div
+          ref={plot}
           role="img"
           aria-label={`${payload.title} — ${payload.kind} chart, ${categoryCount} categories. Use the Table toggle for the values.`}
         >

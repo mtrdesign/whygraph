@@ -89,7 +89,7 @@ function ProjectBudgetForm({ slug, budget }: { slug: string; budget: Budget | nu
               <Input
                 {...p}
                 inputMode="decimal"
-                placeholder="100"
+                placeholder="e.g. 100"
                 value={amount}
                 onChange={(e) => {
                   setAmount(e.target.value);
@@ -205,8 +205,8 @@ export function ProjectUsageSection({ slug, project }: { slug: string; project: 
           )}
         </>
       )}
-      {/* The budget form waits for the report so it never stays live beside a failed load (ER-4). */}
-      {editBudget && !report.isError && (
+      {/* The budget form waits for the report to load, so it never sits live beside a failed or pending one (ER-4). */}
+      {editBudget && data && (
         <ProjectBudgetForm slug={slug} budget={budget} />
       )}
     </SettingsSection>

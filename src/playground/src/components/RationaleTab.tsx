@@ -137,13 +137,14 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
       </p>
     );
   } else if (budgetBlocked) {
+    // One reason, once (USE-3): the page's banner says why and who can change it.
     state = (
       <>
         <Button className="mt-0" disabled title={budgetNoticeText(llm.scope)}>
           Generate rationale
         </Button>
-        <p className="mt-2 text-sm text-destructive" data-testid="generate-blocked">
-          {budgetNoticeText(llm.scope)}
+        <p className="mt-2 text-sm text-muted-foreground" data-testid="generate-blocked">
+          Generation is paused: monthly budget reached
         </p>
       </>
     );

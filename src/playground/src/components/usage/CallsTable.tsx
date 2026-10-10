@@ -1,21 +1,31 @@
 import { Link } from "@tanstack/react-router";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { portalKey, usageApi, type UsageCall, type UsageCallsPage, type UsageQuery } from "../../api";
-import { authMessage } from "../../lib/authErrors";
-import { formatTokens, formatUsd } from "../../lib/format";
+import { formatDateTime, formatTokens, formatUsd } from "../../lib/format";
+import { whatLabel, whereLabel } from "../../lib/usageLabels";
+import { ResponsiveTable, type Column } from "../layout/ResponsiveTable";
 import { Button } from "../ui/button";
 import { Skeleton } from "../ui/skeleton";
-
-function when(at: string): string {
-  const d = new Date(at);
-  return Number.isNaN(d.getTime()) ? at : d.toLocaleString();
-}
+import { UsageError } from "./parts";
 
 const COST_SOURCE: Record<string, string> = {
   provider: "reported by the provider",
   estimated: "estimated from the price table",
   unpriced: "no price on file: tokens only",
 };
+
+/**
+ * LLM calls, newest or costliest first, with keyset paging on the server's `next`.
+ * Shared by the table and by the page's filter chips (which read the first rows).
+ */
+export function useCallsQuery(scope: "org" | "me", query: UsageQuery) {
+  return useInfiniteQuery<UsageCallsPage, Error, { pages: UsageCallsPage[] }, readonly unknown[], string | undefined>({
+    queryKey: portalKey("usage", scope, "calls", query),
+    queryFn: ({ pageParam }) => usageApi(scope).calls({ ...query, before: pageParam }),
+    initialPageParam: undefined,
+    getNextPageParam: (last) => last.next ?? undefined,
+  });
+}
 
 /** The scan run and chat session a call belongs to, linked when the viewer may open them. */
 function CallLinks({ call, viewerUid, openable }: { call: UsageCall; viewerUid?: string; openable: boolean }) {
@@ -30,10 +40,10 @@ function CallLinks({ call, viewerUid, openable }: { call: UsageCall; viewerUid?:
           params={{ slug, runId: String(call.scan_run_id) }}
           className="text-primary-text hover:underline"
         >
-          Run #{call.scan_run_id}
+          Scan
         </Link>
       ) : (
-        <span key="run">Run #{call.scan_run_id}</span>
+        <span key="run">Scan</span>
       ),
     );
   }
@@ -49,11 +59,11 @@ function CallLinks({ call, viewerUid, openable }: { call: UsageCall; viewerUid?:
           className="text-primary-text hover:underline"
           data-testid={`call-chat-${call.id}`}
         >
-          Chat #{call.chat_session_id}
+          Chat
         </Link>
       ) : (
         <span key="chat" data-testid={`call-chat-${call.id}`}>
-          #{call.chat_session_id}
+          {own ? "Chat" : "Chat (another member)"}
         </span>
       ),
     );
@@ -62,9 +72,9 @@ function CallLinks({ call, viewerUid, openable }: { call: UsageCall; viewerUid?:
 }
 
 /**
- * LLM calls, newest or costliest first, with "Load more" (keyset paging on the
- * server's `next`). `openable` lists the project slugs the viewer can still open:
- * a call of any other project (removed, or no longer shared) links nowhere.
+ * LLM calls, newest or costliest first, with "Load more". `openable` lists the
+ * project slugs the viewer can still open: a call of any other project (removed, or
+ * no longer shared) links nowhere. Below `sm` each call stacks (PH-5).
  */
 export function CallsTable({
   scope,
@@ -77,85 +87,121 @@ export function CallsTable({
   query: UsageQuery;
   viewerUid?: string;
   openable: Set<string>;
-  /** Hide the Who column (a single member's view). */
+  /** Hide the Who column (a single member's view, and local mode, which has one user). */
   showWho?: boolean;
 }) {
-  const calls = useInfiniteQuery<UsageCallsPage, Error, { pages: UsageCallsPage[] }, readonly unknown[], string | undefined>({
-    queryKey: portalKey("usage", scope, "calls", query),
-    queryFn: ({ pageParam }) => usageApi(scope).calls({ ...query, before: pageParam }),
-    initialPageParam: undefined,
-    getNextPageParam: (last) => last.next ?? undefined,
-  });
+  const calls = useCallsQuery(scope, query);
   const rows = calls.data?.pages.flatMap((p) => p.items) ?? [];
+  const columns: Column<UsageCall>[] = [
+    {
+      key: "when",
+      header: "When",
+      cell: (c) => <span className="whitespace-nowrap text-muted-foreground">{formatDateTime(c.created_at)}</span>,
+    },
+    {
+      key: "project",
+      header: "Project",
+      cell: (c) => <span title={c.project_slug ?? undefined}>{c.project_name ?? c.project_slug ?? "-"}</span>,
+    },
+  ];
+  if (showWho) {
+    columns.push({
+      key: "who",
+      header: "Who",
+      cell: (c) => (
+        <>
+          {c.actor_label ?? "-"}
+          {c.client_name && <span className="block text-muted-foreground">{c.client_name}</span>}
+        </>
+      ),
+    });
+  }
+  columns.push(
+    {
+      key: "what",
+      header: "What",
+      primary: true,
+      cell: (c) => {
+        const what = whatLabel(c.task);
+        const where = whereLabel(c.source);
+        return (
+          <span className="whitespace-nowrap">
+            {what}
+            {where !== what && <span className="font-normal text-muted-foreground"> · {where}</span>}
+          </span>
+        );
+      },
+    },
+    {
+      key: "model",
+      header: "Model",
+      cell: (c) => (
+        <span className="font-mono text-xs" title={`${c.provider} · key: ${c.key_scope}`}>
+          {c.model_served ?? c.model_requested ?? c.provider}
+        </span>
+      ),
+    },
+    {
+      key: "tokens",
+      header: "Tokens in / out",
+      align: "right",
+      cell: (c) => (
+        <span className="whitespace-nowrap">
+          {formatTokens(c.input_tokens)} / {formatTokens(c.output_tokens)}
+        </span>
+      ),
+    },
+    {
+      key: "cost",
+      header: "Est. cost",
+      align: "right",
+      cell: (c) => (
+        <span className="whitespace-nowrap" title={COST_SOURCE[c.cost_source]}>
+          {c.cost_source === "unpriced" ? (
+            <span className="text-warning">unpriced</span>
+          ) : (
+            <>
+              {formatUsd(c.cost_usd)}
+              {c.cost_source === "provider" && <span className="text-muted-foreground"> *</span>}
+            </>
+          )}
+        </span>
+      ),
+    },
+    {
+      key: "details",
+      header: "Details",
+      cell: (c) => (
+        <span className="text-muted-foreground">
+          {c.subject && (
+            <span className="block max-w-[16rem] truncate font-mono text-xs" title={c.subject}>
+              {c.subject}
+            </span>
+          )}
+          <CallLinks call={c} viewerUid={viewerUid} openable={!!c.project_slug && openable.has(c.project_slug)} />
+        </span>
+      ),
+    },
+  );
   return (
     <div className="flex flex-col gap-3" data-testid="calls-table">
       {calls.isLoading && <Skeleton className="h-24" />}
-      {calls.isError && <p className="text-sm text-destructive">Failed to load: {authMessage(calls.error)}</p>}
+      {calls.isError && (
+        <UsageError
+          error={calls.error}
+          what="these calls"
+          title="Couldn't load these calls"
+          onRetry={() => void calls.refetch()}
+        />
+      )}
       {calls.data && rows.length === 0 && <p className="text-sm text-muted-foreground">No calls match.</p>}
       {rows.length > 0 && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="text-muted-foreground">
-              <tr>
-                <th className="py-1.5 pr-3 font-medium">When</th>
-                <th className="py-1.5 pr-3 font-medium">Project</th>
-                {showWho && <th className="py-1.5 pr-3 font-medium">Who</th>}
-                <th className="py-1.5 pr-3 font-medium">What</th>
-                <th className="py-1.5 pr-3 font-medium">Model</th>
-                <th className="py-1.5 pr-3 text-right font-medium">Tokens in / out</th>
-                <th className="py-1.5 pr-3 text-right font-medium">Est. cost</th>
-                <th className="py-1.5 font-medium">Details</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {rows.map((c) => (
-                <tr key={c.id} data-testid={`call-${c.id}`}>
-                  <td className="whitespace-nowrap py-1.5 pr-3 text-muted-foreground">{when(c.created_at)}</td>
-                  <td className="max-w-[10rem] truncate py-1.5 pr-3" title={c.project_slug ?? undefined}>
-                    {c.project_name ?? c.project_slug ?? "-"}
-                  </td>
-                  {showWho && (
-                    <td className="max-w-[10rem] truncate py-1.5 pr-3">
-                      {c.actor_label ?? "-"}
-                      {c.client_name && <span className="block text-muted-foreground">{c.client_name}</span>}
-                    </td>
-                  )}
-                  <td className="whitespace-nowrap py-1.5 pr-3">
-                    {c.task}
-                    <span className="text-muted-foreground"> · {c.source}</span>
-                  </td>
-                  <td className="max-w-[14rem] truncate py-1.5 pr-3 font-mono" title={`${c.provider} · key: ${c.key_scope}`}>
-                    {c.model_served ?? c.model_requested ?? c.provider}
-                  </td>
-                  <td className="whitespace-nowrap py-1.5 pr-3 text-right tabular-nums">
-                    {formatTokens(c.input_tokens)} / {formatTokens(c.output_tokens)}
-                  </td>
-                  <td className="whitespace-nowrap py-1.5 pr-3 text-right tabular-nums" title={COST_SOURCE[c.cost_source]}>
-                    {c.cost_source === "unpriced" ? (
-                      <span className="text-warning">unpriced</span>
-                    ) : (
-                      <>
-                        {formatUsd(c.cost_usd)}
-                        {c.cost_source === "provider" && <span className="text-muted-foreground"> *</span>}
-                      </>
-                    )}
-                  </td>
-                  <td className="py-1.5 text-muted-foreground">
-                    {c.subject && (
-                      <span className="block max-w-[16rem] truncate font-mono" title={c.subject}>
-                        {c.subject}
-                      </span>
-                    )}
-                    <CallLinks call={c} viewerUid={viewerUid} openable={!!c.project_slug && openable.has(c.project_slug)} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <>
+          <ResponsiveTable columns={columns} rows={rows} rowKey={(c) => String(c.id)} rowTestId={(c) => `call-${c.id}`} />
           {rows.some((c) => c.cost_source === "provider") && (
-            <p className="mt-2 text-[11px] text-muted-foreground">* cost reported by the provider.</p>
+            <p className="text-[11px] text-muted-foreground">* cost reported by the provider.</p>
           )}
-        </div>
+        </>
       )}
       {calls.hasNextPage && (
         <div>

@@ -20,9 +20,7 @@ import {
 import { Sheet, SheetContent, SheetTitle } from "../ui/sheet";
 import { Sidebar } from "./Sidebar";
 import { buildCrumbs, pageTitle, scanRunKey } from "./crumbs";
-import { BudgetBanner } from "./BudgetBanner";
-import { WelcomeBanner } from "../onboarding/WelcomeBanner";
-import { ReaderBanner } from "./ReaderBanner";
+import { BannerStack } from "./BannerStack";
 import { LiveRegion } from "./LiveRegion";
 
 /**
@@ -170,9 +168,7 @@ export function AppShell({
         </SheetContent>
       </Sheet>
       <div className="flex min-w-0 flex-1 flex-col">
-        <WelcomeBanner />
-        <ReaderBanner />
-        <BudgetBanner />
+        <BannerStack slug={slug} />
         <PageHeader projectName={projectName} />
         <main id="main" tabIndex={-1} className="flex min-h-0 flex-1 flex-col overflow-auto outline-none">
           {children}

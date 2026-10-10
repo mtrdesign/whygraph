@@ -77,6 +77,13 @@ export function formatResetsAt(iso: string): string {
   return `${day} ${month}, ${hh}:${mm} UTC`;
 }
 
+/** `1 Nov`: the day a month's budgets reset (UTC), for a banner. */
+export function formatResetsOn(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return `${d.getUTCDate()} ${d.toLocaleDateString("en-US", { month: "short", timeZone: "UTC" })}`;
+}
+
 /** A range for a caption: `1 Oct 2026 - 31 Oct 2026` (the exclusive end shown as the last day). */
 export function formatRange(range: UsageRange): string {
   const show = (day: string) =>

@@ -74,7 +74,14 @@ each view:
 | **Prices** | The price table and your overrides. See [Prices](#prices-and-overrides) |
 
 Click a row in a breakdown to open the Calls tab filtered to it. A call row shows its time, project,
-who, task, model, tokens and cost, and links to the scan run or chat session it belongs to.
+who (production only), what it was (**Chat**, **Describe** or **Rationale card**), model, tokens and
+cost, and links to the **Scan** or **Chat** it belongs to. Another member's chat reads "Chat (another
+member)" and does not link. Every Calls filter applies as soon as you change it (the Model box waits
+until you stop typing), and a filter that came from a link shows as a chip: "This scan: Full rescan -
+9 Oct 2026, 14:02" or "This chat: <the chat's title>". Click the chip to clear it.
+
+On a phone the tab strip becomes a menu, and each table stacks into one card per row. A month with
+nothing in it draws no chart and says "No LLM usage this month yet".
 
 !!! note "Triggered is not benefited"
     Every figure is split into **interactive** (chat, generating a rationale card, agents, the lazy
@@ -104,7 +111,8 @@ prefixed with `'` so a spreadsheet does not run it.
 (git history and the CodeGraph index, no LLM), so they cost nothing. System appears as a member row
 (filter `member=system`) only if something unattended ever calls a model.
 
-In local mode there is one user, and the calls are simply "you".
+In local mode there is one user, and the calls are simply "you": the Calls tab has no Who column,
+and the top budget is called the **Portal budget** (the **Organization budget** in production).
 
 !!! info "Production: members and My usage"
     On a [production](../deploy/production.md) portal **owners and org admins see everyone**, and the
@@ -179,9 +187,24 @@ is permanent.
 
 Each budget is checked against **50, 75 and 100%** as spend is added:
 
-- **Banners.** Owners and admins see one on Usage & cost and the Projects page, naming the organization
-  and any project at or over 50%. A member sees their own budget at each threshold on every page. The
-  50% and 75% banners can be dismissed for the month; the 100% one cannot.
+- **Banners.** Every banner sits in one stack above the page (the welcome note, the instance-admin
+  note, then the budget banner) and links to **Review budgets** (owners and admins) or **My usage**
+  (members). Owners and admins see one on Usage & cost and the Projects page, naming the organization
+  and any project at or over 50%. A member sees their own budget at each threshold on every page.
+  The percentage is your actual spend, not the threshold it crossed.
+
+    | Level | Tone | Dismiss for the month |
+    |---|---|---|
+    | 50% | info | Yes |
+    | 75% | warning | Yes |
+    | 100%, **no hard stop** | warning: "Spending continues: this budget has no hard stop" | Yes |
+    | 100% with the **hard stop** | warning, with a **Stopped** pill, the amount and "Resets 1 Nov" | **No** |
+
+    A dismissed level stays gone for the month in this browser, and a higher level shows again. A
+    budget that becomes hard-stopped shows its banner even if its 100% was dismissed while it was
+    soft. On a stopped project's pages the notice is the one banner (Chat shows the same words in
+    place of its composer instead), says what still works, and tells a member to ask an owner or
+    admin to raise the budget.
 - **Once a month.** Each threshold fires **once per budget per month**. Raising a budget does not
   re-arm a threshold already crossed, though the banners always show the live percentage. A budget
   deleted and set again is new, and can fire again. Lowering a budget below the spend counts as a

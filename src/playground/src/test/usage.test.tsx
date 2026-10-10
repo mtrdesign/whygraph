@@ -345,6 +345,8 @@ function mount(path: string) {
 }
 const here = (router: ReturnType<typeof mount>["router"]) =>
   router.state.location.pathname + router.state.location.searchStr;
+// A breakdown stacks below `sm`, so its wrapper holds the table and the stacked list: query the table.
+const breakdownTable = async (testId: string) => within(await screen.findByTestId(testId)).getByRole("table");
 const tabNames = async () => (await screen.findAllByRole("tab")).map((t) => t.textContent);
 
 beforeEach(() => {
@@ -443,7 +445,7 @@ describe("Usage page tabs by role and mode", () => {
 describe("breakdowns, drill-down and calls", () => {
   it("links a member to the drill-down, System to its calls, and leaves a deleted member as text", async () => {
     mount("/usage?tab=members");
-    const table = await screen.findByTestId("breakdown-member");
+    const table = await breakdownTable("breakdown-member");
     expect(within(table).getByRole("link", { name: "Ben (@ben)" })).toHaveAttribute("href", "/usage/members/u2");
     expect(within(table).getByRole("link", { name: "System" })).toHaveAttribute(
       "href",
@@ -463,7 +465,7 @@ describe("breakdowns, drill-down and calls", () => {
         },
       });
     mount("/usage?tab=projects&from=2026-09-01&to=2026-10-01");
-    const table = await screen.findByTestId("breakdown-project");
+    const table = await breakdownTable("breakdown-project");
     expect(within(table).getByRole("link", { name: "Project alpha" })).toHaveAttribute(
       "href",
       "/usage?tab=calls&from=2026-09-01&to=2026-10-01&project=alpha",
@@ -493,19 +495,25 @@ describe("breakdowns, drill-down and calls", () => {
         next: "cursor-2",
       });
     const { router } = mount("/usage?tab=calls&project=alpha");
-    expect(await screen.findByTestId("call-chat-1")).toHaveAttribute("href", "/p/alpha/chat/4");
-    expect(screen.getByTestId("call-chat-2").tagName).toBe("SPAN");
-    expect(screen.getByTestId("call-chat-2")).toHaveTextContent("#9");
+    // Each cell is in the table and in the stacked list; the table's comes first.
+    expect((await screen.findAllByTestId("call-chat-1"))[0]).toHaveAttribute("href", "/p/alpha/chat/4");
+    expect(screen.getAllByTestId("call-chat-2")[0].tagName).toBe("SPAN");
+    expect(screen.getAllByTestId("call-chat-2")[0]).toHaveTextContent("Chat (another member)");
     const scanRow = screen.getByTestId("call-3");
-    expect(within(scanRow).getByRole("link", { name: "Run #12" })).toHaveAttribute("href", "/p/alpha/scans/12");
+    expect(within(scanRow).getByRole("link", { name: "Scan" })).toHaveAttribute("href", "/p/alpha/scans/12");
+    expect(scanRow).not.toHaveTextContent("#12");
     expect(scanRow).toHaveTextContent("unpriced");
+    // "What" reads as a label, not the ledger key.
+    expect(scanRow).toHaveTextContent("Describe");
     expect(fake.calls.some((c) => c.path === "/api/usage/calls" && c.search.includes("project=alpha"))).toBe(true);
 
+    // Every filter applies as it changes: there is no Filter button (CN-2).
     const filters = screen.getByTestId("calls-filters");
+    expect(within(filters).queryByRole("button", { name: "Filter" })).toBeNull();
     await userEvent.selectOptions(within(filters).getByLabelText("Sort"), "cost");
+    await waitFor(() => expect(here(router)).toContain("sort=cost"));
     await userEvent.selectOptions(within(filters).getByLabelText("Task"), "analyze");
-    await userEvent.click(within(filters).getByRole("button", { name: "Filter" }));
-    await waitFor(() => expect(here(router)).toBe("/usage?tab=calls&project=alpha&task=analyze&sort=cost"));
+    await waitFor(() => expect(here(router)).toBe("/usage?tab=calls&project=alpha&sort=cost&task=analyze"));
     await waitFor(() =>
       expect(
         fake.calls.some((c) => c.path === "/api/usage/calls" && c.search.includes("sort=cost") && c.search.includes("task=analyze")),
@@ -668,7 +676,7 @@ describe("prices", () => {
     mount("/usage?tab=prices");
     expect(await screen.findByTestId("prices-as-of")).toHaveTextContent("2026-09-25");
     const bundled = screen.getByTestId("price-anthropic-claude-sonnet-4-5");
-    expect(bundled).toHaveAttribute("data-origin", "bundled");
+    expect(bundled).toHaveTextContent("bundled");
     expect(within(bundled).queryByRole("button", { name: "Revert" })).toBeNull();
     await userEvent.click(within(bundled).getByRole("button", { name: "Override" }));
     const form = await screen.findByTestId("price-form-anthropic-claude-sonnet-4-5");
@@ -689,6 +697,7 @@ describe("prices", () => {
     );
 
     const override = screen.getByTestId("price-openrouter-deepseek/deepseek-chat");
+    expect(override).toHaveTextContent("override");
     await userEvent.click(within(override).getByRole("button", { name: "Revert" }));
     await waitFor(() => {
       const del = fake.calls.find((c) => c.method === "DELETE" && c.path === "/api/prices");
@@ -715,5 +724,137 @@ describe("prices", () => {
     expect(await screen.findByTestId("price-table")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Override" })).toBeNull();
     expect(screen.queryByTestId("add-price")).toBeNull();
+  });
+});
+
+// ---- M2f-3 S21a: usage on every width and in local mode --------------------------------
+
+describe("Usage tabs, filters and copy (S21a)", () => {
+  it("offers the eight tabs as a select on a phone and as a scrollable strip above it (PH-6)", async () => {
+    fake.state = adminState();
+    const { router } = mount("/usage");
+    const select = await screen.findByRole("combobox", { name: "Usage view" });
+    expect(within(select).getAllByRole("option").map((o) => o.textContent)).toEqual([
+      "Overview",
+      "Projects",
+      "Members",
+      "Models",
+      "Machines",
+      "Calls",
+      "Budgets",
+      "Prices",
+    ]);
+    expect(screen.getAllByRole("tablist")[0]).toHaveAttribute("data-variant", "scrollable");
+    await userEvent.selectOptions(select, "budgets");
+    await waitFor(() => expect(here(router)).toBe("/usage?tab=budgets"));
+  });
+
+  it("names the filter chips by what they filter to, never by an id (USE-5)", async () => {
+    fake.routes["/api/projects/alpha/scans/12"] = () =>
+      json({
+        id: 12,
+        status: "ok",
+        trigger: "manual",
+        kind: "scan",
+        analyze: true,
+        queued_at: "2026-10-09T14:02:00Z",
+        started_at: "2026-10-09T14:02:00Z",
+        summary: null,
+      });
+    fake.routes["/api/projects/alpha/chat/sessions"] = () =>
+      json([
+        { id: 4, title: "Why is the cache keyed this way", provider: "openai", model: "gpt", created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-01T00:00:00Z" },
+      ]);
+    fake.routes["/api/usage/calls"] = () =>
+      json({ items: [call(1, { chat_session_id: 4 }), call(3, { source: "scan", task: "analyze", scan_run_id: 12 })], next: null });
+    mount("/usage?tab=calls&project=alpha&scan_run=12&chat_session=4");
+    expect(await screen.findByRole("button", { name: /^This scan: Full rescan/ })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "This chat: Why is the cache keyed this way ×" })).toBeInTheDocument();
+    expect(screen.queryByText(/#12|#4/)).toBeNull();
+  });
+
+  it("calls another member's chat 'Chat (another member)'", async () => {
+    fake.routes["/api/usage/calls"] = () =>
+      json({ items: [call(2, { user_uid: "u2", actor_label: "Ben (@ben)", chat_session_id: 9 })], next: null });
+    mount("/usage?tab=calls&project=alpha&chat_session=9");
+    expect(await screen.findByRole("button", { name: "Chat (another member) ×" })).toBeInTheDocument();
+  });
+
+  it("filters by the Model text after typing stops, with an example placeholder (CN-2)", async () => {
+    const { router } = mount("/usage?tab=calls");
+    const model = await screen.findByLabelText("Model");
+    expect(model).toHaveAttribute("placeholder", expect.stringMatching(/^e\.g\. /));
+    await userEvent.type(model, "gpt-5");
+    await waitFor(() => expect(here(router)).toBe("/usage?tab=calls&model=gpt-5"));
+  });
+
+  it("local mode: no 'because of whom', no Who column, 'Portal budget' (MODE-5)", async () => {
+    fake.state = localState();
+    mount("/usage");
+    const tile = await screen.findByTestId("tile-budget");
+    expect(tile).toHaveTextContent("Portal budget");
+    expect(document.body).not.toHaveTextContent("because of whom");
+    expect(screen.getByText(/What this portal's LLM keys are spending/)).toBeInTheDocument();
+    cleanup();
+    mount("/usage?tab=calls");
+    const row = await screen.findByTestId("call-1");
+    const table = within(row.closest("table") as HTMLElement);
+    expect(table.queryByRole("columnheader", { name: "Who" })).toBeNull();
+    cleanup();
+    mount("/usage?tab=budgets");
+    const org = await screen.findByTestId("budget-org");
+    expect(org).toHaveTextContent("Portal budget");
+    expect(document.body).not.toHaveTextContent("owners included");
+  });
+
+  it("production keeps the organization wording and the Who column", async () => {
+    mount("/usage?tab=calls");
+    const row = await screen.findByTestId("call-1");
+    expect(within(row.closest("table") as HTMLElement).getByRole("columnheader", { name: "Who" })).toBeInTheDocument();
+    cleanup();
+    mount("/usage");
+    expect(await screen.findByTestId("tile-budget")).toHaveTextContent("Organization budget");
+  });
+
+  it("links 'None - set one' to the Budgets tab when there is no budget", async () => {
+    fake.state = orgState("owner", usageBlock(null, gauge({ budget_usd: null, pct: null })));
+    mount("/usage");
+    const link = await screen.findByRole("link", { name: "None - set one" });
+    expect(link).toHaveAttribute("href", "/usage?tab=budgets");
+  });
+
+  it("draws no chart for a month with nothing in it (ER-9)", async () => {
+    fake.routes["/api/usage"] = (_m, _b, search) => {
+      const r = report(search);
+      return json({
+        ...r,
+        series: r.series.map((d) => ({ ...d, calls: 0, cost_usd: 0 })),
+      });
+    };
+    mount("/usage");
+    expect(await screen.findByTestId("usage-no-spend")).toHaveTextContent("No LLM usage this month yet");
+    expect(screen.queryByTestId("usage-daily-chart")).toBeNull();
+  });
+
+  it("hides the CSV button on an empty breakdown (ER-9)", async () => {
+    fake.routes["/api/usage"] = (_m, _b, search) => json({ ...report(search), groups: [] });
+    mount("/usage?tab=machines");
+    await screen.findByText("No LLM calls in this range.");
+    expect(screen.queryByTestId("csv-machine")).toBeNull();
+  });
+
+  it("renders a 403 as the No access state, not an error line (ER-8)", async () => {
+    fake.routes["/api/budgets"] = () => json({ error: "no", code: "forbidden" }, 403);
+    mount("/usage?tab=budgets");
+    expect(await screen.findByText("No access")).toBeInTheDocument();
+  });
+
+  it("shows a price with the money format and a bundled or override pill", async () => {
+    mount("/usage?tab=prices");
+    const bundled = await screen.findByTestId("price-anthropic-claude-sonnet-4-5");
+    expect(bundled).toHaveTextContent("$3.00");
+    expect(bundled).toHaveTextContent("$0.30");
+    expect(within(bundled).getByText("bundled")).toBeInTheDocument();
+    expect(screen.getByTestId("price-openrouter-deepseek/deepseek-chat")).toHaveTextContent("$0.50");
   });
 });

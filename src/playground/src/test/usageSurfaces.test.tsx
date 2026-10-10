@@ -232,7 +232,72 @@ describe("BudgetBanner", () => {
     const banner = await screen.findByTestId("budget-banner-me");
     expect(banner).toHaveTextContent(MEMBER_STOPPED_LINE);
     expect(banner).toHaveAttribute("data-threshold", "100");
+    expect(banner).toHaveAttribute("data-tone", "warning");
+    // The Stopped pill, the amount, the reset day, and who can raise it.
+    expect(within(banner).getByText("Stopped")).toBeInTheDocument();
+    expect(banner).toHaveTextContent("$50 of $50");
+    expect(banner).toHaveTextContent("Resets 1 Nov.");
+    expect(banner).toHaveTextContent("Ask an owner or admin to raise it.");
+    expect(within(banner).getByRole("link", { name: "My usage" })).toHaveAttribute("href", "/usage/me");
     expect(within(banner).queryByRole("button", { name: "Dismiss for this month" })).toBeNull();
+  });
+
+  it("the tone follows the level: 50 info, 75 and 100 warning (USE-1)", async () => {
+    for (const [pct, tone] of [
+      [50, "info"],
+      [80, "warning"],
+      [100, "warning"],
+    ] as const) {
+      fake.state = memberAt(pct);
+      mount("/members");
+      expect(await screen.findByTestId("budget-banner-me")).toHaveAttribute("data-tone", tone);
+      cleanup();
+    }
+  });
+
+  it("a soft budget at 100% says spending continues and can be dismissed for the month (R4)", async () => {
+    fake.state = memberAt(100);
+    const user = userEvent.setup();
+    mount("/members");
+    const banner = await screen.findByTestId("budget-banner-me");
+    expect(banner).toHaveTextContent("Spending continues: this budget has no hard stop.");
+    expect(within(banner).queryByText("Stopped")).toBeNull();
+    await user.click(within(banner).getByRole("button", { name: "Dismiss for this month" }));
+    expect(screen.queryByTestId("budget-banner-me")).toBeNull();
+    expect(window.localStorage.getItem("whygraph:budget-banner:me:2026-10:100")).toBe("1");
+  });
+
+  it("a hard stop stays up even after the same level was dismissed while the budget was soft", async () => {
+    window.localStorage.setItem("whygraph:budget-banner:me:2026-10:100", "1");
+    fake.state = memberAt(100, { hard_stop: true, blocked: true });
+    mount("/members");
+    expect(await screen.findByTestId("budget-banner-me")).toHaveTextContent("Stopped");
+  });
+
+  it("an org hard stop is not dismissible and links an admin to Review budgets", async () => {
+    fake.state = orgState("owner", usageBlock(null, gauge({ budget_usd: 100, spent_usd: 100, pct: 100, hard_stop: true, blocked: true })));
+    mount("/");
+    const banner = await screen.findByTestId("budget-banner-org");
+    expect(within(banner).getByText("Stopped")).toBeInTheDocument();
+    expect(banner).toHaveTextContent("Resets 1 Nov.");
+    expect(within(banner).queryByRole("button", { name: "Dismiss for this month" })).toBeNull();
+    expect(within(banner).getByRole("link", { name: "Review budgets" })).toHaveAttribute("href", "/usage?tab=budgets");
+  });
+
+  it("an org soft budget at 100% says spending continues and is dismissible", async () => {
+    fake.state = orgState("owner", usageBlock(null, gauge({ budget_usd: 100, spent_usd: 100, pct: 100 })));
+    mount("/");
+    const banner = await screen.findByTestId("budget-banner-org");
+    expect(banner).toHaveTextContent("Spending continues: this budget has no hard stop.");
+    expect(within(banner).getByRole("button", { name: "Dismiss for this month" })).toBeInTheDocument();
+  });
+
+  it("stacks Welcome before Budget (USE-1)", async () => {
+    fake.state = { ...(memberAt(80) as object), welcome: { org_name: "Acme", role: "member" } };
+    mount("/members");
+    const budget = await screen.findByTestId("budget-banner-me");
+    const welcome = await screen.findByTestId("welcome-banner");
+    expect(welcome.compareDocumentPosition(budget) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("owners and admins get one org banner on Projects and Usage, naming projects at or over 50%", async () => {
@@ -249,7 +314,9 @@ describe("BudgetBanner", () => {
     expect(banner).toHaveTextContent("Acme is at 80% of its monthly budget");
     expect(banner).toHaveTextContent("Project alpha (100%), Project beta (55%)");
     expect(banner).toHaveAttribute("data-threshold", "100");
-    expect(within(banner).queryByRole("button")).toBeNull();
+    // A soft budget at 100% (a project here) is dismissible for the month (R4).
+    expect(within(banner).getByRole("button", { name: "Dismiss for this month" })).toBeInTheDocument();
+    expect(within(banner).getByRole("link", { name: "Review budgets" })).toHaveAttribute("href", "/usage?tab=budgets");
   });
 
   it("the org banner is not on other pages, and a member never sees it", async () => {
@@ -287,6 +354,42 @@ describe("budget_exceeded on a project", () => {
     expect(notice).toHaveTextContent("You can still read everything that's already generated.");
   });
 
+  it("the stop banner carries the Stopped pill, the reset day, and Review budgets for an admin (USE-2)", async () => {
+    fake.state = orgState("owner", usageBlock(gauge(), gauge()));
+    fake.routes["/api/projects/alpha"] = () => json(blocked("org"));
+    mount("/p/alpha");
+    const notice = await screen.findByTestId("budget-notice");
+    expect(within(notice).getByText("Stopped")).toBeInTheDocument();
+    expect(notice).toHaveTextContent("Resets 1 Nov.");
+    expect(notice).toHaveAttribute("data-tone", "warning");
+    expect(within(notice).getByRole("link", { name: "Review budgets" })).toHaveAttribute("href", "/usage?tab=budgets");
+    expect(within(notice).queryByRole("button", { name: "Dismiss for this month" })).toBeNull();
+  });
+
+  it("a member is told to ask an owner or admin, and sees the stop once (USE-2, USE-3)", async () => {
+    fake.state = orgState("member", usageBlock(gauge({ budget_usd: 50, spent_usd: 50, pct: 100, hard_stop: true, blocked: true }), null));
+    fake.routes["/api/projects/alpha"] = () => json(blocked("member"));
+    mount("/p/alpha");
+    const notice = await screen.findByTestId("budget-notice");
+    expect(notice).toHaveTextContent("Ask an owner or admin to raise it.");
+    // The member's own banner would repeat it: one reason per place.
+    expect(screen.queryByTestId("budget-banner-me")).toBeNull();
+  });
+
+  it("local mode names the portal, not the organization", async () => {
+    fake.state = {
+      mode: "local",
+      setup_complete: true,
+      user: { uid: "u1", display_name: "Local", role: "owner" },
+      port: 8765,
+      shared_folders: [],
+      usage: usageBlock(null, gauge()),
+    };
+    fake.routes["/api/projects/alpha"] = () => json(blocked("org"));
+    mount("/p/alpha");
+    expect(await screen.findByTestId("budget-notice")).toHaveTextContent("This portal's monthly LLM budget is reached");
+  });
+
   it("a normal project has no notice", async () => {
     mount("/p/alpha");
     await screen.findByRole("heading", { name: "Project alpha" });
@@ -299,7 +402,10 @@ describe("budget_exceeded on a project", () => {
     inProject(<RationaleTab qualifiedName="a.b" />);
     const button = await screen.findByRole("button", { name: "Generate rationale" });
     expect(button).toBeDisabled();
-    expect(await screen.findByTestId("generate-blocked")).toHaveTextContent(MEMBER_STOPPED_LINE);
+    // One reason, once: the banner says why; this line only says it is paused (USE-3).
+    expect(await screen.findByTestId("generate-blocked")).toHaveTextContent(
+      "Generation is paused: monthly budget reached",
+    );
   });
 
   it("Generate stays enabled without a block", async () => {

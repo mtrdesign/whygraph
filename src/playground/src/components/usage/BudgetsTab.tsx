@@ -13,7 +13,8 @@ import {
   type Member,
 } from "../../api";
 import { authMessage } from "../../lib/authErrors";
-import { formatPct, formatUsd } from "../../lib/format";
+import { formatDateTime, formatPct, formatUsd } from "../../lib/format";
+import { inheritedLayerLabel } from "../../lib/labels";
 import { formatMonth, formatResetsAt } from "../../lib/usageRange";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -21,7 +22,8 @@ import { Label } from "../ui/label";
 import { Skeleton } from "../ui/skeleton";
 import { Switch } from "../ui/switch";
 import { Field, nativeSelectClass } from "../portal/Field";
-import { SpendBar, UnpricedNote, UsageSection } from "./parts";
+import { ResponsiveTable, type Column } from "../layout/ResponsiveTable";
+import { SpendBar, UnpricedNote, UsageError, UsageSection } from "./parts";
 
 export const BUDGETS_KEY = portalKey("budgets");
 
@@ -123,7 +125,7 @@ export function BudgetEditor({
   const busy = save.isPending || remove.isPending;
 
   return (
-    <div className="flex flex-col gap-2 rounded-lg border border-border p-3" data-testid={testId}>
+    <div className="flex flex-col gap-2 rounded-lg border border-border bg-card p-3 shadow-card" data-testid={testId}>
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
         <span className="font-medium">{title}</span>
         {description && <span className="text-xs text-muted-foreground">{description}</span>}
@@ -139,7 +141,7 @@ export function BudgetEditor({
               <Input
                 {...p}
                 inputMode="decimal"
-                placeholder="100"
+                placeholder="e.g. 100"
                 value={amount}
                 onChange={(e) => {
                   setAmount(e.target.value);
@@ -236,7 +238,7 @@ function AddBudget({
           <Input
             {...p}
             inputMode="decimal"
-            placeholder="50"
+            placeholder="e.g. 50"
             value={amount}
             onChange={(e) => {
               setAmount(e.target.value);
@@ -258,40 +260,44 @@ function AddBudget({
   );
 }
 
-const ALERT_SCOPE: Record<string, string> = { org: "Organization", project: "Project", member: "Member" };
+type Alert = BudgetsView["alerts"][number];
 
-function Alerts({ alerts }: { alerts: BudgetsView["alerts"] }) {
+function Alerts({ alerts, orgLabel }: { alerts: BudgetsView["alerts"]; orgLabel: string }) {
   if (alerts.length === 0) {
     return <p className="text-sm text-muted-foreground">No budget has crossed 50% this month.</p>;
   }
+  const scope: Record<string, string> = { org: orgLabel, project: "Project", member: "Member" };
+  const columns: Column<Alert>[] = [
+    {
+      key: "when",
+      header: "When",
+      cell: (a) => <span className="whitespace-nowrap text-muted-foreground">{formatDateTime(a.crossed_at)}</span>,
+    },
+    {
+      key: "budget",
+      header: "Budget",
+      primary: true,
+      cell: (a) => (
+        <>
+          <span className="font-normal text-muted-foreground">{scope[a.scope] ?? a.scope}</span> {a.label ?? ""}
+        </>
+      ),
+    },
+    {
+      key: "threshold",
+      header: "Threshold",
+      align: "right",
+      cell: (a) => (
+        <span className={a.threshold >= 100 ? "text-destructive" : a.threshold >= 75 ? "text-warning" : undefined}>
+          {a.threshold}%
+        </span>
+      ),
+    },
+    { key: "spent", header: "Spent then", align: "right", cell: (a) => formatUsd(a.spent_usd) },
+  ];
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-left text-xs" data-testid="budget-alerts">
-        <thead className="text-muted-foreground">
-          <tr>
-            <th className="py-1.5 pr-3 font-medium">When</th>
-            <th className="py-1.5 pr-3 font-medium">Budget</th>
-            <th className="py-1.5 pr-3 text-right font-medium">Threshold</th>
-            <th className="py-1.5 text-right font-medium">Spent then</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-border">
-          {alerts.map((a, i) => (
-            <tr key={`${a.crossed_at}:${i}`}>
-              <td className="whitespace-nowrap py-1.5 pr-3 text-muted-foreground">
-                {new Date(a.crossed_at).toLocaleString()}
-              </td>
-              <td className="py-1.5 pr-3">
-                <span className="text-muted-foreground">{ALERT_SCOPE[a.scope] ?? a.scope}</span> {a.label ?? ""}
-              </td>
-              <td className={`py-1.5 pr-3 text-right ${a.threshold >= 100 ? "text-destructive" : a.threshold >= 75 ? "text-warning" : ""}`}>
-                {a.threshold}%
-              </td>
-              <td className="py-1.5 text-right tabular-nums">{formatUsd(a.spent_usd)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div data-testid="budget-alerts">
+      <ResponsiveTable columns={columns} rows={alerts} rowKey={(a) => `${a.crossed_at}:${a.scope}:${a.label ?? ""}:${a.threshold}`} />
     </div>
   );
 }
@@ -329,9 +335,18 @@ export function BudgetsTab({
 
   if (budgets.isLoading) return <Skeleton className="h-40" />;
   if (budgets.isError || !budgets.data) {
-    return <p className="text-sm text-destructive">Failed to load: {authMessage(budgets.error)}</p>;
+    return (
+      <UsageError
+        error={budgets.error}
+        what="the budgets"
+        title="Couldn't load the budgets"
+        onRetry={() => void budgets.refetch()}
+      />
+    );
   }
   const data = budgets.data;
+  // What the top-level budget is called: the organization in production, the portal locally (MODE-5).
+  const layer = inheritedLayerLabel(production ? "production" : "local", true);
   const roleOf = new Map((members.data ?? []).map((m) => [m.uid, m.role]));
   // An org admin may not set or remove their own override or an owner's.
   const memberLock = (uid: string): string | undefined => {
@@ -355,19 +370,22 @@ export function BudgetsTab({
     <div className="flex flex-col gap-6" data-testid="budgets-tab">
       <p className="text-[13px] text-muted-foreground">
         Budgets for {formatMonth(data.month)}, in estimated USD; they reset on {formatResetsAt(data.resets_at)}. At
-        50, 75 and 100% the people concerned see a banner. With <strong className="font-medium">hard stop</strong> on, a
+        50, 75 and 100% the people concerned see a banner, which they can dismiss for the month. With <strong className="font-medium">hard stop</strong> on, a
         spent budget turns new LLM spend off for everyone it covers until the month resets: they can still read
         everything that is already generated.
         {!canEdit && " Owners and org admins change budgets."}
       </p>
       <UnpricedNote calls={data.unpriced_calls} budgets />
 
-      <UsageSection title="Organization" description="Caps the whole organization, owners included.">
+      <UsageSection
+        title={layer}
+        description={production ? "Caps the whole organization, owners included." : "Caps everything this portal spends."}
+      >
         <BudgetEditor
           key={k(data.org)}
           target={{ scope: "org" }}
           budget={data.org}
-          title="Organization budget"
+          title={`${layer} budget`}
           editable={canEdit}
           testId="budget-org"
         />
@@ -415,7 +433,7 @@ export function BudgetsTab({
 
       <UsageSection
         title="Projects"
-        description="Caps everyone's spend on one project. Each stays at or below the organization's budget."
+        description={`Caps everyone's spend on one project. Each stays at or below the ${layer.toLowerCase()}'s budget.`}
         testId="budget-projects"
       >
         {data.projects.length === 0 && !canEdit && (
@@ -442,7 +460,7 @@ export function BudgetsTab({
       </UsageSection>
 
       <UsageSection title="This month's alerts" description="Each threshold fires once per budget and month.">
-        <Alerts alerts={data.alerts} />
+        <Alerts alerts={data.alerts} orgLabel={layer} />
       </UsageSection>
     </div>
   );

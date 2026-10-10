@@ -124,6 +124,25 @@ describe("buildOption", () => {
   });
 });
 
+describe("buildOption x-axis thinning (PH-9)", () => {
+  const days = {
+    ...bar,
+    rows: Array.from({ length: 30 }, (_, i) => [`Oct ${i + 1}`, i, 1]),
+  };
+  const axis = (width?: number) =>
+    buildOption(days, CHART_COLORS.light, { width }).xAxis as { axisLabel: { interval: number; hideOverlap: boolean } };
+
+  it("draws at most 6 labels below 480 px and 12 otherwise, always dropping overlaps", () => {
+    const narrow = axis(390).axisLabel;
+    expect(Math.ceil(30 / (narrow.interval + 1))).toBeLessThanOrEqual(6);
+    expect(narrow.hideOverlap).toBe(true);
+    const wide = axis(900).axisLabel;
+    expect(Math.ceil(30 / (wide.interval + 1))).toBeLessThanOrEqual(12);
+    expect(wide.interval).toBeLessThan(narrow.interval);
+    expect(axis(undefined).axisLabel.interval).toBe(wide.interval);
+  });
+});
+
 describe("buildOption value formats", () => {
   type Fmt = (v: unknown) => string;
   const axisLabel = (o: Record<string, unknown>) =>

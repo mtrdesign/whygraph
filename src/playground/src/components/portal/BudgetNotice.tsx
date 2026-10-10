@@ -1,4 +1,5 @@
 import { budgetNoticeText } from "../../lib/budgetBanner";
+import { usePortalState } from "../../lib/identity";
 import { cn } from "@/lib/utils";
 import { Alert } from "../ui/alert";
 
@@ -18,6 +19,7 @@ export function BudgetNotice({
   testId?: string;
   className?: string;
 }) {
+  const mode = usePortalState().data?.mode;
   return (
     <Alert
       variant="warning"
@@ -26,7 +28,7 @@ export function BudgetNotice({
       data-scope={scope ?? undefined}
       className={cn("px-3", className)}
     >
-      {message ?? budgetNoticeText(scope)}
+      {message ?? budgetNoticeText(scope, mode)}
     </Alert>
   );
 }

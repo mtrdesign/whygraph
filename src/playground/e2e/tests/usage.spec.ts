@@ -41,6 +41,16 @@ test("a chat message shows on Usage & cost, then a hard-stopped project budget c
   await expect(page.getByTestId("chats-section").getByRole("button", { name: "New chat" })).toBeDisabled();
   await expect(page.getByPlaceholder("Ask about this repository…")).toHaveCount(0);
 
+  // Any other page of the project carries the stop once, as a banner (USE-1, USE-3): the
+  // Stopped pill, when it resets, and no dismiss button - Chat itself shows no banner.
+  await expect(page.getByTestId("budget-notice")).toHaveCount(0);
+  await page.goto(`/p/${notes.slug}`);
+  const stop = page.getByTestId("budget-notice");
+  await expect(stop).toContainText("Stopped");
+  await expect(stop).toContainText(/Resets \d+ \w{3}\./);
+  await expect(stop.getByRole("button", { name: "Dismiss for this month" })).toHaveCount(0);
+  await expect(stop.getByRole("link", { name: "Review budgets" })).toBeVisible();
+
   // Leave the project usable for any spec that follows.
   await call(page.request, "DELETE", `${env.baseUrl}/api/projects/${notes.slug}/budget`);
 });

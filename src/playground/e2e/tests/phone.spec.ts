@@ -18,8 +18,6 @@ import { call, configureStubLlm, STUB_REPLY } from "../lib/usage";
 // failure (`test.fail()`), so fixing it turns the run red until its entry is removed.
 // The main session maintains the list between steps; the last step empties it.
 const KNOWN_OVERFLOW: Record<string, string> = {
-  "local /usage": "PH-6: the Usage tab strip overflows",
-  "production /usage": "PH-6: the Usage tab strip overflows",
 };
 
 const PHONE = { width: 390, height: 844 };

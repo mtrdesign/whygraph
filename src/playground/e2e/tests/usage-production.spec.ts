@@ -78,6 +78,10 @@ test("member usage: the owner sees who spent, a member sees only their own, a me
   await expect(cy.getByTestId("chat-budget-notice")).toBeVisible();
   // The Chats section's "+" is disabled with the reason (USE-4).
   await expect(cy.getByTestId("chats-section").getByRole("button", { name: "New chat" })).toBeDisabled();
+  // Elsewhere in the project the stop is one banner that says who can raise it (USE-2, USE-3).
+  await cy.goto(`${org}/p/demo`);
+  await expect(cy.getByTestId("budget-notice")).toContainText("Ask an owner or admin to raise it.");
+  await expect(cy.getByTestId("budget-banner-me")).toHaveCount(0);
   await chatOnce(dee, `${org}/p/demo`, "hello from dee");
 
   await benContext.close();

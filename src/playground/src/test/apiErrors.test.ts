@@ -92,11 +92,6 @@ describe("extras", () => {
     );
   });
 
-  it("lists tracked paths", () => {
-    const message = errorMessage(new ApiError(422, "x", "tracked_whygraph_state", { paths: [".whygraph/"] }));
-    expect(message).toContain("(.whygraph/)");
-  });
-
   it("turns Retry-After into minutes", () => {
     expect(errorMessage(new ApiError(429, "x", "throttled", { retry_after: 600 }))).toBe(
       "Too many attempts. Try again in 10 minutes.",

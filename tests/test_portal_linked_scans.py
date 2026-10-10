@@ -215,6 +215,31 @@ def test_linked_manual_scan_is_codegraph_only(
     assert all(c["cwd"] == str(root) for c in calls)
 
 
+def test_linked_first_initialize_queues_its_codegraph_only_scan(
+    env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    with client_for() as client:
+        client.post("/api/portal/setup", json={"display_name": "Tess"})
+        root = make_repo(env.shared, "lnk")
+        seed_codegraph(root)
+        linked_row(root, "lnk")
+        init = client.post("/api/projects/lnk/init", json={"agents": []})
+        assert init.status_code == 200, init.text
+        run = wait_run(client, "lnk", init.json()["initial_run_id"])
+        assert (run["status"], run["trigger"], run["analyze"]) == (
+            "ok",
+            "initial",
+            False,
+        )
+        again = client.post(
+            "/api/projects/lnk/init", json={"agents": [], "force": True}
+        )
+        assert again.json()["initial_run_id"] is None
+    (call,) = scanner.calls()
+    assert runner_flags(call) == CODEGRAPH_ONLY_FLAGS
+    assert not whygraph_db(root).exists()
+
+
 def _scan(client: TestClient, slug: str, **body: object) -> int:
     response = client.post(f"/api/projects/{slug}/scans", json=body or None)
     assert response.status_code == 202, response.text

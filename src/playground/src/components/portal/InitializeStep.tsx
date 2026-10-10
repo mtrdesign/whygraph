@@ -3,7 +3,15 @@ import { Link } from "@tanstack/react-router";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { CheckCircle2Icon, TriangleAlertIcon } from "lucide-react";
-import { portalApi, portalKey, projectApi, projectKey, type Detected, type InitResult } from "../../api";
+import {
+  portalApi,
+  portalKey,
+  projectApi,
+  projectKey,
+  type Detected,
+  type InitResult,
+  type ProjectDetails,
+} from "../../api";
 import { loadDetected } from "../../lib/detected";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
@@ -96,6 +104,13 @@ export function InitializeStep({
       }),
     onSuccess: (result) => {
       setDone(result);
+      // Mark the cached project initialized at once: "Continue" may be clicked
+      // before the refetch lands, and the wizard routes on this flag.
+      if (result.initialized) {
+        queryClient.setQueryData<ProjectDetails>(projectKey(slug, "project"), (old) =>
+          old ? { ...old, initialized: true } : old,
+        );
+      }
       void queryClient.invalidateQueries({ queryKey: projectKey(slug, "project") });
       void queryClient.invalidateQueries({ queryKey: portalKey("projects") });
       void queryClient.invalidateQueries({ queryKey: projectKey(slug, "init-preview") });

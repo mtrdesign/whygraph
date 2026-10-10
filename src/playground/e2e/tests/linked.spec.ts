@@ -191,7 +191,7 @@ test("a linked project: connect, evidence over MCP, revocation, removal", async 
   await page.getByRole("button", { name: "Initialize", exact: true }).click();
   await expect(page.getByTestId("init-done")).toBeVisible();
   await page.getByRole("button", { name: "Continue to first scan" }).click();
-  await page.getByRole("button", { name: "Start first scan" }).click();
+  // The first Initialize queued the first scan: the step follows it.
   await expect(page.getByText("First scan complete")).toBeVisible({ timeout: 30_000 });
   await page.getByRole("button", { name: "Open project", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/p/${SLUG}$`));

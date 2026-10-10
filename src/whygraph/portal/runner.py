@@ -45,6 +45,15 @@ process:
   tracks WhyGraph's state fails the run and marks the project with reason
   ``tracked_whygraph_state``; that mark does not refuse requests (the
   next sync re-checks, and clears it once the repository is fixed).
+* **Imports** (M2f-3 plan section 4.8). An imported project's row exists
+  before its clone (``initialized_at`` unset): its first run
+  (:meth:`ScanRunner.request_import`, also Retry) clones into a
+  ``repos/<org>/.clone-*`` temp folder, refuses tracked state as a sync
+  does, renames the clone into place, runs the production Initialize, sets
+  ``initialized_at`` and then scans. A failure, cancel or interruption
+  removes the temp folder (a cancel takes effect when the ``git clone``
+  returns); leftovers of a crash are swept at start. At most one importing
+  run per org runs at a time, and a queued import survives a restart.
 * **Child I/O.** stdout JSON lines go to ``<data>/runs/<id>.jsonl``, stderr
   to ``<data>/runs/<id>.log``; both pipes are drained by their own thread
   so a flood never deadlocks the child. A ``usage`` event (one per LLM
@@ -151,6 +160,7 @@ from typing import IO, TYPE_CHECKING, Any
 import anyio
 import anyio.to_thread
 from fastapi.responses import StreamingResponse
+from sqlalchemy import update
 from sqlmodel import col, select
 
 from whygraph.core.config import Config, ConfigError
@@ -167,9 +177,17 @@ from whygraph.services.git.credentials import (
 )
 
 from .audit import audit
+from .clones import (
+    clone_dir_is_safe,
+    discard_clone,
+    production_initialize,
+    remove_clone,
+    sweep_clone_dirs,
+    temp_clone_dir,
+)
 from .context import resolve_root, resolved_layer
 from .db import data_dir, get_session
-from .github_app import GitHubAccessLost, InstallationToken
+from .github_app import GitHubAccessLost, GitHubRepo, InstallationToken
 from .github_auth import GitHubUnavailable
 from .models import Project, ScanRun, User
 from .paths import TRACKED_STATE_PATHS, check_project_paths
@@ -901,6 +919,10 @@ class _Pending:
     scan_requested: bool
     estimate: dict | None = None
     """The compact describe estimate the requester saw (full runs only)."""
+    org_id: int | None = None
+    """The project's org (per-org import fairness in ``_dispatch``)."""
+    importing: bool = False
+    """Whether the run clones the project first (an import, M2f-3 plan section 4.8)."""
 
     def merge(
         self,
@@ -1086,6 +1108,7 @@ class _Job:
     cancelled: bool = False
     head: str | None = None
     scanned: bool = False
+    cloned: bool = False
     cancelled_by: int | None = None
     ctx: ProjectContext | None = None
     result: dict | None = None
@@ -1307,7 +1330,7 @@ class ScanRunner:
     # ---- lifecycle ------------------------------------------------------
 
     async def start(self, state: PortalState) -> None:
-        """Start the queue: sweep token files, requeue ``queued`` rows, catch up, poll.
+        """Start the queue: sweep token files and clones, requeue ``queued`` rows, catch up, poll.
 
         Called by the lifespan after the portal DB is migrated and stale
         ``running`` rows were marked ``interrupted``. Local mode then polls
@@ -1330,6 +1353,8 @@ class ScanRunner:
         try:
             # A previous process's children are gone: so is any use of their tokens.
             await anyio.to_thread.run_sync(sweep_token_files, data_dir())
+            # Only the runner clones, and this is the one portal process.
+            await anyio.to_thread.run_sync(sweep_clone_dirs, data_dir())
             await self._requeue()
             await self.catch_up()
         except Exception:  # noqa: BLE001 -- never fail the portal start
@@ -1698,6 +1723,44 @@ class ScanRunner:
             may_spend=False,  # a sync never describes
         )
 
+    async def request_import(
+        self, project_id: int, *, principal: Principal | None = None
+    ) -> int:
+        """Queue (or coalesce into) an imported project's first run: clone, then scan.
+
+        A ``sync`` that scans (``trigger=initial``, structure-only, as every
+        first run). While the project is not initialized the run clones it
+        first (see the module docstring); on an initialized project it is an
+        ordinary sync. Used by the import (``POST /api/projects``) and its
+        Retry (``POST .../scans``).
+
+        Parameters
+        ----------
+        project_id : int
+            ``projects.id`` of a production GitHub project.
+        principal : Principal or None
+            Recorded as ``requested_by``.
+
+        Returns
+        -------
+        int
+            The pending run's id.
+
+        Raises
+        ------
+        RunnerUnavailable, ProjectBusy, SourceNotAllowed, ProjectAccessLost
+            As for :meth:`request_sync`.
+        """
+        return await self._request(
+            project_id,
+            kind="sync",
+            trigger="initial",
+            analyze=False,
+            requested_by=principal.user_id if principal else None,
+            scan_requested=True,
+            may_spend=False,  # a first run never describes
+        )
+
     async def _request(
         self,
         project_id: int,
@@ -1714,9 +1777,10 @@ class ScanRunner:
             raise RunnerUnavailable("the scan runner is not running")
         with self._claim_request(project_id):
             gate = await anyio.to_thread.run_sync(_project_gate, project_id)
+            importing = False
             with self._claim_org(None if gate is None else gate[3]):
                 if gate is not None:
-                    source, lost, reason, _org_id = gate
+                    source, lost, reason, _org_id, initialized = gate
                     if source not in allowed_sources(self._mode()):
                         raise SourceNotAllowed(_unsupported_source(source))
                     if lost and reason != REASON_TRACKED_STATE:
@@ -1727,6 +1791,8 @@ class ScanRunner:
                     if github and kind == "scan":
                         # Scan now fetches first (M2d-2 plan section 0.2 #23).
                         kind, scan_requested = "sync", True
+                    # Not initialized yet: the run clones first (an import).
+                    importing = github and not initialized
                 return await self._request_claimed(
                     project_id,
                     org_id=None if gate is None else gate[3],
@@ -1737,6 +1803,7 @@ class ScanRunner:
                     scan_requested=scan_requested,
                     may_spend=may_spend,
                     estimate=estimate,
+                    importing=importing,
                 )
 
     async def _request_claimed(
@@ -1751,6 +1818,7 @@ class ScanRunner:
         scan_requested: bool,
         may_spend: bool,
         estimate: dict | None = None,
+        importing: bool = False,
     ) -> int:
         assert self._lock is not None
         async with self._lock:
@@ -1778,6 +1846,8 @@ class ScanRunner:
                     requested_by=requested_by,
                     scan_requested=scan_requested,
                     estimate=estimate,
+                    org_id=org_id,
+                    importing=importing,
                 )
                 run_id = await anyio.to_thread.run_sync(
                     partial(
@@ -1802,6 +1872,7 @@ class ScanRunner:
                     scan_requested=scan_requested,
                     estimate=estimate,
                 )
+                pending.importing = pending.importing or importing
                 run_id = pending.run_id
                 await anyio.to_thread.run_sync(_update_queued, pending)
             self._dispatch()
@@ -2040,12 +2111,23 @@ class ScanRunner:
     # ---- dispatch + execution -------------------------------------------
 
     def _dispatch(self) -> None:
-        """Start pending jobs (oldest first) while under the cap. Loop-thread only."""
+        """Start pending jobs (oldest first) while under the cap. Loop-thread only.
+
+        An import waits while another import of its org runs (M2f-3 plan
+        decision 0.3 #41), so one org's multi-repo import clones one
+        repository at a time and never holds every slot.
+        """
         while not self._stopping and self._tg is not None:
             if len(self._running) >= self.max_concurrent:
                 return
+            cloning = {
+                j.spec.org_id for j in self._running.values() if j.spec.importing
+            }
             waiting = [
-                p for pid, p in self._pending.items() if pid not in self._running
+                p
+                for pid, p in self._pending.items()
+                if pid not in self._running
+                and not (p.importing and p.org_id in cloning)
             ]
             if not waiting:
                 return
@@ -2101,6 +2183,8 @@ class ScanRunner:
             summary["estimate"] = job.spec.estimate
         if job.spec.kind == "sync" and job.scanned:
             summary["scanned"] = True
+        if job.cloned:
+            summary["cloned"] = True
         finished_at = _now()
         if job.scanned and (coverage := self._coverage(job)) is not None:
             summary["coverage"] = {**coverage, "at": finished_at}
@@ -2138,6 +2222,7 @@ class ScanRunner:
         assert state is not None
         spec = job.spec
         github: _GitHubProject | None = None
+        importing = False
         with get_session() as session:
             project = session.get(Project, spec.project_id)
             run = session.get(ScanRun, spec.run_id)
@@ -2179,6 +2264,8 @@ class ScanRunner:
                     default_branch=project.default_branch,
                     last_scanned_head=project.last_scanned_head,
                 )
+                # An import: the clone is this run's first phase.
+                importing = project.initialized_at is None
             layer = resolved_layer(session, project)
             root = resolve_root(project)
             source = project.source
@@ -2269,7 +2356,11 @@ class ScanRunner:
                 event({"type": "error", "message": message})
                 return message
 
-            if (message := refused()) is not None:
+            # An import has no clone yet: the sync below makes it.
+            if (
+                not (importing and spec.kind == "sync")
+                and (message := refused()) is not None
+            ):
                 return "failed", {"error": message}, redact
 
             summary: dict[str, Any] = {}
@@ -2280,17 +2371,22 @@ class ScanRunner:
                     log(message)
                     event({"type": "error", "message": message})
                     return "failed", {"error": message}, redact
-                event({"type": "sync", "status": "fetching"})
+                if not importing:
+                    event({"type": "sync", "status": "fetching"})
                 try:
-                    synced = self._github_sync(job, github, root, redact)
+                    synced = self._github_sync(
+                        job, github, root, redact, clone=importing, event=event
+                    )
                 except _SyncFailed as exc:
                     message = redact(str(exc))
-                    log(f"sync failed: {message}")
+                    log(f"{'clone' if importing else 'sync'} failed: {message}")
                     event({"type": "sync", "status": "failed", "error": message})
                     return "failed", {"error": message}, redact
                 if synced is None:
-                    # Cancelled after the fetch: the tree did not move.
-                    return "cancelled", summary, redact
+                    # Cancelled (or interrupted) after the fetch or the clone:
+                    # the tree did not move, and no clone was kept.
+                    status = "cancelled" if job.cancelled else "interrupted"
+                    return status, summary, redact
                 token, synced_summary = synced
                 summary.update(synced_summary)
                 event({"type": "sync", "status": "ok", **synced_summary})
@@ -2595,16 +2691,27 @@ class ScanRunner:
         return token
 
     def _github_sync(
-        self, job: _Job, github: _GitHubProject, root: Path, redact: Redactor
+        self,
+        job: _Job,
+        github: _GitHubProject,
+        root: Path,
+        redact: Redactor,
+        *,
+        clone: bool = False,
+        event: Callable[[dict], None] | None = None,
     ) -> tuple[InstallationToken, dict[str, Any]] | None:
         """Sync a production clone (worker thread): see the module docstring.
+
+        With ``clone`` (an import) the repository is cloned instead
+        (:meth:`_github_clone`).
 
         Returns
         -------
         tuple or None
             The token it minted and the summary fields (``moved``, plus
-            ``history_rewritten`` / ``default_branch`` when they apply);
-            ``None`` when the job was cancelled after the fetch.
+            ``history_rewritten`` / ``default_branch`` when they apply; a
+            clone's ``cloned``); ``None`` when the job was cancelled after
+            the fetch (or the clone).
 
         Raises
         ------
@@ -2627,6 +2734,8 @@ class ScanRunner:
             raise _SyncFailed(f"GitHub is unavailable: {exc}") from exc
         if info.id != github.repo_id:
             raise _SyncFailed("GitHub answered for another repository")
+        if clone:
+            return self._github_clone(job, info, token, root, redact, event)
         branch = info.default_branch
         repo = Repository(root)
         try:
@@ -2671,9 +2780,109 @@ class ScanRunner:
             summary["default_branch"] = branch
         return token, summary
 
+    def _github_clone(
+        self,
+        job: _Job,
+        info: GitHubRepo,
+        token: InstallationToken,
+        root: Path,
+        redact: Redactor,
+        event: Callable[[dict], None] | None,
+    ) -> tuple[InstallationToken, dict[str, Any]] | None:
+        """An import's first phase (worker thread): clone, refuse, move, Initialize.
+
+        Clones ``info`` into a ``repos/<org>/.clone-*`` temp folder with the
+        repo-scoped token, refuses a repository that tracks ``.whygraph/``
+        / ``.codegraph/`` (marked like a sync), renames the clone onto
+        ``root`` (never into an existing folder), runs the production
+        Initialize, sets ``initialized_at`` (only if still unset) and drops
+        the project's cached context. The temp folder is gone however this
+        ends; the ``git clone`` itself cannot be interrupted, so a cancel
+        takes effect when it returns.
+
+        Returns
+        -------
+        tuple or None
+            The token and ``{"cloned": True}``; ``None`` when the job was
+            cancelled (or interrupted) during the clone.
+
+        Raises
+        ------
+        _SyncFailed
+            Any failure.
+        """
+        state = self._state
+        assert state is not None and state.github_app is not None
+        project_id = job.spec.project_id
+        base = state.data_dir
+        if event is not None:
+            event({"type": "sync", "status": "cloning", "full_name": info.full_name})
+        _update_github_repo(
+            project_id,
+            remote_url=f"{state.github_app.config.web_url}/{info.full_name}",
+            default_branch=info.default_branch,
+        )
+        tmp = temp_clone_dir(root)
+        try:
+            root.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        except OSError as exc:
+            raise _SyncFailed(f"could not create the server folder: {exc}") from exc
+        if not clone_dir_is_safe(tmp, base, depth=2):
+            raise _SyncFailed("refusing to clone outside the portal's repos folder")
+        for form in {str(tmp), os.path.realpath(tmp)}:
+            redact.learn_path(form, ".")
+        url = f"{github_git_host().url}/{info.full_name}.git"
+        try:
+            try:
+                Repository.clone(url, tmp, env=git_env(token.token))
+            except GitError as exc:
+                if _GIT_ACCESS_DENIED.search(_error_chain(exc)):
+                    _mark_access_lost(project_id, REASON_GIT_DENIED)
+                raise
+            if job.cancelled or job.interrupted:
+                return None
+            repo = Repository(tmp)
+            tracked = repo.tracked_paths("HEAD", *TRACKED_STATE_PATHS)
+            if tracked:
+                _mark_access_lost(project_id, REASON_TRACKED_STATE)
+                raise _SyncFailed(
+                    f"{info.full_name} tracks WhyGraph's own state "
+                    f"({', '.join(tracked[:5])}); remove .whygraph/ and "
+                    ".codegraph/ from the repository to import it"
+                )
+            repo.set_remote_head(info.default_branch)
+            try:
+                os.rename(tmp, root)  # fails on a non-empty root; never merges
+            except OSError as exc:
+                raise _SyncFailed(
+                    "a folder for this project already exists on the server; "
+                    "remove the project and import it again"
+                ) from exc
+        except (GitError, InvalidRepoUrlError) as exc:
+            raise _SyncFailed(_error_chain(exc)) from exc
+        finally:
+            remove_clone(tmp, base, depth=2)  # nothing left after the rename
+        try:
+            production_initialize(state.migrations, state.contexts.get(project_id))
+        except Exception as exc:  # noqa: BLE001 -- a failed import keeps no folder
+            discard_clone(root, base, state.migrations)
+            if isinstance(exc, UnsafePathError):
+                raise _SyncFailed(
+                    f"refusing to initialize: {exc} (WhyGraph never follows a "
+                    "symbolic link out of the repository)"
+                ) from exc
+            raise _SyncFailed(f"could not initialize the project: {exc}") from exc
+        _mark_initialized(project_id)
+        state.contexts.invalidate(project_id)
+        _clear_access_lost(project_id)
+        job.cloned = True
+        return token, {"cloned": True}
+
     async def _requeue(self) -> None:
         """Turn ``queued`` rows left by a previous process back into pending jobs."""
-        specs = await anyio.to_thread.run_sync(_recover_queued)
+        specs = await anyio.to_thread.run_sync(
+            _recover_queued, self._mode() == "production"
+        )
         async with self._lock:  # type: ignore[union-attr]
             for spec in specs:
                 self._pending[spec.project_id] = spec
@@ -2847,8 +3056,10 @@ def _error_chain(exc: BaseException) -> str:
     return ": ".join(p for p in parts if p)
 
 
-def _project_gate(project_id: int) -> tuple[str, bool, str | None, int] | None:
-    """``(source, access lost?, access_lost_reason, org_id)``, or ``None`` for a missing project."""
+def _project_gate(
+    project_id: int,
+) -> tuple[str, bool, str | None, int, bool] | None:
+    """``(source, access lost?, access_lost_reason, org_id, initialized?)``, or ``None`` if missing."""
     with get_session() as session:
         project = session.get(Project, project_id)
         if project is None:
@@ -2858,6 +3069,7 @@ def _project_gate(project_id: int) -> tuple[str, bool, str | None, int] | None:
             project.access_lost_at is not None,
             project.access_lost_reason,
             project.org_id,
+            project.initialized_at is not None,
         )
 
 
@@ -3020,6 +3232,17 @@ def _update_github_repo(
         session.add(project)
 
 
+def _mark_initialized(project_id: int) -> None:
+    """Set an imported project's ``initialized_at`` - only if still unset."""
+    with get_session() as session:
+        session.exec(
+            update(Project)
+            .where(col(Project.id) == project_id)
+            .where(col(Project.initialized_at).is_(None))
+            .values(initialized_at=_now())
+        )
+
+
 def _unsupported_source(source: str) -> str:
     """The refusal message for a project whose ``source`` the mode does not accept."""
     if source == "github":
@@ -3179,8 +3402,13 @@ def _mark_interrupted(run_ids: list[int]) -> None:
                 session.add(run)
 
 
-def _recover_queued() -> list[_Pending]:
-    """Requeue ``queued`` rows (one pending job per project); cancel the rest."""
+def _recover_queued(production: bool = False) -> list[_Pending]:
+    """Requeue ``queued`` rows (one pending job per project); cancel the rest.
+
+    A row whose project is gone, not initialized or without its root is
+    cancelled - except a production import's (a GitHub project not
+    initialized yet), whose run makes the clone (M2f-3 plan section 4.8).
+    """
     specs: dict[int, _Pending] = {}
     kept: dict[int, ScanRun] = {}
     with get_session() as session:
@@ -3190,10 +3418,18 @@ def _recover_queued() -> list[_Pending]:
         for run in rows:
             assert run.id is not None
             project = session.get(Project, run.project_id)
-            gone = (
-                project is None
-                or project.initialized_at is None
-                or root_status(resolve_root(project)) != "ok"
+            importing = (
+                production
+                and project is not None
+                and project.source == "github"
+                and project.initialized_at is None
+            )
+            gone = project is None or (
+                not importing
+                and (
+                    project.initialized_at is None
+                    or root_status(resolve_root(project)) != "ok"
+                )
             )
             existing = specs.get(run.project_id)
             if gone or existing is not None:
@@ -3220,6 +3456,8 @@ def _recover_queued() -> list[_Pending]:
                 requested_by=run.requested_by,
                 scan_requested=_queued_scan_requested(run),
                 estimate=_queued_estimate(run),
+                org_id=None if project is None else project.org_id,
+                importing=importing,
             )
             kept[run.project_id] = run
         # Fold merged rows into the kept one, in this same session (a second

@@ -101,6 +101,7 @@ from .orgs import is_valid_org_slug
 from .paths import check_project_paths
 from .platform_pending import PendingConnects, PendingLinks
 from .projects import is_valid_slug
+from .repo_cache import RepoListCache
 from .repos import DiscoveryCache
 from .runner import ScanRunner
 from .security import PortalOrigins, Principal, _is_under
@@ -521,6 +522,9 @@ class PortalState:
     agent_calls : AgentCallBook
         The agent-call counters (every MCP and ``/api/v1`` data call), flushed
         to ``agent_call_days`` by the lifespan (M2f-3 plan section 4.10).
+    repo_cache : RepoListCache
+        Each ``(user, installation)``'s GitHub repository list for the
+        import's repo search, a minute at a time (M2f-3 plan section 4.8).
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -583,6 +587,7 @@ class PortalState:
         self.budgets = BudgetBook(self.spend, defer=self.usage_writer.call)
         self.spend.on_add = self.budgets.on_add
         self.agent_calls = AgentCallBook()
+        self.repo_cache = RepoListCache()
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0

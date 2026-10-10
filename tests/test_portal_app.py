@@ -11,8 +11,11 @@ from __future__ import annotations
 import functools
 import json
 import os
+import shlex
 import subprocess
+import sys
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from http.server import ThreadingHTTPServer
@@ -74,6 +77,7 @@ from whygraph.services.llm.chat import TextDelta, TurnDone
 PORT = 8765
 BASE_URL = f"http://127.0.0.1:{PORT}"
 CLIENT_HEADER = {"X-WhyGraph-Client": "1"}
+FAKE_SCAN = Path(__file__).parent / "fixtures" / "fake_scan.py"
 
 _NODES = [
     {
@@ -174,6 +178,12 @@ def env(
     ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr("whygraph.serve.app._STATIC_DIR", tmp_path / "nostatic")
+    # A scan the portal queues on its own (a first Initialize's, an
+    # import's) runs the fake scanner, never the real one; the runner tests'
+    # `scanner` fixture replaces it with a recording one.
+    monkeypatch.setenv(
+        "WHYGRAPH_SCAN_CMD", shlex.join([sys.executable, str(FAKE_SCAN)])
+    )
     portal_db._reset_engine()
     return SimpleNamespace(
         data=data, shared=Path(os.path.realpath(shared)), tmp=tmp_path
@@ -561,9 +571,31 @@ def add_local(client: TestClient, root: Path, **extra) -> dict:
 
 
 def init_project(client: TestClient, slug: str, **body) -> dict:
+    """``POST /init`` (asserted ``200``); waits for the first scan it queued, if any."""
     response = client.post(f"/api/projects/{slug}/init", json={"agents": [], **body})
     assert response.status_code == 200, response.text
-    return response.json()
+    out = response.json()
+    if out.get("initial_run_id") is not None:
+        wait_scan(client, f"/api/projects/{slug}", out["initial_run_id"])
+    return out
+
+
+RUN_ENDED = frozenset({"ok", "failed", "cancelled", "interrupted"})
+
+
+def wait_scan(
+    client: TestClient, project_url: str, run_id: int, timeout: float = 30.0
+) -> dict:
+    """Poll ``GET <project_url>/scans/<run_id>`` until the run ended; the run."""
+    deadline = time.monotonic() + timeout
+    while True:
+        response = client.get(f"{project_url}/scans/{run_id}")
+        assert response.status_code == 200, response.text
+        run = response.json()
+        if run["status"] in RUN_ENDED:
+            return run
+        assert time.monotonic() < deadline, f"run {run_id} did not end: {run}"
+        time.sleep(0.03)
 
 
 def initialized_repo(client: TestClient, env: SimpleNamespace, name: str) -> Path:
@@ -2241,7 +2273,15 @@ def test_a_local_github_row_is_listed_unsupported_unscannable_and_removable(
     assert init.status_code == 409 and init.json()["code"] == "source_not_allowed"
     assert ready.post("/api/projects/legacy/sync").status_code == 404  # route gone
     with portal_db.get_session() as session:
-        assert session.exec(select(ScanRun.id)).all() == []
+        # Only demo's first scan, queued by its Initialize.
+        assert (
+            session.exec(
+                select(ScanRun.id)
+                .join(Project, Project.id == ScanRun.project_id)
+                .where(Project.slug == "legacy")
+            ).all()
+            == []
+        )
 
     refused = ready.delete("/api/projects/legacy")
     assert refused.status_code == 409 and refused.json()["code"] == "confirm_name"
@@ -2276,8 +2316,9 @@ def test_remove_never_rmtrees_outside_the_repos_dir(
 
 
 def test_scan_endpoints_without_runs(ready: TestClient, env: SimpleNamespace) -> None:
-    # Scanning itself is covered by tests/test_portal_runner.py.
-    initialized_repo(ready, env, "demo")
+    # Scanning itself is covered by tests/test_portal_runner.py. Not
+    # initialized: the first Initialize would queue the first scan.
+    add_local(ready, make_repo(env.shared, "demo"))
     assert ready.get("/api/projects/demo/scans").json() == {"runs": [], "next": None}
     assert ready.get("/api/projects/demo/scans/1").status_code == 404
     assert ready.get("/api/projects/demo/scans/1/events").status_code == 404

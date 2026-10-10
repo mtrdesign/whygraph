@@ -83,6 +83,29 @@ class Throttle:
             now = self._clock()
             return self._retry_after(self._live(key, now), now, limit)
 
+    def remaining(self, key: Hashable, *, limit: int | None = None) -> int:
+        """Return how many more events ``key`` may record now (``0`` at the limit).
+
+        Does not count an event (like :meth:`check`).
+
+        Parameters
+        ----------
+        key : Hashable
+            What is counted.
+        limit : int, optional
+            As for :meth:`check`.
+
+        Returns
+        -------
+        int
+            The limit minus the events still in the window, never negative.
+        """
+        with self._lock:
+            now = self._clock()
+            events = self._live(key, now)
+            allowed = self.limit if limit is None else limit
+            return max(0, allowed - (0 if events is None else len(events)))
+
     def record(self, key: Hashable) -> None:
         """Count one event for ``key``."""
         with self._lock:

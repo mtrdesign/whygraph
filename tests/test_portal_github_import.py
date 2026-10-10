@@ -21,6 +21,7 @@ the ``503`` / ``404`` of an unconfigured app and of local mode.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import threading
@@ -40,6 +41,7 @@ from sqlalchemy import text
 from sqlmodel import select
 
 from github_fake import FakeGitHub
+from test_portal_runner import wait_for
 from test_portal_app import (  # noqa: F401 -- fixtures
     GITHUB_APP_CLIENT_ID,
     GITHUB_APP_CLIENT_SECRET,
@@ -58,6 +60,7 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     portal_client,
     prod_portal,
     production_env,
+    wait_scan,
 )
 from test_portal_identity_routes import (  # noqa: F401 -- `audit_log` is a fixture
     audit_log,
@@ -65,11 +68,16 @@ from test_portal_identity_routes import (  # noqa: F401 -- `audit_log` is a fixt
     events,
 )
 from whygraph.portal import db as portal_db
+from whygraph.portal import runner as runner_mod
 from whygraph.portal import sessions
+from whygraph.portal import webhook as webhook_mod
+from whygraph.portal.clones import clone_dir_is_safe, sweep_clone_dirs
 from whygraph.portal.github_app import GitHubApp, UserTokens
 from whygraph.portal.github_auth import GitHubOAuth
 from whygraph.portal.models import Membership, Organization, Project, User
-from whygraph.portal.routes import _clone_dir_is_safe
+from whygraph.portal.orgs import add_member
+from whygraph.portal.repo_cache import RepoListCache
+from whygraph.portal.runner import RunnerUnavailable
 
 API = 2**31  # repository ids above 2^31, as on github.com (spike #9)
 API_REPO, PULLLESS_REPO, HIDDEN_REPO, OTHER_PUBLIC, OWN_REPO, POISONED = (
@@ -242,6 +250,49 @@ def import_repo(
         at(org) + "/api/projects",
         json={"source": "github", "installation_id": installation, "repo_id": repo_id},
     )
+
+
+def wait_import(w: World, response: httpx.Response, org: str = "acme") -> dict:
+    """The import's first run (asserted queued by a ``201``), once it ended."""
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert isinstance(body["initial_run_id"], int), body
+    url = at(org) + f"/api/projects/{body['project']['slug']}"
+    return wait_scan(w.client, url, body["initial_run_id"])
+
+
+def imported_ok(
+    w: World, repo_id: int = API_REPO, *, org: str = "acme", **kw: int
+) -> httpx.Response:
+    """Import a repository and wait for its first run to end ``ok``; the import's answer."""
+    response = import_repo(w, repo_id, org=org, **kw)
+    run = wait_import(w, response, org)
+    assert run["status"] == "ok", run
+    return response
+
+
+def run_events(w: World, run_id: int) -> list[dict]:
+    path = w.env.data / "runs" / f"{run_id}.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+class CloneGate:
+    """Holds the runner's ``git clone`` until :meth:`open` (a slow clone)."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.entered = threading.Event()
+        self.gate = threading.Event()
+        real = runner_mod.Repository.clone
+
+        def clone(url, dest, **kwargs):  # noqa: ANN001, ANN202
+            self.entered.set()
+            assert self.gate.wait(30)
+            return real(url, dest, **kwargs)
+
+        monkeypatch.setattr(runner_mod.Repository, "clone", staticmethod(clone))
+
+    def open(self) -> None:
+        self.gate.set()
 
 
 def project_row(org: str, slug: str) -> Project | None:
@@ -631,9 +682,12 @@ def test_the_listings_show_what_the_user_sees(world: World) -> None:
         "default_branch": "main",
         "imported": False,
     }
-    assert import_repo(w, API_REPO).status_code == 201
+    assert body["per_page"] == 100 and body["truncated"] is False
+    assert body["imports_left"] == 30
+    imported_ok(w)
     body = w.client.get(url).json()
     assert [r["imported"] for r in body["repos"]] == [True, False, False]
+    assert body["imports_left"] == 29  # the throttle counts each import
     # An installation the user cannot see.
     hidden = w.client.get(
         at("acme") + f"/api/github/installations/{OTHER_INSTALLATION}/repos"
@@ -665,30 +719,64 @@ def test_the_listings_need_the_add_project_role(world: World) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_import_clones_initializes_and_saves_the_forge_layer(
-    world: World, audit_log: pytest.LogCaptureFixture
+def test_import_answers_at_once_then_its_run_clones_initializes_and_scans(
+    world: World,
+    audit_log: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     w = world
     connected(w)
+    gate = CloneGate(monkeypatch)
     response = import_repo(w, API_REPO)
     assert response.status_code == 201, response.text
     assert_no_token(response)
     body = response.json()
-    assert body["project"]["slug"] == "api" and body["project"]["initialized"]
+    run_id = body["initial_run_id"]
+    assert isinstance(run_id, int) and "scan_error" not in body
+    assert body["project"]["slug"] == "api"
+    assert not body["project"]["initialized"] and body["project"]["importing"]
     assert body["project"]["remote_url"] == f"{w.server.url}/acme/api"
     assert (
         body["project"]["github_full_name"],
         body["project"]["installation_account"],
     ) == ("acme/api", "acme")
+    # Production never sends the server clone path (MODE-1).
+    assert body["project"]["root"] is None
+    row = project_row("acme", "api")
+    assert row is not None and row.initialized_at is None
+    assert row.root == "repos/acme/api"
+    # The request did no git work: the run clones, as its first phase.
+    assert gate.entered.wait(10)
+    assert clone_dirs(w) == []
+    url = at("acme") + "/api/projects/api"
+    run = w.client.get(f"{url}/scans/{run_id}").json()
+    assert (run["status"], run["kind"], run["trigger"]) == (
+        "running",
+        "sync",
+        "initial",
+    )
+    assert {"type": "sync", "status": "cloning", "full_name": "acme/api"} in (
+        run_events(w, run_id)
+    )
+    (event,) = [e for e in events(audit_log) if e["event"] == "project_imported"]
+    assert (event["org"], event["repo_id"], event["full_name"]) == (
+        "acme",
+        API_REPO,
+        "acme/api",
+    )
+
+    gate.open()
+    run = wait_scan(w.client, url, run_id)
+    assert run["status"] == "ok", run
+    assert run["summary"]["cloned"] is True and run["summary"]["scanned"] is True
+    assert "moved" not in run["summary"]
+    assert {"type": "sync", "status": "ok", "cloned": True} in run_events(w, run_id)
     listed = w.client.get(at("acme") + "/api/projects").json()["projects"]
     assert [
         (p["github_full_name"], p["installation_account"], p["root"], p["importing"])
         for p in listed
     ] == [("acme/api", "acme", None, False)]
     root = w.repos / "acme" / "api"
-    # Production never sends the server clone path (MODE-1).
-    assert body["project"]["root"] is None
-    assert project_row("acme", "api").root == "repos/acme/api"
     assert (root / "README.md").read_text() == "api\n"
     assert (root / ".whygraph" / "whygraph.db").is_file()
     assert clone_dirs(w) == ["api"]  # no .clone-* left behind
@@ -704,19 +792,16 @@ def test_import_clones_initializes_and_saves_the_forge_layer(
     )
     assert (row.github_installation_id, row.default_branch) == (INSTALLATION, "main")
     assert row.created_by == ben_id() and row.initialized_at is not None
+    assert row.last_scan_at is not None  # the scan followed the clone
     config = w.client.get(at("acme") + "/api/projects/api/config").json()
     assert config["config"] == {"scan": {"forge": "auto"}}
-    # Initialized for real: the data routes open the project.
-    assert w.client.get(at("acme") + "/api/projects/api/scans").status_code == 200
-    (event,) = [e for e in events(audit_log) if e["event"] == "project_imported"]
-    assert (event["org"], event["repo_id"], event["full_name"]) == (
-        "acme",
-        API_REPO,
-        "acme/api",
+    assert w.client.get(url).json()["initialized"] is True
+    # The mints were scoped to the one repository.
+    mints = w.fake.calls("POST", f"/api/v3/app/installations/{INSTALLATION}/")
+    assert mints and all(
+        b'"repository_ids":[' + str(API_REPO).encode() + b"]" in m.content
+        for m in mints
     )
-    # The mint was scoped to the one repository.
-    (mint,) = w.fake.calls("POST", f"/api/v3/app/installations/{INSTALLATION}/")
-    assert b'"repository_ids":[' + str(API_REPO).encode() + b"]" in mint.content
 
 
 def test_import_takes_an_optional_name(world: World) -> None:
@@ -736,6 +821,8 @@ def test_import_takes_an_optional_name(world: World) -> None:
         "the-api",
         "The API",
     )
+    assert wait_import(w, response)["status"] == "ok"
+    assert clone_dirs(w) == ["the-api"]
 
 
 @pytest.mark.parametrize(
@@ -775,12 +862,11 @@ def test_a_repo_imports_once_per_org_and_into_two_orgs(world: World) -> None:
     w = world
     assert create_org(w.client, "bravo", "Bravo").status_code == 201
     connected(w)
-    assert import_repo(w, API_REPO).status_code == 201
+    imported_ok(w)
     again = import_repo(w, API_REPO)
     assert (again.status_code, again.json()["code"]) == (409, "duplicate")
     # The same repository in another org: its own clone at repos/bravo/api.
-    other = import_repo(w, API_REPO, org="bravo")
-    assert other.status_code == 201, other.text
+    other = imported_ok(w, org="bravo")
     assert other.json()["project"]["slug"] == "api"
     assert other.json()["project"]["root"] is None
     assert clone_dirs(w, "acme") == ["api"] and clone_dirs(w, "bravo") == ["api"]
@@ -793,11 +879,12 @@ def test_a_taken_folder_retries_the_slug(world: World) -> None:
     leftover = w.repos / "acme" / "api"
     leftover.mkdir(parents=True)
     (leftover / "stray").write_text("x")
-    response = import_repo(w, API_REPO)
-    assert response.status_code == 201, response.text
+    response = imported_ok(w)
+    # The slug choice skips the leftover folder: the clone never meets it.
     assert response.json()["project"]["slug"] == "api-2"
     assert (leftover / "stray").exists()  # never merged into or removed
     assert (w.repos / "acme" / "api-2" / "README.md").is_file()
+    assert clone_dirs(w) == ["api", "api-2"]
 
 
 def test_a_slug_race_in_the_database_retries(
@@ -833,8 +920,7 @@ def test_a_slug_race_in_the_database_retries(
         )
 
     monkeypatch.setattr(routes, "unique_slug", stale)
-    response = import_repo(w, API_REPO)
-    assert response.status_code == 201, response.text
+    response = imported_ok(w)
     assert response.json()["project"]["slug"] == "api-2"
     assert calls == [set(), {"api"}]
     assert clone_dirs(w) == ["api-2"]
@@ -845,16 +931,14 @@ def test_concurrent_imports_of_one_repo_keep_one_clone(
 ) -> None:
     w = world
     connected(w)
-    from whygraph.portal import routes
-
     barrier = threading.Barrier(2, timeout=30)
-    real_clone = routes.Repository.clone
+    real_hit = w.state.import_org.hit
 
-    def clone(url, dest, **kwargs):  # noqa: ANN001, ANN202
+    def hit(key, **kwargs):  # noqa: ANN001, ANN202
         barrier.wait()  # both requests passed the duplicate pre-check
-        return real_clone(url, dest, **kwargs)
+        return real_hit(key, **kwargs)
 
-    monkeypatch.setattr(routes.Repository, "clone", staticmethod(clone))
+    monkeypatch.setattr(w.state.import_org, "hit", hit)
     results: list[httpx.Response] = []
 
     def run() -> None:
@@ -870,20 +954,29 @@ def test_concurrent_imports_of_one_repo_keep_one_clone(
     ]
     (refused,) = [r for r in results if r.status_code == 409]
     assert refused.json()["code"] == "duplicate"
+    (accepted,) = [r for r in results if r.status_code == 201]
+    assert wait_import(w, accepted)["status"] == "ok"
     assert clone_dirs(w) == ["api"]
     with portal_db.get_session() as session:
         assert len(session.exec(select(Project.id)).all()) == 1
 
 
-def test_a_repo_tracking_whygraph_state_is_refused(world: World) -> None:
+def test_a_repo_tracking_whygraph_state_fails_its_import_run(world: World) -> None:
     w = world
     connected(w)
     response = import_repo(w, POISONED)
-    assert response.status_code == 422, response.text
-    assert response.json()["code"] == "tracked_whygraph_state"
-    assert response.json()["paths"] == [".whygraph/whygraph.db"]
-    assert clone_dirs(w) == []
-    assert project_row("acme", "poisoned") is None
+    run = wait_import(w, response)
+    assert run["status"] == "failed", run
+    assert (
+        "tracks WhyGraph's own state (.whygraph/whygraph.db)"
+        in (run["summary"]["error"])
+    )
+    assert clone_dirs(w) == []  # no folder left, temp or final
+    row = project_row("acme", "poisoned")
+    assert row is not None and row.initialized_at is None
+    assert row.access_lost_reason == "tracked_whygraph_state"
+    listed = w.client.get(at("acme") + "/api/projects/poisoned").json()
+    assert listed["importing"] is True
 
 
 def test_imports_are_throttled_per_org(world: World) -> None:
@@ -894,6 +987,8 @@ def test_imports_are_throttled_per_org(world: World) -> None:
     response = import_repo(w, API_REPO)
     assert (response.status_code, response.json()["code"]) == (429, "throttled")
     assert clone_dirs(w) == []
+    with portal_db.get_session() as session:
+        assert session.exec(select(Project.id)).first() is None
 
 
 def project_org_id(slug: str) -> int:
@@ -906,7 +1001,7 @@ def project_org_id(slug: str) -> int:
 def test_production_initialize_is_rerunnable(world: World) -> None:
     w = world
     connected(w)
-    assert import_repo(w, API_REPO).status_code == 201
+    imported_ok(w)
     with portal_db.get_session() as session:
         session.exec(text("UPDATE projects SET initialized_at = NULL"))
     w.state.contexts.invalidate(None)
@@ -914,8 +1009,13 @@ def test_production_initialize_is_rerunnable(world: World) -> None:
     assert init.status_code == 200, init.text
     assert init.json()["initialized"] is True and init.json()["agent_files"] == []
     assert project_row("acme", "api").initialized_at is not None
+    # The call that set initialized_at queued a scan (a sync that scans).
+    url = at("acme") + "/api/projects/api"
+    run = wait_scan(w.client, url, init.json()["initial_run_id"])
+    assert (run["status"], run["kind"]) == ("ok", "sync")
     again = w.client.post(at("acme") + "/api/projects/api/init", json={})
     assert again.status_code == 200, again.text
+    assert again.json()["initial_run_id"] is None
     agents = w.client.post(
         at("acme") + "/api/projects/api/init", json={"agents": ["claude"]}
     )
@@ -927,7 +1027,7 @@ def test_production_initialize_is_rerunnable(world: World) -> None:
 def test_production_config_fixes_the_branch_remote_and_hooks(world: World) -> None:
     w = world
     connected(w)
-    assert import_repo(w, API_REPO).status_code == 201
+    imported_ok(w)
     url = at("acme") + "/api/projects/api/config"
     for key, value in (
         ("hooks", True),
@@ -945,13 +1045,269 @@ def test_production_config_fixes_the_branch_remote_and_hooks(world: World) -> No
 def test_removing_an_imported_project_deletes_its_clone(world: World) -> None:
     w = world
     connected(w)
-    assert import_repo(w, API_REPO).status_code == 201
+    imported_ok(w)
     response = w.client.request(
         "DELETE", at("acme") + "/api/projects/api", json={"confirm_name": "api"}
     )
     assert response.status_code == 200, response.text
     assert response.json()["checkout_deleted"] is True
     assert clone_dirs(w) == [] and (w.repos / "acme").is_dir()
+
+
+# ---------------------------------------------------------------------------
+# The background import (M2f-3 plan sections 4.8, 6.2 #1)
+# ---------------------------------------------------------------------------
+
+
+def test_a_runner_refusal_after_the_commit_still_imports(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The row stays (Import failed, with Retry); the answer says why no run started."""
+    w = world
+    connected(w)
+
+    async def refuse(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise RunnerUnavailable("the scan runner is not running")
+
+    monkeypatch.setattr(w.state.runner, "request_import", refuse)
+    response = import_repo(w, API_REPO)
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert (body["initial_run_id"], body["scan_error"]) == (None, "runner_unavailable")
+    assert body["project"]["importing"] is True
+    url = at("acme") + "/api/projects/api"
+    assert w.client.get(f"{url}/scans").json()["runs"] == []
+    assert clone_dirs(w) == []
+    # A webhook push for an importing project queues nothing.
+    assert webhook_mod._push_targets(API_REPO) == []
+
+
+def test_retry_requeues_the_import_hits_the_throttle_and_clears_a_failed_mint(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    w = world
+    connected(w)
+
+    async def refuse(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise RunnerUnavailable("the scan runner is not running")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(w.state.runner, "request_import", refuse)
+        assert import_repo(w, API_REPO).json()["initial_run_id"] is None
+    # The first run's mint was refused: the project reads access-lost.
+    with portal_db.get_session() as session:
+        session.exec(
+            text(
+                "UPDATE projects SET access_lost_at = '2026-10-01T00:00:00+00:00', "
+                "access_lost_reason = 'no_access'"
+            )
+        )
+    url = at("acme") + "/api/projects/api"
+    org_id = project_org_id("acme")
+    for _ in range(29):  # 1 used by the import itself
+        w.state.import_org.record(org_id)
+    throttled = w.client.post(f"{url}/scans", json={})
+    assert (throttled.status_code, throttled.json()["code"]) == (429, "throttled")
+    w.state.import_org = type(w.state.import_org)(30, 3600)
+
+    retry = w.client.post(f"{url}/scans", json={"trigger": "manual", "analyze": True})
+    assert retry.status_code == 202, retry.text
+    run = wait_scan(w.client, url, retry.json()["run_id"])
+    assert (run["status"], run["trigger"], run["analyze"]) == ("ok", "initial", False)
+    assert run["summary"]["cloned"] is True
+    row = project_row("acme", "api")
+    assert row.access_lost_at is None and row.initialized_at is not None
+    assert w.state.import_org.remaining(org_id) == 29  # the Retry counted
+    assert (w.repos / "acme" / "api" / "README.md").is_file()
+
+
+def test_a_failed_import_is_removed_without_a_path_warning(world: World) -> None:
+    w = world
+    connected(w)
+    assert wait_import(w, import_repo(w, POISONED))["status"] == "failed"
+    response = w.client.request(
+        "DELETE",
+        at("acme") + "/api/projects/poisoned",
+        json={"confirm_name": "poisoned"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["warnings"] == [] and body["checkout_deleted"] is False
+    assert project_row("acme", "poisoned") is None
+
+
+def test_a_cancel_during_the_clone_takes_effect_when_it_returns(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    w = world
+    connected(w)
+    gate = CloneGate(monkeypatch)
+    response = import_repo(w, API_REPO)
+    run_id = response.json()["initial_run_id"]
+    assert gate.entered.wait(10)
+    url = at("acme") + "/api/projects/api"
+    cancel = w.client.post(f"{url}/scans/{run_id}/cancel")
+    assert cancel.status_code == 202, cancel.text
+    assert cancel.json()["was"] == "running"
+    time.sleep(0.3)
+    assert w.client.get(f"{url}/scans/{run_id}").json()["status"] == "running"
+    gate.open()
+    run = wait_scan(w.client, url, run_id)
+    assert run["status"] == "cancelled", run
+    assert clone_dirs(w) == []  # the temp folder went, nothing moved into place
+    assert project_row("acme", "api").initialized_at is None
+
+
+def test_imports_of_one_org_clone_one_at_a_time_and_a_queued_one_cancels_at_once(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    w = world
+    readers = {"ben": {"pull": True}}
+    w.server.add_repo(API + 7, "acme/lib", INSTALLATION, readers=readers)
+    w.server.add_repo(API + 8, "acme/cli", INSTALLATION, readers=readers)
+    assert create_org(w.client, "bravo", "Bravo").status_code == 201
+    connected(w)
+    gate = CloneGate(monkeypatch)
+    first = import_repo(w, API_REPO).json()["initial_run_id"]
+    assert gate.entered.wait(10)
+    second = import_repo(w, API + 7).json()["initial_run_id"]
+    third = import_repo(w, API + 8).json()["initial_run_id"]
+    other = import_repo(w, API_REPO, org="bravo").json()["initial_run_id"]
+
+    def status(org: str, slug: str, run_id: int) -> str:
+        url = at(org) + f"/api/projects/{slug}/scans/{run_id}"
+        return w.client.get(url).json()["status"]
+
+    # The cap is two, but acme's second import waits for its first; bravo's
+    # (another org) takes the free slot.
+    wait_for(lambda: status("bravo", "api", other) == "running")
+    assert status("acme", "lib", second) == "queued"
+    cancel = w.client.post(at("acme") + f"/api/projects/cli/scans/{third}/cancel")
+    assert cancel.status_code == 200, cancel.text
+    assert status("acme", "cli", third) == "cancelled"  # at once
+    gate.open()
+    for org, slug, run_id in (
+        ("acme", "api", first),
+        ("acme", "lib", second),
+        ("bravo", "api", other),
+    ):
+        run = wait_scan(w.client, at(org) + f"/api/projects/{slug}", run_id)
+        assert run["status"] == "ok", (slug, run)
+    assert clone_dirs(w) == ["api", "lib"] and clone_dirs(w, "bravo") == ["api"]
+
+
+def test_sweep_clone_dirs_removes_every_leftover_temp_folder(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    for rel in (
+        "repos/acme/.clone-api-1/.git",
+        "repos/acme/api/.git",
+        "repos/bravo/.clone-web-2",
+        "repos/legacy/.git",
+    ):
+        (data / rel).mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (data / "repos" / "acme" / ".clone-evil-3").symlink_to(outside)
+    assert sweep_clone_dirs(data) == 2
+    assert sorted(p.name for p in (data / "repos" / "acme").iterdir()) == [
+        ".clone-evil-3",  # a symlink is never followed or removed
+        "api",
+    ]
+    assert list((data / "repos" / "bravo").iterdir()) == []
+    assert outside.is_dir() and (data / "repos" / "legacy").is_dir()
+    assert sweep_clone_dirs(tmp_path / "nothing") == 0
+
+
+# ---------------------------------------------------------------------------
+# Repo search (M2f-3 plan sections 4.8, 6.2 #2)
+# ---------------------------------------------------------------------------
+
+
+def repos_url(installation: int = INSTALLATION) -> str:
+    return at("acme") + f"/api/github/installations/{installation}/repos"
+
+
+def test_repo_search_filters_and_pages_the_whole_list(world: World) -> None:
+    w = world
+    readers = {"ben": {"pull": True}}
+    for i in range(150):  # API ids order them after the fixture's repos
+        w.fake.add_repo(
+            API + 100 + i, f"acme/svc-{i:03}", INSTALLATION, readers=readers
+        )
+    connected(w)
+    body = w.client.get(repos_url(), params={"q": "svc"}).json()
+    assert (body["total_count"], body["page"], body["per_page"]) == (150, 1, 100)
+    assert len(body["repos"]) == 100 and body["truncated"] is False
+    assert body["repos"][0]["full_name"] == "acme/svc-000"
+    page2 = w.client.get(repos_url(), params={"q": "svc", "page": 2}).json()
+    assert [r["full_name"] for r in page2["repos"]][:2] == [
+        "acme/svc-100",
+        "acme/svc-101",
+    ]
+    assert len(page2["repos"]) == 50
+    narrow = w.client.get(repos_url(), params={"q": "  SVC-01"}).json()
+    assert narrow["total_count"] == 10  # svc-010 .. svc-019, case-insensitive
+    everything = w.client.get(repos_url()).json()
+    assert everything["total_count"] == 153
+    assert w.client.get(repos_url(), params={"q": "x" * 101}).status_code == 422
+    # One fill served every query (two GitHub pages: 100 + 53).
+    calls = w.fake.calls("GET", f"/api/v3/user/installations/{INSTALLATION}/")
+    assert len(calls) == 2
+
+    # The cap: a fill reads at most max_pages pages and says it stopped.
+    w.state.repo_cache = RepoListCache(max_pages=1)
+    capped = w.client.get(repos_url()).json()
+    assert (capped["total_count"], capped["truncated"]) == (100, True)
+
+
+def test_repo_search_caches_per_user_and_refreshes(world: World) -> None:
+    w = world
+    w.fake.add_user("cat")
+    w.server.add_repo(
+        API + 9, "acme/cats", INSTALLATION, readers={"cat": {"pull": True}}
+    )
+    now = [1000.0]
+    w.state.repo_cache = RepoListCache(clock=lambda: now[0])
+    connected(w)
+    ben = w.client.get(repos_url()).json()
+    assert [r["full_name"] for r in ben["repos"]] == [
+        "acme/api",
+        "acme/web",
+        "acme/poisoned",
+    ]
+    # A repository added on GitHub shows after the TTL, or on a refresh -
+    # once the 10 s refresh limit passed.
+    w.fake.add_repo(API + 10, "acme/new", INSTALLATION, readers={"ben": {"pull": True}})
+    now[0] += 5
+    assert w.client.get(repos_url(), params={"refresh": 1}).json()["total_count"] == 3
+    now[0] += 6
+    assert w.client.get(repos_url(), params={"refresh": 1}).json()["total_count"] == 4
+    now[0] += 30
+    assert w.client.get(repos_url()).json()["total_count"] == 4  # cached
+
+    # Another member of the org never sees Ben's cached list.
+    with portal_db.get_session() as session:
+        org_id = session.exec(
+            select(Organization.id).where(Organization.slug == "acme")
+        ).one()
+    w.client.cookies.clear()
+    assert github_sign_in(w.client, "cat").status_code == 200
+    with portal_db.get_session() as session:
+        cat = session.exec(select(User).where(User.github_login == "cat")).one()
+        add_member(session, org_id=org_id, user_id=cat.id, role="admin")
+    assert connect(w, login="cat").status_code == 200
+    cats = w.client.get(repos_url()).json()
+    assert [r["full_name"] for r in cats["repos"]] == ["acme/cats"]
+    assert {key[1] for key in w.state.repo_cache._slots} == {INSTALLATION}
+    assert len(w.state.repo_cache._slots) == 2  # one list per (user, installation)
+
+
+def test_repo_search_maps_github_errors(world: World) -> None:
+    w = world
+    _needs_authorization(w.client.get(repos_url()))
+    connected(w)
+    hidden = w.client.get(repos_url(OTHER_INSTALLATION))
+    assert (hidden.status_code, hidden.json()["code"]) == (404, "no_access")
 
 
 # ---------------------------------------------------------------------------
@@ -963,19 +1319,19 @@ def test_the_clone_guard_wants_exactly_the_layout_of_the_row(tmp_path: Path) -> 
     data = tmp_path / "data"
     (data / "repos" / "acme" / "api").mkdir(parents=True)
     (data / "repos" / "legacy").mkdir()
-    assert _clone_dir_is_safe(data / "repos" / "acme" / "api", data, depth=2)
-    assert _clone_dir_is_safe(data / "repos" / "acme" / ".clone-x-1", data, depth=2)
-    assert not _clone_dir_is_safe(data / "repos" / "acme", data, depth=2)
-    assert not _clone_dir_is_safe(data / "repos" / "acme" / "api", data, depth=1)
-    assert _clone_dir_is_safe(data / "repos" / "legacy", data, depth=1)
-    assert not _clone_dir_is_safe(tmp_path / "elsewhere" / "x" / "y", data, depth=2)
+    assert clone_dir_is_safe(data / "repos" / "acme" / "api", data, depth=2)
+    assert clone_dir_is_safe(data / "repos" / "acme" / ".clone-x-1", data, depth=2)
+    assert not clone_dir_is_safe(data / "repos" / "acme", data, depth=2)
+    assert not clone_dir_is_safe(data / "repos" / "acme" / "api", data, depth=1)
+    assert clone_dir_is_safe(data / "repos" / "legacy", data, depth=1)
+    assert not clone_dir_is_safe(tmp_path / "elsewhere" / "x" / "y", data, depth=2)
     # A symlinked org folder or project folder is refused, wherever it points.
     outside = tmp_path / "outside"
     (outside / "api").mkdir(parents=True)
     (data / "repos" / "evil").symlink_to(outside)
-    assert not _clone_dir_is_safe(data / "repos" / "evil" / "api", data, depth=2)
+    assert not clone_dir_is_safe(data / "repos" / "evil" / "api", data, depth=2)
     (data / "repos" / "acme" / "link").symlink_to(data / "repos" / "acme" / "api")
-    assert not _clone_dir_is_safe(data / "repos" / "acme" / "link", data, depth=2)
+    assert not clone_dir_is_safe(data / "repos" / "acme" / "link", data, depth=2)
 
 
 # ---------------------------------------------------------------------------

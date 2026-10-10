@@ -80,6 +80,7 @@ from whygraph.portal.runner import (
     SourceNotAllowed,
     _event_line,
     _insert_run,
+    _Job,
     _Pending,
     _read_frames,
     _recover_queued,
@@ -239,6 +240,14 @@ def legacy_github_project(env: SimpleNamespace, name: str) -> int:
         return project.id
 
 
+def forget_first_scan(slug: str) -> None:
+    """Make a project read as never scanned ``ok`` (as if its first scan failed)."""
+    with portal_db.get_session() as session:
+        project = session.exec(select(Project).where(Project.slug == slug)).one()
+        project.last_scan_at = None
+        session.add(project)
+
+
 def commit(root: Path, text: str) -> str:
     (root / "sample.py").write_text(text)
     _git(root, "add", "sample.py")
@@ -247,9 +256,13 @@ def commit(root: Path, text: str) -> str:
 
 
 def first_scan(client: TestClient, slug: str) -> dict:
-    """Run the structure-only first scan to completion (so later ones keep their trigger)."""
-    run = wait_run(client, slug, scan(client, slug))
-    assert run["status"] == "ok" and run["trigger"] == "initial"
+    """The structure-only first scan the first Initialize queued, ended (so later ones keep their trigger).
+
+    ``init_project`` already waited for it; this asserts it is the project's
+    one run and that it ended ``ok`` as an ``initial`` scan.
+    """
+    (run,) = wait_idle(client, slug)
+    assert run["status"] == "ok" and run["trigger"] == "initial", run
     return run
 
 
@@ -574,14 +587,28 @@ def test_oversized_child_lines_are_written_as_a_placeholder() -> None:
 def test_first_scan_is_initial_and_argv_per_trigger(
     portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
 ) -> None:
-    root = local_project(portal, env, "demo")
+    root = make_repo(env.shared, "demo")
+    seed_codegraph(root)
+    add_local(portal, root)
     head = _git(root, "rev-parse", "HEAD").strip()
 
-    # Whatever asks, the first scan records `initial` and spends nothing.
+    # The first Initialize queues the first scan; whatever asks before it
+    # ended ok, a scan records `initial` and spends nothing.
+    scanner.hold.touch()
+    init = portal.post("/api/projects/demo/init", json={"agents": []})
+    assert init.status_code == 200, init.text
+    first = init.json()["initial_run_id"]
+    wait_for(scanner.calls)
     run_id = scan(portal, "demo", trigger="describe")
-    run = wait_run(portal, "demo", run_id)
-    assert (run["status"], run["trigger"], run["analyze"]) == ("ok", "initial", False)
-    assert run["summary"]["exit_code"] == 0
+    scanner.hold.unlink()
+    for rid in (first, run_id):
+        run = wait_run(portal, "demo", rid)
+        assert (run["status"], run["trigger"], run["analyze"]) == (
+            "ok",
+            "initial",
+            False,
+        )
+        assert run["summary"]["exit_code"] == 0
     with portal_db.get_session() as session:
         project = session.exec(select(Project).where(Project.slug == "demo")).one()
         assert project.last_scanned_head == head and project.last_scan_at
@@ -601,6 +628,7 @@ def test_first_scan_is_initial_and_argv_per_trigger(
         ["--progress", "json", "--managed-by-portal", *flags]
         for flags in (
             ["--skip-analyze"],
+            ["--skip-analyze"],
             ["--skip-analyze", "--no-remote"],
             [],
             ["--skip-analyze"],
@@ -608,6 +636,65 @@ def test_first_scan_is_initial_and_argv_per_trigger(
         )
     ]
     assert all(Path(c["cwd"]) == root for c in calls)
+
+
+def _init(client: TestClient, slug: str, **body: Any) -> dict:
+    response = client.post(f"/api/projects/{slug}/init", json={"agents": [], **body})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_the_first_initialize_queues_the_first_scan_once(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    """M2f-3 R2 / decision 0.3 #9: only the call that sets initialized_at queues it."""
+    root = make_repo(env.shared, "demo")
+    seed_codegraph(root)
+    (root / ".mcp.json").write_text('{"mcpServers": {"other": {"command": "x"}}}\n')
+    _git(root, "add", ".mcp.json")
+    _git(root, "commit", "-q", "-m", "mcp")
+    add_local(portal, root)
+
+    assert _init(portal, "demo", dry_run=True)["initial_run_id"] is None
+    pending = _init(portal, "demo", agents=["claude"])
+    assert pending["needs_confirmation"] == [".mcp.json"]
+    assert (pending["initialized"], pending["initial_run_id"]) == (False, None)
+    assert runs(portal, "demo") == []
+
+    done = _init(portal, "demo", agents=["claude"], confirm_tracked=[".mcp.json"])
+    assert done["initialized"] is True and "scan_error" not in done
+    run = wait_run(portal, "demo", done["initial_run_id"])
+    assert (run["status"], run["trigger"], run["analyze"]) == ("ok", "initial", False)
+    assert run["requested_by"]["label"] == "Tess"
+
+    # "Update agent files" (settings mode) and later previews queue nothing.
+    again = _init(
+        portal, "demo", agents=["claude"], force=True, confirm_tracked=[".mcp.json"]
+    )
+    assert again["initial_run_id"] is None
+    assert _init(portal, "demo", dry_run=True)["initial_run_id"] is None
+    assert [r["id"] for r in runs(portal, "demo")] == [run["id"]]
+    assert len(scanner.calls()) == 1
+
+
+def test_a_refused_first_scan_never_fails_the_initialize(
+    portal: TestClient,
+    env: SimpleNamespace,
+    scanner: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def refuse(*args: Any, **kwargs: Any) -> int:
+        raise RunnerUnavailable("the scan runner is not running")
+
+    monkeypatch.setattr(portal.app.state.portal.runner, "request_scan", refuse)
+    root = make_repo(env.shared, "demo")
+    seed_codegraph(root)
+    add_local(portal, root)
+    done = _init(portal, "demo")
+    assert done["initialized"] is True
+    assert (done["initial_run_id"], done["scan_error"]) == (None, "runner_unavailable")
+    assert runs(portal, "demo") == []
+    assert portal.get("/api/projects/demo").json()["initialized"] is True
 
 
 def test_hook_scans_are_refused_outside_local_mode(
@@ -624,7 +711,7 @@ def test_hook_scans_are_refused_outside_local_mode(
     # (and production holds no local folder at all: the source policy)
     manual = portal.post("/api/projects/demo/scans", json={"trigger": "manual"})
     assert manual.status_code == 409 and manual.json()["code"] == "source_not_allowed"
-    assert scanner.calls() == []
+    assert len(scanner.calls()) == 1  # only the first Initialize's scan
     portal.app.state.portal.mode = "local"
     first_scan(portal, "demo")
     run = wait_run(portal, "demo", scan(portal, "demo", trigger="hook"))
@@ -667,17 +754,18 @@ def test_global_cap_of_two(
 ) -> None:
     for name in ("a1", "a2", "a3"):
         local_project(portal, env, name)
+    base = len(scanner.calls())  # each Initialize's first scan
     scanner.hold.touch()
     ids = {name: scan(portal, name) for name in ("a1", "a2", "a3")}
-    wait_for(lambda: len(scanner.calls()) == 2)
+    wait_for(lambda: len(scanner.calls()) == base + 2)
     time.sleep(0.3)
     statuses = sorted(run_by_id(portal, n, i)["status"] for n, i in ids.items())
     assert statuses == ["queued", "running", "running"]
-    assert len(scanner.calls()) == 2
+    assert len(scanner.calls()) == base + 2
     scanner.hold.unlink()
     for name, run_id in ids.items():
         assert wait_run(portal, name, run_id)["status"] == "ok"
-    assert len(scanner.calls()) == 3
+    assert len(scanner.calls()) == base + 3
 
 
 def test_failed_scan_and_stderr_flood(
@@ -702,7 +790,6 @@ def test_child_env_passes_allowlist_not_portal_credentials(
     scanner: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    local_project(portal, env, "demo")
     monkeypatch.setenv("SSL_CERT_FILE", "/etc/ssl/cert.pem")
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-portal-env")
@@ -713,6 +800,7 @@ def test_child_env_passes_allowlist_not_portal_credentials(
     password = env.tmp / "postgres.password"
     password.write_text(make_url(os.environ["WHYGRAPH_DATABASE_URL"]).password or "")
     monkeypatch.setenv("WHYGRAPH_DATABASE_PASSWORD_FILE", str(password))
+    local_project(portal, env, "demo")
     first_scan(portal, "demo")
     wait_run(portal, "demo", scan(portal, "demo", trigger="manual"))
     for call in scanner.calls():
@@ -796,7 +884,7 @@ def test_events_sse_replays_then_follows(
     local_project(portal, env, "demo")
     scanner.hold.touch()
     run_id = scan(portal, "demo")
-    wait_for(lambda: len(scanner.calls()) == 1)
+    wait_for(lambda: len(scanner.calls()) == 2)  # after the first Initialize's
     wait_for(lambda: (env.data / "runs" / f"{run_id}.jsonl").stat().st_size > 0)
     threading.Timer(0.5, scanner.hold.unlink).start()
 
@@ -948,7 +1036,8 @@ def test_restart_interrupts_running_and_requeues_queued(
         assert merged["summary"] == {"merged_into": ids[1]}
         with portal_db.get_session() as session:
             assert session.get(ScanRun, ids[2]).status == "cancelled"
-    assert [runner_flags(c)[3:] for c in scanner.calls()] == [[]]
+    # After the two Initializes' first scans, only the requeued run.
+    assert [runner_flags(c)[3:] for c in scanner.calls()][2:] == [[]]
 
 
 def test_recover_queued_reads_the_persisted_scan_flag(
@@ -977,6 +1066,91 @@ def test_recover_queued_reads_the_persisted_scan_flag(
         assert json.loads(session.get(ScanRun, run_id).summary) == {
             "scan_requested": True
         }
+
+
+def test_recover_queued_keeps_a_production_import_and_cancels_the_rest(
+    env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    """M2f-3 section 4.8: a queued import survives a restart (no root, not initialized)."""
+    with client_for() as client:
+        client.post("/api/portal/setup", json={"display_name": "Tess"})
+    with portal_db.get_session() as session:
+        org = builtin_org_id(session)
+        importing = Project(
+            org_id=org,
+            slug="api",
+            name="api",
+            source="github",
+            root="repos/acme/api",  # not cloned yet
+            github_repo_id=1,
+            github_installation_id=7,
+        )
+        local = Project(
+            org_id=org,
+            slug="half",
+            name="half",
+            source="local",
+            root=str(make_repo(env.shared, "half")),  # never initialized
+        )
+        session.add_all([importing, local])
+        session.flush()
+        ids = (importing.id, local.id, org)
+    import_run = _insert_run(ids[0], "sync", "initial", False, None)
+    local_run = _insert_run(ids[1], "scan", "manual", False, None)
+    (spec,) = _recover_queued(production=True)
+    assert (spec.run_id, spec.importing, spec.org_id) == (import_run, True, ids[2])
+    with portal_db.get_session() as session:
+        assert session.get(ScanRun, import_run).status == "queued"
+        assert session.get(ScanRun, local_run).status == "cancelled"
+    # A local portal (or a portal without the GitHub source) keeps none.
+    assert _recover_queued() == []
+    with portal_db.get_session() as session:
+        assert session.get(ScanRun, import_run).status == "cancelled"
+
+
+class _Tasks:
+    """A task group stand-in that records what ``_dispatch`` starts."""
+
+    def __init__(self) -> None:
+        self.started: list[int] = []
+
+    def start_soon(self, fn, job) -> None:  # noqa: ANN001
+        self.started.append(job.spec.run_id)
+
+
+def _spec(run_id: int, org_id: int, *, importing: bool) -> _Pending:
+    return _Pending(
+        run_id=run_id,
+        project_id=run_id,
+        kind="sync",
+        trigger="initial",
+        analyze=False,
+        requested_by=None,
+        scan_requested=True,
+        org_id=org_id,
+        importing=importing,
+    )
+
+
+def test_dispatch_runs_one_import_per_org_at_a_time() -> None:
+    """M2f-3 decision 0.3 #41: an org's imports clone one by one, others go on."""
+    runner = ScanRunner(max_concurrent=3)
+    tasks = _Tasks()
+    runner._tg = tasks
+    runner._running[1] = _Job(spec=_spec(1, 10, importing=True))
+    for spec in (
+        _spec(2, 10, importing=True),  # org 10 is already cloning: waits
+        _spec(3, 20, importing=True),  # another org's import
+        _spec(4, 10, importing=False),  # org 10's ordinary sync
+    ):
+        runner._pending[spec.project_id] = spec
+    runner._dispatch()
+    assert tasks.started == [3, 4]
+    assert set(runner._pending) == {2}
+    # Once org 10's clone ended, its next import starts.
+    del runner._running[1]
+    runner._dispatch()
+    assert tasks.started == [3, 4, 2] and runner._pending == {}
 
 
 def test_delete_refuses_while_a_scan_request_is_in_flight(
@@ -1039,9 +1213,9 @@ def test_scan_request_refused_while_a_removal_runs(
     assert refused.status_code == 409, refused.text
     assert "being removed" in refused.json()["error"]
     assert deleted[0].status_code == 200, deleted[0].text
-    assert scanner.calls() == []
+    assert len(scanner.calls()) == 1  # only the first Initialize's scan
     with portal_db.get_session() as session:
-        assert session.exec(select(ScanRun)).all() == []
+        assert session.exec(select(ScanRun)).all() == []  # gone with the project
 
 
 def test_removing_a_project_deletes_its_run_files(
@@ -1196,8 +1370,11 @@ def test_stale_reports_commits_behind(
     portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
 ) -> None:
     root = local_project(portal, env, "demo")
-    assert portal.get("/api/projects/demo").json()["stale"] is None  # never scanned
-    first_scan(portal, "demo")
+    first_scan(portal, "demo")  # the first Initialize's
+    assert portal.get("/api/projects/demo").json()["stale"] is None  # at HEAD
+    with portal_db.get_session() as session:
+        demo_id = session.exec(select(Project.id).where(Project.slug == "demo")).one()
+    portal.app.state.portal.runner.stale.drop(demo_id)  # past the 10 s HEAD memo
     commit(root, "one\n")
     commit(root, "two\n")
     commit(root, "three\n")
@@ -1289,11 +1466,10 @@ def test_shutdown_with_open_stream_interrupts_the_run(
             ).status_code
             == 201
         )
-        assert http.post("/api/projects/demo/init", json={"agents": []}).json()[
-            "initialized"
-        ]
         scanner.hold.touch()  # never released: the child runs until shutdown
-        run_id = http.post("/api/projects/demo/scans").json()["run_id"]
+        init = http.post("/api/projects/demo/init", json={"agents": []}).json()
+        assert init["initialized"]
+        run_id = init["initial_run_id"]  # the first Initialize's scan
         wait_for(lambda: len(scanner.calls()) == 1)
 
         received: list[str] = []
@@ -1368,9 +1544,9 @@ def test_open_stream_gets_the_shutdown_frame_without_holding_the_stop(
         root = make_repo(env.shared, "demo")
         seed_codegraph(root)
         http.post("/api/projects", json={"source": "local", "path": str(root)})
-        http.post("/api/projects/demo/init", json={"agents": []})
         scanner.hold.touch()
-        run_id = http.post("/api/projects/demo/scans").json()["run_id"]
+        init = http.post("/api/projects/demo/init", json={"agents": []}).json()
+        run_id = init["initial_run_id"]  # the first Initialize's scan
         wait_for(lambda: len(scanner.calls()) == 1)
 
         received: list[str] = []
@@ -1579,22 +1755,28 @@ def test_commits_during_a_running_scan_yield_one_hook_follow_up(
         ).is_success
         init = http.post("/api/projects/demo/init", json={"agents": []}).json()
         assert init["initialized"] and "post-commit" in init["hooks"]["installed"]
-        with portal_db.get_session() as session:  # past the first (initial) scan
-            project = session.exec(select(Project)).one()
-            project.last_scan_at = "2026-01-01T00:00:00+00:00"
-            session.add(project)
+        wait_for(  # past the first (initial) scan the Initialize queued
+            lambda: (
+                http.get(f"/api/projects/demo/scans/{init['initial_run_id']}").json()[
+                    "status"
+                ]
+                in TERMINAL
+            )
+        )
 
         scanner.hold.touch()
         running = http.post("/api/projects/demo/scans", json={"trigger": "manual"})
         running_id = running.json()["run_id"]
-        wait_for(lambda: len(scanner.calls()) == 1)
+        wait_for(lambda: len(scanner.calls()) == 2)
 
         commit("one.txt")
         commit("two.txt")
 
         def pending() -> list[dict]:
             rows = http.get("/api/projects/demo/scans").json()["runs"]
-            return [r for r in rows if r["id"] != running_id]
+            return [
+                r for r in rows if r["id"] not in (running_id, init["initial_run_id"])
+            ]
 
         queued = wait_for(pending)
         time.sleep(1.0)  # let the second hook's request land too
@@ -1604,9 +1786,9 @@ def test_commits_during_a_running_scan_yield_one_hook_follow_up(
         assert queued[0]["id"] == follow_up["id"]
 
         scanner.hold.unlink()
-        wait_for(lambda: len(scanner.calls()) == 2)
-        assert "--skip-analyze" in runner_flags(scanner.calls()[1])
-        assert "--no-remote" in runner_flags(scanner.calls()[1])
+        wait_for(lambda: len(scanner.calls()) == 3)
+        assert "--skip-analyze" in runner_flags(scanner.calls()[2])
+        assert "--no-remote" in runner_flags(scanner.calls()[2])
     finally:
         http.close()
         server.should_exit = True
@@ -1696,13 +1878,21 @@ def test_a_1x_repo_migrates_through_the_wizard_and_keeps_its_commits(
     assert hook.read_text() == _V1_HOOK  # the 1.x helper rescans until Initialize
     assert legacy.read_text() == _V1_HELPER
 
-    # Initialize, migrating both agent files.
-    done = init_project(
-        portal,
-        "legacy",
-        agents=["claude", "vscode"],
-        agent_actions={"claude": "migrate", "vscode": "migrate"},
+    # Initialize, migrating both agent files. Its first scan runs the real
+    # child (below).
+    monkeypatch.setenv(
+        "WHYGRAPH_SCAN_CMD",
+        f"{shlex.quote(sys.executable)} -m whygraph scan --no-codegraph",
     )
+    response = portal.post(
+        "/api/projects/legacy/init",
+        json={
+            "agents": ["claude", "vscode"],
+            "agent_actions": {"claude": "migrate", "vscode": "migrate"},
+        },
+    )
+    assert response.status_code == 200, response.text
+    done = response.json()
     assert done["initialized"] is True, done
     assert not (root / "whygraph.toml").exists()  # acceptance #4
     assert (root / ".whygraph" / "backups" / f"whygraph-{old_revision}.db").is_file()
@@ -1721,11 +1911,7 @@ def test_a_1x_repo_migrates_through_the_wizard_and_keeps_its_commits(
     assert entry["type"] == "http" and entry["url"].endswith("/mcp/legacy")
 
     # The first scan (the real child) adds only the new commit.
-    monkeypatch.setenv(
-        "WHYGRAPH_SCAN_CMD",
-        f"{shlex.quote(sys.executable)} -m whygraph scan --no-codegraph",
-    )
-    run = wait_run(portal, "legacy", scan(portal, "legacy"), timeout=120)
+    run = wait_run(portal, "legacy", done["initial_run_id"], timeout=120)
     assert (run["status"], run["trigger"]) == ("ok", "initial"), run
     with sqlite3.connect(db) as conn:
         rows = dict(
@@ -1893,6 +2079,7 @@ def test_a_request_that_would_spend_needs_may_spend(
     portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
 ) -> None:
     local_project(portal, env, "demo")
+    forget_first_scan("demo")
     # The first scan is forced to `initial` (no analyze), so a body-less
     # request without the right passes: the gate runs after the forcing.
     first = _request(portal, "demo", trigger=None, analyze=None, may_spend=False)
@@ -1906,7 +2093,9 @@ def test_a_request_that_would_spend_needs_may_spend(
     ):
         with pytest.raises(ScanForbidden):
             _request(portal, "demo", trigger=trigger, analyze=analyze, may_spend=False)
-    assert [r["id"] for r in runs(portal, "demo")] == [first]  # nothing queued
+    # Nothing queued: the newest run is still `first` (then the Initialize's).
+    assert [r["id"] for r in runs(portal, "demo")][:1] == [first]
+    assert len(runs(portal, "demo")) == 2
 
     quick = _request(portal, "demo", trigger="manual", analyze=False, may_spend=False)
     assert wait_run(portal, "demo", quick)["analyze"] is False
@@ -2415,6 +2604,7 @@ def test_a_full_run_stores_its_estimate_at_enqueue_and_keeps_it(
     portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
 ) -> None:
     local_project(portal, env, "demo")
+    forget_first_scan("demo")
     # The first-scan forcing turns the request structure-only: no estimate.
     forced = _request(
         portal, "demo", trigger=None, analyze=None, may_spend=True, estimate=EST

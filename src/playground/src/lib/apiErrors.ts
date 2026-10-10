@@ -231,10 +231,6 @@ export const MESSAGES: Record<string, Resolver> = {
     ctx === "github"
       ? "This repository is already a project in this organization."
       : "This repository is already a project.",
-  clone_failed: {
-    message: "WhyGraph couldn't clone this repository. Check that it still exists and can be read, then try again.",
-    action: RETRY,
-  },
   no_access: (_err, ctx) =>
     ctx === "add-project"
       ? "This token cannot read the repository. Grant it read access to the repository's contents (and pull requests and issues, for the GitHub crawl)."
@@ -254,11 +250,6 @@ export const MESSAGES: Record<string, Resolver> = {
   github_required: "Importing from GitHub needs an account that signs in with GitHub.",
   github_app_not_configured: "This portal has no GitHub App configured. Ask an instance administrator.",
   start_from_portal: "Open your organization in WhyGraph and choose Import from GitHub.",
-  tracked_whygraph_state: (err) => {
-    const paths = Array.isArray(err.extra.paths) ? (err.extra.paths as unknown[]).filter((p) => typeof p === "string") : [];
-    const which = paths.length > 0 ? ` (${paths.join(", ")})` : " (.whygraph/ or .codegraph/)";
-    return `This repository tracks WhyGraph's own state${which}. Remove it from the repository to import it.`;
-  },
   busy: (_err, ctx) =>
     ctx === "link"
       ? { message: "The platform is busy right now. Try again in a moment.", action: RETRY }
@@ -274,6 +265,7 @@ export const MESSAGES: Record<string, Resolver> = {
   needs_confirmation: "Some agent files are tracked by git. Confirm them before WhyGraph changes them.",
   not_in_production: "This isn't available on a team portal.",
   hook_local_only: "Commit hooks trigger scans only on a local portal.",
+  runner_unavailable: { message: "The scan queue isn't running right now. Try again in a moment.", action: RETRY },
   managed_on_platform: "This project is managed on the platform. Change it there.",
 
   // Linking to a platform (M2e)

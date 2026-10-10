@@ -365,7 +365,6 @@ describe("Import from GitHub", () => {
 
   it.each([
     ["no_access", 404, /not available to you through this installation/],
-    ["tracked_whygraph_state", 422, /tracks WhyGraph's own state/],
     ["duplicate", 409, /already a project in this organization/],
     ["source_not_allowed", 403, /not supported here/],
     ["throttled", 429, /Too many imports/],

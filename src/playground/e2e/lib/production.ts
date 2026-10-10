@@ -76,9 +76,8 @@ export async function importRepo(page: Page, org: string, repo: string): Promise
   }
   await page.getByTestId(`repo-${repo}`).getByRole("button", { name: `Import ${repo}` }).click();
 
-  // The import cloned it: Configure carries the first scan (above the settings).
+  // The import's own run clones, then scans: Configure follows it (above the settings).
   await expect(page).toHaveURL(new RegExp(`/p/${slug}/init\\?step=configure`));
-  await page.getByRole("button", { name: "Start first scan" }).click();
   await expect(page.getByText("First scan complete")).toBeVisible({ timeout: 30_000 });
   await openAfterFirstScan(page);
   await expect(page).toHaveURL(new RegExp(`/p/${slug}$`));

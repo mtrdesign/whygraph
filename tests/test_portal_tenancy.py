@@ -352,7 +352,7 @@ def wait_idle(client: TestClient, headers: dict, slug: str = "api") -> list[dict
 
 
 def _add_org_project(world: World, org: OrgWorld, defaults: dict) -> None:
-    """Add, name, configure, initialize and seed ``org``'s ``api``; start its scan."""
+    """Add, name, configure, initialize (which starts its scan) and seed ``org``'s ``api``."""
     client, owner = world.client, org.owner
     org.root = _marked_repo(world.env, org.mark)
     _seed_codegraph(org.root, org.mark)
@@ -371,12 +371,12 @@ def _add_org_project(world: World, org: OrgWorld, defaults: dict) -> None:
     _ok(client.put("/api/projects/api/config", json=config, headers=owner))
     init = client.post("/api/projects/api/init", json={"agents": []}, headers=owner)
     assert _ok(init)["marker_written"] is True
+    # The first Initialize queues the project's first scan (M2f-3 R2).
+    org.run_id = init.json()["initial_run_id"]
+    assert isinstance(org.run_id, int)
     _seed_history(org.root)
     org.marker_sha = _git(org.root, "rev-parse", "HEAD").strip()
     org.first_sha = _git(org.root, "rev-list", "--max-parents=0", "HEAD").strip()
-    org.run_id = _ok(client.post("/api/projects/api/scans", headers=owner), 202)[
-        "run_id"
-    ]
     session = client.post(
         "/api/projects/api/chat/sessions",
         json={"title": org.session_title},

@@ -273,6 +273,8 @@ def test_coverage_points_and_events(local: SimpleNamespace) -> None:
 def test_coverage_points_are_thinned_to_120(local: SimpleNamespace) -> None:
     pid = local.project_id
     with portal_db.get_session() as session:
+        # Only these runs (not the first Initialize's own scan).
+        session.exec(delete(ScanRun).where(ScanRun.project_id == pid))
         runs = [
             ScanRun(
                 project_id=pid,

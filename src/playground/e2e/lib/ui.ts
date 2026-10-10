@@ -64,8 +64,8 @@ export async function openMainSymbol(page: Page, fx: Fixture): Promise<void> {
 
 /** Run the first (structure-only) scan and leave the wizard for the project. */
 export async function firstScan(page: Page, fx: Fixture): Promise<void> {
-  await page.getByRole("button", { name: "Start first scan" }).click();
-  await expect(page.getByTestId("scan-progress")).toBeVisible();
+  // The first Initialize queued the first scan: the step follows that run (or
+  // shows it done) instead of offering "Start first scan".
   await expect(page.getByText("First scan complete")).toBeVisible({ timeout: 30_000 });
   // The fake scanner records no commits, so the cost card has nothing to describe:
   // it offers "Open project" where a real scan would offer "Later".

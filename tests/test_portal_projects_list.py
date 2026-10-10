@@ -253,7 +253,8 @@ def test_last_scan_stats_from_the_newest_snapshot(
     (listed,) = [
         p for p in ready.get("/api/projects").json()["projects"] if p["slug"] == "demo"
     ]
-    assert listed["last_scan_stats"] is None and listed["importing"] is False
+    # The first Initialize's scan left a (fake, empty) snapshot.
+    assert listed["last_scan_stats"]["commits"] == 0 and listed["importing"] is False
     _add_runs(
         "demo",
         _coverage(10, 10.0, 1, "2026-10-01T00:00:00+00:00"),

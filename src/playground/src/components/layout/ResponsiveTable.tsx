@@ -24,12 +24,15 @@ export function ResponsiveTable<T>({
   rows,
   rowKey,
   onRowClick,
+  rowTestId,
   empty,
 }: {
   columns: Column<T>[];
   rows: T[];
   rowKey: (row: T) => string;
   onRowClick?: (row: T) => void;
+  /** A test id for each row of the table layout (the stacked list repeats the rows, so it carries none). */
+  rowTestId?: (row: T) => string;
   empty?: ReactNode;
 }) {
   if (rows.length === 0 && empty) return <>{empty}</>;
@@ -61,6 +64,7 @@ export function ResponsiveTable<T>({
             {rows.map((row) => (
               <tr
                 key={rowKey(row)}
+                data-testid={rowTestId?.(row)}
                 className={cn("border-b border-border last:border-0", clickable)}
                 onClick={onRowClick ? () => onRowClick(row) : undefined}
               >

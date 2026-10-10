@@ -115,7 +115,15 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
   const method = init?.method ?? "GET";
   const body = init?.body ? (JSON.parse(String(init.body)) as Json) : null;
   log.push({ method, path: url.pathname + url.search, body });
-  const handler = handlers[`${method} ${url.pathname}`];
+  let handler = handlers[`${method} ${url.pathname}`];
+  // `GET .../scans/<id>` (the run page's header) falls back to the row of the list handler.
+  const one = /^(\/api\/projects\/[^/]+\/scans)\/(\d+)$/.exec(url.pathname);
+  if (!handler && method === "GET" && one && handlers[`GET ${one[1]}`]) {
+    handler = (b, u) => {
+      const rows = (handlers[`GET ${one[1]}`](b, u) as { runs: Json[] }).runs;
+      return rows.find((r) => String(r.id) === one[2]) ?? { status: 404, body: { error: `run ${one[2]} not found` } };
+    };
+  }
   if (!handler) return Promise.resolve(json({ error: `unhandled ${method} ${url.pathname}` }, 500));
   const out = handler(body, url);
   if (out instanceof Response) return Promise.resolve(out);
@@ -207,8 +215,13 @@ describe("Scan run (screen 7)", () => {
     const task = within(phase3).getByTestId("task-analyze");
     expect(task).toHaveTextContent("41 / 62");
     expect(within(phase3).getByRole("progressbar")).toHaveAttribute("aria-valuenow", "66");
-    expect(screen.getByRole("heading", { name: /Scan #6/ })).toBeInTheDocument();
+    // The title is "<what> - <when>", never the run id (R5); phases are named up front.
+    const heading = screen.getByRole("heading", { level: 1 });
+    expect(heading).toHaveTextContent(/^Full rescan - /);
+    expect(heading).not.toHaveTextContent("#6");
+    expect(screen.getByTestId("run-meta")).toHaveTextContent("Requested by you · started");
     expect(screen.getByText("Running")).toBeInTheDocument();
+    expect(screen.getByTestId("phase-count")).toHaveTextContent("Phase 3 of 3");
     // The stream is a `fetch` (never EventSource) that carries the client header.
     expect(calls("GET", "/api/projects/alpha/scans/6/events")).toHaveLength(1);
   });
@@ -312,15 +325,15 @@ describe("Scan run (screen 7)", () => {
 
     await user.click(screen.getByTestId("cancel-run"));
     const dialog = await screen.findByTestId("cancel-run-dialog");
-    expect(dialog).toHaveTextContent("Cancel scan #6?");
-    expect(dialog).toHaveTextContent("Commits it already described are kept");
+    expect(dialog).toHaveTextContent("Stop this scan?");
+    expect(dialog).toHaveTextContent("Commits described so far are kept.");
     await user.click(within(dialog).getByRole("button", { name: "Keep it" }));
     await waitFor(() => expect(screen.queryByTestId("cancel-run-dialog")).not.toBeInTheDocument());
     expect(calls("POST", "/api/projects/alpha/scans/6/cancel")).toHaveLength(0);
 
     await user.click(screen.getByTestId("cancel-run"));
     await user.click(
-      within(await screen.findByTestId("cancel-run-dialog")).getByRole("button", { name: "Cancel scan" }),
+      within(await screen.findByTestId("cancel-run-dialog")).getByRole("button", { name: "Stop scan" }),
     );
     await waitFor(() => expect(calls("POST", "/api/projects/alpha/scans/6/cancel")).toHaveLength(1));
   });
@@ -333,12 +346,24 @@ describe("Scan run (screen 7)", () => {
     const user = userEvent.setup();
     mount("/p/alpha/scans/6");
     await user.click(await screen.findByTestId("cancel-run"));
-    expect(await screen.findByTestId("cancel-run-dialog")).toHaveTextContent("removed from the queue");
+    const dialog = await screen.findByTestId("cancel-run-dialog");
+    expect(dialog).toHaveTextContent("Remove this scan from the queue?");
+    expect(dialog).toHaveTextContent("removed from the queue");
   });
 
-  it("a run the user cancelled says so, and offers no Cancel", async () => {
+  it("a run someone else cancelled names them", async () => {
     handlers["GET /api/projects/alpha/scans"] = () => ({
-      runs: [run(6, { status: "cancelled", summary: { cancelled_by: "user" } })],
+      runs: [run(6, { status: "cancelled", cancelled_by: { uid: "u2", label: "Ben" }, summary: { cancelled_by: "user" } })],
+    });
+    handlers["GET /api/projects/alpha/scans/6/events"] = () =>
+      sse([frame(1, { type: "start", phase_total: 2 }), endFrame(2, "cancelled", { cancelled_by: "user" })]);
+    mount("/p/alpha/scans/6");
+    expect(await screen.findByTestId("run-result")).toHaveTextContent("Cancelled by Ben");
+  });
+
+  it("a run the viewer cancelled says so, and offers no Cancel", async () => {
+    handlers["GET /api/projects/alpha/scans"] = () => ({
+      runs: [run(6, { status: "cancelled", cancelled_by: { uid: "u1", label: "Ada" }, summary: { cancelled_by: "user" } })],
     });
     handlers["GET /api/projects/alpha/scans/6/events"] = () =>
       sse([
@@ -347,8 +372,8 @@ describe("Scan run (screen 7)", () => {
       ]);
     mount("/p/alpha/scans/6");
     const result = await screen.findByTestId("run-result");
-    expect(result).toHaveTextContent("Cancelled");
-    expect(result).toHaveTextContent("You cancelled this run");
+    expect(result).toHaveTextContent("Cancelled by you");
+    expect(result).toHaveTextContent("Commits it had already described are kept");
     expect(screen.queryByTestId("cancel-run")).not.toBeInTheDocument();
   });
 
@@ -364,7 +389,7 @@ describe("Scan run (screen 7)", () => {
     mount("/p/alpha/scans/6");
     const result = await screen.findByTestId("run-result");
     expect(result).toHaveTextContent("Stopped: monthly budget reached");
-    expect(result).not.toHaveTextContent("You cancelled this run");
+    expect(result).not.toHaveTextContent("Cancelled by");
   });
 
   it("an ok run shows its LLM usage only when it made calls, and a budget-skipped LLM phase", async () => {
@@ -390,14 +415,136 @@ describe("Scan run (screen 7)", () => {
     expect(screen.queryByTestId("run-usage")).toBeNull();
   });
 
-  it("an unknown run id is reported, not retried forever", async () => {
+  it("an unknown run id renders the not-found state and requests nothing more", async () => {
+    handlers["GET /api/projects/alpha/scans/99"] = () => ({ status: 404, body: { error: "run 99 not found" } });
     handlers["GET /api/projects/alpha/scans/99/events"] = () => ({
       status: 404,
-      body: { error: "run 99 not found", code: "not_found" },
+      body: { error: "run 99 not found" },
     });
     mount("/p/alpha/scans/99");
-    expect(await screen.findByTestId("run-unavailable")).toHaveTextContent("Run #99 was not found");
-    expect(calls("GET", "/api/projects/alpha/scans/99/events")).toHaveLength(1);
+    const missing = await screen.findByTestId("not-found");
+    expect(missing).toHaveAttribute("data-kind", "run");
+    expect(missing).toHaveTextContent("Scan run not found");
+    await new Promise((r) => setTimeout(r, 50));
+    expect(calls("GET", "/api/projects/alpha/scans/99")).toHaveLength(1);
+    expect(calls("GET", "/api/projects/alpha/scans/99/events").length).toBeLessThanOrEqual(1);
+  });
+
+  it("an import says it imported and scanned; a sync with nothing new says so, but never on a first run", async () => {
+    handlers["GET /api/projects/alpha/scans"] = () => ({
+      runs: [run(6, { kind: "sync", trigger: "initial", analyze: false, summary: { cloned: true, scanned: true, moved: true } })],
+    });
+    handlers["GET /api/projects/alpha/scans/6/events"] = () =>
+      sse([endFrame(1, "ok", { cloned: true, scanned: true, moved: true, elapsed_sec: 30 })]);
+    const first = mount("/p/alpha/scans/6");
+    expect(await screen.findByTestId("run-result")).toHaveTextContent("Imported and scanned");
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(/^Import - /);
+    first.router.history.push("/");
+    document.body.innerHTML = "";
+
+    handlers["GET /api/projects/alpha/scans"] = () => ({
+      runs: [run(7, { kind: "sync", trigger: "push", analyze: false, summary: { moved: false } })],
+    });
+    handlers["GET /api/projects/alpha/scans/7/events"] = () =>
+      sse([endFrame(1, "ok", { moved: false, elapsed_sec: 2 }, 7)]);
+    mount("/p/alpha/scans/7");
+    expect(await screen.findByTestId("run-result")).toHaveTextContent("No new commits");
+    document.body.innerHTML = "";
+
+    handlers["GET /api/projects/alpha/scans"] = () => ({
+      runs: [run(8, { kind: "sync", trigger: "initial", analyze: false, summary: { moved: false } })],
+    });
+    handlers["GET /api/projects/alpha/scans/8/events"] = () =>
+      sse([endFrame(1, "ok", { moved: false, elapsed_sec: 2 }, 8)]);
+    mount("/p/alpha/scans/8");
+    const result = await screen.findByTestId("run-result");
+    expect(result).not.toHaveTextContent("No new commits");
+    expect(result).toHaveTextContent("Finished in 2.0s");
+  });
+
+  it("a failed run explains itself, offers Retry, Open settings and the log, and keeps the raw error under details", async () => {
+    handlers["GET /api/projects/alpha/scans"] = () => ({
+      runs: [run(6, { status: "failed", summary: { error: "no API key for anthropic" } })],
+    });
+    handlers["GET /api/projects/alpha/scans/6/events"] = () =>
+      sse([
+        frame(1, { type: "start", phase_total: 3, phases: ["Structural crawl", "Author identity", "LLM descriptions"] }),
+        frame(2, { type: "phase", phase: 1, title: "Structural crawl" }),
+        endFrame(3, "failed", { error: "no API key for anthropic" }),
+      ]);
+    handlers["POST /api/projects/alpha/scans"] = () => ({ status: 202, body: { run_id: 9 } });
+    handlers["GET /api/projects/alpha/scans/9/events"] = () => sse([]);
+    const user = userEvent.setup();
+    const { router } = mount("/p/alpha/scans/6");
+    const result = await screen.findByTestId("run-result");
+    expect(result).toHaveTextContent("The scan failed");
+    expect(within(result).getByRole("link", { name: "Open settings" })).toHaveAttribute("href", "/p/alpha/settings?section=models");
+    expect(within(result).getByTestId("run-error-details")).toHaveTextContent("no API key for anthropic");
+    // The later phases did not run: they read Skipped.
+    expect(screen.getByTestId("phase-2")).toHaveAttribute("data-status", "skipped");
+    expect(screen.getByTestId("phase-3")).toHaveTextContent("Commit descriptions");
+    expect(screen.getByTestId("phase-3")).toHaveTextContent("Skipped");
+    await user.click(within(result).getByTestId("run-retry"));
+    // A full run is retried as a full run.
+    await waitFor(() => expect(calls("POST", "/api/projects/alpha/scans").map((c) => c.body)).toEqual([{ trigger: "manual", analyze: true }]));
+    await waitFor(() => expect(here(router)).toBe("/p/alpha/scans/9"));
+  });
+
+  it("a failed sync is a red 'Sync from GitHub - failed' row", async () => {
+    handlers["GET /api/projects/alpha/scans"] = () => ({
+      runs: [run(6, { kind: "sync", status: "failed", analyze: false, summary: { error: "could not get a GitHub token: unreachable" } })],
+    });
+    handlers["GET /api/projects/alpha/scans/6/events"] = () =>
+      sse([
+        frame(1, { type: "sync", status: "fetching" }),
+        frame(2, { type: "sync", status: "failed", error: "could not get a GitHub token: unreachable" }),
+        endFrame(3, "failed", { error: "could not get a GitHub token: unreachable" }),
+      ]);
+    mount("/p/alpha/scans/6");
+    const step = await screen.findByTestId("sync-step");
+    await waitFor(() => expect(step).toHaveAttribute("data-status", "failed"));
+    expect(step).toHaveTextContent("Sync from GitHub - failed");
+    expect(await screen.findByTestId("run-result")).toHaveTextContent("GitHub could not be reached");
+  });
+
+  it("a cancelled run's phase is a stop, not a failure; the cost lines show on every outcome that has them", async () => {
+    const usage = { calls: 3, input_tokens: 10, output_tokens: 1, cost_usd: 0.1, cost_source: "estimated" };
+    const stats = { cancelled_by: "user", usage, estimate: { commits: 4, cost_usd: 0.5 } };
+    handlers["GET /api/portal/state"] = () => ({
+      mode: "local",
+      setup_complete: true,
+      user: { uid: "u1", display_name: "Ada", role: "owner" },
+      port: 8765,
+      shared_folders: ["/repos"],
+      version: "2.0.0",
+      usage: {
+        month: "2026-10",
+        resets_at: "2026-11-01T00:00:00Z",
+        me: null,
+        org: { spent_usd: 0, budget_usd: null, pct: null, hard_stop: false, blocked: false },
+        projects_over: [],
+      },
+    });
+    handlers["GET /api/projects/alpha/scans"] = () => ({
+      runs: [run(6, { status: "cancelled", cancelled_by: { uid: "u1", label: "Ada" }, summary: stats })],
+    });
+    handlers["GET /api/projects/alpha/scans/6/events"] = () =>
+      sse([
+        frame(1, { type: "start", phase_total: 2, phases: ["Structural crawl", "LLM descriptions"] }),
+        frame(2, { type: "phase", phase: 1, title: "Structural crawl" }),
+        frame(3, { type: "phase", phase: 2, title: "LLM descriptions" }),
+        endFrame(4, "cancelled", stats),
+      ]);
+    mount("/p/alpha/scans/6");
+    const result = await screen.findByTestId("run-result");
+    expect(result).toHaveTextContent("Cancelled by you");
+    expect(within(result).getByTestId("run-usage")).toHaveTextContent("LLM usage: ~$0.10, 3 calls");
+    expect(within(result).getByTestId("run-estimate")).toHaveTextContent("Estimated $0.50 before the run");
+    expect(within(result).getByRole("link", { name: "View these calls" })).toHaveAttribute(
+      "href",
+      "/usage?tab=calls&scan_run=6",
+    );
+    expect(screen.getByTestId("phase-2")).toHaveAttribute("data-status", "cancelled");
   });
 
   it("Scan now during a run queues one follow-up; asking again folds into the same run id", async () => {
@@ -409,7 +556,9 @@ describe("Scan run (screen 7)", () => {
 
     await quickRescan(user);
     const followup = await screen.findByTestId("followup");
-    expect(followup).toHaveTextContent("run #7");
+    expect(followup).toHaveTextContent("Another request joined this run");
+    expect(followup).not.toHaveTextContent("folds into");
+    expect(within(followup).getByRole("link")).toHaveAttribute("href", "/p/alpha/scans/7");
     // The live view of the running run is not abandoned.
     expect(here(router)).toBe("/p/alpha/scans/6");
 
@@ -437,7 +586,7 @@ describe("Scan run (screen 7)", () => {
     mount("/p/alpha/scans/6");
     await screen.findByTestId("phase-3");
     await quickRescan(user);
-    expect(await screen.findByTestId("followup")).toHaveTextContent("run #7");
+    expect(await screen.findByTestId("followup")).toHaveTextContent("Another request joined this run");
 
     // The follow-up started (here: run 6 handed over); asking again refreshes the list.
     followUp = "running";
@@ -461,11 +610,13 @@ describe("Scan run (screen 7)", () => {
 // ---- screen 8: history ----------------------------------------------------------------------
 
 describe("Scan history (screen 8)", () => {
-  it("lists runs with trigger, status and duration, each linking to the run", async () => {
+  it("lists runs by title, requester, status, when, duration and result; the whole row opens the run", async () => {
+    const recent = new Date(Date.now() - 2 * 60_000).toISOString();
     handlers["GET /api/projects/alpha/scans"] = () => ({
       runs: [
-        run(9, { trigger: "hook", analyze: false, summary: { status: "ok", elapsed_sec: 6, analyze_skipped: null } }),
-        run(8, { status: "interrupted", finished_at: null, summary: null }),
+        run(10, { status: "queued", queued_at: recent, started_at: null, finished_at: null, summary: null, requested_by: null }),
+        run(9, { trigger: "hook", analyze: false, requested_by: null, summary: { status: "ok", elapsed_sec: 6, analyze_skipped: null } }),
+        run(8, { status: "interrupted", finished_at: null, summary: null, requested_by: { uid: "u2", label: "Ben" } }),
         run(7, { trigger: "initial", status: "failed", summary: { error: "boom" } }),
         run(6, { kind: "sync", trigger: "poll", summary: { moved: false, elapsed_sec: 2 } }),
       ],
@@ -474,17 +625,74 @@ describe("Scan history (screen 8)", () => {
     const { router } = mount("/p/alpha/scans");
     const table = await screen.findByTestId("scan-history");
     const r9 = within(table).getByTestId("run-9");
-    expect(r9).toHaveTextContent("Git hook");
+    expect(r9).toHaveTextContent(/^Commit hook - /);
+    expect(r9).not.toHaveTextContent("#9");
+    expect(r9).toHaveTextContent("System");
     expect(r9).toHaveTextContent("Succeeded");
     expect(r9).toHaveTextContent("6.0s");
     expect(r9).toHaveTextContent("Structure only");
+    expect(within(table).getByTestId("run-10")).toHaveTextContent("Queued 2 min ago");
     expect(within(table).getByTestId("run-8")).toHaveTextContent("Interrupted");
-    expect(within(table).getByTestId("run-7")).toHaveTextContent("Initial");
+    expect(within(table).getByTestId("run-8")).toHaveTextContent("Ben");
+    // The viewer's own runs read "You"; a first scan is "First scan"; a failure keeps its text.
+    expect(within(table).getByTestId("run-7")).toHaveTextContent("First scan");
+    expect(within(table).getByTestId("run-7")).toHaveTextContent("You");
     expect(within(table).getByTestId("run-7")).toHaveTextContent("boom");
-    expect(within(table).getByTestId("run-6")).toHaveTextContent("Already up to date");
+    expect(within(table).getByTestId("run-6")).toHaveTextContent("Scheduled check");
+    expect(within(table).getByTestId("run-6")).toHaveTextContent("No new commits");
+    // No cost keys in the payload (a reader): no Cost column.
+    expect(within(table).queryByRole("columnheader", { name: "Cost" })).toBeNull();
 
-    await user.click(within(r9).getByRole("link", { name: "#9" }));
+    // Clicking anywhere in the row (not only the link) opens it.
+    await user.click(within(r9).getByText("6.0s"));
     await waitFor(() => expect(here(router)).toBe("/p/alpha/scans/9"));
+  });
+
+  it("shows a Cost column only when the payload carries cost: actual, with the estimate beneath", async () => {
+    handlers["GET /api/projects/alpha/scans"] = () => ({
+      runs: [
+        run(9, { cost_usd: 0.42, estimate_usd: 0.5 }),
+        run(8, { cost_usd: null, estimate_usd: null, analyze: false }),
+      ],
+    });
+    mount("/p/alpha/scans");
+    const table = await screen.findByTestId("scan-history");
+    expect(within(table).getByRole("columnheader", { name: "Cost" })).toBeInTheDocument();
+    expect(within(table).getByTestId("run-9")).toHaveTextContent("$0.42");
+    expect(within(table).getByTestId("run-9")).toHaveTextContent("est. $0.50");
+    expect(within(table).getByTestId("run-8")).not.toHaveTextContent("est.");
+  });
+
+  it("filters live in the URL and go to the API; the empty result offers Clear filters", async () => {
+    handlers["GET /api/projects/alpha/scans"] = (_b, url) =>
+      url.searchParams.get("status") === "failed" ? { runs: [] } : { runs: [run(9)] };
+    const user = userEvent.setup();
+    const { router } = mount("/p/alpha/scans");
+    await screen.findByTestId("scan-history");
+    await user.selectOptions(screen.getByTestId("filter-status"), "failed");
+    await waitFor(() => expect(router.state.location.searchStr).toContain("status=failed"));
+    expect(await screen.findByText("No runs match these filters")).toBeInTheDocument();
+    expect(log.some((c) => c.path === "/api/projects/alpha/scans?status=failed")).toBe(true);
+    await user.click(screen.getAllByRole("button", { name: "Clear filters" })[0]);
+    await screen.findByTestId("scan-history");
+    expect(router.state.location.searchStr).not.toContain("status=");
+  });
+
+  it("starts from the filters in the URL, offers Me / System and pages with Load more", async () => {
+    handlers["GET /api/projects/alpha/scans"] = (_b, url) =>
+      url.searchParams.get("before") === "8"
+        ? { runs: [run(7)], next: null }
+        : { runs: [run(9), run(8)], next: 8 };
+    const user = userEvent.setup();
+    mount("/p/alpha/scans?requester=system&type=quick");
+    await screen.findByTestId("scan-history");
+    expect(screen.getByTestId("filter-requester")).toHaveValue("system");
+    expect(screen.getByTestId("filter-type")).toHaveValue("quick");
+    expect(within(screen.getByTestId("filter-requester")).getByRole("option", { name: "Me" })).toBeInTheDocument();
+    expect(calls("GET", "/api/projects/alpha/scans?type=quick&requester=system")).toHaveLength(1);
+    await user.click(screen.getByTestId("scans-load-more"));
+    expect(await screen.findByTestId("run-7")).toBeInTheDocument();
+    expect(screen.queryByTestId("scans-load-more")).toBeNull();
   });
 
   it("shows an empty state, and Scan now opens the queued run", async () => {

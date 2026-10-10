@@ -62,6 +62,8 @@ interface Fake {
   over?: Record<string, Record<string, unknown>>;
   /** The chat sessions every project lists. */
   sessions?: unknown[];
+  /** The row `GET .../scans/<id>` answers; without it a run is "not found". */
+  run?: unknown;
 }
 
 let fake: Fake;
@@ -158,6 +160,9 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     }
     if (!rest) return Promise.resolve(json(details(slug)));
     if (rest === "/scans") return Promise.resolve(json({ runs: [] }));
+    if (/^\/scans\/\d+$/.test(rest)) {
+      return Promise.resolve(fake.run ? json(fake.run) : json({ error: "run not found" }, 404));
+    }
     if (rest === "/chat/sessions") return Promise.resolve(json(fake.sessions ?? []));
     if (rest === "/search") {
       return Promise.resolve(
@@ -675,10 +680,20 @@ describe("an importing project", () => {
 
   it("renders the run page", async () => {
     fake.over = { alpha: importing };
+    fake.run = {
+      id: 5,
+      kind: "sync",
+      trigger: "initial",
+      analyze: false,
+      status: "queued",
+      queued_at: "2026-10-09T14:02:00Z",
+      requested_by: null,
+      started_at: null,
+      finished_at: null,
+      summary: null,
+    };
     mount("/p/alpha/scans/5");
-    await waitFor(() =>
-      expect(screen.queryByTestId("run-view") ?? screen.queryByTestId("run-unavailable")).not.toBeNull(),
-    );
+    expect(await screen.findByTestId("run-view")).toHaveTextContent("Import - ");
     expect(screen.queryByTestId("project-unavailable")).toBeNull();
     expect(screen.queryByTestId("not-initialized")).toBeNull();
   });
@@ -842,7 +857,7 @@ describe("shell keyboard and titles", () => {
         summary: null,
       });
     });
-    await waitFor(() => expect(runCrumbs).toHaveTextContent(/Manual scan - /));
+    await waitFor(() => expect(runCrumbs).toHaveTextContent(/Full rescan - /));
   });
 
   it("names an unknown route 'Not found' in the crumbs and the page", async () => {

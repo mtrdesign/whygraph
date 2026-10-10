@@ -623,6 +623,7 @@ const PAGE_WIDTH: Record<string, React.ComponentProps<typeof PageContainer>["wid
   explorer: "full",
   chat: "full",
   settings: "default",
+  scans: "default",
 };
 
 function ProjectLayout() {

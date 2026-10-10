@@ -4,7 +4,18 @@ import { ApiError, type ProjectSummary, type ScanRunRow } from "../api";
 import { mcpSnippet } from "../lib/agents";
 import { projectProblem } from "../lib/errors";
 import { projectStatus } from "../lib/projectStatus";
-import { formatSeconds, runOutcome, runSeconds, triggerLabel } from "../lib/scanFormat";
+import {
+  carriesCost,
+  cancelledLabel,
+  failureSummary,
+  formatSeconds,
+  requesterLabel,
+  runLabel,
+  runOutcome,
+  runSeconds,
+  runTitle,
+  syncOutcome,
+} from "../lib/scanFormat";
 import { progressModel, rawPercent } from "../lib/scanProgress";
 import { initialScanRunState, phaseRows, reduceScanRun, type ScanRunState } from "../lib/scanRun";
 
@@ -35,11 +46,41 @@ describe("phaseRows", () => {
       ev({ type: "phase", phase: 2, title: "Author identity" }),
     ]);
     expect(phaseRows(s).map((p) => [p.title, p.status])).toEqual([
-      ["Structural crawl", "done"],
-      ["Author identity", "running"],
+      ["Git history and GitHub", "done"],
+      ["Author identities", "running"],
       ["Step 3", "pending"],
       ["Step 4", "pending"],
     ]);
+  });
+
+  it("names every phase up front from the start event's titles", () => {
+    const s = fold([
+      ev({ type: "start", phase_total: 4, phases: ["Structural crawl", "PR-origin recovery", "Author identity", "LLM descriptions"] }),
+      ev({ type: "phase", phase: 1, title: "Structural crawl" }),
+    ]);
+    expect(phaseRows(s).map((p) => [p.title, p.status])).toEqual([
+      ["Git history and GitHub", "running"],
+      ["Pull request origins", "pending"],
+      ["Author identities", "pending"],
+      ["Commit descriptions", "pending"],
+    ]);
+  });
+
+  it("skips the phases after a failure and marks a cancelled phase as stopped, not failed", () => {
+    const phases = ["Structural crawl", "Author identity", "LLM descriptions"];
+    const failed = fold([
+      ev({ type: "start", phase_total: 3, phases }),
+      ev({ type: "phase", phase: 1, title: "Structural crawl" }),
+      ev({ type: "end", run_id: 1, status: "failed", summary: null }),
+    ]);
+    expect(phaseRows(failed).map((p) => p.status)).toEqual(["failed", "skipped", "skipped"]);
+    const cancelled = fold([
+      ev({ type: "start", phase_total: 3, phases }),
+      ev({ type: "phase", phase: 1, title: "Structural crawl" }),
+      ev({ type: "phase", phase: 2, title: "Author identity" }),
+      ev({ type: "end", run_id: 1, status: "cancelled", summary: null }),
+    ]);
+    expect(phaseRows(cancelled).map((p) => p.status)).toEqual(["done", "cancelled", "skipped"]);
   });
 
   it("takes timings and crawler reports from the result, and flags a failed crawler's phase", () => {
@@ -111,11 +152,60 @@ describe("scan formatting", () => {
     expect(runSeconds(row({ finished_at: null }))).toBeNull();
   });
 
-  it("names triggers and outcomes", () => {
-    expect(triggerLabel(row({ trigger: "hook" }))).toBe("Git hook");
-    expect(triggerLabel(row({ trigger: "initial" }))).toBe("Initial");
-    expect(triggerLabel(row({ trigger: "push" }))).toBe("Push");
-    expect(triggerLabel(row({ trigger: "reconcile" }))).toBe("Reconcile");
+  it("names runs and titles them without an id", () => {
+    expect(runLabel(row({ trigger: "initial" }))).toBe("First scan");
+    expect(runLabel(row({ trigger: "initial", kind: "sync" }))).toBe("Import");
+    expect(runLabel(row({ trigger: "manual", analyze: false }))).toBe("Quick rescan");
+    expect(runLabel(row({ trigger: "manual", analyze: true }))).toBe("Full rescan");
+    expect(runLabel(row({ trigger: "describe" }))).toBe("Describe");
+    expect(runLabel(row({ trigger: "hook" }))).toBe("Commit hook");
+    expect(runLabel(row({ trigger: "push", kind: "sync" }))).toBe("GitHub push");
+    expect(runLabel(row({ trigger: "sync", kind: "sync" }))).toBe("Sync from GitHub");
+    expect(runLabel(row({ trigger: "reconcile", kind: "sync" }))).toBe("Scheduled check");
+    expect(runTitle(row({ queued_at: "2026-10-09T14:02:00+00:00" }))).toMatch(/^Full rescan - .*2026/);
+    expect(runTitle(row({}))).toMatch(/^Full rescan - /);
+    expect(runTitle(row({}))).not.toMatch(/#\d/);
+  });
+
+  it("says who asked and who cancelled, as 'You' only for the viewer", () => {
+    expect(requesterLabel({ requested_by: null }, "u1")).toBe("System");
+    expect(requesterLabel({ requested_by: { uid: "u1", label: "Ada" } }, "u1")).toBe("You");
+    expect(requesterLabel({ requested_by: { uid: "u2", label: "Ben (@ben)" } }, "u1")).toBe("Ben (@ben)");
+    const by = (uid: string) => ({ cancelled_by: { uid, label: "Ben" }, summary: { cancelled_by: "user" } });
+    expect(cancelledLabel(by("u2"), "u1")).toBe("Cancelled by Ben");
+    expect(cancelledLabel(by("u1"), "u1")).toBe("Cancelled by you");
+    expect(cancelledLabel({ cancelled_by: null, summary: { cancelled_by: "budget" } }, "u1")).toBe(
+      "Stopped: monthly budget reached",
+    );
+    expect(cancelledLabel({ cancelled_by: null, summary: null }, "u1")).toBe("Cancelled");
+  });
+
+  it("carries cost only when a row has the keys (absent, not null, is hidden)", () => {
+    expect(carriesCost([row({})])).toBe(false);
+    expect(carriesCost([row({}), row({ cost_usd: null })])).toBe(true);
+  });
+
+  it("words a sync's outcome, never 'No new commits' on a first run", () => {
+    expect(syncOutcome({ trigger: "initial" }, { cloned: true, scanned: true })).toBe("Imported and scanned");
+    expect(syncOutcome({ trigger: "push" }, { moved: true, scanned: true })).toBe("Fetched new commits and scanned");
+    expect(syncOutcome({ trigger: "push" }, { moved: false })).toBe("No new commits");
+    expect(syncOutcome({ trigger: "initial" }, { moved: false })).toBeNull();
+  });
+
+  it("summarises a failure through the registry, with the raw text kept for details", () => {
+    const lost = failureSummary({ error: "the WhyGraph GitHub App cannot reach this repository any more - reconnect it on GitHub" });
+    expect(lost.known).toBe(true);
+    expect(lost.message).toContain("can no longer read this repository");
+    expect(lost.details[0]).toContain("GitHub App");
+    const key = failureSummary({ crawlers: [{ name: "analyze", status: "failed", error: "no API key for anthropic" }] });
+    expect(key.settings).toBe("models");
+    const odd = failureSummary({ error: "boom" });
+    expect(odd.known).toBe(false);
+    expect(odd.message).toContain("stopped before it finished");
+    expect(odd.details).toEqual(["boom"]);
+  });
+
+  it("names outcomes for the history", () => {
     expect(runOutcome(row({ status: "failed", summary: { error: "boom" } }))).toBe("boom");
     expect(runOutcome(row({ status: "failed", summary: { exit_code: 2 } }))).toBe("Exit code 2");
     expect(runOutcome(row({ status: "cancelled", summary: { cancelled_by: "budget" } }))).toBe(
@@ -124,9 +214,19 @@ describe("scan formatting", () => {
     expect(runOutcome(row({ summary: { analyze_skipped: "budget" } }))).toBe(
       "LLM phase skipped: monthly budget reached",
     );
-    expect(runOutcome(row({ status: "cancelled", summary: { merged_into: 9 } }))).toBe("Merged into run #9");
-    expect(runOutcome(row({ status: "cancelled", summary: { cancelled_by: "user" } }))).toBe("Cancelled by you");
+    expect(runOutcome(row({ status: "cancelled", summary: { merged_into: 9 } }))).toBe("Cancelled");
+    expect(runOutcome(row({ summary: { merged_into: 9 } }))).toBe("Covered by another run");
+    expect(runOutcome(row({ status: "cancelled", cancelled_by: { uid: "u1", label: "Ada" } }), "u1")).toBe(
+      "Cancelled by you",
+    );
     expect(runOutcome(row({ kind: "sync", summary: { moved: true } }))).toBe("Fetched new commits");
+    expect(runOutcome(row({ kind: "sync", summary: { moved: true, scanned: true } }))).toBe(
+      "Fetched new commits and scanned",
+    );
+    expect(runOutcome(row({ kind: "sync", summary: { moved: false } }))).toBe("No new commits");
+    expect(runOutcome(row({ kind: "sync", trigger: "initial", summary: { cloned: true, scanned: true } }))).toBe(
+      "Imported and scanned",
+    );
     expect(runOutcome(row({ analyze: false, summary: { status: "ok" } }))).toBe("Structure only");
   });
 

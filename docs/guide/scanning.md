@@ -22,6 +22,40 @@ whygraph scan
     `whygraph scan` there exits with status `2` and points at the project in the portal. To use the
     repo headless again, remove it from the Projects page or delete `.whygraph/portal.json`.
 
+## Watching a scan and the history
+
+A project's **Scans** page lists every run, newest first, and a run opens on its own page. A run is
+titled by what it was and when - *Full rescan - 9 Oct 2026, 14:02*, *Quick rescan*, *First scan*,
+*Import*, *Describe*, *Commit hook*, *GitHub push*, *Sync from GitHub* or *Scheduled check* - never
+by a run number (the number is only in the address). Quick versus full is visible on every row.
+
+**The run page** shows who asked for it and when it was queued, started and finished, then the
+phases. Every phase is named from the start ("Phase 2 of 4"), so you can see what is still to come;
+a phase that never ran because an earlier one failed reads *Skipped*, and a run you stopped shows a
+grey stop mark on the phase it was in, not a red failure. Per-task progress bars (commits described
+so far) stay on this page. The outcome says what happened - *Imported and scanned*, *Fetched new
+commits and scanned*, *No new commits* (never shown for a first run) or *Finished in 3m 10s* - and a
+failed run explains itself in plain words with **Retry**, **Open settings** (for a missing key or
+token) and **Open the log**; the raw error is under **Show details**. A cancelled run says
+*Cancelled by you*, *Cancelled by* a colleague, or *Stopped: monthly budget reached*.
+
+**Cost.** A project admin (anyone who can see the project's usage) also gets the cost of each run: the
+LLM calls and what they cost on the run page, with *estimated $X before the run* when a full run was
+queued with an estimate, and a **Cost** column in the history showing the actual cost with the
+estimate beneath it. On an organization portal the **View these calls** link opens the calls behind
+that cost on the [Usage & cost](../portal/usage.md) page. Without access to usage the cost column and lines are
+simply absent.
+
+**The history** loads fifty runs at a time (**Load more** fetches the next page) and filters by
+**Status**, **Trigger**, **Requested by** (*Me*, *System*, or - for organization admins - a member) and
+**Type** (*Full*, *Quick*, or *Sync* for a GitHub fetch that found nothing to scan). The filters are in
+the address, so a filtered view can be bookmarked or shared; **Clear filters** resets them.
+
+!!! note "The run log in production"
+    On a production portal the first line of a run's log is `$ whygraph scan <flags>` - the flags
+    only, never the command's full path or arguments - and paths inside the server's copy of the
+    repository appear as `.` and `<data>`, so a log never reveals where the portal keeps its files.
+
 ## What a scan does
 
 A scan runs up to four ordered phases. Each prints a header numbered against the phases that will

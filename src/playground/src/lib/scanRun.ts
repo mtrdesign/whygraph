@@ -1,6 +1,6 @@
 import { useEffect, useReducer } from "react";
 import { ApiError, projectApi, type ScanEvent, type ScanRunStatus, type ScanRunSummary } from "../api";
-import { PHASE_TASKS, rawPercent } from "./scanProgress";
+import { PHASE_TASKS, phaseLabel, rawPercent } from "./scanProgress";
 
 export { crawlerLabel } from "./scanProgress";
 
@@ -203,11 +203,14 @@ export function useScanRun(slug: string, runId: number | null): ScanRunState {
   return state;
 }
 
-export type PhaseStatus = "pending" | "running" | "done" | "failed" | "skipped";
+export type PhaseStatus = "pending" | "running" | "done" | "failed" | "skipped" | "cancelled";
 
 export interface PhaseRow {
   phase: number;
+  /** The checklist label (`phaseLabel`): "Git history and GitHub". */
   title: string;
+  /** The title the scan announced ("Structural crawl"). */
+  rawTitle: string;
   status: PhaseStatus;
   /** Seconds, known once the scan's `result` event arrived. */
   seconds: number | null;
@@ -225,14 +228,16 @@ export interface CrawlerResult {
 }
 
 /**
- * The phase timeline of a run. Titles come from the `phase` events; a phase the
- * stream has not reached yet is listed as pending up to the announced
- * `phase_total` (or skipped, once the run has ended without reaching it). A phase
- * is done once a later one started or the run ended, and `failed` when a crawler
- * of the phase reported failure in the `result` event.
+ * The phase timeline of a run. Every phase is named up front from `plannedPhases`
+ * (the `start` event's titles, through `phaseLabel`; "Step n" only for an older
+ * run without them). A phase the stream has not reached is pending, or skipped once
+ * the run has ended without reaching it (after a failure, a cancel). A phase is
+ * done once a later one started or the run ended, `failed` when a crawler of the
+ * phase reported failure in the `result` event or the run died in it, and
+ * `cancelled` when the run was cancelled while it was running.
  */
 export function phaseRows(state: ScanRunState): PhaseRow[] {
-  const total = Math.max(state.phaseTotal ?? 0, state.phases.at(-1)?.phase ?? 0);
+  const total = Math.max(state.phaseTotal ?? 0, state.plannedPhases?.length ?? 0, state.phases.at(-1)?.phase ?? 0);
   const source = state.result ?? state.summary;
   const timings = (source?.phase_timings ?? {}) as Record<string, number>;
   const crawlers: CrawlerResult[] = source?.crawlers ?? [];
@@ -240,21 +245,23 @@ export function phaseRows(state: ScanRunState): PhaseRow[] {
   const rows: PhaseRow[] = [];
   for (let n = 1; n <= total; n++) {
     const seen = state.phases.find((p) => p.phase === n);
-    const title = seen?.title ?? `Step ${n}`;
-    const names = PHASE_TASKS[title] ?? [];
+    const rawTitle = seen?.title ?? state.plannedPhases?.[n - 1] ?? `Step ${n}`;
+    const names = PHASE_TASKS[rawTitle] ?? [];
     const failed = crawlers.some((c) => names.includes(c.name) && c.status === "failed");
     let status: PhaseStatus;
     if (!seen) status = ended ? "skipped" : "pending";
     else if (failed) status = "failed";
+    else if (state.finished === "cancelled" && !state.result && n === state.phase) status = "cancelled";
     // A run that ended without a `result` died in the phase it was in.
     else if (ended && state.finished !== "ok" && !state.result && n === state.phase) status = "failed";
     else if (ended || (state.phase ?? 0) > n) status = "done";
     else status = "running";
     rows.push({
       phase: n,
-      title,
+      title: phaseLabel(rawTitle),
+      rawTitle,
       status,
-      seconds: typeof timings[title] === "number" ? timings[title] : null,
+      seconds: typeof timings[rawTitle] === "number" ? timings[rawTitle] : null,
       tasks: state.tasks.filter((t) => names.includes(t.name)),
       crawlers: crawlers.filter((c) => names.includes(c.name)),
     });

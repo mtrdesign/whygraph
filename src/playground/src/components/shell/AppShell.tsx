@@ -4,9 +4,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { MenuIcon } from "lucide-react";
 import { membersApi, portalKey, type ChatSession, type ScanRun } from "../../api";
 import { chatSessionsKey } from "../../lib/chatSessions";
-import { formatDateTime } from "../../lib/format";
 import { usePortalState } from "../../lib/identity";
-import { triggerLabel } from "../../lib/labels";
+import { runTitle } from "../../lib/scanFormat";
 import { useDocumentTitle } from "../../lib/useDocumentTitle";
 import { useUi } from "../../store";
 import { Button } from "../ui/button";
@@ -22,6 +21,7 @@ import { Sheet, SheetContent, SheetTitle } from "../ui/sheet";
 import { Sidebar } from "./Sidebar";
 import { buildCrumbs, pageTitle, scanRunKey } from "./crumbs";
 import { BudgetBanner } from "./BudgetBanner";
+import { WelcomeBanner } from "../onboarding/WelcomeBanner";
 import { ReaderBanner } from "./ReaderBanner";
 import { LiveRegion } from "./LiveRegion";
 
@@ -35,13 +35,6 @@ function useCachedData<T>(key: readonly unknown[] | null): T | undefined {
     (onChange) => queryClient.getQueryCache().subscribe(onChange),
     () => (key ? queryClient.getQueryData<T>(key) : undefined),
   );
-}
-
-/** A run's crumb title, "<what> - <when>" (§0.3 #12); S18's run page owns the final wording. */
-function runCrumbTitle(run: ScanRun): string {
-  const when = run.queued_at ?? run.started_at;
-  const what = run.kind === "sync" ? "Sync" : `${triggerLabel(run)} scan`;
-  return when ? `${what} - ${formatDateTime(when)}` : what;
 }
 
 /**
@@ -78,13 +71,13 @@ export function PageHeader({
   const chatTitle = chat ? sessions?.find((s) => s.id === Number(chat[2]))?.title : undefined;
   const runMatch = /^\/p\/([^/]+)\/scans\/(\d+)$/.exec(pathname);
   const run = useCachedData<ScanRun>(runMatch ? scanRunKey(decodeURIComponent(runMatch[1]), Number(runMatch[2])) : null);
-  const runTitle = run ? runCrumbTitle(run) : undefined;
+  const runCrumb = run ? runTitle(run) : undefined;
   const wizardStep = search.step === "setup" || search.step === "configure" ? search.step : undefined;
   const crumbs = buildCrumbs(pathname, {
     projectName,
     memberName,
     chatTitle,
-    runTitle,
+    runTitle: runCrumb,
     wizardStep,
     orgUsage: !!state?.usage?.org,
   });
@@ -177,6 +170,7 @@ export function AppShell({
         </SheetContent>
       </Sheet>
       <div className="flex min-w-0 flex-1 flex-col">
+        <WelcomeBanner />
         <ReaderBanner />
         <BudgetBanner />
         <PageHeader projectName={projectName} />

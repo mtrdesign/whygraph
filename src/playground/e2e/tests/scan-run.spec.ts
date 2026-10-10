@@ -55,6 +55,10 @@ test("two clicks on Rescan during a run coalesce onto one follow-up run", async 
   await page.goto(`/p/${notes.slug}/scans`);
   await expect(page.getByTestId(`run-${running}`)).toContainText("Succeeded");
   await expect(page.getByTestId(`run-${posts[0]}`)).toContainText("Succeeded");
+  // Runs are titled by what they were (no run id); the history has the requester column.
+  await expect(page.getByTestId(`run-${running}`)).toContainText(/Quick rescan - /);
+  await expect(page.getByTestId(`run-${running}`)).not.toContainText(`#${running}`);
+  await expect(page.getByTestId("scan-history").getByRole("columnheader", { name: "Requested by" })).toBeVisible();
 });
 
 test("a failing scan shows the error and the log, and the project card says so", async ({ page }, testInfo) => {
@@ -66,6 +70,7 @@ test("a failing scan shows the error and the log, and the project card says so",
   await page.waitForURL(`**/p/${notes.slug}/scans/*`);
 
   await expect(page.getByTestId("run-result")).toContainText("The scan failed", { timeout: 30_000 });
+  await expect(page.getByTestId("run-error-details")).toBeVisible();
   // A failed run opens its log on its own; open it only if it is still closed.
   const toggle = page.getByTestId("run-log").getByRole("button", { name: /Log/ });
   if ((await toggle.getAttribute("aria-expanded")) !== "true") await toggle.click();
@@ -95,10 +100,11 @@ test("Cancel stops a running scan; the run and the history say it was cancelled"
 
   await page.getByTestId("cancel-run").click();
   const dialog = page.getByTestId("cancel-run-dialog");
-  await expect(dialog).toContainText(`Cancel scan #${running}?`);
-  await dialog.getByRole("button", { name: "Cancel scan" }).click();
+  await expect(dialog).toContainText("Stop this scan?");
+  await expect(dialog).toContainText("The project keeps the data from its last finished scan.");
+  await dialog.getByRole("button", { name: "Stop scan" }).click();
 
-  await expect(page.getByTestId("run-result")).toContainText("You cancelled this run", { timeout: 20_000 });
+  await expect(page.getByTestId("run-result")).toContainText("Cancelled by you", { timeout: 20_000 });
   await expect(page.getByTestId("cancel-run")).toHaveCount(0);
   await page.goto(`/p/${notes.slug}/scans`);
   await expect(page.getByTestId(`run-${running}`)).toContainText("Cancelled by you");

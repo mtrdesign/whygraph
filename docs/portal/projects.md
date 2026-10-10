@@ -38,9 +38,9 @@ Adding a local repository **writes nothing into it**. It only registers the proj
 existing `whygraph.toml` to offer its settings, and reports what 1.x left behind (see
 [Upgrading from 1.x](upgrading.md#from-1x)).
 
-If the origin is on GitHub you can paste a token here so the remote crawl (pull requests and issues)
-can work; it is checked against GitHub before anything is stored. You can also add it later, on the
-Configure step.
+This step does not ask for a GitHub token. If the origin is on GitHub, the Configure step has a
+**GitHub token** row where you can paste one so the remote crawl (pull requests and issues) can work;
+it is checked against GitHub before anything is stored.
 
 The project's name defaults to the repository name and becomes its **slug** (lowercase letters,
 digits and hyphens), which appears in URLs and in the MCP endpoint. The slug cannot change later; the

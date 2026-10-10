@@ -415,15 +415,33 @@ the project up, and a server copy gets no agent files, git hooks or marker files
 2. **Pick an installation.** The page lists the app's installations you can see on GitHub. **Install
    / configure on GitHub** installs the app on another account or organization, or changes which
    repositories an installation covers, and brings you back.
-3. **Pick a repository.** Repositories load 100 at a time (**Load more**), with a filter over the
-   loaded ones; those already in this organization are disabled.
+3. **Pick repositories.** Each installation shows with its avatar. The search box filters on the
+   server (a substring of `owner/name`, after a short pause) and the page says how many repositories
+   match; **Refresh** reloads the list from GitHub, and **Load more** pages through the matches.
+   Tick as many repositories as you like. Those already in this organization link to their project
+   and cannot be ticked. The page says "You can import N more this hour" and stops you ticking more
+   than that (see the limit below).
+4. **Import.** **Import N repositories** (the sticky footer) imports them one at a time and shows
+   each row as Waiting, Starting and Started, or the reason it failed. The request returns at once:
+   the portal clones the repository in the background as the first phase of the project's first
+   run, and then scans it (structure only, no LLM) without you asking. If the hourly limit is
+   reached, the rest of the selection is reported as not started. One repository takes you straight
+   to **Configure**; several show a summary with a **Configure** link for each and **Go to
+   projects**.
+
+A project is **Importing** until its clone finishes. If the clone or the first scan fails, the
+project reads **Import failed** with **Retry** (which counts against the hourly limit like the first
+attempt) and **Remove**; Retry clones again. Importing projects list only Overview, Scans and
+Settings until they are ready.
 
 An import succeeds only if, at that moment, **you** can see the installation and read the
 repository on GitHub, and the installation covers it. An installation is not tied to one WhyGraph
 organization: whoever can see a repository through it can import it into an organization they
 administer, and the same repository can be a project in two organizations, each with its own copy.
 Within one organization a repository can be imported once. Imports are throttled to 30 an hour per
-organization. The bootstrap admin signs in with a password, not GitHub, so it cannot import.
+organization, one per repository. The bootstrap admin signs in with a password, not GitHub, so it
+cannot import: the page offers **Sign in with GitHub** and **Open Members** (make a GitHub user an
+owner there).
 
 A production project's settings show its repository and installation account read-only. Its
 remote, default branch and hooks cannot be changed, and a personal access token is refused (the

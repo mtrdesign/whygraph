@@ -74,10 +74,11 @@ export async function importRepo(page: Page, org: string, repo: string): Promise
     await page.getByRole("link", { name: `Continue as ${owner}` }).click();
     await expect(page).toHaveURL(new RegExp(`^${orgUrl(org)}/projects/new`));
   }
-  await page.getByTestId(`repo-${repo}`).getByRole("button", { name: `Import ${repo}` }).click();
+  await page.getByRole("checkbox", { name: `Select ${repo}` }).click();
+  await page.getByRole("button", { name: "Import 1 repository" }).click();
 
-  // The import's own run clones, then scans: Configure follows it (above the settings).
-  await expect(page).toHaveURL(new RegExp(`/p/${slug}/init\\?step=configure`));
+  // The request only queues the run: it clones, then scans, and Configure follows it.
+  await expect(page).toHaveURL(new RegExp(`/p/${slug}/init\\?step=configure&run=\\d+`));
   await expect(page.getByText("First scan complete")).toBeVisible({ timeout: 30_000 });
   await openAfterFirstScan(page);
   await expect(page).toHaveURL(new RegExp(`/p/${slug}$`));

@@ -169,7 +169,7 @@ test("projects from GitHub: connect, import, scan, members, a push, deleting the
   const answer = await refused;
   expect(answer.status()).toBe(403);
   expect(((await answer.json()) as { code?: string }).code).toBe("github_required");
-  await expect(page.getByTestId("github-error")).toContainText("needs an account that signs in with GitHub");
+  await expect(page.getByTestId("github-required")).toContainText("Importing needs a GitHub sign-in");
 
   // cy signs in once, Ben adds him as a member (M2d-1's flow): cy sees the
   // project, without the owners' and admins' New project.

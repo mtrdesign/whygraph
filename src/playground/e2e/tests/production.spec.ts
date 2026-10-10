@@ -79,7 +79,8 @@ test("bootstrap, organizations on their own hosts, sign-in hand-off and reader a
 
   // Ada adds ben on acme's Members page; Ben reloads and sees Projects.
   await page.goto(`${orgUrl("acme")}/members`);
-  await expect(page.getByRole("heading", { name: "Members" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Members", exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByTestId("members-heading")).toContainText("Members (");
   await page.getByLabel("GitHub username").fill("ben");
   await page.getByRole("button", { name: "Invite", exact: true }).click();
   await expect(page.getByTestId("member-list")).toContainText("@ben");
@@ -258,7 +259,7 @@ test("project access: Restricted projects, an invited user's grants, roles and a
   await ben.getByRole("button", { name: "Invite", exact: true }).click();
   await expect(ben.getByTestId("invite-pending")).toBeVisible();
   await expect(ben.getByTestId("invitations")).toContainText("@dee");
-  await expect(ben.getByTestId("invitations")).toContainText("demo (viewer)");
+  await expect(ben.getByTestId("invitations")).toContainText("demo: Viewer");
 
   // Dee signs in and is a member at once: she sees demo, not notes; she may
   // look but not rescan, and has no Chats section.
@@ -320,7 +321,7 @@ test("project access: Restricted projects, an invited user's grants, roles and a
         await cy.reload();
         await expect(table).toBeVisible();
         const text = await table.innerText();
-        return ["invitation_created", "project_restricted_changed", "project_grant_changed", "org_ownership_transferred"]
+        return ["Invitation created", "Restricted setting changed", "Project access changed", "Ownership transferred"]
           .filter((e) => !text.includes(e));
       },
       { timeout: 30_000 },

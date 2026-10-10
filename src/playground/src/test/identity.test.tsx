@@ -917,6 +917,36 @@ describe("members page", () => {
     expect(screen.queryByRole("button", { name: "Leave organization" })).toBeNull();
   });
 
+  it("counts the members in its heading", async () => {
+    visit("owner");
+    await waitFor(() => expect(screen.getByTestId("members-heading")).toHaveTextContent("Members (4)"));
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Members");
+  });
+
+  it("shows project access chips from grants, and none when the server sends no grants", async () => {
+    visit("admin", (rows) =>
+      rows.map((r) =>
+        r.uid === "u4" ? { ...r, grants: [{ project: "api", name: "api", role: "contributor" }] } : r,
+      ),
+    );
+    const meg = await rowOf("u4");
+    expect(meg.getByTestId("member-grants-u4")).toHaveTextContent("api: Contributor");
+    expect(screen.queryByTestId("member-grants-u3")).toBeNull();
+  });
+
+  it("a direct add says what the person will see and links to the row, until dismissed", async () => {
+    visit("owner");
+    const user = userEvent.setup();
+    await user.type(await screen.findByLabelText("GitHub username"), "dan");
+    await user.click(screen.getByRole("button", { name: "Invite" }));
+    const note = await screen.findByTestId("member-added");
+    expect(note).toHaveTextContent("@dan is now a member. They'll see a welcome note the next time they open Acme.");
+    expect(within(note).getByRole("link", { name: "Show in the list" })).toHaveAttribute("href", "#member-u9");
+    expect(screen.queryByText("Added @dan")).toBeNull();
+    await user.click(within(note).getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByTestId("member-added")).toBeNull();
+  });
+
   it("adds by GitHub username and role", async () => {
     visit("admin");
     const user = userEvent.setup();
@@ -1025,6 +1055,50 @@ describe("account page", () => {
     expect(screen.queryByLabelText("Current password")).toBeNull();
   });
 
+  it("lists your organizations with roles and links", async () => {
+    fake.routes["/api/account"] = () => json(account({}));
+    fake.orgs = [
+      { slug: "acme", name: "Acme", role: "owner", url: ORG },
+      { slug: "rocket", name: "Rocket", role: "member", url: "http://rocket.whygraph.localhost:8765" },
+    ];
+    mount("/account");
+    const acme = within(await screen.findByTestId("account-org-acme"));
+    expect(acme.getByRole("link", { name: /Acme/ })).toHaveAttribute("href", `${ORG}/`);
+    expect(acme.getByText("Owner")).toBeInTheDocument();
+    expect(within(screen.getByTestId("account-org-rocket")).getByText("Member")).toBeInTheDocument();
+  });
+
+  it("offers Connect your agent when no local portal is connected, and not otherwise", async () => {
+    fake.routes["/api/account"] = () => json(account({}));
+    fake.routes["/api/connect/tokens"] = () => json([]);
+    mount("/account");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Connect your agent" }));
+    expect(await screen.findByTestId("connect-agent-dialog")).toBeInTheDocument();
+    // The base host has no projects to pick from.
+    expect(fake.calls.some((c) => c.path === "/api/projects")).toBe(false);
+  });
+
+  it("says what still works under a hard stop, with the reset date", async () => {
+    fake.routes["/api/account"] = () => json(account({}));
+    fake.routes["/api/connect/tokens"] = () => json([]);
+    fake.routes["/api/account/usage"] = () =>
+      json({
+        month: "2026-10",
+        resets_at: "2026-11-01T00:00:00Z",
+        orgs: [
+          { slug: "acme", name: "Acme", url: ORG, spent_usd: 10, calls: 4, budget_usd: 10, pct: 100, hard_stop: true },
+          { slug: "rocket", name: "Rocket", url: ORG, spent_usd: 2, calls: 1, budget_usd: 10, pct: 20, hard_stop: true },
+        ],
+      });
+    mount("/account");
+    const stopped = await screen.findByTestId("account-usage-stopped-acme");
+    expect(stopped).toHaveTextContent("Stopped");
+    expect(stopped).toHaveTextContent("You can still read everything that's already generated.");
+    expect(stopped).toHaveTextContent("1 Nov, 00:00 UTC");
+    expect(screen.queryByTestId("account-usage-stopped-rocket")).toBeNull();
+  });
+
   it("keeps the password section for a password account", async () => {
     fake.routes["/api/account"] = () =>
       json(account({ email: "ada@example.com", github_login: null, avatar_url: null, has_password: true }));
@@ -1076,11 +1150,32 @@ describe("admin page", () => {
     expect(ada.queryByRole("button", { name: "Disable" })).toBeNull();
   });
 
-  it("disables and enables an account", async () => {
+  it("shows the settings check card, clean or with problems", async () => {
+    mount("/admin");
+    expect(await screen.findByTestId("base-check-ok")).toHaveTextContent("found no problems");
+  });
+
+  it("lists the base URL problems in the settings check card", async () => {
+    fake.routes["/api/admin/settings"] = () => json({ base_url: BASE, base_check: ["*.whygraph.localhost does not resolve"] });
+    mount("/admin");
+    expect(await screen.findByTestId("base-check")).toHaveTextContent("does not resolve");
+  });
+
+  it("makes an admin with a secondary button", async () => {
+    mount("/admin");
+    const ben = within(await screen.findByTestId("admin-user-u2"));
+    expect(ben.getByRole("button", { name: "Make admin" }).className).toContain("bg-secondary");
+  });
+
+  it("disables only after a confirmation, and enables at once", async () => {
     mount("/admin");
     const u = userEvent.setup();
     const ben = within(await screen.findByTestId("admin-user-u2"));
     await u.click(ben.getByRole("button", { name: "Disable" }));
+    expect(fake.calls.some((c) => c.path === "/api/admin/users/u2" && c.method === "PATCH")).toBe(false);
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("Disable Ben?");
+    await u.click(within(dialog).getByRole("button", { name: "Disable" }));
     await waitFor(() =>
       expect(fake.calls.find((c) => c.path === "/api/admin/users/u2")?.body).toEqual({ disabled: true }),
     );
@@ -1162,12 +1257,60 @@ describe("invitations", () => {
     await user.selectOptions(await screen.findByLabelText("Access to Project alpha"), "viewer");
     await user.click(screen.getByRole("button", { name: "Invite" }));
     const note = await screen.findByTestId("invite-pending");
+    expect(note).toHaveAttribute("data-slot", "alert");
+    expect(note.className).toContain("bg-info-soft");
     expect(note).toHaveTextContent("No message is sent. Share this link with @dan");
     expect(within(note).getByRole("button", { name: "Copy" })).toBeInTheDocument();
     const post = fake.calls.find((c) => c.path === "/api/org/members" && c.method === "POST");
     expect(post?.body).toEqual({ github_login: "dan", role: "member", grants: [{ project: "alpha", role: "viewer" }] });
     // The new invitation shows up in the pending list.
     expect(await screen.findByTestId("invitation-i9")).toHaveTextContent("@dan");
+  });
+
+  it("keeps one notice per invite until dismissed; the next submit does not clear it", async () => {
+    visit();
+    let n = 0;
+    fake.routes["/api/org/members"] = (method, body) => {
+      if (method !== "POST") return json([]);
+      const b = body as { github_login: string; role: string };
+      const created = invitation(`i${++n}`, b.github_login, { role: b.role });
+      invitations.push(created);
+      return json({ ...created, pending: true }, 201);
+    };
+    const user = userEvent.setup();
+    for (const login of ["dan", "eve"]) {
+      await user.type(await screen.findByLabelText("GitHub username"), login);
+      await user.click(screen.getByRole("button", { name: "Invite" }));
+      await waitFor(() => expect(fake.calls.filter((c) => c.method === "POST")).toHaveLength(login === "dan" ? 1 : 2));
+    }
+    const notes = await screen.findAllByTestId("invite-pending");
+    expect(notes).toHaveLength(2);
+    expect(notes[0]).toHaveTextContent("@dan");
+    expect(notes[1]).toHaveTextContent("@eve");
+    await user.click(within(notes[0]).getByRole("button", { name: "Dismiss" }));
+    expect(screen.getAllByTestId("invite-pending")).toHaveLength(1);
+    expect(screen.getByTestId("invite-pending")).toHaveTextContent("@eve");
+  });
+
+  it("lists open and expired invitations, with closed ones collapsed", async () => {
+    visit();
+    invitations.push(
+      invitation("i1", "open", {}),
+      invitation("i2", "late", { status: "expired" }),
+      invitation("i3", "done", { status: "redeemed", redeemed_at: "2026-10-03T00:00:00Z" }),
+      invitation("i4", "gone", { status: "revoked", revoked_at: "2026-10-03T00:00:00Z" }),
+    );
+    const user = userEvent.setup();
+    const late = within(await screen.findByTestId("invitation-i2"));
+    expect(late.getByText(/^Expired/)).toBeInTheDocument();
+    expect(late.getByRole("button", { name: "Revoke" })).toBeInTheDocument();
+    expect(screen.getByTestId("invitation-i1")).toHaveTextContent(/Open, expires/);
+    expect(screen.queryByTestId("invitation-i3")).toBeNull();
+    await user.click(screen.getByRole("button", { name: /closed invitations/ }));
+    const done = within(await screen.findByTestId("invitation-i3"));
+    expect(done.getByText(/^Accepted/)).toBeInTheDocument();
+    expect(done.queryByRole("button", { name: "Revoke" })).toBeNull();
+    expect(screen.getByTestId("invitation-i4")).toHaveTextContent("Revoked");
   });
 
   it("an owner and an admin see the grants only for the member role", async () => {
@@ -1184,7 +1327,8 @@ describe("invitations", () => {
     const user = userEvent.setup();
     const row = within(await screen.findByTestId("invitation-i1"));
     expect(row.getByText("@eve")).toBeInTheDocument();
-    expect(row.getByText(/Invited by Ada/)).toBeInTheDocument();
+    expect(row.getByText("Ada")).toBeInTheDocument();
+    expect(row.getByText("alpha: Viewer")).toBeInTheDocument();
     await user.click(row.getByRole("button", { name: "Revoke" }));
     const dialog = await screen.findByRole("dialog");
     await user.click(within(dialog).getByRole("button", { name: "Revoke" }));
@@ -1370,13 +1514,13 @@ describe("audit log", () => {
     const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
 
     mount("/audit");
-    expect(await screen.findByTestId("audit-3")).toHaveTextContent("org_renamed");
+    expect(await screen.findByTestId("audit-3")).toHaveTextContent("Organization renamed");
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "Load more" }));
-    expect(await screen.findByTestId("audit-1")).toHaveTextContent("member_added");
+    expect(await screen.findByTestId("audit-1")).toHaveTextContent("Member added");
     expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
 
-    await user.type(screen.getByLabelText("Event"), "org_renamed");
+    await user.selectOptions(screen.getByLabelText("Event"), "org_renamed");
     await user.type(screen.getByLabelText("Actor"), "@ada");
     await user.click(screen.getByRole("button", { name: "Filter" }));
     await waitFor(() =>
@@ -1390,6 +1534,43 @@ describe("audit log", () => {
     expect(csv?.search).toContain("event=org_renamed");
     expect(click).toHaveBeenCalled();
     click.mockRestore();
+  });
+
+  it("labels events, names the target, shows details as pairs and calls a null actor System", async () => {
+    fake.state = orgState("owner");
+    fake.routes["/api/org/audit"] = () =>
+      json({
+        events: [
+          {
+            ...event(7, "budget_set"),
+            target: "u4",
+            target_label: "Meg (@meg)",
+            fields: { scope: "member", monthly_usd: "25.00", hard_stop: true },
+          },
+          { ...event(6, "key_tested"), actor: null, fields: { provider: "openai", result: "ok" } },
+        ],
+        next: null,
+      });
+    mount("/audit");
+    const budget = within(await screen.findByTestId("audit-7"));
+    expect(budget.getByText("Budget set")).toBeInTheDocument();
+    expect(budget.getByText("Meg (@meg)")).toBeInTheDocument();
+    expect(budget.getByText("Monthly budget").nextSibling).toHaveTextContent("$25");
+    expect(budget.getByText("Hard stop").nextSibling).toHaveTextContent("Yes");
+    const tested = within(screen.getByTestId("audit-6"));
+    expect(tested.getByText("API key tested")).toBeInTheDocument();
+    expect(tested.getByText("System")).toBeInTheDocument();
+    expect(tested.getByText("Provider").nextSibling).toHaveTextContent("openai");
+  });
+
+  it("filters by event in a grouped select", async () => {
+    fake.state = orgState("owner");
+    fake.routes["/api/org/audit"] = () => json({ events: [], next: null });
+    mount("/audit");
+    const select = (await screen.findByLabelText("Event")) as HTMLSelectElement;
+    const groups = Array.from(select.querySelectorAll("optgroup")).map((g) => g.label);
+    expect(groups).toEqual(["Members", "Projects", "Budgets", "Security", "Organization"]);
+    expect(within(select).getByRole("option", { name: "API key tested" })).toHaveValue("key_tested");
   });
 
   it("is a page and a sidebar item for owners only", async () => {
@@ -1420,7 +1601,8 @@ describe("admin security events", () => {
       json({ events: [{ id: 5, created_at: "2026-10-05T10:00:00Z", org: null, actor: null, event: "github_signin", target: null, ip: null, fields: {} }], next: null });
     mount("/admin");
     const box = within(await screen.findByTestId("admin-audit"));
-    expect(await box.findByText("github_signin")).toBeInTheDocument();
+    expect(await box.findByText("Signed in with GitHub")).toBeInTheDocument();
+    expect(box.getAllByText("System").length).toBeGreaterThan(0);
     expect(box.queryByRole("button", { name: "Download CSV" })).toBeNull();
   });
 });

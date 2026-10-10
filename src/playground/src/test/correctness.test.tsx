@@ -111,7 +111,7 @@ describe("Members page (BUG-1, BUG-25)", () => {
     mount("/members");
     const me = within(await screen.findByTestId("member-u1"));
     expect(me.queryByRole("combobox")).toBeNull();
-    expect(me.getByText("owner")).toBeInTheDocument();
+    expect(me.getByTestId("own-role")).toHaveTextContent("Owner");
     expect(me.getByTestId("own-role-note")).toHaveTextContent("You can't change your own role");
     // Everyone else keeps the select, sized by the caller's width.
     const meg = within(screen.getByTestId("member-u4"));

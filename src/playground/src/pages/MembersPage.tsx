@@ -11,21 +11,23 @@ import {
   type Invitation,
   type Member,
   type MemberRole,
-  type PendingInvite,
   type ProjectRole,
 } from "../api";
 import { UserAvatar } from "../components/auth/UserAvatar";
 import { CopyButton } from "../components/portal/CopyButton";
 import { Field, nativeSelect, nativeSelectClass } from "../components/portal/Field";
-import { Alert, AlertDescription } from "../components/ui/alert";
+import { ResponsiveTable, type Column } from "../components/layout/ResponsiveTable";
+import { ErrorState } from "../components/state/ErrorState";
+import { Alert, AlertAction, AlertDescription } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { ConfirmDialog } from "../components/portal/ConfirmDialog";
 import { Input } from "../components/ui/input";
 import { Skeleton } from "../components/ui/skeleton";
 import { authMessage } from "../lib/authErrors";
-import { formatUsd } from "../lib/format";
+import { formatDate, formatUsd } from "../lib/format";
 import { canAdmin, canOwn, usePortalState, useRole } from "../lib/identity";
+import { orgRoleLabel, projectRoleLabel } from "../lib/labels";
 import { hardNavigate } from "../lib/navigation";
 
 const MEMBERS = portalKey("members");
@@ -36,11 +38,6 @@ function rolesFor(viewerIsOwner: boolean): MemberRole[] {
   return viewerIsOwner ? ["member", "admin", "owner"] : ["member", "admin"];
 }
 
-function joined(at: string): string {
-  const d = new Date(at);
-  return Number.isNaN(d.getTime()) ? at : d.toLocaleDateString();
-}
-
 const ROLE_HELP: Record<MemberRole, string> = {
   member: "Gets the organization's default project role, plus any project access given below.",
   admin: "Manages members, settings and every project.",
@@ -49,13 +46,19 @@ const ROLE_HELP: Record<MemberRole, string> = {
 
 const GRANT_ROLES: ProjectRole[] = ["viewer", "contributor", "admin"];
 
+type Notice =
+  | { kind: "invited"; key: string; login: string }
+  | { kind: "added"; key: string; uid: string; login: string };
+
 /** The invite form: one GitHub username, a role and (for a member) optional project access. */
 function InviteMember({ viewerIsOwner }: { viewerIsOwner: boolean }) {
   const queryClient = useQueryClient();
   const [login, setLogin] = useState("");
   const [role, setRole] = useState<MemberRole>("member");
   const [grants, setGrants] = useState<Record<string, ProjectRole>>({});
-  const [pending, setPending] = useState<PendingInvite | null>(null);
+  // One notice per invite or direct add, kept until dismissed: the next submit does not clear them.
+  const [notices, setNotices] = useState<Notice[]>([]);
+  const orgName = usePortalState().data?.org?.name ?? "this organization";
   const projects = useQuery({ queryKey: portalKey("projects"), queryFn: portalApi.projects });
   const list = projects.data?.projects ?? [];
   const invite = useMutation({
@@ -69,12 +72,14 @@ function InviteMember({ viewerIsOwner }: { viewerIsOwner: boolean }) {
     },
     onSuccess: async (res) => {
       if ("pending" in res && res.pending) {
-        setPending(res);
+        setNotices((n) => [...n, { kind: "invited", key: res.uid, login: res.github_login }]);
         await queryClient.invalidateQueries({ queryKey: INVITATIONS });
       } else {
-        setPending(null);
         const m = res as Member;
-        toast.success(`Added ${m.github_login ? `@${m.github_login}` : m.display_name}`);
+        setNotices((n) => [
+          ...n,
+          { kind: "added", key: m.uid, uid: m.uid, login: m.github_login ?? m.display_name },
+        ]);
         await queryClient.invalidateQueries({ queryKey: MEMBERS });
       }
       setLogin("");
@@ -85,15 +90,15 @@ function InviteMember({ viewerIsOwner }: { viewerIsOwner: boolean }) {
   const code = invite.error instanceof ApiError ? invite.error.code : undefined;
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    setPending(null);
     invite.mutate();
   };
 
   return (
+    <div className="flex flex-col gap-3">
     <form
       noValidate
       onSubmit={submit}
-      className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5"
+      className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5 shadow-card"
       data-testid="add-member"
     >
       <div className="flex flex-col gap-1">
@@ -173,76 +178,182 @@ function InviteMember({ viewerIsOwner }: { viewerIsOwner: boolean }) {
           <AlertDescription>{authMessage(invite.error)}</AlertDescription>
         </Alert>
       )}
-      {pending && (
-        <Alert data-testid="invite-pending">
-          <AlertDescription className="flex flex-wrap items-center gap-3">
-            <span>
-              No message is sent. Share this link with @{pending.github_login}:{" "}
-              <span className="font-mono">{window.location.origin}</span>
-            </span>
-            <CopyButton text={window.location.origin} />
-          </AlertDescription>
-        </Alert>
-      )}
       <div>
         <Button type="submit" disabled={invite.isPending || !login.trim()}>
           {invite.isPending ? "Inviting…" : "Invite"}
         </Button>
       </div>
     </form>
+      {notices.map((n) => (
+        <Alert key={`${n.kind}-${n.key}`} variant="info" data-testid={n.kind === "invited" ? "invite-pending" : "member-added"}>
+          <AlertDescription className="flex flex-wrap items-center gap-3 pr-20">
+            {n.kind === "invited" ? (
+              <>
+                <span>
+                  No message is sent. Share this link with @{n.login}:{" "}
+                  <span className="font-mono break-all">{window.location.origin}</span>
+                </span>
+                <CopyButton text={window.location.origin} />
+              </>
+            ) : (
+              <span>
+                @{n.login} is now a member. They'll see a welcome note the next time they open {orgName}.{" "}
+                <a href={`#member-${n.uid}`} className="text-primary-text hover:underline">
+                  Show in the list
+                </a>
+              </span>
+            )}
+          </AlertDescription>
+          <AlertAction>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setNotices((list) => list.filter((x) => x !== n))}
+            >
+              Dismiss
+            </Button>
+          </AlertAction>
+        </Alert>
+      ))}
+    </div>
   );
 }
 
-/** Open invitations (and the last 30 days of closed ones) with Revoke on the open ones. */
+/** What an invitation's status column says. */
+function inviteStatus(inv: Invitation): string {
+  switch (inv.status) {
+    case "open":
+      return `Open, expires ${formatDate(inv.expires_at)}`;
+    case "expired":
+      return `Expired ${formatDate(inv.expires_at)}`;
+    case "redeemed":
+      return `Accepted ${formatDate(inv.redeemed_at)}`;
+    default:
+      return `Revoked ${formatDate(inv.revoked_at)}`;
+  }
+}
+
+/**
+ * Open and expired invitations with Revoke on them; the ones closed in the last
+ * 30 days (accepted or revoked) sit under a collapsed "Closed" heading (MEM-4).
+ */
 function Invitations({ viewerIsOwner }: { viewerIsOwner: boolean }) {
   const queryClient = useQueryClient();
   const [revoking, setRevoking] = useState<Invitation | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showClosed, setShowClosed] = useState(false);
   const invitations = useQuery({ queryKey: INVITATIONS, queryFn: invitationsApi.list });
   const revoke = useMutation({
     mutationFn: (uid: string) => invitationsApi.revoke(uid),
     onSuccess: async () => {
       setRevoking(null);
-      toast.success("Invitation revoked");
       await queryClient.invalidateQueries({ queryKey: INVITATIONS });
     },
     onError: (err) => setError(authMessage(err)),
   });
   const rows = invitations.data ?? [];
+  const current = rows.filter((i) => i.status === "open" || i.status === "expired");
+  const closed = rows.filter((i) => i.status !== "open" && i.status !== "expired");
   if (!invitations.isLoading && rows.length === 0) return null;
+
+  const columns = (withActions: boolean): Column<Invitation>[] => [
+    {
+      key: "who",
+      header: "Person",
+      primary: true,
+      cell: (inv) => <span className="font-mono">@{inv.github_login}</span>,
+    },
+    {
+      key: "role",
+      header: "Role",
+      cell: (inv) => <Badge variant={inv.role === "member" ? "outline" : "secondary"}>{orgRoleLabel(inv.role)}</Badge>,
+    },
+    {
+      key: "by",
+      header: "Invited by",
+      hideBelow: "md",
+      cell: (inv) => inv.invited_by?.display_name ?? "-",
+    },
+    {
+      key: "access",
+      header: "Project access",
+      hideBelow: "md",
+      cell: (inv) =>
+        inv.grants.length > 0 ? (
+          <span className="flex flex-wrap gap-1">
+            {inv.grants.map((g) => (
+              <Badge key={g.project} variant="outline">
+                {g.project}: {projectRoleLabel(g.role)}
+              </Badge>
+            ))}
+          </span>
+        ) : (
+          <span className="text-muted-foreground">Organization default</span>
+        ),
+    },
+    {
+      key: "status",
+      header: "Status",
+      cell: (inv) => <span className="text-muted-foreground">{inviteStatus(inv)}</span>,
+    },
+    ...(withActions
+      ? [
+          {
+            key: "actions",
+            header: <span className="sr-only">Actions</span>,
+            cell: (inv: Invitation) =>
+              inv.role !== "owner" || viewerIsOwner ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setError(null);
+                    setRevoking(inv);
+                  }}
+                >
+                  Revoke
+                </Button>
+              ) : null,
+          } satisfies Column<Invitation>,
+        ]
+      : []),
+  ];
+
   return (
-    <section className="flex flex-col gap-1 rounded-xl border border-border bg-card p-5" data-testid="invitations">
+    <section className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5 shadow-card" data-testid="invitations">
       <h2 className="text-sm font-semibold">Invitations</h2>
       {invitations.isLoading && <Skeleton className="h-12" />}
-      <ul className="divide-y divide-border">
-        {rows.map((inv) => (
-          <li key={inv.uid} className="flex flex-wrap items-center gap-3 py-3" data-testid={`invitation-${inv.uid}`}>
-            <div className="flex min-w-0 flex-1 flex-col leading-tight">
-              <span className="truncate font-mono text-sm">@{inv.github_login}</span>
-              <span className="truncate text-xs text-muted-foreground">
-                {inv.invited_by ? `Invited by ${inv.invited_by.display_name}` : "Invited"}
-                {inv.grants.length > 0 && ` - access to ${inv.grants.map((g) => `${g.project} (${g.role})`).join(", ")}`}
-              </span>
-            </div>
-            <Badge variant={inv.role === "member" ? "outline" : "secondary"}>{inv.role}</Badge>
-            <span className="text-xs text-muted-foreground">
-              {inv.status === "open" ? `Expires ${joined(inv.expires_at)}` : inv.status}
-            </span>
-            {(inv.status === "open" || inv.status === "expired") && (inv.role !== "owner" || viewerIsOwner) && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => {
-                  setError(null);
-                  setRevoking(inv);
-                }}
-              >
-                Revoke
-              </Button>
-            )}
-          </li>
-        ))}
-      </ul>
+      {current.length > 0 && (
+        <ResponsiveTable
+          columns={columns(true)}
+          rows={current}
+          rowKey={(i) => i.uid}
+          rowTestId={(i) => `invitation-${i.uid}`}
+        />
+      )}
+      {!invitations.isLoading && current.length === 0 && (
+        <p className="text-sm text-muted-foreground">No open invitations.</p>
+      )}
+      {closed.length > 0 && (
+        <div className="flex flex-col gap-2" data-testid="invitations-closed">
+          <button
+            type="button"
+            className="w-fit text-xs font-medium text-primary-text hover:underline"
+            aria-expanded={showClosed}
+            onClick={() => setShowClosed((v) => !v)}
+          >
+            {showClosed ? "Hide" : "Show"} closed invitations (last 30 days, {closed.length})
+          </button>
+          {showClosed && (
+            <ResponsiveTable
+              columns={columns(false)}
+              rows={closed}
+              rowKey={(i) => i.uid}
+              rowTestId={(i) => `invitation-${i.uid}`}
+            />
+          )}
+        </div>
+      )}
       <ConfirmDialog
         open={revoking !== null}
         onOpenChange={(o) => !o && setRevoking(null)}
@@ -294,7 +405,7 @@ function MemberRow({
   });
 
   return (
-    <li className="flex flex-wrap items-center gap-3 py-3" data-testid={`member-${member.uid}`}>
+    <li className="row-wrap py-3" id={`member-${member.uid}`} data-testid={`member-${member.uid}`}>
       <UserAvatar name={name} url={member.avatar_url} />
       <div className="flex min-w-0 flex-1 flex-col leading-tight">
         <span className="truncate font-medium">
@@ -306,7 +417,16 @@ function MemberRow({
         </span>
       </div>
       {member.disabled && <Badge variant="outline">disabled</Badge>}
-      <span className="text-xs text-muted-foreground">Joined {joined(member.joined_at)}</span>
+      {member.grants && member.grants.length > 0 && (
+        <span className="flex flex-wrap gap-1" data-testid={`member-grants-${member.uid}`}>
+          {member.grants.map((g) => (
+            <Badge key={g.project} variant="outline" title={`Access to ${g.name}`}>
+              {g.name}: {projectRoleLabel(g.role)}
+            </Badge>
+          ))}
+        </span>
+      )}
+      <span className="text-xs text-muted-foreground">Joined {formatDate(member.joined_at)}</span>
       {typeof member.month_spend_usd === "number" && (
         <Link
           to="/usage/members/$uid"
@@ -334,15 +454,21 @@ function MemberRow({
           ))}
         </select>
       ) : (
-        <>
-          <Badge variant={member.role === "member" ? "outline" : "secondary"}>{member.role}</Badge>
-          {/* The server refuses a self re-role too; say so instead of offering it (BUG-25). */}
-          {editable && isMe && (
-            <span className="text-xs text-muted-foreground" data-testid="own-role-note">
-              You can't change your own role
+        isMe ? (
+          <>
+            {/* Your own role is text: the server refuses a self re-role, so none is offered (BUG-25). */}
+            <span className="text-sm" data-testid="own-role">
+              {orgRoleLabel(member.role)}
             </span>
-          )}
-        </>
+            {editable && (
+              <span className="text-xs text-muted-foreground" data-testid="own-role-note">
+                You can't change your own role
+              </span>
+            )}
+          </>
+        ) : (
+          <Badge variant={member.role === "member" ? "outline" : "secondary"}>{member.role}</Badge>
+        )
       )}
       {editable && !isMe && (
         <Button
@@ -411,10 +537,13 @@ export function MembersPage() {
       {admin && <InviteMember viewerIsOwner={owner} />}
       {admin && <Invitations viewerIsOwner={owner} />}
 
-      <section className="flex flex-col gap-1 rounded-xl border border-border bg-card p-5">
+      <section className="flex flex-col gap-1 rounded-xl border border-border bg-card p-5 shadow-card">
+        <h2 className="text-sm font-semibold" data-testid="members-heading">
+          Members{members.data ? ` (${members.data.length})` : ""}
+        </h2>
         {members.isLoading && <Skeleton className="h-16" />}
         {members.isError && (
-          <p className="text-sm text-destructive">Failed to load: {members.error.message}</p>
+          <ErrorState error={members.error} title="Couldn't load the members" onRetry={() => void members.refetch()} />
         )}
         {members.data && (
           <ul className="divide-y divide-border" data-testid="member-list">

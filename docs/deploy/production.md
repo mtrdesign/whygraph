@@ -305,6 +305,13 @@ this instance, they are added at once and see the organization in their picker. 
 A username that is not a GitHub user (an organization's login counts) is refused with "No one with that
 GitHub username exists". Adding is throttled to 60 per hour per organization.
 
+The members page heads its list with the count ("Members (12)"). Owners and admins also see each
+person's **project access** as chips ("api: Contributor"): the grants made to them on individual
+projects, on top of the organization's default project role. Plain members see the list without the
+chips. After a direct add, the page says "@ben is now a member. They'll see a welcome note the next
+time they open Acme." with a link to the new row; the person sees a one-time welcome banner on
+their next visit. Your own row shows your role as text: nobody changes their own role.
+
 ### Organization roles
 
 | Who | Can |
@@ -380,6 +387,13 @@ applied. An invitation is valid for 14 days and there is one open invitation per
 organization. Admins can revoke it from the members page, and only owners can revoke an owner
 invitation.
 
+After you invite someone, the page keeps a notice ("No message is sent. Share this link with @dee")
+with a copy button until you dismiss it; inviting the next person adds a second notice instead of
+replacing the first. The **Invitations** list shows every **open** and **expired** invitation with
+its role, who invited, the project access it carries and when it expires, and Revoke on each.
+Invitations that closed in the last 30 days (accepted or revoked) are listed too, collapsed under
+"Show closed invitations".
+
 ### Ownership transfer and renaming
 
 - **Transfer.** An owner can make another member the owner and become an admin in one step, by typing
@@ -405,6 +419,11 @@ invitation.
 
 An instance admin manages the instance from `/admin` on the base host: users, who is an admin, the
 list of organizations and the [self-check](#the-self-check).
+
+- **Settings check.** A card at the top shows the base URL and what the self-check found: "no
+  problems", the missing DNS records it names, or "not run yet".
+- **Users.** **Make admin** / **Remove admin** change who administers the instance. **Disable** asks
+  for a confirmation first (it ends the person's sessions at once); **Enable** restores the account.
 
 - **Keep two admins.** The last admin can't be demoted, and there is no recovery path for a locked-out
   admin in this release.
@@ -493,6 +512,9 @@ default branch, and a force-push: the copy is reset to GitHub's branch, and the 
 history was rewritten.
 
 An instance that GitHub cannot reach still works, at the pace of the hourly check plus **Scan now**.
+
+A run's log starts with the command as you would type it (`$ whygraph scan <flags>`) and never names
+a server path: the project's copy reads as `.` and the data directory as `<data>`.
 
 ### When access is lost
 
@@ -645,6 +667,7 @@ plus these GitHub, member, project and organization events:
 | `budget_hard_stop_engaged` | A budget with the hard stop reached 100% (same fields): LLM spend it covers is off until the month resets or the budget is raised. |
 | `budget_set`, `budget_removed` | An owner or admin set or removed a budget (with its scope, amount and hard-stop flag, and the member or project). |
 | `price_override_set`, `price_override_removed` | An owner or admin set or reverted an organization price for a provider and model. |
+| `key_tested` | Someone pressed **Test key** on an LLM key (with the `scope`, the `provider` and the `result`; never any key material). |
 
 Each carries the event, the user, the target user, the client address and the host. A password
 sign-in failure shows only the first 3 characters of the email and its domain. No token, code, state,
@@ -654,7 +677,11 @@ They go to the portal's normal log (`docker compose logs portal`) and, in produc
 portal's database**, where they are kept for **400 days** and then deleted.
 
 - **The audit page.** Owners see an **Audit** page for their organization, filterable by event, person
-  and date, 50 events to a page. **Download CSV** exports the same filter (at most 50,000 rows). A cell
+  and date, 50 events to a page. Each event has a plain label ("Member added", "API key tested"),
+  and the **Event** filter groups them as Members, Projects, Budgets, Security and Organization. A
+  row names the person or project it concerns, shows its details as label / value pairs, and reads
+  "System" where no one acted (a sign-in refusal, a webhook, a budget threshold). The event names in
+  the table above are what the log lines and the CSV carry. **Download CSV** exports the same filter (at most 50,000 rows). A cell
   that starts with `=`, `+`, `-` or `@` is prefixed with `'` so a spreadsheet does not run it.
 - **Instance admins** have the same list on `/admin` for events that belong to no organization and for
   organizations that were deleted.

@@ -303,6 +303,10 @@ describe("connected portals", () => {
     expect(section).toHaveTextContent("Revoked by an admin");
     expect(section.querySelectorAll("button")).toHaveLength(1); // only the live one can be revoked
     await user.click(section.querySelector("button")!);
+    // A confirmation first; the row then says why, with no toast.
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("That machine loses access at once");
+    await user.click(within(dialog).getByRole("button", { name: "Revoke" }));
     await waitFor(() => expect(section).toHaveTextContent("Revoked by you"));
   });
 

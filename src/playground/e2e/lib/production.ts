@@ -33,6 +33,8 @@ export async function signedIn(page: Page): Promise<void> {
   );
   await page.waitForLoadState();
   await expect(page.getByRole("heading").first()).toBeVisible();
+  // Let a trailing client redirect finish, so the next goto() does not abort it (ERR_ABORTED).
+  await page.waitForLoadState("networkidle");
 }
 
 /** Fill the organization-creation form (the page is already on it) and wait for the new org's host. */

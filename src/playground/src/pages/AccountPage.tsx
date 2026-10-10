@@ -1,13 +1,20 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ApiError, accountApi, portalKey } from "../api";
+import { ACCOUNT_ORGS_KEY } from "../components/shell/OrgSwitcher";
+import { ErrorState } from "../components/state/ErrorState";
+import { StatusPill } from "../components/ui/status-pill";
+import { Badge } from "../components/ui/badge";
+import { orgRoleLabel } from "../lib/labels";
 import { UserAvatar } from "../components/auth/UserAvatar";
 import { MyConnectedPortals } from "../components/portal/ConnectedPortals";
 import { SpendBar, UsageSection } from "../components/usage/parts";
 import { Field } from "../components/portal/Field";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
+import { Skeleton } from "../components/ui/skeleton";
 import { Input } from "../components/ui/input";
 import { PASSWORD_HINT, authMessage } from "../lib/authErrors";
 import { formatUsd } from "../lib/format";
@@ -28,6 +35,7 @@ function MyUsage() {
       <ul className="divide-y divide-border">
         {orgs.map((o) => {
           const href = safeHref(`${o.url.replace(/\/$/, "")}/usage/me`);
+          const stopped = o.hard_stop && o.budget_usd !== null && (o.pct ?? 0) >= 100;
           return (
             <li key={o.slug} className="flex flex-col gap-1.5 py-3" data-testid={`account-usage-${o.slug}`}>
               <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -40,6 +48,15 @@ function MyUsage() {
                 </span>
               </div>
               <SpendBar pct={o.pct} label={`${o.name} budget used`} />
+              {stopped && (
+                <p className="flex flex-wrap items-center gap-2 text-xs" data-testid={`account-usage-stopped-${o.slug}`}>
+                  <StatusPill tone="warn" label="Stopped" title="Monthly budget reached" />
+                  <span>
+                    You can still read everything that's already generated. LLM spending resumes{" "}
+                    {formatResetsAt(usage.data?.resets_at ?? "")}.
+                  </span>
+                </p>
+              )}
               <div className="flex flex-wrap items-center gap-x-3 text-xs text-muted-foreground">
                 <span>
                   {o.calls.toLocaleString("en-US")} {o.calls === 1 ? "call" : "calls"}
@@ -56,6 +73,47 @@ function MyUsage() {
         })}
       </ul>
     </UsageSection>
+  );
+}
+
+/** Your organizations: the name opens the org (its own host), with your role there. */
+function MyOrganizations() {
+  const orgs = useQuery({ queryKey: ACCOUNT_ORGS_KEY, queryFn: accountApi.orgs });
+  return (
+    <section
+      className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5 shadow-card"
+      data-testid="account-orgs"
+    >
+      <h2 className="text-sm font-semibold">Your organizations</h2>
+      {orgs.isLoading && <Skeleton className="h-10" />}
+      {orgs.isError && (
+        <ErrorState error={orgs.error} title="Couldn't load your organizations" onRetry={() => void orgs.refetch()} />
+      )}
+      {orgs.data && orgs.data.length === 0 && (
+        <p className="text-sm text-muted-foreground">
+          You aren't in an organization yet.{" "}
+          <Link to="/orgs/new" className="text-primary-text hover:underline">
+            Create one
+          </Link>
+          .
+        </p>
+      )}
+      {orgs.data && orgs.data.length > 0 && (
+        <ul className="divide-y divide-border">
+          {orgs.data.map((o) => (
+            <li key={o.slug} className="row-wrap py-2.5" data-testid={`account-org-${o.slug}`}>
+              <a
+                href={safeHref(o.url)}
+                className="min-w-0 flex-1 break-words font-medium text-primary-text hover:underline"
+              >
+                {o.name} <span className="font-mono text-xs font-normal text-muted-foreground">{o.slug}</span>
+              </a>
+              <Badge variant={o.role === "member" ? "outline" : "secondary"}>{orgRoleLabel(o.role)}</Badge>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -126,7 +184,7 @@ export function AccountPage() {
         </div>
       </div>
 
-      <form noValidate onSubmit={onRename} className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5">
+      <form noValidate onSubmit={onRename} className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5 shadow-card">
         <h2 className="text-sm font-semibold">Profile</h2>
         <Field label="Display name">
           {(p) => <Input {...p} value={name} onChange={(e) => setName(e.target.value)} />}
@@ -145,7 +203,7 @@ export function AccountPage() {
         <form
           noValidate
           onSubmit={onPassword}
-          className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5"
+          className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5 shadow-card"
         >
           <h2 className="text-sm font-semibold">Change password</h2>
           <Field
@@ -203,6 +261,8 @@ export function AccountPage() {
           </div>
         </form>
       )}
+
+      <MyOrganizations />
 
       <MyUsage />
 

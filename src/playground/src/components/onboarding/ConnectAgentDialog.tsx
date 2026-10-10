@@ -24,7 +24,13 @@ export function ConnectAgentDialog({
 }) {
   const state = usePortalState().data;
   const production = isProduction(state);
-  const projects = useQuery({ queryKey: portalKey("projects"), queryFn: portalApi.projects, enabled: open });
+  // The base host (the Account page) has no projects of its own: it only says where to go.
+  const onBase = state?.host_kind === "base";
+  const projects = useQuery({
+    queryKey: portalKey("projects"),
+    queryFn: portalApi.projects,
+    enabled: open && !onBase,
+  });
   const [choice, setChoice] = useState("");
   const readable = (projects.data?.projects ?? []).filter(
     (p) => !p.importing && (!p.permissions || p.permissions.includes("project.read")),
@@ -39,7 +45,8 @@ export function ConnectAgentDialog({
         <DialogHeader>
           <DialogTitle>Connect your agent</DialogTitle>
           <DialogDescription>
-            Your coding agent reads this organization's history through WhyGraph running on your machine.
+            Your coding agent reads {onBase ? "your organizations'" : "this organization's"} history through WhyGraph
+            running on your machine.
           </DialogDescription>
         </DialogHeader>
         <ol className="flex list-decimal flex-col gap-1.5 pl-5 text-sm">
@@ -59,7 +66,11 @@ export function ConnectAgentDialog({
             Start it: <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">whygraph up</code>
             <CopyButton text="whygraph up" />
           </li>
-          <li>Pick a project below and open the link.</li>
+          <li>
+            {onBase
+              ? "Open one of your organizations, then a project, and use \"Use with your agent\" there."
+              : "Pick a project below and open the link."}
+          </li>
         </ol>
         {projects.isSuccess && readable.length === 0 && (
           <p className="text-sm text-muted-foreground" data-testid="connect-agent-no-projects">

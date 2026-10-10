@@ -18,7 +18,7 @@ export function AuthLayout({
 }) {
   const inChrome = useContext(InBaseChrome);
   return (
-    <div className="flex min-h-[70vh] items-center justify-center bg-background p-6">
+    <div className="flex min-h-[70vh] items-start justify-center bg-background px-6 pt-[8vh] pb-6">
       <div className="flex w-full max-w-md flex-col gap-6">
         <div className="flex flex-col gap-1.5">
           {!inChrome && (

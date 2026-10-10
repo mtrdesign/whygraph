@@ -221,7 +221,7 @@ First-time setup: open https://whygraph.example.com/setup and enter the bootstra
 Bootstrap secret: <24 characters>
 ```
 
-Open `<your base URL>/setup`, enter the secret, an email, a name and a password. That creates the
+The setup page says the same: the secret is in the portal's log, and shows this command. Open `<your base URL>/setup`, enter the secret, an email, a name and a password. That creates the
 first **instance admin** and signs you in; you land on "Create organization". The secret exists only in
 the portal's memory, is regenerated on every start until an admin exists, and the route is inert once
 one does. Until it is used, sign-in answers that the instance is not claimed yet, so nobody can grab
@@ -266,9 +266,35 @@ The base host's pages (the organization list, your account, administration) shar
 **Sign out**. Opened from an organization, they also offer **Back to** that organization.
 
 Someone who belongs to no organization yet sees "You're not in an organization yet" after signing in,
-with **Create organization** and the GitHub username an owner needs to add them. When an
+with **Create organization** and the GitHub username an owner needs to add them. The create page says
+the same ("Joining a team? You don't need your own organization") for a first-time GitHub user, and an
+organization's address that the account is not a member of names that organization and carries the
+hint too. When an
 organization's address sends you to sign in, the sign-in page says where you will land; when your
 session ended, it says that instead.
+
+## The first visit
+
+**Creating an organization.** The URL name is checked as you type (after a short pause): the form
+says "acme.whygraph.example.com is available", or that the name is reserved or already taken -
+including the names of deleted organizations, which are never reused. The server still decides when
+you submit.
+
+**The checklist.** An owner or admin of an organization with no projects sees five steps on the
+Projects page instead of an empty list: **Connect GitHub** (a bootstrap admin, who signs in with a
+password, is asked to sign in with GitHub to import repositories; anyone else is offered **Install the
+WhyGraph GitHub App** when it is not yet installed for them), **Import a repository**, **Add an LLM
+key** (an admin who cannot change organization keys sees "Ask an owner"), **Invite your team** and
+**Connect your agent**. Steps tick themselves off, **Dismiss** hides the list in that browser for that
+person and organization, **Getting started** in the header brings it back, and it is gone once every
+step is done. When every project is linked from a local portal, the key step is left out - such
+projects use the platform's keys.
+
+**The welcome banner.** A person added to an organization (by an invitation they redeemed or by being
+added directly) sees "You've been added to Acme as a Member." once, with **Connect your agent** and
+**Dismiss**. If the dismissal could not be saved, the next page load retries it without showing the
+banner again. A person in several organizations also sees a **New** marker on that organization in the
+picker and the switcher until they dismiss that banner.
 
 ## Members
 

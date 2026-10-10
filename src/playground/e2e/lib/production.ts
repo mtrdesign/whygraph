@@ -42,7 +42,7 @@ export async function createOrg(page: Page, name: string, slug: string): Promise
   await expect(page.getByTestId("slug-preview")).toHaveText(`${slug}.${base.host}`);
   await page.getByRole("button", { name: "Create organization" }).click();
   await expect(page).toHaveURL(new RegExp(`^${orgUrl(slug)}/`));
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
 }
 
 /**

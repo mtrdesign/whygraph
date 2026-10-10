@@ -15,6 +15,8 @@ import { useScanActions } from "../lib/scanActions";
 import { cn } from "../lib/utils";
 import { AccessLostNotice, UnsupportedSourceNotice } from "../components/portal/AccessLost";
 import { LinkNotice } from "../components/portal/LinkNotice";
+import { FirstRunChecklist } from "../components/onboarding/FirstRunChecklist";
+import { useFirstRun } from "../components/onboarding/firstRun";
 import { PortChangeBanner } from "../components/portal/PortChangeNotice";
 import { ProjectStatusBadge as StatusBadge } from "../components/portal/ProjectStatusBadge";
 import { ScanMenuItems } from "../components/portal/ScanMenu";
@@ -234,8 +236,9 @@ function ProjectCard({
 }
 
 /**
- * Until S20's first-run checklist lands, the owner's empty state: still "No
- * projects yet" with the add action, in the slot the checklist takes over.
+ * The empty state for an owner / admin / local user while the first-run checklist is
+ * not showing (dismissed, done, loading or unavailable): "No projects yet" with the
+ * add action.
  */
 function ChecklistPlaceholder({ production }: { production: boolean }) {
   return (
@@ -278,6 +281,8 @@ export function ProjectsPage() {
   const role = useRole();
   // Local mode's single user always may; in production owners and admins import.
   const canAdd = !production || canAdmin(role);
+  const firstRun = useFirstRun(canAdd);
+  const showChecklist = canAdd && firstRun.open && !firstRun.dismissed;
   const search = useSearch({ strict: false }) as ProjectsSearch;
   const navigate = useNavigate();
   const [limit, setLimit] = useState(PAGE_CARDS);
@@ -310,7 +315,14 @@ export function ProjectsPage() {
             {projects.isSuccess ? plural(list.length, "project") : "\u00a0"}
           </p>
         </div>
-        {addButton}
+        <div className="flex flex-wrap items-center gap-2">
+          {canAdd && firstRun.open && firstRun.dismissed && (
+            <Button variant="ghost" onClick={firstRun.restore} data-testid="getting-started-link">
+              Getting started
+            </Button>
+          )}
+          {addButton}
+        </div>
       </div>
 
       <PortChangeBanner />
@@ -365,9 +377,33 @@ export function ProjectsPage() {
         <ErrorState error={projects.error} title="Couldn't load projects" onRetry={() => void projects.refetch()} />
       )}
 
+      {projects.isSuccess && list.length > 0 && showChecklist && (
+        <div data-testid="first-run-slot">
+          <FirstRunChecklist
+            firstRun={firstRun}
+            production={production}
+            projects={list}
+            githubLogin={state?.user?.github_login}
+            empty={false}
+          />
+        </div>
+      )}
+
       {projects.isSuccess && list.length === 0 &&
         (canAdd ? (
-          <ChecklistPlaceholder production={production} />
+          showChecklist ? (
+            <div data-testid="first-run-slot">
+              <FirstRunChecklist
+                firstRun={firstRun}
+                production={production}
+                projects={list}
+                githubLogin={state?.user?.github_login}
+                empty
+              />
+            </div>
+          ) : (
+            <ChecklistPlaceholder production={production} />
+          )
         ) : role === "reader" ? (
           <EmptyState
             icon={<FolderGit2Icon />}

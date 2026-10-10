@@ -85,6 +85,15 @@ of the two entries.
 **Codex** loads `.codex/config.toml` only for projects you have marked as trusted. Trust the project
 in Codex for the server to load.
 
+## Connect your agent outside a project
+
+You do not need to open a project first. On a production portal the **Connect your agent** button on
+the Projects page checklist, and on the banner a new member sees, opens a short dialog: install
+WhyGraph and run `whygraph up` on your machine, choose one of the projects you can read (a lone project
+is chosen for you), then follow the **Use with your agent** link for it. With no project yet the dialog
+says to open a project and use that card there. A local portal's checklist sends you to the first
+project's Overview instead, where the agent card lives.
+
 ## Agent activity
 
 The portal counts how often agents call WhyGraph, per project, so the project's **Overview** can show

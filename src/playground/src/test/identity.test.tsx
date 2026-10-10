@@ -296,6 +296,8 @@ describe("router gate - production org host", () => {
     fake.state = orgState(null);
     mount("/");
     await screen.findByRole("heading", { name: "No access to this organization" });
+    expect(screen.getByText(/is not a member of/)).toBeInTheDocument();
+    expect(screen.getByTestId("join-hint")).toHaveTextContent("Ask an owner to add");
     expect(screen.getByRole("link", { name: "Your organizations" })).toHaveAttribute("href", `${BASE}/orgs`);
   });
 

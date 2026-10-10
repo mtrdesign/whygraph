@@ -203,7 +203,8 @@ export function ConnectPage() {
         </Alert>
       )}
       <p className="text-xs text-muted-foreground">
-        Allowing gives that machine read-only access to this project until you revoke it in your account.
+        Allowing gives that machine read-only access to this project. You can revoke it any time in the
+        project's Settings &gt; Connected portals.
       </p>
       <div className="flex flex-wrap gap-2">
         <Button onClick={() => allow.mutate()} disabled={!selected || allow.isPending}>

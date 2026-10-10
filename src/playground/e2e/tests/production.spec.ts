@@ -59,7 +59,7 @@ test("bootstrap, organizations on their own hosts, sign-in hand-off and reader a
   await expect(page.getByTestId("org-list")).toContainText("Acme");
   await page.getByTestId("back-to-org").click();
   await expect(page).toHaveURL(new RegExp(`^${orgUrl("acme")}/`));
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
 
   // Ben (a second browser context, so his cookies are his own) signs in with
   // GitHub and creates bravo (the plan says beta, which is a reserved slug).
@@ -84,7 +84,7 @@ test("bootstrap, organizations on their own hosts, sign-in hand-off and reader a
   await page.getByRole("button", { name: "Invite", exact: true }).click();
   await expect(page.getByTestId("member-list")).toContainText("@ben");
   await ben.reload();
-  await expect(ben.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await expect(ben.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
 
   // Promoted to admin, Ben gets the Members page's controls; then Ada removes him.
   await page.getByLabel("Role for Ben").selectOption("admin");
@@ -126,12 +126,12 @@ test("bootstrap, organizations on their own hosts, sign-in hand-off and reader a
   // Signing in as Ada hands her back to acme.
   await signIn(page, "ada@example.com");
   await expect(page).toHaveURL(new RegExp(`^${orgUrl("acme")}/`));
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
 
   // bravo's host needs no new sign-in (the cookie covers the subdomains); as an
   // instance admin who is not a member, Ada reads it behind the banner.
   await page.goto(`${orgUrl("bravo")}/`);
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
   await expect(page.getByTestId("reader-banner")).toBeVisible();
   await expect(page).not.toHaveURL(/\/signin/);
 });
@@ -154,6 +154,10 @@ test("projects from GitHub: connect, import, scan, members, a push, deleting the
   await signedIn(ben);
   await ben.goto("/orgs/new");
   await createOrg(ben, "Rocket", "rocket");
+  // Before the import, a new org's empty page is the first-run checklist.
+  await expect(ben.getByTestId("first-run-checklist")).toContainText("No projects yet");
+  await expect(ben.getByTestId("first-run-project")).toContainText("Import a repository");
+  await expect(ben.getByTestId("first-run-invite")).toContainText("Invite your team");
   await importRepo(ben, "rocket", "ben/demo");
   expect((await runs(ben, "demo")).map((r) => r.status)).toEqual(["ok"]);
 
@@ -213,6 +217,8 @@ test("projects from GitHub: connect, import, scan, members, a push, deleting the
   await ben.goto("/orgs/new");
   await ben.getByLabel("Organization name").fill("Rocket");
   await ben.getByLabel("URL name").fill("rocket");
+  // The live check already says so before submit; the server still refuses it.
+  await expect(ben.getByTestId("slug-status")).toContainText("rocket." + base.host + " is already taken");
   await ben.getByRole("button", { name: "Create organization" }).click();
   await expect(ben.getByText("That URL name is already taken.")).toBeVisible();
   await benContext.close();

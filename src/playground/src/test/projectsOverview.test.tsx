@@ -497,13 +497,13 @@ describe("Projects list", () => {
     );
   });
 
-  it("the empty state for the local user keeps 'No projects yet' and fetches no onboarding", async () => {
+  it("the empty state for the local user keeps 'No projects yet' and asks for the onboarding items", async () => {
     mount("/");
     expect(await screen.findByText("No projects yet")).toBeInTheDocument();
     expect(screen.getByTestId("first-run-slot")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Add project" })).toHaveAttribute("href", "/projects/new");
     expect(screen.getByRole("link", { name: "New project" })).toBeInTheDocument();
-    expect(fake.log.some((c) => c.path.startsWith("/api/onboarding"))).toBe(false);
+    await waitFor(() => expect(fake.log.some((c) => c.path.startsWith("/api/onboarding"))).toBe(true));
   });
 
   it.each([

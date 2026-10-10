@@ -139,7 +139,7 @@ is offline and token-free. Rapid commits coalesce into one follow-up scan, and t
 The hooks run a shared helper that lives in the git directory, at `.git/whygraph/whygraph-scan` (in a
 linked worktree, the main repository's git directory), never in the working tree - a checkout or pull
 cannot replace it. Repositories set up by an earlier build had it at `.whygraph/hooks/whygraph-scan`;
-the next Initialize or hooks change moves it. The helper finds the portal through
+the next set-up or hooks change moves it. The helper finds the portal through
 `.whygraph/portal.env`, a two-line file (`slug`, `port`) it **parses and never sources**, and ignores
 if git tracks it or it is a symbolic link. It never writes through a symbolic link either. An existing hook of your own is appended to behind a
 sentinel guard, never overwritten. `post-checkout` skips the two cases that can't have changed

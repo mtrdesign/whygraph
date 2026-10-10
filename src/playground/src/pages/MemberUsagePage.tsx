@@ -16,6 +16,7 @@ import {
   UsageSection,
 } from "../components/usage/parts";
 import { Badge } from "../components/ui/badge";
+import { CardGridSkeleton, TableSkeleton } from "../components/state/Skeletons";
 import { Skeleton } from "../components/ui/skeleton";
 import { ErrorState } from "../components/state/ErrorState";
 import { formatNumber, formatPct, formatTokens, formatUsd } from "../lib/format";
@@ -41,7 +42,7 @@ function Breakdown({
   const pretty = (row: UsageGroupRow) => (row.key === null ? null : usageKeyLabel(group, String(row.key)));
   return (
     <UsageSection title={title}>
-      {report.isLoading && <Skeleton className="h-20" />}
+      {report.isLoading && <TableSkeleton rows={3} cols={3} />}
       {report.isError && <ErrorState error={report.error} context="usage" onRetry={() => void report.refetch()} />}
       {report.data && (
         <BreakdownTable group={group} rows={report.data.groups} compact link={group === "task" ? pretty : undefined} />
@@ -149,7 +150,17 @@ export function MemberUsagePage({ uid }: { uid?: string }) {
         <CsvButton download={() => usageApi(scope).csv(query)} testId="csv-member" />
       </div>
 
-      {report.isLoading && <Skeleton className="h-40" />}
+      {report.isLoading && (
+        <div className="flex flex-col gap-6" data-testid="member-usage-loading">
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+            {[0, 1, 2, 3].map((i) => (
+              <Skeleton key={i} className="h-[74px] rounded-lg" />
+            ))}
+          </div>
+          <Skeleton className="h-[260px] w-full rounded-xl" />
+          <CardGridSkeleton count={3} cols={3} cardClassName="h-40" label="Loading the usage report" />
+        </div>
+      )}
       {report.isError && <ErrorState error={report.error} context="usage" onRetry={() => void report.refetch()} />}
       {report.data && (
         <>

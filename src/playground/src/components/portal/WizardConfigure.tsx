@@ -14,12 +14,12 @@ import {
   type ScanRunRow,
 } from "../../api";
 import { layerToValues, type ModelPick } from "../../lib/configForm";
-import { formatUsd } from "../../lib/format";
-import { isProduction, usePortalState, useReadOnly } from "../../lib/identity";
+import { canOwn, isProduction, usePortalState, useReadOnly, useRole } from "../../lib/identity";
 import { inheritedLayerLabel, providerLabel } from "../../lib/labels";
 import { can } from "../../lib/permissions";
 import { plural } from "../../lib/plural";
 import { scanAvailability } from "../../lib/scanAvailability";
+import { costPhrase, modelLabel } from "../../lib/scanFormat";
 import { useScanRun, type ScanRunState } from "../../lib/scanRun";
 import { scanRunKey } from "../shell/crumbs";
 import { DisabledReason } from "../state/DisabledReason";
@@ -227,6 +227,8 @@ function DescriptionsNeed({
   const production = isProduction(portal);
   const readOnly = useReadOnly();
   const mayConfigure = can(project, "project.configure") && !readOnly;
+  // Only an owner changes the org's keys: they get the link, not "an owner can add one".
+  const owner = canOwn(useRole());
   const [key, setKey] = useState("");
   const model = describeModel(config?.config, inherited, estimate);
   const provider = model.provider;
@@ -263,8 +265,8 @@ function DescriptionsNeed({
         </p>
       </div>
       <p className="text-sm" data-testid="describe-model">
-        Model:{" "}
-        {model.model ? <span className="font-mono">{`${provider}/${model.model}`}</span> : `${name}, its default model`}
+        {/* One form while the run goes and after it (never a raw provider/model id). */}
+        Model: {modelLabel(name, model.model)}
         {model.inherited && <span className="text-muted-foreground"> (inherited from {layer})</span>}
       </p>
       {!missing ? (
@@ -295,9 +297,19 @@ function DescriptionsNeed({
               <Field
                 label={`${name} API key`}
                 hint={
-                  production
-                    ? "Saved for this project only. An owner can add one for the whole organization in Organization settings."
-                    : "Stored encrypted. Only its last characters are ever shown."
+                  !production ? (
+                    "Stored encrypted. Only its last characters are ever shown."
+                  ) : owner ? (
+                    <>
+                      Saved for this project only. To use one key for every project, add it in{" "}
+                      <Link to="/settings" search={{ section: "models" }} className="text-primary-text hover:underline">
+                        Organization settings
+                      </Link>
+                      .
+                    </>
+                  ) : (
+                    "Saved for this project only. An organization owner can add one for every project."
+                  )
                 }
               >
                 {(p) => (
@@ -531,7 +543,7 @@ export function WizardConfigure({
       : avail.full.allowed
         ? undefined
         : avail.full.reason;
-  const cost = estimate.data?.cost && !estimate.data.cost_hidden ? ` (~${formatUsd(estimate.data.cost.usd)})` : "";
+  const cost = estimate.data?.cost && !estimate.data.cost_hidden ? ` (${costPhrase(estimate.data.cost.usd)})` : "";
   const describeLabel = waiting ? `Describe ${plural(waiting, "commit")}${cost}` : "Describe commits";
   const describeButton = (
     <Button variant="outline" onClick={() => describe.mutate()} disabled={!!describeReason || describe.isPending}>

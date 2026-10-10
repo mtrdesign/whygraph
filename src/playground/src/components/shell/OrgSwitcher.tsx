@@ -38,7 +38,9 @@ function NewDot() {
 }
 
 /**
- * The org switcher at the top of the sidebar (NAV-2). Production, org host: a menu
+ * The org switcher at the top of the sidebar (NAV-2). Production, org host: a
+ * full-width row under the brand (the name truncates only when it is longer than
+ * the sidebar, whole in its title), opening a menu
  * with who is signed in, the current org (role badge), the caller's other orgs
  * (fetched on first open, cached 5 minutes; each a hard navigation to its host),
  * then "All organizations" and "Create organization" on the base host. Local mode:
@@ -73,7 +75,8 @@ function OrgMenu({ state }: { state: PortalState | undefined }) {
       <DropdownMenuTrigger
         aria-label={`Organization: ${org?.name ?? "none"}. Switch organization`}
         data-testid="org-switcher"
-        className="ml-auto flex h-6 min-w-0 max-w-[9rem] items-center gap-1 rounded-md border border-border px-1.5 text-[12px] font-medium outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+        title={org?.name}
+        className="flex h-7 w-full min-w-0 items-center justify-between gap-1 rounded-md border border-border px-2 text-[12px] font-medium outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
       >
         <span className="truncate">{org?.name ?? "No organization"}</span>
         <ChevronsUpDownIcon className="size-3 shrink-0 text-muted-foreground" aria-hidden />

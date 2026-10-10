@@ -252,7 +252,10 @@ export function projectHealth(
     items.push({ id: "unsafe_path", tone: "error", title: "A symbolic link is in the way", actions: [] });
   }
 
-  const usable = p.initialized && p.root_status === "ok" && !p.importing;
+  // Access lost and an unsupported source refuse every scan: only their own fix is
+  // offered, never a Retry / Rescan / Describe the server would refuse (OVW-3).
+  const usable =
+    p.initialized && p.root_status === "ok" && !p.importing && !p.access_lost && p.source_supported !== false;
   if (usable && scanning) pill({ key: "scanning", label: "Scanning", tone: "busy" });
 
   // 7. A hard-stopped budget: the role block wins (the caller cannot spend anyway).

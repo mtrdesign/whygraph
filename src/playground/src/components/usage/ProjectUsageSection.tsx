@@ -4,6 +4,7 @@ import { budgetsApi, projectKey, projectUsageApi, type Budget, type ProjectSumma
 import { errorMessage } from "../../lib/apiErrors";
 import { formatNumber, formatPct, formatTokens, formatUsd } from "../../lib/format";
 import { canAdmin, usePortalState, useRole } from "../../lib/identity";
+import { inheritedLayerLabel } from "../../lib/labels";
 import { formatResetsAt } from "../../lib/usageRange";
 import { Field } from "../portal/Field";
 import { ConfirmDialog } from "../portal/ConfirmDialog";
@@ -53,13 +54,15 @@ function ProjectBudgetForm({ slug, budget }: { slug: string; budget: Budget | nu
     },
   });
   const dirty = amount.trim() !== savedAmount || hardStop !== savedStop;
+  // The budget above this one: the organization's in production, the portal's locally (MODE-5).
+  const above = inheritedLayerLabel(usePortalState().data?.mode, true).toLowerCase();
 
   return (
     <div className="flex flex-col gap-2 border-t border-border pt-4" data-testid="project-budget">
       <div className="row-wrap gap-y-0.5">
         <h3 className="text-[13px] font-medium">Project budget</h3>
         <span className="text-xs text-muted-foreground">
-          Caps what this project's LLM calls may cost in a month, on top of the organization's budget.
+          Caps what this project's LLM calls may cost in a month, on top of the {above}'s budget.
         </span>
       </div>
       <SectionForm
@@ -124,7 +127,7 @@ function ProjectBudgetForm({ slug, budget }: { slug: string; budget: Budget | nu
         open={confirmRemove}
         onOpenChange={setConfirmRemove}
         title="Remove the project budget?"
-        description="This project's LLM calls are then capped only by the organization's budget."
+        description={`This project's LLM calls are then capped only by the ${above}'s budget.`}
         confirmLabel="Remove budget"
         pending={remove.isPending}
         error={remove.isError ? errorMessage(remove.error) : null}
@@ -157,7 +160,17 @@ export function ProjectUsageSection({ slug, project }: { slug: string; project: 
       testId="project-usage"
       description={`Estimated LLM spend on this project this month.${resets ? ` Resets ${formatResetsAt(resets)}.` : ""}`}
     >
-      {report.isLoading && <Skeleton className="h-40" />}
+      {report.isLoading && (
+        <div className="flex flex-col gap-4" data-testid="project-usage-loading" aria-busy="true">
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
+            {[0, 1, 2].map((i) => (
+              <Skeleton key={i} className="h-[74px] rounded-lg" />
+            ))}
+          </div>
+          <Skeleton className="h-3 w-72 max-w-full" />
+          <Skeleton className="h-[260px] w-full rounded-xl" />
+        </div>
+      )}
       {report.isError && (
         <ErrorState error={report.error} title="Couldn't load this project's usage" onRetry={() => void report.refetch()} />
       )}

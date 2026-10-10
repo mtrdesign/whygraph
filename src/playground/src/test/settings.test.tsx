@@ -593,6 +593,14 @@ describe("project settings by audience and mode", () => {
     await screen.findByTestId("config-form");
     expect(screen.getByLabelText("Display name")).toBeDisabled();
     expect(screen.getByLabelText("Default model model")).toBeDisabled();
+    // SET-4: every control, including the ones `<fieldset disabled>` does not
+    // reach (Base UI's Switch and Checkbox are spans).
+    for (const select of Array.from(document.querySelectorAll("select"))) {
+      expect(select).toBeDisabled();
+    }
+    const forge = screen.getByRole("switch", { name: "Fetch pull requests and issues from GitHub" });
+    expect(forge).toHaveAttribute("data-disabled");
+    for (const box of screen.getAllByRole("checkbox")) expect(box).toHaveAttribute("data-disabled");
     expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
     expect(within(keyCard("anthropic")).queryByRole("button")).toBeNull();
     expect(within(keyCard("anthropic")).getByTestId("key-status")).toHaveTextContent(/^Set$/);

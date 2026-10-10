@@ -30,6 +30,19 @@ describe("consistency gates", () => {
     expect(hits(/toLocaleDateString|toLocaleTimeString|new Date\([^)]*\)\.toLocaleString/, ["lib/format.ts"])).toEqual([]);
   });
 
+  it("pins no locale on a date outside lib/format.ts (CN-3: one viewer-locale shape)", () => {
+    // `new Intl.DateTimeFormat("en-US", ...)`, an `"en-GB"` literal or a date helper handed `"en-US"` forces
+    // a spelling the viewer did not choose. (An `en-US` money format, `toLocaleString("en-US")` on a number,
+    // is not a date and stays allowed.)
+    const forced = /Intl\.DateTimeFormat\(\s*["'`]|["'`]en-GB["'`]|(?:formatUtc|toLocale(?:Date|Time)String)\([^\n]*["'`]en-US["'`]/;
+    expect(hits(forced, ["lib/format.ts"])).toEqual([]);
+    // The pattern itself: each forced form is caught, a money format is not.
+    expect(forced.test('new Intl.DateTimeFormat("en-GB", { month: "short" })')).toBe(true);
+    expect(forced.test('formatUtc(d, { month: "short" }, "en-US")')).toBe(true);
+    expect(forced.test('const L = "en-GB";')).toBe(true);
+    expect(forced.test('n.toLocaleString("en-US", { maximumFractionDigits: 6 })')).toBe(false);
+  });
+
   it("never shows 'Failed to load' (ER-1: ErrorState words the failure)", () => {
     expect(hits(/Failed to load/)).toEqual([]);
   });

@@ -12,12 +12,15 @@ import { useProjectQuery, useSlug } from "../lib/project";
 import { LAST_PROJECT_KEY } from "../lib/lastProject";
 import { createAppRouter, parseSearch, stringifySearch } from "../router";
 import {
+  ORG_SETTINGS_SECTIONS,
+  PROJECT_SETTINGS_SECTIONS,
   validateBaseSearch,
   validateInitSearch,
   validateProjectsSearch,
   validateScansSearch,
 } from "../lib/routeSearch";
 import { useUi } from "../store";
+import { configSections } from "../components/portal/ConfigForm";
 import { ThemeProvider } from "../theme";
 
 // The heavy views (xyflow, elk, echarts) are replaced by probes that print what
@@ -613,8 +616,27 @@ describe("search params for the M2f-3 pages", () => {
   });
 
   it("drops a section global settings does not have", async () => {
-    const global = mount("/settings?section=danger");
+    const global = mount("/settings?section=agents");
     await waitFor(() => expect(here(global.router)).toBe("/settings"));
+  });
+
+  it("deep-links every section a settings page renders (SET-1)", async () => {
+    const hooks = mount("/p/alpha/settings?section=hooks");
+    await waitFor(() => expect(here(hooks.router)).toBe("/p/alpha/settings?section=hooks"));
+    const projectIds = [
+      ...configSections("project", { production: false, source: "local" }),
+      ...configSections("project", { production: true, source: "github" }),
+    ].map((s) => s.id);
+    for (const id of [...projectIds, "general", "budgets", "agents", "access", "connections", "danger"]) {
+      expect(PROJECT_SETTINGS_SECTIONS as readonly string[]).toContain(id);
+    }
+    const orgIds = [
+      ...configSections("global", { production: false }),
+      ...configSections("global", { production: true, configurer: true }),
+    ].map((s) => s.id);
+    for (const id of [...orgIds, "general", "budgets", "danger"]) {
+      expect(ORG_SETTINGS_SECTIONS as readonly string[]).toContain(id);
+    }
   });
 
   it("validates the base routes' next, stay and from", () => {
@@ -796,6 +818,9 @@ describe("shell keyboard and titles", () => {
     });
     const heading = await screen.findByRole("heading", { level: 1, name: "Projects" });
     await waitFor(() => expect(heading).toHaveFocus());
+    // A heading is not a control: no focus box around the page title.
+    expect(heading).toHaveAttribute("tabindex", "-1");
+    expect(heading.style.outline).toMatch(/none/);
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Projects"));
   });
 
@@ -836,6 +861,17 @@ describe("shell keyboard and titles", () => {
     mount("/p/alpha/chat/12");
     const crumbs = await screen.findByRole("navigation", { name: "breadcrumb" });
     await waitFor(() => expect(crumbs).toHaveTextContent("Why the cache"));
+    // One line in the h-12 header: no wrap, the middle crumbs truncate first and the
+    // last (the page) keeps most of the line.
+    const list = within(crumbs).getByTestId("breadcrumbs");
+    expect(list.className).toContain("flex-nowrap");
+    expect(list.className).not.toMatch(/(^|\s)flex-wrap(\s|$)/);
+    const items = list.querySelectorAll('[data-slot="breadcrumb-item"]');
+    const last = items[items.length - 1];
+    expect(last.className).toContain("shrink-0");
+    expect(last.className).toContain("max-w-[70%]");
+    expect(last.querySelector('[data-slot="breadcrumb-page"]')?.className).toContain("truncate");
+    for (const middle of Array.from(items).slice(0, -1)) expect(middle.className).toContain("min-w-0");
     await waitFor(() => expect(document.title).toBe("Why the cache · Project alpha · WhyGraph"));
     document.body.innerHTML = "";
 

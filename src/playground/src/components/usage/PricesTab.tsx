@@ -2,19 +2,30 @@ import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { portalKey, pricesApi, type PriceBody, type PriceRow } from "../../api";
 import { authMessage } from "../../lib/authErrors";
-import { formatDateTime, formatUsd } from "../../lib/format";
+import { formatDateTime, formatUsd, formatUsdPrecise } from "../../lib/format";
+import { providerLabel } from "../../lib/labels";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { TableSkeleton } from "../state/Skeletons";
 import { Skeleton } from "../ui/skeleton";
-import { Field, nativeSelectClass } from "../portal/Field";
+import { Field } from "../portal/Field";
 import { ResponsiveTable, type Column } from "../layout/ResponsiveTable";
-import { UsageError, UsageSection } from "./parts";
+import { ChoiceSelect, UsageError, UsageSection } from "./parts";
 
 export const PRICES_KEY = portalKey("prices");
 
 /** The providers a price may name (`LlmClientFactory.BUILTIN_PROVIDERS`). */
 export const PRICE_PROVIDERS = ["anthropic", "openai", "openrouter", "deepseek", "ollama"] as const;
+
+/** The Model box's example for each provider, in that provider's own id format (USE-5). */
+export const MODEL_PLACEHOLDER: Record<(typeof PRICE_PROVIDERS)[number], string> = {
+  anthropic: "e.g. claude-sonnet-4-5",
+  openai: "e.g. gpt-4o-mini",
+  openrouter: "e.g. anthropic/claude-sonnet-4.5",
+  deepseek: "e.g. deepseek-chat",
+  ollama: "e.g. llama3.1",
+};
 
 const MAX_RATE = 10_000;
 
@@ -34,7 +45,7 @@ const rate = (v: number | null) =>
     ? "-"
     : Math.round(v * 100) / 100 === v
       ? formatUsd(v)
-      : `$${v.toLocaleString("en-US", { maximumFractionDigits: 6 })}`;
+      : formatUsdPrecise(v);
 
 function draftOf(row?: PriceRow): Draft {
   const s = (v: number | null | undefined) => (v === null || v === undefined ? "" : String(v));
@@ -164,19 +175,25 @@ function AddPrice() {
   return (
     <form onSubmit={submit} className="flex flex-col gap-2" data-testid="add-price" noValidate>
       <div className="flex flex-wrap items-end gap-3">
-        <Field label="Provider" className="w-36">
+        <Field label="Provider" className="w-36 max-sm:w-full">
           {(p) => (
-            <select {...p} className={nativeSelectClass} value={provider} onChange={(e) => setProvider(e.target.value)}>
-              {PRICE_PROVIDERS.map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
+            <ChoiceSelect
+              {...p}
+              value={provider}
+              onChange={setProvider}
+              options={PRICE_PROVIDERS.map((name) => ({ value: name, label: providerLabel(name) }))}
+            />
           )}
         </Field>
-        <Field label="Model" className="w-56">
-          {(p) => <Input {...p} placeholder="e.g. deepseek-chat" value={model} onChange={(e) => setModel(e.target.value)} />}
+        <Field label="Model" className="w-56 max-sm:w-full">
+          {(p) => (
+            <Input
+              {...p}
+              placeholder={MODEL_PLACEHOLDER[provider as (typeof PRICE_PROVIDERS)[number]] ?? "e.g. model-id"}
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+            />
+          )}
         </Field>
         <RateInputs draft={draft} onChange={setDraft} />
         <Button type="submit" size="sm" disabled={save.isPending}>
@@ -189,6 +206,33 @@ function AddPrice() {
         </p>
       )}
     </form>
+  );
+}
+
+/** The Prices tab while it loads: the intro, the Add form (editors) and the table, in their shapes (ER-5). */
+function PricesSkeleton({ canEdit }: { canEdit: boolean }) {
+  const card = "flex flex-col gap-4 rounded-xl border border-border bg-card p-4 shadow-card sm:p-5";
+  return (
+    <div className="flex flex-col gap-6" data-testid="prices-loading">
+      <div className="flex flex-col gap-1.5">
+        <Skeleton className="h-3.5 w-full" />
+        <Skeleton className="h-3.5 w-3/5" />
+      </div>
+      {canEdit && (
+        <div className={card}>
+          <Skeleton className="h-4 w-28" />
+          <div className="flex flex-wrap gap-3">
+            {["w-36", "w-56", "w-28", "w-28", "w-28", "w-28"].map((w, i) => (
+              <Skeleton key={i} className={`h-8 ${w}`} />
+            ))}
+          </div>
+        </div>
+      )}
+      <div className={card}>
+        <Skeleton className="h-4 w-24" />
+        <TableSkeleton rows={8} cols={7} label="Loading the price table" />
+      </div>
+    </div>
   );
 }
 
@@ -212,7 +256,7 @@ export function PricesTab({ canEdit }: { canEdit: boolean }) {
     onError: (err) => setRevertError(authMessage(err)),
   });
 
-  if (prices.isLoading) return <Skeleton className="h-40" />;
+  if (prices.isLoading) return <PricesSkeleton canEdit={canEdit} />;
   if (prices.isError || !prices.data) {
     return (
       <UsageError

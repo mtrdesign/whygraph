@@ -410,7 +410,7 @@ describe("Projects list", () => {
     const alpha = await screen.findByTestId("project-alpha");
     expect(within(alpha).getByTestId("card-stats")).toHaveTextContent("1,240 commits · 38% described · 52 symbols explained");
     expect(within(alpha).getByTestId("card-cost")).toHaveTextContent("$12 this month of $50");
-    expect(within(alpha).getByRole("meter")).toHaveAttribute("aria-valuenow", "25");
+    expect(within(alpha).getByRole("progressbar", { name: "Monthly budget used" })).toHaveAttribute("aria-valuenow", "25");
     // A repo directly in the shared folder would only repeat its name: no subtitle;
     // a nested one shows the path relative to the shared folder.
     expect(within(alpha).queryByTestId("card-subtitle")).toBeNull();
@@ -443,6 +443,13 @@ describe("Projects list", () => {
     const card = await screen.findByTestId("project-alpha");
     expect(card).toHaveTextContent("Scanning");
     expect(card).not.toHaveTextContent("Scanned");
+  });
+
+  it("holds the count line with a placeholder while the list loads (ER-5)", async () => {
+    mount("/");
+    expect(await screen.findByTestId("projects-count-loading")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("projects-count")).toHaveTextContent(/\d+ projects?/));
+    expect(screen.queryByTestId("projects-count-loading")).toBeNull();
   });
 
   it("searches and sorts through the URL", async () => {
@@ -622,6 +629,38 @@ describe("Overview", () => {
     expect(within(failed).getByRole("link", { name: "Open log" })).toHaveAttribute("href", "/p/alpha/scans/9");
     await user.click(within(failed).getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(here(router)).toBe("/p/alpha/scans/7"));
+  });
+
+  it("an access-lost project offers only its fix: no Retry, Rescan or Describe anywhere (OVW-3)", async () => {
+    fake.details.alpha = details({
+      source: "github",
+      access_lost: true,
+      access_lost_reason: "no_access",
+      last_scan_status: "failed",
+      stale: { commits_behind: 2 },
+    });
+    fake.overview = overview({ last_failure: { run_id: 9, at: OLD, message: "simulated crawler error" } });
+    fake.estimate = {
+      commits: 30,
+      upper_bound: true,
+      large_commits: 0,
+      model: { provider: "anthropic", model: "claude-haiku-4-5" },
+      tokens: null,
+      cost: null,
+      cost_hidden: true,
+      missing_key: null,
+    };
+    mount("/p/alpha");
+    expect(await screen.findByTestId("access-lost")).toBeInTheDocument();
+    expect(screen.queryByTestId("health-failed")).toBeNull();
+    expect(screen.queryByTestId("stale-banner")).toBeNull();
+    expect(screen.queryByTestId("health-waiting")).toBeNull();
+    expect(screen.queryByTestId("estimate-card")).toBeNull();
+    expect(within(screen.getByTestId("health-panel")).queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Describe" })).toBeNull();
+    for (const b of screen.queryAllByRole("button", { name: "Rescan" })) expect(b).toBeDisabled();
+    const health = projectHealth(details({ access_lost: true, access_lost_reason: "no_access", last_scan_status: "failed" }));
+    expect(health.items.flatMap((i) => i.actions.map((a) => a.kind))).not.toContain("retry_scan");
   });
 
   it("shows waiting commits without a price to a caller without project.usage (R6)", async () => {

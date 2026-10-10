@@ -16,6 +16,7 @@ import { ProjectProvider } from "../lib/project";
 import { createAppRouter } from "../router";
 import { ThemeProvider } from "../theme";
 import { useUi } from "../store";
+import { formatResetsOn } from "../lib/usageRange";
 
 // The chart card draws to a canvas; these tests cover the surfaces, not ECharts.
 vi.mock("echarts-for-react/esm/core", () => ({ default: () => <div data-testid="echart" /> }));
@@ -61,6 +62,8 @@ const usageBlock = (me: unknown, org: unknown, projects_over: unknown = org ? []
   org,
   projects_over,
 });
+/** The reset day as every budget surface prints it (the viewer's locale, CN-3). */
+const RESETS = `Resets ${formatResetsOn("2026-11-01T00:00:00+00:00")}.`;
 const ada = { uid: "u1", display_name: "Ada", email: null, github_login: "ada", role: null, is_instance_admin: false };
 function orgState(role: string, usage: unknown) {
   return {
@@ -236,7 +239,7 @@ describe("BudgetBanner", () => {
     // The Stopped pill, the amount, the reset day, and who can raise it.
     expect(within(banner).getByText("Stopped")).toBeInTheDocument();
     expect(banner).toHaveTextContent("$50 of $50");
-    expect(banner).toHaveTextContent("Resets 1 Nov.");
+    expect(banner).toHaveTextContent(RESETS);
     expect(banner).toHaveTextContent("Ask an owner or admin to raise it.");
     expect(within(banner).getByRole("link", { name: "My usage" })).toHaveAttribute("href", "/usage/me");
     expect(within(banner).queryByRole("button", { name: "Dismiss for this month" })).toBeNull();
@@ -279,7 +282,7 @@ describe("BudgetBanner", () => {
     mount("/");
     const banner = await screen.findByTestId("budget-banner-org");
     expect(within(banner).getByText("Stopped")).toBeInTheDocument();
-    expect(banner).toHaveTextContent("Resets 1 Nov.");
+    expect(banner).toHaveTextContent(RESETS);
     expect(within(banner).queryByRole("button", { name: "Dismiss for this month" })).toBeNull();
     expect(within(banner).getByRole("link", { name: "Review budgets" })).toHaveAttribute("href", "/usage?tab=budgets");
   });
@@ -336,7 +339,11 @@ describe("BudgetBanner", () => {
       usage: usageBlock(null, gauge({ pct: 76, spent_usd: 76 })),
     };
     mount("/");
-    expect(await screen.findByTestId("budget-banner-org")).toHaveTextContent("at 76% of its monthly budget");
+    const banner = await screen.findByTestId("budget-banner-org");
+    expect(banner).toHaveTextContent("at 76% of its monthly budget");
+    // The portal has no organization to name (MODE-5).
+    expect(banner).toHaveTextContent("This portal is at 76% of its monthly budget");
+    expect(banner).not.toHaveTextContent("Local is at");
   });
 });
 
@@ -360,7 +367,7 @@ describe("budget_exceeded on a project", () => {
     mount("/p/alpha");
     const notice = await screen.findByTestId("budget-notice");
     expect(within(notice).getByText("Stopped")).toBeInTheDocument();
-    expect(notice).toHaveTextContent("Resets 1 Nov.");
+    expect(notice).toHaveTextContent(RESETS);
     expect(notice).toHaveAttribute("data-tone", "warning");
     expect(within(notice).getByRole("link", { name: "Review budgets" })).toHaveAttribute("href", "/usage?tab=budgets");
     expect(within(notice).queryByRole("button", { name: "Dismiss for this month" })).toBeNull();
@@ -440,6 +447,11 @@ describe("Chat under a hard stop", () => {
     updated_at: "2026-10-01T00:00:00Z",
     messages,
   });
+  // A thread sends only once its provider list loaded (a failed list disables the composer, ER-4).
+  beforeEach(() => {
+    fake.routes["/api/projects/alpha/chat/providers"] = () =>
+      json([{ provider: "openai", configured: true, default_model: "gpt", env_var: null }]);
+  });
 
   it("replaces the composer with the notice, keeping the history readable", async () => {
     fake.routes["/api/projects/alpha"] = () => json(project("alpha", { llm_block: "budget_exceeded", llm_block_scope: "project" }));
@@ -452,6 +464,42 @@ describe("Chat under a hard stop", () => {
     );
     expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
     expect(screen.queryByRole("textbox")).toBeNull();
+  });
+
+  it("the Chat notice gives the reset day and tells a member to ask an owner or admin (USE-2)", async () => {
+    fake.routes["/api/projects/alpha"] = () => json(project("alpha", { llm_block: "budget_exceeded", llm_block_scope: "project" }));
+    fake.routes["/api/projects/alpha/chat/sessions/1"] = () => json(transcript([msg(1, "user", "why?")]));
+    inProject(<MessageThread sessionId={1} />);
+    const notice = await screen.findByTestId("chat-budget-notice");
+    expect(notice).toHaveAttribute("data-scope", "project");
+    await waitFor(() => expect(notice).toHaveTextContent(RESETS));
+    expect(notice).toHaveTextContent("Ask an owner or admin to raise it.");
+    expect(within(notice).queryByRole("link")).toBeNull();
+  });
+
+  it("the Chat notice links an owner to Review budgets, and local mode to Raise it in Budgets (USE-2)", async () => {
+    fake.routes["/api/projects/alpha"] = () => json(project("alpha", { llm_block: "budget_exceeded", llm_block_scope: "org" }));
+    fake.routes["/api/projects/alpha/chat/sessions/1"] = () => json(transcript([msg(1, "user", "why?")]));
+    fake.state = orgState("owner", usageBlock(null, gauge({ budget_usd: 100, spent_usd: 100, pct: 100, hard_stop: true, blocked: true })));
+    mount("/p/alpha/chat/1");
+    let notice = await screen.findByTestId("chat-budget-notice");
+    expect(notice).toHaveTextContent(RESETS);
+    expect(within(notice).getByRole("link", { name: "Review budgets" })).toHaveAttribute("href", "/usage?tab=budgets");
+    expect(notice).not.toHaveTextContent("Ask an owner or admin");
+    cleanup();
+
+    fake.state = {
+      mode: "local",
+      setup_complete: true,
+      user: { uid: "u1", display_name: "Local", role: "owner" },
+      port: 8765,
+      shared_folders: [],
+      usage: usageBlock(null, gauge({ budget_usd: 100, spent_usd: 100, pct: 100, hard_stop: true, blocked: true })),
+    };
+    mount("/p/alpha/chat/1");
+    notice = await screen.findByTestId("chat-budget-notice");
+    expect(notice).toHaveTextContent("This portal's monthly LLM budget is reached");
+    expect(within(notice).getByRole("link", { name: "Raise it in Budgets" })).toHaveAttribute("href", "/usage?tab=budgets");
   });
 
   it("keeps the composer when nothing blocks", async () => {

@@ -47,9 +47,11 @@ test("a chat message shows on Usage & cost, then a hard-stopped project budget c
   await page.goto(`/p/${notes.slug}`);
   const stop = page.getByTestId("budget-notice");
   await expect(stop).toContainText("Stopped");
-  await expect(stop).toContainText(/Resets \d+ \w{3}\./);
+  // The reset day in the viewer's locale: "Nov 1" or "1 Nov" (CN-3).
+  await expect(stop).toContainText(/Resets (\d+ \w{3}|\w{3} \d+)\./);
   await expect(stop.getByRole("button", { name: "Dismiss for this month" })).toHaveCount(0);
-  await expect(stop.getByRole("link", { name: "Review budgets" })).toBeVisible();
+  // Local mode's one user raises it themself (USE-2).
+  await expect(stop.getByRole("link", { name: "Raise it in Budgets" })).toBeVisible();
 
   // Leave the project usable for any spec that follows.
   await call(page.request, "DELETE", `${env.baseUrl}/api/projects/${notes.slug}/budget`);

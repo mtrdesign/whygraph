@@ -80,6 +80,28 @@ test.describe("local portal at 390px", () => {
     });
   }
 
+  test("local /setup (first run)", async ({ page }) => {
+    // A fresh portal is the only one that shows /setup: answer the state as a
+    // first run (no user yet) with a long shared folder, the case PH-4 names.
+    const longFolder = "/Users/someone-with-a-long-name/Projects/clients/an-extremely-long-folder-name-for-repositories";
+    await page.route("**/api/portal/state", async (route) => {
+      const real = await route.fetch();
+      const body = (await real.json()) as Record<string, unknown>;
+      await route.fulfill({
+        response: real,
+        json: { ...body, setup_complete: false, user: null, shared_folders: [longFolder] },
+      });
+    });
+    await page.goto("/setup");
+    await expect(page.getByRole("heading", { name: "Welcome to WhyGraph" })).toBeVisible();
+    await expect(page.getByTitle(longFolder)).toBeVisible();
+    expect(await problems(page), "local /setup").toEqual([]);
+    // The path stays inside its card.
+    const card = (await page.locator("form").boundingBox())!;
+    const path = (await page.getByTitle(longFolder).boundingBox())!;
+    expect(path.x + path.width).toBeLessThanOrEqual(card.x + card.width + 1);
+  });
+
   test("local navigation sheet is 240px wide", async ({ page }) => {
     await page.goto("/");
     await page.getByRole("button", { name: "Open navigation" }).click();

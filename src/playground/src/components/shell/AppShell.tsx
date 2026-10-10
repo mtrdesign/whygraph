@@ -93,25 +93,32 @@ export function PageHeader({
         <MenuIcon />
       </Button>
       <Breadcrumb className="min-w-0 flex-1">
-        <BreadcrumbList>
+        {/* One line in the h-12 header: the middle crumbs truncate first, the
+            last (the page) keeps most of the line and truncates only when it
+            alone is too long. */}
+        <BreadcrumbList className="flex-nowrap overflow-hidden" data-testid="breadcrumbs">
           {crumbs.map((crumb, i) => {
             const last = i === crumbs.length - 1;
             return (
               <Fragment key={`${i}:${crumb.label}`}>
-                <BreadcrumbItem>
+                <BreadcrumbItem
+                  className={last ? "min-w-0 max-w-[70%] shrink-0" : "min-w-0 shrink"}
+                  title={crumb.label}
+                >
                   {last ? (
-                    <BreadcrumbPage>{crumb.label}</BreadcrumbPage>
+                    <BreadcrumbPage className="truncate">{crumb.label}</BreadcrumbPage>
                   ) : crumb.to ? (
                     <BreadcrumbLink
+                      className="truncate"
                       render={<Link to={crumb.to.to} params={crumb.to.params} />}
                     >
                       {crumb.label}
                     </BreadcrumbLink>
                   ) : (
-                    <span>{crumb.label}</span>
+                    <span className="truncate">{crumb.label}</span>
                   )}
                 </BreadcrumbItem>
-                {!last && <BreadcrumbSeparator />}
+                {!last && <BreadcrumbSeparator className="shrink-0" />}
               </Fragment>
             );
           })}

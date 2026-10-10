@@ -130,6 +130,12 @@ afterEach(() => {
 
 // ---- the consent page ---------------------------------------------------------------
 
+/** Choose a project in the consent page's styled select (CN-5: `ui/select`, not a native `<select>`). */
+async function pickProject(user: ReturnType<typeof userEvent.setup>, label: string) {
+  await user.click(await screen.findByRole("combobox", { name: "Project" }));
+  await user.click(await screen.findByRole("option", { name: label }));
+}
+
 describe("connect page", () => {
   it("connect page uses server URLs only", async () => {
     const user = userEvent.setup();
@@ -142,7 +148,7 @@ describe("connect page", () => {
     expect(hard).toHaveBeenLastCalledWith(SERVER_CANCEL);
 
     // Allow goes to the server's `redirect`, byte for byte, after posting the validated request.
-    await user.selectOptions(await screen.findByRole("combobox"), "acme/alpha");
+    await pickProject(user, "Acme / Alpha");
     await user.click(screen.getByRole("button", { name: "Allow" }));
     await waitFor(() => expect(hard).toHaveBeenCalledTimes(2));
     expect(hard).toHaveBeenLastCalledWith(SERVER_ALLOW);
@@ -198,14 +204,15 @@ describe("connect page", () => {
       });
     mount(`/connect${query({ org: "acme", project: "beta" })}`);
     await screen.findByTestId("connect-access-lost");
-    expect(screen.getByRole("combobox")).toHaveValue("acme/beta");
+    // The styled select shows the hinted project (CN-5).
+    expect(screen.getByRole("combobox", { name: "Project" })).toHaveTextContent("Acme / Beta");
   });
 
   it("shows the server's refusal when Allow fails", async () => {
     fake.routes["POST /api/connect/authorize"] = () => json({ detail: "not found" }, 404);
     const user = userEvent.setup();
     mount(`/connect${query()}`);
-    await user.selectOptions(await screen.findByRole("combobox"), "acme/alpha");
+    await pickProject(user, "Acme / Alpha");
     await user.click(screen.getByRole("button", { name: "Allow" }));
     await screen.findByTestId("connect-error");
     expect(hard).not.toHaveBeenCalled();

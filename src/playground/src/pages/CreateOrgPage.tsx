@@ -7,6 +7,7 @@ import { Field } from "../components/portal/Field";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { ACCOUNT_ORGS_KEY } from "../components/shell/OrgSwitcher";
 import { Button } from "../components/ui/button";
+import { DisabledReason } from "../components/state/DisabledReason";
 import { Input } from "../components/ui/input";
 import { authMessage } from "../lib/authErrors";
 import { baseHostOf, useFinishAuth, usePortalState } from "../lib/identity";
@@ -72,8 +73,19 @@ export function CreateOrgPage() {
       : code === "bad_slug"
         ? authMessage(create.error)
         : undefined;
+  // The live check refused the slug on screen: no "your address will be" preview,
+  // and Create is disabled with the check's reason (a known-bad submit is not offered).
+  const refused = checked && !checked.available ? `${slug}.${host} ${SLUG_REASON[checked.reason ?? "invalid"] ?? "is not available"}` : null;
+  const disabledReason = !name.trim()
+    ? "Enter the organization's name."
+    : !slug
+      ? "Enter a URL name."
+      : refused
+        ? `Choose another URL name: ${refused}.`
+        : null;
   const submit = (e: FormEvent) => {
     e.preventDefault();
+    if (refused) return;
     create.mutate();
   };
 
@@ -110,13 +122,17 @@ export function CreateOrgPage() {
         <Field
           label="URL name"
           hint={
-            <>
-              Your address will be{" "}
-              <span className="font-mono" data-testid="slug-preview">
-                {slug || "your-org"}.{host}
-              </span>
-              . Use {SLUG_RULE}
-            </>
+            refused ? (
+              `Use ${SLUG_RULE}`
+            ) : (
+              <>
+                Your address will be{" "}
+                <span className="font-mono" data-testid="slug-preview">
+                  {slug || "your-org"}.{host}
+                </span>
+                . Use {SLUG_RULE}
+              </>
+            )
           }
           error={slugError}
         >
@@ -140,9 +156,7 @@ export function CreateOrgPage() {
             data-testid="slug-status"
             className={checked.available ? "text-xs text-success" : "text-xs text-destructive"}
           >
-            {checked.available
-              ? `${slug}.${host} is available`
-              : `${slug}.${host} ${SLUG_REASON[checked.reason ?? "invalid"] ?? "is not available"}`}
+            {checked.available ? `${slug}.${host} is available` : refused}
           </p>
         )}
         {create.isError && !slugError && (
@@ -150,9 +164,17 @@ export function CreateOrgPage() {
             <AlertDescription>{authMessage(create.error)}</AlertDescription>
           </Alert>
         )}
-        <Button type="submit" disabled={create.isPending || !name.trim() || !slug}>
-          {create.isPending ? "Creating…" : "Create organization"}
-        </Button>
+        {disabledReason && !create.isPending ? (
+          <DisabledReason reason={disabledReason}>
+            <Button type="submit" disabled className="w-full">
+              Create organization
+            </Button>
+          </DisabledReason>
+        ) : (
+          <Button type="submit" disabled={create.isPending}>
+            {create.isPending ? "Creating…" : "Create organization"}
+          </Button>
+        )}
       </form>
     </AuthLayout>
   );

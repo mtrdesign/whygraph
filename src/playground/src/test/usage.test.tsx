@@ -5,7 +5,7 @@ import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PROJECT_ACTIONS } from "../lib/permissions";
 import { formatPct, formatTokens, formatUsd } from "../lib/format";
-import { addDays, formatResetsAt, matchPreset, monthRange, presetRange } from "../lib/usageRange";
+import { addDays, formatRange, formatResetsAt, formatResetsOn, matchPreset, monthRange, presetRange } from "../lib/usageRange";
 import { AMOUNT_HINT, parseAmount } from "../components/usage/BudgetsTab";
 import { parseRates } from "../components/usage/PricesTab";
 import { validateUsageSearch } from "../pages/UsagePage";
@@ -16,6 +16,23 @@ import { useUi } from "../store";
 // The chart card draws to a canvas; these tests cover the page, not ECharts.
 vi.mock("echarts-for-react/esm/core", () => ({ default: () => <div data-testid="echart" /> }));
 vi.mock("../components/charts/echarts", () => ({ default: {} }));
+
+/** Choose `option` in a styled select (`ui/select`, CN-5): open it, click the option. */
+async function pick(trigger: HTMLElement, option: string) {
+  await userEvent.click(trigger);
+  await userEvent.click(await screen.findByRole("option", { name: option }));
+}
+
+/** The option labels a styled select offers (opens it, reads them, closes it with Escape). */
+async function optionsOf(trigger: HTMLElement): Promise<string[]> {
+  await userEvent.click(trigger);
+  const listbox = await screen.findByRole("listbox");
+  const labels = within(listbox)
+    .getAllByRole("option")
+    .map((o) => o.textContent ?? "");
+  await userEvent.keyboard("{Escape}");
+  return labels;
+}
 
 // ---- pure helpers ------------------------------------------------------------------
 
@@ -60,8 +77,22 @@ describe("lib/usageRange", () => {
     expect(addDays("2026-02-28", 1)).toBe("2026-03-01");
   });
 
-  it("says when a month resets", () => {
-    expect(formatResetsAt("2026-11-01T00:00:00+00:00")).toBe("1 Nov, 00:00 UTC");
+  it("says when a month resets, in the alerts' viewer-locale shape (CN-3)", () => {
+    const utc = (o: Intl.DateTimeFormatOptions) =>
+      new Intl.DateTimeFormat(undefined, { ...o, timeZone: "UTC" }).format(new Date("2026-11-01T00:00:00Z"));
+    const shape = { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" } as const;
+    expect(formatResetsAt("2026-11-01T00:00:00+00:00")).toBe(`${utc(shape)} UTC`);
+    expect(formatResetsOn("2026-11-01T00:00:00Z")).toBe(utc({ day: "numeric", month: "short" }));
+    expect(formatResetsAt("soon")).toBe("soon");
+  });
+
+  it("captions a range in the viewer's locale, never a forced en-GB (CN-3)", () => {
+    const day = (d: string) =>
+      new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" }).format(
+        new Date(`${d}T00:00:00Z`),
+      );
+    expect(formatRange({ from: "2026-10-01", to: "2026-11-01" })).toBe(`${day("2026-10-01")} - ${day("2026-10-31")}`);
+    expect(formatRange({ from: "2026-10-07", to: "2026-10-08" })).toBe(day("2026-10-07"));
   });
 
   it("validates the /usage address", () => {
@@ -510,9 +541,9 @@ describe("breakdowns, drill-down and calls", () => {
     // Every filter applies as it changes: there is no Filter button (CN-2).
     const filters = screen.getByTestId("calls-filters");
     expect(within(filters).queryByRole("button", { name: "Filter" })).toBeNull();
-    await userEvent.selectOptions(within(filters).getByLabelText("Sort"), "cost");
+    await pick(within(filters).getByLabelText("Sort"), "Costliest first");
     await waitFor(() => expect(here(router)).toContain("sort=cost"));
-    await userEvent.selectOptions(within(filters).getByLabelText("Task"), "analyze");
+    await pick(within(filters).getByLabelText("Task"), "Descriptions");
     await waitFor(() => expect(here(router)).toBe("/usage?tab=calls&project=alpha&sort=cost&task=analyze"));
     await waitFor(() =>
       expect(
@@ -571,8 +602,8 @@ describe("budget editor", () => {
     expect(owner).toHaveTextContent("Only an owner can change an owner's budget.");
     expect(within(screen.getByTestId("budget-member-u2")).getByRole("textbox")).toHaveValue("25");
     const picker = within(screen.getByTestId("add-member-budget")).getByLabelText("Member");
-    const options = within(picker).getAllByRole("option").map((o) => o.textContent);
-    expect(options).toEqual(["Choose…", "Cleo (@cleo)"]);
+    expect(picker).toHaveTextContent("Choose…");
+    expect(await optionsOf(picker)).toEqual(["Cleo (@cleo)"]);
     expect(screen.getByTestId("unpriced-note")).toHaveTextContent("3 calls had no price and are not counted toward budgets");
     expect(screen.getByTestId("budget-alerts")).toHaveTextContent("75%");
     expect(screen.getByTestId("budget-org-spent")).toHaveTextContent("$80 of $100 (80%)");
@@ -582,11 +613,7 @@ describe("budget editor", () => {
     mount("/usage?tab=budgets");
     expect(within(await screen.findByTestId("budget-member-u3")).getByRole("textbox")).toBeInTheDocument();
     const picker = within(screen.getByTestId("add-member-budget")).getByLabelText("Member");
-    expect(within(picker).getAllByRole("option").map((o) => o.textContent)).toEqual([
-      "Choose…",
-      "Cleo (@cleo)",
-      "Zed (@zed)",
-    ]);
+    expect(await optionsOf(picker)).toEqual(["Cleo (@cleo)", "Zed (@zed)"]);
   });
 
   it("validates the amount before sending", async () => {
@@ -856,5 +883,134 @@ describe("Usage tabs, filters and copy (S21a)", () => {
     expect(bundled).toHaveTextContent("$0.30");
     expect(within(bundled).getByText("bundled")).toBeInTheDocument();
     expect(screen.getByTestId("price-openrouter-deepseek/deepseek-chat")).toHaveTextContent("$0.50");
+  });
+});
+
+// ---- S25 fix pass: budget states, soft bars, styled selects, shaped skeletons, local copy -----
+
+describe("Usage S25 fixes", () => {
+  const spent = (over: Record<string, unknown>) => ({
+    ...BUDGETS,
+    projects: [
+      { ...budget(0.01, 0.24, true), slug: "alpha", name: "Project alpha" },
+      { ...budget(10, 12, false), slug: "beta", name: "Project beta" },
+      { ...budget(40, 10, true), slug: "gamma", name: "Project gamma" },
+    ],
+    ...over,
+  });
+
+  it("pills a spent budget: Stopped with a hard stop, Budget reached without one, nothing below 100% (CO-1)", async () => {
+    fake.routes["/api/budgets"] = () => json(spent({}));
+    mount("/usage?tab=budgets");
+    const stopped = within(await screen.findByTestId("budget-project-alpha")).getByTestId("budget-stopped");
+    expect(stopped).toHaveTextContent("Stopped");
+    expect(stopped).toHaveAttribute("title", "Monthly budget reached");
+    expect(stopped).toHaveAttribute("data-tone", "warn");
+    const reached = within(screen.getByTestId("budget-project-beta")).getByTestId("budget-reached");
+    expect(reached).toHaveTextContent("Budget reached");
+    expect(reached).toHaveAttribute("data-tone", "warn");
+    expect(within(screen.getByTestId("budget-project-gamma")).queryByTestId("budget-stopped")).toBeNull();
+    expect(within(screen.getByTestId("budget-project-gamma")).queryByTestId("budget-reached")).toBeNull();
+  });
+
+  it("lists budgets as rows inside their card, never a panel inside a card (CN-5)", async () => {
+    mount("/usage?tab=budgets");
+    const row = await screen.findByTestId("budget-org");
+    expect(row.className).not.toMatch(/bg-muted|rounded-lg|border /);
+    expect(row.parentElement?.className).toContain("divide-y");
+  });
+
+  it("draws spend in soft tones: indigo, a softened warning from 75%, a softened destructive from 100% (CO-5)", async () => {
+    fake.routes["/api/budgets"] = () => json(spent({}));
+    mount("/usage?tab=budgets");
+    const bar = (testId: string) => within(screen.getByTestId(testId)).getByRole("progressbar");
+    await screen.findByTestId("budget-project-alpha");
+    // gamma 25%, the org 80%, alpha 2,400%.
+    expect(bar("budget-project-gamma")).toHaveAttribute("data-level", "ok");
+    expect(bar("budget-project-gamma").className).toContain("bg-track");
+    expect((bar("budget-project-gamma").firstChild as HTMLElement).className).toContain("bg-primary");
+    expect(bar("budget-org")).toHaveAttribute("data-level", "high");
+    expect((bar("budget-org").firstChild as HTMLElement).className).toContain("bg-warning/70");
+    expect(bar("budget-project-alpha")).toHaveAttribute("data-level", "over");
+    expect((bar("budget-project-alpha").firstChild as HTMLElement).className).toContain("bg-destructive/70");
+    for (const el of screen.getAllByRole("progressbar")) {
+      expect((el.firstChild as HTMLElement).className).not.toMatch(/\bbg-warning(?!\/)\b|\bbg-destructive(?!\/)\b/);
+    }
+  });
+
+  it("uses the styled select for the range, the Calls filters and the budget picker (CN-5)", async () => {
+    mount("/usage?tab=projects");
+    const range = await screen.findByRole("combobox", { name: "Range" });
+    expect(range.tagName).toBe("BUTTON");
+    expect(range).toHaveTextContent("This month");
+    cleanup();
+    mount("/usage?tab=budgets");
+    const picker = within(await screen.findByTestId("add-member-budget")).getByRole("combobox", { name: "Member" });
+    expect(picker.tagName).toBe("BUTTON");
+    expect(document.querySelector("[data-testid=usage-page] select:not(.sm\\:hidden)")).toBeNull();
+  });
+
+  it("shapes the loading states: tiles and tables, not one block (ER-5)", async () => {
+    const never = () => new Promise<Response>(() => {});
+    fake.routes["/api/usage"] = never as never;
+    fake.routes["/api/budgets"] = never as never;
+    fake.routes["GET /api/prices"] = never as never;
+    mount("/usage");
+    const overview = await screen.findByTestId("usage-overview-loading");
+    expect(overview.querySelectorAll(".grid > div")).toHaveLength(4 + 2);
+    expect(within(overview).getAllByTestId("skeleton").length).toBeGreaterThanOrEqual(2);
+    cleanup();
+    mount("/usage?tab=budgets");
+    expect(within(await screen.findByTestId("budgets-loading")).getAllByTestId("skeleton").length).toBeGreaterThanOrEqual(3);
+    cleanup();
+    mount("/usage?tab=prices");
+    expect(within(await screen.findByTestId("prices-loading")).getByText("Loading the price table")).toBeInTheDocument();
+  });
+
+  it("local budgets speak to the one portal user, not to a team (MODE-5)", async () => {
+    fake.state = localState();
+    mount("/usage?tab=budgets");
+    const tab = await screen.findByTestId("budgets-tab");
+    expect(tab).not.toHaveTextContent("the people concerned");
+    expect(tab).not.toHaveTextContent("everyone it covers");
+    expect(tab).not.toHaveTextContent("everyone's spend");
+    expect(tab).toHaveTextContent("a banner shows in this portal");
+    expect(screen.getByTestId("budget-projects")).toHaveTextContent("Caps what one project may spend");
+    cleanup();
+    fake.state = ownerState();
+    mount("/usage?tab=budgets");
+    expect(await screen.findByTestId("budgets-tab")).toHaveTextContent("the people concerned see a banner");
+  });
+
+  it("the Add a price model example follows the provider (USE-5)", async () => {
+    mount("/usage?tab=prices");
+    const add = await screen.findByTestId("add-price");
+    const model = within(add).getByLabelText("Model");
+    expect(model).toHaveAttribute("placeholder", "e.g. gpt-4o-mini");
+    for (const [label, example] of [
+      ["Anthropic", "e.g. claude-sonnet-4-5"],
+      ["DeepSeek", "e.g. deepseek-chat"],
+      ["OpenRouter", "e.g. anthropic/claude-sonnet-4.5"],
+    ] as const) {
+      await pick(within(add).getByRole("combobox", { name: "Provider" }), label);
+      expect(model).toHaveAttribute("placeholder", example);
+    }
+  });
+
+  it("prices a model under the provider picked in the styled select", async () => {
+    fake.routes["PUT /api/prices"] = (_m, body) => json(body);
+    mount("/usage?tab=prices");
+    const add = await screen.findByTestId("add-price");
+    await pick(within(add).getByRole("combobox", { name: "Provider" }), "DeepSeek");
+    await userEvent.type(within(add).getByLabelText("Model"), "deepseek-chat");
+    await userEvent.type(within(add).getByLabelText("Input"), "1");
+    await userEvent.type(within(add).getByLabelText("Output"), "2");
+    await userEvent.click(within(add).getByRole("button", { name: "Add price" }));
+    await waitFor(() =>
+      expect(fake.calls.find((c) => c.method === "PUT" && c.path === "/api/prices")?.body).toMatchObject({
+        provider: "deepseek",
+        model: "deepseek-chat",
+      }),
+    );
   });
 });

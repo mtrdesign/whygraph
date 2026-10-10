@@ -164,7 +164,7 @@ export function AccountPage() {
   };
 
   return (
-    <PageContainer className="flex flex-col gap-6 max-w-xl">
+    <PageContainer width="narrow" className="flex flex-col gap-6">
       <div className="flex items-center gap-3">
         {account.data && (
           <UserAvatar name={account.data.display_name} url={account.data.avatar_url} className="size-10 text-sm" />

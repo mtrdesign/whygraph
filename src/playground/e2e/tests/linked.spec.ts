@@ -162,7 +162,9 @@ test("a linked project: connect, evidence over MCP, revocation, removal", async 
   await githubSignIn(page, "cy");
   await expect(page).toHaveURL(new RegExp(`^${base.origin}/connect`));
   await expect(page.getByTestId("connect-client")).toHaveText(MACHINE);
-  await page.getByLabel("Project").selectOption({ label: `Orbit / ${SLUG}` });
+  // The project picker is the styled select (CN-5): open it, pick the option.
+  await page.getByRole("combobox", { name: "Project" }).click();
+  await page.getByRole("option", { name: `Orbit / ${SLUG}` }).click();
   await page.getByRole("button", { name: "Allow" }).click();
 
   // Back on this machine: the callback posted the code once and the wizard went
@@ -178,7 +180,8 @@ test("a linked project: connect, evidence over MCP, revocation, removal", async 
   const others = picker.getByRole("radiogroup", { name: "Other repositories" });
   await others
     .locator("label")
-    .filter({ has: page.getByText(repo, { exact: true }) })
+    // The row's path is truncated from the start (PH-8); the whole path is its title.
+    .filter({ has: page.getByTitle(repo, { exact: true }) })
     .getByRole("radio")
     .check();
   await page.getByRole("button", { name: "Link this checkout" }).click();

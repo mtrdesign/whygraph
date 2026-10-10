@@ -201,10 +201,12 @@ export function runOutcome(run: ScanRunRow, viewerUid?: string | null): string |
   if (run.status === "failed" || run.status === "interrupted") {
     const failure = failureSummary(s);
     if (failure.known) return failure.message;
-    if (typeof s.error === "string") return s.error;
-    const failed = s.crawlers?.find((c) => c.status === "failed");
-    if (failed) return `${failed.name}: ${failed.error ?? "failed"}`;
-    return typeof s.exit_code === "number" ? `Exit code ${s.exit_code}` : null;
+    // Never the raw crawler or runner text here (ER-3): it is under "Show details"
+    // on the run page.
+    if (run.status === "interrupted") return "Interrupted: the portal stopped while it ran";
+    return s.crawlers?.some((c) => c.status === "failed")
+      ? "Part of the scan failed"
+      : "The scan stopped before it finished";
   }
   if (run.kind === "sync") {
     const synced = syncOutcome(run, s);
@@ -217,4 +219,33 @@ export function runOutcome(run: ScanRunRow, viewerUid?: string | null): string |
   if (s.analyze_skipped) return s.analyze_skipped === "--skip-analyze" ? "Structure only" : "Descriptions skipped";
   if (run.status !== "ok") return null;
   return run.analyze ? "With descriptions" : "Structure only";
+}
+
+/** Below a cent a cost reads "less than $0.01", never "<$0.01" or "~<$0.01". */
+const CENT = 0.01;
+
+/**
+ * A short cost for a button or a line: "less than $0.01" or "about $0.42"
+ * (IMP-6), lower case so it reads inside a sentence or brackets.
+ */
+export function costPhrase(usd: number): string {
+  return usd < CENT ? "less than $0.01" : `about ${formatUsd(usd)}`;
+}
+
+/**
+ * The estimate's cost line: "Less than $0.01", "About $0.42 (between $0.21 and
+ * $0.63)", or "About $0.42 (up to $0.63)" when the low end rounds to nothing; one
+ * approximation, never "~" on top of "About" (IMP-6).
+ */
+export function estimateCostLine(cost: { usd: number; low: number; high: number }): string {
+  const head = costPhrase(cost.usd);
+  const line = head.charAt(0).toUpperCase() + head.slice(1);
+  if (cost.high < CENT || formatUsd(cost.low) === formatUsd(cost.high)) return line;
+  if (cost.low < CENT) return `${line} (up to ${formatUsd(cost.high)})`;
+  return `${line} (between ${formatUsd(cost.low)} and ${formatUsd(cost.high)})`;
+}
+
+/** A model as the UI names it everywhere: "Anthropic, claude-opus-4-7" or "Anthropic, its default model". */
+export function modelLabel(providerName: string, model: string | null | undefined): string {
+  return model ? `${providerName}, ${model}` : `${providerName}, its default model`;
 }

@@ -31,6 +31,7 @@ import {
 } from "../../lib/scanFormat";
 import {
   codegraphRow,
+  codegraphText,
   crawlerLabel,
   phaseRows,
   useScanRun,
@@ -73,20 +74,22 @@ const PHASE_ICON: Record<PhaseStatus, React.ReactNode> = {
   cancelled: <SquareIcon className="size-3.5 fill-current text-muted-foreground/70" />,
 };
 
+/**
+ * One crawler's live line: its human name and, when it reports a total, the count
+ * once ("3 of 10"). The crawler's own description (lower case, often the count
+ * again) is never shown (SCN-5).
+ */
 function TaskLine({ task, showLabel = true }: { task: TaskState; showLabel?: boolean }) {
   const pct = task.total ? Math.min(100, Math.round((task.completed / task.total) * 100)) : null;
   return (
     <div className="flex flex-col gap-1" data-testid={`task-${task.name}`}>
       <div className="flex items-baseline justify-between gap-3 text-xs">
         <span className="font-medium">{showLabel ? crawlerLabel(task.name) : ""}</span>
-        <span className="truncate text-muted-foreground">
-          {task.description}
-          {task.total ? (
-            <span className="ml-2 tabular-nums text-foreground">
-              {formatNumber(task.completed)} / {formatNumber(task.total)}
-            </span>
-          ) : null}
-        </span>
+        {task.total ? (
+          <span className="tabular-nums text-muted-foreground">
+            {formatNumber(task.completed)} of {formatNumber(task.total)}
+          </span>
+        ) : null}
       </div>
       {pct !== null && <Progress value={pct} aria-label={crawlerLabel(task.name)} />}
     </div>
@@ -128,7 +131,7 @@ function PhaseItem({ phase }: { phase: PhaseRow }) {
               className={cn("text-xs", c.error ? "text-destructive" : "text-muted-foreground")}
             >
               <span className="font-medium text-foreground">{crawlerLabel(c.name)}</span>{" "}
-              {c.error ?? c.summary}
+              {c.error ? "did not finish. The error is under Show details." : c.summary}
               {c.warning && <span className="block text-warning">{c.warning}</span>}
             </p>
           ))}
@@ -137,7 +140,21 @@ function PhaseItem({ phase }: { phase: PhaseRow }) {
   );
 }
 
-function SyncItem({ sync }: { sync: NonNullable<ScanRunState["sync"]> }) {
+/**
+ * The sync row of a production GitHub project. `scanning` is whether a scan
+ * followed the sync (its phases started, or the run's summary says `scanned`):
+ * a manual rescan scans even when the fetch brought nothing new, so "nothing to
+ * scan" is only said of a run that ended without scanning (BUG-6).
+ */
+function SyncItem({
+  sync,
+  scanning,
+  ended,
+}: {
+  sync: NonNullable<ScanRunState["sync"]>;
+  scanning: boolean;
+  ended: boolean;
+}) {
   const failed = sync.status === "failed";
   const text =
     sync.status === "cloning"
@@ -149,8 +166,14 @@ function SyncItem({ sync }: { sync: NonNullable<ScanRunState["sync"]> }) {
           : sync.cloned
             ? "Cloned the repository"
             : sync.moved
-              ? "Fetched new commits; scanning them next"
-              : "No new commits; nothing to scan";
+              ? scanning || ended
+                ? "Fetched new commits"
+                : "Fetched new commits; scanning them next"
+              : scanning
+                ? "Already up to date with GitHub; rescanning the current code"
+                : ended
+                  ? "No new commits; nothing to scan"
+                  : "No new commits";
   const status: PhaseStatus =
     sync.status === "fetching" || sync.status === "cloning" ? "running" : failed ? "failed" : "done";
   return (
@@ -631,7 +654,13 @@ export function ScanRunView({ slug, runId }: { slug: string; runId: number }) {
               </p>
             )}
             <ul className="flex flex-col divide-y divide-border">
-              {live.sync && <SyncItem sync={live.sync} />}
+              {live.sync && (
+                <SyncItem
+                  sync={live.sync}
+                  scanning={live.phaseTotal !== null || live.phases.length > 0 || !!(live.summary ?? row.summary)?.scanned}
+                  ended={live.finished !== null}
+                />
+              )}
               {phases.map((p) => (
                 <PhaseItem key={p.phase} phase={p} />
               ))}
@@ -654,9 +683,8 @@ export function ScanRunView({ slug, runId }: { slug: string; runId: number }) {
                   </span>
                   <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                     <span className="text-sm font-medium">CodeGraph index</span>
-                    <span className="text-xs text-muted-foreground">
-                      Runs alongside the phases.{" "}
-                      {cg.result ? (cg.result.error ?? cg.result.summary ?? "") : (cg.task?.description ?? "")}
+                    <span className="text-xs text-muted-foreground" data-testid="codegraph-text">
+                      {codegraphText(cg, live.finished)}
                     </span>
                   </div>
                 </li>

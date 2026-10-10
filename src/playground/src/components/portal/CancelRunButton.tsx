@@ -1,7 +1,6 @@
 import { errorMessage } from "../../lib/apiErrors";
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
 import { projectApi, projectKey } from "../../api";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
@@ -41,9 +40,9 @@ export function CancelRunButton({
   const [error, setError] = useState<string | null>(null);
   const cancel = useMutation({
     mutationFn: () => projectApi(slug).cancelScan(runId),
-    onSuccess: (r) => {
+    onSuccess: () => {
       setOpen(false);
-      toast.success(r.was === "queued" ? `The ${noun} was removed from the queue` : `Stopping the ${noun}`);
+      // No toast: the run page itself turns to "Cancelled by you" (CN-1).
       void queryClient.invalidateQueries({ queryKey: projectKey(slug, "scans") });
       void queryClient.invalidateQueries({ queryKey: projectKey(slug, "project") });
     },

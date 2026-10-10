@@ -129,14 +129,14 @@ export function Overview() {
   if (isLoading || !laidOut)
     return (
       <div className="flex h-full items-center justify-center">
-        <Loading label="Loading overview…" />
+        <Loading label="Loading the graph…" />
       </div>
     );
   if (isError)
     return (
       <div className="flex h-full items-center justify-center p-4">
         <ErrorState
-          title="Couldn't load the overview"
+          title="Couldn't load the graph"
           error={error}
           onRetry={() => void refetch()}
           className="w-full max-w-md"

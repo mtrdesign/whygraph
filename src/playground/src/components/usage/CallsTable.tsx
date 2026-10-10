@@ -5,7 +5,7 @@ import { formatDateTime, formatTokens, formatUsd } from "../../lib/format";
 import { whatLabel, whereLabel } from "../../lib/usageLabels";
 import { ResponsiveTable, type Column } from "../layout/ResponsiveTable";
 import { Button } from "../ui/button";
-import { Skeleton } from "../ui/skeleton";
+import { TableSkeleton } from "../state/Skeletons";
 import { UsageError } from "./parts";
 
 const COST_SOURCE: Record<string, string> = {
@@ -185,7 +185,7 @@ export function CallsTable({
   );
   return (
     <div className="flex flex-col gap-3" data-testid="calls-table">
-      {calls.isLoading && <Skeleton className="h-24" />}
+      {calls.isLoading && <TableSkeleton rows={5} cols={5} label="Loading the calls" />}
       {calls.isError && (
         <UsageError
           error={calls.error}

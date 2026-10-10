@@ -114,6 +114,8 @@ export function MessageThread({
   // session it just became, until the list catches up) shows the draft's.
   const choice = session ?? (currentId === null || createdId !== null ? draftChoice : null);
 
+  // The provider list failed (ER-4): nothing can be chosen, so nothing is sent until it loads.
+  const providersFailed = providers.isError && !providers.data;
   // The chosen provider has no key (EXC-2, MODE-4): the composer is dead and says why.
   const noKeyProvider = choice
     ? (providers.data?.find((p) => p.provider === choice.provider && !p.configured)?.provider ?? null)
@@ -134,6 +136,12 @@ export function MessageThread({
       )}
     </>
   ) : null;
+
+  const composerNotice = providersFailed
+    ? "Chat can't send until the provider list loads. Retry above."
+    : noKeyNotice;
+  // The composer is disabled or replaced: a starter prompt would fill a box that cannot send.
+  const cannotSend = budgetBlocked || noKeyProvider !== null || providersFailed;
 
   const update = useMutation({
     mutationFn: (vars: { provider?: string; model?: string }) =>
@@ -380,6 +388,7 @@ export function MessageThread({
                   key={text}
                   variant="outline"
                   className="h-auto justify-start whitespace-normal py-2 text-left"
+                  disabled={cannotSend}
                   onClick={() => setStarter((prev) => ({ text, n: (prev?.n ?? 0) + 1 }))}
                 >
                   {text}
@@ -405,7 +414,18 @@ export function MessageThread({
         </div>
       )}
 
-      {choice && (
+      {providersFailed && (
+        <div className="border-t border-border px-4 py-2" data-testid="chat-providers-error">
+          <ErrorState
+            context="chat"
+            title="Couldn't load the chat providers"
+            error={providers.error}
+            onRetry={() => void providers.refetch()}
+          />
+        </div>
+      )}
+
+      {choice && !providersFailed && (
         <div className="border-t border-border px-4 py-2">
           <ModelSelect
             compact
@@ -445,8 +465,8 @@ export function MessageThread({
         <Composer
           streaming={streaming}
           fill={starter}
-          disabled={noKeyProvider !== null}
-          notice={noKeyNotice}
+          disabled={noKeyProvider !== null || providersFailed}
+          notice={composerNotice}
           onSend={send}
           onStop={() => abortRef.current?.abort()}
         />

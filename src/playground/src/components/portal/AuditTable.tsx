@@ -1,8 +1,15 @@
 import { errorMessage } from "../../lib/apiErrors";
-import { useState, type FormEvent } from "react";
+import { Fragment, useState, type FormEvent } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { auditApi, type AuditEventRow, type AuditFilters } from "../../api";
-import { AUDIT_GROUPS, auditDetails, auditEventsIn, auditLabel } from "../../lib/auditEvents";
+import {
+  AUDIT_GROUPS,
+  auditDetails,
+  auditEventsIn,
+  auditLabel,
+  auditTarget,
+  type AuditDetail,
+} from "../../lib/auditEvents";
 import { saveBlob } from "../../lib/download";
 import { formatDateTime } from "../../lib/format";
 import { ResponsiveTable, type Column } from "../layout/ResponsiveTable";
@@ -13,6 +20,29 @@ import { Input } from "../ui/input";
 import { Field, nativeSelectClass } from "./Field";
 
 type Page = { events: AuditEventRow[]; next: number | null };
+
+/**
+ * A details value that wraps between words and segments (after `@`, `.`, `/`,
+ * `_` and `-`) before it would split one (only a segment wider than the whole
+ * cell splits); an id is short, muted and mono, with the whole value in its title.
+ */
+function DetailValue({ detail }: { detail: Omit<AuditDetail, "label"> }) {
+  const parts = detail.value.split(/(?<=[@./_-])/);
+  return (
+    <span
+      title={detail.title}
+      className={detail.mono ? "font-mono text-muted-foreground" : undefined}
+      data-testid="audit-value"
+    >
+      {parts.map((part, i) => (
+        <Fragment key={i}>
+          {i > 0 && <wbr />}
+          {part}
+        </Fragment>
+      ))}
+    </span>
+  );
+}
 
 /**
  * Security events, newest first, with a grouped event select and actor / date filters and "Load more"
@@ -63,7 +93,14 @@ export function AuditTable({ scope, filename = "whygraph-audit.csv" }: { scope: 
       cell: (r) => <span className="whitespace-nowrap text-muted-foreground">{formatDateTime(r.created_at)}</span>,
     },
     { key: "actor", header: "Actor", cell: (r) => r.actor?.label ?? r.actor?.uid ?? "System" },
-    { key: "target", header: "Target", cell: (r) => r.target_label ?? r.target ?? "" },
+    {
+      key: "target",
+      header: "Target",
+      cell: (r) => {
+        const target = auditTarget(r);
+        return target ? <DetailValue detail={target} /> : null;
+      },
+    },
     {
       key: "details",
       header: "Details",
@@ -75,7 +112,9 @@ export function AuditTable({ scope, filename = "whygraph-audit.csv" }: { scope: 
             {pairs.map((d) => (
               <div key={d.label} className="contents">
                 <dt className="text-muted-foreground">{d.label}</dt>
-                <dd className="min-w-0 break-words">{d.value}</dd>
+                <dd className="min-w-0 break-words">
+                  <DetailValue detail={d} />
+                </dd>
               </div>
             ))}
           </dl>

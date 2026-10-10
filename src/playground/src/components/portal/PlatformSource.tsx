@@ -18,6 +18,7 @@ import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { CommandBlock } from "../layout/CommandBlock";
+import { PathText } from "../layout/PathText";
 import { Field } from "./Field";
 
 /**
@@ -120,8 +121,9 @@ function PathRow({
             </span>
           )}
         </span>
-        <span className="truncate font-mono text-xs text-muted-foreground" title={path}>
-          {path}
+        {/* Truncated from the start, so the distinguishing tail stays (PH-8). */}
+        <span className="flex min-w-0 text-muted-foreground">
+          <PathText path={path} />
         </span>
       </span>
     </label>
@@ -161,13 +163,16 @@ function Picker({
 
   return (
     <div className="flex flex-col gap-4" data-testid="platform-picker">
-      <p className="flex items-center gap-2 text-sm">
-        <CheckCircle2Icon className="size-4 text-success" />
-        Connected to{" "}
-        <span className="font-medium">
-          {pending.org}/{pending.project.name}
-        </span>{" "}
-        on {platformHost(pending.platform_origin)}
+      <p className="flex items-start gap-2 text-sm" data-testid="platform-connected">
+        <CheckCircle2Icon className="mt-0.5 size-4 shrink-0 text-success" />
+        {/* One sentence that wraps at phone width, not three squeezed columns. */}
+        <span className="min-w-0 wrap-break-word">
+          Connected to{" "}
+          <span className="font-medium">
+            {pending.org}/{pending.project.name}
+          </span>{" "}
+          on {platformHost(pending.platform_origin)}
+        </span>
       </p>
       {blocked && (
         <Alert variant="destructive" data-testid="slug-taken">

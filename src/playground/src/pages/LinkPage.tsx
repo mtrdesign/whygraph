@@ -53,7 +53,7 @@ export function LinkPage() {
   });
 
   return (
-    <PageContainer className="flex flex-col gap-5 max-w-[640px]">
+    <PageContainer width="narrow" className="flex flex-col gap-5">
       <div className="flex flex-col gap-1">
         <h1 className="text-[22px] font-semibold tracking-tight">Link a checkout to a platform project</h1>
         <p className="text-[13px] text-muted-foreground">

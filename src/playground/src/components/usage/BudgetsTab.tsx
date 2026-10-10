@@ -19,11 +19,12 @@ import { formatMonth, formatResetsAt } from "../../lib/usageRange";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
+import { FormSkeleton, TableSkeleton } from "../state/Skeletons";
 import { Skeleton } from "../ui/skeleton";
 import { Switch } from "../ui/switch";
-import { Field, nativeSelectClass } from "../portal/Field";
+import { Field } from "../portal/Field";
 import { ResponsiveTable, type Column } from "../layout/ResponsiveTable";
-import { SpendBar, UnpricedNote, UsageError, UsageSection } from "./parts";
+import { BudgetStatePill, ChoiceSelect, SpendBar, UnpricedNote, UsageError, UsageSection } from "./parts";
 
 export const BUDGETS_KEY = portalKey("budgets");
 
@@ -123,10 +124,11 @@ export function BudgetEditor({
   const busy = save.isPending || remove.isPending;
 
   return (
-    <div className="flex flex-col gap-2 rounded-lg bg-muted/40 p-3" data-testid={testId}>
-      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+    <div className="flex flex-col gap-2 py-4 first:pt-0 last:pb-0" data-testid={testId}>
+      <div className="row-wrap gap-x-2 gap-y-0.5">
         <span className="font-medium">{title}</span>
         {description && <span className="text-xs text-muted-foreground">{description}</span>}
+        {budget && <BudgetStatePill pct={budget.pct} hardStop={budget.hard_stop} />}
         <span className="ml-auto text-xs tabular-nums text-muted-foreground" data-testid={testId && `${testId}-spent`}>
           {budget ? spentLine(budget) : "No budget"}
         </span>
@@ -217,18 +219,9 @@ function AddBudget({
     add.mutate({ target: toTarget(choice), monthly_usd: parsed.amount });
   };
   return (
-    <form onSubmit={submit} className="flex flex-wrap items-end gap-3" data-testid={testId} noValidate>
-      <Field label={label} className="w-56">
-        {(p) => (
-          <select {...p} className={nativeSelectClass} value={choice} onChange={(e) => setChoice(e.target.value)}>
-            <option value="">Choose…</option>
-            {options.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        )}
+    <form onSubmit={submit} className="flex flex-wrap items-end gap-3 py-4 first:pt-0 last:pb-0" data-testid={testId} noValidate>
+      <Field label={label} className="w-56 max-sm:w-full">
+        {(p) => <ChoiceSelect {...p} value={choice} onChange={setChoice} options={options} placeholder="Choose…" />}
       </Field>
       <Field label="Monthly budget (USD)" className="w-44" error={error ?? undefined}>
         {(p) => (
@@ -312,6 +305,36 @@ function memberLabel(m: Member): string {
   return m.github_login ? `${name} (@${m.github_login})` : name;
 }
 
+/** The budgets of one section as rows split by rules, not panels inside the card (CN-5). */
+function BudgetList({ children }: { children: ReactNode }) {
+  return <div className="flex flex-col divide-y divide-border">{children}</div>;
+}
+
+/** The Budgets tab while it loads: the intro, the budget sections and the alerts table, in their shapes (ER-5). */
+function BudgetsSkeleton({ production }: { production: boolean }) {
+  const section = (key: string, body: ReactNode) => (
+    <div key={key} className="flex flex-col gap-4 rounded-xl border border-border bg-card p-4 shadow-card sm:p-5">
+      <div className="flex flex-col gap-1.5">
+        <Skeleton className="h-4 w-32" />
+        <Skeleton className="h-3 w-64 max-w-full" />
+      </div>
+      {body}
+    </div>
+  );
+  return (
+    <div className="flex flex-col gap-6" data-testid="budgets-loading">
+      <div className="flex flex-col gap-1.5">
+        <Skeleton className="h-3.5 w-full" />
+        <Skeleton className="h-3.5 w-4/5" />
+      </div>
+      {section("org", <FormSkeleton fields={1} label="Loading the budgets" />)}
+      {production && section("members", <FormSkeleton fields={2} />)}
+      {section("projects", <FormSkeleton fields={1} />)}
+      {section("alerts", <TableSkeleton rows={3} cols={4} />)}
+    </div>
+  );
+}
+
 /**
  * The Budgets tab (plan section 4.13): the org budget, the member default and
  * per-member overrides (production), per-project budgets, this month's crossings
@@ -338,7 +361,7 @@ export function BudgetsTab({
     enabled: production,
   });
 
-  if (budgets.isLoading) return <Skeleton className="h-40" />;
+  if (budgets.isLoading) return <BudgetsSkeleton production={production} />;
   if (budgets.isError || !budgets.data) {
     return (
       <UsageError
@@ -368,16 +391,21 @@ export function BudgetsTab({
   const projectOptions = (projects.data?.projects ?? [])
     .filter((p) => !budgeted.has(p.slug))
     .map((p) => ({ value: p.slug, label: p.name }));
+  const local = !production;
   // Each editor is keyed by its current values, so a saved change from elsewhere re-seeds the form.
   const k = (b: Budget | null) => (b ? `${b.monthly_usd}:${b.hard_stop}` : "none");
 
   return (
     <div className="flex flex-col gap-6" data-testid="budgets-tab">
       <p className="text-[13px] text-muted-foreground">
-        Budgets for {formatMonth(data.month)}, in estimated USD; they reset on {formatResetsAt(data.resets_at)}. At
-        50, 75 and 100% the people concerned see a banner, which they can dismiss for the month. With <strong className="font-medium">hard stop</strong> on, a
-        spent budget turns new LLM spend off for everyone it covers until the month resets: they can still read
-        everything that is already generated.
+        Budgets for {formatMonth(data.month)}, in estimated USD; they reset on {formatResetsAt(data.resets_at)}.{" "}
+        {local
+          ? "At 50, 75 and 100% a banner shows in this portal, which you can dismiss for the month. With "
+          : "At 50, 75 and 100% the people concerned see a banner, which they can dismiss for the month. With "}
+        <strong className="font-medium">hard stop</strong> on,{" "}
+        {local
+          ? "a spent budget turns new LLM spend off for what it caps until the month resets: you can still read everything that is already generated."
+          : "a spent budget turns new LLM spend off for everyone it covers until the month resets: they can still read everything that is already generated."}
         {!canEdit && " Owners and org admins change budgets."}
       </p>
       <UnpricedNote calls={data.unpriced_calls} budgets />
@@ -386,14 +414,16 @@ export function BudgetsTab({
         title={layer}
         description={production ? "Caps the whole organization, owners included." : "Caps everything this portal spends."}
       >
-        <BudgetEditor
-          key={k(data.org)}
-          target={{ scope: "org" }}
-          budget={data.org}
-          title={`${layer} budget`}
-          editable={canEdit}
-          testId="budget-org"
-        />
+        <BudgetList>
+          <BudgetEditor
+            key={k(data.org)}
+            target={{ scope: "org" }}
+            budget={data.org}
+            title={`${layer} budget`}
+            editable={canEdit}
+            testId="budget-org"
+          />
+        </BudgetList>
       </UsageSection>
 
       {production && (
@@ -402,66 +432,74 @@ export function BudgetsTab({
           description="The default caps each member separately; an override replaces it for one person. Both stay at or below the organization's budget."
           testId="budget-members"
         >
-          <BudgetEditor
-            key={k(data.member_default)}
-            target={{ scope: "member_default" }}
-            budget={data.member_default}
-            title="Default for every member"
-            editable={canEdit}
-            testId="budget-member-default"
-          />
-          {data.members.map((m) => {
-            const lock = memberLock(m.uid);
-            return (
-              <BudgetEditor
-                key={`${m.uid}:${k(m)}`}
-                target={{ scope: "member", uid: m.uid }}
-                budget={m}
-                title={m.label ?? m.uid}
-                description={m.uid === viewerUid ? "(you)" : roleOf.get(m.uid) === "owner" ? "owner" : undefined}
-                editable={canEdit && !lock}
-                readOnlyReason={canEdit ? lock : undefined}
-                testId={`budget-member-${m.uid}`}
-              />
-            );
-          })}
-          {canEdit && (
-            <AddBudget
-              label="Member"
-              options={memberOptions}
-              toTarget={(uid) => ({ scope: "member", uid })}
-              testId="add-member-budget"
+          <BudgetList>
+            <BudgetEditor
+              key={k(data.member_default)}
+              target={{ scope: "member_default" }}
+              budget={data.member_default}
+              title="Default for every member"
+              editable={canEdit}
+              testId="budget-member-default"
             />
-          )}
+            {data.members.map((m) => {
+              const lock = memberLock(m.uid);
+              return (
+                <BudgetEditor
+                  key={`${m.uid}:${k(m)}`}
+                  target={{ scope: "member", uid: m.uid }}
+                  budget={m}
+                  title={m.label ?? m.uid}
+                  description={m.uid === viewerUid ? "(you)" : roleOf.get(m.uid) === "owner" ? "owner" : undefined}
+                  editable={canEdit && !lock}
+                  readOnlyReason={canEdit ? lock : undefined}
+                  testId={`budget-member-${m.uid}`}
+                />
+              );
+            })}
+            {canEdit && (
+              <AddBudget
+                label="Member"
+                options={memberOptions}
+                toTarget={(uid) => ({ scope: "member", uid })}
+                testId="add-member-budget"
+              />
+            )}
+          </BudgetList>
         </UsageSection>
       )}
 
       <UsageSection
         title="Projects"
-        description={`Caps everyone's spend on one project. Each stays at or below the ${layer.toLowerCase()}'s budget.`}
+        description={
+          local
+            ? "Caps what one project may spend. Each stays at or below the portal's budget."
+            : `Caps everyone's spend on one project. Each stays at or below the ${layer.toLowerCase()}'s budget.`
+        }
         testId="budget-projects"
       >
         {data.projects.length === 0 && !canEdit && (
           <p className="text-sm text-muted-foreground">No project has a budget.</p>
         )}
-        {data.projects.map((p) => (
-          <BudgetEditor
-            key={`${p.slug}:${k(p)}`}
-            target={{ scope: "project", slug: p.slug }}
-            budget={p}
-            title={p.name}
-            editable={canEdit}
-            testId={`budget-project-${p.slug}`}
-          />
-        ))}
-        {canEdit && (
-          <AddBudget
-            label="Project"
-            options={projectOptions}
-            toTarget={(slug) => ({ scope: "project", slug })}
-            testId="add-project-budget"
-          />
-        )}
+        <BudgetList>
+          {data.projects.map((p) => (
+            <BudgetEditor
+              key={`${p.slug}:${k(p)}`}
+              target={{ scope: "project", slug: p.slug }}
+              budget={p}
+              title={p.name}
+              editable={canEdit}
+              testId={`budget-project-${p.slug}`}
+            />
+          ))}
+          {canEdit && (
+            <AddBudget
+              label="Project"
+              options={projectOptions}
+              toTarget={(slug) => ({ scope: "project", slug })}
+              testId="add-project-budget"
+            />
+          )}
+        </BudgetList>
       </UsageSection>
 
       <UsageSection title="This month's alerts" description="Each threshold fires once per budget and month.">

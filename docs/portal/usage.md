@@ -34,8 +34,8 @@ What is **not** recorded:
   which records them against the connection's owner. Your local portal records nothing for them.
 - **Anything the provider bills you for outside WhyGraph**, and your own provider's discounts.
 
-Figures are for a **calendar month in UTC**; the page says when the month resets ("resets 1 Nov, 00:00
-UTC"). History is kept for [400 days](#retention-and-deletion).
+Figures are for a **calendar month in UTC**; the page says when the month resets, in your browser's
+date format ("Nov 1, 2026, 12:00 AM UTC" in US English). History is kept for [400 days](#retention-and-deletion).
 
 ## Provider-reported, estimated, unpriced
 
@@ -180,7 +180,10 @@ A call already sent to the provider finishes, so spend can overshoot by the call
 
 Everything the stop refuses answers **`403 budget_exceeded`** with a `scope` of `org`, `project` or
 `member`. The notice on the project's pages, in Chat and beside **Generate rationale** says whose
-budget it is. If a person is both a Viewer and over a budget, the Viewer notice wins, since the role
+budget it is. On the project's pages and in Chat it also says when the month resets and what to do:
+**Review budgets** for owners and admins, "Ask an owner or admin to raise it" for everyone else, and
+**Raise it in Budgets** in local mode. On the Budgets tab a spent budget carries a **Stopped** pill
+when its hard stop is on, and a **Budget reached** pill when it only alerts. If a person is both a Viewer and over a budget, the Viewer notice wins, since the role
 is permanent.
 
 ### Alerts
@@ -190,7 +193,7 @@ Each budget is checked against **50, 75 and 100%** as spend is added:
 - **Banners.** Every banner sits in one stack above the page (the welcome note, the instance-admin
   note, then the budget banner) and links to **Review budgets** (owners and admins) or **My usage**
   (members). Owners and admins see one on Usage & cost and the Projects page, naming the organization
-  and any project at or over 50%. A member sees their own budget at each threshold on every page.
+  (in local mode, "This portal") and any project at or over 50%. A member sees their own budget at each threshold on every page.
   The percentage is your actual spend, not the threshold it crossed.
 
     | Level | Tone | Dismiss for the month |
@@ -198,7 +201,7 @@ Each budget is checked against **50, 75 and 100%** as spend is added:
     | 50% | info | Yes |
     | 75% | warning | Yes |
     | 100%, **no hard stop** | warning: "Spending continues: this budget has no hard stop" | Yes |
-    | 100% with the **hard stop** | warning, with a **Stopped** pill, the amount and "Resets 1 Nov" | **No** |
+    | 100% with the **hard stop** | warning, with a **Stopped** pill, the amount and the reset day ("Resets Nov 1") | **No** |
 
     A dismissed level stays gone for the month in this browser, and a higher level shows again. A
     budget that becomes hard-stopped shows its banner even if its 100% was dismissed while it was

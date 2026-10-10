@@ -78,7 +78,9 @@ export function WelcomeBanner() {
           "flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 rounded-none border-x-0 border-t-0 px-4 py-2 text-[13px]",
         )}
       >
-        <p className="min-w-0 flex-1">
+        {/* A 20rem basis: on a phone the buttons wrap under the text instead of
+            squeezing it into a narrow column. */}
+        <p className="min-w-0 flex-[1_1_20rem]" data-testid="welcome-text">
           <strong className="font-medium">
             You've been added to {welcome.org_name} as {article} {role}.
           </strong>{" "}

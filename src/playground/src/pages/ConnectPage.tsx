@@ -4,9 +4,10 @@ import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ApiError, connectApi, type ConnectRequest } from "../api";
 import { AuthLayout } from "../components/auth/AuthLayout";
-import { Field, nativeSelectClass } from "../components/portal/Field";
+import { Field } from "../components/portal/Field";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Skeleton } from "../components/ui/skeleton";
 import { linkError } from "../lib/errors";
 import { hardNavigate } from "../lib/navigation";
@@ -172,21 +173,32 @@ export function ConnectPage() {
       )}
       {list.length > 0 && (
         <Field label="Project" hint="Only projects of organizations you are a member of are listed.">
-          {(p) => (
-            <select
-              {...p}
-              className={nativeSelectClass}
-              value={selectedKey}
-              onChange={(e) => setChoice(e.target.value)}
-            >
-              <option value="">Choose a project…</option>
-              {list.map((proj) => (
-                <option key={keyOf(proj.org, proj.slug)} value={keyOf(proj.org, proj.slug)}>
-                  {proj.org_name} / {proj.name}
-                </option>
-              ))}
-            </select>
-          )}
+          {(p) => {
+            const items = list.map((proj) => ({
+              value: keyOf(proj.org, proj.slug),
+              label: `${proj.org_name} / ${proj.name}`,
+            }));
+            return (
+              <Select
+                items={items}
+                value={selectedKey || null}
+                onValueChange={(next) => {
+                  if (typeof next === "string") setChoice(next);
+                }}
+              >
+                <SelectTrigger {...p} className="w-full min-w-0">
+                  <SelectValue placeholder="Choose a project…" />
+                </SelectTrigger>
+                <SelectContent alignItemWithTrigger={false}>
+                  {items.map((item) => (
+                    <SelectItem key={item.value} value={item.value}>
+                      {item.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            );
+          }}
         </Field>
       )}
       {selected?.access_lost && (

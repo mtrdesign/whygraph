@@ -54,8 +54,9 @@ function OverviewNodeInner({ data }: NodeProps) {
             style={{ width: `${total ? Math.max(fraction * 100, 3) : 0}%` }}
           />
         </div>
-        <span className="text-[10px] text-muted-foreground">
-          {analyzed}/{total}
+        {/* Visible words, not a bare "0/2" (EXC-6). */}
+        <span className="shrink-0 text-[10px] text-muted-foreground" data-testid="overview-node-coverage">
+          {analyzed} of {total} explained
         </span>
       </div>
       {d.internal_edges > 0 && (

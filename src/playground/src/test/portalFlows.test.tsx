@@ -17,6 +17,8 @@ type Json = Record<string, unknown>;
 
 interface Fake {
   setupComplete: boolean;
+  /** The state's shared folders (default `["/repos"]`). */
+  sharedFolders?: string[];
   /** `shared` for check-path; flipped by a test to simulate `whygraph up --add-folder`. */
   shared: boolean;
   github: { slug: string; remote_url: string } | null;
@@ -153,7 +155,7 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
       setup_complete: fake.setupComplete,
       user: fake.setupComplete ? { uid: "u1", display_name: "Ada", role: "owner" } : null,
       port: fake.port ?? (fake.portChange?.port as number | undefined) ?? 8765,
-      shared_folders: ["/repos"],
+      shared_folders: fake.sharedFolders ?? ["/repos"],
       port_change: fake.portChange,
     });
   }
@@ -357,6 +359,24 @@ describe("first-run setup", () => {
     expect(posts("/api/portal/setup")[0].body).toEqual({ display_name: "Ada Lovelace" });
     // The empty state is what a fresh portal shows.
     expect(await screen.findByText("No projects yet")).toBeInTheDocument();
+  });
+
+  it("wraps a long shared-folder path inside the card at phone width (PH-4)", async () => {
+    // jsdom has no layout, so the phone-width overflow is asserted through what
+    // prevents it: the path is a block PathText (wraps anywhere, a break after
+    // each "/") in a shrinkable column, not a bare mono line.
+    const long = "/Users/someone-with-a-long-name/Projects/clients/an-extremely-long-folder-name-for-repositories";
+    fake.setupComplete = false;
+    fake.sharedFolders = [long];
+    mount("/setup");
+    const list = await screen.findByTestId("setup-shared-folders");
+    const path = within(list).getByTitle(long);
+    expect(path).toHaveAttribute("data-slot", "path-text");
+    expect(path.className).toContain("wrap-anywhere");
+    expect(path.className).not.toContain("whitespace-nowrap");
+    expect(path.querySelectorAll("wbr").length).toBe(long.split("/").length - 1);
+    expect(path.textContent).toBe(long);
+    expect(list.className).toContain("min-w-0");
   });
 
   it("is a dead end once setup is complete", async () => {
@@ -803,7 +823,7 @@ describe("Configure", () => {
     fake.events = DONE;
   });
 
-  it("follows the run in ?run=, then shows the estimate and Describe N commits (~$X)", async () => {
+  it("follows the run in ?run=, then shows the estimate and Describe N commits (about $X)", async () => {
     const user = userEvent.setup();
     const { router } = mount("/p/alpha/init?step=configure&run=7");
     expect(await screen.findByRole("heading", { name: "First scan complete" })).toBeInTheDocument();
@@ -814,13 +834,15 @@ describe("Configure", () => {
 
     const card = await screen.findByTestId("scan-estimate");
     expect(card).toHaveTextContent("120 commits to describe");
-    expect(card).toHaveTextContent("anthropic/claude-haiku-4-5");
-    expect(card).toHaveTextContent("~$1.20");
+    expect(card).toHaveTextContent("Anthropic, claude-haiku-4-5");
+    // One approximation, a readable range (IMP-6).
+    expect(card).toHaveTextContent("About $1.20 (between $0.60 and $1.80)");
+    expect(card).not.toHaveTextContent("~");
     // The choices live in the footer, not the card.
     expect(within(card).queryByRole("button")).toBeNull();
     expect(screen.getByTestId("key-ready")).toHaveTextContent("Uses the Anthropic key from Portal defaults.");
 
-    await user.click(screen.getByRole("button", { name: "Describe 120 commits (~$1.20)" }));
+    await user.click(screen.getByRole("button", { name: "Describe 120 commits (about $1.20)" }));
     await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=configure&run=8"));
     expect(posts("/api/projects/alpha/scans")[0].body).toEqual({ trigger: "describe" });
   });
@@ -834,12 +856,13 @@ describe("Configure", () => {
   });
 
   it("keeps the describe model's inherited note once the estimate names the model (A4)", async () => {
-    // The server's model id in mono, still inherited (the project layer sets none).
+    // The same "provider, model" form as before the estimate, never the raw id, still inherited.
     mount("/p/alpha/init?step=configure&run=7");
     await screen.findByTestId("scan-estimate");
     const after = screen.getByTestId("describe-model");
-    await waitFor(() => expect(after).toHaveTextContent("Model: anthropic/claude-haiku-4-5 (inherited from Portal defaults)"));
-    expect(after.querySelector(".font-mono")).toHaveTextContent("anthropic/claude-haiku-4-5");
+    await waitFor(() => expect(after).toHaveTextContent("Model: Anthropic, claude-haiku-4-5 (inherited from Portal defaults)"));
+    expect(after).not.toHaveTextContent("anthropic/");
+    expect(after.querySelector(".font-mono")).toBeNull();
   });
 
   it("drops the inherited note when the project layer picks the describe model", async () => {
@@ -847,7 +870,7 @@ describe("Configure", () => {
     mount("/p/alpha/init?step=configure&run=7");
     await screen.findByTestId("scan-estimate");
     const line = screen.getByTestId("describe-model");
-    await waitFor(() => expect(line).toHaveTextContent("Model: anthropic/claude-haiku-4-5"));
+    await waitFor(() => expect(line).toHaveTextContent("Model: Anthropic, claude-haiku-4-5"));
     expect(line).not.toHaveTextContent("inherited");
   });
 

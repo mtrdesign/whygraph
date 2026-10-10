@@ -17,7 +17,9 @@ import { ErrorState } from "../state/ErrorState";
 import { ForbiddenState } from "../state/ForbiddenState";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { Field, nativeSelectClass } from "../portal/Field";
+import { Field } from "../portal/Field";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
+import { StatusPill } from "../ui/status-pill";
 import { cn } from "@/lib/utils";
 
 // Small shared pieces of the Usage & cost pages (the org page, the member
@@ -113,12 +115,15 @@ export function SplitLine({ split }: { split: UsageSplit }) {
 }
 
 /**
- * Spend against a budget: a bar that turns to the warning colour at 75% and to
- * the destructive colour at 100%. `pct` is the server's (one decimal).
+ * Spend against a budget, in the soft tones (CO-5): an indigo fill on the empty
+ * `track` under 75%, a softened warning fill from 75% and a softened destructive fill
+ * from 100% (never the full-strength warning colour). `pct` is the server's (one
+ * decimal). The Overview and Projects cards reuse it.
  */
 export function SpendBar({ pct, label }: { pct: number | null; label?: string }) {
   if (pct === null) return null;
   const width = Math.max(0, Math.min(100, pct));
+  const level = pct >= 100 ? "over" : pct >= 75 ? "high" : "ok";
   return (
     <div
       role="progressbar"
@@ -127,16 +132,84 @@ export function SpendBar({ pct, label }: { pct: number | null; label?: string })
       aria-valuemax={100}
       aria-valuenow={Math.round(width)}
       aria-valuetext={formatPct(pct)}
-      className="h-1.5 w-full overflow-hidden rounded-full bg-muted"
+      data-level={level}
+      className={cn("h-1.5 w-full overflow-hidden rounded-full", level === "over" ? "bg-destructive-soft" : "bg-track")}
     >
       <div
         className={cn(
           "h-full rounded-full transition-all",
-          pct >= 100 ? "bg-destructive" : pct >= 75 ? "bg-warning" : "bg-primary",
+          level === "over" ? "bg-destructive/70" : level === "high" ? "bg-warning/70" : "bg-primary",
         )}
         style={{ width: `${width}%` }}
       />
     </div>
+  );
+}
+
+/** The tooltip of a hard-stopped budget's pill (section 0.3 #38). */
+export const STOPPED_TITLE = "Monthly budget reached";
+
+/** A soft budget's pill tooltip at 100%: it warns and does not stop. */
+export const SOFT_REACHED_TITLE = "Monthly budget reached. Spending continues: this budget has no hard stop.";
+
+/**
+ * The state pill of a spent budget (CO-1): **Stopped** when its hard stop is on (no new
+ * LLM spend until the month resets), **Budget reached** for a soft budget; nothing below 100%.
+ */
+export function BudgetStatePill({ pct, hardStop }: { pct: number | null; hardStop: boolean }) {
+  if (pct === null || pct < 100) return null;
+  return hardStop ? (
+    <StatusPill tone="warn" label="Stopped" title={STOPPED_TITLE} data-testid="budget-stopped" />
+  ) : (
+    <StatusPill tone="warn" label="Budget reached" title={SOFT_REACHED_TITLE} data-testid="budget-reached" />
+  );
+}
+
+/**
+ * One choice from a short list: the shared styled select (CN-5), wired to a `Field`'s
+ * `id` / `aria-*` props. `""` may be an option's value ("All"); a `value` no option has
+ * shows the `placeholder` ("Choose...").
+ */
+export function ChoiceSelect({
+  value,
+  onChange,
+  options,
+  placeholder,
+  size = "default",
+  className,
+  ...trigger
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  options: { value: string; label: string }[];
+  placeholder?: string;
+  size?: "sm" | "default";
+  className?: string;
+  id?: string;
+  "aria-invalid"?: boolean;
+  "aria-describedby"?: string;
+  "aria-label"?: string;
+}) {
+  const known = options.some((o) => o.value === value);
+  return (
+    <Select
+      items={options}
+      value={known ? value : null}
+      onValueChange={(next) => {
+        if (typeof next === "string") onChange(next);
+      }}
+    >
+      <SelectTrigger {...trigger} size={size} className={cn("w-full min-w-0", className)}>
+        <SelectValue placeholder={placeholder} />
+      </SelectTrigger>
+      <SelectContent alignItemWithTrigger={false}>
+        {options.map((o) => (
+          <SelectItem key={o.value} value={o.value}>
+            {o.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   );
 }
 
@@ -227,19 +300,12 @@ export function RangePicker({
     <form onSubmit={apply} className="flex flex-wrap items-end gap-2" data-testid="range-picker">
       <Field label="Range" className="w-40">
         {(p) => (
-          <select
+          <ChoiceSelect
             {...p}
-            className={nativeSelectClass}
             value={custom ? "custom" : preset}
-            onChange={(e) => choose(e.target.value)}
-          >
-            {RANGE_PRESETS.map((r) => (
-              <option key={r.value} value={r.value}>
-                {r.label}
-              </option>
-            ))}
-            <option value="custom">Custom</option>
-          </select>
+            onChange={choose}
+            options={[...RANGE_PRESETS, { value: "custom", label: "Custom" }]}
+          />
         )}
       </Field>
       {custom && (

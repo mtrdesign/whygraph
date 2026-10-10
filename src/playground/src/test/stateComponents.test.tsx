@@ -6,6 +6,8 @@ import { ApiError, setErrorMode } from "../api";
 import { NotFoundPage } from "../components/portal/EdgeStates";
 import { DisabledReason } from "../components/state/DisabledReason";
 import { ErrorState } from "../components/state/ErrorState";
+import { NotFoundState } from "../components/state/NotFoundState";
+import { PageContainer } from "../components/layout/PageContainer";
 import { PortalErrorPage } from "../components/state/PortalErrorPage";
 import { QueryState } from "../components/state/QueryState";
 import { TooltipProvider } from "../components/ui/tooltip";
@@ -190,5 +192,35 @@ describe("NotFoundPage", () => {
   it("defaults to the plain page kind", async () => {
     await renderWithRouter(<NotFoundPage />);
     expect(screen.getByRole("heading", { name: "Page not found" })).toBeInTheDocument();
+  });
+});
+
+// ---- page-level states sit at the page's position (PH-11) ------------------------------------
+
+describe("page-level states inside a PageContainer", () => {
+  const boxed = (el: Element | null) => !!el?.closest('[class*="max-w-3xl"][class*="p-6"]');
+
+  it("adds no box of their own inside the page's container", async () => {
+    await renderWithRouter(
+      <PageContainer width="default" data-testid="page">
+        <ErrorState error={new ApiError(500, "boom")} size="page" />
+        <NotFoundState kind="run" />
+      </PageContainer>,
+    );
+    const page = screen.getByTestId("page");
+    const error = screen.getByTestId("error-state");
+    const notFound = screen.getByTestId("not-found");
+    // Direct children of the page: no second max-width / padding wrapper.
+    expect(error.parentElement).toBe(page);
+    expect(notFound.parentElement).toBe(page);
+    expect(boxed(error) || boxed(notFound)).toBe(false);
+  });
+
+  it("bring the standard page container when nothing holds them", async () => {
+    await renderWithRouter(<NotFoundState kind="page" />);
+    const wrapper = screen.getByTestId("not-found").parentElement!;
+    expect(wrapper.className).toContain("max-w-5xl");
+    expect(wrapper.className).toContain("px-4");
+    expect(wrapper.className).not.toContain("p-6");
   });
 });

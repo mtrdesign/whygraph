@@ -113,11 +113,13 @@ export function validateScansSearch(search: Record<string, unknown>): ScansSearc
 }
 
 // ---- settings sections (§0.3 #22) -------------------------------------------------------
+// Every id a settings page's section list renders, so each one deep-links (SET-1).
 
 export const PROJECT_SETTINGS_SECTIONS = [
   "general",
   "models",
   "github",
+  "hooks",
   "budgets",
   "agents",
   "access",
@@ -125,7 +127,7 @@ export const PROJECT_SETTINGS_SECTIONS = [
   "danger",
 ] as const;
 export type ProjectSettingsSection = (typeof PROJECT_SETTINGS_SECTIONS)[number];
-export const ORG_SETTINGS_SECTIONS = ["general", "models", "github", "budgets", "limits"] as const;
+export const ORG_SETTINGS_SECTIONS = ["general", "models", "github", "limits", "budgets", "danger"] as const;
 export type OrgSettingsSection = (typeof ORG_SETTINGS_SECTIONS)[number];
 
 /** `/p/$slug/settings?section=`: the section to scroll to. */

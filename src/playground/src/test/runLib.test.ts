@@ -7,6 +7,9 @@ import { projectStatus } from "../lib/projectStatus";
 import {
   carriesCost,
   cancelledLabel,
+  costPhrase,
+  estimateCostLine,
+  modelLabel,
   failureSummary,
   formatSeconds,
   requesterLabel,
@@ -17,7 +20,7 @@ import {
   syncOutcome,
 } from "../lib/scanFormat";
 import { progressModel, rawPercent } from "../lib/scanProgress";
-import { initialScanRunState, phaseRows, reduceScanRun, type ScanRunState } from "../lib/scanRun";
+import { codegraphText, initialScanRunState, phaseRows, reduceScanRun, type ScanRunState } from "../lib/scanRun";
 
 const fold = (events: Parameters<typeof reduceScanRun>[1][]): ScanRunState =>
   events.reduce(reduceScanRun, initialScanRunState);
@@ -114,6 +117,42 @@ describe("phaseRows", () => {
     expect(phaseRows(s).map((p) => p.status)).toEqual(["failed", "skipped", "skipped"]);
   });
 
+  it("a failure that names no phase still belongs to one (BUG-6)", () => {
+    const phases = ["Structural crawl", "Author identity"];
+    // The child's result fails a crawler of no phase while the run was in phase 1.
+    const inPhase = fold([
+      ev({ type: "start", phase_total: 2, phases }),
+      ev({ type: "phase", phase: 1, title: "Structural crawl" }),
+      ev({ type: "result", status: "failed", crawlers: [{ name: "mystery", status: "failed", error: "x" }] }),
+      ev({ type: "end", run_id: 1, status: "failed", summary: null }),
+    ]);
+    expect(phaseRows(inPhase).map((p) => p.status)).toEqual(["failed", "skipped"]);
+    // A failure before any phase started is the first phase's.
+    const before = fold([
+      ev({ type: "start", phase_total: 2, phases }),
+      ev({ type: "result", status: "failed", crawlers: [], error: "token file is empty" }),
+      ev({ type: "end", run_id: 1, status: "failed", summary: null }),
+    ]);
+    expect(phaseRows(before).map((p) => p.status)).toEqual(["failed", "skipped"]);
+    // A failed sync owns its failure: no phase turns red.
+    const sync = fold([
+      ev({ type: "sync", status: "failed", error: "fetch failed" }),
+      ev({ type: "start", phase_total: 2, phases }),
+      ev({ type: "end", run_id: 1, status: "failed", summary: null }),
+    ]);
+    expect(phaseRows(sync).map((p) => p.status)).toEqual(["skipped", "skipped"]);
+  });
+
+  it("words the CodeGraph row as a sentence, never the crawler's raw text (SCN-5)", () => {
+    const task = { name: "codegraph", completed: 0, total: null, description: "indexing" };
+    expect(codegraphText({ task, result: null }, null)).toBe("Refreshing the code index alongside the other phases.");
+    expect(codegraphText({ task, result: { status: "ok" } }, "ok")).toBe(
+      "The code index was refreshed alongside the other phases.",
+    );
+    expect(codegraphText({ task, result: { status: "failed" } }, "failed")).toContain("did not update");
+    expect(codegraphText({ task, result: null }, "cancelled")).toBe("Stopped with the run.");
+  });
+
   it("keeps a task's latest counter under its phase", () => {
     const s = fold([
       ev({ type: "start", phase_total: 1 }),
@@ -205,9 +244,26 @@ describe("scan formatting", () => {
     expect(odd.details).toEqual(["boom"]);
   });
 
+  it("words costs readably: one approximation, 'less than $0.01' below a cent (IMP-6)", () => {
+    expect(costPhrase(0.004)).toBe("less than $0.01");
+    expect(costPhrase(0.42)).toBe("about $0.42");
+    expect(estimateCostLine({ usd: 0.004, low: 0.002, high: 0.006 })).toBe("Less than $0.01");
+    expect(estimateCostLine({ usd: 0.004, low: 0.002, high: 0.01 })).toBe("Less than $0.01 (up to $0.01)");
+    expect(estimateCostLine({ usd: 0.42, low: 0.21, high: 0.63 })).toBe("About $0.42 (between $0.21 and $0.63)");
+    expect(modelLabel("Anthropic", "claude-opus-4-7")).toBe("Anthropic, claude-opus-4-7");
+    expect(modelLabel("Anthropic", "")).toBe("Anthropic, its default model");
+  });
+
   it("names outcomes for the history", () => {
-    expect(runOutcome(row({ status: "failed", summary: { error: "boom" } }))).toBe("boom");
-    expect(runOutcome(row({ status: "failed", summary: { exit_code: 2 } }))).toBe("Exit code 2");
+    // An unrecognised failure is a sentence, never the raw text (ER-3).
+    expect(runOutcome(row({ status: "failed", summary: { error: "boom" } }))).toBe("The scan stopped before it finished");
+    expect(runOutcome(row({ status: "failed", summary: { exit_code: 2 } }))).toBe("The scan stopped before it finished");
+    expect(
+      runOutcome(row({ status: "failed", summary: { crawlers: [{ name: "git", status: "failed", error: "git: simulated crawler error" }] } })),
+    ).toBe("Part of the scan failed");
+    expect(runOutcome(row({ status: "interrupted", summary: { error: "x" } }))).toBe(
+      "Interrupted: the portal stopped while it ran",
+    );
     expect(runOutcome(row({ status: "cancelled", summary: { cancelled_by: "budget" } }))).toBe(
       "Stopped: monthly budget reached",
     );

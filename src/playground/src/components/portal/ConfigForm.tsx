@@ -592,7 +592,13 @@ export function ConfigForm({
               render={({ field }) => (
                 <div className="row-wrap justify-between gap-3">
                   <Label htmlFor="forge-switch">Fetch pull requests and issues from GitHub</Label>
-                  <Switch id="forge-switch" checked={field.value} onCheckedChange={field.onChange} />
+                  {/* Base UI's Switch is a span: `<fieldset disabled>` does not reach it (SET-4). */}
+                  <Switch
+                    id="forge-switch"
+                    checked={field.value}
+                    onCheckedChange={field.onChange}
+                    disabled={readOnly}
+                  />
                 </div>
               )}
             />

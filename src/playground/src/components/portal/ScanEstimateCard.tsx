@@ -5,7 +5,8 @@ import { useCanFor } from "../../lib/permissions";
 import { ErrorState } from "../state/ErrorState";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { formatTokens, formatUsd } from "../../lib/format";
+import { formatTokens } from "../../lib/format";
+import { estimateCostLine, modelLabel } from "../../lib/scanFormat";
 import { providerLabel } from "../../lib/labels";
 import { plural } from "../../lib/plural";
 
@@ -92,7 +93,7 @@ export function EstimateBody({
   totalCommits?: number | null;
 }) {
   const { commits, model, tokens, cost, large_commits, missing_key, cost_hidden } = estimate;
-  const modelName = model.model ? `${model.provider}/${model.model}` : (model.provider ?? "default model");
+  const modelName = model.provider ? modelLabel(providerLabel(model.provider), model.model) : "The default model";
   const showActions = actions && commits > 0;
   return (
     <div className="flex flex-col gap-4" data-testid="scan-estimate">
@@ -115,7 +116,7 @@ export function EstimateBody({
             <span className="font-normal text-muted-foreground">(upper bound)</span>
           </p>
           <p className="text-sm text-muted-foreground">
-            Model <span className="font-mono text-foreground">{modelName}</span>
+            Model: <span className="text-foreground">{modelName}</span>
             {tokens && (
               <>
                 {" "}
@@ -128,8 +129,7 @@ export function EstimateBody({
           </p>
           {cost ? (
             <p className="text-sm text-muted-foreground" data-testid="estimate-cost">
-              About <span className="font-medium text-foreground">~{formatUsd(cost.usd)}</span>, between{" "}
-              {formatUsd(cost.low)} and {formatUsd(cost.high)} ({pricedWith(cost.prices_as_of)})
+              <span className="font-medium text-foreground">{estimateCostLine(cost)}</span>, {pricedWith(cost.prices_as_of)}
             </p>
           ) : (
             tokens && <p className="text-sm text-muted-foreground">No price on file for this model, so tokens only.</p>

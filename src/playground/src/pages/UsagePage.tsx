@@ -18,6 +18,7 @@ import { CallsTable, useCallsQuery } from "../components/usage/CallsTable";
 import { PricesTab } from "../components/usage/PricesTab";
 import { DailyCostChart } from "../components/usage/UsageChart";
 import {
+  ChoiceSelect,
   CsvButton,
   EstimatedNote,
   RangePicker,
@@ -29,7 +30,8 @@ import {
   UsageSection,
 } from "../components/usage/parts";
 import { TabsSelect } from "../components/layout/TabsSelect";
-import { Field, nativeSelectClass } from "../components/portal/Field";
+import { Field } from "../components/portal/Field";
+import { TableSkeleton } from "../components/state/Skeletons";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -157,6 +159,43 @@ function rangeOf(search: RangeSearch): Partial<UsageRange> {
 
 // ---- Overview ---------------------------------------------------------------------
 
+/** The Overview while it loads: four tiles, the notes, the chart and the two top-5 tables, in their shapes (ER-5). */
+function OverviewSkeleton() {
+  const card = "flex flex-col gap-4 rounded-xl border border-border bg-card p-4 shadow-card sm:p-5";
+  return (
+    <div className="flex flex-col gap-6" data-testid="usage-overview-loading" aria-busy="true">
+      <span className="sr-only" role="status">
+        Loading the usage report
+      </span>
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className="flex flex-col gap-1.5 rounded-lg border border-border bg-card px-3 py-2.5 shadow-card">
+            <Skeleton className="h-3 w-20" />
+            <Skeleton className="h-7 w-24" />
+            <Skeleton className="h-3 w-16" />
+          </div>
+        ))}
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <Skeleton className="h-3 w-72 max-w-full" />
+        <Skeleton className="h-3 w-full" />
+      </div>
+      <Skeleton className="h-[260px] w-full rounded-xl" />
+      <div className="grid gap-6 md:grid-cols-2">
+        {[0, 1].map((i) => (
+          <div key={i} className={card}>
+            <div className="flex flex-col gap-1.5">
+              <Skeleton className="h-4 w-28" />
+              <Skeleton className="h-3 w-40" />
+            </div>
+            <TableSkeleton rows={3} cols={3} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Overview({ toCalls }: { toCalls: (filter: UsageSearch) => UsageSearch }) {
   const state = usePortalState().data;
   const usage = state?.usage;
@@ -165,7 +204,7 @@ function Overview({ toCalls }: { toCalls: (filter: UsageSearch) => UsageSearch }
   const models = useUsageReport("org", { group: "model" });
   const lastMonth = useUsageReport("org", monthRange(-1));
 
-  if (thisMonth.isLoading) return <Skeleton className="h-60" />;
+  if (thisMonth.isLoading) return <OverviewSkeleton />;
   if (thisMonth.isError || !thisMonth.data) {
     return (
       <UsageError
@@ -251,7 +290,7 @@ function Overview({ toCalls }: { toCalls: (filter: UsageSearch) => UsageSearch }
         </UsageSection>
         <UsageSection title="Top models" description="This month, by the model the provider served.">
           {models.isLoading ? (
-            <Skeleton className="h-24" />
+            <TableSkeleton rows={3} cols={3} label="Loading the top models" />
           ) : (
             <BreakdownTable group="model" rows={models.data?.groups ?? []} limit={5} compact link={linkModel} />
           )}
@@ -294,7 +333,7 @@ function GroupTab({
         <RangePicker range={range} onChange={setRange} />
         {!empty && <CsvButton download={() => usageApi("org").csv({ ...range, group })} testId={`csv-${group}`} />}
       </div>
-      {report.isLoading && <Skeleton className="h-32" />}
+      {report.isLoading && <TableSkeleton rows={5} cols={4} label="Loading this breakdown" />}
       {report.isError && (
         <UsageError
           error={report.error}
@@ -376,26 +415,19 @@ function CallsTab({
   const select = (label: string, key: "project" | "member" | "task" | "source", options: { value: string; label: string }[]) => (
     <Field label={label} className="w-40 max-sm:w-full">
       {(p) => (
-        <select
+        <ChoiceSelect
           {...p}
-          className={nativeSelectClass}
           value={search[key] ?? ""}
-          onChange={(e) =>
+          onChange={(value) =>
             apply({
               ...search,
-              [key]: e.target.value || undefined,
+              [key]: value || undefined,
               // A session id means nothing without its project.
               ...(key === "project" ? { chat_session: undefined } : {}),
             })
           }
-        >
-          <option value="">All</option>
-          {options.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
+          options={[{ value: "", label: "All" }, ...options]}
+        />
       )}
     </Field>
   );
@@ -428,15 +460,15 @@ function CallsTab({
         </Field>
         <Field label="Sort" className="w-36 max-sm:w-full">
           {(p) => (
-            <select
+            <ChoiceSelect
               {...p}
-              className={nativeSelectClass}
               value={search.sort ?? "time"}
-              onChange={(e) => apply({ ...search, sort: e.target.value === "cost" ? "cost" : undefined })}
-            >
-              <option value="time">Newest first</option>
-              <option value="cost">Costliest first</option>
-            </select>
+              onChange={(value) => apply({ ...search, sort: value === "cost" ? "cost" : undefined })}
+              options={[
+                { value: "time", label: "Newest first" },
+                { value: "cost", label: "Costliest first" },
+              ]}
+            />
           )}
         </Field>
       </div>

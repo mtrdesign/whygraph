@@ -83,7 +83,8 @@ export function ModelSelect({
       <Select
         items={providerItems}
         value={provider || null}
-        disabled={disabled || providers.isLoading}
+        // Nothing to pick from while the list loads or after it failed (ER-4).
+        disabled={disabled || providers.isLoading || providers.isError}
         onValueChange={(next) => {
           if (!next) return;
           setFilter("");

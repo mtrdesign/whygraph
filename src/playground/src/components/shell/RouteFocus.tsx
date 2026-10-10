@@ -42,7 +42,12 @@ export function RouteFocus() {
         if (!pageChoseFocus(main)) {
           const target = heading ?? main;
           if (target) {
-            if (target === heading && !heading.hasAttribute("tabindex")) heading.setAttribute("tabindex", "-1");
+            if (target === heading && !heading.hasAttribute("tabindex")) {
+              heading.setAttribute("tabindex", "-1");
+              // A heading is not a control: focus lands there for screen readers,
+              // without the focus ring real controls keep.
+              heading.style.outline = "none";
+            }
             target.focus({ preventScroll: true });
           }
         }

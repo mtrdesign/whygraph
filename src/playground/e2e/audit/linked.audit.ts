@@ -108,7 +108,8 @@ test("linked project: both portals", async ({ page, browser, request }) => {
     await expect(page.getByTestId("connect-client")).toHaveText(MACHINE);
     await settle(page, 800);
     await snap(page, "production", "linked", "connect-consent", "default", "The platform's consent page (/connect): which machine asks, the project picker, Allow / Deny");
-    await page.getByLabel("Project").selectOption({ label: `Orbit / ${SLUG}` });
+    await page.getByRole("combobox", { name: "Project" }).click();
+    await page.getByRole("option", { name: `Orbit / ${SLUG}` }).click();
     await page.getByRole("button", { name: "Allow" }).click();
     await expect(page).toHaveURL(new RegExp(`^${env.baseUrl}/projects/new\\?.*link=`));
     const picker = page.getByTestId("platform-picker");
@@ -118,7 +119,7 @@ test("linked project: both portals", async ({ page, browser, request }) => {
     await picker
       .getByRole("radiogroup", { name: "Other repositories" })
       .locator("label")
-      .filter({ has: page.getByText(repo, { exact: true }) })
+      .filter({ has: page.getByTitle(repo, { exact: true }) })
       .getByRole("radio")
       .check();
     await page.getByRole("button", { name: "Link this checkout" }).click();

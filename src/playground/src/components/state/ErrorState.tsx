@@ -5,6 +5,7 @@ import { errorInfo, type ErrorContext, type ErrorInfo } from "../../lib/apiError
 import { cn } from "../../lib/utils";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
+import { InPage } from "../layout/PageContainer";
 
 const VARIANT: Record<ErrorInfo["tone"], "destructive" | "warning" | "info"> = {
   error: "destructive",
@@ -115,6 +116,8 @@ export function ErrorState({
     </Alert>
   );
 
-  if (size === "page") return <div className={cn("mx-auto w-full max-w-3xl p-6", className)}>{panel}</div>;
+  // A page-level failure sits where the page would: inside the page's own
+  // container (one is added only when nothing holds it yet), never a second box.
+  if (size === "page") return <InPage>{className ? <div className={className}>{panel}</div> : panel}</InPage>;
   return className ? <div className={className}>{panel}</div> : panel;
 }

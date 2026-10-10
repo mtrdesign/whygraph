@@ -17,12 +17,18 @@ import { cn } from "@/lib/utils";
 import { alertVariants } from "../ui/alert";
 import { Button } from "../ui/button";
 import { StatusPill } from "../ui/status-pill";
+import { STOPPED_TITLE } from "../usage/parts";
 
 /** The one-line sentence a soft budget adds at 100%: it warns and does not stop. */
 export const SOFT_100_LINE = "Spending continues: this budget has no hard stop.";
 
 /** The words for a viewer who cannot change budgets. */
 export const ASK_ADMIN_LINE = "Ask an owner or admin to raise it.";
+
+/** The action for whoever can see the budgets: "Review budgets", or "Raise it in Budgets" for local mode's user. */
+export function budgetsLinkText(mode: string | null | undefined): string {
+  return mode === "local" ? "Raise it in Budgets" : "Review budgets";
+}
 
 /**
  * One strip of the banner stack: a tone (`info` at 50%, `warning` above and for a
@@ -72,7 +78,7 @@ export function BannerStrip({
   );
 }
 
-const STOPPED_PILL = <StatusPill tone="warn" label="Stopped" title="Monthly budget reached" />;
+const STOPPED_PILL = <StatusPill tone="warn" label="Stopped" title={STOPPED_TITLE} />;
 
 function Bar({
   scope,
@@ -166,6 +172,7 @@ function MemberBanner({
 }
 
 function OrgBanner({ usage, orgName }: { usage: StateUsage; orgName: string }) {
+  // `orgName` is "This portal" in local mode (MODE-5): the portal has no organization to name.
   const org = usage.org;
   const orgThreshold = thresholdOf(org?.pct);
   const projects = (usage.projects_over ?? [])
@@ -222,7 +229,7 @@ export function ProjectStopBanner({ scope }: { scope?: string | null }) {
       action={
         usage?.org ? (
           <Link to="/usage" search={{ tab: "budgets" }} className={linkClass}>
-            Review budgets
+            {budgetsLinkText(state?.mode)}
           </Link>
         ) : undefined
       }
@@ -253,7 +260,10 @@ export function BudgetBanner({ projectStopped = false }: { projectStopped?: bool
   return (
     <>
       {usage.me && <MemberBanner me={usage.me} usage={usage} orgUsage={!!usage.org} covered={projectStopped} />}
-      {usage.org && orgPage && <OrgBanner usage={usage} orgName={state?.org?.name ?? "The organization"} />}
+      {usage.org && orgPage && <OrgBanner
+          usage={usage}
+          orgName={state?.mode === "local" ? "This portal" : (state?.org?.name ?? "The organization")}
+        />}
     </>
   );
 }

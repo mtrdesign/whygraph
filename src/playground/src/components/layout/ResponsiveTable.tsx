@@ -94,12 +94,17 @@ export function ResponsiveTable<T>({
           >
             <div className="min-w-0 font-medium break-words">{primary.cell(row)}</div>
             <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
-              {others.map((c) => (
-                <div key={c.key} className="contents">
-                  <dt className="text-xs text-muted-foreground">{c.header}</dt>
-                  <dd className="min-w-0 break-words">{c.cell(row)}</dd>
-                </div>
-              ))}
+              {others.map((c) => {
+                const value = c.cell(row);
+                // An empty cell is left out: no label without a value.
+                if (value === null || value === undefined || value === "" || value === false) return null;
+                return (
+                  <div key={c.key} className="contents">
+                    <dt className="text-xs text-muted-foreground">{c.header}</dt>
+                    <dd className="min-w-0 break-words">{value}</dd>
+                  </div>
+                );
+              })}
             </dl>
           </li>
         ))}

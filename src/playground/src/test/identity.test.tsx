@@ -14,6 +14,7 @@ import { createAppRouter } from "../router";
 import { ThemeProvider } from "../theme";
 import { ApiError } from "../api";
 import { useUi } from "../store";
+import { formatResetsAt } from "../lib/usageRange";
 
 // `hardNavigate` is mocked globally (src/test/setup.ts); redirect tests wait for
 // the spy rather than for the router, because a hard navigation never resolves.
@@ -921,6 +922,11 @@ describe("members page", () => {
     visit("owner");
     await waitFor(() => expect(screen.getByTestId("members-heading")).toHaveTextContent("Members (4)"));
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Members");
+    // On a phone the identity takes its own line; details and actions wrap under it.
+    for (const identity of screen.getAllByTestId("member-identity")) {
+      expect(identity.className).toContain("basis-full");
+      expect(identity.parentElement?.className).toContain("row-wrap");
+    }
   });
 
   it("shows project access chips from grants, and none when the server sends no grants", async () => {
@@ -1095,7 +1101,8 @@ describe("account page", () => {
     const stopped = await screen.findByTestId("account-usage-stopped-acme");
     expect(stopped).toHaveTextContent("Stopped");
     expect(stopped).toHaveTextContent("You can still read everything that's already generated.");
-    expect(stopped).toHaveTextContent("1 Nov, 00:00 UTC");
+    // The viewer-locale shape the Usage pages use (CN-3).
+    expect(stopped).toHaveTextContent(formatResetsAt("2026-11-01T00:00:00Z"));
     expect(screen.queryByTestId("account-usage-stopped-rocket")).toBeNull();
   });
 
@@ -1261,10 +1268,49 @@ describe("invitations", () => {
     expect(note.className).toContain("bg-info-soft");
     expect(note).toHaveTextContent("No message is sent. Share this link with @dan");
     expect(within(note).getByRole("button", { name: "Copy" })).toBeInTheDocument();
+    // The link is a command block that breaks after "/" (never break-all, no
+    // reserved right column for Dismiss, which sits in the flow).
+    const link = note.querySelector("pre")!;
+    expect(link.textContent).toBe(window.location.origin);
+    expect(link.className).not.toContain("break-all");
+    expect(note.innerHTML).not.toContain("pr-20");
+    expect(within(note).getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
     const post = fake.calls.find((c) => c.path === "/api/org/members" && c.method === "POST");
     expect(post?.body).toEqual({ github_login: "dan", role: "member", grants: [{ project: "alpha", role: "viewer" }] });
     // The new invitation shows up in the pending list.
     expect(await screen.findByTestId("invitation-i9")).toHaveTextContent("@dan");
+  });
+
+  it("keeps the project access select wide enough for Organization default", async () => {
+    visit();
+    const select = await screen.findByLabelText("Access to Project alpha");
+    expect(select.className).not.toContain("w-36");
+    expect(select.className).toContain("w-48");
+  });
+
+  it("shows the invite form as a skeleton until the projects load (ER-5)", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => (release = r));
+    fake.routes["/api/projects"] = () =>
+      gate.then(() => json({ projects: [project("alpha")] })) as unknown as Response;
+    visit();
+    expect(await screen.findByTestId("add-member-loading")).toBeInTheDocument();
+    expect(screen.queryByTestId("add-member")).toBeNull();
+    release();
+    const form = await screen.findByTestId("add-member");
+    // The access fieldset is there with the form, not popping in after it.
+    expect(within(form).getByTestId("invite-grants")).toBeInTheDocument();
+  });
+
+  it("says when the invitations fail to load, with Retry, instead of hiding the section (ER-4)", async () => {
+    visit();
+    let fail = true;
+    fake.routes["/api/org/invitations"] = () => (fail ? json({ error: "boom" }, 500) : json([invitation("i1", "dan")]));
+    const section = within(await screen.findByTestId("invitations"));
+    expect(await section.findByText("Couldn't load the invitations")).toBeInTheDocument();
+    fail = false;
+    await userEvent.setup().click(section.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByTestId("invitation-i1")).toHaveTextContent("@dan");
   });
 
   it("keeps one notice per invite until dismissed; the next submit does not clear it", async () => {
@@ -1398,6 +1444,37 @@ describe("org settings (general and ownership)", () => {
     await waitFor(() =>
       expect(fake.calls.find((c) => c.path === "/api/org/transfer")?.body).toEqual({ user_uid: "u2", confirm_slug: "acme" }),
     );
+  });
+
+  it("says when the members fail to load instead of an empty New owner select (ER-4)", async () => {
+    let fail = true;
+    fake.routes["/api/org/members"] = () =>
+      fail
+        ? json({ error: "boom" }, 500)
+        : json([
+            { uid: "u1", display_name: "Ada", github_login: "ada", avatar_url: null, role: "owner", joined_at: "2026-10-01T00:00:00Z", disabled: false },
+            { uid: "u2", display_name: "Meg", github_login: "meg", avatar_url: null, role: "member", joined_at: "2026-10-01T00:00:00Z", disabled: false },
+          ]);
+    mount("/settings");
+    const ownership = within(await screen.findByTestId("org-ownership"));
+    expect(await ownership.findByText("Couldn't load the members")).toBeInTheDocument();
+    expect(ownership.queryByLabelText("New owner")).toBeNull();
+    fail = false;
+    await userEvent.setup().click(ownership.getByRole("button", { name: "Retry" }));
+    const select = (await ownership.findByLabelText("New owner")) as HTMLSelectElement;
+    await waitFor(() => expect(select).toBeEnabled());
+    // Nothing chosen yet: Transfer is disabled and says why.
+    expect(ownership.getByRole("button", { name: "Transfer ownership" })).toBeDisabled();
+    expect(ownership.getByText("Choose the new owner first.")).toBeInTheDocument();
+  });
+
+  it("disables New owner with a reason when no other member can take it", async () => {
+    fake.routes["/api/org/members"] = () =>
+      json([{ uid: "u1", display_name: "Ada", github_login: "ada", avatar_url: null, role: "owner", joined_at: "2026-10-01T00:00:00Z", disabled: false }]);
+    mount("/settings");
+    const ownership = within(await screen.findByTestId("org-ownership"));
+    expect(await ownership.findByText(/No other active member can become the owner/)).toBeInTheDocument();
+    expect(ownership.getByLabelText("New owner")).toBeDisabled();
   });
 
   it("an admin sees neither section", async () => {
@@ -1560,7 +1637,50 @@ describe("audit log", () => {
     const tested = within(screen.getByTestId("audit-6"));
     expect(tested.getByText("API key tested")).toBeInTheDocument();
     expect(tested.getByText("System")).toBeInTheDocument();
-    expect(tested.getByText("Provider").nextSibling).toHaveTextContent("openai");
+    expect(tested.getByText("Provider").nextSibling).toHaveTextContent("OpenAI");
+    expect(tested.getByText("Result").nextSibling).toHaveTextContent("Works");
+  });
+
+  it("words codes, shortens ids, formats rates and leaves empty fields out (MEM-1)", async () => {
+    fake.state = orgState("owner");
+    const inv = "76b37542-8a8a-4c1e-9d2b-0f1e2d3c4b5a";
+    fake.routes["/api/org/audit"] = () =>
+      json({
+        events: [
+          {
+            ...event(9, "member_add_refused"),
+            fields: { reason: "no_such_github_user", github_login: "ghost", role: "member" },
+          },
+          { ...event(8, "invitation_created"), target: inv, fields: { invitation: inv, scope: "org", grants: 0 } },
+          {
+            ...event(5, "price_override_set"),
+            fields: { provider: "anthropic", model: "claude-x", input_per_mtok: "3.000000", cache_read_per_mtok: null },
+          },
+          { ...event(4, "github_signin_refused"), fields: { reason: "2fa_required", github_login: "ada" } },
+        ],
+        next: null,
+      });
+    mount("/audit");
+    const refused = within(await screen.findByTestId("audit-9"));
+    expect(refused.getByText("Reason").nextSibling).toHaveTextContent("No such GitHub user");
+    expect(refused.getByText("GitHub login").nextSibling).toHaveTextContent("@ghost");
+    expect(refused.getByText("Role").nextSibling).toHaveTextContent("Member");
+    const created = within(screen.getByTestId("audit-8"));
+    // The raw UUID is never printed whole: its first block, muted mono, whole in the title.
+    expect(screen.getByTestId("audit-8")).not.toHaveTextContent(inv);
+    const id = created.getByText("Invitation").nextSibling as HTMLElement;
+    expect(id).toHaveTextContent("76b37542");
+    expect(id.querySelector("[title]")).toHaveAttribute("title", inv);
+    expect(id.querySelector("[title]")?.className).toContain("font-mono");
+    expect(created.getByText("Scope").nextSibling).toHaveTextContent("Organization");
+    const price = within(screen.getByTestId("audit-5"));
+    expect(price.getByText("Input price").nextSibling).toHaveTextContent("$3.00 per million tokens");
+    // A null rate is left out, not printed as a bare label or a dash.
+    expect(price.queryByText("Cache read price")).toBeNull();
+    const twoFactor = within(screen.getByTestId("audit-4"));
+    expect(twoFactor.getByText("Reason").nextSibling).toHaveTextContent("Two-factor authentication is required");
+    // Values wrap between segments (after "@", "." ...), never mid-word.
+    expect(document.body).not.toHaveTextContent(/no_such_github_user|2fa_required|Github login/);
   });
 
   it("filters by event in a grouped select", async () => {
@@ -1730,6 +1850,23 @@ describe("org switcher and account menu (org host)", () => {
     expect(screen.queryByRole("menuitem", { name: "Switch organization" })).toBeNull();
     await user.click(screen.getByRole("menuitem", { name: "Account" }));
     await waitFor(() => expect(hard).toHaveBeenCalledWith(`${BASE}/account?from=acme`));
+  });
+
+  it("keeps the role whole beside a long email, and the org switcher on its own row with the full name", async () => {
+    fake.state = orgState("reader", {
+      user: { ...ada, email: "ada.lovelace.with.a.long.address@example.com" },
+      org: { slug: "acme", name: "Rocket Laboratories", role: "reader" },
+    });
+    mount("/");
+    const who = await screen.findByTestId("account-who");
+    expect(who).toHaveTextContent("ada.lovelace.with.a.long.address@example.com · Read-only");
+    const role = within(who).getByText(/Read-only/);
+    expect(role.className).toContain("shrink-0");
+    expect(role.className).not.toContain("truncate");
+    const trigger = await screen.findByTestId("org-switcher");
+    expect(trigger).toHaveAttribute("title", "Rocket Laboratories");
+    expect(trigger.className).not.toMatch(/max-w-\[/);
+    expect(trigger.className).toContain("w-full");
   });
 
   it("offers Import a repository in the project switcher to owners and admins only", async () => {

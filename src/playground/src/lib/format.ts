@@ -81,12 +81,40 @@ export function formatClock(value: When): string {
 }
 
 /**
- * A date part in UTC, for the usage pages that bucket by UTC day and month
- * (`{ month: "short", day: "numeric" }` -> `Oct 7`). `locale` pins the spelling the caller wants.
+ * A date part in UTC, in the viewer's locale, for the usage pages that bucket by UTC
+ * day and month (`{ month: "short", day: "numeric" }` -> `Oct 7` or `7 Oct`).
  */
-export function formatUtc(value: When, options: Intl.DateTimeFormatOptions, locale = "en-US"): string {
+export function formatUtc(value: When, options: Intl.DateTimeFormatOptions): string {
   const d = toDate(value);
-  return d ? new Intl.DateTimeFormat(locale, { ...options, timeZone: "UTC" }).format(d) : "-";
+  return d ? new Intl.DateTimeFormat(undefined, { ...options, timeZone: "UTC" }).format(d) : "-";
+}
+
+const DATE_UTC = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+const DATE_TIME_UTC = new Intl.DateTimeFormat(undefined, {
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+  timeZone: "UTC",
+});
+
+/** `formatDate`'s shape for a UTC calendar day (a usage range bound); `-` for a missing or invalid value. */
+export function formatDateUtc(value: When): string {
+  const d = toDate(value);
+  return d ? DATE_UTC.format(d) : "-";
+}
+
+/** `formatDateTime`'s shape in UTC, marked ` UTC` (when the month's budgets reset); `-` for a missing value. */
+export function formatDateTimeUtc(value: When): string {
+  const d = toDate(value);
+  return d ? `${DATE_TIME_UTC.format(d)} UTC` : "-";
+}
+
+/** A USD price that may be a fraction of a cent (`$0.075`, up to six places); `-` when not a number. */
+export function formatUsdPrecise(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return `$${value.toLocaleString("en-US", { maximumFractionDigits: 6 })}`;
 }
 
 /** A whole-number-friendly count in the viewer's locale (`1,234`); `-` when not a number. */

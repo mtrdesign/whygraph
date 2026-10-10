@@ -567,6 +567,23 @@ describe("production project pages", () => {
     expect(within(missing).queryByRole("textbox")).toBeNull();
   });
 
+  it("gives an owner who may add the org key a link to Organization settings, not 'an owner can add one' (IMP-6)", async () => {
+    handlers["GET /api/projects/api/config"] = () => ({
+      config: {},
+      secrets: secrets(),
+      effective_keys: { anthropic: "none", openai: "none", openrouter: "none", deepseek: "none" },
+      import: { found: false, error: null, secrets_moved: [], dropped: [], custom_db_paths: [], warnings: [] },
+    });
+    mount("/p/api/init?step=configure");
+    const missing = await screen.findByTestId("key-missing");
+    expect(missing).not.toHaveTextContent("An owner can add one");
+    expect(missing).toHaveTextContent("To use one key for every project, add it in Organization settings.");
+    expect(within(missing).getByRole("link", { name: "Organization settings" })).toHaveAttribute(
+      "href",
+      "/settings?section=models",
+    );
+  });
+
   it("sends ?step=initialize (now setup) on to Configure", async () => {
     const router = mount("/p/api/init?step=initialize");
     await waitFor(() => expect(here(router)).toBe("/p/api/init?step=configure"));

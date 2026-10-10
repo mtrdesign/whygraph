@@ -93,7 +93,7 @@ export function InitProjectPage() {
           : "The first scan runs in the background. Meanwhile, check what commit descriptions need. You can change all of this later in Settings.";
 
   return (
-    <PageContainer className="flex flex-col gap-5 max-w-[760px]">
+    <PageContainer width="narrow" className="flex flex-col gap-5">
       <div className="flex flex-col gap-1">
         <h1 className="text-[22px] font-semibold tracking-tight break-words">
           {p.name}: {TITLE[step]}

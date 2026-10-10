@@ -10,7 +10,8 @@ never share one - which is what the project-switch test relies on.
 
 Options (before the runner's own ``--progress json --managed-by-portal ...``):
 
-``--control DIR``   look for ``DIR/fail`` (exit 1 after phase 3, with a stderr
+``--control DIR``   look for ``DIR/fail`` (the ``git`` crawler fails in phase
+                    1, the later phases never start, exit 1, with a stderr
                     line carrying a fake key so redaction can be checked) and
                     ``DIR/delay`` (seconds per tick) on every run
 ``--delay SEC``     seconds per tick when ``DIR/delay`` is absent (default 0.15)
@@ -54,6 +55,12 @@ OWN_SWITCHES = ("--codegraph-only", "--real-git")
 
 REAL_GIT_FLAGS = ("--skip-analyze", "--no-remote", "--no-codegraph")
 """Forced on the real scanner: no LLM, no network, no CodeGraph binary."""
+
+REAL_GIT_PHASES = ["Structural crawl", "Author identity"]
+"""The phases the real scanner announces under :data:`REAL_GIT_FLAGS`."""
+
+FAKE_KEY = "sk-ant-api03-simulatedE2EKey0123456789"
+"""A provider-key-shaped secret the failure writes to stderr (redacted in the log)."""
 
 _SCHEMA = """\
 CREATE TABLE nodes (
@@ -199,7 +206,10 @@ def forwarded(args: list[str]) -> list[str]:
 def real_git(args: list[str], fail: bool) -> int:
     """The ``--real-git`` run: the CodeGraph seed, then the real git crawl."""
     if fail:
-        emit({"type": "start", "phase_total": 1, "phases": ["Code index"]})
+        # The phases the real scanner announces with REAL_GIT_FLAGS; the git
+        # crawler fails in the first, so the second never starts.
+        emit({"type": "start", "phase_total": 2, "phases": REAL_GIT_PHASES})
+        emit({"type": "phase", "phase": 1, "title": "Structural crawl"})
         sys.stderr.write("scan failed: simulated git error\n")
         emit(
             {
@@ -286,15 +296,11 @@ def main() -> int:
         )
         time.sleep(delay)
     emit({"type": "task", "name": "codegraph", "description": "indexing"})
-    emit({"type": "phase", "phase": 2, "title": "PR-origin recovery"})
-    time.sleep(delay)
-    emit({"type": "phase", "phase": 3, "title": "Author identity"})
-    time.sleep(delay)
 
     if fail:
-        sys.stderr.write(
-            "scan failed: simulated crawler error with key sk-ant-secret-abcd\n"
-        )
+        # The failure belongs to phase 1 (the git crawler's); the later phases
+        # never start, so the run page shows them skipped, not done.
+        sys.stderr.write(f"scan failed: simulated crawler error with key {FAKE_KEY}\n")
         emit(
             {
                 "type": "result",
@@ -307,12 +313,17 @@ def main() -> int:
                         "status": "failed",
                         "summary": "",
                         "error": "simulated crawler error",
-                    }
+                    },
                 ],
                 "analyze_skipped": None,
             }
         )
         return 1
+
+    emit({"type": "phase", "phase": 2, "title": "PR-origin recovery"})
+    time.sleep(delay)
+    emit({"type": "phase", "phase": 3, "title": "Author identity"})
+    time.sleep(delay)
 
     seed_codegraph(Path(os.getcwd()))
     if analyze:

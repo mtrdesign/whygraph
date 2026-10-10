@@ -274,8 +274,10 @@ export function Sidebar({
             <NetworkIcon className="size-3.5 text-primary-foreground" aria-hidden />
           </div>
           <span className="font-semibold tracking-tight">WhyGraph</span>
-          <OrgSwitcher state={state.data} />
+          {!production && <OrgSwitcher state={state.data} />}
         </div>
+        {/* Its own row, so the org's name is read whole; only a truly long one truncates. */}
+        {production && <OrgSwitcher state={state.data} />}
         <ProjectSwitcher slug={slug} name={projectName} />
       </div>
 
@@ -337,11 +339,21 @@ export function Sidebar({
               </span>
               <div className="flex min-w-0 flex-1 flex-col leading-tight">
                 <span className="truncate text-[13px] font-medium">{user?.display_name}</span>
-                <span className="truncate text-[11px] text-muted-foreground" data-testid="account-who">
-                  {[user?.github_login ? `@${user.github_login}` : signedInAs(user), orgRoleText(state.data?.org?.role)]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </span>
+                {(() => {
+                  // The identity truncates (a long email); the role after it never does.
+                  const who = user?.github_login ? `@${user.github_login}` : signedInAs(user);
+                  const role = orgRoleText(state.data?.org?.role);
+                  return (
+                    <span className="flex min-w-0 text-[11px] text-muted-foreground" data-testid="account-who">
+                      {who && (
+                        <span className="min-w-0 truncate" title={who}>
+                          {who}
+                        </span>
+                      )}
+                      {role && <span className="shrink-0 whitespace-pre">{who ? ` · ${role}` : role}</span>}
+                    </span>
+                  );
+                })()}
               </div>
               <ChevronsUpDownIcon className="size-3.5 shrink-0 text-muted-foreground" />
             </DropdownMenuTrigger>

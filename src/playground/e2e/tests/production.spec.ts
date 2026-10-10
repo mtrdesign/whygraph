@@ -224,10 +224,12 @@ test("projects from GitHub: connect, import, scan, members, a push, deleting the
   await ben.goto("/orgs/new");
   await ben.getByLabel("Organization name").fill("Rocket");
   await ben.getByLabel("URL name").fill("rocket");
-  // The live check already says so before submit; the server still refuses it.
+  // The live check says the retired slug is taken, so the known-bad submit is not
+  // offered: no address preview, Create disabled (the server's own refusal is
+  // covered by the pytest suite).
   await expect(ben.getByTestId("slug-status")).toContainText("rocket." + base.host + " is already taken");
-  await ben.getByRole("button", { name: "Create organization" }).click();
-  await expect(ben.getByText("That URL name is already taken.")).toBeVisible();
+  await expect(ben.getByTestId("slug-preview")).toHaveCount(0);
+  await expect(ben.getByRole("button", { name: "Create organization" })).toBeDisabled();
   await benContext.close();
 });
 

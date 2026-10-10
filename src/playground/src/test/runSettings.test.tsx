@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { toast } from "sonner";
 import { createAppRouter } from "../router";
 import { ThemeProvider } from "../theme";
 import { useUi } from "../store";
@@ -213,7 +214,9 @@ describe("Scan run (screen 7)", () => {
     expect(screen.getByTestId("phase-2")).toHaveAttribute("data-status", "done");
     // One bar with its counter for the LLM descriptions task.
     const task = within(phase3).getByTestId("task-analyze");
-    expect(task).toHaveTextContent("41 / 62");
+    // The count once, never the crawler's raw lower-case description beside it (SCN-5).
+    expect(task).toHaveTextContent("41 of 62");
+    expect(task).not.toHaveTextContent("describing");
     expect(within(phase3).getByRole("progressbar")).toHaveAttribute("aria-valuenow", "66");
     // The title is "<what> - <when>", never the run id (R5); phases are named up front.
     const heading = screen.getByRole("heading", { level: 1 });
@@ -315,6 +318,7 @@ describe("Scan run (screen 7)", () => {
   });
 
   it("Cancel on a running run asks first, then POSTs the cancel", async () => {
+    const toastSuccess = vi.spyOn(toast, "success");
     handlers["POST /api/projects/alpha/scans/6/cancel"] = () => ({
       status: 202,
       body: { run_id: 6, was: "running" },
@@ -336,6 +340,10 @@ describe("Scan run (screen 7)", () => {
       within(await screen.findByTestId("cancel-run-dialog")).getByRole("button", { name: "Stop scan" }),
     );
     await waitFor(() => expect(calls("POST", "/api/projects/alpha/scans/6/cancel")).toHaveLength(1));
+    // No "Stopping the scan" toast: the page itself says "Cancelled by you".
+    await waitFor(() => expect(screen.queryByTestId("cancel-run-dialog")).not.toBeInTheDocument());
+    expect(toastSuccess).not.toHaveBeenCalled();
+    toastSuccess.mockRestore();
   });
 
   it("a queued run can be cancelled too; the dialog says it just leaves the queue", async () => {
@@ -507,6 +515,47 @@ describe("Scan run (screen 7)", () => {
     expect(await screen.findByTestId("run-result")).toHaveTextContent("GitHub could not be reached");
   });
 
+  it("a quick rescan whose sync found nothing new but went on to scan and fail never says 'nothing to scan' (BUG-6)", async () => {
+    handlers["GET /api/projects/alpha/scans"] = () => ({
+      runs: [run(6, { kind: "sync", status: "failed", analyze: false, summary: { scanned: true } })],
+    });
+    handlers["GET /api/projects/alpha/scans/6/events"] = () =>
+      sse([
+        frame(1, { type: "sync", status: "fetching" }),
+        frame(2, { type: "sync", status: "ok", moved: false }),
+        frame(3, { type: "start", phase_total: 2, phases: ["Structural crawl", "Author identity"] }),
+        frame(4, { type: "phase", phase: 1, title: "Structural crawl" }),
+        frame(5, {
+          type: "result",
+          status: "failed",
+          crawlers: [{ name: "git", status: "failed", error: "git: simulated crawler error" }],
+        }),
+        endFrame(6, "failed", { scanned: true, crawlers: [{ name: "git", status: "failed", error: "git: simulated crawler error" }] }),
+      ]);
+    mount("/p/alpha/scans/6");
+    const step = await screen.findByTestId("sync-step");
+    await waitFor(() => expect(screen.getByTestId("run-result")).toHaveTextContent("The scan failed"));
+    expect(step).not.toHaveTextContent("nothing to scan");
+    expect(step).toHaveTextContent("Already up to date with GitHub");
+    // The failure belongs to its phase; the phase after it did not run.
+    expect(screen.getByTestId("phase-1")).toHaveAttribute("data-status", "failed");
+    expect(screen.getByTestId("phase-2")).toHaveAttribute("data-status", "skipped");
+    // The raw crawler error is only under "Show details" (ER-3).
+    expect(screen.getByTestId("phase-1")).not.toHaveTextContent("simulated crawler error");
+    expect(screen.getByTestId("run-error-details")).toHaveTextContent("simulated crawler error");
+  });
+
+  it("a sync that found nothing and scanned nothing says so once it ended", async () => {
+    handlers["GET /api/projects/alpha/scans"] = () => ({
+      runs: [run(6, { kind: "sync", trigger: "push", analyze: false, summary: { moved: false } })],
+    });
+    handlers["GET /api/projects/alpha/scans/6/events"] = () =>
+      sse([frame(1, { type: "sync", status: "ok", moved: false }), endFrame(2, "ok", { moved: false, elapsed_sec: 1 })]);
+    mount("/p/alpha/scans/6");
+    const step = await screen.findByTestId("sync-step");
+    await waitFor(() => expect(step).toHaveTextContent("No new commits; nothing to scan"));
+  });
+
   it("a cancelled run's phase is a stop, not a failure; the cost lines show on every outcome that has them", async () => {
     const usage = { calls: 3, input_tokens: 10, output_tokens: 1, cost_usd: 0.1, cost_source: "estimated" };
     const stats = { cancelled_by: "user", usage, estimate: { commits: 4, cost_usd: 0.5 } };
@@ -551,11 +600,16 @@ describe("Scan run (screen 7)", () => {
     // Backend behaviour: a request while a run is active joins the ONE pending run.
     handlers["POST /api/projects/alpha/scans"] = () => ({ status: 202, body: { run_id: 7 } });
     const user = userEvent.setup();
+    const success = vi.spyOn(toast, "success");
     const { router } = mount("/p/alpha/scans/6");
     await screen.findByTestId("phase-3");
 
     await quickRescan(user);
     const followup = await screen.findByTestId("followup");
+    // The run id is only in a URL: the toast offers "Open run", never "#7" (SCN-4).
+    expect(success).toHaveBeenCalledWith("Scan queued", expect.objectContaining({ action: expect.objectContaining({ label: "Open run" }) }));
+    expect(success.mock.calls.flat().join(" ")).not.toContain("#7");
+    success.mockRestore();
     expect(followup).toHaveTextContent("Another request joined this run");
     expect(followup).not.toHaveTextContent("folds into");
     expect(within(followup).getByRole("link")).toHaveAttribute("href", "/p/alpha/scans/7");
@@ -634,10 +688,12 @@ describe("Scan history (screen 8)", () => {
     expect(within(table).getByTestId("run-10")).toHaveTextContent("Queued 2 min ago");
     expect(within(table).getByTestId("run-8")).toHaveTextContent("Interrupted");
     expect(within(table).getByTestId("run-8")).toHaveTextContent("Ben");
-    // The viewer's own runs read "You"; a first scan is "First scan"; a failure keeps its text.
+    // The viewer's own runs read "You"; a first scan is "First scan"; an unrecognised
+    // failure is a sentence, its raw text only on the run page (ER-3).
     expect(within(table).getByTestId("run-7")).toHaveTextContent("First scan");
     expect(within(table).getByTestId("run-7")).toHaveTextContent("You");
-    expect(within(table).getByTestId("run-7")).toHaveTextContent("boom");
+    expect(within(table).getByTestId("run-7")).toHaveTextContent("The scan stopped before it finished");
+    expect(within(table).getByTestId("run-7")).not.toHaveTextContent("boom");
     expect(within(table).getByTestId("run-6")).toHaveTextContent("Scheduled check");
     expect(within(table).getByTestId("run-6")).toHaveTextContent("No new commits");
     // No cost keys in the payload (a reader): no Cost column.
@@ -731,7 +787,9 @@ describe("Scan history (screen 8)", () => {
 
 describe("Project overview (screen 9a)", () => {
   it("shows stats, recent scans and the per-agent connect snippet with the MCP URL", async () => {
-    handlers["GET /api/projects/alpha/scans"] = () => ({ runs: [run(6), run(5, { trigger: "hook" })] });
+    handlers["GET /api/projects/alpha/scans"] = () => ({
+      runs: [run(6), run(5, { trigger: "hook" }), run(4, { trigger: "manual", analyze: false })],
+    });
     const user = userEvent.setup();
     mount("/p/alpha");
     const stats = await screen.findByTestId("stats");
@@ -742,8 +800,11 @@ describe("Project overview (screen 9a)", () => {
     expect(within(stats).getByTestId("stat-issues")).toHaveTextContent("12");
     expect(stats).toHaveTextContent("31");
     const recent = await screen.findByTestId("recent-scans");
-    // ResponsiveTable renders the table and the phone list; either shows the trigger.
-    expect(within(recent).getAllByText("Git hook")[0]).toBeInTheDocument();
+    // ResponsiveTable renders the table and the phone list; either shows the run's
+    // label, the history's words with quick vs full visible (SCN-3).
+    expect(within(recent).getAllByText("Commit hook")[0]).toBeInTheDocument();
+    expect(within(recent).getAllByText("Quick rescan")[0]).toBeInTheDocument();
+    expect(within(recent).queryByText("Manual")).toBeNull();
 
     expect(screen.getByTestId("mcp-url")).toHaveTextContent("http://127.0.0.1:8765/mcp/alpha");
     // Claude Code is configured, so its tab is open with the interpolated port form.

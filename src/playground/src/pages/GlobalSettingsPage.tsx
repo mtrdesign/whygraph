@@ -10,6 +10,8 @@ import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { PathText } from "../components/layout/PathText";
+import { DisabledReason } from "../components/state/DisabledReason";
+import { ErrorState } from "../components/state/ErrorState";
 import { ReadOnlyNotice } from "../components/settings/ReadOnlyNotice";
 import { SectionForm } from "../components/settings/SectionForm";
 import { SettingsLayout, SettingsSection, type SettingsNavItem } from "../components/settings/SettingsLayout";
@@ -169,30 +171,63 @@ function Ownership({ slug, name, me }: { slug: string; name: string; me: string 
           someone the owner role on the Members page.
         </p>
       </div>
-      <Field label="New owner">
-        {(p) => (
-          <select {...p} className={nativeSelectClass} value={target} onChange={(e) => setTarget(e.target.value)}>
-            <option value="">Choose a member</option>
-            {candidates.map((m) => (
-              <option key={m.uid} value={m.uid}>
-                {label(m)}
-              </option>
-            ))}
-          </select>
-        )}
-      </Field>
-      <div>
-        <Button
-          variant="outline"
-          disabled={!target}
-          onClick={() => {
-            transfer.reset();
-            setOpen(true);
-          }}
-        >
-          Transfer ownership
-        </Button>
-      </div>
+      {members.isError ? (
+        // ER-4: a failed member list is said, with Retry - not an empty select.
+        <ErrorState
+          error={members.error}
+          title="Couldn't load the members"
+          onRetry={() => void members.refetch()}
+        />
+      ) : (
+        <>
+          <Field
+            label="New owner"
+            hint={
+              members.isLoading
+                ? "Loading the members…"
+                : candidates.length === 0
+                  ? "No other active member can become the owner. Invite someone on the Members page first."
+                  : undefined
+            }
+          >
+            {(p) => (
+              <select
+                {...p}
+                className={nativeSelectClass}
+                value={target}
+                disabled={members.isLoading || candidates.length === 0}
+                onChange={(e) => setTarget(e.target.value)}
+              >
+                <option value="">Choose a member</option>
+                {candidates.map((m) => (
+                  <option key={m.uid} value={m.uid}>
+                    {label(m)}
+                  </option>
+                ))}
+              </select>
+            )}
+          </Field>
+          <div>
+            {target ? (
+              <Button
+                variant="outline"
+                onClick={() => {
+                  transfer.reset();
+                  setOpen(true);
+                }}
+              >
+                Transfer ownership
+              </Button>
+            ) : (
+              <DisabledReason reason="Choose the new owner first.">
+                <Button variant="outline" disabled>
+                  Transfer ownership
+                </Button>
+              </DisabledReason>
+            )}
+          </div>
+        </>
+      )}
       <TypedConfirmDialog
         open={open}
         onOpenChange={setOpen}

@@ -5,6 +5,8 @@ import { useQuery } from "@tanstack/react-query";
 import { portalApi, projectKey, type RationaleCard } from "../api";
 import { isProduction, usePortalState } from "../lib/identity";
 import { providerLabel } from "../lib/labels";
+import { formatDateTime } from "../lib/format";
+import { plural } from "../lib/plural";
 import { useSlug } from "../lib/project";
 import { budgetNoticeText } from "../lib/budgetBanner";
 import { useLlmBlock, useProjectCan } from "../lib/permissions";
@@ -12,6 +14,9 @@ import { useProjectApi, useProjectKey, useProjectQuery } from "../lib/project";
 import { Button } from "./ui/button";
 import { ErrorState } from "./state/ErrorState";
 import { Loading } from "./Loading";
+
+/** "an Anthropic", "an OpenAI", "a DeepSeek": the article a provider's name takes. */
+const withArticle = (name: string) => `${/^[aeiou]/i.test(name) ? "an" : "a"} ${name}`;
 
 // The Rationale tab (the resolved Q3 design): on open it does a CACHE-ONLY read
 // (`GET`, never an LLM call). A cached card renders directly; otherwise a
@@ -54,9 +59,9 @@ function Card({ card }: { card: RationaleCard }) {
       <div className="mt-4 border-t border-border pt-2 text-[11px] text-muted-foreground">
         {card.provider}
         {card.model ? ` · ${card.model}` : ""}
-        {card.cached_at ? ` · generated ${card.cached_at}` : ""}
+        {card.cached_at ? ` · generated ${formatDateTime(card.cached_at)}` : ""}
         {card.evidence_count &&
-          ` · ${card.evidence_count.commits} commits, ${card.evidence_count.prs} PRs, ${card.evidence_count.issues} issues`}
+          ` · ${plural(card.evidence_count.commits, "commit")}, ${plural(card.evidence_count.prs, "PR")}, ${plural(card.evidence_count.issues, "issue")}`}
       </div>
     </div>
   );
@@ -151,7 +156,7 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
   } else if (missingKey) {
     state = (
       <p className="text-sm text-muted-foreground" data-testid="rationale-no-key">
-        Add a {providerLabel(missingKey)} key to generate rationale.{" "}
+        Add {withArticle(providerLabel(missingKey))} key to generate rationale.{" "}
         {canConfigure ? (
           <Link
             to="/p/$slug/settings"

@@ -12,7 +12,6 @@ import { projectStatus } from "../lib/projectStatus";
 import { showScannedAgo, STATUS_ORDER } from "../lib/projectHealth";
 import type { ProjectSort, ProjectsSearch } from "../lib/routeSearch";
 import { useScanActions } from "../lib/scanActions";
-import { cn } from "../lib/utils";
 import { AccessLostNotice, UnsupportedSourceNotice } from "../components/portal/AccessLost";
 import { LinkNotice } from "../components/portal/LinkNotice";
 import { FirstRunChecklist } from "../components/onboarding/FirstRunChecklist";
@@ -20,6 +19,7 @@ import { useFirstRun } from "../components/onboarding/firstRun";
 import { PortChangeBanner } from "../components/portal/PortChangeNotice";
 import { ProjectStatusBadge as StatusBadge } from "../components/portal/ProjectStatusBadge";
 import { ScanMenuItems } from "../components/portal/ScanMenu";
+import { SpendBar } from "../components/usage/parts";
 import { PageContainer } from "../components/layout/PageContainer";
 import { PathText, pathRepeatsName } from "../components/layout/PathText";
 import { EmptyState } from "../components/state/EmptyState";
@@ -113,21 +113,7 @@ function CostLine({ usage }: { usage: NonNullable<ProjectSummary["usage"]> }) {
         <span className="font-medium text-foreground tabular-nums">{formatUsd(usage.month_spend_usd)}</span> this month
         {usage.budget && ` of ${formatUsd(usage.budget.monthly_usd)}`}
       </span>
-      {usage.budget && pct !== null && (
-        <div
-          className="h-1 w-full overflow-hidden rounded-full bg-track"
-          role="meter"
-          aria-label="Monthly budget used"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={Math.min(100, Math.round(pct))}
-        >
-          <div
-            className={cn("h-full rounded-full", pct >= 100 ? "bg-destructive" : pct >= 75 ? "bg-warning" : "bg-primary")}
-            style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
-          />
-        </div>
-      )}
+      {usage.budget && <SpendBar pct={pct} label="Monthly budget used" />}
     </div>
   );
 }
@@ -312,7 +298,18 @@ export function ProjectsPage() {
         <div className="min-w-0">
           <h1 className="text-[22px] font-semibold tracking-tight">Projects</h1>
           <p className="text-[13px] text-muted-foreground" data-testid="projects-count">
-            {projects.isSuccess ? plural(list.length, "project") : "\u00a0"}
+            {/* The count line is held by a placeholder while loading, so the header never changes shape (ER-5). */}
+            {projects.isSuccess ? (
+              plural(list.length, "project")
+            ) : projects.isLoading ? (
+              <span
+                className="inline-block h-3 w-16 animate-pulse rounded-md bg-muted align-middle"
+                aria-hidden="true"
+                data-testid="projects-count-loading"
+              />
+            ) : (
+              "\u00a0"
+            )}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">

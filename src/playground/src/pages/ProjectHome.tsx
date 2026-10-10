@@ -22,8 +22,9 @@ import { can } from "../lib/permissions";
 import { agentChart, agentKindLabel, coverageChart, EVENT_LABEL, EVENT_TONE } from "../lib/overview";
 import { TASKS } from "../lib/configForm";
 import { useScanActions } from "../lib/scanActions";
-import { formatSeconds, runSeconds, triggerLabel } from "../lib/scanFormat";
+import { formatSeconds, runLabel, runSeconds, runTitle } from "../lib/scanFormat";
 import { markerColor, useChartColors } from "../components/charts/chartTheme";
+import { SpendBar } from "../components/usage/parts";
 import { PageContainer } from "../components/layout/PageContainer";
 import { PathText, pathRepeatsName } from "../components/layout/PathText";
 import { ResponsiveTable, type Column } from "../components/layout/ResponsiveTable";
@@ -227,21 +228,7 @@ function UsageCard({ usage, slug }: { usage: NonNullable<ProjectOverview["usage"
           {usage.budget_usd !== null ? ` of ${formatUsd(usage.budget_usd)} (${formatPct(pct)})` : " spent, no budget set"}
         </span>
       </p>
-      {usage.budget_usd !== null && pct !== null && (
-        <div
-          className="h-1.5 w-full overflow-hidden rounded-full bg-track"
-          role="meter"
-          aria-label="Monthly budget used"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={Math.min(100, Math.round(pct))}
-        >
-          <div
-            className={pct >= 100 ? "h-full bg-destructive" : pct >= 75 ? "h-full bg-warning" : "h-full bg-primary"}
-            style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
-          />
-        </div>
-      )}
+      {usage.budget_usd !== null && <SpendBar pct={pct} label="Monthly budget used" />}
       {usage.by_task.length > 0 ? (
         <ul className="flex flex-col gap-1 text-xs">
           {usage.by_task.map((t) => (
@@ -382,9 +369,9 @@ function RecentScans({
           to="/p/$slug/scans/{-$runId}"
           params={{ slug, runId: String(run.id) }}
           className="text-primary-text hover:underline"
+          title={runTitle(run)}
         >
-          {triggerLabel(run)}
-          {run.kind === "scan" && !run.analyze ? " · structure only" : ""}
+          {runLabel(run)}
         </Link>
       ),
     },
@@ -525,10 +512,22 @@ export function ProjectHome() {
     waiting,
     unsafePath: !!unsafe,
   });
-  const showEstimate = ready && !linked && !dismissed && !!estimate.data && estimate.data.commits > 0;
+  // Access lost / an unsupported source refuse every scan, Describe included (OVW-3).
+  const scannable = !p.access_lost && p.source_supported !== false;
+  const showEstimate = ready && !linked && scannable && !dismissed && !!estimate.data && estimate.data.commits > 0;
   const link = p.link ?? null;
   const deadLink = linked && (link?.status === "revoked" || link?.status === "removed");
   const role = p.my_role && p.my_role !== "admin" ? projectRoleLabel(p.my_role) : null;
+  const headerReconnect = deadLink && !!link && linkNotice(link).actions.includes("reconnect");
+  // The header holds a dead link's Reconnect, so the health item does not repeat it.
+  const shownHealth = headerReconnect
+    ? {
+        ...health,
+        items: health.items.map((i) =>
+          i.id === "link" ? { ...i, actions: i.actions.filter((a) => a.kind !== "reconnect") } : i,
+        ),
+      }
+    : health;
 
   // "Connect your agent": hidden for a dead link or a missing folder (it could not work).
   const setup: ReactNode =
@@ -542,7 +541,7 @@ export function ProjectHome() {
 
   // The header's actions by state (OVW-3): a dead link offers only Reconnect.
   const actions: ReactNode = deadLink ? (
-    link && linkNotice(link).actions.includes("reconnect") ? (
+    headerReconnect && link ? (
       <Button render={<Link to="/link" search={reconnectSearch(link)} />}>Reconnect</Button>
     ) : null
   ) : (
@@ -591,7 +590,8 @@ export function ProjectHome() {
       {linked && (
         <section data-testid="linked-panel" className={CARD}>
           <h2 className="text-sm font-semibold">Linked project</h2>
-          <LinkNotice project={p} />
+          {/* A link problem is the health panel's item; here only the healthy "Linked to" line. */}
+          {(!link || link.status === "ok") && <LinkNotice project={p} />}
           {platformRoleLabel(p.link) && (
             <p data-testid="linked-role" className="text-xs text-muted-foreground">
               Your role on the platform project: {platformRoleLabel(p.link)}
@@ -607,7 +607,7 @@ export function ProjectHome() {
 
       <HealthPanel
         project={p}
-        health={health}
+        health={shownHealth}
         onScan={scanNow}
         scanPending={scanPending}
         unsafeProblem={unsafe}

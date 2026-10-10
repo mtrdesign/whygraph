@@ -110,6 +110,16 @@ describe("CommandBlock / PageContainer", () => {
     expect(pre).toHaveAttribute("data-scroll-x");
     expect(pre.textContent).toBe("whygraph up --add-folder /x");
   });
+  it("breaks a URL after / and -, never with break-all", () => {
+    const url = "http://whygraph.localhost:8765/mcp/notes-light";
+    const { container } = render(<CommandBlock command={url} />);
+    const pre = container.querySelector("pre")!;
+    expect(pre.className).not.toContain("break-all");
+    expect(pre.className).toContain("wrap-anywhere");
+    expect(pre.textContent).toBe(url);
+    // http:/ + / + whygraph.localhost:8765/ + mcp/ + notes- + light
+    expect(pre.querySelectorAll("wbr")).toHaveLength(5);
+  });
   it("applies the width", () => {
     const { container } = render(<PageContainer width="narrow">x</PageContainer>);
     expect(container.firstElementChild!.className).toContain("max-w-3xl");
@@ -129,6 +139,16 @@ describe("ResponsiveTable", () => {
     expect(container.querySelector("table")).toBeTruthy();
     expect(container.querySelector("li .font-medium")).toHaveTextContent("alpha");
     expect(container.querySelector("li dt")).toHaveTextContent("Count");
+  });
+  it("leaves an empty cell out of the stacked list (no label without a value)", () => {
+    const cols = [
+      { key: "name", header: "Name", cell: (r: (typeof rows)[0]) => r.name, primary: true },
+      { key: "target", header: "Target", cell: () => null },
+      { key: "n", header: "Count", cell: (r: (typeof rows)[0]) => r.n },
+    ];
+    const { container } = render(<ResponsiveTable columns={cols} rows={rows} rowKey={(r) => r.id} />);
+    const labels = Array.from(container.querySelectorAll("li dt")).map((d) => d.textContent);
+    expect(labels).toEqual(["Count"]);
   });
   it("renders the empty state and handles row clicks", () => {
     const onRow = vi.fn();

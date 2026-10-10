@@ -282,6 +282,14 @@ describe("platform source", () => {
     expect(within(picker).getByRole("radiogroup", { name: "Checkout" })).toHaveTextContent("/repos/alpha");
     expect(within(picker).getByRole("radiogroup", { name: "Other repositories" })).toHaveTextContent("/repos/other");
     expect(screen.queryByTestId("no-candidates")).toBeNull();
+    // PH-8: candidate paths keep their tail (a start-truncating PathText); the
+    // "Connected to" line wraps, its icon never squeezed.
+    const row = within(picker).getByTitle("/repos/alpha");
+    expect(row).toHaveAttribute("data-slot", "path-text");
+    const connected = screen.getByTestId("platform-connected");
+    expect(connected.className).not.toContain("items-center");
+    expect(connected.querySelector("svg")?.getAttribute("class")).toContain("shrink-0");
+    expect(connected.querySelector("span")?.className).toContain("min-w-0");
     const submit = screen.getByRole("button", { name: "Link this checkout" });
     expect(submit).toBeDisabled();
     await user.click(screen.getByRole("radio", { name: /alpha/ }));
@@ -547,8 +555,14 @@ describe("linked project pages", () => {
     const health = await screen.findByTestId("health-panel");
     expect(health).toHaveAttribute("data-status", "link_revoked");
     expect(screen.getByTestId("health-link")).toHaveTextContent("Access revoked");
+    // The notice once (the health item, not again in the linked card) and Reconnect once (the header).
     const reconnect = screen.getAllByRole("link", { name: "Reconnect" });
+    expect(reconnect).toHaveLength(1);
     expect(reconnect[0].getAttribute("href")).toContain("/link?");
+    expect(within(screen.getByTestId("health-link")).getByText(/Access revoked/)).toBeInTheDocument();
+    expect(within(screen.getByTestId("linked-panel")).queryByText(/Access revoked/)).toBeNull();
+    expect(within(screen.getByTestId("linked-panel")).queryByTestId("link-notice")).toBeNull();
+    expect(within(screen.getByTestId("health-link")).getByRole("link", { name: "Remove from this machine" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Rescan" })).toBeNull();
     expect(within(screen.getByTestId("linked-panel")).queryByRole("link", { name: /Manage on platform/ })).toBeNull();
     expect(screen.queryByTestId("connect-agent")).toBeNull();

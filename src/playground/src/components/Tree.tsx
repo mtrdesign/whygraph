@@ -104,8 +104,9 @@ function TreeRow({
         onClick={handleClick}
         style={{ paddingLeft: depth * 14 + 8 }}
         className={cn(
-          "flex cursor-pointer items-center gap-1.5 py-1 pr-2 text-sm hover:bg-accent",
-          isSelected && "bg-primary-soft text-primary-text",
+          "flex cursor-pointer items-center gap-1.5 py-1 pr-2 text-sm",
+          // The selected row keeps its tint under the pointer; only the others take the hover grey.
+          isSelected ? "bg-primary-soft text-primary-text" : "hover:bg-accent",
         )}
       >
         {entry.has_children ? (

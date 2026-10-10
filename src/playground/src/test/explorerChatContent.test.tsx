@@ -7,6 +7,8 @@ import { PROJECT_ACTIONS } from "../lib/permissions";
 import { createAppRouter } from "../router";
 import { useUi } from "../store";
 import { ThemeProvider } from "../theme";
+import { ReactFlowProvider } from "@xyflow/react";
+import { OverviewNode } from "../components/OverviewNode";
 
 // M2f-3 S15 (section 6.4 "Explorer / Chat content"): the phone Explorer's tabs, the deep link
 // without `file`, the Rationale tab's state matrix, the chat no-key notice and hard-stop selects,
@@ -23,6 +25,10 @@ interface Fake {
   rationale: Record<string, unknown>;
   calls: string[];
   usage: Response | null;
+  /** Session costs the usage API answers in turn (the last one repeats). */
+  costs?: number[];
+  /** The provider list answers this status instead (ER-4). */
+  providersStatus?: number;
   stream: string[];
   transcript: unknown[];
   role: string;
@@ -101,10 +107,11 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
   if (path === "/api/projects") return Promise.resolve(json({ projects: [fake.project] }));
   if (path === "/api/projects/alpha") return Promise.resolve(json(fake.project));
   if (path === "/api/usage" || path === "/api/usage/me") {
+    const cost = fake.costs ? (fake.costs.length > 1 ? fake.costs.shift()! : fake.costs[0]) : 0.84;
     return Promise.resolve(
       fake.usage ??
         json({
-          totals: { calls: 2, cost_usd: 0.84 },
+          totals: { calls: 2, cost_usd: cost },
           split: {},
           series: [],
           groups: [],
@@ -145,7 +152,10 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
   if (rest === "/node/rationale") return Promise.resolve(json(fake.rationale));
   if (rest === "/node/evidence") return Promise.resolve(json({ evidence: [] }));
   if (rest === "/history") return Promise.resolve(json({ evidence: [] }));
-  if (rest === "/chat/providers") return Promise.resolve(json(fake.providers));
+  if (rest === "/chat/providers") {
+    if (fake.providersStatus) return Promise.resolve(json({ error: "boom", code: "x" }, fake.providersStatus));
+    return Promise.resolve(json(fake.providers));
+  }
   if (rest === "/chat/models") {
     return Promise.resolve(json({ provider: "openai", source: "live", default_model: "gpt-x", models: [{ id: "gpt-x", display_name: "GPT X" }] }));
   }
@@ -278,6 +288,31 @@ describe("BUG-17: ?node= without file", () => {
     expect(await screen.findByText("mod.py")).toBeInTheDocument();
     expect(fake.calls.some((c) => c.includes("/tree?dir=src%2Fapp"))).toBe(true);
   });
+
+  it("the selected tree row keeps its tint under the pointer (no grey hover on it)", async () => {
+    mount(`/p/alpha/explorer?node=${encodeURIComponent(SYMBOL.qualified_name)}`);
+    const row = (await screen.findByText("mod.py")).parentElement!;
+    await waitFor(() => expect(row.className).toContain("bg-primary-soft"));
+    expect(row.className).not.toContain("hover:bg-accent");
+    expect(screen.getByText("src").parentElement!.className).toContain("hover:bg-accent");
+  });
+});
+
+describe("the Explorer graph", () => {
+  it("says '0 of 2 explained' in words on a canvas node, not a bare '0/2' (EXC-6)", () => {
+    render(
+      <ReactFlowProvider>
+        <OverviewNode
+          {...({
+            id: "d",
+            data: { label: "src", kind: "directory", coverage: { analyzed: 0, total: 2, fraction: 0 }, internal_edges: 0 },
+          } as unknown as Parameters<typeof OverviewNode>[0])}
+        />
+      </ReactFlowProvider>,
+    );
+    expect(screen.getByTestId("overview-node-coverage")).toHaveTextContent("0 of 2 explained");
+    expect(screen.queryByText("0/2")).toBeNull();
+  });
 });
 
 describe("the Rationale tab states", () => {
@@ -310,11 +345,31 @@ describe("the Rationale tab states", () => {
     expect(hint).not.toHaveTextContent("whygraph scan");
   });
 
+  it("counts a card's evidence with plurals: 1 commit, not 1 commits", async () => {
+    fake.rationale = {
+      status: "cached",
+      purpose: "p",
+      why: "w",
+      provider: "anthropic",
+      evidence_count: { commits: 1, prs: 2, issues: 1 },
+    };
+    await open();
+    expect(await screen.findByText(/1 commit, 2 PRs, 1 issue$/)).toBeInTheDocument();
+  });
+
+  it("dates a cached card in words, never a raw ISO stamp", async () => {
+    fake.rationale = { status: "cached", purpose: "p", why: "w", provider: "anthropic", cached_at: "2026-10-03T14:05:00Z" };
+    await open();
+    const line = await screen.findByText(/ · generated /);
+    expect(line.textContent).not.toContain("2026-10-03T14:05");
+    expect(line.textContent).toMatch(/generated \S/);
+  });
+
   it("asks for a key (admin: with a Settings link; others: ask an admin)", async () => {
     fake.project = baseProject({ missing_key: "anthropic" });
     await open();
     const note = await screen.findByTestId("rationale-no-key");
-    expect(note).toHaveTextContent("Add a Anthropic key to generate rationale");
+    expect(note).toHaveTextContent("Add an Anthropic key to generate rationale");
     expect(within(note).getByRole("link", { name: "Open Settings" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Generate rationale" })).toBeNull();
   });
@@ -409,6 +464,39 @@ describe("Chat content", () => {
     expect(call).toContain("project=alpha");
     expect(call).toContain("chat_session=4");
     expect(call).toContain("from=2026-10-01");
+  });
+
+  it("asks again for a zero cost after a turn, and shows it once the ledger has it (EXC-4)", async () => {
+    // The first answers come before the usage rows are written (a zero), then the priced total.
+    fake.costs = [0, 0.05];
+    mount("/p/alpha/chat/4");
+    await screen.findByTestId("chat-title");
+    expect(screen.queryByTestId("chat-cost")).toBeNull();
+    expect(await screen.findByTestId("chat-cost", {}, { timeout: 5000 })).toHaveTextContent("This chat: ~$0.05");
+    expect(fake.calls.filter((c) => c.startsWith("GET /api/usage")).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("disables the composer and the starter prompts with a reason when the providers fail (ER-4)", async () => {
+    fake.providersStatus = 500;
+    mount("/p/alpha/chat");
+    expect(await screen.findByText("Couldn't load the chat providers")).toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toBeDisabled();
+    expect(screen.getByTestId("chat-no-key")).toHaveTextContent("Chat can't send until the provider list loads");
+    for (const text of ["What changed most in the last month?", "Explain how this project is structured"]) {
+      expect(screen.getByRole("button", { name: text })).toBeDisabled();
+    }
+    // Retry brings the list (and the composer) back.
+    fake.providersStatus = undefined;
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.getByRole("textbox")).toBeEnabled());
+    expect(screen.getByRole("button", { name: "What changed most in the last month?" })).toBeEnabled();
+  });
+
+  it("disables the starter prompts when the provider has no key", async () => {
+    fake.providers = [{ provider: "openai", configured: false, default_model: "gpt-x", env_var: null }];
+    mount("/p/alpha/chat");
+    await screen.findByTestId("chat-no-key");
+    expect(screen.getByRole("button", { name: "Which areas have no rationale yet?" })).toBeDisabled();
   });
 
   it("reads /api/usage/me in production and hides the cost on a 403", async () => {

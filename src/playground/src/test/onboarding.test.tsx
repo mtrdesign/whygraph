@@ -308,6 +308,9 @@ describe("WelcomeBanner", () => {
     const banner = await screen.findByTestId("welcome-banner");
     expect(banner).toHaveTextContent("You've been added to Acme as a Member.");
     expect(banner).toHaveTextContent("Next: connect your agent");
+    // The text has a real basis, so on a phone the buttons wrap under it (no 140px column).
+    expect(banner.className).toContain("flex-wrap");
+    expect(within(banner).getByTestId("welcome-text").className).toContain("flex-[1_1_20rem]");
     await user.click(within(banner).getByRole("button", { name: "Dismiss" }));
     expect(screen.queryByTestId("welcome-banner")).toBeNull();
     await waitFor(() => expect(fake.dismissWelcome).toBe(1));
@@ -395,10 +398,22 @@ describe("org pages", () => {
     await waitFor(() => expect(screen.getByTestId("slug-status")).toHaveTextContent("admin.whygraph.localhost:8765 is reserved"), {
       timeout: 3000,
     });
+    // A refused slug: no "your address will be" preview, Create disabled with the reason.
+    expect(screen.queryByTestId("slug-preview")).toBeNull();
+    expect(screen.getByRole("button", { name: "Create organization" })).toBeDisabled();
+    expect(screen.getByText("Choose another URL name: admin.whygraph.localhost:8765 is reserved.")).toBeInTheDocument();
     fake.slug = { status: 200, body: { slug: "taken", available: false, reason: "taken" } };
     await user.clear(slug);
     await user.type(slug, "taken");
     await waitFor(() => expect(screen.getByTestId("slug-status")).toHaveTextContent("is already taken"), { timeout: 3000 });
+    expect(screen.getByRole("button", { name: "Create organization" })).toBeDisabled();
+    // An available one brings the preview and the button back.
+    fake.slug = { status: 200, body: { slug: "free", available: true, reason: null } };
+    await user.clear(slug);
+    await user.type(slug, "free");
+    await waitFor(() => expect(screen.getByTestId("slug-status")).toHaveTextContent("is available"), { timeout: 3000 });
+    expect(screen.getByTestId("slug-preview")).toHaveTextContent("free.whygraph.localhost:8765");
+    expect(screen.getByRole("button", { name: "Create organization" })).toBeEnabled();
   });
 
   it("says nothing when the check is throttled", async () => {

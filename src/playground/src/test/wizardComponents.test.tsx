@@ -331,13 +331,30 @@ describe("EstimateBody", () => {
     const card = screen.getByTestId("scan-estimate");
     expect(card).toHaveTextContent("1,204 commits to describe");
     expect(card).toHaveTextContent("(upper bound)");
-    expect(card).toHaveTextContent("anthropic/claude-haiku-4-5");
+    expect(card).toHaveTextContent("Model: Anthropic, claude-haiku-4-5");
     expect(screen.getByTestId("estimate-tokens")).toHaveTextContent("2.4M input and 310k output tokens");
-    expect(card).toHaveTextContent("~$4.60");
+    expect(card).toHaveTextContent("About $4.60 (between $2.30 and $6.90)");
     await user.click(screen.getByRole("button", { name: "Describe now" }));
     await user.click(screen.getByRole("button", { name: "Later" }));
     expect(onDescribe).toHaveBeenCalled();
     expect(onLater).toHaveBeenCalled();
+  });
+
+  it("words a cost under a cent readably: never '~<$0.01' (IMP-6)", () => {
+    render(
+      <EstimateBody
+        slug="a"
+        estimate={{ ...estimate, commits: 1, cost: { usd: 0.004, low: 0.002, high: 0.006, currency: "USD", prices_as_of: "2026-09-01" } }}
+        canDescribe
+        canConfigure
+        onDescribe={() => {}}
+        onLater={() => {}}
+      />,
+    );
+    const line = screen.getByTestId("estimate-cost");
+    expect(line).toHaveTextContent("Less than $0.01");
+    expect(line).not.toHaveTextContent("<$");
+    expect(line).not.toHaveTextContent("~");
   });
 
   it("shows tokens only for an unpriced model", () => {

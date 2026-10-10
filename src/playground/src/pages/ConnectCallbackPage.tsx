@@ -44,7 +44,7 @@ export function ConnectCallbackPage() {
   }, []);
 
   return (
-    <PageContainer className="flex flex-col gap-4 max-w-[640px]">
+    <PageContainer width="narrow" className="flex flex-col gap-4">
       {!search.state ? (
         <Alert variant="destructive" data-testid="callback-invalid">
           <AlertTitle>Nothing to finish</AlertTitle>

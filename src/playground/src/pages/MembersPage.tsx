@@ -15,11 +15,11 @@ import {
   type ProjectRole,
 } from "../api";
 import { UserAvatar } from "../components/auth/UserAvatar";
-import { CopyButton } from "../components/portal/CopyButton";
+import { CommandBlock } from "../components/layout/CommandBlock";
 import { Field, nativeSelect, nativeSelectClass } from "../components/portal/Field";
 import { ResponsiveTable, type Column } from "../components/layout/ResponsiveTable";
 import { ErrorState } from "../components/state/ErrorState";
-import { Alert, AlertAction, AlertDescription } from "../components/ui/alert";
+import { Alert, AlertDescription } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { ConfirmDialog } from "../components/portal/ConfirmDialog";
@@ -94,6 +94,25 @@ function InviteMember({ viewerIsOwner }: { viewerIsOwner: boolean }) {
     invite.mutate();
   };
 
+  if (projects.isLoading) {
+    // ER-5: the form appears whole once its data is in - no fieldset popping in.
+    return (
+      <div
+        className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5 shadow-card"
+        data-testid="add-member-loading"
+        aria-busy="true"
+      >
+        <Skeleton className="h-4 w-32" />
+        <Skeleton className="h-3 w-full max-w-md" />
+        <div className="flex flex-col gap-3 sm:flex-row">
+          <Skeleton className="h-8 flex-1" />
+          <Skeleton className="h-8 sm:w-36" />
+        </div>
+        <Skeleton className="h-8 w-20" />
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-3">
     <form
@@ -146,15 +165,25 @@ function InviteMember({ viewerIsOwner }: { viewerIsOwner: boolean }) {
       <p className="text-xs text-muted-foreground" data-testid="role-help">
         {ROLE_HELP[role]}
       </p>
+      {role === "member" && projects.isError && (
+        <ErrorState
+          error={projects.error}
+          title="Couldn't load the projects for project access"
+          onRetry={() => void projects.refetch()}
+        />
+      )}
       {role === "member" && list.length > 0 && (
         <fieldset className="flex flex-col gap-2" data-testid="invite-grants">
           <legend className="text-xs font-medium">Project access (optional)</legend>
           {list.map((proj) => (
             <div key={proj.slug} className="flex items-center gap-3">
-              <span className="min-w-0 flex-1 truncate text-sm">{proj.name}</span>
+              <span className="min-w-0 flex-1 truncate text-sm" title={proj.name}>
+                {proj.name}
+              </span>
+              {/* Wide enough for "Organization default". */}
               <select
                 aria-label={`Access to ${proj.name}`}
-                className={nativeSelect("w-36 shrink-0")}
+                className={nativeSelect("w-48 shrink-0")}
                 value={grants[proj.slug] ?? ""}
                 onChange={(e) =>
                   setGrants((g) => {
@@ -187,33 +216,31 @@ function InviteMember({ viewerIsOwner }: { viewerIsOwner: boolean }) {
     </form>
       {notices.map((n) => (
         <Alert key={`${n.kind}-${n.key}`} variant="info" data-testid={n.kind === "invited" ? "invite-pending" : "member-added"}>
-          <AlertDescription className="flex flex-wrap items-center gap-3 pr-20">
+          {/* Dismiss sits in the flow (no reserved right column), so the text has
+              the whole width on a phone and Dismiss wraps under it. */}
+          <AlertDescription className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
             {n.kind === "invited" ? (
-              <>
-                <span>
-                  No message is sent. Share this link with @{n.login}:{" "}
-                  <span className="font-mono break-all">{window.location.origin}</span>
-                </span>
-                <CopyButton text={window.location.origin} />
-              </>
+              <div className="flex min-w-0 flex-[1_1_16rem] flex-col gap-2">
+                <span>No message is sent. Share this link with @{n.login}:</span>
+                <CommandBlock command={window.location.origin} />
+              </div>
             ) : (
-              <span>
+              <span className="min-w-0 flex-[1_1_16rem]">
                 @{n.login} is now a member. They'll see a welcome note the next time they open {orgName}.{" "}
                 <a href={`#member-${n.uid}`} className="text-primary-text hover:underline">
                   Show in the list
                 </a>
               </span>
             )}
-          </AlertDescription>
-          <AlertAction>
             <Button
               size="sm"
               variant="ghost"
+              className="shrink-0"
               onClick={() => setNotices((list) => list.filter((x) => x !== n))}
             >
               Dismiss
             </Button>
-          </AlertAction>
+          </AlertDescription>
         </Alert>
       ))}
     </div>
@@ -255,7 +282,8 @@ function Invitations({ viewerIsOwner }: { viewerIsOwner: boolean }) {
   const rows = invitations.data ?? [];
   const current = rows.filter((i) => i.status === "open" || i.status === "expired");
   const closed = rows.filter((i) => i.status !== "open" && i.status !== "expired");
-  if (!invitations.isLoading && rows.length === 0) return null;
+  // Hidden only when there truly are none; a failed load says so, with Retry (ER-4).
+  if (invitations.isSuccess && rows.length === 0) return null;
 
   const columns = (withActions: boolean): Column<Invitation>[] => [
     {
@@ -324,6 +352,13 @@ function Invitations({ viewerIsOwner }: { viewerIsOwner: boolean }) {
     <section className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5 shadow-card" data-testid="invitations">
       <h2 className="text-sm font-semibold">Invitations</h2>
       {invitations.isLoading && <Skeleton className="h-12" />}
+      {invitations.isError && (
+        <ErrorState
+          error={invitations.error}
+          title="Couldn't load the invitations"
+          onRetry={() => void invitations.refetch()}
+        />
+      )}
       {current.length > 0 && (
         <ResponsiveTable
           columns={columns(true)}
@@ -332,7 +367,7 @@ function Invitations({ viewerIsOwner }: { viewerIsOwner: boolean }) {
           rowTestId={(i) => `invitation-${i.uid}`}
         />
       )}
-      {!invitations.isLoading && current.length === 0 && (
+      {invitations.isSuccess && current.length === 0 && (
         <p className="text-sm text-muted-foreground">No open invitations.</p>
       )}
       {closed.length > 0 && (
@@ -406,15 +441,19 @@ function MemberRow({
 
   return (
     <li className="row-wrap py-3" id={`member-${member.uid}`} data-testid={`member-${member.uid}`}>
-      <UserAvatar name={name} url={member.avatar_url} />
-      <div className="flex min-w-0 flex-1 flex-col leading-tight">
-        <span className="truncate font-medium">
-          {name}
-          {isMe && <span className="font-normal text-muted-foreground"> (you)</span>}
-        </span>
-        <span className="truncate font-mono text-xs text-muted-foreground">
-          {member.github_login ? `@${member.github_login}` : "no GitHub account"}
-        </span>
+      {/* The identity takes the whole first line on a phone (the details and
+          actions wrap under it), never squeezed beside them. */}
+      <div className="flex min-w-0 basis-full items-center gap-3 sm:basis-48 sm:flex-1" data-testid="member-identity">
+        <UserAvatar name={name} url={member.avatar_url} />
+        <div className="flex min-w-0 flex-1 flex-col leading-tight">
+          <span className="truncate font-medium">
+            {name}
+            {isMe && <span className="font-normal text-muted-foreground"> (you)</span>}
+          </span>
+          <span className="truncate font-mono text-xs text-muted-foreground">
+            {member.github_login ? `@${member.github_login}` : "no GitHub account"}
+          </span>
+        </div>
       </div>
       {member.disabled && <Badge variant="outline">disabled</Badge>}
       {member.grants && member.grants.length > 0 && (

@@ -1,5 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import { Button } from "../ui/button";
+import { InPage } from "../layout/PageContainer";
 
 export type NotFoundKind = "project" | "run" | "page" | "team-only";
 
@@ -22,6 +23,8 @@ const COPY: Record<NotFoundKind, { title: string; body: string }> = {
 /**
  * A specific "not found": what is missing, why that can happen, one way back
  * (`back` replaces "Back to projects" where there are no projects, the base host).
+ * It renders at the page's position: inside the page's `PageContainer`, or in
+ * one of its own when nothing holds it.
  */
 export function NotFoundState({
   kind = "page",
@@ -32,14 +35,16 @@ export function NotFoundState({
 }) {
   const copy = COPY[kind];
   return (
-    <div className="mx-auto w-full max-w-3xl p-6" data-testid="not-found" data-kind={kind}>
-      <h1 className="text-lg font-semibold tracking-tight">{copy.title}</h1>
-      <p className="mt-1 text-sm text-muted-foreground">{copy.body}</p>
-      <div className="mt-3">
-        <Button size="sm" variant="outline" render={<Link to={back.to} />}>
-          {back.label}
-        </Button>
+    <InPage>
+      <div data-testid="not-found" data-kind={kind}>
+        <h1 className="text-lg font-semibold tracking-tight">{copy.title}</h1>
+        <p className="mt-1 text-sm text-muted-foreground">{copy.body}</p>
+        <div className="mt-3">
+          <Button size="sm" variant="outline" render={<Link to={back.to} />}>
+            {back.label}
+          </Button>
+        </div>
       </div>
-    </div>
+    </InPage>
   );
 }

@@ -26,23 +26,28 @@ export function useScanActions(slug: string, current?: { id: number; active: boo
     void queryClient.invalidateQueries({ queryKey: portalKey("projects") });
   };
 
+  const open = (runId: number) =>
+    void navigate({
+      to: "/p/$slug/scans/{-$runId}",
+      params: { slug, runId: String(runId) },
+    });
+
+  // The run id is only ever in a URL (SCN-4): a toast names the run by an
+  // "Open run" action, never by "#7".
   const landed = (runId: number, what: string) => {
     refresh();
     if (current?.active) {
       if (runId === current.id) {
         toast.info(`${what} is already queued - this run will cover it`);
       } else if (runId === followUp) {
-        toast.info(`${what} is already queued as run #${runId}`);
+        toast.info(`${what} is already queued`, { action: { label: "Open run", onClick: () => open(runId) } });
       } else {
         setFollowUp(runId);
-        toast.success(`${what} queued as run #${runId}`);
+        toast.success(`${what} queued`, { action: { label: "Open run", onClick: () => open(runId) } });
       }
       return;
     }
-    void navigate({
-      to: "/p/$slug/scans/{-$runId}",
-      params: { slug, runId: String(runId) },
-    });
+    open(runId);
   };
 
   const scan = useMutation({

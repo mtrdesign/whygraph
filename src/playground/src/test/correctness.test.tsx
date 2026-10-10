@@ -103,7 +103,7 @@ describe("Members page (BUG-1, BUG-25)", () => {
     const grants = await screen.findByTestId("invite-grants");
     expect(within(grants).getByText("Project alpha")).toBeInTheDocument();
     const select = within(grants).getByLabelText("Access to Project alpha");
-    expect(select.className).toContain("w-36");
+    expect(select.className).toContain("w-48");
     expect(select.className).not.toContain("w-full");
   });
 

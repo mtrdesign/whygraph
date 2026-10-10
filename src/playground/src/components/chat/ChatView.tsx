@@ -19,12 +19,17 @@ interface ThreadSlot {
   adopted: number | null;
 }
 
+// How often, and how many times, a zero session cost is asked again after a turn.
+export const COST_RETRY_MS = 2000;
+export const COST_RETRIES = 5;
+
 /**
  * This session's cost so far (R5): the usage API filtered to the project and the chat session,
  * from the session's first day. Production reads the caller's own usage (`/api/usage/me`), local
  * mode the portal's. Per-turn cost is not stored in the project DB, so this total is the figure
  * that is the same live and after a reload. Hidden when the call is refused (403), fails, or
- * there is no priced spend yet.
+ * there is no priced spend yet; a zero is asked again shortly after a turn (the ledger is
+ * written just after the turn ends).
  */
 function SessionCost({ slug, session }: { slug: string; session: ChatSession }) {
   const production = isProduction(usePortalState().data);
@@ -34,6 +39,15 @@ function SessionCost({ slug, session }: { slug: string; session: ChatSession }) 
     queryFn: () => usageApi(scope).report({ project: slug, chat_session: session.id, from: session.created_at.slice(0, 10) }),
     retry: false,
     enabled: !!session.created_at,
+    // A zero is never final (EXC-4): the turn's usage rows are written in a batch
+    // just after the turn ends, so a zero right then is asked again a few times,
+    // and a zero is refetched on the next visit rather than cached.
+    staleTime: 0,
+    refetchInterval: (query) => {
+      const spent = query.state.data?.totals.cost_usd ?? 0;
+      if (query.state.status === "error" || spent > 0) return false;
+      return query.state.dataUpdateCount < COST_RETRIES ? COST_RETRY_MS : false;
+    },
   });
   const usd = cost.data?.totals.cost_usd;
   if (!usd || usd <= 0) return null;

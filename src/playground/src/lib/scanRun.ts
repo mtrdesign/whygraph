@@ -234,7 +234,8 @@ export interface CrawlerResult {
  * the run has ended without reaching it (after a failure, a cancel). A phase is
  * done once a later one started or the run ended, `failed` when a crawler of the
  * phase reported failure in the `result` event or the run died in it, and
- * `cancelled` when the run was cancelled while it was running.
+ * `cancelled` when the run was cancelled while it was running. A failed run always
+ * shows one failed phase.
  */
 export function phaseRows(state: ScanRunState): PhaseRow[] {
   const total = Math.max(state.phaseTotal ?? 0, state.plannedPhases?.length ?? 0, state.phases.at(-1)?.phase ?? 0);
@@ -266,6 +267,14 @@ export function phaseRows(state: ScanRunState): PhaseRow[] {
       crawlers: crawlers.filter((c) => names.includes(c.name)),
     });
   }
+  // A failure always belongs to a phase (BUG-6): a failed run whose failed crawler
+  // (or runner error) names no phase fails the phase it was in, or the first one
+  // when it never reached any; the phases after it stay skipped. A failed sync
+  // owns its own failure, so the phases are left skipped.
+  if (state.finished === "failed" && state.sync?.status !== "failed" && !rows.some((r) => r.status === "failed")) {
+    const at = rows.find((r) => r.phase === state.phase) ?? rows[0];
+    if (at) at.status = "failed";
+  }
   return rows;
 }
 
@@ -276,4 +285,19 @@ export function codegraphRow(state: ScanRunState): { task: TaskState | null; res
     task: state.tasks.find((t) => t.name === "codegraph") ?? null,
     result: source?.crawlers?.find((c) => c.name === "codegraph") ?? null,
   };
+}
+
+/** The CodeGraph row's sentence: what the index did, never the crawler's raw words (SCN-5). */
+export function codegraphText(
+  cg: { task: TaskState | null; result: Pick<CrawlerResult, "status"> | null },
+  finished: ScanRunStatus | null,
+): string {
+  if (cg.result) {
+    return cg.result.status === "failed"
+      ? "The code index did not update. The error is under Show details."
+      : "The code index was refreshed alongside the other phases.";
+  }
+  if (finished === "cancelled") return "Stopped with the run.";
+  if (finished) return "The code index was not refreshed.";
+  return "Refreshing the code index alongside the other phases.";
 }

@@ -604,7 +604,9 @@ describe("production project pages", () => {
     await user.click(await screen.findByRole("button", { name: "Remove project" }));
     const dialog = await screen.findByTestId("remove-dialog");
     expect(dialog).toHaveTextContent("This removes the server copy and every scan.");
-    expect(dialog).toHaveTextContent("/data/repos/acme/api");
+    // No server path in production (MODE-1, SET-9).
+    expect(dialog).toHaveTextContent("The server copy of the repository.");
+    expect(dialog).not.toHaveTextContent("/data/");
     expect(dialog).toHaveTextContent("The repository on GitHub; nothing is changed there.");
     expect(dialog).not.toHaveTextContent(/git hooks|portal\.\*|MCP entries|checkout/);
     expect(within(dialog).queryByRole("checkbox")).toBeNull();

@@ -4,11 +4,15 @@ import { toast } from "sonner";
 import { accessApi, portalKey, projectKey, type AccessPerson, type ProjectRole } from "../../api";
 import { authMessage } from "../../lib/authErrors";
 import { formatUsd } from "../../lib/format";
+import { projectRoleLabel } from "../../lib/labels";
 import { UserAvatar } from "../auth/UserAvatar";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Skeleton } from "../ui/skeleton";
 import { Switch } from "../ui/switch";
+import { SettingsSection } from "../settings/SettingsLayout";
+import { ErrorState } from "../state/ErrorState";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { nativeSelect, nativeSelectClass } from "./Field";
 
 const ROLES: ProjectRole[] = ["viewer", "contributor", "admin"];
@@ -53,10 +57,13 @@ export function ProjectAccess({ slug }: { slug: string }) {
     },
     onError: (err) => toast.error(authMessage(err)),
   });
+  const [removing, setRemoving] = useState<AccessPerson | null>(null);
   const removeGrant = useMutation({
     mutationFn: (uid: string) => api.removeGrant(uid),
-    onSuccess: refresh,
-    onError: (err) => toast.error(authMessage(err)),
+    onSuccess: async () => {
+      setRemoving(null);
+      await refresh();
+    },
   });
 
   const people = data.data?.people ?? [];
@@ -66,21 +73,16 @@ export function ProjectAccess({ slug }: { slug: string }) {
   const fallback = restricted ? "none" : (data.data?.org_default ?? "none");
 
   return (
-    <section
-      id="settings-access"
-      aria-label="Access"
-      className="flex scroll-mt-4 flex-col gap-4 rounded-xl border border-border bg-card p-5"
-      data-testid="project-access"
+    <SettingsSection
+      id="access"
+      title="Access"
+      testId="project-access"
+      description="Org admins and owners always have the Admin role. Everyone else gets the role given here, or the organization's default."
     >
-      <div>
-        <h2 className="text-sm font-semibold">Access</h2>
-        <p className="mt-0.5 text-xs text-muted-foreground">
-          Org admins and owners always have the Admin role. Everyone else gets the role given here, or the
-          organization's default.
-        </p>
-      </div>
       {data.isLoading && <Skeleton className="h-24" />}
-      {data.isError && <p className="text-sm text-destructive">Failed to load: {data.error.message}</p>}
+      {data.isError && (
+        <ErrorState error={data.error} title="Couldn't load who has access" onRetry={() => void data.refetch()} />
+      )}
       {data.data && (
         <>
           <label className="flex items-center gap-3 text-sm">
@@ -99,13 +101,15 @@ export function ProjectAccess({ slug }: { slug: string }) {
           </label>
           <ul className="divide-y divide-border" data-testid="access-people">
             {listed.map((p) => (
-              <li key={p.uid} className="flex flex-wrap items-center gap-3 py-2.5" data-testid={`access-${p.uid}`}>
-                <UserAvatar name={personName(p)} url={p.avatar} />
-                <div className="flex min-w-0 flex-1 flex-col leading-tight">
-                  <span className="truncate font-medium">{personName(p)}</span>
-                  <span className="truncate font-mono text-xs text-muted-foreground">
-                    {p.login ? `@${p.login}` : ""}
-                  </span>
+              <li key={p.uid} className="row-wrap gap-y-2 py-2.5" data-testid={`access-${p.uid}`}>
+                <div className="flex min-w-48 flex-1 items-center gap-3">
+                  <UserAvatar name={personName(p)} url={p.avatar} />
+                  <div className="flex min-w-0 flex-col leading-tight">
+                    <span className="truncate font-medium">{personName(p)}</span>
+                    <span className="truncate font-mono text-xs text-muted-foreground">
+                      {p.login ? `@${p.login}` : ""}
+                    </span>
+                  </div>
                 </div>
                 {typeof p.month_spend_usd === "number" && (
                   <span className="text-xs text-muted-foreground" data-testid={`access-spend-${p.uid}`}>
@@ -113,22 +117,22 @@ export function ProjectAccess({ slug }: { slug: string }) {
                   </span>
                 )}
                 {p.source === "org_admin" ? (
-                  <>
+                  <span className="row-wrap gap-2">
                     <Badge variant="secondary">Admin</Badge>
                     <span className="text-xs text-muted-foreground">as org {p.org_role}</span>
-                  </>
+                  </span>
                 ) : (
-                  <>
+                  <span className="row-wrap gap-2">
                     <select
                       aria-label={`Role for ${personName(p)}`}
-                      className={nativeSelect("w-32")}
+                      className={nativeSelect("w-36")}
                       value={p.project_role ?? "viewer"}
                       disabled={setGrant.isPending}
                       onChange={(e) => setGrant.mutate({ uid: p.uid, role: e.target.value as ProjectRole })}
                     >
                       {ROLES.map((r) => (
                         <option key={r} value={r}>
-                          {r}
+                          {projectRoleLabel(r)}
                         </option>
                       ))}
                     </select>
@@ -136,11 +140,14 @@ export function ProjectAccess({ slug }: { slug: string }) {
                       size="sm"
                       variant="outline"
                       disabled={removeGrant.isPending}
-                      onClick={() => removeGrant.mutate(p.uid)}
+                      onClick={() => {
+                        removeGrant.reset();
+                        setRemoving(p);
+                      }}
                     >
                       Remove
                     </Button>
-                  </>
+                  </span>
                 )}
               </li>
             ))}
@@ -177,7 +184,7 @@ export function ProjectAccess({ slug }: { slug: string }) {
               >
                 {ROLES.map((r) => (
                   <option key={r} value={r}>
-                    {r}
+                    {projectRoleLabel(r)}
                   </option>
                 ))}
               </select>
@@ -195,7 +202,7 @@ export function ProjectAccess({ slug }: { slug: string }) {
               <ul className="text-xs text-muted-foreground">
                 {data.data.invitations.map((i) => (
                   <li key={i.uid}>
-                    <span className="font-mono">@{i.github_login}</span> - {i.role}
+                    <span className="font-mono">@{i.github_login}</span> - {projectRoleLabel(i.role)}
                   </li>
                 ))}
               </ul>
@@ -203,6 +210,22 @@ export function ProjectAccess({ slug }: { slug: string }) {
           )}
         </>
       )}
-    </section>
+      <ConfirmDialog
+        open={removing !== null}
+        onOpenChange={(open) => {
+          if (!open) setRemoving(null);
+        }}
+        title={`Remove ${removing ? personName(removing) : "this person"}'s access?`}
+        description={
+          restricted
+            ? "They lose access to this project at once (it is Restricted)."
+            : "They fall back to the organization's default role on this project at once."
+        }
+        confirmLabel="Remove"
+        pending={removeGrant.isPending}
+        error={removeGrant.isError ? authMessage(removeGrant.error) : null}
+        onConfirm={() => removing && removeGrant.mutate(removing.uid)}
+      />
+    </SettingsSection>
   );
 }

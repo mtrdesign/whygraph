@@ -592,8 +592,18 @@ describe("linked project pages", () => {
     expect(await screen.findByTestId("linked-name")).toHaveTextContent("Alpha");
     expect(screen.queryByRole("button", { name: "Rename" })).toBeNull();
     expect(screen.queryByText("Models and keys")).toBeNull();
+    // The platform owns the rest, and says so (SET-4, plan section 0.3 #42).
+    expect(screen.getByTestId("settings-managed")).toHaveTextContent("Change its settings there.");
+    const nav = screen.getByRole("navigation", { name: "Settings sections" });
+    expect(within(nav).getAllByRole("button").map((b) => b.textContent)).toEqual([
+      "General",
+      "Agents",
+      "Git hooks",
+      "Danger zone",
+    ]);
+    expect(screen.queryByTestId("key-anthropic")).toBeNull();
     await user.click(await screen.findByRole("checkbox", { name: "post-commit" }));
-    await user.click(screen.getByRole("button", { name: "Save hooks" }));
+    await user.click(within(screen.getByRole("region", { name: "Git hooks" })).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(mutations().some((c) => c.method === "PUT")).toBe(true));
     // Nothing but [scan].hooks goes back: the seeded scan.forge is a key a
     // linked project's PUT allowlist does not hold, and the portal refuses a
@@ -607,7 +617,15 @@ describe("linked project pages", () => {
   it("removing says when the token could not be revoked and links the account page", async () => {
     const user = userEvent.setup();
     fake.routes["DELETE /api/projects/alpha"] = () =>
-      json({ removed: "alpha", hooks: null, agent_files: [], checkout_deleted: false, warnings: [], token_revoked: false });
+      json({
+        removed: "alpha",
+        hooks: null,
+        agent_files: [],
+        checkout_deleted: false,
+        warnings: [],
+        token_revoked: false,
+        token_revoke_result: "unreachable",
+      });
     mount("/p/alpha/settings");
     await user.click(await screen.findByRole("button", { name: "Remove from this machine" }));
     const dialog = await screen.findByTestId("remove-dialog");
@@ -616,10 +634,18 @@ describe("linked project pages", () => {
     expect(within(failed).getByRole("link")).toHaveAttribute("href", "https://whygraph.example.com/account");
   });
 
-  it("a revoked token that did revoke shows no warning", async () => {
+  it("a token the platform had already revoked shows no warning (BUG-7)", async () => {
     const user = userEvent.setup();
     fake.routes["DELETE /api/projects/alpha"] = () =>
-      json({ removed: "alpha", hooks: null, agent_files: [], checkout_deleted: false, warnings: [], token_revoked: true });
+      json({
+        removed: "alpha",
+        hooks: null,
+        agent_files: [],
+        checkout_deleted: false,
+        warnings: [],
+        token_revoked: false,
+        token_revoke_result: "already_revoked",
+      });
     mount("/p/alpha/settings");
     await user.click(await screen.findByRole("button", { name: "Remove from this machine" }));
     const dialog = await screen.findByTestId("remove-dialog");

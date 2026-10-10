@@ -27,11 +27,14 @@ test("a chat message shows on Usage & cost, then a hard-stopped project budget c
   await expect(rows.first()).toContainText(/\$0\.\d\d/);
   await expect(rows.first()).not.toContainText("unpriced");
 
-  // A budget far below that spend, with the hard stop, on this project only.
-  await call(page.request, "PUT", `${env.baseUrl}/api/projects/${notes.slug}/budget`, {
-    monthly_usd: 0.01,
-    hard_stop: true,
-  });
+  // A budget far below that spend, with the hard stop, on this project only -
+  // set from the settings' Usage section, whose form saves on its own (R3).
+  await page.goto(`/p/${notes.slug}/settings?section=budgets`);
+  const budget = page.getByTestId("project-budget");
+  await budget.getByLabel("Monthly budget (USD)").fill("0.01");
+  await budget.getByRole("switch").click();
+  await budget.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(budget.getByText("Saved")).toBeVisible();
   await page.goto(`/p/${notes.slug}/chat`);
   await expect(page.getByTestId("chat-budget-notice")).toBeVisible();
   // The Chats section's "+" is disabled with the reason (USE-4).

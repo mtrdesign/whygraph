@@ -896,9 +896,11 @@ describe("Project settings (screen 10)", () => {
     const input = await screen.findByLabelText("Display name");
     await user.clear(input);
     await user.type(input, "Alpha team");
-    await user.click(screen.getByRole("button", { name: "Rename" }));
+    // One save model (R3): General's own Save, then "Saved" in place.
+    await user.click(within(screen.getByRole("region", { name: "General" })).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(calls("PATCH", "/api/projects/alpha")).toHaveLength(1));
     expect(calls("PATCH", "/api/projects/alpha")[0].body).toEqual({ name: "Alpha team" });
+    expect(await within(screen.getByRole("region", { name: "General" })).findByText("Saved")).toBeInTheDocument();
   });
 
   it("shows the config form (project scope) and the configured agents", async () => {
@@ -921,8 +923,9 @@ describe("Project settings (screen 10)", () => {
       ).toBe(true),
     );
     expect(calls("POST", "/api/projects/alpha/init").some((c) => !c.body?.dry_run)).toBe(false);
-
-    await user.click(screen.getByRole("button", { name: "Apply changes" }));
+    // No "Apply changes" any more: the Agents section saves like every other.
+    expect(screen.queryByRole("button", { name: "Apply changes" })).toBeNull();
+    await user.click(within(screen.getByRole("region", { name: "Agents" })).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(calls("POST", "/api/projects/alpha/init").some((c) => !c.body?.dry_run)).toBe(true));
     const applied = calls("POST", "/api/projects/alpha/init").find((c) => !c.body?.dry_run)!;
     expect(applied.body).toMatchObject({ agents: ["claude"], force: true });
@@ -946,7 +949,7 @@ describe("Project settings (screen 10)", () => {
         ),
       ).toBe(true),
     );
-    await user.click(screen.getByRole("button", { name: "Apply changes" }));
+    await user.click(within(screen.getByRole("region", { name: "Agents" })).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(calls("POST", "/api/projects/alpha/init").some((c) => !c.body?.dry_run)).toBe(true));
     const applied = calls("POST", "/api/projects/alpha/init").find((c) => !c.body?.dry_run)!;
     expect(applied.body).toMatchObject({ agents: ["cursor"], agent_actions: { claude: "remove" } });
@@ -964,8 +967,10 @@ describe("Project settings (screen 10)", () => {
     const { router } = mount("/p/alpha/settings");
     await user.click(await screen.findByRole("button", { name: "Remove project" }));
     const dialog = await screen.findByTestId("remove-dialog");
-    expect(dialog).toHaveTextContent("Your repository, including its");
+    // Plain copy (SET-9): no "whygraph scan works in it again".
+    expect(dialog).toHaveTextContent("Your repository stays as it is.");
     expect(dialog).toHaveTextContent(".whygraph/");
+    expect(dialog).not.toHaveTextContent("whygraph scan");
     await user.click(within(dialog).getByRole("checkbox", { name: /Also remove the agent MCP entries/ }));
     await user.click(within(dialog).getByRole("button", { name: "Remove project" }));
     await waitFor(() => expect(calls("DELETE", "/api/projects/alpha")).toHaveLength(1));
@@ -1054,11 +1059,11 @@ describe("Global settings (screen 11)", () => {
       await screen.findByLabelText("OpenAI-compatible base URL"),
       "http://host.docker.internal:1234/v1",
     );
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(within(screen.getByRole("region", { name: "Models and keys" })).getByRole("button", { name: "Save" }));
     const cleared = await screen.findByTestId("cleared-keys");
     expect(cleared).toHaveTextContent("alpha");
-    expect(cleared).toHaveTextContent("openai");
-    expect(within(cleared).getByRole("link", { name: "alpha" })).toHaveAttribute("href", "/p/alpha/settings");
+    expect(cleared).toHaveTextContent("OpenAI");
+    expect(within(cleared).getByRole("link", { name: "alpha" })).toHaveAttribute("href", "/p/alpha/settings?section=models");
     expect(calls("PUT", "/api/portal/defaults")).toHaveLength(1);
   });
 });

@@ -20,15 +20,24 @@ you need headless configuration, from the tree below.
 
 For each project the portal builds its configuration from two layers, the **project** layer winning:
 
-1. the global defaults from **Settings** (models, provider endpoints; provider keys are inherited too);
+1. the defaults from **Settings** in the sidebar - the portal defaults locally, the organization's
+   settings in production (models, provider endpoints; provider keys are inherited too);
 2. the project's own settings.
+
+Both pages are split into sections (General, Models and keys, GitHub, ...) with a section list beside
+them; `?section=<id>` opens a page at one section. An empty project field shows the value it inherits
+and where from (*Inherited: ... from portal defaults*, or *from the organization*); a field the project
+sets is marked *Overridden here* with **Reset**. Each section has its own **Save** and **Discard**, so
+saving one section never sends another section's unsaved edits; a key is saved or removed on its own,
+at once, from its key card. People who may only read the settings see them disabled. See
+[Settings](../portal/projects.md#settings) for every section.
 
 Two things differ from a `whygraph.toml`:
 
 - **Keys and tokens are entered in the UI, not read from your environment.** The portal and its scans
   are started with none of your shell's variables - `ANTHROPIC_API_KEY`, `GH_TOKEN` and the rest do not
-  reach them. A project's own key for a provider wins over the global one, and a global key is never
-  sent to a project that overrides that provider's endpoint.
+  reach them. A project's own key for a provider wins over the inherited one, and an inherited key is
+  never sent to a project that overrides that provider's endpoint (its key card says so).
 - **Only some keys can be set.** Database paths are always `<repo>/.whygraph/whygraph.db` and
   `<repo>/.codegraph/codegraph.db`. Importing a repository's `whygraph.toml` takes models, the
   `[analyze]` / `[rationale]` / `[chat]` tuning keys, and `[scan].forge`, `remote`, `default_branch` and

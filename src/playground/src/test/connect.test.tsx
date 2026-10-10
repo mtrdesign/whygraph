@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { PROJECT_ACTIONS } from "../lib/permissions";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -379,7 +379,7 @@ describe("agent limits", () => {
     await user.type(screen.getByLabelText("Commit descriptions per hour"), "300");
     await user.clear(generations);
     await user.type(generations, "0");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(within(screen.getByRole("region", { name: "Agent limits" })).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(put).toBeDefined());
     expect(put?.config?.rationale).toEqual({ agent_generations_per_hour: 0 });
     expect(put?.config?.analyze).toEqual({ agent_descriptions_per_hour: 300 });
@@ -392,7 +392,7 @@ describe("agent limits", () => {
     const user = userEvent.setup();
     mount("/settings");
     await user.type(await screen.findByLabelText("Rationale cards per hour"), "10001");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(within(screen.getByRole("region", { name: "Agent limits" })).getByRole("button", { name: "Save" }));
     await screen.findByText(/whole number from 0 to 10,000/);
     expect(fake.calls.some((c) => c.method === "PUT")).toBe(false);
   });

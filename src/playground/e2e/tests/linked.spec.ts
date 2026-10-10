@@ -226,7 +226,10 @@ test("a linked project: connect, evidence over MCP, revocation, removal", async 
   const row = connections.getByTestId("connection-row").filter({ hasText: MACHINE });
   await expect(row).toContainText("@cy");
   await row.getByRole("button", { name: "Revoke" }).click();
+  // Revoking asks first; the revoked token then stays listed with the reason (SET-10).
+  await ben.getByRole("dialog").getByRole("button", { name: "Revoke" }).click();
   await expect(connections).toContainText("No local portal is connected to this project.");
+  await expect(connections.getByTestId("revoked-connections")).toContainText(MACHINE);
 
   // The next question gets no history from the platform, and every hunk is
   // labelled from this checkout's refs - the pushed one as awaiting a scan.

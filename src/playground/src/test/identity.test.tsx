@@ -1107,7 +1107,7 @@ describe("org settings page", () => {
     fake.state = orgState("owner");
     mount("/settings");
     await screen.findByTestId("config-form");
-    expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Models and keys" })).getByRole("button", { name: "Save" })).toBeInTheDocument();
     expect(screen.queryByTestId("settings-owner-only")).toBeNull();
   });
 
@@ -1220,7 +1220,7 @@ describe("org settings (general and ownership)", () => {
     fake.routes["/api/org"] = () => json({ slug: "acme", name: "Acme Inc", default_project_role: "viewer" });
     mount("/settings");
     const general = within(await screen.findByTestId("org-general"));
-    const save = general.getByRole("button", { name: "Save organization" });
+    const save = general.getByRole("button", { name: "Save" });
     expect(save).toBeDisabled();
     const user = userEvent.setup();
     const name = general.getByLabelText("Organization name");
@@ -1328,6 +1328,8 @@ describe("project access section", () => {
       }),
     );
     await user.click(section.getByTestId("access-u2").querySelector("button") as HTMLElement);
+    // Removing someone's access asks first.
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Remove" }));
     await waitFor(() =>
       expect(fake.calls.some((c) => c.path === "/api/projects/alpha/access/u2" && c.method === "DELETE")).toBe(true),
     );

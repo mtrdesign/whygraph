@@ -1,7 +1,6 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
 import { CheckCircle2Icon, InfoIcon, TriangleAlertIcon } from "lucide-react";
 import {
   ApiError,
@@ -28,6 +27,7 @@ import { CopyButton } from "./CopyButton";
 import { DetectedPanel } from "./DetectedPanel";
 import { InitPreview } from "./InitPreview";
 import { RunCard } from "./WizardConfigure";
+import { SectionForm } from "../settings/SectionForm";
 
 const EMPTY: Detected = {
   existing_db: false,
@@ -148,11 +148,8 @@ export function InitializeStep({
       void queryClient.invalidateQueries({ queryKey: projectKey(slug, "project") });
       void queryClient.invalidateQueries({ queryKey: portalKey("projects") });
       void queryClient.invalidateQueries({ queryKey: projectKey(slug, "init-preview") });
-      if (!result.initialized) return;
-      if (settings) {
-        toast.success("Agent changes applied");
-        return;
-      }
+      // Settings: the done panel says it ("Agent files updated"); no toast (CN-1).
+      if (!result.initialized || settings) return;
       // Straight on to Configure unless there is something to read first.
       if (!linked && !needsReading(result)) onDone(result);
     },
@@ -208,20 +205,21 @@ export function InitializeStep({
     init.mutate();
   };
   const label = init.isPending
-    ? settings
-      ? "Applying…"
-      : linked
-        ? "Finishing…"
-        : "Setting up…"
-    : settings
-      ? "Apply changes"
-      : linked
-        ? noAgent && noAgentOk
-          ? "Finish without an agent"
-          : "Finish"
-        : "Set up project";
+    ? linked
+      ? "Finishing…"
+      : "Setting up…"
+    : linked
+      ? noAgent && noAgentOk
+        ? "Finish without an agent"
+        : "Finish"
+      : "Set up project";
 
-  return (
+  // Settings: the picker and the preview are a section form (R3) - Save applies
+  // the agent changes, Discard puts the configured agents back.
+  const settingsDirty =
+    force || agents.length !== configured.length || agents.some((a) => !configured.includes(a));
+
+  const content = (
     <div className="flex flex-col gap-5">
       {panelDetected && !settings && (
         <DetectedPanel detected={panelDetected} removed={removed} onActionChange={setAction} />
@@ -328,9 +326,7 @@ export function InitializeStep({
         )}
       </Block>
 
-      {init.isError && (
-        <ErrorState error={init.error} title={settings ? "Couldn't apply the changes" : "Couldn't set the project up"} />
-      )}
+      {init.isError && !settings && <ErrorState error={init.error} title="Couldn't set the project up" />}
       {done && !done.initialized && (
         <Alert>
           <AlertTitle>Not finished yet</AlertTitle>
@@ -341,18 +337,41 @@ export function InitializeStep({
         </Alert>
       )}
 
-      <div className="row-wrap items-center justify-end gap-2">
-        {unconfirmed.length > 0 && (
-          <span className="mr-auto text-xs text-muted-foreground" data-testid="confirm-hint">
-            Confirm the committed file{unconfirmed.length > 1 ? "s" : ""} above, or deselect{" "}
-            {unconfirmed.length > 1 ? "their agents" : "its agent"}, to continue.
-          </span>
-        )}
-        <Button onClick={submit} disabled={blocked || init.isPending}>
-          {label}
-        </Button>
-      </div>
+      {(unconfirmed.length > 0 || !settings) && (
+        <div className="row-wrap items-center justify-end gap-2">
+          {unconfirmed.length > 0 && (
+            <span className="mr-auto text-xs text-muted-foreground" data-testid="confirm-hint">
+              Confirm the committed file{unconfirmed.length > 1 ? "s" : ""} above, or deselect{" "}
+              {unconfirmed.length > 1 ? "their agents" : "its agent"}, to continue.
+            </span>
+          )}
+          {!settings && (
+            <Button onClick={submit} disabled={blocked || init.isPending}>
+              {label}
+            </Button>
+          )}
+        </div>
+      )}
     </div>
+  );
+
+  if (!settings) return content;
+  return (
+    <SectionForm
+      name="Agents"
+      dirty={settingsDirty}
+      saveDisabled={blocked}
+      errorTitle="Couldn't apply the changes"
+      onSave={async () => (await init.mutateAsync()).initialized}
+      onDiscard={() => {
+        setAgents([...configured]);
+        setForce(false);
+        setConfirmed(new Set());
+        init.reset();
+      }}
+    >
+      {content}
+    </SectionForm>
   );
 }
 

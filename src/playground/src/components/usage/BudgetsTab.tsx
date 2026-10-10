@@ -40,7 +40,7 @@ export function parseAmount(raw: string): { amount: number } | { error: string }
 }
 
 /** After a budget write: the budgets, the banners (`state.usage`) and every `llm_block` may have moved. */
-function useBudgetWritten() {
+export function useBudgetWritten() {
   const queryClient = useQueryClient();
   return async (target: BudgetTarget) => {
     await Promise.all([

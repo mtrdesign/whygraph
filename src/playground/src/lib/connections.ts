@@ -19,6 +19,25 @@ export function revokedLabel(reason: RevokedReason | string | null): string {
   return "Revoked";
 }
 
+/** The same reasons as a project admin reads them about someone else's token. */
+const ADMIN_REASONS: Record<RevokedReason, string> = {
+  user_revoked: "Revoked by its owner",
+  admin_revoked: "Revoked by an admin",
+  removed_locally: "Removed from that machine",
+  member_removed: "The member was removed from the organization",
+  member_left: "The member left the organization",
+  user_disabled: "The account was disabled",
+  project_deleted: "The project was deleted",
+  org_deleted: "The organization was deleted",
+  idle: "Unused for too long",
+  project_access_removed: "The member's access to the project was removed",
+};
+
+export function revokedLabelForAdmin(reason: RevokedReason | string | null): string {
+  if (reason && Object.prototype.hasOwnProperty.call(ADMIN_REASONS, reason)) return ADMIN_REASONS[reason as RevokedReason];
+  return "Revoked";
+}
+
 // ---- the "Use with your agent" deep link (plan section 4.6) ---------------------
 
 export const LOCAL_PORT_KEY = "whygraph.localPort";

@@ -98,22 +98,57 @@ starts the full scan that writes the descriptions, once the first scan has finis
 on this project; otherwise it says why it is disabled. Spend is tracked on [Usage & cost](usage.md);
 descriptions you skip backfill on demand. See [Scanning](../guide/scanning.md).
 
-## Models, keys and GitHub
+## Settings
 
 A project's **Settings** set how it uses LLMs and GitHub (the wizard's Configure step links there as
-**More settings**):
+**More settings**). A list of sections sits beside the page (a strip you can scroll sideways on a
+phone) and follows your scroll position; a link such as `/p/<project>/settings?section=models` opens
+the page at that section. The section ids are `general`, `models`, `github`, `budgets`, `agents`,
+`access`, `connections` and `danger`.
 
 | Section | What you set |
 |---|---|
-| **Models** | A default model, with optional overrides for per-commit descriptions, rationale cards and chat |
-| **Provider keys** | One key per provider. Keys are **write-only**: the page shows `set ...a1b2` and never the key. Providers without a key show a "no key" badge while a task resolves to them |
-| **Endpoints** | A base URL for OpenAI-compatible gateways, and the Ollama host. Changing an endpoint clears the key stored for it - a key must not follow you to a different server |
-| **GitHub** | A token, and whether to crawl pull requests and issues at all |
-| **Git hooks** | Which of `post-commit`, `post-merge`, `post-rewrite` and `post-checkout` refresh the project |
+| **General** | The display name (the URL name never changes) and where the project comes from |
+| **Models and keys** | One key card per provider; a default model with optional overrides for per-commit descriptions, rationale cards and chat; a base URL for OpenAI-compatible gateways and the Ollama host. Changing an endpoint clears the key stored for it - a key must not follow you to a different server |
+| **GitHub** | Whether to crawl pull requests and issues at all, and (locally) the GitHub token card |
+| **Git hooks** | Which of `post-commit`, `post-merge`, `post-rewrite` and `post-checkout` refresh the project (local folders only) |
+| **Usage** | This month's spend on the project and, for owners and admins, its monthly budget |
+| **Agents** | The coding agents connected to the project, and **Update agent files** |
+| **Access** and **Connected portals** | Production only: who may open the project, and the members' local portals linked to it |
+| **Danger zone** | Remove the project |
 
-Every project inherits the defaults from **Settings** in the portal sidebar: models, provider keys
-and endpoints you set there apply to all projects unless a project overrides them. Set your keys once
-there and most projects need no configuration of their own.
+**Each section saves on its own.** Edits wait for that section's **Save** (or **Discard**), which
+stay disabled until you change something; a saved section says *Saved* in place. Leaving the page
+with unsaved changes asks first. Some things act at once, each after its own confirmation: replacing
+or removing a key, granting or removing someone's access, revoking a connection and removing the
+project.
+
+**Inherited values.** Every project inherits the defaults from **Settings** in the portal sidebar
+(the organization's settings in production). An empty field shows what it inherits, for example
+*Inherited: claude-sonnet-4-5 (Anthropic) from portal defaults*; a field the project sets says
+*Overridden here*, with **Reset** to go back to the inherited value. Set your keys once in the
+defaults and most projects need no configuration of their own.
+
+**Key cards.** Keys are **write-only**: a card says *Set ...a1b2* and never shows the key (only
+people who may change the key see its last four characters). A card also says when the key is
+inherited (*Using the portal default key*), when there is none, and when the project has no key
+because it points that provider at its own endpoint - an inherited key never follows a project to a
+different server. For project admins it shows when the key was last used and offers:
+
+- **Test** - asks the provider whether the stored key works, without spending tokens, and says what
+  it answered (*Key works*, *The provider rejected this key*, *Couldn't reach the provider*). A
+  GitHub token is tested against the project's own repository.
+- **Replace** - paste a new key; it is saved at once, after a confirmation.
+- **Remove**, or **Revert to the portal default key** (*Revert to the organization key* in
+  production) when an inherited key would take over. The confirmation says which key is used next.
+
+The defaults page warns when a task's provider has no key there (*Chat uses OpenAI, which has no
+key*), and lists the projects whose own key was cleared because an endpoint changed.
+
+**Read-only.** People who may look but not change settings see them in a disabled form, with a note
+saying so and who can change them; key tails and key actions are not shown to them. A project
+[linked to a platform](platform-projects.md) shows only General (its name, read-only), Agents and
+Git hooks: the platform owns the rest, and the page names the platform where its settings change.
 
 !!! warning "Credentials from your shell environment no longer reach WhyGraph"
     `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GH_TOKEN` and the rest, exported in your shell, are **not**
@@ -249,6 +284,6 @@ access.
 seconds and is recorded as *Cancelled by you*. Commits it had already described are kept, so the next
 scan picks up where it stopped.
 
-Removing a project offers to strip what the portal wrote: the git hooks, the markers, and the `whygraph`
-entries in agent config files it created. It never deletes your repository, its `.whygraph/` data, or
-(for a local repo) anything else.
+Removing a project (Settings, **Danger zone**) offers to strip what the portal wrote: the git hooks,
+the markers, and the `whygraph` entries in agent config files it created. It never deletes your
+repository or its `.whygraph/` history, so adding the folder again later picks the history up.

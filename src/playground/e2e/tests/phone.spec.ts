@@ -19,7 +19,6 @@ import { call, configureStubLlm, STUB_REPLY } from "../lib/usage";
 // The main session maintains the list between steps; the last step empties it.
 const KNOWN_OVERFLOW: Record<string, string> = {
   "local /usage": "PH-6: the Usage tab strip overflows",
-  "local project settings": "PH-4: unbreakable mono paths (settings General)",
   "production /usage": "PH-6: the Usage tab strip overflows",
 };
 

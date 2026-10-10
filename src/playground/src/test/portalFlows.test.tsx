@@ -561,8 +561,8 @@ describe("ConfigForm (project settings)", () => {
     fake.projects = [summary("alpha", { missing_key: "anthropic" })];
     mount("/p/alpha/settings");
     const row = await screen.findByTestId("key-anthropic");
-    expect(within(row).getByText("no key for anthropic")).toBeInTheDocument();
-    expect(within(screen.getByTestId("key-openai")).queryByText(/no key for/)).toBeNull();
+    expect(within(row).getByTestId("key-warning")).toHaveTextContent("A task uses Anthropic, which has no key.");
+    expect(within(screen.getByTestId("key-openai")).queryByTestId("key-warning")).toBeNull();
 
     const hooks = screen.getByRole("heading", { name: "Git hooks" }).closest("section")!;
     const boxes = within(hooks).getAllByRole("checkbox");
@@ -602,39 +602,48 @@ describe("ConfigForm (project settings)", () => {
     await screen.findByTestId("config-form");
     expect(screen.queryByRole("heading", { name: "Git hooks" })).toBeNull();
     expect(screen.queryByText(/syncs it on a schedule/)).toBeNull();
-    // Local mode keeps the GitHub token for the PR crawl.
-    expect(screen.getByLabelText("GitHub token")).toBeInTheDocument();
+    // Local mode keeps the GitHub token for the PR crawl, as its own key card.
+    const token = screen.getByTestId("key-github");
+    expect(within(token).getByTestId("key-status")).toHaveTextContent("No token");
+    expect(within(token).getByRole("button", { name: "Add token" })).toBeInTheDocument();
   });
 
-  it("saves the whole layer (unknown keys kept) and secrets write-only", async () => {
+  it("saves the whole layer (unknown keys kept); a key goes out on its own, write-only", async () => {
     const user = userEvent.setup();
     mount("/p/alpha/settings");
     await screen.findByTestId("config-form");
+    const puts = () => fake.log.filter((c) => c.method === "PUT" && c.path === "/api/projects/alpha/config");
+
+    // The key card sends its own PUT with only that secret (R3).
+    const key = screen.getByTestId("key-anthropic");
+    await user.click(within(key).getByRole("button", { name: "Add key" }));
+    await user.type(within(key).getByLabelText("New Anthropic key"), "sk-ant-1234");
+    await user.click(within(key).getByRole("button", { name: "Save key" }));
+    await waitFor(() => expect(puts()).toHaveLength(1));
+    expect(puts()[0].body).toEqual({ secrets: { llm: { anthropic: "sk-ant-1234" } } });
 
     await user.selectOptions(screen.getByLabelText("Default model provider"), "anthropic");
     await user.type(screen.getByLabelText("Default model model"), "claude-sonnet-4-5");
-    await user.type(screen.getByLabelText("anthropic", { selector: "input" }), "sk-ant-1234");
-    await user.click(screen.getByRole("button", { name: "Save settings" }));
+    await user.click(within(screen.getByRole("region", { name: "Models and keys" })).getByRole("button", { name: "Save" }));
 
-    await waitFor(() => expect(fake.log.some((c) => c.method === "PUT")).toBe(true));
-    const put = fake.log.find((c) => c.method === "PUT" && c.path === "/api/projects/alpha/config")!;
-    expect(put.body).toEqual({
+    await waitFor(() => expect(puts()).toHaveLength(2));
+    expect(puts()[1].body).toEqual({
       config: {
         llm: { model: "anthropic/claude-sonnet-4-5" },
         analyze: { max_diff_chars: 5000 },
         scan: { forge: "auto", hooks: ["post-commit"] },
       },
-      secrets: { llm: { anthropic: "sk-ant-1234" } },
     });
     // A secret never travels inside the config dict (rule 4).
-    expect(JSON.stringify(put.body!.config)).not.toContain("sk-ant");
+    expect(JSON.stringify(puts()[1].body)).not.toContain("sk-ant");
   });
 
-  it("sends nothing when nothing changed", async () => {
-    const user = userEvent.setup();
+  it("sends nothing when nothing changed: Save and Discard wait for an edit", async () => {
     mount("/p/alpha/settings");
     await screen.findByTestId("config-form");
-    await user.click(screen.getByRole("button", { name: "Save settings" }));
+    const models = within(screen.getByRole("region", { name: "Models and keys" }));
+    expect(models.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(models.getByRole("button", { name: "Discard" })).toBeDisabled();
     expect(fake.log.some((c) => c.method === "PUT")).toBe(false);
   });
 
@@ -646,11 +655,13 @@ describe("ConfigForm (project settings)", () => {
     const user = userEvent.setup();
     mount("/p/alpha/settings");
     const row = await screen.findByTestId("key-openai");
-    expect(within(row).getByText("set ...a1b2")).toBeInTheDocument();
-    expect(within(row).getByLabelText("openai", { selector: "input" })).toHaveValue("");
+    expect(within(row).getByTestId("key-status")).toHaveTextContent("Set ...a1b2");
+    // Write-only: no field holds the key; Replace opens an empty one.
+    expect(within(row).queryByRole("textbox")).toBeNull();
+    expect(within(row).getByRole("button", { name: "Replace" })).toBeInTheDocument();
 
     await user.type(screen.getByLabelText("OpenAI-compatible base URL"), "nonsense");
-    await user.click(screen.getByRole("button", { name: "Save settings" }));
+    await user.click(within(screen.getByRole("region", { name: "Models and keys" })).getByRole("button", { name: "Save" }));
     expect(await screen.findByText("Enter an http(s) URL")).toBeInTheDocument();
   });
 });

@@ -18,6 +18,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from sqlmodel import delete
 
 from test_portal_app import (  # noqa: F401 -- fixtures
@@ -40,6 +41,14 @@ from whygraph.portal.models import (
 
 NOW = datetime.now(timezone.utc)
 TODAY = NOW.date()
+
+
+@pytest.fixture(autouse=True)
+def _pin_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the route's and the counter's clock to NOW, so a run across midnight stays green."""
+    monkeypatch.setattr("whygraph.portal.overview_routes._utcnow", lambda: NOW)
+    monkeypatch.setattr("whygraph.portal.agent_calls._utcnow", lambda: NOW)
+
 
 _KEYS = {"coverage", "events", "last_failure", "usage", "agents"}
 _AGENT_KEYS = {

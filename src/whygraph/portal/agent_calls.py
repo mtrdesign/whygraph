@@ -167,7 +167,7 @@ class AgentCallBook:
         *,
         flush_every: float = FLUSH_EVERY_SEC,
         max_keys: int = MAX_KEYS,
-        clock: Callable[[], datetime] = _utcnow,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.flush_every = flush_every
         self.max_keys = max_keys
@@ -208,7 +208,7 @@ class AgentCallBook:
         key = CallKey(
             org_id,
             project_id,
-            self._clock().astimezone(timezone.utc).date().isoformat(),
+            (self._clock or _utcnow)().astimezone(timezone.utc).date().isoformat(),
             source,
             user_id,
             connection_id,

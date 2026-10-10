@@ -639,6 +639,7 @@ PATH_PARAMS: dict[str, Callable[[OrgWorld], str]] = {
     "{user_uid}": lambda o: o.owner_uid,  # an owner: 409 org_admin
     "{installation_id}": lambda o: "7",
     "{link_id}": lambda o: "nolink",  # no pending link: 410 link_expired
+    "{provider}": lambda o: "openrouter",  # no key stored: 409 key_missing
 }
 """How to fill each path parameter for an org; an unmapped one fails the sweep."""
 
@@ -828,6 +829,18 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         200,
         body=lambda w, o: {"config": {"llm": {"model": o.model}}},
         shows=lambda o: [o.model, o.hint("anthropic")],
+    ),
+    # Key tests (M2f-3 section 4.13): openrouter has no key in any world, so
+    # the sweep never reaches a provider (test_portal_keys.py tests for real)
+    ("POST", "/api/portal/defaults/keys/{provider}/test"): Call(
+        409, shows=lambda o: ["key_missing"]
+    ),
+    ("POST", "/api/projects/{slug}/keys/{provider}/test"): Call(
+        409, shows=lambda o: ["key_missing"]
+    ),
+    # (local-only; the marked repos have no GitHub origin)
+    ("POST", "/api/projects/{slug}/github-token/test"): Call(
+        422, shows=lambda o: ["not_github"]
     ),
     ("GET", "/api/projects"): Call(200, check=_projects_check),
     # Production's members page (swept on org hosts only, over prod_world)
@@ -1453,7 +1466,10 @@ def context_calls(two_orgs: World, monkeypatch: pytest.MonkeyPatch) -> list[int]
 
 def test_the_admin_routes_are_the_planned_ones() -> None:
     # Org settings and org-level keys are the owner's (M2d-1 plan section 0.1).
-    assert OWNER_ROUTES == [("PUT", "/api/portal/defaults")]
+    assert OWNER_ROUTES == [
+        ("POST", "/api/portal/defaults/keys/{provider}/test"),
+        ("PUT", "/api/portal/defaults"),
+    ]
     # The org admin's: adding and removing projects (removal is an org
     # action, M2f-1 plan section 0.2 #7), and the budgets (M2f-2 section
     # 0.2 #12; the per-member ones are production's).
@@ -1487,6 +1503,9 @@ def test_the_admin_routes_are_the_planned_ones() -> None:
         ("PUT", "/api/projects/{slug}/config"),
         ("POST", "/api/projects/{slug}/init"),
         ("GET", "/api/projects/{slug}/usage"),  # M2f-2 section 0.2 #13
+        # Testing the project's keys (M2f-3 section 4.13)
+        ("POST", "/api/projects/{slug}/keys/{provider}/test"),
+        ("POST", "/api/projects/{slug}/github-token/test"),
     }
     # Everyone reads the price table (it prices their own estimates).
     assert ("GET", "/api/prices") in MEMBER_ROUTES

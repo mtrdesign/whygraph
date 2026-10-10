@@ -642,8 +642,17 @@ def refresh_links(
     return len(rows)
 
 
-def revoke_token(row: PlatformLink, *, transport: Any = None) -> str | None:
-    """Give up a connection token on its platform, best effort.
+REVOKE_RESULTS: tuple[str, ...] = ("revoked", "already_revoked", "unreachable")
+"""What giving up a connection token can end in (M2f-3 plan section 4.5, BUG-7)."""
+
+_GONE_CODES = frozenset({"token_revoked", "invalid_token"})
+"""Platform refusals meaning the token no longer works there anyway."""
+
+
+def revoke_token_outcome(
+    row: PlatformLink, *, transport: Any = None
+) -> tuple[str, str | None]:
+    """Give up a connection token on its platform, best effort, and say how it went.
 
     ``DELETE /api/v1/projects/{slug}/token``, so the token this machine
     holds stops working even when the row that holds it is about to be
@@ -659,14 +668,18 @@ def revoke_token(row: PlatformLink, *, transport: Any = None) -> str | None:
 
     Returns
     -------
-    str or None
-        ``None`` when the platform confirmed it, else why it could not be
-        done - a message for the user, free of the token.
+    tuple[str, str or None]
+        ``("revoked", None)`` when the platform confirmed it;
+        ``("already_revoked", None)`` when the platform answered that the
+        token was revoked (or is unknown) already - it no longer works, so
+        there is nothing left to do; else ``("unreachable", why)``, ``why``
+        a message for the user, free of the token (the token may still work
+        on the platform).
     """
     try:
         token: str | None = decrypt(row.token_ciphertext)
     except InvalidToken:
-        return "this portal can no longer read the token it held"
+        return "unreachable", "this portal can no longer read the token it held"
     try:
         client = PlatformHttp(
             platform_origin=row.platform_origin,
@@ -675,19 +688,38 @@ def revoke_token(row: PlatformLink, *, transport: Any = None) -> str | None:
             transport=transport,
         )
     except ValueError as exc:
-        return str(exc)
+        return "unreachable", str(exc)
     try:
         client.revoke(row.remote_slug)
+    except PlatformRefused as exc:
+        if exc.status == 401 and exc.code in _GONE_CODES:
+            return "already_revoked", None
+        return "unreachable", str(exc)
     except PlatformError as exc:
-        return str(exc)
+        return "unreachable", str(exc)
     except Exception as exc:  # noqa: BLE001 -- a removal must still finish
         # Only the kind of failure: an unexpected exception's message has
         # not been through the client's redaction.
         logger.exception("revoking the token of project %s failed", row.project_id)
-        return f"the platform could not be reached ({type(exc).__name__})"
+        return (
+            "unreachable",
+            f"the platform could not be reached ({type(exc).__name__})",
+        )
     finally:
         client.close()
-    return None
+    return "revoked", None
+
+
+def revoke_token(row: PlatformLink, *, transport: Any = None) -> str | None:
+    """:func:`revoke_token_outcome`'s failure message, or ``None``.
+
+    Returns
+    -------
+    str or None
+        ``None`` when the token no longer works on the platform (revoked
+        now or already), else why it could not be revoked.
+    """
+    return revoke_token_outcome(row, transport=transport)[1]
 
 
 def _rows_statement(project_ids: Sequence[int] | None):
@@ -758,12 +790,14 @@ __all__ = [
     "NOT_FOUND_CODE",
     "PROJECT_ACCESS_REMOVED",
     "REFRESH_AFTER_SEC",
+    "REVOKE_RESULTS",
     "LinkRefresh",
     "LinkedProject",
     "due_for_refresh",
     "link_block",
     "refresh_links",
     "revoke_token",
+    "revoke_token_outcome",
     "save_status",
     "status_of",
     "touch_status",

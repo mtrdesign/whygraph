@@ -525,6 +525,14 @@ class PortalState:
     repo_cache : RepoListCache
         Each ``(user, installation)``'s GitHub repository list for the
         import's repo search, a minute at a time (M2f-3 plan section 4.8).
+    key_test : Throttle
+        Key and token tests (M2f-3 plan section 4.13), one hour window, per
+        key limits through ``hit_all``: ``("u", org_id, user_id)`` 10 and
+        ``("o", org_id)`` 60.
+    key_test_transport : httpx.BaseTransport or None
+        Replaces the network of the LLM key probe
+        (:func:`whygraph.portal.key_test.probe_llm_key`; tests plug an
+        ``httpx.MockTransport`` in); ``None`` in a real run.
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -588,6 +596,8 @@ class PortalState:
         self.spend.on_add = self.budgets.on_add
         self.agent_calls = AgentCallBook()
         self.repo_cache = RepoListCache()
+        self.key_test = Throttle(60, 60 * 60)
+        self.key_test_transport: Any = None
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0

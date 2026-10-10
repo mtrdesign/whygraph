@@ -19,6 +19,8 @@ Composition (plan section 4.5.1)::
     /api/projects/{slug}/usage    (portal/usage_routes.py; /api/usage/me* is
                                   production-only)
     /api/projects/{slug}/overview the project Overview (portal/overview_routes.py)
+    .../keys/{provider}/test,     the key tests (portal/key_routes.py; the
+    .../github-token/test         GitHub token test is local-only)
     /api/projects/*               management; each route names its action through
                                   org_access / project_access / project_db_access
     /api/projects/{slug}/...      serve.routes.router (project.read),
@@ -121,6 +123,7 @@ from .hosts import (
 )
 from .linked import refresh_links
 from .mcp_mount import McpDispatcher, build_session_manager
+from .key_routes import key_local_router, key_router
 from .member_routes import members_router
 from .migrate import MIGRATION_LOCK
 from .models import ScanRun, Setting, User
@@ -285,6 +288,8 @@ def create_portal_app(
     app.include_router(usage_router)  # both modes: usage reads and CSV (M2f-2)
     app.include_router(usage_me_router)  # production-only: a member's own usage
     app.include_router(overview_router)  # both modes: a project's Overview (M2f-3)
+    app.include_router(key_router)  # both modes: the LLM key tests (M2f-3)
+    app.include_router(key_local_router)  # local-only: the GitHub token test
     app.include_router(portal_router)
     app.include_router(projects_router)
     app.include_router(platform_router)  # local-only: connect and link (M2e)

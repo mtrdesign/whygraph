@@ -802,9 +802,37 @@ def list_for_user(db: Session, user_id: int) -> list[TokenInfo]:
     return _infos(db, col(ConnectionToken.user_id) == user_id)
 
 
-def list_for_project(db: Session, project_id: int) -> list[TokenInfo]:
-    """The live tokens of ``project_id`` (any member's), newest first."""
-    return _infos(db, col(ConnectionToken.project_id) == project_id, *_live())
+def list_for_project(
+    db: Session, project_id: int, *, include_revoked: bool = False
+) -> list[TokenInfo]:
+    """The live tokens of ``project_id`` (any member's), newest first.
+
+    Parameters
+    ----------
+    db : Session
+        A portal DB session.
+    project_id : int
+        The project.
+    include_revoked : bool, optional
+        Also list tokens revoked in the last :data:`PURGE_AFTER` (30 days),
+        which the sweep has not deleted yet (M2f-3 plan section 4.13).
+
+    Returns
+    -------
+    list[TokenInfo]
+        Newest first.
+    """
+    if not include_revoked:
+        return _infos(db, col(ConnectionToken.project_id) == project_id, *_live())
+    since = _iso(_now() - PURGE_AFTER)
+    return _infos(
+        db,
+        col(ConnectionToken.project_id) == project_id,
+        or_(
+            col(ConnectionToken.revoked_at).is_(None),
+            col(ConnectionToken.revoked_at) >= since,
+        ),
+    )
 
 
 def sweep() -> tuple[int, int]:

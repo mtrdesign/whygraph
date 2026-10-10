@@ -674,7 +674,7 @@ def test_platform_routes_404_in_production(production_env: SimpleNamespace) -> N
     assert LOCAL_ONLY_ROUTES  # the inventory names them
     with prod_portal() as client:
         for path, method in sorted(LOCAL_ONLY_ROUTES):
-            url = path.replace("{link_id}", "nolink")
+            url = path.replace("{link_id}", "nolink").replace("{slug}", "api")
             for prefix in (at(), at("quokka")):
                 response = client.request(method, prefix + url, json={})
                 assert response.status_code == 404, (

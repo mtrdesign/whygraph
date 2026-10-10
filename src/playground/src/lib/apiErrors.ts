@@ -268,6 +268,11 @@ export const MESSAGES: Record<string, Resolver> = {
   runner_unavailable: { message: "The scan queue isn't running right now. Try again in a moment.", action: RETRY },
   managed_on_platform: "This project is managed on the platform. Change it there.",
 
+  // Key and token tests (M2f-3)
+  key_missing: "There's no saved key to test here.",
+  not_testable: "This provider has no key to test.",
+  not_github: "This project's remote isn't on GitHub, so there's no GitHub token to test.",
+
   // Linking to a platform (M2e)
   bad_client_name: "Use a machine name of 1-64 letters, digits, dots, underscores, dashes and spaces.",
   origin_mismatch:

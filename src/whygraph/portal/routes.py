@@ -32,7 +32,7 @@ import copy
 import json
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from functools import partial
@@ -45,7 +45,7 @@ import anyio
 import anyio.from_thread
 from fastapi import APIRouter, Body, Depends, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import and_, case, cast, false, func, not_
+from sqlalchemy import and_, case, cast, false, func, not_, or_
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
@@ -98,11 +98,18 @@ from .authz import (
     OrgAccess,
     ProjectRole,
     Role,
+    allowed,
     authorize,
     effective_project_role,
     project_allowed,
 )
-from .config_layers import ConfigPolicyError, find_secret_paths, load_layer, save_layer
+from .config_layers import (
+    ConfigPolicyError,
+    endpoint_of,
+    find_secret_paths,
+    load_layer,
+    save_layer,
+)
 from .context import build_project_context, resolve_root
 from .db import get_session
 from .deps import (
@@ -136,7 +143,7 @@ from .github_app_routes import (
     user_token,
 )
 from .github_auth import GitHubUnavailable
-from .linked import due_for_refresh, link_block, revoke_token
+from .linked import due_for_refresh, link_block, revoke_token, revoke_token_outcome
 from .models import (
     SCAN_STATUSES,
     SCAN_TRIGGERS,
@@ -147,6 +154,7 @@ from .models import (
     ProjectGrant,
     ScanRun,
     Secret,
+    UsageEvent,
     User,
 )
 from .orgs import add_member
@@ -173,6 +181,7 @@ from .repos import (
     DISCOVERY_LIMIT,
     check_path,
     detect_existing,
+    github_link,
     root_status,
 )
 from .estimate import compact_estimate
@@ -404,22 +413,202 @@ def _port_change_in(state: PortalState, access: OrgAccess | None) -> dict | None
     }
 
 
-def _secrets_view(session: Session, project_id: int | None, *, org_id: int) -> dict:
+def _secrets_view(
+    session: Session, project_id: int | None, *, org_id: int, hints: bool = True
+) -> dict:
+    """Each secret's ``{set, hint, unreadable?}``; ``hint`` is ``None`` without ``hints``.
+
+    ``hints`` is whether the caller may change these keys (M2f-3 plan
+    section 0.3 #20): everyone else gets the same shape with no tail.
+    """
+
+    def status(**scope: Any) -> dict:
+        found = secret_status(session, project_id=project_id, org_id=org_id, **scope)
+        return found if hints else {**found, "hint": None}
+
     return {
         "llm": {
-            tag: secret_status(
-                session,
-                kind=LLM_API_KEY,
-                provider=tag,
-                project_id=project_id,
-                org_id=org_id,
-            )
-            for tag in LLM_KEY_PROVIDERS
+            tag: status(kind=LLM_API_KEY, provider=tag) for tag in LLM_KEY_PROVIDERS
         },
-        "github_token": secret_status(
-            session, kind=GITHUB_TOKEN, project_id=project_id, org_id=org_id
+        "github_token": status(kind=GITHUB_TOKEN),
+    }
+
+
+GITHUB_RUN_TRIGGERS: tuple[str, ...] = ("initial", "manual", "describe")
+"""Triggers whose scans fetch from GitHub (a hook scan is ``--no-remote``):
+an ``ok`` one is the GitHub token's "last used" (M2f-3 plan section 0.3 #18)."""
+
+
+def _org_secret_set(session: Session, org_id: int) -> set[tuple[str, str | None]]:
+    """``(kind, provider)`` of every org-level secret of ``org_id``."""
+    rows = session.exec(
+        select(Secret.kind, Secret.provider).where(
+            Secret.org_id == org_id,
+            col(Secret.project_id).is_(None),
+        )
+    ).all()
+    return {(kind, provider) for kind, provider in rows}
+
+
+def github_token_scope(session: Session, project_id: int, org_id: int) -> str:
+    """Where a project's GitHub token comes from: ``project``, ``org`` or ``none``.
+
+    The project's own secret wins (even an unreadable one: the context
+    never falls back to the org's then), else the org default.
+
+    Parameters
+    ----------
+    session : Session
+        A portal DB session.
+    project_id, org_id : int
+        The project and its org.
+
+    Returns
+    -------
+    str
+        ``"project"``, ``"org"`` or ``"none"``.
+    """
+    rows = session.exec(
+        select(Secret.project_id).where(
+            Secret.org_id == org_id,
+            Secret.kind == GITHUB_TOKEN,
+            or_(  # type: ignore[arg-type]
+                col(Secret.project_id).is_(None), Secret.project_id == project_id
+            ),
+        )
+    ).all()
+    if project_id in rows:
+        return "project"
+    return "org" if None in rows else "none"
+
+
+def github_remote(project: Project, root: Path) -> str | None:
+    """``owner/name`` of a project's GitHub remote, or ``None``.
+
+    A production import names it in ``remote_url``
+    (:func:`_github_full_name`); a local folder's comes from its ``origin``
+    on github.com, parsed as the add-project probe does
+    (:func:`~whygraph.portal.repos.github_link`). A linked project has none
+    here (its platform owns it).
+
+    Parameters
+    ----------
+    project : Project
+        The project row.
+    root : Path
+        Its absolute root.
+
+    Returns
+    -------
+    str or None
+        ``owner/name``.
+    """
+    if project.source == "platform":
+        return None
+    full_name = _github_full_name(project)
+    if full_name is not None:
+        return full_name
+    if not root.is_dir():
+        return None
+    link = github_link(root)
+    return link["slug"] if link is not None else None
+
+
+def _llm_last_used(
+    session: Session, org_id: int, scopes: dict[str, str], project_id: int | None
+) -> dict[str, str | None]:
+    """Each provider's newest ledger row for the key in effect (M2f-3 section 0.3 #19).
+
+    ``scopes`` maps a provider to the key scope in effect: ``org`` reads the
+    org key's calls across the org, ``project`` the project key's calls in
+    ``project_id``; any other scope has no stored key, so ``None``.
+    """
+    rows = session.exec(
+        select(
+            UsageEvent.provider,
+            UsageEvent.key_scope,
+            func.max(UsageEvent.created_at),
+        )
+        .where(
+            UsageEvent.org_id == org_id,
+            col(UsageEvent.provider).in_(tuple(scopes)),
+            or_(  # type: ignore[arg-type]
+                UsageEvent.key_scope == "org",
+                and_(
+                    UsageEvent.key_scope == "project",
+                    UsageEvent.project_id == project_id,
+                ),
+            ),
+        )
+        .group_by(UsageEvent.provider, UsageEvent.key_scope)
+    ).all()
+    newest = {(provider, scope): at for provider, scope, at in rows}
+    return {
+        tag: (newest.get((tag, scope)) if scope in ("org", "project") else None)
+        for tag, scope in scopes.items()
+    }
+
+
+def _github_last_used(session: Session, project_ids: list[int]) -> str | None:
+    """The newest ``ok`` GitHub-fetching scan of ``project_ids`` (its end time)."""
+    if not project_ids:
+        return None
+    return session.exec(
+        select(func.max(ScanRun.finished_at)).where(
+            col(ScanRun.project_id).in_(project_ids),
+            ScanRun.kind == "scan",
+            ScanRun.status == "ok",
+            col(ScanRun.trigger).in_(GITHUB_RUN_TRIGGERS),
+        )
+    ).one()
+
+
+def _project_key_last_used(
+    session: Session,
+    project: BoundProject,
+    scopes: dict[str, str],
+    github_scope: str,
+) -> dict:
+    """``key_last_used`` of a project's config payload (configurers only)."""
+    return {
+        "llm": _llm_last_used(session, project.org_id, scopes, project.id),
+        "github_token": (
+            None if github_scope == "none" else _github_last_used(session, [project.id])
         ),
     }
+
+
+def _org_key_last_used(session: Session, org_id: int, org_secrets: set) -> dict:
+    """``key_last_used`` of the defaults payload (``org.configure`` holders only).
+
+    The org GitHub token's last use is the newest GitHub-fetching scan of a
+    local project that has no token of its own.
+    """
+    llm = _llm_last_used(
+        session,
+        org_id,
+        {
+            tag: ("org" if (LLM_API_KEY, tag) in org_secrets else "none")
+            for tag in LLM_KEY_PROVIDERS
+        },
+        None,
+    )
+    github: str | None = None
+    if (GITHUB_TOKEN, None) in org_secrets:
+        own = select(Secret.project_id).where(
+            Secret.org_id == org_id,
+            Secret.kind == GITHUB_TOKEN,
+            col(Secret.project_id).is_not(None),
+        )
+        inheriting = session.exec(
+            select(Project.id).where(
+                Project.org_id == org_id,
+                Project.source == "local",
+                col(Project.id).not_in(own),
+            )
+        ).all()
+        github = _github_last_used(session, list(inheriting))
+    return {"llm": llm, "github_token": github}
 
 
 def _apply_secrets(
@@ -1110,22 +1299,43 @@ def post_check_path(body: PathBody, request: Request) -> dict:
         raise ApiError(422, str(exc)) from exc
 
 
-def _defaults_view(session: Session, org_id: int) -> dict:
+def _defaults_view(session: Session, org_id: int, *, configurer: bool) -> dict:
+    """The defaults payload; ``configurer`` = the caller holds ``org.configure``.
+
+    Without it the payload is ``read_only``, carries no key tails
+    (``hint: null``) and no ``key_last_used`` (M2f-3 plan section 4.13).
+    """
     any_key = session.exec(
         select(Secret.id).where(Secret.org_id == org_id, Secret.kind == LLM_API_KEY)
     ).first()
-    return {
+    view = {
         "config": load_layer(session, None, org_id=org_id),
-        "secrets": _secrets_view(session, None, org_id=org_id),
+        "secrets": _secrets_view(session, None, org_id=org_id, hints=configurer),
         "no_provider_key": any_key is None,
+        "read_only": not configurer,
+        "can_test_keys": configurer,
     }
+    if configurer:
+        view["key_last_used"] = _org_key_last_used(
+            session, org_id, _org_secret_set(session, org_id)
+        )
+    return view
 
 
 @portal_router.get("/defaults")
 def get_defaults(access: OrgAccess = Depends(org_access(Action.ORG_READ))) -> dict:
-    """The org default config (rule 6) and the org secrets' status."""
+    """The org default config (rule 6) and the org secrets' status.
+
+    Key tails, ``key_last_used`` and ``can_test_keys`` are for
+    ``org.configure`` holders (owners) only; everyone else reads a
+    ``read_only`` payload with ``hint: null``.
+    """
     with get_session() as session:
-        return _defaults_view(session, access.org_id)
+        return _defaults_view(
+            session,
+            access.org_id,
+            configurer=allowed(access.role, Action.ORG_CONFIGURE),
+        )
 
 
 @portal_router.put("/defaults")
@@ -1164,7 +1374,7 @@ def put_defaults(
             _apply_secrets(session, body.secrets, None, org_id=org_id)
     state.contexts.invalidate(None)
     with get_session() as session:
-        view = _defaults_view(session, org_id)
+        view = _defaults_view(session, org_id, configurer=True)
     view["cleared_project_keys"] = cleared
     return view
 
@@ -1975,12 +2185,16 @@ def _remove_project(
     state: PortalState, project: BoundProject, body: DeleteProjectBody
 ) -> dict:
     """The body of :func:`delete_project`, run under the runner's removal reservation."""
+    production = state.mode == "production"
     if project.source == "github" and body.confirm_name != project.name:
+        # Production never names the server clone's path (MODE-1).
         raise ApiError(
             409,
-            f"type the project name to delete the checkout at {project.root}",
+            "type the project name to delete its server copy"
+            if production
+            else f"type the project name to delete the checkout at {project.root}",
             code="confirm_name",
-            folder=str(project.root),
+            **({} if production else {"folder": str(project.root)}),
         )
 
     with get_session() as session:
@@ -1996,13 +2210,15 @@ def _remove_project(
 
     # First, before anything local changes: give up this machine's access.
     token_revoked = True
+    token_revoke_result: str | None = None
     if project.source == "platform":
         link = _link_of(project.id)
-        failure = (
-            "this project has no link row"
-            if link is None
-            else revoke_token(link, transport=state.platform_transport)
-        )
+        if link is None:
+            failure: str | None = "this project has no link row"
+        else:
+            token_revoke_result, failure = revoke_token_outcome(
+                link, transport=state.platform_transport
+            )
         token_revoked = failure is None
         if failure is not None:
             origin = link.platform_origin if link is not None else "the platform"
@@ -2080,7 +2296,8 @@ def _remove_project(
         depth = 2 if state.mode == "production" else 1
         checkout_deleted = remove_clone(project.root, state.data_dir, depth=depth)
         if not checkout_deleted and project.root.exists():
-            warnings.append(f"refused to delete {project.root}: not a portal clone")
+            where = "the server copy" if production else str(project.root)
+            warnings.append(f"refused to delete {where}: not a portal clone")
     return {
         "removed": project.slug,
         "hooks": hooks,
@@ -2089,8 +2306,67 @@ def _remove_project(
         # Whether this machine holds no connection token for the project any
         # more: the platform confirmed the revoke, or there never was one.
         "token_revoked": token_revoked,
+        # How giving the token up went (BUG-7): revoked / already_revoked /
+        # unreachable, or None when there was no token (not linked).
+        "token_revoke_result": token_revoke_result,
         "warnings": warnings,
     }
+
+
+def _config_view(
+    session: Session, project: BoundProject, key_scopes: Mapping[str, str]
+) -> dict:
+    """The config payload's ``config``, ``secrets`` and the M2f-3 key fields.
+
+    Plan section 4.13: ``read_only`` (no ``project.configure``, or linked),
+    ``managed_on_platform``, ``can_test_keys``; for a project that is not
+    linked ``effective_keys`` (``key_scopes``), ``inherited`` (whether the
+    org key would take over a removed project key - never its tail),
+    ``github`` (the remote and the token's scope) and, for configurers,
+    ``key_last_used``. Key tails are only for configurers; an org key's tail
+    is never here. A linked project reads no secret, so ``secrets`` is
+    ``None``.
+    """
+    linked = project.source == "platform"
+    configurer = project_allowed(project.role, Action.PROJECT_CONFIGURE)
+    view: dict[str, Any] = {
+        "config": load_layer(session, project.id, org_id=project.org_id),
+        "secrets": (
+            None
+            if linked
+            else _secrets_view(
+                session, project.id, org_id=project.org_id, hints=configurer
+            )
+        ),
+        "read_only": linked or not configurer,
+        "managed_on_platform": linked,
+        "can_test_keys": configurer and not linked,
+    }
+    if linked:
+        return view
+    row = session.get(Project, project.id)
+    layer = view["config"]
+    org_secrets = _org_secret_set(session, project.org_id)
+    github_scope = github_token_scope(session, project.id, project.org_id)
+    scopes = {tag: key_scopes.get(tag, "none") for tag in LLM_KEY_PROVIDERS}
+    view["effective_keys"] = scopes
+    view["inherited"] = {
+        tag: {
+            # Rule 3: an org key never reaches a project overriding the endpoint.
+            "set": (LLM_API_KEY, tag) in org_secrets
+            and endpoint_of(layer, tag.replace("-", "_")) is None
+        }
+        for tag in LLM_KEY_PROVIDERS
+    }
+    view["github"] = {
+        "remote": github_remote(row, project.root) if row is not None else None,
+        "token": github_scope,
+    }
+    if configurer:
+        view["key_last_used"] = _project_key_last_used(
+            session, project, scopes, github_scope
+        )
+    return view
 
 
 @projects_router.get("/{slug}/config")
@@ -2106,17 +2382,11 @@ def get_project_config(
     Allowed for a linked project, which is what its hooks checkboxes read -
     but read-only (``PUT`` is refused except ``[scan].hooks``) and without
     the secrets block: a linked project reads no secret at all, so there is
-    nothing to report (plan sections 4.9, 4.11).
+    nothing to report (plan sections 4.9, 4.11). The key fields of M2f-3
+    (:func:`_config_view`) depend on the caller's role.
     """
     with get_session() as session:
-        body = {
-            "config": load_layer(session, project.id, org_id=project.org_id),
-            "secrets": (
-                None
-                if project.source == "platform"
-                else _secrets_view(session, project.id, org_id=project.org_id)
-            ),
-        }
+        body = _config_view(session, project, project.ctx.key_scopes)
     preview = (
         preview_import(project.root) if project.source == "local" else ImportPreview()
     )
@@ -2193,10 +2463,8 @@ def put_project_config(
             hooks_error = str(exc)
 
     with get_session() as session:
-        view = {
-            "config": load_layer(session, project.id, org_id=project.org_id),
-            "secrets": _secrets_view(session, project.id, org_id=project.org_id),
-        }
+        # A linked project's secrets stay null, as on GET (BUG-21).
+        view = _config_view(session, project, new_ctx.key_scopes)
     view["hooks"] = hooks
     view["hooks_error"] = hooks_error
     return view

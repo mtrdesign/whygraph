@@ -1253,6 +1253,11 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/portal/check-path", "POST"): "org.add_project",
     ("/api/portal/defaults", "GET"): "org.read",
     ("/api/portal/defaults", "PUT"): "org.configure",
+    # Key tests (M2f-3 section 4.13): the org key is the owner's, a project's
+    # keys its admins'; the GitHub token test is local-only
+    ("/api/portal/defaults/keys/{provider}/test", "POST"): "org.configure",
+    (f"{_P}/keys/{{provider}}/test", "POST"): _CONFIGURE,
+    (f"{_P}/github-token/test", "POST"): _CONFIGURE,
     ("/api/projects", "GET"): "org.read",
     ("/api/projects", "POST"): "org.add_project",
     # Production's members page: org_access(...) (M2d-1 section 4.5)
@@ -1404,6 +1409,8 @@ LOCAL_ONLY_ROUTES = {
     ("/api/platform/callback", "POST"),
     ("/api/platform/pending/{link_id}", "GET"),
     ("/api/platform/pending/{link_id}", "DELETE"),
+    # The GitHub token test (M2f-3 section 4.13): production has no PATs
+    ("/api/projects/{slug}/github-token/test", "POST"),
 }
 """Local mode's own routes (M2e plan section 4.8): org-scoped, but gated by
 :func:`~whygraph.portal.deps.require_local`, so production answers ``404`` on
@@ -1479,6 +1486,7 @@ _FILL = {
     "{user_uid}": "someone",
     "{installation_id}": "7",
     "{link_id}": "nolink",
+    "{provider}": "openrouter",
 }
 
 

@@ -32,6 +32,22 @@ export function truncateStart(text: string, max: number): string {
   return `…${text.slice(text.length - (max - 1))}`;
 }
 
+/** Width of `text` set in `el`'s font, measured on a hidden probe outside React's tree. */
+function measureText(el: HTMLElement, text: string): number {
+  const probe = document.createElement("span");
+  const style = getComputedStyle(el);
+  probe.style.cssText = "position:absolute;left:-99999px;top:0;visibility:hidden;white-space:pre";
+  probe.style.font = style.font;
+  probe.style.fontFamily = style.fontFamily;
+  probe.style.fontSize = style.fontSize;
+  probe.style.letterSpacing = style.letterSpacing;
+  probe.textContent = text;
+  document.body.appendChild(probe);
+  const width = probe.getBoundingClientRect().width || probe.scrollWidth;
+  probe.remove();
+  return width;
+}
+
 /** `shown` with a break opportunity after each `/`, so a block wraps between segments. */
 function withBreaks(shown: string) {
   return shown.split(/(?<=\/)/).map((part, i) => (
@@ -71,10 +87,10 @@ export function PathText({
     const el = ref.current;
     if (!el || typeof ResizeObserver === "undefined") return;
     const fit = () => {
-      // Measure with the full text in place, then cut to what fits.
-      el.textContent = shown;
+      // Measure the full text on an off-screen probe: the span's own text node
+      // belongs to React, so it is only ever changed through state.
       const avail = el.clientWidth;
-      const full = el.scrollWidth;
+      const full = measureText(el, shown);
       if (avail > 0 && full > avail) {
         const perChar = full / shown.length;
         setText(truncateStart(shown, Math.max(2, Math.floor(avail / perChar))));

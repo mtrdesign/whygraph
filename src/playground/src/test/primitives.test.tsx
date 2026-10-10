@@ -1,6 +1,7 @@
 import { act, fireEvent, render, renderHook, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PathText, displayPath, truncateStart } from "../components/layout/PathText";
+import { repoRowBase } from "../components/portal/LocalSource";
 import { ResponsiveTable } from "../components/layout/ResponsiveTable";
 import { TabsSelect } from "../components/layout/TabsSelect";
 import { CommandBlock } from "../components/layout/CommandBlock";
@@ -30,6 +31,67 @@ describe("PathText", () => {
     const el = screen.getByLabelText("/a/b/c");
     expect(el).toHaveAttribute("title", "/a/b/c");
     expect(el).toHaveTextContent("b/c");
+  });
+  it("keeps the start-truncated tail of every sibling row after the resize observer fires", async () => {
+    // jsdom has no layout: the span is 140px wide and each mono character 7px.
+    const width = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientWidth");
+    const scroll = Object.getOwnPropertyDescriptor(Element.prototype, "scrollWidth");
+    Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.dataset.slot === "path-text" ? 140 : 0;
+      },
+    });
+    Object.defineProperty(Element.prototype, "scrollWidth", {
+      configurable: true,
+      get(this: Element) {
+        return (this.textContent ?? "").length * 7;
+      },
+    });
+    const callbacks: (() => void)[] = [];
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(private cb: () => void) {}
+        observe() {
+          callbacks.push(this.cb);
+        }
+        disconnect() {}
+      },
+    );
+    try {
+      const names = ["billing", "notes", "payments", "search", "web"];
+      render(
+        <div>
+          {names.map((n) => (
+            <PathText key={n} path={`/private/var/folders/56/abcdef/T/shared/${n}`} />
+          ))}
+        </div>,
+      );
+      // The observer's first callback lands right after the first fit.
+      await act(async () => callbacks.forEach((cb) => cb()));
+      const shown = names.map((n) => screen.getByLabelText(`/private/var/folders/56/abcdef/T/shared/${n}`).textContent);
+      shown.forEach((t, i) => {
+        expect(t!.startsWith("…")).toBe(true);
+        expect(t!.endsWith(`/shared/${names[i]}`)).toBe(true);
+        expect(t!.length).toBeLessThanOrEqual(20);
+      });
+      expect(new Set(shown).size).toBe(names.length);
+    } finally {
+      if (width) Object.defineProperty(HTMLElement.prototype, "clientWidth", width);
+      if (scroll) Object.defineProperty(Element.prototype, "scrollWidth", scroll);
+    }
+  });
+  it("an add-project repo row reads <shared folder>/<name> when the relative path only repeats the name (A8)", () => {
+    const shared = ["/private/var/folders/56/T/shared"];
+    const row = (path: string, name: string) => displayPath(path, repoRowBase(path, name, shared));
+    expect(row("/private/var/folders/56/T/shared/billing", "billing")).toBe("shared/billing");
+    // Deeper: the path relative to the shared folder already says more than the name.
+    expect(row("/private/var/folders/56/T/shared/team/billing", "billing")).toBe("team/billing");
+    // The shared folder itself is the repo: its parent's name leads.
+    expect(row("/private/var/folders/56/T/shared", "shared")).toBe("T/shared");
+    // Outside every shared folder: the whole path.
+    expect(row("/elsewhere/billing", "billing")).toBe("/elsewhere/billing");
   });
   it("wraps in block variant between segments, never with break-all", () => {
     render(<PathText path="/a/b" variant="block" />);

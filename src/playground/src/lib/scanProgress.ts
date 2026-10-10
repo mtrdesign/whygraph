@@ -67,8 +67,9 @@ const TASK_STATUS: Record<string, { verb: string; unit?: string }> = {
 
 /**
  * The overall bar's shares: the clone / fetch of a production project, the
- * CodeGraph index (it runs alongside the phases) and the scan phases, which split
- * theirs equally. A run's percentage is renormalized over the parts it has.
+ * CodeGraph index (it runs alongside the phases; a fixed share from the start that
+ * fills only when its task completes or the run ends) and the scan phases, which
+ * split theirs equally. A run's percentage is renormalized over the parts it has.
  */
 export const WEIGHTS = { clone: 15, codegraph: 20, phases: 65 } as const;
 
@@ -111,7 +112,13 @@ function shape(state: ScanRunState) {
   const codegraphTask = state.tasks.find((t) => t.name === "codegraph") ?? null;
   const source = state.result ?? state.summary;
   const codegraphResult = source?.crawlers?.find((c) => c.name === "codegraph") ?? null;
-  const hasCodegraph = codegraphOnly || codegraphTask !== null || codegraphResult !== null;
+  // The portal never passes `--no-codegraph`: every run with scan phases refreshes
+  // the code index beside them, so its share and its (pending) row are there from
+  // the start, not only once a task or result names it. A result that lists its
+  // crawlers without CodeGraph (a headless `--no-codegraph` scan) drops both.
+  const resultWithout = !!source?.crawlers?.length && codegraphResult === null;
+  const hasCodegraph =
+    codegraphOnly || codegraphTask !== null || codegraphResult !== null || (scan.length > 0 && !resultWithout);
   return { scan, codegraphOnly, codegraphTask, codegraphResult, hasCodegraph };
 }
 

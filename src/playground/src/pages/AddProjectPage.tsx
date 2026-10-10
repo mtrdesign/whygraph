@@ -1,6 +1,5 @@
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
 import { ApiError, githubApi, portalKey, projectKey, type AddProjectResult } from "../api";
 import { saveDetected } from "../lib/detected";
 import { isProduction, usePortalState } from "../lib/identity";
@@ -42,11 +41,11 @@ export function AddProjectPage() {
     installations.error instanceof ApiError && installations.error.code === "github_required";
 
   const onAdded = (result: AddProjectResult) => {
-    const { slug, name } = result.project;
+    const { slug } = result.project;
     saveDetected(slug, result.detected);
     queryClient.setQueryData(projectKey(slug, "project"), result.project);
     void queryClient.invalidateQueries({ queryKey: portalKey("projects") });
-    toast.success(`${platform ? "Linked" : "Added"} ${name}`);
+    // No toast: the Set up page names the project (CN-1).
     void navigate({ to: "/p/$slug/init", params: { slug }, search: { step: "setup" } });
   };
 

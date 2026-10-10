@@ -182,16 +182,14 @@ export function RunCard({ slug, runId }: { slug: string; runId: number }) {
  * The model commit descriptions use, as far as the client can tell: the project
  * layer's `[analyze]`, then its default model, then the inherited layer's, then
  * WhyGraph's default provider. The scan estimate (the server's own resolution)
- * wins once it is in.
+ * wins once it is in; whether the pick is inherited still follows the layers (a
+ * project layer with no model of its own inherits whatever the estimate names).
  */
 export function describeModel(
   project: ConfigDict | undefined,
   inherited: ConfigDict | undefined,
   estimate?: ScanEstimate,
 ): ModelPick & { inherited: boolean } {
-  if (estimate?.model.provider) {
-    return { provider: estimate.model.provider, model: estimate.model.model ?? "", inherited: false };
-  }
   const pick = (layer: ConfigDict | undefined): ModelPick | null => {
     if (!layer) return null;
     const v = layerToValues(layer);
@@ -200,6 +198,10 @@ export function describeModel(
     return null;
   };
   const own = pick(project);
+  if (estimate?.model.provider) {
+    // Unknown until the project layer is in: say nothing rather than guess.
+    return { provider: estimate.model.provider, model: estimate.model.model ?? "", inherited: !!project && !own };
+  }
   if (own) return { ...own, inherited: false };
   const up = pick(inherited);
   if (up) return { ...up, inherited: true };
@@ -261,7 +263,8 @@ function DescriptionsNeed({
         </p>
       </div>
       <p className="text-sm" data-testid="describe-model">
-        Model: <span className="font-mono">{model.model ? `${provider}/${model.model}` : `${name}, its default model`}</span>
+        Model:{" "}
+        {model.model ? <span className="font-mono">{`${provider}/${model.model}`}</span> : `${name}, its default model`}
         {model.inherited && <span className="text-muted-foreground"> (inherited from {layer})</span>}
       </p>
       {!missing ? (
@@ -282,14 +285,14 @@ function DescriptionsNeed({
           <AlertDescription>
             <p>Descriptions can wait; add one now or later.</p>
             <form
-              className="mt-2 flex flex-wrap items-end gap-2"
+              className="mt-2"
               onSubmit={(e) => {
                 e.preventDefault();
                 if (key.trim()) save.mutate();
               }}
             >
+              {/* The button sits beside the input and the hint runs under both, on every width. */}
               <Field
-                className="min-w-0 flex-1 basis-48"
                 label={`${name} API key`}
                 hint={
                   production
@@ -298,18 +301,21 @@ function DescriptionsNeed({
                 }
               >
                 {(p) => (
-                  <Input
-                    {...p}
-                    type="password"
-                    autoComplete="off"
-                    value={key}
-                    onChange={(e) => setKey(e.target.value)}
-                  />
+                  <div className="flex gap-2">
+                    <Input
+                      {...p}
+                      className="min-w-0 flex-1"
+                      type="password"
+                      autoComplete="off"
+                      value={key}
+                      onChange={(e) => setKey(e.target.value)}
+                    />
+                    <Button type="submit" className="shrink-0" disabled={!key.trim() || save.isPending}>
+                      {save.isPending ? "Saving…" : "Save key"}
+                    </Button>
+                  </div>
                 )}
               </Field>
-              <Button type="submit" size="sm" disabled={!key.trim() || save.isPending}>
-                {save.isPending ? "Saving…" : "Save key"}
-              </Button>
             </form>
             {save.isError && <ErrorState error={save.error} size="inline" className="mt-2" />}
           </AlertDescription>
@@ -340,33 +346,45 @@ function DescriptionsNeed({
  * The local GitHub token row (R2): a project whose remote is on GitHub and that
  * has no token in effect. Saving the token also asks for a quick rescan, which
  * the runner merges with the running first scan or queues behind it, so pull
- * requests and issues arrive without a full rescan.
+ * requests and issues arrive without a full rescan. The row follows that rescan
+ * (a link to its run page) and refreshes the project when it ends, so the
+ * Overview never inherits a stale "Scanning".
  */
 function GitHubTokenRow({
   slug,
   project,
   github,
+  firstScanDone,
+  runId,
 }: {
   slug: string;
   project: ProjectDetails;
   github: { remote: string | null; token: "project" | "org" | "none" };
+  /** The first scan has finished: the token is used by a rescan of its own now. */
+  firstScanDone: boolean;
+  /** The run the page follows (the first scan). */
+  runId: number | null;
 }) {
   const queryClient = useQueryClient();
   const readOnly = useReadOnly();
   const [token, setToken] = useState("");
-  const [saved, setSaved] = useState(false);
+  const [rescan, setRescan] = useState<number | null>(null);
+  // Folded only for its end: useWizardRun refreshes the project then.
+  const followed = useWizardRun(slug, rescan !== null && rescan !== runId ? rescan : null);
   const save = useMutation({
     mutationFn: async () => {
       await projectApi(slug).putConfig({ secrets: { github_token: token.trim() } });
       return projectApi(slug).requestScan({ trigger: "manual", analyze: false });
     },
-    onSuccess: () => {
+    onSuccess: ({ run_id }) => {
       setToken("");
-      setSaved(true);
+      setRescan(run_id);
       void queryClient.invalidateQueries({ queryKey: projectKey(slug, "config") });
       void queryClient.invalidateQueries({ queryKey: projectKey(slug, "project") });
     },
   });
+  const saved = rescan !== null;
+  const rescanEnded = followed.state.finished;
   if (!github.remote) return null;
   return (
     <section className={CARD} data-testid="github-token-row">
@@ -377,9 +395,27 @@ function GitHubTokenRow({
         </p>
       </div>
       {saved ? (
-        <p className="flex items-center gap-2 text-sm" data-testid="github-token-saved">
-          <CheckCircle2Icon className="size-4 text-success" />
-          Saved. WhyGraph fetches pull requests and issues right after the first scan.
+        <p className="row-wrap items-center gap-x-2 gap-y-1 text-sm" data-testid="github-token-saved">
+          <CheckCircle2Icon className="size-4 shrink-0 text-success" />
+          <span>
+            {!firstScanDone
+              ? "Saved. WhyGraph fetches pull requests and issues right after the first scan."
+              : rescanEnded === "ok"
+                ? "Saved. The rescan has fetched pull requests and issues."
+                : rescanEnded
+                  ? "Saved. The rescan did not finish."
+                  : "Saved. WhyGraph fetches pull requests and issues in a quick rescan now."}
+          </span>
+          {rescan !== null && rescan !== runId && (
+            <Link
+              to="/p/$slug/scans/{-$runId}"
+              params={{ slug, runId: String(rescan) }}
+              className="text-primary-text hover:underline"
+              data-testid="github-token-rescan"
+            >
+              {rescanEnded ? "Show the rescan" : "Follow the rescan"}
+            </Link>
+          )}
         </p>
       ) : github.token === "org" ? (
         <p className="text-sm text-muted-foreground">Using the portal default token. Nothing to do.</p>
@@ -394,18 +430,28 @@ function GitHubTokenRow({
           }}
         >
           <p className="text-sm">
-            PRs and issues need a GitHub token. Add one and WhyGraph fetches them right after the first scan.
+            {firstScanDone
+              ? "PRs and issues need a GitHub token. Add one and WhyGraph fetches them in a quick rescan."
+              : "PRs and issues need a GitHub token. Add one and WhyGraph fetches them right after the first scan."}
           </p>
-          <div className="flex flex-wrap items-end gap-2">
-            <Field className="min-w-0 flex-1 basis-48" label="GitHub token" hint="Read access to the repository is enough. Stored encrypted.">
-              {(p) => (
-                <Input {...p} type="password" autoComplete="off" value={token} onChange={(e) => setToken(e.target.value)} />
-              )}
-            </Field>
-            <Button type="submit" size="sm" disabled={!token.trim() || save.isPending}>
-              {save.isPending ? "Saving…" : "Save token"}
-            </Button>
-          </div>
+          {/* The button sits beside the input and the hint runs under both, on every width. */}
+          <Field label="GitHub token" hint="Read access to the repository is enough. Stored encrypted.">
+            {(p) => (
+              <div className="flex gap-2">
+                <Input
+                  {...p}
+                  className="min-w-0 flex-1"
+                  type="password"
+                  autoComplete="off"
+                  value={token}
+                  onChange={(e) => setToken(e.target.value)}
+                />
+                <Button type="submit" className="shrink-0" disabled={!token.trim() || save.isPending}>
+                  {save.isPending ? "Saving…" : "Save token"}
+                </Button>
+              </div>
+            )}
+          </Field>
           {save.isError && <ErrorState error={save.error} size="inline" />}
         </form>
       ) : (
@@ -524,7 +570,13 @@ export function WizardConfigure({
       )}
 
       {!production && config.data?.github && (
-        <GitHubTokenRow slug={slug} project={project} github={config.data.github} />
+        <GitHubTokenRow
+          slug={slug}
+          project={project}
+          github={config.data.github}
+          firstScanDone={scanned}
+          runId={runId ?? null}
+        />
       )}
 
       <p className="text-sm">

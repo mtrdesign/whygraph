@@ -29,6 +29,8 @@ interface Fake {
   estimate: Json;
   /** `port` of `GET /api/portal/state` (else the port change's, else 8765). */
   port?: number;
+  /** `POST .../scans` (not describe) answers this run id (default 7, the first run's). */
+  rescanRunId?: number;
   /** `GET .../scans/{id}`: the run's row (its trigger names the wizard's card). */
   runRow: Json | null;
   /** `port_change` of `GET /api/portal/state`. */
@@ -250,7 +252,7 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
       if (result.initialized) proj.initialized = true;
       return reply(result);
     }
-    if (rest === "/scans" && method === "POST") return reply({ run_id: body?.trigger === "describe" ? 8 : 7 }, 202);
+    if (rest === "/scans" && method === "POST") return reply({ run_id: body?.trigger === "describe" ? 8 : (fake.rescanRunId ?? 7) }, 202);
     if (rest === "/scans" && method === "GET") return reply({ runs: [], next: null });
     const run = /^\/scans\/(\d+)$/.exec(rest);
     if (run && method === "GET") {
@@ -448,20 +450,17 @@ describe("Add project - local repo", () => {
     expect(await screen.findByRole("heading", { name: "Web: Set up" })).toBeInTheDocument();
   });
 
-  it("offers the optional token for a GitHub-linked repo and sends it", async () => {
+  it("asks for no GitHub token on Source (Configure asks once, R2) and adds a GitHub-linked repo without one", async () => {
     fake.github = { slug: "acme/web", remote_url: "https://github.com/acme/web" };
     const user = userEvent.setup();
     mount("/projects/new");
     await user.click(await screen.findByRole("radio", { name: /web/ }));
-    const token = await screen.findByLabelText(/Linked to github.com\/acme\/web/);
-    await user.type(token, "ghp_secret");
+    expect(await screen.findByText(/Ready to add/)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Linked to github.com/)).toBeNull();
+    expect(screen.queryByPlaceholderText(/GitHub token/)).toBeNull();
     await user.click(screen.getByRole("button", { name: "Add project" }));
     await waitFor(() => expect(posts("/api/projects")).toHaveLength(1));
-    expect(posts("/api/projects")[0].body).toEqual({
-      source: "local",
-      path: "/repos/web",
-      token: "ghp_secret",
-    });
+    expect(posts("/api/projects")[0].body).toEqual({ source: "local", path: "/repos/web" });
   });
 
   it("says a missing folder does not exist, not that it is no git repository (BUG-9)", async () => {
@@ -815,6 +814,32 @@ describe("Configure", () => {
     expect(posts("/api/projects/alpha/scans")[0].body).toEqual({ trigger: "describe" });
   });
 
+  it("before the estimate, the describe model is layer-derived prose, not set like a model id", async () => {
+    fake.events = RUNNING;
+    mount("/p/alpha/init?step=configure&run=7");
+    const before = await screen.findByTestId("describe-model");
+    await waitFor(() => expect(before).toHaveTextContent("Model: Anthropic, its default model (inherited from Portal defaults)"));
+    expect(before.querySelector(".font-mono")).toBeNull();
+  });
+
+  it("keeps the describe model's inherited note once the estimate names the model (A4)", async () => {
+    // The server's model id in mono, still inherited (the project layer sets none).
+    mount("/p/alpha/init?step=configure&run=7");
+    await screen.findByTestId("scan-estimate");
+    const after = screen.getByTestId("describe-model");
+    await waitFor(() => expect(after).toHaveTextContent("Model: anthropic/claude-haiku-4-5 (inherited from Portal defaults)"));
+    expect(after.querySelector(".font-mono")).toHaveTextContent("anthropic/claude-haiku-4-5");
+  });
+
+  it("drops the inherited note when the project layer picks the describe model", async () => {
+    fake.config.alpha.config = { analyze: { provider: "anthropic", model: "claude-haiku-4-5" } };
+    mount("/p/alpha/init?step=configure&run=7");
+    await screen.findByTestId("scan-estimate");
+    const line = screen.getByTestId("describe-model");
+    await waitFor(() => expect(line).toHaveTextContent("Model: anthropic/claude-haiku-4-5"));
+    expect(line).not.toHaveTextContent("inherited");
+  });
+
   it("while the scan runs: one bar with a status line, the estimate placeholder, Describe disabled", async () => {
     fake.events = RUNNING;
     mount("/p/alpha/init?step=configure&run=7");
@@ -905,6 +930,42 @@ describe("Configure", () => {
     const put = fake.log.find((c) => c.method === "PUT")!;
     expect(put.body).toEqual({ secrets: { github_token: "ghp_secret" } });
     expect(posts("/api/projects/alpha/scans").at(-1)!.body).toEqual({ trigger: "manual", analyze: false });
+  });
+
+  it("after the first scan, a saved GitHub token says a quick rescan fetches PRs now and links that run (A5)", async () => {
+    fake.config.alpha.github = { remote: "acme/alpha", token: "none" };
+    fake.rescanRunId = 9;
+    const user = userEvent.setup();
+    mount("/p/alpha/init?step=configure&run=7");
+    expect(await screen.findByRole("heading", { name: "First scan complete" })).toBeInTheDocument();
+    // The blurb follows the run: the scan no longer "runs in the background".
+    expect(screen.getByText(/The first scan is complete\./)).toBeInTheDocument();
+    expect(screen.queryByText(/The first scan runs in the background/)).toBeNull();
+    const row = screen.getByTestId("github-token-row");
+    expect(row).toHaveTextContent("Add one and WhyGraph fetches them in a quick rescan.");
+    await user.type(within(row).getByLabelText("GitHub token"), "ghp_secret");
+    await user.click(within(row).getByRole("button", { name: "Save token" }));
+    const saved = await screen.findByTestId("github-token-saved");
+    // The fake streams the same ended run for the rescan: the row follows it to its end.
+    await waitFor(() => expect(saved).toHaveTextContent("Saved. The rescan has fetched pull requests and issues."));
+    expect(within(saved).getByTestId("github-token-rescan")).toHaveAttribute("href", "/p/alpha/scans/9");
+    expect(fake.log.some((c) => c.path === "/api/projects/alpha/scans/9/events")).toBe(true);
+    expect(posts("/api/projects/alpha/scans").at(-1)!.body).toEqual({ trigger: "manual", analyze: false });
+  });
+
+  it("names the quick rescan while it runs after the first scan", async () => {
+    fake.config.alpha.github = { remote: "acme/alpha", token: "none" };
+    fake.rescanRunId = 9;
+    const user = userEvent.setup();
+    mount("/p/alpha/init?step=configure&run=7");
+    expect(await screen.findByRole("heading", { name: "First scan complete" })).toBeInTheDocument();
+    fake.events = RUNNING;
+    const row = screen.getByTestId("github-token-row");
+    await user.type(within(row).getByLabelText("GitHub token"), "ghp_secret");
+    await user.click(within(row).getByRole("button", { name: "Save token" }));
+    const saved = await screen.findByTestId("github-token-saved");
+    expect(saved).toHaveTextContent("Saved. WhyGraph fetches pull requests and issues in a quick rescan now.");
+    expect(within(saved).getByRole("link", { name: "Follow the rescan" })).toHaveAttribute("href", "/p/alpha/scans/9");
   });
 
   it("the GitHub token row has nothing to do when the portal default token applies", async () => {

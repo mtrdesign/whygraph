@@ -1,7 +1,7 @@
 import { useDeferredValue, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { CheckCircle2Icon, GitBranchIcon } from "lucide-react";
+import { CheckCircle2Icon } from "lucide-react";
 import {
   ApiError,
   portalApi,
@@ -22,6 +22,23 @@ import { NotSharedAlert } from "./NotSharedAlert";
 
 /** `check-path`'s answer; `exists` (M2f-3) is not in the shared type yet. */
 type CheckResult = CheckPathResult & { exists?: boolean };
+
+/**
+ * The `base` a repo row prints its path against: the shared folders, unless the
+ * path relative to them only repeats the repo's name (a repo directly in a shared
+ * folder). Then the row shows `<shared folder>/<name>`, measured from the shared
+ * folder's parent; the full path stays in the tooltip.
+ */
+export function repoRowBase(path: string, name: string, base?: string[]): string[] | undefined {
+  if (displayPath(path, base).toLowerCase() !== name.toLowerCase()) return base;
+  const roots = (base ?? []).map((b) => b.replace(/\/+$/, "")).filter(Boolean);
+  const root = roots.find((r) => path === r || path.startsWith(`${r}/`));
+  if (!root) return base;
+  // The repo is the shared folder itself: one level further up.
+  const container = path === root ? root.slice(0, root.lastIndexOf("/")) : root;
+  const parent = container.slice(0, container.lastIndexOf("/"));
+  return parent ? [parent] : undefined;
+}
 
 /** The registry's sentence for a check-path refusal the answer implies (no request failed). */
 const refusal = (code: string) => errorMessage(new ApiError(400, "", code), "add-project");
@@ -54,12 +71,8 @@ function RepoRow({
       />
       <span className="flex min-w-0 flex-1 flex-col">
         <span className="font-medium break-words">{repo.name}</span>
-        {/* Relative to its shared folder, unless that only repeats the name: then the whole path. */}
-        <PathText
-          path={repo.path}
-          base={displayPath(repo.path, base).toLowerCase() === repo.name.toLowerCase() ? undefined : base}
-          className="text-xs text-muted-foreground"
-        />
+        {/* Relative to its shared folder; `<shared folder>/<name>` when that only repeats the name. */}
+        <PathText path={repo.path} base={repoRowBase(repo.path, repo.name, base)} className="text-xs text-muted-foreground" />
       </span>
       {repo.registered && <span className="text-xs text-muted-foreground">Already added</span>}
     </label>
@@ -69,7 +82,8 @@ function RepoRow({
 /**
  * Screen 3: pick a repo discovered under the shared folders, or type a path. A
  * typed (or picked) path is checked first, so an unshared folder shows the
- * `--add-folder` alert and a GitHub-linked repo offers the optional token field.
+ * `--add-folder` alert. A GitHub token is asked for once, on Configure (R2), so
+ * none is asked for here.
  */
 export function LocalSource({ onAdded }: { onAdded: (result: AddProjectResult) => void }) {
   const [search, setSearch] = useState("");
@@ -77,7 +91,6 @@ export function LocalSource({ onAdded }: { onAdded: (result: AddProjectResult) =
   const [path, setPath] = useState("");
   const [check, setCheck] = useState<CheckResult | null>(null);
   const shared = usePortalState().data?.shared_folders;
-  const [token, setToken] = useState("");
   const [error, setError] = useState<AddError | null>(null);
 
   const repos = useQuery({
@@ -99,11 +112,7 @@ export function LocalSource({ onAdded }: { onAdded: (result: AddProjectResult) =
 
   const add = useMutation({
     mutationFn: () =>
-      portalApi.addProject({
-        source: "local",
-        path: check!.path,
-        ...(token.trim() ? { token: token.trim() } : {}),
-      }),
+      portalApi.addProject({ source: "local", path: check!.path }),
     onSuccess: onAdded,
     onError: (err) => setError(addProjectError(err, "local")),
   });
@@ -163,34 +172,32 @@ export function LocalSource({ onAdded }: { onAdded: (result: AddProjectResult) =
       </div>
 
       <form
-        className="flex items-end gap-2"
         onSubmit={(e) => {
           e.preventDefault();
           if (path.trim()) pick(path.trim());
         }}
       >
-        <Field
-          className="flex-1"
-          label="Or enter a path"
-          error={pathError?.field === "path" && !notShared ? pathError.message : undefined}
-        >
+        {/* The button sits beside the input and an error runs under both, on every width. */}
+        <Field label="Or enter a path" error={pathError?.field === "path" && !notShared ? pathError.message : undefined}>
           {(p) => (
-            <Input
-              {...p}
-              placeholder="/Users/you/Work/my-repo"
-              className="font-mono"
-              value={path}
-              onChange={(e) => {
-                setPath(e.target.value);
-                setCheck(null);
-                setError(null);
-              }}
-            />
+            <div className="flex gap-2">
+              <Input
+                {...p}
+                placeholder="/Users/you/Work/my-repo"
+                className="min-w-0 flex-1 font-mono"
+                value={path}
+                onChange={(e) => {
+                  setPath(e.target.value);
+                  setCheck(null);
+                  setError(null);
+                }}
+              />
+              <Button type="submit" variant="outline" className="shrink-0" disabled={!path.trim() || checkPath.isPending}>
+                {checkPath.isPending ? "Checking…" : "Check"}
+              </Button>
+            </div>
           )}
         </Field>
-        <Button type="submit" variant="outline" disabled={!path.trim() || checkPath.isPending}>
-          {checkPath.isPending ? "Checking…" : "Check"}
-        </Button>
       </form>
 
       {(notShared || error?.command) && (
@@ -202,39 +209,14 @@ export function LocalSource({ onAdded }: { onAdded: (result: AddProjectResult) =
       )}
 
       {ok && (
-        <div className="flex flex-col gap-3">
-          <p className="row-wrap items-center gap-x-2 gap-y-1 text-sm text-foreground">
-            <CheckCircle2Icon className="size-4 shrink-0 text-success" />
-            <span className="shrink-0">Ready to add</span>
-            <PathText path={check.path} base={shared} className="min-w-0 flex-1 text-xs text-muted-foreground" />
-          </p>
-          {check.github && (
-            <Field
-              label={
-                <span className="flex items-center gap-1.5">
-                  <GitBranchIcon className="size-3.5" />
-                  Linked to github.com/{check.github.slug}
-                </span>
-              }
-              hint="A token is optional: it is only needed to fetch pull requests and issues. It is stored encrypted and never shown again."
-              error={error?.field === "token" ? error.message : undefined}
-            >
-              {(p) => (
-                <Input
-                  {...p}
-                  type="password"
-                  autoComplete="off"
-                  placeholder="GitHub token (optional)"
-                  value={token}
-                  onChange={(e) => setToken(e.target.value)}
-                />
-              )}
-            </Field>
-          )}
-        </div>
+        <p className="row-wrap items-center gap-x-2 gap-y-1 text-sm text-foreground">
+          <CheckCircle2Icon className="size-4 shrink-0 text-success" />
+          <span className="shrink-0">Ready to add</span>
+          <PathText path={check.path} base={shared} className="min-w-0 flex-1 text-xs text-muted-foreground" />
+        </p>
       )}
 
-      {error && error.field !== "path" && !(error.field === "token" && check?.github) && (
+      {error && error.field !== "path" && (
         <Alert variant="destructive">
           <AlertTitle>Could not add the project</AlertTitle>
           <AlertDescription>{error.message}</AlertDescription>

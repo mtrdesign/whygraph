@@ -23,6 +23,7 @@ import { PathText, pathRepeatsName } from "../components/layout/PathText";
 import { EmptyState } from "../components/state/EmptyState";
 import { ErrorState } from "../components/state/ErrorState";
 import { CardGridSkeleton } from "../components/state/Skeletons";
+import { Skeleton } from "../components/ui/skeleton";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import {
@@ -350,7 +351,16 @@ export function ProjectsPage() {
         </div>
       )}
 
-      {projects.isLoading && <CardGridSkeleton count={4} cols={2} cardClassName="h-40" label="Loading projects" />}
+      {projects.isLoading && (
+        <>
+          {/* The search / sort row and cards at the real height, so nothing jumps when the list lands (ER-5). */}
+          <div className="flex flex-wrap items-center gap-2" aria-hidden="true">
+            <Skeleton className="h-8 min-w-0 flex-1 rounded-lg sm:max-w-xs" />
+            <Skeleton className="h-8 w-36 rounded-lg" />
+          </div>
+          <CardGridSkeleton count={4} cols={2} cardClassName="h-31" label="Loading projects" />
+        </>
+      )}
       {projects.isError && (
         <ErrorState error={projects.error} title="Couldn't load projects" onRetry={() => void projects.refetch()} />
       )}

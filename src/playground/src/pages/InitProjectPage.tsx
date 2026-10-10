@@ -83,9 +83,13 @@ export function InitProjectPage() {
       ? mode === "linked"
         ? "Connect your coding agents to the linked project. Review each file before anything is written."
         : "Connect your coding agents and set the repository up. Review each file before anything is written; the first scan starts right after."
-      : production
-        ? "WhyGraph copies and scans the repository in the background. Meanwhile, check what commit descriptions need. You can change all of this later in Settings."
-        : "The first scan runs in the background. Meanwhile, check what commit descriptions need. You can change all of this later in Settings.";
+      : scanned
+        ? production
+          ? "WhyGraph has copied and scanned the repository. Check what commit descriptions need, then open the project. You can change all of this later in Settings."
+          : "The first scan is complete. Check what commit descriptions need, then open the project. You can change all of this later in Settings."
+        : production
+          ? "WhyGraph copies and scans the repository in the background. Meanwhile, check what commit descriptions need. You can change all of this later in Settings."
+          : "The first scan runs in the background. Meanwhile, check what commit descriptions need. You can change all of this later in Settings.";
 
   return (
     <div className="mx-auto flex w-full max-w-[760px] flex-col gap-5 p-4 sm:p-8">

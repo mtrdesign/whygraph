@@ -484,6 +484,8 @@ export function ProjectHome() {
     queryKey: projectKey(slug, "project"),
     queryFn: () => portalApi.project(slug),
     refetchInterval: (q) => (q.state.data?.running_scan ? 3000 : false),
+    // A cached "running" (say, from the wizard) may be over already: check before trusting it.
+    refetchOnMount: (q) => (q.state.data?.running_scan ? "always" : true),
   });
   const p = project.data;
   const linked = p?.source === "platform";

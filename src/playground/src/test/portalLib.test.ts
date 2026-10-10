@@ -297,5 +297,8 @@ describe("agent notes", () => {
     expect(selectionNotes(["claude"]).some((n) => /twice/.test(n))).toBe(false);
     expect(selectionNotes(["claude", "vscode"]).some((n) => /twice/.test(n))).toBe(true);
     expect(selectionNotes(["codex"]).join(" ")).toMatch(/trust this project/);
+    // A note names its agent once ("Claude Code asks...", not "Claude Code: Claude Code asks...").
+    expect(selectionNotes(["claude"])[0]).toMatch(/^Claude Code asks/);
+    expect(selectionNotes(["codex"])[0]).toMatch(/^Codex loads/);
   });
 });

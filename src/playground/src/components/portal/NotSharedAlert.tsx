@@ -19,7 +19,7 @@ export function NotSharedAlert({
   checking?: boolean;
 }) {
   return (
-    <Alert data-testid="not-shared-alert">
+    <Alert variant="warning" data-testid="not-shared-alert">
       <TriangleAlertIcon />
       <AlertTitle>This folder isn't shared with the portal</AlertTitle>
       <AlertDescription>

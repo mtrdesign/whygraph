@@ -8,8 +8,9 @@ import { Badge } from "../ui/badge";
 import { Checkbox } from "../ui/checkbox";
 import { CopyButton } from "./CopyButton";
 
-const STATUS: Record<FileStatus, { label: string; variant: "default" | "secondary" | "outline" | "destructive" }> = {
-  write: { label: "Create", variant: "default" },
+// Soft badges only (§4.2): "Create" in the brand tint, never the solid primary.
+const STATUS: Record<FileStatus, { label: string; variant: "brand" | "secondary" | "outline" | "destructive" }> = {
+  write: { label: "Create", variant: "brand" },
   overwrite: { label: "Update", variant: "secondary" },
   skip: { label: "Up to date", variant: "outline" },
   refused: { label: "Paste manually", variant: "destructive" },

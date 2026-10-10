@@ -56,7 +56,8 @@ export const agentInfo = (id: string): AgentInfo | undefined => AGENTS.find((a) 
 export function selectionNotes(selected: readonly string[]): string[] {
   const notes: string[] = [];
   for (const a of AGENTS) {
-    if (selected.includes(a.id) && a.note) notes.push(`${a.label}: ${a.note}`);
+    // Each note already names its agent.
+    if (selected.includes(a.id) && a.note) notes.push(a.note);
   }
   if (selected.includes("claude") && selected.includes("vscode")) {
     notes.push(

@@ -254,10 +254,11 @@ describe("reducer: plannedPhases, sync clone, maxPercent", () => {
       ev({ type: "task", name: "git", completed: 90, total: 100 }),
     ]);
     const high = s.maxPercent!;
-    expect(high).toBe(90);
+    // 90% of the phases' 65 of 85 (CodeGraph's 20 is there from the start).
+    expect(high).toBe(68);
     s = reduceScanRun(s, ev({ type: "task", name: "github", completed: 0, total: 100 }));
-    // The pure ratio is now 45%; the high-water mark stays.
-    expect(rawPercent(s)).toBe(45);
+    // The pure ratio is now 45% of the phases (34% overall); the high-water mark stays.
+    expect(rawPercent(s)).toBe(34);
     expect(s.maxPercent).toBe(high);
     expect(progressModel(s).percent).toBe(high);
     s = reduceScanRun(s, ev({ type: "end", run_id: 1, status: "ok", summary: null }));
@@ -270,7 +271,7 @@ describe("reducer: plannedPhases, sync clone, maxPercent", () => {
       ev({ type: "phase", phase: 1, title: "Structural crawl" }),
       ev({ type: "task", name: "git", completed: 1, total: 2 }),
     ]);
-    expect(s.maxPercent).toBe(50);
+    expect(s.maxPercent).toBe(38);
     expect(reduceScanRun(s, { type: "reset" }).maxPercent).toBeNull();
   });
 });
@@ -282,19 +283,46 @@ describe("progressModel", () => {
     expect(progressModel(s).status).toBe("Reading git history");
   });
 
-  it("splits the scan phases' share equally and adds CodeGraph's share once its task shows", () => {
+  it("splits the scan phases' share equally beside CodeGraph's fixed share from the start", () => {
     const base = [
       ev({ type: "start", phase_total: 2, phases: ["Structural crawl", "Author identity"] }),
       ev({ type: "phase", phase: 1, title: "Structural crawl" }),
       ev({ type: "task", name: "git", completed: 50, total: 100 }),
     ];
-    // Phases only: half of the first of two phases.
-    expect(progressModel(fold(base)).percent).toBe(25);
-    // With CodeGraph (20) beside the phases (65): 16.25 of 85.
+    // CodeGraph (20) beside the phases (65) before any codegraph event: half of
+    // the first of two phases is 16.25 of 85, and the Code index row is pending.
+    const early = progressModel(fold(base));
+    expect(early.percent).toBe(19);
+    expect(early.steps.at(-1)).toEqual({ label: "Code index", state: "pending" });
+    // Its task showing changes nothing in the weights; the row runs.
     const withCg = fold([...base, ev({ type: "task", name: "codegraph", completed: 0, total: null })]);
     expect(rawPercent(withCg)).toBe(19);
+    expect(progressModel(withCg).steps.at(-1)).toEqual({ label: "Code index", state: "running" });
     const cgDone = fold([...base, ev({ type: "task", name: "codegraph", completed: 1, total: 1 })]);
     expect(rawPercent(cgDone)).toBe(Math.floor(((20 + 16.25) / 85) * 100));
+  });
+
+  it("keeps the bar monotonic as the CodeGraph result lands", () => {
+    let s = fold([
+      ev({ type: "start", phase_total: 1, phases: ["Structural crawl"] }),
+      ev({ type: "phase", phase: 1, title: "Structural crawl" }),
+      ev({ type: "task", name: "git", completed: 10, total: 10 }),
+    ]);
+    const before = progressModel(s).percent!;
+    s = reduceScanRun(s, ev({ type: "task", name: "codegraph", completed: 0, total: null }));
+    expect(progressModel(s).percent).toBeGreaterThanOrEqual(before);
+    s = reduceScanRun(s, ev({ type: "task", name: "codegraph", completed: 1, total: 1 }));
+    expect(progressModel(s).percent).toBeGreaterThanOrEqual(before);
+  });
+
+  it("drops the CodeGraph share and row when the result lists crawlers without it", () => {
+    const s = fold([
+      ev({ type: "start", phase_total: 1, phases: ["Structural crawl"] }),
+      ev({ type: "phase", phase: 1, title: "Structural crawl" }),
+      ev({ type: "task", name: "git", completed: 5, total: 10 }),
+      ev({ type: "result", status: "ok", crawlers: [{ name: "git", status: "ok" }] }),
+    ]);
+    expect(progressModel(s).steps.map((x) => x.label)).toEqual(["Git history and GitHub"]);
   });
 
   it("gives a production clone its share and names the repository", () => {
@@ -308,8 +336,8 @@ describe("progressModel", () => {
       ev({ type: "phase", phase: 1, title: "Structural crawl" }),
       ev({ type: "task", name: "git", completed: 0, total: 100 }),
     ]);
-    // The clone (15) of clone + phases (80).
-    expect(progressModel(scanning).percent).toBe(18);
+    // The clone (15) of clone + CodeGraph + phases (100).
+    expect(progressModel(scanning).percent).toBe(15);
     expect(progressModel(scanning).steps[0]).toEqual({ label: "Clone the repository", state: "done" });
     const fetching = fold([ev({ type: "sync", status: "fetching" })]);
     expect(progressModel(fetching, { fullName: "acme/api" }).status).toBe("Fetching acme/api from GitHub");
@@ -366,6 +394,7 @@ describe("progressModel", () => {
       { label: "Git history and GitHub", state: "done" },
       { label: "Author identities", state: "failed" },
       { label: "Commit descriptions", state: "skipped" },
+      { label: "Code index", state: "skipped" },
     ]);
   });
 });

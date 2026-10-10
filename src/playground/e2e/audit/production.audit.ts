@@ -23,7 +23,10 @@ const snap = (page: Page, area: string, name: string, state: string, desc: strin
   shoot(page, { mode: M, area, name, state, desc } satisfies ShotMeta, opts);
 
 function bootstrapSecret(): string {
-  const m = /Bootstrap secret: ([A-Za-z0-9_-]{24})/.exec(fs.readFileSync(env.prodLog, "utf8"));
+  const m = /Bootstrap secret: ([A-Za-z0-9_-]{24})/.exec(
+    // A colourised log (FORCE_COLOR) wraps the line in ANSI codes; match the plain text.
+    fs.readFileSync(env.prodLog, "utf8").replace(/\x1b\[[0-9;]*m/g, ""),
+  );
   if (!m) throw new Error(`no bootstrap secret in ${env.prodLog}`);
   return m[1];
 }

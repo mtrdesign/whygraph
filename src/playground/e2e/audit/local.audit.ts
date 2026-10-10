@@ -18,25 +18,21 @@ const at = (area: string, name: string, state = "default") => ({ mode: M, area, 
 const snap = (page: Page, area: string, name: string, state: string, desc: string, opts?: Parameters<typeof shoot>[2]) =>
   shoot(page, { mode: M, area, name, state, desc } satisfies ShotMeta, opts);
 
-/** Add a repo through the wizard (list pick), keep the defaults, Initialize with Claude Code. */
+/** Add a repo through the wizard (list pick), Set up with Claude Code; ends on Configure following the first scan. */
 async function addAndInit(page: Page, slug: string): Promise<void> {
   await page.goto("/projects/new");
   await page.getByRole("radio", { name: new RegExp(`${slug}\\b`) }).check();
   await expect(page.getByText("Ready to add")).toBeVisible();
   await page.getByRole("button", { name: "Add project" }).click();
-  await expect(page).toHaveURL(new RegExp(`/p/${slug}/init\\?step=configure`));
-  await page.getByRole("button", { name: "Save and continue" }).click();
   await expect(page).toHaveURL(new RegExp(`/p/${slug}/init\\?step=setup`));
   await page.getByRole("checkbox", { name: /Claude Code/ }).check();
   await expect(page.getByTestId("init-preview")).toBeVisible();
-  await page.getByRole("button", { name: "Initialize", exact: true }).click();
-  await expect(page.getByTestId("init-done")).toBeVisible();
-  await page.getByRole("button", { name: "Continue to first scan" }).click();
-  await expect(page).toHaveURL(new RegExp(`/p/${slug}/init\\?step=configure`));
+  await page.getByRole("button", { name: "Set up project", exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`/p/${slug}/init\\?step=configure&run=\\d+`));
 }
 
 async function firstScanDone(page: Page, slug: string): Promise<void> {
-  // The first Initialize queued the first scan: no "Start first scan" click.
+  // Set up queued the first scan: Configure follows it.
   await expect(page.getByText("First scan complete")).toBeVisible({ timeout: 60_000 });
   await page.getByRole("button", { name: "Open project" }).click();
   await expect(page).toHaveURL(new RegExp(`/p/${slug}$`));
@@ -156,40 +152,53 @@ test("local mode: every screen", async ({ page }) => {
   });
 
   const wizard = "add-project";
-  await attempt(page, at(wizard, "configure"), async () => {
+  await attempt(page, at(wizard, "setup"), async () => {
     await page.goto("/projects/new");
     await page.getByRole("radio", { name: /notes\b/ }).check();
     await page.getByRole("button", { name: "Add project" }).click();
-    await expect(page).toHaveURL(/\/p\/notes\/init\?step=configure/);
+    await expect(page).toHaveURL(/\/p\/notes\/init\?step=setup/);
     await page.waitForTimeout(800);
-    await snap(page, wizard, "step-configure", "default", "Wizard step 1, Configure (/p/notes/init?step=configure) right after Add project");
-    await page.getByRole("button", { name: "Save and continue" }).click();
-    await expect(page).toHaveURL(/step=setup/);
-    await page.waitForTimeout(800);
-    await snap(page, wizard, "step-initialize", "no-agent", "Wizard step 2, Initialize: no agent ticked yet");
+    await snap(page, wizard, "step-initialize", "no-agent", "Wizard step 2, Set up (/p/notes/init?step=setup) right after Add project: no agent ticked yet");
     await page.getByRole("checkbox", { name: /Claude Code/ }).check();
     await expect(page.getByTestId("init-preview")).toBeVisible();
     await page.waitForTimeout(500);
-    await snap(page, wizard, "step-initialize", "preview", "Wizard step 2 with Claude Code ticked: the per-file init preview");
-    // Initialize queues the first scan: slow the fake scanner so it is still running on the next step.
+    await snap(page, wizard, "step-initialize", "preview", "Wizard step 2 with Claude Code ticked: the per-file preview above 'Set up project'");
+    // Set up queues the first scan: slow the fake scanner so it is still running on Configure.
     ctl.delay(2.5);
-    await page.getByRole("button", { name: "Initialize", exact: true }).click();
-    await expect(page.getByTestId("init-done")).toBeVisible();
-    await snap(page, wizard, "step-initialize", "done", "Wizard step 2 after Initialize: what was written");
-    await page.getByRole("button", { name: "Continue to first scan" }).click();
-    await expect(page).toHaveURL(/step=configure/);
+    await page.getByRole("button", { name: "Set up project", exact: true }).click();
+    await expect(page).toHaveURL(/step=configure&run=\d+/);
     await page.waitForTimeout(800);
-    await snap(page, wizard, "step-scan", "ready", "Wizard first-scan step (?step=configure after Initialize): the first scan queued automatically by Initialize, settings below");
+    await snap(page, wizard, "step-configure", "default", "Wizard step 3, Configure (?step=configure&run=<id>) right after Set up: the first scan running, what descriptions need (no key), the GitHub token row (notes has a github.com origin), the pending estimate, the footer");
   });
   await attempt(page, at(wizard, "step-scan", "running"), async () => {
     if (!/step=configure/.test(page.url())) await page.goto("/p/notes/init?step=configure");
     await expect(page.getByTestId("scan-progress")).toBeVisible();
     await page.waitForTimeout(3000);
-    await snap(page, wizard, "step-scan", "running", "Wizard step 3 mid-run: live first-scan progress (fake scanner slowed to 2.5 s / tick)", { viewportOnly: true });
+    await snap(page, wizard, "step-scan", "running", "Configure mid-run: the run card's one bar, status line and checklist (fake scanner slowed to 2.5 s / tick)", { viewportOnly: true });
     ctl.delay(null);
     await expect(page.getByText("First scan complete")).toBeVisible({ timeout: 90_000 });
     await page.waitForTimeout(800);
-    await snap(page, wizard, "step-scan", "done", "Wizard step 3 done: 'First scan complete' and the cost card (the fake scanner records no commits, so 'Nothing to describe')");
+    await snap(page, wizard, "step-scan", "done", "Configure after the first scan: 'First scan complete', the estimate (the fake scanner records no commits: 'No commits yet'), the footer");
+  });
+  await attempt(page, at(wizard, "step-configure", "github-token-saved"), async () => {
+    const row = page.getByTestId("github-token-row");
+    await row.getByLabel("GitHub token").fill("ghp_auditstub000000000000000000000000000");
+    await row.getByRole("button", { name: "Save token" }).click();
+    await expect(page.getByTestId("github-token-saved")).toBeVisible();
+    const need = page.getByTestId("descriptions-need");
+    await need.getByLabel(/API key/).fill("sk-ant-audit-stub");
+    await need.getByRole("button", { name: "Save key" }).click();
+    await expect(page.getByTestId("key-ready")).toBeVisible();
+    await page.waitForTimeout(1200);
+    await snap(page, wizard, "step-configure", "github-token-saved", "Configure after saving a GitHub token (which queues a quick rescan) and an Anthropic key inline: both rows confirmed");
+    // Keep the rest of the walk as before: no token, no Anthropic key on notes.
+    await api(page.request, "PUT", `${env.baseUrl}/api/projects/notes/config`, { secrets: { github_token: null, llm: { anthropic: null } } });
+    await expect
+      .poll(async () => ((await api<{ running_scan: unknown }>(page.request, "GET", `${env.baseUrl}/api/projects/notes`)).running_scan ?? null), { timeout: 60_000 })
+      .toBeNull();
+  });
+  await attempt(page, at("project", "overview", "first-visit"), async () => {
+    if (!/\/p\/notes\/init/.test(page.url())) await page.goto("/p/notes/init?step=configure");
     await page.getByRole("button", { name: "Open project" }).click();
     await expect(page).toHaveURL(/\/p\/notes$/);
     await page.waitForTimeout(800);
@@ -208,7 +217,7 @@ test("local mode: every screen", async ({ page }) => {
     await page.goto("/projects/new");
     await page.getByRole("radio", { name: /docs-site\b/ }).check();
     await page.getByRole("button", { name: "Add project" }).click();
-    await expect(page).toHaveURL(/\/p\/docs-site\/init\?step=configure/);
+    await expect(page).toHaveURL(/\/p\/docs-site\/init\?step=setup/);
   });
 
   // ---- scans: running (with a follow-up), ok, failed, cancelled -----------
@@ -258,7 +267,9 @@ test("local mode: every screen", async ({ page }) => {
   });
   ctl.delay(null);
   await attempt(page, at("scans", "scan-run", "full-rescan-describe"), async () => {
-    // A Full rescan runs the fake's phase 4 (LLM descriptions).
+    // A Full rescan runs the fake's phase 4 (LLM descriptions); it needs the
+    // describe model's (Anthropic) key, removed again below.
+    await api(page.request, "PUT", `${env.baseUrl}/api/projects/notes/config`, { secrets: { llm: { anthropic: "sk-ant-audit-stub" } } });
     ctl.delay(1.5);
     await page.goto("/p/notes");
     await page.getByRole("button", { name: "Rescan", exact: true }).first().click();
@@ -271,6 +282,7 @@ test("local mode: every screen", async ({ page }) => {
     await snap(page, "scans", "scan-run", "full-rescan-done", "The Full rescan's run page once it ended");
   });
   ctl.delay(null);
+  await api(page.request, "PUT", `${env.baseUrl}/api/projects/notes/config`, { secrets: { llm: { anthropic: null } } }).catch(() => undefined);
 
   await attempt(page, at("scans", "scan-history"), async () => {
     await page.goto("/p/notes/scans");

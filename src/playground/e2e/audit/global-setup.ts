@@ -95,6 +95,8 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   fs.mkdirSync(env.control, { recursive: true });
   for (const f of ["fail", "delay"]) fs.rmSync(path.join(env.control, f), { force: true });
   for (const slug of LOCAL_REPOS) makeRepo(path.join(env.shared, slug));
+  // A github.com origin (never fetched) so the wizard's GitHub token row shows for notes.
+  git(path.join(env.shared, "notes"), "remote", "add", "origin", "https://github.com/acme/notes.git");
 
   const llm = spawn("python3", [path.resolve("e2e/audit/llm_script.py"), "--host", "127.0.0.1", "--port", String(AUDIT_LLM_PORT)], {
     stdio: "ignore",

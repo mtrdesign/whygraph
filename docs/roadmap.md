@@ -41,7 +41,7 @@ Larger, net-new pieces that aren't built yet:
   questions that span repos are not built.
 - **A multi-user, remote portal** - local mode is single-user and loopback-only. A
   [production mode](deploy/production.md) with logins, sessions and organizations on their own
-  subdomains, whose projects are imported from GitHub through a GitHub App, is built but unreleased.
+  subdomains, whose projects are imported from GitHub through a GitHub App, ships in 2.0.0.
   Agents reach its projects through a developer's [connected local portal](portal/platform-projects.md),
   but the production portal itself has no MCP endpoint: agents that talk to it directly (per-agent
   tokens, cloud agents) are what unlock the full [service model](deploy/service.md) beyond one

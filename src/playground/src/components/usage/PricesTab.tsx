@@ -23,7 +23,7 @@ export const MODEL_PLACEHOLDER: Record<(typeof PRICE_PROVIDERS)[number], string>
   anthropic: "e.g. claude-sonnet-4-5",
   openai: "e.g. gpt-4o-mini",
   openrouter: "e.g. anthropic/claude-sonnet-4.5",
-  deepseek: "e.g. deepseek-chat",
+  deepseek: "e.g. deepseek-flash",
   ollama: "e.g. llama3.1",
 };
 

@@ -129,7 +129,7 @@ provider reported, and a cost. What a provider reports decides how that cost is 
 |---|---|---|
 | `anthropic` | Input (cache reads and cache writes included), output, and the cache read and write counts | **Estimated** from the price table |
 | `openai` | Input, output, cached input, and reasoning tokens when the model reports them | **Estimated** from the price table |
-| `deepseek` | Input, output, cache hits, and reasoning tokens when reported | **Unpriced** unless your organization adds a price: the bundled table has no DeepSeek rows, because its model names are retired and reused |
+| `deepseek` | Input, output, cache hits, and reasoning tokens when reported | **Unpriced** unless your organization adds a price: the bundled table has no DeepSeek rows, because DeepSeek bills peak and off-peak rates for its current models (`deepseek-flash`, `deepseek-v4-pro`) |
 | `openrouter` | Input, output, cache reads and writes, reasoning tokens | **Provider-reported**: the `cost` OpenRouter charged. On a BYOK request OpenRouter's own charge excludes the upstream provider's, so WhyGraph adds the upstream inference cost to it |
 | `ollama` | Input and output tokens only | **Unpriced**: a local model has no bill |
 

@@ -129,9 +129,7 @@ def wait_idle(w: World, org: str = "acme") -> list[dict]:
 
 
 def scanned(w: World, org: str = "acme") -> None:
-    """Run the project's first scan to completion."""
-    response = w.client.post(at(org) + "/api/projects/api/scans")
-    assert response.status_code == 202, response.text
+    """Wait for the project's first scan (its import's run) to complete."""
     (run,) = wait_idle(w, org)
     assert run["status"] == "ok", run
 
@@ -376,14 +374,21 @@ def test_a_push_fans_out_across_orgs_and_skips_what_it_must(
     w = hooked
     assert create_org(w.client, "bravo", "Bravo").status_code == 201
     assert import_repo(w, API_REPO, org="bravo").status_code == 201
+    scanned(w, "bravo")  # its import's run cloned and scanned it
 
-    # bravo's copy was never scanned: left to its first, explicit scan.
+    # A copy never scanned ok (its first scan failed) is left to its next scan.
+    with portal_db.get_session() as session:
+        bravo = session.get(Project, row("bravo").id)
+        bravo.last_scanned_head = None
+        session.add(bravo)
     w.server.commit("acme/api")
     deliver(w, "push", push())
     assert requests_seen == [(row().id, "push")]
     wait_idle(w)
 
-    scanned(w, "bravo")
+    rescan = w.client.post(at("bravo") + "/api/projects/api/scans")
+    assert rescan.status_code == 202, rescan.text
+    wait_idle(w, "bravo")
     requests_seen.clear()
     pushed = w.server.commit("acme/api")
     deliver(w, "push", push())
@@ -453,7 +458,7 @@ def test_the_same_repo_in_two_orgs_stays_apart_after_a_push(
     listed = w.client.get(at("bravo") + "/api/projects").json()["projects"]
     assert [
         (p["slug"], p["github_full_name"], p["access_lost"], p["root"]) for p in listed
-    ] == [("api", "acme/api", False, str(w.repos / "bravo" / "api"))]
+    ] == [("api", "acme/api", False, None)]
     assert [r["id"] for r in org_runs(w, "bravo")] == ids["bravo"]
     for method, suffix in (("GET", "/log"), ("GET", "/events"), ("POST", "/cancel")):
         other = w.client.request(

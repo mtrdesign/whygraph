@@ -1,41 +1,21 @@
 import { Link } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { FolderXIcon, LinkIcon, PlayIcon } from "lucide-react";
+import { DownloadIcon, FolderXIcon, LinkIcon, PlayIcon } from "lucide-react";
 import { portalApi, portalKey, projectKey, type ProjectDetails } from "../../api";
 import type { ProjectProblem } from "../../lib/errors";
+import { usePortalState } from "../../lib/identity";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
-import { CopyButton } from "./CopyButton";
+import { CommandBlock } from "../layout/CommandBlock";
+import { PathText } from "../layout/PathText";
+import { NotFoundState, type NotFoundKind } from "../state/NotFoundState";
 
 // Screen 12: the states a project (or the portal) can be in where the normal page
 // cannot render. Each one says what is wrong and what fixes it.
 
-/** Portal database failed to open or migrate (`GET state` answers `{error}`). */
-export function DegradedPage({ message }: { message: string }) {
-  return (
-    <div className="mx-auto max-w-xl p-8" data-testid="degraded-page">
-      <h1 className="text-lg font-semibold">WhyGraph could not start</h1>
-      <p className="mt-2 text-sm text-muted-foreground">
-        The portal database failed to open or migrate, so nothing else can load. Your repositories
-        are untouched. Read the portal log with <span className="font-mono">whygraph logs</span>, fix
-        the cause, then start again with <span className="font-mono">whygraph up</span>.
-      </p>
-      <pre className="mt-3 overflow-auto rounded-md bg-muted p-3 text-xs">{message}</pre>
-    </div>
-  );
-}
-
-export function NotFoundPage() {
-  return (
-    <div className="mx-auto w-full max-w-3xl p-6">
-      <h1 className="text-lg font-semibold tracking-tight">Page not found</h1>
-      <p className="mt-1 text-sm text-muted-foreground">
-        <Link to="/" className="text-primary-text underline-offset-4 hover:underline">
-          Back to projects
-        </Link>
-      </p>
-    </div>
-  );
+/** A page that is not there; `kind` says which (a thin wrapper over `NotFoundState`). */
+export function NotFoundPage({ kind = "page" }: { kind?: NotFoundKind }) {
+  return <NotFoundState kind={kind} />;
 }
 
 /**
@@ -50,8 +30,8 @@ export function ProjectUnavailable({ project }: { project: ProjectDetails }) {
   const local = project.source === "local";
   const check = useQuery({
     queryKey: projectKey(slug, "root-check", project.root),
-    queryFn: () => portalApi.checkPath(project.root),
-    enabled: local && project.root_status === "missing",
+    queryFn: () => portalApi.checkPath(project.root ?? ""),
+    enabled: local && project.root !== null && project.root_status === "missing",
     retry: false,
   });
   const recheck = () => {
@@ -59,6 +39,7 @@ export function ProjectUnavailable({ project }: { project: ProjectDetails }) {
     void queryClient.invalidateQueries({ queryKey: portalKey("projects") });
     void queryClient.invalidateQueries({ queryKey: projectKey(slug, "root-check") });
   };
+  const shared = usePortalState().data?.shared_folders;
   const notGit = project.root_status === "not_git";
   const unshared = local && check.data && !check.data.shared ? check.data : null;
 
@@ -69,7 +50,14 @@ export function ProjectUnavailable({ project }: { project: ProjectDetails }) {
         {notGit ? "This folder is no longer a git repository" : "The project folder is not available"}
       </AlertTitle>
       <AlertDescription>
-        <p className="font-mono text-xs text-foreground">{project.root}</p>
+        {project.root && <PathText
+            path={project.root}
+            // Relative to its shared folder, unless that folder is no longer shared:
+            // then the whole path is what to share again.
+            base={unshared ? undefined : shared}
+            variant="block"
+            className="text-foreground"
+          />}
         {notGit ? (
           <p className="mt-1">
             The <span className="font-mono">.git</span> folder is gone. Restore it, or remove the
@@ -87,14 +75,7 @@ export function ProjectUnavailable({ project }: { project: ProjectDetails }) {
               not shared any more (it was unshared, or the repository moved). Share it again, then
               check again:
             </p>
-            {unshared.command && (
-              <div className="flex flex-wrap items-center gap-2">
-                <code className="min-w-0 flex-1 overflow-x-auto rounded-md bg-muted px-2 py-1 font-mono text-xs text-foreground">
-                  {unshared.command}
-                </code>
-                <CopyButton text={unshared.command} />
-              </div>
-            )}
+            {unshared.command && <CommandBlock command={unshared.command} className="text-foreground" />}
           </div>
         ) : (
           <p className="mt-1">
@@ -132,6 +113,44 @@ export function NotInitialized({ slug }: { slug: string }) {
           <Button size="sm" render={<Link to="/p/$slug/init" params={{ slug }} />}>
             Finish setup
           </Button>
+        </div>
+      </AlertDescription>
+    </Alert>
+  );
+}
+
+/**
+ * A production import that has not finished (`project.importing`): the clone and
+ * its first scan run in the background, so Explorer and Chat have nothing to read
+ * yet. With no run in flight the import did not finish; its run says why.
+ */
+export function ImportingNotice({ project }: { project: ProjectDetails }) {
+  const slug = project.slug;
+  const run = project.running_scan;
+  const repo = project.github_full_name ?? project.name;
+  return (
+    <Alert data-testid="importing-notice">
+      <DownloadIcon />
+      <AlertTitle>{run ? `Importing ${repo}` : "The import did not finish"}</AlertTitle>
+      <AlertDescription>
+        <p>
+          {run
+            ? "WhyGraph is copying the repository and running its first scan. The Explorer and Chat open when it is done."
+            : "The Explorer and Chat open once the repository is imported. The import's last run says what went wrong."}
+        </p>
+        <div className="mt-2">
+          {run ? (
+            <Button
+              size="sm"
+              render={<Link to="/p/$slug/scans/{-$runId}" params={{ slug, runId: String(run.id) }} />}
+            >
+              Follow the import
+            </Button>
+          ) : (
+            <Button size="sm" render={<Link to="/p/$slug/scans/{-$runId}" params={{ slug }} />}>
+              Open scans
+            </Button>
+          )}
         </div>
       </AlertDescription>
     </Alert>

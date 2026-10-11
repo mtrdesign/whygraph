@@ -264,6 +264,37 @@ def scan_estimate(config: Config, *, overrides: PriceOverrides = NO_OVERRIDES) -
     )
 
 
+def compact_estimate(body: dict, missing_key: str | None) -> dict:
+    """The compact estimate a full run stores in ``summary.estimate``.
+
+    Parameters
+    ----------
+    body : dict
+        :func:`scan_estimate`'s (or :func:`render_estimate`'s) body.
+    missing_key : str or None
+        The analyze provider when it has no key (the ``scan-estimate``
+        route's ``missing_key``).
+
+    Returns
+    -------
+    dict
+        ``{commits, model: {provider, model}, cost_usd, cost_low_usd,
+        cost_high_usd, prices_as_of, missing_key}``; the ``cost_*`` values
+        and ``prices_as_of`` are ``None`` for an unpriced model (M2f-3 plan
+        section 4.1).
+    """
+    priced = body.get("cost") or {}
+    return {
+        "commits": body["commits"],
+        "model": dict(body["model"]),
+        "cost_usd": priced.get("usd"),
+        "cost_low_usd": priced.get("low"),
+        "cost_high_usd": priced.get("high"),
+        "prices_as_of": priced.get("prices_as_of"),
+        "missing_key": missing_key,
+    }
+
+
 __all__ = [
     "CHARS_PER_LINE",
     "CHARS_PER_TOKEN",
@@ -273,6 +304,7 @@ __all__ = [
     "SYNTHESIS_INPUT_TOKENS",
     "CommitSize",
     "TokenEstimate",
+    "compact_estimate",
     "estimate_tokens",
     "render_estimate",
     "scan_estimate",

@@ -43,7 +43,7 @@ from .chat import (
     ToolSpec,
     TurnDone,
 )
-from .exceptions import LlmError
+from .exceptions import LlmError, LlmKeyMissing
 from .usage import ANTHROPIC_USAGE_KEYS, anthropic_raw_usage, anthropic_usage_fields
 
 _ENV_VAR = "ANTHROPIC_API_KEY"
@@ -209,7 +209,7 @@ class AnthropicChatAdapter(ChatClient):
             # configuration problem nor is safe to catch broadly (it would
             # also swallow genuine bugs in our own translation code).
             if not (self._api_key or os.environ.get(_ENV_VAR)):
-                raise LlmError(
+                raise LlmKeyMissing(
                     f"anthropic is not configured — set {_ENV_VAR} or "
                     "[llm.anthropic].api_key in whygraph.toml"
                 )

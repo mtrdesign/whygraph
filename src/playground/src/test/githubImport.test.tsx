@@ -292,7 +292,8 @@ describe("Import from GitHub", () => {
     expect(screen.getByRole("button", { name: "Install on GitHub" })).toBeInTheDocument();
   });
 
-  it("disables an imported repo and switches installations", async () => {
+  it("lists imported repos as links to their project and switches installations", async () => {
+    handlers["GET /api/projects"] = () => ({ projects: [project("web")] });
     handlers["GET /api/github/installations/12/repos"] = () => ({
       repos: [repo(5, "ada/notes")],
       total_count: 1,
@@ -301,20 +302,31 @@ describe("Import from GitHub", () => {
     const user = userEvent.setup();
     mount("/projects/new");
     const web = await screen.findByTestId("repo-acme/web");
-    expect(within(web).getByRole("button", { name: "acme/web is already imported" })).toBeDisabled();
     expect(web).toHaveTextContent("Private");
-    expect(within(screen.getByTestId("repo-acme/api")).getByRole("button", { name: "Import acme/api" })).toBeEnabled();
+    expect(web).toHaveTextContent("Imported");
+    expect(within(web).queryByRole("checkbox")).toBeNull();
+    await waitFor(() => expect(within(web).getByRole("link", { name: "acme/web" })).toHaveAttribute("href", "/p/web"));
+    expect(within(screen.getByTestId("repo-acme/api")).getByRole("checkbox")).toBeEnabled();
+    expect(screen.getByTestId("repo-count")).toHaveTextContent("2 repositories");
 
     await user.click(screen.getByRole("radio", { name: "ada" }));
     expect(await screen.findByTestId("repo-ada/notes")).toBeInTheDocument();
     expect(screen.queryByTestId("repo-acme/api")).toBeNull();
   });
 
-  it("loads more pages and filters what is loaded on the client", async () => {
+  it("shows initials when an installation has no avatar", async () => {
+    mount("/projects/new");
+    await screen.findByRole("radiogroup", { name: "GitHub accounts" });
+    expect(screen.getAllByTestId("avatar-initials")[0]).toHaveTextContent("ac");
+  });
+
+  it("searches on the server (debounced, as q), refreshes, and loads more over the filtered list", async () => {
     const page = (n: number) =>
       Array.from({ length: 100 }, (_, i) => repo(n * 1000 + i, `acme/repo-${n}-${String(i).padStart(3, "0")}`));
     handlers["GET /api/github/installations/11/repos"] = (_, url) => {
       const n = Number(url.searchParams.get("page"));
+      const q = url.searchParams.get("q");
+      if (q) return { repos: [repo(9, "acme/needle")], total_count: 1, page: 1 };
       return n === 1
         ? { repos: page(1), total_count: 150, page: 1 }
         : { repos: page(2).slice(0, 50), total_count: 150, page: 2 };
@@ -322,24 +334,35 @@ describe("Import from GitHub", () => {
     const user = userEvent.setup();
     mount("/projects/new");
     await screen.findByTestId("repo-acme/repo-1-000");
-    expect(screen.getByText("100 of 150 loaded")).toBeInTheDocument();
+    expect(screen.getByTestId("repo-count")).toHaveTextContent("150 repositories");
     await user.click(screen.getByRole("button", { name: "Load more" }));
     expect(await screen.findByTestId("repo-acme/repo-2-049")).toBeInTheDocument();
-    expect(screen.getByText("150 of 150 loaded")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
-    expect(calls("GET", "/api/github/installations/11/repos?page=2")).toHaveLength(1);
 
-    await user.type(screen.getByLabelText("Filter repositories"), "repo-2-04");
-    const list = screen.getByRole("list", { name: "Repositories" });
-    expect(within(list).getAllByRole("listitem")).toHaveLength(10);
-    // The filter never asks the server.
-    expect(log.filter((c) => c.path.includes("/repos?"))).toHaveLength(2);
+    await user.type(screen.getByLabelText("Search repositories"), "needle");
+    expect(await screen.findByTestId("repo-acme/needle")).toBeInTheDocument();
+    expect(screen.getByTestId("repo-count")).toHaveTextContent("1 repository");
+    expect(calls("GET", "/api/github/installations/11/repos?page=1&q=needle")).toHaveLength(1);
+    // Typing never asks per keystroke.
+    expect(log.filter((c) => c.path.includes("q=")).map((c) => c.path)).toEqual([
+      "/api/github/installations/11/repos?page=1&q=needle",
+    ]);
+
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() =>
+      expect(calls("GET", "/api/github/installations/11/repos?page=1&q=needle&refresh=1")).toHaveLength(1),
+    );
   });
 
-  it("imports, then continues to Configure in a three-step production wizard", async () => {
+  it("imports one repository and continues to Configure with its run", async () => {
     handlers["POST /api/projects"] = () => ({
       status: 201,
-      body: { project: project("api"), detected: null, import: { found: false, secrets_moved: [], dropped: [] } },
+      body: {
+        project: project("api"),
+        detected: null,
+        import: { found: false, secrets_moved: [], dropped: [] },
+        initial_run_id: 7,
+      },
     });
     handlers["GET /api/projects/api"] = () => project("api");
     handlers["GET /api/projects/api/config"] = () => ({
@@ -349,31 +372,69 @@ describe("Import from GitHub", () => {
     });
     const user = userEvent.setup();
     const router = mount("/projects/new");
-    const steps = within(await screen.findByRole("list", { name: "Steps" }));
-    expect(steps.queryByText("Initialize")).toBeNull();
-    await user.click(await screen.findByRole("button", { name: "Import acme/api" }));
-    await waitFor(() => expect(here(router)).toBe("/p/api/init?step=configure"));
+    expect(await screen.findByRole("button", { name: "Import" })).toBeDisabled();
+    await user.click(await screen.findByRole("checkbox", { name: "Select acme/api" }));
+    await user.click(screen.getByRole("button", { name: "Import 1 repository" }));
+    await waitFor(() => expect(here(router)).toBe("/p/api/init?step=configure&run=7"));
     expect(calls("POST", "/api/projects")[0].body).toEqual({ source: "github", installation_id: 11, repo_id: 1 });
-    await screen.findByTestId("config-form");
-    const wizard = within(screen.getByRole("list", { name: "Steps" }));
-    expect(wizard.getAllByRole("listitem").map((li) => li.textContent).filter(Boolean)).toEqual([
-      "Source",
-      "2Configure",
-      "3First scan",
-    ]);
+  });
+
+  it("caps the selection at imports_left", async () => {
+    handlers["GET /api/github/installations/11/repos"] = () => ({
+      repos: [repo(1, "acme/a"), repo(2, "acme/b"), repo(3, "acme/c")],
+      total_count: 3,
+      page: 1,
+      imports_left: 2,
+    });
+    const user = userEvent.setup();
+    mount("/projects/new");
+    expect(await screen.findByText("You can import 2 more this hour.")).toBeInTheDocument();
+    await user.click(await screen.findByRole("checkbox", { name: "Select acme/a" }));
+    await user.click(screen.getByRole("checkbox", { name: "Select acme/b" }));
+    expect(screen.getByRole("checkbox", { name: "Select acme/c" })).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByRole("button", { name: "Import 2 repositories" })).toBeEnabled();
+  });
+
+  it("imports several one by one, stops at the first 429 and reports the rest as not started", async () => {
+    handlers["GET /api/github/installations/11/repos"] = () => ({
+      repos: [repo(1, "acme/a"), repo(2, "acme/b"), repo(3, "acme/c")],
+      total_count: 3,
+      page: 1,
+    });
+    let n = 0;
+    handlers["POST /api/projects"] = () => {
+      n += 1;
+      return n === 1
+        ? { status: 201, body: { project: project("a"), detected: null, import: {}, initial_run_id: 3 } }
+        : { status: 429, body: { error: "slow down", code: "throttled" } };
+    };
+    const user = userEvent.setup();
+    const router = mount("/projects/new");
+    for (const name of ["a", "b", "c"]) await user.click(await screen.findByRole("checkbox", { name: `Select acme/${name}` }));
+    await user.click(screen.getByRole("button", { name: "Import 3 repositories" }));
+    const results = await screen.findByTestId("import-results");
+    await waitFor(() => expect(within(results).getByTestId("import-acme/c")).toHaveTextContent("Not started"));
+    expect(within(results).getByTestId("import-acme/a")).toHaveTextContent("Started");
+    expect(within(results).getByTestId("import-acme/b")).toHaveTextContent(/Failed.*Too many attempts/);
+    expect(within(results).getByRole("link", { name: "Configure" })).toHaveAttribute(
+      "href",
+      "/p/a/init?step=configure&run=3",
+    );
+    expect(within(results).getByRole("link", { name: "Go to projects" })).toHaveAttribute("href", "/");
+    expect(calls("POST", "/api/projects")).toHaveLength(2);
+    expect(here(router)).toBe("/projects/new");
   });
 
   it.each([
     ["no_access", 404, /not available to you through this installation/],
-    ["tracked_whygraph_state", 422, /tracks WhyGraph's own state/],
     ["duplicate", 409, /already a project in this organization/],
     ["source_not_allowed", 403, /not supported here/],
-    ["throttled", 429, /Too many imports/],
-  ])("shows a refused import (%s)", async (code, status, text) => {
+  ])("shows a refused import (%s) on its row", async (code, status, text) => {
     handlers["POST /api/projects"] = () => ({ status, body: { error: "refused", code } });
     const user = userEvent.setup();
     const router = mount("/projects/new");
-    await user.click(await screen.findByRole("button", { name: "Import acme/api" }));
+    await user.click(await screen.findByRole("checkbox", { name: "Select acme/api" }));
+    await user.click(screen.getByRole("button", { name: "Import 1 repository" }));
     expect(await screen.findByTestId("import-error")).toHaveTextContent(text);
     expect(here(router)).toBe("/projects/new");
   });
@@ -385,19 +446,36 @@ describe("Import from GitHub", () => {
     });
     const user = userEvent.setup();
     mount("/projects/new");
-    await user.click(await screen.findByRole("button", { name: "Import acme/api" }));
+    await user.click(await screen.findByRole("checkbox", { name: "Select acme/api" }));
+    await user.click(screen.getByRole("button", { name: "Import 1 repository" }));
     expect(await screen.findByTestId("github-connect")).toBeInTheDocument();
   });
 
-  it("shows why a password account cannot import", async () => {
+  it("says every repository is already a project, with a way to install on more", async () => {
+    handlers["GET /api/github/installations/11/repos"] = () => ({
+      repos: [repo(1, "acme/api", { imported: true })],
+      total_count: 1,
+      page: 1,
+    });
+    const user = userEvent.setup();
+    mount("/projects/new");
+    const note = await screen.findByTestId("all-imported");
+    expect(note).toHaveTextContent("Every repository this installation covers is already a project here");
+    await user.click(within(note).getByRole("button", { name: "Install on more repositories" }));
+    await waitFor(() => expect(hard).toHaveBeenCalledWith(INSTALL_URL));
+  });
+
+  it("explains a bootstrap password account cannot import, with Sign in with GitHub and Open Members", async () => {
     handlers["GET /api/github/installations"] = () => ({
       status: 403,
       body: { error: "x", code: "github_required" },
     });
+    handlers["POST /auth/github/start"] = () => ({ authorize_url: AUTHORIZE_URL });
     mount("/projects/new");
-    expect(await screen.findByTestId("github-error")).toHaveTextContent(
-      "Importing from GitHub needs an account that signs in with GitHub.",
-    );
+    const box = await screen.findByTestId("github-required");
+    expect(box).toHaveTextContent("Importing needs a GitHub sign-in.");
+    expect(within(box).getByRole("link", { name: "Open Members" })).toHaveAttribute("href", "/members");
+    expect(within(box).getByRole("button", { name: "Sign in with GitHub" })).toBeInTheDocument();
   });
 
   it("is for owners and admins: a member goes back to Projects, which has no New project", async () => {
@@ -438,26 +516,77 @@ describe("production project pages", () => {
     });
   });
 
-  it("Configure has no hooks and no GitHub token, keeps the forge toggle, and continues to the first scan", async () => {
+  it("Configure is one screen: no settings form, no hooks, no GitHub token row, the production settings link", async () => {
+    handlers["GET /api/projects/api/scan-estimate"] = () => ({
+      commits: 12,
+      upper_bound: true,
+      large_commits: 0,
+      model: { provider: "anthropic", model: "claude-haiku-4-5" },
+      tokens: null,
+      cost: null,
+      cost_hidden: true,
+      missing_key: null,
+    });
     const user = userEvent.setup();
     const router = mount("/p/api/init?step=configure");
-    const form = await screen.findByTestId("config-form");
-    expect(within(form).queryByRole("heading", { name: "Git hooks" })).toBeNull();
-    expect(within(form).queryByLabelText("GitHub token")).toBeNull();
-    expect(within(form).queryByText(/syncs it on a schedule/)).toBeNull();
-    const forge = within(form).getByRole("switch", { name: "Fetch pull requests and issues from GitHub" });
-    expect(forge).toBeChecked();
-
-    await user.type(within(form).getByLabelText("anthropic"), "sk-ant-1234");
-    await user.click(within(form).getByRole("button", { name: "Save and continue" }));
-    await waitFor(() => expect(here(router)).toBe("/p/api/init?step=scan"));
-    const put = calls("PUT", "/api/projects/api/config")[0].body!;
-    expect(put.secrets).toEqual({ llm: { anthropic: "sk-ant-1234" } });
+    expect(await screen.findByRole("heading", { name: "Api: Configure" })).toBeInTheDocument();
+    expect(screen.queryByTestId("config-form")).toBeNull();
+    expect(screen.queryByTestId("github-token-row")).toBeNull();
+    expect(screen.queryByText(/Git hooks/)).toBeNull();
+    // Production: Source -> Configure.
+    const steps = within(screen.getByRole("list", { name: "Steps" }));
+    expect(steps.queryByText("Set up")).toBeNull();
+    expect(screen.getByRole("link", { name: "More settings (chat model, limits)" })).toHaveAttribute(
+      "href",
+      "/p/api/settings",
+    );
+    // R6: the count without a price.
+    expect(await screen.findByTestId("scan-estimate")).toHaveTextContent("12 commits are waiting for descriptions.");
+    expect(screen.getByTestId("scan-estimate")).not.toHaveTextContent("tokens hidden");
+    await user.click(screen.getByRole("button", { name: "Open project" }));
+    await waitFor(() => expect(here(router)).toBe("/p/api"));
   });
 
-  it("sends ?step=initialize on to the first scan", async () => {
+  it("tells a member without the key that an owner adds it in Organization settings (IMP-6)", async () => {
+    handlers["GET /api/projects/api"] = () =>
+      project("api", { my_role: "viewer", permissions: ["project.read"], last_scan_at: null });
+    handlers["GET /api/projects/api/config"] = () => ({
+      config: {},
+      secrets: secrets(),
+      read_only: true,
+      effective_keys: { anthropic: "none", openai: "none", openrouter: "none", deepseek: "none" },
+      import: { found: false, error: null, secrets_moved: [], dropped: [], custom_db_paths: [], warnings: [] },
+    });
+    mount("/p/api/init?step=configure");
+    const missing = await screen.findByTestId("key-missing");
+    expect(missing).toHaveTextContent("Your organization has no Anthropic key. An owner can add one in Organization settings.");
+    expect(within(missing).getByRole("link", { name: "Organization settings" })).toHaveAttribute(
+      "href",
+      "/settings?section=models",
+    );
+    expect(within(missing).queryByRole("textbox")).toBeNull();
+  });
+
+  it("gives an owner who may add the org key a link to Organization settings, not 'an owner can add one' (IMP-6)", async () => {
+    handlers["GET /api/projects/api/config"] = () => ({
+      config: {},
+      secrets: secrets(),
+      effective_keys: { anthropic: "none", openai: "none", openrouter: "none", deepseek: "none" },
+      import: { found: false, error: null, secrets_moved: [], dropped: [], custom_db_paths: [], warnings: [] },
+    });
+    mount("/p/api/init?step=configure");
+    const missing = await screen.findByTestId("key-missing");
+    expect(missing).not.toHaveTextContent("An owner can add one");
+    expect(missing).toHaveTextContent("To use one key for every project, add it in Organization settings.");
+    expect(within(missing).getByRole("link", { name: "Organization settings" })).toHaveAttribute(
+      "href",
+      "/settings?section=models",
+    );
+  });
+
+  it("sends ?step=initialize (now setup) on to Configure", async () => {
     const router = mount("/p/api/init?step=initialize");
-    await waitFor(() => expect(here(router)).toBe("/p/api/init?step=scan"));
+    await waitFor(() => expect(here(router)).toBe("/p/api/init?step=configure"));
     expect(calls("POST", "/api/projects/api/init")).toHaveLength(0);
   });
 
@@ -492,7 +621,9 @@ describe("production project pages", () => {
     await user.click(await screen.findByRole("button", { name: "Remove project" }));
     const dialog = await screen.findByTestId("remove-dialog");
     expect(dialog).toHaveTextContent("This removes the server copy and every scan.");
-    expect(dialog).toHaveTextContent("/data/repos/acme/api");
+    // No server path in production (MODE-1, SET-9).
+    expect(dialog).toHaveTextContent("The server copy of the repository.");
+    expect(dialog).not.toHaveTextContent("/data/");
     expect(dialog).toHaveTextContent("The repository on GitHub; nothing is changed there.");
     expect(dialog).not.toHaveTextContent(/git hooks|portal\.\*|MCP entries|checkout/);
     expect(within(dialog).queryByRole("checkbox")).toBeNull();

@@ -154,6 +154,7 @@ BASE_ONLY_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/auth/login", "POST"),
         ("/api/auth/reset", "POST"),
         ("/api/orgs", "POST"),
+        ("/api/orgs/slug-check", "GET"),  # M2f-3 section 4.12
         ("/api/github/app/callback", "POST"),
         ("/api/admin/settings", "GET"),
         ("/api/admin/orgs", "GET"),
@@ -201,6 +202,7 @@ ORG_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/org/transfer", "POST"),
         ("/api/org/audit", "GET"),
         ("/api/org/audit.csv", "GET"),
+        ("/api/org/welcome", "DELETE"),  # M2f-3 section 4.12
         ("/api/github/app/authorize", "POST"),
         ("/api/github/installations", "GET"),
         ("/api/github/installations/{installation_id}/repos", "GET"),
@@ -558,7 +560,8 @@ def test_the_fixture_is_two_marked_orgs_over_real_sessions(
     for org in (w.quokka, w.narwhal):
         w.sign_in(w.owner_of(org))
         body = _ok(w.client.get(at(org.slug) + "/api/projects/api"))
-        assert (body["name"], body["root"]) == (org.name, str(org.root))
+        # Production never sends the server clone path (MODE-1).
+        assert (body["name"], body["root"]) == (org.name, None)
         # M2d-2's summary fields carry the org's mark, so the sweeps'
         # assert_no_leak covers them on every route that shows them.
         assert body["github_full_name"].startswith(f"{org.slug}/api")
@@ -942,6 +945,10 @@ def test_the_reader_route_split_is_the_planned_one() -> None:
     } <= set(OTHER_ROUTES)
     assert ("POST", "/api/projects/{slug}/node/rationale") in OTHER_ROUTES
     assert ("GET", "/api/projects/{slug}/node/rationale") in READ_ROUTES
+    # A reader reads a project's Overview (M2f-3 section 4.10) as a viewer.
+    assert ("GET", "/api/projects/{slug}/overview") in READ_ROUTES
+    # ... and its runs, one by one too (M2f-3 section 4.11).
+    assert ("GET", "/api/projects/{slug}/scans/{run_id}") in READ_ROUTES
     # A reader reads the org's usage and budgets (M2f-2 section 9.2 D2), not
     # a project's usage (a project admin's) and changes no budget or price.
     assert {
@@ -1100,6 +1107,24 @@ def test_an_orgs_member_list_is_invisible_on_another_orgs_host(
     assert [(m["github_login"], m["role"]) for m in narwhal] == [("bob", "owner")]
 
 
+def test_a_member_and_a_reader_get_no_grants_in_the_member_list(
+    prod_world: ProdWorld,
+) -> None:
+    """``grants`` is for ``org.members`` holders; no other answer carries it (T-31)."""
+    w = prod_world
+    w.sign_in("ann")  # owner of quokka
+    owner = _ok(w.client.get(at("quokka") + "/api/org/members"))
+    assert owner and all("grants" in m for m in owner)
+    w.sign_in("bob")  # a plain member of quokka, the owner of narwhal
+    member = _ok(w.client.get(at("quokka") + "/api/org/members"))
+    assert member and all("grants" not in m for m in member)
+    assert "grants" not in w.client.get(at("quokka") + "/api/org/members").text
+    w.client.cookies.clear()
+    w.sign_in("ada")  # an instance admin reads quokka as a reader
+    reader = _ok(w.client.get(at("quokka") + "/api/org/members"))
+    assert reader and all("grants" not in m for m in reader)
+
+
 def test_another_orgs_member_cannot_be_changed_through_this_orgs_host(
     prod_world: ProdWorld,
 ) -> None:
@@ -1140,8 +1165,9 @@ def test_memberships_cannot_store_the_reader_role(prod_world: ProdWorld) -> None
         with portal_db.get_engine().begin() as conn:
             conn.execute(
                 text(
-                    "INSERT INTO memberships (org_id, user_id, role, created_at) "
-                    "VALUES (:org, :user, 'reader', '2026-10-03T00:00:00+00:00')"
+                    "INSERT INTO memberships (org_id, user_id, role, created_at, "
+                    "welcome_pending) VALUES (:org, :user, 'reader', "
+                    "'2026-10-03T00:00:00+00:00', false)"
                 ),
                 {"org": w.narwhal.org_id, "user": w.ids["ada"]},
             )
@@ -1200,7 +1226,10 @@ def test_each_member_sees_and_touches_only_their_own_chat_sessions(
                 refused = w.client.request(method, f"{chat}/{other}{suffix}", json=body)
                 where = (name, method, suffix, other)
                 assert refused.status_code == 404, (where, refused.text)
-                assert refused.json() == {"detail": f"session {other} not found"}
+                assert refused.json() == {
+                    "error": f"session {other} not found",
+                    "code": "not_found",
+                }
     assert seen == {"bob": [bobs], "ann": [w.quokka.session_id]}
     # Nothing the refused calls aimed at changed.
     anns = _ok(w.client.get(f"{chat}/{w.quokka.session_id}"))

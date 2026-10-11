@@ -16,11 +16,14 @@ export function AgentPicker({
   onChange,
   detected = [],
   removed = [],
+  port,
 }: {
   value: readonly string[];
   onChange: (next: string[]) => void;
   detected?: readonly DetectedAgent[];
   removed?: readonly string[];
+  /** The portal's port (`state.port`), named in each card; absent, the cards leave it out. */
+  port?: number;
 }) {
   const groupId = useId();
   const toggle = (id: string, on: boolean) =>
@@ -39,7 +42,7 @@ export function AgentPicker({
             htmlFor={inputId}
             className={cn(
               "flex cursor-pointer items-start gap-3 rounded-lg border border-border p-3 transition-colors hover:bg-muted/40",
-              checked && "border-primary/60 bg-primary/5",
+              checked && "border-primary/60 bg-primary-soft text-primary-text",
               stripped && "cursor-not-allowed opacity-60",
             )}
           >
@@ -56,8 +59,10 @@ export function AgentPicker({
                 {found.length > 0 && <Badge variant="secondary">detected</Badge>}
                 {stripped && <Badge variant="outline">entry will be removed</Badge>}
               </span>
-              <span className="font-mono text-xs text-muted-foreground">{agent.file}</span>
-              <span className="text-xs text-muted-foreground">{agent.commit}</span>
+              <span className="text-xs text-muted-foreground">{agent.adds}</span>
+              {port !== undefined && (
+                <span className="text-xs text-muted-foreground">{agent.portNote(port)}</span>
+              )}
             </span>
           </label>
         );

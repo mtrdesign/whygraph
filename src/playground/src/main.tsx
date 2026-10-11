@@ -22,7 +22,8 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       <QueryClientProvider client={queryClient}>
         <TooltipProvider>
           <RouterProvider router={router} />
-          <Toaster />
+          {/* Top-right (full-width at the top on phone), never over a footer's primary button (§0.3 #27). */}
+          <Toaster position="top-right" />
         </TooltipProvider>
       </QueryClientProvider>
     </ThemeProvider>

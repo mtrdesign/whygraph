@@ -111,6 +111,8 @@ KEY_SCOPES: tuple[str, ...] = ("project", "org", "environment", "none")
 """Whose key paid for an LLM call (``usage_events.key_scope``)."""
 COST_SOURCES: tuple[str, ...] = ("provider", "estimated", "unpriced")
 """Where a call's cost came from (``usage_events.cost_source``)."""
+AGENT_CALL_SOURCES: tuple[str, ...] = ("mcp", "agent")
+"""Who made an agent call (``agent_call_days.source``)."""
 BUDGET_SCOPES: tuple[str, ...] = ("org", "project", "member_default", "member")
 """What a monthly budget caps (``budgets.scope``)."""
 BUDGET_THRESHOLDS: tuple[int, ...] = (50, 75, 100)
@@ -231,6 +233,8 @@ class Membership(PortalBase, table=True):
         (:class:`whygraph.portal.authz.Role`).
     created_at : str
         ISO-8601 UTC timestamp.
+    welcome_pending : bool
+        ``True`` from joining until the member dismisses the welcome banner.
     """
 
     __tablename__ = "memberships"
@@ -256,6 +260,9 @@ class Membership(PortalBase, table=True):
     user_id: int = Field()
     role: str = Field(sa_type=Text)
     created_at: str = Field(default_factory=_now, sa_type=Text)
+    welcome_pending: bool = Field(
+        default=False, sa_column=Column(Boolean, nullable=False)
+    )
 
 
 class User(PortalBase, table=True):
@@ -675,6 +682,12 @@ class ScanRun(PortalBase, table=True):
         JSON-encoded result summary. While a ``sync`` row is queued it holds
         ``{"scan_requested": true}`` when a scan was merged into it, so a
         restart does not drop that scan.
+    queued_at : str or None
+        ISO-8601 UTC timestamp when the run was queued; ``NULL`` on rows
+        older than the ux revision.
+    cancelled_by : int or None
+        ``users.id`` of the member who cancelled the run; ``NULL`` for a
+        budget stop, a system cancel or an old row.
     """
 
     __tablename__ = "scan_runs"
@@ -694,6 +707,12 @@ class ScanRun(PortalBase, table=True):
             name="fk_scan_runs_requested_by",
             ondelete="SET NULL",
         ),
+        ForeignKeyConstraint(
+            ["cancelled_by"],
+            ["users.id"],
+            name="fk_scan_runs_cancelled_by",
+            ondelete="SET NULL",
+        ),
         Index("ix_scan_runs_project_id", "project_id"),
     )
 
@@ -709,6 +728,8 @@ class ScanRun(PortalBase, table=True):
     events_path: str | None = Field(default=None, sa_type=Text)
     log_path: str | None = Field(default=None, sa_type=Text)
     summary: str | None = Field(default=None, sa_type=Text)
+    queued_at: str | None = Field(default=None, sa_type=Text)
+    cancelled_by: int | None = Field(default=None)
 
 
 class ConnectionToken(PortalBase, table=True):
@@ -1196,6 +1217,14 @@ class UsageEvent(PortalBase, table=True):
             "connection_id",
             postgresql_where=text("connection_id IS NOT NULL"),
         ),
+        Index(
+            "ix_usage_events_key_last_used",
+            "org_id",
+            "provider",
+            "key_scope",
+            "project_id",
+            "created_at",
+        ),
     )
 
     id: int | None = Field(default=None, primary_key=True, sa_type=BigInteger)
@@ -1227,6 +1256,82 @@ class UsageEvent(PortalBase, table=True):
     price_version: str | None = Field(default=None, sa_type=Text)
     duration_ms: int | None = Field(default=None)
     created_at: str = Field(default_factory=_now, sa_type=Text)
+
+
+class AgentCallDay(PortalBase, table=True):
+    """One agent-activity counter row (M2f-3).
+
+    Counts the calls of one kind made to one project on one UTC day by one
+    caller; the Overview's agent activity and the onboarding "any agent call"
+    check read it.
+
+    Attributes
+    ----------
+    id : int
+        Serial ``BIGINT`` primary key.
+    org_id, project_id : int
+        The project; the row goes with it.
+    day : str
+        UTC date, ``YYYY-MM-DD``.
+    source : str
+        One of :data:`AGENT_CALL_SOURCES`.
+    user_id : int or None
+        The calling member; no foreign key, the counters outlive the user.
+    connection_id : int or None
+        The connection token that called; no foreign key (the hourly sweep
+        deletes tokens).
+    kind : str
+        The tool or call name, 1 to 64 characters.
+    calls : int
+        How many calls (always positive).
+    """
+
+    __tablename__ = "agent_call_days"
+    __table_args__ = (
+        CheckConstraint(
+            "day ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'", name="ck_agent_call_days_day"
+        ),
+        CheckConstraint(
+            _in("source", AGENT_CALL_SOURCES), name="ck_agent_call_days_source"
+        ),
+        CheckConstraint(
+            "length(kind) BETWEEN 1 AND 64", name="ck_agent_call_days_kind"
+        ),
+        CheckConstraint("calls > 0", name="ck_agent_call_days_calls"),
+        ForeignKeyConstraint(
+            ["org_id"],
+            ["organizations.id"],
+            name="fk_agent_call_days_org",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["org_id", "project_id"],
+            ["projects.org_id", "projects.id"],
+            name="fk_agent_call_days_project",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "day",
+            "source",
+            "user_id",
+            "connection_id",
+            "kind",
+            name="uq_agent_call_days_key",
+            postgresql_nulls_not_distinct=True,
+        ),
+        Index("ix_agent_call_days_org_day", "org_id", "day"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True, sa_type=BigInteger)
+    org_id: int = Field()
+    project_id: int = Field()
+    day: str = Field(sa_type=Text)
+    source: str = Field(sa_type=Text)
+    user_id: int | None = Field(default=None)
+    connection_id: int | None = Field(default=None, sa_type=BigInteger)
+    kind: str = Field(sa_type=Text)
+    calls: int = Field(sa_type=BigInteger)
 
 
 class Budget(PortalBase, table=True):

@@ -148,7 +148,11 @@ def test_codegraph_only_scan_creates_no_whygraph_db(
     assert result.exit_code == 0, result.output
     assert calls == [repo]
     events = _events(result.stdout)
-    assert events[0] == {"type": "start", "phase_total": 1}
+    assert events[0] == {
+        "type": "start",
+        "phase_total": 1,
+        "phases": ["Code index"],
+    }
     assert events[-1]["type"] == "result" and events[-1]["status"] == "ok"
     assert [c["name"] for c in events[-1]["crawlers"]] == ["codegraph"]
     assert (repo / ".whygraph" / "scan.log").is_file()
@@ -209,6 +213,31 @@ def test_linked_manual_scan_is_codegraph_only(
     assert len(calls) == 4
     assert all(runner_flags(c) == CODEGRAPH_ONLY_FLAGS for c in calls)
     assert all(c["cwd"] == str(root) for c in calls)
+
+
+def test_linked_first_initialize_queues_its_codegraph_only_scan(
+    env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    with client_for() as client:
+        client.post("/api/portal/setup", json={"display_name": "Tess"})
+        root = make_repo(env.shared, "lnk")
+        seed_codegraph(root)
+        linked_row(root, "lnk")
+        init = client.post("/api/projects/lnk/init", json={"agents": []})
+        assert init.status_code == 200, init.text
+        run = wait_run(client, "lnk", init.json()["initial_run_id"])
+        assert (run["status"], run["trigger"], run["analyze"]) == (
+            "ok",
+            "initial",
+            False,
+        )
+        again = client.post(
+            "/api/projects/lnk/init", json={"agents": [], "force": True}
+        )
+        assert again.json()["initial_run_id"] is None
+    (call,) = scanner.calls()
+    assert runner_flags(call) == CODEGRAPH_ONLY_FLAGS
+    assert not whygraph_db(root).exists()
 
 
 def _scan(client: TestClient, slug: str, **body: object) -> int:

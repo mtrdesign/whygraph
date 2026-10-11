@@ -21,9 +21,10 @@ export const MEMBER_STOPPED_LINE =
  * The notice for a hard-stopped budget at `scope` (who ran out of budget). The same words
  * show on the project pages, in Chat and on Generate; `member` is the roadmap's line.
  */
-export function budgetNoticeText(scope: string | null | undefined): string {
+export function budgetNoticeText(scope: string | null | undefined, mode?: string | null): string {
   if (scope === "member") return MEMBER_STOPPED_LINE;
-  const whose = scope === "project" ? "This project's" : scope === "org" ? "This organization's" : "The";
+  const org = mode === "local" ? "This portal's" : "This organization's";
+  const whose = scope === "project" ? "This project's" : scope === "org" ? org : "The";
   return `${whose} monthly LLM budget is reached, so chat and generating are paused. You can still read everything that's already generated.`;
 }
 

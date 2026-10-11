@@ -140,11 +140,13 @@ class GitCrawler(Crawler):
         if demoted:
             parts.append(f"{demoted} demoted")
             refs = ", ".join(self._repository.default_branch_refs)
+            are = "commit is" if demoted == 1 else "commits are"
             self.warning = (
-                f"{demoted} commits are no longer reachable from {refs} — "
+                f"{demoted} {are} no longer reachable from {refs} - "
                 "demoted to off-default-branch"
             )
-        self.summary = f"{len(commits)} commits ({', '.join(parts)})"
+        noun = "commit" if len(commits) == 1 else "commits"
+        self.summary = f"{len(commits)} {noun} ({', '.join(parts)})"
 
 
 def _reconcile_branch_membership(

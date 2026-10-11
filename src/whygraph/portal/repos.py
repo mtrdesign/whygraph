@@ -18,6 +18,7 @@ import os
 import shlex
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 from whygraph.agents import detect_entries, is_git_tracked
@@ -149,8 +150,10 @@ def check_path(path: str, shared: tuple[Path, ...], data_dir: Path) -> dict:
     Returns
     -------
     dict
-        ``{"path", "shared", "is_git", "protected", "folder_suggestion",
-        "command", "github"}``. ``path`` is the resolved real path;
+        ``{"path", "exists", "shared", "is_git", "protected",
+        "folder_suggestion", "command", "github"}``. ``path`` is the
+        resolved real path; ``exists`` whether anything is there (as the
+        portal sees it: outside a shared folder that is usually nothing);
         ``protected`` means it overlaps the data directory. When not
         shared, ``folder_suggestion`` is the folder to share (the repo's
         parent, or the repo itself when the parent is ``/`` or ``$HOME``)
@@ -176,6 +179,7 @@ def check_path(path: str, shared: tuple[Path, ...], data_dir: Path) -> dict:
         command = add_folder_command(suggestion)
     return {
         "path": str(real),
+        "exists": real.exists(),
         "shared": is_shared,
         "is_git": is_git,
         "protected": protected,
@@ -185,33 +189,40 @@ def check_path(path: str, shared: tuple[Path, ...], data_dir: Path) -> dict:
     }
 
 
-def discover_repos(shared: tuple[Path, ...]) -> list[Path]:
-    """Find git work trees under the shared folders.
+def discover_repos(shared: tuple[Path, ...], needle: str = "") -> list[Path]:
+    """Find git work trees under the shared folders whose path matches ``needle``.
 
     Walks each folder to :data:`DISCOVERY_DEPTH` levels without following
-    symlinks, skipping dot-dirs and :data:`_SKIP_DIRS`, and stops at
-    :data:`DISCOVERY_LIMIT` results. A repository is not descended into.
+    symlinks, skipping dot-dirs and :data:`_SKIP_DIRS`. A repository is not
+    descended into. The search applies **while walking** and the walk stops
+    at :data:`DISCOVERY_LIMIT` *matches*, so a repository past the first 500
+    of the folders is still found by searching for it (M2f-3 BUG-20).
 
     Parameters
     ----------
     shared : tuple[Path, ...]
         The shared folders.
+    needle : str
+        A case-insensitive substring of the repository's path (which
+        includes its name); ``""`` matches every repository.
 
     Returns
     -------
     list[Path]
-        Repository roots, in walk order.
+        Matching repository roots, in walk order.
     """
+    needle = needle.lower()
     found: list[Path] = []
     for folder in shared:
         base_depth = len(folder.parts)
         for dirpath, dirnames, _files in os.walk(folder, followlinks=False):
             current = Path(dirpath)
             if (current / ".git").exists():
-                found.append(current)
                 dirnames[:] = []
-                if len(found) >= DISCOVERY_LIMIT:
-                    return found
+                if needle in dirpath.lower():
+                    found.append(current)
+                    if len(found) >= DISCOVERY_LIMIT:
+                        return found
                 continue
             if len(current.parts) - base_depth >= DISCOVERY_DEPTH:
                 dirnames[:] = []
@@ -222,23 +233,71 @@ def discover_repos(shared: tuple[Path, ...]) -> list[Path]:
     return found
 
 
+DISCOVERY_CACHE_ENTRIES = 64
+"""Searches :class:`DiscoveryCache` keeps (least recently used out)."""
+
+
 class DiscoveryCache:
-    """A :func:`discover_repos` result cached for :data:`DISCOVERY_TTL_SEC`."""
+    """:func:`discover_repos` results cached for :data:`DISCOVERY_TTL_SEC`.
 
-    def __init__(self, ttl: float = DISCOVERY_TTL_SEC) -> None:
+    Keyed by ``(folders, needle)``: the search runs during the walk, so each
+    needle has its own result. While the unfiltered listing is fresh and
+    complete (under :data:`DISCOVERY_LIMIT`), a search is answered from it
+    without walking again.
+    """
+
+    def __init__(
+        self,
+        ttl: float = DISCOVERY_TTL_SEC,
+        max_entries: int = DISCOVERY_CACHE_ENTRIES,
+    ) -> None:
         self._ttl = ttl
+        self._max = max_entries
         self._lock = threading.Lock()
-        self._at = 0.0
-        self._repos: list[Path] | None = None
+        self._entries: OrderedDict[
+            tuple[tuple[Path, ...], str], tuple[float, list[Path]]
+        ] = OrderedDict()
 
-    def get(self, shared: tuple[Path, ...]) -> list[Path]:
-        """Return the cached repos, walking again once the entry expired."""
+    def _fresh(
+        self, key: tuple[tuple[Path, ...], str], now: float
+    ) -> list[Path] | None:
+        hit = self._entries.get(key)
+        if hit is None or now - hit[0] >= self._ttl:
+            return None
+        self._entries.move_to_end(key)
+        return hit[1]
+
+    def get(self, shared: tuple[Path, ...], needle: str = "") -> list[Path]:
+        """Return the repos matching ``needle``, walking again once the entry expired.
+
+        Parameters
+        ----------
+        shared : tuple[Path, ...]
+            The shared folders.
+        needle : str
+            As :func:`discover_repos` (lower-cased here).
+
+        Returns
+        -------
+        list[Path]
+            A copy of the cached list.
+        """
+        needle = needle.lower()
+        key = (shared, needle)
+        now = time.monotonic()
         with self._lock:
-            if self._repos is not None and time.monotonic() - self._at < self._ttl:
-                return list(self._repos)
-        repos = discover_repos(shared)
+            hit = self._fresh(key, now)
+            if hit is not None:
+                return list(hit)
+            everything = self._fresh((shared, ""), now) if needle else None
+            if everything is not None and len(everything) < DISCOVERY_LIMIT:
+                return [p for p in everything if needle in str(p).lower()]
+        repos = discover_repos(shared, needle)
         with self._lock:
-            self._repos, self._at = repos, time.monotonic()
+            self._entries[key] = (time.monotonic(), repos)
+            self._entries.move_to_end(key)
+            while len(self._entries) > self._max:
+                self._entries.popitem(last=False)
         return list(repos)
 
 

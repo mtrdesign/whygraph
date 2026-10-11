@@ -270,7 +270,11 @@ def test_skip_analyze_no_remote_emits_two_phases_and_a_result(
 
     assert result.exit_code == 0, result.output
     events = _events(result.stdout)
-    assert events[0] == {"type": "start", "phase_total": 2}
+    assert events[0] == {
+        "type": "start",
+        "phase_total": 2,
+        "phases": ["Structural crawl", "Author identity"],
+    }
     assert [e["title"] for e in events if e["type"] == "phase"] == [
         "Structural crawl",
         "Author identity",
@@ -514,7 +518,11 @@ def test_real_scan_of_a_fixture_repo_emits_valid_jsonl(tmp_path: Path) -> None:
 
     assert proc.returncode == 0, proc.stderr
     events = _events(proc.stdout)  # every line valid JSON, nothing else on stdout
-    assert events[0] == {"type": "start", "phase_total": 2}
+    assert events[0] == {
+        "type": "start",
+        "phase_total": 2,
+        "phases": ["Structural crawl", "Author identity"],
+    }
     phases = [e for e in events if e["type"] == "phase"]
     assert len(phases) == events[0]["phase_total"]
     assert events[-1]["type"] == "result" and events[-1]["status"] == "ok"

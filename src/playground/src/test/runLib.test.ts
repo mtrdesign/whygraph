@@ -4,8 +4,23 @@ import { ApiError, type ProjectSummary, type ScanRunRow } from "../api";
 import { mcpSnippet } from "../lib/agents";
 import { projectProblem } from "../lib/errors";
 import { projectStatus } from "../lib/projectStatus";
-import { formatSeconds, runOutcome, runSeconds, triggerLabel } from "../lib/scanFormat";
-import { initialScanRunState, phaseRows, reduceScanRun, type ScanRunState } from "../lib/scanRun";
+import {
+  carriesCost,
+  cancelledLabel,
+  costPhrase,
+  estimateCostLine,
+  modelLabel,
+  failureSummary,
+  formatSeconds,
+  requesterLabel,
+  runLabel,
+  runOutcome,
+  runSeconds,
+  runTitle,
+  syncOutcome,
+} from "../lib/scanFormat";
+import { progressModel, rawPercent } from "../lib/scanProgress";
+import { codegraphText, initialScanRunState, phaseRows, reduceScanRun, type ScanRunState } from "../lib/scanRun";
 
 const fold = (events: Parameters<typeof reduceScanRun>[1][]): ScanRunState =>
   events.reduce(reduceScanRun, initialScanRunState);
@@ -34,11 +49,41 @@ describe("phaseRows", () => {
       ev({ type: "phase", phase: 2, title: "Author identity" }),
     ]);
     expect(phaseRows(s).map((p) => [p.title, p.status])).toEqual([
-      ["Structural crawl", "done"],
-      ["Author identity", "running"],
+      ["Git history and GitHub", "done"],
+      ["Author identities", "running"],
       ["Step 3", "pending"],
       ["Step 4", "pending"],
     ]);
+  });
+
+  it("names every phase up front from the start event's titles", () => {
+    const s = fold([
+      ev({ type: "start", phase_total: 4, phases: ["Structural crawl", "PR-origin recovery", "Author identity", "LLM descriptions"] }),
+      ev({ type: "phase", phase: 1, title: "Structural crawl" }),
+    ]);
+    expect(phaseRows(s).map((p) => [p.title, p.status])).toEqual([
+      ["Git history and GitHub", "running"],
+      ["Pull request origins", "pending"],
+      ["Author identities", "pending"],
+      ["Commit descriptions", "pending"],
+    ]);
+  });
+
+  it("skips the phases after a failure and marks a cancelled phase as stopped, not failed", () => {
+    const phases = ["Structural crawl", "Author identity", "LLM descriptions"];
+    const failed = fold([
+      ev({ type: "start", phase_total: 3, phases }),
+      ev({ type: "phase", phase: 1, title: "Structural crawl" }),
+      ev({ type: "end", run_id: 1, status: "failed", summary: null }),
+    ]);
+    expect(phaseRows(failed).map((p) => p.status)).toEqual(["failed", "skipped", "skipped"]);
+    const cancelled = fold([
+      ev({ type: "start", phase_total: 3, phases }),
+      ev({ type: "phase", phase: 1, title: "Structural crawl" }),
+      ev({ type: "phase", phase: 2, title: "Author identity" }),
+      ev({ type: "end", run_id: 1, status: "cancelled", summary: null }),
+    ]);
+    expect(phaseRows(cancelled).map((p) => p.status)).toEqual(["done", "cancelled", "skipped"]);
   });
 
   it("takes timings and crawler reports from the result, and flags a failed crawler's phase", () => {
@@ -70,6 +115,42 @@ describe("phaseRows", () => {
       ev({ type: "end", run_id: 1, status: "interrupted", summary: null }),
     ]);
     expect(phaseRows(s).map((p) => p.status)).toEqual(["failed", "skipped", "skipped"]);
+  });
+
+  it("a failure that names no phase still belongs to one (BUG-6)", () => {
+    const phases = ["Structural crawl", "Author identity"];
+    // The child's result fails a crawler of no phase while the run was in phase 1.
+    const inPhase = fold([
+      ev({ type: "start", phase_total: 2, phases }),
+      ev({ type: "phase", phase: 1, title: "Structural crawl" }),
+      ev({ type: "result", status: "failed", crawlers: [{ name: "mystery", status: "failed", error: "x" }] }),
+      ev({ type: "end", run_id: 1, status: "failed", summary: null }),
+    ]);
+    expect(phaseRows(inPhase).map((p) => p.status)).toEqual(["failed", "skipped"]);
+    // A failure before any phase started is the first phase's.
+    const before = fold([
+      ev({ type: "start", phase_total: 2, phases }),
+      ev({ type: "result", status: "failed", crawlers: [], error: "token file is empty" }),
+      ev({ type: "end", run_id: 1, status: "failed", summary: null }),
+    ]);
+    expect(phaseRows(before).map((p) => p.status)).toEqual(["failed", "skipped"]);
+    // A failed sync owns its failure: no phase turns red.
+    const sync = fold([
+      ev({ type: "sync", status: "failed", error: "fetch failed" }),
+      ev({ type: "start", phase_total: 2, phases }),
+      ev({ type: "end", run_id: 1, status: "failed", summary: null }),
+    ]);
+    expect(phaseRows(sync).map((p) => p.status)).toEqual(["skipped", "skipped"]);
+  });
+
+  it("words the CodeGraph row as a sentence, never the crawler's raw text (SCN-5)", () => {
+    const task = { name: "codegraph", completed: 0, total: null, description: "indexing" };
+    expect(codegraphText({ task, result: null }, null)).toBe("Refreshing the code index alongside the other phases.");
+    expect(codegraphText({ task, result: { status: "ok" } }, "ok")).toBe(
+      "The code index was refreshed alongside the other phases.",
+    );
+    expect(codegraphText({ task, result: { status: "failed" } }, "failed")).toContain("did not update");
+    expect(codegraphText({ task, result: null }, "cancelled")).toBe("Stopped with the run.");
   });
 
   it("keeps a task's latest counter under its phase", () => {
@@ -110,23 +191,109 @@ describe("scan formatting", () => {
     expect(runSeconds(row({ finished_at: null }))).toBeNull();
   });
 
-  it("names triggers and outcomes", () => {
-    expect(triggerLabel(row({ trigger: "hook" }))).toBe("Git hook");
-    expect(triggerLabel(row({ trigger: "initial" }))).toBe("Initial");
-    expect(triggerLabel(row({ trigger: "push" }))).toBe("Push");
-    expect(triggerLabel(row({ trigger: "reconcile" }))).toBe("Reconcile");
-    expect(runOutcome(row({ status: "failed", summary: { error: "boom" } }))).toBe("boom");
-    expect(runOutcome(row({ status: "failed", summary: { exit_code: 2 } }))).toBe("Exit code 2");
+  it("names runs and titles them without an id", () => {
+    expect(runLabel(row({ trigger: "initial" }))).toBe("First scan");
+    expect(runLabel(row({ trigger: "initial", kind: "sync" }))).toBe("Import");
+    expect(runLabel(row({ trigger: "manual", analyze: false }))).toBe("Quick rescan");
+    expect(runLabel(row({ trigger: "manual", analyze: true }))).toBe("Full rescan");
+    expect(runLabel(row({ trigger: "describe" }))).toBe("Describe");
+    expect(runLabel(row({ trigger: "hook" }))).toBe("Commit hook");
+    expect(runLabel(row({ trigger: "push", kind: "sync" }))).toBe("GitHub push");
+    expect(runLabel(row({ trigger: "sync", kind: "sync" }))).toBe("Sync from GitHub");
+    expect(runLabel(row({ trigger: "reconcile", kind: "sync" }))).toBe("Scheduled check");
+    expect(runTitle(row({ queued_at: "2026-10-09T14:02:00+00:00" }))).toMatch(/^Full rescan - .*2026/);
+    expect(runTitle(row({}))).toMatch(/^Full rescan - /);
+    expect(runTitle(row({}))).not.toMatch(/#\d/);
+  });
+
+  it("says who asked and who cancelled, as 'You' only for the viewer", () => {
+    expect(requesterLabel({ requested_by: null }, "u1")).toBe("System");
+    expect(requesterLabel({ requested_by: { uid: "u1", label: "Ada" } }, "u1")).toBe("You");
+    expect(requesterLabel({ requested_by: { uid: "u2", label: "Ben (@ben)" } }, "u1")).toBe("Ben (@ben)");
+    const by = (uid: string) => ({ cancelled_by: { uid, label: "Ben" }, summary: { cancelled_by: "user" } });
+    expect(cancelledLabel(by("u2"), "u1")).toBe("Cancelled by Ben");
+    expect(cancelledLabel(by("u1"), "u1")).toBe("Cancelled by you");
+    expect(cancelledLabel({ cancelled_by: null, summary: { cancelled_by: "budget" } }, "u1")).toBe(
+      "Stopped: monthly budget reached",
+    );
+    expect(cancelledLabel({ cancelled_by: null, summary: null }, "u1")).toBe("Cancelled");
+  });
+
+  it("carries cost only when a row has the keys (absent, not null, is hidden)", () => {
+    expect(carriesCost([row({})])).toBe(false);
+    expect(carriesCost([row({}), row({ cost_usd: null })])).toBe(true);
+  });
+
+  it("words a sync's outcome, never 'No new commits' on a first run", () => {
+    expect(syncOutcome({ trigger: "initial" }, { cloned: true, scanned: true })).toBe("Imported and scanned");
+    expect(syncOutcome({ trigger: "push" }, { moved: true, scanned: true })).toBe("Fetched new commits and scanned");
+    expect(syncOutcome({ trigger: "push" }, { moved: false })).toBe("No new commits");
+    expect(syncOutcome({ trigger: "initial" }, { moved: false })).toBeNull();
+  });
+
+  it("summarises a failure through the registry, with the raw text kept for details", () => {
+    const lost = failureSummary({ error: "the WhyGraph GitHub App cannot reach this repository any more - reconnect it on GitHub" });
+    expect(lost.known).toBe(true);
+    expect(lost.message).toContain("can no longer read this repository");
+    expect(lost.details[0]).toContain("GitHub App");
+    const key = failureSummary({ crawlers: [{ name: "analyze", status: "failed", error: "no API key for anthropic" }] });
+    expect(key.settings).toBe("models");
+    const odd = failureSummary({ error: "boom" });
+    expect(odd.known).toBe(false);
+    expect(odd.message).toContain("stopped before it finished");
+    expect(odd.details).toEqual(["boom"]);
+  });
+
+  it("words costs readably: one approximation, 'less than $0.01' below a cent (IMP-6)", () => {
+    expect(costPhrase(0.004)).toBe("less than $0.01");
+    expect(costPhrase(0.42)).toBe("about $0.42");
+    expect(estimateCostLine({ usd: 0.004, low: 0.002, high: 0.006 })).toBe("Less than $0.01");
+    expect(estimateCostLine({ usd: 0.004, low: 0.002, high: 0.01 })).toBe("Less than $0.01 (up to $0.01)");
+    expect(estimateCostLine({ usd: 0.42, low: 0.21, high: 0.63 })).toBe("About $0.42 (between $0.21 and $0.63)");
+    expect(modelLabel("Anthropic", "claude-opus-4-7")).toBe("Anthropic, claude-opus-4-7");
+    expect(modelLabel("Anthropic", "")).toBe("Anthropic, its default model");
+  });
+
+  it("names outcomes for the history", () => {
+    // An unrecognised failure is a sentence, never the raw text (ER-3).
+    expect(runOutcome(row({ status: "failed", summary: { error: "boom" } }))).toBe("The scan stopped before it finished");
+    expect(runOutcome(row({ status: "failed", summary: { exit_code: 2 } }))).toBe("The scan stopped before it finished");
+    expect(
+      runOutcome(row({ status: "failed", summary: { crawlers: [{ name: "git", status: "failed", error: "git: simulated crawler error" }] } })),
+    ).toBe("Part of the scan failed");
+    expect(runOutcome(row({ status: "interrupted", summary: { error: "x" } }))).toBe(
+      "Interrupted: the portal stopped while it ran",
+    );
     expect(runOutcome(row({ status: "cancelled", summary: { cancelled_by: "budget" } }))).toBe(
       "Stopped: monthly budget reached",
     );
     expect(runOutcome(row({ summary: { analyze_skipped: "budget" } }))).toBe(
       "LLM phase skipped: monthly budget reached",
     );
-    expect(runOutcome(row({ status: "cancelled", summary: { merged_into: 9 } }))).toBe("Merged into run #9");
-    expect(runOutcome(row({ status: "cancelled", summary: { cancelled_by: "user" } }))).toBe("Cancelled by you");
+    expect(runOutcome(row({ status: "cancelled", summary: { merged_into: 9 } }))).toBe("Cancelled");
+    expect(runOutcome(row({ summary: { merged_into: 9 } }))).toBe("Covered by another run");
+    expect(runOutcome(row({ status: "cancelled", cancelled_by: { uid: "u1", label: "Ada" } }), "u1")).toBe(
+      "Cancelled by you",
+    );
     expect(runOutcome(row({ kind: "sync", summary: { moved: true } }))).toBe("Fetched new commits");
+    expect(runOutcome(row({ kind: "sync", summary: { moved: true, scanned: true } }))).toBe(
+      "Fetched new commits and scanned",
+    );
+    expect(runOutcome(row({ kind: "sync", summary: { moved: false } }))).toBe("No new commits");
+    expect(runOutcome(row({ kind: "sync", trigger: "initial", summary: { cloned: true, scanned: true } }))).toBe(
+      "Imported and scanned",
+    );
     expect(runOutcome(row({ analyze: false, summary: { status: "ok" } }))).toBe("Structure only");
+  });
+
+  it("says a linked project's --codegraph-only run refreshed the code index (BUG-13)", () => {
+    expect(runOutcome(row({ analyze: false, summary: { status: "ok", analyze_skipped: "--codegraph-only" } }))).toBe(
+      "Code index refreshed",
+    );
+    // A missing key is still a skip of the descriptions.
+    expect(runOutcome(row({ summary: { status: "ok", analyze_skipped: "no key for anthropic" } }))).toBe(
+      "Descriptions skipped",
+    );
   });
 });
 
@@ -168,8 +335,9 @@ describe("projectStatus with the last scan outcome", () => {
 
   it("shows a failed or interrupted last scan before staleness, and a running scan before both", () => {
     expect(projectStatus(project({ last_scan_status: "failed" }))).toMatchObject({ label: "Scan failed", tone: "error" });
+    // An interrupted run is a failed scan in the pill's vocabulary (plan section 0.3 #38).
     expect(projectStatus(project({ last_scan_status: "interrupted", stale: { commits_behind: 2 } })).label).toBe(
-      "Scan interrupted",
+      "Scan failed",
     );
     expect(
       projectStatus(project({ last_scan_status: "failed", running_scan: { id: 1, status: "running", trigger: "manual" } }))
@@ -189,8 +357,9 @@ describe("projectProblem", () => {
     expect(p.message).toContain("Replace the link with a real file or folder");
   });
 
-  it("passes other errors through", () => {
-    expect(projectProblem(new Error("nope"))).toMatchObject({ kind: "other", message: "nope" });
+  it("words other errors through the registry", () => {
+    expect(projectProblem(new Error("nope"))).toMatchObject({ kind: "other", title: "Something went wrong" });
+    expect(projectProblem(new Error("nope")).message).not.toContain("nope");
   });
 });
 
@@ -209,5 +378,179 @@ describe("mcpSnippet", () => {
       servers: { whygraph: { type: "http", url: "http://127.0.0.1:${input:whygraph-port}/mcp/alpha" } },
     });
     expect(mcpSnippet("codex", url)).toBe(`[mcp_servers.whygraph]\nurl = "${url}"\n`);
+  });
+});
+
+// ---- the wizard's one progress bar (M2f-3 plan section 4.9) ------------------------------------
+
+describe("reducer: plannedPhases, sync clone, maxPercent", () => {
+  it("keeps the start event's titles apart from the phases seen so far", () => {
+    const s = fold([
+      ev({ type: "start", phase_total: 3, phases: ["Structural crawl", "Author identity", "LLM descriptions"] }),
+      ev({ type: "phase", phase: 1, title: "Structural crawl" }),
+    ]);
+    expect(s.plannedPhases).toEqual(["Structural crawl", "Author identity", "LLM descriptions"]);
+    expect(s.phases).toEqual([{ phase: 1, title: "Structural crawl" }]);
+    // An older run's start has no titles.
+    expect(fold([ev({ type: "start", phase_total: 2 })]).plannedPhases).toBeNull();
+  });
+
+  it("keeps the clone's repository name through the ok frame", () => {
+    const s = fold([
+      ev({ type: "sync", status: "cloning", full_name: "acme/api" }),
+      ev({ type: "sync", status: "ok", cloned: true, moved: true }),
+    ]);
+    expect(s.sync).toMatchObject({ status: "ok", fullName: "acme/api", cloned: true });
+  });
+
+  it("never moves the bar backwards when a later task announces its total", () => {
+    let s = fold([
+      ev({ type: "start", phase_total: 1, phases: ["Structural crawl"] }),
+      ev({ type: "phase", phase: 1, title: "Structural crawl" }),
+      ev({ type: "task", name: "git", completed: 90, total: 100 }),
+    ]);
+    const high = s.maxPercent!;
+    // 90% of the phases' 65 of 85 (CodeGraph's 20 is there from the start).
+    expect(high).toBe(68);
+    s = reduceScanRun(s, ev({ type: "task", name: "github", completed: 0, total: 100 }));
+    // The pure ratio is now 45% of the phases (34% overall); the high-water mark stays.
+    expect(rawPercent(s)).toBe(34);
+    expect(s.maxPercent).toBe(high);
+    expect(progressModel(s).percent).toBe(high);
+    s = reduceScanRun(s, ev({ type: "end", run_id: 1, status: "ok", summary: null }));
+    expect(progressModel(s).percent).toBe(100);
+  });
+
+  it("resets with the run", () => {
+    const s = fold([
+      ev({ type: "start", phase_total: 1 }),
+      ev({ type: "phase", phase: 1, title: "Structural crawl" }),
+      ev({ type: "task", name: "git", completed: 1, total: 2 }),
+    ]);
+    expect(s.maxPercent).toBe(38);
+    expect(reduceScanRun(s, { type: "reset" }).maxPercent).toBeNull();
+  });
+});
+
+describe("progressModel", () => {
+  it("is indeterminate until any total is known", () => {
+    const s = fold([ev({ type: "start", phase_total: 2 }), ev({ type: "phase", phase: 1, title: "Structural crawl" })]);
+    expect(progressModel(s).percent).toBeNull();
+    expect(progressModel(s).status).toBe("Reading git history");
+  });
+
+  it("splits the scan phases' share equally beside CodeGraph's fixed share from the start", () => {
+    const base = [
+      ev({ type: "start", phase_total: 2, phases: ["Structural crawl", "Author identity"] }),
+      ev({ type: "phase", phase: 1, title: "Structural crawl" }),
+      ev({ type: "task", name: "git", completed: 50, total: 100 }),
+    ];
+    // CodeGraph (20) beside the phases (65) before any codegraph event: half of
+    // the first of two phases is 16.25 of 85, and the Code index row is pending.
+    const early = progressModel(fold(base));
+    expect(early.percent).toBe(19);
+    expect(early.steps.at(-1)).toEqual({ label: "Code index", state: "pending" });
+    // Its task showing changes nothing in the weights; the row runs.
+    const withCg = fold([...base, ev({ type: "task", name: "codegraph", completed: 0, total: null })]);
+    expect(rawPercent(withCg)).toBe(19);
+    expect(progressModel(withCg).steps.at(-1)).toEqual({ label: "Code index", state: "running" });
+    const cgDone = fold([...base, ev({ type: "task", name: "codegraph", completed: 1, total: 1 })]);
+    expect(rawPercent(cgDone)).toBe(Math.floor(((20 + 16.25) / 85) * 100));
+  });
+
+  it("keeps the bar monotonic as the CodeGraph result lands", () => {
+    let s = fold([
+      ev({ type: "start", phase_total: 1, phases: ["Structural crawl"] }),
+      ev({ type: "phase", phase: 1, title: "Structural crawl" }),
+      ev({ type: "task", name: "git", completed: 10, total: 10 }),
+    ]);
+    const before = progressModel(s).percent!;
+    s = reduceScanRun(s, ev({ type: "task", name: "codegraph", completed: 0, total: null }));
+    expect(progressModel(s).percent).toBeGreaterThanOrEqual(before);
+    s = reduceScanRun(s, ev({ type: "task", name: "codegraph", completed: 1, total: 1 }));
+    expect(progressModel(s).percent).toBeGreaterThanOrEqual(before);
+  });
+
+  it("drops the CodeGraph share and row when the result lists crawlers without it", () => {
+    const s = fold([
+      ev({ type: "start", phase_total: 1, phases: ["Structural crawl"] }),
+      ev({ type: "phase", phase: 1, title: "Structural crawl" }),
+      ev({ type: "task", name: "git", completed: 5, total: 10 }),
+      ev({ type: "result", status: "ok", crawlers: [{ name: "git", status: "ok" }] }),
+    ]);
+    expect(progressModel(s).steps.map((x) => x.label)).toEqual(["Git history and GitHub"]);
+  });
+
+  it("gives a production clone its share and names the repository", () => {
+    const cloning = fold([ev({ type: "sync", status: "cloning", full_name: "acme/api" })]);
+    expect(progressModel(cloning)).toMatchObject({ percent: null, status: "Cloning acme/api" });
+    expect(progressModel(cloning).steps[0]).toEqual({ label: "Clone the repository", state: "running" });
+    const scanning = fold([
+      ev({ type: "sync", status: "cloning", full_name: "acme/api" }),
+      ev({ type: "sync", status: "ok", cloned: true }),
+      ev({ type: "start", phase_total: 1, phases: ["Structural crawl"] }),
+      ev({ type: "phase", phase: 1, title: "Structural crawl" }),
+      ev({ type: "task", name: "git", completed: 0, total: 100 }),
+    ]);
+    // The clone (15) of clone + CodeGraph + phases (100).
+    expect(progressModel(scanning).percent).toBe(15);
+    expect(progressModel(scanning).steps[0]).toEqual({ label: "Clone the repository", state: "done" });
+    const fetching = fold([ev({ type: "sync", status: "fetching" })]);
+    expect(progressModel(fetching, { fullName: "acme/api" }).status).toBe("Fetching acme/api from GitHub");
+    expect(progressModel(fetching).steps[0].label).toBe("Fetch from GitHub");
+  });
+
+  it("treats a linked --codegraph-only run as one Code index step", () => {
+    let s = fold([
+      ev({ type: "start", phase_total: 1, phases: ["Code index"] }),
+      ev({ type: "phase", phase: 1, title: "CodeGraph" }),
+      ev({ type: "task", name: "codegraph", completed: 0, total: null }),
+    ]);
+    expect(progressModel(s)).toEqual({
+      percent: null,
+      status: "Building the code index",
+      steps: [{ label: "Code index", state: "running" }],
+    });
+    s = reduceScanRun(s, ev({ type: "task", name: "codegraph", completed: 1, total: 1 }));
+    expect(progressModel(s).percent).toBe(99);
+    s = reduceScanRun(s, ev({ type: "end", run_id: 1, status: "ok", summary: null }));
+    expect(progressModel(s)).toMatchObject({ percent: 100, status: "Done", steps: [{ label: "Code index", state: "done" }] });
+  });
+
+  it("writes the status line from the running task", () => {
+    const at = (title: string, task: object) =>
+      progressModel(
+        fold([
+          ev({ type: "start", phase_total: 4 }),
+          ev({ type: "phase", phase: 1, title }),
+          ev({ type: "task", ...task }),
+        ]),
+      ).status;
+    expect(at("Structural crawl", { name: "git", completed: 1240, total: 5300 })).toBe(
+      "Reading git history - 1,240 of 5,300 commits",
+    );
+    expect(at("Structural crawl", { name: "github", completed: 40, total: 120 })).toBe(
+      "Fetching pull requests and issues - 40 of 120",
+    );
+    expect(at("LLM descriptions", { name: "analyze", completed: 12, total: 300 })).toBe(
+      "Describing commits - 12 of 300 commits",
+    );
+  });
+
+  it("lists the planned phases with human labels, and the failed one", () => {
+    const s = fold([
+      ev({ type: "start", phase_total: 3, phases: ["Structural crawl", "Author identity", "LLM descriptions"] }),
+      ev({ type: "phase", phase: 1, title: "Structural crawl" }),
+      ev({ type: "phase", phase: 2, title: "Author identity" }),
+      ev({ type: "end", run_id: 1, status: "failed", summary: null }),
+    ]);
+    const model = progressModel(s);
+    expect(model.status).toBe("The scan failed");
+    expect(model.steps).toEqual([
+      { label: "Git history and GitHub", state: "done" },
+      { label: "Author identities", state: "failed" },
+      { label: "Commit descriptions", state: "skipped" },
+      { label: "Code index", state: "skipped" },
+    ]);
   });
 });

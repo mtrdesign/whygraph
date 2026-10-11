@@ -352,7 +352,7 @@ def wait_idle(client: TestClient, headers: dict, slug: str = "api") -> list[dict
 
 
 def _add_org_project(world: World, org: OrgWorld, defaults: dict) -> None:
-    """Add, name, configure, initialize and seed ``org``'s ``api``; start its scan."""
+    """Add, name, configure, initialize (which starts its scan) and seed ``org``'s ``api``."""
     client, owner = world.client, org.owner
     org.root = _marked_repo(world.env, org.mark)
     _seed_codegraph(org.root, org.mark)
@@ -371,12 +371,12 @@ def _add_org_project(world: World, org: OrgWorld, defaults: dict) -> None:
     _ok(client.put("/api/projects/api/config", json=config, headers=owner))
     init = client.post("/api/projects/api/init", json={"agents": []}, headers=owner)
     assert _ok(init)["marker_written"] is True
+    # The first Initialize queues the project's first scan (M2f-3 R2).
+    org.run_id = init.json()["initial_run_id"]
+    assert isinstance(org.run_id, int)
     _seed_history(org.root)
     org.marker_sha = _git(org.root, "rev-parse", "HEAD").strip()
     org.first_sha = _git(org.root, "rev-list", "--max-parents=0", "HEAD").strip()
-    org.run_id = _ok(client.post("/api/projects/api/scans", headers=owner), 202)[
-        "run_id"
-    ]
     session = client.post(
         "/api/projects/api/chat/sessions",
         json={"title": org.session_title},
@@ -639,6 +639,7 @@ PATH_PARAMS: dict[str, Callable[[OrgWorld], str]] = {
     "{user_uid}": lambda o: o.owner_uid,  # an owner: 409 org_admin
     "{installation_id}": lambda o: "7",
     "{link_id}": lambda o: "nolink",  # no pending link: 410 link_expired
+    "{provider}": lambda o: "openrouter",  # no key stored: 409 key_missing
 }
 """How to fill each path parameter for an org; an unmapped one fails the sweep."""
 
@@ -781,6 +782,21 @@ def _project_usage_check(body: dict, w: World, o: OrgWorld) -> None:
     assert body["split"]["scans"]["calls"] == 1
 
 
+def _onboarding_check(body: dict) -> None:
+    assert [i["id"] for i in body["items"]][-1] == "agent"
+    assert all(set(i) == {"id", "done", "can_act"} for i in body["items"])
+
+
+def _overview_check(body: dict, w: World, o: OrgWorld) -> None:
+    assert set(body) == {"coverage", "events", "last_failure", "usage", "agents"}
+    assert {e["run_id"] for e in body["events"]} <= {o.run_id}
+    assert sum(t["calls"] for t in body["usage"]["by_task"]) == 2
+    # No agent calls and no tokens in either world: no person or machine
+    # (the lists are production's, null locally).
+    assert body["agents"]["people"] in (None, [])
+    assert body["agents"]["connections"] in (None, [])
+
+
 def _my_usage_check(body: dict, w: World, o: OrgWorld) -> None:
     # The owner's own row only: never the System's scan call.
     assert body["totals"]["calls"] == 1
@@ -818,6 +834,18 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         200,
         body=lambda w, o: {"config": {"llm": {"model": o.model}}},
         shows=lambda o: [o.model, o.hint("anthropic")],
+    ),
+    # Key tests (M2f-3 section 4.13): openrouter has no key in any world, so
+    # the sweep never reaches a provider (test_portal_keys.py tests for real)
+    ("POST", "/api/portal/defaults/keys/{provider}/test"): Call(
+        409, shows=lambda o: ["key_missing"]
+    ),
+    ("POST", "/api/projects/{slug}/keys/{provider}/test"): Call(
+        409, shows=lambda o: ["key_missing"]
+    ),
+    # (local-only; the marked repos have no GitHub origin)
+    ("POST", "/api/projects/{slug}/github-token/test"): Call(
+        422, shows=lambda o: ["not_github"]
     ),
     ("GET", "/api/projects"): Call(200, check=_projects_check),
     # Production's members page (swept on org hosts only, over prod_world)
@@ -862,6 +890,11 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         200, check=lambda body, w, o: _audit_check(body, o)
     ),
     ("GET", "/api/org/audit.csv"): Call(200, shows=lambda o: ["created_at"]),
+    # Onboarding (M2f-3 section 4.12): booleans only, no org data to leak
+    ("GET", "/api/onboarding"): Call(
+        200, check=lambda body, w, o: _onboarding_check(body)
+    ),
+    ("DELETE", "/api/org/welcome"): Call(204),
     # Monthly budgets (M2f-2 section 4.11; test_portal_budgets.py drives
     # them). The owner may set any member's override, their own included;
     # a DELETE is idempotent.
@@ -908,6 +941,8 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     ("GET", "/api/usage/me/calls"): Call(200, shows=lambda o: [f"{o.mark}.py"]),
     ("GET", "/api/usage/me.csv"): Call(200, shows=lambda o: [o.model]),
     ("GET", "/api/projects/{slug}/usage"): Call(200, check=_project_usage_check),
+    # The project Overview (M2f-3 section 4.10): only its own runs and ledger
+    ("GET", "/api/projects/{slug}/overview"): Call(200, check=_overview_check),
     # Production's GitHub App import page (swept over prod_world, whose
     # owners have not connected GitHub; test_portal_github_import.py drives it)
     ("POST", "/api/github/app/authorize"): Call(
@@ -966,7 +1001,9 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         410, shows=lambda o: ["link_expired"]
     ),
     # Project management
-    ("GET", "/api/projects/{slug}"): Call(200, shows=lambda o: [o.name, str(o.root)]),
+    # (the root only by name: production sends `root: null`, MODE-1; the
+    # local root is asserted in test_projects_carry_their_org_root)
+    ("GET", "/api/projects/{slug}"): Call(200, shows=lambda o: [o.name]),
     ("PATCH", "/api/projects/{slug}"): Call(
         200, body=lambda w, o: {"name": o.name}, shows=lambda o: [o.name]
     ),
@@ -992,6 +1029,9 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         check=_new_run_check,
     ),
     ("GET", "/api/projects/{slug}/scans"): Call(200, check=_runs_check),
+    ("GET", "/api/projects/{slug}/scans/{run_id}"): Call(
+        200, shows=lambda o: [f'"id":{o.run_id}']
+    ),
     ("POST", "/api/projects/{slug}/scans/{run_id}/cancel"): Call(
         409, shows=lambda o: [f"run {o.run_id} already ended"]
     ),
@@ -1148,6 +1188,7 @@ def test_another_orgs_run_ids_are_not_found_under_the_same_slug(
         run_id = w.other(org).run_id
         base = f"/api/projects/api/scans/{run_id}"
         for response in (
+            w.client.get(base, headers=org.owner),
             w.client.get(f"{base}/events", headers=org.owner),
             w.client.get(f"{base}/log", headers=org.owner),
             w.client.post(f"{base}/cancel", headers=org.owner),
@@ -1435,7 +1476,10 @@ def context_calls(two_orgs: World, monkeypatch: pytest.MonkeyPatch) -> list[int]
 
 def test_the_admin_routes_are_the_planned_ones() -> None:
     # Org settings and org-level keys are the owner's (M2d-1 plan section 0.1).
-    assert OWNER_ROUTES == [("PUT", "/api/portal/defaults")]
+    assert OWNER_ROUTES == [
+        ("POST", "/api/portal/defaults/keys/{provider}/test"),
+        ("PUT", "/api/portal/defaults"),
+    ]
     # The org admin's: adding and removing projects (removal is an org
     # action, M2f-1 plan section 0.2 #7), and the budgets (M2f-2 section
     # 0.2 #12; the per-member ones are production's).
@@ -1461,6 +1505,8 @@ def test_the_admin_routes_are_the_planned_ones() -> None:
         ("POST", "/api/platform/callback"),
         ("GET", "/api/platform/pending/{link_id}"),
         ("DELETE", "/api/platform/pending/{link_id}"),
+        # The first-run checklist (M2f-3 section 4.12)
+        ("GET", "/api/onboarding"),
     }
     # The project admin's (local mode; the connections routes are
     # production's).
@@ -1469,6 +1515,9 @@ def test_the_admin_routes_are_the_planned_ones() -> None:
         ("PUT", "/api/projects/{slug}/config"),
         ("POST", "/api/projects/{slug}/init"),
         ("GET", "/api/projects/{slug}/usage"),  # M2f-2 section 0.2 #13
+        # Testing the project's keys (M2f-3 section 4.13)
+        ("POST", "/api/projects/{slug}/keys/{provider}/test"),
+        ("POST", "/api/projects/{slug}/github-token/test"),
     }
     # Everyone reads the price table (it prices their own estimates).
     assert ("GET", "/api/prices") in MEMBER_ROUTES
@@ -1679,6 +1728,75 @@ def _set_local(w: World, *, restricted: bool | None = None, default: str | None 
             db.get(Project, w.local.project_id).restricted = restricted
         if default is not None:
             db.get(Organization, w.local.org_id).default_project_role = default
+
+
+def _end_frame(text: str) -> dict:
+    """The terminal ``end`` frame of a finished run's event stream."""
+    frames = [
+        line[len("data: ") :] for line in text.splitlines() if line.startswith("data: ")
+    ]
+    end = json.loads(frames[-1])
+    assert end["type"] == "end", end
+    return end
+
+
+def test_run_cost_and_the_estimate_price_are_project_admin_only(
+    two_orgs: World,
+) -> None:
+    """R1 and R6 (M2f-3 plan sections 0.3 #39, #46 and 6.2 #3), per role.
+
+    Every reader sees the run, its requester and its outcome; only a
+    ``project.usage`` holder (an owner, an org admin, a project admin) sees
+    what it cost or was expected to cost, and the describe estimate's price.
+    """
+    w = two_orgs
+    usage = {"calls": 3, "cost_usd": 0.42, "cost_source": "provider"}
+    estimate = {"commits": 4, "model": {}, "cost_usd": 0.6, "missing_key": None}
+    with portal_db.get_session() as db:
+        run = db.get(ScanRun, w.local.run_id)
+        summary = {**json.loads(run.summary), "usage": usage, "estimate": estimate}
+        run.summary = json.dumps(summary)
+        db.add(run)
+    alice = {"uid": w.users["alice"]["x-test-user"], "label": "Alice"}
+    base = f"/api/projects/api/scans/{w.local.run_id}"
+    for user, grant, sees_cost in (
+        ("alice", None, True),  # the owner
+        ("dave", None, True),  # an org admin
+        ("carol", "admin", True),  # a project admin
+        ("carol", None, False),  # a contributor (the org default)
+        ("carol", "viewer", False),
+    ):
+        _grant_carol(w, grant)
+        headers = w.as_(user, "local")
+        where = (user, grant)
+        (listed,) = [r for r in runs(w.client, headers) if r["id"] == w.local.run_id]
+        one = _ok(w.client.get(base, headers=headers))
+        assert one == listed, where
+        assert one["requested_by"] == alice, where
+        assert one["status"] == "ok", where
+        stream = w.client.get(f"{base}/events", headers=headers)
+        assert stream.status_code == 200, stream.text
+        end = _end_frame(stream.text)
+        assert (end["status"], end["summary"] is not None) == ("ok", True), where
+        est = _ok(w.client.get("/api/projects/api/scan-estimate", headers=headers))
+        assert {"commits", "upper_bound", "large_commits", "model"} <= set(est)
+        assert "missing_key" in est, where
+        if sees_cost:
+            assert (one["cost_usd"], one["estimate_usd"]) == (0.42, 0.6), where
+            assert one["summary"]["usage"] == usage, where
+            assert one["summary"]["estimate"] == estimate, where
+            assert end["summary"]["usage"] == usage, where
+            assert "cost_hidden" not in est, where
+            assert est["tokens"] is not None, where
+        else:
+            assert "cost_usd" not in one and "estimate_usd" not in one, where
+            assert "usage" not in one["summary"], where
+            assert "estimate" not in one["summary"], where
+            assert "usage" not in end["summary"], where
+            assert "estimate" not in end["summary"], where
+            assert est["cost_hidden"] is True, where
+            assert (est["cost"], est["tokens"]) == (None, None), where
+    _grant_carol(w, None)
 
 
 def _sweep_call(w: World, user: str, method: str, path: str) -> httpx.Response:

@@ -51,6 +51,7 @@ from .deps import (
     user_access,
 )
 from .github_app import (
+    REPOS_PER_PAGE,
     GitHubApp,
     GitHubNotFound,
     GitHubTokenRejected,
@@ -502,28 +503,41 @@ def get_installation_repos(
     installation_id: int,
     request: Request,
     page: int = Query(1, ge=1, le=10_000),
+    q: str = Query("", max_length=100),
+    refresh: bool = False,
     access: OrgAccess = Depends(org_access(Action.ORG_ADD_PROJECT)),
     principal: Principal = Depends(current_user),
 ) -> dict:
-    """One page (100) of an installation's repositories the user can see.
+    """Search an installation's repositories the user can see, a page (100) at a time.
 
-    ``imported`` marks a repository that is already a project **in this
-    org** (by GitHub's repository id). ``404 no_access`` when the user
-    cannot see the installation; otherwise as
-    :func:`get_installations`.
+    The whole list is read from GitHub with the user's token and cached per
+    ``(user, installation)`` for a minute (``state.repo_cache``, M2f-3 plan
+    section 4.8); ``refresh`` re-reads it (at most once per 10 s). ``q``
+    keeps the repositories whose ``full_name`` contains it (case-insensitive)
+    and the pages run over that filtered list. ``imported`` marks a
+    repository that is already a project **in this org** (by GitHub's
+    repository id), computed for every request. ``404 no_access`` when the
+    user cannot see the installation; otherwise as :func:`get_installations`.
 
     Returns
     -------
     dict
         ``{"repos": [{id, full_name, private, default_branch, imported}],
-        "total_count": n, "page": page}``.
+        "total_count": n (filtered), "page": page, "per_page": 100,
+        "truncated": bool, "imports_left": n}`` - ``imports_left`` is what
+        the org's import throttle allows now.
     """
     state = portal_state(request)
     app = require_github_app(state)
     github_id_of(principal)
     token = user_token(state, principal)
     try:
-        listed = app.installation_repos(token, installation_id, page)
+        listing = state.repo_cache.get(
+            (principal.user_id, installation_id),
+            lambda n: app.installation_repos(token, installation_id, n),
+            per_page=REPOS_PER_PAGE,
+            refresh=refresh,
+        )
     except GitHubTokenRejected:
         raise token_rejected(state, principal) from None
     except GitHubNotFound:
@@ -532,7 +546,10 @@ def get_installation_repos(
         ) from None
     except GitHubUnavailable:
         raise github_unavailable() from None
-    ids = [r.id for r in listed.repos]
+    needle = q.strip().lower()
+    matched = [r for r in listing.repos if needle in r.full_name.lower()]
+    shown = matched[(page - 1) * REPOS_PER_PAGE : page * REPOS_PER_PAGE]
+    ids = [r.id for r in shown]
     with get_session() as db:
         imported = (
             set(
@@ -555,10 +572,13 @@ def get_installation_repos(
                 "default_branch": r.default_branch,
                 "imported": r.id in imported,
             }
-            for r in listed.repos
+            for r in shown
         ],
-        "total_count": listed.total_count,
+        "total_count": len(matched),
         "page": page,
+        "per_page": REPOS_PER_PAGE,
+        "truncated": listing.truncated,
+        "imports_left": state.import_org.remaining(access.org_id),
     }
 
 

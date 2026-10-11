@@ -2,7 +2,7 @@ import fs from "node:fs";
 import { expect, test, type Page } from "@playwright/test";
 import { env } from "../env";
 import { sidebarLink } from "../lib/ui";
-import { base, createOrg, githubSignIn, importRepo, orgUrl, signedIn } from "../lib/production";
+import { base, createOrg, expectNoServerText, githubSignIn, importRepo, orgUrl, signedIn } from "../lib/production";
 
 // Production mode (M2c): the bootstrap secret, organizations on their own hosts,
 // the shared session cookie and the instance admin's read-only access. Runs
@@ -11,7 +11,10 @@ const PASSWORD = "correct horse battery staple";
 
 /** The one-time secret the portal prints in its log (plan 4.3). */
 function bootstrapSecret(): string {
-  const m = /Bootstrap secret: ([A-Za-z0-9_-]{24})/.exec(fs.readFileSync(env.prodLog, "utf8"));
+  const m = /Bootstrap secret: ([A-Za-z0-9_-]{24})/.exec(
+    // A colourised log (FORCE_COLOR) wraps the line in ANSI codes; match the plain text.
+    fs.readFileSync(env.prodLog, "utf8").replace(/\x1b\[[0-9;]*m/g, ""),
+  );
   if (!m) throw new Error(`no bootstrap secret in ${env.prodLog}`);
   return m[1];
 }
@@ -50,11 +53,26 @@ test("bootstrap, organizations on their own hosts, sign-in hand-off and reader a
   await createOrg(page, "Acme", "acme");
   await expect(page.getByTestId("reader-banner")).toHaveCount(0);
 
+  // The org switcher names the org; "All organizations" lists it on the base host
+  // even though it is her only one (`?stay=1`), with a way back (NAV-2, NAV-7).
+  await page.getByTestId("org-switcher").click();
+  await expect(page.getByTestId("org-current")).toContainText("Acme");
+  await page.getByRole("menuitem", { name: "All organizations" }).click();
+  await expect(page).toHaveURL(new RegExp(`^${base.origin}/orgs\\?stay=1&from=acme$`));
+  await expect(page.getByTestId("org-list")).toContainText("Acme");
+  await page.getByTestId("back-to-org").click();
+  await expect(page).toHaveURL(new RegExp(`^${orgUrl("acme")}/`));
+  await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
+
   // Ben (a second browser context, so his cookies are his own) signs in with
   // GitHub and creates bravo (the plan says beta, which is a reserved slug).
   const benContext = await browser.newContext({ baseURL: env.prodUrl });
   const ben = await benContext.newPage();
   await githubSignIn(ben, "ben");
+  // No organization yet: the picker says so (no redirect) and offers to create one.
+  await expect(ben.getByRole("heading", { name: "You're not in an organization yet" })).toBeVisible();
+  await expect(ben.getByTestId("join-hint")).toContainText("@ben");
+  await ben.getByRole("link", { name: "Create organization" }).click();
   await expect(ben).toHaveURL(/\/orgs\/new$/);
   await createOrg(ben, "Bravo", "bravo");
 
@@ -64,12 +82,13 @@ test("bootstrap, organizations on their own hosts, sign-in hand-off and reader a
 
   // Ada adds ben on acme's Members page; Ben reloads and sees Projects.
   await page.goto(`${orgUrl("acme")}/members`);
-  await expect(page.getByRole("heading", { name: "Members" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Members", exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByTestId("members-heading")).toContainText("Members (");
   await page.getByLabel("GitHub username").fill("ben");
   await page.getByRole("button", { name: "Invite", exact: true }).click();
   await expect(page.getByTestId("member-list")).toContainText("@ben");
   await ben.reload();
-  await expect(ben.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await expect(ben.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
 
   // Promoted to admin, Ben gets the Members page's controls; then Ada removes him.
   await page.getByLabel("Role for Ben").selectOption("admin");
@@ -92,22 +111,31 @@ test("bootstrap, organizations on their own hosts, sign-in hand-off and reader a
   await expect(nofa.getByTestId("github-callback-error")).toContainText("two-factor authentication");
   await nofaContext.close();
 
+  // The account menu shows who and in which role, the version inside it, and no
+  // "Switch organization" (the org switcher took that over).
+  await expect(page.getByTestId("account-who")).toContainText("ada@example.com · Owner");
+  await page.getByRole("button", { name: "Account menu" }).click();
+  await expect(page.getByText(/^WhyGraph \d/)).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Switch organization" })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+
   await signOut(page);
 
   // Signed out, acme's host sends the browser to the base host's sign-in.
   await page.goto(`${orgUrl("acme")}/`);
   await expect(page).toHaveURL(new RegExp(`^${base.origin}/signin\\?next=`));
   expect(new URL(page.url()).searchParams.get("next")).toContain(orgUrl("acme"));
+  await expect(page.getByText(`Sign in to continue to ${new URL(orgUrl("acme")).host}.`)).toBeVisible();
 
   // Signing in as Ada hands her back to acme.
   await signIn(page, "ada@example.com");
   await expect(page).toHaveURL(new RegExp(`^${orgUrl("acme")}/`));
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
 
   // bravo's host needs no new sign-in (the cookie covers the subdomains); as an
   // instance admin who is not a member, Ada reads it behind the banner.
   await page.goto(`${orgUrl("bravo")}/`);
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
   await expect(page.getByTestId("reader-banner")).toBeVisible();
   await expect(page).not.toHaveURL(/\/signin/);
 });
@@ -130,8 +158,18 @@ test("projects from GitHub: connect, import, scan, members, a push, deleting the
   await signedIn(ben);
   await ben.goto("/orgs/new");
   await createOrg(ben, "Rocket", "rocket");
+  // Before the import, a new org's empty page is the first-run checklist.
+  await expect(ben.getByTestId("first-run-checklist")).toContainText("No projects yet");
+  await expect(ben.getByTestId("first-run-project")).toContainText("Import a repository");
+  await expect(ben.getByTestId("first-run-invite")).toContainText("Invite your team");
   await importRepo(ben, "rocket", "ben/demo");
   expect((await runs(ben, "demo")).map((r) => r.status)).toEqual(["ok"]);
+  // No server path, key variable or config file name shows on the pages visited (text scan).
+  for (const url of ["/", "/p/demo", "/p/demo/scans", "/p/demo/settings", "/settings", "/members", "/usage"]) {
+    await ben.goto(`${orgUrl("rocket")}${url}`);
+    await expect(ben.getByRole("heading").first()).toBeVisible();
+    await expectNoServerText(ben);
+  }
 
   // Ada, the instance administrator, signs in with a password: she cannot
   // import from GitHub, not even into her own organization.
@@ -145,7 +183,7 @@ test("projects from GitHub: connect, import, scan, members, a push, deleting the
   const answer = await refused;
   expect(answer.status()).toBe(403);
   expect(((await answer.json()) as { code?: string }).code).toBe("github_required");
-  await expect(page.getByTestId("github-error")).toContainText("needs an account that signs in with GitHub");
+  await expect(page.getByTestId("github-required")).toContainText("Importing needs a GitHub sign-in");
 
   // cy signs in once, Ben adds him as a member (M2d-1's flow): cy sees the
   // project, without the owners' and admins' New project.
@@ -189,8 +227,12 @@ test("projects from GitHub: connect, import, scan, members, a push, deleting the
   await ben.goto("/orgs/new");
   await ben.getByLabel("Organization name").fill("Rocket");
   await ben.getByLabel("URL name").fill("rocket");
-  await ben.getByRole("button", { name: "Create organization" }).click();
-  await expect(ben.getByText("That URL name is already taken.")).toBeVisible();
+  // The live check says the retired slug is taken, so the known-bad submit is not
+  // offered: no address preview, Create disabled (the server's own refusal is
+  // covered by the pytest suite).
+  await expect(ben.getByTestId("slug-status")).toContainText("rocket." + base.host + " is already taken");
+  await expect(ben.getByTestId("slug-preview")).toHaveCount(0);
+  await expect(ben.getByRole("button", { name: "Create organization" })).toBeDisabled();
   await benContext.close();
 });
 
@@ -228,17 +270,17 @@ test("project access: Restricted projects, an invited user's grants, roles and a
   await ben.getByRole("button", { name: "Invite", exact: true }).click();
   await expect(ben.getByTestId("invite-pending")).toBeVisible();
   await expect(ben.getByTestId("invitations")).toContainText("@dee");
-  await expect(ben.getByTestId("invitations")).toContainText("demo (viewer)");
+  await expect(ben.getByTestId("invitations")).toContainText("demo: Viewer");
 
   // Dee signs in and is a member at once: she sees demo, not notes; she may
-  // look but not rescan, and has no Chat.
+  // look but not rescan, and has no Chats section.
   const { c: deeContext, page: dee } = await context("dee");
   await dee.goto(`${orgUrl("comet")}/`);
   await expect(dee.getByTestId("project-demo")).toBeVisible();
   await expect(dee.getByTestId("project-notes")).toHaveCount(0);
   await dee.goto(`${orgUrl("comet")}/p/demo`);
   await expect(sidebarLink(dee, "Scans")).toBeVisible();
-  await expect(sidebarLink(dee, "Chat")).toHaveCount(0);
+  await expect(dee.getByTestId("chats-section")).toHaveCount(0);
   await expect(rescan(dee)).toHaveCount(0);
   // The restricted project she holds no grant on answers as if it did not exist.
   const notes = await dee.request.get(`${orgUrl("comet")}/api/projects/notes`, { headers: { "X-WhyGraph-Client": "1" } });
@@ -252,7 +294,7 @@ test("project access: Restricted projects, an invited user's grants, roles and a
   await expect(person.getByRole("combobox")).toHaveValue("contributor");
   await dee.reload();
   await expect(rescan(dee).first()).toBeVisible();
-  await expect(sidebarLink(dee, "Chat")).toBeVisible();
+  await expect(dee.getByTestId("chats-section").first()).toBeVisible();
   await rescan(dee).first().click();
   await expect(dee.getByRole("menuitem")).toHaveCount(0);
   await expect(dee.getByText("Full rescan")).toHaveCount(0);
@@ -290,13 +332,14 @@ test("project access: Restricted projects, an invited user's grants, roles and a
         await cy.reload();
         await expect(table).toBeVisible();
         const text = await table.innerText();
-        return ["invitation_created", "project_restricted_changed", "project_grant_changed", "org_ownership_transferred"]
+        return ["Invitation created", "Restricted setting changed", "Project access changed", "Ownership transferred"]
           .filter((e) => !text.includes(e));
       },
       { timeout: 30_000 },
     )
     .toEqual([]);
   await expect(table).toContainText("@ben");
+  await expectNoServerText(cy);
   await cyContext.close();
   await benContext.close();
 });

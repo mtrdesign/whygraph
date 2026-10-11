@@ -1,10 +1,12 @@
-import { useState, type FormEvent, type ReactNode } from "react";
+import { PageContainer } from "../components/layout/PageContainer";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import {
   membersApi,
   portalApi,
   portalKey,
+  projectApi,
   usageApi,
   type UsageGroup,
   type UsageGroupRow,
@@ -12,10 +14,11 @@ import {
 } from "../api";
 import { BudgetsTab } from "../components/usage/BudgetsTab";
 import { BreakdownTable } from "../components/usage/BreakdownTable";
-import { CallsTable } from "../components/usage/CallsTable";
+import { CallsTable, useCallsQuery } from "../components/usage/CallsTable";
 import { PricesTab } from "../components/usage/PricesTab";
 import { DailyCostChart } from "../components/usage/UsageChart";
 import {
+  ChoiceSelect,
   CsvButton,
   EstimatedNote,
   RangePicker,
@@ -23,17 +26,22 @@ import {
   SplitLine,
   StatTile,
   UnpricedNote,
+  UsageError,
   UsageSection,
 } from "../components/usage/parts";
-import { Field, nativeSelectClass } from "../components/portal/Field";
+import { TabsSelect } from "../components/layout/TabsSelect";
+import { Field } from "../components/portal/Field";
+import { TableSkeleton } from "../components/state/Skeletons";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Skeleton } from "../components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
-import { authMessage } from "../lib/authErrors";
-import { formatPct, formatTokens, formatUsd } from "../lib/format";
+import { useChatSessions } from "../lib/chatSessions";
+import { formatNumber, formatPct, formatTokens, formatUsd } from "../lib/format";
 import { canAdmin, canOwn, isProduction, usePortalState, useRole } from "../lib/identity";
+import { inheritedLayerLabel } from "../lib/labels";
+import { runTitle } from "../lib/scanFormat";
 import { formatRange, monthRange, type UsageRange } from "../lib/usageRange";
 
 // ---- the address ------------------------------------------------------------------
@@ -151,15 +159,61 @@ function rangeOf(search: RangeSearch): Partial<UsageRange> {
 
 // ---- Overview ---------------------------------------------------------------------
 
+/** The Overview while it loads: four tiles, the notes, the chart and the two top-5 tables, in their shapes (ER-5). */
+function OverviewSkeleton() {
+  const card = "flex flex-col gap-4 rounded-xl border border-border bg-card p-4 shadow-card sm:p-5";
+  return (
+    <div className="flex flex-col gap-6" data-testid="usage-overview-loading" aria-busy="true">
+      <span className="sr-only" role="status">
+        Loading the usage report
+      </span>
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className="flex flex-col gap-1.5 rounded-lg border border-border bg-card px-3 py-2.5 shadow-card">
+            <Skeleton className="h-3 w-20" />
+            <Skeleton className="h-7 w-24" />
+            <Skeleton className="h-3 w-16" />
+          </div>
+        ))}
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <Skeleton className="h-3 w-72 max-w-full" />
+        <Skeleton className="h-3 w-full" />
+      </div>
+      <Skeleton className="h-[260px] w-full rounded-xl" />
+      <div className="grid gap-6 md:grid-cols-2">
+        {[0, 1].map((i) => (
+          <div key={i} className={card}>
+            <div className="flex flex-col gap-1.5">
+              <Skeleton className="h-4 w-28" />
+              <Skeleton className="h-3 w-40" />
+            </div>
+            <TableSkeleton rows={3} cols={3} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Overview({ toCalls }: { toCalls: (filter: UsageSearch) => UsageSearch }) {
-  const usage = usePortalState().data?.usage;
+  const state = usePortalState().data;
+  const usage = state?.usage;
+  const layer = inheritedLayerLabel(isProduction(state) ? "production" : "local", true);
   const thisMonth = useUsageReport("org", { group: "project" });
   const models = useUsageReport("org", { group: "model" });
   const lastMonth = useUsageReport("org", monthRange(-1));
 
-  if (thisMonth.isLoading) return <Skeleton className="h-60" />;
+  if (thisMonth.isLoading) return <OverviewSkeleton />;
   if (thisMonth.isError || !thisMonth.data) {
-    return <p className="text-sm text-destructive">Failed to load: {authMessage(thisMonth.error)}</p>;
+    return (
+      <UsageError
+        error={thisMonth.error}
+        what="this usage report"
+        title="Couldn't load the usage report"
+        onRetry={() => void thisMonth.refetch()}
+      />
+    );
   }
   const cur = thisMonth.data;
   const last = lastMonth.data?.totals;
@@ -188,13 +242,13 @@ function Overview({ toCalls }: { toCalls: (filter: UsageSearch) => UsageSearch }
             </>
           }
           value={formatUsd(cur.totals.cost_usd)}
-          detail={`${cur.totals.calls.toLocaleString("en-US")} calls`}
+          detail={`${formatNumber(cur.totals.calls)} calls`}
         />
         <StatTile
           testId="tile-last-month"
           label="Last month"
           value={last ? formatUsd(last.cost_usd) : "-"}
-          detail={last ? `${last.calls.toLocaleString("en-US")} calls` : undefined}
+          detail={last ? `${formatNumber(last.calls)} calls` : undefined}
         />
         <StatTile
           label="Tokens in / out"
@@ -205,8 +259,8 @@ function Overview({ toCalls }: { toCalls: (filter: UsageSearch) => UsageSearch }
         />
         <StatTile
           testId="tile-budget"
-          label="Organization budget"
-          value={org?.budget_usd != null ? formatPct(org.pct) : "None"}
+          label={`${layer} budget`}
+          value={org?.budget_usd != null ? formatPct(org.pct) : "-"}
           detail={
             org?.budget_usd != null ? (
               <span className="flex flex-col gap-1">
@@ -217,7 +271,9 @@ function Overview({ toCalls }: { toCalls: (filter: UsageSearch) => UsageSearch }
                 <SpendBar pct={org.pct} />
               </span>
             ) : (
-              "Set one on the Budgets tab"
+              <Link to="/usage" search={{ tab: "budgets" }} className="text-primary-text hover:underline">
+                None - set one
+              </Link>
             )
           }
         />
@@ -234,7 +290,7 @@ function Overview({ toCalls }: { toCalls: (filter: UsageSearch) => UsageSearch }
         </UsageSection>
         <UsageSection title="Top models" description="This month, by the model the provider served.">
           {models.isLoading ? (
-            <Skeleton className="h-24" />
+            <TableSkeleton rows={3} cols={3} label="Loading the top models" />
           ) : (
             <BreakdownTable group="model" rows={models.data?.groups ?? []} limit={5} compact link={linkModel} />
           )}
@@ -249,7 +305,7 @@ function Overview({ toCalls }: { toCalls: (filter: UsageSearch) => UsageSearch }
 const GROUP_INTRO: Partial<Record<UsageGroup, string>> = {
   project: "What each project's calls cost. A removed project keeps its rows under its old slug.",
   member:
-    "Who triggered the spend: interactive is chat, Explorer Generate, agent calls and on-demand descriptions; scans are the full scans they started. Triggered is not benefited, so this is not a ranking. System covers webhook, reconcile and hook scans.",
+    "Who triggered the spend: interactive is chat, Explorer Generate, agent calls and on-demand descriptions; scans are the full scans they started. This shows who started the spend, not who gained from it, so it is not a ranking. System covers webhook, reconcile and hook scans.",
   model: "Spend per model, as the provider served it.",
   machine:
     "Agent calls through a linked portal, per machine. Everything made in this portal itself is under Portal.",
@@ -268,20 +324,29 @@ function GroupTab({
 }) {
   const range = rangeOf(search);
   const report = useUsageReport("org", { ...range, group });
+  // An empty breakdown has nothing to export.
+  const empty = !!report.data && report.data.groups.length === 0;
   return (
     <div className="flex flex-col gap-4" data-testid={`usage-tab-${group}`}>
       <p className="text-[13px] text-muted-foreground">{GROUP_INTRO[group]}</p>
       <div className="flex flex-wrap items-end justify-between gap-3">
         <RangePicker range={range} onChange={setRange} />
-        <CsvButton download={() => usageApi("org").csv({ ...range, group })} testId={`csv-${group}`} />
+        {!empty && <CsvButton download={() => usageApi("org").csv({ ...range, group })} testId={`csv-${group}`} />}
       </div>
-      {report.isLoading && <Skeleton className="h-32" />}
-      {report.isError && <p className="text-sm text-destructive">Failed to load: {authMessage(report.error)}</p>}
+      {report.isLoading && <TableSkeleton rows={5} cols={4} label="Loading this breakdown" />}
+      {report.isError && (
+        <UsageError
+          error={report.error}
+          what="this usage report"
+          title="Couldn't load this breakdown"
+          onRetry={() => void report.refetch()}
+        />
+      )}
       {report.data && (
         <>
           <p className="text-xs text-muted-foreground">
             {formatRange(report.data.range)}: {formatUsd(report.data.totals.cost_usd)} estimated over{" "}
-            {report.data.totals.calls.toLocaleString("en-US")} calls.
+            {formatNumber(report.data.totals.calls)} calls.
           </p>
           <BreakdownTable group={group} rows={report.data.groups} link={link} />
         </>
@@ -291,6 +356,33 @@ function GroupTab({
 }
 
 // ---- Calls ------------------------------------------------------------------------
+
+/** How long the Model box waits after the last keystroke before it filters. */
+const MODEL_DEBOUNCE_MS = 350;
+
+/** The "This scan: ..." / "This chat: ..." chips name what they filter to, never an id (USE-5). */
+function useChipLabels(search: UsageSearch, viewerUid: string | undefined) {
+  const first = useCallsQuery("org", callsQuery(search));
+  const rows = first.data?.pages.flatMap((p) => p.items) ?? [];
+  const runId = search.scan_run ? Number(search.scan_run) : null;
+  const sessionId = search.chat_session && search.project ? Number(search.chat_session) : null;
+  const runSlug = search.project ?? rows.find((c) => c.scan_run_id === runId)?.project_slug ?? null;
+  const run = useQuery({
+    queryKey: ["usage", "chip", "scan", runSlug, runId],
+    queryFn: () => projectApi(runSlug as string).scan(runId as number),
+    enabled: runId !== null && !!runSlug,
+    retry: false,
+  });
+  // A chat is its owner's: another member's session has no title for the viewer.
+  const owner = rows.find((c) => c.chat_session_id === sessionId)?.user_uid ?? null;
+  const foreign = sessionId !== null && owner !== null && !!viewerUid && owner !== viewerUid;
+  const sessions = useChatSessions(search.project ?? "", sessionId !== null && !foreign && !!search.project);
+  const title = sessions.data?.find((s) => s.id === sessionId)?.title;
+  return {
+    scan: runId === null ? null : run.data ? `This scan: ${runTitle(run.data)}` : "This scan",
+    chat: sessionId === null ? null : foreign ? "Chat (another member)" : title ? `This chat: ${title}` : "This chat",
+  };
+}
 
 function CallsTab({
   search,
@@ -305,40 +397,37 @@ function CallsTab({
   const openable = useOpenableProjects();
   const projects = useQuery({ queryKey: portalKey("projects"), queryFn: portalApi.projects });
   const members = useQuery({ queryKey: portalKey("members"), queryFn: membersApi.list, enabled: production });
-  const [draft, setDraft] = useState({
-    project: search.project ?? "",
-    member: search.member ?? "",
-    task: search.task ?? "",
-    source: search.source ?? "",
-    model: search.model ?? "",
-    sort: search.sort ?? "time",
-  });
   const query = callsQuery(search);
-  const submit = (e: FormEvent) => {
-    e.preventDefault();
-    apply({
-      ...search,
-      project: draft.project || undefined,
-      member: draft.member || undefined,
-      task: draft.task || undefined,
-      source: draft.source || undefined,
-      model: draft.model.trim() || undefined,
-      sort: draft.sort === "cost" ? "cost" : undefined,
-      // A session id means nothing without its project.
-      chat_session: draft.project && draft.project === search.project ? search.chat_session : undefined,
-    });
-  };
+  const chips = useChipLabels(search, state?.user?.uid);
+
+  // Every filter applies as it changes; only the Model text waits for typing to stop.
+  const latest = useRef({ search, apply });
+  latest.current = { search, apply };
+  const [model, setModel] = useState(search.model ?? "");
+  useEffect(() => setModel(search.model ?? ""), [search.model]);
+  useEffect(() => {
+    const value = model.trim() || undefined;
+    if (value === latest.current.search.model) return;
+    const timer = setTimeout(() => latest.current.apply({ ...latest.current.search, model: value }), MODEL_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [model]);
+
   const select = (label: string, key: "project" | "member" | "task" | "source", options: { value: string; label: string }[]) => (
-    <Field label={label} className="w-40">
+    <Field label={label} className="w-40 max-sm:w-full">
       {(p) => (
-        <select {...p} className={nativeSelectClass} value={draft[key]} onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}>
-          <option value="">All</option>
-          {options.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
+        <ChoiceSelect
+          {...p}
+          value={search[key] ?? ""}
+          onChange={(value) =>
+            apply({
+              ...search,
+              [key]: value || undefined,
+              // A session id means nothing without its project.
+              ...(key === "project" ? { chat_session: undefined } : {}),
+            })
+          }
+          options={[{ value: "", label: "All" }, ...options]}
+        />
       )}
     </Field>
   );
@@ -351,11 +440,9 @@ function CallsTab({
     ...(members.data ?? []).map((m) => ({ value: m.uid, label: m.display_name || m.github_login || m.uid })),
     { value: "system", label: "System" },
   ];
-  const chips: { label: string; clear: UsageSearch }[] = [];
-  if (search.scan_run) chips.push({ label: `Scan run #${search.scan_run}`, clear: { ...search, scan_run: undefined } });
-  if (search.chat_session && search.project) {
-    chips.push({ label: `Chat session #${search.chat_session}`, clear: { ...search, chat_session: undefined } });
-  }
+  const active: { label: string; clear: UsageSearch }[] = [];
+  if (chips.scan) active.push({ label: chips.scan, clear: { ...search, scan_run: undefined } });
+  if (chips.chat) active.push({ label: chips.chat, clear: { ...search, chat_session: undefined } });
 
   return (
     <div className="flex flex-col gap-4" data-testid="usage-tab-calls">
@@ -363,36 +450,38 @@ function CallsTab({
         <RangePicker range={rangeOf(search)} onChange={(r) => apply({ ...search, from: r.from, to: r.to })} />
         <CsvButton download={() => usageApi("org").csv(query)} testId="csv-calls" />
       </div>
-      <form onSubmit={submit} className="flex flex-wrap items-end gap-3" data-testid="calls-filters">
+      <div className="flex flex-wrap items-end gap-3" role="group" aria-label="Filters" data-testid="calls-filters">
         {select("Project", "project", projectOptions)}
         {production && select("Member", "member", memberOptions)}
         {select("Task", "task", TASKS)}
         {select("Source", "source", SOURCES)}
-        <Field label="Model" className="w-44">
-          {(p) => <Input {...p} placeholder="claude-sonnet-4-5" value={draft.model} onChange={(e) => setDraft({ ...draft, model: e.target.value })} />}
+        <Field label="Model" className="w-44 max-sm:w-full">
+          {(p) => <Input {...p} placeholder="e.g. claude-sonnet-4-5" value={model} onChange={(e) => setModel(e.target.value)} />}
         </Field>
-        <Field label="Sort" className="w-36">
+        <Field label="Sort" className="w-36 max-sm:w-full">
           {(p) => (
-            <select {...p} className={nativeSelectClass} value={draft.sort} onChange={(e) => setDraft({ ...draft, sort: e.target.value as "time" | "cost" })}>
-              <option value="time">Newest first</option>
-              <option value="cost">Costliest first</option>
-            </select>
+            <ChoiceSelect
+              {...p}
+              value={search.sort ?? "time"}
+              onChange={(value) => apply({ ...search, sort: value === "cost" ? "cost" : undefined })}
+              options={[
+                { value: "time", label: "Newest first" },
+                { value: "cost", label: "Costliest first" },
+              ]}
+            />
           )}
         </Field>
-        <Button type="submit" variant="outline">
-          Filter
-        </Button>
-      </form>
-      {chips.length > 0 && (
+      </div>
+      {active.length > 0 && (
         <div className="flex flex-wrap gap-2">
-          {chips.map((c) => (
+          {active.map((c) => (
             <Button key={c.label} type="button" size="xs" variant="secondary" onClick={() => apply(c.clear)}>
               {c.label} ×
             </Button>
           ))}
         </div>
       )}
-      <CallsTable scope="org" query={query} viewerUid={state?.user?.uid} openable={openable} />
+      <CallsTable scope="org" query={query} viewerUid={state?.user?.uid} openable={openable} showWho={production} />
     </div>
   );
 }
@@ -451,13 +540,15 @@ export function UsagePage() {
   };
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-col gap-6 p-6 sm:p-8" data-testid="usage-page">
+    <PageContainer width="default" className="flex flex-col gap-6" data-testid="usage-page">
       <div className="flex flex-wrap items-start gap-3">
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <h1 className="text-[22px] font-semibold tracking-tight">Usage & cost</h1>
           <p className="text-[13px] text-muted-foreground">
-            What {state?.org?.name ?? "this organization"}'s LLM keys are spending, on what, and because of whom. Counts
-            and cost only; no prompt or chat content is kept.
+            {production
+              ? `What ${state?.org?.name ?? "this organization"}'s LLM keys are spending, on what, and because of whom.`
+              : "What this portal's LLM keys are spending, and on what."}{" "}
+            Counts and cost only; no prompt or chat content is kept.
           </p>
         </div>
         {state?.usage?.me && (
@@ -467,11 +558,14 @@ export function UsagePage() {
         )}
       </div>
       <Tabs value={tab} onValueChange={(value) => go({ ...search, tab: value as UsageTab })} className="gap-5">
-        <TabsList
-          variant="line"
-          // Scrolls sideways on a phone; the bottom padding keeps the active underline inside the clip.
-          className="w-full justify-start overflow-x-auto overflow-y-hidden border-b border-border pb-[7px] group-data-horizontal/tabs:h-10"
-        >
+        {/* Eight tabs do not fit a phone: a select stands in below `sm` (PH-6). */}
+        <TabsSelect
+          label="Usage view"
+          value={tab}
+          onValueChange={(value) => go({ ...search, tab: value as UsageTab })}
+          tabs={tabs.map((t) => ({ value: t.key, label: t.label }))}
+        />
+        <TabsList variant="scrollable" className="max-sm:hidden">
           {tabs.map((t) => (
             <TabsTrigger key={t.key} value={t.key} className="flex-none text-[13px]">
               {t.label}
@@ -498,8 +592,6 @@ export function UsagePage() {
         <TabsContent value="calls">
           {tab === "calls" && (
             <CallsTab
-              // Re-seed the filter form when a link changes the filters.
-              key={JSON.stringify(callsQuery(search))}
               search={search}
               production={production}
               apply={(next) => go({ ...next, tab: "calls" })}
@@ -518,6 +610,6 @@ export function UsagePage() {
         </TabsContent>
         <TabsContent value="prices">{tab === "prices" && <PricesTab canEdit={canAdmin(role)} />}</TabsContent>
       </Tabs>
-    </div>
+    </PageContainer>
   );
 }

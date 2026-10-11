@@ -155,7 +155,8 @@ def resolve_target(
     if qualified_name:
         if path or line_start or line_end:
             raise WhyGraphError(
-                "pass either qualified_name OR (path, line_start, line_end), not both"
+                "pass either qualified_name OR (path, line_start, line_end), not both",
+                code="bad_target",
             )
         root = repo_root()
         codegraph_db = get_config().codegraph_db
@@ -164,10 +165,13 @@ def resolve_target(
                 symbol = graph.symbol(qualified_name)
                 stale = symbol is not None and _is_stale(graph, root, symbol)
         except CodeGraphError as exc:
-            raise WhyGraphError.wrap("qualified_name targeting needs CodeGraph", exc)
+            raise WhyGraphError.wrap(
+                "qualified_name targeting needs CodeGraph", exc, code="not_indexed"
+            )
         if symbol is None:
             raise WhyGraphError(
-                f"qualified_name {qualified_name!r} not found in CodeGraph"
+                f"qualified_name {qualified_name!r} not found in CodeGraph",
+                code="symbol_not_found",
             )
         index_stale = False
         if stale:
@@ -185,10 +189,13 @@ def resolve_target(
 
     if not (path and line_start and line_end):
         raise WhyGraphError(
-            "pass either qualified_name OR all of (path, line_start, line_end)"
+            "pass either qualified_name OR all of (path, line_start, line_end)",
+            code="bad_target",
         )
     if line_start < 1 or line_end < line_start:
-        raise WhyGraphError("line_start must be >= 1 and line_end >= line_start")
+        raise WhyGraphError(
+            "line_start must be >= 1 and line_end >= line_start", code="bad_target"
+        )
     return Target(
         path=path,
         line_start=line_start,

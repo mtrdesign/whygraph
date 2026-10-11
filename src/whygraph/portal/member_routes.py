@@ -331,7 +331,10 @@ def get_members(access: OrgAccess = Depends(org_access(Action.ORG_READ))) -> lis
 
     For an ``org.usage`` caller each row also carries ``month_spend_usd``
     and ``month_split: {interactive, scans}`` (M2f-2 plan section 4.12),
-    from one grouped query.
+    from one grouped query. For an ``org.members`` holder each row also
+    carries ``grants: [{project, name, role}]`` (the member's per-project
+    roles; ``project`` is the slug), from one query; a caller without that
+    action never sees the key (M2f-3 plan section 4.12).
     """
     spend = (
         member_month_spend(access.org_id)
@@ -345,9 +348,28 @@ def get_members(access: OrgAccess = Depends(org_access(Action.ORG_READ))) -> lis
             .where(Membership.org_id == access.org_id)
             .order_by(col(Membership.created_at), col(User.id))
         ).all()
+        grants: dict[int, list[dict]] | None = None
+        if allowed(access.role, Action.ORG_MEMBERS):
+            grants = {}
+            for user_id, slug, name, grant_role in db.exec(
+                select(
+                    ProjectGrant.user_id,
+                    Project.slug,
+                    Project.name,
+                    ProjectGrant.role,
+                )
+                .join(Project, col(Project.id) == col(ProjectGrant.project_id))
+                .where(ProjectGrant.org_id == access.org_id)
+                .order_by(col(Project.name), col(Project.slug))
+            ).all():
+                grants.setdefault(user_id, []).append(
+                    {"project": slug, "name": name, "role": grant_role}
+                )
         members = []
         for user, role, joined in rows:
             row = _member_row(user, role, joined)
+            if grants is not None:
+                row["grants"] = grants.get(user.id, [])  # type: ignore[arg-type]
             if spend is not None:
                 row.update(member_spend_fields(spend, user.id))  # type: ignore[arg-type]
             members.append(row)
@@ -488,6 +510,8 @@ def post_member(
                 membership = add_member(
                     db, org_id=access.org_id, user_id=user.id, role=role
                 )
+                membership.welcome_pending = True
+                db.add(membership)
                 for project_id, _, project_role in projects:
                     db.add(
                         ProjectGrant(
@@ -940,6 +964,8 @@ def _redeem_one(
     ).first()
     if membership is None:
         membership = add_member(db, org_id=org_id, user_id=user_id, role=role)
+        membership.welcome_pending = True
+        db.add(membership)
     if membership.role not in (Role.OWNER.value, Role.ADMIN.value):
         grants = InvitationGrant.__table__
         projects = Project.__table__

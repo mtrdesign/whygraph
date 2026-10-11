@@ -12,6 +12,8 @@ import ELK from "elkjs/lib/elk.bundled.js";
 import { useProjectQuery } from "../lib/project";
 import { OverviewNode, type OverviewNodeData } from "./OverviewNode";
 import { Loading } from "./Loading";
+import { ErrorState } from "./state/ErrorState";
+import { EmptyState } from "./state/EmptyState";
 import { useTheme } from "../theme";
 
 // The Phase-2 LOD overview and landing view: directory super-nodes with weighted,
@@ -67,7 +69,7 @@ export function Overview() {
   const [positions, setPositions] = useState<Record<string, { x: number; y: number }>>({});
 
   const expandedParam = useMemo(() => [...expanded].sort().join(","), [expanded]);
-  const { data, isLoading, isError, error } = useProjectQuery(["overview", expandedParam], (api) =>
+  const { data, isLoading, isError, error, refetch } = useProjectQuery(["overview", expandedParam], (api) =>
     api.overview(expandedParam),
   );
 
@@ -127,25 +129,33 @@ export function Overview() {
   if (isLoading || !laidOut)
     return (
       <div className="flex h-full items-center justify-center">
-        <Loading label="Loading overview…" />
+        <Loading label="Loading the graph…" />
       </div>
     );
   if (isError)
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-muted-foreground">
-        <div className="text-sm text-destructive">{(error as Error).message}</div>
-        <div className="text-xs">
-          Scan from the WhyGraph portal (or run{" "}
-          <code className="text-foreground">whygraph scan</code> outside it) to build the
-          index.
-        </div>
+      <div className="flex h-full items-center justify-center p-4">
+        <ErrorState
+          title="Couldn't load the graph"
+          error={error}
+          onRetry={() => void refetch()}
+          className="w-full max-w-md"
+        />
       </div>
+    );
+  if (data && data.nodes.length === 0)
+    return (
+      <EmptyState
+        className="h-full"
+        title="Nothing indexed yet"
+        description="The code index has no symbols to draw. Run a scan from the project Overview to build it."
+      />
     );
 
   return (
     <div className="h-full">
       <div className="absolute left-1/2 top-3 z-10 -translate-x-1/2 whitespace-nowrap rounded-full border border-border bg-muted/80 px-3 py-1 text-xs text-muted-foreground backdrop-blur-sm">
-        Overview — click a directory to expand · coverage colored
+        Overview - click a directory to expand · coverage colored
       </div>
       <ReactFlow
         nodes={nodes}

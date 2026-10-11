@@ -26,10 +26,31 @@ class WhyGraphError(ToolError):
     Surfaces to the agent as the tool's error message — phrased for a
     reader who will act on it (e.g. "scan from the WhyGraph portal (or run
     ``whygraph scan`` outside it) first").
+
+    Parameters
+    ----------
+    message : str, optional
+        The message the agent (or the Explorer's "Show details") reads.
+    code : str, optional
+        A machine-readable code (``no_evidence``, ``blame_failed``, ...)
+        that the portal's HTTP translation sends beside the message, so
+        the playground can word the failure itself. The MCP surface
+        ignores it.
+
+    Attributes
+    ----------
+    code : str or None
+        As passed.
     """
 
+    def __init__(self, message: str = "", *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
     @classmethod
-    def wrap(cls, message: str, cause: BaseException) -> "WhyGraphError":
+    def wrap(
+        cls, message: str, cause: BaseException, *, code: str | None = None
+    ) -> "WhyGraphError":
         """Build a ``WhyGraphError`` that chains ``cause`` as ``__cause__``.
 
         Captures the recurring ``raise WhyGraphError(f"{prefix}: {exc}") from exc``
@@ -45,6 +66,8 @@ class WhyGraphError(ToolError):
         cause:
             The underlying exception. Stringified into the message and
             attached as ``__cause__`` for traceback chaining.
+        code:
+            The machine-readable code, as for the constructor.
 
         Returns
         -------
@@ -57,7 +80,7 @@ class WhyGraphError(ToolError):
         --------
         >>> raise WhyGraphError.wrap("git blame failed", exc)  # doctest: +SKIP
         """
-        err = cls(f"{message}: {cause}")
+        err = cls(f"{message}: {cause}", code=code)
         err.__cause__ = cause
         return err
 

@@ -82,7 +82,7 @@ export function ToolCallCard({ activity }: { activity: ToolActivity }) {
             <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
               Arguments
             </div>
-            <pre className="overflow-x-auto rounded-sm bg-background p-2 font-mono text-[11px] text-foreground">
+            <pre className="max-h-48 overflow-y-auto whitespace-pre-wrap break-words rounded-sm bg-background p-2 font-mono text-[11px] text-foreground">
               {JSON.stringify(args, null, 2)}
             </pre>
           </div>
@@ -95,7 +95,7 @@ export function ToolCallCard({ activity }: { activity: ToolActivity }) {
             ) : (
               // Plain text in a <pre>: tool results are repo content and never
               // get rendered as markup.
-              <pre className="max-h-72 overflow-auto rounded-sm bg-background p-2 font-mono text-[11px] text-foreground">
+              <pre className="max-h-72 overflow-y-auto whitespace-pre-wrap break-words rounded-sm bg-background p-2 font-mono text-[11px] text-foreground">
                 {result ? formatResult(result) : "(no result)"}
               </pre>
             )}

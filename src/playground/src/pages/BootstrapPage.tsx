@@ -37,14 +37,17 @@ export function BootstrapPage() {
   return (
     <AuthLayout
       title="Set up WhyGraph"
-      description="Create the first administrator. The portal printed a bootstrap secret in its log when it started."
+      description="Create the first administrator. The portal printed a one-time setup secret in its log when it started."
     >
       <form noValidate className="flex flex-col gap-4" onSubmit={submit}>
         <Field
           label="Bootstrap secret"
           hint={
             <>
-              Look for the log line <span className="font-mono">Bootstrap secret: ...</span>.
+              The setup secret is in the portal's log:{" "}
+              <code className="font-mono" data-testid="bootstrap-command">
+                docker compose logs portal | grep "Bootstrap secret:"
+              </code>
             </>
           }
           error={fieldError("bad_secret")}

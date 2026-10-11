@@ -21,7 +21,7 @@ function SymbolNodeInner({ data }: NodeProps) {
       className={cn(
         "min-w-[150px] max-w-[220px] rounded-lg border px-3 py-2 shadow-xs transition-colors",
         d.is_focus
-          ? "border-primary bg-primary/20 ring-2 ring-primary/40"
+          ? "border-primary bg-primary-soft ring-2 ring-primary/40"
           : "border-border bg-muted hover:border-primary/60",
       )}
     >

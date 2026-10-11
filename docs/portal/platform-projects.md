@@ -33,16 +33,22 @@ already, check the project and the machine name, and press **Allow**. The browse
 portal, which exchanges the one-time code for a **connection token** for that one project, held
 encrypted in the portal's own database (see [Security](security.md#connected-portals)). Then:
 
-1. **Pick the checkout.** The wizard lists repositories under your [shared
-   folders](shared-folders.md) that match the project. A checkout matches when its `origin` names
-   the platform project's repository (host, owner and name, so a mirror or an SSH host alias
-   works), **or** the commit the platform last scanned exists in it. A project the platform has
-   not scanned yet needs the `origin` match. Anything else is refused with `origin_mismatch`.
-2. **Initialize.** The same preview as for a local project: `.gitignore` entries, the git hooks,
-   the MCP entry and bundled files for each agent you select, and the two marker files. No
-   database is created. See [Connecting agents](agents.md): a linked project uses the same agent
-   files, with the same slug as the platform's project.
-3. **First scan.** A CodeGraph index of your checkout. It reads no history and calls no LLM.
+1. **Pick the checkout** (the wizard's Source step). The wizard lists repositories under your
+   [shared folders](shared-folders.md) that match the project. A checkout matches when its
+   `origin` names the platform project's repository (host, owner and name, so a mirror or an SSH
+   host alias works), **or** the commit the platform last scanned exists in it; other repositories
+   are listed below the matches for that second case. A project the platform has not scanned yet
+   needs the `origin` match. Anything else is refused with `origin_mismatch`.
+2. **Set up.** The same preview as for a local project: `.gitignore` entries, the git hooks, the
+   MCP entry and bundled files for each agent you select, and the two marker files. No database is
+   created. The agents the checkout already has are ticked; with none ticked, the step warns that
+   nothing on this machine would use the link, and **Finish** asks once more. See
+   [Connecting agents](agents.md): a linked project uses the same agent files, with the same slug
+   as the platform's project.
+
+**Finish** also starts the first scan, a CodeGraph index of your checkout (it reads no history and
+calls no LLM), and the last panel follows it, with **Connect your agent** below. There is no
+Configure step: the project's models and keys are the platform's.
 
 The slug is the platform's slug. If a project with that slug already exists on your portal, linking
 is refused with `slug_taken`. Only members of the organization can link: an instance admin's

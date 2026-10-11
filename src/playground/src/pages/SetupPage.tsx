@@ -1,3 +1,4 @@
+import { errorMessage } from "../lib/apiErrors";
 import { useNavigate, useRouter, useSearch } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
@@ -10,6 +11,7 @@ import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
+import { PathText } from "../components/layout/PathText";
 
 const schema = z.object({
   display_name: z.string().trim().min(1, "Enter a name").max(100, "At most 100 characters"),
@@ -46,7 +48,7 @@ export function SetupPage() {
   const shared = state.data?.shared_folders ?? [];
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-6">
-      <div className="flex w-full max-w-md flex-col gap-6">
+      <div className="flex w-full min-w-0 max-w-md flex-col gap-6">
         <div className="flex flex-col gap-1.5">
           <h1 className="text-2xl font-semibold tracking-tight">Welcome to WhyGraph</h1>
           <p className="text-sm text-muted-foreground">
@@ -57,7 +59,7 @@ export function SetupPage() {
 
         <form
           noValidate
-          className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5"
+          className="flex min-w-0 flex-col gap-4 rounded-xl border border-border bg-card p-5 shadow-card"
           onSubmit={form.handleSubmit((v) => setup.mutate(v))}
         >
           <Field label="Your name" error={form.formState.errors.display_name?.message}>
@@ -73,9 +75,12 @@ export function SetupPage() {
           {shared.length > 0 && (
             <div className="flex flex-col gap-1 text-sm">
               <span className="text-muted-foreground">Shared folders</span>
-              <ul className="font-mono text-xs">
+              <ul className="flex min-w-0 flex-col gap-0.5" data-testid="setup-shared-folders">
                 {shared.map((f) => (
-                  <li key={f}>{f}</li>
+                  <li key={f} className="min-w-0">
+                    {/* Wraps after a "/" so a long path never widens the card (PH-4). */}
+                    <PathText path={f} variant="block" />
+                  </li>
                 ))}
               </ul>
             </div>
@@ -84,7 +89,7 @@ export function SetupPage() {
           {setup.isError && (
             <Alert variant="destructive">
               <AlertTitle>Setup failed</AlertTitle>
-              <AlertDescription>{setup.error.message}</AlertDescription>
+              <AlertDescription>{errorMessage(setup.error)}</AlertDescription>
             </Alert>
           )}
 

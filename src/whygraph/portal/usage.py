@@ -36,10 +36,12 @@ from typing import TYPE_CHECKING
 from whygraph.core.config import Config
 from whygraph.core.usage import UsageRecord, UsageScope
 
+from .models import AGENT_CALL_SOURCES
 from .prices import PriceOverrides, cost, has_custom_endpoint, price_for
 from .usage_store import PriceBook, SpendBook, UsageRow, UsageWriter
 
 if TYPE_CHECKING:
+    from .agent_calls import AgentCallBook
     from .budgets import BudgetBook
     from .deps import BoundProject, PortalState
     from .security import Principal
@@ -233,6 +235,8 @@ class PortalUsageSink:
         The org price overrides, read per call.
     budgets : BudgetBook, optional
         The budget map :meth:`blocked_scope` reads; ``None`` blocks nothing.
+    calls : AgentCallBook, optional
+        Where :meth:`count_call` counts agent calls; ``None`` counts nothing.
     """
 
     def __init__(
@@ -243,6 +247,7 @@ class PortalUsageSink:
         book: SpendBook,
         prices: PriceBook,
         budgets: BudgetBook | None = None,
+        calls: AgentCallBook | None = None,
     ) -> None:
         self.scope = scope
         self.attribution = attribution
@@ -250,6 +255,7 @@ class PortalUsageSink:
         self._book = book
         self._prices = prices
         self._budgets = budgets
+        self._calls = calls
 
     def row_for(self, rec: UsageRecord) -> UsageRow:
         """Build (and price) the ledger row of one record.
@@ -332,6 +338,35 @@ class PortalUsageSink:
         a = self.attribution
         return self._budgets.blocked_scope(a.org_id, a.project_id, a.user_id)
 
+    def count_call(self, kind: str) -> None:
+        """Count one agent call of ``kind`` (M2f-3 plan section 4.10).
+
+        Only for the agent sources (``mcp``, ``agent``): an Explorer or chat
+        binding counts nothing. The call is attributed as the sink's
+        LLM calls are - org, project, member and connection - on today's
+        UTC row.
+
+        Parameters
+        ----------
+        kind : str
+            The registered MCP name or the ``v1:`` route name.
+        """
+        a = self.attribution
+        if (
+            self._calls is None
+            or a.project_id is None
+            or self.scope.source not in AGENT_CALL_SOURCES
+        ):
+            return
+        self._calls.add(
+            org_id=a.org_id,
+            project_id=a.project_id,
+            source=self.scope.source,
+            user_id=a.user_id,
+            connection_id=a.connection_id,
+            kind=kind,
+        )
+
 
 def usage_sink_for(
     state: PortalState,
@@ -366,7 +401,8 @@ def usage_sink_for(
     Returns
     -------
     PortalUsageSink
-        A sink with a fresh :class:`~whygraph.core.usage.UsageScope`.
+        A sink with a fresh :class:`~whygraph.core.usage.UsageScope`; it
+        counts agent calls in ``state.agent_calls``.
     """
     attribution = Attribution(
         org_id=project.org_id,
@@ -389,6 +425,7 @@ def usage_sink_for(
         state.spend,
         state.prices,
         state.budgets,
+        state.agent_calls,
     )
 
 

@@ -18,6 +18,9 @@ Composition (plan section 4.5.1)::
     /api/usage*,                  the usage ledger's reads and CSV
     /api/projects/{slug}/usage    (portal/usage_routes.py; /api/usage/me* is
                                   production-only)
+    /api/projects/{slug}/overview the project Overview (portal/overview_routes.py)
+    .../keys/{provider}/test,     the key tests (portal/key_routes.py; the
+    .../github-token/test         GitHub token test is local-only)
     /api/projects/*               management; each route names its action through
                                   org_access / project_access / project_db_access
     /api/projects/{slug}/...      serve.routes.router (project.read),
@@ -43,10 +46,11 @@ the :class:`~whygraph.portal.security.PortalOrigins`, marks runs left
 ``running`` by a previous process ``interrupted``, follows a port change
 into the managed repos (:mod:`whygraph.portal.port_change`), starts the
 usage writer (after production's audit writer), the runner, the daily
-ledger prune and
+ledger and agent-call counter prunes, the agent-call flush watcher and
 this app's own MCP session manager and the lock's liveness check (a lost
 lock shuts the portal down), and turns strict project-context mode on. On
-exit it sets the shutdown event (open streams end), stops the runner, turns
+exit it sets the shutdown event (open streams end), stops the runner, flushes
+the agent-call counters, turns
 strict mode off again and releases the lock - on every path, including a
 failed start.
 
@@ -91,7 +95,7 @@ from whygraph.serve.errors import whygraph_error_handler
 from whygraph.serve.routes import generate_router
 from whygraph.serve.routes import router as data_router
 
-from . import audit_store, budgets, connections, usage_store
+from . import agent_calls, audit_store, budgets, connections, usage_store
 from . import db as portal_db
 from .access_routes import access_router
 from .audit import clear_writer, set_writer
@@ -119,11 +123,14 @@ from .hosts import (
 )
 from .linked import refresh_links
 from .mcp_mount import McpDispatcher, build_session_manager
+from .key_routes import key_local_router, key_router
 from .member_routes import members_router
 from .migrate import MIGRATION_LOCK
 from .models import ScanRun, Setting, User
 from .org_routes import org_router
 from .orgs import ensure_builtin_org
+from .onboarding_routes import onboarding_router, welcome_router
+from .overview_routes import overview_router
 from .platform_routes import platform_router
 from .port_change import reconcile_port
 from .repos import SHARED_FOLDERS_ENV, parse_shared_folders
@@ -281,6 +288,11 @@ def create_portal_app(
     app.include_router(budget_member_router)  # production-only: member budgets
     app.include_router(usage_router)  # both modes: usage reads and CSV (M2f-2)
     app.include_router(usage_me_router)  # production-only: a member's own usage
+    app.include_router(overview_router)  # both modes: a project's Overview (M2f-3)
+    app.include_router(key_router)  # both modes: the LLM key tests (M2f-3)
+    app.include_router(key_local_router)  # local-only: the GitHub token test
+    app.include_router(onboarding_router)  # both modes: first-run checklist (M2f-3)
+    app.include_router(welcome_router)  # production-only: DELETE /api/org/welcome
     app.include_router(portal_router)
     app.include_router(projects_router)
     app.include_router(platform_router)  # local-only: connect and link (M2e)
@@ -428,6 +440,8 @@ async def _serving(state: PortalState) -> AsyncIterator[None]:
             watcher.start_soon(_watch_instance_lock, state)
         if not state.degraded:
             watcher.start_soon(_prune_usage_events)  # the ledger exists in both modes
+            watcher.start_soon(_flush_agent_calls, state.agent_calls)
+            watcher.start_soon(_prune_agent_call_days)
         if state.mode == "production":
             watcher.start_soon(_check_base_url, state)
             if not state.degraded:
@@ -446,6 +460,8 @@ async def _serving(state: PortalState) -> AsyncIterator[None]:
             try:
                 if not state.degraded:
                     await state.runner.shutdown(grace=5.0)
+                    # The last counts, after the runner (and every stream) ended.
+                    await anyio.to_thread.run_sync(state.agent_calls.flush)
             finally:
                 set_strict(False)
                 state.session_manager = None
@@ -524,6 +540,27 @@ async def _prune_usage_events() -> None:
             if deleted:
                 _log.info("usage ledger pruning: %d row(s) deleted", deleted)
         await anyio.sleep(USAGE_PRUNE_EVERY_SEC)
+
+
+async def _flush_agent_calls(book: agent_calls.AgentCallBook) -> None:
+    """Flush the agent-call book when it is due: checked every second; never fatal."""
+    while True:
+        await anyio.sleep(agent_calls.CHECK_EVERY_SEC)
+        if book.due():
+            await anyio.to_thread.run_sync(book.flush)  # never raises
+
+
+async def _prune_agent_call_days() -> None:
+    """Delete agent-call counters past their retention: at start, then daily; never fatal."""
+    while True:
+        try:
+            deleted = await anyio.to_thread.run_sync(agent_calls.prune)
+        except Exception:  # noqa: BLE001 -- a failed prune is retried tomorrow
+            _log.exception("agent-call counter pruning failed")
+        else:
+            if deleted:
+                _log.info("agent-call counter pruning: %d row(s) deleted", deleted)
+        await anyio.sleep(agent_calls.PRUNE_EVERY_SEC)
 
 
 async def _refresh_link_statuses(state: PortalState) -> None:

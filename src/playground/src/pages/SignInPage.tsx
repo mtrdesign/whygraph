@@ -10,7 +10,7 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { authMessage } from "../lib/authErrors";
-import { useFinishAuth } from "../lib/identity";
+import { isSafeNext, useFinishAuth, usePortalState } from "../lib/identity";
 import { hardNavigate } from "../lib/navigation";
 
 /** The instance administrator's email and password, behind the disclosure. */
@@ -69,12 +69,30 @@ function AdminSignIn({ next }: { next?: string }) {
 }
 
 /**
+ * What the sign-in page says under its title (NAV-8, ER-7): a session that ended
+ * (`reauth=1`: an org host sent the person back), else where a valid `next` lands
+ * ("...to continue to acme.example.com/p/api", or connecting a local portal).
+ */
+export function signInDescription(next: string | undefined, reauth: boolean, baseUrl: string | undefined): string {
+  if (reauth) return "Your session ended. Sign in to continue.";
+  if (!next || !isSafeNext(next, baseUrl)) return "Sign in to WhyGraph.";
+  const url = new URL(next);
+  const base = new URL(baseUrl!);
+  if (url.host === base.host && url.pathname.replace(/\/+$/, "") === "/connect") {
+    return "Sign in to connect your local portal.";
+  }
+  const path = url.pathname === "/" ? "" : url.pathname.replace(/\/+$/, "");
+  return `Sign in to continue to ${url.host}${path}.`;
+}
+
+/**
  * `<base>/signin`: GitHub sign-in (which also creates an account on first use),
  * with the administrator's password form behind a disclosure. `?next=` is where
  * the server may send you back.
  */
 export function SignInPage() {
-  const { next } = useSearch({ strict: false }) as { next?: string };
+  const { next, reauth } = useSearch({ strict: false }) as { next?: string; reauth?: boolean };
+  const baseUrl = usePortalState().data?.base_url;
   const [adminOpen, setAdminOpen] = useState(false);
 
   const start = useMutation({
@@ -85,7 +103,7 @@ export function SignInPage() {
   const busy = start.isPending || start.isSuccess;
 
   return (
-    <AuthLayout title="Sign in" description="Sign in to WhyGraph.">
+    <AuthLayout title="Sign in" description={signInDescription(next, !!reauth, baseUrl)}>
       <Button size="lg" disabled={busy} onClick={() => start.mutate()}>
         <GitHubMark className="size-4" />
         {busy ? "Opening GitHub…" : "Sign in with GitHub"}

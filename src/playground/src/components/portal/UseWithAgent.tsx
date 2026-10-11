@@ -20,7 +20,7 @@ export function UseWithAgent({ baseUrl, org, slug }: { baseUrl: string; org: str
 
   return (
     <section
-      className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5"
+      className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5 shadow-card"
       data-testid="use-with-agent"
     >
       <div>

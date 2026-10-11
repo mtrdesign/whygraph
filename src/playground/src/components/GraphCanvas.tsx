@@ -13,6 +13,7 @@ import { useProjectQuery } from "../lib/project";
 import { useTheme } from "../theme";
 import { SymbolNode, type SymbolNodeData } from "./SymbolNode";
 import { Loading } from "./Loading";
+import { ErrorState } from "./state/ErrorState";
 import { Kbd } from "./ui/kbd";
 
 // The center canvas: the one-hop ego graph of the selected symbol. Coordinates
@@ -35,7 +36,7 @@ export function GraphCanvas() {
   const selectedQn = useExplorerSearch().node;
   const openNode = useOpenNode();
 
-  const { data, isLoading, isError, error } = useProjectQuery(
+  const { data, isLoading, isError, error, refetch } = useProjectQuery(
     ["ego", selectedQn],
     (api) => api.ego(selectedQn!),
     { enabled: !!selectedQn },
@@ -96,8 +97,8 @@ export function GraphCanvas() {
 
   if (isError)
     return (
-      <div className="flex h-full items-center justify-center text-sm text-destructive">
-        {(error as Error).message}
+      <div className="flex h-full items-center justify-center p-4">
+        <ErrorState title="Couldn't load the graph" error={error} onRetry={() => void refetch()} className="w-full max-w-md" />
       </div>
     );
 

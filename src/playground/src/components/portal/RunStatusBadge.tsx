@@ -1,22 +1,17 @@
-import { cn } from "@/lib/utils";
 import type { ScanRunStatus } from "../../api";
 import { runStatus, type RunTone } from "../../lib/scanFormat";
+import { StatusPill, type StatusPillTone } from "../ui/status-pill";
 
-const DOT: Record<RunTone, string> = {
-  ok: "bg-success",
-  busy: "bg-primary animate-pulse",
-  warn: "bg-warning",
-  error: "bg-destructive",
-  idle: "bg-muted-foreground/50",
+const TONE: Record<RunTone, StatusPillTone> = {
+  ok: "ok",
+  busy: "busy",
+  warn: "warn",
+  error: "error",
+  idle: "idle",
 };
 
-/** A run's status as a dot and a word (`Running`, `Succeeded`, `Interrupted` ...). */
+/** A run's status as a soft pill (`Running`, `Succeeded`, `Interrupted` ...). */
 export function RunStatusBadge({ status, className }: { status: ScanRunStatus; className?: string }) {
   const s = runStatus(status);
-  return (
-    <span className={cn("inline-flex items-center gap-1.5 text-xs", className)} data-status={status}>
-      <span className={cn("size-2 rounded-full", DOT[s.tone])} aria-hidden />
-      {s.label}
-    </span>
-  );
+  return <StatusPill tone={TONE[s.tone]} label={s.label} className={className} data-status={status} />;
 }

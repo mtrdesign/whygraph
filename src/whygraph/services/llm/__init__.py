@@ -62,7 +62,7 @@ from .chat import (
 )
 from .client import LlmClient
 from .deepseek import DeepSeekAdapter
-from .exceptions import LlmAuthError, LlmError
+from .exceptions import LlmAuthError, LlmError, LlmKeyMissing
 from .factory import LlmClientFactory
 from .ollama import OllamaAdapter
 from .openai import OpenAIAdapter
@@ -86,6 +86,7 @@ __all__ = [
     "LlmClient",
     "LlmClientFactory",
     "LlmAuthError",
+    "LlmKeyMissing",
     "LlmError",
     "Message",
     "ModelInfo",

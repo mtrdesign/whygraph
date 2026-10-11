@@ -301,6 +301,7 @@ def test_ego_graph_has_focus_neighbours_and_coords(serve_client) -> None:
 def test_ego_graph_404_for_unknown_symbol(serve_client) -> None:
     r = serve_client.get("/api/graph/ego", params={"qualified_name": "pkg.nope"})
     assert r.status_code == 404
+    assert r.json() == {"error": "'pkg.nope' not found", "code": "symbol_not_found"}
 
 
 def test_overview_lifts_to_directory_supernode(serve_client) -> None:

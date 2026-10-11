@@ -9,6 +9,9 @@ import { DetectedPanel } from "../components/portal/DetectedPanel";
 import { InitPreview } from "../components/portal/InitPreview";
 import { NotSharedAlert } from "../components/portal/NotSharedAlert";
 import { EstimateBody } from "../components/portal/ScanEstimateCard";
+import { ScanProgress } from "../components/portal/ScanProgress";
+import { WizardSteps } from "../components/portal/WizardSteps";
+import { initialScanRunState, reduceScanRun } from "../lib/scanRun";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -123,7 +126,8 @@ describe("InitPreview", () => {
     expect(within(row(".cursor/mcp.json")).getByText("Update")).toHaveAttribute("data-status", "overwrite");
     expect(within(row(".cursor/mcp.json")).getByText("Show changes")).toBeInTheDocument();
     expect(within(row(".codex/config.toml")).getByText("Up to date")).toBeInTheDocument();
-    expect(within(row(".codex/config.toml")).getByText("already up to date")).toBeInTheDocument();
+    // "Up to date" once: the badge says it, the server's "already up to date" is not repeated (SET-8).
+    expect(within(row(".codex/config.toml")).queryByText("already up to date")).toBeNull();
   });
 
   it("shows a refused file with a copyable snippet and never a confirm box", async () => {
@@ -327,13 +331,30 @@ describe("EstimateBody", () => {
     const card = screen.getByTestId("scan-estimate");
     expect(card).toHaveTextContent("1,204 commits to describe");
     expect(card).toHaveTextContent("(upper bound)");
-    expect(card).toHaveTextContent("anthropic/claude-haiku-4-5");
+    expect(card).toHaveTextContent("Model: Anthropic, claude-haiku-4-5");
     expect(screen.getByTestId("estimate-tokens")).toHaveTextContent("2.4M input and 310k output tokens");
-    expect(card).toHaveTextContent("~$4.60");
+    expect(card).toHaveTextContent("About $4.60 (between $2.30 and $6.90)");
     await user.click(screen.getByRole("button", { name: "Describe now" }));
     await user.click(screen.getByRole("button", { name: "Later" }));
     expect(onDescribe).toHaveBeenCalled();
     expect(onLater).toHaveBeenCalled();
+  });
+
+  it("words a cost under a cent readably: never '~<$0.01' (IMP-6)", () => {
+    render(
+      <EstimateBody
+        slug="a"
+        estimate={{ ...estimate, commits: 1, cost: { usd: 0.004, low: 0.002, high: 0.006, currency: "USD", prices_as_of: "2026-09-01" } }}
+        canDescribe
+        canConfigure
+        onDescribe={() => {}}
+        onLater={() => {}}
+      />,
+    );
+    const line = screen.getByTestId("estimate-cost");
+    expect(line).toHaveTextContent("Less than $0.01");
+    expect(line).not.toHaveTextContent("<$");
+    expect(line).not.toHaveTextContent("~");
   });
 
   it("shows tokens only for an unpriced model", () => {
@@ -343,7 +364,7 @@ describe("EstimateBody", () => {
     expect(screen.getByTestId("scan-estimate")).toHaveTextContent("tokens only");
   });
 
-  it("disables Describe now while the provider has no key and links to Configure", async () => {
+  it("disables Describe now while the provider has no key and links to the model settings", async () => {
     await renderWithRouter(
       <EstimateBody
         slug="a"
@@ -355,10 +376,159 @@ describe("EstimateBody", () => {
       />,
     );
     expect(screen.getByRole("button", { name: "Describe now" })).toBeDisabled();
-    expect(screen.getByTestId("missing-key")).toHaveTextContent("no key for anthropic");
-    expect(screen.getByRole("link", { name: "Add a key in Configure" })).toHaveAttribute(
+    // Information, not an error (IMP-3).
+    expect(screen.getByTestId("missing-key")).toHaveTextContent("No Anthropic key yet");
+    expect(screen.getByRole("link", { name: "Add a key in Settings" })).toHaveAttribute(
       "href",
-      "/p/a/init?step=configure",
+      "/p/a/settings?section=models",
     );
+  });
+
+  it("shows the count without a price or tokens when the cost is hidden (R6)", () => {
+    render(
+      <EstimateBody
+        slug="a"
+        estimate={{ ...estimate, tokens: null, cost: null, cost_hidden: true }}
+        canDescribe={false}
+        canConfigure={false}
+        onDescribe={() => {}}
+        onLater={() => {}}
+      />,
+    );
+    const card = screen.getByTestId("scan-estimate");
+    expect(card).toHaveTextContent("1,204 commits are waiting for descriptions. Ask a project admin to describe them.");
+    expect(card).not.toHaveTextContent(/tokens hidden|no price on file|\$/i);
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("says one commit is waiting, and offers Describe now to someone who may", () => {
+    render(
+      <EstimateBody
+        slug="a"
+        estimate={{ ...estimate, commits: 1, tokens: null, cost: null, cost_hidden: true }}
+        canDescribe
+        canConfigure={false}
+        onDescribe={() => {}}
+        onLater={() => {}}
+      />,
+    );
+    expect(screen.getByTestId("scan-estimate")).toHaveTextContent("1 commit is waiting for descriptions.");
+    expect(screen.getByTestId("scan-estimate")).not.toHaveTextContent("Ask a project admin");
+    expect(screen.getByRole("button", { name: "Describe now" })).toBeEnabled();
+  });
+
+  it("pluralizes the very large commits line", () => {
+    const { rerender } = render(
+      <EstimateBody slug="a" estimate={{ ...estimate, large_commits: 1 }} canDescribe canConfigure onDescribe={() => {}} onLater={() => {}} />,
+    );
+    expect(screen.getByTestId("scan-estimate")).toHaveTextContent("1 very large commit is described file by file");
+    rerender(
+      <EstimateBody slug="a" estimate={{ ...estimate, large_commits: 3 }} canDescribe canConfigure onDescribe={() => {}} onLater={() => {}} />,
+    );
+    expect(screen.getByTestId("scan-estimate")).toHaveTextContent("3 very large commits are described file by file");
+  });
+
+  it("tells an empty history from a fully described one (BUG-14)", () => {
+    const { rerender } = render(
+      <EstimateBody slug="a" estimate={{ ...estimate, commits: 0 }} totalCommits={0} canDescribe canConfigure onDescribe={() => {}} onLater={() => {}} />,
+    );
+    expect(screen.getByTestId("scan-estimate")).toHaveTextContent("No commits yet. Push some history, then rescan.");
+    rerender(
+      <EstimateBody slug="a" estimate={{ ...estimate, commits: 0 }} totalCommits={40} canDescribe canConfigure onDescribe={() => {}} onLater={() => {}} />,
+    );
+    expect(screen.getByTestId("scan-estimate")).toHaveTextContent("every reachable commit already has a description");
+  });
+
+  it("leaves the choices to the caller with actions off (the wizard footer)", () => {
+    render(
+      <EstimateBody slug="a" estimate={estimate} actions={false} canDescribe canConfigure onDescribe={() => {}} onLater={() => {}} />,
+    );
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.getByTestId("estimate-cost")).toHaveTextContent("between $2.30 and $6.90");
+  });
+});
+
+// ---- the stepper ---------------------------------------------------------------------------
+
+describe("WizardSteps", () => {
+  const labels = () =>
+    within(screen.getByRole("list", { name: "Steps" }))
+      .getAllByRole("listitem")
+      .map((li) => li.textContent)
+      .filter(Boolean);
+
+  it("orders the steps per mode", () => {
+    const { rerender } = render(<WizardSteps current="source" mode="local" />);
+    expect(labels()).toEqual(["1Source", "2Set up", "3Configure"]);
+    rerender(<WizardSteps current="source" mode="production" />);
+    expect(labels()).toEqual(["1Source", "2Configure"]);
+    rerender(<WizardSteps current="source" mode="linked" />);
+    expect(labels()).toEqual(["1Source", "2Set up"]);
+  });
+
+  it("collapses to one line below sm", () => {
+    render(<WizardSteps current="setup" mode="local" />);
+    expect(screen.getByTestId("wizard-step-compact")).toHaveTextContent("Step 2 of 3 - Set up");
+    const list = screen.getByRole("list", { name: "Steps" }).className.split(" ");
+    expect(list).toEqual(expect.arrayContaining(["hidden", "sm:flex"]));
+    expect(screen.getByTestId("wizard-step-compact").className).toMatch(/sm:hidden/);
+  });
+
+  it("marks the current step, and ticks it once complete", () => {
+    const { rerender } = render(<WizardSteps current="configure" mode="local" />);
+    const configure = () =>
+      within(screen.getByRole("list", { name: "Steps" })).getByText("Configure").closest("li")!;
+    expect(configure()).toHaveAttribute("aria-current", "step");
+    expect(configure()).toHaveAttribute("data-state", "current");
+    rerender(<WizardSteps current="configure" mode="local" complete />);
+    expect(configure()).toHaveAttribute("data-state", "done");
+  });
+
+  it("links an earlier step back to its page", async () => {
+    await renderWithRouter(<WizardSteps current="configure" mode="local" slug="a" />);
+    expect(screen.getByRole("link", { name: /Set up/ })).toHaveAttribute("href", "/p/a/init?step=setup");
+    expect(screen.queryByRole("link", { name: /Source/ })).toBeNull();
+  });
+});
+
+// ---- the one progress bar -----------------------------------------------------------------------
+
+describe("ScanProgress", () => {
+  const ev = (event: object) => ({ type: "event", event }) as Parameters<typeof reduceScanRun>[1];
+  const fold = (events: object[]) => events.map(ev).reduce(reduceScanRun, initialScanRunState);
+
+  it("shows one bar, the status line, a checklist with human labels and Show details", async () => {
+    const state = fold([
+      { type: "start", phase_total: 2, phases: ["Structural crawl", "LLM descriptions"] },
+      { type: "phase", phase: 1, title: "Structural crawl" },
+      { type: "task", name: "git", completed: 1240, total: 5300 },
+      { type: "task", name: "codegraph", completed: 0, total: null },
+    ]);
+    await renderWithRouter(<ScanProgress slug="a" runId={7} state={state} />);
+    expect(screen.getAllByRole("progressbar")).toHaveLength(1);
+    expect(screen.getByTestId("scan-status")).toHaveTextContent("Reading git history - 1,240 of 5,300 commits");
+    const steps = within(screen.getByTestId("scan-steps"));
+    expect(steps.getByText("Git history and GitHub")).toBeInTheDocument();
+    expect(steps.getByText("Commit descriptions")).toBeInTheDocument();
+    expect(steps.getByText("Code index")).toBeInTheDocument();
+    expect(steps.getByText("1,240 of 5,300")).toBeInTheDocument();
+    // No raw crawler names.
+    expect(screen.queryByText("git")).toBeNull();
+    expect(screen.queryByText("codegraph")).toBeNull();
+    expect(screen.getByRole("link", { name: "Show details" })).toHaveAttribute("href", "/p/a/scans/7");
+  });
+
+  it("is indeterminate until a total is known", async () => {
+    const state = fold([{ type: "start", phase_total: 2 }, { type: "phase", phase: 1, title: "Structural crawl" }]);
+    await renderWithRouter(<ScanProgress slug="a" runId={7} state={state} />);
+    expect(screen.getByRole("progressbar")).not.toHaveAttribute("aria-valuenow");
+    expect(screen.getByTestId("scan-status")).toHaveTextContent("Reading git history");
+  });
+
+  it("names the repository a production import clones", async () => {
+    const state = fold([{ type: "sync", status: "cloning", full_name: "acme/api" }]);
+    await renderWithRouter(<ScanProgress slug="a" runId={7} state={state} />);
+    expect(screen.getByTestId("scan-status")).toHaveTextContent("Cloning acme/api");
+    expect(within(screen.getByTestId("scan-steps")).getByText("Clone the repository")).toBeInTheDocument();
   });
 });

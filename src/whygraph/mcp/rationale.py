@@ -143,7 +143,12 @@ class GenerationNotPermitted(WhyGraphError):
                 if reason == BUDGET_EXCEEDED
                 else _GENERATION_NOT_PERMITTED_MESSAGE
             )
-        super().__init__(message)
+        super().__init__(
+            message,
+            code=BUDGET_EXCEEDED
+            if reason == BUDGET_EXCEEDED
+            else "generation_not_permitted",
+        )
         self.reason = reason
         self.scope = scope
 
@@ -195,7 +200,7 @@ def linked_rationale(remote: RemoteProject, target: Target) -> dict:
     split = split_by_push_status(repo, blame_target(repo, target))
     sendable = pushed_target(repo, target, split)
     if sendable is None:
-        raise NoEvidenceError(_NOT_PUSHED_MESSAGE)
+        raise NoEvidenceError(_NOT_PUSHED_MESSAGE, code="no_evidence")
     try:
         card = remote.rationale(sendable, split.pushed)
     except RemoteError as exc:
@@ -248,7 +253,7 @@ def rationale_card(
         The generator failed.
     """
     if not evidence:
-        raise NoEvidenceError(_NO_EVIDENCE_MESSAGE)
+        raise NoEvidenceError(_NO_EVIDENCE_MESSAGE, code="no_evidence")
 
     config = get_config()
     provider, pinned_model = config.cache_identity("rationale")
@@ -287,7 +292,9 @@ def rationale_card(
             subject=target.qualified_name or target.path,
         )
     except (AnalyzeError, LlmError) as exc:
-        raise RationaleGenerationError.wrap("rationale generation failed", exc)
+        raise RationaleGenerationError.wrap(
+            "rationale generation failed", exc, code="provider_error"
+        )
 
     cached_at = store_cached(target, evidence, rationale, provider, pinned_model)
     return _format_response(target, rationale, evidence, cached_at)

@@ -540,12 +540,23 @@ def delete_token(
 @connect_router.get("/api/projects/{slug}/connections")
 def get_project_connections(
     project: BoundProject = Depends(project_access(Action.PROJECT_CONFIGURE)),
+    include: str | None = None,
 ) -> list[dict]:
-    """Every member's live tokens of the project, newest first."""
+    """Every member's live tokens of the project, newest first.
+
+    ``?include=revoked`` also lists the tokens revoked in the last 30 days
+    (the sweep deletes older ones), each with ``revoked_at`` and
+    ``revoked_reason`` (M2f-3 plan section 4.13); any other ``include`` is
+    ``422 bad_filter``.
+    """
+    if include not in (None, "revoked"):
+        raise ApiError(422, "include must be 'revoked'", code="bad_filter")
+    revoked = include == "revoked"
     with get_session() as db:
-        infos = connections.list_for_project(db, project.id)
-    return [
-        {
+        infos = connections.list_for_project(db, project.id, include_revoked=revoked)
+    rows = []
+    for info in infos:
+        row = {
             "uid": info.uid,
             "user_login": info.user_login,
             "user_name": info.user_name,
@@ -553,8 +564,11 @@ def get_project_connections(
             "created_at": info.created_at,
             "last_used_at": info.last_used_at,
         }
-        for info in infos
-    ]
+        if revoked:
+            row["revoked_at"] = info.revoked_at
+            row["revoked_reason"] = info.revoked_reason
+        rows.append(row)
+    return rows
 
 
 @connect_router.delete("/api/projects/{slug}/connections/{uid}", status_code=204)

@@ -92,6 +92,22 @@ def test_summary_reports_commit_counts(repo_root: Path) -> None:
     assert rescan.summary == "3 commits (0 new)"
 
 
+def test_summary_says_one_commit_not_one_commits(tmp_path: Path) -> None:
+    root = tmp_path / "one"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "user.name", "Test User")
+    _git(root, "config", "commit.gpgsign", "false")
+    (root / "a.txt").write_text("hello\n")
+    _git(root, "add", "a.txt")
+    _git(root, "commit", "-q", "-m", "only")
+
+    crawler = GitCrawler(Progress(), repository=Repository(root))
+    crawler.run()
+    assert crawler.summary == "1 commit (1 new)"
+
+
 def test_first_scan_persists_all_commits(repo_root: Path) -> None:
     repo = Repository(repo_root)
     expected_shas = {c.sha for c in repo.commits}
@@ -442,7 +458,7 @@ def test_rewritten_history_demotes_and_warns(cloned: Path) -> None:
     assert _rows()[sha] == (0, None)
     assert "1 demoted" in crawler.summary
     assert crawler.warning is not None
-    assert "1 commits are no longer reachable from origin/main, main" in crawler.warning
+    assert "1 commit is no longer reachable from origin/main, main" in crawler.warning
 
 
 @contextmanager

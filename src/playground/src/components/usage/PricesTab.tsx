@@ -1,19 +1,31 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
 import { portalKey, pricesApi, type PriceBody, type PriceRow } from "../../api";
 import { authMessage } from "../../lib/authErrors";
+import { formatDateTime, formatUsd, formatUsdPrecise } from "../../lib/format";
+import { providerLabel } from "../../lib/labels";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { TableSkeleton } from "../state/Skeletons";
 import { Skeleton } from "../ui/skeleton";
-import { Field, nativeSelectClass } from "../portal/Field";
-import { UsageSection } from "./parts";
+import { Field } from "../portal/Field";
+import { ResponsiveTable, type Column } from "../layout/ResponsiveTable";
+import { ChoiceSelect, UsageError, UsageSection } from "./parts";
 
 export const PRICES_KEY = portalKey("prices");
 
 /** The providers a price may name (`LlmClientFactory.BUILTIN_PROVIDERS`). */
 export const PRICE_PROVIDERS = ["anthropic", "openai", "openrouter", "deepseek", "ollama"] as const;
+
+/** The Model box's example for each provider, in that provider's own id format (USE-5). */
+export const MODEL_PLACEHOLDER: Record<(typeof PRICE_PROVIDERS)[number], string> = {
+  anthropic: "e.g. claude-sonnet-4-5",
+  openai: "e.g. gpt-4o-mini",
+  openrouter: "e.g. anthropic/claude-sonnet-4.5",
+  deepseek: "e.g. deepseek-chat",
+  ollama: "e.g. llama3.1",
+};
 
 const MAX_RATE = 10_000;
 
@@ -27,7 +39,13 @@ const RATE_FIELDS: { key: RateField; label: string; required: boolean }[] = [
 
 type Draft = Record<RateField, string>;
 
-const rate = (v: number | null) => (v === null ? "-" : `$${v.toLocaleString("en-US", { maximumFractionDigits: 6 })}`);
+// A price per million tokens: the money format for whole cents, more places for a fraction of one.
+const rate = (v: number | null) =>
+  v === null
+    ? "-"
+    : Math.round(v * 100) / 100 === v
+      ? formatUsd(v)
+      : formatUsdPrecise(v);
 
 function draftOf(row?: PriceRow): Draft {
   const s = (v: number | null | undefined) => (v === null || v === undefined ? "" : String(v));
@@ -74,7 +92,7 @@ function RateInputs({ draft, onChange }: { draft: Draft; onChange: (d: Draft) =>
             <Input
               {...p}
               inputMode="decimal"
-              placeholder={required ? "3.00" : "optional"}
+              placeholder={required ? "e.g. 3.00" : "optional"}
               value={draft[key]}
               onChange={(e) => onChange({ ...draft, [key]: e.target.value })}
             />
@@ -89,9 +107,8 @@ function useSavePrice(onDone: () => void, setError: (e: string | null) => void) 
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (body: PriceBody) => pricesApi.put(body),
-    onSuccess: async (row) => {
+    onSuccess: async () => {
       setError(null);
-      toast.success(`Price of ${row.model} saved`);
       onDone();
       await queryClient.invalidateQueries({ queryKey: PRICES_KEY });
     },
@@ -111,7 +128,15 @@ function OverrideForm({ row, onClose }: { row: PriceRow; onClose: () => void }) 
     save.mutate({ provider: row.provider, model: row.model, ...parsed.rates });
   };
   return (
-    <form onSubmit={submit} className="flex flex-col gap-2 py-2" data-testid={`price-form-${row.provider}-${row.model}`} noValidate>
+    <form
+      onSubmit={submit}
+      className="flex flex-col gap-2 rounded-lg bg-muted/40 p-3"
+      data-testid={`price-form-${row.provider}-${row.model}`}
+      noValidate
+    >
+      <p className="text-xs font-medium">
+        Override the price of <span className="font-mono">{row.model}</span> ({row.provider})
+      </p>
       <div className="flex flex-wrap items-end gap-3">
         <RateInputs draft={draft} onChange={setDraft} />
         <Button type="submit" size="sm" disabled={save.isPending}>
@@ -150,19 +175,25 @@ function AddPrice() {
   return (
     <form onSubmit={submit} className="flex flex-col gap-2" data-testid="add-price" noValidate>
       <div className="flex flex-wrap items-end gap-3">
-        <Field label="Provider" className="w-36">
+        <Field label="Provider" className="w-36 max-sm:w-full">
           {(p) => (
-            <select {...p} className={nativeSelectClass} value={provider} onChange={(e) => setProvider(e.target.value)}>
-              {PRICE_PROVIDERS.map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
+            <ChoiceSelect
+              {...p}
+              value={provider}
+              onChange={setProvider}
+              options={PRICE_PROVIDERS.map((name) => ({ value: name, label: providerLabel(name) }))}
+            />
           )}
         </Field>
-        <Field label="Model" className="w-56">
-          {(p) => <Input {...p} placeholder="deepseek-chat" value={model} onChange={(e) => setModel(e.target.value)} />}
+        <Field label="Model" className="w-56 max-sm:w-full">
+          {(p) => (
+            <Input
+              {...p}
+              placeholder={MODEL_PLACEHOLDER[provider as (typeof PRICE_PROVIDERS)[number]] ?? "e.g. model-id"}
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+            />
+          )}
         </Field>
         <RateInputs draft={draft} onChange={setDraft} />
         <Button type="submit" size="sm" disabled={save.isPending}>
@@ -175,6 +206,33 @@ function AddPrice() {
         </p>
       )}
     </form>
+  );
+}
+
+/** The Prices tab while it loads: the intro, the Add form (editors) and the table, in their shapes (ER-5). */
+function PricesSkeleton({ canEdit }: { canEdit: boolean }) {
+  const card = "flex flex-col gap-4 rounded-xl border border-border bg-card p-4 shadow-card sm:p-5";
+  return (
+    <div className="flex flex-col gap-6" data-testid="prices-loading">
+      <div className="flex flex-col gap-1.5">
+        <Skeleton className="h-3.5 w-full" />
+        <Skeleton className="h-3.5 w-3/5" />
+      </div>
+      {canEdit && (
+        <div className={card}>
+          <Skeleton className="h-4 w-28" />
+          <div className="flex flex-wrap gap-3">
+            {["w-36", "w-56", "w-28", "w-28", "w-28", "w-28"].map((w, i) => (
+              <Skeleton key={i} className={`h-8 ${w}`} />
+            ))}
+          </div>
+        </div>
+      )}
+      <div className={card}>
+        <Skeleton className="h-4 w-24" />
+        <TableSkeleton rows={8} cols={7} label="Loading the price table" />
+      </div>
+    </div>
   );
 }
 
@@ -191,24 +249,85 @@ export function PricesTab({ canEdit }: { canEdit: boolean }) {
   const [revertError, setRevertError] = useState<string | null>(null);
   const revert = useMutation({
     mutationFn: (row: PriceRow) => pricesApi.revert(row.provider, row.model),
-    onSuccess: async (_, row) => {
+    onSuccess: async () => {
       setRevertError(null);
-      toast.success(`Override of ${row.model} removed`);
       await queryClient.invalidateQueries({ queryKey: PRICES_KEY });
     },
     onError: (err) => setRevertError(authMessage(err)),
   });
 
-  if (prices.isLoading) return <Skeleton className="h-40" />;
+  if (prices.isLoading) return <PricesSkeleton canEdit={canEdit} />;
   if (prices.isError || !prices.data) {
-    return <p className="text-sm text-destructive">Failed to load: {authMessage(prices.error)}</p>;
+    return (
+      <UsageError
+        error={prices.error}
+        what="the price table"
+        title="Couldn't load the prices"
+        onRetry={() => void prices.refetch()}
+      />
+    );
   }
   const needle = filter.trim().toLowerCase();
   const rows = prices.data.rows.filter(
     (r) => !needle || r.model.toLowerCase().includes(needle) || r.provider.toLowerCase().includes(needle),
   );
   const keyOf = (r: PriceRow) => `${r.provider}/${r.model}`;
-  const columns = canEdit ? 8 : 7;
+  const editingRow = prices.data.rows.find((r) => keyOf(r) === editing);
+  const right = (v: number | null) => <span className="whitespace-nowrap">{rate(v)}</span>;
+  const columns: Column<PriceRow>[] = [
+    { key: "provider", header: "Provider", cell: (r) => <span className="text-muted-foreground">{providerLabel(r.provider)}</span> },
+    {
+      key: "model",
+      header: "Model",
+      primary: true,
+      cell: (r) => (
+        <span className="font-mono text-xs" title={r.model}>
+          {r.model}
+        </span>
+      ),
+    },
+    { key: "in", header: "Input", align: "right", cell: (r) => right(r.input_per_mtok) },
+    { key: "out", header: "Output", align: "right", cell: (r) => right(r.output_per_mtok) },
+    { key: "cr", header: "Cache read", align: "right", cell: (r) => right(r.cache_read_per_mtok) },
+    { key: "cw", header: "Cache write", align: "right", cell: (r) => right(r.cache_write_per_mtok) },
+    {
+      key: "source",
+      header: "Source",
+      cell: (r) =>
+        r.origin === "override" ? (
+          <Badge variant="secondary" title={r.updated_at ? `Set ${formatDateTime(r.updated_at)}` : undefined}>
+            override
+          </Badge>
+        ) : (
+          <Badge variant="outline">bundled</Badge>
+        ),
+    },
+  ];
+  if (canEdit) {
+    columns.push({
+      key: "actions",
+      header: <span className="sr-only">Actions</span>,
+      cell: (r) => (
+        <span className="flex flex-wrap justify-end gap-1.5">
+          <Button type="button" size="xs" variant="outline" onClick={() => setEditing(keyOf(r))} disabled={editing === keyOf(r)}>
+            Override
+          </Button>
+          {r.origin === "override" && (
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              disabled={revert.isPending}
+              onClick={() => revert.mutate(r)}
+              title="Remove the override: the bundled price applies again, if the table has one"
+            >
+              Revert
+            </Button>
+          )}
+        </span>
+      ),
+    });
+  }
 
   return (
     <div className="flex flex-col gap-6" data-testid="prices-tab">
@@ -232,7 +351,7 @@ export function PricesTab({ canEdit }: { canEdit: boolean }) {
           <Input
             aria-label="Filter models"
             placeholder="Filter models"
-            className="w-48"
+            className="w-48 max-sm:w-full"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
           />
@@ -243,110 +362,17 @@ export function PricesTab({ canEdit }: { canEdit: boolean }) {
             {revertError}
           </p>
         )}
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs" data-testid="price-table">
-            <thead className="text-muted-foreground">
-              <tr>
-                <th className="py-1.5 pr-3 font-medium">Provider</th>
-                <th className="py-1.5 pr-3 font-medium">Model</th>
-                <th className="py-1.5 pr-3 text-right font-medium">Input</th>
-                <th className="py-1.5 pr-3 text-right font-medium">Output</th>
-                <th className="py-1.5 pr-3 text-right font-medium">Cache read</th>
-                <th className="py-1.5 pr-3 text-right font-medium">Cache write</th>
-                <th className="py-1.5 pr-3 font-medium">Source</th>
-                {canEdit && <th className="py-1.5 font-medium" />}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {rows.map((r) => (
-                <PriceTableRow
-                  key={keyOf(r)}
-                  row={r}
-                  canEdit={canEdit}
-                  columns={columns}
-                  editing={editing === keyOf(r)}
-                  onEdit={() => setEditing(keyOf(r))}
-                  onClose={() => setEditing(null)}
-                  onRevert={() => revert.mutate(r)}
-                  reverting={revert.isPending}
-                />
-              ))}
-            </tbody>
-          </table>
-          {rows.length === 0 && <p className="py-2 text-sm text-muted-foreground">No model matches.</p>}
+        {editingRow && <OverrideForm key={keyOf(editingRow)} row={editingRow} onClose={() => setEditing(null)} />}
+        <div data-testid="price-table">
+          <ResponsiveTable
+            columns={columns}
+            rows={rows}
+            rowKey={keyOf}
+            rowTestId={(r) => `price-${r.provider}-${r.model}`}
+            empty={<p className="py-2 text-sm text-muted-foreground">No model matches.</p>}
+          />
         </div>
       </UsageSection>
     </div>
-  );
-}
-
-function PriceTableRow({
-  row,
-  canEdit,
-  columns,
-  editing,
-  onEdit,
-  onClose,
-  onRevert,
-  reverting,
-}: {
-  row: PriceRow;
-  canEdit: boolean;
-  columns: number;
-  editing: boolean;
-  onEdit: () => void;
-  onClose: () => void;
-  onRevert: () => void;
-  reverting: boolean;
-}) {
-  const override = row.origin === "override";
-  return (
-    <>
-      <tr data-testid={`price-${row.provider}-${row.model}`} data-origin={row.origin}>
-        <td className="py-1.5 pr-3 text-muted-foreground">{row.provider}</td>
-        <td className="max-w-[18rem] truncate py-1.5 pr-3 font-mono" title={row.model}>
-          {row.model}
-        </td>
-        <td className="py-1.5 pr-3 text-right tabular-nums">{rate(row.input_per_mtok)}</td>
-        <td className="py-1.5 pr-3 text-right tabular-nums">{rate(row.output_per_mtok)}</td>
-        <td className="py-1.5 pr-3 text-right tabular-nums">{rate(row.cache_read_per_mtok)}</td>
-        <td className="py-1.5 pr-3 text-right tabular-nums">{rate(row.cache_write_per_mtok)}</td>
-        <td className="whitespace-nowrap py-1.5 pr-3">
-          {override ? (
-            <Badge variant="secondary" title={row.updated_at ? `Set ${new Date(row.updated_at).toLocaleString()}` : undefined}>
-              override
-            </Badge>
-          ) : (
-            <span className="text-muted-foreground">bundled</span>
-          )}
-        </td>
-        {canEdit && (
-          <td className="whitespace-nowrap py-1.5 text-right">
-            <Button type="button" size="xs" variant="ghost" onClick={onEdit} disabled={editing}>
-              Override
-            </Button>
-            {override && (
-              <Button
-                type="button"
-                size="xs"
-                variant="ghost"
-                disabled={reverting}
-                onClick={onRevert}
-                title="Remove the override: the bundled price applies again, if the table has one"
-              >
-                Revert
-              </Button>
-            )}
-          </td>
-        )}
-      </tr>
-      {editing && (
-        <tr>
-          <td colSpan={columns}>
-            <OverrideForm row={row} onClose={onClose} />
-          </td>
-        </tr>
-      )}
-    </>
   );
 }

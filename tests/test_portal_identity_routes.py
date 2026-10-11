@@ -591,6 +591,7 @@ def test_account_orgs_lists_real_memberships_only(world: SimpleNamespace) -> Non
             "name": "Quokka",
             "role": "owner",
             "url": at("quokka"),
+            "new": False,
         }
     ]
     log_in(client, "ada@example.com")  # an instance admin reads, but belongs nowhere

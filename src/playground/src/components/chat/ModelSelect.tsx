@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { providerLabel } from "../../lib/labels";
 import { useProjectQuery } from "../../lib/project";
 import { Input } from "../ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
@@ -62,9 +63,11 @@ export function ModelSelect({
   // silently reports a different model than the session is actually using.
   const missingCurrent = !!model && !visible.some((m) => m.id === model);
 
+  // A provider without a key is listed but disabled; what to do about it is the
+  // composer's notice (mode-aware, MODE-4), never an environment variable name.
   const providerItems = (providers.data ?? []).map((p) => ({
     value: p.provider,
-    label: p.configured ? p.provider : `${p.provider} — set ${p.env_var}`,
+    label: p.configured ? providerLabel(p.provider) : `${providerLabel(p.provider)} (no key)`,
     disabled: !p.configured,
   }));
   const modelItems = [
@@ -76,11 +79,12 @@ export function ModelSelect({
   const triggerClass = compact ? "w-auto" : "w-full";
 
   return (
-    <div className={cn(compact ? "flex items-center gap-2" : "space-y-2")}>
+    <div className={cn(compact ? "flex min-w-0 flex-wrap items-center gap-2" : "space-y-2")}>
       <Select
         items={providerItems}
         value={provider || null}
-        disabled={disabled || providers.isLoading}
+        // Nothing to pick from while the list loads or after it failed (ER-4).
+        disabled={disabled || providers.isLoading || providers.isError}
         onValueChange={(next) => {
           if (!next) return;
           setFilter("");
@@ -101,13 +105,13 @@ export function ModelSelect({
         </SelectContent>
       </Select>
 
-      <div className={cn(compact ? "flex items-center gap-2" : "space-y-2")}>
+      <div className={cn(compact ? "flex min-w-0 max-w-full flex-wrap items-center gap-2" : "space-y-2")}>
         {showFilter && (
           <Input
             aria-label="Filter models"
             value={filter}
             placeholder={`Filter ${options.length} models…`}
-            className={cn(compact && "h-7 w-40 px-2 text-xs")}
+            className={cn(compact && "h-7 w-40 max-w-full px-2 text-xs")}
             onChange={(e) => setFilter(e.target.value)}
           />
         )}
@@ -123,7 +127,7 @@ export function ModelSelect({
           <SelectTrigger
             aria-label="Model"
             size={compact ? "sm" : "default"}
-            className={cn(triggerClass, compact && "max-w-[16rem]")}
+            className={cn(triggerClass, compact && "max-w-full min-w-0 sm:max-w-[16rem]")}
           >
             <SelectValue
               placeholder={
@@ -131,7 +135,7 @@ export function ModelSelect({
               }
             />
           </SelectTrigger>
-          <SelectContent alignItemWithTrigger={false} className="w-auto max-w-[28rem]">
+          <SelectContent alignItemWithTrigger={false} className="w-auto max-w-[min(28rem,calc(100vw-2rem))]">
             {modelItems.length === 0 && (
               <div className="px-2 py-1.5 text-sm text-muted-foreground">no matches</div>
             )}
@@ -154,6 +158,7 @@ export function ModelSelect({
         <span
           title={`Couldn't list models: ${models.data.error ?? "unknown error"}`}
           className="shrink-0 text-[11px] text-warning"
+          role="img"
           aria-label="Model list unavailable; showing defaults"
         >
           ⚠

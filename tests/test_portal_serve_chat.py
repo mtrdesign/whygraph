@@ -49,7 +49,7 @@ from whygraph.services.llm.chat import (
     ToolCallMade,
     TurnDone,
 )
-from whygraph.services.llm.exceptions import LlmError
+from whygraph.services.llm.exceptions import LlmError, LlmKeyMissing
 
 
 @pytest.fixture
@@ -211,17 +211,21 @@ def test_create_session_rejects_a_configured_non_chat_provider(
     )
     response = chat_client.post("/api/chat/sessions", json={})
     assert response.status_code == 400
-    assert "not a chat provider" in response.json()["detail"]
+    assert response.json()["code"] == "bad_config"
+    assert "not a chat provider" in response.json()["error"]
 
 
 def test_create_session_rejects_a_non_chat_provider(chat_client) -> None:
     response = chat_client.post("/api/chat/sessions", json={"provider": "ollama"})
     assert response.status_code == 400
-    assert "not a chat provider" in response.json()["detail"]
+    assert response.json()["code"] == "bad_provider"
+    assert "not a chat provider" in response.json()["error"]
 
 
 def test_unknown_session_is_404_everywhere(chat_client) -> None:
-    assert chat_client.get("/api/chat/sessions/999").status_code == 404
+    missing = chat_client.get("/api/chat/sessions/999")
+    assert missing.status_code == 404
+    assert missing.json() == {"error": "session 999 not found", "code": "not_found"}
     assert (
         chat_client.patch("/api/chat/sessions/999", json={"title": "x"}).status_code
         == 404
@@ -287,6 +291,7 @@ def test_rename_rejects_an_empty_title(chat_client) -> None:
         f"/api/chat/sessions/{session['id']}", json={"title": "  "}
     )
     assert response.status_code == 400
+    assert response.json()["code"] == "bad_title"
 
 
 def test_empty_message_is_rejected(chat_client) -> None:
@@ -295,6 +300,7 @@ def test_empty_message_is_rejected(chat_client) -> None:
         f"/api/chat/sessions/{session['id']}/messages", json={"content": "   "}
     )
     assert response.status_code == 400
+    assert response.json()["code"] == "bad_content"
 
 
 def test_delete_removes_the_messages_too(chat_client, monkeypatch) -> None:
@@ -805,7 +811,7 @@ def test_unconfigured_provider_yields_a_single_error_frame(
     chat_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def _boom(*a, **k):
-        raise LlmError("provider not configured")
+        raise LlmKeyMissing("openrouter is not configured - set OPENROUTER_API_KEY")
 
     monkeypatch.setattr(serve_chat, "make_chat_client", _boom)
     session = _new_session(chat_client, provider="openrouter")
@@ -816,14 +822,18 @@ def test_unconfigured_provider_yields_a_single_error_frame(
     assert response.status_code == 200  # status is committed before streaming
     frames = _frames(response)
     assert [f["type"] for f in frames] == ["error"]
-    assert "OPENROUTER_API_KEY" in frames[0]["message"]
+    # The SPA words a missing key from the code and the provider (MODE-4):
+    # no environment variable or `whygraph.toml` key in the text.
+    assert frames[0]["code"] == "no_llm_key"
+    assert frames[0]["provider"] == "openrouter"
+    assert "OPENROUTER_API_KEY" not in frames[0]["message"]
 
     # The question is still in the transcript, so a retry needs no retyping —
     # and the failure is a row, not just a frame, so a refresh replays it.
     messages = chat_client.get(f"/api/chat/sessions/{session['id']}").json()["messages"]
     assert [m["role"] for m in messages] == ["user", "assistant"]
     assert messages[-1]["content"] == ""
-    assert "OPENROUTER_API_KEY" in messages[-1]["error"]
+    assert messages[-1]["error"] == frames[0]["message"]
 
 
 def test_mid_stream_provider_error_is_in_band_and_keeps_partial_text(
@@ -843,6 +853,7 @@ def test_mid_stream_provider_error_is_in_band_and_keeps_partial_text(
     frames = _frames(response)
     assert [f["type"] for f in frames] == ["text_delta", "error"]
     assert "connection reset" in frames[-1]["message"]
+    assert frames[-1]["code"] == "provider_error"
 
     messages = chat_client.get(f"/api/chat/sessions/{session['id']}").json()["messages"]
     assert [(m["role"], m["content"]) for m in messages] == [
@@ -883,6 +894,32 @@ def test_provider_error_before_any_token_still_persists_a_reply_row(
         ("assistant", ""),
     ]
     assert messages[-1]["error"] == "401 invalid x-api-key"
+
+
+def test_an_unreachable_provider_is_coded_llm_unavailable(
+    chat_client, monkeypatch
+) -> None:
+    """A connection failure under the ``LlmError`` reads as ``llm_unavailable``."""
+
+    class APIConnectionError(Exception):
+        pass
+
+    def _unreachable(*, client, history, registry=None, **kwargs):
+        raise LlmError("openai API error") from APIConnectionError("refused")
+        yield  # pragma: no cover -- makes this a generator
+
+    monkeypatch.setattr(serve_chat, "make_chat_client", lambda *a, **k: object())
+    monkeypatch.setattr(serve_chat, "run_turn", _unreachable)
+    session = _new_session(chat_client)
+
+    frames = _frames(
+        chat_client.post(
+            f"/api/chat/sessions/{session['id']}/messages", json={"content": "hi"}
+        )
+    )
+    assert frames == [
+        {"type": "error", "code": "llm_unavailable", "message": "openai API error"}
+    ]
 
 
 def test_client_disconnect_persists_a_stopped_marker(chat_client, monkeypatch) -> None:
@@ -945,6 +982,7 @@ def test_unexpected_crash_is_also_an_in_band_error(chat_client, monkeypatch) -> 
     )
     assert frames[-1]["type"] == "error"
     assert "RuntimeError: bug" in frames[-1]["message"]
+    assert frames[-1]["code"] == "provider_error"
 
     messages = chat_client.get(f"/api/chat/sessions/{session['id']}").json()["messages"]
     assert messages[-1]["error"] == "RuntimeError: bug"
@@ -959,7 +997,9 @@ def test_chat_router_does_not_shadow_explorer_routes(chat_client) -> None:
     """``.../chat`` is mounted beside the project's data routes, not over it."""
     # An Explorer route with no CodeGraph index still 503s (its own contract),
     # rather than 404-ing because the chat prefix swallowed it.
-    assert chat_client.get("/api/tree").status_code == 503
+    response = chat_client.get("/api/tree")
+    assert response.status_code == 503
+    assert response.json()["code"] == "not_indexed"
 
 
 # ---------------------------------------------------------------------------
@@ -1041,6 +1081,7 @@ def test_models_empty_live_list_is_treated_as_a_failure(
 def test_models_rejects_a_non_chat_provider(chat_client) -> None:
     response = chat_client.get("/api/chat/models", params={"provider": "ollama"})
     assert response.status_code == 400
+    assert response.json()["code"] == "bad_provider"
 
 
 # ---------------------------------------------------------------------------

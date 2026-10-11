@@ -35,35 +35,40 @@
 
 /* Semantic tokens only - components never use raw colours. Values are OKLCH and
    were checked against WCAG AA: 4.5:1 for body text (foreground, muted-foreground,
-   primary-text, status colours, primary-foreground on primary) and 3:1 for the
-   UI boundaries that identify a control (input, ring). --border is deliberately
+   primary-text, status colours on their -soft background and on --card, primary-foreground
+   on primary) and 3:1 for the
+   UI boundaries that identify a control (input on background / card / popover / muted, ring);
+   test/contrast.test.ts enforces the pairs. --border is deliberately
    quiet ("structure should be felt, not seen") and is only ever a divider. */
 :root {
-  --background: oklch(0.99 0.002 90); /* warm near-white */
+  --background: oklch(0.985 0.002 285); /* cool near-white */
   --foreground: oklch(0.21 0.006 285);
-  --card: var(--background);
+  --card: oklch(1 0 0); /* a step above the page: depth */
   --card-foreground: var(--foreground);
-  --popover: var(--background);
+  --popover: oklch(1 0 0);
   --popover-foreground: var(--foreground);
-  --muted: oklch(0.96 0.003 90);
+  --muted: oklch(0.96 0.004 285);
   --muted-foreground: oklch(0.5 0.01 285);
   --secondary: var(--muted);
   --secondary-foreground: var(--foreground);
   --accent: oklch(0.955 0.006 285); /* hover / selected surface, not the brand colour */
   --accent-foreground: var(--foreground);
-  --border: oklch(0.92 0.004 90);
+  --border: oklch(0.915 0.004 285);
   --input: oklch(0.62 0.01 285);
   --ring: oklch(0.55 0.21 277);
   --primary: oklch(0.55 0.21 277); /* indigo, the brand accent (~#5b5fe0) */
   --primary-foreground: oklch(0.99 0 0);
   --primary-text: oklch(0.5 0.21 277); /* indigo tuned for text and links on the page */
-  --success: oklch(0.5 0.14 150);
+  --success: oklch(0.45 0.13 150);
+  --success-soft: oklch(0.95 0.045 150);
   --success-foreground: oklch(0.99 0 0);
-  --warning: oklch(0.5 0.11 75);
+  --warning: oklch(0.47 0.11 70);
+  --warning-soft: oklch(0.955 0.055 88);
   --warning-foreground: oklch(0.99 0 0);
-  --destructive: oklch(0.55 0.22 27);
+  --destructive: oklch(0.52 0.21 27);
+  --destructive-soft: oklch(0.955 0.03 27);
   --destructive-foreground: oklch(0.99 0 0);
-  --sidebar: oklch(0.975 0.003 90); /* one step off the content */
+  --sidebar: oklch(0.972 0.003 285); /* one step off the content */
   --sidebar-foreground: var(--foreground);
   --sidebar-primary: var(--primary);
   --sidebar-primary-foreground: var(--primary-foreground);
@@ -71,6 +76,12 @@
   --sidebar-accent-foreground: var(--accent-foreground);
   --sidebar-border: var(--border);
   --sidebar-ring: var(--ring);
+  --primary-soft: oklch(0.955 0.03 277); /* selected / in progress surface */
+  --info: oklch(0.48 0.13 245);
+  --info-soft: oklch(0.955 0.03 245);
+  --info-foreground: oklch(0.99 0 0);
+  --track: oklch(0.94 0.004 285); /* empty progress track */
+  --card-shadow: 0 1px 2px oklch(0.2 0.01 285 / 0.06), 0 0 0 1px oklch(0.2 0.01 285 / 0.04);
   --radius: 0.5rem;
   color-scheme: light;
 }
@@ -78,27 +89,31 @@
 .dark {
   --background: oklch(0.16 0.004 285); /* the family of the old #0b0d12 */
   --foreground: oklch(0.94 0.004 285);
-  --card: var(--background);
+  --card: oklch(0.195 0.005 285);
   --card-foreground: var(--foreground);
-  --popover: oklch(0.19 0.005 285);
+  --popover: oklch(0.215 0.006 285); /* one step above a card */
   --popover-foreground: var(--foreground);
-  --muted: oklch(0.21 0.005 285);
+  --muted: oklch(0.23 0.006 285);
   --muted-foreground: oklch(0.72 0.01 285);
   --secondary: var(--muted);
   --secondary-foreground: var(--foreground);
   --accent: oklch(0.25 0.008 285);
   --accent-foreground: var(--foreground);
   --border: oklch(0.27 0.006 285);
-  --input: oklch(0.5 0.01 285);
+  --input: oklch(0.53 0.01 285);
   --ring: oklch(0.62 0.2 277);
-  --primary: oklch(0.55 0.21 277);
+  --primary: oklch(0.57 0.21 277);
   --primary-foreground: oklch(0.99 0 0);
-  --primary-text: oklch(0.75 0.14 277);
-  --success: oklch(0.75 0.15 150);
+  --primary-text: oklch(0.78 0.13 277);
+  --primary-soft: oklch(0.28 0.07 277);
+  --success: oklch(0.8 0.15 150);
+  --success-soft: oklch(0.27 0.05 150);
   --success-foreground: oklch(0.16 0 0);
-  --warning: oklch(0.8 0.14 80);
+  --warning: oklch(0.83 0.13 82);
+  --warning-soft: oklch(0.28 0.05 80);
   --warning-foreground: oklch(0.16 0 0);
-  --destructive: oklch(0.7 0.19 22);
+  --destructive: oklch(0.76 0.16 22);
+  --destructive-soft: oklch(0.28 0.07 22);
   --destructive-foreground: oklch(0.16 0 0);
   --sidebar: oklch(0.14 0.004 285); /* dimmer than the content */
   --sidebar-foreground: var(--foreground);
@@ -108,6 +123,11 @@
   --sidebar-accent-foreground: var(--accent-foreground);
   --sidebar-border: var(--border);
   --sidebar-ring: var(--ring);
+  --info: oklch(0.78 0.11 245);
+  --info-soft: oklch(0.28 0.05 245);
+  --info-foreground: oklch(0.16 0 0);
+  --track: oklch(0.26 0.006 285);
+  --card-shadow: 0 0 0 1px oklch(1 0 0 / 0.04);
   color-scheme: dark;
 }
 
@@ -132,12 +152,20 @@
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
   --color-primary-text: var(--primary-text);
+  --color-primary-soft: var(--primary-soft);
   --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
   --color-success-foreground: var(--success-foreground);
   --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
   --color-warning-foreground: var(--warning-foreground);
   --color-destructive: var(--destructive);
+  --color-destructive-soft: var(--destructive-soft);
   --color-destructive-foreground: var(--destructive-foreground);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-info-foreground: var(--info-foreground);
+  --color-track: var(--track);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);
@@ -146,6 +174,10 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+
+  /* `--card-shadow` is the raw token; the utility has its own name so the
+     mapping is not self-referencing. */
+  --shadow-card: var(--card-shadow);
 
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
@@ -178,6 +210,17 @@
   --tw-prose-pre-bg: var(--muted);
   --tw-prose-th-borders: var(--border);
   --tw-prose-td-borders: var(--border);
+}
+
+/* A wrapping row of inline facts (phone layout): the cells wrap instead of
+   overflowing, and shrink with the container. */
+@utility row-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: calc(var(--spacing) * 3);
+  row-gap: calc(var(--spacing) * 1);
+  min-width: 0;
 }
 
 @layer base {

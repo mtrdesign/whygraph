@@ -31,8 +31,16 @@ The first time you open the portal it shows a **Welcome** screen. Enter your nam
 creates the single local user. The screen also shows the portal's mode (**Local**) and the folders it
 can see, and carries the [shared-machine note](security.md#shared-machines).
 
-You land on an empty Projects page. [Share a folder](shared-folders.md) that holds your repositories
-if you have not yet, then [add a project](projects.md).
+You land on an empty Projects page, and it is a short **checklist** instead of a blank one:
+
+1. **Add an LLM key** - under **Settings**, so descriptions, rationale cards and Chat have a model.
+2. **Add a project** - [share a folder](shared-folders.md) that holds your repositories if you have not
+   yet, then [add a project](projects.md).
+3. **Connect your agent** - from the project's Overview, once it exists.
+
+Each step has one button and ticks itself off when it is done. **Dismiss** hides the checklist in this
+browser, and **Getting started** in the Projects header brings it back; it disappears for good when
+every step is done. Projects can be added before a key is saved - the first scan never calls an LLM.
 
 ## The host commands
 

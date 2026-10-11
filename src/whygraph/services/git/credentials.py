@@ -56,6 +56,13 @@ alone would miss it. WhyGraph's own connection tokens (``wgc_...``, M2e)
 match too.
 """
 
+PROVIDER_KEY_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}")
+"""An LLM provider API key (``sk-ant-...``, ``sk-proj-...``, ``sk-or-v1-...``).
+
+The left boundary keeps words that merely end in ``sk-`` ("risk-assessment-
+template-v2-final", "task-runner-...") intact.
+"""
+
 _PASS_THROUGH_EXACT = frozenset(
     {
         "PATH",
@@ -372,7 +379,9 @@ def git_env(
 
 
 def redact_tokens(text: str) -> str:
-    """Replace anything matching :data:`TOKEN_PATTERN` by its prefix and ``***``.
+    """Replace GitHub tokens and provider API keys by their prefix and ``***``.
+
+    :data:`TOKEN_PATTERN` is applied first, then :data:`PROVIDER_KEY_PATTERN`.
 
     Parameters
     ----------
@@ -382,6 +391,8 @@ def redact_tokens(text: str) -> str:
     Returns
     -------
     str
-        ``text`` with each match replaced by e.g. ``ghs_***`` or ``wgc_***``.
+        ``text`` with each match replaced by e.g. ``ghs_***``, ``wgc_***`` or
+        ``sk-***``.
     """
-    return TOKEN_PATTERN.sub(lambda m: m.group()[:4] + "***", text)
+    text = TOKEN_PATTERN.sub(lambda m: m.group()[:4] + "***", text)
+    return PROVIDER_KEY_PATTERN.sub(lambda m: m.group()[:3] + "***", text)

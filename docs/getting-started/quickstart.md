@@ -16,18 +16,19 @@ container, and shares that folder with it. Drop `--add-folder` to start without 
 ## 2. Open it in the browser
 
 Open <http://127.0.0.1:8765>. The first time, enter your name on the Welcome screen. You land on an
-empty **Projects** page.
+**Projects** page, which starts with a short checklist: add an LLM key, add a project, connect your
+agent. Each step ticks itself off; **Dismiss** hides the list and **Getting started** brings it back.
 
 ## 3. Add a project
 
-Choose **New project**, pick a repository from your shared folders, and follow the four steps:
+Choose **New project**, pick a repository from your shared folders, and follow the three steps:
 
 1. **Source** - the repository.
-2. **Configure** - models and provider keys. Set keys once under **Settings** and every project
-   inherits them.
-3. **Initialize** - review the preview, choose which agents to connect, confirm.
-4. **First scan** - reads git history and refreshes the CodeGraph index, with live progress. It never
-   calls an LLM, so it is free and fast.
+2. **Set up** - review the preview and choose which agents to connect. Set provider keys once under
+   **Settings** and every project inherits them.
+3. **Configure** - the first scan starts on its own: it reads git history and refreshes the CodeGraph
+   index, with live progress, and it never calls an LLM, so it is free and fast. This step also shows
+   the estimate for the optional descriptions.
 
 !!! warning "Enter your keys in the portal"
     `ANTHROPIC_API_KEY`, `GH_TOKEN` and the other credentials in your shell environment do **not**
@@ -41,7 +42,7 @@ The project opens in the [Explorer](../guide/playground.md): the code graph with
 evidence side by side, and a [Chat assistant](../guide/chat.md) that answers questions by calling
 WhyGraph's tools.
 
-Your agent connected during Initialize. Approve the `whygraph` server when it asks (Claude Code) or trust
+Your agent connected during Set up. Approve the `whygraph` server when it asks (Claude Code) or trust
 the project (Codex), then ask why a function exists and WhyGraph answers from history. See
 [Connecting agents](../portal/agents.md).
 

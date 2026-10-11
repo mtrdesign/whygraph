@@ -60,6 +60,7 @@ from whygraph.db.engine import dispose_engine
 from . import audit_store, connections
 from .audit import audit
 from .authz import DEFAULT_PROJECT_ROLES, Action, OrgAccess, Role
+from .clones import remove_clone
 from .context import resolve_root
 from .db import get_session
 from .deps import (
@@ -86,7 +87,6 @@ from .models import (
 )
 from .orgs import lock_org_slug
 from .paths import db_paths
-from .routes import _remove_clone
 from .runner import ProjectBusy, remove_run_files, run_files
 from .security import Principal
 
@@ -207,7 +207,7 @@ def _clean_up(state: PortalState, slug: str, deleted: _Deleted) -> None:
     org_dir = state.data_dir / "repos" / slug
     try:
         # Exactly one level under <data>/repos, no symlink (the clone guard).
-        if not _remove_clone(org_dir, state.data_dir, depth=1) and org_dir.exists():
+        if not remove_clone(org_dir, state.data_dir, depth=1) and org_dir.exists():
             _log.warning(
                 "org deletion: refused to delete %s: not a portal folder", org_dir
             )

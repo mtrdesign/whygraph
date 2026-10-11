@@ -12,6 +12,7 @@ rendering is exercised.
 from __future__ import annotations
 
 import io
+import json
 import subprocess
 from pathlib import Path
 from typing import Iterator
@@ -251,6 +252,80 @@ def test_phase_numbering_across_flag_combinations(
     # `n` never exceeds `phase_total`.
     total = len(expected)
     assert f"Phase {total + 1}/" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("flags", "remote", "titles"),
+    [
+        (
+            [],
+            True,
+            [
+                "Structural crawl",
+                "PR-origin recovery",
+                "Author identity",
+                "LLM descriptions",
+            ],
+        ),
+        (
+            ["--skip-analyze"],
+            True,
+            ["Structural crawl", "PR-origin recovery", "Author identity"],
+        ),
+        (
+            ["--no-remote"],
+            False,
+            ["Structural crawl", "Author identity", "LLM descriptions"],
+        ),
+        (
+            ["--no-remote", "--skip-analyze"],
+            False,
+            ["Structural crawl", "Author identity"],
+        ),
+    ],
+)
+def test_start_event_lists_the_phase_titles(
+    isolated_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    flags: list[str],
+    remote: bool,
+    titles: list[str],
+) -> None:
+    """The ``start`` event names every phase up front, in run order."""
+    _patch_crawlers(monkeypatch, [])
+    if remote:
+        monkeypatch.setattr(
+            scan_mod, "_select_github_client", lambda *a, **k: _DummyClient()
+        )
+    monkeypatch.setattr("whygraph.analyze.LlmDescriptor", _DummyDescriptor)
+
+    result = CliRunner().invoke(whygraph_main, ["scan", "--progress", "json", *flags])
+
+    assert result.exit_code == 0, result.output
+    events = [json.loads(line) for line in result.stdout.splitlines() if line]
+    assert events[0] == {"type": "start", "phase_total": len(titles), "phases": titles}
+    assert [e["title"] for e in events if e["type"] == "phase"] == titles
+
+
+def test_codegraph_only_start_event_sends_code_index(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_crawlers(monkeypatch, [])
+
+    result = CliRunner().invoke(
+        whygraph_main,
+        [
+            "scan",
+            "--progress",
+            "json",
+            "--managed-by-portal",
+            "--codegraph-only",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    first = json.loads(result.stdout.splitlines()[0])
+    assert first == {"type": "start", "phase_total": 1, "phases": ["Code index"]}
 
 
 class _Fake:

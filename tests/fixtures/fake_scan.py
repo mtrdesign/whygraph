@@ -103,7 +103,13 @@ def main() -> int:
                 )
                 + "\n"
             )
-    _emit({"type": "start", "phase_total": 2})
+    _emit(
+        {
+            "type": "start",
+            "phase_total": 2,
+            "phases": ["Structural crawl", "Author identity"],
+        }
+    )
     _emit({"type": "phase", "phase": 1, "title": "Structural crawl"})
     if echo:
         value = os.environ.get(echo, "")

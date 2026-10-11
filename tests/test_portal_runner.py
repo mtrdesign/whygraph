@@ -80,6 +80,7 @@ from whygraph.portal.runner import (
     SourceNotAllowed,
     _event_line,
     _insert_run,
+    _Job,
     _Pending,
     _read_frames,
     _recover_queued,
@@ -239,6 +240,14 @@ def legacy_github_project(env: SimpleNamespace, name: str) -> int:
         return project.id
 
 
+def forget_first_scan(slug: str) -> None:
+    """Make a project read as never scanned ``ok`` (as if its first scan failed)."""
+    with portal_db.get_session() as session:
+        project = session.exec(select(Project).where(Project.slug == slug)).one()
+        project.last_scan_at = None
+        session.add(project)
+
+
 def commit(root: Path, text: str) -> str:
     (root / "sample.py").write_text(text)
     _git(root, "add", "sample.py")
@@ -247,9 +256,13 @@ def commit(root: Path, text: str) -> str:
 
 
 def first_scan(client: TestClient, slug: str) -> dict:
-    """Run the structure-only first scan to completion (so later ones keep their trigger)."""
-    run = wait_run(client, slug, scan(client, slug))
-    assert run["status"] == "ok" and run["trigger"] == "initial"
+    """The structure-only first scan the first Initialize queued, ended (so later ones keep their trigger).
+
+    ``init_project`` already waited for it; this asserts it is the project's
+    one run and that it ended ``ok`` as an ``initial`` scan.
+    """
+    (run,) = wait_idle(client, slug)
+    assert run["status"] == "ok" and run["trigger"] == "initial", run
     return run
 
 
@@ -433,6 +446,22 @@ def test_the_redactor_learns_new_values() -> None:
     assert out == "…1111 …2222 …9876"
 
 
+def test_redactor_learn_path_rewrites_on_a_path_boundary_root_first() -> None:
+    redact = redactor([])
+    redact.learn_path("/data", "<data>")
+    redact.learn_path("/data/repos/acme/api", ".")
+    text = (
+        "cd /data/repos/acme/api && ls /data/repos/acme/api/src "
+        "'/data/repos/acme/api' /data/runs/1.log /data/repos/acme/api-v2/x "
+        "/data/repos/acme/api"
+    )
+    assert redact(text) == (
+        "cd . && ls ./src '.' <data>/runs/1.log <data>/repos/acme/api-v2/x ."
+    )
+    assert redact('{"m": "/data/repos/acme/api"}') == '{"m": "."}'
+    assert redact("/mnt/data/x") == "/mnt/data/x"
+
+
 def test_token_file_is_0600_and_never_read_torn(tmp_path: Path) -> None:
     path = tmp_path / "runs" / "3.token"
     path.parent.mkdir()
@@ -516,7 +545,13 @@ def test_read_frames_skips_a_line_longer_than_a_chunk(tmp_path: Path) -> None:
     big = json.dumps(
         {"type": "result", "crawlers": [{"name": "git", "error": "x" * 300_000}]}
     )
-    start = json.dumps({"type": "start", "phase_total": 2})
+    start = json.dumps(
+        {
+            "type": "start",
+            "phase_total": 2,
+            "phases": ["Structural crawl", "Author identity"],
+        }
+    )
     phase = json.dumps({"type": "phase", "phase": 2})
     path.write_text(f"{start}\n{big}\n{phase}\n")
 
@@ -552,14 +587,28 @@ def test_oversized_child_lines_are_written_as_a_placeholder() -> None:
 def test_first_scan_is_initial_and_argv_per_trigger(
     portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
 ) -> None:
-    root = local_project(portal, env, "demo")
+    root = make_repo(env.shared, "demo")
+    seed_codegraph(root)
+    add_local(portal, root)
     head = _git(root, "rev-parse", "HEAD").strip()
 
-    # Whatever asks, the first scan records `initial` and spends nothing.
+    # The first Initialize queues the first scan; whatever asks before it
+    # ended ok, a scan records `initial` and spends nothing.
+    scanner.hold.touch()
+    init = portal.post("/api/projects/demo/init", json={"agents": []})
+    assert init.status_code == 200, init.text
+    first = init.json()["initial_run_id"]
+    wait_for(scanner.calls)
     run_id = scan(portal, "demo", trigger="describe")
-    run = wait_run(portal, "demo", run_id)
-    assert (run["status"], run["trigger"], run["analyze"]) == ("ok", "initial", False)
-    assert run["summary"]["exit_code"] == 0
+    scanner.hold.unlink()
+    for rid in (first, run_id):
+        run = wait_run(portal, "demo", rid)
+        assert (run["status"], run["trigger"], run["analyze"]) == (
+            "ok",
+            "initial",
+            False,
+        )
+        assert run["summary"]["exit_code"] == 0
     with portal_db.get_session() as session:
         project = session.exec(select(Project).where(Project.slug == "demo")).one()
         assert project.last_scanned_head == head and project.last_scan_at
@@ -572,11 +621,13 @@ def test_first_scan_is_initial_and_argv_per_trigger(
     ]:
         run = wait_run(portal, "demo", scan(portal, "demo", **body))
         assert (run["status"], run["trigger"]) == ("ok", trigger)
-        assert run["requested_by"] == (None if trigger == "hook" else 1)
+        by = run["requested_by"]
+        assert (by["label"] if by else None) == (None if trigger == "hook" else "Tess")
     calls = scanner.calls()
     assert [runner_flags(c) for c in calls] == [
         ["--progress", "json", "--managed-by-portal", *flags]
         for flags in (
+            ["--skip-analyze"],
             ["--skip-analyze"],
             ["--skip-analyze", "--no-remote"],
             [],
@@ -585,6 +636,65 @@ def test_first_scan_is_initial_and_argv_per_trigger(
         )
     ]
     assert all(Path(c["cwd"]) == root for c in calls)
+
+
+def _init(client: TestClient, slug: str, **body: Any) -> dict:
+    response = client.post(f"/api/projects/{slug}/init", json={"agents": [], **body})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_the_first_initialize_queues_the_first_scan_once(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    """M2f-3 R2 / decision 0.3 #9: only the call that sets initialized_at queues it."""
+    root = make_repo(env.shared, "demo")
+    seed_codegraph(root)
+    (root / ".mcp.json").write_text('{"mcpServers": {"other": {"command": "x"}}}\n')
+    _git(root, "add", ".mcp.json")
+    _git(root, "commit", "-q", "-m", "mcp")
+    add_local(portal, root)
+
+    assert _init(portal, "demo", dry_run=True)["initial_run_id"] is None
+    pending = _init(portal, "demo", agents=["claude"])
+    assert pending["needs_confirmation"] == [".mcp.json"]
+    assert (pending["initialized"], pending["initial_run_id"]) == (False, None)
+    assert runs(portal, "demo") == []
+
+    done = _init(portal, "demo", agents=["claude"], confirm_tracked=[".mcp.json"])
+    assert done["initialized"] is True and "scan_error" not in done
+    run = wait_run(portal, "demo", done["initial_run_id"])
+    assert (run["status"], run["trigger"], run["analyze"]) == ("ok", "initial", False)
+    assert run["requested_by"]["label"] == "Tess"
+
+    # "Update agent files" (settings mode) and later previews queue nothing.
+    again = _init(
+        portal, "demo", agents=["claude"], force=True, confirm_tracked=[".mcp.json"]
+    )
+    assert again["initial_run_id"] is None
+    assert _init(portal, "demo", dry_run=True)["initial_run_id"] is None
+    assert [r["id"] for r in runs(portal, "demo")] == [run["id"]]
+    assert len(scanner.calls()) == 1
+
+
+def test_a_refused_first_scan_never_fails_the_initialize(
+    portal: TestClient,
+    env: SimpleNamespace,
+    scanner: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def refuse(*args: Any, **kwargs: Any) -> int:
+        raise RunnerUnavailable("the scan runner is not running")
+
+    monkeypatch.setattr(portal.app.state.portal.runner, "request_scan", refuse)
+    root = make_repo(env.shared, "demo")
+    seed_codegraph(root)
+    add_local(portal, root)
+    done = _init(portal, "demo")
+    assert done["initialized"] is True
+    assert (done["initial_run_id"], done["scan_error"]) == (None, "runner_unavailable")
+    assert runs(portal, "demo") == []
+    assert portal.get("/api/projects/demo").json()["initialized"] is True
 
 
 def test_hook_scans_are_refused_outside_local_mode(
@@ -601,7 +711,7 @@ def test_hook_scans_are_refused_outside_local_mode(
     # (and production holds no local folder at all: the source policy)
     manual = portal.post("/api/projects/demo/scans", json={"trigger": "manual"})
     assert manual.status_code == 409 and manual.json()["code"] == "source_not_allowed"
-    assert scanner.calls() == []
+    assert len(scanner.calls()) == 1  # only the first Initialize's scan
     portal.app.state.portal.mode = "local"
     first_scan(portal, "demo")
     run = wait_run(portal, "demo", scan(portal, "demo", trigger="hook"))
@@ -628,7 +738,7 @@ def test_single_flight_and_union_coalescing(
         "manual",
         True,
     )
-    assert queued["requested_by"] == 1  # first explicit requester kept
+    assert queued["requested_by"]["label"] == "Tess"  # first explicit requester kept
     assert len(scanner.calls()) == 2  # single-flight: only the held run started
 
     scanner.hold.unlink()
@@ -644,17 +754,18 @@ def test_global_cap_of_two(
 ) -> None:
     for name in ("a1", "a2", "a3"):
         local_project(portal, env, name)
+    base = len(scanner.calls())  # each Initialize's first scan
     scanner.hold.touch()
     ids = {name: scan(portal, name) for name in ("a1", "a2", "a3")}
-    wait_for(lambda: len(scanner.calls()) == 2)
+    wait_for(lambda: len(scanner.calls()) == base + 2)
     time.sleep(0.3)
     statuses = sorted(run_by_id(portal, n, i)["status"] for n, i in ids.items())
     assert statuses == ["queued", "running", "running"]
-    assert len(scanner.calls()) == 2
+    assert len(scanner.calls()) == base + 2
     scanner.hold.unlink()
     for name, run_id in ids.items():
         assert wait_run(portal, name, run_id)["status"] == "ok"
-    assert len(scanner.calls()) == 3
+    assert len(scanner.calls()) == base + 3
 
 
 def test_failed_scan_and_stderr_flood(
@@ -679,7 +790,6 @@ def test_child_env_passes_allowlist_not_portal_credentials(
     scanner: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    local_project(portal, env, "demo")
     monkeypatch.setenv("SSL_CERT_FILE", "/etc/ssl/cert.pem")
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-portal-env")
@@ -690,6 +800,7 @@ def test_child_env_passes_allowlist_not_portal_credentials(
     password = env.tmp / "postgres.password"
     password.write_text(make_url(os.environ["WHYGRAPH_DATABASE_URL"]).password or "")
     monkeypatch.setenv("WHYGRAPH_DATABASE_PASSWORD_FILE", str(password))
+    local_project(portal, env, "demo")
     first_scan(portal, "demo")
     wait_run(portal, "demo", scan(portal, "demo", trigger="manual"))
     for call in scanner.calls():
@@ -773,7 +884,7 @@ def test_events_sse_replays_then_follows(
     local_project(portal, env, "demo")
     scanner.hold.touch()
     run_id = scan(portal, "demo")
-    wait_for(lambda: len(scanner.calls()) == 1)
+    wait_for(lambda: len(scanner.calls()) == 2)  # after the first Initialize's
     wait_for(lambda: (env.data / "runs" / f"{run_id}.jsonl").stat().st_size > 0)
     threading.Timer(0.5, scanner.hold.unlink).start()
 
@@ -925,7 +1036,8 @@ def test_restart_interrupts_running_and_requeues_queued(
         assert merged["summary"] == {"merged_into": ids[1]}
         with portal_db.get_session() as session:
             assert session.get(ScanRun, ids[2]).status == "cancelled"
-    assert [runner_flags(c)[3:] for c in scanner.calls()] == [[]]
+    # After the two Initializes' first scans, only the requeued run.
+    assert [runner_flags(c)[3:] for c in scanner.calls()][2:] == [[]]
 
 
 def test_recover_queued_reads_the_persisted_scan_flag(
@@ -954,6 +1066,91 @@ def test_recover_queued_reads_the_persisted_scan_flag(
         assert json.loads(session.get(ScanRun, run_id).summary) == {
             "scan_requested": True
         }
+
+
+def test_recover_queued_keeps_a_production_import_and_cancels_the_rest(
+    env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    """M2f-3 section 4.8: a queued import survives a restart (no root, not initialized)."""
+    with client_for() as client:
+        client.post("/api/portal/setup", json={"display_name": "Tess"})
+    with portal_db.get_session() as session:
+        org = builtin_org_id(session)
+        importing = Project(
+            org_id=org,
+            slug="api",
+            name="api",
+            source="github",
+            root="repos/acme/api",  # not cloned yet
+            github_repo_id=1,
+            github_installation_id=7,
+        )
+        local = Project(
+            org_id=org,
+            slug="half",
+            name="half",
+            source="local",
+            root=str(make_repo(env.shared, "half")),  # never initialized
+        )
+        session.add_all([importing, local])
+        session.flush()
+        ids = (importing.id, local.id, org)
+    import_run = _insert_run(ids[0], "sync", "initial", False, None)
+    local_run = _insert_run(ids[1], "scan", "manual", False, None)
+    (spec,) = _recover_queued(production=True)
+    assert (spec.run_id, spec.importing, spec.org_id) == (import_run, True, ids[2])
+    with portal_db.get_session() as session:
+        assert session.get(ScanRun, import_run).status == "queued"
+        assert session.get(ScanRun, local_run).status == "cancelled"
+    # A local portal (or a portal without the GitHub source) keeps none.
+    assert _recover_queued() == []
+    with portal_db.get_session() as session:
+        assert session.get(ScanRun, import_run).status == "cancelled"
+
+
+class _Tasks:
+    """A task group stand-in that records what ``_dispatch`` starts."""
+
+    def __init__(self) -> None:
+        self.started: list[int] = []
+
+    def start_soon(self, fn, job) -> None:  # noqa: ANN001
+        self.started.append(job.spec.run_id)
+
+
+def _spec(run_id: int, org_id: int, *, importing: bool) -> _Pending:
+    return _Pending(
+        run_id=run_id,
+        project_id=run_id,
+        kind="sync",
+        trigger="initial",
+        analyze=False,
+        requested_by=None,
+        scan_requested=True,
+        org_id=org_id,
+        importing=importing,
+    )
+
+
+def test_dispatch_runs_one_import_per_org_at_a_time() -> None:
+    """M2f-3 decision 0.3 #41: an org's imports clone one by one, others go on."""
+    runner = ScanRunner(max_concurrent=3)
+    tasks = _Tasks()
+    runner._tg = tasks
+    runner._running[1] = _Job(spec=_spec(1, 10, importing=True))
+    for spec in (
+        _spec(2, 10, importing=True),  # org 10 is already cloning: waits
+        _spec(3, 20, importing=True),  # another org's import
+        _spec(4, 10, importing=False),  # org 10's ordinary sync
+    ):
+        runner._pending[spec.project_id] = spec
+    runner._dispatch()
+    assert tasks.started == [3, 4]
+    assert set(runner._pending) == {2}
+    # Once org 10's clone ended, its next import starts.
+    del runner._running[1]
+    runner._dispatch()
+    assert tasks.started == [3, 4, 2] and runner._pending == {}
 
 
 def test_delete_refuses_while_a_scan_request_is_in_flight(
@@ -1016,9 +1213,9 @@ def test_scan_request_refused_while_a_removal_runs(
     assert refused.status_code == 409, refused.text
     assert "being removed" in refused.json()["error"]
     assert deleted[0].status_code == 200, deleted[0].text
-    assert scanner.calls() == []
+    assert len(scanner.calls()) == 1  # only the first Initialize's scan
     with portal_db.get_session() as session:
-        assert session.exec(select(ScanRun)).all() == []
+        assert session.exec(select(ScanRun)).all() == []  # gone with the project
 
 
 def test_removing_a_project_deletes_its_run_files(
@@ -1173,8 +1370,11 @@ def test_stale_reports_commits_behind(
     portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
 ) -> None:
     root = local_project(portal, env, "demo")
-    assert portal.get("/api/projects/demo").json()["stale"] is None  # never scanned
-    first_scan(portal, "demo")
+    first_scan(portal, "demo")  # the first Initialize's
+    assert portal.get("/api/projects/demo").json()["stale"] is None  # at HEAD
+    with portal_db.get_session() as session:
+        demo_id = session.exec(select(Project.id).where(Project.slug == "demo")).one()
+    portal.app.state.portal.runner.stale.drop(demo_id)  # past the 10 s HEAD memo
     commit(root, "one\n")
     commit(root, "two\n")
     commit(root, "three\n")
@@ -1266,11 +1466,10 @@ def test_shutdown_with_open_stream_interrupts_the_run(
             ).status_code
             == 201
         )
-        assert http.post("/api/projects/demo/init", json={"agents": []}).json()[
-            "initialized"
-        ]
         scanner.hold.touch()  # never released: the child runs until shutdown
-        run_id = http.post("/api/projects/demo/scans").json()["run_id"]
+        init = http.post("/api/projects/demo/init", json={"agents": []}).json()
+        assert init["initialized"]
+        run_id = init["initial_run_id"]  # the first Initialize's scan
         wait_for(lambda: len(scanner.calls()) == 1)
 
         received: list[str] = []
@@ -1345,9 +1544,9 @@ def test_open_stream_gets_the_shutdown_frame_without_holding_the_stop(
         root = make_repo(env.shared, "demo")
         seed_codegraph(root)
         http.post("/api/projects", json={"source": "local", "path": str(root)})
-        http.post("/api/projects/demo/init", json={"agents": []})
         scanner.hold.touch()
-        run_id = http.post("/api/projects/demo/scans").json()["run_id"]
+        init = http.post("/api/projects/demo/init", json={"agents": []}).json()
+        run_id = init["initial_run_id"]  # the first Initialize's scan
         wait_for(lambda: len(scanner.calls()) == 1)
 
         received: list[str] = []
@@ -1556,22 +1755,28 @@ def test_commits_during_a_running_scan_yield_one_hook_follow_up(
         ).is_success
         init = http.post("/api/projects/demo/init", json={"agents": []}).json()
         assert init["initialized"] and "post-commit" in init["hooks"]["installed"]
-        with portal_db.get_session() as session:  # past the first (initial) scan
-            project = session.exec(select(Project)).one()
-            project.last_scan_at = "2026-01-01T00:00:00+00:00"
-            session.add(project)
+        wait_for(  # past the first (initial) scan the Initialize queued
+            lambda: (
+                http.get(f"/api/projects/demo/scans/{init['initial_run_id']}").json()[
+                    "status"
+                ]
+                in TERMINAL
+            )
+        )
 
         scanner.hold.touch()
         running = http.post("/api/projects/demo/scans", json={"trigger": "manual"})
         running_id = running.json()["run_id"]
-        wait_for(lambda: len(scanner.calls()) == 1)
+        wait_for(lambda: len(scanner.calls()) == 2)
 
         commit("one.txt")
         commit("two.txt")
 
         def pending() -> list[dict]:
             rows = http.get("/api/projects/demo/scans").json()["runs"]
-            return [r for r in rows if r["id"] != running_id]
+            return [
+                r for r in rows if r["id"] not in (running_id, init["initial_run_id"])
+            ]
 
         queued = wait_for(pending)
         time.sleep(1.0)  # let the second hook's request land too
@@ -1581,9 +1786,9 @@ def test_commits_during_a_running_scan_yield_one_hook_follow_up(
         assert queued[0]["id"] == follow_up["id"]
 
         scanner.hold.unlink()
-        wait_for(lambda: len(scanner.calls()) == 2)
-        assert "--skip-analyze" in runner_flags(scanner.calls()[1])
-        assert "--no-remote" in runner_flags(scanner.calls()[1])
+        wait_for(lambda: len(scanner.calls()) == 3)
+        assert "--skip-analyze" in runner_flags(scanner.calls()[2])
+        assert "--no-remote" in runner_flags(scanner.calls()[2])
     finally:
         http.close()
         server.should_exit = True
@@ -1673,13 +1878,21 @@ def test_a_1x_repo_migrates_through_the_wizard_and_keeps_its_commits(
     assert hook.read_text() == _V1_HOOK  # the 1.x helper rescans until Initialize
     assert legacy.read_text() == _V1_HELPER
 
-    # Initialize, migrating both agent files.
-    done = init_project(
-        portal,
-        "legacy",
-        agents=["claude", "vscode"],
-        agent_actions={"claude": "migrate", "vscode": "migrate"},
+    # Initialize, migrating both agent files. Its first scan runs the real
+    # child (below).
+    monkeypatch.setenv(
+        "WHYGRAPH_SCAN_CMD",
+        f"{shlex.quote(sys.executable)} -m whygraph scan --no-codegraph",
     )
+    response = portal.post(
+        "/api/projects/legacy/init",
+        json={
+            "agents": ["claude", "vscode"],
+            "agent_actions": {"claude": "migrate", "vscode": "migrate"},
+        },
+    )
+    assert response.status_code == 200, response.text
+    done = response.json()
     assert done["initialized"] is True, done
     assert not (root / "whygraph.toml").exists()  # acceptance #4
     assert (root / ".whygraph" / "backups" / f"whygraph-{old_revision}.db").is_file()
@@ -1698,11 +1911,7 @@ def test_a_1x_repo_migrates_through_the_wizard_and_keeps_its_commits(
     assert entry["type"] == "http" and entry["url"].endswith("/mcp/legacy")
 
     # The first scan (the real child) adds only the new commit.
-    monkeypatch.setenv(
-        "WHYGRAPH_SCAN_CMD",
-        f"{shlex.quote(sys.executable)} -m whygraph scan --no-codegraph",
-    )
-    run = wait_run(portal, "legacy", scan(portal, "legacy"), timeout=120)
+    run = wait_run(portal, "legacy", done["initial_run_id"], timeout=120)
     assert (run["status"], run["trigger"]) == ("ok", "initial"), run
     with sqlite3.connect(db) as conn:
         rows = dict(
@@ -1765,8 +1974,13 @@ def test_cancel_a_queued_scan_drops_it_from_the_queue(
     assert response.status_code == 200, response.text
     assert response.json() == {"run_id": queued, "was": "queued"}
     row = run_by_id(portal, "demo", queued)
-    assert (row["status"], row["summary"]) == ("cancelled", {"cancelled_by": "user"})
-    assert row["finished_at"]
+    # A manual request is a full run: it keeps the estimate it was queued with.
+    assert row["status"] == "cancelled" and row["finished_at"]
+    assert row["summary"] == {
+        "cancelled_by": "user",
+        "estimate": row["summary"]["estimate"],
+    }
+    assert row["cancelled_by"]["label"] == "Tess"
     scanner.hold.unlink()
     assert wait_run(portal, "demo", running)["status"] == "ok"
     wait_idle(portal, "demo")
@@ -1841,7 +2055,14 @@ def _request(client: TestClient, slug: str, **kwargs: Any) -> int:
     )
 
 
-def _cancel(client: TestClient, slug: str, run_id: int, *, may_cancel_full: bool):  # noqa: ANN202
+def _cancel(  # noqa: ANN202
+    client: TestClient,
+    slug: str,
+    run_id: int,
+    *,
+    may_cancel_full: bool,
+    by: int | None = None,
+):
     runner = client.app.state.portal.runner
     return client.portal.call(
         partial(
@@ -1849,6 +2070,7 @@ def _cancel(client: TestClient, slug: str, run_id: int, *, may_cancel_full: bool
             _project_ref(slug).id,
             run_id,
             may_cancel_full=may_cancel_full,
+            by=by,
         )
     )
 
@@ -1857,6 +2079,7 @@ def test_a_request_that_would_spend_needs_may_spend(
     portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
 ) -> None:
     local_project(portal, env, "demo")
+    forget_first_scan("demo")
     # The first scan is forced to `initial` (no analyze), so a body-less
     # request without the right passes: the gate runs after the forcing.
     first = _request(portal, "demo", trigger=None, analyze=None, may_spend=False)
@@ -1870,7 +2093,9 @@ def test_a_request_that_would_spend_needs_may_spend(
     ):
         with pytest.raises(ScanForbidden):
             _request(portal, "demo", trigger=trigger, analyze=analyze, may_spend=False)
-    assert [r["id"] for r in runs(portal, "demo")] == [first]  # nothing queued
+    # Nothing queued: the newest run is still `first` (then the Initialize's).
+    assert [r["id"] for r in runs(portal, "demo")][:1] == [first]
+    assert len(runs(portal, "demo")) == 2
 
     quick = _request(portal, "demo", trigger="manual", analyze=False, may_spend=False)
     assert wait_run(portal, "demo", quick)["analyze"] is False
@@ -2125,6 +2350,13 @@ def _ids(slug: str = "demo") -> SimpleNamespace:
         )
 
 
+def _uid(user_id: int) -> str:
+    with portal_db.get_session() as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        return user.uid
+
+
 def _usage_events(*subjects: str, **extra: Any) -> str:
     return json.dumps(
         [{**GOOD_USAGE, "subject": s, **extra} for s in subjects], separators=(",", ":")
@@ -2160,7 +2392,7 @@ def test_scan_usage_is_attributed_to_the_requester_and_kept_out_of_events(
     )
     pending = scan(portal, "demo", trigger="hook")
     assert scan(portal, "demo", trigger="manual") == pending
-    assert run_by_id(portal, "demo", pending)["requested_by"] == ids.tess
+    assert run_by_id(portal, "demo", pending)["requested_by"]["label"] == "Tess"
     scanner.hold.unlink()
     hook_run = wait_run(portal, "demo", running)
     run = wait_run(portal, "demo", pending)
@@ -2308,3 +2540,519 @@ def test_a_recovered_merged_run_is_attributed_to_the_full_requester(
         "member",
     )
     assert run["summary"]["usage"]["calls"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Run state: queue time, canceller, the estimate and coverage snapshots
+# (M2f-3 plan sections 0.3 #10-#13, 4.10, 4.11)
+# ---------------------------------------------------------------------------
+
+EST = {
+    "commits": 3,
+    "model": {"provider": "anthropic", "model": "claude-test"},
+    "cost_usd": 0.5,
+    "cost_low_usd": 0.25,
+    "cost_high_usd": 0.75,
+    "prices_as_of": "2026-10-01",
+    "missing_key": False,
+}
+OTHER_EST = {**EST, "commits": 9, "cost_usd": 1.5}
+
+
+def _row(run_id: int) -> ScanRun:
+    with portal_db.get_session() as session:
+        run = session.get(ScanRun, run_id)
+        assert run is not None
+        session.expunge(run)
+        return run
+
+
+def _queued(run_id: int) -> dict | None:
+    summary = _row(run_id).summary
+    return json.loads(summary) if summary else None
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [
+        ((False, None), (True, EST), EST),  # a full request makes it full: takes it
+        ((True, EST), (False, OTHER_EST), EST),  # a quick one merged in: kept
+        ((True, EST), (True, OTHER_EST), EST),  # never recomputed
+        ((True, None), (True, EST), EST),  # a full run without one takes one
+        ((False, None), (False, EST), None),  # quick + quick: none
+    ],
+)
+def test_merge_keeps_or_takes_the_estimate(
+    first: tuple[bool, dict | None],
+    second: tuple[bool, dict | None],
+    expected: dict | None,
+) -> None:
+    pending = _pending(None, first[0])
+    pending.estimate = first[1]
+    pending.merge(
+        kind="scan",
+        trigger="manual",
+        analyze=second[0],
+        requested_by=None,
+        scan_requested=True,
+        estimate=second[1],
+    )
+    assert pending.estimate == expected
+
+
+def test_a_full_run_stores_its_estimate_at_enqueue_and_keeps_it(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    local_project(portal, env, "demo")
+    forget_first_scan("demo")
+    # The first-scan forcing turns the request structure-only: no estimate.
+    forced = _request(
+        portal, "demo", trigger=None, analyze=None, may_spend=True, estimate=EST
+    )
+    run = wait_run(portal, "demo", forced)
+    assert (run["trigger"], run["analyze"]) == ("initial", False)
+    assert "estimate" not in run["summary"]
+    assert _row(forced).queued_at is not None
+
+    # Body-less (a manual run is full), explicit and describe: all keep it.
+    for trigger, analyze in ((None, None), ("manual", True), ("describe", None)):
+        run_id = _request(
+            portal,
+            "demo",
+            trigger=trigger,
+            analyze=analyze,
+            may_spend=True,
+            estimate=EST,
+        )
+        run = wait_run(portal, "demo", run_id)
+        assert run["status"] == "ok" and run["analyze"] is True
+        assert run["summary"]["estimate"] == EST
+    # A quick request carries none.
+    quick = _request(
+        portal, "demo", trigger="manual", analyze=False, may_spend=True, estimate=EST
+    )
+    assert "estimate" not in wait_run(portal, "demo", quick)["summary"]
+
+    # Queued behind a held run: stored on the queued row, merged as section 0.3 #10.
+    running = _queue_behind_a_held_scan(portal, scanner, "demo")
+    quick = _request(portal, "demo", trigger="manual", analyze=False, may_spend=True)
+    assert _queued(quick) is None
+    full = _request(
+        portal, "demo", trigger="manual", analyze=True, may_spend=True, estimate=EST
+    )
+    assert full == quick and _queued(full) == {
+        "estimate": EST
+    }  # taken when it turns full
+    again = _request(
+        portal,
+        "demo",
+        trigger="describe",
+        analyze=None,
+        may_spend=True,
+        estimate=OTHER_EST,
+    )
+    later_quick = _request(
+        portal, "demo", trigger="hook", analyze=None, may_spend=False
+    )
+    assert again == later_quick == full
+    assert _queued(full) == {"estimate": EST}  # never recomputed
+    queued_row = _row(full)
+    assert queued_row.queued_at is not None and queued_row.started_at is None
+    scanner.hold.unlink()
+    assert wait_run(portal, "demo", running)["status"] == "ok"
+    done = wait_run(portal, "demo", full)
+    assert done["status"] == "ok" and done["summary"]["estimate"] == EST
+
+    # A failed full run keeps it too.
+    scanner.configure(exit=1)
+    failed = _request(
+        portal, "demo", trigger="describe", analyze=None, may_spend=True, estimate=EST
+    )
+    run = wait_run(portal, "demo", failed)
+    assert run["status"] == "failed" and run["summary"]["estimate"] == EST
+
+
+def test_cancel_records_the_canceller_and_keeps_the_estimate(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    local_project(portal, env, "demo")
+    first_scan(portal, "demo")
+    tess = _ids().tess
+    scanner.hold.touch()
+    running = _request(
+        portal, "demo", trigger="manual", analyze=None, may_spend=True, estimate=EST
+    )
+    wait_for(lambda: len(scanner.calls()) == 2)
+    queued = _request(portal, "demo", trigger="hook", analyze=None, may_spend=False)
+    full = _request(
+        portal,
+        "demo",
+        trigger="describe",
+        analyze=None,
+        may_spend=True,
+        estimate=OTHER_EST,
+    )
+    assert full == queued
+
+    # Cancelled while queued: the summary keeps the estimate, the column the user.
+    assert _cancel(portal, "demo", queued, may_cancel_full=True, by=tess) == "queued"
+    row = _row(queued)
+    assert row.status == "cancelled" and row.cancelled_by == tess
+    assert json.loads(row.summary) == {"cancelled_by": "user", "estimate": OTHER_EST}
+
+    # Cancelled while running: the same, written when the child exits.
+    assert _cancel(portal, "demo", running, may_cancel_full=True, by=tess) == "running"
+    scanner.hold.unlink()
+    run = wait_run(portal, "demo", running)
+    assert run["status"] == "cancelled"
+    assert run["summary"]["cancelled_by"] == "user"
+    assert run["summary"]["estimate"] == EST
+    assert _row(running).cancelled_by == tess
+
+    # The route records the caller; the run routes return it as a person.
+    scanner.hold.touch()
+    held = _request(portal, "demo", trigger="hook", analyze=None, may_spend=False)
+    wait_for(lambda: len(scanner.calls()) == 3)
+    assert cancel(portal, "demo", held).status_code == 202
+    scanner.hold.unlink()
+    assert wait_run(portal, "demo", held)["status"] == "cancelled"
+    assert _row(held).cancelled_by == tess
+    by = portal.get(f"/api/projects/demo/scans/{held}").json()["cancelled_by"]
+    assert by == {"uid": _uid(tess), "label": "Tess"}
+
+    # Without a canceller the column stays NULL (and the payload says System).
+    scanner.hold.touch()
+    held = _request(portal, "demo", trigger="hook", analyze=None, may_spend=False)
+    wait_for(lambda: len(scanner.calls()) == 4)
+    assert _cancel(portal, "demo", held, may_cancel_full=True) == "running"
+    scanner.hold.unlink()
+    assert wait_run(portal, "demo", held)["cancelled_by"] is None
+    assert _row(held).cancelled_by is None
+
+
+def test_a_budget_stop_records_no_canceller(env: SimpleNamespace) -> None:
+    with client_for() as client:
+        client.post("/api/portal/setup", json={"display_name": "Tess"})
+        project_id = legacy_github_project(env, "demo")
+    tess = _ids().tess
+    for stop_reason, expected in (("budget", None), (None, tess)):
+        run_id = _insert_run(project_id, "scan", "manual", True, tess)
+        job = runner_mod._Job(spec=_pending(tess, True))
+        job.spec.run_id = run_id
+        job.cancelled, job.cancelled_by, job.stop_reason = True, tess, stop_reason
+        runner_mod._finish_run(
+            job, "cancelled", {"cancelled_by": "x"}, "2026-10-09T00:00:00+00:00"
+        )
+        row = _row(run_id)
+        assert (row.status, row.cancelled_by) == ("cancelled", expected)
+        assert row.finished_at == "2026-10-09T00:00:00+00:00"
+
+
+def test_recover_queued_restores_the_estimate(
+    env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    with client_for() as client:
+        client.post("/api/portal/setup", json={"display_name": "Tess"})
+        local_project(client, env, "demo")
+        local_project(client, env, "other")
+        first_scan(client, "demo")
+        first_scan(client, "other")
+    ids, other = _ids(), _ids("other")
+    # One queued full run with its estimate.
+    full = _insert_run(
+        ids.project_id,
+        "scan",
+        "describe",
+        True,
+        ids.tess,
+        summary=json.dumps({"estimate": EST}),
+    )
+    # A quick run with a full one folded into it at recovery: it takes the estimate.
+    quick = _insert_run(other.project_id, "scan", "hook", False, None)
+    folded = _insert_run(
+        other.project_id,
+        "scan",
+        "manual",
+        True,
+        ids.tess,
+        summary=json.dumps({"estimate": OTHER_EST}),
+    )
+    specs = {spec.run_id: spec for spec in _recover_queued()}
+    assert specs[full].estimate == EST
+    assert specs[quick].estimate == OTHER_EST and specs[quick].analyze is True
+    assert _queued(full) == {"estimate": EST}
+    assert _queued(quick) == {"estimate": OTHER_EST}
+    assert _row(folded).status == "cancelled"
+    assert _row(full).queued_at is not None
+    # A quick row cannot carry one, whatever its summary says.
+    quick_row = ScanRun(
+        project_id=ids.project_id,
+        trigger="hook",
+        analyze=False,
+        summary=json.dumps({"estimate": EST}),
+    )
+    assert runner_mod._queued_estimate(quick_row) is None
+
+
+def test_portal_summary_keys_cannot_come_from_the_child(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    local_project(portal, env, "demo")
+    first = first_scan(portal, "demo")
+    # The first scan's coverage snapshot: the project's live counts at its end.
+    assert first["summary"]["coverage"] == {
+        **portal.get("/api/projects/demo").json()["stats"],
+        "at": first["finished_at"],
+    }
+    forged = {
+        "coverage": {"commits": 999},
+        "estimate": {"cost_usd": 0},
+        "cloned": True,
+        "scanned": True,
+        "usage": {"calls": 999},
+    }
+    scanner.configure(result_extra=json.dumps(forged))
+    run = wait_run(portal, "demo", scan(portal, "demo", trigger="hook"))
+    summary = run["summary"]
+    assert summary["status"] == "ok"  # the rest of the child's result is kept
+    assert (
+        summary["coverage"]["commits"] == 0
+        and summary["coverage"]["at"] == run["finished_at"]
+    )
+    assert summary["usage"]["calls"] == 0
+    for key in ("estimate", "cloned", "scanned"):
+        assert key not in summary
+
+
+def test_execute_sets_portal_keys_after_the_sync_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sync's own summary is merged before the child's: it cannot set them either."""
+    spec = runner_mod._Pending(
+        run_id=7,
+        project_id=1,
+        kind="sync",
+        trigger="manual",
+        analyze=True,
+        requested_by=None,
+        scan_requested=True,
+        estimate=EST,
+    )
+    runner = ScanRunner()
+    recorded: list[tuple[str, dict]] = []
+
+    def inner(job: Any) -> tuple[str, dict, Any]:
+        job.scanned = True
+        forged = {"moved": True, "estimate": OTHER_EST, "coverage": {}, "cloned": True}
+        return "ok", {**forged, "scanned": False}, runner_mod.redactor([])
+
+    monkeypatch.setattr(runner, "_execute_inner", inner)
+    monkeypatch.setattr(
+        runner_mod,
+        "_finish_run",
+        lambda job, status, summary, now=None: recorded.append((status, summary)),
+    )
+    runner._execute(runner_mod._Job(spec=spec))
+    ((status, summary),) = recorded
+    assert status == "ok"
+    assert summary["moved"] is True and summary["scanned"] is True
+    assert summary["estimate"] == EST
+    assert (
+        "coverage" not in summary and "cloned" not in summary
+    )  # no state: no snapshot
+
+
+# ---------------------------------------------------------------------------
+# The run routes and the history API (M2f-3 plan sections 4.11, 6.2 #3)
+# ---------------------------------------------------------------------------
+
+
+def _add_run(
+    project_id: int,
+    *,
+    kind: str = "scan",
+    trigger: str = "manual",
+    analyze: bool = False,
+    status: str = "ok",
+    by: int | None = None,
+    cancelled_by: int | None = None,
+    summary: str | dict | None = None,
+) -> int:
+    """Insert a finished run row directly (the runner never sees it)."""
+    with portal_db.get_session() as session:
+        run = ScanRun(
+            project_id=project_id,
+            kind=kind,
+            trigger=trigger,
+            analyze=analyze,
+            status=status,
+            requested_by=by,
+            cancelled_by=cancelled_by,
+            queued_at="2026-10-09T10:00:00+00:00",
+            started_at="2026-10-09T10:00:01+00:00",
+            finished_at="2026-10-09T10:01:00+00:00",
+            summary=summary if not isinstance(summary, dict) else json.dumps(summary),
+        )
+        session.add(run)
+        session.flush()
+        assert run.id is not None
+        return run.id
+
+
+def test_run_history_filters_pages_and_shapes(
+    portal: TestClient, env: SimpleNamespace
+) -> None:
+    local_project(portal, env, "demo")
+    local_project(portal, env, "other")
+    ids = _ids()
+    tess = {"uid": _uid(ids.tess), "label": "Tess"}
+    usage = {"calls": 2, "cost_usd": 0.4, "cost_source": "provider"}
+    full = _add_run(
+        ids.project_id,
+        analyze=True,
+        by=ids.tess,
+        summary={"status": "ok", "usage": usage, "estimate": EST},
+    )
+    hook = _add_run(ids.project_id, trigger="hook", status="failed")
+    fetched = _add_run(ids.project_id, kind="sync", trigger="sync", summary={})
+    synced = _add_run(
+        ids.project_id, kind="sync", trigger="push", summary={"scanned": True}
+    )
+    broken = _add_run(
+        ids.project_id,
+        kind="sync",
+        trigger="reconcile",
+        status="cancelled",
+        summary="not json {",
+    )
+    stopped = _add_run(
+        ids.project_id,
+        trigger="describe",
+        analyze=True,
+        status="cancelled",
+        by=ids.tess,
+        cancelled_by=ids.tess,
+        summary={"cancelled_by": "user"},
+    )
+    mine = [stopped, broken, synced, fetched, hook, full]
+    base = "/api/projects/demo/scans"
+
+    def listed(**query: Any) -> list[int]:
+        response = portal.get(base, params=query)
+        assert response.status_code == 200, response.text
+        return [r["id"] for r in response.json()["runs"] if r["id"] in mine]
+
+    assert listed() == mine  # newest first
+    assert listed(status="failed") == [hook]
+    assert listed(status="ok,failed") == [synced, fetched, hook, full]
+    assert listed(trigger="sync,push") == [synced, fetched]
+    assert listed(type="full") == [stopped, full]
+    # A sync that only fetched (a non-JSON summary counts as not scanned) ...
+    assert listed(type="sync") == [broken, fetched]
+    # ... and one that went on to scan is quick, like any structure-only scan.
+    assert listed(type="quick") == [synced, hook]
+    assert listed(requester=tess["uid"]) == [stopped, full]
+    assert listed(requester="system") == [broken, synced, fetched, hook]
+    assert listed(requester="no-such-uid") == []
+    assert listed(type="full", status="cancelled", requester=tess["uid"]) == [stopped]
+
+    # The Run shape: people as {uid, label}, System as null; cost for an admin.
+    rows = {r["id"]: r for r in portal.get(base).json()["runs"]}
+    assert rows[full]["requested_by"] == tess
+    assert rows[full]["cancelled_by"] is None
+    assert rows[full]["queued_at"] == "2026-10-09T10:00:00+00:00"
+    assert (rows[full]["cost_usd"], rows[full]["estimate_usd"]) == (0.4, 0.5)
+    assert rows[full]["summary"]["usage"] == usage
+    assert rows[full]["summary"]["estimate"] == EST
+    assert rows[stopped]["cancelled_by"] == tess
+    assert (rows[stopped]["cost_usd"], rows[stopped]["estimate_usd"]) == (None, None)
+    assert rows[hook]["requested_by"] is None
+    assert rows[broken]["summary"] is None
+    # GET /scans/{id}: the same Run; another project's run is not found.
+    assert portal.get(f"{base}/{full}").json() == rows[full]
+    missing = portal.get(f"/api/projects/other/scans/{full}")
+    assert missing.status_code == 404
+    assert missing.json() == {"error": f"run {full} not found"}
+
+    # Paging: `next` is the next page's `before`, null on the last page.
+    paged = [
+        _add_run(ids.project_id, trigger="poll", status="interrupted") for _ in range(5)
+    ]
+    query = {"status": "interrupted", "limit": "2"}
+    first = portal.get(base, params=query).json()
+    assert [r["id"] for r in first["runs"]] == [paged[4], paged[3]]
+    assert first["next"] == paged[3]
+    second = portal.get(base, params={**query, "before": first["next"]}).json()
+    assert [r["id"] for r in second["runs"]] == [paged[2], paged[1]]
+    last = portal.get(base, params={**query, "before": second["next"]}).json()
+    assert ([r["id"] for r in last["runs"]], last["next"]) == ([paged[0]], None)
+    # The default page is 50 runs.
+    for _ in range(50):
+        _add_run(ids.project_id, trigger="poll", status="interrupted")
+    page = portal.get(base, params={"status": "interrupted"}).json()
+    assert len(page["runs"]) == 50 and page["next"] is not None
+
+    for query, code in [
+        ({"limit": "0"}, "bad_filter"),
+        ({"limit": "101"}, "bad_filter"),
+        ({"limit": "ten"}, "bad_filter"),
+        ({"status": "done"}, "bad_filter"),
+        ({"status": "ok,done"}, "bad_filter"),
+        ({"trigger": "cron"}, "bad_filter"),
+        ({"type": "scan"}, "bad_filter"),  # `type` is not the `kind` field
+        ({"requester": "x" * 500}, "bad_filter"),
+        ({"before": "abc"}, "bad_cursor"),
+        ({"before": "0"}, "bad_cursor"),
+        ({"before": "-3"}, "bad_cursor"),
+        ({"before": "²"}, "bad_cursor"),
+    ]:
+        response = portal.get(base, params=query)
+        assert response.status_code == 422, (query, response.text)
+        assert response.json()["code"] == code, query
+
+
+def test_post_scan_stores_the_describe_estimate(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    local_project(portal, env, "demo")
+    # The first scan is forced structure-only: no estimate on it.
+    assert "estimate" not in first_scan(portal, "demo")["summary"]
+    for body in ({}, {"trigger": "describe"}, {"trigger": "manual", "analyze": True}):
+        run = wait_run(portal, "demo", scan(portal, "demo", **body))
+        estimate = run["summary"]["estimate"]
+        assert set(estimate) == {
+            "commits",
+            "model",
+            "cost_usd",
+            "cost_low_usd",
+            "cost_high_usd",
+            "prices_as_of",
+            "missing_key",
+        }, body
+        assert estimate["model"]["provider"] == "anthropic"
+        assert estimate["missing_key"] == "anthropic"
+        assert run["estimate_usd"] == estimate["cost_usd"]
+    for body in ({"trigger": "manual", "analyze": False}, {"trigger": "hook"}):
+        run = wait_run(portal, "demo", scan(portal, "demo", **body))
+        assert "estimate" not in run["summary"], body
+        assert run["estimate_usd"] is None
+
+
+def test_run_routes_answer_for_an_uninitialized_project(
+    portal: TestClient, env: SimpleNamespace
+) -> None:
+    root = make_repo(env.shared, "fresh")
+    assert add_local(portal, root)["project"]["slug"] == "fresh"
+    base = "/api/projects/fresh/scans"
+    assert portal.get(base).json() == {"runs": [], "next": None}
+    for response in (
+        portal.get(f"{base}/1"),
+        portal.get(f"{base}/1/events"),
+        portal.get(f"{base}/1/log"),
+        portal.post(f"{base}/1/cancel"),
+    ):
+        assert response.status_code == 404, response.text
+    refused = portal.post(base)
+    assert refused.status_code == 409
+    assert refused.json()["code"] == "not_initialized"
+    assert not (root / ".whygraph" / "whygraph.db").exists()

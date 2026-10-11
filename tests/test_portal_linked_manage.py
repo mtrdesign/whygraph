@@ -159,6 +159,9 @@ REFUSED: list[tuple[str, str, dict | None]] = [
     ("GET", f"/api/projects/{SLUG}/chat/sessions/1", None),
     ("DELETE", f"/api/projects/{SLUG}/chat/sessions/1", None),
     ("POST", f"/api/projects/{SLUG}/chat/sessions/1/messages", {"text": "hi"}),
+    # Its keys are the platform's to test (M2f-3 section 4.13)
+    ("POST", f"/api/projects/{SLUG}/keys/anthropic/test", None),
+    ("POST", f"/api/projects/{SLUG}/github-token/test", None),
 ]
 """Every route of plan section 4.11's table that a linked project refuses."""
 
@@ -242,6 +245,19 @@ def test_linked_config_get_is_read_only_and_secret_free(
     assert body.status_code == 200, body.text
     answer = body.json()
     assert answer["secrets"] is None
+    # M2f-3 section 0.3 #42: read-only, managed on the platform, no key fields.
+    assert answer["read_only"] is True
+    assert answer["managed_on_platform"] is True
+    assert answer["can_test_keys"] is False
+    for key in ("effective_keys", "inherited", "github", "key_last_used"):
+        assert key not in answer, key
+    # The writable hooks key answers the same secret-free view (BUG-21).
+    put = portal.put(
+        f"/api/projects/{SLUG}/config", json={"config": {"scan": {"hooks": True}}}
+    )
+    assert put.status_code == 200, put.text
+    assert put.json()["secrets"] is None
+    assert put.json()["managed_on_platform"] is True
     # The control: a local project's config GET does carry one.
     local = make_repo(env.shared, "plain", remote=None)
     added = portal.post("/api/projects", json={"source": "local", "path": str(local)})
@@ -297,6 +313,7 @@ def test_remove_from_machine_revokes_token(
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["token_revoked"] is True
+    assert body["token_revoke_result"] == "revoked"
     assert body["warnings"] == []
     assert body["checkout_deleted"] is False
 
@@ -328,6 +345,7 @@ def test_remove_from_machine_when_unreachable(
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["token_revoked"] is False
+    assert body["token_revoke_result"] == "unreachable"
     assert len(body["warnings"]) == 1
     warning = body["warnings"][0]
     assert fake.platform_origin in warning
@@ -357,8 +375,31 @@ def test_remove_from_machine_with_an_unreadable_token(
 
     body = portal.delete(f"/api/projects/{SLUG}").json()
     assert body["token_revoked"] is False
+    assert body["token_revoke_result"] == "unreachable"
     assert "no longer read the token" in body["warnings"][0]
     assert len(fake.requests) == before  # nothing was sent with a guess
+
+
+def test_remove_from_machine_when_the_token_was_already_revoked(
+    portal: TestClient,
+    fake: FakePlatform,
+    env: SimpleNamespace,
+    scanner: SimpleNamespace,
+) -> None:
+    """A platform answering ``401 token_revoked`` is ``already_revoked`` (BUG-7).
+
+    The token works nowhere any more, so ``token_revoked`` stays true and no
+    "revoke it on the platform" warning is added.
+    """
+    linked_project(portal, fake, env)
+    fake.revoke_token(TOKEN, "admin_revoked")
+
+    body = portal.delete(f"/api/projects/{SLUG}").json()
+    assert body["token_revoked"] is True
+    assert body["token_revoke_result"] == "already_revoked"
+    assert body["warnings"] == []
+    with portal_db.get_session() as session:
+        assert session.exec(select(Project.id)).all() == []
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,5 @@
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import {
-  Link,
   Navigate,
   Outlet,
   createRootRouteWithContext,
@@ -14,18 +13,29 @@ import {
   type RouterHistory,
 } from "@tanstack/react-router";
 import { useQuery, type QueryClient } from "@tanstack/react-query";
-import { ApiError, portalApi, portalKey, projectApi, projectKey, setBaseUrl, type PortalState } from "./api";
+import {
+  ApiError,
+  portalApi,
+  portalKey,
+  projectApi,
+  projectKey,
+  setBaseUrl,
+  setErrorMode,
+  type PortalState,
+  type ProjectDetails,
+} from "./api";
 import { projectProblem } from "./lib/errors";
 import { can } from "./lib/permissions";
 import { getLastProject, setLastProject } from "./lib/lastProject";
 import { ProjectProvider } from "./lib/project";
-import { canAdmin, canOwn, isProduction, isSafeNext, signInUrl, usePortalState } from "./lib/identity";
+import { canAdmin, canOwn, isProduction, isSafeNext, signInUrl, usePortalState, useReadOnly } from "./lib/identity";
 import { hardNavigate } from "./lib/navigation";
 import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
 import { safeLinkNext } from "./lib/linkNext";
-import { BudgetNotice } from "./components/portal/BudgetNotice";
 import { LinkedElsewhere } from "./components/portal/LinkedActions";
 import { AppShell } from "./components/shell/AppShell";
+import { BaseChrome } from "./components/shell/BaseChrome";
+import { RouteFocus } from "./components/shell/RouteFocus";
 import { useGlobalShortcuts } from "./components/shell/shortcuts";
 import { CommandPalette } from "./components/CommandPalette";
 import { ChatView } from "./components/chat/ChatView";
@@ -33,7 +43,7 @@ import { ExplorerPage } from "./pages/ExplorerPage";
 import { ProjectHome } from "./pages/ProjectHome";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { AddProjectPage, type NewProjectSearch } from "./pages/AddProjectPage";
-import { InitProjectPage, type InitStep } from "./pages/InitProjectPage";
+import { InitProjectPage } from "./pages/InitProjectPage";
 import { SetupPage } from "./pages/SetupPage";
 import { GlobalSettingsPage } from "./pages/GlobalSettingsPage";
 import { AuditPage } from "./pages/AuditPage";
@@ -57,12 +67,27 @@ import { ResetPasswordPage } from "./pages/ResetPasswordPage";
 import { SessionNotReceivedPage } from "./pages/SessionNotReceivedPage";
 import { SignInPage } from "./pages/SignInPage";
 import {
-  DegradedPage,
+  ImportingNotice,
   NotFoundPage,
   NotInitialized,
   ProblemAlert,
   ProjectUnavailable,
 } from "./components/portal/EdgeStates";
+import { ForbiddenState } from "./components/state/ForbiddenState";
+import { NotFoundState } from "./components/state/NotFoundState";
+import { PortalErrorPage } from "./components/state/PortalErrorPage";
+import { QueryState } from "./components/state/QueryState";
+import { PageContainer } from "./components/layout/PageContainer";
+import { PageSkeleton } from "./components/state/Skeletons";
+import {
+  type BaseSearch,
+  validateBaseSearch,
+  validateInitSearch,
+  validateOrgSettingsSearch,
+  validateProjectSettingsSearch,
+  validateProjectsSearch,
+  validateScansSearch,
+} from "./lib/routeSearch";
 
 // The route tree for §4.9, code-based (a generated `routeTree.gen.ts` would not
 // exist yet when `tsc --noEmit` runs ahead of `vite build`).
@@ -106,8 +131,9 @@ export function parseSearch(search: string): Record<string, string> {
 export function stringifySearch(search: Record<string, unknown>): string {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(search)) {
-    if (value === undefined || value === null || value === "") continue;
-    params.set(key, String(value));
+    if (value === undefined || value === null || value === "" || value === false) continue;
+    // A flag is written `?stay=1`; an array (a filter list) joins with commas.
+    params.set(key, value === true ? "1" : String(value));
   }
   const qs = params.toString();
   return qs ? `?${qs}` : "";
@@ -147,22 +173,6 @@ export async function resolveLastProject(queryClient: QueryClient): Promise<stri
 
 // ---- root -------------------------------------------------------------------
 
-function RootError({ error, reset }: { error: Error; reset: () => void }) {
-  return (
-    <div className="mx-auto max-w-xl p-8">
-      <h1 className="text-lg font-semibold">Something went wrong</h1>
-      <pre className="mt-3 overflow-auto rounded-md bg-muted p-3 text-xs">{error.message}</pre>
-      <button
-        type="button"
-        onClick={reset}
-        className="mt-3 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-accent"
-      >
-        Try again
-      </button>
-    </div>
-  );
-}
-
 // ---- production identity gate (M2c section 4.10) ----------------------------
 
 // What the base host serves (everything else is the org tree, which lives on an
@@ -180,6 +190,8 @@ const BASE_PATHS = new Set([
   "/connect",
 ]);
 const SIGNED_OUT_PATHS = new Set(["/signin", "/auth/github", "/reset"]);
+// The org tree's paths, which a base host hands to the org picker instead of a not-found page.
+const ORG_TREE = /^\/(p|explorer|chat|projects|link|connect\/callback|settings|members|audit|usage)(\/|$)/;
 
 /** A redirect target that may carry a query (`/signin?next=...`) as TanStack's `to` + `search`. */
 function redirectTo(target: string) {
@@ -209,8 +221,8 @@ export function setupRedirect(
 /**
  * Where the base host sends this request instead of rendering it, or `null` to
  * render. `/signin` with a valid `next` while signed in is *not* redirected: the
- * route renders the "session not received" page there, which breaks the loop
- * org host (no cookie) -> sign-in -> picker -> org host.
+ * route decides there (`SignInRoute`), which breaks the loop org host (no cookie)
+ * -> sign-in -> picker -> org host.
  */
 export function baseHostRedirect(portal: PortalState, pathname: string, href?: string): string | null {
   const path = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
@@ -224,7 +236,9 @@ export function baseHostRedirect(portal: PortalState, pathname: string, href?: s
     return "/signin";
   }
   if (path === "/") return "/orgs";
-  if (!BASE_PATHS.has(path)) return "/";
+  // The org tree (and its legacy links) lives on an org host: the picker leads there.
+  // Any other unknown address renders "Page not found" in the base chrome (NAV-7).
+  if (ORG_TREE.test(path)) return "/";
   if (path === "/admin" && !portal.user.is_instance_admin) return "/orgs";
   return null;
 }
@@ -232,17 +246,30 @@ export function baseHostRedirect(portal: PortalState, pathname: string, href?: s
 function RootLayout() {
   const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
   useGlobalShortcuts();
-  if (portal.error) return <DegradedPage message={portal.error} />;
+  // The portal's own database failed to open or migrate: nothing else can load.
+  if (portal.error) return <PortalErrorPage error={portal.error} />;
   if (portal.mode === "production" && portal.host_kind === "org" && portal.user && !portal.org) {
     return <NoOrgAccessPage />;
   }
-  return <Outlet />;
+  return (
+    <>
+      <RouteFocus />
+      <Outlet />
+    </>
+  );
 }
 
 function RootNotFound() {
   const state = usePortalState();
-  // The shell's sidebar calls /api/projects, which is a 404 on the base host.
-  if (isProduction(state.data) && state.data?.host_kind === "base") return <NotFoundPage />;
+  // The shell's sidebar calls /api/projects, which is a 404 on the base host: the
+  // base chrome instead, with a way back to the organizations.
+  if (isProduction(state.data) && state.data?.host_kind === "base") {
+    return (
+      <BaseChrome title="Not found">
+        <NotFoundState kind="page" back={{ label: "Your organizations", to: "/orgs" }} />
+      </BaseChrome>
+    );
+  }
   return (
     <AppShell>
       <NotFoundPage />
@@ -261,6 +288,7 @@ const rootRoute = createRootRouteWithContext<RouterContext>()({
       staleTime: 30_000,
     });
     const kind = portal.mode === "production" ? portal.host_kind : undefined;
+    setErrorMode(portal.mode === "production" ? "production" : "local");
     setBaseUrl(!portal.error && kind && kind !== "local" ? (portal.base_url ?? null) : null);
     if (!portal.error && kind === "base") {
       const href = new URL(location.href, window.location.origin).href;
@@ -282,7 +310,7 @@ const rootRoute = createRootRouteWithContext<RouterContext>()({
     return { portal };
   },
   component: RootLayout,
-  errorComponent: ({ error, reset }) => <RootError error={error as Error} reset={reset} />,
+  errorComponent: ({ error, reset }) => <PortalErrorPage error={error} reset={reset} />,
   notFoundComponent: RootNotFound,
 });
 
@@ -300,41 +328,64 @@ const setupRoute = createRoute({
 
 // ---- base-host pages (production; no AppShell) ----------------------------------
 
-const validateNext = (search: Record<string, unknown>): { next?: string } => ({ next: text(search.next) });
+// `next`, `stay` and `from` (lib/routeSearch.ts) on every base route that reads them.
+const validateNext = validateBaseSearch;
 
 function BaseLayout() {
-  const state = usePortalState();
-  const user = state.data?.user;
-  if (!user) return <Outlet />;
   return (
-    <>
-      <nav aria-label="Account" className="flex items-center gap-4 border-b border-border px-6 py-2 text-sm">
-        <Link to="/orgs" className="font-medium hover:underline">
-          Organizations
-        </Link>
-        {user.is_instance_admin && (
-          <Link to="/admin" className="hover:underline">
-            Administration
-          </Link>
-        )}
-        <Link to="/account" className="ml-auto hover:underline">
-          {user.display_name}
-        </Link>
-      </nav>
+    <BaseChrome>
       <Outlet />
-    </>
+    </BaseChrome>
   );
+}
+
+// `/signin` also reads `reauth=1`: the org host sent the person back after a
+// `401 login_required` (api.ts `redirectToSignIn`).
+function validateSignInSearch(search: Record<string, unknown>): BaseSearch & { reauth?: boolean } {
+  return { ...validateBaseSearch(search), reauth: search.reauth === "1" || search.reauth === true || undefined };
+}
+
+// Signed in, `/signin?next=<org host>` without `reauth` means the org host loaded
+// without the session (its gate sent the browser here). Go back once; if the same
+// address bounces back within this window, the cookie is not reaching it.
+const BOUNCE_KEY = "whygraph.signin-bounce";
+const BOUNCE_MS = 30_000;
+
+/** True when `next` already bounced back here moments ago (or storage is blocked: never risk a loop). */
+function bouncedBack(next: string): boolean {
+  try {
+    const raw = window.sessionStorage.getItem(BOUNCE_KEY);
+    const last = raw ? (JSON.parse(raw) as { next?: string; at?: number }) : null;
+    return last?.next === next && typeof last.at === "number" && Date.now() - last.at < BOUNCE_MS;
+  } catch {
+    return true;
+  }
+}
+
+function ReturnTo({ next }: { next: string }) {
+  const bounced = useMemo(() => bouncedBack(next), [next]);
+  useEffect(() => {
+    if (bounced) return;
+    try {
+      window.sessionStorage.setItem(BOUNCE_KEY, JSON.stringify({ next, at: Date.now() }));
+    } catch {
+      // Unreachable: `bouncedBack` already read the storage.
+    }
+    void hardNavigate(next);
+  }, [bounced, next]);
+  return bounced ? <SessionNotReceivedPage /> : null;
 }
 
 function SignInRoute() {
   const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
-  const { next } = useSearch({ strict: false }) as { next?: string };
+  const { next, reauth } = useSearch({ strict: false }) as { next?: string; reauth?: boolean };
   const state = usePortalState().data ?? portal;
   if (state.user) {
-    // Signed in: no `next` goes to the picker; a valid `next` means that address
-    // did not receive the cookie, so say so instead of looping.
-    if (isSafeNext(next, state.base_url)) return <SessionNotReceivedPage />;
-    return <Navigate to="/orgs" replace />;
+    // Signed in: no `next` goes to the picker. With a valid `next`, `reauth` means
+    // the org host refused this session (the cookie problem); without it, go back
+    // once and say so only if it bounces (ER-7).
+    if (!isSafeNext(next, state.base_url)) return <Navigate to="/orgs" replace />;
+    return reauth ? <SessionNotReceivedPage /> : <ReturnTo next={next!} />;
   }
   return <SignInPage />;
 }
@@ -343,7 +394,7 @@ const baseLayout = createRoute({ getParentRoute: () => rootRoute, id: "base", co
 const signInRoute = createRoute({
   getParentRoute: () => baseLayout,
   path: "/signin",
-  validateSearch: validateNext,
+  validateSearch: validateSignInSearch,
   component: SignInRoute,
 });
 // GitHub's return address (M2d-1); a signed-in visitor may land here too (a new
@@ -382,7 +433,17 @@ const orgsRoute = createRoute({
 });
 const newOrgRoute = createRoute({ getParentRoute: () => baseLayout, path: "/orgs/new", component: CreateOrgPage });
 const adminRoute = createRoute({ getParentRoute: () => baseLayout, path: "/admin", component: AdminPage });
-const accountRoute = createRoute({ getParentRoute: () => baseLayout, path: "/account", component: AccountPage });
+// Local mode has no account (one implicit user): its settings are the portal's (BUG-10).
+const accountRoute = createRoute({
+  getParentRoute: () => baseLayout,
+  path: "/account",
+  validateSearch: validateNext,
+  beforeLoad: ({ context }) => {
+    const { portal } = context as { portal?: PortalState };
+    if (portal && !portal.error && portal.mode !== "production") throw redirect({ to: "/settings", replace: true });
+  },
+  component: AccountPage,
+});
 // A local portal's consent request (M2e): signed-out visitors are sent to sign in
 // first, with this whole address as `next`.
 const connectRoute = createRoute({
@@ -412,7 +473,12 @@ function PortalLayout() {
 }
 
 const portalLayout = createRoute({ getParentRoute: () => rootRoute, id: "portal", component: PortalLayout });
-const projectsRoute = createRoute({ getParentRoute: () => portalLayout, path: "/", component: ProjectsPage });
+const projectsRoute = createRoute({
+  getParentRoute: () => portalLayout,
+  path: "/",
+  validateSearch: validateProjectsSearch,
+  component: ProjectsPage,
+});
 // Local mode's single user may always add; in production only an org's owners
 // and admins may (`org.add_project`), everyone else goes back to Projects.
 function NewProjectRoute() {
@@ -469,13 +535,14 @@ const connectCallbackRoute = createRoute({
 const globalSettingsRoute = createRoute({
   getParentRoute: () => portalLayout,
   path: "/settings",
+  validateSearch: validateOrgSettingsSearch,
   component: GlobalSettingsPage,
 });
 
 // Org members exist only in production; local mode has one implicit user.
 function MembersRoute() {
   const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
-  return isProduction(portal) ? <MembersPage /> : <NotFoundPage />;
+  return isProduction(portal) ? <MembersPage /> : <NotFoundPage kind="team-only" />;
 }
 const membersRoute = createRoute({ getParentRoute: () => portalLayout, path: "/members", component: MembersRoute });
 
@@ -484,7 +551,14 @@ function AuditRoute() {
   const state = usePortalState().data;
   const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
   const current = state ?? portal;
-  return isProduction(current) && canOwn(current.org?.role ?? undefined) ? <AuditPage /> : <NotFoundPage />;
+  if (!isProduction(current)) return <NotFoundPage kind="team-only" />;
+  if (canOwn(current.org?.role ?? undefined)) return <AuditPage />;
+  return (
+    <div className="mx-auto w-full max-w-3xl p-6">
+      <h1 className="sr-only">Audit log</h1>
+      <ForbiddenState what="the audit log" grant="owner" />
+    </div>
+  );
 }
 const auditRoute = createRoute({ getParentRoute: () => portalLayout, path: "/audit", component: AuditRoute });
 
@@ -510,7 +584,8 @@ function MyUsageRoute() {
   const state = usePortalState().data;
   const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
   const current = state ?? portal;
-  return isProduction(current) && current.usage?.me ? <MemberUsagePage /> : <NotFoundPage />;
+  if (!isProduction(current)) return <NotFoundPage kind="team-only" />;
+  return current.usage?.me ? <MemberUsagePage /> : <NotFoundPage />;
 }
 const myUsageRoute = createRoute({
   getParentRoute: () => portalLayout,
@@ -524,7 +599,8 @@ function MemberUsageRoute() {
   const { portal } = useRouteContext({ strict: false }) as { portal: PortalState };
   const { uid } = useParams({ strict: false }) as { uid: string };
   const current = state ?? portal;
-  return isProduction(current) && current.usage?.org ? <MemberUsagePage key={uid} uid={uid} /> : <NotFoundPage />;
+  if (!isProduction(current)) return <NotFoundPage kind="team-only" />;
+  return current.usage?.org ? <MemberUsagePage key={uid} uid={uid} /> : <NotFoundPage />;
 }
 const memberUsageRoute = createRoute({
   getParentRoute: () => portalLayout,
@@ -539,8 +615,19 @@ const memberUsageRoute = createRoute({
 // edge-state notice (screen 12) instead of firing requests that can only fail.
 const DATA_PAGES = new Set(["explorer", "chat", "scans"]);
 
+// The width of each project page's `PageContainer`, so the layout's loading and
+// error states sit where the page will (PH-11, ER-5). The Overview, the wizard and
+// the scan pages are narrow; Settings the default; Explorer and Chat full.
+const PAGE_WIDTH: Record<string, React.ComponentProps<typeof PageContainer>["width"]> = {
+  explorer: "full",
+  chat: "full",
+  settings: "default",
+  scans: "default",
+};
+
 function ProjectLayout() {
   const { slug } = useParams({ strict: false }) as { slug: string };
+  const readOnly = useReadOnly();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const page = pathname.split("/")[3];
   const project = useQuery({
@@ -549,14 +636,16 @@ function ProjectLayout() {
     retry: false,
   });
   // `stats: null` on a usable project means the backend refused to open its data
-  // (a symlink in the way, `409 unsafe_path`). One cheap data call tells which
-  // problem it is, so Explorer and Chat show the instruction instead of a bare error.
+  // (a symlink in the way, `409 unsafe_path`). One cheap data call that opens the
+  // project DB tells which problem it is, so Explorer and Chat show the instruction
+  // instead of a bare error. The estimate route keeps the initialized gate (the run
+  // routes do not), and its key is the one `ScanEstimateCard` reads.
   const usable =
     !!project.data && project.data.initialized && project.data.root_status === "ok" && project.data.source !== "platform";
   const probeWanted = usable && DATA_PAGES.has(page) && project.data?.stats === null;
   const probe = useQuery({
-    queryKey: projectKey(slug, "scans"),
-    queryFn: () => projectApi(slug).scans(),
+    queryKey: projectKey(slug, "scan-estimate"),
+    queryFn: () => projectApi(slug).scanEstimate(),
     enabled: probeWanted,
     retry: false,
   });
@@ -569,56 +658,70 @@ function ProjectLayout() {
   if (notFound) {
     return (
       <AppShell>
-        <NotFoundPage />
+        <NotFoundPage kind="project" />
         <CommandPalette />
       </AppShell>
     );
   }
 
-  const notice = (node: React.ReactNode) => <div className="mx-auto w-full max-w-3xl p-6">{node}</div>;
-  let body: React.ReactNode = <Outlet />;
-  if (project.isLoading) {
-    body = <p className="p-6 text-sm text-muted-foreground">Loading…</p>;
-  } else if (project.isError) {
-    body = <p className="p-6 text-sm text-destructive">Failed to load project: {project.error.message}</p>;
-  } else if (project.data && DATA_PAGES.has(page) && project.data.source === "platform" && page !== "scans") {
-    // No local Explorer or Chat for a linked project: the data routes refuse it (M2e).
-    body = notice(<LinkedElsewhere project={project.data} />);
-  } else if (project.data && page === "chat" && !can(project.data, "project.chat")) {
-    // ChatView never mounts, so no chat request fires for a viewer.
-    body = notice(
-      <Alert data-testid="chat-read-only">
-        <AlertTitle>Chat needs the Contributor role</AlertTitle>
-        <AlertDescription>
-          Ask a project admin for the Contributor role to chat. You can still browse the Explorer and the
-          existing rationale cards.
-        </AlertDescription>
-      </Alert>,
-    );
-  } else if (project.data && DATA_PAGES.has(page)) {
-    if (project.data.root_status === "ok" && project.data.initialized && probeWanted && probe.isLoading) {
-      // Hold the page back until the probe says its data can be opened.
-      body = <p className="p-6 text-sm text-muted-foreground">Loading…</p>;
-    } else if (project.data.root_status !== "ok") {
-      body = notice(<ProjectUnavailable project={project.data} />);
-    } else if (!project.data.initialized) {
-      body = notice(<NotInitialized slug={slug} />);
-    } else if (probe.isError && projectProblem(probe.error).kind === "unsafe_path") {
-      body = notice(<ProblemAlert problem={projectProblem(probe.error)} />);
+  const width = PAGE_WIDTH[page ?? ""] ?? "narrow";
+  const notice = (node: React.ReactNode) => <PageContainer width="narrow">{node}</PageContainer>;
+  const pageBody = (data: ProjectDetails): React.ReactNode => {
+    // A production import still cloning (or whose clone failed) has no folder and no
+    // project DB yet: its scans and run pages stream the clone; Explorer and Chat wait.
+    if (data.importing && DATA_PAGES.has(page)) {
+      return page === "scans" ? <Outlet /> : notice(<ImportingNotice project={data} />);
     }
-  }
+    if (DATA_PAGES.has(page) && data.source === "platform" && page !== "scans") {
+      // No local Explorer or Chat for a linked project: the data routes refuse it (M2e).
+      return notice(<LinkedElsewhere project={data} />);
+    }
+    if (page === "chat" && !can(data, "project.chat")) {
+      // ChatView never mounts, so no chat request fires for a viewer (SET-5: the
+      // instance-admin reader is not a member, so there is no role to ask for).
+      return notice(
+        <Alert data-testid="chat-read-only">
+          <AlertTitle>{readOnly ? "Chat is not available" : "Chat needs the Contributor role"}</AlertTitle>
+          <AlertDescription>
+            {readOnly
+              ? "You're viewing this organization as an instance administrator. Chat is read-only access, so it is not available."
+              : "Chat needs the Contributor role. Ask a project admin to change your role."}
+          </AlertDescription>
+        </Alert>,
+      );
+    }
+    if (DATA_PAGES.has(page)) {
+      // Hold the page back until the probe says its data can be opened.
+      if (data.root_status === "ok" && data.initialized && probeWanted && probe.isLoading) return <PageSkeleton width={width} />;
+      if (data.root_status !== "ok") return notice(<ProjectUnavailable project={data} />);
+      if (!data.initialized) return notice(<NotInitialized slug={slug} />);
+      if (probe.isError && projectProblem(probe.error).kind === "unsafe_path") {
+        return notice(<ProblemAlert problem={projectProblem(probe.error)} />);
+      }
+    }
+    return <Outlet />;
+  };
+  const gate = (
+    <QueryState
+      query={project}
+      loading={<PageSkeleton width={width} className={page ? undefined : "sm:py-8"} />}
+      errorTitle="Couldn't load this project"
+      forbidden={{ what: "this project", grant: "project-admin" }}
+      notFound="project"
+    >
+      {pageBody}
+    </QueryState>
+  );
+  // The error, forbidden and not-found states get the page's container (the
+  // skeleton brings its own); a loaded project's page renders its own.
+  const body =
+    project.data === undefined && project.isError ? <PageContainer width={width}>{gate}</PageContainer> : gate;
 
   // `key={slug}` remounts the whole subtree on a project switch, so component
   // state (tree expansion, open tab, a half-typed chat draft) cannot carry over.
   return (
     <ProjectProvider key={slug} slug={slug}>
       <AppShell slug={slug} projectName={project.data?.name}>
-        {/* A hard-stopped budget on every project page except Chat, which says it in place of its composer. */}
-        {project.data?.llm_block === "budget_exceeded" && page !== "chat" && (
-          <div className="shrink-0 px-4 pt-3">
-            <BudgetNotice scope={project.data.llm_block_scope} />
-          </div>
-        )}
         {body}
         <CommandPalette slug={slug} />
       </AppShell>
@@ -651,22 +754,28 @@ function ScansRoute() {
 const scansRoute = createRoute({
   getParentRoute: () => projectRoute,
   path: "scans/{-$runId}",
+  validateSearch: validateScansSearch,
   component: ScansRoute,
 });
 const projectSettingsRoute = createRoute({
   getParentRoute: () => projectRoute,
   path: "settings",
+  validateSearch: validateProjectSettingsSearch,
   component: ProjectSettingsPage,
 });
-const INIT_STEPS: readonly InitStep[] = ["configure", "initialize", "scan"];
-
 const initRoute = createRoute({
   getParentRoute: () => projectRoute,
   path: "init",
-  // `?step=` picks the wizard step; absent, the page chooses from the project's state.
-  validateSearch: (search: Record<string, unknown>): { step?: InitStep } => ({
-    step: INIT_STEPS.find((s) => s === search.step),
-  }),
+  // `?step=setup|configure` picks the wizard step (absent, the page chooses from the
+  // project's state); `?run=` is the first scan's run. The old `initialize` / `scan`
+  // are redirected to `setup` / `configure`, keeping `run`.
+  validateSearch: validateInitSearch,
+  beforeLoad: ({ params, search, location }) => {
+    const raw = parseSearch(location.searchStr ?? "").step;
+    if (raw !== undefined && raw !== search.step) {
+      throw redirect({ to: "/p/$slug/init", params: { slug: params.slug }, search, replace: true });
+    }
+  },
   component: InitProjectPage,
 });
 

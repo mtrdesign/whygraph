@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { PROJECT_ACTIONS } from "../lib/permissions";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -130,6 +130,12 @@ afterEach(() => {
 
 // ---- the consent page ---------------------------------------------------------------
 
+/** Choose a project in the consent page's styled select (CN-5: `ui/select`, not a native `<select>`). */
+async function pickProject(user: ReturnType<typeof userEvent.setup>, label: string) {
+  await user.click(await screen.findByRole("combobox", { name: "Project" }));
+  await user.click(await screen.findByRole("option", { name: label }));
+}
+
 describe("connect page", () => {
   it("connect page uses server URLs only", async () => {
     const user = userEvent.setup();
@@ -142,7 +148,7 @@ describe("connect page", () => {
     expect(hard).toHaveBeenLastCalledWith(SERVER_CANCEL);
 
     // Allow goes to the server's `redirect`, byte for byte, after posting the validated request.
-    await user.selectOptions(await screen.findByRole("combobox"), "acme/alpha");
+    await pickProject(user, "Acme / Alpha");
     await user.click(screen.getByRole("button", { name: "Allow" }));
     await waitFor(() => expect(hard).toHaveBeenCalledTimes(2));
     expect(hard).toHaveBeenLastCalledWith(SERVER_ALLOW);
@@ -198,14 +204,15 @@ describe("connect page", () => {
       });
     mount(`/connect${query({ org: "acme", project: "beta" })}`);
     await screen.findByTestId("connect-access-lost");
-    expect(screen.getByRole("combobox")).toHaveValue("acme/beta");
+    // The styled select shows the hinted project (CN-5).
+    expect(screen.getByRole("combobox", { name: "Project" })).toHaveTextContent("Acme / Beta");
   });
 
   it("shows the server's refusal when Allow fails", async () => {
     fake.routes["POST /api/connect/authorize"] = () => json({ detail: "not found" }, 404);
     const user = userEvent.setup();
     mount(`/connect${query()}`);
-    await user.selectOptions(await screen.findByRole("combobox"), "acme/alpha");
+    await pickProject(user, "Acme / Alpha");
     await user.click(screen.getByRole("button", { name: "Allow" }));
     await screen.findByTestId("connect-error");
     expect(hard).not.toHaveBeenCalled();
@@ -303,6 +310,10 @@ describe("connected portals", () => {
     expect(section).toHaveTextContent("Revoked by an admin");
     expect(section.querySelectorAll("button")).toHaveLength(1); // only the live one can be revoked
     await user.click(section.querySelector("button")!);
+    // A confirmation first; the row then says why, with no toast.
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("That machine loses access at once");
+    await user.click(within(dialog).getByRole("button", { name: "Revoke" }));
     await waitFor(() => expect(section).toHaveTextContent("Revoked by you"));
   });
 
@@ -379,7 +390,7 @@ describe("agent limits", () => {
     await user.type(screen.getByLabelText("Commit descriptions per hour"), "300");
     await user.clear(generations);
     await user.type(generations, "0");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(within(screen.getByRole("region", { name: "Agent limits" })).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(put).toBeDefined());
     expect(put?.config?.rationale).toEqual({ agent_generations_per_hour: 0 });
     expect(put?.config?.analyze).toEqual({ agent_descriptions_per_hour: 300 });
@@ -392,7 +403,7 @@ describe("agent limits", () => {
     const user = userEvent.setup();
     mount("/settings");
     await user.type(await screen.findByLabelText("Rationale cards per hour"), "10001");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(within(screen.getByRole("region", { name: "Agent limits" })).getByRole("button", { name: "Save" }));
     await screen.findByText(/whole number from 0 to 10,000/);
     expect(fake.calls.some((c) => c.method === "PUT")).toBe(false);
   });
@@ -493,9 +504,9 @@ describe("link error messages", () => {
       expect(message, code).not.toContain("_");
     }
   });
-  it("falls back to the server's own message for an unknown code", () => {
-    expect(linkError(new ApiError(500, "boom", "weird"))).toBe("boom");
-    expect(linkError(new ApiError(500, "boom", "constructor"))).toBe("boom");
+  it("falls back to the status's sentence for an unknown code, never the server's text", () => {
+    expect(linkError(new ApiError(500, "boom", "weird"))).toMatch(/WhyGraph hit an error/);
+    expect(linkError(new ApiError(500, "boom", "constructor"))).toMatch(/WhyGraph hit an error/);
   });
   it("labels every revocation reason", () => {
     for (const r of ["user_revoked", "admin_revoked", "removed_locally", "member_removed", "member_left", "user_disabled", "project_deleted", "org_deleted", "idle", "project_access_removed"]) {

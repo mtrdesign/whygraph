@@ -1,3 +1,4 @@
+import { formatNumber } from "./format";
 import { z } from "zod";
 import type { ConfigDict, SecretsPatch } from "../api";
 
@@ -227,7 +228,7 @@ const agentLimit = z.string().refine(
     const t = s.trim();
     return t === "" || (/^[0-9]{1,5}$/.test(t) && Number(t) <= MAX_AGENT_LIMIT);
   },
-  `Enter a whole number from 0 to ${MAX_AGENT_LIMIT.toLocaleString("en-US")}, or leave it blank`,
+  `Enter a whole number from 0 to ${formatNumber(MAX_AGENT_LIMIT)}, or leave it blank`,
 );
 
 export const configFormSchema = z.object({

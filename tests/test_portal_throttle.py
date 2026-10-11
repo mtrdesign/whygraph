@@ -74,6 +74,22 @@ def test_check_does_not_count():
     assert t.check("k") is not None
 
 
+def test_remaining_matches_check_without_recording():
+    t, clock = make(limit=3)
+    assert t.remaining("k") == 3
+    for left in (2, 1, 0):
+        t.record("k")
+        assert t.remaining("k") == left
+        assert t.remaining("k") == left  # reading counts nothing
+        assert (t.check("k") is None) == (left > 0)
+    assert t.remaining("k", limit=5) == 2  # a per-call limit, as for check
+    assert t.remaining("k", limit=1) == 0  # never negative
+    assert t.remaining("other") == 3
+    clock.now += 60
+    assert t.remaining("k") == 3  # the window passed
+    assert "other" not in t._events
+
+
 def test_hit_checks_then_records():
     t, clock = make(limit=2)
     assert t.hit("k") is None

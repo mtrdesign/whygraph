@@ -1,4 +1,6 @@
 import { useReadOnly } from "../../lib/identity";
+import { alertVariants } from "../ui/alert";
+import { cn } from "@/lib/utils";
 
 /** Shown over an org the signed-in instance admin is not a member of. */
 export function ReaderBanner() {
@@ -7,7 +9,10 @@ export function ReaderBanner() {
     <div
       role="status"
       data-testid="reader-banner"
-      className="shrink-0 border-b border-border bg-muted px-4 py-1.5 text-center text-[13px] text-muted-foreground"
+      className={cn(
+        alertVariants({ variant: "info" }),
+        "shrink-0 rounded-none border-x-0 border-t-0 px-4 py-1.5 text-center text-[13px]",
+      )}
     >
       Viewing as instance admin (read-only)
     </div>

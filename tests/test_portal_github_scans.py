@@ -23,6 +23,8 @@ import, a scan and a refresh (acceptance criterion 9).
 
 from __future__ import annotations
 
+import json
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -83,10 +85,12 @@ ORG = "acme"
 
 
 def imported(w: World) -> Path:
-    """Connect GitHub and import ``acme/api``; the clone's root."""
+    """Connect GitHub and import ``acme/api``, its first run (the clone) ended ``ok``; the root."""
     connected(w)
     response = import_repo(w, API_REPO)
     assert response.status_code == 201, response.text
+    run = wait_run(w, response.json()["initial_run_id"])
+    assert run["status"] == "ok", run
     return w.repos / ORG / "api"
 
 
@@ -175,8 +179,10 @@ def token_files(w: World) -> list[Path]:
 
 
 def recorded_env(scanner: SimpleNamespace) -> dict[str, str]:
-    (call,) = scanner.calls()
-    return call["env"]
+    """The newest child's environment (after the import's own first scan)."""
+    calls = scanner.calls()
+    assert len(calls) == 2, calls
+    return calls[-1]["env"]
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +198,7 @@ def test_scan_now_fetches_first_and_hands_the_child_a_token_file(
     pushed = w.server.commit("acme/api", message="Pushed after the import")
     scanner.hold.touch()
     run_id = scan(w)
-    wait_for(scanner.calls)
+    wait_for(lambda: len(scanner.calls()) == 2)  # after the import's own
 
     # The tree moved before the child started, and the child runs on it.
     assert head(root) == pushed
@@ -209,7 +215,7 @@ def test_scan_now_fetches_first_and_hands_the_child_a_token_file(
     scanner.hold.unlink()
     run = wait_run(w, run_id)
     assert run["status"] == "ok", run
-    assert (run["kind"], run["trigger"]) == ("sync", "initial")
+    assert (run["kind"], run["trigger"]) == ("sync", "manual")
     assert run["summary"]["moved"] is True
     assert "history_rewritten" not in run["summary"]
     assert not token_file.exists() and token_files(w) == []
@@ -220,7 +226,7 @@ def test_scan_now_fetches_first_and_hands_the_child_a_token_file(
     run = wait_run(w, scan(w))
     assert (run["status"], run["kind"], run["trigger"]) == ("ok", "sync", "manual")
     assert run["summary"]["moved"] is False
-    assert len(scanner.calls()) == 2
+    assert len(scanner.calls()) == 3
 
 
 def test_the_token_file_is_refreshed_across_an_expiry(
@@ -270,7 +276,7 @@ def test_the_token_file_goes_when_the_child_fails_or_is_cancelled(
     scanner.configure()
     scanner.hold.touch()
     run_id = scan(w)
-    wait_for(lambda: len(scanner.calls()) == 2)
+    wait_for(lambda: len(scanner.calls()) == 3)  # import, failed, this one
     assert len(token_files(w)) == 1
     response = w.client.post(at(ORG) + f"/api/projects/api/scans/{run_id}/cancel")
     assert response.status_code == 202, response.text
@@ -353,7 +359,7 @@ def test_a_branch_tracking_whygraph_state_is_refused_at_sync(
     assert run["status"] == "failed"
     assert "tracks WhyGraph's own state" in run["summary"]["error"]
     assert head(root) == before and not (root / ".codegraph" / "codegraph.db").exists()
-    assert scanner.calls() == []
+    assert len(scanner.calls()) == 1  # the import's own scan only
     body = details(w)
     assert (body["access_lost"], body["access_lost_reason"]) == (
         True,
@@ -384,7 +390,7 @@ def test_a_refused_mint_marks_access_lost_and_a_good_one_restores_it(
     w.fake.uninstall(INSTALLATION)
 
     run = wait_run(w, scan(w))
-    assert run["status"] == "failed" and scanner.calls() == []
+    assert run["status"] == "failed" and len(scanner.calls()) == 1
     body = details(w)
     assert (body["access_lost"], body["access_lost_reason"]) == (True, "no_access")
     listed = w.client.get(at(ORG) + "/api/projects").json()
@@ -396,7 +402,7 @@ def test_a_refused_mint_marks_access_lost_and_a_good_one_restores_it(
     response = request_scan(w)
     assert response.status_code == 409, response.text
     assert response.json()["code"] == "github_access_lost"
-    assert len(runs(w)) == 1  # nothing queued
+    assert len(runs(w)) == 2  # nothing queued (the import's run, the failed one)
 
     # Reinstalled: a successful mint clears it, and scans work again.
     w.fake.add_installation(INSTALLATION, "acme", account_type="Organization")
@@ -415,7 +421,7 @@ def test_a_git_401_marks_access_lost(world: World, scanner: SimpleNamespace) -> 
     w.fake.force("git", status=401, times=None)
 
     run = wait_run(w, scan(w))
-    assert run["status"] == "failed" and scanner.calls() == []
+    assert run["status"] == "failed" and len(scanner.calls()) == 1
     assert head(root) == before
     assert details(w)["access_lost_reason"] == "git_access_denied"
     assert request_scan(w).json()["code"] == "github_access_lost"
@@ -434,7 +440,7 @@ def test_a_refused_refresh_marks_access_lost_and_stops_refreshing(
     w.state.runner.token_refresh_margin = 3
     scanner.hold.touch()
     run_id = scan(w)
-    wait_for(scanner.calls)
+    wait_for(lambda: len(scanner.calls()) == 2)
     token_file = Path(recorded_env(scanner)[TOKEN_FILE_ENV])
     first = token_file.read_text()
     wait_for(lambda: token_file.read_text() != first)  # a refresh happened
@@ -458,7 +464,7 @@ def test_a_queued_run_of_an_access_lost_project_fails_without_syncing(
     imported(w)
     scanner.hold.touch()
     held = scan(w)
-    wait_for(scanner.calls)
+    wait_for(lambda: len(scanner.calls()) == 2)
     queued = scan(w)  # waits behind the held run
     assert queued != held
     from whygraph.portal import runner as runner_mod
@@ -468,7 +474,7 @@ def test_a_queued_run_of_an_access_lost_project_fails_without_syncing(
     assert wait_run(w, held)["status"] == "ok"
     run = wait_run(w, queued)
     assert run["status"] == "failed" and "reconnect" in run["summary"]["error"]
-    assert len(scanner.calls()) == 1
+    assert len(scanner.calls()) == 2  # the import's and the held run's
 
 
 # ---------------------------------------------------------------------------
@@ -484,11 +490,7 @@ def test_the_reconcile_syncs_only_when_the_remote_moved(
     world: World, scanner: SimpleNamespace
 ) -> None:
     w = world
-    imported(w)
-    reconcile(w)  # never scanned: left to the first, explicit scan
-    assert runs(w) == []
-    wait_run(w, scan(w))
-
+    imported(w)  # its first run cloned and scanned
     reconcile(w)  # nothing moved
     assert len(runs(w)) == 1
     pushed = w.server.commit("acme/api", message="A push whose webhook was missed")
@@ -512,7 +514,6 @@ def test_the_reconcile_marks_a_refused_mint_and_clears_it_once_access_returns(
 ) -> None:
     w = world
     imported(w)
-    wait_run(w, scan(w))
     w.fake.uninstall(INSTALLATION)
     w.server.commit("acme/api")
     reconcile(w)
@@ -546,7 +547,6 @@ def test_the_reconcile_runs_at_start_on_its_own_loop_and_survives_an_exception(
         assert github_sign_in(client, "ben").status_code == 200
         assert create_org(client, "acme", "Acme").status_code == 201
         imported(w)
-        wait_run(w, scan(w))
     pushed = w.server.commit("acme/api", message="Pushed while the portal was down")
 
     release, entered = threading.Event(), threading.Event()
@@ -649,3 +649,38 @@ def test_no_github_credential_lands_in_the_db_a_run_file_or_a_response(
         response = w.client.get(url)
         assert response.status_code == 200, (url, response.text)
         assert not TOKEN_SHAPE.search(response.text), url
+
+
+def test_the_production_log_is_path_free_and_starts_with_the_flags(
+    world: World, scanner: SimpleNamespace
+) -> None:
+    """MODE-2: no data dir or clone path in the log; the argv line is the flags.
+
+    The import's first run, which also clones.
+    """
+    w = world
+    connected(w)
+    run_id = import_repo(w, API_REPO).json()["initial_run_id"]
+    run = wait_run(w, run_id)
+    assert run["status"] == "ok", run
+    root = w.repos / ORG / "api"
+    text = run_log(w, run_id) + json.dumps(run)
+    text += (w.env.data / "runs" / f"{run_id}.jsonl").read_text()
+    assert str(w.env.data) not in text and str(root) not in text
+    assert ".clone-" not in text
+    assert "$ whygraph scan --skip-analyze" in text
+    assert "--managed-by-portal" not in text and "-m whygraph" not in text
+
+
+def test_a_missing_clone_is_reported_without_its_path(
+    world: World, scanner: SimpleNamespace
+) -> None:
+    w = world
+    root = imported(w)
+    shutil.rmtree(root / ".git")
+    run_id = scan(w)
+    run = wait_run(w, run_id)
+    assert run["status"] == "failed", run
+    assert str(w.env.data) not in json.dumps(run)
+    assert "server copy is missing" in run["summary"]["error"]
+    assert "server copy is missing" in run_log(w, run_id)

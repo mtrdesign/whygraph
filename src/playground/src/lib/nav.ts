@@ -45,16 +45,3 @@ export function useActiveSessionId(): number | null {
   const { id } = useParams({ strict: false }) as { id?: string };
   return id !== undefined && /^\d+$/.test(id) ? Number(id) : null;
 }
-
-export function useSetActiveSession() {
-  const navigate = useNavigate();
-  const slug = useSlug();
-  return useCallback(
-    (id: number | null) =>
-      navigate({
-        to: "/p/$slug/chat/{-$id}",
-        params: { slug, id: id === null ? undefined : String(id) },
-      }),
-    [navigate, slug],
-  );
-}

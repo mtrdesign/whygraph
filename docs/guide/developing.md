@@ -160,11 +160,21 @@ so it can run beside any of them.
 |---|---|
 | `make test` | `pytest` only |
 | `make e2e` | The Playwright suite against a throwaway portal and a fake scanner, both themes (`ARGS="--project=light"` for one) |
+| `make audit` | The screenshot audit: walks every screen of both portals (local, production, linked) at desktop and phone width in light and dark, and writes PNGs, `manifest.json` and `gaps.md` under `src/playground/e2e/.artifacts/audit/` (`ARGS="--project=local"` for one). About 30 minutes, run by hand before a merge, never in CI; see `src/playground/e2e/audit/README.md` |
 | `make inspect SLUG=<slug>` | The MCP Inspector against a project's `/mcp/<slug>` on the running dev portal |
 | `make db SLUG=<slug>` | A DBGate viewer on `:8081` for a scratch repo's two databases, plus a **Portal** connection to the `make dev-db` Postgres (through `host.docker.internal:55432`). Copy `docker-compose.example.yml` to `docker-compose.yml` first; an older copy needs refreshing to get the Portal connection |
 | `make dev-db` / `make dev-db-down` | Start (and wait for) / stop the dev portal's Postgres; see above |
 | `make image` | Build the image like the release does (`IMAGE=...` to retag) |
 | `make docs` / `make docs-build` | Serve this site with live reload / build it strictly, as CI does |
+
+### The phone project
+
+`make e2e` also has a `phone` Playwright project (390x844, light), run after `light` and `production`
+(`ARGS="--project=phone"` for just that, which pulls its dependencies in). Its one spec,
+`e2e/tests/phone.spec.ts`, opens the main routes of both portals and asserts that nothing scrolls
+horizontally (except an element marked `data-scroll-x`, an opted-in scroller) and that every page has an
+`h1`, visible or `sr-only`. A page not fixed yet is a `test.fail()` entry in the spec's
+`KNOWN_OVERFLOW`, so fixing it turns the run red until the entry is removed.
 
 ## Requirements and gotchas
 

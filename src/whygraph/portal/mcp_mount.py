@@ -116,7 +116,7 @@ class McpDispatcher:
             request_state = scope.get("state", {})
             principal = request_state.get("principal")
             if principal is None:
-                raise ApiError(409, "setup required")
+                raise ApiError(409, "setup required", code="setup_required")
             org_slug = request_state.get("org_slug")
             access = None
             if org_slug is not None:

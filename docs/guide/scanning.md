@@ -5,7 +5,7 @@ picks up new commits and backfills what's missing.
 
 **In the portal you don't run it by hand.** The [portal](../portal/index.md) runs every scan itself, as
 a `whygraph scan` child process in the project's folder: the first scan during
-[project setup](../portal/projects.md#first-scan), then **Scan now**, the git hooks, and a periodic
+[project setup](../portal/projects.md#configure), then **Scan now**, the git hooks, and a periodic
 catch-up (in [production mode](../deploy/production.md#keeping-projects-current), GitHub's push
 webhooks and an hourly check instead). Progress and the log of each run are on the project's
 **Scans** page. How runs are triggered, queued and coalesced is in the
@@ -21,6 +21,40 @@ whygraph scan
     Once the portal has initialized a repository it is scanned by the portal only. Running
     `whygraph scan` there exits with status `2` and points at the project in the portal. To use the
     repo headless again, remove it from the Projects page or delete `.whygraph/portal.json`.
+
+## Watching a scan and the history
+
+A project's **Scans** page lists every run, newest first, and a run opens on its own page. A run is
+titled by what it was and when - *Full rescan - 9 Oct 2026, 14:02*, *Quick rescan*, *First scan*,
+*Import*, *Describe*, *Commit hook*, *GitHub push*, *Sync from GitHub* or *Scheduled check* - never
+by a run number (the number is only in the address). Quick versus full is visible on every row.
+
+**The run page** shows who asked for it and when it was queued, started and finished, then the
+phases. Every phase is named from the start ("Phase 2 of 4"), so you can see what is still to come;
+a phase that never ran because an earlier one failed reads *Skipped*, and a run you stopped shows a
+grey stop mark on the phase it was in, not a red failure. Per-task progress bars (commits described
+so far) stay on this page. The outcome says what happened - *Imported and scanned*, *Fetched new
+commits and scanned*, *No new commits* (never shown for a first run) or *Finished in 3m 10s* - and a
+failed run explains itself in plain words with **Retry**, **Open settings** (for a missing key or
+token) and **Open the log**; the raw error is under **Show details**. A cancelled run says
+*Cancelled by you*, *Cancelled by* a colleague, or *Stopped: monthly budget reached*.
+
+**Cost.** A project admin (anyone who can see the project's usage) also gets the cost of each run: the
+LLM calls and what they cost on the run page, with *estimated $X before the run* when a full run was
+queued with an estimate, and a **Cost** column in the history showing the actual cost with the
+estimate beneath it. On an organization portal the **View these calls** link opens the calls behind
+that cost on the [Usage & cost](../portal/usage.md) page. Without access to usage the cost column and lines are
+simply absent.
+
+**The history** loads fifty runs at a time (**Load more** fetches the next page) and filters by
+**Status**, **Trigger**, **Requested by** (*Me*, *System*, or - for organization admins - a member) and
+**Type** (*Full*, *Quick*, or *Sync* for a GitHub fetch that found nothing to scan). The filters are in
+the address, so a filtered view can be bookmarked or shared; **Clear filters** resets them.
+
+!!! note "The run log in production"
+    On a production portal the first line of a run's log is `$ whygraph scan <flags>` - the flags
+    only, never the command's full path or arguments - and paths inside the server's copy of the
+    repository appear as `.` and `<data>`, so a log never reveals where the portal keeps its files.
 
 ## What a scan does
 
@@ -105,7 +139,7 @@ is offline and token-free. Rapid commits coalesce into one follow-up scan, and t
 The hooks run a shared helper that lives in the git directory, at `.git/whygraph/whygraph-scan` (in a
 linked worktree, the main repository's git directory), never in the working tree - a checkout or pull
 cannot replace it. Repositories set up by an earlier build had it at `.whygraph/hooks/whygraph-scan`;
-the next Initialize or hooks change moves it. The helper finds the portal through
+the next set-up or hooks change moves it. The helper finds the portal through
 `.whygraph/portal.env`, a two-line file (`slug`, `port`) it **parses and never sources**, and ignores
 if git tracks it or it is a symbolic link. It never writes through a symbolic link either. An existing hook of your own is appended to behind a
 sentinel guard, never overwritten. `post-checkout` skips the two cases that can't have changed

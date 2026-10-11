@@ -20,8 +20,8 @@ test("a repo outside the shared folders shows the not-shared alert and cannot be
   await expect(alert).toBeVisible();
   await expect(alert).toContainText("This folder isn't shared with the portal");
   // The command comes from the backend, already quoted, and shares the repo's parent folder.
-  await expect(alert.locator("code")).toContainText("whygraph up --add-folder");
-  await expect(alert.locator("code")).toContainText(path.dirname(env.outside));
+  await expect(alert.locator("pre")).toContainText("whygraph up --add-folder");
+  await expect(alert.locator("pre")).toContainText(path.dirname(env.outside));
   await expect(alert.getByRole("button", { name: "Copy" })).toBeVisible();
   await expect(alert.getByRole("button", { name: "Check again" })).toBeEnabled();
 

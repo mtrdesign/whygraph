@@ -2,6 +2,8 @@
 // `from` inclusive and `to` exclusive, so every range here is a pair of UTC
 // `YYYY-MM-DD` strings in that convention.
 
+import { formatDateTimeUtc, formatDateUtc, formatUtc } from "./format";
+
 export interface UsageRange {
   from: string;
   to: string;
@@ -59,33 +61,34 @@ export function matchPreset(range: Partial<UsageRange>, now: Date = new Date()):
   return hit?.value ?? "custom";
 }
 
-/** `2026-10` -> `October 2026`. */
+/** `2026-10` -> `October 2026` (the viewer's locale). */
 export function formatMonth(month: string): string {
   const d = new Date(`${month}-01T00:00:00Z`);
   if (Number.isNaN(d.getTime())) return month;
-  return d.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
+  return formatUtc(d, { month: "long", year: "numeric" });
 }
 
-/** A reset instant as the budget UI says it: `1 Nov, 00:00 UTC`. */
+/**
+ * A reset instant as the budget UI says it: `formatDateTime`'s viewer-locale shape in
+ * UTC (`Nov 1, 2026, 12:00 AM UTC`), the same shape as the alerts' "When".
+ */
 export function formatResetsAt(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  const day = d.getUTCDate();
-  const month = d.toLocaleDateString("en-US", { month: "short", timeZone: "UTC" });
-  const hh = String(d.getUTCHours()).padStart(2, "0");
-  const mm = String(d.getUTCMinutes()).padStart(2, "0");
-  return `${day} ${month}, ${hh}:${mm} UTC`;
+  return toDate(iso) ? formatDateTimeUtc(iso) : iso;
 }
 
-/** A range for a caption: `1 Oct 2026 - 31 Oct 2026` (the exclusive end shown as the last day). */
+/** `Nov 1` (or `1 Nov`): the day a month's budgets reset (UTC), for a banner. */
+export function formatResetsOn(iso: string): string {
+  return toDate(iso) ? formatUtc(iso, { day: "numeric", month: "short" }) : iso;
+}
+
+/** A range for a caption: `Oct 1, 2026 - Oct 31, 2026` (the exclusive end shown as the last day). */
 export function formatRange(range: UsageRange): string {
-  const show = (day: string) =>
-    new Date(`${day}T00:00:00Z`).toLocaleDateString("en-GB", {
-      day: "numeric",
-      month: "short",
-      year: "numeric",
-      timeZone: "UTC",
-    });
+  const show = (day: string) => formatDateUtc(`${day}T00:00:00Z`);
   const last = addDays(range.to, -1);
   return last === range.from ? show(range.from) : `${show(range.from)} - ${show(last)}`;
+}
+
+function toDate(iso: string): Date | null {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? null : d;
 }

@@ -3,7 +3,7 @@
 WhyGraph reaches your editor over **HTTP MCP**. Each project has an endpoint on the
 [portal](../portal/index.md), `http://127.0.0.1:<port>/mcp/<slug>`, and any agent that speaks MCP over
 HTTP can use it. You don't write that config yourself: when you
-[initialize a project](../portal/projects.md#initialize), you pick the agents and the portal writes
+[set up a project](../portal/projects.md#set-up), you pick the agents and the portal writes
 each one's entry, after showing you a preview.
 
 ## Supported agents

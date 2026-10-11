@@ -6,16 +6,32 @@ import {
   CircleDashedIcon,
   CircleIcon,
   MinusCircleIcon,
+  SquareIcon,
   XCircleIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ApiError, portalApi, projectApi, projectKey, type ScanRunRow, type ScanRunStatus } from "../../api";
+import { usePortalState } from "../../lib/identity";
 import { can } from "../../lib/permissions";
 import { projectProblem } from "../../lib/errors";
+import { formatClock, formatNumber, formatUsd } from "../../lib/format";
 import { useScanActions } from "../../lib/scanActions";
-import { BUDGET_SKIPPED, BUDGET_STOPPED, formatSeconds, runSeconds, triggerLabel, usageLine } from "../../lib/scanFormat";
+import { scanAvailability } from "../../lib/scanAvailability";
+import {
+  BUDGET_SKIPPED,
+  CODE_INDEX_REFRESHED,
+  cancelledLabel,
+  failureSummary,
+  formatSeconds,
+  requesterLabel,
+  runSeconds,
+  runTitle,
+  syncOutcome,
+  usageLine,
+} from "../../lib/scanFormat";
 import {
   codegraphRow,
+  codegraphText,
   crawlerLabel,
   phaseRows,
   useScanRun,
@@ -24,13 +40,17 @@ import {
   type ScanRunState,
   type TaskState,
 } from "../../lib/scanRun";
-import { timeAgo } from "../../lib/projectStatus";
+import { PageContainer } from "../layout/PageContainer";
+import { scanRunKey } from "../shell/crumbs";
+import { ErrorState } from "../state/ErrorState";
+import { NotFoundState } from "../state/NotFoundState";
+import { DetailSkeleton } from "../state/Skeletons";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Progress } from "../ui/progress";
 import { Spinner } from "../ui/spinner";
 import { CancelRunButton } from "./CancelRunButton";
-import { ScanMenu } from "./ScanMenu";
+import { FULL_SCAN, QUICK_SCAN, ScanMenu } from "./ScanMenu";
 import { RunStatusBadge } from "./RunStatusBadge";
 
 /** Re-render every `ms` while `enabled` (a live elapsed-time readout). */
@@ -50,22 +70,26 @@ const PHASE_ICON: Record<PhaseStatus, React.ReactNode> = {
   done: <CheckCircle2Icon className="size-4 text-success" />,
   failed: <XCircleIcon className="size-4 text-destructive" />,
   skipped: <MinusCircleIcon className="size-4 text-muted-foreground/60" />,
+  // A stopped phase is not an error: a grey stop square, not the red X (SCN-6).
+  cancelled: <SquareIcon className="size-3.5 fill-current text-muted-foreground/70" />,
 };
 
+/**
+ * One crawler's live line: its human name and, when it reports a total, the count
+ * once ("3 of 10"). The crawler's own description (lower case, often the count
+ * again) is never shown (SCN-5).
+ */
 function TaskLine({ task, showLabel = true }: { task: TaskState; showLabel?: boolean }) {
   const pct = task.total ? Math.min(100, Math.round((task.completed / task.total) * 100)) : null;
   return (
     <div className="flex flex-col gap-1" data-testid={`task-${task.name}`}>
       <div className="flex items-baseline justify-between gap-3 text-xs">
         <span className="font-medium">{showLabel ? crawlerLabel(task.name) : ""}</span>
-        <span className="truncate text-muted-foreground">
-          {task.description}
-          {task.total ? (
-            <span className="ml-2 tabular-nums text-foreground">
-              {task.completed.toLocaleString("en-US")} / {task.total.toLocaleString("en-US")}
-            </span>
-          ) : null}
-        </span>
+        {task.total ? (
+          <span className="tabular-nums text-muted-foreground">
+            {formatNumber(task.completed)} of {formatNumber(task.total)}
+          </span>
+        ) : null}
       </div>
       {pct !== null && <Progress value={pct} aria-label={crawlerLabel(task.name)} />}
     </div>
@@ -84,11 +108,17 @@ function PhaseItem({ phase }: { phase: PhaseRow }) {
       </span>
       <div className="flex min-w-0 flex-1 flex-col gap-2">
         <div className="flex items-baseline justify-between gap-3">
-          <span className={cn("text-sm font-medium", phase.status === "pending" && "text-muted-foreground")}>
+          <span className={cn(
+              "text-sm font-medium",
+              (phase.status === "pending" || phase.status === "skipped") && "text-muted-foreground",
+            )}>
             {phase.title}
           </span>
           {phase.seconds !== null && (
             <span className="text-xs tabular-nums text-muted-foreground">{formatSeconds(phase.seconds)}</span>
+          )}
+          {(phase.status === "skipped" || phase.status === "cancelled") && (
+            <span className="text-xs text-muted-foreground">{phase.status === "skipped" ? "Skipped" : "Stopped"}</span>
           )}
         </div>
         {showTasks && phase.tasks.map((t) => (
@@ -101,7 +131,7 @@ function PhaseItem({ phase }: { phase: PhaseRow }) {
               className={cn("text-xs", c.error ? "text-destructive" : "text-muted-foreground")}
             >
               <span className="font-medium text-foreground">{crawlerLabel(c.name)}</span>{" "}
-              {c.error ?? c.summary}
+              {c.error ? "did not finish. The error is under Show details." : c.summary}
               {c.warning && <span className="block text-warning">{c.warning}</span>}
             </p>
           ))}
@@ -110,27 +140,52 @@ function PhaseItem({ phase }: { phase: PhaseRow }) {
   );
 }
 
-function SyncItem({ sync }: { sync: NonNullable<ScanRunState["sync"]> }) {
+/**
+ * The sync row of a production GitHub project. `scanning` is whether a scan
+ * followed the sync (its phases started, or the run's summary says `scanned`):
+ * a manual rescan scans even when the fetch brought nothing new, so "nothing to
+ * scan" is only said of a run that ended without scanning (BUG-6).
+ */
+function SyncItem({
+  sync,
+  scanning,
+  ended,
+}: {
+  sync: NonNullable<ScanRunState["sync"]>;
+  scanning: boolean;
+  ended: boolean;
+}) {
+  const failed = sync.status === "failed";
   const text =
-    sync.status === "fetching"
-      ? "Fetching from GitHub"
-      : sync.status === "failed"
-        ? `Fetch failed${sync.error ? `: ${sync.error}` : ""}`
-        : sync.moved
-          ? "Fetched new commits; scanning them next"
-          : "Already up to date; nothing to scan";
+    sync.status === "cloning"
+      ? `Cloning ${sync.fullName ?? "the repository"}`
+      : sync.status === "fetching"
+        ? "Fetching from GitHub"
+        : failed
+          ? (sync.error ?? "The fetch did not finish")
+          : sync.cloned
+            ? "Cloned the repository"
+            : sync.moved
+              ? scanning || ended
+                ? "Fetched new commits"
+                : "Fetched new commits; scanning them next"
+              : scanning
+                ? "Already up to date with GitHub; rescanning the current code"
+                : ended
+                  ? "No new commits; nothing to scan"
+                  : "No new commits";
   const status: PhaseStatus =
-    sync.status === "fetching" ? "running" : sync.status === "failed" ? "failed" : "done";
+    sync.status === "fetching" || sync.status === "cloning" ? "running" : failed ? "failed" : "done";
   return (
     <li className="flex gap-3 py-3" data-testid="sync-step" data-status={status}>
       <span className="mt-0.5 shrink-0" aria-hidden>
         {PHASE_ICON[status]}
       </span>
-      <div className="flex flex-col">
-        <span className="text-sm font-medium">Sync with GitHub</span>
-        <span className={cn("text-xs", status === "failed" ? "text-destructive" : "text-muted-foreground")}>
-          {text}
+      <div className="flex min-w-0 flex-col">
+        <span className={cn("text-sm font-medium", failed && "text-destructive")}>
+          {failed ? "Sync from GitHub - failed" : "Sync from GitHub"}
         </span>
+        <span className={cn("text-xs break-words", failed ? "text-destructive" : "text-muted-foreground")}>{text}</span>
       </div>
     </li>
   );
@@ -142,16 +197,16 @@ function RunLog({
   runId,
   active,
   finished,
-  autoOpen,
+  open,
+  onToggle,
 }: {
   slug: string;
   runId: number;
   active: boolean;
   finished: ScanRunStatus | null;
-  autoOpen: boolean;
+  open: boolean;
+  onToggle: () => void;
 }) {
-  const [userOpen, setUserOpen] = useState<boolean | null>(null);
-  const open = userOpen ?? autoOpen;
   const log = useQuery({
     // `finished` is part of the key so the log is read once more after the run ends.
     queryKey: projectKey(slug, "scan-log", runId, finished),
@@ -167,11 +222,11 @@ function RunLog({
   }, [text]);
 
   return (
-    <section className="rounded-xl border border-border bg-card" data-testid="run-log">
+    <section className="rounded-xl border border-border bg-card shadow-card" data-testid="run-log">
       <button
         type="button"
         aria-expanded={open}
-        onClick={() => setUserOpen(!open)}
+        onClick={onToggle}
         className="flex w-full items-center justify-between px-5 py-3 text-left text-sm font-semibold"
       >
         Log
@@ -180,12 +235,12 @@ function RunLog({
       {open && (
         <div className="flex flex-col gap-2 border-t border-border px-5 py-3">
           {log.isLoading && <p className="text-xs text-muted-foreground">Loading the log…</p>}
-          {log.isError && <p className="text-xs text-destructive">Could not read the log: {log.error.message}</p>}
+          {log.isError && <ErrorState error={log.error} size="inline" onRetry={() => void log.refetch()} />}
           {log.data && (
             <>
               {log.data.truncated && (
                 <p className="text-xs text-muted-foreground">
-                  Showing the end of the log ({Math.round(log.data.size / 1024).toLocaleString("en-US")} KiB in
+                  Showing the end of the log ({formatNumber(Math.round(log.data.size / 1024))} KiB in
                   all). Keys are redacted.
                 </p>
               )}
@@ -203,11 +258,62 @@ function RunLog({
   );
 }
 
-function Outcome({ slug, state, row }: { slug: string; state: ScanRunState; row: ScanRunRow | null }) {
+/** The cost lines of a run, on every outcome that has them (and only when the payload carries them). */
+function CostLines({ runId, summary, canSeeCalls }: { runId: number; summary: ScanRunRow["summary"]; canSeeCalls: boolean }) {
+  const usage = usageLine(summary);
+  const estimate = summary?.estimate?.cost_usd;
+  if (!usage && typeof estimate !== "number") return null;
+  return (
+    <>
+      {usage && (
+        <p data-testid="run-usage">
+          {usage}
+          {canSeeCalls && (
+            <>
+              {" "}
+              <Link
+                to="/usage"
+                search={{ tab: "calls", scan_run: String(runId) }}
+                className="text-primary-text hover:underline"
+              >
+                View these calls
+              </Link>
+            </>
+          )}
+        </p>
+      )}
+      {typeof estimate === "number" && (
+        <p data-testid="run-estimate">Estimated {formatUsd(estimate)} before the run</p>
+      )}
+    </>
+  );
+}
+
+function Outcome({
+  slug,
+  runId,
+  state,
+  row,
+  viewerUid,
+  canSeeCalls,
+  retry,
+  onOpenLog,
+}: {
+  slug: string;
+  runId: number;
+  state: ScanRunState;
+  row: ScanRunRow;
+  viewerUid: string | null;
+  canSeeCalls: boolean;
+  /** Retry the run's own kind of scan; `null` when this viewer may not (or it is not offered). */
+  retry: { run: () => void; pending: boolean; allowed: boolean; reason?: string } | null;
+  onOpenLog: () => void;
+}) {
   const status = state.finished;
   if (!status) return null;
-  const summary = state.summary ?? row?.summary ?? null;
+  const summary = state.summary ?? row.summary ?? null;
   const elapsed = summary?.elapsed_sec;
+  const costs = <CostLines runId={runId} summary={summary} canSeeCalls={canSeeCalls} />;
 
   if (typeof summary?.merged_into === "number") {
     return (
@@ -220,7 +326,7 @@ function Outcome({ slug, state, row }: { slug: string; state: ScanRunState; row:
             params={{ slug, runId: String(summary.merged_into) }}
             className="text-primary-text hover:underline"
           >
-            run #{summary.merged_into}
+            that run
           </Link>
           .
         </AlertDescription>
@@ -228,47 +334,76 @@ function Outcome({ slug, state, row }: { slug: string; state: ScanRunState; row:
     );
   }
   if (status === "ok") {
+    const merged = { ...summary, moved: summary?.moved ?? state.sync?.moved, cloned: summary?.cloned ?? state.sync?.cloned };
+    const synced = row.kind === "sync" ? syncOutcome(row, merged) : null;
     return (
       <Alert data-testid="run-result">
         <CheckCircle2Icon />
         <AlertTitle>
-          {state.sync?.status === "ok" && state.sync.moved === false
-            ? "Already up to date"
-            : `Finished${typeof elapsed === "number" ? ` in ${formatSeconds(elapsed)}` : ""}`}
+          {synced ?? `Finished${typeof elapsed === "number" ? ` in ${formatSeconds(elapsed)}` : ""}`}
         </AlertTitle>
         <AlertDescription>
+          {synced && typeof elapsed === "number" && <p>Finished in {formatSeconds(elapsed)}.</p>}
           {summary?.analyze_skipped === "budget" ? (
             <p>{BUDGET_SKIPPED}</p>
+          ) : summary?.analyze_skipped === "--codegraph-only" ? (
+            <p>{CODE_INDEX_REFRESHED}. The history is on the platform.</p>
           ) : summary?.analyze_skipped && summary.analyze_skipped !== "--skip-analyze" ? (
             <p>Commit descriptions were skipped: {summary.analyze_skipped}</p>
-          ) : summary?.analyze_skipped || (row && !row.analyze) ? (
+          ) : summary?.analyze_skipped || !row.analyze ? (
             <p>Structure only: git history and code structure, no LLM calls.</p>
           ) : (
             <p>Git history, code structure and commit descriptions are up to date.</p>
           )}
-          {usageLine(summary) && <p data-testid="run-usage">{usageLine(summary)}</p>}
+          {costs}
         </AlertDescription>
       </Alert>
     );
   }
   if (status === "failed") {
-    const failed = (state.result?.crawlers ?? summary?.crawlers ?? []).filter((c) => c.status === "failed");
-    const message =
-      state.error ??
-      (typeof summary?.error === "string" ? summary.error : null) ??
-      (failed.length ? null : `The scan exited with code ${summary?.exit_code ?? "?"}.`);
+    const failure = failureSummary(summary, state.error);
+    const syncFailed = state.sync?.status === "failed";
     return (
       <Alert variant="destructive" data-testid="run-result">
         <XCircleIcon />
-        <AlertTitle>The scan failed</AlertTitle>
+        <AlertTitle>{syncFailed ? "The sync from GitHub failed" : "The scan failed"}</AlertTitle>
         <AlertDescription>
-          {message && <p>{message}</p>}
-          {failed.map((c) => (
-            <p key={c.name}>
-              <span className="font-medium">{crawlerLabel(c.name)}:</span> {c.error ?? "failed"}
-            </p>
-          ))}
-          <p className="mt-1">The log below has the detail.</p>
+          <p>{failure.message}</p>
+          {costs}
+          <div className="mt-2 flex flex-wrap gap-2">
+            {retry &&
+              (retry.allowed ? (
+                <Button size="sm" variant="outline" onClick={retry.run} disabled={retry.pending} data-testid="run-retry">
+                  Retry
+                </Button>
+              ) : (
+                <span className="self-center text-xs text-muted-foreground" data-testid="run-retry-reason">
+                  {retry.reason}
+                </span>
+              ))}
+            {failure.settings && (
+              <Button
+                size="sm"
+                variant="outline"
+                render={<Link to="/p/$slug/settings" params={{ slug }} search={{ section: failure.settings }} />}
+              >
+                Open settings
+              </Button>
+            )}
+            <Button size="sm" variant="ghost" onClick={onOpenLog} data-testid="run-open-log">
+              Open the log
+            </Button>
+          </div>
+          {failure.details.length > 0 && (
+            <details className="mt-2 text-xs" data-testid="run-error-details">
+              <summary className="cursor-pointer select-none">Show details</summary>
+              <div className="mt-1 flex flex-col gap-1 break-words whitespace-pre-wrap">
+                {failure.details.map((d, i) => (
+                  <p key={i}>{d}</p>
+                ))}
+              </div>
+            </details>
+          )}
         </AlertDescription>
       </Alert>
     );
@@ -279,50 +414,56 @@ function Outcome({ slug, state, row }: { slug: string; state: ScanRunState; row:
         <AlertTitle>Interrupted</AlertTitle>
         <AlertDescription>
           The portal stopped while this ran. Nothing is lost; run another scan to finish the job.
+          {costs}
         </AlertDescription>
       </Alert>
     );
   }
+  const budget = summary?.cancelled_by === "budget";
   return (
     <Alert data-testid="run-result">
-      <AlertTitle>{summary?.cancelled_by === "budget" ? BUDGET_STOPPED : "Cancelled"}</AlertTitle>
-      {summary?.cancelled_by === "budget" && (
-        <AlertDescription>
-          The monthly budget ran out, so the run was stopped. Commits it had already described are kept; run
-          another scan once the budget is raised or next month.
-        </AlertDescription>
-      )}
-      {summary?.cancelled_by === "user" && (
-        <AlertDescription>
-          You cancelled this run. Commits it had already described are kept; run another scan to finish the
-          job.
-        </AlertDescription>
-      )}
+      <AlertTitle>{cancelledLabel({ cancelled_by: row.cancelled_by, summary }, viewerUid)}</AlertTitle>
+      <AlertDescription>
+        {budget ? (
+          <p>
+            The monthly budget ran out, so the run was stopped. Commits it had already described are kept; run
+            another scan once the budget is raised or next month.
+          </p>
+        ) : row.analyze ? (
+          <p>Commits it had already described are kept; run another scan to finish the job.</p>
+        ) : (
+          <p>The project keeps the data from its last finished scan.</p>
+        )}
+        {costs}
+      </AlertDescription>
     </Alert>
   );
 }
 
 /**
- * Screen 7: one scan run, live. Phases come from the events stream (their count
- * from the first event's `phase_total`) with a bar per task that reports a total
- * (the LLM descriptions phase), timings once the run's `result` arrives, then the
- * outcome and the tail of `runs/<id>.log`. The stream is followed to its `end`
- * frame, and reconnects on its own, so a reload or a second viewer sees the same
- * run. "Scan now" here coalesces: a click during a run queues one follow-up and
- * every further click reports the same run id.
+ * One scan run, live. The header comes from `GET /scans/<id>` (cached under
+ * `scanRunKey`, which the breadcrumb reads): the run's title, status and a meta
+ * line. Phases come from the events stream, every one named up front from the
+ * `start` event, with a bar per task that reports a total (the LLM descriptions
+ * phase) and timings once the run's `result` arrives; then the outcome and the
+ * tail of `runs/<id>.log`. The stream is followed to its `end` frame, and
+ * reconnects on its own, so a reload or a second viewer sees the same run. A run
+ * that does not exist renders "not found" and requests nothing more. "Rescan"
+ * here coalesces: a click during a run queues one follow-up and every further
+ * click reports the same run id.
  */
 export function ScanRunView({ slug, runId }: { slug: string; runId: number }) {
   const queryClient = useQueryClient();
-  const runs = useQuery({
-    queryKey: projectKey(slug, "scans"),
-    queryFn: () => projectApi(slug).scans(),
-    refetchInterval: (q) =>
-      q.state.data?.runs.some((r) => r.id === runId && (r.status === "queued" || r.status === "running"))
-        ? 3000
-        : false,
+  const run = useQuery({
+    queryKey: scanRunKey(slug, runId),
+    queryFn: () => projectApi(slug).scan(runId),
+    retry: false,
+    refetchInterval: (q) => (q.state.data?.status === "queued" || q.state.data?.status === "running" ? 3000 : false),
   });
-  const row = runs.data?.runs.find((r) => r.id === runId) ?? null;
-  const live = useScanRun(slug, runId);
+  const row = run.data ?? null;
+  const missing = run.error instanceof ApiError && run.error.status === 404;
+  // A run the API says does not exist is not followed: no events request, no polling.
+  const live = useScanRun(slug, missing ? null : runId);
   const status: ScanRunStatus | null = live.finished ?? row?.status ?? null;
   const active = status === "queued" || status === "running" || (status === null && !live.failure);
   const { scanNow, scanPending, followUp } = useScanActions(slug, {
@@ -333,31 +474,50 @@ export function ScanRunView({ slug, runId }: { slug: string; runId: number }) {
     queryKey: projectKey(slug, "project"),
     queryFn: () => portalApi.project(slug),
   });
+  const portal = usePortalState().data;
+  const viewerUid = portal?.user?.uid ?? null;
+  const [logChoice, setLogChoice] = useState<boolean | null>(null);
   // A contributor may stop a structure-only run; a run that may spend needs the full scan action.
   const mayCancel =
     can(project.data, "project.scan_full") || (can(project.data, "project.scan") && row?.analyze === false);
   const now = useNow(1000, status === "running");
+  // The follow-up notice holds only while this run is active and the follow-up is
+  // still waiting behind it (BUG-4); a row not listed yet counts as queued.
+  const followUpRun = useQuery({
+    // Under the `scans` prefix, so a rescan request (which invalidates it) refreshes the follow-up too.
+    queryKey: [...projectKey(slug, "scans"), "follow-up", followUp],
+    queryFn: () => projectApi(slug).scan(followUp as number),
+    enabled: followUp !== null && followUp !== runId && active,
+    retry: false,
+    refetchInterval: 3000,
+  });
+  const showFollowUp =
+    active &&
+    followUp !== null &&
+    followUp !== runId &&
+    (followUpRun.data === undefined || followUpRun.data.status === "queued");
 
-  // The list row is stale the moment the stream ends: refresh it (and the project
-  // card's badge) once.
+  // The cached row is stale the moment the stream ends: refresh it, the history and
+  // the project card's badge once.
   useEffect(() => {
     if (live.finished) {
+      void queryClient.invalidateQueries({ queryKey: scanRunKey(slug, runId) });
       void queryClient.invalidateQueries({ queryKey: projectKey(slug, "scans") });
       void queryClient.invalidateQueries({ queryKey: projectKey(slug, "project") });
     }
-  }, [live.finished, queryClient, slug]);
+  }, [live.finished, queryClient, slug, runId]);
 
+  if (missing || live.failure?.status === 404) {
+    return <NotFoundState kind="run" back={{ label: "Back to scans", to: `/p/${slug}/scans` }} />;
+  }
   if (live.failure) {
-    const problem = projectProblem(
-      new ApiError(live.failure.status, live.failure.message, live.failure.code),
-    );
-    const notFound = live.failure.status === 404;
+    const problem = projectProblem(new ApiError(live.failure.status, live.failure.message, live.failure.code));
     return (
-      <div className="mx-auto w-full max-w-3xl p-6">
+      <PageContainer width="default">
         <Alert variant="destructive" data-testid="run-unavailable">
-          <AlertTitle>{notFound ? `Run #${runId} was not found` : "This run cannot be shown"}</AlertTitle>
+          <AlertTitle>This run cannot be shown</AlertTitle>
           <AlertDescription>
-            {notFound ? "It may belong to another project." : live.failure.message}
+            {live.failure.message}
             {live.failure.code === "unsafe_path" && <p className="mt-1">{problem.message}</p>}
           </AlertDescription>
         </Alert>
@@ -366,41 +526,71 @@ export function ScanRunView({ slug, runId }: { slug: string; runId: number }) {
             Back to scans
           </Button>
         </div>
-      </div>
+      </PageContainer>
+    );
+  }
+  if (run.isError) {
+    return (
+      <PageContainer width="default">
+        <ErrorState error={run.error} title="Couldn't load this run" onRetry={() => void run.refetch()} size="page" />
+      </PageContainer>
+    );
+  }
+  if (!row) {
+    return (
+      <PageContainer width="default">
+        <DetailSkeleton label="Loading the run" />
+      </PageContainer>
     );
   }
 
   const phases = phaseRows(live);
   const cg = codegraphRow(live);
-  const kind = row?.kind ?? (live.sync ? "sync" : "scan");
-  const started = row?.started_at ?? null;
   const duration =
-    status === "running" && started
-      ? Math.max(0, (now - Date.parse(started)) / 1000)
-      : row
-        ? runSeconds({ ...row, summary: live.summary ?? row.summary })
-        : null;
+    status === "running" && row.started_at
+      ? Math.max(0, (now - Date.parse(row.started_at)) / 1000)
+      : runSeconds({ ...row, summary: live.summary ?? row.summary });
   const waiting = status === "queued" || (status === null && live.phaseTotal === null);
   const badStatus = status === "failed" || status === "interrupted";
+  const logOpen = logChoice ?? badStatus;
+  const phaseNow = phases.find((p) => p.status === "running");
+  const availability = project.data ? scanAvailability(project.data) : null;
+  const retryKind = row.analyze ? availability?.full : availability?.quick;
+  const retry =
+    project.data && retryKind && (project.data.permissions?.includes("project.scan") ?? false)
+      ? {
+          run: () => scanNow(row.analyze ? FULL_SCAN : QUICK_SCAN),
+          pending: scanPending,
+          allowed: retryKind.allowed,
+          reason: retryKind.reason,
+        }
+      : null;
+  const meta = [
+    `Requested by ${requesterLabel(row, viewerUid).replace(/^You$/, "you")}`,
+    row.queued_at ? `queued ${formatClock(row.queued_at)}` : null,
+    row.started_at ? `started ${formatClock(row.started_at)}` : null,
+    duration !== null ? formatSeconds(duration) : null,
+  ].filter(Boolean);
+  const openLog = () => {
+    setLogChoice(true);
+    setTimeout(() => document.querySelector('[data-testid="run-log"]')?.scrollIntoView?.({ block: "nearest" }), 0);
+  };
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 p-6 sm:p-8" data-testid="run-view">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex flex-col gap-1">
-          <h1 className="flex items-center gap-3 text-[22px] font-semibold tracking-tight">
-            {kind === "sync" ? "Sync" : "Scan"} #{runId}
+    <PageContainer width="default" className="flex flex-col gap-4" >
+      <div className="flex flex-wrap items-start justify-between gap-3" data-testid="run-view">
+        <div className="flex min-w-0 flex-col gap-1">
+          <h1 className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[22px] font-semibold tracking-tight">
+            {runTitle(row)}
             {status && <RunStatusBadge status={status} />}
           </h1>
-          <p className="text-[13px] text-muted-foreground">
-            {row ? triggerLabel(row) : "Loading"}
-            {row?.analyze === false && kind === "scan" ? " · structure only" : ""}
-            {started ? ` · started ${timeAgo(started)}` : ""}
-            {duration !== null ? ` · ${formatSeconds(duration)}` : ""}
+          <p className="text-[13px] text-muted-foreground" data-testid="run-meta">
+            {meta.join(" · ")}
           </p>
         </div>
         <div className="flex gap-2">
           {mayCancel && (status === "queued" || status === "running") && (
-            <CancelRunButton slug={slug} runId={runId} status={status} kind={kind} />
+            <CancelRunButton slug={slug} runId={runId} status={status} kind={row.kind} analyze={row.analyze} />
           )}
           {project.data && (
             <ScanMenu
@@ -413,33 +603,42 @@ export function ScanRunView({ slug, runId }: { slug: string; runId: number }) {
         </div>
       </div>
 
-      {followUp !== null && followUp !== runId && (
+      {showFollowUp && (
         <Alert data-testid="followup">
-          <AlertTitle>Another scan is queued</AlertTitle>
+          <AlertTitle>Another request joined this run</AlertTitle>
           <AlertDescription>
-            It starts when this one finishes:{" "}
+            A follow-up scan starts when this one finishes, and asking again adds nothing more.{" "}
             <Link
               to="/p/$slug/scans/{-$runId}"
               params={{ slug, runId: String(followUp) }}
               className="text-primary-text hover:underline"
             >
-              run #{followUp}
+              Open the follow-up
             </Link>
-            . Asking again folds into the same run.
+            .
           </AlertDescription>
         </Alert>
       )}
 
-      {live.error && (
+      {live.error && status !== "failed" && (
         <Alert variant="destructive" data-testid="run-error">
           <AlertTitle>The scan could not run</AlertTitle>
           <AlertDescription>{live.error}</AlertDescription>
         </Alert>
       )}
 
-      <Outcome slug={slug} state={live} row={row} />
+      <Outcome
+        slug={slug}
+        runId={runId}
+        state={live}
+        row={row}
+        viewerUid={viewerUid}
+        canSeeCalls={!!portal?.usage?.org}
+        retry={retry}
+        onOpenLog={openLog}
+      />
 
-      <section className="rounded-xl border border-border bg-card px-5 py-1" aria-label="Phases">
+      <section className="rounded-xl border border-border bg-card px-5 py-1 shadow-card" aria-label="Phases">
         {waiting ? (
           <p className="py-4 text-sm text-muted-foreground" data-testid="run-waiting">
             <CircleDashedIcon className="mr-2 inline size-4 align-text-bottom" />
@@ -448,40 +647,61 @@ export function ScanRunView({ slug, runId }: { slug: string; runId: number }) {
               : "Starting…"}
           </p>
         ) : (
-          <ul className="flex flex-col divide-y divide-border">
-            {live.sync && <SyncItem sync={live.sync} />}
-            {phases.map((p) => (
-              <PhaseItem key={p.phase} phase={p} />
-            ))}
-            {(cg.task || cg.result) && (
-              <li className="flex gap-3 py-3" data-testid="codegraph-step">
-                <span className="mt-0.5 shrink-0" aria-hidden>
-                  {
-                    PHASE_ICON[
-                      cg.result
-                        ? cg.result.status === "failed"
-                          ? "failed"
-                          : "done"
-                        : live.finished
-                          ? "skipped"
-                          : "running"
-                    ]
-                  }
-                </span>
-                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <span className="text-sm font-medium">CodeGraph index</span>
-                  <span className="text-xs text-muted-foreground">
-                    Runs alongside the phases.{" "}
-                    {cg.result ? (cg.result.error ?? cg.result.summary ?? "") : (cg.task?.description ?? "")}
-                  </span>
-                </div>
-              </li>
+          <>
+            {phaseNow && phases.length > 1 && (
+              <p className="pt-3 text-xs text-muted-foreground" data-testid="phase-count">
+                Phase {phaseNow.phase} of {phases.length}
+              </p>
             )}
-          </ul>
+            <ul className="flex flex-col divide-y divide-border">
+              {live.sync && (
+                <SyncItem
+                  sync={live.sync}
+                  scanning={live.phaseTotal !== null || live.phases.length > 0 || !!(live.summary ?? row.summary)?.scanned}
+                  ended={live.finished !== null}
+                />
+              )}
+              {phases.map((p) => (
+                <PhaseItem key={p.phase} phase={p} />
+              ))}
+              {(cg.task || cg.result) && (
+                <li className="flex gap-3 py-3" data-testid="codegraph-step">
+                  <span className="mt-0.5 shrink-0" aria-hidden>
+                    {
+                      PHASE_ICON[
+                        cg.result
+                          ? cg.result.status === "failed"
+                            ? "failed"
+                            : "done"
+                          : live.finished === "cancelled"
+                            ? "cancelled"
+                            : live.finished
+                              ? "skipped"
+                              : "running"
+                      ]
+                    }
+                  </span>
+                  <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span className="text-sm font-medium">CodeGraph index</span>
+                    <span className="text-xs text-muted-foreground" data-testid="codegraph-text">
+                      {codegraphText(cg, live.finished)}
+                    </span>
+                  </div>
+                </li>
+              )}
+            </ul>
+          </>
         )}
       </section>
 
-      <RunLog slug={slug} runId={runId} active={active} finished={live.finished} autoOpen={badStatus} />
-    </div>
+      <RunLog
+        slug={slug}
+        runId={runId}
+        active={active}
+        finished={live.finished}
+        open={logOpen}
+        onToggle={() => setLogChoice(!logOpen)}
+      />
+    </PageContainer>
   );
 }

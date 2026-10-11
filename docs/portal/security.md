@@ -122,6 +122,12 @@ the checks change:
   `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`, so an `insteadOf`, `http.*` or `include`
   in the host's git config cannot redirect a fetch. `origin` is set from the repository id before
   every fetch, and the checkout runs with hooks disabled.
+- **No server paths.** API answers never name a server path: a project imported from GitHub has no
+  `root` in its payload, and removing one names no clone folder. A run's log starts with the
+  user-level command (`$ whygraph scan <flags>`; the full command line goes to the portal's own log
+  at debug level), and every log line and event, git's error text included, has the clone rewritten
+  to `.` and the data directory to `<data>`. Local mode keeps the full paths and command line: they
+  are your own machine's.
 - **What is off.** No shared folders, no local repositories, no `/mcp`, no git-hook scans. Agents
   reach a production portal's projects through a [connected portal](#connected-portals), not directly.
 
@@ -184,6 +190,26 @@ runs on a developer's laptop and a repository on it is untrusted.
 
 - LLM API keys and GitHub tokens are stored in the portal database **encrypted** (Fernet), and the API
   is write-only for them: the UI shows `set ...a1b2`, never the key.
+- **Key tails are only for whoever can change the key.** The last four characters, the "last used"
+  time and the key actions go only to a caller who may change that key: an organization's keys to
+  its owners, a project's keys to its admins. Everyone else gets "set" or "not set" and nothing more,
+  in the API answer itself, not only in the page. An organization key's tail never appears on a
+  project's settings.
+- **"Test key" tests the stored key, never a typed one.** No route accepts a key to test. The test
+  makes one free, read-only call with the stored key - the provider's model listing (Anthropic,
+  OpenAI, DeepSeek) or key endpoint (OpenRouter); Ollama has no key to test - follows no redirect,
+  stops after 10 seconds, and reduces the answer to one word (works, rejected, rate limited,
+  unreachable, unexpected). The provider's body is never returned, so a test cannot read what an
+  address serves. Tests are limited to 10 per person and 60 per organization an hour, are not
+  counted as usage, and in production each one is a `key_tested` security event naming the scope,
+  provider and result, never the key.
+- **A custom endpoint is tested where it points.** When a provider has a custom `base_url`, the test
+  calls that address with the key - the address the portal already sends that key to for every model
+  call - so a test learns nothing an owner could not see from Chat's model list for the same
+  endpoint. The address is not restricted to public networks, because a self-hosted gateway on a
+  private address is a normal setup; the hourly limit bounds it.
+- **The GitHub token test is local-only.** It runs the add-project form's repository check against
+  the project's own GitHub remote. Production stores no GitHub token, and answers `404` to it.
 - The encryption key is `secret.key` in the data directory. This protects a **database dump** (a
   `whygraph backup` file, say) or a copy of the database's files on their own. It does not protect
   against someone who can read your data directory, which holds both, which is why that directory is
@@ -193,7 +219,9 @@ runs on a developer's laptop and a repository on it is untrusted.
   passed to the portal.
 - A scan runs as a child process with an allowlisted environment (`PATH`, `HOME`, locale, `TZ`, TLS and
   proxy variables). Keys and tokens reach it only as the variables that one scan needs, and any key
-  that appears in a run's progress or log file is masked to its last four characters.
+  that appears in a run's progress or log file is masked to its last four characters. Anything
+  shaped like a provider key (`sk-ant-...`, `sk-proj-...`, `sk-or-v1-...`) is masked as well, even a
+  key the portal never handed to the scan.
 - A GitHub token used for a fetch (in production, the installation token) is handed to git through a
   host-scoped credential helper. It is not in `.git/config`, argv, logs or run files, and is not sent
   to any other host. Anything shaped like a GitHub token in a run's output is masked, even when a
@@ -201,6 +229,15 @@ runs on a developer's laptop and a repository on it is untrusted.
 - Changing a provider's endpoint clears the key stored for the old one, and an endpoint found in a
   repository's `whygraph.toml` is never imported. A committed file cannot redirect your key to another
   server.
+
+## What agent activity records
+
+A project's Overview counts the calls agents make: every MCP tool, resource and prompt call, and
+every `/api/v1` data call of a connected portal. A counter row holds the project, a UTC day, the
+source, who made the call (a person or a connection), the tool's name and a number - **never** a
+path, a symbol, an argument or anything a call returned. The tool names are WhyGraph's own, a caller
+can only add to its own rows, and rows are kept 400 days. See [Agent
+activity](agents.md#agent-activity).
 
 ## Repository content is not trusted
 

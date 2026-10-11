@@ -39,7 +39,7 @@ export function LinkedElsewhere({ project }: { project: ProjectSummary }) {
   return (
     <section
       data-testid="linked-elsewhere"
-      className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5"
+      className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5 shadow-card"
     >
       <h2 className="text-sm font-semibold">The Explorer and Chat are on the platform</h2>
       <p className="text-sm text-muted-foreground">

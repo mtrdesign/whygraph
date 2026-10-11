@@ -73,8 +73,8 @@ FALLBACK_MODELS: dict[str, tuple[tuple[str, str], ...]] = {
         ("gpt-4o-mini", "GPT-4o mini"),
     ),
     "deepseek": (
-        ("deepseek-chat", "DeepSeek Chat"),
-        ("deepseek-reasoner", "DeepSeek Reasoner"),
+        ("deepseek-flash", "DeepSeek Flash"),
+        ("deepseek-v4-pro", "DeepSeek V4 Pro"),
     ),
     # OpenRouter's /models needs no key, so this is only reached when the
     # network itself is unavailable.

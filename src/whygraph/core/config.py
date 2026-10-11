@@ -196,7 +196,7 @@ class DeepSeekConfig:
     Attributes
     ----------
     model : str
-        DeepSeek model identifier (e.g. ``"deepseek-chat"``).
+        DeepSeek model identifier (e.g. ``"deepseek-flash"``).
     api_key : str or None
         Explicit API key. ``None`` (default) reads ``DEEPSEEK_API_KEY``
         from the environment (the adapter handles this — DeepSeek does
@@ -205,7 +205,7 @@ class DeepSeekConfig:
         Per-request timeout in seconds. Default ``60``.
     """
 
-    model: str = "deepseek-chat"
+    model: str = "deepseek-flash"
     api_key: str | None = field(default=None, repr=False)
     timeout_sec: int = 60
 

@@ -29,7 +29,7 @@ kinds of driver - you at a browser and an editor, or an application over MCP.
 
     Production mode adds accounts, sessions and one address per organization
     (`<org>.<your host>`), behind a Caddy with a wildcard certificate. A compose bundle ships in the
-    repository. Unreleased.
+    repository.
 
     [:octicons-arrow-right-24: Run in production](production.md)
 

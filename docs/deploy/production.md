@@ -1,12 +1,5 @@
 # Run in production
 
-!!! note "Unreleased"
-    Production mode is on `main` and is not in any released image yet; docs deploy from `main`. The
-    compose file below pins the current release's image, which does not have it. Until a release ships
-    it, build the image from the repository (`make image`) and point the compose file's portal image
-    at it. This page describes the change on
-    its way and may move until then.
-
 Production mode runs the portal for **more than one person**: people sign in with GitHub (two-factor
 authentication required), sessions live on the server, and every organization gets its own address,
 `<org>.<your host>`. It is the same image and the same portal as [local mode](docker.md), selected by

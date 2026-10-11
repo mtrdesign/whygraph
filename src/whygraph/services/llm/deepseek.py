@@ -26,7 +26,7 @@ class DeepSeekAdapter(OpenAIAdapter):
     Parameters
     ----------
     model : str, optional
-        DeepSeek model identifier. Default ``"deepseek-chat"``.
+        DeepSeek model identifier. Default ``"deepseek-flash"``.
     api_key : str, optional
         Explicit API key. ``None`` (default) reads
         ``DEEPSEEK_API_KEY`` from the environment.
@@ -42,7 +42,7 @@ class DeepSeekAdapter(OpenAIAdapter):
     def __init__(
         self,
         *,
-        model: str = "deepseek-chat",
+        model: str = "deepseek-flash",
         api_key: str | None = None,
         timeout_sec: int = 60,
         client: openai.OpenAI | None = None,

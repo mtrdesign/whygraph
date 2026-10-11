@@ -208,7 +208,7 @@ For each role WhyGraph resolves one `(provider, model)` pair, highest precedence
 | 1 | The role's own `model` (`[analyze]`, `[rationale]`, `[chat]`) | Written as `"provider/model"` it switches provider too - but only when the table has no `provider` key and the prefix is a known provider, so `provider = "openrouter"` + `model = "openai/gpt-4o"` stays one OpenRouter model. |
 | 2 | `[llm].model` | Used when its provider is the role's provider. |
 | 3 | `[llm.<provider>].model` | Deprecated - see below. |
-| 4 | The provider's built-in default | `claude-opus-4-7`, `gpt-4o`, `deepseek-chat`, `openrouter/auto`, `llama3`. |
+| 4 | The provider's built-in default | `claude-opus-4-7`, `gpt-4o`, `deepseek-flash`, `openrouter/auto`, `llama3`. |
 
 The provider comes from the role's `provider`, else the prefix of its `model`, else the provider of
 `[llm].model`, else `anthropic`.

@@ -52,9 +52,7 @@ The Welcome screen says the same thing the first time you open the portal.
 
 ## Production mode
 
-!!! note "Unreleased"
-    Production mode is on `main` and in no released image yet. Setup is in
-    [Run in production](../deploy/production.md).
+Setup is in [Run in production](../deploy/production.md).
 
 Everything above describes local mode. In production mode the portal is reached over the network, so
 the checks change:

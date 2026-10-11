@@ -991,7 +991,7 @@ describe("Usage S25 fixes", () => {
     expect(model).toHaveAttribute("placeholder", "e.g. gpt-4o-mini");
     for (const [label, example] of [
       ["Anthropic", "e.g. claude-sonnet-4-5"],
-      ["DeepSeek", "e.g. deepseek-chat"],
+      ["DeepSeek", "e.g. deepseek-flash"],
       ["OpenRouter", "e.g. anthropic/claude-sonnet-4.5"],
     ] as const) {
       await pick(within(add).getByRole("combobox", { name: "Provider" }), label);

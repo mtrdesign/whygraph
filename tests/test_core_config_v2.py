@@ -205,7 +205,7 @@ def test_task_provider_beats_llm_model_provider(tmp_path: Path) -> None:
         '[llm]\nmodel = "openai/gpt-4o"\n[rationale]\nprovider = "deepseek"\n', tmp_path
     )
 
-    assert cfg.model_for("rationale") == ("deepseek", "deepseek-chat")
+    assert cfg.model_for("rationale") == ("deepseek", "deepseek-flash")
 
 
 def test_llm_model_beats_deprecated_provider_table_model(tmp_path: Path) -> None:
@@ -528,7 +528,7 @@ def test_client_factory_default_model_follows_llm_model() -> None:
     factory = LlmClientFactory(config=LlmConfig(model="openai/gpt-4o-mini"))
 
     assert factory.make("openai", client=object()).model == "gpt-4o-mini"
-    assert factory.make("deepseek", client=object()).model == "deepseek-chat"
+    assert factory.make("deepseek", client=object()).model == "deepseek-flash"
     assert factory.make("openai", model="gpt-4o", client=object()).model == "gpt-4o"
 
 

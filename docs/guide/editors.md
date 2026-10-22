@@ -1,8 +1,9 @@
 # Wiring your editor
 
-WhyGraph reaches your editor over **HTTP MCP**. Each project has an endpoint on the
-[portal](../portal/index.md), `http://127.0.0.1:<port>/mcp/<slug>`, and any agent that speaks MCP over
-HTTP can use it. You don't write that config yourself: when you
+WhyGraph reaches your editor over **HTTP MCP**. Each project has two endpoints on the
+[portal](../portal/index.md): `http://127.0.0.1:<port>/mcp/<slug>`, WhyGraph's own tools, and
+`http://127.0.0.1:<port>/mcp/<slug>/code`, CodeGraph's graph tools served by the portal. Any agent that
+speaks MCP over HTTP can use them. You don't write that config yourself: when you
 [set up a project](../portal/projects.md#set-up), you pick the agents and the portal writes
 each one's entry, after showing you a preview.
 
@@ -43,11 +44,11 @@ command shows up twice in Cursor's slash menu. A project initialized by an earli
 `.cursor/commands/` files; delete them by hand if you do not want the duplicates. Copilot also reads
 `AGENTS.md`, so with both VS Code and Codex selected the two always-on blocks overlap.
 
-Each agent's install also **append-merges** a CodeGraph usage-guidance block into that agent's
-always-on instructions - `CLAUDE.md`, `AGENTS.md`, or `.github/copilot-instructions.md`, and an
+Each agent's install also **append-merges** a CodeGraph usage-guidance block, pointing at the portal's
+`codegraph_*` tools, into that agent's always-on instructions - `CLAUDE.md`, `AGENTS.md`, or `.github/copilot-instructions.md`, and an
 always-apply rule for Cursor. Your own content is preserved; the block is added below it.
 
 ## Verify
 
 Check the portal is running (`whygraph status`), then ask your agent to list its MCP servers - `whygraph`
-should be there. Next, see how an agent [actually calls the tools](mcp-usage.md).
+and `codegraph` should both be there. Next, see how an agent [actually calls the tools](mcp-usage.md).

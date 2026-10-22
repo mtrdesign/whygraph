@@ -22,8 +22,8 @@ Set up".
 !!! note "A linked project is different after the first step"
     A platform project's wizard is **Source** and **Set up**: it has no Configure step and no local
     database. Its models, keys and history are the platform's, its Explorer and Chat open there, and
-    its first scan builds the CodeGraph index only. The only setting it keeps is which git hooks rescan
-    the checkout. Setting it up writes the same agent files as any project.
+    its first scan builds the CodeGraph index only. The only settings it keeps are which git hooks rescan
+    the checkout and whether the portal serves the CodeGraph tools. Setting it up writes the same agent files as any project.
 
 ## Pick a repository
 
@@ -54,7 +54,8 @@ file:
 
 - `.gitignore` gains `whygraph.toml`, `.whygraph/` and `.codegraph/`.
 - The [auto-rescan git hooks](../guide/scanning.md#keep-it-fresh) are installed (local projects).
-- For each agent you select, an HTTP MCP entry is written to that agent's config file, and the
+- For each agent you select, two HTTP MCP entries (`whygraph` and `codegraph`) are written to that
+  agent's config file, and the
   agent's bundled assets (skills, commands, subagents) are copied in: `.mcp.json` and `.claude/` for
   Claude Code, `.cursor/` for Cursor, `.vscode/mcp.json` and `.github/` for VS Code, and
   `.codex/config.toml`, `AGENTS.md` and `.codex/agents/` for Codex. Each card names the port the
@@ -103,8 +104,8 @@ descriptions you skip backfill on demand. See [Scanning](../guide/scanning.md).
 A project's **Settings** set how it uses LLMs and GitHub (the wizard's Configure step links there as
 **More settings**). A list of sections sits beside the page (a strip you can scroll sideways on a
 phone) and follows your scroll position; a link such as `/p/<project>/settings?section=models` opens
-the page at that section. The section ids are `general`, `models`, `github`, `budgets`, `agents`,
-`access`, `connections` and `danger`.
+the page at that section. The section ids are `general`, `models`, `github`, `scanning`, `budgets`,
+`agents`, `access`, `connections` and `danger`.
 
 | Section | What you set |
 |---|---|
@@ -112,8 +113,9 @@ the page at that section. The section ids are `general`, `models`, `github`, `bu
 | **Models and keys** | One key card per provider; a default model with optional overrides for per-commit descriptions, rationale cards and chat; a base URL for OpenAI-compatible gateways and the Ollama host. Changing an endpoint clears the key stored for it - a key must not follow you to a different server |
 | **GitHub** | Whether to crawl pull requests and issues at all, and (locally) the GitHub token card |
 | **Git hooks** | Which of `post-commit`, `post-merge`, `post-rewrite` and `post-checkout` refresh the project (local folders only) |
+| **Scanning** | One switch, **Serve CodeGraph tools to agents** (`[scan].serve_codegraph`, on by default; local folders and linked projects). Off, the project's `/mcp/<slug>/code` endpoint answers every call with a "turned off" error and the Overview says so. It stops nothing that is running: the CodeGraph server is shared by every project |
 | **Usage** | This month's spend on the project and, for owners and admins, its monthly budget |
-| **Agents** | The coding agents connected to the project, and **Update agent files** (unedited files update silently, edited ones wait for your say; see [Keeping the agent files up to date](agents.md#agent-files-upgrade)) |
+| **Agents** | The coding agents connected to the project, and **Update agent files** (unedited files update silently, edited ones wait for your say, and **Overwrite my edits too** replaces those as well; a line shows the installed version of the agent files against the current one; see [Keeping the agent files up to date](agents.md#agent-files-upgrade)) |
 | **Access** and **Connected portals** | Production only: who may open the project, and the members' local portals linked to it |
 | **Danger zone** | Remove the project |
 
@@ -148,7 +150,7 @@ key*), and lists the projects whose own key was cleared because an endpoint chan
 **Read-only.** People who may look but not change settings see them in a disabled form, with a note
 saying so and who can change them; key tails and key actions are not shown to them. A project
 [linked to a platform](platform-projects.md) shows only General (its name, read-only), Agents and
-Git hooks: the platform owns the rest, and the page names the platform where its settings change.
+Git hooks (which also holds the **Serve CodeGraph tools to agents** switch): the platform owns the rest, and the page names the platform where its settings change.
 
 !!! warning "Credentials from your shell environment no longer reach WhyGraph"
     `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GH_TOKEN` and the rest, exported in your shell, are **not**
@@ -230,14 +232,21 @@ The health panel lists what needs attention, most important first, each with wha
 | The import is running, or did not finish | **Follow the import**; **Retry import** and **Open log** |
 | The folder is not available, or is no longer a git repository | Share the folder again (the command is shown), or remove the project |
 | A symbolic link where a real file belongs | See the [security model](security.md#symbolic-links) |
+| **A symbolic link leaves the repository** (the code index is not refreshed while it is there; the links are named) | Remove the links, then scan |
+| **CodeGraph is paused on this portal (every project)**: the shared server stopped after repeated crashes | **Restart CodeGraph** (whoever may start a scan; it restarts the server for every project) and **Open CodeGraph log** |
+| **The code index could not be refreshed** (a failed refresh, or the last scan's CodeGraph step failed) | **Rescan** and **Open CodeGraph log** |
+| **CodeGraph tool(s) withheld**: the portal's CodeGraph differs from the version WhyGraph was built against | Nothing to click; see [the schema pin](../reference/mcp.md#the-codegraph-endpoint) |
+| **Hosted CodeGraph tools are off** | Turn **Serve CodeGraph tools to agents** back on under Settings > Scanning |
+| **CodeGraph binary not found on this portal** (a natively run development portal) | Information only |
 | **Setup not finished** | **Finish setup** resumes the wizard |
 | The monthly budget is reached and its hard stop is on | See usage and budgets |
 | No key for the model that describes commits, writes rationale cards or chats | **Add a key** (project admins) |
 | The last scan failed | **Retry** and **Open log** |
-| The checkout is ahead of the last scan | **Rescan** |
+| The checkout is ahead of what WhyGraph last scanned, so the Explorer, Chat and the `whygraph_*` tools miss the newest commits; the CodeGraph tools stay current | **Rescan** |
 | Commits have no description yet | **Describe** (project admins); they also fill in as you browse |
 
-With nothing to report it says **Healthy**. An import ranks above "folder missing", because an
+The CodeGraph rows are local-mode only, sit between "last scan failed" and "behind", and never change
+the status pill. With nothing to report it says **Healthy**. An import ranks above "folder missing", because an
 imported repository has no folder until its clone lands.
 
 ### Tiles, coverage and usage
@@ -261,7 +270,7 @@ link to the project's usage and budgets.
 **Agent activity** counts the calls agents made to this project over the last 30 days: MCP calls
 locally, calls from linked portals in production. It says how many used the LLM (and what they cost,
 for people who see usage), which kinds of call they were ("Evidence lookups", "Rationale cards",
-"Area history", ...), when the last one was and, in production, who made them and through which
+"Area history", "Code exploration", ...), when the last one was and, in production, who made them and through which
 connected portal. With no call in 30 days the section shows **Connect your agent** instead; see
 [Agent activity](agents.md#agent-activity).
 

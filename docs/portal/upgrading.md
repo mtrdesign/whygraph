@@ -6,8 +6,15 @@ happens depends on where you come from:
 - **From 1.x**, you add your repositories to the portal; their data is reused. See
   [From 1.x](#from-1x).
 - **Agent files in your repositories** are not rewritten by an upgrade. Open each project's Settings >
-  Agents and use **Update agent files**: files you have not edited update silently and edited ones are
-  listed first. See [Keeping the agent files up to date](agents.md#agent-files-upgrade).
+  Agents and use **Update agent files**, once per project: it adds the `codegraph` MCP entry, files you
+  have not edited update silently and edited ones are listed first (a project set up before the
+  manifest existed asks about each file once). See [Keeping the agent files up to date](agents.md#agent-files-upgrade).
+- **If you installed CodeGraph on your host**, the portal now serves its tools, so you can remove the
+  global install with `codegraph uninstall --keep-cli`. See
+  [If you installed CodeGraph yourself](agents.md#own-codegraph).
+- **The first scan of each project after upgrading rebuilds its code index** once, in full, so that
+  symbols read through a symbolic link that leaves the repository are dropped. See the
+  [security model](security.md#symbolic-links).
 - **A release that moves the pinned Postgres major version** needs a dump and a restore. See
   [Postgres major versions](#postgres-major).
 

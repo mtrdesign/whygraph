@@ -124,6 +124,8 @@ cp -a ~/.local/share/whygraph /somewhere/safe/whygraph-data
 whygraph up
 ```
 
+`logs/`, `locks/` and `codegraph-home/` are disposable; a copy without them restores fine.
+
 To restore, `whygraph down`, put the copy back in place of the data directory, and `whygraph up`. A
 copy holds `secret.key` and `postgres.password` too, so it is as sensitive as the live data
 directory. Prefer dumps: they are smaller, can be made while WhyGraph runs, and survive a Postgres

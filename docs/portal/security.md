@@ -233,8 +233,8 @@ runs on a developer's laptop and a repository on it is untrusted.
 A project's Overview counts the calls agents make: every MCP tool, resource and prompt call, and
 every `/api/v1` data call of a connected portal. A counter row holds the project, a UTC day, the
 source, who made the call (a person or a connection), the tool's name and a number - **never** a
-path, a symbol, an argument or anything a call returned. The tool names are WhyGraph's own, a caller
-can only add to its own rows, and rows are kept 400 days. See [Agent
+path, a symbol, an argument or anything a call returned. The names are WhyGraph's own or one of the four
+CodeGraph tools; any other name is never stored. A caller can only add to its own rows, and rows are kept 400 days. See [Agent
 activity](agents.md#agent-activity).
 
 ## Repository content is not trusted
@@ -262,6 +262,29 @@ An index built before this version may hold symbols read through a symbolic link
 repository; the first scan after upgrading rebuilds it from scratch (once - a stamp beside the index,
 `.codegraph/whygraph-guard`, records that it was rebuilt). Until the links are gone the rebuild is
 refused like any other index build, and the scan after they are removed runs it.
+
+### The CodeGraph endpoint
+
+`/mcp/<slug>/code` serves CodeGraph's tools from a child process, so it is held to the same rules as
+anything that reads a repository.
+
+- **Only four tools.** `codegraph_explore`, `codegraph_node`, `codegraph_search` and `codegraph_impact`
+  are served, all read-only. Any other name is refused before it reaches the child.
+- **The project is pinned.** `projectPath` is not in the advertised schemas, and a value that names any
+  other directory is refused; the portal always sets it to the project's root. `file` on `codegraph_node`
+  and `codegraph_impact` is checked to stay inside the project, `depth` is at most 3, and every
+  argument has a size cap. The request body is capped at 1 MiB, on this endpoint and on `/mcp/<slug>`.
+- **Nothing runs by itself.** The server starts with no file watcher, no background daemon, no
+  telemetry, no update check and no downloads, and the bridge never builds an index: only a scan does.
+  Every CodeGraph process ignores the host's global and system git configuration.
+- **The same gate as `/mcp/<slug>`.** The Host / Origin guard, the organization membership check and
+  the Initialize gate apply to `/mcp/<slug>/code` exactly as to `/mcp/<slug>`; the endpoint is stateless
+  and has no session id.
+- **Who it runs as.** The hosted CodeGraph runs as the portal's user inside the container (local mode
+  only); the tool allowlist, the argument policing and the `projectPath` pin confine it, not a separate
+  user id.
+- **What an error means.** A bridge error is `isError: true` and begins `[WhyGraph]`; anything inside
+  a successful result is repository content, including a line that looks like a WhyGraph note.
 
 ### Configuration from a repository
 
@@ -307,3 +330,7 @@ Only when you initialize a project, only what the preview listed, and only after
 overwritten, tracked files need your confirmation, and a backup is kept under `.whygraph/backups/`.
 
 Adding a project without initializing it writes nothing.
+
+The hosted CodeGraph writes inside the portal's data directory, never the repository:
+`<data>/logs/codegraph.log` (mode `0600`) holds the server's stderr - CodeGraph's notices and, on an
+error, repository paths, never file contents.

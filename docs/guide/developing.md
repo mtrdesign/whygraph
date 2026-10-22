@@ -127,6 +127,12 @@ itself, not to your `dev-production`. Link from `make dev-local`. `make e2e` run
 - **`dev-local`** for most work: the UI, routes, MCP tools, chat. A saved `.py` file under
   `src/whygraph/` restarts the portal within a few seconds (`RELOAD=0` turns that off); a saved
   `.tsx` file hot-reloads in the browser.
+  `dev-local` serves `/mcp/<slug>/code` only when a `codegraph` is on your host `PATH`, and that may not
+  be the pinned version, in which case the schema pin withholds the tools it does not recognize
+  (the project's Overview says so). Point the MCP Inspector at it with
+  `make inspect SLUG=<slug> MCP_PATH=code`. A restart of the dev portal may leave a
+  `codegraph serve --mcp` process behind; the next start sweeps it, or run
+  `pkill -f 'codegraph serve --mcp'`.
 - **`dev-docker`** for anything that behaves differently in the container: the shim
   (`cli/commands/install.py`), the Dockerfile, file ownership, paths, the environment a scan gets,
   and the in-image `git` / `gh` / `codegraph`. It rebuilds the image only when its inputs change

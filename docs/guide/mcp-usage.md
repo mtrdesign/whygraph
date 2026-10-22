@@ -78,6 +78,50 @@ See [Linked projects](../reference/mcp.md#linked-projects) for every value.
 
 ## What WhyGraph won't do
 
-WhyGraph has **no graph-traversal tools** - no callers, no callees, no symbol search. That's
-CodeGraph's job, on purpose. When your assistant needs "who calls this?", it asks CodeGraph directly.
-WhyGraph stays focused on why the code exists and how it got here.
+The `whygraph` server has **no graph-traversal tools** - no callers, no callees, no symbol search.
+That's CodeGraph's job, on purpose, and you do not install it: the portal runs CodeGraph's own MCP
+server for you and serves it as a second server named `codegraph`, with four read-only tools
+(`codegraph_explore`, `codegraph_search`, `codegraph_node`, `codegraph_impact`). When your assistant
+needs "who calls this?", it asks `codegraph`; `codegraph_node` shows a symbol's callers and callees,
+and `codegraph_impact` the transitive dependents. WhyGraph stays focused on why the code exists and how
+it got here. The tools are listed under [The CodeGraph endpoint](../reference/mcp.md#the-codegraph-endpoint).
+
+## Freshness { #freshness }
+
+CodeGraph's tools read an index of the repository, and an editor saves files faster than any scan. So
+the portal checks the index before it answers each `codegraph_*` call:
+
+- It computes a **fingerprint** of the checkout - `HEAD`, the git status and the size and modification
+  time of each changed file - in about 0.1 s even on large repositories. If it matches the fingerprint
+  of the last refresh, the call goes straight through.
+- Otherwise it runs **one** refresh (`codegraph sync`) and the call waits for it. Calls that arrive
+  meanwhile join that refresh, and at most one more is queued if files change again during it. A refresh
+  takes roughly 0.1 s per changed file plus a fixed cost, so a few edited files cost under a second or
+  two.
+- The wait is bounded at **45 seconds**. Past that the call fails with an error that begins
+  `[WhyGraph] The code index is still updating` and says how many seconds to wait. The refresh keeps
+  running, so calling the same tool again after that usually answers at once. A call never reads an
+  index that is being changed, and never gets stale results.
+- A scan's own index step takes the same per-project lock, so a call during a rebuild waits for it
+  within the same 45 seconds.
+
+Commits are normally already indexed by the git hook scan, so the per-call refresh mostly covers files
+you have edited but not committed. If a refresh fails three times in ten minutes, refreshes for that
+project pause for five minutes and calls say the index could not be refreshed. Files
+that CodeGraph indexes but git ignores (`includeIgnored` in `codegraph.json`) do not move the
+fingerprint and are picked up by the next scan.
+
+### Client timeouts
+
+A call that waits for the index can take tens of seconds, and agents differ in how long they let a tool
+run. What is known, with its source:
+
+| Agent | Tool timeout | Notes |
+|---|---|---|
+| Claude Code | No short limit (documented: a 5-minute idle window for HTTP, reset by progress) | WhyGraph sends progress notifications every 3 seconds while a call waits |
+| Cursor | Reported, not documented by Cursor: about 60 minutes in the IDE, 60 seconds hard in the agent protocol path, where progress is ignored | The 45-second wait was chosen to stay under 60 seconds |
+| VS Code / Copilot | Not documented | |
+| Codex | Documented `tool_timeout_sec` default 60 seconds; its current source uses 300 seconds | The portal writes `tool_timeout_sec = 120` on both Codex entries |
+
+If your client cuts calls off earlier than 45 seconds, the refresh still finishes in the background and
+the retry succeeds.

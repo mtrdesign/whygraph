@@ -310,6 +310,9 @@ jobs:
       # not re-derive it here; two derivations is how they drift apart.
       TAG: ${{ needs.verify.outputs.version }}
     steps:
+      # The CodeGraph probe below mounts scripts/ from the checkout.
+      - uses: actions/checkout@v4
+
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -341,6 +344,15 @@ jobs:
       # that renames a flag cannot fail a WhyGraph release.
       - name: Confirm codegraph resolves on PATH (no-ENTRYPOINT invariant)
         run: docker run --rm "${REGISTRY_IMAGE}:${TAG}" sh -lc 'command -v codegraph'
+
+      # The hosted CodeGraph tool list is pinned (portal/codegraph_tools.json):
+      # a CodeGraph in the image that lists other tools, properties, `required`
+      # or annotations, or a schema that is not valid JSON Schema 2020-12, fails
+      # the release here rather than in a user's agent.
+      - name: Probe the CodeGraph MCP tool schemas against the pinned records
+        run: |
+          docker run --rm -v "$PWD/scripts:/probe:ro" "${REGISTRY_IMAGE}:${TAG}" \
+            python /probe/codegraph_mcp_probe.py --check
 
       # Proves the portal actually boots from the published image, through the
       # REAL shim: installs it from the image (`whygraph install`, as

@@ -41,6 +41,7 @@ test.describe("main flow", () => {
     expect(marker.slug).toBe(notes.slug);
     const mcp = JSON.parse(fs.readFileSync(path.join(notes.path, ".mcp.json"), "utf8"));
     expect(mcp.mcpServers.whygraph.url).toContain(`/mcp/${notes.slug}`);
+    expect(mcp.mcpServers.codegraph.url).toContain(`/mcp/${notes.slug}/code`);
     expect(fs.readFileSync(path.join(notes.path, ".git", "hooks", "post-commit"), "utf8")).toContain("whygraph managed");
   });
 

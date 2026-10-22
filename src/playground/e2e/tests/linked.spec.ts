@@ -55,7 +55,8 @@ async function sharedRepos(page: Page): Promise<string[]> {
 }
 
 interface EvidenceItem {
-  commit: { sha: string; subject: string };
+  sha: string;
+  subject: string;
   source: string;
   push_status?: string;
 }
@@ -114,7 +115,7 @@ async function evidenceFor(
 
 /** The evidence item of one commit, when the answer carries it. */
 const itemFor = (answer: EvidenceAnswer, sha: string) =>
-  answer.evidence.find((e) => e.commit.sha === sha);
+  answer.evidence.find((e) => e.sha === sha);
 
 test("a linked project: connect, evidence over MCP, revocation, removal", async ({
   page,

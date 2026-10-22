@@ -131,19 +131,40 @@ function AssetSummary({ files }: { files: FileOutcome[] }) {
     [count("write"), "to create"],
     [count("overwrite"), "to update"],
     [count("skip"), "already there"],
+    [count("needs_confirmation"), "edited by you"],
   ]
     .filter(([n]) => (n as number) > 0)
     .map(([n, l]) => `${n} ${l}`);
   return (
-    <details className="py-3">
+    <details className="py-3" open={count("needs_confirmation") > 0 || undefined}>
       <summary className="cursor-pointer text-sm">
         Agent assets <span className="text-muted-foreground">({parts.join(", ")})</span>
       </summary>
       <ul className="mt-2 flex flex-col gap-1">
         {files.map((f) => (
-          <li key={f.file} className="flex items-center gap-2 text-xs">
-            <StatusBadge status={f.status} />
-            <span className="font-mono text-muted-foreground">{f.file}</span>
+          <li key={f.file} className="flex flex-col gap-1 text-xs" data-testid={`asset-${f.file}`}>
+            <div className="flex items-center gap-2">
+              {f.status === "needs_confirmation" ? (
+                <Badge variant="secondary" data-status="needs_confirmation">
+                  Edited
+                </Badge>
+              ) : (
+                <StatusBadge status={f.status} />
+              )}
+              <span className="font-mono text-muted-foreground">{f.file}</span>
+            </div>
+            {f.status === "needs_confirmation" && (
+              <details className="pl-2">
+                <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                  Left as is: you edited it and this version's copy differs. Show the difference
+                </summary>
+                {f.diff && (
+                  <div className="mt-1.5">
+                    <DiffView diff={f.diff} />
+                  </div>
+                )}
+              </details>
+            )}
           </li>
         ))}
       </ul>

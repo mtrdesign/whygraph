@@ -67,7 +67,8 @@ export type HealthActionKind =
   | "add_key"
   | "retry_scan"
   | "rescan"
-  | "describe";
+  | "describe"
+  | "update_agents";
 
 export interface HealthAction {
   kind: HealthActionKind;
@@ -90,7 +91,8 @@ export type HealthId =
   | "behind"
   | "waiting"
   | "unscanned"
-  | "scanning";
+  | "scanning"
+  | "agent_files";
 
 export interface HealthItem {
   id: HealthId;
@@ -334,6 +336,20 @@ export function projectHealth(
         ? "Describe them now, or let them fill in on demand as you browse."
         : "They fill in on demand as you browse. Ask a project admin to describe them all at once.",
       actions: canDescribe ? [{ kind: "describe", label: "Describe" }] : [],
+    });
+  }
+
+  // 12. Agent files installed by an older version (the upgrade manifest): low severity.
+  const agentFiles = "agent_files" in p ? p.agent_files : null;
+  if (usable && agentFiles?.outdated) {
+    items.push({
+      id: "agent_files",
+      tone: "info",
+      title: "Agent files are out of date",
+      detail: `Installed ${
+        agentFiles.installed_version ? `v${agentFiles.installed_version}` : "before versions were tracked"
+      }${agentFiles.current_version ? `, current v${agentFiles.current_version}` : ""}. Files you have not edited update silently.`,
+      actions: can(p, "project.setup") ? [{ kind: "update_agents", label: "Update" }] : [],
     });
   }
 

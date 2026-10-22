@@ -106,7 +106,9 @@ class InitializeResult:
         One outcome per agent config file touched.
     asset_files : tuple[FileOutcome, ...]
         One outcome per bundled asset file (``write`` / ``skip`` /
-        ``overwrite``).
+        ``overwrite`` / ``needs_confirmation``). An edited asset awaiting
+        confirmation (the upgrade manifest, :mod:`whygraph.assets`) never
+        withholds the markers; only ``agent_files`` do.
     assets : dict[str, InstallResult]
         Raw asset-install result per agent name.
     configured_agents : tuple[str, ...]
@@ -238,6 +240,7 @@ def initialize_project(
     asset_files: list[FileOutcome] = []
     asset_results: dict[str, assets_mod.InstallResult] = {}
     configured: list[str] = []
+    manifest_before = None if dry_run else assets_mod.read_manifest(root)
     for name, action in actions.items():
         target = agents_mod.AGENTS[name]
         if action == "remove":
@@ -259,6 +262,14 @@ def initialize_project(
             )
             asset_results[name] = installed
             asset_files.extend(_asset_outcomes(root, name, installed))
+
+    if (
+        manifest_before is not None
+        and any(r.needs_confirmation for r in asset_results.values())
+        and assets_mod.read_manifest(root) is not None
+    ):
+        # An edited file is still stale: keep the version the manifest had.
+        assets_mod.set_manifest_version(root, manifest_before["version"])
 
     result = InitializeResult(
         dry_run=dry_run,
@@ -284,6 +295,10 @@ def _touched_paths(
     """Every work-tree path :func:`initialize_project` may read or write."""
     paths = [root / ".gitignore", root / _hooks.LEGACY_HELPER_RELPATH]
     paths.append(root / ".whygraph" / "backups")  # agent-file backups
+    paths += [
+        root / assets_mod.MANIFEST_RELPATH,
+        root / assets_mod.MANIFEST_RELPATH.with_name("assets.json.tmp"),
+    ]
     for name, action in actions.items():
         target = agents_mod.AGENTS[name]
         if target.scope == "project":
@@ -322,10 +337,23 @@ def _asset_outcomes(
         (result.written, "write"),
         (result.overwritten, "overwrite"),
         (result.skipped, "skip"),
+        (result.needs_confirmation, "needs_confirmation"),
     ):
         for p in paths:
             rel = Path(p).relative_to(root).as_posix()
-            out.append(FileOutcome(rel, status, agent))  # type: ignore[arg-type]
+            out.append(
+                FileOutcome(
+                    rel,
+                    status,  # type: ignore[arg-type]
+                    agent,
+                    reason="edited since WhyGraph installed it"
+                    if status == "needs_confirmation"
+                    else None,
+                    diff=result.diffs.get(p)
+                    if status in ("overwrite", "needs_confirmation")
+                    else None,
+                )
+            )
     return sorted(out, key=lambda o: o.file)
 
 

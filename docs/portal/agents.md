@@ -29,8 +29,27 @@ All four agents are project-scoped: the file lives in your repository, so teamma
 Each agent also gets its bundled assets - skills, commands and subagents that teach it when to call
 WhyGraph - copied into `.claude/`, `.cursor/`, `.github/` or the repo root and `.codex/agents/`, and a
 CodeGraph usage-guidance block appended to its always-on instructions (`CLAUDE.md`, `AGENTS.md`,
-`.github/copilot-instructions.md`, or an always-apply rule for Cursor). Re-initializing leaves your
-edited files alone; **Update agent files** in the project's Settings overwrites them.
+`.github/copilot-instructions.md`, or an always-apply rule for Cursor).
+
+### Keeping the agent files up to date { #agent-files-upgrade }
+
+The portal records what it installed in `.whygraph/assets.json` (gitignored with the rest of
+`.whygraph/`): the WhyGraph version and a hash of every file it wrote, and, for the block in a shared
+file such as `AGENTS.md`, of the text between the markers. **Update agent files** in the project's
+Settings (and re-initializing) uses it per file:
+
+| The file on disk | Result |
+|---|---|
+| Missing | Written |
+| Still the way WhyGraph wrote it | Updated silently to this version's copy |
+| You edited it, and this version's copy is the same as the one you started from | Left alone |
+| You edited it, and this version's copy changed | Left alone and listed as **Edited**, with the difference |
+| Installed before the manifest existed (a teammate's checkout, an older release) | Treated as edited |
+
+Tick **Overwrite my edits too** (shown only when edited files are listed) to replace those as well.
+Settings shows `Agent files: v<installed> (current v<package>)` with an **Update** button when the
+recorded version is behind, and the project's Overview lists "Agent files are out of date" the same way.
+Removing an agent deletes only its MCP entry; the installed files and the manifest stay as they are.
 
 ## Safe to commit
 

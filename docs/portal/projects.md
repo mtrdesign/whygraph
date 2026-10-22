@@ -113,7 +113,7 @@ the page at that section. The section ids are `general`, `models`, `github`, `bu
 | **GitHub** | Whether to crawl pull requests and issues at all, and (locally) the GitHub token card |
 | **Git hooks** | Which of `post-commit`, `post-merge`, `post-rewrite` and `post-checkout` refresh the project (local folders only) |
 | **Usage** | This month's spend on the project and, for owners and admins, its monthly budget |
-| **Agents** | The coding agents connected to the project, and **Update agent files** |
+| **Agents** | The coding agents connected to the project, and **Update agent files** (unedited files update silently, edited ones wait for your say; see [Keeping the agent files up to date](agents.md#agent-files-upgrade)) |
 | **Access** and **Connected portals** | Production only: who may open the project, and the members' local portals linked to it |
 | **Danger zone** | Remove the project |
 

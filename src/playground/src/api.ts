@@ -427,6 +427,13 @@ export interface ProjectLink {
 
 export type AccessLostReason = "no_access" | "git_access_denied" | "repo_deleted" | "tracked_whygraph_state";
 
+export interface AgentFilesStatus {
+  /** `null` for a project initialized before the manifest existed. */
+  installed_version: string | null;
+  current_version: string | null;
+  outdated: boolean;
+}
+
 export interface ProjectDetails extends ProjectSummary {
   agents: string[];
   missing_key: string | null;
@@ -436,6 +443,9 @@ export interface ProjectDetails extends ProjectSummary {
   // the project folder is unusable.
   detected?: Detected | null;
   port_change?: ProjectPortChange | null;
+  // The installed vs packaged agent-file version (the upgrade manifest); `null`
+  // in production, without a configured agent or a usable folder.
+  agent_files?: AgentFilesStatus | null;
   stats: {
     commits: number;
     described: number;

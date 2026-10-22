@@ -19,25 +19,39 @@ Initialize step (:func:`whygraph.project_setup.initialize_project`).
 
 Notes
 -----
-The default policy is **skip-if-exists**: a target file that already
-exists is left alone. Pass ``force=True`` to overwrite. This matches
-the "user edits are sacred" default of most scaffolding tools and
-mirrors the spirit of :func:`whygraph.agents.apply_http_entry`, which
-merges into an existing config rather than clobbering it.
+User edits are sacred, and upgrades are manifest-driven. Every install
+writes ``.whygraph/assets.json`` (:data:`MANIFEST_RELPATH`): the package
+version and the SHA-256 of each installed file (for an append-merged
+block, of the body between the sentinels). A re-install without
+``force`` then decides per file:
+
+* missing: written;
+* present and equal to the manifest hash (never edited): overwritten
+  silently, or left as is when it already equals the bundled copy;
+* present, edited, bundled copy unchanged since the manifest: skipped;
+* present, edited, bundled copy changed (or no manifest entry at all, a
+  pre-manifest install): ``needs_confirmation`` with a diff, left
+  untouched until the caller passes ``force=True``.
 
 Files listed in :attr:`whygraph.agents.AgentTarget.assets_merge_files`
-follow a different policy: their bundled content is wrapped in
-``<!-- BEGIN whygraph -->`` / ``<!-- END whygraph -->`` markers and
-**append-merged** into the destination file. This is used for
-repo-shared instruction files that users may have authored themselves
-(e.g. ``.github/copilot-instructions.md``, ``AGENTS.md``). The merge is
-always non-destructive — ``force=False`` has no effect on merge files.
+have their bundled content wrapped in ``<!-- BEGIN whygraph -->`` /
+``<!-- END whygraph -->`` markers and **append-merged** into the
+destination file. This is used for repo-shared instruction files that
+users may have authored themselves (e.g. ``.github/copilot-instructions.md``,
+``AGENTS.md``). Content outside the markers is never touched; the block
+itself follows the same table as a plain file.
 """
 
 from __future__ import annotations
 
+import difflib
+import hashlib
+import json
+import os
 from dataclasses import dataclass, field
 from importlib import resources
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from importlib.resources.abc import Traversable
 from pathlib import Path
 
@@ -48,6 +62,10 @@ BEGIN_MARKER = "<!-- BEGIN whygraph -->"
 
 END_MARKER = "<!-- END whygraph -->"
 """Closing sentinel of the WhyGraph-owned block in an append-merged file."""
+
+
+MANIFEST_RELPATH = Path(".whygraph") / "assets.json"
+"""The upgrade manifest (relative to the project root; gitignored with ``.whygraph/``)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,11 +88,154 @@ class InstallResult:
         For merge files, a path appears here when an existing
         destination file had its WhyGraph block replaced or had a new
         block appended.
+    needs_confirmation : list[Path]
+        Target paths that exist, were edited by the user and differ from
+        the bundled copy that changed (or have no manifest entry): left
+        untouched; ``force=True`` replaces them.
+    diffs : dict[Path, str]
+        A unified diff (installed -> bundled) for every path in
+        ``needs_confirmation`` and for every overwritten path whose
+        content changed.
     """
 
     written: list[Path] = field(default_factory=list)
     skipped: list[Path] = field(default_factory=list)
     overwritten: list[Path] = field(default_factory=list)
+    needs_confirmation: list[Path] = field(default_factory=list)
+    diffs: dict[Path, str] = field(default_factory=dict)
+
+
+def package_version() -> str | None:
+    """Return the installed ``whygraph`` version, or ``None`` when unknown."""
+    try:
+        return _pkg_version("whygraph")
+    except PackageNotFoundError:
+        return None
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def read_manifest(project_root: Path) -> dict | None:
+    """Read ``.whygraph/assets.json``.
+
+    Parameters
+    ----------
+    project_root : Path
+        Repository root. The caller has checked the manifest path.
+
+    Returns
+    -------
+    dict or None
+        ``{"version": str | None, "files": {"<agent>/<relpath>": sha256}}``,
+        or ``None`` when the file is missing or not a valid manifest (the
+        files are then treated as user-edited).
+    """
+    try:
+        data = json.loads((project_root / MANIFEST_RELPATH).read_text(encoding="utf-8"))
+        files = data["files"]
+        version = data.get("version")
+        if not isinstance(files, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in files.items()
+        ):
+            return None
+        if version is not None and not isinstance(version, str):
+            return None
+        return {"version": version, "files": dict(files)}
+    except (
+        OSError,
+        UnicodeDecodeError,
+        ValueError,
+        KeyError,
+        TypeError,
+        AttributeError,
+    ):
+        return None
+
+
+def _write_manifest(project_root: Path, version: str | None, files: dict) -> None:
+    path = project_root / MANIFEST_RELPATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(
+        json.dumps({"version": version, "files": dict(sorted(files.items()))}, indent=2)
+        + "\n",
+        encoding="utf-8",
+    )
+    os.replace(tmp, path)
+
+
+def set_manifest_version(project_root: Path, version: str | None) -> None:
+    """Rewrite the manifest's recorded version (no-op without a manifest)."""
+    manifest = read_manifest(project_root)
+    if manifest is not None:
+        _write_manifest(project_root, version, manifest["files"])
+
+
+def manifest_status(project_root: Path) -> dict:
+    """Report the installed vs packaged agent-file version.
+
+    Parameters
+    ----------
+    project_root : Path
+        Repository root. The caller has checked the manifest path.
+
+    Returns
+    -------
+    dict
+        ``installed_version`` (``None`` for a pre-manifest install),
+        ``current_version`` (``None`` when the package version is
+        unknown) and ``outdated`` (they differ).
+    """
+    manifest = read_manifest(project_root)
+    installed = manifest["version"] if manifest else None
+    current = package_version()
+    return {
+        "installed_version": installed,
+        "current_version": current,
+        "outdated": current is not None and installed != current,
+    }
+
+
+def _diff(rel: str, old: str, new: str) -> str:
+    return "".join(
+        difflib.unified_diff(
+            f"{old}\n".splitlines(keepends=True) if old else [],
+            f"{new}\n".splitlines(keepends=True) if new else [],
+            fromfile=f"a/{rel}",
+            tofile=f"b/{rel}",
+        )
+    )
+
+
+@dataclass(slots=True)
+class _Plan:
+    """Per-install state threaded through :func:`_copy_tree`."""
+
+    agent: str
+    root: Path
+    force: bool
+    dry_run: bool
+    old: dict[str, str]
+    new: dict[str, str] = field(default_factory=dict)
+    result: InstallResult = field(default_factory=InstallResult)
+
+    def decide(self, key: str, current_hash: str | None, bundled_hash: str) -> str:
+        """Classify an existing file: ``skip`` / ``overwrite`` / ``confirm``.
+
+        Records the manifest entry the file should carry afterwards.
+        """
+        old = self.old.get(key)
+        if current_hash == bundled_hash:
+            self.new[key] = bundled_hash
+            return "skip"
+        if self.force or (current_hash is not None and old == current_hash):
+            self.new[key] = bundled_hash
+            return "overwrite"
+        if old is not None:
+            self.new[key] = old
+        return "skip" if old == bundled_hash else "confirm"
 
 
 def packaged_assets_for(target: AgentTarget) -> Traversable:
@@ -146,24 +307,25 @@ def install_assets(
         Usually the user's repository root (i.e. ``Path.cwd()`` from
         the CLI).
     force : bool, default False
-        If ``True``, overwrite target files that already exist. The
-        default leaves existing files alone so user edits survive a
-        re-install. Has no effect on files in
-        :attr:`AgentTarget.assets_merge_files` — those always run the
-        (non-destructive) merge.
+        If ``True``, overwrite target files that already exist, edited
+        or not (the "Overwrite my edits too" path). The default follows
+        the manifest table in the module notes, so user edits survive a
+        re-install unless the caller confirms them.
     source : Traversable or Path, optional
         Asset tree to copy from. ``None`` (default) uses the packaged
         tree returned by :func:`packaged_assets_for`. Tests inject a
         ``tmp_path`` here.
     dry_run : bool, default False
         If ``True``, classify every file exactly as a real call would
-        (written / skipped / overwritten) but touch nothing on disk.
+        (written / skipped / overwritten / needs_confirmation) but touch
+        nothing on disk, the manifest included.
         Used by the "Update agent files" preview.
 
     Returns
     -------
     InstallResult
-        Per-file outcome (written / skipped / overwritten).
+        Per-file outcome (written / skipped / overwritten /
+        needs_confirmation, with diffs).
 
     Raises
     ------
@@ -180,16 +342,30 @@ def install_assets(
     )  # for type checkers; has_assets guarantees this
     dest_root = project_root.joinpath(*target.assets_dest)
     merge_set = frozenset(target.assets_merge_files)
-    result = InstallResult()
-    _copy_tree(
-        src,
-        dest_root,
-        rel_prefix=(),
-        merge_set=merge_set,
+    manifest = read_manifest(project_root)
+    plan = _Plan(
+        agent=target.name,
+        root=project_root,
         force=force,
-        result=result,
         dry_run=dry_run,
+        old=manifest["files"] if manifest else {},
     )
+    _copy_tree(src, dest_root, rel_prefix=(), merge_set=merge_set, plan=plan)
+    result = plan.result
+    if not dry_run:
+        mine = f"{target.name}/"
+        files = {k: v for k, v in plan.old.items() if not k.startswith(mine)}
+        files.update(plan.new)
+        version = package_version()
+        if result.needs_confirmation:
+            # Something is still stale: do not claim the current version.
+            version = manifest["version"] if manifest else None
+        if (
+            manifest is None
+            or files != manifest["files"]
+            or version != manifest["version"]
+        ):
+            _write_manifest(project_root, version, files)
     return result
 
 
@@ -199,16 +375,14 @@ def _copy_tree(
     *,
     rel_prefix: tuple[str, ...],
     merge_set: frozenset[str],
-    force: bool,
-    result: InstallResult,
-    dry_run: bool = False,
+    plan: _Plan,
 ) -> None:
     """Recursively copy ``src`` into ``dest``, recording each file's fate.
 
     Walks ``src`` via :meth:`Traversable.iterdir` (works for both
     ``Path`` and packaged ``Traversable`` sources) and mirrors its
-    structure under ``dest``. The fate of each file (written / skipped
-    / overwritten) is appended to ``result``.
+    structure under ``dest``. The fate of each file is recorded on
+    ``plan.result`` and its manifest hash on ``plan.new``.
 
     ``rel_prefix`` accumulates path components from the source root, so
     we can identify whether a given file matches an entry in
@@ -223,60 +397,88 @@ def _copy_tree(
                 target,
                 rel_prefix=rel_components,
                 merge_set=merge_set,
-                force=force,
-                result=result,
-                dry_run=dry_run,
+                plan=plan,
             )
             continue
         if not entry.is_file():
             continue
         rel_str = "/".join(rel_components)
+        key = f"{plan.agent}/{rel_str}"
         if rel_str in merge_set:
-            _merge_block(entry, target, result=result, dry_run=dry_run)
+            _merge_block(entry, target, key=key, plan=plan)
             continue
-        already_exists = target.exists()
-        if already_exists and not force:
-            result.skipped.append(target)
+        bundled = entry.read_text(encoding="utf-8")
+        if not target.exists():
+            if not plan.dry_run:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(bundled, encoding="utf-8")
+            plan.new[key] = _sha(bundled)
+            plan.result.written.append(target)
             continue
-        if not dry_run:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(entry.read_text(encoding="utf-8"), encoding="utf-8")
-        if already_exists:
-            result.overwritten.append(target)
-        else:
-            result.written.append(target)
+        try:
+            current: str | None = target.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            current = None
+        action = plan.decide(
+            key, None if current is None else _sha(current), _sha(bundled)
+        )
+        _record(plan, target, action, current, bundled)
+        if action == "overwrite" and not plan.dry_run:
+            target.write_text(bundled, encoding="utf-8")
+
+
+def _record(
+    plan: _Plan, target: Path, action: str, current: str | None, bundled: str
+) -> None:
+    """File ``target`` under the :class:`InstallResult` list for ``action``."""
+    result = plan.result
+    rel = target.relative_to(plan.root).as_posix()
+    diff = _diff(rel, current or "", bundled)
+    if action == "skip":
+        result.skipped.append(target)
+    elif action == "overwrite":
+        result.overwritten.append(target)
+        result.diffs[target] = diff
+    else:
+        result.needs_confirmation.append(target)
+        result.diffs[target] = diff
 
 
 def _merge_block(
     src_entry: Traversable | Path,
     dest_path: Path,
     *,
-    result: InstallResult,
-    dry_run: bool = False,
+    key: str,
+    plan: _Plan,
 ) -> None:
     """Append-merge ``src_entry``'s body into ``dest_path``.
 
     The bundled body is wrapped in :data:`BEGIN_MARKER` /
     :data:`END_MARKER` markers and:
 
-    * **dest missing** — written fresh; appended to ``result.written``.
-    * **dest exists, markers present** — content between the markers is
-      replaced in-place (idempotent re-run); appended to
-      ``result.overwritten``.
-    * **dest exists, markers missing** — the wrapped block is appended
+    * **dest missing** - written fresh; appended to ``result.written``.
+    * **dest exists, markers present** - the block follows the same table
+      as a plain file (see the module notes): replaced in place when it
+      is unedited (``overwritten``), left alone when it already equals
+      the bundled body or the user edited it and the bundle did not
+      change (``skipped``), and ``needs_confirmation`` when it was edited
+      and the bundle changed. ``force`` replaces it.
+    * **dest exists, markers missing** - the wrapped block is appended
       to the existing content, separated by a single blank line if the
       file does not already end in one; appended to ``result.overwritten``.
 
-    The merge is always non-destructive — user content outside the
-    markers is preserved verbatim.
+    Content outside the markers is preserved verbatim.
     """
+    result = plan.result
     bundled = src_entry.read_text(encoding="utf-8").rstrip("\n")
     block = f"{BEGIN_MARKER}\n{bundled}\n{END_MARKER}\n"
+    bundled_hash = _sha(bundled)
 
     if not dest_path.exists():
-        if not dry_run:
+        if not plan.dry_run:
             dest_path.parent.mkdir(parents=True, exist_ok=True)
             dest_path.write_text(block, encoding="utf-8")
+        plan.new[key] = bundled_hash
         result.written.append(dest_path)
         return
 
@@ -285,6 +487,12 @@ def _merge_block(
     end = existing.find(END_MARKER)
 
     if begin != -1 and end != -1 and end > begin:
+        body = existing[begin + len(BEGIN_MARKER) : end]
+        body = body.removeprefix("\n").removesuffix("\n")
+        action = plan.decide(key, _sha(body), bundled_hash)
+        _record(plan, dest_path, action, body, bundled)
+        if action != "overwrite":
+            return
         # Replace the existing WhyGraph block in place. Preserve any
         # content before BEGIN_MARKER and after END_MARKER verbatim.
         end_of_block = end + len(END_MARKER)
@@ -293,27 +501,32 @@ def _merge_block(
         if end_of_block < len(existing) and existing[end_of_block] == "\n":
             end_of_block += 1
         new_content = existing[:begin] + block + existing[end_of_block:]
-        if not dry_run:
+        if not plan.dry_run:
             dest_path.write_text(new_content, encoding="utf-8")
-        result.overwritten.append(dest_path)
         return
 
-    # No markers — append the block after the existing content,
+    # No markers - append the block after the existing content,
     # ensuring exactly one blank line of separation.
     separator = (
         ""
         if existing.endswith("\n\n")
         else ("\n" if existing.endswith("\n") else "\n\n")
     )
-    if not dry_run:
+    if not plan.dry_run:
         dest_path.write_text(existing + separator + block, encoding="utf-8")
+    plan.new[key] = bundled_hash
     result.overwritten.append(dest_path)
 
 
 __all__ = [
     "BEGIN_MARKER",
     "END_MARKER",
+    "MANIFEST_RELPATH",
     "InstallResult",
     "install_assets",
+    "manifest_status",
+    "package_version",
     "packaged_assets_for",
+    "read_manifest",
+    "set_manifest_version",
 ]

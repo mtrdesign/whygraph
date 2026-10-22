@@ -5,6 +5,9 @@ happens depends on where you come from:
 
 - **From 1.x**, you add your repositories to the portal; their data is reused. See
   [From 1.x](#from-1x).
+- **Agent files in your repositories** are not rewritten by an upgrade. Open each project's Settings >
+  Agents and use **Update agent files**: files you have not edited update silently and edited ones are
+  listed first. See [Keeping the agent files up to date](agents.md#agent-files-upgrade).
 - **A release that moves the pinned Postgres major version** needs a dump and a restore. See
   [Postgres major versions](#postgres-major).
 

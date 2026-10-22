@@ -977,12 +977,35 @@ describe("Project settings (screen 10)", () => {
     expect(within(agents).getByRole("checkbox", { name: /Cursor/ })).not.toBeChecked();
   });
 
-  it("Update agent files previews with force, warns about local edits, then applies with force", async () => {
+  it("Update agent files re-initializes without force: edited files wait for 'Overwrite my edits too'", async () => {
+    const edited = {
+      file: ".claude/agents/planner.md",
+      status: "needs_confirmation",
+      agent: "claude",
+      reason: "edited since WhyGraph installed it",
+      snippet: null,
+      diff: "--- a/.claude/agents/planner.md\n+++ b/.claude/agents/planner.md\n@@ -1 +1 @@\n-MINE\n+THEIRS\n",
+    };
+    const base = handlers["POST /api/projects/alpha/init"];
+    handlers["POST /api/projects/alpha/init"] = (body, url) => ({
+      ...(base(body, url) as Json),
+      asset_files: body?.force ? [{ ...edited, status: "overwrite" }] : [edited],
+    });
+    handlers["GET /api/projects/alpha"] = () =>
+      details("alpha", {
+        agent_files: { installed_version: "2.0.0", current_version: "2.1.0", outdated: true },
+      });
     const user = userEvent.setup();
     mount("/p/alpha/settings");
+    // The Settings line names both versions and offers Update.
+    expect(await screen.findByTestId("agent-files-version")).toHaveTextContent("v2.0.0 (current v2.1.0)");
+    expect(screen.queryByRole("checkbox", { name: /Overwrite my edits too/ })).toBeNull();
     await user.click(await screen.findByRole("checkbox", { name: /Update agent files/ }));
+    // The edited file is listed; force is a separate, explicit choice.
+    expect(await screen.findByTestId("asset-.claude/agents/planner.md")).toHaveTextContent("Edited");
+    expect(screen.queryByTestId("force-warning")).toBeNull();
+    await user.click(await screen.findByRole("checkbox", { name: /Overwrite my edits too/ }));
     expect(await screen.findByTestId("force-warning")).toHaveTextContent("Local edits to these files are replaced");
-    // The preview is a dry run carrying force; nothing is written yet.
     await waitFor(() =>
       expect(
         calls("POST", "/api/projects/alpha/init").some((c) => c.body?.dry_run === true && c.body?.force === true),
@@ -996,6 +1019,16 @@ describe("Project settings (screen 10)", () => {
     const applied = calls("POST", "/api/projects/alpha/init").find((c) => !c.body?.dry_run)!;
     expect(applied.body).toMatchObject({ agents: ["claude"], force: true });
     expect(await screen.findByTestId("init-done")).toHaveTextContent("Agent files updated");
+  });
+
+  it("Update agent files alone sends no force", async () => {
+    const user = userEvent.setup();
+    mount("/p/alpha/settings");
+    await user.click(await screen.findByRole("checkbox", { name: /Update agent files/ }));
+    await user.click(within(screen.getByRole("region", { name: "Agents" })).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("POST", "/api/projects/alpha/init").some((c) => !c.body?.dry_run)).toBe(true));
+    const applied = calls("POST", "/api/projects/alpha/init").find((c) => !c.body?.dry_run)!;
+    expect(applied.body?.force).toBeUndefined();
   });
 
   it("unticking a configured agent removes its entry; ticking another adds it", async () => {

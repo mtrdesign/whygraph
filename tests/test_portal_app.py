@@ -2004,7 +2004,31 @@ def test_uninitialized_project_gates_data_routes_and_creates_no_db(
     details = ready.get("/api/projects/demo").json()
     assert details["agents"] == ["claude"]
     assert details["stats"]["commits"] == 0
+    assert details["agent_files"]["outdated"] is False
     assert ready.get("/api/projects/demo/chat/sessions").json() == []
+
+    # The upgrade manifest (plan section 6.4): an edited asset whose bundled copy
+    # changed is reported with its diff, and only `force` replaces it.
+    manifest = root / ".whygraph" / "assets.json"
+    data = json.loads(manifest.read_text())
+    data["version"] = "0.0.1"
+    data["files"]["claude/agents/planner.md"] = "0" * 64
+    manifest.write_text(json.dumps(data))
+    planner = root / ".claude" / "agents" / "planner.md"
+    planner.write_text("MINE")
+    assert ready.get("/api/projects/demo").json()["agent_files"] == {
+        "installed_version": "0.0.1",
+        "current_version": details["agent_files"]["current_version"],
+        "outdated": True,
+    }
+    plan = init_project(ready, "demo", agents=["claude"], dry_run=True)
+    edited = [f for f in plan["asset_files"] if f["status"] == "needs_confirmation"]
+    assert [f["file"] for f in edited] == [".claude/agents/planner.md"]
+    assert "-MINE" in edited[0]["diff"] and plan["needs_confirmation"] == []
+    assert planner.read_text() == "MINE"
+    init_project(ready, "demo", agents=["claude"], force=True)
+    assert planner.read_text() != "MINE"
+    assert ready.get("/api/projects/demo").json()["agent_files"]["outdated"] is False
 
 
 def test_project_details_recompute_detected_and_last_scan_status(

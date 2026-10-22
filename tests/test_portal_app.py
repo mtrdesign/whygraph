@@ -64,6 +64,7 @@ from whygraph.portal.deps import (
 )
 from whygraph.portal.github_app import APP_ENV_VARS
 from whygraph.portal.github_auth import GitHubAuthConfig, GitHubOAuth
+from whygraph.portal.codegraph_host import CodeGraphDispatcher
 from whygraph.portal.mcp_mount import McpDispatcher
 from whygraph.portal.models import Project, ScanRun, User
 from whygraph.portal.orgs import add_member, create_org
@@ -188,6 +189,9 @@ def env(
     monkeypatch.setenv(
         "WHYGRAPH_SCAN_CMD", shlex.join([sys.executable, str(FAKE_SCAN)])
     )
+    # No real `codegraph serve --mcp` is ever started (nor pre-warmed): the
+    # CodeGraph bridge tests point this at their fake.
+    monkeypatch.setenv("WHYGRAPH_CODEGRAPH_CMD", str(tmp_path / "no-codegraph"))
     portal_db._reset_engine()
     return SimpleNamespace(
         data=data, shared=Path(os.path.realpath(shared)), tmp=tmp_path
@@ -747,6 +751,9 @@ def test_a_failing_portal_migration_serves_a_degraded_app(
         assert state.status_code == 200
         assert "disk on fire" in state.json()["error"]
         assert client.get("/api/projects").status_code == 503
+        # A degraded local portal starts no CodeGraph child.
+        assert client.app.state.portal.codegraph_host is None
+        assert client.post("/mcp/demo/code", json={}).status_code == 503
         assert (
             client.post("/api/portal/setup", json={"display_name": "x"}).status_code
             == 503
@@ -874,7 +881,9 @@ def test_every_api_request_needs_the_client_header(ready: TestClient) -> None:
     assert ready.get("/api/portal/state", headers=bare).status_code == 403
 
 
-@pytest.mark.parametrize("path", ["/api/portal/state", "/mcp/demo", "/"])
+@pytest.mark.parametrize(
+    "path", ["/api/portal/state", "/mcp/demo", "/mcp/demo/code", "/"]
+)
 def test_a_foreign_host_is_rejected(ready: TestClient, path: str) -> None:
     response = ready.get(path, headers={"host": "evil.example:8765"})
     assert response.status_code == 421
@@ -891,7 +900,7 @@ def test_a_foreign_host_is_rejected(ready: TestClient, path: str) -> None:
         {"Sec-Fetch-Site": "same-site"},
     ],
 )
-@pytest.mark.parametrize("path", ["/api/portal/state", "/mcp/demo"])
+@pytest.mark.parametrize("path", ["/api/portal/state", "/mcp/demo", "/mcp/demo/code"])
 def test_cross_origin_requests_are_rejected(
     ready: TestClient, path: str, headers: dict
 ) -> None:
@@ -1478,9 +1487,19 @@ def test_only_the_mcp_routes_have_no_dependant(client: TestClient) -> None:
         if (rc.path or "").startswith(("/api", "/mcp"))
         and getattr(rc, "dependant", None) is None
     ]
-    assert sorted(rc.path for rc in bare) == ["/mcp", "/mcp/{rest:path}", "/mcp/{slug}"]
+    assert sorted(rc.path for rc in bare) == [
+        "/mcp",
+        "/mcp/{rest:path}",
+        "/mcp/{slug}",
+        "/mcp/{slug}/code",
+    ]
     (dispatcher,) = (rc for rc in bare if rc.path == "/mcp/{slug}")
     assert isinstance(dispatcher.endpoint, McpDispatcher)
+    (bridge,) = (rc for rc in bare if rc.path == "/mcp/{slug}/code")
+    assert isinstance(bridge.endpoint, CodeGraphDispatcher)
+    # Registered before the catch-all, which would answer 404.
+    paths = [rc.path for rc in iter_route_contexts(client.app.routes)]
+    assert paths.index("/mcp/{slug}/code") < paths.index("/mcp/{rest:path}")
 
 
 _FILL = {
@@ -1607,7 +1626,7 @@ def test_unscoped_api_paths_are_json_404s_not_the_spa(
         assert tree.headers["content-type"].startswith("application/json")
         assert "error" in tree.json()
         assert client.get("/api").status_code == 404
-        for path in ("/mcp", "/mcp/demo/extra", "/mcp/"):
+        for path in ("/mcp", "/mcp/demo/extra", "/mcp/demo/code/extra", "/mcp/"):
             response = client.post(path, json={})
             assert response.status_code == 404, path
             assert response.headers["content-type"].startswith("application/json")
@@ -1941,12 +1960,13 @@ def test_uninitialized_project_gates_data_routes_and_creates_no_db(
             "error": "not initialized",
             "code": "not_initialized",
         }
-    mcp = ready.post(
-        "/mcp/demo",
-        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
-        headers={"Accept": "application/json, text/event-stream"},
-    )
-    assert mcp.status_code == 409
+    for path in ("/mcp/demo", "/mcp/demo/code"):
+        mcp = ready.post(
+            path,
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            headers={"Accept": "application/json, text/event-stream"},
+        )
+        assert mcp.status_code == 409, path
     assert ready.post("/api/projects/demo/scans").status_code == 409
 
     assert ready.get("/api/projects/demo/config").status_code == 200

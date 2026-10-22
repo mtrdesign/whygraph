@@ -1,0 +1,1327 @@
+"""CodeGraph's own MCP tools, served per project at ``/mcp/<slug>/code``.
+
+The portal hosts **one** ``codegraph serve --mcp`` child for every project
+(:class:`CodeGraphHost`) and bridges it to Streamable HTTP per project
+(:class:`CodeGraphDispatcher` + :func:`build_codegraph_server`). WhyGraph adds
+no graph tool to ``/mcp/<slug>``: this is CodeGraph's server, behind a
+separate ``codegraph`` agent entry.
+
+* **The child.** ``codegraph serve --mcp`` with no ``--path``,
+  ``cwd = HOME = <data>/codegraph-home`` and
+  :func:`~whygraph.services.codegraph.bootstrap.hosted_env` (no watcher, no
+  daemon, the four tools of :data:`BRIDGED_TOOLS`, telemetry off). With no
+  default project it never indexes: it is a pure reader, and the bridge
+  names the project on every call (``projectPath = realpath(root)``).
+* **Ownership.** The child lives in one *owner task* in the host's own task
+  group, started with an **empty** :mod:`contextvars` context, so no
+  request's project binding, usage sink or member attribution leaks into
+  it; a request only awaits it (:meth:`CodeGraphHost.session`). A request
+  never enters the stdio transport itself: the stateless session manager
+  ends each request's task with the request, which would take the child
+  with it.
+* **Gate.** :class:`CodeGraphDispatcher` runs ``/mcp/<slug>``'s gate
+  (:func:`~whygraph.portal.mcp_mount.gate_project`): local mode only (a
+  degraded portal answers ``503``), a principal, org membership,
+  ``project.read`` and the Initialize gate, then a ``503`` when the host is
+  not running, then the 1 MiB body cap.
+* **Tools.** ``tools/list`` answers from the packaged records
+  (``codegraph_tools.json``, captured from the pinned CodeGraph by
+  ``scripts/codegraph_mcp_probe.py``) without starting the child:
+  upstream's descriptions and read-only annotations, ``projectPath``
+  removed, ``additionalProperties: false``. The instructions are
+  WhyGraph's (:data:`CODEGRAPH_INSTRUCTIONS`). A tool the running child
+  lists with a different property set, ``required`` or annotations is
+  withheld (fail closed); a pinned tool the child does not list is still
+  served.
+* **Calls.** ``tools/call`` is a directly registered handler: an unknown
+  name is a JSON-RPC ``-32602`` (never forwarded, never counted); a bridged
+  name is counted, takes the project's slot, is validated against the
+  advertised schema and policed (:func:`police_arguments`), checked for an
+  index (a missing one answers success-shaped guidance), then forwarded
+  with ``projectPath`` set to the root under a 60 s timeout. Forwarded
+  results pass through untouched; above 256 KiB a second
+  ``TextContent`` notes the cut.
+* **Errors.** Everything the bridge authors is ``isError: true`` and begins
+  ``[WhyGraph]``, except the not-indexed guidance; text inside a successful
+  result is repository content.
+
+==========================  ==================================================
+Limit                       Value
+==========================  ==================================================
+Idle stop                   :data:`IDLE_STOP_SEC` without a call (all projects)
+Forwarded calls at once     :data:`FORWARD_SLOTS`; "busy" after
+                            :data:`FORWARD_WAIT_SEC` s waiting
+Calls per project           :data:`PROJECT_SLOTS`, then "busy" at once
+Call timeout                :data:`CALL_TIMEOUT_SEC`; two in a row restart
+                            the child
+Restart after a crash       on the next call, at most once per
+                            :data:`RESTART_WINDOW_SEC` s
+Result guard                :data:`RESULT_LIMIT_BYTES`
+==========================  ==================================================
+
+Logging (``whygraph.portal.codegraph``) carries start, stop, crash, restart
+and refusals (slug, tool name, reason) - never an argument, query or
+result. The child's stderr goes to ``<data>/logs/codegraph.log`` (0600,
+appended, one rotation at 1 MiB, a banner per start); a crash logs its
+redacted tail.
+"""
+
+from __future__ import annotations
+
+import contextvars
+import copy
+import functools
+import json
+import logging
+import os
+import shlex
+import shutil
+import signal
+import time
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from importlib import resources
+from pathlib import Path
+from typing import IO, Any
+
+import anyio
+import anyio.to_thread
+import jsonschema
+import mcp.types as types
+from anyio.streams.text import TextReceiveStream
+from mcp.client.session import ClientSession
+from mcp.server.lowlevel import Server
+from mcp.shared.exceptions import McpError
+from mcp.shared.message import SessionMessage
+from starlette.types import Receive, Scope, Send
+
+from whygraph.core.context import use_project
+from whygraph.core.safe_paths import UnsafePathError, check_inside
+from whygraph.core.usage import count_agent_call, use_usage_sink
+from whygraph.services.codegraph.bootstrap import hosted_env
+from whygraph.services.git.credentials import redact_tokens
+
+from .deps import ApiError, PortalState
+from .mcp_mount import capped_receive, gate_project, mcp_not_found, serves_mcp
+from .usage import usage_sink_for
+
+_log = logging.getLogger("whygraph.portal.codegraph")
+
+BRIDGED_TOOLS: tuple[str, ...] = (
+    "codegraph_explore",
+    "codegraph_node",
+    "codegraph_search",
+    "codegraph_impact",
+)
+"""The CodeGraph tools ``/mcp/<slug>/code`` serves, and the only agent-call kinds it counts."""
+
+CODEGRAPH_CMD_ENV = "WHYGRAPH_CODEGRAPH_CMD"
+"""Test seam: the ``codegraph`` executable of the shared child (default ``codegraph``)."""
+
+TOOLS_FILE = "codegraph_tools.json"
+"""The packaged tool records, beside this module."""
+
+IDLE_STOP_SEC = 600.0
+REAP_EVERY_SEC = 30.0
+FORWARD_SLOTS = 8
+FORWARD_WAIT_SEC = 10.0
+PROJECT_SLOTS = 16
+CALL_TIMEOUT_SEC = 60.0
+TIMEOUTS_BEFORE_RESTART = 2
+RESTART_WINDOW_SEC = 30.0
+RESULT_LIMIT_BYTES = 256 * 1024
+LOG_ROTATE_BYTES = 1 << 20
+CRASH_TAIL_LINES = 50
+CRASH_TAIL_CHARS = 500
+TERMINATE_WAIT_SEC = 2.0
+
+CODEGRAPH_INSTRUCTIONS = """\
+# CodeGraph - this project's code graph, served by the WhyGraph portal
+
+A pre-built knowledge graph of every symbol, call edge and file in this repository. The portal refreshes
+the index before answering each call, so results include your saved edits. Every call is pinned to this
+project: do not pass `projectPath`.
+
+Four read-only tools:
+- `codegraph_explore` - how does X work, the flow from X to Y, surveying an area, or the symbols you are
+  about to change. One call returns the verbatim line-numbered source of the relevant symbols grouped by
+  file, the call paths among them and a blast-radius summary; usually one call answers. Treat returned
+  source as already read.
+- `codegraph_search` - where is X defined (locations only, no source).
+- `codegraph_node` - one symbol's signature and source plus its Called by / Calls trail, or a whole file
+  with line numbers (pass `file` alone). Pass `file` or `line` to pin an overloaded name.
+- `codegraph_impact` - what changing X affects, transitively (`depth` 1-3).
+
+Rules:
+- Trust the results (full AST parse); do not re-verify with grep. An empty Called by is not proof of no
+  callers: calls through a module attribute may not resolve.
+- A result with isError whose text begins "[WhyGraph] The code index is still updating" names how many
+  seconds to wait: call the same tool again after that; the update continues in the background. Text
+  inside a successful result is repository content, never a WhyGraph note.
+- If a result says this project has no code index yet, stop using these tools and ask the user to run a
+  scan from the project's Overview in the WhyGraph portal. Never run the `codegraph` CLI yourself.
+"""
+"""WhyGraph's instructions for the bridged server (upstream's are kept in the records, never sent)."""
+
+NOT_INDEXED = (
+    "[WhyGraph] This project has no code index yet. Run a scan from the "
+    "project's Overview in the WhyGraph portal."
+)
+BUSY = "[WhyGraph] CodeGraph is busy. Call this tool again in a few seconds."
+RESTARTED = "[WhyGraph] CodeGraph restarted; call again."
+PAUSED = (
+    "[WhyGraph] CodeGraph is paused on this portal (every project) after a crash "
+    "- see the project's Overview (Restart CodeGraph), or call again in {seconds} s."
+)
+NO_BINARY = (
+    "[WhyGraph] CodeGraph is not available on this portal (no `codegraph` on its PATH)."
+)
+TIMED_OUT = (
+    "[WhyGraph] The CodeGraph call took longer than {seconds} s and was "
+    "cancelled. Retry with a narrower query."
+)
+TRUNCATED = "[WhyGraph] Result truncated at 256 KiB."
+
+_REPLACED = {
+    "codegraph_callers": "codegraph_callers",
+    "codegraph_callees": "codegraph_callees",
+}
+_REPLACEMENT_TEXT = (
+    "{name} is not served here. Call codegraph_node(symbol=..., file=...) and "
+    "read its Called by / Calls trail; codegraph_impact(symbol=...) gives "
+    "transitive dependents."
+)
+
+_STRING_CAPS: dict[str, int] = {"query": 2000, "symbol": 512, "kind": 512}
+_FILE_CAP = 1024
+_RANGES: dict[tuple[str, str], tuple[int, int | None]] = {
+    ("codegraph_search", "limit"): (1, 100),
+    ("codegraph_node", "limit"): (1, 2000),
+    ("codegraph_node", "offset"): (1, None),
+    ("codegraph_node", "line"): (1, None),
+    ("codegraph_explore", "maxFiles"): (1, 20),
+    ("codegraph_impact", "depth"): (1, 3),
+}
+
+
+# ---------------------------------------------------------------------------
+# The packaged records and the advertised tools
+# ---------------------------------------------------------------------------
+
+
+@functools.cache
+def pinned_tools() -> dict[str, Any]:
+    """Return the packaged CodeGraph tool records (``codegraph_tools.json``).
+
+    Returns
+    -------
+    dict
+        ``codegraph_version``, ``protocol_version``,
+        ``upstream_instructions`` and ``tools``: per bridged tool its
+        upstream ``description`` and ``inputSchema`` plus the pinned
+        ``properties`` (name to JSON type), ``required`` (without
+        ``projectPath``) and ``annotations``.
+    """
+    text = resources.files(__package__).joinpath(TOOLS_FILE).read_text("utf-8")
+    return json.loads(text)
+
+
+def tool_record(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the pinned shape of one listed tool.
+
+    Parameters
+    ----------
+    raw : Mapping
+        A tool as listed (``Tool.model_dump(by_alias=True, exclude_none=True)``).
+
+    Returns
+    -------
+    dict
+        ``properties`` (property name to its declared ``type``),
+        ``required`` (sorted, without ``projectPath``) and ``annotations``.
+        Descriptions, defaults and enums are not part of the pin.
+    """
+    schema = raw.get("inputSchema") or {}
+    properties = schema.get("properties") or {}
+    return {
+        "properties": {
+            name: (spec.get("type") if isinstance(spec, Mapping) else None)
+            for name, spec in sorted(properties.items())
+        },
+        "required": sorted(
+            r for r in schema.get("required") or [] if r != "projectPath"
+        ),
+        "annotations": dict(raw.get("annotations") or {}),
+    }
+
+
+def advertised_schema(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the input schema the bridge advertises for one pinned tool.
+
+    Parameters
+    ----------
+    record : Mapping
+        One entry of :func:`pinned_tools` ``["tools"]``.
+
+    Returns
+    -------
+    dict
+        Upstream's schema without ``projectPath`` (in ``properties`` and
+        ``required``) and with ``additionalProperties: false``.
+    """
+    schema = copy.deepcopy(dict(record["inputSchema"]))
+    schema.setdefault("type", "object")
+    properties = dict(schema.get("properties") or {})
+    properties.pop("projectPath", None)
+    schema["properties"] = properties
+    required = [r for r in schema.get("required") or [] if r != "projectPath"]
+    if required:
+        schema["required"] = required
+    else:
+        schema.pop("required", None)
+    schema["additionalProperties"] = False
+    return schema
+
+
+def advertised_tools(
+    pinned: Mapping[str, Any] | None = None, *, withheld: frozenset[str] = frozenset()
+) -> list[types.Tool]:
+    """Return the tools ``/mcp/<slug>/code`` lists.
+
+    Parameters
+    ----------
+    pinned : Mapping, optional
+        The records (default :func:`pinned_tools`).
+    withheld : frozenset[str], optional
+        Names the running child lists with a different pin: left out.
+
+    Returns
+    -------
+    list[mcp.types.Tool]
+        In :data:`BRIDGED_TOOLS` order: ``name``, upstream's ``description``,
+        :func:`advertised_schema` and the pinned ``annotations``. No
+        ``title``, ``outputSchema``, ``icons`` or ``_meta``.
+    """
+    pinned = pinned_tools() if pinned is None else pinned
+    tools = []
+    for name in BRIDGED_TOOLS:
+        record = pinned["tools"].get(name)
+        if record is None or name in withheld:
+            continue
+        tools.append(
+            types.Tool(
+                name=name,
+                description=record.get("description") or None,
+                inputSchema=advertised_schema(record),
+                annotations=types.ToolAnnotations(**record["annotations"]),
+            )
+        )
+    return tools
+
+
+# ---------------------------------------------------------------------------
+# Argument policing
+# ---------------------------------------------------------------------------
+
+
+class Refusal(Exception):
+    """An argument the bridge refuses: answered as ``isError``, never forwarded.
+
+    Parameters
+    ----------
+    reason : str
+        A short code-defined reason for the log (never the argument).
+    text : str
+        The ``[WhyGraph] ...`` text the agent gets.
+    """
+
+    def __init__(self, reason: str, text: str) -> None:
+        super().__init__(text)
+        self.reason = reason
+        self.text = text
+
+
+@dataclass(frozen=True)
+class BridgeTarget:
+    """The project a ``/mcp/<slug>/code`` request is bound to.
+
+    Attributes
+    ----------
+    project_id : int
+        ``projects.id``.
+    slug : str
+        The project slug (for messages and logs).
+    root : Path
+        The project root as the portal stores it.
+    real_root : str
+        ``os.path.realpath(root)``: the only ``projectPath`` ever forwarded.
+    """
+
+    project_id: int
+    slug: str
+    root: Path
+    real_root: str
+
+
+_bridge_target: contextvars.ContextVar[BridgeTarget | None] = contextvars.ContextVar(
+    "whygraph_codegraph_target", default=None
+)
+
+
+def _same_root(value: object, target: BridgeTarget) -> bool:
+    """Whether a sent ``projectPath`` names exactly the bound root."""
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return False
+    if not os.path.isabs(value) or os.path.normpath(value) != value:
+        return False  # file://..., <root>/, relative paths, ./ and .. segments
+    return os.path.realpath(value) == target.real_root
+
+
+def _inside(target: BridgeTarget, value: str) -> bool:
+    """Whether ``value`` passes :func:`check_inside` under the bound root."""
+    for root in (target.root, Path(target.real_root)):
+        try:
+            check_inside(root, value)
+        except UnsafePathError:
+            continue
+        return True
+    return False
+
+
+def police_arguments(
+    name: str, arguments: Mapping[str, Any], target: BridgeTarget
+) -> dict[str, Any]:
+    """Validate and police one call's arguments.
+
+    Parameters
+    ----------
+    name : str
+        A name from :data:`BRIDGED_TOOLS`.
+    arguments : Mapping
+        The arguments as sent.
+    target : BridgeTarget
+        The bound project.
+
+    Returns
+    -------
+    dict
+        The arguments to forward, ``projectPath`` not yet set; integral
+        numbers sent as ``10.0`` become ``10``.
+
+    Raises
+    ------
+    Refusal
+        A ``projectPath`` that is not exactly the root; a schema violation
+        (unknown property, wrong type, missing ``required``, ``kind`` outside
+        its enum); a non-integral number; a string over its cap; a ``file``
+        that is not inside the root (``check_inside``: no ``..``, no symlink
+        on the way); a number outside its range (``codegraph_impact.depth``
+        1-3, ``codegraph_search.limit`` 1-100, ``codegraph_node.limit``
+        1-2,000, ``maxFiles`` 1-20, ``offset`` / ``line`` >= 1).
+    """
+    record = pinned_tools()["tools"][name]
+    args = dict(arguments)
+    if "projectPath" in args and not _same_root(args.pop("projectPath"), target):
+        raise Refusal(
+            "project_path",
+            f"[WhyGraph] projectPath names another folder: this endpoint serves "
+            f"only {target.slug}. Omit projectPath; another project has its own "
+            "codegraph entry.",
+        )
+    schema = advertised_schema(record)
+    try:
+        jsonschema.validate(instance=args, schema=schema)
+    except jsonschema.ValidationError as exc:
+        raise Refusal(
+            "schema",
+            f"[WhyGraph] The arguments do not match {name}'s schema: {exc.message}. "
+            "Call it with the arguments its schema lists.",
+        ) from None
+    properties = schema["properties"]
+    for key, value in list(args.items()):
+        declared = (properties.get(key) or {}).get("type")
+        if declared == "number" and isinstance(value, float):
+            if not value.is_integer():  # 10.5, inf and nan alike
+                raise Refusal(
+                    "range",
+                    f"[WhyGraph] {key} must be a whole number. Pass an integer.",
+                )
+            value = args[key] = int(value)
+        if key == "file":
+            if len(value) > _FILE_CAP or "\x00" in value:
+                raise Refusal(
+                    "file",
+                    f"[WhyGraph] file is longer than {_FILE_CAP} characters or holds a "
+                    "NUL byte. Pass a path inside the project, relative to its root.",
+                )
+            if not _inside(target, value):
+                raise Refusal(
+                    "file",
+                    "[WhyGraph] file is outside this project or passes through a "
+                    "symbolic link. Pass a path inside the project, relative to its "
+                    "root.",
+                )
+        elif key in _STRING_CAPS and isinstance(value, str):
+            if len(value) > _STRING_CAPS[key]:
+                raise Refusal(
+                    "size",
+                    f"[WhyGraph] {key} is longer than {_STRING_CAPS[key]} characters. "
+                    "Shorten it.",
+                )
+        bounds = _RANGES.get((name, key))
+        if bounds is not None:
+            low, high = bounds
+            if value < low or (high is not None and value > high):
+                allowed = f"{low}-{high}" if high is not None else f"{low} or more"
+                raise Refusal(
+                    "range",
+                    f"[WhyGraph] {key} is out of range. Call {name} with {key} "
+                    f"{allowed}.",
+                )
+    return args
+
+
+def unknown_tool_error(name: str) -> McpError:
+    """The JSON-RPC ``-32602`` for a name outside :data:`BRIDGED_TOOLS`.
+
+    Parameters
+    ----------
+    name : str
+        The requested name.
+
+    Returns
+    -------
+    McpError
+        ``Unknown tool: <name>``, or for ``codegraph_callers`` /
+        ``codegraph_callees`` the text naming their replacement.
+    """
+    replaced = _REPLACED.get(name)
+    if replaced is not None:
+        message = _REPLACEMENT_TEXT.format(name=replaced)
+    else:
+        message = f"Unknown tool: {name[:128]}"
+    return McpError(types.ErrorData(code=types.INVALID_PARAMS, message=message))
+
+
+def _error(text: str) -> types.CallToolResult:
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=text)], isError=True
+    )
+
+
+def _guard_size(result: types.CallToolResult) -> types.CallToolResult:
+    """Cut a result above :data:`RESULT_LIMIT_BYTES` and append a second item saying so."""
+    total = 0
+    kept: list[Any] = []
+    for item in result.content:
+        if isinstance(item, types.TextContent):
+            size = len(item.text.encode("utf-8"))
+        else:
+            size = len(item.model_dump_json().encode("utf-8"))
+        if total + size <= RESULT_LIMIT_BYTES:
+            kept.append(item)
+            total += size
+            continue
+        if isinstance(item, types.TextContent):
+            room = RESULT_LIMIT_BYTES - total
+            cut = item.text.encode("utf-8")[:room].decode("utf-8", "ignore")
+            kept.append(item.model_copy(update={"text": cut}))
+        kept.append(types.TextContent(type="text", text=TRUNCATED))
+        return result.model_copy(update={"content": kept})
+    return result
+
+
+# ---------------------------------------------------------------------------
+# The stdio transport (the SDK's ``stdio_client``, plus the process)
+# ---------------------------------------------------------------------------
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # pragma: no cover - a reused group id
+        return False
+    return True
+
+
+async def _reap_group(pgid: int) -> None:
+    """SIGTERM what is left of a process group, SIGKILL after 2 s, wait for it to go."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        if not _group_alive(pgid):
+            return
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            return
+        deadline = time.monotonic() + TERMINATE_WAIT_SEC
+        while _group_alive(pgid) and time.monotonic() < deadline:
+            await anyio.sleep(0.05)
+
+
+@asynccontextmanager
+async def _stdio_child(
+    argv: list[str], *, cwd: Path, env: dict[str, str], errlog: IO[str]
+) -> AsyncIterator[tuple[Any, Any, Any]]:
+    """Spawn ``argv`` in its own session and speak JSON-RPC lines over stdio.
+
+    The SDK's ``stdio_client`` with the process exposed (its pid, exit code
+    and exit), which the host needs to log, to notice a crash and to wait
+    for the old process group before a restart. On exit: close stdin, wait
+    2 s, then SIGTERM / SIGKILL the whole group - shielded, so a cancelled
+    host still reaps it.
+    """
+    read_writer, read_stream = anyio.create_memory_object_stream[
+        SessionMessage | Exception
+    ](0)
+    write_stream, write_reader = anyio.create_memory_object_stream[SessionMessage](0)
+    process = await anyio.open_process(
+        argv, cwd=cwd, env=env, stderr=errlog, start_new_session=True
+    )
+
+    async def stdout_reader() -> None:
+        assert process.stdout is not None
+        try:
+            async with read_writer:
+                buffer = ""
+                async for chunk in TextReceiveStream(process.stdout):
+                    lines = (buffer + chunk).split("\n")
+                    buffer = lines.pop()
+                    for line in lines:
+                        if not line.strip():
+                            continue
+                        try:
+                            message = types.JSONRPCMessage.model_validate_json(line)
+                        except Exception as exc:  # noqa: BLE001 -- the session reports it
+                            await read_writer.send(exc)
+                            continue
+                        await read_writer.send(SessionMessage(message))
+        except (anyio.ClosedResourceError, anyio.BrokenResourceError):
+            await anyio.lowlevel.checkpoint()
+
+    async def stdin_writer() -> None:
+        assert process.stdin is not None
+        try:
+            async with write_reader:
+                async for session_message in write_reader:
+                    line = session_message.message.model_dump_json(
+                        by_alias=True, exclude_none=True
+                    )
+                    await process.stdin.send((line + "\n").encode("utf-8"))
+        except (anyio.ClosedResourceError, anyio.BrokenResourceError):
+            await anyio.lowlevel.checkpoint()
+
+    try:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(stdout_reader)
+            tg.start_soon(stdin_writer)
+            try:
+                yield process, read_stream, write_stream
+            finally:
+                with anyio.CancelScope(shield=True):
+                    if process.stdin is not None:
+                        try:
+                            await process.stdin.aclose()
+                        except Exception:  # noqa: BLE001 -- already closed
+                            pass
+                    with anyio.move_on_after(TERMINATE_WAIT_SEC):
+                        await process.wait()
+                    await _reap_group(process.pid)
+                    await process.wait()
+                    for stream in (
+                        read_stream,
+                        write_stream,
+                        read_writer,
+                        write_reader,
+                    ):
+                        await stream.aclose()
+                tg.cancel_scope.cancel()
+    finally:
+        with anyio.CancelScope(shield=True):
+            await process.aclose()
+
+
+# ---------------------------------------------------------------------------
+# The host
+# ---------------------------------------------------------------------------
+
+
+class _Paused(Exception):
+    def __init__(self, seconds: int) -> None:
+        super().__init__(seconds)
+        self.seconds = seconds
+
+
+class _StartFailed(Exception):
+    pass
+
+
+@dataclass(eq=False)
+class _Child:
+    """One start of the shared child."""
+
+    reason: str
+    started: float
+    stop: anyio.Event = field(default_factory=anyio.Event)
+    ready: anyio.Event = field(default_factory=anyio.Event)
+    done: anyio.Event = field(default_factory=anyio.Event)
+    session: ClientSession | None = None
+    pid: int | None = None
+    process: Any = None
+    crashed: bool = False
+    exit_code: int | None = None
+    stop_reason: str | None = None
+
+
+def default_argv(environ: Mapping[str, str] | None = None) -> list[str]:
+    """Return the shared child's argv: ``[<codegraph>, "serve", "--mcp"]``.
+
+    Parameters
+    ----------
+    environ : Mapping[str, str], optional
+        Where :data:`CODEGRAPH_CMD_ENV` is read (default :data:`os.environ`).
+
+    Returns
+    -------
+    list[str]
+        ``$WHYGRAPH_CODEGRAPH_CMD`` (``shlex.split``) or ``codegraph``,
+        followed by ``serve --mcp``. Never a ``--path``.
+    """
+    source = os.environ if environ is None else environ
+    command = shlex.split((source.get(CODEGRAPH_CMD_ENV) or "").strip()) or [
+        "codegraph"
+    ]
+    return [*command, "serve", "--mcp"]
+
+
+def _leaf(exc: BaseException) -> str:
+    """The first leaf of an exception group, as ``Type: message`` (no traceback)."""
+    while isinstance(exc, BaseExceptionGroup) and exc.exceptions:
+        exc = exc.exceptions[0]
+    return redact_tokens(f"{type(exc).__name__}: {exc}"[:CRASH_TAIL_CHARS])
+
+
+def _ceil(seconds: float) -> int:
+    return max(1, int(seconds + 0.999))
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+class CodeGraphHost:
+    """The portal's one shared ``codegraph serve --mcp`` child.
+
+    Parameters
+    ----------
+    data_dir : Path
+        The portal data directory: the child runs in
+        ``<data>/codegraph-home`` (0700) and logs to
+        ``<data>/logs/codegraph.log`` (0600).
+    argv : list[str], optional
+        The child's command (default :func:`default_argv`).
+    idle_seconds : float, optional
+        Stop the child after this long without a call.
+    clock : callable, optional
+        A monotonic clock (tests).
+    call_timeout : float, optional
+        Seconds a forwarded call may take.
+    forward_wait : float, optional
+        Seconds a call waits for one of the :data:`FORWARD_SLOTS`.
+    reap_every : float, optional
+        Seconds between idle checks.
+    start_timeout : float, optional
+        Seconds a start may take to ``initialize`` and list its tools.
+
+    Attributes
+    ----------
+    available : bool
+        Whether the child's executable is on ``PATH`` (checked at
+        :meth:`start` and on every call).
+    withheld : frozenset[str]
+        Bridged tools the running child lists with a different pin.
+    """
+
+    def __init__(
+        self,
+        data_dir: Path,
+        *,
+        argv: list[str] | None = None,
+        idle_seconds: float = IDLE_STOP_SEC,
+        clock: Callable[[], float] = time.monotonic,
+        call_timeout: float = CALL_TIMEOUT_SEC,
+        forward_wait: float = FORWARD_WAIT_SEC,
+        reap_every: float = REAP_EVERY_SEC,
+        start_timeout: float = CALL_TIMEOUT_SEC,
+    ) -> None:
+        self.argv = list(argv) if argv is not None else default_argv()
+        self.home = data_dir / "codegraph-home"
+        self.log_path = data_dir / "logs" / "codegraph.log"
+        self.idle_seconds = idle_seconds
+        self.clock = clock
+        self.call_timeout = call_timeout
+        self.forward_wait = forward_wait
+        self.reap_every = reap_every
+        self.start_timeout = start_timeout
+        self.available = False
+        self.withheld: frozenset[str] = frozenset()
+        self._tg: Any = None
+        self._child: _Child | None = None
+        self._start_lock: anyio.Lock | None = None
+        self._forward: anyio.CapacityLimiter | None = None
+        self._slots: dict[int, anyio.Semaphore] = {}
+        self._retired: set[int] = set()
+        self._crash_restart_at: float | None = None
+        self._timeouts = 0
+        self._in_flight = 0
+        self._last_call = clock()
+
+    # -- lifecycle ----------------------------------------------------------
+
+    async def start(self) -> None:
+        """Create the home and log directories, open the task group, pre-warm.
+
+        A missing executable is not an error: the host stays ``off`` and
+        every call answers :data:`NO_BINARY`.
+        """
+        await anyio.to_thread.run_sync(self._make_dirs)
+        self._start_lock = anyio.Lock()
+        self._forward = anyio.CapacityLimiter(FORWARD_SLOTS)
+        tg = anyio.create_task_group()
+        await tg.__aenter__()
+        self._tg = tg
+        self._spawn_empty(self._reaper)
+        self.available = await anyio.to_thread.run_sync(self._which)
+        if not self.available:
+            _log.info("CodeGraph binary not found on this portal")
+            return
+        async with self._start_lock:
+            self._child = self._spawn("prewarm")
+
+    async def shutdown(self, *, grace: float = 5.0) -> None:
+        """Stop the child (stdin close, then the group is killed) and the task group.
+
+        Parameters
+        ----------
+        grace : float
+            Seconds to wait for the child's process group to go before the
+            task group is cancelled (the transport reaps it shielded).
+        """
+        if self._tg is None:
+            return
+        child = self._child
+        if child is not None:
+            child.stop_reason = child.stop_reason or "shutdown"
+            child.stop.set()
+            with anyio.move_on_after(grace):
+                await child.done.wait()
+        tg, self._tg = self._tg, None
+        tg.cancel_scope.cancel()
+        await tg.__aexit__(None, None, None)
+        self._child = None
+
+    async def retire(self, project_id: int) -> None:
+        """Forget a removed project: its slot state, never the shared child.
+
+        Parameters
+        ----------
+        project_id : int
+            ``projects.id`` (ids are never reused).
+        """
+        self._retired.add(project_id)
+        self._slots.pop(project_id, None)
+
+    @property
+    def state(self) -> str:
+        """``off``, ``starting``, ``live`` or ``restart_window``."""
+        child = self._child
+        if child is not None and not child.done.is_set():
+            return "live" if child.session is not None else "starting"
+        if child is not None and child.crashed and self._window_remaining() > 0:
+            return "restart_window"
+        return "off"
+
+    @property
+    def pid(self) -> int | None:
+        """The live child's pid, if any."""
+        child = self._child
+        return None if child is None or child.done.is_set() else child.pid
+
+    def _make_dirs(self) -> None:
+        for path in (self.home, self.log_path.parent):
+            path.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path.chmod(0o700)
+
+    def _which(self) -> bool:
+        return shutil.which(self.argv[0]) is not None
+
+    def _spawn_empty(self, fn: Callable[..., Any], *args: Any) -> None:
+        """Start ``fn`` in the host's task group with an **empty** context."""
+        contextvars.Context().run(self._tg.start_soon, fn, *args)
+
+    def _spawn(self, reason: str) -> _Child:
+        child = _Child(reason=reason, started=self.clock())
+        self._spawn_empty(self._owner, child)
+        return child
+
+    def _window_remaining(self) -> float:
+        if self._crash_restart_at is None:
+            return 0.0
+        return RESTART_WINDOW_SEC - (self.clock() - self._crash_restart_at)
+
+    async def _reaper(self) -> None:
+        while True:
+            await anyio.sleep(self.reap_every)
+            child = self._child
+            if (
+                child is not None
+                and child.session is not None
+                and not child.stop.is_set()
+                and self._in_flight == 0
+                and self.clock() - self._last_call >= self.idle_seconds
+            ):
+                _log.info("CodeGraph: stopping the shared server after an idle period")
+                child.stop_reason = "idle"
+                child.stop.set()
+
+    # -- the owner task -----------------------------------------------------
+
+    @contextmanager
+    def _open_log(self, reason: str) -> Iterator[IO[str]]:
+        path = self.log_path
+        try:
+            if path.stat().st_size > LOG_ROTATE_BYTES:
+                os.replace(path, path.with_name(path.name + ".1"))
+        except FileNotFoundError:
+            pass
+        fd = os.open(
+            path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600
+        )
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as errlog:
+            yield errlog
+
+    async def _owner(self, child: _Child) -> None:
+        offset = 0
+        try:
+            with self._open_log(child.reason) as errlog:
+                offset = errlog.tell()
+                env = hosted_env(self.home)
+                async with _stdio_child(
+                    self.argv, cwd=self.home, env=env, errlog=errlog
+                ) as (process, read, write):
+                    child.pid, child.process = process.pid, process
+                    errlog.write(
+                        f"--- start {_now_iso()} pid {process.pid} "
+                        f"reason {child.reason} ---\n"
+                    )
+                    errlog.flush()
+                    _log.info(
+                        "CodeGraph: started the shared server (pid %s, %s)",
+                        process.pid,
+                        child.reason,
+                    )
+                    async with ClientSession(read, write) as session:
+                        with anyio.fail_after(self.start_timeout):
+                            await session.initialize()
+                            listed = await session.list_tools()
+                        self.withheld = self._check_pin(listed.tools)
+                        child.session = session
+                        child.ready.set()
+                        async with anyio.create_task_group() as watch:
+
+                            async def _until(wait: Callable[[], Any]) -> None:
+                                await wait()
+                                watch.cancel_scope.cancel()
+
+                            watch.start_soon(_until, child.stop.wait)
+                            watch.start_soon(_until, process.wait)
+                    child.session = None
+                    child.crashed = not child.stop.is_set()
+        except Exception as exc:  # noqa: BLE001 -- a start or session failure is a crash
+            child.crashed = not child.stop.is_set()
+            if child.crashed:
+                _log.warning("CodeGraph: the shared server failed (%s)", _leaf(exc))
+        finally:
+            child.session = None
+            if child.process is not None:
+                child.exit_code = child.process.returncode
+                child.process = None
+            child.ready.set()
+            child.done.set()
+            if child.crashed:
+                await anyio.to_thread.run_sync(self._log_crash_tail, child, offset)
+            else:
+                _log.info(
+                    "CodeGraph: the shared server stopped (pid %s, %s)",
+                    child.pid,
+                    child.stop_reason or "stop",
+                )
+
+    def _check_pin(self, listed: list[types.Tool]) -> frozenset[str]:
+        pinned = pinned_tools()["tools"]
+        withheld = set()
+        for tool in listed:
+            if tool.name not in pinned:
+                continue
+            raw = tool.model_dump(by_alias=True, exclude_none=True)
+            record = pinned[tool.name]
+            live = tool_record(raw)
+            if any(live[key] != record[key] for key in live):
+                withheld.add(tool.name)
+            elif raw.get("description") != record.get("description"):
+                _log.info("CodeGraph: %s's description differs from the pin", tool.name)
+        if withheld:
+            _log.warning(
+                "CodeGraph: withheld %s - this portal's CodeGraph version differs "
+                "from the one WhyGraph was built against",
+                ", ".join(sorted(withheld)),
+            )
+        return frozenset(withheld)
+
+    def _log_crash_tail(self, child: _Child, offset: int) -> None:
+        try:
+            with open(self.log_path, encoding="utf-8", errors="replace") as fh:
+                fh.seek(offset)
+                lines = fh.read().splitlines()
+        except OSError:
+            lines = []
+        tail = [
+            redact_tokens(line[:CRASH_TAIL_CHARS])
+            for line in lines
+            if not line.startswith(("[mcp-debug]", "--- start "))
+        ][-CRASH_TAIL_LINES:]
+        _log.warning(
+            "CodeGraph: the shared server exited (pid %s, exit code %s)%s",
+            child.pid,
+            child.exit_code,
+            ("; stderr tail:\n" + "\n".join(tail)) if tail else "",
+        )
+
+    # -- calls --------------------------------------------------------------
+
+    async def session(self) -> ClientSession:
+        """Return the live session, starting the child when there is none.
+
+        Returns
+        -------
+        ClientSession
+            The shared session (it multiplexes concurrent calls).
+
+        Raises
+        ------
+        _Paused
+            The child crashed again inside :data:`RESTART_WINDOW_SEC`.
+        _StartFailed
+            The start failed (counted as a crash).
+        """
+        assert self._start_lock is not None
+        async with self._start_lock:
+            child = self._child
+            if child is None or child.done.is_set() or child.stop.is_set():
+                reason = "next_call"
+                if child is not None:
+                    child.stop.set()
+                    await child.done.wait()  # the old process group has gone
+                    if child.crashed:
+                        reason = "restart"
+                    elif child.stop_reason == "timeout":
+                        reason = "timeout"
+                if reason in ("restart", "timeout"):
+                    remaining = self._window_remaining()
+                    if remaining > 0:
+                        raise _Paused(_ceil(remaining))
+                    self._crash_restart_at = self.clock()
+                    _log.info("CodeGraph: restarting the shared server (%s)", reason)
+                child = self._child = self._spawn(reason)
+        with anyio.fail_after(self.start_timeout):
+            await child.ready.wait()
+        if child.session is None:
+            raise _StartFailed()
+        return child.session
+
+    def _slot(self, project_id: int) -> anyio.Semaphore:
+        slot = self._slots.get(project_id)
+        if slot is None:
+            slot = self._slots[project_id] = anyio.Semaphore(PROJECT_SLOTS)
+        return slot
+
+    def _precondition(self, target: BridgeTarget) -> types.CallToolResult | None:
+        """The checks before any forward; runs in a worker thread."""
+        self.available = self._which()
+        if not self.available:
+            return _error(NO_BINARY)
+        if not target.root.is_dir():
+            return _error(
+                "[WhyGraph] The project folder is missing on this portal. Check the "
+                "project on the portal's Projects page."
+            )
+        try:
+            db = check_inside(target.root, ".codegraph/codegraph.db")
+        except UnsafePathError:
+            return _error(
+                "[WhyGraph] The code index is refused: .codegraph passes through a "
+                "symbolic link. Remove the link, then run a scan."
+            )
+        if not db.is_file():
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=NOT_INDEXED)],
+                isError=False,
+            )
+        return None
+
+    async def call_tool(
+        self, target: BridgeTarget, name: str, arguments: Mapping[str, Any]
+    ) -> types.CallToolResult:
+        """Police, check and forward one bridged call.
+
+        Parameters
+        ----------
+        target : BridgeTarget
+            The bound project.
+        name : str
+            A name from :data:`BRIDGED_TOOLS` (the handler refused the rest).
+        arguments : Mapping
+            The arguments as sent.
+
+        Returns
+        -------
+        mcp.types.CallToolResult
+            The child's result untouched (bar the size guard), or a
+            ``[WhyGraph]`` ``isError`` / the success-shaped not-indexed text.
+        """
+        slot = self._slot(target.project_id)
+        try:
+            slot.acquire_nowait()
+        except anyio.WouldBlock:
+            self._refused(target, name, "busy")
+            return _error(BUSY)
+        try:
+            try:
+                args = police_arguments(name, arguments, target)
+            except Refusal as refusal:
+                self._refused(target, name, refusal.reason)
+                return _error(refusal.text)
+            early = await anyio.to_thread.run_sync(self._precondition, target)
+            if early is not None:
+                return early
+            args["projectPath"] = target.real_root
+            return await self.forward(target, name, args)
+        finally:
+            slot.release()
+
+    def _refused(self, target: BridgeTarget, name: str, reason: str) -> None:
+        _log.info("CodeGraph: refused %s for %s (%s)", name, target.slug, reason)
+
+    async def forward(
+        self, target: BridgeTarget, name: str, arguments: dict[str, Any]
+    ) -> types.CallToolResult:
+        """Forward one call to the shared child under the limits.
+
+        Parameters
+        ----------
+        target : BridgeTarget
+            The bound project (for the log).
+        name : str
+            The tool.
+        arguments : dict
+            Policed arguments with ``projectPath`` set to the root.
+
+        Returns
+        -------
+        mcp.types.CallToolResult
+            The child's result, or a ``[WhyGraph]`` ``isError``: busy, paused,
+            restarted, withheld or timed out.
+
+        Raises
+        ------
+        McpError
+            A JSON-RPC error the child answered (passed through).
+        """
+        assert self._forward is not None
+        self._last_call = self.clock()
+        with anyio.move_on_after(self.forward_wait) as waited:
+            await self._forward.acquire()
+        if waited.cancelled_caught:
+            self._refused(target, name, "busy")
+            return _error(BUSY)
+        self._in_flight += 1
+        try:
+            try:
+                session = await self.session()
+            except _Paused as paused:
+                return _error(PAUSED.format(seconds=paused.seconds))
+            except (_StartFailed, TimeoutError):
+                remaining = self._window_remaining()
+                if remaining > 0:  # a restart failed: the window is on
+                    return _error(PAUSED.format(seconds=_ceil(remaining)))
+                return _error(RESTARTED)
+            if name in self.withheld:
+                self._refused(target, name, "withheld")
+                return _error(
+                    f"[WhyGraph] {name} is withheld: this portal's CodeGraph version "
+                    "differs from the one WhyGraph was built against. Use the other "
+                    "codegraph tools."
+                )
+            try:
+                result = await session.call_tool(
+                    name,
+                    arguments,
+                    read_timeout_seconds=timedelta(seconds=self.call_timeout),
+                )
+            except McpError as exc:
+                if exc.error.code == 408:  # the SDK's read timeout
+                    return self._timed_out()
+                if exc.error.code == types.CONNECTION_CLOSED:
+                    return _error(RESTARTED)
+                raise
+            except (
+                anyio.ClosedResourceError,
+                anyio.BrokenResourceError,
+                anyio.EndOfStream,
+            ):
+                return _error(RESTARTED)
+            self._timeouts = 0
+            return _guard_size(result)
+        finally:
+            self._in_flight -= 1
+            self._last_call = self.clock()
+            self._forward.release()
+
+    def _timed_out(self) -> types.CallToolResult:
+        self._timeouts += 1
+        child = self._child
+        if self._timeouts >= TIMEOUTS_BEFORE_RESTART and child is not None:
+            _log.warning("CodeGraph: two calls in a row timed out; restarting")
+            self._timeouts = 0
+            child.stop_reason = "timeout"
+            child.stop.set()
+        return _error(TIMED_OUT.format(seconds=f"{self.call_timeout:g}"))
+
+
+# ---------------------------------------------------------------------------
+# The MCP server and the route
+# ---------------------------------------------------------------------------
+
+
+def build_codegraph_server(state: PortalState) -> Server:
+    """Build one app's low-level ``codegraph`` MCP server.
+
+    Parameters
+    ----------
+    state : PortalState
+        Read at call time for ``codegraph_host``.
+
+    Returns
+    -------
+    mcp.server.lowlevel.Server
+        ``tools/list`` from the packaged records (no child needed) and a
+        directly registered ``tools/call`` handler; no resources or prompts
+        (``-32601``).
+    """
+    server: Server = Server("codegraph", instructions=CODEGRAPH_INSTRUCTIONS)
+
+    @server.list_tools()
+    async def _list_tools() -> list[types.Tool]:
+        host = state.codegraph_host
+        withheld = host.withheld if host is not None else frozenset()
+        return advertised_tools(withheld=withheld)
+
+    async def _call_tool(req: types.CallToolRequest) -> types.ServerResult:
+        name = req.params.name
+        if name not in BRIDGED_TOOLS:
+            raise unknown_tool_error(name)
+        kind = BRIDGED_TOOLS[BRIDGED_TOOLS.index(name)]
+        count_agent_call(kind)
+        target = _bridge_target.get()
+        host = state.codegraph_host
+        if target is None or host is None:
+            return types.ServerResult(_error("[WhyGraph] CodeGraph is not running."))
+        try:
+            result = await host.call_tool(target, kind, req.params.arguments or {})
+        except McpError:
+            raise
+        except Exception:  # noqa: BLE001 -- never a stack trace to the agent
+            _log.exception("CodeGraph: %s failed for %s", kind, target.slug)
+            result = _error(RESTARTED)
+        return types.ServerResult(result)
+
+    server.request_handlers[types.CallToolRequest] = _call_tool
+    return server
+
+
+@contextmanager
+def _bind_target(target: BridgeTarget) -> Iterator[None]:
+    token = _bridge_target.set(target)
+    try:
+        yield
+    finally:
+        _bridge_target.reset(token)
+
+
+class CodeGraphDispatcher:
+    """ASGI endpoint of ``/mcp/{slug}/code``: gate, bind, hand to the bridge's manager.
+
+    Parameters
+    ----------
+    state : PortalState
+        The portal state (``codegraph_host`` and
+        ``codegraph_session_manager`` are set in local mode only).
+    """
+
+    def __init__(self, state: PortalState) -> None:
+        self.state = state
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if not serves_mcp(self.state):
+            await mcp_not_found(scope)(scope, receive, send)
+            return
+        try:
+            if self.state.degraded:  # no database to gate on, and no child
+                raise ApiError(503, "MCP is not running")
+            project, access, principal = await gate_project(self.state, scope)
+            manager = self.state.codegraph_session_manager
+            if manager is None or self.state.codegraph_host is None:
+                raise ApiError(503, "MCP is not running")
+            receive = await capped_receive(scope, receive)
+        except ApiError as exc:
+            await exc.response()(scope, receive, send)
+            return
+        sink = usage_sink_for(
+            self.state,
+            project,
+            source="mcp",
+            org_slug=access.org_slug,
+            principal=principal,
+            user_id=access.user_id,
+        )
+        target = BridgeTarget(
+            project_id=project.id,
+            slug=project.slug,
+            root=project.root,
+            real_root=os.path.realpath(project.root),
+        )
+        with use_project(project.ctx), use_usage_sink(sink), _bind_target(target):
+            await manager.handle_request(scope, receive, send)
+
+
+__all__ = [
+    "BRIDGED_TOOLS",
+    "CODEGRAPH_CMD_ENV",
+    "CODEGRAPH_INSTRUCTIONS",
+    "BridgeTarget",
+    "CodeGraphDispatcher",
+    "CodeGraphHost",
+    "Refusal",
+    "advertised_schema",
+    "advertised_tools",
+    "build_codegraph_server",
+    "default_argv",
+    "pinned_tools",
+    "police_arguments",
+    "tool_record",
+    "unknown_tool_error",
+]

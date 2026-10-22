@@ -2264,6 +2264,9 @@ def _remove_project(
             for t in targets
         ]
 
+    if state.codegraph_host is not None:
+        # Drops the project's bridge state; the shared child stays.
+        anyio.from_thread.run(state.codegraph_host.retire, project.id)
     dispose_engine(project.db_path)
     state.migrations.forget(project.db_path)
     state.contexts.invalidate(project.id)

@@ -10,6 +10,7 @@ Path                            Source      Bound in
 Explorer data / Generate        explorer    ``project_db_access(usage_source=)``
 Chat                            chat        ``project_db_access(usage_source=)``
 Local ``/mcp/<slug>``           mcp         :class:`~whygraph.portal.mcp_mount.McpDispatcher`
+Local ``/mcp/<slug>/code``      mcp         :class:`~whygraph.portal.codegraph_host.CodeGraphDispatcher`
 ``/api/v1`` (a linked portal)   agent       ``v1_project_access`` / ``v1_project_db_access``
 ==============================  ==========  ================================
 

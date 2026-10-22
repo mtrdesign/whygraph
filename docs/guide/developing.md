@@ -161,7 +161,7 @@ so it can run beside any of them.
 | `make test` | `pytest` only |
 | `make e2e` | The Playwright suite against a throwaway portal and a fake scanner, both themes (`ARGS="--project=light"` for one) |
 | `make audit` | The screenshot audit: walks every screen of both portals (local, production, linked) at desktop and phone width in light and dark, and writes PNGs, `manifest.json` and `gaps.md` under `src/playground/e2e/.artifacts/audit/` (`ARGS="--project=local"` for one). About 30 minutes, run by hand before a merge, never in CI; see `src/playground/e2e/audit/README.md` |
-| `make inspect SLUG=<slug>` | The MCP Inspector against a project's `/mcp/<slug>` on the running dev portal |
+| `make inspect SLUG=<slug>` | The MCP Inspector against a project's `/mcp/<slug>` on the running dev portal; add `MCP_PATH=code` for its CodeGraph endpoint, `/mcp/<slug>/code` |
 | `make db SLUG=<slug>` | A DBGate viewer on `:8081` for a scratch repo's two databases, plus a **Portal** connection to the `make dev-db` Postgres (through `host.docker.internal:55432`). Copy `docker-compose.example.yml` to `docker-compose.yml` first; an older copy needs refreshing to get the Portal connection |
 | `make dev-db` / `make dev-db-down` | Start (and wait for) / stop the dev portal's Postgres; see above |
 | `make image` | Build the image like the release does (`IMAGE=...` to retag) |

@@ -1,8 +1,10 @@
 """Agent-activity counters: the in-memory book and its ``agent_call_days`` rows.
 
 M2f-3 plan section 4.10. Every MCP tool / resource / prompt call (local
-``/mcp/<slug>``) and every ``/api/v1`` data call (a connected portal) is
-counted - cache hits included - through
+``/mcp/<slug>``), every bridged CodeGraph tool call (``/mcp/<slug>/code``,
+under the :data:`~whygraph.portal.codegraph_host.BRIDGED_TOOLS` names only)
+and every ``/api/v1`` data call (a connected portal) is counted - cache hits
+included - through
 :func:`whygraph.core.usage.count_agent_call`, which reaches
 :meth:`whygraph.portal.usage.PortalUsageSink.count_call`, which adds one to
 the :class:`AgentCallBook` on ``PortalState.agent_calls``.

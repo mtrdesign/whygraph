@@ -47,8 +47,10 @@ DEV_GITHUB_MODE = if [ -f "$(DEV_ENV_FILE)" ]; then echo "loading $(DEV_ENV_FILE
 	else echo "error: a real GitHub needs every OAuth App and GitHub App variable (see .env.dev.example); missing:$$missing" >&2; exit 1; fi
 
 # `make inspect SLUG=<slug>` points the MCP Inspector at one project's MCP
-# endpoint on the running dev portal.
+# endpoint on the running dev portal; `MCP_PATH=code` picks its CodeGraph
+# endpoint (/mcp/<slug>/code) instead.
 SLUG ?= whygraph
+MCP_PATH ?=
 
 # Local image tag. `make image` builds it with the release's build args.
 IMAGE ?= whygraph:dev
@@ -168,9 +170,9 @@ docs:  ## Serve the docs site locally with live reload (social cards skipped - n
 docs-build:  ## Build the static docs site into ./site (strict; cards skipped unless CI=true)
 	$(UV_RUN) mkdocs build --strict
 
-inspect:  ## MCP Inspector vs a project's endpoint on the running dev portal (SLUG=<slug>)
+inspect:  ## MCP Inspector vs a project's endpoint on the running dev portal (SLUG=<slug>, MCP_PATH=code for CodeGraph)
 	@node -e 'process.exit(+process.versions.node.split(".")[0]>=20?0:1)' 2>/dev/null || { echo "error: MCP Inspector needs Node >= 20 (have $$(node -v 2>/dev/null || echo none)) - try 'nvm use 22'"; exit 1; }
-	npx @modelcontextprotocol/inspector --transport http --server-url http://127.0.0.1:$(DEV_PORT)/mcp/$(SLUG)
+	npx @modelcontextprotocol/inspector --transport http --server-url http://127.0.0.1:$(DEV_PORT)/mcp/$(SLUG)$(if $(MCP_PATH),/$(MCP_PATH))
 
 db:  ## DBGate viewer for a scratch repo's two databases and the dev portal DB (http://localhost:8081; SLUG=<repo>)
 	@test -f docker-compose.yml || { echo "error: docker-compose.yml missing - run: cp docker-compose.example.yml docker-compose.yml"; exit 1; }

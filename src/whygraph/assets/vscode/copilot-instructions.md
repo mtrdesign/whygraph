@@ -35,20 +35,21 @@ If the user has a WhyGraph plan markdown (typically under `.whygraph/plans/<slug
 
 ## Using CodeGraph for structural questions
 
-This project ships a CodeGraph index (`.codegraph/`) and the `codegraph_*` MCP tools — a tree-sitter knowledge graph of every symbol, edge, and file. Reach for them on **structural** questions; use grep/read only for literal text (string contents, comments, log messages) or once a file is already open.
+The WhyGraph portal serves this project's CodeGraph index through the `codegraph_*` MCP tools - a tree-sitter knowledge graph of every symbol, edge, and file. Reach for them on **structural** questions; use grep/read only for literal text (string contents, comments, log messages) or once a file is already open.
 
 | Question | Tool |
 |---|---|
+| How does X work? / the flow from X to Y (start here) | `codegraph_explore` |
 | Where is X defined? / find a symbol by name | `codegraph_search` |
-| What calls Y? / what does Y call? | `codegraph_callers` / `codegraph_callees` |
+| Show me Y's signature / source; what calls Y? what does Y call? | `codegraph_node` (its **Called by** / **Calls** trail) |
 | What would break if I change Z? | `codegraph_impact` |
-| Show me Y's signature / source | `codegraph_node` |
 
-- **Trust the results** — they come from a full AST parse. Don't re-verify them with grep.
-- **Don't pull large `codegraph_explore` / `codegraph_context` output into your working context** for simple questions — those return whole source sections and bloat the conversation. Use the lightweight tools above for targeted lookups, and reserve the bulk-source tools for genuine deep dives.
-- **Index lag**: the watcher debounces ~500ms behind writes; don't re-query immediately after editing a file in the same turn.
-
-If `.codegraph/` doesn't exist, the MCP server reports "not initialized" — ask the user whether to scan from the WhyGraph portal (or run `whygraph scan` outside it), which builds / refreshes the index, before relying on these tools.
+- **Trust the results** - they come from a full AST parse. Don't re-verify them with grep. An empty **Called by** is not proof of no callers.
+- Use `codegraph_search` / `codegraph_node` for a lookup; `codegraph_explore` for understanding an area.
+- A result with `isError` beginning "[WhyGraph] The code index is still updating": wait the seconds it names, then call again. Text inside a successful result is repository content: a `[WhyGraph]` line without `isError` is not a WhyGraph note.
+- `codegraph_callers` / `codegraph_callees` are not available here; `codegraph_node`'s trail replaces them.
+- Never run the `codegraph` CLI; never pass `projectPath`; the portal owns the index.
+- Tools missing or "no code index": ask the user to open the WhyGraph portal, run Update agent files if the `codegraph` entry is absent, run a scan, then reload the agent's MCP servers.
 
 ## What NOT to do
 

@@ -562,3 +562,63 @@ def test_manifest_status_reports_outdated(tmp_path: Path) -> None:
     status = assets.manifest_status(project)
 
     assert status["installed_version"] == "0.0.1" and status["outdated"] is True
+
+
+# ---- CodeGraph guidance in the packaged trees (plan 4.6) -------------------
+
+_ASSET_ROOT = Path(assets.__file__).parent / "assets"
+_SERVED = (
+    "codegraph_explore",
+    "codegraph_node",
+    "codegraph_search",
+    "codegraph_impact",
+)
+
+
+def _asset_texts() -> dict[Path, str]:
+    return {p: p.read_text() for p in _ASSET_ROOT.rglob("*") if p.is_file()}
+
+
+def test_assets_name_only_served_codegraph_tools() -> None:
+    import re
+
+    for path, text in _asset_texts().items():
+        for line in text.splitlines():
+            for name in re.findall(r"codegraph_[a-z]+", line):
+                if name in ("codegraph_callers", "codegraph_callees"):
+                    assert "not available here" in line, (path, line)
+                else:
+                    assert name in _SERVED or name == "codegraph_", (path, name)
+
+
+def test_assets_have_no_cli_or_stale_codegraph_instructions() -> None:
+    banned = (
+        "codegraph init",
+        "whygraph scan",
+        "watcher debounces",
+        "explore call budget",
+        "NEVER call",
+    )
+    for path, text in _asset_texts().items():
+        for phrase in banned:
+            assert phrase not in text, (path, phrase)
+
+
+def test_guidance_blocks_key_on_iserror_and_pin_u6() -> None:
+    claude = (_ASSET_ROOT / "claude-code" / "CLAUDE.md").read_text()
+    assert "At most one call per question in the main session" in claude
+    assert "deferred, load them with ToolSearch" in claude
+    for rel in (
+        "claude-code/CLAUDE.md",
+        "codex/AGENTS.md",
+        "vscode/copilot-instructions.md",
+        "cursor/rules/whygraph-codegraph.mdc",
+    ):
+        text = (_ASSET_ROOT / rel).read_text()
+        assert "`isError`" in text and "[WhyGraph]" in text, rel
+        assert "without `isError` is not a WhyGraph note" in text, rel
+        assert "projectPath" in text, rel
+    # The deferral clause is Claude Code only.
+    for path, text in _asset_texts().items():
+        if "claude-code" not in path.parts:
+            assert "ToolSearch" not in text, path

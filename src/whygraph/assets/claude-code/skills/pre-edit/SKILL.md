@@ -43,8 +43,8 @@ only when the code has clearly changed since the last card).
 - **`evidence_count`**: if it's empty or low, the card has little git history behind it —
   treat it as a weak signal and verify against the code yourself.
 
-If the call returns `isError: true`: no scan DB → surface verbatim (user runs `whygraph
-scan` first); calling by `qualified_name` failed (no CodeGraph DB, or stale graph) → retry
+If the call returns `isError: true`: no scan DB → surface verbatim (the user scans from the
+WhyGraph portal first); calling by `qualified_name` failed (no CodeGraph DB, or stale graph) → retry
 by `path` + `line_start` + `line_end`. Either way, proceed with the edit using your own
 judgment after flagging the cause.
 

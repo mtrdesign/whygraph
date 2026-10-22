@@ -28,24 +28,20 @@ SCOPING:
 
 ## Tools
 
-- **CodeGraph MCP** — `codegraph_search`, `codegraph_callers`, `codegraph_callees`, `codegraph_node`, `codegraph_impact`, `codegraph_explore`. Source of *what is structurally affected*.
+- **CodeGraph MCP** (served by the WhyGraph portal) - `codegraph_search` (find a symbol), `codegraph_node` (one symbol's source + Called by / Calls trail), `codegraph_impact` (transitive dependents, `depth` 1-3), `codegraph_explore` (source + call paths for an area). Source of *what is structurally affected*. `codegraph_callers` / `codegraph_callees` are not available here.
 - **WhyGraph MCP** — `whygraph_rationale_brief`, `whygraph_evidence_for`, `whygraph_area_history`. Source of *why each affected symbol exists*.
 - File tools (read, grep, glob, shell) for grounding against actual source.
 - Subagent delegation — for handing off to `whygraph-researcher` and `whygraph-synthesizer` subagents (deep mode only).
 
-If the CodeGraph MCP tools are unavailable in this session, stop immediately and respond:
-*"WhyGraph planner needs CodeGraph installed in this project. Add this project in the WhyGraph portal and run a scan (or `codegraph init -i`), then re-run `/whygraph-plan`."*
+If the `codegraph_*` tools are not in this session, stop immediately and respond:
+*"WhyGraph planner needs the CodeGraph tools, which the WhyGraph portal serves for this project. Open the portal, check that this project is set up (Settings > Update agent files adds the `codegraph` entry) and has a finished scan, reload the agent's MCP servers, then re-run `/whygraph-plan`."*
 Do not attempt to plan without the graph.
 
 ## Phase 1 — Build the working set (both modes)
 
 **1a. Find seed symbols.** Parse the task for symbol-like terms (function/class/module names, file paths). Use `codegraph_search` to resolve them. When the task names a file rather than a symbol, `whygraph_area_history(path=...)` is a useful secondary signal — the commits and PRs that have ever touched that path point at the code that matters. If you can't resolve any seed at all, ask the user one targeted clarifying question (e.g. *"Which file or module does this touch?"*) and stop.
 
-**1b. Compute the impact set.** For each seed, call `codegraph_impact` (or `codegraph_callers` + `codegraph_callees` if `codegraph_impact` is unavailable). Cap at:
-- **15 nodes** in single-pass mode.
-- **10 nodes** in deep mode (researchers each consume the working set; tighter cap keeps fan-out tractable).
-
-If impact returns more, rank by direct distance from seeds (1-hop > 2-hop > deeper) and keep the top N. Note the truncation count.
+**1b. Compute the impact set.** For each seed, call `codegraph_impact(symbol=<short name>, file=<path>, depth=2)` - pass the symbol's last component, not the dotted qualified name, and pin it with the working set's `file`; `depth` at most 3. It lists the symbols affected by changing the seed, grouped by file. Then call `codegraph_node(symbol=<short name>, file=<path>)` for each seed: its trail lists **Called by** (1-hop callers) and **Calls** (1-hop callees) with `file:line`, which tells 1-hop from 2-hop entries; follow at most 3 callers. If `codegraph_impact` fails for a seed, use the `codegraph_node` trail. An empty **Called by** / impact list is not proof of no callers (a call through a module attribute, e.g. `mod.func(...)`, may not resolve), so grep for the name before treating a seed as a leaf. Cap at 15 nodes in single-pass mode, 10 in deep mode. If there are more, rank by distance from the seeds (1-hop before 2-hop) and keep the top N; note the truncation.
 
 **1c. Warm the rationale cache.** For each working-set node, call `whygraph_rationale_brief(qualified_name=...)` once. The first call generates the card (one LLM call, seconds); later calls on the same unchanged lines are served from the cache (a few hundred ms: blame runs again to check the evidence is unchanged). Researchers will fetch on-demand later — warming the cache here means they hit cache instead of generating cards in parallel.
 

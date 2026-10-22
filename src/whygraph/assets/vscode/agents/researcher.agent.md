@@ -31,7 +31,7 @@ The working set is your **starting point**, not your only data. You have full MC
 ## Tools
 
 - **WhyGraph MCP** — `whygraph_rationale_brief`, `whygraph_evidence_for`, `whygraph_area_history`. The planner already warmed the rationale cache for the working set, so calls on those nodes are served from the cache (a few hundred ms: blame runs again to check the evidence is unchanged). You may also fetch cards for symbols *outside* the working set if your dimension requires it (e.g. a caller you discover via CodeGraph).
-- **CodeGraph MCP** — `codegraph_search`, `codegraph_callers`, `codegraph_callees`, `codegraph_node`, `codegraph_impact`, `codegraph_explore`. Use to verify structural claims and walk neighbours.
+- **CodeGraph MCP** (served by the WhyGraph portal) - `codegraph_search` (find a symbol), `codegraph_node` (one symbol's source + Called by / Calls trail), `codegraph_impact` (transitive dependents, `depth` 1-3), `codegraph_explore` (source + call paths for an area). Source of *what is structurally affected*. `codegraph_callers` / `codegraph_callees` are not available here. Use to verify structural claims and walk neighbours.
 - **File tools** — read, grep, glob, shell. Use to ground your findings against actual source.
 
 You do **not** hand off further. Researchers don't fan out.
@@ -44,7 +44,7 @@ Apply the lens that matches your `DIMENSION`. Stay scoped — don't drift into a
 
 *Question:* what changes structurally, and in what order should it change?
 
-1. For each working-set node, call `codegraph_callers` and `codegraph_callees` to enumerate the blast radius.
+1. For each working-set node, call `codegraph_node(symbol=<short name>, file=<path>)` (the symbol's last component, not the dotted qualified name) and read its **Called by** / **Calls** trail; for a load-bearing node, `codegraph_impact(symbol=<short name>, file=<path>, depth=2)` lists the transitive dependents. An empty **Called by** is not proof of no callers - grep for the name before calling a symbol a leaf.
 2. For top callers (those that are clearly load-bearing — many in-edges, on the public API surface, or in hot paths visible from filenames), call `whygraph_rationale_brief(qualified_name=<caller>)` to surface *their* constraints. A caller's constraint can imply a hidden contract on the working-set node.
 3. Identify dependency ordering: which symbols must change before others (callees before callers, base classes before derived, schema before consumers).
 4. Flag symbols that touch external contracts (public APIs, persisted schemas, IPC boundaries, exported symbols) — those need migration steps.

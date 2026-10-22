@@ -29,7 +29,7 @@ The server also offers prompts: `whygraph_pre_edit_brief`, `whygraph_why_was_thi
 - The user is adding *new* code with no predecessor — no rationale exists yet.
 - The user is about to *edit* the symbol — the `whygraph-pre-edit` rule already covers that path; you'll fetch the brief there.
 - The question is conceptual or domain-level rather than per-symbol ("how does authentication work?" — broader than one symbol).
-- WhyGraph hasn't been scanned in this project. Surface the tool's error verbatim and suggest scanning from the WhyGraph portal (or running `whygraph scan` outside it) first.
+- WhyGraph hasn't been scanned in this project. Surface the tool's error verbatim and suggest scanning from the WhyGraph portal first.
 
 ## What you should NOT do
 

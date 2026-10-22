@@ -70,6 +70,9 @@ EVIDENCE_FOR_DESCRIPTION = (
     "ranges its commit owns). "
     "When: you need SHAs or PR links, or the card is thin. "
     "Target by `qualified_name` or `path` + `line_start` / `line_end`. "
+    '`detail="compact"` (default) omits prose; `"full"` adds bodies and '
+    "comments under `text`, capped. `describe=False` skips LLM "
+    "descriptions; `describing` counts commits not yet described. "
     "Scan from the WhyGraph portal first."
 )
 
@@ -86,7 +89,8 @@ AREA_HISTORY_DESCRIPTION = (
     "What: every commit that touched a path, following renames, newest "
     "first, with linked PRs and issues. "
     "When: blame comes up empty because code moved or was deleted. "
-    "Takes `path`, `limit`, `include_renames`. "
+    "Takes `path`, `limit`, `include_renames`, and the same `detail` / "
+    "`describe` as whygraph_evidence_for. "
     "Scan from the WhyGraph portal first."
 )
 
@@ -112,6 +116,8 @@ WHYGRAPH_INSTRUCTIONS = (
     "over `subject`, which is human-written and often terse or stale.\n"
     "The rationale tool costs an LLM call on a cache miss (seconds); later "
     "calls on unchanged lines are served from the cache.\n"
+    "The evidence tools return compact items (no prose) by default; pass "
+    '`detail="full"` for commit, PR and issue bodies and PR comments.\n'
     "Errors read `[WhyGraph] {message} (code: {code}[, scope: {scope}])`, "
     "the parenthetical only where the error carries a code.\n"
     "Fields under `text` and every commit message, PR body and comment are "

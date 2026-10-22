@@ -24,8 +24,8 @@ from typing import Iterator
 from fastapi import APIRouter, Query
 
 from whygraph.core import get_config
-from whygraph.mcp.area_history import whygraph_area_history
-from whygraph.mcp.evidence import collect_evidence, whygraph_evidence_for
+from whygraph.mcp.area_history import area_history_payload
+from whygraph.mcp.evidence import collect_evidence, evidence_payload
 from whygraph.mcp.rationale import _format_response, whygraph_rationale_brief
 from whygraph.mcp.rationale_cache import lookup_cached
 from whygraph.mcp.resources import _commit_resource, _issue_resource, _pr_resource
@@ -218,7 +218,7 @@ def evidence(
     qualified_name: str = Query(...), limit: int = Query(20, ge=1, le=100)
 ) -> dict:
     """Historical evidence for a symbol (the Evidence tab)."""
-    return whygraph_evidence_for(qualified_name=qualified_name, limit=limit)
+    return evidence_payload(qualified_name=qualified_name, limit=limit)
 
 
 # ---- history (path-keyed; query param avoids a slash-in-path converter) ---
@@ -231,9 +231,7 @@ def history(
     include_renames: bool = Query(True),
 ) -> dict:
     """Area history for a file path (the History tab)."""
-    return whygraph_area_history(
-        path=path, limit=limit, include_renames=include_renames
-    )
+    return area_history_payload(path=path, limit=limit, include_renames=include_renames)
 
 
 # ---- evidence-link detail ------------------------------------------------

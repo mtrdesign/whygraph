@@ -183,7 +183,7 @@ def test_evidence_attributes_squash_lines_to_origin_commits(
 
     by_source: dict[str, set[str]] = {}
     for item in result["evidence"]:
-        by_source.setdefault(item["source"], set()).add(item["commit"]["sha"])
+        by_source.setdefault(item["source"], set()).add(item["sha"])
 
     # The squash commit itself surfaces via direct HEAD blame...
     assert shas["squash"] in by_source.get("blame", set())
@@ -324,6 +324,6 @@ def test_gate_also_fires_for_locally_scanned_feature_commits(
 
     by_source: dict[str, set[str]] = {}
     for item in result["evidence"]:
-        by_source.setdefault(item["source"], set()).add(item["commit"]["sha"])
+        by_source.setdefault(item["source"], set()).add(item["sha"])
 
     assert by_source.get("pr-origin") == {shas["feat1"], shas["feat2"]}

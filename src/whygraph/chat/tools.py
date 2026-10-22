@@ -685,13 +685,18 @@ def _get_evidence(qualified_name: str, limit: int = 10) -> dict:
     """Handler for ``get_evidence``."""
     if not qualified_name:
         return {"error": "qualified_name is required"}
-    return whygraph_evidence_for(qualified_name=qualified_name, limit=max(1, limit))
+    return whygraph_evidence_for(
+        qualified_name=qualified_name, limit=max(1, limit), detail="full"
+    )
 
 
 def _get_area_history(path: str, limit: int = 10, include_renames: bool = True) -> dict:
     """Handler for ``get_area_history``."""
     return whygraph_area_history(
-        path=path, limit=max(1, limit), include_renames=include_renames
+        path=path,
+        limit=max(1, limit),
+        include_renames=include_renames,
+        detail="full",
     )
 
 

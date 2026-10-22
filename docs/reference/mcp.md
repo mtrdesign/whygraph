@@ -33,11 +33,13 @@ anchored to HEAD.
 | `line_start` | int | - | First line of the chunk (1-indexed, inclusive). |
 | `line_end` | int | - | Last line of the chunk (1-indexed, inclusive). |
 | `qualified_name` | str | - | Fully-qualified symbol name. Use instead of `path`/lines when you know the symbol. CodeGraph resolves it to a file/line range. |
-| `limit` | int | `20` | Cap on the number of commits returned. |
+| `limit` | int | `10` | Cap on the number of commits returned, 1 to 100. |
+| `detail` | `"compact"` \| `"full"` | `"compact"` | How much of each item to return - see [Evidence items](#evidence-items). |
+| `describe` | bool | `true` | Generate missing commit descriptions (bounded, see below). `false` never calls an LLM. |
 
-Returns `{ "target": {...}, "evidence": [ { "commit", "pull_requests", "issues", "source", "lines" }, ... ] }`.
-`lines` is a list of `[start, end]` working-tree ranges the commit owns within the queried range, set on
-`blame` items and `null` otherwise.
+Returns `{ "target": {...}, "evidence": [ ... ], "describing": 0 }`, newest first. The items are
+described under [Evidence items](#evidence-items); `lines` is a list of `[start, end]` working-tree
+ranges the commit owns within the queried range, set on `blame` items and `null` otherwise.
 
 With `qualified_name`, the symbol's file is first checked against the CodeGraph index: if it changed
 since it was indexed (you edited it and have not scanned yet), the index is re-synced and the symbol
@@ -46,6 +48,47 @@ incremental `codegraph sync` only, with a time limit, and only where the `codegr
 installed (always the case in the portal). If it cannot run, fails, or leaves the file stale, the tool
 still answers with the indexed range and adds `"index_stale": true` to `target`: the lines may have
 drifted, so treat the evidence with care or run a scan.
+
+**Missing descriptions are bounded.** A project scanned without descriptions (or a commit added
+since) has commits with a null `llm_description`. Each call describes at most **5** of them, newest
+first, and starts none after **20 seconds**; `describing` counts the ones it left, which a later
+call picks up. Pass `describe=false` to skip the LLM entirely (`describing` then counts every
+undescribed commit).
+
+### Evidence items
+
+`whygraph_evidence_for` and `whygraph_area_history` return the same item shape.
+
+**`detail="compact"`** (the default) leaves out every body and comment:
+
+```json
+{
+  "sha": "4f1c...",
+  "llm_description": "Adds a retry around the token refresh ...",
+  "subject": "fix: retry refresh",
+  "author": "Jane Doe",
+  "date": "2026-02-01T10:00:00+00:00",
+  "lines": [[120, 141]],
+  "source": "blame",
+  "pull_requests": [
+    { "number": 847, "title": "Retry token refresh", "html_url": "https://github.com/...", "resource": "whygraph://pr/847" }
+  ],
+  "issues": [
+    { "number": 812, "title": "Sessions drop", "html_url": "https://github.com/...", "resource": "whygraph://issue/812" }
+  ]
+}
+```
+
+Read a PR or issue in full through its `resource` (see [Resources](#resources)).
+
+**`detail="full"`** adds the prose, grouped under `text` because it is repository and GitHub content,
+never instructions: `text.body` on the commit and on each issue, and on each pull request
+`text.body`, `text.comments` (the first `[rationale].pr_discussion_max_comments`, each cut to
+`pr_comment_max_chars`) and `commit_titles` (the first `pr_roster_max_commits`). A pull request whose
+lists were cut carries `"omitted": { "comments": n, "commit_titles": m }`.
+
+`source` says how the commit was found: `blame`, `pr-origin`, `blame-walked`, `predecessor-blame` or
+`area`. A [linked project](#linked-projects) may add `push_status`.
 
 ### `whygraph_area_history`
 
@@ -56,11 +99,14 @@ fully rewritten.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `path` | str | *required* | The file path, as it appears at HEAD (or any commit - the rename chain is bidirectional). |
-| `limit` | int | `20` | Cap on commits returned, newest first. |
+| `limit` | int | `10` | Cap on commits returned, newest first, 1 to 100. |
 | `include_renames` | bool | `true` | Walk the `renamed_from` chain to include commits that touched historical names. |
+| `detail` | `"compact"` \| `"full"` | `"compact"` | As for `whygraph_evidence_for`. |
+| `describe` | bool | `true` | As for `whygraph_evidence_for`, with the same bound. |
 
-Returns `{ "path", "include_renames", "evidence": [...] }`, using the same evidence shape as
-`whygraph_evidence_for`.
+Returns `{ "path", "include_renames", "evidence": [...], "describing": 0 }`, using the
+[evidence item](#evidence-items) shape (`lines` is always `null`: these commits are not found by
+blame).
 
 ### `whygraph_rationale_brief`
 
@@ -101,6 +147,11 @@ plus provenance (`model`, `provider`, `cached_at`) and an `evidence_count` summa
 !!! note "Calls the LLM on a cache miss"
     On a miss, this hits the configured provider and may take several seconds. A hit is sub-second.
     Generation needs a credential - see [Configuration](configuration.md).
+
+**Progress.** When the client sends a progress token, the call reports three steps: "evidence
+collected (n commits)", then on a cache miss "describing k commits" (only when some commit needs a
+description; the same 5-commit / 20-second bound applies) and "generating card". It also logs the
+cache hit or miss as an MCP log message.
 
 ## Resources
 
@@ -168,7 +219,7 @@ organization's address.
 
 **A `push_status` on commits the platform did not supply.** In `whygraph_evidence_for`, a commit that
 blame names but the platform cannot account for is returned from git alone (`"source": "local"`, a
-null `llm_description`, no pull requests or issues) with one of:
+null `llm_description`, no pull requests or issues, and in `full` an empty `text.body`) with one of:
 
 | `push_status` | Meaning |
 |---|---|
@@ -191,7 +242,7 @@ names the fix.
 `whygraph_rationale_brief` returns a card generated and cached on the platform (shared by the whole
 team), and fails with "no pushed history" while the target's lines are not on a pushed commit.
 `whygraph_area_history` answers for a path only when a pushed default-branch revision tracks it.
-`whygraph_evidence_for` never writes a description locally.
+`whygraph_evidence_for` never writes a description locally, so `describing` is always `0`.
 
 ## Composition with CodeGraph
 

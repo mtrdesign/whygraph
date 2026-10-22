@@ -57,11 +57,20 @@ def _rpc(method: str, params: dict | None = None, id: int = 1) -> dict:
 
 
 def _sse_json(text: str) -> dict:
-    """The JSON-RPC message of a one-event SSE response body."""
-    for line in text.splitlines():
-        if line.startswith("data: "):
-            return json.loads(line.removeprefix("data: "))
-    return json.loads(text)
+    """The JSON-RPC response of an SSE response body.
+
+    Notifications sent during the call (the rationale tool's progress and
+    cache log, plan section 5.4) come first and carry no ``id``; the
+    response is the message that does.
+    """
+    messages = [
+        json.loads(line.removeprefix("data: "))
+        for line in text.splitlines()
+        if line.startswith("data: ")
+    ]
+    if not messages:
+        return json.loads(text)
+    return next((m for m in messages if "id" in m), messages[0])
 
 
 def _setup_project(client, root: Path) -> None:
@@ -310,6 +319,66 @@ def test_mcp_client_gets_the_same_evidence_as_a_direct_call(
         direct = whygraph_evidence_for(path="sample.py", line_start=1, line_end=3)
     assert via_mcp == direct
     assert len(direct["evidence"]) == 2
+
+
+def test_rationale_progress_reaches_the_client_over_stateless_http(
+    env: SimpleNamespace,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Progress sent with ``related_request_id`` arrives on the request stream (5.4)."""
+    from whygraph.analyze import Rationale
+
+    class _Generator:
+        @classmethod
+        def from_config(cls, config: object) -> "_Generator":
+            return cls()
+
+        def generate(self, evidence, *, symbol_context=None, subject=None):  # noqa: ANN001
+            return Rationale(
+                purpose="p",
+                why="w",
+                constraints=(),
+                tradeoffs=(),
+                risks=(),
+                model="fake-1",
+                provider="fake",
+            )
+
+    monkeypatch.setattr(rationale, "RationaleGenerator", _Generator)
+    root = make_repo(env.shared, "demo")
+    port = _free_port()
+    seen: list[tuple] = []
+
+    async def _progress(progress: float, total: float | None, message: str | None):
+        seen.append((progress, total, message))
+
+    with live_portal(port):
+        with _http(port) as http:
+            _setup_project(http, root)
+            _seed_commits(root)
+
+        async def _call():
+            async with httpx.AsyncClient(
+                trust_env=False, timeout=30, follow_redirects=False
+            ) as ac:
+                async with streamable_http_client(
+                    f"http://127.0.0.1:{port}/mcp/demo", http_client=ac
+                ) as (read, write, _):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        return await session.call_tool(
+                            "whygraph_rationale_brief",
+                            {"path": "sample.py", "line_start": 1, "line_end": 3},
+                            progress_callback=_progress,
+                        )
+
+        result = asyncio.run(_call())
+
+    assert result.isError is False, result.content
+    assert seen == [
+        (1.0, 3.0, "evidence collected (2 commits)"),
+        (3.0, 3.0, "generating card"),
+    ]
 
 
 def test_slow_mcp_calls_do_not_block_the_ui(

@@ -755,6 +755,21 @@ def test_budget_defaults_to_chat_config(
     assert ToolRegistry()._generation_budget == 7
 
 
+def test_chat_reads_the_full_evidence_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Chat keeps ``detail="full"``: it truncates results itself (plan 5.4)."""
+    seen: list[dict] = []
+
+    def _spy(**kwargs: object) -> dict:
+        seen.append(kwargs)
+        return {"evidence": []}
+
+    monkeypatch.setattr(chat_tools, "whygraph_evidence_for", _spy)
+    monkeypatch.setattr(chat_tools, "whygraph_area_history", _spy)
+    chat_tools._get_evidence("run_turn")
+    chat_tools._get_area_history("a.py")
+    assert [call["detail"] for call in seen] == ["full", "full"]
+
+
 # ---------------------------------------------------------------------------
 # File tools: the clamp (§10, AC #6)
 # ---------------------------------------------------------------------------

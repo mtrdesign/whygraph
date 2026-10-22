@@ -8,9 +8,12 @@ synthesize a structured rationale card.
 
 from __future__ import annotations
 
+import functools
+import logging
 from collections.abc import Callable
 
-from mcp.server.fastmcp import FastMCP
+import anyio.from_thread
+from mcp.server.fastmcp import Context, FastMCP
 
 from whygraph.analyze import AnalyzeError, RationaleGenerator
 from whygraph.core import get_config
@@ -37,6 +40,11 @@ from .evidence import (
     split_by_push_status,
 )
 from .rationale_cache import lookup_cached, store_cached
+
+_log = logging.getLogger(__name__)
+
+PROGRESS_STEPS = 3
+"""The rationale tool's progress steps: evidence, describing, generating."""
 
 
 def _symbol_context(target: Target) -> SymbolContext | None:
@@ -208,6 +216,8 @@ def rationale_card(
     before_generate: Callable[[], None] | None = None,
     allow_description: Callable[[], bool] | None = None,
     force_refresh: bool = False,
+    progress: Callable[[int, str], None] | None = None,
+    note: Callable[[str], None] | None = None,
 ) -> dict:
     """The rationale card of ``target`` from ``evidence``: cached, or generated and cached.
 
@@ -230,6 +240,12 @@ def rationale_card(
     force_refresh : bool, default False
         Skip the cache lookup and generate a new card (still stored, and
         still subject to the generation gates and ``before_generate``).
+    progress : callable, optional
+        Called as ``progress(step, message)`` for step 2 ("describing k
+        commits", only when the backfill describes any) and step 3
+        ("generating card") of :data:`PROGRESS_STEPS` on a cache miss.
+    note : callable, optional
+        Called with a one-line cache hit / miss message.
 
     Returns
     -------
@@ -261,7 +277,11 @@ def rationale_card(
     )
     if cached is not None:
         rationale, cached_at = cached
+        if note is not None:
+            note("rationale cache hit")
         return _format_response(target, rationale, evidence, cached_at)
+    if note is not None:
+        note("rationale cache " + ("bypassed" if force_refresh else "miss"))
 
     ctx = current_project()
     if ctx is not None and not ctx.llm_allowed:
@@ -282,9 +302,18 @@ def rationale_card(
     # fingerprint is sha256-over-sorted-SHAs, so backfilling here does
     # not affect cache keys.
     backfill_evidence_descriptions(
-        evidence, target_path=target.path, allow=allow_description
+        evidence,
+        target_path=target.path,
+        allow=allow_description,
+        on_start=(
+            None
+            if progress is None
+            else lambda k: progress(2, f"describing {k} commits")
+        ),
     )
 
+    if progress is not None:
+        progress(3, "generating card")
     try:
         generator = RationaleGenerator.from_config(config)
         rationale = generator.generate(
@@ -301,12 +330,69 @@ def rationale_card(
     return _format_response(target, rationale, evidence, cached_at)
 
 
+def _client_channel(
+    ctx: Context | None,
+) -> tuple[Callable[[int, str], None] | None, Callable[[str], None] | None]:
+    """The progress and log senders for one MCP request, from its worker thread.
+
+    The tool body runs on a worker thread (:func:`~whygraph.mcp.server.offload`),
+    so each send hops back to the event loop with
+    :func:`anyio.from_thread.run`. Progress goes through
+    ``session.send_progress_notification`` with ``related_request_id`` -
+    never ``ctx.report_progress``, which omits it, so the stateless HTTP
+    transport would route the notification to a GET stream that does not
+    exist and drop it. A failed send is logged and never fails the call.
+
+    Returns
+    -------
+    tuple
+        ``(progress, note)``: ``progress`` is ``None`` without a context
+        or without a client ``progressToken``; ``note`` (``ctx.info``) is
+        ``None`` without a context.
+    """
+    if ctx is None:
+        return None, None
+    try:
+        request = ctx.request_context
+    except ValueError:
+        return None, None
+    request_id = ctx.request_id
+
+    def _send(fn: Callable[[], object]) -> None:
+        try:
+            anyio.from_thread.run(fn)
+        except Exception as exc:  # noqa: BLE001 - a lost notification is not an error
+            _log.debug("MCP notification not sent: %s", exc)
+
+    def note(message: str) -> None:
+        _send(functools.partial(ctx.info, message))
+
+    token = request.meta.progressToken if request.meta else None
+    if token is None:
+        return None, note
+
+    def progress(step: int, message: str) -> None:
+        _send(
+            functools.partial(
+                request.session.send_progress_notification,
+                token,
+                float(step),
+                float(PROGRESS_STEPS),
+                message,
+                related_request_id=request_id,
+            )
+        )
+
+    return progress, note
+
+
 def whygraph_rationale_brief(
     path: str | None = None,
     line_start: int | None = None,
     line_end: int | None = None,
     qualified_name: str | None = None,
     force_refresh: bool = False,
+    ctx: Context | None = None,
 ) -> dict:
     """MCP tool — a rationale card for a chunk of code.
 
@@ -320,7 +406,14 @@ def whygraph_rationale_brief(
 
     For a project linked to a WhyGraph platform the card comes from
     :func:`linked_rationale` instead, out of the platform's shared cache.
+
+    ``ctx`` is injected by FastMCP (never part of the input schema): with a
+    client ``progressToken`` the call reports :data:`PROGRESS_STEPS` steps
+    - "evidence collected (n commits)", "describing k commits" and
+    "generating card" (the last two on a cache miss only) - and logs the
+    cache hit or miss through ``ctx.info``.
     """
+    progress, note = _client_channel(ctx)
     target = resolve_target(
         path=path,
         line_start=line_start,
@@ -331,7 +424,15 @@ def whygraph_rationale_brief(
     if ctx is not None and ctx.remote is not None:
         return linked_rationale(ctx.remote, target)
     evidence = collect_evidence(target, limit=20)
-    return rationale_card(target, evidence, force_refresh=force_refresh)
+    if progress is not None:
+        progress(1, f"evidence collected ({len(evidence)} commits)")
+    return rationale_card(
+        target,
+        evidence,
+        force_refresh=force_refresh,
+        progress=progress,
+        note=note,
+    )
 
 
 def register(mcp: FastMCP) -> None:

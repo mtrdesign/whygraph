@@ -619,3 +619,136 @@ def test_evidence_for_reports_working_tree_lines_on_blame_items(
     covered = sorted(n for e in blamed for a, b in e["lines"] for n in range(a, b + 1))
     assert covered == [1, 2, 3]
     assert all(e["lines"] is None for e in result["evidence"] if e["source"] == "area")
+
+
+# ---- progress and cache notes over a fake MCP session (plan 5.4) -----------
+
+
+class _FakeSession:
+    """Records ``send_progress_notification`` calls the way FastMCP's session takes them."""
+
+    def __init__(self) -> None:
+        self.progress: list[tuple] = []
+
+    async def send_progress_notification(
+        self,
+        progress_token: object,
+        progress: float,
+        total: float | None = None,
+        message: str | None = None,
+        related_request_id: str | None = None,
+    ) -> None:
+        self.progress.append(
+            (progress_token, progress, total, message, related_request_id)
+        )
+
+
+def _fake_ctx(token: object | None) -> tuple[object, _FakeSession, list[str]]:
+    """A stand-in for FastMCP's ``Context``: request meta, session, ``info``."""
+    from types import SimpleNamespace
+
+    session = _FakeSession()
+    notes: list[str] = []
+
+    async def info(message: str) -> None:
+        notes.append(message)
+
+    meta = SimpleNamespace(progressToken=token)
+    ctx = SimpleNamespace(
+        request_context=SimpleNamespace(meta=meta, session=session),
+        request_id="req-7",
+        info=info,
+    )
+    return ctx, session, notes
+
+
+def _run_on_worker_thread(**kwargs: object) -> dict:
+    """Call the tool the way ``offload`` does: on an anyio worker thread."""
+    import functools
+
+    import anyio
+    import anyio.to_thread
+
+    async def _main() -> dict:
+        return await anyio.to_thread.run_sync(
+            functools.partial(whygraph_rationale_brief, **kwargs)
+        )
+
+    return anyio.run(_main)
+
+
+def test_rationale_brief_reports_three_progress_steps_on_a_miss(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_two_commits_with_nulls(temp_git_repo)
+    _install_stub_descriptor(monkeypatch)
+    monkeypatch.chdir(temp_git_repo)
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _FakeGenerator)
+    ctx, session, notes = _fake_ctx("tok-1")
+    args = {"path": "sample.py", "line_start": 1, "line_end": 3}
+
+    card = _run_on_worker_thread(**args, ctx=ctx)
+
+    assert card["purpose"] == "Holds two sample lines."
+    assert session.progress == [
+        ("tok-1", 1.0, 3.0, "evidence collected (2 commits)", "req-7"),
+        ("tok-1", 2.0, 3.0, "describing 2 commits", "req-7"),
+        ("tok-1", 3.0, 3.0, "generating card", "req-7"),
+    ]
+    assert notes == ["rationale cache miss"]
+
+    # A hit: only the evidence step, and the note says so.
+    ctx, session, notes = _fake_ctx("tok-2")
+    _run_on_worker_thread(**args, ctx=ctx)
+    assert [p[1] for p in session.progress] == [1.0]
+    assert notes == ["rationale cache hit"]
+
+
+def test_rationale_brief_sends_no_progress_without_a_token(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _FakeGenerator)
+    ctx, session, notes = _fake_ctx(None)
+
+    _run_on_worker_thread(path="sample.py", line_start=1, line_end=3, ctx=ctx)
+
+    assert session.progress == []
+    assert notes == ["rationale cache miss"]
+
+
+def test_a_failing_notification_never_fails_the_card(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _FakeGenerator)
+    ctx, session, _ = _fake_ctx("tok")
+
+    async def broken(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("stream closed")
+
+    session.send_progress_notification = broken  # type: ignore[method-assign]
+    ctx.info = broken  # type: ignore[attr-defined]
+
+    card = _run_on_worker_thread(path="sample.py", line_start=1, line_end=3, ctx=ctx)
+
+    assert card["purpose"] == "Holds two sample lines."
+
+
+def test_the_context_parameter_is_injected_not_advertised() -> None:
+    import asyncio
+
+    from whygraph.mcp.server import mcp
+
+    tool = mcp._tool_manager.get_tool("whygraph_rationale_brief")
+    assert tool.context_kwarg == "ctx"
+    schemas = {t.name: t.inputSchema for t in asyncio.run(mcp.list_tools())}
+    assert "ctx" not in schemas["whygraph_rationale_brief"]["properties"]

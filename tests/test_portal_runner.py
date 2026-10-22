@@ -337,7 +337,10 @@ def test_trigger_precedence() -> None:
     assert merge_trigger("push", "sync") == "sync"
 
 
-def test_child_env_allowlist_and_injected_secrets(tmp_path: Path) -> None:
+def test_child_env_allowlist_and_injected_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WHYGRAPH_DATA", str(tmp_path / "data"))
     portal_env = {
         "PATH": "/bin",
         "HOME": "/home/me",
@@ -375,6 +378,10 @@ def test_child_env_allowlist_and_injected_secrets(tmp_path: Path) -> None:
     assert sorted(secrets) == ["ghp_project", "sk-proj"]
 
     assert "GIT_CONFIG_GLOBAL" not in env and "GIT_CONFIG_NOSYSTEM" not in env
+    # The CodeGraph writer-lock directory, in both modes; never the watcher switch.
+    lock_dir = str(tmp_path / "data" / "locks" / "codegraph")
+    assert env["WHYGRAPH_CODEGRAPH_LOCK_DIR"] == lock_dir
+    assert "CODEGRAPH_NO_WATCH" not in env and "CODEGRAPH_NO_DAEMON" not in env
 
     # A GitHub (production) project: no personal access token at all - not
     # for gh, not for git - and git reads no global or system config.
@@ -396,6 +403,7 @@ def test_child_env_allowlist_and_injected_secrets(tmp_path: Path) -> None:
         config, layer, source="github", analyze=False, environ=portal_env
     )
     assert "WHYGRAPH_GITHUB_URL" not in no_url
+    assert no_url["WHYGRAPH_CODEGRAPH_LOCK_DIR"] == lock_dir
     # Production: the token file's path, never a token value.
     token_file = tmp_path / "runs" / "7.token"
     with_file, secrets = child_env(
@@ -419,6 +427,14 @@ def test_child_env_allowlist_and_injected_secrets(tmp_path: Path) -> None:
     )
     assert "GH_TOKEN" not in bare and "ANTHROPIC_API_KEY" not in bare
     assert secrets == []
+
+
+def test_start_creates_the_codegraph_lock_dir(
+    portal: TestClient, env: SimpleNamespace
+) -> None:
+    lock_dir = env.data / "locks" / "codegraph"
+    assert lock_dir.is_dir()
+    assert lock_dir.stat().st_mode & 0o777 == 0o700
 
 
 def test_redactor_replaces_secrets_with_hints() -> None:

@@ -18,7 +18,7 @@ import pytest
 
 from conftest import build_fake_codegraph_db
 from whygraph.mcp import targets
-from whygraph.services.codegraph import CodeGraphBootstrapError
+from whygraph.services.codegraph import CodeGraphBootstrapError, writer_lock
 
 A_SOURCE = "def a():\n    return 1\n"
 
@@ -292,10 +292,7 @@ def test_a_busy_resync_of_the_same_repo_is_not_waited_on_forever(
     monkeypatch.setattr(
         targets, "refresh_codegraph_index", lambda *a, **k: calls.append(a)
     )
-    lock = targets._resync_lock(repo)
-    lock.acquire()
-    try:
+    with writer_lock(repo, wait=0) as held:
+        assert held
         assert _resolve().index_stale is True
-    finally:
-        lock.release()
     assert calls == []

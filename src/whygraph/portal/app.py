@@ -94,7 +94,8 @@ from whygraph.serve.chat import router as chat_router
 from whygraph.serve.errors import whygraph_error_handler
 from whygraph.serve.routes import generate_router
 from whygraph.serve.routes import router as data_router
-
+from whygraph.services.codegraph import configure_lock_dir
+from whygraph.services.codegraph.writer_lock import portal_lock_dir
 from . import agent_calls, audit_store, budgets, connections, usage_store
 from . import db as portal_db
 from .access_routes import access_router
@@ -433,6 +434,8 @@ async def _serving(state: PortalState) -> AsyncIterator[None]:
                 stack.push_async_callback(_stop_audit_writer, writer)
             state.usage_writer.start()
             stack.push_async_callback(_stop_usage_writer, state.usage_writer)
+            configure_lock_dir(portal_lock_dir(state.data_dir))
+            stack.callback(configure_lock_dir, None)
             await state.runner.start(state)
         watcher = anyio.create_task_group()
         await watcher.__aenter__()

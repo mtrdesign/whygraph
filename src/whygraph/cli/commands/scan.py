@@ -273,7 +273,10 @@ def scan_cmd(
         # failures land on .warning, not .error.
         codegraph_crawler = (
             CodeGraphCrawler(
-                progress, project_root=repository.root, image=codegraph_image
+                progress,
+                project_root=repository.root,
+                image=codegraph_image,
+                require_lock_dir=managed_by_portal,
             )
             if refresh_codegraph
             else None
@@ -445,7 +448,11 @@ def _scan_codegraph_only(json_mode: bool, codegraph_image: str | None) -> None:
             progress.start_event(1, ["Code index"])
         _emit_phase(progress, 1, "CodeGraph")
         crawler = CodeGraphCrawler(
-            progress, project_root=root, image=codegraph_image, strict=True
+            progress,
+            project_root=root,
+            image=codegraph_image,
+            strict=True,
+            require_lock_dir=True,
         )
         crawler.start()
         crawler.join()

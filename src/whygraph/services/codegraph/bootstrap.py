@@ -36,11 +36,13 @@ import json
 import logging
 import os
 import shutil
+import signal
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 
 from whygraph.core.safe_paths import UnsafePathError, check_inside
+from whygraph.services.git.credentials import pass_through_env
 
 from .exceptions import CodeGraphBootstrapError, CodeGraphUnsafeSymlinkError
 from .paths import CODEGRAPH_DB_RELPATH, GUARD_STAMP_RELPATH
@@ -388,48 +390,124 @@ def _run_codegraph(
             " pass --no-codegraph to skip the CodeGraph step"
         )
 
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else None,
+        text=capture,
+        env=_codegraph_env(env),
+        start_new_session=True,
+    )
     try:
-        result = subprocess.run(
-            cmd,
-            check=True,
-            cwd=cwd,
-            capture_output=capture,
-            text=capture,
-            env=_codegraph_env(env),
-            timeout=timeout,
-        )
+        stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
+        _kill_group(proc)
         raise CodeGraphBootstrapError(
             f"`codegraph {label}` did not finish within {timeout:g} s"
         ) from exc
-    except subprocess.CalledProcessError as exc:
+    except BaseException:
+        _kill_group(proc)
+        raise
+    if proc.returncode != 0:
         if capture:
-            tail = (exc.stderr or exc.stdout or "").strip()
+            tail = (stderr or stdout or "").strip()
             detail = f"\n{tail}" if tail else ""
             raise CodeGraphBootstrapError(
-                f"`codegraph {label}` failed (exit {exc.returncode}){detail}"
-            ) from exc
+                f"`codegraph {label}` failed (exit {proc.returncode}){detail}"
+            )
         raise CodeGraphBootstrapError(
-            f"`codegraph {label}` failed (exit {exc.returncode}) — see output above"
-        ) from exc
-    return (result.stdout or "") if capture else ""
+            f"`codegraph {label}` failed (exit {proc.returncode}) — see output above"
+        )
+    return (stdout or "") if capture else ""
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    """SIGTERM ``proc``'s process group, SIGKILL after 2 s, then reap it.
+
+    ``codegraph`` is an npm shim that starts a bundled Node server; killing
+    only the shim would leave the grandchild holding CodeGraph's own file
+    lock. Mirrors :meth:`whygraph.portal.runner._Job.signal`.
+    """
+    for sig, grace in ((signal.SIGTERM, 2.0), (signal.SIGKILL, None)):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            pass
+        except OSError:  # pragma: no cover - e.g. a foreign group
+            proc.send_signal(sig)
+        try:
+            proc.communicate(timeout=grace)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+_SWITCHES: dict[str, str] = {
+    "DO_NOT_TRACK": "1",
+    "CODEGRAPH_TELEMETRY": "0",
+    "CODEGRAPH_NO_UPDATE_CHECK": "1",
+    "CODEGRAPH_NO_DOWNLOAD": "1",
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_OPTIONAL_LOCKS": "0",
+}
+"""Set on every CodeGraph run: no telemetry, update check or download, and git that
+reads no global config, never prompts and never takes ``.git/index.lock``."""
+
+_HOSTED_SWITCHES: dict[str, str] = {
+    "CODEGRAPH_NO_DAEMON": "1",
+    "CODEGRAPH_NO_WATCH": "1",
+    "CODEGRAPH_MCP_TOOLS": "explore,node,search,impact",
+}
+"""Only for the portal's shared ``serve --mcp`` child. Never for a run that may
+``init``: under ``NO_WATCH`` CodeGraph offers to install its own git hooks."""
 
 
 def _codegraph_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Return ``base`` (default ``os.environ``) minus credentials the indexer never needs.
+    """Return ``base`` (default ``os.environ``) minus credentials, plus the run switches.
 
     CodeGraph only parses source, so every ``*_API_KEY``, ``GH_TOKEN``,
     ``WHYGRAPH_GIT_TOKEN`` and ``CLAUDE_CODE_OAUTH_TOKEN`` is withheld from it (and from the ``docker``
     client of the fallback path); the scan itself may hold them for its
     own LLM / GitHub calls. The portal database variables
-    (``WHYGRAPH_DATABASE_URL`` / ``_PASSWORD_FILE``) are withheld too.
+    (``WHYGRAPH_DATABASE_URL`` / ``_PASSWORD_FILE``) are withheld too. The
+    telemetry / update / download switches and the git switches are set
+    (``_SWITCHES``); ``CODEGRAPH_NO_WATCH`` and ``CODEGRAPH_NO_DAEMON`` never are.
     """
     source = os.environ if base is None else base
-    return {
+    env = {
         k: v
         for k, v in source.items()
         if not k.endswith("_API_KEY") and k not in _CREDENTIAL_ENV
     }
+    env.update(_SWITCHES)
+    return env
+
+
+def hosted_env(home: Path, base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Return the environment of the portal's shared ``codegraph serve --mcp`` child.
+
+    Parameters
+    ----------
+    home : Path
+        The child's ``HOME`` (``<data>/codegraph-home``).
+    base : Mapping[str, str], optional
+        The environment to start from. Default
+        :func:`~whygraph.services.git.credentials.pass_through_env`.
+
+    Returns
+    -------
+    dict[str, str]
+        :func:`_codegraph_env` of ``base`` plus the watcher / daemon switches,
+        the pinned tool list and ``HOME``. No ``WHYGRAPH_*`` variable and no
+        debug variable.
+    """
+    env = _codegraph_env(pass_through_env() if base is None else base)
+    env.update(_HOSTED_SWITCHES)
+    env["HOME"] = str(home)
+    return env
 
 
 def _user_arg() -> list[str]:
@@ -445,6 +523,7 @@ __all__ = [
     "DEFAULT_CODEGRAPH_IMAGE",
     "GUARD_VERSION",
     "ensure_codegraph_db",
+    "hosted_env",
     "index_predates_guard",
     "refresh_codegraph_index",
 ]

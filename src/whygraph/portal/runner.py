@@ -180,6 +180,7 @@ from whygraph.core.usage import UsageRecord, budget_message
 from whygraph.db import get_session as project_session
 from whygraph.mcp.rationale_cache import purge_paths
 from whygraph.services.codegraph import index_predates_guard
+from whygraph.services.codegraph.writer_lock import LOCK_DIR_ENV, portal_lock_dir
 from whygraph.services.git import GitError, InvalidRepoUrlError, Repository
 from whygraph.services.git.credentials import (
     GITHUB_URL_ENV,
@@ -593,6 +594,9 @@ def child_env(
     env = pass_through_env(source_env)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["WHYGRAPH_CONFIG_JSON"] = json.dumps(layer, default=str, sort_keys=True)
+    # The directory of the CodeGraph writer lock (both modes): the child's
+    # CodeGraph step never runs unlocked.
+    env[LOCK_DIR_ENV] = str(portal_lock_dir(data_dir()))
     secrets: list[str] = []
     # No personal access token for a GitHub project (M2d-2 plan section 0.2 #13).
     token = config.scan_token if source == "local" else None
@@ -1272,6 +1276,11 @@ class _TokenRefresher:
 # ---------------------------------------------------------------------------
 
 
+def _make_lock_dir(path: Path) -> None:
+    """Create the CodeGraph writer-lock directory (mode 0700)."""
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+
 class ScanRunner:
     """The portal's scan queue (see the module docstring).
 
@@ -1365,6 +1374,8 @@ class ScanRunner:
         await tg.__aenter__()
         self._tg = tg
         try:
+            # Before any recovered run is dispatched: its child locks CodeGraph there.
+            await anyio.to_thread.run_sync(_make_lock_dir, portal_lock_dir(data_dir()))
             # A previous process's children are gone: so is any use of their tokens.
             await anyio.to_thread.run_sync(sweep_token_files, data_dir())
             # Only the runner clones, and this is the one portal process.

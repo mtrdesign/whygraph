@@ -10,11 +10,14 @@ Three tools cover the two questions - evidence and rationale.
 
 **Reaching for history?** Use the evidence tools:
 
-- `whygraph_evidence_for(path, line_start, line_end | qualified_name, limit=20)` - the commits, PRs,
+- `whygraph_evidence_for(path, line_start, line_end | qualified_name, limit=10)` - the commits, PRs,
   and issues behind a specific range or symbol. Line-blame-driven, anchored to HEAD.
-- `whygraph_area_history(path, limit=20, include_renames=True)` - every commit that touched a file or
+- `whygraph_area_history(path, limit=10, include_renames=True)` - every commit that touched a file or
   its rename predecessors. Use it when the code moved, got deleted, or was rewritten and blame comes
   up short.
+
+Both return compact items (no bodies or comments) unless you pass `detail="full"`; see
+[Evidence items](../reference/mcp.md#evidence-items).
 
 **Reaching for the *why*?** Use the rationale tool:
 
@@ -42,6 +45,7 @@ Prompts are ready-made recipes that wire the tools into a workflow:
   constraints and avoids known risks.
 - `whygraph_why_was_this_written` - recover the original intent behind a chunk of code.
 - `whygraph_triage_commit` - summarize what one commit did and why, from its PR and closing issues.
+  This is the "what did commit X do" path.
 
 ## When the project is linked to a platform
 

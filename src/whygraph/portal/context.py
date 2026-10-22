@@ -131,7 +131,26 @@ def build_project_context(
         config=Config.from_dict(merged, root),
         remote=remote,
         key_scopes=key_scopes,
+        scanned_head=_scanned_head_reader(project.id),
     )
+
+
+def _scanned_head_reader(project_id: int | None) -> Callable[[], str | None]:
+    """A reader of ``projects.last_scanned_head`` that is current on every call.
+
+    The context is cached across scans, so the head is read from the row
+    when asked (``whygraph://repo/overview``'s ``freshness``), never
+    copied into the context.
+    """
+
+    def read() -> str | None:
+        if project_id is None:
+            return None
+        with get_session() as session:
+            project = session.get(Project, project_id)
+            return None if project is None else project.last_scanned_head
+
+    return read
 
 
 def _linked_remote(

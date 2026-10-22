@@ -162,7 +162,7 @@ def test_area_history_tool_traverses_renames(
 
     result = whygraph_area_history("final.py")
 
-    shas = [item["commit"]["sha"] for item in result["evidence"]]
+    shas = [item["sha"] for item in result["evidence"]]
     # Newest first.
     assert shas == ["sha_recent", "sha_rename2", "sha_rename1", "sha_mid", "sha_old"]
     assert result["path"] == "final.py"
@@ -178,7 +178,7 @@ def test_area_history_tool_can_skip_rename_chain(
 
     result = whygraph_area_history("final.py", include_renames=False)
 
-    shas = [item["commit"]["sha"] for item in result["evidence"]]
+    shas = [item["sha"] for item in result["evidence"]]
     # Only commits that literally touched ``final.py`` — predecessors omitted.
     assert shas == ["sha_recent", "sha_rename2"]
 
@@ -193,7 +193,7 @@ def test_area_history_tool_respects_limit(
     result = whygraph_area_history("final.py", limit=2)
 
     assert len(result["evidence"]) == 2
-    assert result["evidence"][0]["commit"]["sha"] == "sha_recent"
+    assert result["evidence"][0]["sha"] == "sha_recent"
 
 
 def test_area_history_tool_rejects_invalid_inputs() -> None:
@@ -201,6 +201,29 @@ def test_area_history_tool_rejects_invalid_inputs() -> None:
         whygraph_area_history("")
     with pytest.raises(WhyGraphError, match="limit must be >= 1"):
         whygraph_area_history("foo.py", limit=0)
+
+
+def test_area_history_error_text_carries_the_prefix_and_no_code() -> None:
+    """A bad argument reads ``[WhyGraph] ...`` with no code suffix (§5.3)."""
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    from whygraph.mcp.errors import log_tool_errors
+
+    tool = log_tool_errors(whygraph_area_history)
+    with pytest.raises(ToolError) as caught:
+        tool("foo.py", limit=0)
+    assert str(caught.value) == "[WhyGraph] limit must be >= 1"
+
+
+def test_area_history_advertises_the_limit_bound() -> None:
+    """The schema carries the 1..100 bound, not just the body check (§5.3)."""
+    import asyncio
+
+    from whygraph.mcp.server import mcp
+
+    tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
+    limit = tools["whygraph_area_history"].inputSchema["properties"]["limit"]
+    assert (limit["minimum"], limit["maximum"]) == (1, 100)
 
 
 # --- D8: alias scope (default branch OR current branch) ----------------------
@@ -293,8 +316,56 @@ def test_area_history_commit_set_stays_default_branch_only(
     )
     result = whygraph_area_history(path="new.py")
 
-    shas = {item["commit"]["sha"] for item in result["evidence"]}
+    shas = {item["sha"] for item in result["evidence"]}
     # c_main is reached only *through* the branch-local rename alias...
     assert "c_main" in shas
     # ...but the unmerged commit itself never enters a default-branch view.
     assert "c_branch" not in shas
+
+
+# --- result budget (plan section 5.4) ----------------------------------------
+
+
+def test_area_history_returns_compact_items_with_null_lines(
+    whygraph_db_initialized: Path,
+) -> None:
+    with get_session() as session:
+        _seed_rename_history(session)
+        session.commit()
+
+    result = whygraph_area_history("final.py", limit=1)
+
+    assert set(result) == {"path", "include_renames", "evidence", "describing"}
+    item = result["evidence"][0]
+    assert item["sha"] == "sha_recent"
+    assert item["lines"] is None  # area items are not blame-derived
+    assert item["source"] == "area"
+    assert "text" not in item and "commit" not in item
+
+
+def test_area_history_full_adds_the_commit_body_under_text(
+    whygraph_db_initialized: Path,
+) -> None:
+    with get_session() as session:
+        _seed_rename_history(session)
+        session.commit()
+
+    result = whygraph_area_history("final.py", limit=1, detail="full")
+
+    assert result["evidence"][0]["text"] == {"body": ""}
+
+
+def test_area_history_payload_keeps_the_nested_explorer_shape(
+    whygraph_db_initialized: Path,
+) -> None:
+    """The Explorer's History tab reads ``item.commit.sha`` (plan 5.4)."""
+    from whygraph.mcp.area_history import area_history_payload
+
+    with get_session() as session:
+        _seed_rename_history(session)
+        session.commit()
+
+    result = area_history_payload("final.py", limit=1)
+
+    assert result["evidence"][0]["commit"]["sha"] == "sha_recent"
+    assert result["describing"] == 0

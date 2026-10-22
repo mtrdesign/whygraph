@@ -438,3 +438,70 @@ def test_resource_errors_on_uninitialized_db(whygraph_db: Path) -> None:
         _pr_resource(1)
     with pytest.raises(WhyGraphError, match="whygraph scan"):
         _issue_resource(1)
+
+
+# ---- freshness -----------------------------------------------------------
+
+
+def test_repo_overview_freshness_without_a_portal_row(
+    whygraph_db_initialized: Path, temp_git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(temp_git_repo)
+    fresh = _repo_overview_resource()["freshness"]
+    assert set(fresh) == {
+        "head",
+        "last_scanned_head",
+        "commits_behind",
+        "codegraph_indexed",
+    }
+    assert fresh["last_scanned_head"] is None and fresh["commits_behind"] is None
+    assert fresh["codegraph_indexed"] is False
+
+
+def test_repo_overview_freshness_counts_commits_behind(
+    whygraph_db_initialized: Path, temp_git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    from whygraph.core import get_config
+    from whygraph.core.context import ProjectContext, use_project
+
+    monkeypatch.chdir(temp_git_repo)
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args],
+            cwd=temp_git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    scanned = git("rev-parse", "HEAD")
+    (temp_git_repo / "more.txt").write_text("x")
+    git("add", "more.txt")
+    git("-c", "user.name=t", "-c", "user.email=t@e", "commit", "-m", "more")
+    head = git("rev-parse", "HEAD")
+    (temp_git_repo / ".codegraph").mkdir()
+    (temp_git_repo / ".codegraph" / "codegraph.db").write_bytes(b"")
+
+    config = get_config()
+
+    def bound(value: str | None) -> ProjectContext:
+        return ProjectContext(
+            slug="demo",
+            root=temp_git_repo,
+            config=config,
+            scanned_head=lambda: value,
+        )
+
+    with use_project(bound(scanned)):
+        behind = _repo_overview_resource()["freshness"]
+    assert behind == {
+        "head": head,
+        "last_scanned_head": scanned,
+        "commits_behind": 1,
+        "codegraph_indexed": True,
+    }
+    with use_project(bound(head)):
+        assert _repo_overview_resource()["freshness"]["commits_behind"] == 0

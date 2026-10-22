@@ -32,6 +32,7 @@ from mcp.server.fastmcp import FastMCP
 
 from whygraph.core.usage import count_agent_call
 
+from .descriptions import WHYGRAPH_INSTRUCTIONS
 from . import area_history, evidence, prompts, rationale, resources
 
 MCP_THREAD_TOKENS = 8
@@ -130,7 +131,7 @@ class ThreadOffload:
         return register
 
 
-mcp = FastMCP("whygraph")
+mcp = FastMCP("whygraph", instructions=WHYGRAPH_INSTRUCTIONS)
 
 _registrar = ThreadOffload(mcp)
 evidence.register(_registrar)

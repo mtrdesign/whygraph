@@ -102,8 +102,8 @@ def _pre_edit_brief(
     line_end : int, optional
         Last line (1-indexed, inclusive) of the chunk being edited.
     qualified_name : str, optional
-        Fully-qualified symbol name (e.g. ``pkg.module.func``). Use
-        instead of ``path``/``line_start``/``line_end`` when you know the
+        Symbol name as CodeGraph resolves it: bare (``func``) or
+        ``Class::method``, never dotted. Use instead of ``path``/``line_start``/``line_end`` when you know the
         symbol but not the lines.
     """
     target = _target_label(path, line_start, line_end, qualified_name)
@@ -139,7 +139,8 @@ def _why_was_this_written(
     line_end : int, optional
         Last line (1-indexed, inclusive) of the chunk.
     qualified_name : str, optional
-        Fully-qualified symbol name. Use instead of path / line_start /
+        Symbol name as CodeGraph resolves it: bare (``func``) or
+        ``Class::method``, never dotted. Use instead of path / line_start /
         line_end when you know the symbol but not the lines.
     """
     target = _target_label(path, line_start, line_end, qualified_name)

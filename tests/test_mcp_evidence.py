@@ -164,13 +164,13 @@ def test_evidence_for_joins_commits_prs_and_issues(
     }
     evidence = result["evidence"]
     # Newest commit first.
-    assert [item["commit"]["sha"] for item in evidence] == [
+    assert [item["sha"] for item in evidence] == [
         newest.sha,
         oldest.sha,
     ]
     assert [pr["number"] for pr in evidence[0]["pull_requests"]] == [5]
     assert [issue["number"] for issue in evidence[0]["issues"]] == [9]
-    assert evidence[0]["issues"][0]["labels"] == ["bug"]
+    assert evidence[0]["issues"][0]["resource"] == "whygraph://issue/9"
     # The older commit owns line 3 only — no PR/issue links.
     assert evidence[1]["pull_requests"] == []
     assert evidence[1]["issues"] == []
@@ -189,7 +189,7 @@ def test_evidence_for_skips_blamed_sha_absent_from_db(
     monkeypatch.chdir(temp_git_repo)
     result = whygraph_evidence_for(path="sample.py", line_start=1, line_end=3)
 
-    assert [item["commit"]["sha"] for item in result["evidence"]] == [newest.sha]
+    assert [item["sha"] for item in result["evidence"]] == [newest.sha]
 
 
 def test_evidence_for_errors_when_db_not_initialized(
@@ -268,7 +268,7 @@ def test_evidence_for_backfills_null_llm_description(
 
     result = whygraph_evidence_for(path="sample.py", line_start=1, line_end=3)
 
-    by_sha = {item["commit"]["sha"]: item["commit"] for item in result["evidence"]}
+    by_sha = {item["sha"]: item for item in result["evidence"]}
     assert by_sha[newest.sha]["llm_description"] == "backfilled summary"
     assert by_sha[oldest.sha]["llm_description"] == "Mechanical diff summary."
     # The pre-described commit was skipped — only one descriptor call total.
@@ -319,7 +319,7 @@ def test_evidence_for_bulk_commit_uses_per_file_description(
 
     result = whygraph_evidence_for(path="sample.py", line_start=1, line_end=3)
 
-    by_sha = {item["commit"]["sha"]: item["commit"] for item in result["evidence"]}
+    by_sha = {item["sha"]: item for item in result["evidence"]}
     # The returned description for the bulk commit is the per-file text,
     # not the stub.
     assert by_sha[newest.sha]["llm_description"] == "backfilled summary"
@@ -390,7 +390,7 @@ def test_evidence_for_merges_area_history_when_blame_is_thin(
     monkeypatch.chdir(temp_git_repo)
     result = whygraph_evidence_for(path="sample.py", line_start=1, line_end=3)
 
-    shas = [item["commit"]["sha"] for item in result["evidence"]]
+    shas = [item["sha"] for item in result["evidence"]]
     # Newest first; the predecessor-touching commit comes through the
     # area-history merge despite never appearing in blame.
     assert newest.sha in shas
@@ -431,7 +431,7 @@ def test_evidence_for_does_not_duplicate_when_blame_and_area_agree(
     monkeypatch.chdir(temp_git_repo)
     result = whygraph_evidence_for(path="sample.py", line_start=1, line_end=3)
 
-    shas = [item["commit"]["sha"] for item in result["evidence"]]
+    shas = [item["sha"] for item in result["evidence"]]
     assert sorted(shas) == sorted({newest.sha, oldest.sha})
 
 
@@ -513,7 +513,7 @@ def test_evidence_for_walks_past_refactor_heavy_commit(
     monkeypatch.chdir(repo)
     result = whygraph_evidence_for(path="sample.py", line_start=1, line_end=1)
 
-    by_sha = {item["commit"]["sha"]: item for item in result["evidence"]}
+    by_sha = {item["sha"]: item for item in result["evidence"]}
     assert by_sha[boring_sha]["source"] == "blame"
     assert original_sha in by_sha
     assert by_sha[original_sha]["source"] == "blame-walked"
@@ -580,7 +580,7 @@ def test_evidence_for_surfaces_predecessor_blame_via_rename(
     monkeypatch.chdir(repo)
     result = whygraph_evidence_for(path="new.py", line_start=1, line_end=1)
 
-    sources = {item["commit"]["sha"]: item["source"] for item in result["evidence"]}
+    sources = {item["sha"]: item["source"] for item in result["evidence"]}
     assert original_sha in sources
     assert sources[original_sha] == "predecessor-blame"
 
@@ -623,7 +623,285 @@ def test_evidence_for_silent_noop_when_analyze_misconfigured(
     result = whygraph_evidence_for(path="sample.py", line_start=1, line_end=3)
 
     for item in result["evidence"]:
-        assert item["commit"]["llm_description"] is None
+        assert item["llm_description"] is None
     with get_session() as session:
         for sha in (newest.sha, oldest.sha):
             assert session.get(Commit, sha).llm_description is None
+
+
+# ---- result budget: detail, describe, the bounded backfill (plan 5.4) ------
+
+
+def _seed_pr_world(repo_root: Path) -> tuple[str, str]:
+    """Both commits scanned; the newest in PR #5 (long discussion) closing #9."""
+    import json
+
+    newest, oldest = list(Repository(repo_root).commits)
+    pr = _db_pr(number=5, merge_commit_sha=newest.sha)
+    pr.comments = json.dumps(
+        [{"author": "alice", "body": "x" * 600, "created_at": "t"}]
+        + [{"author": "bob", "body": f"c{n}", "created_at": "t"} for n in range(21)]
+    )
+    pr.commit_titles = json.dumps(
+        [{"oid": f"oid{n}", "headline": f"h{n}", "author_name": "J"} for n in range(31)]
+    )
+    with get_session() as session:
+        session.add(_db_commit(oldest.sha, committed_at="2026-01-01T00:00:00+00:00"))
+        session.add(_db_commit(newest.sha, committed_at="2026-02-01T00:00:00+00:00"))
+        session.add(pr)
+        session.add(_db_issue(number=9))
+        session.add(PRIssueLink(pr_number=5, issue_number=9, link_kind="closes"))
+    return newest.sha, oldest.sha
+
+
+def test_evidence_for_defaults_to_the_compact_shape(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    newest, _ = _seed_pr_world(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+
+    result = whygraph_evidence_for(path="sample.py", line_start=1, line_end=3)
+
+    assert set(result) == {"target", "evidence", "describing"}
+    assert result["describing"] == 0
+    item = result["evidence"][0]
+    assert list(item) == [
+        "sha",
+        "llm_description",
+        "subject",
+        "author",
+        "date",
+        "lines",
+        "source",
+        "pull_requests",
+        "issues",
+    ]
+    assert (item["sha"], item["author"]) == (newest, "Test User")
+    assert item["date"] == "2026-02-01T00:00:00+00:00"
+    assert item["pull_requests"] == [
+        {
+            "number": 5,
+            "title": "A pull request",
+            "html_url": "https://example.com/pr/5",
+            "resource": "whygraph://pr/5",
+        }
+    ]
+    assert item["issues"] == [
+        {
+            "number": 9,
+            "title": "An issue",
+            "html_url": "https://example.com/issue/9",
+            "resource": "whygraph://issue/9",
+        }
+    ]
+    blob = json.dumps(result)
+    for prose in ("PR body.", "Issue body.", "x" * 50, "oid0", '"text"'):
+        assert prose not in blob
+
+
+def test_evidence_for_full_groups_prose_under_text_and_caps_it(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    newest, oldest = _seed_pr_world(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+
+    result = whygraph_evidence_for(
+        path="sample.py", line_start=1, line_end=3, detail="full"
+    )
+
+    by_sha = {item["sha"]: item for item in result["evidence"]}
+    item = by_sha[newest]
+    assert item["text"] == {"body": ""}
+    pr = item["pull_requests"][0]
+    assert pr["resource"] == "whygraph://pr/5"
+    assert pr["text"]["body"] == "PR body."
+    comments = pr["text"]["comments"]
+    assert len(comments) == 20  # pr_discussion_max_comments
+    assert comments[0]["body"] == "x" * 500 + "..."  # pr_comment_max_chars
+    assert comments[1] == {"author": "bob", "body": "c0", "created_at": "t"}
+    assert len(pr["commit_titles"]) == 30  # pr_roster_max_commits
+    assert pr["omitted"] == {"comments": 2, "commit_titles": 1}
+    assert item["issues"][0]["text"] == {"body": "Issue body."}
+    # A commit with no PR has nothing to omit.
+    assert by_sha[oldest]["pull_requests"] == []
+
+
+def test_full_pr_without_clipping_carries_no_omitted() -> None:
+    from whygraph.mcp.evidence import _evidence_dict, shape_evidence_item
+    from whygraph.analyze import CommitEvidence
+
+    commit = _db_commit("abc", committed_at="2026-01-01T00:00:00+00:00")
+    pr = _db_pr(number=1, merge_commit_sha="abc")
+    pr.comments = '[{"author": "a", "body": "ok", "created_at": "t"}]'
+    item = _evidence_dict(CommitEvidence(commit=commit, pull_requests=(pr,)))
+
+    shaped = shape_evidence_item(item, "full")
+
+    assert "omitted" not in shaped["pull_requests"][0]
+    assert shaped["pull_requests"][0]["text"]["comments"][0]["body"] == "ok"
+    assert shaped["lines"] is None  # no lines on the input: null, not missing
+
+
+def test_the_evidence_tools_default_to_ten_items() -> None:
+    import asyncio
+    import inspect
+
+    from whygraph.mcp.area_history import whygraph_area_history
+    from whygraph.mcp.server import mcp
+
+    for tool in (whygraph_evidence_for, whygraph_area_history):
+        params = inspect.signature(tool).parameters
+        assert params["limit"].default == 10
+        assert (params["detail"].default, params["describe"].default) == (
+            "compact",
+            True,
+        )
+    tools = {t.name: t for t in asyncio.run(mcp.list_tools())}
+    for name in ("whygraph_evidence_for", "whygraph_area_history"):
+        props = tools[name].inputSchema["properties"]
+        assert props["limit"]["default"] == 10
+        assert props["detail"]["enum"] == ["compact", "full"]
+        assert props["describe"]["default"] is True
+
+
+def test_describe_false_never_calls_an_llm_and_reports_describing(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    newest, oldest = list(Repository(temp_git_repo).commits)
+    with get_session() as session:
+        for sha, at in ((oldest.sha, "2026-01-01"), (newest.sha, "2026-02-01")):
+            session.add(
+                _db_commit(
+                    sha, committed_at=f"{at}T00:00:00+00:00", llm_description=None
+                )
+            )
+
+    class _Refuse:
+        @classmethod
+        def from_config(cls, _cfg: object) -> None:
+            raise AssertionError("an LLM client was built")
+
+    monkeypatch.setattr("whygraph.analyze.LlmDescriptor", _Refuse)
+    monkeypatch.chdir(temp_git_repo)
+
+    result = whygraph_evidence_for(
+        path="sample.py", line_start=1, line_end=3, describe=False
+    )
+
+    assert result["describing"] == 2
+    assert all(item["llm_description"] is None for item in result["evidence"])
+
+
+def _undescribed(count: int) -> list:
+    """``count`` undescribed in-memory evidence items, newest first."""
+    from whygraph.analyze import CommitEvidence
+
+    return [
+        CommitEvidence(
+            commit=_db_commit(
+                f"sha{n}",
+                committed_at=f"2026-01-{30 - n:02d}T00:00:00+00:00",
+                llm_description=None,
+            )
+        )
+        for n in range(count)
+    ]
+
+
+def _fake_backfill(monkeypatch: pytest.MonkeyPatch, *, sleep: float = 0.0) -> list[str]:
+    """Stub the descriptor and ``backfill_all``; return the described SHAs."""
+    import time
+
+    import whygraph.analyze as analyze_pkg
+
+    described: list[str] = []
+
+    class _Descriptor:
+        @classmethod
+        def from_config(cls, _cfg: object) -> "_Descriptor":
+            return cls()
+
+    def backfill_all(commits, *, repository, descriptor) -> int:  # noqa: ANN001
+        for commit in commits:
+            time.sleep(sleep)
+            described.append(commit.sha)
+            commit.llm_description = "described"
+        return len(commits)
+
+    monkeypatch.setattr(analyze_pkg, "LlmDescriptor", _Descriptor)
+    monkeypatch.setattr(analyze_pkg, "backfill_all", backfill_all)
+    return described
+
+
+def test_backfill_describes_at_most_five_commits_newest_first(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whygraph.mcp import evidence as ev
+
+    assert (ev.MAX_BACKFILL_PER_CALL, ev.BACKFILL_WALL_SEC) == (5, 20)
+    described = _fake_backfill(monkeypatch)
+    monkeypatch.chdir(temp_git_repo)
+    items = _undescribed(7)
+    started: list[int] = []
+
+    left = ev.backfill_evidence_descriptions(
+        items, target_path="sample.py", on_start=started.append
+    )
+
+    assert described == [f"sha{n}" for n in range(5)]
+    assert (left, started) == (2, [5])
+    assert [i.commit.llm_description for i in items[5:]] == [None, None]
+
+
+def test_backfill_starts_no_description_past_the_wall_clock(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow descriptor: the bound stops the loop, the rest is ``describing``."""
+    from whygraph.mcp import evidence as ev
+
+    described = _fake_backfill(monkeypatch, sleep=0.3)
+    monkeypatch.chdir(temp_git_repo)
+
+    left = ev.backfill_evidence_descriptions(
+        _undescribed(4), target_path="sample.py", wall_sec=0.45
+    )
+
+    assert described == ["sha0", "sha1"]
+    assert left == 2
+
+
+def test_evidence_for_reports_what_the_bound_left(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whygraph.mcp import evidence as ev
+
+    newest, oldest = list(Repository(temp_git_repo).commits)
+    with get_session() as session:
+        for sha, at in ((oldest.sha, "2026-01-01"), (newest.sha, "2026-02-01")):
+            session.add(
+                _db_commit(
+                    sha, committed_at=f"{at}T00:00:00+00:00", llm_description=None
+                )
+            )
+    described = _fake_backfill(monkeypatch)
+    monkeypatch.setattr(ev, "MAX_BACKFILL_PER_CALL", 1)
+    monkeypatch.chdir(temp_git_repo)
+
+    result = whygraph_evidence_for(path="sample.py", line_start=1, line_end=3)
+
+    assert described == [newest.sha]  # newest first
+    assert result["describing"] == 1

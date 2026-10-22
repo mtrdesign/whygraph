@@ -2189,6 +2189,20 @@ def test_context_merges_layers_project_wins(org: int) -> None:
     assert ctx.config.scan_forge == "github"
 
 
+def test_context_reads_the_scanned_head_when_asked(org: int) -> None:
+    """``freshness`` must not go stale in the cached context."""
+    with portal_db.get_session() as s:
+        p = _project(s)
+        ctx = _build(s, p)
+        project_id = p.id
+    assert ctx.scanned_head is not None and ctx.scanned_head() is None
+    with portal_db.get_session() as s:
+        row = s.get(Project, project_id)
+        row.last_scanned_head = "a" * 40
+        s.add(row)
+    assert ctx.scanned_head() == "a" * 40
+
+
 def test_context_null_resets_a_key(org: int) -> None:
     with portal_db.get_session() as s:
         save_layer(s, None, {"analyze": {"max_workers": 2}}, org_id=org)

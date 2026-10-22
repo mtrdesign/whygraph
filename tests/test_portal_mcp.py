@@ -57,11 +57,20 @@ def _rpc(method: str, params: dict | None = None, id: int = 1) -> dict:
 
 
 def _sse_json(text: str) -> dict:
-    """The JSON-RPC message of a one-event SSE response body."""
-    for line in text.splitlines():
-        if line.startswith("data: "):
-            return json.loads(line.removeprefix("data: "))
-    return json.loads(text)
+    """The JSON-RPC response of an SSE response body.
+
+    Notifications sent during the call (the rationale tool's progress and
+    cache log, plan section 5.4) come first and carry no ``id``; the
+    response is the message that does.
+    """
+    messages = [
+        json.loads(line.removeprefix("data: "))
+        for line in text.splitlines()
+        if line.startswith("data: ")
+    ]
+    if not messages:
+        return json.loads(text)
+    return next((m for m in messages if "id" in m), messages[0])
 
 
 def _setup_project(client, root: Path) -> None:
@@ -302,14 +311,78 @@ def test_mcp_client_gets_the_same_evidence_as_a_direct_call(
 
         result = asyncio.run(_call())
 
-    assert result.isError is False, result.content
+    assert result.isError is False, result.content[0].text
     via_mcp = result.structuredContent
-    if via_mcp is None or set(via_mcp) == {"result"}:
-        via_mcp = (via_mcp or {}).get("result") or json.loads(result.content[0].text)
+    assert via_mcp is not None and "result" not in via_mcp
+    assert json.loads(result.content[0].text) == via_mcp
     with use_project(manual_ctx(root, slug="demo")):
         direct = whygraph_evidence_for(path="sample.py", line_start=1, line_end=3)
     assert via_mcp == direct
     assert len(direct["evidence"]) == 2
+
+
+def test_rationale_progress_reaches_the_client_over_stateless_http(
+    env: SimpleNamespace,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Progress sent with ``related_request_id`` arrives on the request stream (5.4)."""
+    from whygraph.analyze import Rationale
+
+    class _Generator:
+        @classmethod
+        def from_config(cls, config: object) -> "_Generator":
+            return cls()
+
+        def generate(self, evidence, *, symbol_context=None, subject=None):  # noqa: ANN001
+            return Rationale(
+                purpose="p",
+                why="w",
+                constraints=(),
+                tradeoffs=(),
+                risks=(),
+                model="fake-1",
+                provider="fake",
+            )
+
+    monkeypatch.setattr(rationale, "RationaleGenerator", _Generator)
+    root = make_repo(env.shared, "demo")
+    port = _free_port()
+    seen: list[tuple] = []
+
+    async def _progress(progress: float, total: float | None, message: str | None):
+        seen.append((progress, total, message))
+
+    with live_portal(port):
+        with _http(port) as http:
+            _setup_project(http, root)
+            _seed_commits(root)
+
+        async def _call():
+            async with httpx.AsyncClient(
+                trust_env=False, timeout=30, follow_redirects=False
+            ) as ac:
+                async with streamable_http_client(
+                    f"http://127.0.0.1:{port}/mcp/demo", http_client=ac
+                ) as (read, write, _):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        return await session.call_tool(
+                            "whygraph_rationale_brief",
+                            {"path": "sample.py", "line_start": 1, "line_end": 3},
+                            progress_callback=_progress,
+                        )
+
+        result = asyncio.run(_call())
+
+    assert result.isError is False, result.content[0].text
+    card = result.structuredContent
+    assert card is not None and json.loads(result.content[0].text) == card
+    assert card["generated"] is True and card["evidence"]
+    assert set(card["evidence"][0]) == {"sha", "subject", "pull_requests", "issues"}
+    assert seen == [
+        (1.0, 3.0, "evidence collected (2 commits)"),
+        (3.0, 3.0, "generating card"),
+    ]
 
 
 def test_slow_mcp_calls_do_not_block_the_ui(
@@ -375,3 +448,38 @@ def test_slow_mcp_calls_do_not_block_the_ui(
     assert elapsed < 2.0, f"GET /api/portal/state took {elapsed:.2f}s"
     assert all(r.status_code == 200 for r in responses)
     assert len(started) == calls
+
+
+def test_tools_declare_an_output_schema() -> None:
+    tools = {t.name: t for t in asyncio.run(mcp_server.mcp.list_tools())}
+    for name, required in {
+        "whygraph_rationale_brief": {"target"},
+        "whygraph_evidence_for": {"target", "evidence", "describing"},
+        "whygraph_area_history": {"path", "include_renames", "evidence", "describing"},
+    }.items():
+        schema = tools[name].outputSchema
+        assert schema is not None and set(schema["required"]) == required
+    props = tools["whygraph_rationale_brief"].outputSchema["properties"]
+    assert {"status", "evidence", "generated", "platform"} <= set(props)
+    assert "cached_only" in tools["whygraph_rationale_brief"].inputSchema["properties"]
+
+
+def test_tools_carry_titles_annotations_and_server_instructions() -> None:
+    from whygraph.mcp.descriptions import WHYGRAPH_INSTRUCTIONS
+
+    tools = {t.name: t for t in asyncio.run(mcp_server.mcp.list_tools())}
+    expected = {
+        "whygraph_rationale_brief": ("Rationale card", False, True),
+        "whygraph_evidence_for": ("Evidence for a target", False, False),
+        "whygraph_area_history": ("Area history", True, False),
+    }
+    for name, (title, read_only, open_world) in expected.items():
+        ann = tools[name].annotations
+        assert ann is not None and ann.title == title
+        assert ann.readOnlyHint is read_only
+        assert ann.destructiveHint is (None if read_only else False)
+        assert ann.openWorldHint is open_world
+        assert len(tools[name].description) <= 600
+        assert "whygraph scan" not in tools[name].description
+    assert mcp_server.mcp.instructions == WHYGRAPH_INSTRUCTIONS
+    assert WHYGRAPH_INSTRUCTIONS.startswith("WhyGraph")

@@ -21,6 +21,8 @@ For intent questions about an existing symbol — "what is this for?", "is this 
 
 If the user suspects the cached rationale is stale, re-call with `force_refresh: true`.
 
+The server also offers prompts: `whygraph_pre_edit_brief`, `whygraph_why_was_this_written`, `whygraph_triage_commit`.
+
 ## When planning a non-trivial change
 
 For multi-file changes, migrations, feature additions, or anything that ripples across the codebase, use the `/whygraph-plan` prompt. It dispatches to a planner subagent that builds a CodeGraph impact set, warms the rationale cache, and produces an ordered step-by-step plan with verbatim constraint/risk quotes.

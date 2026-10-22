@@ -47,6 +47,8 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
+from pathlib import Path
 from typing import Callable
 
 from mcp.server.fastmcp import FastMCP
@@ -54,6 +56,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, col, select
 
+from whygraph.core import get_config
 from whygraph.core.context import current_project
 from whygraph.core.remote import (
     RemoteError,
@@ -70,7 +73,8 @@ from whygraph.db.models import (
     PRIssueLink,
     PullRequest,
 )
-from whygraph.services.git import GitError, Repository
+from whygraph.services.codegraph.paths import CODEGRAPH_DB_RELPATH
+from whygraph.services.git import GitError, Repository, git_env
 
 from .errors import WhyGraphError
 from .evidence import _json_list, _linked_prs, local_push_status
@@ -766,6 +770,56 @@ def _find_changes_row(
     return row
 
 
+def _git_out(root: Path, *args: str) -> str | None:
+    """Stdout of ``git <args>`` in ``root``, or ``None`` on any failure."""
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=root,
+            env=git_env(),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = result.stdout.strip()
+    return out if result.returncode == 0 and out else None
+
+
+def _freshness() -> dict:
+    """The ``freshness`` block of the repo overview (local project).
+
+    Returns
+    -------
+    dict
+        ``head`` (``git rev-parse HEAD``), ``last_scanned_head`` (the
+        portal row's, ``None`` without one or before the first scan),
+        ``commits_behind`` (HEAD commits the last scan has not seen; ``0``
+        when equal, ``None`` when unknown or never scanned) and
+        ``codegraph_indexed`` (the CodeGraph database exists).
+    """
+    root = repo_root()
+    ctx = current_project()
+    scanned = ctx.scanned_head() if ctx and ctx.scanned_head else None
+    head = _git_out(root, "rev-parse", "HEAD")
+    behind = None
+    if head and scanned:
+        if head == scanned:
+            behind = 0
+        else:
+            out = _git_out(root, "rev-list", "--count", f"{scanned}..HEAD")
+            behind = int(out) if out and out.isdigit() else None
+    db = get_config().codegraph_db or root / CODEGRAPH_DB_RELPATH
+    return {
+        "head": head,
+        "last_scanned_head": scanned,
+        "commits_behind": behind,
+        "codegraph_indexed": db.is_file(),
+    }
+
+
 def _repo_overview_resource() -> dict:
     """Read the resource backing ``whygraph://repo/overview``.
 
@@ -776,7 +830,10 @@ def _repo_overview_resource() -> dict:
     ``Author`` table) because authors-resolution is a separate scan step
     that may not have run.
 
-    A linked project's summary is the platform's, over its server clone.
+    ``freshness`` says whether the scan is current: ``head``,
+    ``last_scanned_head``, ``commits_behind`` and ``codegraph_indexed``
+    (see :func:`_freshness`). A linked project's summary - freshness
+    included - is the platform's, over its server clone.
     """
     _log.debug("repo overview resource read")
     remote = _remote()
@@ -846,6 +903,7 @@ def _repo_overview_resource() -> dict:
             "described": described_count,
             "fraction": fraction,
         },
+        "freshness": _freshness(),
         "top_contributors": [
             {
                 "author_name": row[0],
@@ -891,7 +949,8 @@ def register(mcp: FastMCP) -> None:
         name="whygraph_repo_overview",
         description=(
             "Repository-level summary: row counts, commit date range, "
-            "scan freshness, LLM-description coverage, top contributors."
+            "scan freshness (incl. HEAD vs the last scanned head), "
+            "LLM-description coverage, top contributors."
         ),
         mime_type="application/json",
     )(_repo_overview_resource)

@@ -104,6 +104,38 @@ of the two entries.
 **Codex** loads `.codex/config.toml` only for projects you have marked as trusted. Trust the project
 in Codex for the server to load.
 
+## Reviewing a diff (Claude Code) { #whygraph-review }
+
+Claude Code gets one more slash command, `/whygraph-review [<base>] [--generate]`. It checks a diff
+against the recorded rationale: for each hunk it finds the enclosing symbol with CodeGraph, reads that
+symbol's rationale card, and reports exactly one verdict - **Constraint at risk** or **Risk triggered**
+(each quoting the card verbatim), **No rationale**, or **Consistent** - followed by a
+`## Confidence: high|medium|low` line. It runs as the `whygraph-reviewer` subagent, which may run only
+`git diff` and writes no files.
+
+- **What it reviews.** With no `<base>`, your uncommitted changes against `HEAD`; with a clean working
+  tree, the branch against its merge base with the default branch (`origin/HEAD`, then `main`, then
+  `master`). With a `<base>`, the working tree against the commit where your branch left it. Untracked
+  files are new code and have no rationale, so they are left out; so are binary and deleted files. At
+  most 40 hunks are reviewed.
+- **No LLM spend by default.** It reads only cards that are already cached (`cached_only`), and a hunk
+  without one reports **No rationale**. `--generate` lets WhyGraph generate the missing cards, one LLM
+  call each, charged to the project's [budget](usage.md); a `budget_exceeded` refusal stops further
+  generation for the rest of the review.
+- **A card matches exact lines.** A card is cached for a symbol's line range and the commits blamed on
+  it. An edit that changes the symbol's length, or a commit that lands on its lines, means the earlier
+  card no longer matches, so that hunk reports **No rationale** until a card is made for the code as it
+  stands (`--generate`, or the next `/rationale` or `/whygraph-plan` that reaches it).
+- **Linked projects.** On a checkout [linked to a platform](platform-projects.md) the platform serves the
+  cards and does not honour `cached_only`, so without `--generate` the reviewer does not ask for cards
+  at all: every hunk with a symbol reports **No rationale** and confidence is `low`. The one evidence
+  lookup it makes to tell that the project is linked may let the platform describe one commit, under
+  the platform's description limit. With `--generate` it asks the platform, which may generate cards
+  under its own budget.
+- **Other agents.** Cursor, VS Code and Codex do not get the reviewer yet. Cursor also loads
+  `.claude/skills/`, so with Claude Code selected `/whygraph-review` shows up in Cursor's slash menu too;
+  it is untested there.
+
 ## Connect your agent outside a project
 
 You do not need to open a project first. On a production portal the **Connect your agent** button on

@@ -23,10 +23,22 @@ Both return compact items (no bodies or comments) unless you pass `detail="full"
 
 - `whygraph_rationale_brief(path, line_start, line_end | qualified_name)` - a structured card:
   purpose, why, constraints, tradeoffs, risks. Cached, so a repeat call is instant.
+  `cached_only=True` reads the cache and never generates: a miss is `{"status": "not_cached"}`, at no
+  LLM cost.
 
 A typical flow: before editing a function, your assistant calls `whygraph_rationale_brief` to ground
 itself in intent. If the card comes back thin, it falls back to `whygraph_evidence_for` for the raw
 history.
+
+## Checking a diff against the rationale
+
+In Claude Code, `/whygraph-review [<base>] [--generate]` runs the same tools over a diff: CodeGraph's
+`codegraph_node` finds the symbol around each hunk, `whygraph_rationale_brief` with `cached_only=True`
+reads its card, and the reviewer reports per hunk whether a constraint is at risk or a risk is
+triggered, quoting the card verbatim. Without `--generate` it spends no LLM budget. On a project linked
+to a platform it asks for no cards unless you pass `--generate`, because the platform does not honour
+`cached_only`. See [Reviewing a diff](../portal/agents.md#whygraph-review) for what it reviews and its
+limits.
 
 ## The resources
 

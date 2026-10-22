@@ -16,7 +16,7 @@ from whygraph import agents, assets
 
 
 def test_packaged_claude_assets_present() -> None:
-    """All 9 bundled .md files are reachable via importlib.resources.
+    """All 11 bundled .md files are reachable via importlib.resources.
 
     Guards against a packaging regression: if hatch stopped shipping
     ``src/whygraph/assets/claude-code/`` for any reason, this test
@@ -29,8 +29,10 @@ def test_packaged_claude_assets_present() -> None:
         "agents/researcher.md",
         "agents/synthesizer.md",
         "agents/implementor.md",
+        "agents/whygraph-reviewer.md",
         "skills/whygraph-plan/SKILL.md",
         "skills/whygraph-implement/SKILL.md",
+        "skills/whygraph-review/SKILL.md",
         "skills/rationale/SKILL.md",
         "skills/pre-edit/SKILL.md",
     )
@@ -268,8 +270,8 @@ def test_install_from_packaged_source(tmp_path: Path) -> None:
     assert (project / ".claude" / "agents" / "planner.md").is_file()
     assert (project / ".claude" / "skills" / "rationale" / "SKILL.md").is_file()
     assert (project / ".claude" / "skills" / "pre-edit" / "SKILL.md").is_file()
-    # 4 agents + 4 skills + CLAUDE.md (merge file, written fresh) = 9 files.
-    assert len(result.written) == 9
+    # 5 agents + 5 skills + CLAUDE.md (merge file, written fresh) = 11 files.
+    assert len(result.written) == 11
 
 
 # ---- install_assets: defensive guard -------------------------------------
@@ -935,3 +937,255 @@ def test_verify_lines_are_literal_commands() -> None:
     ]
     for prose in ("- **Verify:** run the tests", "- **Verify:** check it still works"):
         assert not _LITERAL_COMMAND.search(prose)
+
+
+# ---- /whygraph-review (plan 6.6) -------------------------------------------
+
+_REVIEWER = "whygraph-reviewer"
+_REVIEW_SKILL = _ASSET_ROOT / "claude-code" / "skills" / "whygraph-review" / "SKILL.md"
+_BASE_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._/^~-]*$"
+_HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+
+_FIXTURE_DIFF = """\
+diff --git a/src/cache.py b/src/cache.py
+index 1111111..2222222 100644
+--- a/src/cache.py
++++ b/src/cache.py
+@@ -13 +13,3 @@ class Cache:
+-        return hashlib.sha256((name + path).encode()).hexdigest()
++        key = name + path
++        return hashlib.md5(key.encode()).hexdigest()
++
+@@ -40,3 +41,0 @@ def purge(rows):
+-    for row in rows:
+-        row.delete()
+-    return len(rows)
+diff --git a/docs/notes.md b/docs/notes.md
+new file mode 100644
+--- /dev/null
++++ b/docs/notes.md
+@@ -0,0 +1 @@
++Cache keys are content-addressable.
+diff --git a/old.py b/old.py
+deleted file mode 100644
+--- a/old.py
++++ /dev/null
+@@ -1,2 +0,0 @@
+-def gone():
+-    pass
+diff --git a/logo.png b/logo.png
+Binary files a/logo.png and b/logo.png differ
+"""
+
+_FIXTURE_CARDS = {
+    ("src/cache.py", 13, 15): {
+        "constraints": [
+            "The key is sha256 of qualified_name + file_path, so cards survive "
+            "a backend swap."
+        ],
+        "risks": ["Changing the hash orphans every cached card."],
+    },
+    ("src/cache.py", 41, 41): {
+        "constraints": [],
+        "risks": ["Purging without a count breaks the scan summary."],
+    },
+}
+
+
+def _diff_hunks(diff: str) -> list[tuple[str, int, int]]:
+    """The reviewer's Step 1 rule: one ``(path, start, end)`` per new-side hunk.
+
+    Deleted files (``+++ /dev/null``) and binary files (no ``+++`` line) are
+    skipped, as the agent body says.
+    """
+    hunks: list[tuple[str, int, int]] = []
+    path: str | None = None
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            path = None
+        elif line.startswith("+++ "):
+            new = line[4:]
+            path = None if new == "/dev/null" else new.removeprefix("b/")
+        elif path and (match := _HUNK_HEADER.match(line)):
+            c = int(match.group(1))
+            d = 1 if match.group(2) is None else int(match.group(2))
+            start, end = (max(c, 1), max(c, 1)) if d == 0 else (c, c + d - 1)
+            hunks.append((path, start, end))
+    return hunks
+
+
+def _review_contract() -> list[str]:
+    """The fenced output contract in the reviewer's body, as lines."""
+    body = "\n".join(_agent_body("claude-code", _REVIEWER))
+    found = re.findall(r"```markdown\n(# Review:.*?)\n```", body, re.S)
+    assert len(found) == 1
+    return found[0].splitlines()
+
+
+def _review_problems(
+    review: str,
+    hunks: list[tuple[str, int, int]],
+    cards: dict[tuple[str, int, int], dict],
+    verdicts: set[str],
+) -> list[str]:
+    """Check a review against the contract; return what is wrong (empty: valid)."""
+    lines = review.strip().splitlines()
+    head = re.fullmatch(r"# Review: (\d+) hunks", lines[0]) if lines else None
+    if head is None:
+        return ["the first line is not '# Review: <n> hunks'"]
+    problems: list[str] = []
+    body = lines[1:]
+    if re.fullmatch(r"## Confidence: (?:high|medium|low) - \S.*", lines[-1]):
+        body = lines[1:-1]
+    else:
+        problems.append("the last line is not the Confidence line")
+    sections: list[tuple[str, list[str]]] = []
+    for line in body:
+        if line.startswith("## "):
+            sections.append((line, []))
+        elif line.strip():
+            if not sections:
+                problems.append(f"text before the first hunk: {line}")
+            else:
+                sections[-1][1].append(line)
+    if int(head.group(1)) != len(sections):
+        problems.append("<n> is not the number of hunk sections")
+    seen: list[tuple[str, int, int]] = []
+    for heading, verdict_lines in sections:
+        match = re.fullmatch(r"## (\S+):(\d+)-(\d+) \((.+)\)", heading)
+        if match is None:
+            problems.append(f"bad heading: {heading}")
+            continue
+        key = (match.group(1), int(match.group(2)), int(match.group(3)))
+        seen.append(key)
+        if len(verdict_lines) != 1:
+            problems.append(f"{heading}: {len(verdict_lines)} verdict lines")
+            continue
+        verdict = re.fullmatch(r"\*\*(.+?):\*\* (\S.*)", verdict_lines[0])
+        if verdict is None or verdict.group(1) not in verdicts:
+            problems.append(f"{heading}: not a verdict: {verdict_lines[0]}")
+            continue
+        field = {"Constraint at risk": "constraints", "Risk triggered": "risks"}
+        if verdict.group(1) in field:
+            quote = re.match(r'"(.+?)" - \S', verdict.group(2))
+            listed = cards.get(key, {}).get(field[verdict.group(1)], [])
+            if quote is None or quote.group(1) not in listed:
+                problems.append(f"{heading}: not a verbatim card quote")
+    if seen != hunks:
+        problems.append(f"the hunks {seen} are not the diff's {hunks}")
+    return problems
+
+
+def _fill(template: str, quote: str | None = None) -> str:
+    """Fill a contract template line: a quote first, then every other slot."""
+    if quote is not None:
+        template = re.sub(r'"<[^>]+>"', lambda _: f'"{quote}"', template)
+    return re.sub(r"<[^>]+>", "it may", template)
+
+
+def test_review_output_contract_on_a_fixture_diff() -> None:
+    """A review built from the contract's own template lines passes the checker.
+
+    The fixture diff's hunks follow the body's range rule; a paraphrased
+    quote, a second verdict, a wrong count or range, or a missing Confidence
+    line each fail it.
+    """
+    body = "\n".join(_agent_body("claude-code", _REVIEWER))
+    assert "`<start>` = `c`, `<end>` = `c + d - 1`" in body
+    assert "deletion-only hunk (`d` = 0)" in body
+    assert "Skip binary files and deleted files" in body
+
+    hunks = _diff_hunks(_FIXTURE_DIFF)
+    assert hunks == [
+        ("src/cache.py", 13, 15),
+        ("src/cache.py", 41, 41),
+        ("docs/notes.md", 1, 1),
+    ]
+
+    contract = _review_contract()
+    verdicts = {
+        found.group(1)
+        for line in contract
+        if (found := re.match(r"\*\*(.+?):\*\*", line))
+    }
+    assert verdicts == {
+        "Constraint at risk",
+        "Risk triggered",
+        "No rationale",
+        "Consistent",
+    }
+    heading = "## <path>:<start>-<end> (<symbol>)"
+    assert {line for line in contract if line.startswith("## <")} == {heading}
+    line_for = {v: _line_starting(contract, f"**{v}:**") for v in verdicts}
+    confidence = _line_starting(contract, "## Confidence:")
+    assert confidence == "## Confidence: <high | medium | low> - <reason>"
+
+    def section(hunk: tuple[str, int, int], symbol: str, line: str) -> str:
+        path, start, end = hunk
+        top = heading.replace("<path>", path).replace("<start>", str(start))
+        top = top.replace("<end>", str(end)).replace("<symbol>", symbol)
+        return f"{top}\n{line}\n"
+
+    constraint = _FIXTURE_CARDS[hunks[0]]["constraints"][0]
+    risk = _FIXTURE_CARDS[hunks[1]]["risks"][0]
+    parts = [
+        section(hunks[0], "key", _fill(line_for["Constraint at risk"], constraint)),
+        section(hunks[1], "purge", _fill(line_for["Risk triggered"], risk)),
+        section(hunks[2], "not indexed", _fill(line_for["No rationale"])),
+    ]
+    assert contract[0] == "# Review: <n> hunks"
+    confidence = confidence.replace("<high | medium | low>", "medium")
+    review = "\n".join(["# Review: 3 hunks", "", *parts, _fill(confidence)])
+    assert _review_problems(review, hunks, _FIXTURE_CARDS, verdicts) == []
+
+    broken = {
+        "paraphrase": review.replace(constraint, "The key must stay a sha256."),
+        "two verdicts": review.replace(
+            "## src/cache.py:41-41", "**Consistent:** fine\n\n## src/cache.py:41-41"
+        ),
+        "count": review.replace("# Review: 3 hunks", "# Review: 2 hunks"),
+        "range": review.replace("src/cache.py:13-15", "src/cache.py:13-14"),
+        "no confidence": review.rsplit("\n## Confidence", 1)[0],
+        "unknown verdict": review.replace("**No rationale:**", "**Looks fine:**"),
+    }
+    for name, text in broken.items():
+        assert _review_problems(text, hunks, _FIXTURE_CARDS, verdicts), name
+
+
+def test_reviewer_wiring() -> None:
+    """The skill and agent frontmatter match plan 6.1 / 6.6; Claude Code only."""
+    cc = _ASSET_ROOT / "claude-code"
+    skill = _frontmatter(_REVIEW_SKILL)
+    assert skill["name"] == "whygraph-review"
+    assert skill["disable-model-invocation"] == "true"
+    assert skill["allowed-tools"] == "Agent, Read"
+    assert "--generate" in skill["argument-hint"]
+    agent = _frontmatter(cc / "agents" / f"{_REVIEWER}.md")
+    assert agent["name"] == _REVIEWER and agent["model"] == "sonnet"
+    assert agent["tools"] == (
+        "Read, Grep, Glob, Bash, mcp__whygraph__*, mcp__codegraph__*"
+    )
+
+    body = "\n".join(_agent_body("claude-code", _REVIEWER))
+    skill_text = _REVIEW_SKILL.read_text()
+    assert "run only `git diff` commands" in body
+    # No LLM spend without --generate: cached cards, an undescribed probe,
+    # and no rationale call at all on a linked project (cached_only is not
+    # honoured there).
+    assert "cached_only=True" in body and "describe=False" in body
+    assert "Never pass `force_refresh`" in body
+    assert "carries a `platform` block" in body
+    assert "do not call `whygraph_rationale_brief` at all" in body
+    assert 'subagent_type: "whygraph-reviewer"' in skill_text
+    assert "GENERATE: <true | false>" in skill_text
+    assert "GENERATE: <true | false>" in body
+    assert f"`{_BASE_PATTERN}`" in skill_text and f"`{_BASE_PATTERN}`" in body
+    base = re.compile(_BASE_PATTERN)
+    for ok in ("main", "origin/main", "HEAD~3", "v2.0.0", "a1b2c3d"):
+        assert base.match(ok), ok
+    for bad in ("--output=x", "-p", "main;rm", "$(id)", "a b"):
+        assert not base.match(bad), bad
+
+    # Claude Code first: the other trees get a reviewer after Step 9.
+    for tree in ("cursor", "vscode", "codex"):
+        assert not [p for p in (_ASSET_ROOT / tree).rglob("*review*")], tree

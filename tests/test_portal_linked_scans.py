@@ -116,6 +116,8 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root.mkdir()
     _git(root, "init", "-q", "-b", "main")
     monkeypatch.chdir(root)
+    # The portal hands every scan child a writer-lock directory.
+    monkeypatch.setenv("WHYGRAPH_CODEGRAPH_LOCK_DIR", str(tmp_path / "locks"))
     monkeypatch.setattr("whygraph.cli.configure_logging", lambda *a, **kw: None)
     monkeypatch.setattr(core, "_config", Config())
     return root

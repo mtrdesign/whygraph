@@ -23,7 +23,7 @@ Don't dump the full brief verbatim to the user unless asked. Use it to shape the
 
 For intent questions about an existing symbol — "what is this for?", "is this still needed?", "can I delete this?" — call `whygraph_rationale_brief` and present the response **verbatim**. The grounded answer is the value; don't paraphrase or pre-answer from the code.
 
-If the user suspects the cached rationale is stale, re-call with `force_refresh: true`.
+If the user suspects the cached rationale is stale, re-call with `force_refresh: true`. If it errors with `code: budget_exceeded` or `generation_not_permitted`, do not retry; call `whygraph_evidence_for` instead (no LLM, always allowed) and tell the user generation is paused for this project.
 
 The companion tool `whygraph_evidence_for` returns the raw commits / PRs / issues backing a card — call it only when the brief looks wrong and you want to verify the source.
 

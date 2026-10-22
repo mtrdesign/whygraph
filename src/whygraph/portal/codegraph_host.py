@@ -227,6 +227,10 @@ PAUSED = (
     "[WhyGraph] CodeGraph is paused on this portal (every project) after a crash "
     "- see the project's Overview (Restart CodeGraph), or call again in {seconds} s."
 )
+TURNED_OFF = (
+    "[WhyGraph] The CodeGraph tools are turned off for this project "
+    "([scan].serve_codegraph = false; Settings > Scanning in the portal)."
+)
 NO_BINARY = (
     "[WhyGraph] CodeGraph is not available on this portal (no `codegraph` on its PATH)."
 )
@@ -429,12 +433,16 @@ class BridgeTarget:
         The project root as the portal stores it.
     real_root : str
         ``os.path.realpath(root)``: the only ``projectPath`` ever forwarded.
+    serve : bool
+        ``[scan].serve_codegraph``; ``False`` answers the "turned off"
+        ``isError`` before anything else.
     """
 
     project_id: int
     slug: str
     root: Path
     real_root: str
+    serve: bool = True
 
 
 _bridge_target: contextvars.ContextVar[BridgeTarget | None] = contextvars.ContextVar(
@@ -807,6 +815,12 @@ class _Child:
     crashed: bool = False
     exit_code: int | None = None
     stop_reason: str | None = None
+    listed: bool = False
+    since: str | None = None
+
+
+class HostBusy(Exception):
+    """A restart of the shared child is already in progress."""
 
 
 @dataclass(eq=False)
@@ -852,7 +866,30 @@ class _Fresh:
     failures: list[float] = field(default_factory=list)
     paused_until: float | None = None
     guard_paths: tuple[str, ...] = ()
+    guard_checked_at: str | None = None
     last_sync: dict[str, Any] | None = None
+    last_call_at: str | None = None
+    tally: dict[str, int] = field(default_factory=lambda: dict.fromkeys(TALLY_KEYS, 0))
+
+
+TALLY_KEYS = (
+    "calls",
+    "waited",
+    "still_updating",
+    "refresh_failed",
+    "busy",
+    "refused",
+    "timeouts",
+    "sum_wait_ms",
+    "max_wait_ms",
+)
+"""The per-project outcome tallies :meth:`CodeGraphHost.snapshot` reports (memory only)."""
+
+WAITED_MIN_SEC = 0.05
+"""A call counts as having waited for the index after this long."""
+
+LOG_TAIL_BYTES = 64 * 1024
+"""How much of the CodeGraph log :meth:`CodeGraphHost.log_tail` returns."""
 
 
 def default_argv(environ: Mapping[str, str] | None = None) -> list[str]:
@@ -978,6 +1015,8 @@ class CodeGraphHost:
         self._fresh_lock = threading.Lock()
         self._fp_limiter: anyio.CapacityLimiter | None = None
         self._sync_limiter: anyio.CapacityLimiter | None = None
+        self.hosts_path = data_dir / "locks" / "codegraph" / "hosts.json"
+        self._restarting = False
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -996,6 +1035,7 @@ class CodeGraphHost:
         await tg.__aenter__()
         self._tg = tg
         self._spawn_empty(self._reaper)
+        await self._sweep_orphan()
         self.available = await anyio.to_thread.run_sync(self._which)
         if not self.available:
             _log.info("CodeGraph binary not found on this portal")
@@ -1158,6 +1198,8 @@ class CodeGraphHost:
                     self.argv, cwd=self.home, env=env, errlog=errlog
                 ) as (process, read, write):
                     child.pid, child.process = process.pid, process
+                    child.since = _now_iso()
+                    self._write_hosts(process.pid)
                     errlog.write(
                         f"--- start {_now_iso()} pid {process.pid} "
                         f"reason {child.reason} ---\n"
@@ -1174,6 +1216,7 @@ class CodeGraphHost:
                             listed = await session.list_tools()
                         self.withheld = self._check_pin(listed.tools)
                         child.session = session
+                        child.listed = True
                         child.ready.set()
                         async with anyio.create_task_group() as watch:
 
@@ -1196,6 +1239,8 @@ class CodeGraphHost:
                 child.process = None
             child.ready.set()
             child.done.set()
+            if child.pid is not None:
+                self._write_hosts(None)
             if child.crashed:
                 await anyio.to_thread.run_sync(self._log_crash_tail, child, offset)
             else:
@@ -1244,6 +1289,210 @@ class CodeGraphHost:
             child.exit_code,
             ("; stderr tail:\n" + "\n".join(tail)) if tail else "",
         )
+
+    # -- ops surface (plan section 4.2c) --------------------------------------
+
+    def _server_state(self) -> str:
+        """The snapshot's ``server.state``: ``off``, ``starting``, ``live``,
+        ``restart_window`` or ``unavailable`` (the last start failed)."""
+        if not self.available:
+            return "off"
+        state = self.state
+        child = self._child
+        if (
+            state == "off"
+            and child is not None
+            and child.crashed
+            and not child.listed
+            and not self._stopping
+        ):
+            return "unavailable"
+        return state
+
+    def snapshot(self, project_id: int) -> dict[str, Any]:
+        """A lock-protected copy of the host's and one project's ops state.
+
+        No await and no I/O: the overview adds ``enabled``, ``index`` and
+        ``last_index_failure``, which need the config, the project's SQLite
+        and the portal database.
+
+        Parameters
+        ----------
+        project_id : int
+            ``projects.id``.
+
+        Returns
+        -------
+        dict
+            ``server``, ``last_call_at``, ``last_sync``, ``sync_failures_10m``,
+            ``sync_paused_until``, ``guard``, ``withheld_tools`` and
+            ``since_start`` (memory only, never in ``agent_calls``).
+        """
+        now = self.clock()
+        child = self._child
+        server = {
+            "state": self._server_state(),
+            "pid": self.pid,
+            "since": child.since if child is not None and self.pid else None,
+            "shared": True,
+            "available": self.available,
+        }
+        with self._fresh_lock:
+            st = self._fresh.get(project_id) or _Fresh()
+            paused = st.paused_until is not None and now < st.paused_until
+            paused_until = (
+                datetime.now(timezone.utc)
+                + timedelta(seconds=(st.paused_until or now) - now)
+            ).isoformat(timespec="seconds")
+            guard = (
+                None
+                if st.guard_checked_at is None
+                else {
+                    "ok": not st.guard_paths,
+                    "paths": list(st.guard_paths[:GUARD_PATHS_SHOWN]),
+                    "checked_at": st.guard_checked_at,
+                }
+            )
+            return {
+                "server": server,
+                "last_call_at": st.last_call_at,
+                "last_sync": dict(st.last_sync) if st.last_sync else None,
+                "sync_failures_10m": sum(
+                    1 for t in st.failures if now - t < SYNC_FAILURE_WINDOW_SEC
+                ),
+                "sync_paused_until": paused_until if paused else None,
+                "guard": guard,
+                "withheld_tools": sorted(self.withheld),
+                "since_start": dict(st.tally),
+            }
+
+    async def restart(self, project_id: int) -> str:
+        """Restart the shared child for an operator (the Overview's button).
+
+        Stops the child, waits for its process group, clears the crash
+        window and this project's sync-failure window, and starts a fresh
+        child. Never kills an in-flight index refresh.
+
+        Parameters
+        ----------
+        project_id : int
+            The project whose sync-failure window is cleared.
+
+        Returns
+        -------
+        str
+            The snapshot's ``server.state`` just before the restart.
+
+        Raises
+        ------
+        HostBusy
+            Another restart is in progress.
+        """
+        if self._restarting:
+            raise HostBusy()
+        self._restarting = True
+        try:
+            was = self._server_state()
+            with self._fresh_lock:
+                st = self._fresh.get(project_id)
+                if st is not None:
+                    st.failures = []
+                    st.paused_until = None
+            if self._tg is None or self._start_lock is None:
+                return was
+            async with self._start_lock:
+                child = self._child
+                if child is not None and not child.done.is_set():
+                    child.stop_reason = child.stop_reason or "restart"
+                    child.stop.set()
+                if child is not None:
+                    await child.done.wait()
+                self._crash_restart_at = None
+                self._timeouts = 0
+                self.available = await anyio.to_thread.run_sync(self._which)
+                if self.available and not self._stopping:
+                    self._child = self._spawn("operator")
+            return was
+        finally:
+            self._restarting = False
+
+    def log_tail(self, limit: int = LOG_TAIL_BYTES) -> dict[str, Any] | None:
+        """The last ``limit`` bytes of the shared log, redacted at read time (blocking).
+
+        Returns
+        -------
+        dict or None
+            ``{"text", "size", "truncated"}``; ``None`` when there is no
+            log file yet.
+        """
+        try:
+            with open(self.log_path, "rb") as fh:
+                size = fh.seek(0, os.SEEK_END)
+                start = max(0, size - limit)
+                fh.seek(start)
+                data = fh.read(limit)
+        except FileNotFoundError:
+            return None
+        truncated = start > 0
+        if truncated:
+            newline = data.find(b"\n")
+            data = data[newline + 1 :] if newline >= 0 else b""
+        return {
+            "text": redact_tokens(data.decode("utf-8", "replace")),
+            "size": size,
+            "truncated": truncated,
+        }
+
+    def _write_hosts(self, pid: int | None) -> None:
+        """Record the running child's pid (``None`` once it stopped) for the orphan sweep."""
+        try:
+            self.hosts_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            tmp = self.hosts_path.with_name(self.hosts_path.name + ".tmp")
+            tmp.write_text(json.dumps({"pid": pid, "started": _now_iso()}))
+            os.replace(tmp, self.hosts_path)
+        except OSError:
+            _log.info("CodeGraph: could not record the server pid")
+
+    def _recorded_orphan(self) -> int | None:
+        """The pid ``hosts.json`` names when it is still our ``... serve --mcp`` (blocking)."""
+        try:
+            pid = json.loads(self.hosts_path.read_text()).get("pid")
+        except (OSError, ValueError, AttributeError):
+            return None
+        if not isinstance(pid, int) or pid <= 1 or pid == os.getpid():
+            return None
+        try:
+            out = subprocess.run(
+                ["ps", "-o", "command=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return None
+        tokens = out.split()
+        if tokens[-2:] != ["serve", "--mcp"]:
+            return None
+        return pid if os.path.basename(self.argv[0]) in out else None
+
+    async def _sweep_orphan(self) -> None:
+        """Kill a child an earlier portal left behind (dev-local restarts), then rewrite the file."""
+        pid = await anyio.to_thread.run_sync(self._recorded_orphan)
+        if pid is not None:
+            _log.info("CodeGraph: stopping a leftover server (pid %s)", pid)
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except OSError:  # not a group leader
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except OSError:
+                    pass
+            await _reap_group(pid)
+        if self.hosts_path.exists():
+            await anyio.to_thread.run_sync(self._write_hosts, None)
 
     # -- calls --------------------------------------------------------------
 
@@ -1295,6 +1544,8 @@ class CodeGraphHost:
 
     def _precondition(self, target: BridgeTarget) -> types.CallToolResult | None:
         """The checks before any forward; runs in a worker thread."""
+        if not target.serve:
+            return _error(TURNED_OFF)
         self.available = self._which()
         if not self.available:
             return _error(NO_BINARY)
@@ -1345,6 +1596,9 @@ class CodeGraphHost:
             The child's result untouched (bar the size guard), or a
             ``[WhyGraph]`` ``isError`` / the success-shaped not-indexed text.
         """
+        st = self._fresh_for(target.project_id)
+        st.tally["calls"] += 1
+        st.last_call_at = _now_iso()
         slot = self._slot(target.project_id)
         try:
             slot.acquire_nowait()
@@ -1361,11 +1615,13 @@ class CodeGraphHost:
             if early is not None:
                 return early
             self._in_flight += 1  # a call waiting for the index keeps the child
+            began = anyio.current_time()
             try:
                 stale = await self._freshen(target, progress)
             finally:
                 self._in_flight -= 1
                 self._last_call = self.clock()
+            self._tally_wait(st, anyio.current_time() - began, stale)
             if stale is not None:
                 self._refused(target, name, "freshness")
                 return stale
@@ -1376,6 +1632,30 @@ class CodeGraphHost:
 
     def _refused(self, target: BridgeTarget, name: str, reason: str) -> None:
         _log.info("CodeGraph: refused %s for %s (%s)", name, target.slug, reason)
+        if reason != "freshness":  # the freshness outcomes are tallied by kind
+            key = "busy" if reason == "busy" else "refused"
+            self._fresh_for(target.project_id).tally[key] += 1
+
+    @staticmethod
+    def _tally_wait(
+        st: _Fresh, seconds: float, stale: types.CallToolResult | None
+    ) -> None:
+        """Count a call that waited for the index, and how it ended."""
+        tally = st.tally
+        if seconds >= WAITED_MIN_SEC:
+            ms = int(seconds * 1000)
+            tally["waited"] += 1
+            tally["sum_wait_ms"] += ms
+            tally["max_wait_ms"] = max(tally["max_wait_ms"], ms)
+        if stale is None:
+            return
+        text = stale.content[0].text if stale.content else ""
+        if text == REFRESH_FAILED:
+            tally["refresh_failed"] += 1
+        elif text.startswith("[WhyGraph] Indexing is refused"):
+            tally["refused"] += 1
+        else:
+            tally["still_updating"] += 1
 
     # -- freshness (plan section 4.2a) ---------------------------------------
 
@@ -1400,6 +1680,7 @@ class CodeGraphHost:
             st.synced_fp = fp
             if fp is not None:
                 st.guard_paths = ()  # the scan's own guard passed
+                st.guard_checked_at = _now_iso()
 
     def _fresh_for(self, project_id: int) -> _Fresh:
         with self._fresh_lock:
@@ -1640,12 +1921,14 @@ class CodeGraphHost:
             if not st.guard_paths:  # the next scan after the link is gone rebuilds
                 await anyio.to_thread.run_sync(_drop_guard_stamp, root)
             st.guard_paths = sync.guard_paths = paths
+            st.guard_checked_at = _now_iso()
             sync.result = "guard"
             _log.info(
                 "CodeGraph: refused to refresh %s's index (symbolic link)", target.slug
             )
             return None
         st.guard_paths = ()
+        st.guard_checked_at = _now_iso()
         process = await anyio.open_process(
             self.sync_argv,
             cwd=root,
@@ -1809,6 +2092,7 @@ class CodeGraphHost:
                 )
             except McpError as exc:
                 if exc.error.code == 408:  # the SDK's read timeout
+                    self._fresh_for(target.project_id).tally["timeouts"] += 1
                     return self._timed_out()
                 if exc.error.code == types.CONNECTION_CLOSED:
                     return _error(RESTARTED)
@@ -1967,6 +2251,7 @@ class CodeGraphDispatcher:
             slug=project.slug,
             root=project.root,
             real_root=os.path.realpath(project.root),
+            serve=project.ctx.config.scan_serve_codegraph,
         )
         with use_project(project.ctx), use_usage_sink(sink), _bind_target(target):
             await manager.handle_request(scope, receive, send)
@@ -1979,6 +2264,7 @@ __all__ = [
     "BridgeTarget",
     "CodeGraphDispatcher",
     "CodeGraphHost",
+    "HostBusy",
     "Refusal",
     "advertised_schema",
     "advertised_tools",

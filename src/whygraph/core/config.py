@@ -1046,6 +1046,11 @@ class Config:
         the names are checked by
         :func:`whygraph.hooks.resolve_hook_names` at the point of use, so
         ``core`` keeps no dependency on the hooks module.
+    scan_serve_codegraph : bool
+        Whether the portal answers this project's ``/mcp/<slug>/code``
+        CodeGraph tools (default ``True``). Loaded from
+        ``[scan].serve_codegraph``; ``False`` turns the tools off for this
+        project only.
     scan_default_branch : str or None
         Override the branch WhyGraph treats as shipped history, e.g.
         ``"develop"``. Loaded from ``[scan].default_branch``; an empty
@@ -1088,6 +1093,7 @@ class Config:
     scan_remote: str = "origin"
     scan_token: str | None = field(default=None, repr=False)
     scan_hooks: bool | tuple[str, ...] = True
+    scan_serve_codegraph: bool = True
     scan_default_branch: str | None = None
     whygraph_db: Path | None = None
     codegraph_db: Path | None = None
@@ -1243,6 +1249,11 @@ class Config:
             data["scan_token"] = token or None
         if "hooks" in scan:
             data["scan_hooks"] = _parse_hooks(scan.pop("hooks"))
+        if "serve_codegraph" in scan:
+            serve = scan.pop("serve_codegraph")
+            if not isinstance(serve, bool):
+                raise ConfigError("[scan].serve_codegraph must be true or false")
+            data["scan_serve_codegraph"] = serve
         if "default_branch" in scan:
             branch = (scan.pop("default_branch") or "").strip()
             data["scan_default_branch"] = (

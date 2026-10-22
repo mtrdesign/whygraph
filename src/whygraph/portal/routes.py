@@ -186,6 +186,7 @@ from .repos import (
 )
 from .estimate import compact_estimate
 from .estimate import scan_estimate as _scan_estimate
+from .codegraph_host import HostBusy
 from .runner import (
     COST_SUMMARY_KEYS,
     ProjectAccessLost,
@@ -1189,6 +1190,12 @@ def get_state(request: Request) -> dict:
     if state.mode == "local":
         # The machine name the link page prefills (M2e section 4.8).
         body["hostname"] = default_client_name()
+        # Counts only (the route is public): is CodeGraph hosted and running.
+        host = state.codegraph_host
+        body["codegraph"] = {
+            "available": bool(host is not None and host.available),
+            "live": 1 if host is not None and host.state == "live" else 0,
+        }
     if state.mode == "production":
         # Production-only fields, so the local body stays exactly as it was.
         assert state.base_url is not None
@@ -3257,6 +3264,50 @@ def scan_log(
         return log_tail(project.id, run_id)
     except RunNotFound as exc:
         raise ApiError(404, f"run {run_id} not found") from exc
+
+
+def _codegraph_host(request: Request):
+    """The app's CodeGraph host, or ``404 not_found`` (production, degraded, none)."""
+    host = portal_state(request).codegraph_host
+    if host is None:
+        raise ApiError(404, "CodeGraph is not hosted by this portal", code="not_found")
+    return host
+
+
+@projects_router.get("/{slug}/codegraph/log")
+def codegraph_log(
+    request: Request,
+    project: BoundProject = Depends(project_access(Action.PROJECT_READ)),
+) -> dict:
+    """The tail of the shared CodeGraph log: ``{text, size, truncated}``.
+
+    At most the last 64 KiB, starting at a line boundary when cut, redacted
+    at read time (the file itself is not). ``404 not_found`` when there is
+    no log yet or the portal does not host CodeGraph (production).
+    """
+    tail = _codegraph_host(request).log_tail()
+    if tail is None:
+        raise ApiError(404, "no CodeGraph log yet", code="not_found")
+    return tail
+
+
+@projects_router.post("/{slug}/codegraph/restart")
+async def codegraph_restart(
+    request: Request,
+    project: BoundProject = Depends(project_access(Action.PROJECT_SCAN)),
+) -> dict:
+    """Restart the **shared** CodeGraph server (every project's calls retry).
+
+    Clears this project's sync-failure window; never kills an in-flight
+    index refresh. ``{"was": <server.state before>, "shared": true}``;
+    ``409 busy`` while another restart is in progress.
+    """
+    host = _codegraph_host(request)
+    try:
+        was = await host.restart(project.id)
+    except HostBusy as exc:
+        raise ApiError(409, "CodeGraph is already restarting", code="busy") from exc
+    return {"was": was, "shared": True}
 
 
 @projects_router.get("/{slug}/scan-estimate")

@@ -788,7 +788,15 @@ def _onboarding_check(body: dict) -> None:
 
 
 def _overview_check(body: dict, w: World, o: OrgWorld) -> None:
-    assert set(body) == {"coverage", "events", "last_failure", "usage", "agents"}
+    assert set(body) == {
+        "coverage",
+        "events",
+        "last_failure",
+        "usage",
+        "agents",
+        "codegraph",
+    }
+    assert body["codegraph"]["server"]["shared"] is True
     assert {e["run_id"] for e in body["events"]} <= {o.run_id}
     assert sum(t["calls"] for t in body["usage"]["by_task"]) == 2
     # No agent calls and no tokens in either world: no person or machine
@@ -1040,6 +1048,12 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         200, shows=lambda o: [f'"run_id":{o.run_id}']
     ),
     ("GET", "/api/projects/{slug}/scan-estimate"): Call(200),
+    # The shared CodeGraph host (this world is local mode, no `codegraph` on
+    # PATH): no log yet; a restart of an off host answers `was: off`
+    ("GET", "/api/projects/{slug}/codegraph/log"): Call(404),
+    ("POST", "/api/projects/{slug}/codegraph/restart"): Call(
+        200, shows=lambda o: ['"shared":true']
+    ),
     # The Explorer router
     ("GET", "/api/projects/{slug}/search"): Call(
         200, query=lambda o: {"q": "fn"}, shows=lambda o: [f"{o.mark}_fn"]

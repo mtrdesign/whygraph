@@ -634,6 +634,8 @@ def test_setup_flow(client: TestClient, env: SimpleNamespace) -> None:
         "usage": None,
         # The machine name the platform link page prefills (M2e section 4.8)
         "hostname": default_client_name(),
+        # Counts only: no `codegraph` on the test PATH
+        "codegraph": {"available": False, "live": 0},
     }
     assert client.get("/api/projects").json() == {
         "error": "setup required",
@@ -1359,6 +1361,9 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     (f"{_P}/scans/{{run_id}}", "GET"): _READ,
     (f"{_P}/scans/{{run_id}}/events", "GET"): _READ,
     (f"{_P}/scans/{{run_id}}/log", "GET"): _READ,
+    # The shared CodeGraph server's ops surface (portal-hosted CodeGraph 4.2c)
+    (f"{_P}/codegraph/log", "GET"): _READ,
+    (f"{_P}/codegraph/restart", "POST"): _SCAN,
     # The describe estimate: project_db_access(...) (the unsafe-path probe)
     (f"{_P}/scan-estimate", "GET"): _READ,
     # The Explorer router: include_router(..., project_db_access(PROJECT_READ))

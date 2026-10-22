@@ -1,9 +1,10 @@
 """The project Overview's data: ``GET /api/projects/{slug}/overview`` (M2f-3).
 
 Plan section 4.10. One route on :data:`overview_router` (both modes),
-``project_access(Action.PROJECT_READ)``; it reads only the portal database
-(never the project's), so it answers for an uninitialized or linked project
-too:
+``project_access(Action.PROJECT_READ)``; it reads the portal database (never
+the project's WhyGraph DB; the ``codegraph`` block also counts the rows of
+the project's CodeGraph index), so it answers for an uninitialized or linked
+project too:
 
 - ``coverage.points`` - the ``summary.coverage`` snapshots the runner writes
   after each run that scanned, last :data:`COVERAGE_DAYS` days, oldest first,
@@ -14,6 +15,10 @@ too:
   one (its message as the runner stored it);
 - ``usage`` - this month's spend, budget and task split, only with
   ``project.usage``;
+- ``codegraph`` - local mode only (``null`` otherwise): the shared
+  CodeGraph server's state, this project's index refreshes and call
+  tallies (:meth:`~whygraph.portal.codegraph_host.CodeGraphHost.snapshot`),
+  the index file count and ``last_index_failure`` (plan section 4.2c);
 - ``agents`` - :data:`AGENT_DAYS` days of agent calls (``agent_call_days``
   plus the unflushed book), the LLM calls agents caused (the usage ledger,
   ``source`` ``mcp`` / ``agent``), the top kinds, and in production the
@@ -23,13 +28,17 @@ too:
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections import Counter
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import func
 from sqlmodel import Session, col, select
+
+from whygraph.core.safe_paths import UnsafePathError, check_inside
 
 from . import connections
 from .authz import Action, project_allowed
@@ -68,6 +77,9 @@ TOP_KINDS = 8
 
 REMOVED_MEMBER_LABEL = "Removed member"
 """The ``people`` label of calls by someone no longer in the org."""
+
+CODEGRAPH_RUNS_SCANNED = 50
+"""How many recent runs ``last_index_failure`` looks through."""
 
 _FINISHED = ("ok", "failed", "interrupted", "cancelled")
 
@@ -199,6 +211,71 @@ def _last_failure(db: Session, project_id: int) -> dict[str, Any] | None:
         "message": error
         if isinstance(error, str) and error
         else _FAILURE_MESSAGES[run.status],
+    }
+
+
+def _last_index_failure(db: Session, project_id: int) -> dict[str, Any] | None:
+    """The newest run whose ``summary.codegraph.status`` is ``failed`` after the last ``ok`` one.
+
+    Mirrors :func:`_last_failure`, which sees only ``failed`` / ``interrupted``
+    runs and so misses a non-strict scan's CodeGraph failure.
+    """
+    runs = db.exec(
+        select(ScanRun)
+        .where(
+            ScanRun.project_id == project_id,
+            col(ScanRun.status).in_(_FINISHED),
+            col(ScanRun.summary).is_not(None),
+            col(ScanRun.summary).contains("codegraph"),
+        )
+        .order_by(col(ScanRun.id).desc())
+        .limit(CODEGRAPH_RUNS_SCANNED)
+    ).all()
+    for run in runs:
+        block = _summary(run.summary).get("codegraph")
+        if not isinstance(block, dict):
+            continue
+        status = block.get("status")
+        if status == "ok":
+            return None
+        if status == "failed":
+            error = block.get("error")
+            return {
+                "run_id": run.id,
+                "at": _run_at(run),
+                "message": error
+                if isinstance(error, str) and error
+                else "The code index could not be refreshed.",
+            }
+    return None
+
+
+def _index_files(project: BoundProject) -> int | None:
+    """``SELECT count(*) FROM files`` in the project's CodeGraph DB, or ``None`` on any error."""
+    try:
+        path = check_inside(project.root, ".codegraph/codegraph.db")
+        if not path.is_file():
+            return None
+        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2)) as c:
+            return int(c.execute("SELECT count(*) FROM files").fetchone()[0])
+    except (UnsafePathError, OSError, sqlite3.Error, TypeError, ValueError):
+        return None
+
+
+def _codegraph(
+    db: Session, state: PortalState, project: BoundProject
+) -> dict[str, Any] | None:
+    """The ``codegraph`` block (``None`` outside local mode or without a host)."""
+    host = state.codegraph_host
+    if host is None:
+        return None
+    block = host.snapshot(project.id)
+    files = _index_files(project)
+    return {
+        **block,
+        "enabled": bool(project.ctx.config.scan_serve_codegraph),
+        "index": {"present": files is not None, "files": files},
+        "last_index_failure": _last_index_failure(db, project.id),
     }
 
 
@@ -409,6 +486,7 @@ def get_overview(
             "last_failure": _last_failure(db, project.id),
             "usage": _usage(db, state, project, now),
             "agents": _agents(db, state, project, now),
+            "codegraph": _codegraph(db, state, project),
         }
 
 

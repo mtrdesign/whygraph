@@ -102,7 +102,13 @@ IMPORT_ALLOWLIST: Spec = {
     "analyze": _all_fields(AnalyzeConfig, "analyze"),
     "rationale": _all_fields(RationaleConfig, "rationale"),
     "chat": _all_fields(ChatConfig),
-    "scan": {"forge": True, "remote": True, "default_branch": True, "hooks": True},
+    "scan": {
+        "forge": True,
+        "remote": True,
+        "default_branch": True,
+        "hooks": True,
+        "serve_codegraph": True,
+    },
 }
 """Rule 1a: what a repo's ``whygraph.toml`` may contribute on import."""
 
@@ -140,13 +146,14 @@ PRODUCTION_PUT_ALLOWLIST: Spec = {**PUT_ALLOWLIST, "scan": {"forge": True}}
 are fixed for a GitHub App project (M2d-2 plan section 0.2 #21); only the PR
 crawl switch ``[scan].forge`` stays writable."""
 
-LINKED_PUT_ALLOWLIST: Spec = {"scan": {"hooks": True}}
+LINKED_PUT_ALLOWLIST: Spec = {"scan": {"hooks": True, "serve_codegraph": True}}
 """What a *linked* project's ``PUT .../config`` may store (M2e plan section 4.11).
 
 A project linked to a WhyGraph platform is configured there: the whole
-config route is refused (``403 managed_on_platform``) except ``[scan].hooks``,
-which is a property of this checkout - which local git hooks keep its
-CodeGraph index fresh - and so stays writable here."""
+config route is refused (``403 managed_on_platform``) except ``[scan].hooks``
+(which local git hooks keep its CodeGraph index fresh) and
+``[scan].serve_codegraph`` (whether this portal serves the CodeGraph tools):
+properties of this checkout, so they stay writable here."""
 
 
 def put_allowlist(mode: str | None) -> Spec:

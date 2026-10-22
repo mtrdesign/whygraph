@@ -375,3 +375,24 @@ def test_slow_mcp_calls_do_not_block_the_ui(
     assert elapsed < 2.0, f"GET /api/portal/state took {elapsed:.2f}s"
     assert all(r.status_code == 200 for r in responses)
     assert len(started) == calls
+
+
+def test_tools_carry_titles_annotations_and_server_instructions() -> None:
+    from whygraph.mcp.descriptions import WHYGRAPH_INSTRUCTIONS
+
+    tools = {t.name: t for t in asyncio.run(mcp_server.mcp.list_tools())}
+    expected = {
+        "whygraph_rationale_brief": ("Rationale card", False, True),
+        "whygraph_evidence_for": ("Evidence for a target", False, False),
+        "whygraph_area_history": ("Area history", True, False),
+    }
+    for name, (title, read_only, open_world) in expected.items():
+        ann = tools[name].annotations
+        assert ann is not None and ann.title == title
+        assert ann.readOnlyHint is read_only
+        assert ann.destructiveHint is (None if read_only else False)
+        assert ann.openWorldHint is open_world
+        assert len(tools[name].description) <= 600
+        assert "whygraph scan" not in tools[name].description
+    assert mcp_server.mcp.instructions == WHYGRAPH_INSTRUCTIONS
+    assert WHYGRAPH_INSTRUCTIONS.startswith("WhyGraph")

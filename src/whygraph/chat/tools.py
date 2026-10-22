@@ -47,6 +47,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from whygraph.core import get_config
 from whygraph.mcp.area_history import whygraph_area_history
+from whygraph.mcp.descriptions import DESCRIPTION_AUTHORITY, QUALIFIED_NAME_DESC
 from whygraph.mcp.errors import WhyGraphError
 from whygraph.mcp.evidence import collect_evidence, whygraph_evidence_for
 from whygraph.mcp.path_history import path_commit_counts
@@ -91,38 +92,6 @@ missing index degrades the conversation rather than ending it."""
 # behavioural caveats (case-sensitivity, cost, default limits). Where the
 # MCP layer already has an agent-facing description, it is reused verbatim.
 
-_QUALIFIED_NAME_DESC = (
-    "The EXACT qualified_name from an earlier result — never construct one. "
-    "CodeGraph names are bare for module-level symbols ('run_turn'), "
-    "'Class::method' for methods ('ToolRegistry::dispatch'), and a "
-    "repo-relative path for file nodes ('src/whygraph/serve/chat.py'). A "
-    "dotted path such as 'whygraph.chat.harness.run_turn' is NOT valid and "
-    "will not resolve — call search_symbols first if you don't have the name."
-)
-"""Shared by the three symbol-keyed tools.
-
-One constant rather than three copies because the copies drifted: all three
-used to say "Dotted symbol name", which is the one shape CodeGraph does not
-use for symbols. The model followed the description, every lookup missed,
-and it burned tool rounds guessing variants.
-"""
-
-_DESCRIPTION_AUTHORITY = (
-    " Each commit carries `llm_description`, generated from the DIFF ALONE — "
-    "the developer's commit message is never shown to that generator. Treat it "
-    "as the authoritative account of what changed. `subject` and `body` are "
-    "human-written and are often terse, stale, or simply wrong; cite them for "
-    "intent, not for fact."
-)
-"""Appended to every history tool's description.
-
-The generator's only input is a diff (``LlmDescriptor.describe(diff)``), so a
-nonsense commit message *cannot* contaminate the description — that is
-architectural, not incidental. Nothing used to tell the model this, so it read
-``subject`` and ``llm_description`` as equally authoritative and anchored on
-whichever arrived first. One constant rather than five copies, for the same
-reason :data:`_QUALIFIED_NAME_DESC` is one: the copies drift.
-"""
 
 _SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -161,7 +130,7 @@ _SPECS: tuple[ToolSpec, ...] = (
             "properties": {
                 "qualified_name": {
                     "type": "string",
-                    "description": _QUALIFIED_NAME_DESC,
+                    "description": QUALIFIED_NAME_DESC,
                 }
             },
             "required": ["qualified_name"],
@@ -217,7 +186,7 @@ _SPECS: tuple[ToolSpec, ...] = (
             "properties": {
                 "qualified_name": {
                     "type": "string",
-                    "description": _QUALIFIED_NAME_DESC,
+                    "description": QUALIFIED_NAME_DESC,
                 }
             },
             "required": ["qualified_name"],
@@ -230,14 +199,14 @@ _SPECS: tuple[ToolSpec, ...] = (
             "commits that authored them (via blame), plus every linked pull "
             "request and issue. This is line-precise and HEAD-anchored. Use "
             "it to answer 'what changed here and why' without paying for "
-            "rationale generation." + _DESCRIPTION_AUTHORITY
+            "rationale generation." + DESCRIPTION_AUTHORITY
         ),
         parameters={
             "type": "object",
             "properties": {
                 "qualified_name": {
                     "type": "string",
-                    "description": _QUALIFIED_NAME_DESC,
+                    "description": QUALIFIED_NAME_DESC,
                 },
                 "limit": {
                     "type": "integer",
@@ -255,7 +224,7 @@ _SPECS: tuple[ToolSpec, ...] = (
             "commits for code that has since been deleted, moved, or fully "
             "rewritten, which line-blame physically cannot. Use it for "
             "'what has been happening in this area lately' questions."
-            + _DESCRIPTION_AUTHORITY
+            + DESCRIPTION_AUTHORITY
         ),
         parameters={
             "type": "object",
@@ -291,7 +260,7 @@ _SPECS: tuple[ToolSpec, ...] = (
             "commit's description / subject / body and against the TITLES of "
             "its pull requests. `path` accepts a DIRECTORY as well as a file "
             "(unlike get_area_history) and follows rename chains. Pass at "
-            "least one of the two." + _DESCRIPTION_AUTHORITY
+            "least one of the two." + DESCRIPTION_AUTHORITY
         ),
         parameters={
             "type": "object",
@@ -323,7 +292,7 @@ _SPECS: tuple[ToolSpec, ...] = (
         description=(
             "Get one commit by SHA — message, stats, author, and its linked "
             "pull requests. Use it to follow up on a SHA another tool "
-            "surfaced." + _DESCRIPTION_AUTHORITY
+            "surfaced." + DESCRIPTION_AUTHORITY
         ),
         parameters={
             "type": "object",
@@ -382,7 +351,7 @@ _SPECS: tuple[ToolSpec, ...] = (
             "number, an exact file path). Returns a compact index — subject "
             "or title, author, date, a truncated description — then use "
             "get_commit / get_pr / get_issue on the entries that matter."
-            + _DESCRIPTION_AUTHORITY
+            + DESCRIPTION_AUTHORITY
         ),
         parameters={
             "type": "object",

@@ -32,6 +32,10 @@ from whygraph.db.models import Commit, CommitFileChange, Issue, PRIssueLink, Pul
 from whygraph.scan.refactor_score import BORING_THRESHOLD
 from whygraph.services.git import BlameHunk, GitError, Repository
 
+from .descriptions import (
+    EVIDENCE_FOR_ANNOTATIONS,
+    EVIDENCE_FOR_DESCRIPTION,
+)
 from .errors import WhyGraphError, log_tool_errors
 from .targets import Target, repo_root, resolve_target, target_dict
 
@@ -55,17 +59,6 @@ _SOURCE_PRIORITY = {
 }
 
 _log = logging.getLogger(__name__)
-
-_TOOL_DESCRIPTION = (
-    "Find the historical evidence behind a chunk of code: the commits that "
-    "own its lines (via git blame), plus the pull requests containing those "
-    "commits and the issues those PRs close. Pass either (path, line_start, "
-    "line_end) or a qualified_name (resolved to a file/line range via "
-    "CodeGraph). Returns {target, evidence}; each blame item carries "
-    "`lines` (the working-tree ranges its commit owns). Scan from the WhyGraph portal "
-    "(or run `whygraph scan` outside it) first to populate the WhyGraph "
-    "database."
-)
 
 
 @dataclass
@@ -1299,7 +1292,7 @@ def whygraph_evidence_for(
 ) -> dict:
     """MCP tool — historical evidence for a chunk of code.
 
-    See :data:`_TOOL_DESCRIPTION` for the agent-facing summary.
+    See :data:`~whygraph.mcp.descriptions.EVIDENCE_FOR_DESCRIPTION` for the agent-facing summary.
 
     For a project linked to a WhyGraph platform the answer comes from
     :func:`linked_evidence` instead, and carries a ``platform`` block.
@@ -1340,6 +1333,9 @@ def whygraph_evidence_for(
 
 def register(mcp: FastMCP) -> None:
     """Attach the evidence tool to an MCP server."""
-    mcp.tool(name="whygraph_evidence_for", description=_TOOL_DESCRIPTION)(
-        log_tool_errors(whygraph_evidence_for)
-    )
+    mcp.tool(
+        name="whygraph_evidence_for",
+        title=EVIDENCE_FOR_ANNOTATIONS.title,
+        description=EVIDENCE_FOR_DESCRIPTION,
+        annotations=EVIDENCE_FOR_ANNOTATIONS,
+    )(log_tool_errors(whygraph_evidence_for))

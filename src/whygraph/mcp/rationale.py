@@ -23,6 +23,10 @@ from whygraph.services.llm import LlmError
 
 from whygraph.analyze import CommitEvidence, Rationale
 
+from .descriptions import (
+    RATIONALE_BRIEF_ANNOTATIONS,
+    RATIONALE_BRIEF_DESCRIPTION,
+)
 from .errors import WhyGraphError, log_tool_errors
 from .targets import Target, repo_root, resolve_target, target_dict
 from .evidence import (
@@ -33,18 +37,6 @@ from .evidence import (
     split_by_push_status,
 )
 from .rationale_cache import lookup_cached, store_cached
-
-_TOOL_DESCRIPTION = (
-    "Generate a structured rationale card (purpose / why / constraints / "
-    "tradeoffs / risks) explaining why a chunk of code exists. Gathers "
-    "historical evidence (commits, PRs, issues) for the target, optionally "
-    "enriches it with CodeGraph symbol context, and asks the configured LLM "
-    "to synthesize the card. Pass either (path, line_start, line_end) or a "
-    "qualified_name. Calls the configured LLM provider — may take several "
-    "seconds. Pass force_refresh=true to regenerate instead of reading the "
-    "cached card. Scan from the WhyGraph portal (or run `whygraph scan` outside it) "
-    "first to populate the WhyGraph database."
-)
 
 
 def _symbol_context(target: Target) -> SymbolContext | None:
@@ -318,7 +310,7 @@ def whygraph_rationale_brief(
 ) -> dict:
     """MCP tool — a rationale card for a chunk of code.
 
-    See :data:`_TOOL_DESCRIPTION` for the agent-facing summary.
+    See :data:`~whygraph.mcp.descriptions.RATIONALE_BRIEF_DESCRIPTION` for the agent-facing summary.
 
     A previously generated card is returned from the SQLite-backed cache
     (see :mod:`whygraph.mcp.rationale_cache`) when the same target,
@@ -344,6 +336,9 @@ def whygraph_rationale_brief(
 
 def register(mcp: FastMCP) -> None:
     """Attach the rationale tool to an MCP server."""
-    mcp.tool(name="whygraph_rationale_brief", description=_TOOL_DESCRIPTION)(
-        log_tool_errors(whygraph_rationale_brief)
-    )
+    mcp.tool(
+        name="whygraph_rationale_brief",
+        title=RATIONALE_BRIEF_ANNOTATIONS.title,
+        description=RATIONALE_BRIEF_DESCRIPTION,
+        annotations=RATIONALE_BRIEF_ANNOTATIONS,
+    )(log_tool_errors(whygraph_rationale_brief))

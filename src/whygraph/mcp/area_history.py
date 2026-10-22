@@ -22,6 +22,10 @@ from whygraph.core.context import current_project
 from whygraph.core.remote import RemoteError, RemoteProject, platform_block
 from whygraph.services.git import Repository
 
+from .descriptions import (
+    AREA_HISTORY_ANNOTATIONS,
+    AREA_HISTORY_DESCRIPTION,
+)
 from .errors import WhyGraphError, log_tool_errors
 from .evidence import (
     _evidence_dict,
@@ -33,16 +37,6 @@ from .path_history import area_history_commits
 from .targets import repo_root
 
 _log = logging.getLogger(__name__)
-
-_TOOL_DESCRIPTION = (
-    "List the commits that have ever touched a given file path or any of "
-    "its rename predecessors. Complements `whygraph_evidence_for` (which "
-    "is line-blame-driven and HEAD-anchored): area_history reaches commits "
-    "for code that has since been deleted, moved, or whose lines were all "
-    "rewritten by a later refactor. Returns commits with their linked PRs "
-    "and issues, newest first. Scan from the WhyGraph portal (or run "
-    "`whygraph scan` outside it) first to populate the WhyGraph database."
-)
 
 
 def linked_area_history(
@@ -95,7 +89,7 @@ def whygraph_area_history(
 ) -> dict:
     """MCP tool — area-history commits for a file path.
 
-    See :data:`_TOOL_DESCRIPTION` for the agent-facing summary.
+    See :data:`~whygraph.mcp.descriptions.AREA_HISTORY_DESCRIPTION` for the agent-facing summary.
 
     Parameters
     ----------
@@ -144,6 +138,9 @@ def whygraph_area_history(
 
 def register(mcp: FastMCP) -> None:
     """Attach the area-history tool to an MCP server."""
-    mcp.tool(name="whygraph_area_history", description=_TOOL_DESCRIPTION)(
-        log_tool_errors(whygraph_area_history)
-    )
+    mcp.tool(
+        name="whygraph_area_history",
+        title=AREA_HISTORY_ANNOTATIONS.title,
+        description=AREA_HISTORY_DESCRIPTION,
+        annotations=AREA_HISTORY_ANNOTATIONS,
+    )(log_tool_errors(whygraph_area_history))

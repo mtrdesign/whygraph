@@ -180,7 +180,7 @@ def test_history_tools_state_which_description_field_is_authoritative() -> None:
     it read ``subject`` as equally authoritative and anchored on whichever
     field arrived first.
     """
-    from whygraph.chat.tools import _DESCRIPTION_AUTHORITY
+    from whygraph.mcp.descriptions import DESCRIPTION_AUTHORITY
 
     history = [
         "get_evidence",
@@ -191,11 +191,11 @@ def test_history_tools_state_which_description_field_is_authoritative() -> None:
     ]
     for name in history:
         spec = next(s for s in TOOL_SPECS if s.name == name)
-        assert _DESCRIPTION_AUTHORITY in spec.description, (
+        assert DESCRIPTION_AUTHORITY in spec.description, (
             f"{name} must state that llm_description is the reliable field"
         )
-    assert "DIFF ALONE" in _DESCRIPTION_AUTHORITY
-    assert "terse, stale, or simply wrong" in _DESCRIPTION_AUTHORITY
+    assert "DIFF ALONE" in DESCRIPTION_AUTHORITY
+    assert "terse, stale, or simply wrong" in DESCRIPTION_AUTHORITY
 
 
 def test_the_stats_spec_ships_the_annotated_schema() -> None:
@@ -1555,7 +1555,7 @@ def test_run_project_stats_has_no_chart_parameter() -> None:
 
 
 def test_the_render_chart_spec_tells_the_model_to_name_columns() -> None:
-    """A wording guard, mirroring `_DESCRIPTION_AUTHORITY`.
+    """A wording guard, mirroring `DESCRIPTION_AUTHORITY`.
 
     "Name columns, never values" is the one instruction that keeps a chart
     traceable to the query that produced it.

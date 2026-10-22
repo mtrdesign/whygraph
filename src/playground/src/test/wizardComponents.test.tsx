@@ -220,6 +220,29 @@ describe("InitPreview", () => {
     );
     expect(screen.getByText(/1 to create, 1 already there/)).toBeInTheDocument();
   });
+
+  it("lists an edited asset with its diff, left as is", () => {
+    render(
+      <InitPreview
+        result={result(
+          [],
+          [
+            file({
+              file: ".claude/agents/a.md",
+              status: "needs_confirmation",
+              diff: "--- a/x\n+++ b/x\n-MINE\n+THEIRS\n",
+            }),
+          ],
+        )}
+        selectedAgents={["claude"]}
+        confirmed={new Set()}
+        onConfirmChange={noop}
+      />,
+    );
+    expect(screen.getByText(/1 edited by you/)).toBeInTheDocument();
+    expect(screen.getByTestId("asset-.claude/agents/a.md")).toHaveTextContent("Edited");
+    expect(screen.getByTestId("diff")).toHaveTextContent("+THEIRS");
+  });
 });
 
 // ---- detected panel -------------------------------------------------------------------

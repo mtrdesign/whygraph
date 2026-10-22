@@ -139,6 +139,15 @@ describe("projectHealth precedence (plan section 4.10)", () => {
     expect(projectHealth(details(over)).status).toMatchObject({ key, label });
   });
 
+  it("outdated agent files are a low-severity item that leaves the pill alone", () => {
+    const h = projectHealth(
+      details({ agent_files: { installed_version: "2.0.0", current_version: "2.1.0", outdated: true } }),
+    );
+    expect(h.status.key).toBe("ready");
+    expect(h.items.map((i) => [i.id, i.tone])).toContainEqual(["agent_files", "info"]);
+    expect(projectHealth(details({ agent_files: { installed_version: "2.1.0", current_version: "2.1.0", outdated: false } })).items).toEqual([]);
+  });
+
   it("names the budget with a tooltip, and a member's own budget is not the project's state", () => {
     expect(projectHealth(details({ llm_block: "budget_exceeded", llm_block_scope: "org" })).status.tooltip).toBe(
       "Monthly budget reached",

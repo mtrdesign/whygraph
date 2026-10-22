@@ -133,6 +133,12 @@ export function HealthPanel({
             {a.label}
           </Button>
         );
+      case "update_agents":
+        return (
+          <Button size="sm" variant="outline" render={<Link to="/p/$slug/settings" params={{ slug }} search={{ section: "agents" }} />}>
+            {a.label}
+          </Button>
+        );
       case "rescan":
         // The behind item offers the same menu as the header; "Scan now" is the first scan.
         return a.label === "Rescan" ? (

@@ -338,10 +338,11 @@ class FileOutcome:
     status : {"write", "overwrite", "skip", "refused", "needs_confirmation"}
         ``write`` creates the file, ``overwrite`` changes an existing
         one, ``skip`` leaves it alone (already up to date, or an asset
-        that exists without ``force``), ``refused`` means the file could
-        not be merged safely and was not touched, and
-        ``needs_confirmation`` means it is git-tracked and its path is
-        not in ``confirm_tracked``.
+        edited by the user that the bundle did not change), ``refused``
+        means the file could not be merged safely and was not touched,
+        and ``needs_confirmation`` means it is git-tracked and its path
+        is not in ``confirm_tracked`` (an agent file) or, for a bundled
+        asset, that the user edited it and the bundle changed.
     agent : str or None
         Canonical agent name the file belongs to, when it has one.
     reason : str or None

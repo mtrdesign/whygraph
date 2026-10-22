@@ -74,7 +74,8 @@ export function InitializeStep({
   /**
    * `settings` reuses this step on an initialized project (screen 10): the picker
    * starts from the agents already `configured`, unticking one removes its entry,
-   * and "Update agent files" (`force`) rewrites files that already exist. It renders
+   * and "Update agent files" brings the files up to date (unedited ones silently, edited
+   * ones only with "Overwrite my edits too", which sends `force`). It renders
    * inside the Agents section, without a card of its own, and queues no scan.
    */
   mode?: "wizard" | "settings";
@@ -101,6 +102,9 @@ export function InitializeStep({
       : [...new Set((detected?.detected_agents ?? []).map((d) => d.agent))],
   );
   const [removedState, setRemoved] = useState<string[]>([]);
+  // "Update agent files" marks the section dirty (the request is the same re-initialize);
+  // `force` ("Overwrite my edits too") is the only flag that changes what is written.
+  const [update, setUpdate] = useState(false);
   const [force, setForce] = useState(false);
   // In settings the removals are exactly the configured agents that were unticked.
   const removed = settings ? configured.filter((a) => !agents.includes(a)) : removedState;
@@ -127,6 +131,8 @@ export function InitializeStep({
     .filter((f) => f.status === "needs_confirmation")
     .map((f) => f.file);
   const unconfirmed = pending.filter((f) => !confirmed.has(f));
+  // Bundled files the person edited, whose packaged copy changed: left alone unless forced.
+  const editedAssets = (preview.data?.asset_files ?? []).filter((f) => f.status === "needs_confirmation");
 
   const init = useMutation({
     mutationFn: () =>
@@ -216,8 +222,9 @@ export function InitializeStep({
 
   // Settings: the picker and the preview are a section form (R3) - Save applies
   // the agent changes, Discard puts the configured agents back.
+  const agentFiles = project.data?.agent_files ?? null;
   const settingsDirty =
-    force || agents.length !== configured.length || agents.some((a) => !configured.includes(a));
+    update || force || agents.length !== configured.length || agents.some((a) => !configured.includes(a));
 
   const content = (
     <div className="flex flex-col gap-5">
@@ -260,16 +267,44 @@ export function InitializeStep({
         )}
         {settings && (
           <div className="flex flex-col gap-2 border-t border-border pt-3">
+            {agentFiles?.outdated && (
+              <p className="flex flex-wrap items-center gap-2 text-sm" data-testid="agent-files-version">
+                <span>
+                  Agent files:{" "}
+                  {agentFiles.installed_version ? `v${agentFiles.installed_version}` : "installed before versions were tracked"}
+                  {agentFiles.current_version && ` (current v${agentFiles.current_version})`}
+                </span>
+                {!update && (
+                  <Button size="sm" variant="outline" onClick={() => setUpdate(true)}>
+                    Update
+                  </Button>
+                )}
+              </p>
+            )}
             <label className="flex cursor-pointer items-start gap-2 text-sm">
-              <Checkbox checked={force} onCheckedChange={setForce} className="mt-0.5" />
+              <Checkbox checked={update} onCheckedChange={setUpdate} className="mt-0.5" />
               <span>
                 Update agent files
                 <span className="block text-xs text-muted-foreground">
-                  Rewrite the instruction files WhyGraph installed for the selected agents with this
-                  version's copies.
+                  Bring the instruction files WhyGraph installed for the selected agents up to this
+                  version. Files you have not edited update silently; edited ones are listed below and
+                  left as they are.
                 </span>
               </span>
             </label>
+            {(editedAssets.length > 0 || force) && (
+              <label className="flex cursor-pointer items-start gap-2 text-sm">
+                <Checkbox checked={force} onCheckedChange={setForce} className="mt-0.5" />
+                <span>
+                  Overwrite my edits too
+                  <span className="block text-xs text-muted-foreground">
+                    {editedAssets.length > 0
+                      ? `${editedAssets.length} file${editedAssets.length > 1 ? "s were" : " was"} edited since WhyGraph installed ${editedAssets.length > 1 ? "them" : "it"}.`
+                      : "Every installed file is replaced with this version's copy."}
+                  </span>
+                </span>
+              </label>
+            )}
             {force && (
               <Alert data-testid="force-warning">
                 <TriangleAlertIcon />
@@ -365,6 +400,7 @@ export function InitializeStep({
       onSave={async () => (await init.mutateAsync()).initialized}
       onDiscard={() => {
         setAgents([...configured]);
+        setUpdate(false);
         setForce(false);
         setConfirmed(new Set());
         init.reset();

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -199,7 +201,7 @@ def test_install_creates_parents(tmp_path: Path) -> None:
 
 
 def test_install_skips_existing(tmp_path: Path) -> None:
-    """Without ``force``, files that exist on disk are left alone."""
+    """Without ``force``, an edited file (no manifest) is left alone and flagged."""
     src = _make_source(tmp_path)
     project = tmp_path / "proj"
     project.mkdir()
@@ -210,7 +212,8 @@ def test_install_skips_existing(tmp_path: Path) -> None:
     result = assets.install_assets(_claude_target(), project, source=src)
 
     assert user_edit.read_text(encoding="utf-8") == "USER EDIT"
-    assert user_edit in result.skipped
+    assert user_edit in result.needs_confirmation
+    assert "-USER EDIT" in result.diffs[user_edit]
     # The other two files are fresh writes.
     assert len(result.written) == 2
     assert result.overwritten == []
@@ -229,7 +232,7 @@ def test_install_force_overwrites(tmp_path: Path) -> None:
 
     assert user_edit.read_text(encoding="utf-8") == "X-AGENT"
     assert user_edit in result.overwritten
-    assert result.skipped == []
+    assert result.skipped == [] and result.needs_confirmation == []
     # The other two files weren't pre-existing, so they're in `written`.
     assert len(result.written) == 2
 
@@ -366,7 +369,7 @@ def test_merge_replaces_between_markers_on_re_run(tmp_path: Path) -> None:
     assert content.startswith("user prefix\n")
     assert content.endswith("user suffix\n")
     assert "BUNDLED BODY" in content
-    assert dest in result.overwritten
+    assert dest in result.skipped  # the block is unchanged: nothing to rewrite
 
 
 def test_merge_appends_when_existing_has_no_markers(tmp_path: Path) -> None:
@@ -405,3 +408,157 @@ def test_merge_idempotent_byte_for_byte(tmp_path: Path) -> None:
     second = dest.read_text(encoding="utf-8")
 
     assert first == second
+
+
+# ---- upgrade manifest (plan section 6.4) -----------------------------------
+
+
+def _manifest(project: Path) -> dict:
+    return json.loads((project / ".whygraph" / "assets.json").read_text())
+
+
+def _installed(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Install the fake tree once; return (source, project, x.md)."""
+    src = _make_source(tmp_path)
+    project = tmp_path / "proj"
+    project.mkdir()
+    assets.install_assets(_claude_target(), project, source=src)
+    return src, project, project / ".claude" / "agents" / "x.md"
+
+
+def _bundle_change(src: Path) -> None:
+    (src / "agents" / "x.md").write_text("X-AGENT v2", encoding="utf-8")
+
+
+def test_manifest_round_trip(tmp_path: Path) -> None:
+    _, project, _ = _installed(tmp_path)
+
+    manifest = _manifest(project)
+
+    assert manifest["version"] == assets.package_version()
+    assert (
+        manifest["files"]["claude/agents/x.md"]
+        == hashlib.sha256(b"X-AGENT").hexdigest()
+    )
+    assert set(manifest["files"]) == {
+        "claude/agents/x.md",
+        "claude/commands/do-it.md",
+        "claude/skills/y/SKILL.md",
+    }
+    assert assets.read_manifest(project) == manifest
+    assert assets.manifest_status(project)["outdated"] is False
+
+
+def test_dry_run_writes_no_manifest(tmp_path: Path) -> None:
+    src = _make_source(tmp_path)
+    project = tmp_path / "proj"
+    project.mkdir()
+
+    assets.install_assets(_claude_target(), project, source=src, dry_run=True)
+
+    assert not (project / ".whygraph").exists()
+
+
+def test_unmodified_file_updates_silently(tmp_path: Path) -> None:
+    src, project, x = _installed(tmp_path)
+    _bundle_change(src)
+
+    result = assets.install_assets(_claude_target(), project, source=src)
+
+    assert x.read_text() == "X-AGENT v2"
+    assert x in result.overwritten and result.needs_confirmation == []
+    assert (
+        _manifest(project)["files"]["claude/agents/x.md"]
+        == hashlib.sha256(b"X-AGENT v2").hexdigest()
+    )
+
+
+def test_edited_file_with_unchanged_bundle_is_skipped(tmp_path: Path) -> None:
+    src, project, x = _installed(tmp_path)
+    x.write_text("MINE")
+
+    result = assets.install_assets(_claude_target(), project, source=src)
+
+    assert x.read_text() == "MINE"
+    assert x in result.skipped and result.needs_confirmation == []
+
+
+def test_edited_file_with_changed_bundle_needs_confirmation(tmp_path: Path) -> None:
+    src, project, x = _installed(tmp_path)
+    x.write_text("MINE")
+    _bundle_change(src)
+    before = _manifest(project)
+
+    result = assets.install_assets(_claude_target(), project, source=src)
+
+    assert x.read_text() == "MINE"
+    assert result.needs_confirmation == [x]
+    assert "+X-AGENT v2" in result.diffs[x]
+    assert _manifest(project)["files"] == before["files"]
+
+    forced = assets.install_assets(_claude_target(), project, source=src, force=True)
+    assert x.read_text() == "X-AGENT v2" and x in forced.overwritten
+
+
+def test_no_manifest_is_treated_as_edited(tmp_path: Path) -> None:
+    src, project, x = _installed(tmp_path)
+    (project / ".whygraph" / "assets.json").unlink()
+    x.write_text("OLD COPY")
+
+    result = assets.install_assets(_claude_target(), project, source=src)
+
+    assert result.needs_confirmation == [x]
+    assert x.read_text() == "OLD COPY"
+    # The files that already equal the bundle are adopted into a new manifest.
+    manifest = _manifest(project)
+    assert "claude/commands/do-it.md" in manifest["files"]
+    assert "claude/agents/x.md" not in manifest["files"]
+    assert manifest["version"] is None  # still stale: no current-version claim
+
+
+def test_missing_file_is_written_again(tmp_path: Path) -> None:
+    src, project, x = _installed(tmp_path)
+    x.unlink()
+
+    result = assets.install_assets(_claude_target(), project, source=src)
+
+    assert x in result.written
+
+
+def test_merge_block_follows_the_table(tmp_path: Path) -> None:
+    src = _make_merge_source(tmp_path)
+    project = tmp_path / "proj"
+    project.mkdir()
+    assets.install_assets(_merge_target(), project, source=src)
+    dest = project / "dest" / "merge-me.md"
+    key = "test-merge/merge-me.md"
+    assert (
+        _manifest(project)["files"][key] == hashlib.sha256(b"BUNDLED BODY").hexdigest()
+    )
+
+    # Unedited block + changed bundle: replaced silently, user text kept.
+    dest.write_text("above\n" + dest.read_text())
+    (src / "merge-me.md").write_text("BUNDLED BODY 2\n")
+    result = assets.install_assets(_merge_target(), project, source=src)
+    assert dest in result.overwritten
+    assert dest.read_text().startswith("above\n")
+    assert "BUNDLED BODY 2" in dest.read_text()
+
+    # Edited block + changed bundle: confirmation, then force.
+    dest.write_text(dest.read_text().replace("BUNDLED BODY 2", "MY BODY"))
+    (src / "merge-me.md").write_text("BUNDLED BODY 3\n")
+    result = assets.install_assets(_merge_target(), project, source=src)
+    assert result.needs_confirmation == [dest]
+    assert "MY BODY" in dest.read_text()
+    forced = assets.install_assets(_merge_target(), project, source=src, force=True)
+    assert dest in forced.overwritten and "BUNDLED BODY 3" in dest.read_text()
+
+
+def test_manifest_status_reports_outdated(tmp_path: Path) -> None:
+    _, project, _ = _installed(tmp_path)
+    assert assets.manifest_status(project)["outdated"] is False
+    assets.set_manifest_version(project, "0.0.1")
+
+    status = assets.manifest_status(project)
+
+    assert status["installed_version"] == "0.0.1" and status["outdated"] is True

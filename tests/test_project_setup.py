@@ -824,7 +824,8 @@ def test_force_overwrites_a_1x_asset_and_dry_run_reports_overwrite(
         repo, agents=["claude"], hooks=False, mcp=HttpMcp(slug="demo"), marker=None
     )
     assert stale.read_text() == "1.x CONTENT"
-    assert _status(plain, ".claude/agents/planner.md") == "skip"
+    # An edited (here: pre-manifest) file is never touched without force.
+    assert _status(plain, ".claude/agents/planner.md") == "needs_confirmation"
 
     preview = initialize_project(
         repo,
@@ -896,7 +897,7 @@ def test_install_assets_dry_run_classifies_without_writing(tmp_path: Path) -> No
     real = assets.install_assets(target, tmp_path)
     assert sorted(real.written) == sorted(dry.written)
     again = assets.install_assets(target, tmp_path, dry_run=True)
-    assert again.skipped and again.overwritten  # files skipped, merge file overwritten
+    assert again.skipped and not again.overwritten  # nothing changed: all skipped
 
 
 # ---- agent_actions and confirm_tracked -----------------------------------
@@ -1058,3 +1059,68 @@ def test_portal_marker_validates_what_the_hook_helper_will_parse(
 ) -> None:
     with pytest.raises(ValueError):
         PortalMarker(slug, port)
+
+
+# ---- the asset upgrade manifest ------------------------------------------
+
+
+def _init(repo: Path, **kw):
+    kw.setdefault("agents", ["claude"])
+    return initialize_project(
+        repo,
+        hooks=False,
+        mcp=HttpMcp(slug="demo"),
+        marker=PortalMarker("demo", 8765),
+        **kw,
+    )
+
+
+def test_initialize_writes_the_manifest_and_a_reinit_is_quiet(repo: Path) -> None:
+    _init(repo)
+    manifest = json.loads((repo / ".whygraph" / "assets.json").read_text())
+    assert manifest["version"] == assets.package_version()
+    assert ".claude/agents/planner.md" not in manifest["files"]
+    assert "claude/agents/planner.md" in manifest["files"]
+
+    again = _init(repo)
+
+    assert {f.status for f in again.asset_files} == {"skip"}
+
+
+def test_edited_asset_is_flagged_but_does_not_withhold_the_marker(
+    repo: Path,
+) -> None:
+    _init(repo)
+    planner = repo / ".claude" / "agents" / "planner.md"
+    planner.write_text("MINE")
+    manifest_path = repo / ".whygraph" / "assets.json"
+    data = json.loads(manifest_path.read_text())
+    # A newer package: the recorded hash is for the old bundled copy.
+    data["files"]["claude/agents/planner.md"] = "0" * 64
+    data["version"] = "0.0.1"
+    manifest_path.write_text(json.dumps(data))
+
+    result = _init(repo)
+
+    assert _status(result, ".claude/agents/planner.md") == "needs_confirmation"
+    diff = next(f.diff for f in result.asset_files if f.status == "needs_confirmation")
+    assert "-MINE" in diff
+    assert result.needs_confirmation == () and result.marker_written is True
+    assert planner.read_text() == "MINE"
+    # Still stale: the recorded version stays old so Settings keeps offering Update.
+    assert assets.manifest_status(repo)["installed_version"] == "0.0.1"
+
+    forced = _init(repo, force=True)
+    assert _status(forced, ".claude/agents/planner.md") == "overwrite"
+    assert assets.manifest_status(repo)["outdated"] is False
+
+
+def test_removing_an_agent_leaves_the_manifest_alone(repo: Path) -> None:
+    _init(repo)
+    manifest_path = repo / ".whygraph" / "assets.json"
+    before = manifest_path.read_text()
+
+    _init(repo, agents=[], agent_actions={"claude": "remove"})
+
+    assert manifest_path.read_text() == before
+    assert (repo / ".claude" / "agents" / "planner.md").exists()

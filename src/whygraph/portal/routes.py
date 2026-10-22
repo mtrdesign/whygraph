@@ -50,6 +50,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
+from whygraph import assets as assets_mod
 from whygraph.agents import AGENTS as AGENT_TARGETS
 from whygraph.agents import (
     UnknownAgentError,
@@ -1054,10 +1055,30 @@ def _details(state: PortalState, project: BoundProject) -> dict:
     )
     body["detected"] = _detected(project) if body["root_status"] == "ok" else None
     body["port_change"] = _port_change_for(state, project)
+    body["agent_files"] = _agent_files_status(state, project, body)
     body["stats"] = (
         _project_stats(state, project) if body["root_status"] == "ok" else None
     )
     return body
+
+
+def _agent_files_status(
+    state: PortalState, project: BoundProject, body: dict
+) -> dict | None:
+    """The installed vs packaged agent-file version (the upgrade manifest).
+
+    ``None`` in production, for a project with no configured agent or a
+    missing folder, or when the manifest path is a symbolic link out of
+    the root; otherwise ``installed_version`` (``None`` before the
+    manifest existed), ``current_version`` and ``outdated``.
+    """
+    if state.mode == "production" or not body["agents"] or body["root_status"] != "ok":
+        return None
+    try:
+        check_inside(project.root, project.root / assets_mod.MANIFEST_RELPATH)
+    except UnsafePathError:
+        return None
+    return assets_mod.manifest_status(project.root)
 
 
 def _port_change_for(state: PortalState, project: BoundProject) -> dict | None:

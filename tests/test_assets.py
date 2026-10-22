@@ -44,7 +44,7 @@ def test_packaged_cursor_assets_present() -> None:
     """All bundled Cursor assets are reachable via importlib.resources.
 
     Covers the full ported surface: 4 rules (skills equivalent), 3
-    commands (slash commands), and 4 subagents — mirroring the
+    skills (slash commands), and 4 subagents — mirroring the
     ``claude-code/`` tree where Cursor has a native concept.
     """
     root = assets.packaged_assets_for(agents.resolve_agent("cursor"))
@@ -53,9 +53,9 @@ def test_packaged_cursor_assets_present() -> None:
         "rules/whygraph-ask-why.mdc",
         "rules/whygraph-plan-change.mdc",
         "rules/whygraph-implement-plan.mdc",
-        "commands/rationale.md",
-        "commands/whygraph-plan.md",
-        "commands/whygraph-implement.md",
+        "skills/rationale/SKILL.md",
+        "skills/whygraph-plan/SKILL.md",
+        "skills/whygraph-implement/SKILL.md",
         "rules/whygraph-codegraph.mdc",
         "agents/planner.md",
         "agents/researcher.md",
@@ -634,7 +634,7 @@ _FRONTMATTER_KEYS = {
     },
     "cursor": {
         "name", "description", "model", "readonly", "is_background",
-        "alwaysApply", "globs",
+        "alwaysApply", "globs", "disable-model-invocation",
     },
     "vscode": {
         "name", "description", "tools", "agents", "user-invocable", "agent",
@@ -687,6 +687,10 @@ def test_harness_frontmatter_wiring() -> None:
         "Agent, Read"
     )
     assert _frontmatter(_ASSET_ROOT / "cursor/agents/planner.md")["readonly"] == "false"
+    for name in ("rationale", "whygraph-plan", "whygraph-implement"):
+        fm = _frontmatter(_ASSET_ROOT / f"cursor/skills/{name}/SKILL.md")
+        assert fm["name"] == name and fm["disable-model-invocation"] == "true"
+    assert not (_ASSET_ROOT / "cursor/commands").exists()
     vs = _ASSET_ROOT / "vscode"
     assert _frontmatter(vs / "prompts/whygraph-plan.prompt.md")["agent"] == (
         "whygraph-planner"

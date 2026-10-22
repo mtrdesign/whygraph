@@ -4,34 +4,15 @@ This repository uses WhyGraph (via the `whygraph` MCP server) to ground code-cha
 
 ## Before editing existing code
 
-When the request is to **edit, refactor, rename, move, or delete** an existing function, class, or module — anything beyond a typo or formatter pass — call the `whygraph_rationale_brief` MCP tool first. Identify the symbol by `qualified_name` (preferred) or by `path` + `line_start` + `line_end`.
-
-The tool returns `purpose`, `why`, `constraints[]`, `tradeoffs[]`, `risks[]`, `evidence_count`, and `cached_at`. Use it to inform the change:
-
-- **Constraints are non-negotiable.** If the requested change would violate one, surface that to the user before editing.
-- **Tradeoffs** explain why an obvious-looking improvement may have already been considered and rejected.
-- **Risks** are flagged *before* the change, not after.
-- **Empty `evidence_count`**: the chunk has no meaningful history yet; proceed with judgement.
-
-Do not dump the full brief verbatim to the user unless asked. Use it to shape the edit, then mention only the parts that affect the change.
-
-## When the user asks "why does X exist?"
-
-For intent questions about an existing symbol — "what is this for?", "is this still needed?", "can I delete this?" — call `whygraph_rationale_brief` and present the response **verbatim**. The grounded answer is the value; don't paraphrase or pre-answer from the code.
-
-If the user suspects the cached rationale is stale, re-call with `force_refresh: true`.
+When the request is to **edit, refactor, rename, move, or delete** an existing function, class, or module (anything beyond a typo or formatter pass), call the `whygraph_rationale_brief` MCP tool first, identifying the symbol by `qualified_name` when CodeGraph resolves it, otherwise by `path` + `line_start` + `line_end`. Treat `constraints[]` as non-negotiable and surface `risks[]` before the change. For "why does X exist?" questions, call it and present the answer verbatim. The details of calling it and reading errors are in `instructions/pre-edit.instructions.md`.
 
 The server also offers prompts: `whygraph_pre_edit_brief`, `whygraph_why_was_this_written`, `whygraph_triage_commit`.
 
-## When planning a non-trivial change
+## Planning and executing
 
-For multi-file changes, migrations, feature additions, or anything that ripples across the codebase, use the `/whygraph-plan` prompt. It dispatches to a planner subagent that builds a CodeGraph impact set, warms the rationale cache, and produces an ordered step-by-step plan with verbatim constraint/risk quotes.
+For multi-file changes, use the `/whygraph-plan` prompt (never draft a parallel plan yourself); to apply a reviewed plan under `.whygraph/plans/`, use `/whygraph-implement`. Skip both for trivial changes (1-3 lines, single file).
 
-Do not draft a parallel plan yourself — that defeats the cost gate. Either invoke `/whygraph-plan` or plan inline without WhyGraph.
-
-## When executing a reviewed plan
-
-If the user has a WhyGraph plan markdown (typically under `.whygraph/plans/<slug>.md`) and wants to apply it, use the `/whygraph-implement` prompt. It hands off to an implementor subagent that reads the plan as a strict contract, runs Verify after each step, and halts on the first failure.
+Copilot also reads `AGENTS.md` at the repo root when WhyGraph installed it for Codex; the two blocks overlap, and this file keeps only the Copilot-specific parts.
 
 ## Using CodeGraph for structural questions
 
@@ -54,7 +35,5 @@ The WhyGraph portal serves this project's CodeGraph index through the `codegraph
 ## What NOT to do
 
 - Don't call `whygraph_rationale_brief` for brand-new code with no predecessor — there's no history to summarize.
-- Don't call it repeatedly for the same symbol in one conversation.
 - Don't treat the brief as authoritative if the code clearly diverges from what it describes — flag the divergence.
-- Don't run `/whygraph-plan` automatically for trivial changes (1–3 lines, single file). Just do the edit.
 - Don't grep for a symbol you could find with `codegraph_search`, or re-verify codegraph results with grep.

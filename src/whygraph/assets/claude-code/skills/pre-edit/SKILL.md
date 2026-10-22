@@ -27,8 +27,8 @@ conversation and the code hasn't changed; or the user told you to skip it.
 
 Identify the chunk one of two ways (pass one, not both):
 
-- **By location** (preferred): `path` + `line_start` + `line_end`.
-- **By name**: `qualified_name` (e.g. `auth.session.refresh_token`) — CodeGraph resolves it.
+- **By name** (preferred when CodeGraph resolves it): `qualified_name` (e.g. `auth.session.refresh_token`).
+- **By location** (fallback): `path` + `line_start` + `line_end`.
 
 Leave other args at their defaults unless you have a specific reason (`force_refresh=True`
 only when the code has clearly changed since the last card).

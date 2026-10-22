@@ -25,8 +25,8 @@ WhyGraph stores a structured rationale for each code chunk in this project — p
 
 The tool accepts two ways to identify the chunk — pass one, not both:
 
-- **By location** (preferred when you have it): `path` + `line_start` + `line_end`. Most accurate, no name resolution needed.
-- **By name**: `qualified_name` (e.g. `auth.session.refresh_token`). CodeGraph resolves it to a file/line range.
+- **By name** (preferred when CodeGraph resolves it): `qualified_name` (e.g. `auth.session.refresh_token`).
+- **By location** (fallback): `path` + `line_start` + `line_end`, when the name does not resolve.
 
 Other useful args:
 

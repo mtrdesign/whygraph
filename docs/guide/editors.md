@@ -37,6 +37,12 @@ The details live on [Connecting agents](../portal/agents.md):
 your editor how to use WhyGraph's tools. Re-initializing leaves your existing files alone; **Update
 agent files** in the project's Settings overwrites them.
 
+Cursor's slash commands (`/rationale`, `/whygraph-plan`, `/whygraph-implement`) are installed as skills under
+`.cursor/skills/`. Cursor also loads `.claude/skills/`, so with both Claude Code and Cursor selected each
+command shows up twice in Cursor's slash menu. A project initialized by an earlier build keeps its old
+`.cursor/commands/` files; delete them by hand if you do not want the duplicates. Copilot also reads
+`AGENTS.md`, so with both VS Code and Codex selected the two always-on blocks overlap.
+
 Each agent's install also **append-merges** a CodeGraph usage-guidance block into that agent's
 always-on instructions - `CLAUDE.md`, `AGENTS.md`, or `.github/copilot-instructions.md`, and an
 always-apply rule for Cursor. Your own content is preserved; the block is added below it.

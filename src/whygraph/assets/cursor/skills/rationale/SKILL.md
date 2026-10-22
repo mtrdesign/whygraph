@@ -1,3 +1,9 @@
+---
+name: rationale
+description: Show the WhyGraph rationale for a code chunk - purpose, why, constraints, tradeoffs, risks. Read-only lookup.
+disable-model-invocation: true
+---
+
 # /rationale — show the WhyGraph rationale for a code chunk
 
 Show the WhyGraph rationale for a code chunk — purpose, why, constraints, tradeoffs, risks. Read-only lookup.

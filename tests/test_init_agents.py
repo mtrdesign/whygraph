@@ -206,7 +206,7 @@ def test_cursor_writes_mcp_json_and_installs_rules(tmp_path: Path) -> None:
     ).read_text(encoding="utf-8")
     assert "alwaysApply: true" in codegraph_rule
     # Slash commands and subagents land in their respective subdirs.
-    assert (tmp_path / ".cursor" / "commands" / "whygraph-plan.md").is_file()
+    assert (tmp_path / ".cursor" / "skills" / "whygraph-plan" / "SKILL.md").is_file()
     assert (tmp_path / ".cursor" / "agents" / "planner.md").is_file()
     assert not (tmp_path / ".claude").exists()
 

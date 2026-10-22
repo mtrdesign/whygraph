@@ -7,26 +7,14 @@ description: Before editing, refactoring, renaming, deleting, or replacing exist
 
 WhyGraph stores a structured rationale for each code chunk in this project — purpose, why it exists, constraints to preserve, tradeoffs, and risks — derived from git history (and PRs/issues when the scan picked them up). Before changing existing code, pull this brief so the edit respects the original intent rather than rediscovering it from scratch.
 
-## When to call `whygraph_rationale_brief`
-
-**Call before:**
-- Editing the body of an existing function, method, or class
-- Refactoring, renaming, moving, deleting, or replacing a symbol
-- Answering "why does this exist?", "what is this for?", "is this still needed?", "can I delete this?"
-- Any change you would describe as more than a typo, comment, or formatting fix
-
-**Skip when:**
-- Adding entirely new code with no predecessor
-- Trivial edits: typos, comment-only changes, whitespace, import sorting, formatter output
-- You already fetched the brief for the same symbol earlier in this conversation and the underlying code hasn't changed
-- The user has explicitly told you to skip the brief
+The always-on `copilot-instructions.md` says *when* to call `whygraph_rationale_brief` (before editing, refactoring, renaming, moving or deleting existing code; not for new code, typos or formatter output). This file covers how to call it and what to do with the result.
 
 ## How to call it
 
 The tool accepts two ways to identify the chunk — pass one, not both:
 
-- **By location** (preferred when you have it): `path` + `line_start` + `line_end`. Most accurate, no name resolution needed.
-- **By name**: `qualified_name` (e.g. `auth.session.refresh_token`). CodeGraph resolves it to a file/line range.
+- **By name** (preferred when CodeGraph resolves it): `qualified_name` (e.g. `auth.session.refresh_token`).
+- **By location** (fallback): `path` + `line_start` + `line_end`, when the name does not resolve.
 
 Other useful args:
 

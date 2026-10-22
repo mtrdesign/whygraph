@@ -1,3 +1,9 @@
+---
+name: whygraph-implement
+description: Execute a reviewed WhyGraph plan markdown step by step, running Verify after each step and halting on the first failure.
+disable-model-invocation: true
+---
+
 # /whygraph-implement — execute a reviewed WhyGraph plan
 
 Execute a reviewed WhyGraph plan markdown step by step. Reads the plan as a strict contract, runs Verify after each step, halts on first failure, appends an Implementation log to the plan.
@@ -31,7 +37,7 @@ If validation passes, do not summarise the plan — the subagent will read it it
 
 ## Step 3 — Dispatch to the implementor subagent
 
-Delegate to the `whygraph-implementor` subagent (it lives in `.cursor/agents/implementor.md`). If `--model` was passed in Step 1, hand that off as the model override.
+Run the `whygraph-implementor` subagent (it lives in `.cursor/agents/implementor.md`; start it by name). If `--model` was passed in Step 1, hand that off as the model override.
 
 The handoff prompt body must be exactly:
 

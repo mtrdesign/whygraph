@@ -1,3 +1,9 @@
+---
+name: whygraph-plan
+description: Plan a non-trivial code change with WhyGraph rationale and CodeGraph symbols. Asks scoping questions if needed, then runs the planner subagent to produce a step-by-step plan.
+disable-model-invocation: true
+---
+
 # /whygraph-plan — plan a non-trivial change with grounded rationale
 
 Plan a non-trivial code change with WhyGraph rationale + CodeGraph symbols. Asks scoping questions if needed, then dispatches to the planner subagent (which optionally fans out to 3 researchers + a synthesizer) to produce a step-by-step plan.
@@ -40,7 +46,7 @@ Capture the user's answers verbatim into a `SCOPING:` block to pass to the plann
 
 ## Step 3 — Dispatch to the planner subagent
 
-Delegate to the `whygraph-planner` subagent (it lives in `.cursor/agents/planner.md`). The handoff prompt body must be:
+Run the `whygraph-planner` subagent (it lives in `.cursor/agents/planner.md`; start it by name) with this prompt body:
 
 ```
 TASK: <task description>

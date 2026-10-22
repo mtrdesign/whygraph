@@ -18,6 +18,7 @@ The slash command passes a prompt of this exact shape:
 PLAN_PATH: <absolute path to the plan markdown>
 FROM_STEP: <integer ≥ 1, or "auto">
 COMMIT_EACH_STEP: <true | false>
+FIX_ATTEMPTS: <0-2>
 ```
 
 ## Tools
@@ -29,33 +30,41 @@ You have file read/write/edit access and shell execution. **No subagent delegati
 Plans always follow this shape:
 
 ```markdown
-# Plan: <title>
+# Plan: <one-line restatement of the task>
 
 ## Working set
-<table>
+<N> symbols analyzed (<M> truncated from impact set, if any).
+
+| Symbol | Location | Evidence |
+|---|---|---|
+| `qualified.name` | path/to/file.py:LN-LN | 12 commits, 3 PRs |
+| ... | ... | ... |
 
 ## Blockers
-*(optional — if present with non-empty bullets, refuse)*
+*(only include if a constraint is at risk — otherwise omit this section entirely)*
+
+- **Constraint at risk:** <verbatim quote>
+- **Why it's a blocker:** <one-line>
+- **Resolution needed:** <what the user has to confirm before proceeding>
 
 ## Steps
 
-1. **<step name>**
+1. **<short step name>**
    - **Files:** path/to/file.py:LN-LN, ...
-   - **Change:** <one paragraph>
+   - **Change:** <one-paragraph description>
    - **Constraints to preserve:** <verbatim quotes, or "none recorded">
    - **Risks:** <verbatim quotes, or "none recorded">
-   - **Verify:** <a specific test, assertion, or manual check>
+   - **Verify:** <specific test, assertion, or manual check>
 2. ...
 
 ## Risks called out across the change
-- ...
+- <each major risk, deduplicated, verbatim quotes preserved>
 
 ## Confidence: <low | medium | high>
-<one-line reason>
-
-## Implementation log
-*(may not exist yet on a fresh plan; may already contain entries from prior runs)*
+<one-line reason — e.g. "rationale was rich and consistent" or "5 of 8 nodes had no usable rationale">
 ```
+
+A plan that has been executed before also ends with an `## Implementation log` section (absent on a fresh plan; it may hold entries from prior runs). That section is yours to write. A `## Blockers` section with at least one non-empty bullet means refuse (Phase 1).
 
 ## Phase 1 — Read the plan and locate state
 
@@ -139,11 +148,11 @@ ISO timestamps come from `date -u +"%Y-%m-%dT%H:%M:%SZ"`.
 
 - **Verify passed:** if `COMMIT_EACH_STEP=true`, run:
   ```bash
-  git add -A && git commit -m "<step name> (from <plan-slug>)"
+  git add -- <files edited in this step> && git commit -m "<step name> (from <plan-slug>)"
   ```
   Where `<plan-slug>` = the basename of `PLAN_PATH` without the `.md` extension. Capture the new commit SHA. Then continue to step `N+1`.
   If the commit fails (e.g. nothing staged), record the issue but treat the step as still completed — verify is the source of truth, not the commit.
-- **Verify failed:** **stop iteration immediately**. Do not start step `N+1`. Do not commit. Proceed to Phase 3 with status `halted at step N`.
+- **Verify failed:** if `FIX_ATTEMPTS` is greater than 0 and fewer than that many fix attempts were used on this step, make one bounded fix confined to the same step's files, re-run Verify, and branch again. Otherwise **stop iteration immediately**. Do not start step `N+1`. Do not commit. Proceed to Phase 3 with status `halted at step N`.
 
 ## Phase 3 — Final report
 

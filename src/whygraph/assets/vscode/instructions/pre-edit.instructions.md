@@ -45,6 +45,7 @@ If the tool returns `isError: true`, the cause is one of:
 - **No scan DB in this project** — surface the error verbatim; the user needs to scan from the WhyGraph portal first.
 - **No CodeGraph DB** when calling by `qualified_name` — fall back to calling by `path` + `line_start` + `line_end`.
 - **Symbol not found** when calling by `qualified_name` — likely a stale graph; try the path+lines form instead.
+- **`code: budget_exceeded` or `generation_not_permitted`** — do not retry; call `whygraph_evidence_for` instead (no LLM, always allowed) and tell the user generation is paused for this project.
 
 In every case, proceed with the edit using your own judgment after flagging the cause to the user.
 

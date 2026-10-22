@@ -45,7 +45,18 @@ Do not invent questions outside these axes. Do not ask all three by default — 
 
 Capture the user's answers verbatim into a `SCOPING:` block to pass to the planner.
 
-## Step 3 — Dispatch to the planner subagent
+## Step 3 — Resolve the plan path
+
+Resolve `OUT_PATH` now, before dispatch - the planner writes the plan there itself:
+
+- If `--out <path>` was passed in Step 1, use that path. Resolve relative paths against the current working directory. If the path doesn't end in `.md`, append `.md`.
+- Otherwise, build the default path:
+  1. Slugify the task description: lowercase, replace any run of non-alphanumeric characters with a single `-`, strip leading/trailing `-`, truncate to 60 chars.
+  2. Default path: `.whygraph/plans/<slug>.md` (relative to the repo root - find it via `git rev-parse --show-toplevel`).
+  3. If that file already exists, append `-2`, `-3`, … until you find an unused name. Don't overwrite.
+- Make `OUT_PATH` absolute, and ensure its parent directory exists with `mkdir -p <parent>`.
+
+## Step 4 — Dispatch to the planner subagent
 
 This prompt runs as the `whygraph-planner` custom agent (`.github/agents/planner.agent.md`). Its input is:
 
@@ -56,36 +67,17 @@ SCOPING:
 - <axis>: <user answer>
 - <axis>: <user answer>
 (or "SCOPING: skipped" if --no-questions or no questions were needed)
+OUT_PATH: <absolute path resolved in Step 3>
 ```
 
 Where `MODE` is `shallow` if `--shallow` was passed, `deep` if `--deep` was passed, otherwise `auto` (the planner will decide based on impact size).
 
 The planner has its own system prompt and access to CodeGraph + WhyGraph MCP tools — do not inline planning instructions here.
 
-## Step 4 — Print the result
+## Step 5 — Print the result
 
-When the planner returns, print its output **verbatim** to the user. Do not summarize, paraphrase, re-format, or comment on the plan. The planner is the source of truth.
+When the planner returns, print its reply **verbatim** to the user. It is `Saved plan to <path>` plus the plan's `## Blockers` and `## Confidence` lines - the planner wrote the file itself. Do not summarize, paraphrase, re-format, or comment on it, and do not write the file yourself. The planner is the source of truth.
 
 If the planner reports that CodeGraph isn't available, surface that message verbatim and stop — don't attempt a fallback or save anything. WhyGraph planning is meaningless without the graph.
 
-## Step 5 — Save the plan to disk
-
-Only run this step if the planner output contains a plan (i.e. a line matching `^# Plan: (.+)$`). If no such line was found, skip the save silently — the planner returned an error or refusal, not a plan.
-
-**5a. Resolve the save path:**
-
-- If `--out <path>` was passed in Step 1, use that path. Resolve relative paths against the current working directory. If the path doesn't end in `.md`, append `.md`.
-- Otherwise, build the default path:
-  1. Extract the title from the `# Plan: <title>` line.
-  2. Slugify: lowercase, replace any run of non-alphanumeric characters with a single `-`, strip leading/trailing `-`, truncate to 60 chars.
-  3. Default path: `.whygraph/plans/<slug>.md` (relative to the repo root — find it via `git rev-parse --show-toplevel`).
-  4. If that file already exists, append `-2`, `-3`, … until you find an unused name. Don't overwrite.
-
-**5b. Write the file:**
-
-- Ensure the parent directory exists with `mkdir -p <parent>`.
-- Save the planner's verbatim output to the resolved path.
-
-**5c. Tell the user:** after the verbatim plan, print one final line: `Saved plan to <resolved-path>`.
-
-This prompt's only job is: parse → scope → dispatch → print → save. Do not edit other files, run other tools, or improvise.
+This prompt's only job is: parse → scope → resolve path → dispatch → print. Do not edit other files, run other tools, or improvise.

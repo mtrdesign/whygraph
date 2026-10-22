@@ -707,3 +707,154 @@ def test_harness_frontmatter_wiring() -> None:
         assert 'model_reasoning_effort = "medium"' in toml
     assert "/agent " not in (_ASSET_ROOT / "codex/AGENTS.md").read_text()
     assert "## WhyGraph" in (cc / "CLAUDE.md").read_text()
+
+
+# ---- pipeline parity (plan 6.2, 6.5) --------------------------------------
+
+_AGENT_PATHS = {
+    "claude-code": "claude-code/agents/{n}.md",
+    "cursor": "cursor/agents/{n}.md",
+    "vscode": "vscode/agents/{n}.agent.md",
+    "codex": "codex/.codex/agents/{n}.toml",
+}
+_AGENT_NAMES = ("planner", "synthesizer", "implementor", "researcher")
+
+
+def _agent_body(tree: str, name: str) -> list[str]:
+    """Return an agent's instruction body (no frontmatter) as stripped lines."""
+    text = (_ASSET_ROOT / _AGENT_PATHS[tree].format(n=name)).read_text()
+    if text.startswith("---\n"):
+        text = text.split("\n---\n", 1)[1]
+    else:  # codex TOML: the body is the developer_instructions string
+        text = text.split('developer_instructions = """\n', 1)[1].rsplit('"""', 1)[0]
+    return text.strip().splitlines()
+
+
+def test_plan_schema_identical() -> None:
+    """The fenced plan schema is byte-identical in all 12 agent files."""
+    import re
+
+    blocks: dict[tuple[str, str], str] = {}
+    for tree in _AGENT_PATHS:
+        for name in ("planner", "synthesizer", "implementor"):
+            body = "\n".join(_agent_body(tree, name))
+            found = re.findall(r"```markdown\n(# Plan:.*?)\n```", body, re.S)
+            assert len(found) == 1, (tree, name)
+            blocks[(tree, name)] = found[0]
+    assert len(set(blocks.values())) == 1, {
+        key: block[:60] for key, block in blocks.items()
+    }
+    assert "## Confidence:" in next(iter(blocks.values()))
+
+
+# The allowlisted substitution table: platform vocabulary that may differ
+# between the four trees. Everything else in an agent body must be identical.
+_PARITY_SUBS = [
+    (r" \(in Claude Code the schemas may be deferred.*?first\)", ""),
+    (r"`/whygraph-plan`|`the planning workflow`", "<RERUN>"),
+    (
+        r"(?i)\b(?:Agent tool|subagent (?:delegation|handoff)|"
+        r"nested agent invocations?|subagent invocations?)\b",
+        "<AGENT-TOOL>",
+    ),
+    (
+        r"(?i)\b(?:spawn(?:ed|ing)?|delegat(?:e|es|ed|ing|ion)(?: to)?|"
+        r"hand(?:ed|ing)? off(?: to)?|handoff)\b",
+        "<DISPATCH>",
+    ),
+    (r"slash (?:command|prompt)|\bcaller\b", "<INVOKER>"),
+]
+# A line that differs after substitution must be platform tool vocabulary.
+_PARITY_PLATFORM = (
+    r"<AGENT-TOOL>|<DISPATCH>|<INVOKER>|\b(?:Read|Write|Grep|Glob|Bash|Edit|read|"
+    r"grep|glob|shell|file reads|write-new-file|read-then-edit)\b|"
+    r"^Your prompt has this shape:$|then to the synthesizer"
+)
+# Lines only one tree has: its own fallback note for missing nested delegation.
+_PARITY_TREE_ONLY = r"(?i)<DISPATCH> is unavailable|nested (?:subagents|<DISPATCH>)"
+_PARITY_TOOLS = {"Read", "Edit", "Write", "Grep", "Glob", "Bash"}
+
+
+def _parity_norm(line: str) -> str:
+    import re
+
+    for pattern, repl in _PARITY_SUBS:
+        line = re.sub(pattern, repl, line)
+    return line
+
+
+def _parity_tokens(line: str) -> list[str]:
+    import re
+
+    out = []
+    for tok in re.findall(r"`([^`]+)`", line):
+        words = set(re.findall(r"[A-Za-z]+", tok))
+        if (words and words <= _PARITY_TOOLS) or tok.startswith("/agent "):
+            continue
+        out.append(tok)
+    return sorted(out)
+
+
+@pytest.mark.parametrize("name", _AGENT_NAMES)
+def test_body_parity(name: str) -> None:
+    """The four trees' agent bodies differ only by allowlisted platform wording.
+
+    A per-line edit that lands in one tree and misses another shows up here: a
+    differing line must be platform vocabulary with the same backticked
+    identifiers on both sides, or a tree-only delegation fallback note.
+    """
+    import difflib
+    import re
+
+    base = [_parity_norm(line) for line in _agent_body("claude-code", name)]
+    for tree in ("cursor", "vscode", "codex"):
+        other = [_parity_norm(line) for line in _agent_body(tree, name)]
+        matcher = difflib.SequenceMatcher(None, base, other, autojunk=False)
+        for op, i1, i2, j1, j2 in matcher.get_opcodes():
+            if op == "equal":
+                continue
+            left, right = base[i1:i2], other[j1:j2]
+            where = (name, tree, left, right)
+            if not any(line.strip() for line in left + right):
+                continue
+            if not (left and right):  # one-sided: a tree-only note
+                for line in left or right:
+                    assert not line.strip() or re.search(_PARITY_TREE_ONLY, line), where
+                continue
+            assert any(re.search(_PARITY_PLATFORM, line) for line in left + right), (
+                where
+            )
+            tokens = lambda lines: sorted(  # noqa: E731
+                tok for line in lines for tok in _parity_tokens(line)
+            )
+            assert tokens(left) == tokens(right), where
+
+
+def test_pipeline_streamlining_texts_in_every_tree() -> None:
+    """The 6.2 sentences reached all four trees (inline cards, OUT_PATH, budget)."""
+    for tree in _AGENT_PATHS:
+        planner = "\n".join(_agent_body(tree, "planner"))
+        assert "OUT_PATH" in planner and "Saved plan to" in planner, tree
+        assert "is_empty: <bool>" not in planner, tree
+        assert "constraints: [<verbatim>, ...]" in planner, tree
+        assert "(unavailable:" in planner, tree
+        researcher = "\n".join(_agent_body(tree, "researcher"))
+        assert "budget_exceeded" in researcher, tree
+        assert "cached_only=True" in researcher, tree
+        assert "(unavailable:" in "\n".join(_agent_body(tree, "synthesizer")), tree
+        implementor = "\n".join(_agent_body(tree, "implementor"))
+        assert "FIX_ATTEMPTS" in implementor and "git add -A" not in implementor, tree
+    for rel in (
+        "claude-code/skills/pre-edit/SKILL.md",
+        "cursor/rules/whygraph-pre-edit.mdc",
+        "vscode/instructions/pre-edit.instructions.md",
+        "codex/AGENTS.md",
+    ):
+        assert "budget_exceeded" in (_ASSET_ROOT / rel).read_text(), rel
+    for rel in (
+        "claude-code/skills/whygraph-plan/SKILL.md",
+        "cursor/skills/whygraph-plan/SKILL.md",
+        "vscode/prompts/whygraph-plan.prompt.md",
+        "codex/AGENTS.md",
+    ):
+        assert "OUT_PATH" in (_ASSET_ROOT / rel).read_text(), rel

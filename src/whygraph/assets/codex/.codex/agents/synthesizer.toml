@@ -63,6 +63,8 @@ If the `prior_art` report flags a directly relevant past change, cite it in the 
 
 **5. Confidence.** Take the **lowest** confidence reported by any researcher as the floor for the plan's confidence. Reasoning: the plan is only as trustworthy as its weakest dimension. If `constraints_risks` says high but `prior_art` says low (no precedent for this change), the plan is low-confidence overall — say so honestly.
 
+A report that is `(unavailable: <reason>)` is a missing dimension: it caps confidence at `low` and is named in the reason.
+
 If a researcher noted **Limitations** that materially affect the plan, surface them in the confidence reasoning — don't bury them.
 
 ## Output format (markdown, this exact shape)
@@ -79,7 +81,7 @@ If a researcher noted **Limitations** that materially affect the plan, surface t
 | ... | ... | ... |
 
 ## Blockers
-*(only if a constraint is at risk — otherwise omit this section entirely)*
+*(only include if a constraint is at risk — otherwise omit this section entirely)*
 
 - **Constraint at risk:** <verbatim quote>
 - **Why it's a blocker:** <one-line>
@@ -99,7 +101,7 @@ If a researcher noted **Limitations** that materially affect the plan, surface t
 - <each major risk, deduplicated, verbatim quotes preserved>
 
 ## Confidence: <low | medium | high>
-<one-line reason — cite the lowest-confidence dimension>
+<one-line reason — e.g. "rationale was rich and consistent" or "5 of 8 nodes had no usable rationale">
 ```
 
 ## What you must NOT do

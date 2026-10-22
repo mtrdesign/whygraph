@@ -46,7 +46,7 @@ only when the code has clearly changed since the last card).
 If the call returns `isError: true`: no scan DB → surface verbatim (the user scans from the
 WhyGraph portal first); calling by `qualified_name` failed (no CodeGraph DB, or stale graph) → retry
 by `path` + `line_start` + `line_end`. Either way, proceed with the edit using your own
-judgment after flagging the cause.
+judgment after flagging the cause. If it errors with `code: budget_exceeded` or `generation_not_permitted`, do not retry; call `whygraph_evidence_for` instead (no LLM, always allowed) and tell the user generation is paused for this project.
 
 ## When to also call `whygraph_evidence_for`
 

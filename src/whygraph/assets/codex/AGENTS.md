@@ -13,7 +13,7 @@ The tool returns `purpose`, `why`, `constraints[]`, `tradeoffs[]`, `risks[]`, `e
 - **Risks** are flagged *before* the change, not after.
 - **Empty `evidence_count`**: the chunk has no meaningful history yet; proceed with judgement.
 
-If the tool returns `isError: true`, surface the error verbatim and proceed with your own judgment after flagging the cause to the user.
+If the tool returns `isError: true`, surface the error verbatim and proceed with your own judgment after flagging the cause to the user. If it errors with `code: budget_exceeded` or `generation_not_permitted`, do not retry; call `whygraph_evidence_for` instead (no LLM, always allowed) and tell the user generation is paused for this project.
 
 Don't dump the full brief verbatim to the user unless asked. Use it to shape the edit, then mention only the parts that affect the change.
 
@@ -39,7 +39,10 @@ Pass the task description in the planner's expected prompt shape:
 TASK: <task description>
 MODE: <shallow | deep | auto>
 SCOPING: skipped       # or "- <axis>: <answer>" lines
+OUT_PATH: <absolute path>   # .whygraph/plans/<slug>.md under the repo root
 ```
+
+Pick `OUT_PATH` yourself: slugify the task (lowercase, runs of non-alphanumerics to `-`, at most 60 characters) and never overwrite an existing file. The planner writes the plan there and replies with the path plus its Blockers and Confidence lines.
 
 Don't draft a parallel plan yourself — that defeats the cost gate. Either invoke `whygraph-planner` or plan inline without WhyGraph.
 
@@ -55,6 +58,7 @@ Pass the implementor's expected prompt shape:
 PLAN_PATH: <absolute path>
 FROM_STEP: <integer or "auto">
 COMMIT_EACH_STEP: <true | false>
+FIX_ATTEMPTS: <0-2>   # failed-Verify fix attempts per step, default 0
 ```
 
 **Skip when**: no plan markdown exists, the "plan" is an informal chat-message bullet list (not a `# Plan:` markdown file with the standard schema), the change is trivial, the user is asking you to *review* the plan rather than execute it, or the plan has unresolved blockers.

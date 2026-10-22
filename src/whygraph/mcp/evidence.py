@@ -18,8 +18,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Annotated
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, col, select
 
@@ -1288,7 +1290,7 @@ def whygraph_evidence_for(
     line_start: int | None = None,
     line_end: int | None = None,
     qualified_name: str | None = None,
-    limit: int = 20,
+    limit: Annotated[int, Field(ge=1, le=100)] = 20,
 ) -> dict:
     """MCP tool — historical evidence for a chunk of code.
 

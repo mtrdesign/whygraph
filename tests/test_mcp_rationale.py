@@ -465,6 +465,36 @@ def test_a_budget_context_refuses_a_card_with_its_scope(
     assert built == []
 
 
+def test_a_budget_refusal_reaches_the_agent_with_code_and_scope(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Over MCP the refusal names its code and scope (§5.3)."""
+    import dataclasses
+
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    from whygraph.core.context import use_project
+    from whygraph.mcp.errors import log_tool_errors
+
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    built = _forbid_llm_factories(monkeypatch)
+    blocked = dataclasses.replace(
+        _viewer_ctx(temp_git_repo, whygraph_db_initialized),
+        llm_block="budget_exceeded",
+        llm_block_scope="project",
+    )
+    tool = log_tool_errors(whygraph_rationale_brief)
+    with use_project(blocked), pytest.raises(ToolError) as caught:
+        tool(path="sample.py", line_start=1, line_end=3)
+    text = str(caught.value)
+    assert "[WhyGraph] " in text
+    assert text.endswith("(code: budget_exceeded, scope: project)")
+    assert built == []
+
+
 def test_a_budget_spent_mid_request_refuses_the_next_card(
     temp_git_repo: Path,
     whygraph_db_initialized: Path,

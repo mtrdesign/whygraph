@@ -123,6 +123,30 @@ Orchestration recipes that wire the tools into a workflow.
 | `whygraph_why_was_this_written` | Why was this written? | `path` / `line_start` / `line_end` / `qualified_name` | Recover the original intent behind a chunk of code from its commits, PRs, and closing issues. |
 | `whygraph_triage_commit` | Triage a commit | `sha` | Summarize what one commit did and why, using its linked PR and closing issues. |
 
+## Errors
+
+A tool that cannot serve a request returns an error result (`isError`) whose text reads:
+
+```text
+[WhyGraph] {message} (code: {code}[, scope: {scope}])
+```
+
+The parenthetical appears only where the error carries a code, and the `scope` part only for the
+budget refusal. Argument mistakes (a missing path, `limit` out of range) are errors with no code.
+Match on the `[WhyGraph]` prefix, not on the start of the text, because the MCP client may add its own
+prefix.
+
+| Code | Scope | Meaning | What to do |
+|---|---|---|---|
+| `bad_target` | - | The target is malformed: both `qualified_name` and `path` were given, a required line is missing, or the lines are out of range. | Pass either `qualified_name` or `path` with `line_start` / `line_end`. |
+| `not_indexed` | - | A `qualified_name` was given but the project's CodeGraph index cannot be read. | Use `path` and lines instead, or scan the project from the WhyGraph portal. |
+| `symbol_not_found` | - | The `qualified_name` is not in the CodeGraph index. | Check the name (bare form, or `Class::method`), or use `path` and lines. |
+| `blame_failed` | - | `git blame` failed on the target file. | The file may be untracked or the repository damaged; try another target. |
+| `no_evidence` | - | The lines map to no scanned commit. | Scan the project from the WhyGraph portal, then retry. |
+| `generation_not_permitted` | - | No card is cached and your role on the project (viewer) cannot generate one. | Ask a contributor or admin to generate the card. |
+| `budget_exceeded` | `org`, `project`, or `member` | No card is cached and the LLM budget is reached. Cached cards still read. | Wait for the budget to reset, or ask an admin to raise it. The scope says whose budget it is. |
+| `provider_error` | - | The LLM provider failed while writing the card. | Retry later; check the provider key in the portal if it keeps failing. |
+
 ## Linked projects
 
 A project [linked to a platform](../portal/platform-projects.md) has no local WhyGraph database, so

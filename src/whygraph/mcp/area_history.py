@@ -15,8 +15,10 @@ commits whose touched paths have since been deleted or renamed away.
 from __future__ import annotations
 
 import logging
+from typing import Annotated
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 
 from whygraph.core.context import current_project
 from whygraph.core.remote import RemoteError, RemoteProject, platform_block
@@ -84,7 +86,7 @@ def linked_area_history(
 
 def whygraph_area_history(
     path: str,
-    limit: int = 20,
+    limit: Annotated[int, Field(ge=1, le=100)] = 20,
     include_renames: bool = True,
 ) -> dict:
     """MCP tool — area-history commits for a file path.

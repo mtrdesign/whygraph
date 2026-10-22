@@ -203,6 +203,29 @@ def test_area_history_tool_rejects_invalid_inputs() -> None:
         whygraph_area_history("foo.py", limit=0)
 
 
+def test_area_history_error_text_carries_the_prefix_and_no_code() -> None:
+    """A bad argument reads ``[WhyGraph] ...`` with no code suffix (§5.3)."""
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    from whygraph.mcp.errors import log_tool_errors
+
+    tool = log_tool_errors(whygraph_area_history)
+    with pytest.raises(ToolError) as caught:
+        tool("foo.py", limit=0)
+    assert str(caught.value) == "[WhyGraph] limit must be >= 1"
+
+
+def test_area_history_advertises_the_limit_bound() -> None:
+    """The schema carries the 1..100 bound, not just the body check (§5.3)."""
+    import asyncio
+
+    from whygraph.mcp.server import mcp
+
+    tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
+    limit = tools["whygraph_area_history"].inputSchema["properties"]["limit"]
+    assert (limit["minimum"], limit["maximum"]) == (1, 100)
+
+
 # --- D8: alias scope (default branch OR current branch) ----------------------
 
 

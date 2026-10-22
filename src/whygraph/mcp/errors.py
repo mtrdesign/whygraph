@@ -85,6 +85,37 @@ class WhyGraphError(ToolError):
         return err
 
 
+def tool_error_text(exc: WhyGraphError) -> str:
+    """Return the text an agent reads for a failed WhyGraph tool call.
+
+    The shape is ``[WhyGraph] {message} (code: {code}[, scope: {scope}])``.
+    The parenthetical is present only when the error carries a ``code``; the
+    ``scope`` part only when it carries a scope too.
+
+    Parameters
+    ----------
+    exc : WhyGraphError
+        The error the tool raised.
+
+    Returns
+    -------
+    str
+        The message, prefixed and suffixed as above.
+
+    Examples
+    --------
+    >>> tool_error_text(WhyGraphError("limit must be >= 1"))
+    '[WhyGraph] limit must be >= 1'
+    """
+    text = f"[WhyGraph] {exc}"
+    code = getattr(exc, "code", None)
+    if code is None:
+        return text
+    scope = getattr(exc, "scope", None)
+    detail = f"code: {code}" + (f", scope: {scope}" if scope else "")
+    return f"{text} ({detail})"
+
+
 def log_tool_errors(func: _F) -> _F:
     """Wrap an MCP tool so every failure is logged before it propagates.
 
@@ -96,6 +127,10 @@ def log_tool_errors(func: _F) -> _F:
     WARNING with just their message; anything else logs a full traceback at
     ERROR. The exception is always re-raised unchanged so FastMCP still
     builds the ``isError`` response.
+
+    A :class:`WhyGraphError` is re-raised as a plain ``ToolError`` whose text
+    is :func:`tool_error_text`, so the agent always reads the same shape. Any
+    other exception is re-raised unchanged.
 
     ``functools.wraps`` sets ``__wrapped__``, so ``inspect.signature`` still
     sees the original parameters — FastMCP's argument validation and the
@@ -118,7 +153,7 @@ def log_tool_errors(func: _F) -> _F:
             return func(*args, **kwargs)
         except WhyGraphError as exc:
             _log.warning("%s rejected request: %s", func.__name__, exc)
-            raise
+            raise ToolError(tool_error_text(exc)) from exc
         except Exception:
             _log.exception("%s failed", func.__name__)
             raise

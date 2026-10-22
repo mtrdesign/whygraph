@@ -622,3 +622,84 @@ def test_guidance_blocks_key_on_iserror_and_pin_u6() -> None:
     for path, text in _asset_texts().items():
         if "claude-code" not in path.parts:
             assert "ToolSearch" not in text, path
+
+
+# ---- harness frontmatter (plan 6.1) ---------------------------------------
+
+_FRONTMATTER_KEYS = {
+    "claude-code": {
+        "name", "description", "model", "tools", "disallowedTools", "maxTurns",
+        "when_to_use", "user-invocable", "allowed-tools", "argument-hint",
+        "disable-model-invocation",
+    },
+    "cursor": {
+        "name", "description", "model", "readonly", "is_background",
+        "alwaysApply", "globs",
+    },
+    "vscode": {
+        "name", "description", "tools", "agents", "user-invocable", "agent",
+        "argument-hint", "applyTo",
+    },
+}  # fmt: skip
+_DOCUMENTED_MODELS = {"sonnet", "opus", "haiku", "inherit"}
+
+
+def _frontmatter(path: Path) -> dict[str, str]:
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---\n"):
+        return {}
+    block = text[4 : text.index("\n---\n", 4)]
+    out: dict[str, str] = {}
+    for line in block.splitlines():
+        if ":" in line and not line.startswith((" ", "-")):
+            key, _, value = line.partition(":")
+            out[key.strip()] = value.strip()
+    return out
+
+
+def test_frontmatter_allowlist() -> None:
+    """Every asset's frontmatter keys and ``model`` values are documented ones."""
+    for tree, keys in _FRONTMATTER_KEYS.items():
+        for path in (_ASSET_ROOT / tree).rglob("*"):
+            if path.suffix not in {".md", ".mdc"}:
+                continue
+            fm = _frontmatter(path)
+            assert set(fm) <= keys, (path, set(fm) - keys)
+            if "model" in fm:
+                assert fm["model"] in _DOCUMENTED_MODELS, (path, fm["model"])
+            if tree == "vscode" and "agent" in fm:
+                assert fm["agent"] in {
+                    "agent",
+                    "whygraph-planner",
+                    "whygraph-implementor",
+                }, path
+
+
+def test_harness_frontmatter_wiring() -> None:
+    cc = _ASSET_ROOT / "claude-code"
+    assert _frontmatter(cc / "agents/researcher.md")["disallowedTools"] == "Agent"
+    assert _frontmatter(cc / "agents/researcher.md")["model"] == "sonnet"
+    assert _frontmatter(cc / "agents/synthesizer.md")["tools"] == (
+        "Read, Grep, Glob, Bash"
+    )
+    assert "Write" not in _frontmatter(cc / "agents/planner.md")["disallowedTools"]
+    assert _frontmatter(cc / "skills/whygraph-implement/SKILL.md")["allowed-tools"] == (
+        "Agent, Read"
+    )
+    assert _frontmatter(_ASSET_ROOT / "cursor/agents/planner.md")["readonly"] == "false"
+    vs = _ASSET_ROOT / "vscode"
+    assert _frontmatter(vs / "prompts/whygraph-plan.prompt.md")["agent"] == (
+        "whygraph-planner"
+    )
+    assert _frontmatter(vs / "prompts/whygraph-implement.prompt.md")["agent"] == (
+        "whygraph-implementor"
+    )
+    assert "agent" in _frontmatter(vs / "agents/planner.agent.md")["tools"]
+    for name in ("researcher", "synthesizer", "implementor"):
+        fm = _frontmatter(vs / f"agents/{name}.agent.md")
+        assert fm["user-invocable"] == "false" and fm["agents"] == "[]"
+    for name in ("researcher", "synthesizer"):
+        toml = (_ASSET_ROOT / f"codex/.codex/agents/{name}.toml").read_text()
+        assert 'model_reasoning_effort = "medium"' in toml
+    assert "/agent " not in (_ASSET_ROOT / "codex/AGENTS.md").read_text()
+    assert "## WhyGraph" in (cc / "CLAUDE.md").read_text()

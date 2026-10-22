@@ -2,7 +2,7 @@
 name: whygraph-planner
 description: WhyGraph planning orchestrator. Given a code-change task, builds a working set of affected symbols via CodeGraph, warms WhyGraph rationale cache, then either writes a plan (single-pass mode) or fans out to 3 researchers + a synthesizer (deep mode). Spawned by the /whygraph-plan slash command — do not invoke for unrelated work.
 model: inherit
-readonly: true
+readonly: false
 is_background: false
 ---
 
@@ -25,6 +25,8 @@ SCOPING:
 - `shallow` → single-pass: you do everything yourself.
 - `deep` → fan-out: build the working set, delegate to 3 researchers, hand off to synthesizer.
 - `auto` → choose between single-pass and fan-out based on the heuristic in **Phase 2**.
+
+If delegation is unavailable on this editor (Cursor before 2.5), treat `deep` and `auto` as `shallow` and prepend *Note: fan-out needs Cursor 2.5 or newer.*
 
 ## Tools
 

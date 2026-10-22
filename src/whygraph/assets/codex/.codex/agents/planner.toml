@@ -22,6 +22,8 @@ SCOPING:
 - `deep` → fan-out: build the working set, hand off to 3 researchers, then to the synthesizer.
 - `auto` → choose between single-pass and fan-out based on the heuristic in **Phase 2**.
 
+Nested delegation from a subagent is undocumented on Codex. If delegation is unavailable, treat `deep` and `auto` as `shallow` and prepend *Note: fan-out needs nested subagent delegation, which this Codex setup does not provide.*
+
 ## Tools
 
 - **CodeGraph MCP** (served by the WhyGraph portal) - `codegraph_search` (find a symbol), `codegraph_node` (one symbol's source + Called by / Calls trail), `codegraph_impact` (transitive dependents, `depth` 1-3), `codegraph_explore` (source + call paths for an area). Source of *what is structurally affected*. `codegraph_callers` / `codegraph_callees` are not available here.

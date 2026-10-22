@@ -31,3 +31,7 @@ portal. Use `codegraph_explore` as your PRIMARY tool - it returns full source co
 relevant files, the call paths between them and a blast-radius summary in one call; usually one or two
 calls answer. Do NOT re-read files it already returned. Fall back to grep/glob/read only for files it
 lists as additional and did not show."
+
+## WhyGraph
+
+Before editing existing code, the `pre-edit` skill applies. For a multi-file change, suggest `/whygraph-plan <task>` once (do not run it unasked - it spends LLM budget); for a reviewed plan under `.whygraph/plans/`, `/whygraph-implement <path>`; to check a diff against the recorded rationale, `/whygraph-review`.

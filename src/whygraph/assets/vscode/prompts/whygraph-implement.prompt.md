@@ -2,7 +2,7 @@
 description: Execute a reviewed WhyGraph plan markdown step by step. Reads the plan as a strict contract, runs Verify after each step, halts on first failure.
 name: whygraph-implement
 argument-hint: <plan.md> [--from-step N] [--commit-each-step] [--model <model-id>]
-agent: agent
+agent: whygraph-implementor
 ---
 
 # /whygraph-implement — execute a reviewed WhyGraph plan
@@ -38,9 +38,7 @@ If validation passes, do not summarise the plan — the subagent will read it it
 
 ## Step 3 — Dispatch to the implementor subagent
 
-Delegate to the `whygraph-implementor` custom agent (it lives in `.github/agents/implementor.agent.md` and appears in the VS Code agents dropdown). If `--model` was passed in Step 1, hand that off as the model override.
-
-The handoff prompt body must be exactly:
+This prompt runs as the `whygraph-implementor` custom agent (`.github/agents/implementor.agent.md`). Its input is exactly:
 
 ```
 PLAN_PATH: <absolute path to the plan>

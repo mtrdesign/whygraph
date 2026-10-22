@@ -31,7 +31,7 @@ The server also offers prompts: `whygraph_pre_edit_brief`, `whygraph_why_was_thi
 
 ## Planning a non-trivial change
 
-For multi-file changes, migrations, feature additions, or anything that ripples across the codebase, hand off to the `whygraph-planner` subagent — invoke via `/agent whygraph-planner` (or natural-language delegation). The planner builds a CodeGraph impact set, warms the rationale cache, and produces an ordered step-by-step plan with verbatim constraint/risk quotes. For richer changes it fans out to three researchers (impact, constraints+risks, prior art) and a synthesizer.
+For multi-file changes, migrations, feature additions, or anything that ripples across the codebase, hand off to the `whygraph-planner` agent (ask Codex to delegate to it by name). The planner builds a CodeGraph impact set, warms the rationale cache, and produces an ordered step-by-step plan with verbatim constraint/risk quotes. For richer changes it fans out to three researchers (impact, constraints+risks, prior art) and a synthesizer.
 
 Pass the task description in the planner's expected prompt shape:
 
@@ -47,7 +47,7 @@ Don't draft a parallel plan yourself — that defeats the cost gate. Either invo
 
 ## Executing a reviewed plan
 
-If the user has a WhyGraph plan markdown (typically under `.whygraph/plans/<slug>.md`) and wants to apply it, hand off to the `whygraph-implementor` subagent — `/agent whygraph-implementor`. It reads the plan as a strict contract, applies each step in order, runs Verify after each step, halts on the first failure, and logs progress back into the plan.
+If the user has a WhyGraph plan markdown (typically under `.whygraph/plans/<slug>.md`) and wants to apply it, hand off to the `whygraph-implementor` agent (ask Codex to delegate to it by name). It reads the plan as a strict contract, applies each step in order, runs Verify after each step, halts on the first failure, and logs progress back into the plan.
 
 Pass the implementor's expected prompt shape:
 

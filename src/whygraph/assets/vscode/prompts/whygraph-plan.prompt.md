@@ -2,7 +2,7 @@
 description: Plan a non-trivial code change with WhyGraph rationale + CodeGraph symbols. Asks scoping questions if needed, then dispatches to the planner subagent.
 name: whygraph-plan
 argument-hint: <task description> [--shallow|--deep] [--no-questions] [--out <path>]
-agent: agent
+agent: whygraph-planner
 ---
 
 # /whygraph-plan — plan a non-trivial change with grounded rationale
@@ -47,7 +47,7 @@ Capture the user's answers verbatim into a `SCOPING:` block to pass to the plann
 
 ## Step 3 — Dispatch to the planner subagent
 
-Delegate to the `whygraph-planner` custom agent (it lives in `.github/agents/planner.agent.md` and appears in the VS Code agents dropdown). The handoff prompt body must be:
+This prompt runs as the `whygraph-planner` custom agent (`.github/agents/planner.agent.md`). Its input is:
 
 ```
 TASK: <task description>

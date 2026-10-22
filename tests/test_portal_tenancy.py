@@ -663,6 +663,9 @@ class Call:
     # The body lists every repo of the (instance-wide) shared folders, so
     # the other org's root and name may appear - never as registered.
     discovery: bool = False
+    # The production sweep (test_portal_hosts_isolation.py) shares this table;
+    # set where production answers differently (no CodeGraph host there).
+    prod_status: int | None = None
 
 
 def _repos_check(body: dict, w: World, o: OrgWorld) -> None:
@@ -796,7 +799,9 @@ def _overview_check(body: dict, w: World, o: OrgWorld) -> None:
         "agents",
         "codegraph",
     }
-    assert body["codegraph"]["server"]["shared"] is True
+    # Local mode hosts CodeGraph; production has no host (null).
+    if body["codegraph"] is not None:
+        assert body["codegraph"]["server"]["shared"] is True
     assert {e["run_id"] for e in body["events"]} <= {o.run_id}
     assert sum(t["calls"] for t in body["usage"]["by_task"]) == 2
     # No agent calls and no tokens in either world: no person or machine
@@ -1052,7 +1057,7 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     # PATH): no log yet; a restart of an off host answers `was: off`
     ("GET", "/api/projects/{slug}/codegraph/log"): Call(404),
     ("POST", "/api/projects/{slug}/codegraph/restart"): Call(
-        200, shows=lambda o: ['"shared":true']
+        200, shows=lambda o: ['"shared":true'], prod_status=404
     ),
     # The Explorer router
     ("GET", "/api/projects/{slug}/search"): Call(

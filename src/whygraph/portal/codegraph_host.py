@@ -696,7 +696,7 @@ async def _reap_group(pgid: int) -> None:
             return
         try:
             os.killpg(pgid, sig)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):  # gone, or a zombie (macOS)
             return
         deadline = time.monotonic() + TERMINATE_WAIT_SEC
         while _group_alive(pgid) and time.monotonic() < deadline:

@@ -613,6 +613,7 @@ describe("linked project pages", () => {
       "General",
       "Agents",
       "Git hooks",
+      "Scanning",
       "Danger zone",
     ]);
     expect(screen.queryByTestId("key-anthropic")).toBeNull();
@@ -625,6 +626,19 @@ describe("linked project pages", () => {
     // whole save.
     expect(mutations().find((c) => c.method === "PUT")?.body).toEqual({
       config: { scan: { hooks: ["post-merge", "post-rewrite", "post-checkout"] } },
+    });
+  });
+
+  it("the Scanning switch saves serve_codegraph with the saved hooks, nothing else", async () => {
+    const user = userEvent.setup();
+    fake.config = { scan: { forge: "off", hooks: ["post-commit"] } };
+    mount("/p/alpha/settings");
+    const section = await screen.findByRole("region", { name: "Scanning" });
+    await user.click(await within(section).findByRole("switch", { name: "Serve CodeGraph tools to agents" }));
+    await user.click(within(section).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mutations().some((c) => c.method === "PUT")).toBe(true));
+    expect(mutations().find((c) => c.method === "PUT")?.body).toEqual({
+      config: { scan: { hooks: ["post-commit"], serve_codegraph: false } },
     });
   });
 

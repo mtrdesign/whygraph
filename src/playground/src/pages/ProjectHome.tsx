@@ -247,16 +247,45 @@ function UsageCard({ usage, slug }: { usage: NonNullable<ProjectOverview["usage"
   );
 }
 
+/** The hosted CodeGraph server's state and this portal run's call outcomes (two short lines). */
+function CodegraphLines({ codegraph }: { codegraph: NonNullable<ProjectOverview["codegraph"]> }) {
+  const { server, last_sync: sync, since_start: t } = codegraph;
+  const serverLine = [
+    `CodeGraph server: ${server.state.replace("_", " ")}`,
+    server.pid ? `pid ${server.pid}` : null,
+    server.since && server.state === "live" ? timeAgo(server.since)?.replace(/ ago$/, "") : null,
+    sync
+      ? `index refreshed ${timeAgo(sync.at) ?? "recently"} (${(sync.duration_ms / 1000).toFixed(1)} s)`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <div className="flex flex-col gap-0.5 text-xs text-muted-foreground" data-testid="codegraph-lines">
+      <p data-testid="codegraph-server">{serverLine}</p>
+      {t.calls > 0 && (
+        <p data-testid="codegraph-tallies">
+          {t.waited} call{t.waited === 1 ? "" : "s"} waited for the index, {t.timeouts} timed out, {t.refused}{" "}
+          refused (since the portal started).
+        </p>
+      )}
+    </div>
+  );
+}
+
 /** Agent calls in the last 30 days, or the setup card when there were none. */
 function AgentActivity({
   agents,
+  codegraph,
   production,
   setup,
 }: {
   agents: ProjectOverview["agents"];
+  codegraph?: ProjectOverview["codegraph"];
   production: boolean;
   setup: ReactNode;
 }) {
+  const cg = codegraph && codegraph.server.available ? <CodegraphLines codegraph={codegraph} /> : null;
   if (agents.total_calls === 0) {
     return (
       setup ?? (
@@ -265,6 +294,7 @@ function AgentActivity({
             Agent activity
           </h2>
           <p className="text-sm text-muted-foreground">No agent called this project in the last 30 days.</p>
+          {cg}
         </section>
       )
     );
@@ -284,6 +314,7 @@ function AgentActivity({
           {agents.last_call_day && ` Last call ${formatDate(`${agents.last_call_day}T12:00:00Z`)}.`}
         </p>
       </div>
+      {cg}
       <Suspense fallback={<Skeleton className="h-[220px] w-full" />}>
         <ChartBlock payload={agentChart(agents.days, production)} />
       </Suspense>
@@ -511,6 +542,7 @@ export function ProjectHome() {
     lastFailure: overview.data?.last_failure ?? null,
     waiting,
     unsafePath: !!unsafe,
+    codegraph: overview.data?.codegraph ?? null,
   });
   // Access lost / an unsupported source refuse every scan, Describe included (OVW-3).
   const scannable = !p.access_lost && p.source_supported !== false;
@@ -638,7 +670,7 @@ export function ProjectHome() {
       {overview.data?.usage && <UsageCard usage={overview.data.usage} slug={slug} />}
 
       {overview.isSuccess ? (
-        <AgentActivity agents={overview.data.agents} production={production} setup={setup} />
+        <AgentActivity agents={overview.data.agents} codegraph={overview.data.codegraph} production={production} setup={setup} />
       ) : overview.isError ? (
         <>
           <ErrorState

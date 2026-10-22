@@ -24,7 +24,7 @@ import { Checkbox } from "../ui/checkbox";
 import { AgentPicker } from "./AgentPicker";
 import { ConnectAgent } from "./ConnectAgent";
 import { CopyButton } from "./CopyButton";
-import { DetectedPanel } from "./DetectedPanel";
+import { DetectedPanel, ForeignCodegraphEntry } from "./DetectedPanel";
 import { InitPreview } from "./InitPreview";
 import { RunCard } from "./WizardConfigure";
 import { SectionForm } from "../settings/SectionForm";
@@ -101,6 +101,10 @@ export function InitializeStep({
       ? [...configured]
       : [...new Set((detected?.detected_agents ?? []).map((d) => d.agent))],
   );
+  // Files whose foreign `codegraph` entry becomes the portal's.
+  const [replaceCodegraph, setReplaceCodegraph] = useState<string[]>([]);
+  const setReplace = (file: string, on: boolean) =>
+    setReplaceCodegraph((r) => (on ? [...new Set([...r, file])] : r.filter((f) => f !== file)));
   const [removedState, setRemoved] = useState<string[]>([]);
   // "Update agent files" marks the section dirty (the request is the same re-initialize);
   // `force` ("Overwrite my edits too") is the only flag that changes what is written.
@@ -119,9 +123,15 @@ export function InitializeStep({
   );
 
   const preview = useQuery({
-    queryKey: projectKey(slug, "init-preview", [...agents].sort(), [...removed].sort(), force),
+    queryKey: projectKey(slug, "init-preview", [...agents].sort(), [...removed].sort(), force, [...replaceCodegraph].sort()),
     queryFn: () =>
-      projectApi(slug).init({ agents, agent_actions: agentActions, dry_run: true, ...(force && { force }) }),
+      projectApi(slug).init({
+        agents,
+        agent_actions: agentActions,
+        dry_run: true,
+        ...(force && { force }),
+        ...(replaceCodegraph.length > 0 && { replace_codegraph: replaceCodegraph }),
+      }),
     placeholderData: keepPreviousData,
     retry: false,
     staleTime: 0,
@@ -141,6 +151,7 @@ export function InitializeStep({
         agent_actions: agentActions,
         confirm_tracked: pending.filter((f) => confirmed.has(f)),
         ...(force && { force }),
+        ...(replaceCodegraph.length > 0 && { replace_codegraph: replaceCodegraph }),
       }),
     onSuccess: (result) => {
       setDone(result);
@@ -224,12 +235,18 @@ export function InitializeStep({
   // the agent changes, Discard puts the configured agents back.
   const agentFiles = project.data?.agent_files ?? null;
   const settingsDirty =
-    update || force || agents.length !== configured.length || agents.some((a) => !configured.includes(a));
+    update || force || replaceCodegraph.length > 0 || agents.length !== configured.length || agents.some((a) => !configured.includes(a));
 
   const content = (
     <div className="flex flex-col gap-5">
       {panelDetected && !settings && (
-        <DetectedPanel detected={panelDetected} removed={removed} onActionChange={setAction} />
+        <DetectedPanel
+          detected={panelDetected}
+          removed={removed}
+          onActionChange={setAction}
+          replaceCodegraph={replaceCodegraph}
+          onReplaceCodegraph={setReplace}
+        />
       )}
 
       <Block flat={settings}>
@@ -259,6 +276,19 @@ export function InitializeStep({
               Pick at least one agent - without one, nothing on this machine uses the link.
             </AlertDescription>
           </Alert>
+        )}
+        {settings && (preview.data?.foreign_codegraph ?? []).length > 0 && (
+          <ul className="flex flex-col divide-y divide-border" data-testid="foreign-codegraph-list">
+            {(preview.data?.foreign_codegraph ?? []).map((f) => (
+              <ForeignCodegraphEntry
+                key={f.file}
+                file={f.file}
+                detail={f.description}
+                replace={replaceCodegraph.includes(f.file)}
+                onReplaceChange={(on) => setReplace(f.file, on)}
+              />
+            ))}
+          </ul>
         )}
         {settings && removed.length > 0 && (
           <p className="text-xs text-muted-foreground" data-testid="removal-note">
@@ -402,6 +432,7 @@ export function InitializeStep({
         setAgents([...configured]);
         setUpdate(false);
         setForce(false);
+        setReplaceCodegraph([]);
         setConfirmed(new Set());
         init.reset();
       }}

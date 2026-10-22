@@ -198,7 +198,7 @@ describe("InitPreview", () => {
     );
     expect(within(screen.getByTestId("file-.mcp.json")).getByRole("checkbox")).toBeChecked();
     const notes = screen.getByTestId("init-preview").querySelector("ul:last-child")!;
-    expect(notes).toHaveTextContent(/approve the project's MCP server/);
+    expect(notes).toHaveTextContent(/approve the project's MCP servers/);
     expect(notes).toHaveTextContent(/shows up twice in VS Code/);
     expect(notes).toHaveTextContent(/trust this project in Codex/);
   });
@@ -294,6 +294,38 @@ describe("DetectedPanel", () => {
     expect(onActionChange).toHaveBeenCalledWith("claude", "remove");
     await user.click(within(vscode).getByRole("button", { name: "Migrate to HTTP" }));
     expect(onActionChange).toHaveBeenCalledWith("vscode", "migrate");
+  });
+
+  it("warns about the user's own CodeGraph and feeds the replace checkbox (entries only)", async () => {
+    const onReplaceCodegraph = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <DetectedPanel
+        detected={{
+          existing_db: false,
+          managed_hooks: [],
+          detected_agents: [],
+          custom_db_paths: [],
+          codegraph_entries: [{ agent: "claude", file: ".mcp.json", key: "mcpServers.codegraph", shape: "stdio", tracked: true }],
+          codegraph_sections: ["AGENTS.md"],
+          codegraph_hooks: ["/repo/.git/hooks/post-commit"],
+        }}
+        removed={[]}
+        onActionChange={() => {}}
+        replaceCodegraph={[]}
+        onReplaceCodegraph={onReplaceCodegraph}
+      />,
+    );
+    const panel = screen.getByTestId("detected-panel");
+    expect(panel).toHaveTextContent("Your own CodeGraph server - the portal serves CodeGraph for this project.");
+    expect(screen.getByTestId("foreign-codegraph")).toHaveTextContent(".mcp.json");
+    expect(screen.getByTestId("foreign-codegraph-section")).toHaveTextContent("AGENTS.md");
+    expect(screen.getByTestId("foreign-codegraph-hook")).toHaveTextContent("post-commit");
+    // Only the entry offers a replace; sections and hooks have no toggle.
+    const boxes = screen.getAllByRole("checkbox", { name: "Replace with the portal's CodeGraph" });
+    expect(boxes).toHaveLength(1);
+    await user.click(boxes[0]);
+    expect(onReplaceCodegraph).toHaveBeenCalledWith(".mcp.json", true);
   });
 
   it("renders nothing for a repo with no earlier state", () => {

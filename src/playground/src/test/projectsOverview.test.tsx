@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ProjectDetails, ProjectOverview, ProjectSummary } from "../api";
+import type { CodegraphOverview, ProjectDetails, ProjectOverview, ProjectSummary } from "../api";
 import { PROJECT_ACTIONS, type ProjectAction } from "../lib/permissions";
 import { projectHealth, showScannedAgo } from "../lib/projectHealth";
 import { scanAvailability } from "../lib/scanAvailability";
@@ -300,6 +300,82 @@ describe("Overview chart data", () => {
     expect(agentKindLabel("whygraph_evidence_for")).toBe("Evidence lookups");
     expect(agentKindLabel("v1:pr")).toBe("Pull request lookups");
     expect(agentKindLabel("something_new")).toBe("something_new");
+    expect(agentKindLabel("codegraph_explore")).toBe("Code exploration");
+    expect(agentKindLabel("codegraph_node")).toBe("Symbol and file reads");
+    expect(agentKindLabel("codegraph_search")).toBe("Symbol search");
+    expect(agentKindLabel("codegraph_impact")).toBe("Change impact");
+  });
+});
+
+// ---- the hosted CodeGraph block (plan section 4.2c) ---------------------------------------
+
+function cg(over: Partial<CodegraphOverview> = {}): CodegraphOverview {
+  return {
+    server: { state: "live", pid: 1234, since: new Date(Date.now() - 12 * 60_000).toISOString(), shared: true, available: true },
+    enabled: true,
+    last_call_at: null,
+    last_sync: { at: new Date(Date.now() - 3000).toISOString(), duration_ms: 612, result: "ok", changed_files: 3 },
+    sync_failures_10m: 0,
+    sync_paused_until: null,
+    guard: { ok: true, paths: [], checked_at: "2026-10-09T10:00:00Z" },
+    index: { present: true, files: 1050 },
+    withheld_tools: [],
+    last_index_failure: null,
+    since_start: { calls: 20, waited: 12, still_updating: 0, refresh_failed: 0, busy: 0, refused: 1, timeouts: 2, sum_wait_ms: 0, max_wait_ms: 0 },
+    ...over,
+  };
+}
+
+describe("projectHealth codegraph items", () => {
+  const ids = (codegraph: CodegraphOverview | null) =>
+    projectHealth(details(), { codegraph }).items.map((i) => [i.id, i.tone]);
+
+  it("a live server and a fresh index add nothing, and no block adds nothing", () => {
+    expect(ids(cg())).toEqual([]);
+    expect(ids(null)).toEqual([]);
+  });
+
+  it.each(["restart_window", "unavailable"] as const)("%s is an error with Restart and Open log", (state) => {
+    const h = projectHealth(details(), { codegraph: cg({ server: { ...cg().server, state } }) });
+    expect(h.items[0]).toMatchObject({ id: "codegraph", tone: "error", title: "CodeGraph is paused on this portal (every project)" });
+    expect(h.items[0].actions.map((a) => a.kind)).toEqual(["codegraph_restart", "codegraph_log"]);
+    // No new status pill.
+    expect(h.status.key).toBe("ready");
+  });
+
+  it("a viewer is offered the log but not the restart", () => {
+    const h = projectHealth(details({ permissions: VIEWER }), { codegraph: cg({ server: { ...cg().server, state: "unavailable" } }) });
+    expect(h.items[0].actions.map((a) => a.kind)).toEqual(["codegraph_log"]);
+  });
+
+  it("lists the symlink paths, a failed refresh, withheld tools, the off switch and a missing binary", () => {
+    const h = projectHealth(details(), {
+      codegraph: cg({
+        guard: { ok: false, paths: ["docs/out"], checked_at: "x" },
+        last_sync: { at: "2026-10-09T10:00:00Z", duration_ms: 1, result: "failed" },
+        withheld_tools: ["codegraph_files"],
+        enabled: false,
+        server: { ...cg().server, available: false, state: "off" },
+      }),
+    });
+    expect(h.items.map((i) => i.title)).toEqual([
+      "A symbolic link leaves the repository",
+      "The code index could not be refreshed",
+      "CodeGraph tool(s) withheld: codegraph_files",
+      "Hosted CodeGraph tools are off (Settings > Scanning)",
+      "CodeGraph binary not found on this portal",
+    ]);
+    expect(h.items[0].detail).toContain("docs/out");
+    expect(h.items[1].actions.map((a) => a.label)).toEqual(["Rescan", "Open CodeGraph log"]);
+    expect(h.items.slice(3).map((i) => i.tone)).toEqual(["info", "info"]);
+    expect(new Set(h.items.map((i) => i.id)).size).toBe(h.items.length);
+  });
+
+  it("sits after a failed scan and before behind", () => {
+    const h = projectHealth(details({ last_scan_status: "failed", stale: { commits_behind: 2 } }), {
+      codegraph: cg({ server: { ...cg().server, state: "unavailable" } }),
+    });
+    expect(h.items.map((i) => i.id)).toEqual(["failed", "codegraph", "behind"]);
   });
 });
 
@@ -363,6 +439,8 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     if (!rest) return Promise.resolve(json(d));
     if (rest === "/scans" && method === "GET") return Promise.resolve(json({ runs: [] }));
     if (rest === "/scans" && method === "POST") return Promise.resolve(json({ run_id: 7 }, 202));
+    if (rest === "/codegraph/log") return Promise.resolve(json({ text: "server started\n", size: 15, truncated: false }));
+    if (rest === "/codegraph/restart" && method === "POST") return Promise.resolve(json({ was: "unavailable", shared: true }));
     if (rest === "/overview") return Promise.resolve(reply(fake.overview));
     if (rest === "/scan-estimate") return Promise.resolve(reply(fake.estimate));
     if (rest.endsWith("/events")) return Promise.resolve(new Response("", { status: 200, headers: { "content-type": "text/event-stream" } }));
@@ -567,6 +645,40 @@ describe("Overview", () => {
     expect(screen.getByRole("button", { name: "About Symbols explained" })).toBeInTheDocument();
     // A contributor gets a plain Rescan; no Full rescan to offer.
     expect(screen.getByRole("button", { name: "Rescan" })).toBeEnabled();
+  });
+
+  it("shows the CodeGraph server line, the tallies, the log and a restart that names the shared server", async () => {
+    const user = userEvent.setup();
+    fake.details.alpha = details();
+    fake.overview = overview({
+      codegraph: cg({ server: { ...cg().server, state: "unavailable" } }),
+      agents: {
+        ...overview().agents,
+        total_calls: 3,
+        by_kind: [{ kind: "codegraph_explore", calls: 3 }],
+        last_call_day: "2026-10-09",
+      },
+    });
+    mount("/p/alpha");
+    const server = await screen.findByTestId("codegraph-server");
+    expect(server).toHaveTextContent("CodeGraph server: unavailable · pid 1234");
+    expect(server).toHaveTextContent("index refreshed just now (0.6 s)");
+    expect(screen.getByTestId("codegraph-tallies")).toHaveTextContent(
+      "12 calls waited for the index, 2 timed out, 1 refused (since the portal started).",
+    );
+    expect(screen.getByTestId("agent-kinds")).toHaveTextContent("Code exploration");
+
+    await user.click(screen.getByRole("button", { name: "Open CodeGraph log" }));
+    expect(await screen.findByTestId("codegraph-log-dialog")).toHaveTextContent("server started");
+    await user.keyboard("{Escape}");
+
+    await user.click(screen.getByRole("button", { name: "Restart CodeGraph" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("restarts the CodeGraph server for every project on this portal");
+    await user.click(within(dialog).getByRole("button", { name: "Restart CodeGraph" }));
+    await waitFor(() =>
+      expect(fake.log.some((c) => c.method === "POST" && c.path === "/api/projects/alpha/codegraph/restart")).toBe(true),
+    );
   });
 
   it("says history starts with the next scan, and shows no usage card without usage", async () => {

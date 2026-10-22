@@ -591,6 +591,21 @@ describe("ConfigForm (project settings)", () => {
     expect(within(hooks).getByRole("checkbox", { name: /post-merge/ })).not.toBeChecked();
   });
 
+  it("saves the Scanning switch as [scan].serve_codegraph = false, leaving the rest", async () => {
+    const user = userEvent.setup();
+    mount("/p/alpha/settings");
+    await screen.findByTestId("config-form");
+    const section = screen.getByRole("region", { name: "Scanning" });
+    const toggle = within(section).getByRole("switch", { name: "Serve CodeGraph tools to agents" });
+    expect(toggle).toBeChecked();
+    await user.click(toggle);
+    await user.click(within(section).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(fake.log.some((c) => c.method === "PUT")).toBe(true));
+    expect(fake.log.find((c) => c.method === "PUT")?.body).toMatchObject({
+      config: { scan: { forge: "auto", hooks: ["post-commit"], serve_codegraph: false } },
+    });
+  });
+
   it("lists the keys the whygraph.toml import dropped, with their hints (acceptance #17)", async () => {
     fake.importReport = {
       found: true,
@@ -764,7 +779,7 @@ describe("Set up (Initialize)", () => {
     fake.port = 18765;
     mount("/p/alpha/init?step=setup");
     const claude = (await screen.findByRole("checkbox", { name: /Claude Code/ })).closest("label")!;
-    expect(claude).toHaveTextContent("Adds .mcp.json and .claude/ for Claude Code.");
+    expect(claude).toHaveTextContent("Adds .mcp.json (whygraph and codegraph entries) and .claude/ for Claude Code.");
     expect(claude).toHaveTextContent("Connects on port 18765");
     expect(screen.queryByText(/8765\b(?!.)/)).toBeNull();
     expect(screen.queryByText(/unset variable/)).toBeNull();
@@ -1037,6 +1052,7 @@ const PORT_CHANGE = {
           file: ".codex/config.toml",
           action: "manual",
           line: 'url = "http://127.0.0.1:9001/mcp/alpha"',
+          lines: ['url = "http://127.0.0.1:9001/mcp/alpha"', 'url = "http://127.0.0.1:9001/mcp/alpha/code"'],
           reason: "tracked by git",
           diff: '-url = "http://127.0.0.1:8765/mcp/alpha"\n+url = "http://127.0.0.1:9001/mcp/alpha"',
         },
@@ -1064,7 +1080,9 @@ describe("port change", () => {
     const manual = b.getByTestId("port-manual-codex");
     expect(within(manual).getByText('url = "http://127.0.0.1:9001/mcp/alpha"')).toBeInTheDocument();
     expect(manual).toHaveTextContent("tracked by git");
-    expect(within(manual).getByRole("button", { name: "Copy" })).toBeInTheDocument();
+    // One copy button per line: the whygraph entry, then the codegraph one.
+    expect(within(manual).getByText('url = "http://127.0.0.1:9001/mcp/alpha/code"')).toBeInTheDocument();
+    expect(within(manual).getAllByRole("button", { name: "Copy" })).toHaveLength(2);
     const unmounted = b.getByTestId("port-change-unmounted");
     expect(within(unmounted).getByText("/repos/away")).toBeInTheDocument();
   });

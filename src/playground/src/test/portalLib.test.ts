@@ -100,6 +100,19 @@ describe("config form mapping", () => {
     expect((layer.llm as Record<string, unknown>).openai).toEqual({ timeout_sec: 30 });
   });
 
+  it("serve_codegraph: on by default, off only when false, written only when changed", () => {
+    expect(layerToValues(stored).serveCodegraph).toBe(true);
+    expect(layerToValues({ scan: { serve_codegraph: false } }).serveCodegraph).toBe(false);
+    const v = layerToValues(stored);
+    v.serveCodegraph = false;
+    expect((valuesToLayer(stored, v, { scan: true }).scan as Record<string, unknown>).serve_codegraph).toBe(false);
+    // Back on: the key is dropped (the default), and the rest of the table stays.
+    const off = { scan: { forge: "auto", serve_codegraph: false } };
+    const on = layerToValues(off);
+    on.serveCodegraph = true;
+    expect(valuesToLayer(off, on, { scan: true }).scan).toEqual({ forge: "auto" });
+  });
+
   it("writes only what changed and prunes emptied tables", () => {
     const v = layerToValues(stored);
     v.defaultModel = { provider: "", model: "" };

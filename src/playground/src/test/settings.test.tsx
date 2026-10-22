@@ -217,11 +217,12 @@ describe("SettingsLayout", () => {
       "Models and keys",
       "GitHub",
       "Git hooks",
+      "Scanning",
       "Usage",
       "Agents",
       "Danger zone",
     ]);
-    for (const id of ["general", "models", "github", "hooks", "budgets", "agents", "danger"]) {
+    for (const id of ["general", "models", "github", "hooks", "scanning", "budgets", "agents", "danger"]) {
       expect(document.getElementById(`settings-${id}`)).not.toBeNull();
     }
   });

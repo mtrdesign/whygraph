@@ -120,6 +120,7 @@ export const PROJECT_SETTINGS_SECTIONS = [
   "models",
   "github",
   "hooks",
+  "scanning",
   "budgets",
   "agents",
   "access",

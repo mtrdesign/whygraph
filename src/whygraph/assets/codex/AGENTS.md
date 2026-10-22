@@ -31,7 +31,7 @@ The server also offers prompts: `whygraph_pre_edit_brief`, `whygraph_why_was_thi
 
 ## Planning a non-trivial change
 
-For multi-file changes, migrations, feature additions, or anything that ripples across the codebase, hand off to the `whygraph-planner` agent (ask Codex to delegate to it by name). The planner builds a CodeGraph impact set, warms the rationale cache, and produces an ordered step-by-step plan with verbatim constraint/risk quotes. For richer changes it fans out to three researchers (impact, constraints+risks, prior art) and a synthesizer.
+For multi-file changes, migrations, feature additions, or anything that ripples across the codebase, hand off to the `whygraph-planner` agent (ask Codex to delegate to it by name). The planner builds a CodeGraph impact set, warms the rationale cache, and produces an ordered step-by-step plan with verbatim constraint/risk quotes. For richer changes it fans out to three researchers (verification, constraints+risks, prior art) and a synthesizer.
 
 Pass the task description in the planner's expected prompt shape:
 

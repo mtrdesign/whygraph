@@ -5,7 +5,7 @@ description: When the user wants to plan a non-trivial code change — "plan how
 
 # Suggest /whygraph-plan for non-trivial changes
 
-The user is gesturing at a multi-file change, feature addition, migration, or deletion that ripples. WhyGraph has a planner subagent (invoked via the `/whygraph-plan` prompt) that grounds plans in CodeGraph (structural impact) and WhyGraph (rationale, constraints, risks). It produces an ordered, verifiable plan with verbatim rationale quotes, optionally fanning out to three parallel researchers (impact / constraints+risks / prior art) for richer changes.
+The user is gesturing at a multi-file change, feature addition, migration, or deletion that ripples. WhyGraph has a planner subagent (invoked via the `/whygraph-plan` prompt) that grounds plans in CodeGraph (structural impact) and WhyGraph (rationale, constraints, risks). It produces an ordered, verifiable plan with verbatim rationale quotes, optionally fanning out to three parallel researchers (verification / constraints+risks / prior art) for richer changes.
 
 ## What to do
 

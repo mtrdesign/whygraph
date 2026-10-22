@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -858,3 +859,79 @@ def test_pipeline_streamlining_texts_in_every_tree() -> None:
         "codex/AGENTS.md",
     ):
         assert "OUT_PATH" in (_ASSET_ROOT / rel).read_text(), rel
+
+
+# ---- the verification lens (plan 6.3) -------------------------------------
+
+# A literal command a Verify line may carry: the repo's own runner, in backticks.
+_LITERAL_COMMAND = re.compile(r"`((?:uv run |npm |npx |make |pytest)[^`]*)`")
+
+
+def _line_starting(lines: list[str], prefix: str) -> str:
+    """Return the one line of ``lines`` that starts with ``prefix``."""
+    found = [line for line in lines if line.startswith(prefix)]
+    assert len(found) == 1, (prefix, found)
+    return found[0]
+
+
+def test_verification_lens_replaces_impact() -> None:
+    """`verification` replaces `impact` in every tree and every enumeration."""
+    dims = "<verification | constraints_risks | prior_art>"
+    for tree in _AGENT_PATHS:
+        researcher = _agent_body(tree, "researcher")
+        planner = _agent_body(tree, "planner")
+        synthesizer = _agent_body(tree, "synthesizer")
+        assert "### `verification`" in researcher and "### `impact`" not in researcher
+        assert f"DIMENSION: {dims}" in researcher and f"DIMENSION: {dims}" in planner
+        for body in (planner, synthesizer):
+            assert "=== verification ===" in body and "=== impact ===" not in body
+        assert any(line.startswith("**1d. Dependency order.**") for line in planner)
+        assert not any("file's role" in line for line in synthesizer), tree
+    for path, text in _asset_texts().items():
+        assert not re.search(
+            r"\(impact(?:,| /)|`impact` (?:researcher|report)", text
+        ), path
+
+
+def test_verify_lines_are_literal_commands() -> None:
+    """The lens contract and the synthesizer's step 3 demand literal commands.
+
+    A fixture report filled in from the lens's own output contract yields a
+    Verify line per symbol that is a backticked runner command, never prose.
+    """
+    for tree in _AGENT_PATHS:
+        researcher = _agent_body(tree, "researcher")
+        lens = _line_starting(researcher, "3. For each working-set symbol")
+        assert "literal commands in backticks" in lens and "Never write prose" in lens
+        assert _LITERAL_COMMAND.search(lens), tree
+        contract = researcher[researcher.index("## Verify candidates") :]
+        assert all("`<literal command>`" in line for line in contract[3:5])
+
+        synthesizer = _agent_body(tree, "synthesizer")
+        verify = _line_starting(synthesizer, "- **Verify**")
+        assert "`verification` report" in verify and "verbatim in backticks" in verify
+        assert "Never write a prose Verify" in verify
+        assert _LITERAL_COMMAND.search(verify), tree
+
+    # Fixture: fill the Claude Code contract's own template lines; the Verify
+    # lines a synthesizer copies from that report are literal commands.
+    researcher = _agent_body("claude-code", "researcher")
+    contract = researcher[researcher.index("## Verify candidates") :]
+    covered, uncovered = (
+        line for line in contract[2:5] if line.startswith("- `qualified.name`")
+    )
+    report = [
+        covered.replace(
+            "`<literal command>`", "`uv run pytest tests/test_cache.py::test_key -q`"
+        ),
+        uncovered.replace(
+            "`<test file>::<test name>`", "`tests/test_c.py::test_ev`"
+        ).replace("`<literal command>`", "`uv run pytest tests/test_c.py::test_ev -q`"),
+    ]
+    commands = [_LITERAL_COMMAND.findall(line)[-1] for line in report]
+    assert commands == [
+        "uv run pytest tests/test_cache.py::test_key -q",
+        "uv run pytest tests/test_c.py::test_ev -q",
+    ]
+    for prose in ("- **Verify:** run the tests", "- **Verify:** check it still works"):
+        assert not _LITERAL_COMMAND.search(prose)

@@ -51,6 +51,8 @@ Do not attempt to plan without the graph.
 
 For each card, record: `qualified_name`, `file_path:line_range`, `evidence_count`, `purpose`, `constraints[]` and `risks[]` (verbatim), and `is_empty` (no rationale recorded, or `purpose` and `why` both blank). Also read `freshness` from `whygraph://repo/overview` once; when `commits_behind` is greater than 0, start the plan with *Note: history is N commits behind HEAD.* (N = `commits_behind`).
 
+**1d. Dependency order.** Order the working set callees before callers, from the 1b trail (leaves before roots, base classes before derived, schema before consumers), and list it in that order wherever you pass it. Mark a node on an external contract (public API, persisted schema, IPC boundary, exported symbol): its step needs a migration.
+
 The **working set** is the table of these records — that's what you (single-pass) or the researchers (deep) build the plan from.
 
 ## Phase 2 — Branch on mode
@@ -62,7 +64,7 @@ The **working set** is the table of these records — that's what you (single-pa
 - `MODE: auto` picks single-pass when **working-set size < 5** OR **>60% of cards are empty or have `evidence_count.commits` < 3**. Either condition means fan-out would be ceremony — there isn't enough material for three researchers to find distinct angles.
 - `MODE: deep` always skips this branch (goes to fan-out below).
 
-In single-pass: synthesise the plan yourself. Output format below. Sequence changes in dependency order (callees before callers, leaves before roots). Quote constraints and risks **verbatim** from rationale cards — never paraphrase. Flag any step that appears to violate a constraint as a *Blocker*. Include a verification step per change. Report honest confidence.
+In single-pass: synthesise the plan yourself. Output format below. Sequence changes in the 1d dependency order. Quote constraints and risks **verbatim** from rationale cards — never paraphrase. Flag any step that appears to violate a constraint as a *Blocker*. Include a verification step per change. Report honest confidence.
 
 If `MODE: auto` fell back to single-pass for either heuristic reason, prepend the plan with the appropriate notice:
 - *"Note: Auto-mode chose single-pass (impact set is small — fan-out would be ceremony)."*
@@ -77,7 +79,7 @@ You are an orchestrator. Do **not** synthesise yourself.
 ```
 TASK: <user's task verbatim>
 
-DIMENSION: <impact | constraints_risks | prior_art>
+DIMENSION: <verification | constraints_risks | prior_art>
 
 WORKING SET:
 - qualified_name: <qn>
@@ -112,8 +114,8 @@ WORKING SET:
 
 RESEARCHER REPORTS:
 
-=== impact ===
-<verbatim impact report>
+=== verification ===
+<verbatim verification report>
 
 === constraints_risks ===
 <verbatim constraints_risks report>

@@ -180,6 +180,7 @@ from whygraph.core.usage import UsageRecord, budget_message
 from whygraph.db import get_session as project_session
 from whygraph.mcp.rationale_cache import purge_paths
 from whygraph.services.codegraph import index_predates_guard
+from whygraph.services.codegraph.fingerprint import Fingerprint, fingerprint
 from whygraph.services.codegraph.writer_lock import LOCK_DIR_ENV, portal_lock_dir
 from whygraph.services.git import GitError, InvalidRepoUrlError, Repository
 from whygraph.services.git.credentials import (
@@ -1130,6 +1131,7 @@ class _Job:
     cancelled_by: int | None = None
     ctx: ProjectContext | None = None
     result: dict | None = None
+    codegraph_fp: Fingerprint | None = None
     usage_total: _UsageTotal = field(default_factory=_UsageTotal)
     stop_reason: str | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -2279,6 +2281,7 @@ class ScanRunner:
         finished_at = _now()
         if job.scanned and (coverage := self._coverage(job)) is not None:
             summary["coverage"] = {**coverage, "at": finished_at}
+        self._codegraph_after(job, summary)
         try:
             _finish_run(job, status, summary, finished_at)
         except Exception:  # noqa: BLE001 -- e.g. the database is gone
@@ -2288,6 +2291,47 @@ class ScanRunner:
             )
         finally:
             job.done.set()
+
+    def _codegraph_fingerprint(self, root: Path) -> Fingerprint | None:
+        """What the child's CodeGraph step will index, taken before it starts.
+
+        Only while the portal hosts CodeGraph (local mode); ``None`` otherwise
+        or when it cannot be taken (the bridge then refreshes after the run).
+        """
+        state = self._state
+        if state is None or getattr(state, "codegraph_host", None) is None:
+            return None
+        try:
+            return fingerprint(root)
+        except Exception:  # noqa: BLE001 -- the bridge refreshes instead
+            return None
+
+    def _codegraph_after(self, job: _Job, summary: Mapping[str, Any]) -> None:
+        """Tell the CodeGraph host what a run left in the index (portal-hosted CodeGraph plan, 4.2a).
+
+        The child's ``summary.codegraph.status`` ``ok``: the fingerprint taken
+        before it started is current, so the next bridge call refreshes
+        nothing. ``skipped``: nothing changed. Anything else after the child
+        started (a failed step, a cancelled or interrupted run, no
+        ``result`` at all): the index may be mid-change, so the next call
+        refreshes before it forwards.
+        """
+        state = self._state
+        host = getattr(state, "codegraph_host", None) if state is not None else None
+        if host is None or not job.scanned:
+            return
+        block = summary.get("codegraph")
+        status = block.get("status") if isinstance(block, Mapping) else None
+        if status == "skipped":
+            return
+        try:
+            host.note_scan_index(
+                job.spec.project_id, job.codegraph_fp if status == "ok" else None
+            )
+        except Exception:  # noqa: BLE001 -- never fails a run
+            _log.exception(
+                "scan runner: could not note run %s's code index", job.spec.run_id
+            )
 
     def _coverage(self, job: _Job) -> dict | None:
         """The project's coverage counts after a run that scanned, or ``None``.
@@ -2494,6 +2538,7 @@ class ScanRunner:
                 return "failed", summary, redact
 
             job.head = git_head(root)
+            job.codegraph_fp = self._codegraph_fingerprint(root)
             analyze, downgraded = spec.analyze, False
             if analyze and who is not None:
                 # Re-checked at dispatch (queued, merged or recovered runs):

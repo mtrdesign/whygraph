@@ -22,6 +22,15 @@ Knobs (environment):
 ``FAKE_CG_BIG``           answer with this many bytes of text
 ``FAKE_CG_CALL_LOG``      append each called tool's name, one per line
 
+``sync`` / ``index`` / ``init`` (the bridge's freshness sync; it must never
+run the last two) append one JSON line per event to ``FAKE_CG_SYNC_LOG``:
+``{"event": "start", "argv", "cwd", "pid", "pgid", "no_watch", "at"}``, then
+``{"event": "end", "at"}``. Knobs:
+
+``FAKE_CG_SYNC_SLEEP``    seconds a ``sync`` takes (default 0)
+``FAKE_CG_SYNC_EXIT``     the exit code of a ``sync`` (default 0)
+``FAKE_CG_SYNC_STDERR``   a line written to stderr by a ``sync``
+
 Each answer also says whether the client advertised the ``roots``
 capability (``client_roots``).
 """
@@ -141,10 +150,40 @@ def serve() -> None:
     anyio.run(_run)
 
 
+def _sync_log(event: dict) -> None:
+    path = os.environ.get("FAKE_CG_SYNC_LOG")
+    if path:
+        with open(path, "a") as fh:
+            fh.write(json.dumps({**event, "at": time.time()}) + "\n")
+
+
+def writer(argv: list[str]) -> int:
+    _sync_log(
+        {
+            "event": "start",
+            "argv": argv,
+            "cwd": os.getcwd(),
+            "pid": os.getpid(),
+            "pgid": os.getpgid(0),
+            "no_watch": os.environ.get("CODEGRAPH_NO_WATCH"),
+        }
+    )
+    if argv[0] != "sync":
+        _sync_log({"event": "end"})
+        return 0
+    if os.environ.get("FAKE_CG_SYNC_STDERR"):
+        print(os.environ["FAKE_CG_SYNC_STDERR"], file=sys.stderr)
+    time.sleep(float(os.environ.get("FAKE_CG_SYNC_SLEEP") or 0))
+    _sync_log({"event": "end"})
+    return int(os.environ.get("FAKE_CG_SYNC_EXIT") or 0)
+
+
 def main(argv: list[str]) -> int:
     if argv[:2] == ["serve", "--mcp"]:
         serve()
         return 0
+    if argv[:1] in (["sync"], ["index"], ["init"]):
+        return writer(argv)
     print(f"fake codegraph: unsupported {argv}", file=sys.stderr)
     return 2
 

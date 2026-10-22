@@ -1,4 +1,4 @@
-"""Tests for the CodeGraph bridge, ``/mcp/<slug>/code`` (portal-hosted CodeGraph plan, step 3a).
+"""Tests for the CodeGraph bridge, ``/mcp/<slug>/code`` (portal-hosted CodeGraph plan, steps 3a-3b).
 
 The shared child is ``tests/fixtures/fake_codegraph_mcp.py`` behind an
 executable ``codegraph`` wrapper (its knobs are baked into the wrapper,
@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import contextvars
 import json
+import threading
 import logging
 import os
 import shlex
 import stat
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -41,7 +43,7 @@ from test_portal_link import (  # noqa: F401 -- fixtures
     portal,
 )
 from test_portal_mcp import MCP_HEADERS, _rpc, _setup_project, _sse_json
-from test_portal_runner import scanner  # noqa: F401 -- fixture
+from test_portal_runner import scan, scanner, wait_idle, wait_run  # noqa: F401
 from whygraph.core import usage as core_usage
 from whygraph.core.context import ProjectContext, use_project
 from whygraph.portal import codegraph_host
@@ -53,12 +55,23 @@ from whygraph.portal.codegraph_host import (
     NO_BINARY,
     NOT_INDEXED,
     PAUSED,
+    REFRESH_FAILED,
     RESTARTED,
     BridgeTarget,
     CodeGraphHost,
     Refusal,
+    guard_text,
     police_arguments,
+    still_updating_text,
 )
+from whygraph.portal.runner import ScanRunner, _Job, _Pending
+from whygraph.services.codegraph.fingerprint import (
+    FINGERPRINT_GIT_FLAGS,
+    Fingerprint,
+    fingerprint,
+)
+from whygraph.services.codegraph.paths import GUARD_STAMP_RELPATH
+from whygraph.services.codegraph.writer_lock import writer_lock
 from whygraph.portal.models import AgentCallDay
 
 FAKE = Path(__file__).parent / "fixtures" / "fake_codegraph_mcp.py"
@@ -78,12 +91,14 @@ def fake_cg(env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> SimpleName
         bin=bin_dir / "codegraph",
         pids=env.tmp / "cg.pids",
         calls=env.tmp / "cg.calls",
+        syncs=env.tmp / "cg.syncs",
     )
 
     def configure(**knobs: Any) -> None:
         values = {
             "FAKE_CG_PID_FILE": str(ns.pids),
             "FAKE_CG_CALL_LOG": str(ns.calls),
+            "FAKE_CG_SYNC_LOG": str(ns.syncs),
             **{f"FAKE_CG_{k.upper()}": str(v) for k, v in knobs.items()},
         }
         lines = ["#!/bin/sh"]
@@ -102,8 +117,15 @@ def fake_cg(env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> SimpleName
     def calls() -> list[str]:
         return ns.calls.read_text().split() if ns.calls.exists() else []
 
+    def syncs() -> list[dict]:
+        """The fake's writer events (``start`` / ``end`` of each sync)."""
+        if not ns.syncs.exists():
+            return []
+        return [json.loads(line) for line in ns.syncs.read_text().splitlines()]
+
     configure()
     ns.configure, ns.pid_list, ns.call_list = configure, pids, calls
+    ns.sync_list = syncs
     monkeypatch.setenv("WHYGRAPH_CODEGRAPH_CMD", str(ns.bin))
     return ns
 
@@ -173,10 +195,33 @@ def _target(root: Path, slug: str = "demo", project_id: int = 1) -> BridgeTarget
 
 
 def _indexed_repo(tmp: Path, name: str = "repo") -> Path:
+    """A git repo with one commit and an (empty) index."""
     root = tmp / name
     (root / ".codegraph").mkdir(parents=True)
     (root / ".codegraph" / "codegraph.db").write_text("")
+    (root / "a.py").write_text("def f():\n    return 1\n")
+    _git(root, "init", "-q")
+    _git(root, "add", "a.py")
+    _git(root, "commit", "-q", "-m", "first")
     return Path(os.path.realpath(root))
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=T",
+            "-c",
+            "commit.gpgsign=false",
+            *args,
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
 
 
 def _host(cg: SimpleNamespace, data: Path, **kw: Any) -> CodeGraphHost:
@@ -420,7 +465,9 @@ def test_node_file_outside_the_root_is_refused_and_never_forwarded(
     caplog.set_level(logging.INFO, logger="whygraph.portal.codegraph")
     with portal_client() as client:
         root = _project(env, client)
-        (root / "lnk").symlink_to(env.tmp)
+        # A link inside the repository (one out of it is the guard's business).
+        (root / "inner").mkdir()
+        (root / "lnk").symlink_to(root / "inner")
         for file in (
             "/data/postgres.password",
             str(secret),
@@ -891,6 +938,8 @@ def test_the_forward_limiter_answers_busy(
     async def main() -> list[str]:
         host = _host(fake_cg, tmp_path / "data", forward_wait=0.3)
         await host.start()
+        for i, root in enumerate(roots):  # indexed: every call forwards at once
+            host.note_scan_index(i + 1, fingerprint(root))
         texts: list[str] = []
 
         async def one(i: int) -> None:
@@ -1034,3 +1083,523 @@ def test_a_linked_project_is_served_and_makes_no_platform_request(
     seen = _forwarded(_call(portal, "codegraph_search", {"query": "fn"}))
     assert seen["arguments"]["projectPath"] == os.path.realpath(root)
     assert len(fake.requests) == before
+
+
+# ---------------------------------------------------------------------------
+# Freshness (plan section 4.2a)
+# ---------------------------------------------------------------------------
+
+
+def _starts(cg: SimpleNamespace) -> list[dict]:
+    return [e for e in cg.sync_list() if e["event"] == "start"]
+
+
+def _ends(cg: SimpleNamespace) -> list[dict]:
+    return [e for e in cg.sync_list() if e["event"] == "end"]
+
+
+async def _until(predicate: Any, timeout: float = 10.0) -> None:
+    with anyio.fail_after(timeout):
+        while not predicate():
+            await anyio.sleep(0.02)
+
+
+def _sse_all(text: str) -> list[dict]:
+    """Every JSON-RPC message of an SSE response body, in order."""
+    return [
+        json.loads(line.removeprefix("data: "))
+        for line in text.splitlines()
+        if line.startswith("data: ")
+    ]
+
+
+def _search(host: CodeGraphHost, root: Path, **kw: Any) -> Any:
+    return host.call_tool(_target(root), "codegraph_search", {"query": "q"}, **kw)
+
+
+def test_an_unchanged_tree_forwards_without_a_refresh(
+    fake_cg: SimpleNamespace, tmp_path: Path
+) -> None:
+    root = _indexed_repo(tmp_path)
+
+    async def main() -> list[bool]:
+        host = _host(fake_cg, tmp_path / "data")
+        await host.start()
+        out = []
+        try:
+            out.append((await _search(host, root)).isError)  # cold start: one sync
+            out.append((await _search(host, root)).isError)  # unchanged: none
+            (root / "a.py").write_text("def g():\n    return 22\n")
+            out.append((await _search(host, root)).isError)  # an edit: one sync
+            out.append((await _search(host, root)).isError)
+        finally:
+            await host.shutdown()
+        return out
+
+    assert anyio.run(main) == [False] * 4
+    starts = _starts(fake_cg)
+    assert len(starts) == 2
+    # The bridge only ever syncs - never init / index - in the project root,
+    # with the scan environment (never the hosted child's NO_WATCH).
+    assert all(e["argv"] == ["sync", "-q"] for e in starts)
+    assert all(os.path.realpath(e["cwd"]) == str(root) for e in starts)
+    assert all(e["no_watch"] is None for e in starts)
+    assert all(e["pgid"] == e["pid"] for e in starts)  # its own process group
+    assert fake_cg.call_list() == ["codegraph_search"] * 4
+
+
+def test_a_writer_holding_the_lock_makes_an_unchanged_call_wait(
+    fake_cg: SimpleNamespace, tmp_path: Path
+) -> None:
+    root = _indexed_repo(tmp_path)
+    held = threading.Event()
+
+    def hold(seconds: float) -> None:
+        with writer_lock(root, wait=0) as ok:  # a scan's CodeGraph step
+            assert ok
+            held.set()
+            time.sleep(seconds)
+
+    async def main() -> tuple[Any, float, Any]:
+        host = _host(fake_cg, tmp_path / "data", sync_wait=0.6, progress_every=0.1)
+        await host.start()
+        host.note_scan_index(1, fingerprint(root))
+        try:
+            held.clear()
+            thread = threading.Thread(target=hold, args=(0.4,))
+            thread.start()
+            held.wait(5)
+            t0 = time.monotonic()
+            waited = await _search(host, root)
+            took = time.monotonic() - t0
+            thread.join()
+            held.clear()
+            thread = threading.Thread(target=hold, args=(1.5,))
+            thread.start()
+            held.wait(5)
+            gave_up = await _search(host, root)
+            thread.join()
+        finally:
+            await host.shutdown()
+        return waited, took, gave_up
+
+    waited, took, gave_up = anyio.run(main)
+    assert waited.isError is False and took >= 0.3
+    assert gave_up.isError is True
+    assert gave_up.content[0].text.startswith(
+        "[WhyGraph] The code index is still updating: 0 changed file(s)"
+    )
+    assert _starts(fake_cg) == []  # an unchanged tree never syncs
+    assert fake_cg.call_list() == ["codegraph_search"]
+
+
+def test_concurrent_calls_share_one_sync_and_a_change_queues_one_trailing_sync(
+    fake_cg: SimpleNamespace, tmp_path: Path
+) -> None:
+    fake_cg.configure(sync_sleep=1.0)
+    root = _indexed_repo(tmp_path)
+
+    async def main() -> list[Any]:
+        host = _host(fake_cg, tmp_path / "data")
+        await host.start()
+        results: list[Any] = []
+
+        async def one() -> None:
+            results.append(await _search(host, root))
+
+        try:
+            async with anyio.create_task_group() as tg:
+                for _ in range(5):
+                    tg.start_soon(one)
+                await _until(lambda: len(_starts(fake_cg)) == 1)
+                await anyio.sleep(0.1)
+                (root / "b.py").write_text("x = 1\n")  # during the sync
+                for _ in range(3):
+                    tg.start_soon(one)
+        finally:
+            await host.shutdown()
+        return results
+
+    results = anyio.run(main)
+    assert [r.isError for r in results] == [False] * 8
+    starts, ends = _starts(fake_cg), _ends(fake_cg)
+    assert len(starts) == 2 and len(ends) == 2
+    # The trailing sync paused 250 ms after the first ended (fairness to a scan).
+    assert starts[1]["at"] - ends[0]["at"] >= 0.25
+    assert len(fake_cg.call_list()) == 8
+
+
+def test_progress_notifications_ride_the_request_stream_only_with_a_token(
+    env: SimpleNamespace,  # noqa: F811
+    fake_cg: SimpleNamespace,
+) -> None:
+    fake_cg.configure(sync_sleep=1.2)
+    with portal_client() as client:
+        root = _project(env, client)
+        wait_idle(client, "demo")
+        client.app.state.portal.codegraph_host.progress_every = 0.2
+        params = {"name": "codegraph_search", "arguments": {"query": "fn"}}
+        with_token = _sse_all(
+            _code(
+                client, "tools/call", {**params, "_meta": {"progressToken": "tok"}}
+            ).text
+        )
+        (root / "sample.py").write_text("changed\n")
+        without = _sse_all(_code(client, "tools/call", params).text)
+    progress = [m for m in with_token if m.get("method") == "notifications/progress"]
+    assert len(progress) >= 3
+    values = [m["params"]["progress"] for m in progress]
+    assert values == sorted(values) and len(set(values)) == len(values)
+    for m in progress:
+        assert m["params"]["progressToken"] == "tok"
+        assert m["params"]["total"] == 45
+        assert m["params"]["message"].startswith(
+            ("Refreshing the code index (", "Waiting for")
+        )
+    assert with_token[-1]["result"]["isError"] is False
+    assert len(without) == 1 and without[0]["result"]["isError"] is False
+    assert len(_starts(fake_cg)) == 2
+
+
+def test_a_sync_past_the_wait_is_a_retryable_error_and_keeps_running(
+    fake_cg: SimpleNamespace, tmp_path: Path
+) -> None:
+    fake_cg.configure(sync_sleep=1.5)
+    root = _indexed_repo(tmp_path)
+
+    async def main() -> tuple[Any, Any]:
+        host = _host(fake_cg, tmp_path / "data", sync_wait=0.4)
+        await host.start()
+        try:
+            first = await _search(host, root)
+            assert fake_cg.call_list() == []  # not forwarded
+            await _until(lambda: len(_ends(fake_cg)) == 1)  # not killed
+            second = await _search(host, root)
+        finally:
+            await host.shutdown()
+        return first, second
+
+    first, second = anyio.run(main)
+    assert first.isError is True
+    text = first.content[0].text
+    assert text.startswith("[WhyGraph] The code index is still updating: ")
+    assert " s to go. Call this tool again" in text
+    assert "Do not fall back to grep" in text
+    assert second.isError is False
+    assert len(_starts(fake_cg)) == 1  # the retry found it done
+    assert fake_cg.call_list() == ["codegraph_search"]
+
+
+def test_a_sync_past_the_hard_limit_is_killed(
+    fake_cg: SimpleNamespace, tmp_path: Path
+) -> None:
+    fake_cg.configure(sync_sleep=30)
+    root = _indexed_repo(tmp_path)
+
+    async def main() -> Any:
+        host = _host(fake_cg, tmp_path / "data", sync_wait=10, sync_hard_limit=2)
+        await host.start()
+        try:
+            return await _search(host, root)
+        finally:
+            await host.shutdown()
+
+    result = anyio.run(main)
+    assert result.content[0].text == REFRESH_FAILED and result.isError is True
+    (start,) = _starts(fake_cg)
+    assert _ends(fake_cg) == []
+    assert not _alive(start["pid"])
+
+
+def test_failed_syncs_keep_the_old_fingerprint_and_pause_after_three(
+    fake_cg: SimpleNamespace,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    token = "ghp_" + "c" * 36
+    fake_cg.configure(sync_exit=1, sync_stderr=f"boom {token}")
+    root = _indexed_repo(tmp_path)
+    clock = _Clock()
+
+    async def main() -> list[str]:
+        host = _host(fake_cg, tmp_path / "data", clock=clock)
+        await host.start()
+        out = []
+        try:
+            for _ in range(4):
+                out.append((await _search(host, root)).content[0].text)
+            assert host._fresh[1].synced_fp is None
+            assert len(_starts(fake_cg)) == 3  # the fourth ran no sync
+            clock.now += 301
+            fake_cg.configure(sync_sleep=0)  # sync_exit back to 0
+            result = await _search(host, root)
+            out.append("ok" if not result.isError else result.content[0].text)
+        finally:
+            await host.shutdown()
+        return out
+
+    out = anyio.run(main)
+    assert out == [REFRESH_FAILED] * 4 + ["ok"]
+    assert len(_starts(fake_cg)) == 4
+    warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if "refreshing demo's index" in r.getMessage()
+    ]
+    assert len(warnings) == 3
+    assert "boom ghp_***" in warnings[0] and token not in warnings[0]
+
+
+def test_a_fingerprint_failure_refreshes_anyway(
+    fake_cg: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _indexed_repo(tmp_path)
+
+    def broken(*_: Any, **__: Any) -> Fingerprint:
+        raise RuntimeError("dubious ownership")
+
+    monkeypatch.setattr(codegraph_host, "fingerprint", broken)
+
+    async def main() -> list[bool]:
+        host = _host(fake_cg, tmp_path / "data")
+        await host.start()
+        try:
+            return [(await _search(host, root)).isError for _ in range(2)]
+        finally:
+            await host.shutdown()
+
+    assert anyio.run(main) == [False, False]
+    assert len(_starts(fake_cg)) == 2  # no fingerprint, so every call syncs
+
+
+def test_a_link_out_of_the_repository_refuses_the_refresh_until_it_is_gone(
+    fake_cg: SimpleNamespace, tmp_path: Path
+) -> None:
+    root = _indexed_repo(tmp_path)
+    (root / GUARD_STAMP_RELPATH).write_text("1\n")
+    secret = tmp_path / "secret.txt"
+    secret.write_text("SECRET_VALUE")
+    (root / "evil.py").symlink_to(secret)
+
+    async def main() -> tuple[Any, Any, Any]:
+        host = _host(fake_cg, tmp_path / "data")
+        await host.start()
+        try:
+            refused = await _search(host, root)
+            again = await _search(host, root)
+            (root / "evil.py").unlink()
+            served = await _search(host, root)
+        finally:
+            await host.shutdown()
+        return refused, again, served
+
+    refused, again, served = anyio.run(main)
+    assert refused.isError is True and again.isError is True
+    assert refused.content[0].text == guard_text(("evil.py",))
+    assert "SECRET_VALUE" not in refused.content[0].text
+    # R16: the next scan after the link is gone rebuilds the index in full.
+    assert not (root / GUARD_STAMP_RELPATH).exists()
+    assert served.isError is False
+    assert len(_starts(fake_cg)) == 1  # only after the link was removed
+    assert fake_cg.call_list() == ["codegraph_search"]
+
+
+def test_a_dropped_http_connection_does_not_kill_the_sync_or_the_host(
+    fake_cg: SimpleNamespace, tmp_path: Path
+) -> None:
+    fake_cg.configure(sync_sleep=1.0)
+    root = _indexed_repo(tmp_path)
+
+    async def main() -> tuple[str, Any, Any]:
+        host = _host(fake_cg, tmp_path / "data")
+        await host.start()
+        try:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(_search, host, root)
+                await _until(lambda: len(_starts(fake_cg)) == 1)
+                tg.cancel_scope.cancel()  # what a dropped connection does
+            await _until(lambda: len(_ends(fake_cg)) == 1)
+            await anyio.sleep(0.1)
+            synced = host._fresh[1].synced_fp
+            after = await _search(host, root)
+            return host.state, synced, after
+        finally:
+            await host.shutdown()
+
+    state, synced, after = anyio.run(main)
+    assert state == "live" and synced is not None
+    assert after.isError is False
+    assert len(_starts(fake_cg)) == 1  # the next call found the index current
+    assert fake_cg.call_list() == ["codegraph_search"]
+
+
+def test_removal_kills_the_projects_sync_and_keeps_the_child(
+    fake_cg: SimpleNamespace, tmp_path: Path
+) -> None:
+    fake_cg.configure(sync_sleep=30)
+    root = _indexed_repo(tmp_path)
+
+    async def main() -> tuple[list[Any], int | None, int | None, bool]:
+        host = _host(fake_cg, tmp_path / "data")
+        await host.start()
+        results: list[Any] = []
+
+        async def one() -> None:
+            results.append(await _search(host, root))
+
+        try:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(one)
+                await _until(lambda: len(_starts(fake_cg)) == 1)
+                before = host.pid
+                await host.retire(1)
+            return results, before, host.pid, 1 in host._fresh
+        finally:
+            await host.shutdown()
+
+    results, before, after, kept = anyio.run(main)
+    (start,) = _starts(fake_cg)
+    assert not _alive(start["pid"])
+    assert results[0].content[0].text == REFRESH_FAILED
+    assert before == after and before is not None
+    assert kept is False
+
+
+def test_shutdown_reaps_a_running_sync(
+    fake_cg: SimpleNamespace, tmp_path: Path
+) -> None:
+    fake_cg.configure(sync_sleep=30)
+    root = _indexed_repo(tmp_path)
+
+    async def main() -> None:
+        host = _host(fake_cg, tmp_path / "data")
+        await host.start()
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(_search, host, root)
+            await _until(lambda: len(_starts(fake_cg)) == 1)
+            tg.cancel_scope.cancel()  # the call goes; the sync runs on
+        t0 = time.monotonic()
+        await host.shutdown()
+        assert time.monotonic() - t0 < 10
+
+    anyio.run(main)
+    (start,) = _starts(fake_cg)
+    assert not _alive(start["pid"])
+    assert not any(_alive(p) for p in fake_cg.pid_list())
+
+
+def test_a_scan_whose_codegraph_step_ended_ok_spares_the_next_call_a_refresh(
+    env: SimpleNamespace,  # noqa: F811
+    fake_cg: SimpleNamespace,
+    scanner: SimpleNamespace,  # noqa: F811
+) -> None:
+    scanner.configure(result_extra=json.dumps({"codegraph": {"status": "ok"}}))
+    with portal_client() as client:
+        _project(env, client)
+        wait_idle(client, "demo")
+        _forwarded(_call(client, "codegraph_search", {"query": "fn"}))
+        assert _starts(fake_cg) == []  # the initial scan indexed this tree
+        run = wait_run(client, "demo", scan(client, "demo", trigger="hook"))
+        assert run["summary"]["codegraph"] == {"status": "ok"}
+        _forwarded(_call(client, "codegraph_search", {"query": "fn"}))
+        assert _starts(fake_cg) == []
+        # A run whose CodeGraph step failed may have left the index half
+        # rewritten: the next call refreshes first.
+        scanner.configure(
+            result_extra=json.dumps({"codegraph": {"status": "failed", "error": "x"}})
+        )
+        wait_run(client, "demo", scan(client, "demo", trigger="hook"))
+        _forwarded(_call(client, "codegraph_search", {"query": "fn"}))
+        assert len(_starts(fake_cg)) == 1
+
+
+def test_the_runner_notes_what_a_run_left_in_the_index() -> None:
+    noted: list[tuple] = []
+    runner = ScanRunner()
+    runner._state = SimpleNamespace(  # type: ignore[assignment]
+        codegraph_host=SimpleNamespace(
+            note_scan_index=lambda project_id, fp: noted.append((project_id, fp))
+        )
+    )
+    fp = Fingerprint("digest", "head", 0)
+
+    def job(scanned: bool = True) -> _Job:
+        spec = _Pending(
+            run_id=1,
+            project_id=7,
+            kind="scan",
+            trigger="hook",
+            analyze=False,
+            requested_by=None,
+            scan_requested=False,
+        )
+        out = _Job(spec=spec, scanned=scanned)
+        out.codegraph_fp = fp
+        return out
+
+    runner._codegraph_after(job(), {"codegraph": {"status": "ok"}})
+    runner._codegraph_after(job(), {"codegraph": {"status": "failed"}})
+    runner._codegraph_after(job(), {})  # interrupted / cancelled: no result
+    runner._codegraph_after(job(), {"codegraph": {"status": "skipped"}})
+    runner._codegraph_after(job(scanned=False), {})  # the child never started
+    assert noted == [(7, fp), (7, None), (7, None)]
+    runner._state = None  # type: ignore[assignment]
+    runner._codegraph_after(job(), {})  # no portal state: nothing to tell
+
+
+def test_fingerprint_sees_re_edits_and_untracked_files_not_the_portals_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from whygraph.services.codegraph import fingerprint as fp_mod
+
+    seen: list[list[str]] = []
+    real_run = fp_mod.subprocess.run
+
+    def spy(argv: list[str], **kw: Any) -> Any:
+        seen.append(list(argv))
+        return real_run(argv, **kw)
+
+    root = _indexed_repo(tmp_path)
+    monkeypatch.setattr(fp_mod.subprocess, "run", spy)
+    clean = fingerprint(root)
+    assert clean.dirty == 0 and clean.head
+    (root / "a.py").write_text("def f():\n    return 22\n")
+    dirty = fingerprint(root)
+    assert dirty.digest != clean.digest and dirty.dirty == 1
+    # Re-editing an already dirty file (same size): only its mtime moves.
+    (root / "a.py").write_text("def f():\n    return 33\n")
+    st = (root / "a.py").stat()
+    os.utime(root / "a.py", ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+    again = fingerprint(root)
+    assert again.digest != dirty.digest
+    (root / "new.py").write_text("y = 2\n")
+    untracked = fingerprint(root)
+    assert untracked.digest != again.digest and untracked.dirty == 2
+    # What the portal writes itself never moves it.
+    (root / ".codegraph" / "codegraph.db").write_text("rewritten")
+    (root / ".whygraph").mkdir()
+    (root / ".whygraph" / "scan.log").write_text("log")
+    assert fingerprint(root).digest == untracked.digest
+    for argv in seen:
+        assert argv[0] == "git"
+        assert list(FINGERPRINT_GIT_FLAGS) == argv[1 : 1 + len(FINGERPRINT_GIT_FLAGS)]
+    assert "core.checkStat=minimal" in FINGERPRINT_GIT_FLAGS
+    assert "core.trustctime=false" in FINGERPRINT_GIT_FLAGS
+
+
+def test_still_updating_and_guard_texts() -> None:
+    assert "3 changed file(s), 1 s so far, about 5 s to go" in still_updating_text(
+        3, 1.2, queued=False, wait=45
+    )
+    assert "300 changed file(s), 2 s so far, about 28 s to go" in (
+        still_updating_text(300, 2.4, queued=False, wait=45)
+    )
+    assert "about 45 s to go" in still_updating_text(300, 0, queued=True, wait=45)
+    assert guard_text(("a.py",)) == (
+        "[WhyGraph] Indexing is refused: a.py is a symbolic link that leaves the "
+        "repository. Remove the link, then run a scan."
+    )
+    many = guard_text(tuple("abcdefg"))
+    assert (
+        "a, b, c, d, e are symbolic links that leave the repository (2 more)." in many
+    )

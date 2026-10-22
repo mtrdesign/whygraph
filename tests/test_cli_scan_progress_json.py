@@ -334,6 +334,49 @@ def test_failed_crawler_is_reported_in_result_and_exit_code(
     assert authors["status"] == "failed" and authors["error"] == "boom"
 
 
+@pytest.mark.parametrize(
+    ("flags", "failing", "expected"),
+    [
+        ([], (), {"status": "ok", "files": None}),
+        ([], ("codegraph",), {"status": "failed", "error": "boom"}),
+        (["--no-codegraph"], (), {"status": "skipped"}),
+    ],
+)
+def test_result_reports_the_codegraph_step(
+    isolated_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    flags: list[str],
+    failing: tuple[str, ...],
+    expected: dict,
+) -> None:
+    """``summary.codegraph`` (portal-hosted CodeGraph plan, 4.2a / 4.2c)."""
+    _patch_crawlers(monkeypatch, failing=failing)
+    result = CliRunner().invoke(
+        whygraph_main,
+        ["scan", "--progress", "json", "--skip-analyze", "--no-remote", *flags],
+    )
+    events = _events(result.stdout)
+    assert events[-1]["type"] == "result"
+    assert events[-1]["codegraph"] == expected
+
+
+def test_result_counts_the_indexed_files(
+    isolated_db: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+
+    (repo / ".codegraph").mkdir()
+    with sqlite3.connect(repo / ".codegraph" / "codegraph.db") as conn:
+        conn.execute("CREATE TABLE files (path TEXT)")
+        conn.executemany("INSERT INTO files VALUES (?)", [("a.py",), ("b.py",)])
+    _patch_crawlers(monkeypatch)
+    result = CliRunner().invoke(
+        whygraph_main,
+        ["scan", "--progress", "json", "--skip-analyze", "--no-remote"],
+    )
+    assert _events(result.stdout)[-1]["codegraph"] == {"status": "ok", "files": 2}
+
+
 def test_console_quiet_is_restored_after_a_json_scan(
     isolated_db: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -41,6 +41,22 @@ separate ``codegraph`` agent entry.
   with ``projectPath`` set to the root under a 60 s timeout. Forwarded
   results pass through untouched; above 256 KiB a second
   ``TextContent`` notes the cut.
+* **Freshness.** Before a forward the call checks the project's git
+  fingerprint
+  (:func:`~whygraph.services.codegraph.fingerprint.fingerprint`: ``HEAD``, ``git status`` and the
+  ``(mtime_ns, size)`` of every listed path) against the one of the last
+  successful index refresh. Unchanged -> forward (after waiting for a scan
+  that holds the writer lock). Changed -> a ``codegraph sync -q`` under the
+  writer lock, single-flight per project with at most one trailing sync,
+  started in the host's task group; the call waits for it up to
+  :data:`SYNC_WAIT_SEC` (sending progress every :data:`PROGRESS_EVERY_SEC`
+  when the request carries a progress token), then forwards. Past the wait
+  it answers the "still updating" ``isError`` and the sync keeps running
+  (killed only past :data:`SYNC_HARD_LIMIT_SEC`): no call ever forwards to
+  an index a writer is changing, and none answers "may be stale". A
+  dropped connection cancels only the waiting call, never the sync or the
+  child. A scan whose CodeGraph step ended OK records its own fingerprint
+  (:meth:`CodeGraphHost.note_scan_index`), so the next call syncs nothing.
 * **Errors.** Everything the bridge authors is ``isError: true`` and begins
   ``[WhyGraph]``, except the not-indexed guidance; text inside a successful
   result is repository content.
@@ -57,6 +73,15 @@ Call timeout                :data:`CALL_TIMEOUT_SEC`; two in a row restart
 Restart after a crash       on the next call, at most once per
                             :data:`RESTART_WINDOW_SEC` s
 Result guard                :data:`RESULT_LIMIT_BYTES`
+Wait for the index          :data:`SYNC_WAIT_SEC`; progress every
+                            :data:`PROGRESS_EVERY_SEC`
+Index refresh               :data:`SYNC_HARD_LIMIT_SEC`, then killed;
+                            :data:`SYNC_SLOTS` projects at once; paused
+                            :data:`SYNC_PAUSE_SEC` after
+                            :data:`SYNC_FAILURES_BEFORE_PAUSE` failures in
+                            :data:`SYNC_FAILURE_WINDOW_SEC`
+Fingerprint                 :data:`FINGERPRINT_TIMEOUT_SEC`;
+                            :data:`FINGERPRINT_SLOTS` at once
 ==========================  ==================================================
 
 Logging (``whygraph.portal.codegraph``) carries start, stop, crash, restart
@@ -73,12 +98,16 @@ import copy
 import functools
 import json
 import logging
+import math
 import os
 import shlex
 import shutil
 import signal
+import subprocess
+import threading
 import time
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from collections import deque
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -100,8 +129,20 @@ from starlette.types import Receive, Scope, Send
 from whygraph.core.context import use_project
 from whygraph.core.safe_paths import UnsafePathError, check_inside
 from whygraph.core.usage import count_agent_call, use_usage_sink
-from whygraph.services.codegraph.bootstrap import hosted_env
-from whygraph.services.git.credentials import redact_tokens
+from whygraph.services.codegraph.bootstrap import _codegraph_env, hosted_env
+from whygraph.services.codegraph.exceptions import CodeGraphBootstrapError
+from whygraph.services.codegraph.fingerprint import (
+    Fingerprint,
+    changed_files,
+    fingerprint,
+)
+from whygraph.services.codegraph.paths import GUARD_STAMP_RELPATH
+from whygraph.services.codegraph.symlinks import escaping_symlinks
+from whygraph.services.codegraph.writer_lock import async_writer_lock
+from whygraph.services.git.credentials import (
+    pass_through_env,
+    redact_tokens,
+)
 
 from .deps import ApiError, PortalState
 from .mcp_mount import capped_receive, gate_project, mcp_not_found, serves_mcp
@@ -136,6 +177,17 @@ LOG_ROTATE_BYTES = 1 << 20
 CRASH_TAIL_LINES = 50
 CRASH_TAIL_CHARS = 500
 TERMINATE_WAIT_SEC = 2.0
+SYNC_WAIT_SEC = 45.0
+SYNC_HARD_LIMIT_SEC = 600.0
+PROGRESS_EVERY_SEC = 3.0
+TRAILING_PAUSE_SEC = 0.25
+SYNC_SLOTS = 2
+SYNC_FAILURES_BEFORE_PAUSE = 3
+SYNC_FAILURE_WINDOW_SEC = 600.0
+SYNC_PAUSE_SEC = 300.0
+SYNC_STDERR_TAIL_LINES = 20
+FINGERPRINT_SLOTS = 4
+GUARD_PATHS_SHOWN = 5
 
 CODEGRAPH_INSTRUCTIONS = """\
 # CodeGraph - this project's code graph, served by the WhyGraph portal
@@ -183,6 +235,26 @@ TIMED_OUT = (
     "cancelled. Retry with a narrower query."
 )
 TRUNCATED = "[WhyGraph] Result truncated at 256 KiB."
+STILL_UPDATING = (
+    "[WhyGraph] The code index is still updating: {changed} changed file(s), "
+    "{so_far} s so far, about {eta} s to go. Call this tool again after that; "
+    "the update continues in the background. Do not fall back to grep for "
+    "this question."
+)
+REFRESH_FAILED = (
+    "[WhyGraph] The code index could not be refreshed. Run a scan from the "
+    "project's Overview in the WhyGraph portal."
+)
+GUARD_REFUSED = (
+    "[WhyGraph] Indexing is refused: {paths} that {leave} the repository{more}. "
+    "Remove the link, then run a scan."
+)
+PROGRESS_SYNC = "Refreshing the code index ({changed} changed files, {seconds}s)"
+PROGRESS_QUEUED = "Waiting for another project's index refresh"
+PROGRESS_LOCKED = "Waiting for a scan to finish updating the code index"
+
+ProgressFn = Callable[[float, str], Awaitable[None]]
+"""Sends one progress notification: ``(seconds elapsed, message)``."""
 
 _REPLACED = {
     "codegraph_callers": "codegraph_callers",
@@ -533,6 +605,67 @@ def _guard_size(result: types.CallToolResult) -> types.CallToolResult:
     return result
 
 
+def still_updating_text(
+    changed: int, so_far: float, *, queued: bool, wait: float
+) -> str:
+    """The "still updating" text of a call whose wait ran out.
+
+    Parameters
+    ----------
+    changed : int
+        Changed files the refresh covers.
+    so_far : float
+        Seconds the refresh has run (or waited for a writer).
+    queued : bool
+        The refresh still waits for one of the :data:`SYNC_SLOTS`: the ETA is
+        then the whole wait.
+    wait : float
+        The wait bound (:data:`SYNC_WAIT_SEC`).
+
+    Returns
+    -------
+    str
+        :data:`STILL_UPDATING` with an ETA of about 0.1 s per changed file,
+        at least 5 s.
+    """
+    seconds = int(so_far)
+    eta = math.ceil(wait) if queued else max(5, math.ceil(changed * 0.1 - seconds))
+    return STILL_UPDATING.format(changed=changed, so_far=seconds, eta=eta)
+
+
+def guard_text(paths: tuple[str, ...]) -> str:
+    """The guard refusal text naming up to :data:`GUARD_PATHS_SHOWN` links.
+
+    Parameters
+    ----------
+    paths : tuple[str, ...]
+        :func:`~whygraph.services.codegraph.symlinks.escaping_symlinks`'s
+        root-relative paths (at least one).
+
+    Returns
+    -------
+    str
+        :data:`GUARD_REFUSED`, with ``(<k> more)`` past the shown paths.
+    """
+    shown = paths[:GUARD_PATHS_SHOWN]
+    more = len(paths) - len(shown)
+    if len(shown) == 1:
+        named, leave = f"{shown[0]} is a symbolic link", "leaves"
+    else:
+        named, leave = f"{', '.join(shown)} are symbolic links", "leave"
+    return GUARD_REFUSED.format(
+        paths=named, leave=leave, more=f" ({more} more)" if more else ""
+    )
+
+
+def _drop_guard_stamp(root: Path) -> None:
+    """Remove the index's guard stamp so the next scan runs a full ``index`` (R16)."""
+    try:
+        check_inside(root, GUARD_STAMP_RELPATH).unlink(missing_ok=True)
+    except (UnsafePathError, OSError):
+        pass
+
+
 # ---------------------------------------------------------------------------
 # The stdio transport (the SDK's ``stdio_client``, plus the process)
 # ---------------------------------------------------------------------------
@@ -676,6 +809,52 @@ class _Child:
     stop_reason: str | None = None
 
 
+@dataclass(eq=False)
+class _FpFlight:
+    """One fingerprint run that every call arriving before it started shares."""
+
+    done: anyio.Event = field(default_factory=anyio.Event)
+    result: Fingerprint | None = None
+
+
+@dataclass(eq=False)
+class _Sync:
+    """One bridge ``codegraph sync -q`` of a project (running, queued or trailing).
+
+    ``phase``: ``pausing`` (a trailing sync's 250 ms), ``queued`` (waiting
+    for one of the :data:`SYNC_SLOTS`), ``locked`` (waiting for the writer
+    lock), ``running`` (guard, then the process), ``done``. ``result``:
+    ``ok``, ``failed``, ``killed``, ``guard`` or ``retired``.
+    """
+
+    fp: Fingerprint | None
+    trailing: bool = False
+    phase: str = "queued"
+    started: float | None = None
+    changed: int = 0
+    pgid: int | None = None
+    result: str | None = None
+    guard_paths: tuple[str, ...] = ()
+    done: anyio.Event = field(default_factory=anyio.Event)
+    scope: anyio.CancelScope = field(default_factory=anyio.CancelScope)
+
+
+@dataclass(eq=False)
+class _Fresh:
+    """A project's freshness state (loop-owned; :meth:`CodeGraphHost.note_scan_index`
+    sets ``synced_fp`` from a runner thread under the host's lock)."""
+
+    synced_fp: Fingerprint | None = None
+    fp_running: _FpFlight | None = None
+    fp_next: _FpFlight | None = None
+    sync: _Sync | None = None
+    trailing: _Sync | None = None
+    failures: list[float] = field(default_factory=list)
+    paused_until: float | None = None
+    guard_paths: tuple[str, ...] = ()
+    last_sync: dict[str, Any] | None = None
+
+
 def default_argv(environ: Mapping[str, str] | None = None) -> list[str]:
     """Return the shared child's argv: ``[<codegraph>, "serve", "--mcp"]``.
 
@@ -735,6 +914,14 @@ class CodeGraphHost:
         Seconds between idle checks.
     start_timeout : float, optional
         Seconds a start may take to ``initialize`` and list its tools.
+    sync_wait : float, optional
+        Seconds a call waits for the index (:data:`SYNC_WAIT_SEC`).
+    sync_hard_limit : float, optional
+        Seconds before a refresh is killed (:data:`SYNC_HARD_LIMIT_SEC`).
+    progress_every : float, optional
+        Seconds between progress notifications while a call waits.
+    trailing_pause : float, optional
+        Seconds a trailing refresh sleeps before it takes the writer lock.
 
     Attributes
     ----------
@@ -756,6 +943,10 @@ class CodeGraphHost:
         forward_wait: float = FORWARD_WAIT_SEC,
         reap_every: float = REAP_EVERY_SEC,
         start_timeout: float = CALL_TIMEOUT_SEC,
+        sync_wait: float = SYNC_WAIT_SEC,
+        sync_hard_limit: float = SYNC_HARD_LIMIT_SEC,
+        progress_every: float = PROGRESS_EVERY_SEC,
+        trailing_pause: float = TRAILING_PAUSE_SEC,
     ) -> None:
         self.argv = list(argv) if argv is not None else default_argv()
         self.home = data_dir / "codegraph-home"
@@ -766,6 +957,10 @@ class CodeGraphHost:
         self.forward_wait = forward_wait
         self.reap_every = reap_every
         self.start_timeout = start_timeout
+        self.sync_wait = sync_wait
+        self.sync_hard_limit = sync_hard_limit
+        self.progress_every = progress_every
+        self.trailing_pause = trailing_pause
         self.available = False
         self.withheld: frozenset[str] = frozenset()
         self._tg: Any = None
@@ -778,6 +973,11 @@ class CodeGraphHost:
         self._timeouts = 0
         self._in_flight = 0
         self._last_call = clock()
+        self._stopping = False
+        self._fresh: dict[int, _Fresh] = {}
+        self._fresh_lock = threading.Lock()
+        self._fp_limiter: anyio.CapacityLimiter | None = None
+        self._sync_limiter: anyio.CapacityLimiter | None = None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -790,6 +990,8 @@ class CodeGraphHost:
         await anyio.to_thread.run_sync(self._make_dirs)
         self._start_lock = anyio.Lock()
         self._forward = anyio.CapacityLimiter(FORWARD_SLOTS)
+        self._fp_limiter = anyio.CapacityLimiter(FINGERPRINT_SLOTS)
+        self._sync_limiter = anyio.CapacityLimiter(SYNC_SLOTS)
         tg = anyio.create_task_group()
         await tg.__aenter__()
         self._tg = tg
@@ -802,29 +1004,46 @@ class CodeGraphHost:
             self._child = self._spawn("prewarm")
 
     async def shutdown(self, *, grace: float = 5.0) -> None:
-        """Stop the child (stdin close, then the group is killed) and the task group.
+        """Stop the child, every index refresh, and the task group.
+
+        The child: stdin close, then its group is killed. A running refresh:
+        its process group gets SIGTERM, SIGKILL after 2 s, and is waited for
+        before the writer lock is released.
 
         Parameters
         ----------
         grace : float
-            Seconds to wait for the child's process group to go before the
-            task group is cancelled (the transport reaps it shielded).
+            Seconds to wait for the process groups to go before the task
+            group is cancelled (the transport and the refreshes reap them
+            shielded).
         """
         if self._tg is None:
             return
+        self._stopping = True
+        syncs = []
+        with self._fresh_lock:
+            states = list(self._fresh.values())
+        for st in states:
+            syncs += self._kill_syncs(st)
         child = self._child
         if child is not None:
             child.stop_reason = child.stop_reason or "shutdown"
             child.stop.set()
-            with anyio.move_on_after(grace):
+        with anyio.move_on_after(grace):
+            if child is not None:
                 await child.done.wait()
+            for sync in syncs:
+                await sync.done.wait()
         tg, self._tg = self._tg, None
         tg.cancel_scope.cancel()
         await tg.__aexit__(None, None, None)
         self._child = None
 
     async def retire(self, project_id: int) -> None:
-        """Forget a removed project: its slot state, never the shared child.
+        """Forget a removed project: its slot and freshness state, never the shared child.
+
+        A running index refresh of the project is killed (SIGTERM to its
+        process group, SIGKILL after 2 s) and waited for.
 
         Parameters
         ----------
@@ -833,6 +1052,24 @@ class CodeGraphHost:
         """
         self._retired.add(project_id)
         self._slots.pop(project_id, None)
+        with self._fresh_lock:
+            st = self._fresh.pop(project_id, None)
+        if st is not None:
+            for sync in self._kill_syncs(st):
+                await sync.done.wait()
+
+    def _kill_syncs(self, st: _Fresh) -> list[_Sync]:
+        """Cancel a project's refreshes; return the ones whose task must still end."""
+        trailing, st.trailing = st.trailing, None
+        if trailing is not None:  # never started: nothing to reap
+            trailing.result = "retired"
+            trailing.phase = "done"
+            trailing.done.set()
+        sync = st.sync
+        if sync is None or sync.done.is_set():
+            return []
+        sync.scope.cancel()  # its shielded finally reaps the group, then unlocks
+        return [sync]
 
     @property
     def state(self) -> str:
@@ -843,6 +1080,13 @@ class CodeGraphHost:
         if child is not None and child.crashed and self._window_remaining() > 0:
             return "restart_window"
         return "off"
+
+    @property
+    def sync_argv(self) -> list[str]:
+        """The bridge's index refresh: the child's command with ``sync -q``."""
+        argv = self.argv
+        command = argv[:-2] if argv[-2:] == ["serve", "--mcp"] else argv[:1]
+        return [*command, "sync", "-q"]
 
     @property
     def pid(self) -> int | None:
@@ -1074,9 +1318,14 @@ class CodeGraphHost:
         return None
 
     async def call_tool(
-        self, target: BridgeTarget, name: str, arguments: Mapping[str, Any]
+        self,
+        target: BridgeTarget,
+        name: str,
+        arguments: Mapping[str, Any],
+        *,
+        progress: ProgressFn | None = None,
     ) -> types.CallToolResult:
-        """Police, check and forward one bridged call.
+        """Police, check, freshen and forward one bridged call.
 
         Parameters
         ----------
@@ -1086,6 +1335,9 @@ class CodeGraphHost:
             A name from :data:`BRIDGED_TOOLS` (the handler refused the rest).
         arguments : Mapping
             The arguments as sent.
+        progress : callable, optional
+            Sends a progress notification while the call waits for the index
+            (only when the request carried a progress token).
 
         Returns
         -------
@@ -1108,6 +1360,15 @@ class CodeGraphHost:
             early = await anyio.to_thread.run_sync(self._precondition, target)
             if early is not None:
                 return early
+            self._in_flight += 1  # a call waiting for the index keeps the child
+            try:
+                stale = await self._freshen(target, progress)
+            finally:
+                self._in_flight -= 1
+                self._last_call = self.clock()
+            if stale is not None:
+                self._refused(target, name, "freshness")
+                return stale
             args["projectPath"] = target.real_root
             return await self.forward(target, name, args)
         finally:
@@ -1115,6 +1376,380 @@ class CodeGraphHost:
 
     def _refused(self, target: BridgeTarget, name: str, reason: str) -> None:
         _log.info("CodeGraph: refused %s for %s (%s)", name, target.slug, reason)
+
+    # -- freshness (plan section 4.2a) ---------------------------------------
+
+    def note_scan_index(self, project_id: int, fp: Fingerprint | None) -> None:
+        """Record a scan's CodeGraph step (callable from a runner thread).
+
+        Parameters
+        ----------
+        project_id : int
+            The scanned project.
+        fp : Fingerprint or None
+            The fingerprint taken before the scan child started, when its
+            CodeGraph step ended OK (the next call forwards without a
+            refresh); ``None`` when the step may have left the index changed
+            but not current (failed, cancelled, interrupted), so the next
+            call refreshes first.
+        """
+        with self._fresh_lock:
+            if project_id in self._retired:
+                return
+            st = self._fresh.setdefault(project_id, _Fresh())
+            st.synced_fp = fp
+            if fp is not None:
+                st.guard_paths = ()  # the scan's own guard passed
+
+    def _fresh_for(self, project_id: int) -> _Fresh:
+        with self._fresh_lock:
+            return self._fresh.setdefault(project_id, _Fresh())
+
+    async def _freshen(
+        self, target: BridgeTarget, progress: ProgressFn | None
+    ) -> types.CallToolResult | None:
+        """Wait until the project's index is current; ``None`` to forward, else the error."""
+        begun = anyio.current_time()
+        deadline = begun + self.sync_wait
+        st = self._fresh_for(target.project_id)
+        fp = await self._fingerprint(target, st)
+        if target.project_id in self._retired:  # removed while the call waited
+            return _error(REFRESH_FAILED)
+        running = st.sync is not None and not st.sync.done.is_set()
+        if (
+            fp is not None
+            and st.synced_fp is not None
+            and fp.digest == st.synced_fp.digest
+            and not running
+            and st.trailing is None
+            and not st.guard_paths
+        ):
+            return await self._wait_for_writers(target, begun, deadline, progress)
+        if self._paused(st):
+            return _error(REFRESH_FAILED)
+        sync = self._sync_for(target, st, fp)
+        done = await self._wait(
+            sync.done, begun, deadline, progress, lambda: self._progress_text(sync)
+        )
+        if not done:
+            return _error(self._still_updating(sync))
+        if sync.result == "ok":
+            return None
+        if sync.result == "guard":
+            return _error(guard_text(sync.guard_paths))
+        return _error(REFRESH_FAILED)
+
+    async def _fingerprint(
+        self, target: BridgeTarget, st: _Fresh
+    ) -> Fingerprint | None:
+        """The project's fingerprint, taken after this call arrived (single-flight).
+
+        A call that arrives while one runs waits for the **next** one (shared
+        by every call arriving meanwhile), so a save made just before the
+        call is never missed. ``None`` on failure: the caller refreshes.
+        """
+        if st.fp_running is None:
+            flight = st.fp_running = _FpFlight()
+            self._spawn_empty(self._run_fingerprint, target, st, flight)
+        else:
+            if st.fp_next is None:
+                st.fp_next = _FpFlight()
+            flight = st.fp_next
+        await flight.done.wait()
+        return flight.result
+
+    async def _run_fingerprint(
+        self, target: BridgeTarget, st: _Fresh, flight: _FpFlight
+    ) -> None:
+        try:
+            flight.result = await anyio.to_thread.run_sync(
+                fingerprint, Path(target.real_root), limiter=self._fp_limiter
+            )
+        except Exception as exc:  # noqa: BLE001 -- a refresh runs anyway
+            _log.info(
+                "CodeGraph: no fingerprint for %s (%s); refreshing the index",
+                target.slug,
+                type(exc).__name__,
+            )
+        finally:
+            flight.done.set()
+            if st.fp_running is flight:
+                st.fp_running, st.fp_next = st.fp_next, None
+                if st.fp_running is not None:
+                    if self._tg is not None and not self._stopping:
+                        self._spawn_empty(
+                            self._run_fingerprint, target, st, st.fp_running
+                        )
+                    else:
+                        st.fp_running.done.set()
+
+    def _paused(self, st: _Fresh) -> bool:
+        return st.paused_until is not None and self.clock() < st.paused_until
+
+    def _sync_for(
+        self, target: BridgeTarget, st: _Fresh, fp: Fingerprint | None
+    ) -> _Sync:
+        """The refresh this call waits for: the running one, the trailing one, or a new one."""
+        current = st.sync
+        if current is None or current.done.is_set():
+            sync = st.sync = _Sync(fp=fp)
+            self._spawn_empty(self._run_sync, target, st, sync)
+            return sync
+        if current.phase != "running":  # it has not read the tree yet
+            current.fp = fp
+            return current
+        if fp is not None and current.fp is not None and fp.digest == current.fp.digest:
+            return current
+        if st.trailing is None:
+            st.trailing = _Sync(fp=fp, trailing=True, phase="pausing")
+        else:
+            st.trailing.fp = fp  # the newest tree it will read
+        return st.trailing
+
+    async def _wait(
+        self,
+        event: anyio.Event,
+        begun: float,
+        deadline: float,
+        progress: ProgressFn | None,
+        describe: Callable[[], str],
+    ) -> bool:
+        """Wait for ``event`` until ``deadline``, sending progress; whether it fired.
+
+        Cancelling the waiting call (a dropped connection) never touches what
+        it waits for: the refresh runs in the host's task group.
+        """
+        last = 0.0
+        while True:
+            remaining = deadline - anyio.current_time()
+            if remaining <= 0:
+                return event.is_set()
+            with anyio.move_on_after(min(remaining, self.progress_every)):
+                await event.wait()
+                return True
+            if progress is None or event.is_set():
+                continue
+            last = max(round(anyio.current_time() - begun, 1), last + 0.1)
+            try:
+                await progress(last, describe())
+            except Exception:  # noqa: BLE001 -- the client went away; keep waiting
+                progress = None
+
+    async def _wait_for_writers(
+        self,
+        target: BridgeTarget,
+        begun: float,
+        deadline: float,
+        progress: ProgressFn | None,
+    ) -> types.CallToolResult | None:
+        """An unchanged tree: forward unless another writer (a scan) holds the lock.
+
+        Then wait for the lock within the call's budget; past it the "still
+        updating" error, never a read of an index being rewritten.
+        """
+        root = Path(target.real_root)
+        last = 0.0
+        step = 0.0  # the first look is a try-lock
+        while True:
+            async with async_writer_lock(root, wait=step) as held:
+                pass
+            if held:
+                return None
+            if anyio.current_time() >= deadline:
+                return _error(
+                    still_updating_text(
+                        0,
+                        anyio.current_time() - begun,
+                        queued=False,
+                        wait=self.sync_wait,
+                    )
+                )
+            if progress is not None and step > 0:
+                last = max(round(anyio.current_time() - begun, 1), last + 0.1)
+                try:
+                    await progress(last, PROGRESS_LOCKED)
+                except Exception:  # noqa: BLE001 -- the client went away
+                    progress = None
+            step = min(deadline - anyio.current_time(), self.progress_every)
+
+    def _progress_text(self, sync: _Sync) -> str:
+        if sync.phase in ("queued", "pausing"):
+            return PROGRESS_QUEUED
+        if sync.phase == "locked":
+            return PROGRESS_LOCKED
+        seconds = int(anyio.current_time() - (sync.started or anyio.current_time()))
+        return PROGRESS_SYNC.format(changed=sync.changed, seconds=seconds)
+
+    def _still_updating(self, sync: _Sync) -> str:
+        so_far = 0.0 if sync.started is None else anyio.current_time() - sync.started
+        return still_updating_text(
+            sync.changed,
+            so_far,
+            queued=sync.phase in ("queued", "pausing"),
+            wait=self.sync_wait,
+        )
+
+    async def _run_sync(self, target: BridgeTarget, st: _Fresh, sync: _Sync) -> None:
+        """One ``codegraph sync -q`` (a task of the host's group, empty context)."""
+        root = Path(target.real_root)
+        began = anyio.current_time()
+        tail: deque[str] = deque(maxlen=SYNC_STDERR_TAIL_LINES)
+        exit_code: int | None = None
+        try:
+            with sync.scope:
+                if sync.trailing:
+                    await anyio.sleep(self.trailing_pause)  # fairness to a scan
+                sync.phase = "queued"
+                assert self._sync_limiter is not None
+                async with self._sync_limiter:
+                    sync.phase, sync.started = "locked", anyio.current_time()
+                    async with async_writer_lock(
+                        root, wait=self.sync_hard_limit
+                    ) as held:
+                        if not held:
+                            tail.append("another CodeGraph writer held the lock")
+                            sync.result = "failed"
+                            return
+                        sync.phase, sync.started = "running", anyio.current_time()
+                        exit_code = await self._sync_locked(target, st, sync, tail)
+        except Exception as exc:  # noqa: BLE001 -- e.g. the spawn failed
+            tail.append(_leaf(exc))
+            sync.result = "failed"
+        finally:
+            with anyio.CancelScope(shield=True):
+                if sync.result is None:
+                    sync.result = "retired" if sync.scope.cancel_called else "failed"
+                self._sync_ended(target, st, sync, began, exit_code, tail)
+
+    async def _sync_locked(
+        self, target: BridgeTarget, st: _Fresh, sync: _Sync, tail: deque[str]
+    ) -> int | None:
+        """The guard, then the process, under the writer lock; its exit code."""
+        root = Path(target.real_root)
+        before = st.synced_fp
+        sync.changed = await anyio.to_thread.run_sync(
+            changed_files, root, before, sync.fp
+        )
+        try:
+            paths = await anyio.to_thread.run_sync(escaping_symlinks, root)
+        except CodeGraphBootstrapError as exc:
+            tail.append(redact_tokens(str(exc))[:CRASH_TAIL_CHARS])
+            sync.result = "failed"
+            return None
+        if paths:
+            if not st.guard_paths:  # the next scan after the link is gone rebuilds
+                await anyio.to_thread.run_sync(_drop_guard_stamp, root)
+            st.guard_paths = sync.guard_paths = paths
+            sync.result = "guard"
+            _log.info(
+                "CodeGraph: refused to refresh %s's index (symbolic link)", target.slug
+            )
+            return None
+        st.guard_paths = ()
+        process = await anyio.open_process(
+            self.sync_argv,
+            cwd=root,
+            env=_codegraph_env(pass_through_env()),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        sync.pgid = process.pid
+        try:
+            read = anyio.Event()
+
+            async def read_stderr() -> None:
+                assert process.stderr is not None
+                buffer = ""
+                try:
+                    async for chunk in TextReceiveStream(
+                        process.stderr, errors="replace"
+                    ):
+                        lines = (buffer + chunk).split("\n")
+                        buffer = lines.pop()
+                        tail.extend(line[:CRASH_TAIL_CHARS] for line in lines if line)
+                    if buffer:
+                        tail.append(buffer[:CRASH_TAIL_CHARS])
+                finally:
+                    read.set()
+
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(read_stderr)
+                with anyio.move_on_after(self.sync_hard_limit) as limit:
+                    await process.wait()
+                if limit.cancelled_caught:
+                    sync.result = "killed"
+                    tail.append(f"killed after {self.sync_hard_limit:g} s")
+                await _reap_group(process.pid)  # a leftover would hold stderr open
+                with anyio.move_on_after(TERMINATE_WAIT_SEC):
+                    await read.wait()
+                tg.cancel_scope.cancel()
+            sync.result = sync.result or ("ok" if process.returncode == 0 else "failed")
+            return process.returncode
+        finally:
+            # Wait for the whole group before the writer lock is released.
+            with anyio.CancelScope(shield=True):
+                await _reap_group(process.pid)
+                with anyio.move_on_after(TERMINATE_WAIT_SEC):
+                    await process.wait()
+                await process.aclose()
+
+    def _sync_ended(
+        self,
+        target: BridgeTarget,
+        st: _Fresh,
+        sync: _Sync,
+        began: float,
+        exit_code: int | None,
+        tail: deque[str],
+    ) -> None:
+        """Record a refresh's outcome, wake its waiters, start the trailing one."""
+        now = self.clock()
+        if sync.result == "ok":
+            st.synced_fp = sync.fp
+        elif sync.result in ("failed", "killed"):
+            st.failures = [
+                t for t in st.failures if now - t < SYNC_FAILURE_WINDOW_SEC
+            ] + [now]
+            if len(st.failures) >= SYNC_FAILURES_BEFORE_PAUSE:
+                st.paused_until = now + SYNC_PAUSE_SEC
+                st.failures = []
+            _log.warning(
+                "CodeGraph: refreshing %s's index failed (%s, exit code %s)%s",
+                target.slug,
+                sync.result,
+                exit_code,
+                ("; stderr tail:\n" + "\n".join(redact_tokens(x) for x in tail))
+                if tail
+                else "",
+            )
+        if sync.result != "retired":
+            st.last_sync = {
+                "at": _now_iso(),
+                "duration_ms": int((anyio.current_time() - began) * 1000),
+                "result": sync.result if sync.result in ("ok", "killed") else "failed",
+                "changed_files": sync.changed,
+            }
+        sync.phase = "done"
+        sync.done.set()
+        if st.sync is not sync:
+            return
+        trailing, st.trailing = st.trailing, None
+        if trailing is None:
+            return
+        if (
+            self._tg is None
+            or self._stopping
+            or target.project_id in self._retired
+            or self._paused(st)
+        ):
+            trailing.result = "retired" if not self._paused(st) else "failed"
+            trailing.phase = "done"
+            trailing.done.set()
+            return
+        st.sync = trailing
+        self._spawn_empty(self._run_sync, target, st, trailing)
 
     async def forward(
         self, target: BridgeTarget, name: str, arguments: dict[str, Any]
@@ -1241,7 +1876,12 @@ def build_codegraph_server(state: PortalState) -> Server:
         if target is None or host is None:
             return types.ServerResult(_error("[WhyGraph] CodeGraph is not running."))
         try:
-            result = await host.call_tool(target, kind, req.params.arguments or {})
+            result = await host.call_tool(
+                target,
+                kind,
+                req.params.arguments or {},
+                progress=_progress_sender(server, host.sync_wait),
+            )
         except McpError:
             raise
         except Exception:  # noqa: BLE001 -- never a stack trace to the agent
@@ -1251,6 +1891,30 @@ def build_codegraph_server(state: PortalState) -> Server:
 
     server.request_handlers[types.CallToolRequest] = _call_tool
     return server
+
+
+def _progress_sender(server: Server, total: float) -> ProgressFn | None:
+    """Progress notifications for the current request, or ``None`` without a token.
+
+    Routed with ``related_request_id`` so the stateless transport writes them
+    to the request's own SSE stream (without it they would target a GET
+    stream that does not exist and be dropped).
+    """
+    ctx = server.request_context
+    token = ctx.meta.progressToken if ctx.meta is not None else None
+    if token is None:
+        return None
+
+    async def send(elapsed: float, message: str) -> None:
+        await ctx.session.send_progress_notification(
+            token,
+            elapsed,
+            total=total,
+            message=message,
+            related_request_id=ctx.request_id,
+        )
+
+    return send
 
 
 @contextmanager
@@ -1320,8 +1984,10 @@ __all__ = [
     "advertised_tools",
     "build_codegraph_server",
     "default_argv",
+    "guard_text",
     "pinned_tools",
     "police_arguments",
+    "still_updating_text",
     "tool_record",
     "unknown_tool_error",
 ]

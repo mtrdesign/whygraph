@@ -519,3 +519,73 @@ def test_the_backfill_stops_before_the_commit_after_the_budget_is_spent(
     assert (done, described) == (1, ["a" * 40])
     described.clear()
     assert backfill_mod.backfill_all(commits, repository=None, descriptor=None) == 3
+
+
+def test_force_refresh_skips_the_cache_and_stores_the_new_card(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    calls: list[int] = []
+
+    class _CountingGenerator(_FakeGenerator):
+        def generate(self, evidence, *, symbol_context=None, subject=None):
+            calls.append(1)
+            return super().generate(
+                evidence, symbol_context=symbol_context, subject=subject
+            )
+
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _CountingGenerator)
+    args = {"path": "sample.py", "line_start": 1, "line_end": 3}
+
+    whygraph_rationale_brief(**args)
+    whygraph_rationale_brief(**args)
+    assert len(calls) == 1  # second call served from the cache
+    whygraph_rationale_brief(**args, force_refresh=True)
+    assert len(calls) == 2  # forced: generated again
+    whygraph_rationale_brief(**args)
+    assert len(calls) == 2  # and the forced card was stored
+
+
+def test_force_refresh_still_honours_the_generation_gate(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whygraph.analyze import CommitEvidence as _CE
+    from whygraph.mcp.rationale import GenerationNotPermitted, rationale_card
+
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _FakeGenerator)
+    monkeypatch.setattr("whygraph.mcp.rationale.usage_blocked", lambda: "org")
+    from whygraph.mcp.evidence import collect_evidence
+    from whygraph.mcp.targets import resolve_target
+
+    target = resolve_target(
+        path="sample.py", line_start=1, line_end=3, qualified_name=None
+    )
+    evidence: list[_CE] = collect_evidence(target, limit=20)
+    with pytest.raises(GenerationNotPermitted):
+        rationale_card(target, evidence, force_refresh=True)
+
+
+def test_evidence_for_reports_working_tree_lines_on_blame_items(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whygraph.mcp.evidence import whygraph_evidence_for
+
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+
+    result = whygraph_evidence_for(path="sample.py", line_start=1, line_end=3)
+
+    blamed = [e for e in result["evidence"] if e["source"] == "blame"]
+    assert blamed
+    covered = sorted(n for e in blamed for a, b in e["lines"] for n in range(a, b + 1))
+    assert covered == [1, 2, 3]
+    assert all(e["lines"] is None for e in result["evidence"] if e["source"] == "area")

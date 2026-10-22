@@ -61,7 +61,8 @@ _TOOL_DESCRIPTION = (
     "own its lines (via git blame), plus the pull requests containing those "
     "commits and the issues those PRs close. Pass either (path, line_start, "
     "line_end) or a qualified_name (resolved to a file/line range via "
-    "CodeGraph). Returns {target, evidence}. Scan from the WhyGraph portal "
+    "CodeGraph). Returns {target, evidence}; each blame item carries "
+    "`lines` (the working-tree ranges its commit owns). Scan from the WhyGraph portal "
     "(or run `whygraph scan` outside it) first to populate the WhyGraph "
     "database."
 )
@@ -322,7 +323,11 @@ def evidence_from_hunks(
             prs = _linked_prs(session, hunk.sha)
             issues = _linked_issues(session, prs)
             by_sha[hunk.sha] = CommitEvidence(
-                commit, tuple(prs), tuple(issues), source=source
+                commit,
+                tuple(prs),
+                tuple(issues),
+                source=source,
+                lines=hunk_lines(hunk) if source == "blame" else None,
             )
         # Detach so the loaded columns remain readable after the
         # session closes.
@@ -855,6 +860,26 @@ def _issue_dict(issue: Issue) -> dict:
     }
 
 
+def hunk_lines(hunk: BlameHunk) -> tuple[tuple[int, int], ...] | None:
+    """The working-tree line ranges ``hunk`` owns, merged and sorted.
+
+    Read off ``hunk.origins`` (``final_start`` plus the range length);
+    ``None`` for a hunk without origins.
+    """
+    spans = sorted(
+        (o.final_start, o.final_start + (o.end - o.start)) for o in hunk.origins
+    )
+    if not spans:
+        return None
+    merged = [spans[0]]
+    for start, end in spans[1:]:
+        if start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return tuple(merged)
+
+
 def _evidence_dict(item: CommitEvidence) -> dict:
     """Serialize one :class:`CommitEvidence` to a JSON-ready dict."""
     return {
@@ -1139,6 +1164,7 @@ def local_evidence_dict(hunk: BlameHunk, push_status: str) -> dict:
         "pull_requests": [],
         "issues": [],
         "source": LOCAL_SOURCE,
+        "lines": [list(r) for r in hunk_lines(hunk) or ()] or None,
         "push_status": push_status,
     }
 
@@ -1202,6 +1228,10 @@ def merge_linked_evidence(
         )
     for hunk, push_status in split.local:
         by_sha.setdefault(hunk.sha, local_evidence_dict(hunk, push_status))
+    for hunk in (*split.pushed, *(h for h, _ in split.local)):
+        item = by_sha.get(hunk.sha)
+        if item is not None and "lines" not in item:
+            item["lines"] = [list(r) for r in hunk_lines(hunk) or ()] or None
     items = sorted(
         by_sha.values(),
         key=lambda item: _parsed_time((item.get("commit") or {}).get("committed_at")),
@@ -1298,7 +1328,13 @@ def whygraph_evidence_for(
     backfill_evidence_descriptions(evidence, target_path=target.path)
     return {
         "target": target_dict(target),
-        "evidence": [_evidence_dict(item) for item in evidence],
+        "evidence": [
+            {
+                **_evidence_dict(item),
+                "lines": [list(r) for r in item.lines or ()] or None,
+            }
+            for item in evidence
+        ],
     }
 
 

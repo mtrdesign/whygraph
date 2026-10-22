@@ -30,7 +30,7 @@ The working set is your **starting point**, not your only data. You have full MC
 
 ## Tools
 
-- **WhyGraph MCP** — `whygraph_rationale_brief`, `whygraph_evidence_for`, `whygraph_area_history`. The planner already warmed the rationale cache for the working set, so calls on those nodes are sub-millisecond. You may also fetch cards for symbols *outside* the working set if your dimension requires it (e.g. a caller you discover via CodeGraph).
+- **WhyGraph MCP** — `whygraph_rationale_brief`, `whygraph_evidence_for`, `whygraph_area_history`. The planner already warmed the rationale cache for the working set, so calls on those nodes are served from the cache (a few hundred ms: blame runs again to check the evidence is unchanged). You may also fetch cards for symbols *outside* the working set if your dimension requires it (e.g. a caller you discover via CodeGraph).
 - **CodeGraph MCP** — `codegraph_search`, `codegraph_callers`, `codegraph_callees`, `codegraph_node`, `codegraph_impact`, `codegraph_explore`. Use to verify structural claims and walk neighbours.
 - **File tools** — read, grep, glob, shell. Use to ground your findings against actual source.
 

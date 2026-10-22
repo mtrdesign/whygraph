@@ -35,7 +35,9 @@ anchored to HEAD.
 | `qualified_name` | str | - | Fully-qualified symbol name. Use instead of `path`/lines when you know the symbol. CodeGraph resolves it to a file/line range. |
 | `limit` | int | `20` | Cap on the number of commits returned. |
 
-Returns `{ "target": {...}, "evidence": [ { "commit", "pull_requests", "issues", "source" }, ... ] }`.
+Returns `{ "target": {...}, "evidence": [ { "commit", "pull_requests", "issues", "source", "lines" }, ... ] }`.
+`lines` is a list of `[start, end]` working-tree ranges the commit owns within the queried range, set on
+`blame` items and `null` otherwise.
 
 With `qualified_name`, the symbol's file is first checked against the CodeGraph index: if it changed
 since it was indexed (you edited it and have not scanned yet), the index is re-synced and the symbol
@@ -74,6 +76,7 @@ switching `[rationale].provider` or `model` regenerates rather than returning th
 | `line_start` | int | First line of the chunk. |
 | `line_end` | int | Last line of the chunk. |
 | `qualified_name` | str | Fully-qualified symbol name, instead of `path`/lines. |
+| `force_refresh` | bool (default `false`) | Skip the cache and generate a new card (still stored; the same permission and budget checks apply). |
 
 Returns the card:
 

@@ -58,12 +58,18 @@ class CommitEvidence:
         without specifying ``source`` get the default ``"blame"`` — which
         matches the pre-Phase-3 behaviour where every entry came from
         ``git blame``.
+    lines : tuple[tuple[int, int], ...] or None
+        Working-tree line ranges (1-based, inclusive) the commit owns within
+        the queried range. Set only on ``"blame"`` items; ``None`` when the
+        coordinates are not the working tree's (walked, origin, predecessor
+        and area items).
     """
 
     commit: Commit
     pull_requests: tuple[PullRequest, ...] = ()
     issues: tuple[Issue, ...] = ()
     source: str = "blame"
+    lines: tuple[tuple[int, int], ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)

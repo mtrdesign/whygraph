@@ -6,7 +6,7 @@ Parse the user's input as `<target> [--force]`:
 
 - First non-flag token → `target`. Two forms are accepted:
   - A qualified_name like `whygraph_rationale_brief` or `auth.session.refresh_token` → pass as `qualified_name`.
-  - A `path:line_start-line_end` triple like `src/whygraph/mcp_server.py:957-1056` → split into `path`, `line_start`, `line_end`.
+  - A `path:line_start-line_end` triple like `src/auth/session.py:120-180` → split into `path`, `line_start`, `line_end`.
 - `--force` → pass `force_refresh: true` (bypasses the rationale cache).
 
 If no target was provided, respond with: `Usage: /rationale <qualified_name | path:line_start-line_end> [--force]` and stop.

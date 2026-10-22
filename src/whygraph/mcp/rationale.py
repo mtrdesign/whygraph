@@ -41,7 +41,8 @@ _TOOL_DESCRIPTION = (
     "enriches it with CodeGraph symbol context, and asks the configured LLM "
     "to synthesize the card. Pass either (path, line_start, line_end) or a "
     "qualified_name. Calls the configured LLM provider — may take several "
-    "seconds. Scan from the WhyGraph portal (or run `whygraph scan` outside it) "
+    "seconds. Pass force_refresh=true to regenerate instead of reading the "
+    "cached card. Scan from the WhyGraph portal (or run `whygraph scan` outside it) "
     "first to populate the WhyGraph database."
 )
 
@@ -214,6 +215,7 @@ def rationale_card(
     *,
     before_generate: Callable[[], None] | None = None,
     allow_description: Callable[[], bool] | None = None,
+    force_refresh: bool = False,
 ) -> dict:
     """The rationale card of ``target`` from ``evidence``: cached, or generated and cached.
 
@@ -233,6 +235,9 @@ def rationale_card(
     allow_description : callable, optional
         The description backfill's budget (see
         :func:`~whygraph.mcp.evidence.backfill_evidence_descriptions`).
+    force_refresh : bool, default False
+        Skip the cache lookup and generate a new card (still stored, and
+        still subject to the generation gates and ``before_generate``).
 
     Returns
     -------
@@ -257,7 +262,11 @@ def rationale_card(
 
     config = get_config()
     provider, pinned_model = config.cache_identity("rationale")
-    cached = lookup_cached(target, evidence, provider, pinned_model)
+    cached = (
+        None
+        if force_refresh
+        else lookup_cached(target, evidence, provider, pinned_model)
+    )
     if cached is not None:
         rationale, cached_at = cached
         return _format_response(target, rationale, evidence, cached_at)
@@ -305,6 +314,7 @@ def whygraph_rationale_brief(
     line_start: int | None = None,
     line_end: int | None = None,
     qualified_name: str | None = None,
+    force_refresh: bool = False,
 ) -> dict:
     """MCP tool — a rationale card for a chunk of code.
 
@@ -313,6 +323,8 @@ def whygraph_rationale_brief(
     A previously generated card is returned from the SQLite-backed cache
     (see :mod:`whygraph.mcp.rationale_cache`) when the same target,
     provider, model, and evidence fingerprint are all unchanged.
+    ``force_refresh=True`` skips that lookup and generates (and stores) a
+    new card.
 
     For a project linked to a WhyGraph platform the card comes from
     :func:`linked_rationale` instead, out of the platform's shared cache.
@@ -327,7 +339,7 @@ def whygraph_rationale_brief(
     if ctx is not None and ctx.remote is not None:
         return linked_rationale(ctx.remote, target)
     evidence = collect_evidence(target, limit=20)
-    return rationale_card(target, evidence)
+    return rationale_card(target, evidence, force_refresh=force_refresh)
 
 
 def register(mcp: FastMCP) -> None:

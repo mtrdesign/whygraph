@@ -45,6 +45,7 @@ Prompts are ready-made recipes that wire the tools into a workflow:
   constraints and avoids known risks.
 - `whygraph_why_was_this_written` - recover the original intent behind a chunk of code.
 - `whygraph_triage_commit` - summarize what one commit did and why, from its PR and closing issues.
+  This is the "what did commit X do" path.
 
 ## When the project is linked to a platform
 

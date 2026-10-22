@@ -123,6 +123,7 @@ switching `[rationale].provider` or `model` regenerates rather than returning th
 | `line_end` | int | Last line of the chunk. |
 | `qualified_name` | str | Fully-qualified symbol name, instead of `path`/lines. |
 | `force_refresh` | bool (default `false`) | Skip the cache and generate a new card (still stored; the same permission and budget checks apply). |
+| `cached_only` | bool (default `false`) | On a cache miss return `{ "status": "not_cached", "target": {...} }` at once: no generation, no description backfill, no LLM spend. Use it to read what is already known. Has no effect with `force_refresh`, nor on a [linked](#linked-projects) project, whose card the platform serves. |
 
 Returns the card:
 
@@ -137,12 +138,24 @@ Returns the card:
   "model": "claude-opus-4-7",
   "provider": "anthropic",
   "cached_at": "2026-06-11T12:00:00Z",
-  "evidence_count": { "commits": 8, "prs": 3, "issues": 2 }
+  "evidence_count": { "commits": 8, "prs": 3, "issues": 2 },
+  "evidence": [
+    {
+      "sha": "...",
+      "subject": "...",
+      "pull_requests": [{ "number": 847, "html_url": "..." }],
+      "issues": [{ "number": 12, "html_url": "..." }]
+    }
+  ],
+  "generated": false
 }
 ```
 
 The card carries exactly five narrative fields - **purpose, why, constraints, tradeoffs, risks** -
-plus provenance (`model`, `provider`, `cached_at`) and an `evidence_count` summary.
+plus provenance (`model`, `provider`, `cached_at`) and an `evidence_count` summary. `evidence` cites
+the top five commits (newest first) with their PR and issue links, so you can name "PR #847" without
+an evidence call; it is derived on each call, not stored with the card. `generated` is `true` when
+this call paid for the card and `false` when it was read from the cache.
 
 !!! note "Calls the LLM on a cache miss"
     On a miss, this hits the configured provider and may take several seconds. A hit is sub-second.
@@ -162,7 +175,19 @@ Read-only, JSON, addressed by URI.
 | `whygraph://commit/{sha}` | `whygraph_commit` | A scanned commit and the pull requests that contain it (closing issues not inlined). |
 | `whygraph://pr/{number}` | `whygraph_pull_request` | A pull request and the issues it closes. Includes full `commit_titles` and `comments`. |
 | `whygraph://issue/{number}` | `whygraph_issue` | An issue and the pull requests that close it. |
-| `whygraph://repo/overview` | `whygraph_repo_overview` | Repo-level summary: row counts, commit date range, scan freshness, LLM-description coverage, top contributors. |
+| `whygraph://repo/overview` | `whygraph_repo_overview` | Repo-level summary: row counts, commit date range, scan freshness, LLM-description coverage, top contributors, and a `freshness` block. |
+
+The overview's `freshness` block says whether the index is current, so a planner can read it once and
+warn when the plan rests on an old scan:
+
+```json
+"freshness": { "head": "...", "last_scanned_head": "...", "commits_behind": 3, "codegraph_indexed": true }
+```
+
+`head` is the checkout's `HEAD`, `last_scanned_head` the default-branch commit of the last finished
+scan, `commits_behind` how many commits `HEAD` has that the scan has not seen (`0` when equal,
+`null` when unknown or never scanned) and `codegraph_indexed` whether the CodeGraph index exists. A
+linked project's overview, `freshness` included, is the platform's, over its server clone.
 
 ## Prompts
 
@@ -173,6 +198,13 @@ Orchestration recipes that wire the tools into a workflow.
 | `whygraph_pre_edit_brief` | Pre-edit brief | `path` / `line_start` / `line_end` / `qualified_name` | Before you edit, gather rationale and history so the edit respects constraints and avoids known risks. |
 | `whygraph_why_was_this_written` | Why was this written? | `path` / `line_start` / `line_end` / `qualified_name` | Recover the original intent behind a chunk of code from its commits, PRs, and closing issues. |
 | `whygraph_triage_commit` | Triage a commit | `sha` | Summarize what one commit did and why, using its linked PR and closing issues. |
+
+## Structured output
+
+Each tool declares an `outputSchema` and returns the same object as `structuredContent` alongside the
+indented JSON text block, with identical keys. Keys that do not apply to a result (such as `platform`
+outside a linked project, or everything but `status` and `target` on a `not_cached` card) are absent
+rather than `null`.
 
 ## Errors
 
@@ -231,6 +263,11 @@ null `llm_description`, no pull requests or issues, and in `full` an empty `text
 The labels come from your `origin/*` refs as the last fetch left them; WhyGraph never fetches.
 `whygraph://commit/{sha}` for a commit the platform lacks returns its git message with the same
 label.
+
+**`platform.answered`.** `whygraph_evidence_for` adds `"answered": true` to its `platform` block when
+the platform accounted for the pushed commits, and `false` when it did not (nothing was pushed to ask
+about, or the call failed). With `false`, read `pending_scan` and `not_on_default_branch` as local
+guesses.
 
 **Offline behaviour.** If the platform cannot be reached, is revoked or is gone,
 `whygraph_evidence_for` still answers with your blame, every pushed commit labelled `pending_scan`

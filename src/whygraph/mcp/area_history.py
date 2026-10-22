@@ -15,7 +15,7 @@ commits whose touched paths have since been deleted or renamed away.
 from __future__ import annotations
 
 import logging
-from typing import Annotated
+from typing import Annotated, Any, TypedDict
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
@@ -28,6 +28,7 @@ from .descriptions import (
     AREA_HISTORY_ANNOTATIONS,
     AREA_HISTORY_DESCRIPTION,
 )
+from .structured import structured
 from .errors import WhyGraphError, log_tool_errors
 from .evidence import (
     MAX_BACKFILL_PER_CALL,
@@ -88,6 +89,24 @@ def linked_area_history(
         "describing": 0,
         "platform": platform_block(remote),
     }
+
+
+class _AreaHistoryRequired(TypedDict):
+    path: str
+    include_renames: bool
+    evidence: list[dict[str, Any]]
+    describing: int
+
+
+class AreaHistoryResult(_AreaHistoryRequired, total=False):
+    """The ``whygraph_area_history`` result, for FastMCP's output schema.
+
+    ``evidence`` items are the ``compact`` or ``full`` shape of
+    :func:`~whygraph.mcp.evidence.shape_evidence_item`; ``platform`` is
+    set for a linked project.
+    """
+
+    platform: dict[str, Any]
 
 
 def area_history_payload(
@@ -163,7 +182,7 @@ def whygraph_area_history(
     include_renames: bool = True,
     detail: Detail = "compact",
     describe: bool = True,
-) -> dict:
+) -> AreaHistoryResult:
     """MCP tool — area-history commits for a file path.
 
     See :data:`~whygraph.mcp.descriptions.AREA_HISTORY_DESCRIPTION` for the agent-facing summary.
@@ -188,4 +207,4 @@ def register(mcp: FastMCP) -> None:
         title=AREA_HISTORY_ANNOTATIONS.title,
         description=AREA_HISTORY_DESCRIPTION,
         annotations=AREA_HISTORY_ANNOTATIONS,
-    )(log_tool_errors(whygraph_area_history))
+    )(log_tool_errors(structured(AreaHistoryResult)(whygraph_area_history)))

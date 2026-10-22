@@ -311,10 +311,10 @@ def test_mcp_client_gets_the_same_evidence_as_a_direct_call(
 
         result = asyncio.run(_call())
 
-    assert result.isError is False, result.content
+    assert result.isError is False, result.content[0].text
     via_mcp = result.structuredContent
-    if via_mcp is None or set(via_mcp) == {"result"}:
-        via_mcp = (via_mcp or {}).get("result") or json.loads(result.content[0].text)
+    assert via_mcp is not None and "result" not in via_mcp
+    assert json.loads(result.content[0].text) == via_mcp
     with use_project(manual_ctx(root, slug="demo")):
         direct = whygraph_evidence_for(path="sample.py", line_start=1, line_end=3)
     assert via_mcp == direct
@@ -374,7 +374,11 @@ def test_rationale_progress_reaches_the_client_over_stateless_http(
 
         result = asyncio.run(_call())
 
-    assert result.isError is False, result.content
+    assert result.isError is False, result.content[0].text
+    card = result.structuredContent
+    assert card is not None and json.loads(result.content[0].text) == card
+    assert card["generated"] is True and card["evidence"]
+    assert set(card["evidence"][0]) == {"sha", "subject", "pull_requests", "issues"}
     assert seen == [
         (1.0, 3.0, "evidence collected (2 commits)"),
         (3.0, 3.0, "generating card"),
@@ -444,6 +448,20 @@ def test_slow_mcp_calls_do_not_block_the_ui(
     assert elapsed < 2.0, f"GET /api/portal/state took {elapsed:.2f}s"
     assert all(r.status_code == 200 for r in responses)
     assert len(started) == calls
+
+
+def test_tools_declare_an_output_schema() -> None:
+    tools = {t.name: t for t in asyncio.run(mcp_server.mcp.list_tools())}
+    for name, required in {
+        "whygraph_rationale_brief": {"target"},
+        "whygraph_evidence_for": {"target", "evidence", "describing"},
+        "whygraph_area_history": {"path", "include_renames", "evidence", "describing"},
+    }.items():
+        schema = tools[name].outputSchema
+        assert schema is not None and set(schema["required"]) == required
+    props = tools["whygraph_rationale_brief"].outputSchema["properties"]
+    assert {"status", "evidence", "generated", "platform"} <= set(props)
+    assert "cached_only" in tools["whygraph_rationale_brief"].inputSchema["properties"]
 
 
 def test_tools_carry_titles_annotations_and_server_instructions() -> None:

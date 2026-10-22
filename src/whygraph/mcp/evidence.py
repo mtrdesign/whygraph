@@ -19,7 +19,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal, TypedDict
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
@@ -40,6 +40,7 @@ from .descriptions import (
     EVIDENCE_FOR_ANNOTATIONS,
     EVIDENCE_FOR_DESCRIPTION,
 )
+from .structured import structured
 from .errors import WhyGraphError, log_tool_errors
 from .targets import Target, repo_root, resolve_target, target_dict
 
@@ -76,6 +77,24 @@ MAX_BACKFILL_PER_CALL = 5
 
 Detail = Literal["compact", "full"]
 """How much of each evidence item an MCP tool returns (plan section 5.4, U8)."""
+
+
+class _EvidenceToolRequired(TypedDict):
+    target: dict[str, Any]
+    evidence: list[dict[str, Any]]
+    describing: int
+
+
+class EvidenceToolResult(_EvidenceToolRequired, total=False):
+    """The ``whygraph_evidence_for`` result, for FastMCP's output schema.
+
+    ``evidence`` items are the ``compact`` or ``full`` shape of
+    :func:`shape_evidence_item`; ``platform`` is set for a linked project.
+    (Optional keys use ``total=False``: ``NotRequired`` is lost to the
+    string annotations ``from __future__ import annotations`` makes.)
+    """
+
+    platform: dict[str, Any]
 
 
 @dataclass
@@ -1427,16 +1446,22 @@ def linked_evidence(remote: RemoteProject, target: Target, *, limit: int) -> dic
     dict
         ``{"target", "evidence", "describing", "platform"}`` with items in
         the nested shape; ``describing`` is always ``0`` (descriptions
-        are the platform's).
+        are the platform's). ``platform.answered`` is ``False`` when the
+        platform did not account for the pushed hunks (nothing pushed to
+        ask about, or the call failed offline / revoked / removed), so
+        the ``pending_scan`` / ``not_on_default_branch`` labels are local
+        guesses.
     """
     repo = Repository(repo_root())
     split = split_by_push_status(repo, blame_target(repo, target))
     sendable = pushed_target(repo, target, split)
     items: list[dict] = []
     unknown: list[str] = [hunk.sha for hunk in split.pushed]
+    answered = False
     if sendable is not None:
         try:
             items, unknown = remote.evidence(sendable, split.pushed, limit)
+            answered = True
         except RemoteError:
             # Offline, revoked or removed: the agent still gets blame, with
             # every pushed SHA labelled from the local refs.
@@ -1445,7 +1470,7 @@ def linked_evidence(remote: RemoteProject, target: Target, *, limit: int) -> dic
         "target": target_dict(target),
         "evidence": merge_linked_evidence(items, unknown, split, limit=limit),
         "describing": 0,
-        "platform": platform_block(remote),
+        "platform": {**platform_block(remote), "answered": answered},
     }
 
 
@@ -1535,7 +1560,7 @@ def whygraph_evidence_for(
     limit: Annotated[int, Field(ge=1, le=100)] = 10,
     detail: Detail = "compact",
     describe: bool = True,
-) -> dict:
+) -> EvidenceToolResult:
     """MCP tool — historical evidence for a chunk of code.
 
     See :data:`~whygraph.mcp.descriptions.EVIDENCE_FOR_DESCRIPTION` for the agent-facing summary.
@@ -1566,4 +1591,4 @@ def register(mcp: FastMCP) -> None:
         title=EVIDENCE_FOR_ANNOTATIONS.title,
         description=EVIDENCE_FOR_DESCRIPTION,
         annotations=EVIDENCE_FOR_ANNOTATIONS,
-    )(log_tool_errors(whygraph_evidence_for))
+    )(log_tool_errors(structured(EvidenceToolResult)(whygraph_evidence_for)))

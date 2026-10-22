@@ -309,7 +309,11 @@ def test_mcp_linked_labels_uncommitted_and_unpushed(
     # Compact items: the platform's nested item is shaped like a local one.
     assert "commit" not in remote_item and "text" not in remote_item
     assert payload["describing"] == 0  # descriptions are the platform's
-    assert payload["platform"] == {"status": "ok", "url": API_ORIGIN}
+    assert payload["platform"] == {
+        "status": "ok",
+        "url": API_ORIGIN,
+        "answered": True,
+    }
     assert payload["target"] == {
         "path": "a.py",
         "line_start": 1,
@@ -388,7 +392,11 @@ def test_mcp_linked_makes_no_request_without_a_pushed_hunk(
         payload = whygraph_evidence_for(path="a.py", line_start=3, line_end=3)
     assert fake.requests == []
     assert statuses(payload) == {repo.c3: PUSH_NOT_PUSHED}
-    assert payload["platform"] == {"status": "ok", "url": API_ORIGIN}
+    assert payload["platform"] == {
+        "status": "ok",
+        "url": API_ORIGIN,
+        "answered": False,
+    }
 
     with use_project(linked), pytest.raises(WhyGraphError) as caught:
         whygraph_rationale_brief(path="a.py", line_start=3, line_end=3)
@@ -507,7 +515,11 @@ def test_mcp_linked_offline_fallback(
     fake.failure = "timeout"
     with use_project(linked):
         payload = whygraph_evidence_for(path="a.py", line_start=1, line_end=6)
-    assert payload["platform"] == {"status": "unreachable", "url": API_ORIGIN}
+    assert payload["platform"] == {
+        "status": "unreachable",
+        "url": API_ORIGIN,
+        "answered": False,  # the labels above are local guesses
+    }
     assert statuses(payload) == {
         repo.c1: PUSH_PENDING_SCAN,
         repo.c2: PUSH_PENDING_SCAN,
@@ -535,7 +547,11 @@ def test_mcp_linked_reports_revoked(
     fake.revoke_token(TOKEN, "admin_revoked")
     with use_project(linked):
         payload = whygraph_evidence_for(path="a.py", line_start=1, line_end=6)
-    assert payload["platform"] == {"status": "revoked", "url": API_ORIGIN}
+    assert payload["platform"] == {
+        "status": "revoked",
+        "url": API_ORIGIN,
+        "answered": False,
+    }
     assert set(sources(payload).values()) == {"local"}
 
     with use_project(linked), pytest.raises(WhyGraphError) as caught:

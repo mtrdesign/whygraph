@@ -752,3 +752,56 @@ def test_the_context_parameter_is_injected_not_advertised() -> None:
     assert tool.context_kwarg == "ctx"
     schemas = {t.name: t.inputSchema for t in asyncio.run(mcp.list_tools())}
     assert "ctx" not in schemas["whygraph_rationale_brief"]["properties"]
+
+
+def test_card_cites_evidence_and_says_whether_it_was_generated(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _FakeGenerator)
+    args = {"path": "sample.py", "line_start": 1, "line_end": 3}
+
+    first = whygraph_rationale_brief(**args)
+    again = whygraph_rationale_brief(**args)
+
+    assert (first["generated"], again["generated"]) == (True, False)
+    assert first["evidence"] == again["evidence"]
+    assert 1 <= len(first["evidence"]) <= 5
+    ref = first["evidence"][0]
+    assert set(ref) == {"sha", "subject", "pull_requests", "issues"}
+    assert len(ref["sha"]) == 40 and ref["subject"]
+    assert first["evidence_count"]["commits"] >= len(first["evidence"])
+
+
+def test_cached_only_never_generates(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    calls: list[int] = []
+
+    class _CountingGenerator(_FakeGenerator):
+        def generate(self, evidence, *, symbol_context=None, subject=None):
+            calls.append(1)
+            return super().generate(
+                evidence, symbol_context=symbol_context, subject=subject
+            )
+
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _CountingGenerator)
+    args = {"path": "sample.py", "line_start": 1, "line_end": 3}
+
+    miss = whygraph_rationale_brief(**args, cached_only=True)
+    assert miss["status"] == "not_cached"
+    assert miss["target"]["path"] == "sample.py"
+    assert set(miss) == {"status", "target"}
+    assert calls == []
+
+    whygraph_rationale_brief(**args)  # pays for the card
+    hit = whygraph_rationale_brief(**args, cached_only=True)
+    assert hit["generated"] is False and "purpose" in hit
+    assert len(calls) == 1

@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -80,6 +81,17 @@ FAKE = Path(__file__).parent / "fixtures" / "fake_codegraph_mcp.py"
 # ---------------------------------------------------------------------------
 # Fixtures and helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _whygraph_logs_reach_caplog(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Undo a neighbour's ``configure_logging`` (``propagate = False``) for ``caplog``."""
+    logger = logging.getLogger("whygraph")
+    monkeypatch.setattr(logger, "propagate", True)
+    level = logger.level
+    logger.setLevel(logging.NOTSET)  # setLevel also clears the level caches
+    yield
+    logger.setLevel(level)
 
 
 @pytest.fixture

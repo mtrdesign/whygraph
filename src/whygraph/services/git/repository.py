@@ -16,6 +16,7 @@ from .blame import BlameHunk
 from .commands import (
     GitBlameCmd,
     GitCheckMailmapCmd,
+    GitCheckoutPathsCmd,
     GitCheckoutResetCmd,
     GitCloneCmd,
     GitCurrentBranchCmd,
@@ -37,6 +38,7 @@ from .commands import (
     GitResolveCommitCmd,
     GitRevListShasCmd,
     GitSetRemoteHeadCmd,
+    GitSetConfigCmd,
     GitSetRemoteUrlCmd,
     GitSymbolicRefCmd,
 )
@@ -72,6 +74,12 @@ _BLAME_IGNORE_REVS_FILE = ".git-blame-ignore-revs"
 # ARG_MAX on every platform even for a repository with thousands of
 # distinct identities; the results are concatenated in input order.
 _MAILMAP_CHUNK = 500
+
+# Paths per ``git checkout -- <paths>`` of :meth:`Repository.neutralize_symlinks`.
+_PATHS_CHUNK = 500
+
+# A tracked symbolic link's mode in ``git ls-files -s``.
+_SYMLINK_MODE = "120000"
 
 # Short branch names probed, in order, when ``refs/remotes/<remote>/HEAD``
 # is unset — which is the common case, since a plain ``git clone`` sets it
@@ -917,6 +925,72 @@ class Repository:
             self._shell.run(GitCheckoutResetCmd(branch, commit), cwd=self.root)
         except ShellError as exc:
             raise GitError(f"failed to check out {branch} at {commit[:9]}") from exc
+
+    def neutralize_symlinks(self) -> tuple[str, ...]:
+        """Leave no symbolic link git tracks in the working tree (purely local).
+
+        Sets ``core.symlinks=false`` in the repository's own config, so every
+        later checkout writes a tracked link as a plain file holding its
+        target, then rewrites each tracked link already on disk that way:
+        the link is removed (never what it points to) and the path checked
+        out again from the index, hooks disabled. A clone made before
+        clones set ``core.symlinks=false`` is fixed by one call; on a clean
+        clone it changes nothing. A link whose folder is itself a link is
+        skipped (that folder is a tracked link too and is rewritten).
+
+        Returns
+        -------
+        tuple of str
+            The root-relative paths rewritten, in ``git ls-files`` order;
+            empty when there were none.
+
+        Raises
+        ------
+        GitError
+            If git fails (not a repository, an unreadable index).
+        """
+        try:
+            self._shell.run(GitSetConfigCmd("core.symlinks", "false"), cwd=self.root)
+        except ShellError as exc:
+            raise GitError("failed to set core.symlinks") from exc
+        rewritten: list[str] = []
+        for entry in self._ls_files_z("-s"):
+            meta, tab, rel = entry.partition("\t")
+            if not tab or meta.split(" ", 1)[0] != _SYMLINK_MODE:
+                continue
+            try:
+                check_inside(self.root, Path(rel).parent)
+            except UnsafePathError:
+                continue
+            path = self.root / rel
+            if path.is_symlink():
+                path.unlink()
+                rewritten.append(rel)
+        for start in range(0, len(rewritten), _PATHS_CHUNK):
+            chunk = rewritten[start : start + _PATHS_CHUNK]
+            try:
+                self._shell.run(GitCheckoutPathsCmd(chunk), cwd=self.root)
+            except ShellError as exc:
+                raise GitError("failed to rewrite tracked links as files") from exc
+        return tuple(rewritten)
+
+    def _ls_files_z(self, *args: str) -> list[str]:
+        """``git ls-files -z <args>`` as a list, read as bytes so any file name decodes."""
+        try:
+            result = subprocess.run(
+                ["git", "ls-files", "-z", *args],
+                cwd=self.root,
+                capture_output=True,
+                timeout=self._shell.timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise GitError("failed to list the tracked files") from exc
+        if result.returncode != 0:
+            lines = os.fsdecode(result.stderr).strip().splitlines()
+            detail = lines[-1] if lines else f"exit {result.returncode}"
+            raise GitError(f"failed to list the tracked files: {detail}")
+        return [os.fsdecode(e) for e in result.stdout.split(b"\0") if e]
 
     def set_remote_head(self, branch: str) -> None:
         """Record ``branch`` as the origin remote's default (``refs/remotes/<origin>/HEAD``).

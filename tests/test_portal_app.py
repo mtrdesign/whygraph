@@ -71,6 +71,8 @@ from whygraph.portal.platform_routes import default_client_name
 from whygraph.portal.runner import ScanRunner
 from whygraph.portal.security import PortalGuard, build_origins
 from whygraph.serve import chat as serve_chat
+from whygraph.services.codegraph import GUARD_STAMP_RELPATH
+from whygraph.services.codegraph.bootstrap import GUARD_VERSION
 from whygraph.services.github import GitHubError, RepoAccessError
 from whygraph.services.llm.chat import TextDelta, TurnDone
 
@@ -151,10 +153,12 @@ def manual_ctx(root: Path, slug: str = "manual") -> ProjectContext:
 
 
 def seed_codegraph(root: Path) -> None:
+    """A CodeGraph index, stamped as built behind the symbolic-link guard."""
     (root / ".codegraph").mkdir(exist_ok=True)
     build_fake_codegraph_db(
         root / ".codegraph" / "codegraph.db", nodes=_NODES, edges=_EDGES
     )
+    (root / GUARD_STAMP_RELPATH).write_text(GUARD_VERSION + "\n")
 
 
 @pytest.fixture

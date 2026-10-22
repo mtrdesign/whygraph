@@ -118,6 +118,9 @@ printf 'def add(a, b):\n    return a + b\n' > "$R/src/calc.py"
 git -C "$R" add -A && commit -m "feat: add calc"
 printf '\n\ndef mul(a, b):\n    return a * b\n' >> "$R/src/calc.py"
 commit -am "feat: add mul"
+# A symbolic link out of the repository (untracked): no scan may index through it.
+printf 'def SECRET_VALUE():\n    return 1\n' > "$S/share/outside_secret.py"
+ln -s ../../outside_secret.py "$R/src/leak.py"
 
 echo "== portal"
 whygraph up --add-folder "$S/share" >/dev/null
@@ -141,6 +144,12 @@ check "claude MCP entry is HTTP" grep -q "/mcp/demo" "$R/.mcp.json"
 echo "== first scan"
 check "request a scan" test "$(code_of POST /api/projects/demo/scans -d '{"trigger":"manual"}')" = 202
 check "first scan is 'initial' and ends ok" test "$(wait_run initial)" = ok
+cg_warning=$(api GET /api/projects/demo/scans | json "next((c.get('warning', '') for r in d['runs'] if r['trigger'] == 'initial' for c in (r.get('summary') or {}).get('crawlers', []) if c['name'] == 'codegraph'), '')")
+check "the first scan refused to index through a symbolic link" \
+    sh -c 'printf "%s" "$1" | grep -q "symbolic link"' _ "$cg_warning"
+check "no SECRET_VALUE row in the CodeGraph index" \
+    sh -c '! cat "$1"/.codegraph/codegraph.db* 2>/dev/null | grep -qa SECRET_VALUE' _ "$R"
+rm "$R/src/leak.py"
 
 echo "== MCP"
 init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}'

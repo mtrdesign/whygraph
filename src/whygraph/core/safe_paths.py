@@ -83,11 +83,34 @@ def check_inside(root: Path, path: Path | str) -> Path:
         if current.is_symlink():
             raise UnsafePathError(current, "is a symbolic link")
     full = root / rel
-    real_root = os.path.realpath(root)
-    real = os.path.realpath(full)
-    if os.path.commonpath([real_root, real]) != real_root:
+    if not resolves_inside(root, full):
         raise UnsafePathError(full, f"resolves outside {root}")
     return full
 
 
-__all__ = ["UnsafePathError", "check_inside"]
+def resolves_inside(root: Path | str, path: Path | str) -> bool:
+    """Whether ``realpath(path)`` lies under ``realpath(root)``.
+
+    The realpath half of :func:`check_inside`: symbolic links on the way
+    are allowed as long as the path they lead to stays under the root. A
+    dangling link resolves as far as it can and is judged lexically from
+    there, so a link to a missing file outside the root is outside.
+
+    Parameters
+    ----------
+    root : Path or str
+        The repository root (it may itself be a symlink).
+    path : Path or str
+        The path to judge, absolute or relative to the current directory.
+
+    Returns
+    -------
+    bool
+        ``True`` when the resolved path is the root or below it.
+    """
+    real_root = os.path.realpath(root)
+    real = os.path.realpath(path)
+    return os.path.commonpath([real_root, real]) == real_root
+
+
+__all__ = ["UnsafePathError", "check_inside", "resolves_inside"]

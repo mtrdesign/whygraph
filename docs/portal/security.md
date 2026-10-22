@@ -250,12 +250,31 @@ initializing, the Explorer, Chat, the MCP endpoint and scans all stop for that p
 `whygraph.toml` link is not imported, and removing the project leaves the linked files alone. Replace
 the link with a real file or folder to continue.
 
+CodeGraph, which builds the code index, follows symbolic links out of the repository on purpose. So
+before every index build or refresh WhyGraph lists the files CodeGraph would read - tracked and
+untracked files, files in embedded repositories, and folders a `codegraph.json` `include` adds - and
+refuses to run CodeGraph while any of them is a link that leads out of the project's folder. A link
+that stays inside the folder is fine. There is no setting to skip the check and no partial index: the
+scan reports the links (the first five by name), the CodeGraph step fails, and the rest of the scan
+still runs. Replace each link with a regular file or remove it, then scan again.
+
+An index built before this version may hold symbols read through a symbolic link that leaves the
+repository; the first scan after upgrading rebuilds it from scratch (once - a stamp beside the index,
+`.codegraph/whygraph-guard`, records that it was rebuilt). Until the links are gone the rebuild is
+refused like any other index build, and the scan after they are removed runs it.
+
 ### Configuration from a repository
 
 An imported `whygraph.toml` contributes only an allowlist of settings (models, tuning keys and a few
 `[scan]` keys). Database paths are always `<repo>/.whygraph/whygraph.db` and
 `<repo>/.codegraph/codegraph.db`, whatever a file says. A `remote` or `default_branch` value that could be
 read by git as an option is dropped.
+
+A committed `codegraph.json` is CodeGraph's own configuration and is honoured as written: `extensions`,
+`include`, `includeIgnored` and `exclude` change which files of the repository are indexed. It is
+repository-controlled configuration, so it cannot widen the index beyond the project's folder: the
+symbolic-link check above walks every folder its `include` and `includeIgnored` patterns add, and a
+`codegraph.json` that is itself a link out of the folder is refused.
 
 ### Hooks
 
@@ -272,6 +291,13 @@ Local mode clones nothing: a local project is a folder you shared. In production
 only a repository the GitHub App covers, from `WHYGRAPH_GITHUB_URL` (`https` except on loopback), with
 a restricted protocol list, into `repos/<org>/<project>` under its data directory. It removes a failed
 clone it created and will not delete a directory it did not.
+
+A clone never contains a symbolic link: it is made with `core.symlinks=false` in its own git config,
+and every sync checks out the same way, so a link a repository commits arrives as a plain file holding
+the link's target. One repository can therefore not point into another tenant's clone or the portal's
+data. A clone made by an earlier version is fixed by its next sync, which rewrites any link still on
+disk as a plain file and drops the cached rationale cards of those files; at start the portal queues
+one such sync, with a scan, for every clone that does not have `core.symlinks=false` yet.
 
 ## What the portal writes to your repository
 

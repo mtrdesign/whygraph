@@ -70,6 +70,8 @@ from whygraph.portal.models import Project, ScanRun, UsageEvent, User
 from whygraph.portal.prices import BUNDLED_AS_OF
 from whygraph.portal.secrets import LLM_API_KEY, put_secret
 from whygraph.portal.usage_store import UsageRow
+from whygraph.services.codegraph import GUARD_STAMP_RELPATH
+from whygraph.services.codegraph.bootstrap import GUARD_VERSION
 from whygraph.portal.runner import (
     LOG_TAIL_BYTES,
     MAX_EVENT_LINE,
@@ -1364,6 +1366,30 @@ def test_catch_up_on_start_only_when_head_moved(
         rs = wait_idle(client, "demo")
         assert len(rs) == 2 and rs[0]["trigger"] == "hook" and rs[0]["status"] == "ok"
         assert client.get("/api/projects").json()["projects"][0]["stale"] is None
+
+
+def test_an_index_from_before_the_symlink_guard_gets_one_hook_scan_at_start(
+    env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    """Plan Step 1 item 2b (R16): its CodeGraph step rebuilds the index, once."""
+    with client_for() as client:
+        client.post("/api/portal/setup", json={"display_name": "Tess"})
+        root = local_project(client, env, "demo")
+        first_scan(client, "demo")
+    (root / GUARD_STAMP_RELPATH).unlink()  # an index an older build wrote
+    with client_for(ScanRunner(sleep=FakeClock().sleep)) as client:
+        rs = wait_idle(client, "demo")
+        assert len(rs) == 2, rs
+        assert (rs[0]["trigger"], rs[0]["status"]) == ("hook", "ok")
+        assert runner_flags(scanner.calls()[-1])[3:] == [
+            "--skip-analyze",
+            "--no-remote",
+        ]
+    # The fake child runs no CodeGraph: stamp the index as the rebuild would.
+    (root / GUARD_STAMP_RELPATH).write_text(GUARD_VERSION + "\n")
+    with client_for(ScanRunner(sleep=FakeClock().sleep)) as client:
+        time.sleep(0.3)
+        assert len(runs(client, "demo")) == 2  # once: nothing queued again
 
 
 def test_stale_reports_commits_behind(

@@ -45,6 +45,16 @@ process:
   tracks WhyGraph's state fails the run and marks the project with reason
   ``tracked_whygraph_state``; that mark does not refuse requests (the
   next sync re-checks, and clears it once the repository is fixed).
+* **Symbolic links** (portal-hosted CodeGraph plan, Step 1). A clone and
+  every checkout write a tracked link as a plain file
+  (``core.symlinks=false``); every sync also rewrites links an older clone
+  still holds (:meth:`Repository.neutralize_symlinks`) and drops the
+  cached rationale cards of those paths. At a production start, a clone
+  without ``core.symlinks=false`` gets one ``trigger=reconcile`` sync
+  that scans (:meth:`ScanRunner.neutralize_clones`); at a local start, a
+  project whose CodeGraph index predates the symbolic-link guard gets one
+  ``hook`` scan, whose CodeGraph step rebuilds it
+  (:meth:`ScanRunner.rebuild_unguarded_indexes`).
 * **Imports** (M2f-3 plan section 4.8). An imported project's row exists
   before its clone (``initialized_at`` unset): its first run
   (:meth:`ScanRunner.request_import`, also Retry) clones into a
@@ -164,8 +174,12 @@ from sqlalchemy import update
 from sqlmodel import col, select
 
 from whygraph.core.config import Config, ConfigError
+from whygraph.core.context import use_project
 from whygraph.core.safe_paths import UnsafePathError, check_inside
 from whygraph.core.usage import UsageRecord, budget_message
+from whygraph.db import get_session as project_session
+from whygraph.mcp.rationale_cache import purge_paths
+from whygraph.services.codegraph import index_predates_guard
 from whygraph.services.git import GitError, InvalidRepoUrlError, Repository
 from whygraph.services.git.credentials import (
     GITHUB_URL_ENV,
@@ -1357,6 +1371,8 @@ class ScanRunner:
             await anyio.to_thread.run_sync(sweep_clone_dirs, data_dir())
             await self._requeue()
             await self.catch_up()
+            await self.rebuild_unguarded_indexes()
+            await self.neutralize_clones()
         except Exception:  # noqa: BLE001 -- never fail the portal start
             _log.exception("scan runner: startup recovery failed")
         if self._local_mode():
@@ -1999,6 +2015,70 @@ class ScanRunner:
                     )
                 except ProjectBusy:
                     continue  # being removed
+
+    async def rebuild_unguarded_indexes(self) -> None:
+        """Queue a ``trigger=hook`` scan for each local project whose index predates the guard.
+
+        An index built before WhyGraph refused symbolic links out of the
+        repository may hold symbols read through one; the scan's CodeGraph
+        step rebuilds such an index with a full ``codegraph index`` and
+        stamps it (:func:`~whygraph.services.codegraph.index_predates_guard`),
+        so the next start queues nothing. A refused rebuild leaves the
+        stamp missing, and a later scan retries it. Run at a local start
+        only; a never-scanned project is left to its first scan, as
+        :meth:`catch_up` does.
+        """
+        if not self._local_mode():
+            return
+        projects = await anyio.to_thread.run_sync(_initialized_projects)
+        for p in projects:
+            if (
+                p["source"] not in ("local", "platform")
+                or not p["root_ok"]
+                or not p["last_scanned_head"]
+            ):
+                continue
+            if not await anyio.to_thread.run_sync(index_predates_guard, p["root"]):
+                continue
+            try:
+                await self._request(
+                    p["id"],
+                    kind="scan",
+                    trigger="hook",
+                    analyze=False,
+                    requested_by=None,
+                    scan_requested=True,
+                    may_spend=False,  # a hook scan never describes
+                )
+            except ProjectBusy:
+                continue  # being removed
+
+    async def neutralize_clones(self) -> None:
+        """Queue one ``trigger=reconcile`` sync for each clone that may still hold links.
+
+        A production clone made before clones set ``core.symlinks=false``
+        can hold a tracked symbolic link (to another tenant's clone, say).
+        The sync rewrites them as plain files and drops the cached cards of
+        those paths (:meth:`_github_sync`), and it scans, so the CodeGraph
+        index drops what it read through them. Read from the clone's own
+        config (``git config --get core.symlinks``): no column, and a clone
+        a sync already fixed is skipped. Run at a production start only.
+        """
+        state = self._state
+        if state is None or state.mode != "production" or state.github_app is None:
+            return
+        projects = await anyio.to_thread.run_sync(_initialized_projects)
+        for p in projects:
+            if p["source"] != "github" or not p["root_ok"]:
+                continue
+            if await anyio.to_thread.run_sync(_symlinks_off, p["root"]):
+                continue
+            try:
+                await self.request_sync(
+                    p["id"], trigger="reconcile", scan_requested=True
+                )
+            except (ProjectBusy, ProjectAccessLost, SourceNotAllowed):
+                continue
 
     def _mode(self) -> str | None:
         """The portal's mode (``None`` before :meth:`start`)."""
@@ -2770,9 +2850,13 @@ class ScanRunner:
             before = git_head(root)
             repo.checkout_reset(branch, target)
             repo.set_remote_head(branch)
+            # A clone of an older build may still hold tracked links.
+            rewritten = repo.neutralize_symlinks()
         except (GitError, InvalidRepoUrlError) as exc:
             raise _SyncFailed(_error_chain(exc)) from exc
         _clear_access_lost(project_id)
+        if rewritten:
+            _purge_rewritten_links(project_id, job.ctx, rewritten)
         summary: dict[str, Any] = {"moved": before != target}
         if before and before != target and repo.is_ancestor(before, target) is False:
             summary["history_rewritten"] = True
@@ -2851,6 +2935,8 @@ class ScanRunner:
                     ".codegraph/ from the repository to import it"
                 )
             repo.set_remote_head(info.default_branch)
+            # The clone already wrote links as files (core.symlinks=false).
+            repo.neutralize_symlinks()
             try:
                 os.rename(tmp, root)  # fails on a non-empty root; never merges
             except OSError as exc:
@@ -3469,6 +3555,42 @@ def _recover_queued(production: bool = False) -> list[_Pending]:
             row.summary = _queued_summary(spec)
             session.add(row)
     return list(specs.values())
+
+
+def _symlinks_off(root: Path) -> bool:
+    """Whether the clone at ``root`` has ``core.symlinks=false`` in its own config."""
+    value = _git_out(root, "config", "--get", "core.symlinks")
+    return value is not None and value.lower() == "false"
+
+
+def _purge_rewritten_links(
+    project_id: int, ctx: ProjectContext | None, paths: tuple[str, ...]
+) -> None:
+    """Drop the cached rationale cards of files that were links (worker thread, best effort).
+
+    A card written while the path was a link may quote what it pointed to.
+    Nothing is opened through a symlinked ``.whygraph/`` or before the
+    project has a WhyGraph DB.
+    """
+    _log.warning(
+        "scan runner: project %s: rewrote %d tracked symbolic link(s) as files",
+        project_id,
+        len(paths),
+    )
+    if ctx is None or ctx.remote is not None:
+        return
+    try:
+        check_project_paths(ctx.root)
+        db_path = Path(ctx.config.whygraph_db or ctx.root / ".whygraph/whygraph.db")
+        if not db_path.is_file():
+            return
+        with use_project(ctx), project_session() as session:
+            purge_paths(session, paths)
+    except Exception:  # noqa: BLE001 -- the sync and the scan go on
+        _log.exception(
+            "scan runner: project %s: could not drop the cards of rewritten links",
+            project_id,
+        )
 
 
 def _initialized_projects() -> list[dict]:

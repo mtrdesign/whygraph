@@ -6,6 +6,11 @@ monkeypatches :func:`shutil.which` and :func:`subprocess.run` so neither a
 real CodeGraph install nor a Docker daemon is needed. Each test owns its
 own ``tmp_path``-rooted "project" so the idempotency / DB-creation checks
 operate on isolated files.
+
+The symbolic-link guard (``escaping_symlinks``, which runs git) is stubbed
+to "nothing escapes" for every test here: ``tests/test_codegraph_symlinks.py``
+covers it against real repositories. The guard tests at the end put it
+back with an answer of their own.
 """
 
 from __future__ import annotations
@@ -21,17 +26,32 @@ import pytest
 from whygraph.services.codegraph import bootstrap
 from whygraph.services.codegraph.bootstrap import (
     DEFAULT_CODEGRAPH_IMAGE,
+    GUARD_VERSION,
     ensure_codegraph_db,
+    index_predates_guard,
     refresh_codegraph_index,
 )
-from whygraph.services.codegraph.exceptions import CodeGraphBootstrapError
+from whygraph.services.codegraph.exceptions import (
+    CodeGraphBootstrapError,
+    CodeGraphUnsafeSymlinkError,
+)
+from whygraph.services.codegraph.paths import GUARD_STAMP_RELPATH
 
 
-def _make_existing_db(project_root: Path) -> Path:
+@pytest.fixture(autouse=True)
+def _no_escaping_links(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guard finds nothing (it shells out to git, which these tests fake)."""
+    monkeypatch.setattr(bootstrap, "escaping_symlinks", lambda root: ())
+
+
+def _make_existing_db(project_root: Path, *, guarded: bool = True) -> Path:
+    """An index; ``guarded`` stamps it as built behind the symbolic-link guard."""
     cg_dir = project_root / ".codegraph"
     cg_dir.mkdir(exist_ok=True)
     db = cg_dir / "codegraph.db"
     db.touch()
+    if guarded:
+        (project_root / GUARD_STAMP_RELPATH).write_text(GUARD_VERSION + "\n")
     return db
 
 
@@ -542,3 +562,171 @@ def test_refresh_env_is_the_given_base_minus_credentials(
     )
 
     assert captured["env"] == {"PATH": "/bin"}
+
+
+# --------------------------------------------------------------------------- #
+# The symbolic-link guard and the pre-guard rebuild (plan Step 1, R16)
+# --------------------------------------------------------------------------- #
+
+
+def _refusing_guard(
+    monkeypatch: pytest.MonkeyPatch, paths: tuple[str, ...]
+) -> list[Path]:
+    """Make the guard report ``paths``; the roots it was asked about."""
+    asked: list[Path] = []
+
+    def guard(root: Path) -> tuple[str, ...]:
+        asked.append(root)
+        return paths
+
+    monkeypatch.setattr(bootstrap, "escaping_symlinks", guard)
+    return asked
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_the_guard_refuses_before_codegraph_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing: bool
+) -> None:
+    if existing:
+        _make_existing_db(tmp_path)
+    links = tuple(f"app/link{i}.py" for i in range(7))
+    asked = _refusing_guard(monkeypatch, links)
+    monkeypatch.setattr(bootstrap.shutil, "which", _which("codegraph"))
+    calls: list[list[str]] = []
+    monkeypatch.setattr(bootstrap.subprocess, "run", _status_run(calls))
+
+    with pytest.raises(CodeGraphUnsafeSymlinkError) as raised:
+        refresh_codegraph_index(tmp_path, capture=True)
+
+    assert calls == []  # not even `codegraph status`
+    assert asked == [tmp_path.resolve()]
+    assert raised.value.paths == links
+    message = str(raised.value)
+    assert "app/link0.py" in message and "app/link4.py" in message
+    assert "app/link5.py" not in message and "and 2 more" in message
+    # A non-strict scan swallows it as a bootstrap failure.
+    assert isinstance(raised.value, CodeGraphBootstrapError)
+
+
+def test_ensure_refuses_before_init(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _refusing_guard(monkeypatch, ("evil.py",))
+    monkeypatch.setattr(bootstrap.shutil, "which", _which("codegraph"))
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(bootstrap.subprocess, "run", _capturing_run(captured))
+
+    with pytest.raises(CodeGraphUnsafeSymlinkError, match="1 symbolic link leads out"):
+        ensure_codegraph_db(tmp_path)
+    assert "cmd" not in captured
+    assert not (tmp_path / ".codegraph").exists()
+
+
+def test_the_read_path_resync_is_refused_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`mcp/targets.py` re-syncs with allow_rebuild=False: still guarded."""
+    _make_existing_db(tmp_path)
+    _refusing_guard(monkeypatch, ("evil.py",))
+    monkeypatch.setattr(bootstrap.shutil, "which", _which("codegraph"))
+    calls: list[list[str]] = []
+    monkeypatch.setattr(bootstrap.subprocess, "run", _status_run(calls))
+
+    with pytest.raises(CodeGraphUnsafeSymlinkError):
+        refresh_codegraph_index(tmp_path, allow_rebuild=False)
+    assert calls == []
+
+
+def test_a_first_index_is_stamped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(bootstrap.shutil, "which", _which("codegraph"))
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        bootstrap.subprocess, "run", _capturing_run(captured, create_db_at=tmp_path)
+    )
+    (tmp_path / ".codegraph").mkdir()
+
+    refresh_codegraph_index(tmp_path)
+
+    assert captured["cmd"] == ["codegraph", "init", "-i"]
+    assert (tmp_path / GUARD_STAMP_RELPATH).read_text().strip() == GUARD_VERSION
+    assert index_predates_guard(tmp_path) is False
+
+
+def test_an_index_from_before_the_guard_is_rebuilt_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _make_existing_db(tmp_path, guarded=False)
+    assert index_predates_guard(tmp_path) is True
+    monkeypatch.setattr(bootstrap.shutil, "which", _which("codegraph"))
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        bootstrap.subprocess, "run", _status_run(calls, status=_status_json(24, 24))
+    )
+
+    refresh_codegraph_index(tmp_path, capture=True)
+    assert calls == [["codegraph", "index", "-q"]]  # no status check needed
+    assert index_predates_guard(tmp_path) is False
+
+    calls.clear()
+    refresh_codegraph_index(tmp_path, capture=True)
+    assert calls[-1] == ["codegraph", "sync", "-q"]
+    assert ["codegraph", "index", "-q"] not in calls
+
+
+def test_the_read_path_never_rebuilds_an_unstamped_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _make_existing_db(tmp_path, guarded=False)
+    monkeypatch.setattr(bootstrap.shutil, "which", _which("codegraph"))
+    calls: list[list[str]] = []
+    monkeypatch.setattr(bootstrap.subprocess, "run", _status_run(calls))
+
+    refresh_codegraph_index(tmp_path, allow_rebuild=False)
+
+    assert calls == [["codegraph", "sync", "-q"]]
+    assert index_predates_guard(tmp_path) is True  # a sync never stamps
+
+
+def test_a_refused_rebuild_keeps_the_index_unstamped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first scan after the links are gone rebuilds it (R16)."""
+    _make_existing_db(tmp_path, guarded=False)
+    _refusing_guard(monkeypatch, ("evil.py",))
+    monkeypatch.setattr(bootstrap.shutil, "which", _which("codegraph"))
+    calls: list[list[str]] = []
+    monkeypatch.setattr(bootstrap.subprocess, "run", _status_run(calls))
+
+    with pytest.raises(CodeGraphUnsafeSymlinkError):
+        refresh_codegraph_index(tmp_path)
+    assert index_predates_guard(tmp_path) is True
+
+    monkeypatch.setattr(bootstrap, "escaping_symlinks", lambda root: ())
+    refresh_codegraph_index(tmp_path)
+    assert calls == [["codegraph", "index", "-q"]]
+    assert index_predates_guard(tmp_path) is False
+
+
+@pytest.mark.parametrize("stamp", [None, "0\n", ""])
+def test_index_predates_guard_reads_the_stamp(
+    tmp_path: Path, stamp: str | None
+) -> None:
+    assert index_predates_guard(tmp_path) is False  # no index at all
+    _make_existing_db(tmp_path, guarded=False)
+    if stamp is not None:
+        (tmp_path / GUARD_STAMP_RELPATH).write_text(stamp)
+    assert index_predates_guard(tmp_path) is True
+
+
+def test_index_predates_guard_never_reads_through_a_linked_codegraph_dir(
+    tmp_path: Path,
+) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "codegraph.db").touch()
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / ".codegraph").symlink_to(elsewhere)
+    assert index_predates_guard(root) is False

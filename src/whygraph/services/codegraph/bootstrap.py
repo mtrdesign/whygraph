@@ -19,6 +19,15 @@ WhyGraph is run:
 :func:`ensure_codegraph_db` is idempotent (the 1.x init step used it);
 :func:`refresh_codegraph_index` re-syncs an existing index (used by
 ``whygraph scan``). Both are usable standalone (e.g. from tests).
+
+Neither runs CodeGraph while the repository holds a symbolic link that
+CodeGraph would read and that leads out of it
+(:func:`~.symlinks.escaping_symlinks`): CodeGraph follows such links on
+purpose, so they raise :class:`~.exceptions.CodeGraphUnsafeSymlinkError`
+instead. An index built from scratch behind that guard gets a stamp beside
+it (:data:`~.paths.GUARD_STAMP_RELPATH`); an index without one may hold
+rows read through a link before the guard existed, so the next refresh that
+may rebuild runs a full ``codegraph index`` (:func:`index_predates_guard`).
 """
 
 from __future__ import annotations
@@ -31,8 +40,11 @@ import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 
-from .exceptions import CodeGraphBootstrapError
-from .paths import CODEGRAPH_DB_RELPATH
+from whygraph.core.safe_paths import UnsafePathError, check_inside
+
+from .exceptions import CodeGraphBootstrapError, CodeGraphUnsafeSymlinkError
+from .paths import CODEGRAPH_DB_RELPATH, GUARD_STAMP_RELPATH
+from .symlinks import escaping_symlinks
 
 DEFAULT_CODEGRAPH_IMAGE: str = "ghcr.io/mtrdesign/whygraph:latest"
 """Default image run by the Docker fallback when no override is given.
@@ -43,6 +55,9 @@ fallback runs ``codegraph`` inside it. ``whygraph scan`` exposes
 also pass an explicit ``image=`` to the functions here. Ignored when a
 local ``codegraph`` binary is used instead.
 """
+
+GUARD_VERSION: str = "1"
+"""The content of :data:`~.paths.GUARD_STAMP_RELPATH`; bumping it rebuilds every index once."""
 
 _log = logging.getLogger(__name__)
 
@@ -96,12 +111,16 @@ def ensure_codegraph_db(
     CodeGraphBootstrapError
         If neither ``codegraph`` nor ``docker`` is on PATH, the command
         exits non-zero, or the database is still missing afterward.
+    CodeGraphUnsafeSymlinkError
+        If the repository holds a symbolic link out of it that CodeGraph
+        would read; CodeGraph is not run.
     """
     project_root = project_root.resolve()
     db_path = project_root / CODEGRAPH_DB_RELPATH
     if db_path.exists():
         return db_path
 
+    _refuse_escaping_symlinks(project_root)
     _run_codegraph(project_root, ["init", "-i"], image=image, capture=capture)
 
     if not db_path.exists():
@@ -109,6 +128,7 @@ def ensure_codegraph_db(
             f"codegraph exited cleanly but {db_path} was not created"
             " — check codegraph output above for errors"
         )
+    _write_guard_stamp(project_root)
     return db_path
 
 
@@ -129,7 +149,9 @@ def refresh_codegraph_index(
     which is what ``whygraph scan`` wants on each run — unless the index
     was built by a CodeGraph with a different *extraction version* than
     the binary about to run: ``sync`` keeps such an index as is ("Already
-    up to date"), so it is rebuilt with ``codegraph index -q`` instead.
+    up to date"), so it is rebuilt with ``codegraph index -q`` instead. An
+    index that predates the symbolic-link guard (:func:`index_predates_guard`)
+    is rebuilt the same way, once.
 
     Parameters
     ----------
@@ -145,9 +167,10 @@ def refresh_codegraph_index(
         Default ``False``.
     allow_rebuild : bool, optional
         When ``False``, never run the full ``codegraph index`` for a
-        foreign extraction version (and skip the ``status`` check): the
-        MCP read path passes this so a tool call only ever does a quick
-        ``sync``. Default ``True`` (what ``whygraph scan`` wants).
+        foreign extraction version or an index that predates the guard
+        (and skip the ``status`` check): the MCP read path passes this so a
+        tool call only ever does a quick ``sync``. Default ``True`` (what
+        ``whygraph scan`` wants).
     timeout : float, optional
         Seconds before a ``codegraph`` subprocess is killed and a
         :class:`CodeGraphBootstrapError` raised. Default ``None`` (no limit).
@@ -165,20 +188,90 @@ def refresh_codegraph_index(
     CodeGraphBootstrapError
         If neither ``codegraph`` nor ``docker`` is on PATH, the command
         exits non-zero, or the database is still missing afterward.
+    CodeGraphUnsafeSymlinkError
+        If the repository holds a symbolic link out of it that CodeGraph
+        would read; CodeGraph is not run.
     """
     project_root = project_root.resolve()
     db_path = project_root / CODEGRAPH_DB_RELPATH
     if not db_path.exists():
         return ensure_codegraph_db(project_root, image=image, capture=capture)
 
+    _refuse_escaping_symlinks(project_root)
     run = {"image": image, "capture": capture, "timeout": timeout, "env": env}
-    if allow_rebuild and _extraction_version_changed(
-        project_root, image=image, timeout=timeout, env=env
+    if allow_rebuild and (
+        _predates_guard_logged(project_root)
+        or _extraction_version_changed(
+            project_root, image=image, timeout=timeout, env=env
+        )
     ):
         _run_codegraph(project_root, ["index", "-q"], **run)
+        _write_guard_stamp(project_root)
     else:
         _run_codegraph(project_root, ["sync", "-q"], **run)
     return db_path
+
+
+def index_predates_guard(project_root: Path) -> bool:
+    """Whether ``<project_root>``'s index exists but was not built behind the guard.
+
+    Such an index may hold symbols CodeGraph read through a symbolic link
+    out of the repository before WhyGraph refused those links; only a full
+    rebuild drops them (a ``sync`` keeps rows of unchanged files). The
+    stamp is written after an ``init`` or ``index`` that the guard let run.
+
+    Parameters
+    ----------
+    project_root : Path
+        The repository root.
+
+    Returns
+    -------
+    bool
+        ``True`` when ``.codegraph/codegraph.db`` is a file and the stamp
+        is missing or names another :data:`GUARD_VERSION`. ``False`` when
+        there is no index, or ``.codegraph/`` is a symbolic link (refused
+        elsewhere; nothing is read through it).
+    """
+    try:
+        db_path = check_inside(project_root, CODEGRAPH_DB_RELPATH)
+        stamp = check_inside(project_root, GUARD_STAMP_RELPATH)
+    except UnsafePathError:
+        return False
+    if not db_path.is_file():
+        return False
+    try:
+        return stamp.read_text(encoding="utf-8").strip() != GUARD_VERSION
+    except (OSError, UnicodeDecodeError):
+        return True
+
+
+def _predates_guard_logged(project_root: Path) -> bool:
+    """:func:`index_predates_guard`, logging the rebuild it causes."""
+    if not index_predates_guard(project_root):
+        return False
+    _log.info(
+        "CodeGraph index predates WhyGraph's symbolic-link guard"
+        " - rebuilding it once (codegraph index)"
+    )
+    return True
+
+
+def _refuse_escaping_symlinks(project_root: Path) -> None:
+    """Raise :class:`CodeGraphUnsafeSymlinkError` before CodeGraph could read through a link."""
+    paths = escaping_symlinks(project_root)
+    if paths:
+        raise CodeGraphUnsafeSymlinkError(paths)
+
+
+def _write_guard_stamp(project_root: Path) -> None:
+    """Record that the index was built from scratch behind the guard (best effort)."""
+    try:
+        stamp = check_inside(project_root, GUARD_STAMP_RELPATH)
+        stamp.write_text(GUARD_VERSION + "\n", encoding="utf-8")
+    except (UnsafePathError, OSError) as exc:
+        # Without the stamp the next refresh rebuilds again: safe, only slower.
+        _log.warning("could not stamp the CodeGraph index as guarded: %s", exc)
 
 
 def _extraction_version_changed(
@@ -350,6 +443,8 @@ def _user_arg() -> list[str]:
 
 __all__ = [
     "DEFAULT_CODEGRAPH_IMAGE",
+    "GUARD_VERSION",
     "ensure_codegraph_db",
+    "index_predates_guard",
     "refresh_codegraph_index",
 ]

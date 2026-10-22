@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
+import tomli_w
 from test_portal_app import (  # noqa: F401 -- `env` is a fixture
     add_local,
     env,
@@ -72,6 +74,7 @@ def test_a_port_change_rewrites_markers_and_literal_entries_only(
     # The untracked Codex literal is rewritten (only the whygraph key's URL).
     codex = (alpha / ".codex" / "config.toml").read_text()
     assert 'url = "http://127.0.0.1:9100/mcp/alpha"' in codex
+    assert 'url = "http://127.0.0.1:9100/mcp/alpha/code"' in codex
 
     # Tracked files are byte-identical; the env-interpolated one needs no rewrite.
     assert (alpha / ".mcp.json").read_bytes() == claude_before
@@ -88,6 +91,10 @@ def test_a_port_change_rewrites_markers_and_literal_entries_only(
     cursor = by_agent["cursor"]
     assert cursor["action"] == "manual"
     assert cursor["line"] == '"url": "http://127.0.0.1:9100/mcp/alpha"'
+    assert cursor["lines"] == [
+        '"url": "http://127.0.0.1:9100/mcp/alpha"',
+        '"url": "http://127.0.0.1:9100/mcp/alpha/code"',
+    ]
     assert "9100" in cursor["diff"]
     assert details == item
 
@@ -120,3 +127,32 @@ def test_a_symlinked_marker_is_left_alone(env: SimpleNamespace, tmp_path: Path) 
     (item,) = report["projects"]
     assert item["markers"] == "skipped" and "symbolic link" in item["reason"]
     assert target.read_text() == "slug=gamma\nport=8765\n"
+
+
+def test_a_port_change_never_adds_or_touches_a_foreign_codegraph_entry(
+    env: SimpleNamespace,  # noqa: F811
+) -> None:
+    with portal_client(8765) as client:
+        client.post("/api/portal/setup", json={"display_name": "T"})
+        root = _initialized(client, env, "delta", ["cursor", "codex"])
+    cursor = root / ".cursor" / "mcp.json"
+    data = json.loads(cursor.read_text())
+    foreign = {"type": "stdio", "command": "codegraph", "args": ["serve", "--mcp"]}
+    data["mcpServers"]["codegraph"] = foreign
+    cursor.write_text(json.dumps(data))
+    # An old project: Codex never got the codegraph table.
+    codex = root / ".codex" / "config.toml"
+    old = tomllib.loads(codex.read_text())
+    del old["mcp_servers"]["codegraph"]
+    codex.write_text(tomli_w.dumps(old))
+
+    with portal_client(9300) as client:
+        client.get("/api/portal/state")
+
+    assert json.loads(cursor.read_text())["mcpServers"]["codegraph"] == foreign
+    assert json.loads(cursor.read_text())["mcpServers"]["whygraph"]["url"].startswith(
+        "http://127.0.0.1:9300/"
+    )
+    rewritten = tomllib.loads(codex.read_text())["mcp_servers"]
+    assert "codegraph" not in rewritten
+    assert rewritten["whygraph"]["url"] == "http://127.0.0.1:9300/mcp/delta"

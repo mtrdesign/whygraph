@@ -260,7 +260,12 @@ def test_codex_writes_and_installs_full_tree(tmp_path: Path) -> None:
     with (tmp_path / ".codex" / "config.toml").open("rb") as f:
         config_data = tomllib.load(f)
     assert config_data["mcp_servers"]["whygraph"] == {
-        "url": "http://127.0.0.1:8765/mcp/demo"
+        "url": "http://127.0.0.1:8765/mcp/demo",
+        "tool_timeout_sec": 120,
+    }
+    assert config_data["mcp_servers"]["codegraph"] == {
+        "url": "http://127.0.0.1:8765/mcp/demo/code",
+        "tool_timeout_sec": 120,
     }
     body = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert "<!-- BEGIN whygraph -->" in body

@@ -149,6 +149,7 @@ def initialize_project(
     agent_actions: Mapping[str, AgentAction] | None = None,
     dry_run: bool = False,
     contained: bool = False,
+    replace_codegraph: Iterable[str | Path] = (),
 ) -> InitializeResult:
     """Wire a repository for WhyGraph: gitignore, hooks, agent configs, assets.
 
@@ -188,6 +189,11 @@ def initialize_project(
     dry_run : bool
         Compute and return the per-file outcomes without writing,
         backing up or creating anything.
+    replace_codegraph : Iterable[str or Path]
+        Relative paths of agent config files whose foreign ``codegraph``
+        entry (for example CodeGraph's own stdio one) the caller agreed
+        to replace with the portal's. Any other foreign entry is left
+        byte-identical and reported on the file's outcome.
     contained : bool
         Refuse to follow a symlink out of the repository: before any
         step runs (dry run included), every path the call could read or
@@ -219,6 +225,7 @@ def initialize_project(
         actions.setdefault(agents_mod.resolve_agent(name).name, "migrate")
     for name, action in (agent_actions or {}).items():
         actions[agents_mod.resolve_agent(name).name] = action
+    replace_files = {Path(p).as_posix() for p in replace_codegraph}
     if contained:
         for path in _touched_paths(root, actions, marker):
             check_inside(root, path)
@@ -248,7 +255,12 @@ def initialize_project(
             continue
 
         outcome = agents_mod.apply_http_entry(
-            target, root, mcp, confirm_tracked=confirm_tracked, dry_run=dry_run
+            target,
+            root,
+            mcp,
+            confirm_tracked=confirm_tracked,
+            dry_run=dry_run,
+            replace_foreign="/".join(target.relative_path) in replace_files,
         )
         agent_files.append(outcome)
         if outcome.status in ("write", "overwrite", "skip"):

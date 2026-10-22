@@ -198,9 +198,14 @@ def _reconcile_agent(target: agents_mod.AgentTarget, root: Path, mcp: HttpMcp) -
     if not (root / rel).is_file():
         entry.update(action="skipped", reason="file does not exist")
         return entry
-    line = _entry_line(target, mcp)
+    lines = [_entry_line(target, mcp)]
+    if any(
+        e.ours and e.agent == target.name
+        for e in agents_mod.detect_codegraph_entries(root)
+    ):
+        lines.append(_entry_line(target, mcp, code=True))
     try:
-        outcome = agents_mod.apply_http_entry(target, root, mcp)
+        outcome = agents_mod.apply_http_entry(target, root, mcp, codegraph="update")
     except OSError as exc:
         entry.update(action="skipped", reason=str(exc))
         return entry
@@ -209,7 +214,8 @@ def _reconcile_agent(target: agents_mod.AgentTarget, root: Path, mcp: HttpMcp) -
     elif outcome.status == "skip":
         entry["action"] = "up_to_date"
     else:  # needs_confirmation (tracked) or refused (unparseable)
-        entry.update(action="manual", line=line, reason=outcome.reason)
+        # ``line`` (the whygraph one) stays until the UI reads ``lines``.
+        entry.update(action="manual", line=lines[0], lines=lines, reason=outcome.reason)
         if outcome.diff:
             entry["diff"] = outcome.diff
         if outcome.snippet:
@@ -217,9 +223,11 @@ def _reconcile_agent(target: agents_mod.AgentTarget, root: Path, mcp: HttpMcp) -
     return entry
 
 
-def _entry_line(target: agents_mod.AgentTarget, mcp: HttpMcp) -> str:
-    """The one line of ``target``'s config that carries the URL."""
-    url = json.dumps(mcp.url_for(target))
+def _entry_line(
+    target: agents_mod.AgentTarget, mcp: HttpMcp, *, code: bool = False
+) -> str:
+    """The one line of ``target``'s config that carries a URL (CodeGraph's with ``code``)."""
+    url = json.dumps(mcp.code_url_for(target) if code else mcp.url_for(target))
     return f"url = {url}" if target.format == "toml" else f'"url": {url}'
 
 

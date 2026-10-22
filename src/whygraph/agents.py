@@ -30,17 +30,29 @@ from __future__ import annotations
 import copy
 import difflib
 import json
+import re
 import subprocess
 import tomllib
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
 import tomli_w
 
+from .core.safe_paths import UnsafePathError, check_inside
+
 MCP_SERVER_NAME = "whygraph"
+CODEGRAPH_SERVER_NAME = "codegraph"
+"""Name of the second entry: the portal's CodeGraph tools (``/mcp/<slug>/code``)."""
+
+CODEX_TOOL_TIMEOUT_SEC = 120
+"""Codex ``tool_timeout_sec`` on both tables (a call may wait on a sync)."""
+
+_CODEGRAPH_URL_RE = re.compile(r"^https?://[^/]+/mcp/[a-z0-9][a-z0-9-]{0,62}/code$")
+
+CodegraphMode = Literal["add", "update", "skip"]
 
 Scope = Literal["project", "user"]
 Format = Literal["json", "toml"]
@@ -298,6 +310,22 @@ class HttpMcp:
             port = str(self.port)
         return f"http://{self.host}:{port}/mcp/{self.slug}"
 
+    def code_url_for(self, agent: AgentTarget | str) -> str:
+        """Return the CodeGraph URL (``<url_for>/code``) in ``agent``'s form.
+
+        Parameters
+        ----------
+        agent : AgentTarget or str
+            The agent (or its name / alias).
+
+        Returns
+        -------
+        str
+            :meth:`url_for` with ``/code`` appended; the port form is the
+            same, so one env variable or input moves both entries.
+        """
+        return self.url_for(agent) + "/code"
+
 
 @dataclass(frozen=True, slots=True)
 class FileOutcome:
@@ -322,6 +350,10 @@ class FileOutcome:
         For ``refused``: the exact entry to paste by hand.
     diff : str or None
         For ``overwrite`` and ``needs_confirmation``: a unified diff.
+    foreign_codegraph : str or None
+        A one-line description of a ``codegraph`` entry that is not
+        WhyGraph's and was left byte-identical (never its ``command`` or
+        ``args``). ``None`` when there is none, or it was replaced.
     """
 
     file: str
@@ -330,6 +362,7 @@ class FileOutcome:
     reason: str | None = None
     snippet: str | None = None
     diff: str | None = None
+    foreign_codegraph: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,6 +392,31 @@ class DetectedEntry:
     stale: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class CodegraphEntry:
+    """A ``codegraph`` MCP entry found in an agent config file.
+
+    Attributes
+    ----------
+    agent : str
+        Canonical agent name.
+    file : str
+        Config path relative to the project root.
+    key : str
+        Dotted location, e.g. ``mcpServers.codegraph``.
+    transport : {"stdio", "http", "unknown"}
+        ``stdio`` for a ``command`` entry, ``http`` for a ``url`` entry.
+    ours : bool
+        ``True`` when the portal wrote it (portal URL shape, no ``command``).
+    """
+
+    agent: str
+    file: str
+    key: str
+    transport: Literal["stdio", "http", "unknown"]
+    ours: bool
+
+
 class _Unmergeable(Exception):
     """An existing config that must not be rewritten; carries the reason."""
 
@@ -368,7 +426,45 @@ def _http_entry(target: AgentTarget, mcp: HttpMcp) -> dict:
     entry: dict = {"url": mcp.url_for(target)}
     if target.name in ("claude", "vscode"):
         entry = {"type": "http", **entry}
+    if target.name == "codex":
+        entry["tool_timeout_sec"] = CODEX_TOOL_TIMEOUT_SEC
     return entry
+
+
+def _is_whygraph_codegraph(entry: object) -> bool:
+    """Return ``True`` when a ``codegraph`` entry is the portal's own.
+
+    Ours is an object / table with a string ``url``, no ``command`` and a
+    URL of the form ``http(s)://<host>/mcp/<slug>/code`` (any port form,
+    any slug). Anything else, such as CodeGraph's own stdio entry, is
+    foreign.
+
+    Parameters
+    ----------
+    entry : object
+        The parsed value under the ``codegraph`` key.
+    """
+    if not isinstance(entry, dict) or "command" in entry:
+        return False
+    url = entry.get("url")
+    return isinstance(url, str) and _CODEGRAPH_URL_RE.match(url) is not None
+
+
+def _codegraph_entry(target: AgentTarget, mcp: HttpMcp) -> dict:
+    """Build the per-agent ``codegraph`` entry (only the URL differs)."""
+    entry = _http_entry(target, mcp)
+    entry["url"] = mcp.code_url_for(target)
+    return entry
+
+
+def _describe_foreign(entry: object) -> str:
+    """One line naming a foreign entry's shape, never its command or args."""
+    if isinstance(entry, dict):
+        if "command" in entry:
+            return "a local command (stdio) server"
+        if "url" in entry:
+            return "an HTTP server at another URL"
+    return "an entry WhyGraph does not recognize"
 
 
 def _vscode_port_input(mcp: HttpMcp) -> dict:
@@ -382,7 +478,7 @@ def _vscode_port_input(mcp: HttpMcp) -> dict:
 
 
 def render_http_snippet(target: AgentTarget, mcp: HttpMcp) -> str:
-    """Render the HTTP registration snippet for ``target``.
+    """Render the HTTP registration snippet (both entries) for ``target``.
 
     Parameters
     ----------
@@ -397,16 +493,21 @@ def render_http_snippet(target: AgentTarget, mcp: HttpMcp) -> str:
         The snippet, ready to print or paste. VS Code's includes the
         ``inputs`` entry its port interpolation needs.
     """
-    entry = _http_entry(target, mcp)
+    entries = {
+        MCP_SERVER_NAME: _http_entry(target, mcp),
+        CODEGRAPH_SERVER_NAME: _codegraph_entry(target, mcp),
+    }
     if target.format == "toml":
-        return (
-            f"[{target.servers_key}.{MCP_SERVER_NAME}]\n"
+        return "\n".join(
+            f"[{target.servers_key}.{name}]\n"
             f"url = {json.dumps(entry['url'])}\n"
+            f"tool_timeout_sec = {entry['tool_timeout_sec']}\n"
+            for name, entry in entries.items()
         )
     payload: dict = {}
     if target.name == "vscode":
         payload["inputs"] = [_vscode_port_input(mcp)]
-    payload[target.servers_key] = {MCP_SERVER_NAME: entry}
+    payload[target.servers_key] = entries
     return json.dumps(payload, indent=2) + "\n"
 
 
@@ -469,12 +570,37 @@ def _drop_stale_vscode(data: dict) -> bool:
     return True
 
 
-def _merge_http(target: AgentTarget, data: dict, mcp: HttpMcp) -> dict:
-    """Return a copy of ``data`` with the HTTP entry merged in."""
+def _merge_http(
+    target: AgentTarget,
+    data: dict,
+    mcp: HttpMcp,
+    codegraph: CodegraphMode = "add",
+    replace_foreign: bool = False,
+) -> tuple[dict, str | None]:
+    """Return a copy of ``data`` with both entries merged in, and any foreign note.
+
+    The second item describes a foreign ``codegraph`` entry that was left
+    alone (``None`` otherwise).
+    """
     out = copy.deepcopy(data)
     table = _servers_table(out, target.servers_key)
     table[MCP_SERVER_NAME] = _http_entry(target, mcp)
+    foreign: str | None = None
+    if codegraph != "skip":
+        current = table.get(CODEGRAPH_SERVER_NAME)
+        if current is None:
+            if codegraph == "add":
+                table[CODEGRAPH_SERVER_NAME] = _codegraph_entry(target, mcp)
+        elif _is_whygraph_codegraph(current) or replace_foreign:
+            table[CODEGRAPH_SERVER_NAME] = _codegraph_entry(target, mcp)
+        else:
+            foreign = _describe_foreign(current)
     out[target.servers_key] = table
+    return _merge_vscode_inputs(target, out, mcp), foreign
+
+
+def _merge_vscode_inputs(target: AgentTarget, out: dict, mcp: HttpMcp) -> dict:
+    """VS Code only: drop the stale 1.x entry and add the port ``inputs`` entry."""
     if target.name != "vscode":
         return out
 
@@ -610,8 +736,10 @@ def apply_http_entry(
     *,
     confirm_tracked: Iterable[str | Path] = (),
     dry_run: bool = False,
+    codegraph: CodegraphMode = "add",
+    replace_foreign: bool = False,
 ) -> FileOutcome:
-    """Merge the HTTP ``whygraph`` entry into ``target``'s config file.
+    """Merge the HTTP ``whygraph`` and ``codegraph`` entries into ``target``'s config.
 
     A file that cannot be parsed (JSON with comments included, TOML
     containing any comment) is **refused**, never replaced; the outcome carries the snippet to paste by hand. Other
@@ -632,11 +760,20 @@ def apply_http_entry(
         may be rewritten.
     dry_run : bool, default False
         Report the outcome without writing (or backing up) anything.
+    codegraph : {"add", "update", "skip"}, default "add"
+        ``add`` writes or updates the portal's ``codegraph`` entry;
+        ``update`` changes it only when it is already ours (the port
+        reconcile); ``skip`` leaves the key alone.
+    replace_foreign : bool, default False
+        Overwrite a ``codegraph`` entry that is not the portal's. Without
+        it such an entry stays byte-identical and the outcome's
+        ``foreign_codegraph`` describes it.
 
     Returns
     -------
     FileOutcome
-        What happened to the file.
+        What happened to the file. Both entries go through one merge, so
+        there is one backup, one diff and one tracked-file confirmation.
 
     Raises
     ------
@@ -648,7 +785,9 @@ def apply_http_entry(
     path = config_path_for(target, project_root)
     try:
         existing = _load_config(target, path, strict_toml=True)
-        new_data = _merge_http(target, existing or {}, mcp)
+        new_data, foreign = _merge_http(
+            target, existing or {}, mcp, codegraph, replace_foreign
+        )
     except _Unmergeable as exc:
         return FileOutcome(
             _rel(target),
@@ -657,7 +796,7 @@ def apply_http_entry(
             reason=str(exc),
             snippet=render_http_snippet(target, mcp),
         )
-    return _commit_change(
+    outcome = _commit_change(
         target,
         project_root,
         new_data,
@@ -665,6 +804,7 @@ def apply_http_entry(
         confirm_tracked=confirm_tracked,
         dry_run=dry_run,
     )
+    return replace(outcome, foreign_codegraph=foreign) if foreign else outcome
 
 
 def remove_entry(
@@ -674,7 +814,7 @@ def remove_entry(
     confirm_tracked: Iterable[str | Path] = (),
     dry_run: bool = False,
 ) -> FileOutcome:
-    """Strip the ``whygraph`` entry (and only it) from ``target``'s config.
+    """Strip the ``whygraph`` entry, and the ``codegraph`` one when it is ours.
 
     Follows the same parse, backup and git-tracked rules as
     :func:`apply_http_entry`. For VS Code the stale 1.x
@@ -715,6 +855,11 @@ def remove_entry(
     new_data = copy.deepcopy(existing)
     table = new_data.get(target.servers_key)
     removed = isinstance(table, dict) and table.pop(MCP_SERVER_NAME, None) is not None
+    if isinstance(table, dict) and _is_whygraph_codegraph(
+        table.get(CODEGRAPH_SERVER_NAME)
+    ):
+        del table[CODEGRAPH_SERVER_NAME]
+        removed = True
     if target.name == "vscode":
         removed = _drop_stale_vscode(new_data) or removed
     if not removed:
@@ -783,10 +928,149 @@ def detect_entries(project_root: Path) -> list[DetectedEntry]:
     return found
 
 
+def detect_codegraph_entries(project_root: Path) -> list[CodegraphEntry]:
+    """Find every ``codegraph`` entry across the four agent files.
+
+    Read-only; a file that cannot be parsed reports nothing. Unlike
+    :func:`detect_entries` this reports CodeGraph's own entry too (marked
+    ``ours=False``) and is not used for the migrate / remove toggles.
+
+    Parameters
+    ----------
+    project_root : Path
+        Repository root.
+
+    Returns
+    -------
+    list[CodegraphEntry]
+        One item per entry found, in agent registry order.
+    """
+    found: list[CodegraphEntry] = []
+    for target in AGENTS.values():
+        try:
+            data = _load_config(
+                target, config_path_for(target, project_root), strict_toml=False
+            )
+        except _Unmergeable:
+            continue
+        table = data.get(target.servers_key) if data else None
+        entry = table.get(CODEGRAPH_SERVER_NAME) if isinstance(table, dict) else None
+        if entry is None:
+            continue
+        transport: Literal["stdio", "http", "unknown"] = "unknown"
+        if isinstance(entry, dict):
+            if "command" in entry:
+                transport = "stdio"
+            elif "url" in entry:
+                transport = "http"
+        found.append(
+            CodegraphEntry(
+                agent=target.name,
+                file=_rel(target),
+                key=f"{target.servers_key}.{CODEGRAPH_SERVER_NAME}",
+                transport=transport,
+                ours=_is_whygraph_codegraph(entry),
+            )
+        )
+    return found
+
+
+_CODEGRAPH_SECTION_FILES = (
+    ".claude/CLAUDE.md",
+    "AGENTS.md",
+    ".github/copilot-instructions.md",
+)
+_CODEGRAPH_HOOK_NAMES = ("post-commit", "post-merge", "post-checkout")
+_CODEGRAPH_HOOK_MARKER = "# >>> codegraph sync hook >>>"
+_MARKER_READ_LIMIT = 1_000_000
+
+
+def _contains_marker(path: Path, marker: str) -> bool:
+    """Whether a regular, non-symlink ``path`` holds ``marker`` (bounded read)."""
+    try:
+        if path.is_symlink() or not path.is_file():
+            return False
+        with path.open("rb") as fh:
+            text = fh.read(_MARKER_READ_LIMIT).decode("utf-8", errors="replace")
+    except OSError:
+        return False
+    return marker in text
+
+
+def detect_codegraph_sections(project_root: Path) -> list[str]:
+    """Return project files holding a ``<!-- CODEGRAPH_START -->`` section.
+
+    Read-only, over the three project-level merge files; a path that
+    leaves the repository through a symlink is not read.
+
+    Parameters
+    ----------
+    project_root : Path
+        Repository root.
+
+    Returns
+    -------
+    list[str]
+        Paths relative to ``project_root``, ``/``-separated.
+    """
+    found: list[str] = []
+    for rel in _CODEGRAPH_SECTION_FILES:
+        path = project_root / rel
+        try:
+            check_inside(project_root, path)
+        except UnsafePathError:
+            continue
+        if _contains_marker(path, "<!-- CODEGRAPH_START -->"):
+            found.append(rel)
+    return found
+
+
+def detect_codegraph_hooks(project_root: Path) -> list[str]:
+    """Return CodeGraph's own git hooks that are installed (R18).
+
+    Looks for ``# >>> codegraph sync hook >>>`` in
+    ``$(git rev-parse --git-common-dir)/hooks/{post-commit,post-merge,
+    post-checkout}``. Strictly read-only: WhyGraph never edits
+    ``.git/hooks`` beyond its own managed block.
+
+    Parameters
+    ----------
+    project_root : Path
+        Repository root.
+
+    Returns
+    -------
+    list[str]
+        Absolute hook paths; empty when git is unavailable.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return []
+    out = proc.stdout.strip()
+    if proc.returncode != 0 or not out:
+        return []
+    hooks_dir = (project_root / out) / "hooks"
+    return [
+        str(hooks_dir / name)
+        for name in _CODEGRAPH_HOOK_NAMES
+        if _contains_marker(hooks_dir / name, _CODEGRAPH_HOOK_MARKER)
+    ]
+
+
 __all__ = [
     "AGENTS",
     "AgentAction",
     "AgentTarget",
+    "CODEGRAPH_SERVER_NAME",
+    "CODEX_TOOL_TIMEOUT_SEC",
+    "CodegraphEntry",
+    "CodegraphMode",
     "DEFAULT_PORTAL_PORT",
     "DetectedEntry",
     "FileOutcome",
@@ -796,6 +1080,9 @@ __all__ = [
     "UnknownAgentError",
     "apply_http_entry",
     "config_path_for",
+    "detect_codegraph_entries",
+    "detect_codegraph_hooks",
+    "detect_codegraph_sections",
     "detect_entries",
     "is_git_tracked",
     "known_agent_names",

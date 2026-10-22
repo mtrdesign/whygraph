@@ -78,12 +78,19 @@ def test_render_json_snippets() -> None:
             "whygraph": {
                 "type": "http",
                 "url": "http://127.0.0.1:${WHYGRAPH_PORT:-8765}/mcp/demo",
-            }
+            },
+            "codegraph": {
+                "type": "http",
+                "url": "http://127.0.0.1:${WHYGRAPH_PORT:-8765}/mcp/demo/code",
+            },
         }
     }
     cursor = json.loads(agents.render_http_snippet(_target("cursor"), MCP))
     assert cursor == {
-        "mcpServers": {"whygraph": {"url": "http://127.0.0.1:8765/mcp/demo"}}
+        "mcpServers": {
+            "whygraph": {"url": "http://127.0.0.1:8765/mcp/demo"},
+            "codegraph": {"url": "http://127.0.0.1:8765/mcp/demo/code"},
+        }
     }
     vscode = json.loads(agents.render_http_snippet(_target("vscode"), MCP))
     assert vscode == {
@@ -99,7 +106,11 @@ def test_render_json_snippets() -> None:
             "whygraph": {
                 "type": "http",
                 "url": "http://127.0.0.1:${input:whygraph-port}/mcp/demo",
-            }
+            },
+            "codegraph": {
+                "type": "http",
+                "url": "http://127.0.0.1:${input:whygraph-port}/mcp/demo/code",
+            },
         },
     }
 
@@ -107,7 +118,16 @@ def test_render_json_snippets() -> None:
 def test_render_codex_snippet() -> None:
     text = agents.render_http_snippet(_target("codex"), MCP)
     assert tomllib.loads(text) == {
-        "mcp_servers": {"whygraph": {"url": "http://127.0.0.1:8765/mcp/demo"}}
+        "mcp_servers": {
+            "whygraph": {
+                "url": "http://127.0.0.1:8765/mcp/demo",
+                "tool_timeout_sec": 120,
+            },
+            "codegraph": {
+                "url": "http://127.0.0.1:8765/mcp/demo/code",
+                "tool_timeout_sec": 120,
+            },
+        }
     }
 
 
@@ -166,7 +186,11 @@ def test_apply_toml_preserves_other_servers(repo: Path) -> None:
     assert out.status == "overwrite"
     assert data["model"] == "x"
     assert data["mcp_servers"]["other"] == {"command": "y"}
-    assert data["mcp_servers"]["whygraph"] == {"url": "http://127.0.0.1:8765/mcp/demo"}
+    assert data["mcp_servers"]["whygraph"] == {
+        "url": "http://127.0.0.1:8765/mcp/demo",
+        "tool_timeout_sec": 120,
+    }
+    assert data["mcp_servers"]["codegraph"]["url"].endswith("/mcp/demo/code")
 
 
 def test_second_apply_is_a_skip_and_makes_no_backup(repo: Path) -> None:
@@ -189,6 +213,177 @@ def test_apply_does_not_reformat_an_equivalent_committed_file(repo: Path) -> Non
     out = agents.apply_http_entry(_target("cursor"), repo, MCP)
     assert out.status == "skip"
     assert path.read_text() == compact
+
+
+# ---- the codegraph entry ---------------------------------------------------
+
+FOREIGN_CODEGRAPH = {
+    "type": "stdio",
+    "command": "codegraph",
+    "args": ["serve", "--mcp"],
+}
+
+
+def test_code_url_follows_the_whygraph_port_form() -> None:
+    for name in ("claude", "cursor", "vscode", "codex"):
+        assert MCP.code_url_for(name) == MCP.url_for(name) + "/code"
+
+
+@pytest.mark.parametrize(
+    ("entry", "ours"),
+    [
+        ({"url": "http://127.0.0.1:8765/mcp/demo/code"}, True),
+        ({"type": "http", "url": "http://h:${WHYGRAPH_PORT:-1}/mcp/a-b/code"}, True),
+        ({"url": "http://127.0.0.1:8765/mcp/demo"}, False),
+        ({"url": "http://127.0.0.1:8765/mcp/demo/code", "command": "x"}, False),
+        ({"url": "http://127.0.0.1:8765/mcp/Demo/code"}, False),
+        ({"url": "ftp://127.0.0.1/mcp/demo/code"}, False),
+        ({"url": 5}, False),
+        (FOREIGN_CODEGRAPH, False),
+        ("text", False),
+    ],
+)
+def test_codegraph_ownership_rule(entry: object, ours: bool) -> None:
+    assert agents._is_whygraph_codegraph(entry) is ours
+
+
+def test_one_merge_one_backup_one_diff_for_both_entries(repo: Path) -> None:
+    path = repo / ".mcp.json"
+    path.write_text(json.dumps({"mcpServers": {"other": {"command": "x"}}}))
+    out = agents.apply_http_entry(_target("claude"), repo, MCP)
+    assert out.status == "overwrite" and out.diff
+    assert '"whygraph"' in out.diff and '"codegraph"' in out.diff
+    assert len(_backups(repo)) == 1
+
+
+def test_a_tracked_file_needs_one_confirmation_for_both(repo: Path) -> None:
+    (repo / ".mcp.json").write_text("{}\n")
+    _git_add(repo, ".mcp.json")
+    out = agents.apply_http_entry(_target("claude"), repo, MCP)
+    assert out.status == "needs_confirmation"
+    assert '"codegraph"' in (out.diff or "")
+
+
+def test_vscode_has_one_port_input_for_both_entries(repo: Path) -> None:
+    agents.apply_http_entry(_target("vscode"), repo, MCP)
+    data = json.loads((repo / ".vscode" / "mcp.json").read_text())
+    assert [i["id"] for i in data["inputs"]] == ["whygraph-port"]
+    assert {"whygraph", "codegraph"} <= set(data["servers"])
+    assert "${input:whygraph-port}" in data["servers"]["codegraph"]["url"]
+
+
+def test_a_foreign_codegraph_entry_stays_byte_identical(repo: Path) -> None:
+    path = repo / ".mcp.json"
+    path.write_text(json.dumps({"mcpServers": {"codegraph": FOREIGN_CODEGRAPH}}))
+    out = agents.apply_http_entry(_target("claude"), repo, MCP)
+    data = json.loads(path.read_text())
+
+    assert data["mcpServers"]["codegraph"] == FOREIGN_CODEGRAPH
+    assert "whygraph" in data["mcpServers"]
+    assert out.foreign_codegraph == "a local command (stdio) server"
+    assert "--mcp" not in (out.foreign_codegraph or "")  # never command / args
+    # Still reported when the second run is a skip.
+    again = agents.apply_http_entry(_target("claude"), repo, MCP)
+    assert again.status == "skip" and again.foreign_codegraph is not None
+
+
+def test_replace_foreign_swaps_it_for_ours(repo: Path) -> None:
+    path = repo / ".mcp.json"
+    path.write_text(json.dumps({"mcpServers": {"codegraph": FOREIGN_CODEGRAPH}}))
+    out = agents.apply_http_entry(_target("claude"), repo, MCP, replace_foreign=True)
+    assert out.foreign_codegraph is None
+    assert json.loads(path.read_text())["mcpServers"]["codegraph"] == {
+        "type": "http",
+        "url": MCP.code_url_for("claude"),
+    }
+
+
+def test_update_mode_never_adds_and_skip_mode_leaves_the_key(repo: Path) -> None:
+    path = repo / ".cursor" / "mcp.json"
+    path.parent.mkdir()
+    path.write_text(
+        json.dumps({"mcpServers": {"whygraph": {"url": "http://x/mcp/demo"}}})
+    )
+    agents.apply_http_entry(_target("cursor"), repo, MCP, codegraph="update")
+    assert "codegraph" not in json.loads(path.read_text())["mcpServers"]
+
+    agents.apply_http_entry(_target("cursor"), repo, MCP)
+    moved = HttpMcp(slug="demo", port=9100)
+    agents.apply_http_entry(_target("cursor"), repo, moved, codegraph="update")
+    servers = json.loads(path.read_text())["mcpServers"]
+    assert servers["codegraph"]["url"] == "http://127.0.0.1:9100/mcp/demo/code"
+
+    agents.apply_http_entry(_target("cursor"), repo, MCP, codegraph="skip")
+    servers = json.loads(path.read_text())["mcpServers"]
+    assert servers["codegraph"]["url"] == "http://127.0.0.1:9100/mcp/demo/code"
+
+
+def test_remove_pops_our_codegraph_but_not_a_foreign_one(repo: Path) -> None:
+    agents.apply_http_entry(_target("claude"), repo, MCP)
+    agents.remove_entry(_target("claude"), repo)
+    assert json.loads((repo / ".mcp.json").read_text()) == {"mcpServers": {}}
+
+    (repo / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"codegraph": FOREIGN_CODEGRAPH}})
+    )
+    out = agents.remove_entry(_target("claude"), repo)
+    assert out.status == "skip"
+    assert json.loads((repo / ".mcp.json").read_text())["mcpServers"] == {
+        "codegraph": FOREIGN_CODEGRAPH
+    }
+
+
+def test_detect_entries_ignores_codegraph_and_detect_codegraph_reports_it(
+    repo: Path,
+) -> None:
+    agents.apply_http_entry(_target("codex"), repo, MCP)
+    (repo / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"codegraph": FOREIGN_CODEGRAPH}})
+    )
+    assert [(e.agent, e.key) for e in agents.detect_entries(repo)] == [
+        ("codex", "mcp_servers.whygraph")
+    ]
+    found = {e.agent: e for e in agents.detect_codegraph_entries(repo)}
+    assert found["claude"].ours is False and found["claude"].transport == "stdio"
+    assert found["codex"].ours is True and found["codex"].transport == "http"
+    assert found["codex"].key == "mcp_servers.codegraph"
+
+
+def test_detect_codegraph_sections_and_hooks_are_read_only(repo: Path) -> None:
+    (repo / "AGENTS.md").write_text("x\n<!-- CODEGRAPH_START -->\ny\n")
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "CLAUDE.md").write_text("no section here\n")
+    hooks = repo / ".git" / "hooks"
+    hooks.mkdir(exist_ok=True)
+    (hooks / "post-merge").write_text("# >>> codegraph sync hook >>>\n")
+    (hooks / "post-commit").write_text("# >>> whygraph managed >>>\n")
+    before = {p: p.read_bytes() for p in (repo / "AGENTS.md", hooks / "post-merge")}
+
+    assert agents.detect_codegraph_sections(repo) == ["AGENTS.md"]
+    assert agents.detect_codegraph_hooks(repo) == [str(hooks / "post-merge")]
+    assert before == {p: p.read_bytes() for p in before}
+
+
+def test_initialize_replace_codegraph_is_per_file(repo: Path) -> None:
+    for rel in (".mcp.json", ".cursor/mcp.json"):
+        p = repo / rel
+        p.parent.mkdir(exist_ok=True)
+        p.write_text(json.dumps({"mcpServers": {"codegraph": FOREIGN_CODEGRAPH}}))
+    result = initialize_project(
+        repo,
+        agents=["claude", "cursor"],
+        hooks=False,
+        mcp=MCP,
+        marker=None,
+        replace_codegraph=[".cursor/mcp.json"],
+    )
+    by_file = {f.file: f for f in result.agent_files}
+    assert by_file[".mcp.json"].foreign_codegraph is not None
+    assert by_file[".cursor/mcp.json"].foreign_codegraph is None
+    claude = json.loads((repo / ".mcp.json").read_text())["mcpServers"]
+    cursor = json.loads((repo / ".cursor" / "mcp.json").read_text())["mcpServers"]
+    assert claude["codegraph"] == FOREIGN_CODEGRAPH
+    assert cursor["codegraph"]["url"].endswith("/mcp/demo/code")
 
 
 # ---- VS Code migration ----------------------------------------------------
@@ -510,7 +705,11 @@ def test_initialize_writes_gitignore_hooks_entry_and_assets(repo: Path) -> None:
             "whygraph": {
                 "type": "http",
                 "url": "http://127.0.0.1:${WHYGRAPH_PORT:-8765}/mcp/demo",
-            }
+            },
+            "codegraph": {
+                "type": "http",
+                "url": "http://127.0.0.1:${WHYGRAPH_PORT:-8765}/mcp/demo/code",
+            },
         }
     }
     assert (repo / ".claude" / "agents" / "planner.md").is_file()

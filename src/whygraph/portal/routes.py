@@ -54,6 +54,7 @@ from whygraph.agents import AGENTS as AGENT_TARGETS
 from whygraph.agents import (
     UnknownAgentError,
     config_path_for,
+    detect_codegraph_hooks,
     remove_entry,
     resolve_agent,
 )
@@ -361,6 +362,7 @@ class InitBody(_Strict):
     dry_run: bool = False
     confirm_tracked: list[str] = Field(default_factory=list)
     agent_actions: dict[str, Literal["migrate", "remove"]] = Field(default_factory=dict)
+    replace_codegraph: list[str] = Field(default_factory=list)
 
 
 class ScanBody(_Strict):
@@ -1092,7 +1094,7 @@ def _hooks_dict(result: HooksResult | None) -> dict | None:
     }
 
 
-def _init_dict(result: InitializeResult) -> dict:
+def _init_dict(result: InitializeResult, root: Path | None = None) -> dict:
     return {
         "dry_run": result.dry_run,
         "gitignore_added": list(result.gitignore_added),
@@ -1104,6 +1106,14 @@ def _init_dict(result: InitializeResult) -> dict:
         "needs_confirmation": [f.file for f in result.needs_confirmation],
         "refused": [f.file for f in result.refused],
         "marker_written": result.marker_written,
+        # Non-blocking warnings: a codegraph entry that is not the portal's
+        # (left as it was) and CodeGraph's own git hooks (read-only).
+        "foreign_codegraph": [
+            {"file": f.file, "description": f.foreign_codegraph}
+            for f in result.agent_files
+            if f.foreign_codegraph
+        ],
+        "codegraph_hooks": detect_codegraph_hooks(root) if root is not None else [],
     }
 
 
@@ -2565,6 +2575,7 @@ def init_project(
             agent_actions=actions,
             dry_run=body.dry_run,
             contained=True,
+            replace_codegraph=body.replace_codegraph,
         )
     except UnsafePathError as exc:
         raise unsafe_path_error(exc) from exc
@@ -2606,7 +2617,7 @@ def init_project(
                     first = True
                 initialized = True
 
-    response = _init_dict(result)
+    response = _init_dict(result, project.root)
     response["initialized"] = initialized
     preview = (
         preview_import(project.root) if project.source == "local" else ImportPreview()

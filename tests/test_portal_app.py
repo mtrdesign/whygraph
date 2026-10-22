@@ -1670,6 +1670,9 @@ def test_add_local_writes_nothing_and_detects_state(
         "managed_hooks": [],
         "detected_agents": [],
         "custom_db_paths": [],
+        "codegraph_entries": [],
+        "codegraph_sections": [],
+        "codegraph_hooks": [],
     }
     assert _git(root, "status", "--porcelain", "--ignored") == before
     assert not (root / ".whygraph").exists()
@@ -2001,6 +2004,11 @@ def test_uninitialized_project_gates_data_routes_and_creates_no_db(
         "type": "http",
         "url": "http://127.0.0.1:${WHYGRAPH_PORT:-8765}/mcp/demo",
     }
+    code = json.loads((root / ".mcp.json").read_text())["mcpServers"]["codegraph"]
+    assert code == {
+        "type": "http",
+        "url": "http://127.0.0.1:${WHYGRAPH_PORT:-8765}/mcp/demo/code",
+    }
     details = ready.get("/api/projects/demo").json()
     assert details["agents"] == ["claude"]
     assert details["stats"]["commits"] == 0
@@ -2057,7 +2065,40 @@ def test_init_waits_for_tracked_agent_files(
     done = init_project(ready, "demo", agents=["claude"], confirm_tracked=[".mcp.json"])
     assert done["initialized"] is True
     servers = json.loads((root / ".mcp.json").read_text())["mcpServers"]
-    assert set(servers) == {"other", "whygraph"}
+    assert set(servers) == {"other", "whygraph", "codegraph"}
+
+
+def test_init_reports_a_foreign_codegraph_and_replaces_it_only_when_asked(
+    ready: TestClient, env: SimpleNamespace
+) -> None:
+    root = make_repo(env.shared, "demo")
+    foreign = {"type": "stdio", "command": "codegraph", "args": ["serve", "--mcp"]}
+    (root / ".mcp.json").write_text(json.dumps({"mcpServers": {"codegraph": foreign}}))
+    hooks = root / ".git" / "hooks"
+    hooks.mkdir(exist_ok=True)
+    (hooks / "post-commit").write_text("#!/bin/sh\n# >>> codegraph sync hook >>>\n")
+    detected = add_local(ready, root)["detected"]
+    assert [
+        (e["agent"], e["shape"], e["tracked"]) for e in detected["codegraph_entries"]
+    ] == [("claude", "stdio", False)]
+    assert detected["detected_agents"] == []  # the whygraph-only list is unchanged
+    assert detected["codegraph_hooks"] == [str(hooks / "post-commit")]
+
+    kept = init_project(ready, "demo", agents=["claude"])
+    assert kept["foreign_codegraph"] == [
+        {"file": ".mcp.json", "description": "a local command (stdio) server"}
+    ]
+    assert kept["codegraph_hooks"] == [str(hooks / "post-commit")]
+    assert "--mcp" not in json.dumps(kept["foreign_codegraph"])
+    servers = json.loads((root / ".mcp.json").read_text())["mcpServers"]
+    assert servers["codegraph"] == foreign and "whygraph" in servers
+
+    replaced = init_project(
+        ready, "demo", agents=["claude"], replace_codegraph=[".mcp.json"]
+    )
+    assert replaced["foreign_codegraph"] == []
+    servers = json.loads((root / ".mcp.json").read_text())["mcpServers"]
+    assert servers["codegraph"]["url"].endswith("/mcp/demo/code")
 
 
 def test_an_older_revision_db_opens_cleanly_with_a_backup(

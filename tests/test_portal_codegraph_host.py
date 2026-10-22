@@ -918,27 +918,60 @@ def test_a_crash_restarts_on_the_next_call_and_a_second_crash_pauses(
 def test_a_failed_start_counts_as_a_crash(
     fake_cg: SimpleNamespace, tmp_path: Path
 ) -> None:
+    """A start whose ``initialize`` fails is a crash, whichever call sees it.
+
+    A call that joins the failing pre-warm start gets "restarted" (the next
+    call may restart at once); a call whose own restart fails gets the
+    restart window. Both orders are pinned explicitly: ``call_tool``'s
+    freshness step runs git before the forward, so racing the pre-warm
+    through it decides the order by timing alone.
+    """
     fake_cg.configure(protocol="1999-01-01")
     root = _indexed_repo(tmp_path)
+    paused = "[WhyGraph] CodeGraph is paused on this portal"
 
-    async def main() -> tuple[str, str]:
-        host = _host(fake_cg, tmp_path / "data")
+    async def joined() -> list[Any]:
+        host = _host(fake_cg, tmp_path / "joined")
         await host.start()
         try:
-            first = await host.call_tool(
-                _target(root), "codegraph_search", {"query": "q"}
-            )
-            second = await host.call_tool(
-                _target(root), "codegraph_search", {"query": "q"}
-            )
+            out: list[Any] = [host.state]  # the pre-warm is still starting
+            for _ in range(3):
+                result = await host.forward(
+                    _target(root), "codegraph_search", {"query": "q"}
+                )
+                out.append(result.content[0].text)
+                out.append(len(fake_cg.pid_list()))
         finally:
             await host.shutdown()
-        return first.content[0].text, second.content[0].text
+        return out
 
-    first, second = anyio.run(main)
-    # The pre-warm start failed; the first call restarts it, which fails too.
-    assert first == RESTARTED
-    assert second.startswith("[WhyGraph] CodeGraph is paused on this portal")
+    out = anyio.run(joined)
+    assert out[0] == "starting"
+    assert (out[1], out[2]) == (RESTARTED, 1)  # joined the pre-warm
+    assert out[3].startswith(paused) and out[4] == 2  # its own restart failed
+    assert out[5].startswith(paused) and out[6] == 2  # no start inside the window
+
+    fake_cg.pids.unlink()
+
+    async def after() -> tuple[str, str, int]:
+        host = _host(fake_cg, tmp_path / "after")
+        await host.start()
+        try:
+            with anyio.fail_after(10):
+                while host.state == "starting":
+                    await anyio.sleep(0.02)
+            state = host.state
+            result = await host.call_tool(
+                _target(root), "codegraph_search", {"query": "q"}
+            )
+            return state, result.content[0].text, len(fake_cg.pid_list())
+        finally:
+            await host.shutdown()
+
+    state, text, starts = anyio.run(after)
+    # A failed pre-warm opens no window: the call restarts, and that fails.
+    assert state == "off"
+    assert text.startswith(paused) and starts == 2
 
 
 def test_the_forward_limiter_answers_busy(

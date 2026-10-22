@@ -14,16 +14,20 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Annotated, Any, Literal, TypedDict
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, col, select
 
 from whygraph.analyze import CommitEvidence
+from whygraph.core.config import RationaleConfig
 from whygraph.core.context import current_project
 from whygraph.core.remote import RemoteError, RemoteProject, platform_block
 from whygraph.core.usage import usage_blocked
@@ -32,6 +36,11 @@ from whygraph.db.models import Commit, CommitFileChange, Issue, PRIssueLink, Pul
 from whygraph.scan.refactor_score import BORING_THRESHOLD
 from whygraph.services.git import BlameHunk, GitError, Repository
 
+from .descriptions import (
+    EVIDENCE_FOR_ANNOTATIONS,
+    EVIDENCE_FOR_DESCRIPTION,
+)
+from .structured import structured
 from .errors import WhyGraphError, log_tool_errors
 from .targets import Target, repo_root, resolve_target, target_dict
 
@@ -56,15 +65,36 @@ _SOURCE_PRIORITY = {
 
 _log = logging.getLogger(__name__)
 
-_TOOL_DESCRIPTION = (
-    "Find the historical evidence behind a chunk of code: the commits that "
-    "own its lines (via git blame), plus the pull requests containing those "
-    "commits and the issues those PRs close. Pass either (path, line_start, "
-    "line_end) or a qualified_name (resolved to a file/line range via "
-    "CodeGraph). Returns {target, evidence}. Scan from the WhyGraph portal "
-    "(or run `whygraph scan` outside it) first to populate the WhyGraph "
-    "database."
-)
+BACKFILL_WALL_SEC = 20
+"""Wall-clock seconds one call may spend describing commits (plan section 5.4).
+
+Checked before each description, so a call starts no new LLM request past it;
+the commits it leaves are counted in the result's ``describing``.
+"""
+
+MAX_BACKFILL_PER_CALL = 5
+"""Commits one call may describe with an LLM, newest first (plan section 5.4)."""
+
+Detail = Literal["compact", "full"]
+"""How much of each evidence item an MCP tool returns (plan section 5.4, U8)."""
+
+
+class _EvidenceToolRequired(TypedDict):
+    target: dict[str, Any]
+    evidence: list[dict[str, Any]]
+    describing: int
+
+
+class EvidenceToolResult(_EvidenceToolRequired, total=False):
+    """The ``whygraph_evidence_for`` result, for FastMCP's output schema.
+
+    ``evidence`` items are the ``compact`` or ``full`` shape of
+    :func:`shape_evidence_item`; ``platform`` is set for a linked project.
+    (Optional keys use ``total=False``: ``NotRequired`` is lost to the
+    string annotations ``from __future__ import annotations`` makes.)
+    """
+
+    platform: dict[str, Any]
 
 
 @dataclass
@@ -322,7 +352,11 @@ def evidence_from_hunks(
             prs = _linked_prs(session, hunk.sha)
             issues = _linked_issues(session, prs)
             by_sha[hunk.sha] = CommitEvidence(
-                commit, tuple(prs), tuple(issues), source=source
+                commit,
+                tuple(prs),
+                tuple(issues),
+                source=source,
+                lines=hunk_lines(hunk) if source == "blame" else None,
             )
         # Detach so the loaded columns remain readable after the
         # session closes.
@@ -664,8 +698,11 @@ def backfill_evidence_descriptions(
     *,
     target_path: str,
     allow: Callable[[], bool] | None = None,
-) -> None:
-    """Lazily backfill ``llm_description`` for any commit in ``items``.
+    max_commits: int = MAX_BACKFILL_PER_CALL,
+    wall_sec: float = BACKFILL_WALL_SEC,
+    on_start: Callable[[int], None] | None = None,
+) -> int:
+    """Lazily backfill ``llm_description`` for the commits in ``items``, bounded.
 
     The MCP tools that consume the evidence call this once they're sure
     they actually need the description text — :func:`whygraph_evidence_for`
@@ -678,8 +715,8 @@ def backfill_evidence_descriptions(
     (``analyze.large_commit_file_count``):
 
     * **Normal commits** — described whole-diff via
-      :func:`~whygraph.analyze.backfill_all`, exactly as before, when
-      their ``llm_description`` is still ``NULL``.
+      :func:`~whygraph.analyze.backfill_all` when their
+      ``llm_description`` is still ``NULL``.
     * **Bulk commits** (imports / squash merges) — never described
       whole-diff. Instead the slice for ``target_path`` is described via
       :func:`~whygraph.analyze.backfill_file_description` (cached on the
@@ -688,7 +725,13 @@ def backfill_evidence_descriptions(
       serializer and the rationale prompt see the file-specific text
       while the DB ``commit`` row keeps its stub. If the bulk commit did
       not touch ``target_path`` (e.g. a rename predecessor), the stub is
-      left in place.
+      left in place. An already cached per-file description is applied
+      without an LLM call and does not count against the bound.
+
+    The commits that need an LLM call are described in ``items`` order
+    (newest first), at most ``max_commits`` of them and none started after
+    ``wall_sec`` seconds; the rest are left for a later call and counted
+    in the return value.
 
     Silently degrades when the configured analyze provider is unavailable —
     the commit keeps whatever ``llm_description`` it already had (a stub for
@@ -698,17 +741,36 @@ def backfill_evidence_descriptions(
     Parameters
     ----------
     items : list[CommitEvidence]
-        The evidence bundle whose descriptions to fill in.
+        The evidence bundle whose descriptions to fill in, newest first.
     target_path : str
         The path the caller resolved the target to — the file used to
         slice bulk commits' diffs. For blame / blame-walked / area
         evidence this is the file the queried lines live in.
     allow : callable, optional
         A budget (the platform's org limit for agent requests): called
-        once per commit that may need an LLM call - every normal commit
-        without a description, every bulk commit whose per-file
-        description is not cached - and that commit is skipped when it
-        returns ``False``. ``None`` (default) describes everything.
+        once per commit just before its LLM call, and that commit is
+        skipped when it returns ``False``. ``None`` (default) describes
+        everything the bound lets through.
+    max_commits : int, optional
+        How many commits this call may describe with an LLM. Default
+        :data:`MAX_BACKFILL_PER_CALL`; ``0`` describes none and only
+        counts them (a tool's ``describe=False``).
+    wall_sec : float, optional
+        No description starts once this many seconds have passed since
+        the first one. Default :data:`BACKFILL_WALL_SEC`. A description
+        already running finishes (its own bound is the provider timeout).
+    on_start : callable, optional
+        Called once with the number of commits this call is about to
+        describe, before the first LLM call, only when that number is
+        positive (the rationale tool's progress step).
+
+    Returns
+    -------
+    int
+        The commits that still need a description because the bound
+        stopped this call: what an MCP result reports as ``describing``.
+        ``0`` when nothing was left, when the caller may not cause LLM
+        spend, or when no provider is configured.
 
     Notes
     -----
@@ -720,18 +782,26 @@ def backfill_evidence_descriptions(
     """
     ctx = current_project()
     if ctx is not None and not ctx.llm_allowed:
-        return
+        return 0
     from whygraph.core import get_config
 
     threshold = get_config().analyze.large_commit_file_count
-    bulk = [it.commit for it in items if it.commit.files_changed > threshold]
-    normal = [
-        it.commit
-        for it in items
-        if it.commit.files_changed <= threshold and it.commit.llm_description is None
-    ]
-    if not bulk and not normal:
-        return
+    pending: list[tuple[Commit, bool]] = []
+    for item in items:
+        commit = item.commit
+        if commit.files_changed > threshold:
+            cached = _cached_file_description(commit.sha, target_path)
+            if cached is not None:
+                # In-memory override for this request (see the docstring).
+                commit.llm_description = cached
+            else:
+                pending.append((commit, True))
+        elif commit.llm_description is None:
+            pending.append((commit, False))
+    if not pending:
+        return 0
+    if max_commits <= 0:
+        return len(pending)
     # Lazy imports mirror the pattern in `whygraph.cli.commands.scan.scan_cmd`
     # and keep the module's import-time surface free of analyze/LLM deps.
     from whygraph.analyze import (
@@ -745,21 +815,27 @@ def backfill_evidence_descriptions(
         descriptor = LlmDescriptor.from_config(get_config())
     except LlmError as exc:
         _log.debug("skipping lazy LLM description backfill: %s", exc)
-        return
+        return 0
 
-    if allow is not None:
-        normal = [commit for commit in normal if allow()]
     repository = Repository(repo_root())
-    for commit in bulk:
+    if on_start is not None:
+        on_start(min(len(pending), max_commits))
+    deadline = time.monotonic() + wall_sec
+    spent = 0
+    for index, (commit, bulk) in enumerate(pending):
+        if spent >= max_commits or time.monotonic() >= deadline:
+            left = len(pending) - index
+            _log.info("lazy LLM description backfill bounded: %d left", left)
+            return left
         if usage_blocked() is not None:
             # An exhausted hard-stopped budget (M2f-2 plan section 4.7):
             # stop before the next describe; backfill_all checks the same.
             break
-        if (
-            allow is not None
-            and not _file_description_cached(commit.sha, target_path)
-            and not allow()
-        ):
+        if allow is not None and not allow():
+            continue
+        spent += 1
+        if not bulk:
+            backfill_all([commit], repository=repository, descriptor=descriptor)
             continue
         try:
             text = backfill_file_description(
@@ -778,19 +854,18 @@ def backfill_evidence_descriptions(
             # rationale prompt read commit.llm_description; the DB row
             # keeps its bulk-commit stub.
             commit.llm_description = text
-    backfill_all(normal, repository=repository, descriptor=descriptor)
+    return 0
 
 
-def _file_description_cached(sha: str, path: str) -> bool:
-    """Whether the per-file description of ``(sha, path)`` is already stored."""
+def _cached_file_description(sha: str, path: str) -> str | None:
+    """The stored per-file description of ``(sha, path)``, if any."""
     with get_session() as session:
-        cached = session.exec(
+        return session.exec(
             select(CommitFileChange.llm_description).where(
                 CommitFileChange.commit_sha == sha,
                 CommitFileChange.path == path,
             )
         ).first()
-    return cached is not None
 
 
 def _commit_dict(commit: Commit) -> dict:
@@ -855,6 +930,26 @@ def _issue_dict(issue: Issue) -> dict:
     }
 
 
+def hunk_lines(hunk: BlameHunk) -> tuple[tuple[int, int], ...] | None:
+    """The working-tree line ranges ``hunk`` owns, merged and sorted.
+
+    Read off ``hunk.origins`` (``final_start`` plus the range length);
+    ``None`` for a hunk without origins.
+    """
+    spans = sorted(
+        (o.final_start, o.final_start + (o.end - o.start)) for o in hunk.origins
+    )
+    if not spans:
+        return None
+    merged = [spans[0]]
+    for start, end in spans[1:]:
+        if start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return tuple(merged)
+
+
 def _evidence_dict(item: CommitEvidence) -> dict:
     """Serialize one :class:`CommitEvidence` to a JSON-ready dict."""
     return {
@@ -863,6 +958,111 @@ def _evidence_dict(item: CommitEvidence) -> dict:
         "issues": [_issue_dict(issue) for issue in item.issues],
         "source": item.source,
     }
+
+
+# ---------------------------------------------------------------------------
+# The MCP item shapes (plan section 5.4): compact by default, full on request
+# ---------------------------------------------------------------------------
+
+
+def _link_ref(kind: str, entry: dict) -> dict:
+    """A PR or issue as a compact link: number, title, URL and its resource."""
+    number = entry.get("number")
+    return {
+        "number": number,
+        "title": entry.get("title"),
+        "html_url": entry.get("html_url"),
+        "resource": f"whygraph://{kind}/{number}",
+    }
+
+
+def _clip(text: object, max_chars: int) -> object:
+    """``text`` cut to ``max_chars`` (marked with ``...``); non-strings unchanged."""
+    if isinstance(text, str) and len(text) > max_chars:
+        return text[:max_chars] + "..."
+    return text
+
+
+def _pr_item(pr: dict, caps: RationaleConfig | None) -> dict:
+    """One PR of an MCP evidence item; with ``caps`` (``full``) adds capped prose and the roster."""
+    out = _link_ref("pr", pr)
+    if caps is None:
+        return out
+    comments = [c for c in pr.get("comments") or [] if isinstance(c, dict)]
+    titles = list(pr.get("commit_titles") or [])
+    kept = comments[: caps.pr_discussion_max_comments]
+    out["text"] = {
+        "body": pr.get("body"),
+        "comments": [
+            {**c, "body": _clip(c.get("body"), caps.pr_comment_max_chars)} for c in kept
+        ],
+    }
+    out["commit_titles"] = titles[: caps.pr_roster_max_commits]
+    omitted = {
+        "comments": len(comments) - len(kept),
+        "commit_titles": len(titles) - len(out["commit_titles"]),
+    }
+    if any(omitted.values()):
+        out["omitted"] = omitted
+    return out
+
+
+def shape_evidence_item(item: dict, detail: Detail = "compact") -> dict:
+    """One evidence item in the shape the MCP tools return.
+
+    Parameters
+    ----------
+    item : dict
+        An item in the nested shape of :func:`_evidence_dict` (the
+        ``/api/v1`` wire shape, also what the Explorer reads), optionally
+        with ``lines`` and ``push_status``. Missing keys read as ``None``,
+        so an older platform's answer still shapes.
+    detail : {"compact", "full"}, optional
+        ``"compact"`` (default): ``sha``, ``llm_description``,
+        ``subject``, ``author``, ``date``, ``lines``, ``source`` and the
+        linked PRs and issues as ``{number, title, html_url, resource}``.
+        ``"full"`` adds the untrusted prose under ``text`` (the commit
+        and issue ``body``; the PR ``body`` and its first
+        ``pr_discussion_max_comments`` comments, each clipped to
+        ``pr_comment_max_chars``), the PR's first ``pr_roster_max_commits``
+        ``commit_titles``, and an ``omitted`` count on a PR whose lists
+        were cut (the ``[rationale]`` caps).
+
+    Returns
+    -------
+    dict
+        The shaped item; ``push_status`` is kept when the input has one.
+    """
+    commit = item.get("commit") or {}
+    out = {
+        "sha": commit.get("sha"),
+        "llm_description": commit.get("llm_description"),
+        "subject": commit.get("subject"),
+        "author": commit.get("author_name"),
+        "date": commit.get("committed_at"),
+        "lines": item.get("lines"),
+        "source": item.get("source"),
+    }
+    if "push_status" in item:
+        out["push_status"] = item["push_status"]
+    caps = None
+    if detail == "full":
+        from whygraph.core import get_config
+
+        caps = get_config().rationale
+    out["pull_requests"] = [
+        _pr_item(pr, caps) for pr in item.get("pull_requests") or []
+    ]
+    issues = []
+    for issue in item.get("issues") or []:
+        entry = _link_ref("issue", issue)
+        if caps is not None:
+            entry["text"] = {"body": issue.get("body")}
+        issues.append(entry)
+    out["issues"] = issues
+    if caps is not None:
+        out["text"] = {"body": commit.get("body")}
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1139,6 +1339,7 @@ def local_evidence_dict(hunk: BlameHunk, push_status: str) -> dict:
         "pull_requests": [],
         "issues": [],
         "source": LOCAL_SOURCE,
+        "lines": [list(r) for r in hunk_lines(hunk) or ()] or None,
         "push_status": push_status,
     }
 
@@ -1202,6 +1403,10 @@ def merge_linked_evidence(
         )
     for hunk, push_status in split.local:
         by_sha.setdefault(hunk.sha, local_evidence_dict(hunk, push_status))
+    for hunk in (*split.pushed, *(h for h, _ in split.local)):
+        item = by_sha.get(hunk.sha)
+        if item is not None and "lines" not in item:
+            item["lines"] = [list(r) for r in hunk_lines(hunk) or ()] or None
     items = sorted(
         by_sha.values(),
         key=lambda item: _parsed_time((item.get("commit") or {}).get("committed_at")),
@@ -1239,16 +1444,24 @@ def linked_evidence(remote: RemoteProject, target: Target, *, limit: int) -> dic
     Returns
     -------
     dict
-        ``{"target", "evidence", "platform"}``.
+        ``{"target", "evidence", "describing", "platform"}`` with items in
+        the nested shape; ``describing`` is always ``0`` (descriptions
+        are the platform's). ``platform.answered`` is ``False`` when the
+        platform did not account for the pushed hunks (nothing pushed to
+        ask about, or the call failed offline / revoked / removed), so
+        the ``pending_scan`` / ``not_on_default_branch`` labels are local
+        guesses.
     """
     repo = Repository(repo_root())
     split = split_by_push_status(repo, blame_target(repo, target))
     sendable = pushed_target(repo, target, split)
     items: list[dict] = []
     unknown: list[str] = [hunk.sha for hunk in split.pushed]
+    answered = False
     if sendable is not None:
         try:
             items, unknown = remote.evidence(sendable, split.pushed, limit)
+            answered = True
         except RemoteError:
             # Offline, revoked or removed: the agent still gets blame, with
             # every pushed SHA labelled from the local refs.
@@ -1256,23 +1469,49 @@ def linked_evidence(remote: RemoteProject, target: Target, *, limit: int) -> dic
     return {
         "target": target_dict(target),
         "evidence": merge_linked_evidence(items, unknown, split, limit=limit),
-        "platform": platform_block(remote),
+        "describing": 0,
+        "platform": {**platform_block(remote), "answered": answered},
     }
 
 
-def whygraph_evidence_for(
+def evidence_payload(
     path: str | None = None,
     line_start: int | None = None,
     line_end: int | None = None,
     qualified_name: str | None = None,
     limit: int = 20,
+    describe: bool = True,
 ) -> dict:
-    """MCP tool — historical evidence for a chunk of code.
+    """Historical evidence for a chunk of code, items in the nested shape.
 
-    See :data:`_TOOL_DESCRIPTION` for the agent-facing summary.
+    The body of :func:`whygraph_evidence_for` before its items are shaped,
+    and what the Explorer's Evidence tab reads (``item.commit.sha``).
 
-    For a project linked to a WhyGraph platform the answer comes from
-    :func:`linked_evidence` instead, and carries a ``platform`` block.
+    Parameters
+    ----------
+    path, line_start, line_end, qualified_name
+        The target (see :func:`~whygraph.mcp.targets.resolve_target`).
+    limit : int, optional
+        Cap on the evidence items. Default 20.
+    describe : bool, optional
+        Backfill missing commit descriptions, bounded by
+        :data:`MAX_BACKFILL_PER_CALL` / :data:`BACKFILL_WALL_SEC`
+        (default). ``False`` never calls an LLM.
+
+    Returns
+    -------
+    dict
+        ``{"target", "evidence", "describing"}``: items in the
+        :func:`_evidence_dict` shape plus ``lines``; ``describing`` counts
+        the commits left undescribed by the bound (or by
+        ``describe=False``). A project linked to a WhyGraph platform is
+        answered by :func:`linked_evidence`, which adds a ``platform``
+        block.
+
+    Raises
+    ------
+    WhyGraphError
+        A bad ``limit`` or target, or a failing blame.
     """
     _log.debug(
         "whygraph_evidence_for called: path=%r line_start=%r line_end=%r "
@@ -1295,15 +1534,61 @@ def whygraph_evidence_for(
     if ctx is not None and ctx.remote is not None:
         return linked_evidence(ctx.remote, target, limit=limit)
     evidence = collect_evidence(target, limit=limit)
-    backfill_evidence_descriptions(evidence, target_path=target.path)
+    describing = backfill_evidence_descriptions(
+        evidence,
+        target_path=target.path,
+        max_commits=MAX_BACKFILL_PER_CALL if describe else 0,
+    )
     return {
         "target": target_dict(target),
-        "evidence": [_evidence_dict(item) for item in evidence],
+        "evidence": [
+            {
+                **_evidence_dict(item),
+                "lines": [list(r) for r in item.lines or ()] or None,
+            }
+            for item in evidence
+        ],
+        "describing": describing,
+    }
+
+
+def whygraph_evidence_for(
+    path: str | None = None,
+    line_start: int | None = None,
+    line_end: int | None = None,
+    qualified_name: str | None = None,
+    limit: Annotated[int, Field(ge=1, le=100)] = 10,
+    detail: Detail = "compact",
+    describe: bool = True,
+) -> EvidenceToolResult:
+    """MCP tool — historical evidence for a chunk of code.
+
+    See :data:`~whygraph.mcp.descriptions.EVIDENCE_FOR_DESCRIPTION` for the agent-facing summary.
+
+    :func:`evidence_payload` with each item passed through
+    :func:`shape_evidence_item` at ``detail``. For a project linked to a
+    WhyGraph platform the answer comes from :func:`linked_evidence`
+    instead, and carries a ``platform`` block.
+    """
+    result = evidence_payload(
+        path=path,
+        line_start=line_start,
+        line_end=line_end,
+        qualified_name=qualified_name,
+        limit=limit,
+        describe=describe,
+    )
+    return {
+        **result,
+        "evidence": [shape_evidence_item(i, detail) for i in result["evidence"]],
     }
 
 
 def register(mcp: FastMCP) -> None:
     """Attach the evidence tool to an MCP server."""
-    mcp.tool(name="whygraph_evidence_for", description=_TOOL_DESCRIPTION)(
-        log_tool_errors(whygraph_evidence_for)
-    )
+    mcp.tool(
+        name="whygraph_evidence_for",
+        title=EVIDENCE_FOR_ANNOTATIONS.title,
+        description=EVIDENCE_FOR_DESCRIPTION,
+        annotations=EVIDENCE_FOR_ANNOTATIONS,
+    )(log_tool_errors(structured(EvidenceToolResult)(whygraph_evidence_for)))

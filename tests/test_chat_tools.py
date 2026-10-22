@@ -180,7 +180,7 @@ def test_history_tools_state_which_description_field_is_authoritative() -> None:
     it read ``subject`` as equally authoritative and anchored on whichever
     field arrived first.
     """
-    from whygraph.chat.tools import _DESCRIPTION_AUTHORITY
+    from whygraph.mcp.descriptions import DESCRIPTION_AUTHORITY
 
     history = [
         "get_evidence",
@@ -191,11 +191,11 @@ def test_history_tools_state_which_description_field_is_authoritative() -> None:
     ]
     for name in history:
         spec = next(s for s in TOOL_SPECS if s.name == name)
-        assert _DESCRIPTION_AUTHORITY in spec.description, (
+        assert DESCRIPTION_AUTHORITY in spec.description, (
             f"{name} must state that llm_description is the reliable field"
         )
-    assert "DIFF ALONE" in _DESCRIPTION_AUTHORITY
-    assert "terse, stale, or simply wrong" in _DESCRIPTION_AUTHORITY
+    assert "DIFF ALONE" in DESCRIPTION_AUTHORITY
+    assert "terse, stale, or simply wrong" in DESCRIPTION_AUTHORITY
 
 
 def test_the_stats_spec_ships_the_annotated_schema() -> None:
@@ -753,6 +753,21 @@ def test_budget_defaults_to_chat_config(
         core, "_config", Config(chat=ChatConfig(max_rationale_generations=7))
     )
     assert ToolRegistry()._generation_budget == 7
+
+
+def test_chat_reads_the_full_evidence_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Chat keeps ``detail="full"``: it truncates results itself (plan 5.4)."""
+    seen: list[dict] = []
+
+    def _spy(**kwargs: object) -> dict:
+        seen.append(kwargs)
+        return {"evidence": []}
+
+    monkeypatch.setattr(chat_tools, "whygraph_evidence_for", _spy)
+    monkeypatch.setattr(chat_tools, "whygraph_area_history", _spy)
+    chat_tools._get_evidence("run_turn")
+    chat_tools._get_area_history("a.py")
+    assert [call["detail"] for call in seen] == ["full", "full"]
 
 
 # ---------------------------------------------------------------------------
@@ -1555,7 +1570,7 @@ def test_run_project_stats_has_no_chart_parameter() -> None:
 
 
 def test_the_render_chart_spec_tells_the_model_to_name_columns() -> None:
-    """A wording guard, mirroring `_DESCRIPTION_AUTHORITY`.
+    """A wording guard, mirroring `DESCRIPTION_AUTHORITY`.
 
     "Name columns, never values" is the one instruction that keeps a chart
     traceable to the query that produced it.

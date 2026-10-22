@@ -44,7 +44,7 @@ Do not attempt to plan without the graph.
 
 If impact returns more, rank by direct distance from seeds (1-hop > 2-hop > deeper) and keep the top N. Note the truncation count.
 
-**1c. Warm the rationale cache.** For each working-set node, call `whygraph_rationale_brief(qualified_name=...)` once. The first call generates the card (slow); the cache (content-hash by bundle signature, prompt v3) makes every subsequent call on the same node sub-millisecond. Researchers will fetch on-demand later — warming the cache here means they hit cache instead of generating cards in parallel.
+**1c. Warm the rationale cache.** For each working-set node, call `whygraph_rationale_brief(qualified_name=...)` once. The first call generates the card (one LLM call, seconds); later calls on the same unchanged lines are served from the cache (a few hundred ms: blame runs again to check the evidence is unchanged). Researchers will fetch on-demand later — warming the cache here means they hit cache instead of generating cards in parallel.
 
 For each card, record: `qualified_name`, `file_path:line_range`, `evidence_count`, `has_constraints`, `has_risks`, `is_empty` (no rationale recorded, or `purpose` and `why` both blank).
 

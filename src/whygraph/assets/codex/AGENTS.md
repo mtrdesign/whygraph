@@ -27,6 +27,8 @@ If the user suspects the cached rationale is stale, re-call with `force_refresh:
 
 The companion tool `whygraph_evidence_for` returns the raw commits / PRs / issues backing a card — call it only when the brief looks wrong and you want to verify the source.
 
+The server also offers prompts: `whygraph_pre_edit_brief`, `whygraph_why_was_this_written`, `whygraph_triage_commit`.
+
 ## Planning a non-trivial change
 
 For multi-file changes, migrations, feature additions, or anything that ripples across the codebase, hand off to the `whygraph-planner` subagent — invoke via `/agent whygraph-planner` (or natural-language delegation). The planner builds a CodeGraph impact set, warms the rationale cache, and produces an ordered step-by-step plan with verbatim constraint/risk quotes. For richer changes it fans out to three researchers (impact, constraints+risks, prior art) and a synthesizer.

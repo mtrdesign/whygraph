@@ -35,7 +35,7 @@ True
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -102,6 +102,12 @@ class ProjectContext:
         by the portal when it builds the context (usage attribution, M2f-2
         plan section 0.2 #8); empty elsewhere. Per project, so safe to
         cache; never mutated.
+    scanned_head : callable or None
+        Returns the project's ``last_scanned_head`` (the default-branch
+        SHA of its last finished scan) as the portal's database holds it
+        *now*, or ``None``. A callable rather than a value because the
+        context is cached across scans. ``None`` (the default) where
+        there is no portal row (headless, tests).
     """
 
     slug: str
@@ -112,6 +118,9 @@ class ProjectContext:
     llm_block: str | None = None
     llm_block_scope: str | None = None
     key_scopes: Mapping[str, str] = field(default_factory=dict, hash=False)
+    scanned_head: Callable[[], str | None] | None = field(
+        default=None, hash=False, compare=False
+    )
 
 
 _current: ContextVar[ProjectContext | None] = ContextVar(

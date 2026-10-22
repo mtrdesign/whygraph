@@ -22,6 +22,8 @@ The user is asking about the *intent* behind existing code. WhyGraph has a struc
 
 4. If the user suspects the cached rationale is stale, re-call with `force_refresh=True`.
 
+The server also offers prompts: `whygraph_pre_edit_brief`, `whygraph_why_was_this_written`, `whygraph_triage_commit`.
+
 ## When NOT to call `whygraph_rationale_brief`
 
 - The user is adding *new* code with no predecessor — no rationale exists yet.

@@ -10,6 +10,12 @@
       "pr_issue_links": 1,
       "pull_requests": 1
     },
+    "freshness": {
+      "codegraph_indexed": true,
+      "commits_behind": null,
+      "head": "<sha1>",
+      "last_scanned_head": null
+    },
     "llm_description_coverage": {
       "described": 0,
       "fraction": 0.0,

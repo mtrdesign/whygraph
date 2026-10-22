@@ -257,14 +257,12 @@ def bodies(fake: FakePlatform, tail: str) -> list[dict]:
 
 def statuses(payload: dict) -> dict[str, str | None]:
     """``sha -> push_status`` of a tool answer's evidence list."""
-    return {
-        item["commit"]["sha"]: item.get("push_status") for item in payload["evidence"]
-    }
+    return {item["sha"]: item.get("push_status") for item in payload["evidence"]}
 
 
 def sources(payload: dict) -> dict[str, str]:
     """``sha -> source`` of a tool answer's evidence list."""
-    return {item["commit"]["sha"]: item["source"] for item in payload["evidence"]}
+    return {item["sha"]: item["source"] for item in payload["evidence"]}
 
 
 UNCOMMITTED_SHA = "0" * 40
@@ -300,15 +298,22 @@ def test_mcp_linked_labels_uncommitted_and_unpushed(
         UNCOMMITTED_SHA: "local",
     }
     # A locally built entry carries blame's metadata and nothing invented.
-    local = next(i for i in payload["evidence"] if i["commit"]["sha"] == repo.c3)
-    assert local["commit"]["llm_description"] is None
-    assert local["commit"]["author_name"] == "Dev"
-    assert local["commit"]["subject"] == "third"
+    local = next(i for i in payload["evidence"] if i["sha"] == repo.c3)
+    assert local["llm_description"] is None
+    assert local["author"] == "Dev"
+    assert local["subject"] == "third"
     assert (local["pull_requests"], local["issues"]) == ([], [])
     # The platform's own entry is passed through, description and all.
-    remote_item = next(i for i in payload["evidence"] if i["commit"]["sha"] == repo.c1)
-    assert remote_item["commit"]["llm_description"] == "what the diff did"
-    assert payload["platform"] == {"status": "ok", "url": API_ORIGIN}
+    remote_item = next(i for i in payload["evidence"] if i["sha"] == repo.c1)
+    assert remote_item["llm_description"] == "what the diff did"
+    # Compact items: the platform's nested item is shaped like a local one.
+    assert "commit" not in remote_item and "text" not in remote_item
+    assert payload["describing"] == 0  # descriptions are the platform's
+    assert payload["platform"] == {
+        "status": "ok",
+        "url": API_ORIGIN,
+        "answered": True,
+    }
     assert payload["target"] == {
         "path": "a.py",
         "line_start": 1,
@@ -387,7 +392,11 @@ def test_mcp_linked_makes_no_request_without_a_pushed_hunk(
         payload = whygraph_evidence_for(path="a.py", line_start=3, line_end=3)
     assert fake.requests == []
     assert statuses(payload) == {repo.c3: PUSH_NOT_PUSHED}
-    assert payload["platform"] == {"status": "ok", "url": API_ORIGIN}
+    assert payload["platform"] == {
+        "status": "ok",
+        "url": API_ORIGIN,
+        "answered": False,
+    }
 
     with use_project(linked), pytest.raises(WhyGraphError) as caught:
         whygraph_rationale_brief(path="a.py", line_start=3, line_end=3)
@@ -477,10 +486,10 @@ def test_mcp_linked_sorts_by_parsed_time(
     with use_project(linked):
         payload = whygraph_evidence_for(path="a.py", line_start=1, line_end=6)
 
-    order = [item["commit"]["sha"] for item in payload["evidence"]]
+    order = [item["sha"] for item in payload["evidence"]]
     assert order == [UNCOMMITTED_SHA, repo.c2, repo.c1, repo.c3]
     # The naive string sort would have swapped the middle pair.
-    stamps = [item["commit"]["committed_at"] for item in payload["evidence"]]
+    stamps = [item["date"] for item in payload["evidence"]]
     assert stamps[1] < stamps[2]
 
 
@@ -506,7 +515,11 @@ def test_mcp_linked_offline_fallback(
     fake.failure = "timeout"
     with use_project(linked):
         payload = whygraph_evidence_for(path="a.py", line_start=1, line_end=6)
-    assert payload["platform"] == {"status": "unreachable", "url": API_ORIGIN}
+    assert payload["platform"] == {
+        "status": "unreachable",
+        "url": API_ORIGIN,
+        "answered": False,  # the labels above are local guesses
+    }
     assert statuses(payload) == {
         repo.c1: PUSH_PENDING_SCAN,
         repo.c2: PUSH_PENDING_SCAN,
@@ -534,7 +547,11 @@ def test_mcp_linked_reports_revoked(
     fake.revoke_token(TOKEN, "admin_revoked")
     with use_project(linked):
         payload = whygraph_evidence_for(path="a.py", line_start=1, line_end=6)
-    assert payload["platform"] == {"status": "revoked", "url": API_ORIGIN}
+    assert payload["platform"] == {
+        "status": "revoked",
+        "url": API_ORIGIN,
+        "answered": False,
+    }
     assert set(sources(payload).values()) == {"local"}
 
     with use_project(linked), pytest.raises(WhyGraphError) as caught:
@@ -589,7 +606,7 @@ def test_mcp_linked_history_comes_from_the_platform(
         payload = whygraph_area_history("a.py", limit=5, include_renames=False)
     assert payload["path"] == "a.py"
     assert payload["include_renames"] is False
-    assert [i["commit"]["sha"] for i in payload["evidence"]] == [repo.c1]
+    assert [i["sha"] for i in payload["evidence"]] == [repo.c1]
     assert payload["platform"] == {"status": "ok", "url": API_ORIGIN}
     sent = next(r for r in fake.requests if r.url.path.endswith("/history"))
     assert dict(sent.url.params) == {

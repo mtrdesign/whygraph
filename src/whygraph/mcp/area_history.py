@@ -15,34 +15,34 @@ commits whose touched paths have since been deleted or renamed away.
 from __future__ import annotations
 
 import logging
+from typing import Annotated, Any, TypedDict
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 
 from whygraph.core.context import current_project
 from whygraph.core.remote import RemoteError, RemoteProject, platform_block
 from whygraph.services.git import Repository
 
+from .descriptions import (
+    AREA_HISTORY_ANNOTATIONS,
+    AREA_HISTORY_DESCRIPTION,
+)
+from .structured import structured
 from .errors import WhyGraphError, log_tool_errors
 from .evidence import (
+    MAX_BACKFILL_PER_CALL,
+    Detail,
     _evidence_dict,
     backfill_evidence_descriptions,
     default_remote_refs,
     path_tracked_at,
+    shape_evidence_item,
 )
 from .path_history import area_history_commits
 from .targets import repo_root
 
 _log = logging.getLogger(__name__)
-
-_TOOL_DESCRIPTION = (
-    "List the commits that have ever touched a given file path or any of "
-    "its rename predecessors. Complements `whygraph_evidence_for` (which "
-    "is line-blame-driven and HEAD-anchored): area_history reaches commits "
-    "for code that has since been deleted, moved, or whose lines were all "
-    "rewritten by a later refactor. Returns commits with their linked PRs "
-    "and issues, newest first. Scan from the WhyGraph portal (or run "
-    "`whygraph scan` outside it) first to populate the WhyGraph database."
-)
 
 
 def linked_area_history(
@@ -66,7 +66,9 @@ def linked_area_history(
     Returns
     -------
     dict
-        ``{"path", "include_renames", "evidence", "platform"}``.
+        ``{"path", "include_renames", "evidence", "describing", "platform"}``
+        with items in the nested shape; ``describing`` is always ``0``
+        (descriptions are the platform's).
 
     Raises
     ------
@@ -84,18 +86,39 @@ def linked_area_history(
         "path": path,
         "include_renames": include_renames,
         "evidence": items,
+        "describing": 0,
         "platform": platform_block(remote),
     }
 
 
-def whygraph_area_history(
+class _AreaHistoryRequired(TypedDict):
+    path: str
+    include_renames: bool
+    evidence: list[dict[str, Any]]
+    describing: int
+
+
+class AreaHistoryResult(_AreaHistoryRequired, total=False):
+    """The ``whygraph_area_history`` result, for FastMCP's output schema.
+
+    ``evidence`` items are the ``compact`` or ``full`` shape of
+    :func:`~whygraph.mcp.evidence.shape_evidence_item`; ``platform`` is
+    set for a linked project.
+    """
+
+    platform: dict[str, Any]
+
+
+def area_history_payload(
     path: str,
     limit: int = 20,
     include_renames: bool = True,
+    describe: bool = True,
 ) -> dict:
-    """MCP tool — area-history commits for a file path.
+    """Area-history commits for a file path, items in the nested shape.
 
-    See :data:`_TOOL_DESCRIPTION` for the agent-facing summary.
+    The body of :func:`whygraph_area_history` before its items are shaped,
+    and what the Explorer's History tab reads.
 
     Parameters
     ----------
@@ -108,15 +131,23 @@ def whygraph_area_history(
         When ``True`` (default), walk the ``renamed_from`` chain and
         include commits that touched historical names. When ``False``,
         only commits that touched the literal ``path`` are returned.
+    describe : bool, optional
+        Backfill missing commit descriptions, bounded (default). ``False``
+        never calls an LLM.
 
     Returns
     -------
     dict
-        ``{"path": str, "include_renames": bool, "evidence": [...]}`` —
-        the ``evidence`` list uses the same JSON shape that
-        ``whygraph_evidence_for`` produces. A project linked to a WhyGraph
-        platform is answered by :func:`linked_area_history`, which adds a
-        ``platform`` block.
+        ``{"path", "include_renames", "evidence", "describing"}`` — the
+        ``evidence`` items use :func:`~whygraph.mcp.evidence._evidence_dict`'s
+        shape, ``describing`` counts the commits left undescribed. A
+        project linked to a WhyGraph platform is answered by
+        :func:`linked_area_history`, which adds a ``platform`` block.
+
+    Raises
+    ------
+    WhyGraphError
+        An empty ``path`` or a bad ``limit``.
     """
     _log.debug(
         "whygraph_area_history called: path=%r limit=%d include_renames=%s",
@@ -134,16 +165,46 @@ def whygraph_area_history(
         return linked_area_history(ctx.remote, path, limit, include_renames)
 
     items = area_history_commits(path, limit=limit, include_renames=include_renames)
-    backfill_evidence_descriptions(items, target_path=path)
+    describing = backfill_evidence_descriptions(
+        items, target_path=path, max_commits=MAX_BACKFILL_PER_CALL if describe else 0
+    )
     return {
         "path": path,
         "include_renames": include_renames,
         "evidence": [_evidence_dict(item) for item in items],
+        "describing": describing,
+    }
+
+
+def whygraph_area_history(
+    path: str,
+    limit: Annotated[int, Field(ge=1, le=100)] = 10,
+    include_renames: bool = True,
+    detail: Detail = "compact",
+    describe: bool = True,
+) -> AreaHistoryResult:
+    """MCP tool — area-history commits for a file path.
+
+    See :data:`~whygraph.mcp.descriptions.AREA_HISTORY_DESCRIPTION` for the agent-facing summary.
+
+    :func:`area_history_payload` with each item passed through
+    :func:`~whygraph.mcp.evidence.shape_evidence_item` at ``detail``
+    (``lines`` is ``null``: area items are not blame-derived).
+    """
+    result = area_history_payload(
+        path, limit=limit, include_renames=include_renames, describe=describe
+    )
+    return {
+        **result,
+        "evidence": [shape_evidence_item(i, detail) for i in result["evidence"]],
     }
 
 
 def register(mcp: FastMCP) -> None:
     """Attach the area-history tool to an MCP server."""
-    mcp.tool(name="whygraph_area_history", description=_TOOL_DESCRIPTION)(
-        log_tool_errors(whygraph_area_history)
-    )
+    mcp.tool(
+        name="whygraph_area_history",
+        title=AREA_HISTORY_ANNOTATIONS.title,
+        description=AREA_HISTORY_DESCRIPTION,
+        annotations=AREA_HISTORY_ANNOTATIONS,
+    )(log_tool_errors(structured(AreaHistoryResult)(whygraph_area_history)))

@@ -450,8 +450,10 @@ def test_portal_state_without_a_binary(
 
 
 def test_the_orphan_sweep_kills_a_recorded_leftover_and_ignores_a_stranger(
-    fake_cg: SimpleNamespace, tmp_path: Path
+    fake_cg: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # procps `ps` cuts its output to $COLUMNS, which would hide "serve --mcp".
+    monkeypatch.setenv("COLUMNS", "40")
     data = tmp_path / "data"
     hosts = data / "locks" / "codegraph" / "hosts.json"
     hosts.parent.mkdir(parents=True)

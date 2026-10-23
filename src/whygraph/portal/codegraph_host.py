@@ -1463,7 +1463,8 @@ class CodeGraphHost:
             return None
         try:
             out = subprocess.run(
-                ["ps", "-o", "command=", "-p", str(pid)],
+                # -ww: procps `ps` would otherwise cut the line to $COLUMNS
+                ["ps", "-ww", "-o", "command=", "-p", str(pid)],
                 capture_output=True,
                 text=True,
                 timeout=5,

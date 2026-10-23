@@ -40,8 +40,8 @@ agent files** in the project's Settings overwrites them.
 
 Cursor's slash commands (`/rationale`, `/whygraph-plan`, `/whygraph-implement`) are installed as skills under
 `.cursor/skills/`. Cursor also loads `.claude/skills/`, so with both Claude Code and Cursor selected each
-command shows up twice in Cursor's slash menu. A project initialized by an earlier build keeps its old
-`.cursor/commands/` files; delete them by hand if you do not want the duplicates. Copilot also reads
+command shows up twice in Cursor's slash menu. A project initialized by an earlier build has old
+`.cursor/commands/` files: **Update agent files** removes them (it asks first if you edited one). Copilot also reads
 `AGENTS.md`, so with both VS Code and Codex selected the two always-on blocks overlap.
 
 Each agent's install also **append-merges** a CodeGraph usage-guidance block, pointing at the portal's

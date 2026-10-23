@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -1189,3 +1190,215 @@ def test_reviewer_wiring() -> None:
     # Claude Code first: the other trees get a reviewer after Step 9.
     for tree in ("cursor", "vscode", "codex"):
         assert not [p for p in (_ASSET_ROOT / tree).rglob("*review*")], tree
+
+
+# ---- retired assets: files WhyGraph no longer ships -----------------------
+
+
+def _retire_do_it(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Install the fake tree, then drop ``commands/do-it.md`` from the bundle."""
+    src, project, _ = _installed(tmp_path)
+    (src / "commands" / "do-it.md").unlink()
+    (src / "commands").rmdir()
+    return src, project, project / ".claude" / "commands" / "do-it.md"
+
+
+def test_unedited_retired_file_is_removed_with_its_empty_dir(tmp_path: Path) -> None:
+    src, project, do_it = _retire_do_it(tmp_path)
+
+    result = assets.install_assets(_claude_target(), project, source=src)
+
+    assert result.removed == [do_it] and result.needs_confirmation == []
+    assert "-DO-IT" in result.diffs[do_it]
+    assert not do_it.exists()
+    assert not (project / ".claude" / "commands").exists()
+    assert (project / ".claude").is_dir()  # the agent's root stays
+    assert "claude/commands/do-it.md" not in _manifest(project)["files"]
+
+
+def test_a_git_tracked_manifest_is_ignored(tmp_path: Path) -> None:
+    # A repo is untrusted: a committed manifest naming one of its own files
+    # (with that file's hash) must not get the file deleted as "retired".
+    src, project, _ = _installed(tmp_path)
+    victim = project / ".claude" / "keep.md"
+    victim.write_text("USER FILE")
+    manifest = _manifest(project)
+    manifest["files"]["claude/keep.md"] = assets._sha("USER FILE")
+    (project / assets.MANIFEST_RELPATH).write_text(json.dumps(manifest))
+    git = ["git", "-C", str(project), "-c", "user.name=t", "-c", "user.email=t@x"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "add", "-f", str(assets.MANIFEST_RELPATH)], check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "m"], check=True)
+
+    assert assets.read_manifest(project) is None
+    result = assets.install_assets(_claude_target(), project, source=src, force=True)
+
+    assert victim.read_text() == "USER FILE" and result.removed == []
+
+
+def test_retired_file_keeps_a_non_empty_dir(tmp_path: Path) -> None:
+    src, project, do_it = _retire_do_it(tmp_path)
+    mine = project / ".claude" / "commands" / "mine.md"
+    mine.write_text("MINE")
+
+    assets.install_assets(_claude_target(), project, source=src)
+
+    assert not do_it.exists() and mine.read_text() == "MINE"
+
+
+def test_edited_retired_file_needs_confirmation_then_force_removes(
+    tmp_path: Path,
+) -> None:
+    src, project, do_it = _retire_do_it(tmp_path)
+    do_it.write_text("MY EDIT")
+    before = _manifest(project)["files"]["claude/commands/do-it.md"]
+
+    result = assets.install_assets(_claude_target(), project, source=src)
+
+    assert result.needs_confirmation == [do_it] and result.retired == [do_it]
+    assert result.removed == []
+    diff = result.diffs[do_it]
+    assert "-MY EDIT" in diff and "+++ b/.claude/commands/do-it.md" in diff
+    assert not [
+        ln
+        for ln in diff.splitlines()
+        if ln.startswith("+") and ln != "+++ b/.claude/commands/do-it.md"
+    ]
+    assert do_it.read_text() == "MY EDIT"
+    # Kept, so the next Update asks again.
+    assert _manifest(project)["files"]["claude/commands/do-it.md"] == before
+    again = assets.install_assets(_claude_target(), project, source=src)
+    assert again.needs_confirmation == [do_it]
+
+    forced = assets.install_assets(_claude_target(), project, source=src, force=True)
+    assert forced.removed == [do_it] and not do_it.exists()
+    assert "claude/commands/do-it.md" not in _manifest(project)["files"]
+
+
+def test_dry_run_reports_a_retired_file_without_removing_it(tmp_path: Path) -> None:
+    src, project, do_it = _retire_do_it(tmp_path)
+    before = _manifest(project)
+
+    result = assets.install_assets(_claude_target(), project, source=src, dry_run=True)
+
+    assert result.removed == [do_it]
+    assert do_it.read_text() == "DO-IT"
+    assert _manifest(project) == before
+
+
+def test_symlink_at_a_retired_path_is_left_alone(tmp_path: Path) -> None:
+    src, project, do_it = _retire_do_it(tmp_path)
+    outside = tmp_path / "outside.md"
+    outside.write_text("DO-IT")
+    do_it.unlink()
+    do_it.symlink_to(outside)
+
+    result = assets.install_assets(_claude_target(), project, source=src)
+
+    assert result.removed == [] and result.needs_confirmation == []
+    assert do_it.is_symlink() and outside.read_text() == "DO-IT"
+
+
+def test_symlinked_retired_dir_is_left_alone(tmp_path: Path) -> None:
+    src, project, do_it = _retire_do_it(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    (project / ".claude" / "commands").rename(elsewhere)
+    (project / ".claude" / "commands").symlink_to(elsewhere)
+
+    result = assets.install_assets(_claude_target(), project, source=src)
+
+    assert result.removed == []
+    assert (elsewhere / "do-it.md").read_text() == "DO-IT"
+
+
+def test_missing_retired_file_just_drops_the_entry(tmp_path: Path) -> None:
+    src, project, do_it = _retire_do_it(tmp_path)
+    do_it.unlink()
+
+    result = assets.install_assets(_claude_target(), project, source=src)
+
+    assert result.removed == [] and result.needs_confirmation == []
+    assert "claude/commands/do-it.md" not in _manifest(project)["files"]
+
+
+def test_manifest_key_with_dot_dot_is_ignored(tmp_path: Path) -> None:
+    src, project, _ = _installed(tmp_path)
+    victim = tmp_path / "victim.md"
+    victim.write_text("X")
+    manifest_path = project / ".whygraph" / "assets.json"
+    data = json.loads(manifest_path.read_text())
+    data["files"]["claude/../../victim.md"] = hashlib.sha256(b"X").hexdigest()
+    manifest_path.write_text(json.dumps(data))
+
+    result = assets.install_assets(_claude_target(), project, source=src)
+
+    assert result.removed == [] and victim.read_text() == "X"
+
+
+def test_pre_manifest_retired_file_uses_the_retired_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = _make_source(tmp_path)
+    project = tmp_path / "proj"
+    old = project / ".claude" / "commands" / "old.md"
+    edited = project / ".claude" / "commands" / "older.md"
+    old.parent.mkdir(parents=True)
+    old.write_text("OLD v1")
+    edited.write_text("OLD v1 + mine")
+    v1 = frozenset({hashlib.sha256(b"OLD v1").hexdigest()})
+    monkeypatch.setattr(
+        assets,
+        "RETIRED_ASSETS",
+        {
+            "claude-code": {
+                "commands/old.md": v1,
+                "commands/older.md": v1,
+                # Still bundled: never a candidate.
+                "agents/x.md": frozenset({hashlib.sha256(b"X-AGENT").hexdigest()}),
+            }
+        },
+    )
+
+    result = assets.install_assets(_claude_target(), project, source=src)
+
+    assert result.removed == [old] and not old.exists()
+    assert result.needs_confirmation == [edited] and edited.exists()
+    assert result.retired == [edited]
+    assert (project / ".claude" / "agents" / "x.md").read_text() == "X-AGENT"
+
+
+def test_cursor_retires_its_old_commands() -> None:
+    """The three 1.x / 2.0 Cursor commands are retired candidates."""
+    cursor = agents.resolve_agent("cursor")
+    retired = assets.retired_assets(cursor, {})
+
+    assert set(retired) == {
+        "commands/rationale.md",
+        "commands/whygraph-implement.md",
+        "commands/whygraph-plan.md",
+    }
+    assert all(len(h) == 1 for h in retired.values())
+    root = assets.packaged_assets_for(cursor)
+    assert not (root / "commands").is_dir()
+    assert (root / "skills" / "rationale" / "SKILL.md").is_file()
+
+
+def test_cursor_retired_hash_matches_the_v2_command(tmp_path: Path) -> None:
+    """A byte-identical v2.0.0 command is removed (when the tag is available)."""
+    rel = "src/whygraph/assets/cursor/commands/rationale.md"
+    shown = subprocess.run(
+        ["git", "show", f"v2.0.0:{rel}"],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+    )
+    if shown.returncode != 0:
+        pytest.skip("the v2.0.0 tag is not available in this checkout")
+    project = tmp_path / "proj"
+    old = project / ".cursor" / "commands" / "rationale.md"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(shown.stdout)
+
+    result = assets.install_assets(agents.resolve_agent("cursor"), project)
+
+    assert old in result.removed and not old.exists()
+    assert not (project / ".cursor" / "commands").exists()

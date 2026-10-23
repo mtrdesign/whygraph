@@ -369,3 +369,57 @@ def test_area_history_payload_keeps_the_nested_explorer_shape(
 
     assert result["evidence"][0]["commit"]["sha"] == "sha_recent"
     assert result["describing"] == 0
+
+
+def test_area_history_full_emits_a_shared_pr_once(
+    whygraph_db_initialized: Path,
+) -> None:
+    """Two commits of one PR: both items carry the ref, the prose appears once."""
+    import json
+
+    from whygraph.db.models import PullRequest
+
+    with get_session() as session:
+        _seed_rename_history(session)
+        session.add(
+            PullRequest(
+                number=7,
+                title="Rename and edit",
+                body="The shared PR body.",
+                state="merged",
+                created_at="2025-03-01T00:00:00+00:00",
+                updated_at="2025-05-01T00:00:00+00:00",
+                merged_at="2025-05-01T00:00:00+00:00",
+                merge_commit_sha="sha_recent",
+                head_sha="headsha",
+                base_ref="main",
+                author="octocat",
+                html_url="https://example.com/pr/7",
+                labels="[]",
+                commit_titles=json.dumps(
+                    [
+                        {
+                            "oid": "sha_rename2",
+                            "headline": "rename",
+                            "author_name": "J",
+                        },
+                        {"oid": "sha_recent", "headline": "edit", "author_name": "J"},
+                    ]
+                ),
+                fetched_at="2025-05-02T00:00:00+00:00",
+            )
+        )
+        session.commit()
+
+    result = whygraph_area_history("final.py", limit=2, detail="full")
+
+    assert [item["sha"] for item in result["evidence"]] == [
+        "sha_recent",
+        "sha_rename2",
+    ]
+    for item in result["evidence"]:
+        assert [pr["resource"] for pr in item["pull_requests"]] == ["whygraph://pr/7"]
+        assert "text" not in item["pull_requests"][0]
+    assert list(result["pull_requests"]) == ["7"]
+    assert result["issues"] == {}
+    assert json.dumps(result).count("The shared PR body.") == 1

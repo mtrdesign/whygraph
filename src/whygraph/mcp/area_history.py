@@ -37,7 +37,7 @@ from .evidence import (
     backfill_evidence_descriptions,
     default_remote_refs,
     path_tracked_at,
-    shape_evidence_item,
+    shape_evidence,
 )
 from .path_history import area_history_commits
 from .targets import repo_root
@@ -102,10 +102,14 @@ class AreaHistoryResult(_AreaHistoryRequired, total=False):
     """The ``whygraph_area_history`` result, for FastMCP's output schema.
 
     ``evidence`` items are the ``compact`` or ``full`` shape of
-    :func:`~whygraph.mcp.evidence.shape_evidence_item`; ``platform`` is
-    set for a linked project.
+    :func:`~whygraph.mcp.evidence.shape_evidence_item`; ``pull_requests``
+    / ``issues`` are the ``detail="full"`` prose maps of
+    :func:`~whygraph.mcp.evidence.shape_evidence`; ``platform`` is set for
+    a linked project.
     """
 
+    pull_requests: dict[str, dict[str, Any]]
+    issues: dict[str, dict[str, Any]]
     platform: dict[str, Any]
 
 
@@ -187,17 +191,14 @@ def whygraph_area_history(
 
     See :data:`~whygraph.mcp.descriptions.AREA_HISTORY_DESCRIPTION` for the agent-facing summary.
 
-    :func:`area_history_payload` with each item passed through
-    :func:`~whygraph.mcp.evidence.shape_evidence_item` at ``detail``
+    :func:`area_history_payload` with its items passed through
+    :func:`~whygraph.mcp.evidence.shape_evidence` at ``detail``
     (``lines`` is ``null``: area items are not blame-derived).
     """
     result = area_history_payload(
         path, limit=limit, include_renames=include_renames, describe=describe
     )
-    return {
-        **result,
-        "evidence": [shape_evidence_item(i, detail) for i in result["evidence"]],
-    }
+    return {**result, **shape_evidence(result["evidence"], detail)}
 
 
 def register(mcp: FastMCP) -> None:

@@ -16,15 +16,18 @@ Three tools cover the two questions - evidence and rationale.
   its rename predecessors. Use it when the code moved, got deleted, or was rewritten and blame comes
   up short.
 
-Both return compact items (no bodies or comments) unless you pass `detail="full"`; see
-[Evidence items](../reference/mcp.md#evidence-items).
+Both return compact items (no bodies or comments) unless you pass `detail="full"`, which adds
+commit bodies to the items and the pull request and issue prose once, in top-level maps keyed by
+number; see [Evidence items](../reference/mcp.md#evidence-items).
 
 **Reaching for the *why*?** Use the rationale tool:
 
 - `whygraph_rationale_brief(path, line_start, line_end | qualified_name)` - a structured card:
   purpose, why, constraints, tradeoffs, risks. Cached, so a repeat call is instant.
-  `cached_only=True` reads the cache and never generates: a miss is `{"status": "not_cached"}`, at no
-  LLM cost.
+  `cached_only=True` reads the cache and never generates, at no LLM cost. It also accepts a card whose
+  lines changed since (`stale: true`) or the card of an overlapping range (`match: "overlap"`); with
+  none, it returns `{"status": "not_cached"}`. See
+  [Cached-only lookups](../reference/mcp.md#cached-only-lookups).
 
 A typical flow: before editing a function, your assistant calls `whygraph_rationale_brief` to ground
 itself in intent. If the card comes back thin, it falls back to `whygraph_evidence_for` for the raw

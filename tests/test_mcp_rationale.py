@@ -100,6 +100,29 @@ def test_rationale_brief_returns_card(
     assert result["target"]["path"] == "sample.py"
 
 
+def test_evidence_count_counts_each_pr_and_issue_once() -> None:
+    """Two commits of one PR closing one issue: one PR, one issue."""
+    from types import SimpleNamespace
+
+    from whygraph.mcp.rationale import _format_response
+    from whygraph.mcp.targets import Target
+
+    pr, issue = SimpleNamespace(number=5), SimpleNamespace(number=9)
+    other_pr = SimpleNamespace(number=6)
+    evidence = [
+        SimpleNamespace(pull_requests=(pr,), issues=(issue,)),
+        SimpleNamespace(pull_requests=(pr, other_pr), issues=(issue,)),
+    ]
+    card = _format_response(
+        Target(path="sample.py", line_start=1, line_end=3, qualified_name=None),
+        _FakeGenerator().generate([]),
+        evidence,
+        "2026-01-01T00:00:00+00:00",
+    )
+
+    assert card["evidence_count"] == {"commits": 2, "prs": 2, "issues": 1}
+
+
 def test_rationale_brief_errors_without_evidence(
     temp_git_repo: Path,
     whygraph_db_initialized: Path,
@@ -805,3 +828,213 @@ def test_cached_only_never_generates(
     hit = whygraph_rationale_brief(**args, cached_only=True)
     assert hit["generated"] is False and "purpose" in hit
     assert len(calls) == 1
+
+
+def _add_commit_on_line_two(repo_root: Path) -> None:
+    """Rewrite line 2 of ``sample.py`` in a new, scanned commit."""
+    import subprocess
+
+    (repo_root / "sample.py").write_text("line one\nline two updated\nline three\n")
+    for args in (["add", "sample.py"], ["commit", "-m", "third commit"]):
+        subprocess.run(["git", *args], cwd=repo_root, check=True, capture_output=True)
+    newest = list(Repository(repo_root).commits)[0]
+    with get_session() as session:
+        session.add(_db_commit(newest.sha, committed_at="2026-03-01T00:00:00+00:00"))
+
+
+def _cache_card(
+    line_start: int,
+    line_end: int,
+    purpose: str,
+    *,
+    fingerprint: str | None = None,
+    qualified_name: str | None = None,
+    cached_at: str = "2026-04-01T00:00:00+00:00",
+) -> None:
+    """Store a card for ``sample.py`` under the configured cache key.
+
+    ``fingerprint`` defaults to the current evidence of the range, so the
+    row is fresh.
+    """
+    import json
+
+    from whygraph.core import get_config
+    from whygraph.db.models import RationaleCache
+    from whygraph.mcp.evidence import collect_evidence
+    from whygraph.mcp.rationale_cache import _fingerprint
+    from whygraph.mcp.targets import Target
+
+    if fingerprint is None:
+        target = Target("sample.py", line_start, line_end, None)
+        fingerprint = _fingerprint(collect_evidence(target, limit=20))
+    provider, _model = get_config().cache_identity("rationale")
+    with get_session() as session:
+        session.add(
+            RationaleCache(
+                path="sample.py",
+                line_start=line_start,
+                line_end=line_end,
+                provider=provider,
+                model="default",
+                evidence_fingerprint=fingerprint,
+                cached_at=cached_at,
+                purpose=purpose,
+                why="cached",
+                constraints=json.dumps([]),
+                tradeoffs=json.dumps([]),
+                risks=json.dumps([]),
+                actual_model="fake-1",
+                qualified_name=qualified_name,
+            )
+        )
+
+
+class _NoGenerator(_FakeGenerator):
+    """A generator a cached_only call must never reach."""
+
+    def generate(self, evidence, *, symbol_context=None, subject=None):
+        raise AssertionError("cached_only must not generate")
+
+
+def test_cached_only_exact_hit_is_marked_fresh(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _NoGenerator)
+    _cache_card(1, 3, "fresh")
+
+    hit = whygraph_rationale_brief(
+        path="sample.py", line_start=1, line_end=3, cached_only=True
+    )
+
+    assert (hit["purpose"], hit["match"], hit["stale"]) == ("fresh", "exact", False)
+    assert hit["generated"] is False and "card_range" not in hit
+
+
+def test_cached_only_returns_a_stale_exact_card(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _FakeGenerator)
+    args = {"path": "sample.py", "line_start": 1, "line_end": 3}
+    first = whygraph_rationale_brief(**args)
+    _add_commit_on_line_two(temp_git_repo)
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _NoGenerator)
+
+    card = whygraph_rationale_brief(**args, cached_only=True)
+
+    assert card["purpose"] == first["purpose"]
+    assert card["cached_at"] == first["cached_at"]
+    assert (card["match"], card["stale"], card["generated"]) == ("exact", True, False)
+    assert card["evidence_count"]["commits"] == 3  # the current evidence
+    assert "status" not in card and "card_range" not in card
+
+
+def test_cached_only_hunk_inside_a_cached_range_gets_its_card(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _NoGenerator)
+    _cache_card(1, 3, "the symbol")
+
+    card = whygraph_rationale_brief(
+        path="sample.py", line_start=2, line_end=2, cached_only=True
+    )
+
+    assert card["purpose"] == "the symbol"
+    assert card["match"] == "overlap" and card["stale"] is False
+    assert card["card_range"] == {"line_start": 1, "line_end": 3}
+    assert card["target"]["line_start"] == card["target"]["line_end"] == 2
+    assert card["generated"] is False
+
+
+def test_cached_only_overlap_card_is_stale_after_a_new_commit(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _NoGenerator)
+    _cache_card(1, 3, "before the change")
+    _add_commit_on_line_two(temp_git_repo)
+
+    card = whygraph_rationale_brief(
+        path="sample.py", line_start=2, line_end=3, cached_only=True
+    )
+
+    assert card["purpose"] == "before the change"
+    assert (card["match"], card["stale"]) == ("overlap", True)
+
+
+def test_cached_only_overlap_prefers_the_smallest_containing_range(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlmodel import delete
+
+    from whygraph.db.models import RationaleCache
+
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _NoGenerator)
+    _cache_card(2, 9, "larger, past the end of the file", fingerprint="old")
+    _cache_card(1, 3, "smallest containing")
+    _cache_card(3, 3, "overlaps only")
+    args = {"path": "sample.py", "line_start": 2, "line_end": 3, "cached_only": True}
+
+    best = whygraph_rationale_brief(**args)
+    assert best["purpose"] == "smallest containing"
+    assert best["card_range"] == {"line_start": 1, "line_end": 3}
+
+    with get_session() as session:
+        session.exec(delete(RationaleCache).where(RationaleCache.line_start == 1))
+    # Containing beats a mere overlap, even when the range no longer blames.
+    larger = whygraph_rationale_brief(**args)
+    assert larger["purpose"] == "larger, past the end of the file"
+    assert larger["stale"] is True
+
+
+def test_cached_only_without_an_overlapping_card_is_not_cached(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _NoGenerator)
+    _cache_card(1, 1, "line one only")
+
+    miss = whygraph_rationale_brief(
+        path="sample.py", line_start=2, line_end=3, cached_only=True
+    )
+
+    assert set(miss) == {"status", "target"} and miss["status"] == "not_cached"
+
+
+def test_a_generating_call_still_regenerates_a_stale_card(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _FakeGenerator)
+    _cache_card(1, 3, "stale", fingerprint="old")
+    _cache_card(1, 9, "overlapping", fingerprint="old")
+
+    card = whygraph_rationale_brief(path="sample.py", line_start=1, line_end=3)
+
+    assert card["generated"] is True
+    assert card["purpose"] == "Holds two sample lines."
+    assert "match" not in card and "stale" not in card

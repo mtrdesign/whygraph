@@ -715,25 +715,43 @@ def test_evidence_for_full_groups_prose_under_text_and_caps_it(
         path="sample.py", line_start=1, line_end=3, detail="full"
     )
 
+    assert set(result) == {
+        "target",
+        "evidence",
+        "describing",
+        "pull_requests",
+        "issues",
+    }
     by_sha = {item["sha"]: item for item in result["evidence"]}
     item = by_sha[newest]
     assert item["text"] == {"body": ""}
-    pr = item["pull_requests"][0]
-    assert pr["resource"] == "whygraph://pr/5"
+    # The item carries only the link refs, the same as compact.
+    assert item["pull_requests"] == [
+        {
+            "number": 5,
+            "title": "A pull request",
+            "html_url": "https://example.com/pr/5",
+            "resource": "whygraph://pr/5",
+        }
+    ]
+    assert item["issues"][0]["resource"] == "whygraph://issue/9"
+    assert "text" not in item["issues"][0]
+    # The prose lives once, in the top-level maps keyed by number.
+    pr = result["pull_requests"]["5"]
     assert pr["text"]["body"] == "PR body."
     comments = pr["text"]["comments"]
     assert len(comments) == 20  # pr_discussion_max_comments
     assert comments[0]["body"] == "x" * 500 + "..."  # pr_comment_max_chars
     assert comments[1] == {"author": "bob", "body": "c0", "created_at": "t"}
     assert len(pr["commit_titles"]) == 30  # pr_roster_max_commits
-    assert pr["omitted"] == {"comments": 2, "commit_titles": 1}
-    assert item["issues"][0]["text"] == {"body": "Issue body."}
+    assert pr["omitted"] == {"comments": 2, "commit_titles": 1, "body_chars": 0}
+    assert result["issues"] == {"9": {"text": {"body": "Issue body."}}}
     # A commit with no PR has nothing to omit.
     assert by_sha[oldest]["pull_requests"] == []
 
 
 def test_full_pr_without_clipping_carries_no_omitted() -> None:
-    from whygraph.mcp.evidence import _evidence_dict, shape_evidence_item
+    from whygraph.mcp.evidence import _evidence_dict, shape_evidence
     from whygraph.analyze import CommitEvidence
 
     commit = _db_commit("abc", committed_at="2026-01-01T00:00:00+00:00")
@@ -741,11 +759,100 @@ def test_full_pr_without_clipping_carries_no_omitted() -> None:
     pr.comments = '[{"author": "a", "body": "ok", "created_at": "t"}]'
     item = _evidence_dict(CommitEvidence(commit=commit, pull_requests=(pr,)))
 
-    shaped = shape_evidence_item(item, "full")
+    shaped = shape_evidence([item], "full")
 
-    assert "omitted" not in shaped["pull_requests"][0]
-    assert shaped["pull_requests"][0]["text"]["comments"][0]["body"] == "ok"
-    assert shaped["lines"] is None  # no lines on the input: null, not missing
+    assert "omitted" not in shaped["pull_requests"]["1"]
+    assert shaped["pull_requests"]["1"]["text"]["comments"][0]["body"] == "ok"
+    assert shaped["evidence"][0]["lines"] is None  # no lines: null, not missing
+
+
+def test_full_emits_a_shared_pr_once_and_both_items_point_at_it(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    newest, oldest = list(Repository(temp_git_repo).commits)
+    pr = _db_pr(number=5, merge_commit_sha=newest.sha)
+    pr.commit_titles = json.dumps(
+        [
+            {"oid": oldest.sha, "headline": "first", "author_name": "J"},
+            {"oid": newest.sha, "headline": "second", "author_name": "J"},
+        ]
+    )
+    pr.body = "The one PR body."
+    with get_session() as session:
+        session.add(_db_commit(oldest.sha, committed_at="2026-01-01T00:00:00+00:00"))
+        session.add(_db_commit(newest.sha, committed_at="2026-02-01T00:00:00+00:00"))
+        session.add(pr)
+        session.add(_db_issue(number=9))
+        session.add(PRIssueLink(pr_number=5, issue_number=9, link_kind="closes"))
+    monkeypatch.chdir(temp_git_repo)
+
+    result = whygraph_evidence_for(
+        path="sample.py", line_start=1, line_end=3, detail="full"
+    )
+
+    assert len(result["evidence"]) == 2
+    for item in result["evidence"]:
+        assert [p["resource"] for p in item["pull_requests"]] == ["whygraph://pr/5"]
+        assert [i["resource"] for i in item["issues"]] == ["whygraph://issue/9"]
+    assert list(result["pull_requests"]) == ["5"]
+    assert list(result["issues"]) == ["9"]
+    blob = json.dumps(result)
+    assert blob.count("The one PR body.") == 1
+    assert blob.count("Issue body.") == 1
+    assert blob.count('"headline": "first"') == 1
+
+
+def test_full_caps_pr_and_issue_bodies() -> None:
+    from whygraph.analyze import CommitEvidence
+    from whygraph.mcp.evidence import (
+        PROSE_BODY_MAX_CHARS,
+        _evidence_dict,
+        shape_evidence,
+    )
+
+    commit = _db_commit("abc", committed_at="2026-01-01T00:00:00+00:00")
+    commit.body = "c" * (PROSE_BODY_MAX_CHARS + 10)
+    pr = _db_pr(number=1, merge_commit_sha="abc")
+    pr.body = "p" * (PROSE_BODY_MAX_CHARS + 7)
+    issue = _db_issue(number=2)
+    issue.body = "i" * (PROSE_BODY_MAX_CHARS + 3)
+    item = _evidence_dict(
+        CommitEvidence(commit=commit, pull_requests=(pr,), issues=(issue,))
+    )
+
+    shaped = shape_evidence([item], "full")
+
+    pr_out = shaped["pull_requests"]["1"]
+    assert pr_out["text"]["body"] == "p" * PROSE_BODY_MAX_CHARS + "..."
+    assert pr_out["omitted"] == {"comments": 0, "commit_titles": 0, "body_chars": 7}
+    issue_out = shaped["issues"]["2"]
+    assert issue_out["text"]["body"] == "i" * PROSE_BODY_MAX_CHARS + "..."
+    assert issue_out["omitted"] == {"body_chars": 3}
+    # The commit body is unique per item and stays whole.
+    assert shaped["evidence"][0]["text"]["body"] == commit.body
+
+
+def test_full_keeps_the_first_entry_for_a_repeated_number() -> None:
+    from whygraph.mcp.evidence import shape_evidence
+
+    first = {"commit": {"sha": "a"}, "pull_requests": [{"number": 3, "body": "one"}]}
+    second = {"commit": {"sha": "b"}, "pull_requests": [{"number": 3, "body": "two"}]}
+
+    shaped = shape_evidence([first, second], "full")
+
+    assert shaped["pull_requests"]["3"]["text"]["body"] == "one"
+
+
+def test_compact_shape_evidence_adds_no_maps() -> None:
+    from whygraph.mcp.evidence import shape_evidence
+
+    item = {"commit": {"sha": "a"}, "pull_requests": [{"number": 3, "body": "x"}]}
+
+    assert set(shape_evidence([item])) == {"evidence"}
 
 
 def test_the_evidence_tools_default_to_ten_items() -> None:

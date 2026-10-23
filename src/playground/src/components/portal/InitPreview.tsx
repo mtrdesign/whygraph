@@ -9,12 +9,17 @@ import { Checkbox } from "../ui/checkbox";
 import { CopyButton } from "./CopyButton";
 
 // Soft badges only (§4.2): "Create" in the brand tint, never the solid primary.
-const STATUS: Record<FileStatus, { label: string; variant: "brand" | "secondary" | "outline" | "destructive" }> = {
+const STATUS: Record<
+  FileStatus,
+  { label: string; variant: "brand" | "secondary" | "outline" | "destructive" | "warning" }
+> = {
   write: { label: "Create", variant: "brand" },
   overwrite: { label: "Update", variant: "secondary" },
   skip: { label: "Up to date", variant: "outline" },
   refused: { label: "Paste manually", variant: "destructive" },
   needs_confirmation: { label: "Committed file", variant: "secondary" },
+  // An asset file WhyGraph no longer ships (e.g. Cursor's old commands).
+  delete: { label: "Remove", variant: "warning" },
 };
 
 export function StatusBadge({ status }: { status: FileStatus }) {
@@ -131,12 +136,13 @@ function AssetSummary({ files }: { files: FileOutcome[] }) {
     [count("write"), "to create"],
     [count("overwrite"), "to update"],
     [count("skip"), "already there"],
+    [count("delete"), "to remove"],
     [count("needs_confirmation"), "edited by you"],
   ]
     .filter(([n]) => (n as number) > 0)
     .map(([n, l]) => `${n} ${l}`);
   return (
-    <details className="py-3" open={count("needs_confirmation") > 0 || undefined}>
+    <details className="py-3" open={count("needs_confirmation") + count("delete") > 0 || undefined}>
       <summary className="cursor-pointer text-sm">
         Agent assets <span className="text-muted-foreground">({parts.join(", ")})</span>
       </summary>
@@ -156,7 +162,9 @@ function AssetSummary({ files }: { files: FileOutcome[] }) {
             {f.status === "needs_confirmation" && (
               <details className="pl-2">
                 <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
-                  Left as is: you edited it and this version's copy differs. Show the difference
+                  {f.reason && /no longer shipped/.test(f.reason)
+                    ? "Left as is: WhyGraph no longer ships it, but you edited it. Show what removing it deletes"
+                    : "Left as is: you edited it and this version's copy differs. Show the difference"}
                 </summary>
                 {f.diff && (
                   <div className="mt-1.5">

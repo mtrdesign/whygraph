@@ -43,8 +43,9 @@ prefer the portal's `codegraph_*` tools over grep, and not to run the `codegraph
 
 The portal records what it installed in `.whygraph/assets.json` (gitignored with the rest of
 `.whygraph/`): the WhyGraph version and a hash of every file it wrote, and, for the block in a shared
-file such as `AGENTS.md`, of the text between the markers. **Update agent files** in the project's
-Settings (and re-initializing) uses it per file:
+file such as `AGENTS.md`, of the text between the markers. A manifest committed to git is ignored, as
+if there were none (a repository must not be able to name its own files as WhyGraph's). **Update agent
+files** in the project's Settings (and re-initializing) uses it per file:
 
 | The file on disk | Result |
 |---|---|
@@ -53,8 +54,14 @@ Settings (and re-initializing) uses it per file:
 | You edited it, and this version's copy is the same as the one you started from | Left alone |
 | You edited it, and this version's copy changed | Left alone and listed as **Edited**, with the difference |
 | Installed before the manifest existed (a teammate's checkout, an older release) | Treated as edited |
+| No longer shipped by WhyGraph, and still the way WhyGraph wrote it | Removed (listed as **Remove**), with its folder when that is left empty |
+| No longer shipped by WhyGraph, and you edited it | Left alone and listed as **Edited**, with what removing it would delete |
 
-Tick **Overwrite my edits too** (shown only when edited files are listed) to replace those as well.
+Tick **Overwrite my edits too** (shown only when edited files are listed) to replace those as well, and
+to remove the edited files WhyGraph no longer ships. A file WhyGraph no longer ships is recognized from
+the manifest, or, for a project initialized before the manifest existed, from the exact content of
+every release that shipped it (Cursor's old `.cursor/commands/` files, for example). A symbolic link
+is never followed or removed.
 Settings shows `Agent files: v<installed> (current v<package>)` with an **Update** button when the
 recorded version is behind, and the project's Overview lists "Agent files are out of date" the same way.
 Removing an agent deletes only its MCP entry; the installed files and the manifest stay as they are.
@@ -137,10 +144,12 @@ symbol's rationale card, and reports exactly one verdict - **Constraint at risk*
   without one reports **No rationale**. `--generate` lets WhyGraph generate the missing cards, one LLM
   call each, charged to the project's [budget](usage.md); a `budget_exceeded` refusal stops further
   generation for the rest of the review.
-- **A card matches exact lines.** A card is cached for a symbol's line range and the commits blamed on
-  it. An edit that changes the symbol's length, or a commit that lands on its lines, means the earlier
-  card no longer matches, so that hunk reports **No rationale** until a card is made for the code as it
-  stands (`--generate`, or the next `/rationale` or `/whygraph-plan` that reaches it).
+- **Cards survive moved and changed code.** A card is cached for a symbol's line range and the commits
+  blamed on it. When the symbol has moved or changed length, the review still reads the card cached for
+  an overlapping range of the same file, and when commits have landed on its lines since, it reads the
+  earlier card and says so: that card is the rationale from before the change, which is what a review
+  checks against. A hunk reports **No rationale** only when no cached card overlaps its symbol (see
+  [Cached-only lookups](../reference/mcp.md#cached-only-lookups)).
 - **Linked projects.** On a checkout [linked to a platform](platform-projects.md) the platform serves the
   cards and does not honour `cached_only`, so without `--generate` the reviewer does not ask for cards
   at all: every hunk with a symbol reports **No rationale** and confidence is `low`. The one evidence

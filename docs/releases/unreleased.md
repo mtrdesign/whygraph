@@ -30,9 +30,20 @@ fixes and additions.
       commit bodies or comments); pass `detail="full"` for the prose. The default `limit` is 10, and a
       call describes at most 5 missing commit descriptions within 20 seconds (`describe=false` skips
       the LLM).
+    - With `detail="full"`, pull request and issue prose comes **once per result**, in top-level
+      `pull_requests` / `issues` maps keyed by number, instead of on every commit of the same pull
+      request; the items keep the compact refs. Pull request and issue bodies are cut at 4000
+      characters (counted in `omitted.body_chars`).
+    - `whygraph_rationale_brief`'s `evidence_count` counts each pull request and issue once, not
+      once per commit that links it.
     - `whygraph_rationale_brief` gains `force_refresh` and `cached_only` (a miss returns `not_cached`
       at no cost), reports progress, and cites the top five commits with their PR and issue links.
       **`cached_only` is not honoured by linked projects**: their cards come from the platform.
+    - A `cached_only` rationale call is looser than a generating one: it returns a card whose lines got
+      new commits since (`stale: true`) or the card of an overlapping range of the same file
+      (`match: "overlap"`, `card_range`), so `/whygraph-review` finds the card of a symbol that moved or
+      changed instead of reporting no rationale. See
+      [Cached-only lookups](../reference/mcp.md#cached-only-lookups).
     - Errors read `[WhyGraph] ... (code: ..., scope: ...)` with a documented
       [code table](../reference/mcp.md#errors), every tool declares an output schema, and tools carry
       annotations and titles.
@@ -42,17 +53,22 @@ fixes and additions.
   a failed researcher no longer stops the run, `verification` replaces the `impact` research lens, and
   `/whygraph-implement` takes `--fix-attempts N`.
 - **Cursor commands are now skills.** `/rationale`, `/whygraph-plan` and `/whygraph-implement` install
-  under `.cursor/skills/`. A project initialized earlier keeps its old `.cursor/commands/` files; delete
-  them by hand if you do not want duplicates.
+  under `.cursor/skills/`. A project initialized earlier has old `.cursor/commands/` files: **Update
+  agent files** removes them (it asks first if you edited one).
+- **Update agent files removes what WhyGraph no longer ships.** A bundled file that a newer version
+  dropped or renamed is removed when you have not edited it, and listed as **Edited** (removed only with
+  **Overwrite my edits too**) when you have. See
+  [Keeping the agent files up to date](../portal/agents.md#agent-files-upgrade).
 
 ## Upgrade path
 
 1. Re-run the installer and `whygraph up` as usual.
 2. **Open each project's Settings > Agents and use Update agent files, once per project.** It adds the
    `codegraph` entry and refreshes the bundled assets. The portal now records a hash of every file it
-   installed in `.whygraph/assets.json`, so files you have not edited update silently and edited ones are
-   listed with a diff; a project initialized before the manifest existed asks about each file once. Tick
-   **Overwrite my edits too** to replace edited files as well.
+   installed in `.whygraph/assets.json`, so files you have not edited update silently (or are removed,
+   such as Cursor's old `.cursor/commands/`) and edited ones are listed with a diff; a project
+   initialized before the manifest existed asks about each file once. Tick **Overwrite my edits too**
+   to replace edited files as well.
 3. In Claude Code, approve the new `codegraph` server when asked.
 4. If you installed CodeGraph on your host, remove it with `codegraph uninstall --keep-cli`. See
    [If you installed CodeGraph yourself](../portal/agents.md#own-codegraph).

@@ -49,11 +49,12 @@ ARG NODE_MAJOR=22
 #   git            — every WhyGraph command crawls git history
 #   ca-certificates, curl, gnupg — fetch the gh + NodeSource apt repos
 #   libgomp1       — OpenMP runtime required by scikit-learn at import time
+#   procps         — `ps`, which the portal's CodeGraph orphan sweep reads
 # Then the GitHub CLI (apt repo) and Node (NodeSource) + the CodeGraph CLI.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        git ca-certificates curl gnupg libgomp1; \
+        git ca-certificates curl gnupg libgomp1 procps; \
     # GitHub CLI
     mkdir -p -m 755 /etc/apt/keyrings; \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \

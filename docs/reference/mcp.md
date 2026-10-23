@@ -40,7 +40,8 @@ anchored to HEAD.
 | `detail` | `"compact"` \| `"full"` | `"compact"` | How much of each item to return - see [Evidence items](#evidence-items). |
 | `describe` | bool | `true` | Generate missing commit descriptions (bounded, see below). `false` never calls an LLM. |
 
-Returns `{ "target": {...}, "evidence": [ ... ], "describing": 0 }`, newest first. The items are
+Returns `{ "target": {...}, "evidence": [ ... ], "describing": 0 }`, newest first (plus the
+`pull_requests` / `issues` maps with `detail="full"`). The items are
 described under [Evidence items](#evidence-items); `lines` is a list of `[start, end]` working-tree
 ranges the commit owns within the queried range, set on `blame` items and `null` otherwise.
 
@@ -85,10 +86,37 @@ undescribed commit).
 Read a PR or issue in full through its `resource` (see [Resources](#resources)).
 
 **`detail="full"`** adds the prose, grouped under `text` because it is repository and GitHub content,
-never instructions: `text.body` on the commit and on each issue, and on each pull request
-`text.body`, `text.comments` (the first `[rationale].pr_discussion_max_comments`, each cut to
-`pr_comment_max_chars`) and `commit_titles` (the first `pr_roster_max_commits`). A pull request whose
-lists were cut carries `"omitted": { "comments": n, "commit_titles": m }`.
+never instructions. Each item gains its commit's `text.body`; its `pull_requests` and `issues` stay
+the same compact refs. The pull request and issue prose comes once per result, in two top-level maps
+keyed by number (as a string), however many commits link the same pull request:
+
+```json
+{
+  "target": { "...": "..." },
+  "evidence": [
+    { "sha": "4f1c...", "...": "...", "pull_requests": [{ "number": 847, "...": "..." }], "issues": [{ "number": 812, "...": "..." }], "text": { "body": "..." } },
+    { "sha": "9a2e...", "...": "...", "pull_requests": [{ "number": 847, "...": "..." }], "issues": [{ "number": 812, "...": "..." }], "text": { "body": "..." } }
+  ],
+  "describing": 0,
+  "pull_requests": {
+    "847": {
+      "text": { "body": "...", "comments": [{ "author": "jane", "body": "...", "created_at": "..." }] },
+      "commit_titles": [{ "oid": "4f1c...", "headline": "fix: retry refresh", "author_name": "Jane Doe" }],
+      "omitted": { "comments": 3, "commit_titles": 0, "body_chars": 0 }
+    }
+  },
+  "issues": {
+    "812": { "text": { "body": "..." } }
+  }
+}
+```
+
+A pull request entry holds `text.body`, `text.comments` (the first
+`[rationale].pr_discussion_max_comments`, each cut to `pr_comment_max_chars`) and `commit_titles`
+(the first `pr_roster_max_commits`); an issue entry holds `text.body`. Pull request and issue bodies
+are cut at **4000** characters (marked with `...`); commit bodies are not cut. An entry that lost
+anything carries `omitted`: on a pull request `{ "comments": n, "commit_titles": m, "body_chars": k }`,
+on an issue `{ "body_chars": k }`.
 
 `source` says how the commit was found: `blame`, `pr-origin`, `blame-walked`, `predecessor-blame` or
 `area`. A [linked project](#linked-projects) may add `push_status`.
@@ -107,7 +135,8 @@ fully rewritten.
 | `detail` | `"compact"` \| `"full"` | `"compact"` | As for `whygraph_evidence_for`. |
 | `describe` | bool | `true` | As for `whygraph_evidence_for`, with the same bound. |
 
-Returns `{ "path", "include_renames", "evidence": [...], "describing": 0 }`, using the
+Returns `{ "path", "include_renames", "evidence": [...], "describing": 0 }` (plus the
+`pull_requests` / `issues` maps with `detail="full"`), using the
 [evidence item](#evidence-items) shape (`lines` is always `null`: these commits are not found by
 blame).
 
@@ -126,7 +155,7 @@ switching `[rationale].provider` or `model` regenerates rather than returning th
 | `line_end` | int | Last line of the chunk. |
 | `qualified_name` | str | Fully-qualified symbol name, instead of `path`/lines. |
 | `force_refresh` | bool (default `false`) | Skip the cache and generate a new card (still stored; the same permission and budget checks apply). |
-| `cached_only` | bool (default `false`) | On a cache miss return `{ "status": "not_cached", "target": {...} }` at once: no generation, no description backfill, no LLM spend. Use it to read what is already known. Has no effect with `force_refresh`, nor on a [linked](#linked-projects) project, whose card the platform serves. |
+| `cached_only` | bool (default `false`) | Never generate: no generation, no description backfill, no LLM spend. Use it to read what is already known. It is looser than a normal lookup: it also returns a card whose lines changed since it was written, or the card of an overlapping range, and `{ "status": "not_cached", "target": {...} }` only when there is none (see [Cached-only lookups](#cached-only-lookups)). Has no effect with `force_refresh`, nor on a [linked](#linked-projects) project, whose card the platform serves. |
 
 Returns the card:
 
@@ -159,6 +188,32 @@ plus provenance (`model`, `provider`, `cached_at`) and an `evidence_count` summa
 the top five commits (newest first) with their PR and issue links, so you can name "PR #847" without
 an evidence call; it is derived on each call, not stored with the card. `generated` is `true` when
 this call paid for the card and `false` when it was read from the cache.
+
+#### Cached-only lookups { #cached-only-lookups }
+
+A `cached_only` call is meant for reading what is already known, such as a review of a branch whose
+symbols have moved or gained commits, so it accepts cards a generating call would replace. In order:
+
+1. The card cached for exactly this range, with unchanged evidence.
+2. The card cached for exactly this range whose lines got new commits since it was written: it is
+   returned with `stale: true` instead of being regenerated.
+3. Otherwise, the best card of the same file (same provider and model) whose range overlaps the
+   requested one: first a card for the same `qualified_name`, then the smallest range that contains
+   the request, then the longest overlap, the newest on a tie. `stale` compares the card's own range
+   with its current evidence.
+4. Otherwise `{ "status": "not_cached", "target": {...} }`.
+
+Every card a `cached_only` call returns carries two more keys, and an overlap a third:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `match` | `"exact"` or `"overlap"` | Whether the card was cached for the requested range or for an overlapping one. |
+| `stale` | bool | `true` when the card's lines got new commits since it was written: it is the rationale from before that change. |
+| `card_range` | `{ "line_start", "line_end" }` | With `match: "overlap"` only: the range the card was written for. `target` stays the requested range. |
+
+`generated` is always `false`. For an overlap card, `evidence_count` and `evidence` describe the
+card's own range. A call without `cached_only` never returns these keys, and treats a stale or
+overlapping card as a miss.
 
 !!! note "Calls the LLM on a cache miss"
     On a miss, this hits the configured provider and may take several seconds. A hit is sub-second.

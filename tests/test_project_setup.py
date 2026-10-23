@@ -9,6 +9,7 @@ git-tracked check, detection, removal and the portal markers.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import tomllib
@@ -17,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from whygraph import agents, assets, project_setup
+from whygraph.core.safe_paths import UnsafePathError
 from whygraph.hooks import HOOK_NAMES, SENTINEL
 from whygraph.project_setup import (
     HttpMcp,
@@ -1124,3 +1126,95 @@ def test_removing_an_agent_leaves_the_manifest_alone(repo: Path) -> None:
 
     assert manifest_path.read_text() == before
     assert (repo / ".claude" / "agents" / "planner.md").exists()
+
+
+# ---- retired assets (files WhyGraph no longer ships) ------------------------
+
+
+def _old_cursor_command(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, content: str = "OLD COMMAND"
+) -> Path:
+    """Seed a pre-manifest ``.cursor/commands/rationale.md`` known as ``OLD COMMAND``."""
+    monkeypatch.setitem(
+        assets.RETIRED_ASSETS,
+        "cursor",
+        {
+            "commands/rationale.md": frozenset(
+                {hashlib.sha256(b"OLD COMMAND").hexdigest()}
+            )
+        },
+    )
+    old = repo / ".cursor" / "commands" / "rationale.md"
+    old.parent.mkdir(parents=True)
+    old.write_text(content)
+    return old
+
+
+def test_unedited_retired_asset_is_a_delete_outcome(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = _old_cursor_command(repo, monkeypatch)
+    kw = dict(agents=["cursor"], contained=True)
+
+    preview = _init(repo, dry_run=True, **kw)
+    outcome = next(
+        f for f in preview.asset_files if f.file == ".cursor/commands/rationale.md"
+    )
+    assert outcome.status == "delete" and outcome.agent == "cursor"
+    assert outcome.reason == "no longer shipped by WhyGraph"
+    assert "-OLD COMMAND" in (outcome.diff or "")
+    assert old.exists()
+
+    real = _init(repo, **kw)
+    assert _status(real, ".cursor/commands/rationale.md") == "delete"
+    assert not (repo / ".cursor" / "commands").exists()
+    assert (repo / ".cursor" / "skills" / "rationale" / "SKILL.md").is_file()
+
+
+def test_edited_retired_asset_asks_then_force_deletes(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = _old_cursor_command(repo, monkeypatch, content="MY COMMAND")
+
+    asked = _init(repo, agents=["cursor"], contained=True)
+    outcome = next(
+        f for f in asked.asset_files if f.file == ".cursor/commands/rationale.md"
+    )
+    assert outcome.status == "needs_confirmation"
+    assert "no longer shipped" in (outcome.reason or "")
+    assert "edited" in (outcome.reason or "")
+    assert "-MY COMMAND" in (outcome.diff or "")
+    assert old.read_text() == "MY COMMAND"
+
+    forced = _init(repo, agents=["cursor"], contained=True, force=True)
+    assert _status(forced, ".cursor/commands/rationale.md") == "delete"
+    assert not old.exists()
+
+
+def test_retired_asset_path_goes_through_check_inside(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(
+        assets.RETIRED_ASSETS,
+        "cursor",
+        {"commands/rationale.md": frozenset({"0" * 64})},
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "rationale.md").write_text("NOT YOURS")
+    (repo / ".cursor").mkdir()
+    (repo / ".cursor" / "commands").symlink_to(outside)
+
+    with pytest.raises(UnsafePathError):
+        _init(repo, agents=["cursor"], contained=True, force=True)
+    assert (outside / "rationale.md").read_text() == "NOT YOURS"
+
+
+def test_removing_an_agent_leaves_retired_asset_files(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = _old_cursor_command(repo, monkeypatch)
+
+    _init(repo, agents=[], agent_actions={"cursor": "remove"})
+
+    assert old.read_text() == "OLD COMMAND"

@@ -66,8 +66,9 @@ fixes and additions.
 2. **Open each project's Settings > Agents and use Update agent files, once per project.** It adds the
    `codegraph` entry and refreshes the bundled assets. The portal now records a hash of every file it
    installed in `.whygraph/assets.json`, so files you have not edited update silently (or are removed,
-   such as Cursor's old `.cursor/commands/`) and edited ones are listed with a diff; a project initialized before the manifest existed asks about each file once. Tick
-   **Overwrite my edits too** to replace edited files as well.
+   such as Cursor's old `.cursor/commands/`) and edited ones are listed with a diff; a project
+   initialized before the manifest existed asks about each file once. Tick **Overwrite my edits too**
+   to replace edited files as well.
 3. In Claude Code, approve the new `codegraph` server when asked.
 4. If you installed CodeGraph on your host, remove it with `codegraph uninstall --keep-cli`. See
    [If you installed CodeGraph yourself](../portal/agents.md#own-codegraph).

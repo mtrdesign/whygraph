@@ -857,8 +857,9 @@ def test_a_timeout_kills_the_forked_grandchild(
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     _make_existing_db(tmp_path)
 
+    # 3 s, not 1: a loaded machine must still get to fork and write the pid.
     with pytest.raises(CodeGraphBootstrapError, match="did not finish"):
-        refresh_codegraph_index(tmp_path, allow_rebuild=False, timeout=1)
+        refresh_codegraph_index(tmp_path, allow_rebuild=False, timeout=3)
 
     pid = int(pid_file.read_text())
     deadline = time.monotonic() + 5

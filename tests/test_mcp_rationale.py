@@ -100,6 +100,29 @@ def test_rationale_brief_returns_card(
     assert result["target"]["path"] == "sample.py"
 
 
+def test_evidence_count_counts_each_pr_and_issue_once() -> None:
+    """Two commits of one PR closing one issue: one PR, one issue."""
+    from types import SimpleNamespace
+
+    from whygraph.mcp.rationale import _format_response
+    from whygraph.mcp.targets import Target
+
+    pr, issue = SimpleNamespace(number=5), SimpleNamespace(number=9)
+    other_pr = SimpleNamespace(number=6)
+    evidence = [
+        SimpleNamespace(pull_requests=(pr,), issues=(issue,)),
+        SimpleNamespace(pull_requests=(pr, other_pr), issues=(issue,)),
+    ]
+    card = _format_response(
+        Target(path="sample.py", line_start=1, line_end=3, qualified_name=None),
+        _FakeGenerator().generate([]),
+        evidence,
+        "2026-01-01T00:00:00+00:00",
+    )
+
+    assert card["evidence_count"] == {"commits": 2, "prs": 2, "issues": 1}
+
+
 def test_rationale_brief_errors_without_evidence(
     temp_git_repo: Path,
     whygraph_db_initialized: Path,

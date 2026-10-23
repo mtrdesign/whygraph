@@ -317,8 +317,8 @@ export function InitializeStep({
                 Update agent files
                 <span className="block text-xs text-muted-foreground">
                   Bring the instruction files WhyGraph installed for the selected agents up to this
-                  version. Files you have not edited update silently; edited ones are listed below and
-                  left as they are.
+                  version. Files you have not edited update silently (or are removed, when WhyGraph no
+                  longer ships them); edited ones are listed below and left as they are.
                 </span>
               </span>
             </label>

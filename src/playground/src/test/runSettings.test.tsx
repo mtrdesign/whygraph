@@ -1031,6 +1031,30 @@ describe("Project settings (screen 10)", () => {
     expect(applied.body?.force).toBeUndefined();
   });
 
+  it("Update agent files previews the files WhyGraph no longer ships as Remove", async () => {
+    const retired = {
+      file: ".cursor/commands/rationale.md",
+      status: "delete",
+      agent: "cursor",
+      reason: "no longer shipped by WhyGraph",
+      snippet: null,
+      diff: "--- a/.cursor/commands/rationale.md\n+++ b/.cursor/commands/rationale.md\n-OLD\n",
+    };
+    const base = handlers["POST /api/projects/alpha/init"];
+    handlers["POST /api/projects/alpha/init"] = (body, url) => ({
+      ...(base(body, url) as Json),
+      asset_files: [retired],
+    });
+    const user = userEvent.setup();
+    mount("/p/alpha/settings");
+    await user.click(await screen.findByRole("checkbox", { name: /Update agent files/ }));
+    const row = await screen.findByTestId("asset-.cursor/commands/rationale.md");
+    expect(within(row).getByText("Remove")).toHaveAttribute("data-status", "delete");
+    expect(screen.getByText(/1 to remove/)).toBeInTheDocument();
+    // Nothing edited: no "Overwrite my edits too" is offered for a plain removal.
+    expect(screen.queryByRole("checkbox", { name: /Overwrite my edits too/ })).toBeNull();
+  });
+
   it("unticking a configured agent removes its entry; ticking another adds it", async () => {
     const user = userEvent.setup();
     mount("/p/alpha/settings");

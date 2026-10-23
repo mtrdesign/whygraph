@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DetectedAgent, Detected, FileOutcome, InitResult } from "../api";
 import { AgentPicker } from "../components/portal/AgentPicker";
 import { DetectedPanel } from "../components/portal/DetectedPanel";
-import { InitPreview } from "../components/portal/InitPreview";
+import { InitPreview, StatusBadge } from "../components/portal/InitPreview";
 import { NotSharedAlert } from "../components/portal/NotSharedAlert";
 import { EstimateBody } from "../components/portal/ScanEstimateCard";
 import { ScanProgress } from "../components/portal/ScanProgress";
@@ -130,6 +130,11 @@ describe("InitPreview", () => {
     expect(within(row(".codex/config.toml")).queryByText("already up to date")).toBeNull();
   });
 
+  it("renders the Remove badge for a delete status", () => {
+    render(<StatusBadge status="delete" />);
+    expect(screen.getByText("Remove")).toHaveAttribute("data-status", "delete");
+  });
+
   it("shows a refused file with a copyable snippet and never a confirm box", async () => {
     const user = userEvent.setup();
     const snippet = '{\n  "servers": { "whygraph": { "type": "http" } }\n}';
@@ -242,6 +247,42 @@ describe("InitPreview", () => {
     expect(screen.getByText(/1 edited by you/)).toBeInTheDocument();
     expect(screen.getByTestId("asset-.claude/agents/a.md")).toHaveTextContent("Edited");
     expect(screen.getByTestId("diff")).toHaveTextContent("+THEIRS");
+  });
+
+  it("counts and lists asset files WhyGraph no longer ships as Remove", () => {
+    render(
+      <InitPreview
+        result={result(
+          [],
+          [
+            file({ file: ".cursor/skills/rationale/SKILL.md", status: "write", agent: "cursor" }),
+            file({
+              file: ".cursor/commands/rationale.md",
+              status: "delete",
+              agent: "cursor",
+              reason: "no longer shipped by WhyGraph",
+              diff: "--- a/.cursor/commands/rationale.md\n+++ b/.cursor/commands/rationale.md\n-OLD\n",
+            }),
+            file({
+              file: ".cursor/commands/whygraph-plan.md",
+              status: "needs_confirmation",
+              agent: "cursor",
+              reason: "no longer shipped by WhyGraph, and edited since it was installed",
+              diff: "--- a/x\n+++ b/x\n-MINE\n",
+            }),
+          ],
+        )}
+        selectedAgents={["cursor"]}
+        confirmed={new Set()}
+        onConfirmChange={noop}
+      />,
+    );
+    expect(screen.getByText(/1 to create, 1 to remove, 1 edited by you/)).toBeInTheDocument();
+    const removed = screen.getByTestId("asset-.cursor/commands/rationale.md");
+    expect(within(removed).getByText("Remove")).toHaveAttribute("data-status", "delete");
+    const edited = screen.getByTestId("asset-.cursor/commands/whygraph-plan.md");
+    expect(edited).toHaveTextContent("Edited");
+    expect(edited).toHaveTextContent("WhyGraph no longer ships it, but you edited it");
   });
 });
 

@@ -109,6 +109,8 @@ check "whygraph-mcp is a removal stub (exit 2)" test "$mcp_rc" -eq 2
 want_version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$(dirname -- "$0")/../pyproject.toml" | head -1)
 check "image reports the pyproject version ($want_version)" \
     sh -c "docker run --rm '$IMAGE' whygraph version | grep -q -- '$want_version'"
+check "image ships ps (the CodeGraph orphan sweep reads it)" \
+    docker run --rm "$IMAGE" sh -c 'command -v ps >/dev/null'
 
 echo "== demo repo"
 R="$S/share/demo"

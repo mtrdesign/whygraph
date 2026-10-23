@@ -9,7 +9,7 @@ follows.
 Evidence is the factual record: the commits that touched a chunk of code, the blame behind each line,
 the pull requests that merged it, the issues those PRs closed, the **person** who wrote each commit,
 and whether that commit is [shipped history or work in
-progress](scanning.md#how-whygraph-sees-branches). WhyGraph collects it during [`scan`](scanning.md)
+progress](scanning.md#how-whygraph-sees-branches). WhyGraph collects it during a [scan](scanning.md)
 and links it together, so one lookup returns the whole chain.
 
 You reach evidence two ways, because there are two questions to ask:
@@ -36,7 +36,7 @@ heuristic**. In order of authority:
    statement of intent rather than an inference, so it wins, and it also decides the display name.
 2. **GitHub's own author triples** - login, name, and email asserted together by GitHub.
 3. **The GitHub noreply address** - `12345+login@users.noreply.github.com` deterministically yields
-   `login`. Pure string work, so it still resolves identities on a `--no-remote` scan.
+   `login`. Pure string work, so it still resolves identities on a Quick rescan.
 4. **Byte-equal emails** - the same address is the same person by construction.
 
 What it refuses to do matters as much. It never merges on display name, never fuzzy-matches

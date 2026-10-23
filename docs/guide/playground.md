@@ -101,8 +101,7 @@ The tab shows one state at a time:
 
 - **Generate rationale** - the symbol has history and you can generate.
 - **No history to explain yet** - the symbol has no commits in the scanned history, so there is no
-  button to press. Rescan from the project Overview after new commits (locally you can also run
-  `whygraph scan`).
+  button to press. Rescan from the project Overview after new commits.
 - **Add a provider key** - the rationale model's provider has no key. People who can change the
   project's settings get a link to them; everyone else is told to ask a project admin.
 - **Viewers can read cards but not generate them** - for the viewer role.

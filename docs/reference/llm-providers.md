@@ -4,7 +4,7 @@ WhyGraph calls an LLM in three places. All three default to `[llm].model`, and e
 
 | Role | Config | What it does |
 |---|---|---|
-| Analysis | `[analyze]` | Writes a per-commit description of the diff during `whygraph scan`. |
+| Analysis | `[analyze]` | Writes a per-commit description of the diff during a scan. |
 | Rationale | `[rationale]` | Writes the five-section rationale card, for MCP, the Explorer, and chat. |
 | Chat | `[chat]` | Drives the [chat assistant](../guide/chat.md). |
 
@@ -12,15 +12,15 @@ Five adapters ship. All five can fill the analysis and rationale roles; only fou
 because chat needs streaming tool calls.
 
 In the portal you choose models and enter keys in the UI (Settings for every project, or per project);
-the config sections and environment variables below are the headless form of the same settings. See
+the config sections below are the `whygraph.toml` form the portal imports once when you add a project. See
 [Configuration](configuration.md#in-the-portal).
 
-| Provider | Config section | Credential (headless env var) | Analysis / rationale | Chat |
+| Provider | Config section | Credential | Analysis / rationale | Chat |
 |---|---|---|---|---|
-| `anthropic` | `[llm.anthropic]` | `ANTHROPIC_API_KEY` | Yes | Yes |
-| `openai` | `[llm.openai]` | `OPENAI_API_KEY` | Yes | Yes |
-| `deepseek` | `[llm.deepseek]` | `DEEPSEEK_API_KEY` | Yes | Yes |
-| `openrouter` | `[llm.openrouter]` | `OPENROUTER_API_KEY` | Yes | Yes |
+| `anthropic` | `[llm.anthropic]` | API key | Yes | Yes |
+| `openai` | `[llm.openai]` | API key | Yes | Yes |
+| `deepseek` | `[llm.deepseek]` | API key | Yes | Yes |
+| `openrouter` | `[llm.openrouter]` | API key | Yes | Yes |
 | `ollama` | `[llm.ollama]` | none (local) | Yes | No |
 
 `ollama` is excluded from chat because local models' tool-calling reliability varies too much to
@@ -39,7 +39,7 @@ model = "anthropic/claude-opus-4-7"   # "provider/model" - the default for every
 model = "claude-haiku-4-5"            # override this role's model only
 
 [llm.anthropic]                       # how to reach that provider - no model here
-# api_key = "sk-ant-..."              # default: read ANTHROPIC_API_KEY from env
+# api_key = "sk-ant-..."              # moved into the encrypted store on import
 timeout_sec = 60
 ```
 
@@ -61,9 +61,8 @@ the defaults) see when the key was last used and can **Test** it. A test asks th
 stored key works without spending tokens - Anthropic's, OpenAI's and DeepSeek's model listings, and
 OpenRouter's key endpoint (its model listing needs no key, so it would prove nothing); a custom base
 URL is tested at that URL. `ollama` has no key to test. Tests are limited to 10 per person and 60 per
-organization an hour. For headless `whygraph scan`, omit `api_key` and the adapter reads
-the conventional environment variable - the recommended setup there, since keys in the environment
-cannot leak into a commit at all. **Variables in your shell do not reach the portal.**
+organization an hour. A key in an imported `whygraph.toml` is moved into the encrypted store
+and never read again. **Variables in your shell do not reach the portal.**
 
 See [Configuration](configuration.md) for every key.
 

@@ -9,7 +9,7 @@ against the running code, so it stays in step with what `whygraph` actually does
 
     ---
 
-    Every command and flag, straight from `--help`: `scan`, `portal`, `install`, `version`, the host
+    Every command and flag, straight from `--help`: `portal`, `install`, `version`, the host
     verbs `up` / `down` / `status` / `logs` / `folders`, and the removed commands.
 
     [:octicons-arrow-right-24: CLI reference](cli.md)

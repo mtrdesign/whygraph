@@ -4,23 +4,12 @@ A scan builds the evidence database and refreshes the CodeGraph index. It's idem
 picks up new commits and backfills what's missing.
 
 **In the portal you don't run it by hand.** The [portal](../portal/index.md) runs every scan itself, as
-a `whygraph scan` child process in the project's folder: the first scan during
+a scan child process in the project's folder: the first scan during
 [project setup](../portal/projects.md#configure), then **Scan now**, the git hooks, and a periodic
 catch-up (in [production mode](../deploy/production.md#keeping-projects-current), GitHub's push
 webhooks and an hourly check instead). Progress and the log of each run are on the project's
 **Scans** page. How runs are triggered, queued and coalesced is in the
 [CLI reference](../reference/cli.md#scans-in-the-portal).
-
-The command is still there for headless use - a CI job, or a checkout that is not in the portal:
-
-```bash
-whygraph scan
-```
-
-!!! note "`whygraph scan` refuses in a portal-managed repository"
-    Once the portal has initialized a repository it is scanned by the portal only. Running
-    `whygraph scan` there exits with status `2` and points at the project in the portal. To use the
-    repo headless again, remove it from the Projects page or delete `.whygraph/portal.json`.
 
 ## Watching a scan and the history
 
@@ -52,15 +41,15 @@ simply absent.
 the address, so a filtered view can be bookmarked or shared; **Clear filters** resets them.
 
 !!! note "The run log in production"
-    On a production portal the first line of a run's log is `$ whygraph scan <flags>` - the flags
-    only, never the command's full path or arguments - and paths inside the server's copy of the
+    On a production portal the first line of a run's log is `$ scan <flags>` (for example
+    `$ scan --skip-analyze --no-remote`, or just `$ scan` for a full scan) - the flags only, never the
+    real command line - and paths inside the server's copy of the
     repository appear as `.` and `<data>`, so a log never reveals where the portal keeps its files.
 
 ## What a scan does
 
-A scan runs up to four ordered phases. Each prints a header numbered against the phases that will
-actually run this time, so a `--no-remote --skip-analyze` pass shows `Phase 1/2` and `Phase 2/2`
-rather than gaps.
+A scan runs up to four ordered phases. The run's page numbers them against the phases that will
+actually run this time, so a Quick rescan shows "Phase 1 of 2" and "Phase 2 of 2" rather than gaps.
 
 1. **Structural crawl** - the git crawler and, when a remote provider is enabled, the GitHub crawler,
    running concurrently. Records commits and the files each one touched, links PRs and issues to
@@ -68,7 +57,7 @@ rather than gaps.
    is **not** first-parent, so work merged from feature branches is not skipped.
 2. **PR-origin recovery** *(optional)* - squash-merge recovery. When a PR was squash-merged, one
    targeted `git fetch` of the PR's original head brings its feature-branch commits into the evidence
-   without polluting area history. Needs the network, so it is skipped under `--no-remote`.
+   without polluting area history. Needs the network, so it is skipped in a Quick rescan.
 3. **Author identity** - resolves commit addresses into one row per human. Local-only, no network and
    no token, so it runs on every scan including the offline git-hook path.
 4. **LLM descriptions** *(optional)* - writes a short description of each commit's diff with the
@@ -87,37 +76,27 @@ the index.
 Blame is *not* recorded at scan time. It's computed on demand when an evidence lookup needs it, which
 is why a scan doesn't have to re-blame the repo every run.
 
-### The results panel
+### The results summary
 
-A scan closes with a summary panel: one row per phase with a status glyph, a one-line summary, and its
-timing, plus the paths to the database and the scan log. A phase that warned - a failed CodeGraph
-refresh, a [bulk branch demotion](#how-whygraph-sees-branches) - shows `⚠` on its row, so a problem
-isn't something you have to catch scrolling past.
+A scan closes with a summary: one row per phase with a status, a one-line summary, and its timing. A
+phase that warned - a failed CodeGraph refresh, a [bulk branch demotion](#how-whygraph-sees-branches) -
+is marked on its row, so a problem isn't something you have to catch scrolling past.
 
-Full detail for every run goes to **`.whygraph/scan.log`**, not the terminal. That's where to look
-when a phase reports something you want to dig into. (In the portal, the same summary and the tail of
-the log are on the run's page.)
+A run's full log is on its page under **Scans**: that's where to look when a phase reports something
+you want to dig into.
 
-## Flags
+## Quick and full rescans
 
-| Flag | Default | What it does |
-|---|---|---|
-| `--skip-analyze` | off | Skip the per-commit LLM phase. Git and GitHub crawlers still run; descriptions backfill lazily and on a later full scan. |
-| `--codegraph / --no-codegraph` | on | Refresh the CodeGraph index concurrently with the crawl. |
-| `--codegraph-image TEXT` | pinned tag | Override the Docker image for the CodeGraph fallback. Ignored when a local `codegraph` binary is found. |
-| `--remote / --no-remote` | on | Crawl the remote for PRs and issues per `[scan].forge`. `--no-remote` is a fast, offline, token-free scan. |
-| `--pr-origins / --no-pr-origins` | on | Recover a squash-merged PR's original commits. Needs the network, so it's skipped under `--no-remote`. |
-| `--progress json` | off | Emit JSON lines on stdout instead of the terminal display, for tools that drive a scan. See the [event reference](../reference/cli.md#json-progress). |
+In the portal, **Scan now** offers two kinds of run:
 
-A common fast pass while iterating:
-
-```bash
-whygraph scan --no-remote --skip-analyze
-```
+| Run | What it does |
+|---|---|
+| **Quick rescan** | Git history and the CodeGraph index only: no LLM and no remote calls (no GitHub PRs or issues), so it is fast, offline and token-free. This is also what the git hooks ask for. |
+| **Full rescan** | Everything a Quick rescan does, plus the GitHub crawl, squash-merge recovery and the LLM description of each commit. |
 
 !!! tip "Lazy backfill"
     Skipping descriptions doesn't lose them. The MCP tools backfill a commit's description on demand
-    when they need it, and a later full `whygraph scan` fills in the rest. Start fast, enrich later.
+    when they need it, and a later Full rescan fills in the rest. Start fast, enrich later.
 
 ## Keep it fresh
 

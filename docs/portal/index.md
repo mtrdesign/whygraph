@@ -29,7 +29,7 @@ flowchart LR
     api --> runner
     api -- "stdio MCP" --> cg
     cg -- "reads .codegraph" --> repos
-    runner -- "whygraph scan" --> repos
+    runner -- "scan child" --> repos
     api -- "reads .whygraph + .codegraph" --> repos
     hooks["git hooks"] -- "POST /api/projects/&lt;slug&gt;/scans" --> api
 ```

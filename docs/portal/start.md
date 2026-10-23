@@ -21,10 +21,10 @@ start them once, not per session. The database container has no published port: 
 reach it, over their private Docker network. Idle, it uses about 30 MiB of RAM; the shared CodeGraph
 server adds about 130-300 MiB while it runs and is stopped after 10 idle minutes.
 
-!!! note "Native installs cannot run the portal"
-    `pip` / `uv` installs provide headless `whygraph scan` only. The portal needs the Docker install.
-    Running `whygraph portal` natively exists for WhyGraph development and is not supported for
-    everyday use; see the [CLI reference](../reference/cli.md#whygraph-portal).
+!!! note "Docker is the only install"
+    The portal needs the Docker install. Running `whygraph portal` natively exists for WhyGraph
+    development and is not supported for everyday use; see the
+    [CLI reference](../reference/cli.md#whygraph-portal).
 
 ## First run
 

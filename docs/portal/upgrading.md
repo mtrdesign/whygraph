@@ -78,13 +78,13 @@ how you start WhyGraph, where configuration and keys live, and how your agents c
 |---|---|
 | `whygraph init` | Removed. Add the repo in the portal; it initializes it. |
 | `whygraph serve` | Removed. The portal is the web panel, for all your projects at once. |
-| `whygraph analyze` | Removed. Per-commit descriptions come from `scan` and from **Describe now**. |
+| `whygraph analyze` | Removed. Per-commit descriptions come from a Full rescan and from **Describe now**. |
 | `whygraph-mcp` (stdio server) | Removed. Agents connect over HTTP to `/mcp/<slug>` on the portal. The `whygraph-mcp` command remains only to print a message. |
-| `whygraph scan` in any repo | Still works headless, but **refuses in a repository the portal manages** - scan from the portal. |
+| `whygraph scan` | Removed. The portal runs every scan (**Scan now**, the git hooks); there is no headless scan. |
 | Hooks ran a local scan | Hooks ask the running portal to scan. They need the portal running; commits made while it was down are caught up when it next starts. |
 | API keys and GitHub tokens from your shell environment | **No longer reach WhyGraph** in the portal. Enter them under Settings. |
 
-`whygraph init`, `whygraph serve` and `whygraph-mcp` still exist as stubs: they print a pointer to the
+`whygraph init`, `whygraph serve`, `whygraph scan` and `whygraph-mcp` still exist as stubs: they print a pointer to the
 portal and exit with status `2`, so an old habit, a stale script or a 1.x agent config that runs
 `whygraph-mcp` fails with a message instead of a bare "not found". `whygraph analyze` is simply gone.
 
@@ -122,8 +122,8 @@ portal and exit with status `2`, so an old habit, a stale script or a 1.x agent 
     has no effect on it or on the scans it runs. The first `whygraph up` names any such variables it
     sees so you know to move them.
 
-Headless `whygraph scan` outside the portal (CI, a plain checkout) still reads the standard variables;
-see [Configuration](../reference/configuration.md#environment-variables).
+`whygraph scan` is gone, so nothing reads those variables any more; see
+[Configuration](../reference/configuration.md#environment-variables).
 
 ### Custom database paths
 
@@ -142,4 +142,4 @@ same providers, models and timeouts it did before.
 
 Your history stays in your repositories, and the project database is backed up before it is migrated.
 To use a repository without the portal again, remove it from the Projects page (or delete
-`.whygraph/portal.json`) and headless `whygraph scan` works in it once more.
+`.whygraph/portal.json`), then install 1.x again.

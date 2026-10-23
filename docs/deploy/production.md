@@ -506,7 +506,7 @@ history was rewritten.
 
 An instance that GitHub cannot reach still works, at the pace of the hourly check plus **Scan now**.
 
-A run's log starts with the command as you would type it (`$ whygraph scan <flags>`) and never names
+A run's log starts with the run's flags (`$ scan <flags>`) and never names
 a server path: the project's copy reads as `.` and the data directory as `<data>`.
 
 ### When access is lost

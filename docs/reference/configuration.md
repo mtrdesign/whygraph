@@ -1,20 +1,21 @@
 # Configuration
 
-WhyGraph has one configuration **shape**, used in two places:
+The **[portal](../portal/index.md)** is where WhyGraph is configured: configuration is stored per project
+in the portal's database and edited in the UI. The **Settings** page holds defaults for every project, and
+a project's own settings override them. API keys and GitHub tokens are stored encrypted there.
 
-- In the **[portal](../portal/index.md)** - the normal way - configuration is stored per project in the
-  portal's database and edited in the UI: the **Settings** page holds defaults for every project, and a
-  project's own settings override them. API keys and GitHub tokens are stored encrypted there.
-- **`whygraph.toml`** at a repo root is the **headless** configuration: what `whygraph scan` reads in a CI
-  job or a plain checkout, and what the portal offers to import when you add the repo. Every field has a
-  built-in default, so an unedited file behaves exactly as if none were present.
+**`whygraph.toml`** at a repo root is not read at scan time. It is a file the portal offers to **import
+once** when you add the repo, in the same shape as the tree below; after that, the portal's settings are
+the only configuration. Every field has a built-in default, so a project with no file behaves exactly as
+if an unedited one were present.
 
-Nothing writes `whygraph.toml` for you any more (`whygraph init` was removed). Create one by hand when
-you need headless configuration, from the tree below.
+Nothing writes `whygraph.toml` for you (`whygraph init` was removed). Create one by hand only if you want
+to seed a project's settings on import.
 
 !!! warning "`whygraph.toml` is gitignored - never commit a token"
     A `whygraph.toml` can hold API keys, so keep it out of git. The portal adds it to `.gitignore` when it
     initializes a project, and moves any keys in it into its encrypted store when it imports the file.
+    That includes `[scan].token`, which is imported once into the project's encrypted GitHub token.
 
 ## In the portal
 
@@ -54,8 +55,6 @@ The values shown are the defaults. This is the tree a `whygraph.toml` uses; the 
 tree per layer.
 
 ```toml
-log_level = "INFO"            # DEBUG | INFO | WARN | ERROR | CRITICAL
-
 [scan]
 forge = "off"                 # source-control forge for the PR/issue crawl:
                               #   "off"    - skip the remote crawl (default)
@@ -63,8 +62,8 @@ forge = "off"                 # source-control forge for the PR/issue crawl:
                               #   "auto"   - detect from the remote URL (github only, for now)
 remote = "origin"             # git remote whose URL is inspected for forge github/auto
                               # (a plain name: letters, digits, ".", "_", "/", "-")
-# token = "ghp_..."           # GitHub token for the gh CLI. Default: read GH_TOKEN /
-                              # GITHUB_TOKEN from env (or an existing `gh auth login`).
+# token = "ghp_..."           # GitHub token. Imported once into the project's encrypted
+                              # GitHub token; never read at scan time.
 hooks = true                  # auto-rescan git hooks installed by the portal:
                               #   true    - all four (post-commit, post-merge,
                               #             post-rewrite, post-checkout)
@@ -110,34 +109,23 @@ max_workers = 2               # parallel LLM calls in the diff-analyzer crawler
                               # (0 = cache-only). Bounds nested LLM spend.
 # context_token_budget = 60000   # history sent to the model, ~chars/4 estimate
 
-# Override default DB locations (resolved relative to this file):
-# whygraph_db  = ".whygraph/whygraph.db"
-# codegraph_db = ".codegraph/codegraph.db"
-
-# Optional rotating file log. Console (stderr) logging is always on.
-# [logging]
-# file         = ".whygraph/logs/whygraph.log"
-# level        = "DEBUG"        # default: inherit top-level log_level
-# max_bytes    = 5_000_000
-# backup_count = 3
-
 # Per-provider connection settings - key, endpoint, timeout. No model here:
 # pick models with [llm].model or a role's own model.
 [llm.anthropic]
-# api_key = "sk-ant-..."        # default: read ANTHROPIC_API_KEY from env
+# api_key = "sk-ant-..."        # moved into the encrypted store on import
 timeout_sec = 60
 
 [llm.openai]
-# api_key = "sk-..."            # default: read OPENAI_API_KEY from env
+# api_key = "sk-..."            # moved into the encrypted store on import
 # base_url = "..."              # default: https://api.openai.com/v1
 timeout_sec = 60
 
 [llm.deepseek]
-# api_key = "sk-..."            # default: read DEEPSEEK_API_KEY from env
+# api_key = "sk-..."            # moved into the encrypted store on import
 timeout_sec = 60
 
 [llm.openrouter]
-# api_key = "sk-or-..."         # default: read OPENROUTER_API_KEY from env
+# api_key = "sk-or-..."         # moved into the encrypted store on import
 timeout_sec = 60
 
 [llm.ollama]
@@ -149,14 +137,11 @@ timeout_sec = 120
 
 | Section | What it controls |
 |---|---|
-| top-level `log_level` | Console log verbosity. |
-| `[scan]` | The crawl: which source-control forge to pull PRs and issues from, the git remote name, an optional pinned GitHub token (headless only), which [auto-rescan hooks](../guide/scanning.md#keep-it-fresh) to install, which branch counts as [shipped history](../guide/scanning.md#how-whygraph-sees-branches), and `serve_codegraph`, whether the portal serves [CodeGraph's tools](mcp.md#the-codegraph-endpoint) to agents (default `true`). |
+| `[scan]` | The crawl: which source-control forge to pull PRs and issues from, the git remote name, a GitHub token (imported once into the encrypted store), which [auto-rescan hooks](../guide/scanning.md#keep-it-fresh) to install, which branch counts as [shipped history](../guide/scanning.md#how-whygraph-sees-branches), and `serve_codegraph`, whether the portal serves [CodeGraph's tools](mcp.md#the-codegraph-endpoint) to agents (default `true`). |
 | `[llm]` | `model` - the default `"provider/model"` for every role. See [Choosing models](#choosing-models). |
-| `[analyze]` | The per-commit LLM diff descriptions written during `scan` - provider, model, parallelism (`max_workers`), the truncation / per-file thresholds, and an [org-only agent limit](#agent-limits-organization-only). |
+| `[analyze]` | The per-commit LLM diff descriptions written during a scan - provider, model, parallelism (`max_workers`), the truncation / per-file thresholds, and an [org-only agent limit](#agent-limits-organization-only). |
 | `[rationale]` | The `whygraph_rationale_brief` card - provider, model, how much of a squash-merged PR is rendered into the prompt, and an [org-only agent limit](#agent-limits-organization-only). |
 | `[chat]` | The [chat assistant](../guide/chat.md) - default provider and model for new sessions, plus the per-turn tool, generation, and context budgets. |
-| `whygraph_db` / `codegraph_db` | Override either database path. |
-| `[logging]` | An optional rotating file log, in addition to the always-on stderr log. |
 | `[llm.*]` | Per-provider **connection** settings - key, timeout, and `base_url` / `host` where relevant. Five adapters; only four can drive chat. See [LLM providers](llm-providers.md). |
 
 ## Agent limits (organization only)
@@ -245,26 +230,16 @@ A 1.x file resolves to exactly the same providers, models, and timeouts it did b
 
 ## Environment variables
 
-The variables in the first two tables apply to **headless** `whygraph scan`. The portal does not read
-them: its container is started with none of your environment, so credentials are entered under
-Settings instead. The portal has variables of its own, in the tables further down.
+The portal and its scans read none of your shell's credential variables: its container is started with
+none of your environment, so provider keys and GitHub tokens are entered under Settings instead, and an
+ambient `GH_TOKEN` / `GITHUB_TOKEN` or `*_API_KEY` no longer applies to anything. The variables below are
+the ones the shim and the portal read.
 
-Omit an `api_key` from an `[llm.*]` table and headless WhyGraph reads the standard environment variable
-instead.
-
-| Variable | Used for |
-|---|---|
-| `ANTHROPIC_API_KEY` | The `anthropic` LLM adapter. |
-| `OPENAI_API_KEY` | The `openai` LLM adapter. |
-| `DEEPSEEK_API_KEY` | The `deepseek` LLM adapter. |
-| `OPENROUTER_API_KEY` | The `openrouter` LLM adapter. |
-| `GH_TOKEN` / `GITHUB_TOKEN` | The `gh` CLI during the remote crawl, when `[scan].token` is unset. |
-
-One variable replaces the file entirely, for tools that launch `whygraph scan` as a child process:
+One variable is internal:
 
 | Variable | Used for |
 |---|---|
-| `WHYGRAPH_CONFIG_JSON` | A whole config tree, as a JSON object shaped like `whygraph.toml`. When set and non-empty it is read **instead of** the repo's `whygraph.toml` (which is then ignored, even if present), and relative paths resolve against the repo root. Invalid JSON or a non-object aborts with a config error. The portal uses it to hand a scan its config without writing a file into the checkout. |
+| `WHYGRAPH_CONFIG_JSON` | What the portal hands its scan child: the project's whole merged config tree, as a JSON object shaped like `whygraph.toml`, so no file is written into the checkout. You do not set it yourself; the scan child refuses to start without it. |
 
 These are read by the Docker shim and the portal rather than by a scan:
 

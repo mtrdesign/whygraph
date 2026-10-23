@@ -43,8 +43,9 @@ prefer the portal's `codegraph_*` tools over grep, and not to run the `codegraph
 
 The portal records what it installed in `.whygraph/assets.json` (gitignored with the rest of
 `.whygraph/`): the WhyGraph version and a hash of every file it wrote, and, for the block in a shared
-file such as `AGENTS.md`, of the text between the markers. **Update agent files** in the project's
-Settings (and re-initializing) uses it per file:
+file such as `AGENTS.md`, of the text between the markers. A manifest committed to git is ignored, as
+if there were none (a repository must not be able to name its own files as WhyGraph's). **Update agent
+files** in the project's Settings (and re-initializing) uses it per file:
 
 | The file on disk | Result |
 |---|---|

@@ -64,7 +64,7 @@ from importlib.metadata import version as _pkg_version
 from importlib.resources.abc import Traversable
 from pathlib import Path
 
-from .agents import AgentTarget
+from .agents import AgentTarget, is_git_tracked
 
 BEGIN_MARKER = "<!-- BEGIN whygraph -->"
 """Opening sentinel of the WhyGraph-owned block in an append-merged file."""
@@ -176,9 +176,13 @@ def read_manifest(project_root: Path) -> dict | None:
     -------
     dict or None
         ``{"version": str | None, "files": {"<agent>/<relpath>": sha256}}``,
-        or ``None`` when the file is missing or not a valid manifest (the
-        files are then treated as user-edited).
+        or ``None`` when the file is missing, not a valid manifest, or
+        tracked by git (a repo is untrusted: a committed manifest could
+        name the repo's own files as retired assets). The files are then
+        treated as user-edited.
     """
+    if is_git_tracked(project_root, MANIFEST_RELPATH.as_posix()):
+        return None
     try:
         data = json.loads((project_root / MANIFEST_RELPATH).read_text(encoding="utf-8"))
         files = data["files"]

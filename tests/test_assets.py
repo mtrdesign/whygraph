@@ -1216,6 +1216,26 @@ def test_unedited_retired_file_is_removed_with_its_empty_dir(tmp_path: Path) -> 
     assert "claude/commands/do-it.md" not in _manifest(project)["files"]
 
 
+def test_a_git_tracked_manifest_is_ignored(tmp_path: Path) -> None:
+    # A repo is untrusted: a committed manifest naming one of its own files
+    # (with that file's hash) must not get the file deleted as "retired".
+    src, project, _ = _installed(tmp_path)
+    victim = project / ".claude" / "keep.md"
+    victim.write_text("USER FILE")
+    manifest = _manifest(project)
+    manifest["files"]["claude/keep.md"] = assets._sha("USER FILE")
+    (project / assets.MANIFEST_RELPATH).write_text(json.dumps(manifest))
+    git = ["git", "-C", str(project), "-c", "user.name=t", "-c", "user.email=t@x"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "add", "-f", str(assets.MANIFEST_RELPATH)], check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "m"], check=True)
+
+    assert assets.read_manifest(project) is None
+    result = assets.install_assets(_claude_target(), project, source=src, force=True)
+
+    assert victim.read_text() == "USER FILE" and result.removed == []
+
+
 def test_retired_file_keeps_a_non_empty_dir(tmp_path: Path) -> None:
     src, project, do_it = _retire_do_it(tmp_path)
     mine = project / ".claude" / "commands" / "mine.md"

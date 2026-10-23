@@ -306,8 +306,8 @@ def test_trigger_to_flags(trigger: str, analyze: bool | None, flags: list[str]) 
 
 def test_default_argv_runs_this_interpreter() -> None:
     argv = scan_argv("hook", False, {})
-    assert argv[:4] == [sys.executable, "-m", "whygraph", "scan"]
-    assert argv[4:] == [
+    assert argv[:5] == [sys.executable, "-P", "-m", "whygraph", "scan"]
+    assert argv[5:] == [
         "--progress",
         "json",
         "--managed-by-portal",
@@ -370,6 +370,7 @@ def test_child_env_allowlist_and_injected_secrets(
     assert env["SSL_CERT_FILE"] == "/etc/cert.pem"
     assert env["HTTPS_PROXY"] == "http://proxy:3128"
     assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["PYTHONSAFEPATH"] == "1"  # never import from the checkout
     assert json.loads(env["WHYGRAPH_CONFIG_JSON"]) == layer
     assert env["GH_TOKEN"] == "ghp_project"
     assert env["ANTHROPIC_API_KEY"] == "sk-proj"
@@ -1650,6 +1651,53 @@ def test_real_scan_child_with_hook_trigger(
     assert events[-1]["status"] == "ok"
     assert run["summary"]["analyze_skipped"] == "--skip-analyze"
     assert portal.get("/api/projects/demo").json()["stats"]["commits"] == 2
+
+
+def test_a_scan_never_imports_a_whygraph_package_the_repo_commits(
+    portal: TestClient, env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The child's cwd is the checkout, and `python -m` puts the cwd first on
+    # sys.path: a committed `whygraph/` package would replace WhyGraph's code.
+    root = local_project(portal, env, "hostile")
+    marker = env.data.parent / "pwned"
+    payload = f"open({str(marker)!r}, 'a').write(__name__ + '\\n')\n"
+    for rel in (
+        "whygraph/__init__.py",
+        "whygraph/__main__.py",
+        "whygraph/scan/__init__.py",
+    ):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(payload)
+    subprocess.run(["git", "add", "whygraph"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "plant"], cwd=root, check=True)
+
+    # The fixture is hostile: a plain `python -m whygraph` from the checkout runs it.
+    unsafe = {k: v for k, v in os.environ.items() if k != "PYTHONSAFEPATH"}
+    subprocess.run(
+        [sys.executable, "-m", "whygraph", "version"],
+        cwd=root,
+        env=unsafe,
+        capture_output=True,
+        timeout=60,
+    )
+    assert marker.is_file()
+    marker.unlink()
+
+    # An override without -P is still covered by the child's PYTHONSAFEPATH.
+    monkeypatch.setenv(
+        "WHYGRAPH_SCAN_CMD",
+        f"{shlex.quote(sys.executable)} -m whygraph scan --no-codegraph",
+    )
+    with portal_db.get_session() as session:  # a hook scan: structure only, offline
+        project = session.exec(select(Project).where(Project.slug == "hostile")).one()
+        project.last_scan_at = "2026-01-01T00:00:00+00:00"
+        session.add(project)
+    run = wait_run(
+        portal, "hostile", scan(portal, "hostile", trigger="hook"), timeout=120
+    )
+    log = (env.data / "runs" / f"{run['id']}.log").read_text()
+    assert run["status"] == "ok", log
+    assert not marker.exists()
 
 
 # ---------------------------------------------------------------------------

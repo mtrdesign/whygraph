@@ -160,8 +160,10 @@ def _format_response(
         "cached_at": cached_at,
         "evidence_count": {
             "commits": len(evidence),
-            "prs": sum(len(item.pull_requests) for item in evidence),
-            "issues": sum(len(item.issues) for item in evidence),
+            # One PR (and the issues it closes) spans several commits: count
+            # each number once, not once per commit.
+            "prs": len({pr.number for item in evidence for pr in item.pull_requests}),
+            "issues": len({i.number for item in evidence for i in item.issues}),
         },
     }
     if generated is not None:

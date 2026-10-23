@@ -78,6 +78,13 @@ MAX_BACKFILL_PER_CALL = 5
 Detail = Literal["compact", "full"]
 """How much of each evidence item an MCP tool returns (plan section 5.4, U8)."""
 
+PROSE_BODY_MAX_CHARS = 4000
+"""Characters of a PR or issue body a ``detail="full"`` result keeps.
+
+The rest is cut (marked with ``...``) and counted in that entry's
+``omitted.body_chars``. Commit bodies are not capped.
+"""
+
 
 class _EvidenceToolRequired(TypedDict):
     target: dict[str, Any]
@@ -89,11 +96,15 @@ class EvidenceToolResult(_EvidenceToolRequired, total=False):
     """The ``whygraph_evidence_for`` result, for FastMCP's output schema.
 
     ``evidence`` items are the ``compact`` or ``full`` shape of
-    :func:`shape_evidence_item`; ``platform`` is set for a linked project.
-    (Optional keys use ``total=False``: ``NotRequired`` is lost to the
-    string annotations ``from __future__ import annotations`` makes.)
+    :func:`shape_evidence_item`; ``pull_requests`` / ``issues`` are the
+    ``detail="full"`` prose maps of :func:`shape_evidence`; ``platform``
+    is set for a linked project. (Optional keys use ``total=False``:
+    ``NotRequired`` is lost to the string annotations
+    ``from __future__ import annotations`` makes.)
     """
 
+    pull_requests: dict[str, dict[str, Any]]
+    issues: dict[str, dict[str, Any]]
     platform: dict[str, Any]
 
 
@@ -983,27 +994,46 @@ def _clip(text: object, max_chars: int) -> object:
     return text
 
 
-def _pr_item(pr: dict, caps: RationaleConfig | None) -> dict:
-    """One PR of an MCP evidence item; with ``caps`` (``full``) adds capped prose and the roster."""
-    out = _link_ref("pr", pr)
-    if caps is None:
-        return out
+def _body_overflow(body: object) -> int:
+    """Characters of ``body`` past :data:`PROSE_BODY_MAX_CHARS` (0 for a non-string)."""
+    if isinstance(body, str):
+        return max(0, len(body) - PROSE_BODY_MAX_CHARS)
+    return 0
+
+
+def _pr_prose(pr: dict, caps: RationaleConfig) -> dict:
+    """One PR's ``full`` entry: capped body and comments, the roster, ``omitted``."""
     comments = [c for c in pr.get("comments") or [] if isinstance(c, dict)]
     titles = list(pr.get("commit_titles") or [])
     kept = comments[: caps.pr_discussion_max_comments]
-    out["text"] = {
-        "body": pr.get("body"),
-        "comments": [
-            {**c, "body": _clip(c.get("body"), caps.pr_comment_max_chars)} for c in kept
-        ],
+    body = pr.get("body")
+    out: dict = {
+        "text": {
+            "body": _clip(body, PROSE_BODY_MAX_CHARS),
+            "comments": [
+                {**c, "body": _clip(c.get("body"), caps.pr_comment_max_chars)}
+                for c in kept
+            ],
+        },
+        "commit_titles": titles[: caps.pr_roster_max_commits],
     }
-    out["commit_titles"] = titles[: caps.pr_roster_max_commits]
     omitted = {
         "comments": len(comments) - len(kept),
         "commit_titles": len(titles) - len(out["commit_titles"]),
+        "body_chars": _body_overflow(body),
     }
     if any(omitted.values()):
         out["omitted"] = omitted
+    return out
+
+
+def _issue_prose(issue: dict) -> dict:
+    """One issue's ``full`` entry: its capped body and ``omitted`` when cut."""
+    body = issue.get("body")
+    out: dict = {"text": {"body": _clip(body, PROSE_BODY_MAX_CHARS)}}
+    overflow = _body_overflow(body)
+    if overflow:
+        out["omitted"] = {"body_chars": overflow}
     return out
 
 
@@ -1021,12 +1051,9 @@ def shape_evidence_item(item: dict, detail: Detail = "compact") -> dict:
         ``"compact"`` (default): ``sha``, ``llm_description``,
         ``subject``, ``author``, ``date``, ``lines``, ``source`` and the
         linked PRs and issues as ``{number, title, html_url, resource}``.
-        ``"full"`` adds the untrusted prose under ``text`` (the commit
-        and issue ``body``; the PR ``body`` and its first
-        ``pr_discussion_max_comments`` comments, each clipped to
-        ``pr_comment_max_chars``), the PR's first ``pr_roster_max_commits``
-        ``commit_titles``, and an ``omitted`` count on a PR whose lists
-        were cut (the ``[rationale]`` caps).
+        ``"full"`` adds the commit ``body`` under ``text``; the PR and
+        issue prose is not on the item but in the top-level maps
+        :func:`shape_evidence` builds, once per number.
 
     Returns
     -------
@@ -1045,23 +1072,60 @@ def shape_evidence_item(item: dict, detail: Detail = "compact") -> dict:
     }
     if "push_status" in item:
         out["push_status"] = item["push_status"]
-    caps = None
-    if detail == "full":
-        from whygraph.core import get_config
-
-        caps = get_config().rationale
     out["pull_requests"] = [
-        _pr_item(pr, caps) for pr in item.get("pull_requests") or []
+        _link_ref("pr", pr) for pr in item.get("pull_requests") or []
     ]
-    issues = []
-    for issue in item.get("issues") or []:
-        entry = _link_ref("issue", issue)
-        if caps is not None:
-            entry["text"] = {"body": issue.get("body")}
-        issues.append(entry)
-    out["issues"] = issues
-    if caps is not None:
+    out["issues"] = [_link_ref("issue", issue) for issue in item.get("issues") or []]
+    if detail == "full":
         out["text"] = {"body": commit.get("body")}
+    return out
+
+
+def shape_evidence(items: list[dict], detail: Detail = "compact") -> dict:
+    """Evidence items in the shape the MCP tools return, PR / issue prose once.
+
+    Parameters
+    ----------
+    items : list of dict
+        Items in the nested shape :func:`shape_evidence_item` takes.
+    detail : {"compact", "full"}, optional
+        ``"compact"`` (default) returns only ``evidence``. ``"full"`` also
+        returns ``pull_requests`` and ``issues``: maps keyed by the number
+        as a string, one entry per PR or issue however many items link it
+        (the first item's copy wins). A PR entry holds the untrusted prose
+        under ``text`` (its ``body`` clipped to
+        :data:`PROSE_BODY_MAX_CHARS`, its first ``pr_discussion_max_comments``
+        comments, each clipped to ``pr_comment_max_chars``), its first
+        ``pr_roster_max_commits`` ``commit_titles`` and, when anything was
+        cut, ``omitted`` (``comments``, ``commit_titles``, ``body_chars``);
+        an issue entry holds ``text.body`` (clipped the same way) and
+        ``omitted.body_chars`` when cut.
+
+    Returns
+    -------
+    dict
+        ``{"evidence": [...]}``, plus ``pull_requests`` and ``issues`` for
+        ``"full"``.
+    """
+    out: dict = {"evidence": [shape_evidence_item(i, detail) for i in items]}
+    if detail != "full":
+        return out
+    from whygraph.core import get_config
+
+    caps = get_config().rationale
+    prs: dict[str, dict] = {}
+    issues: dict[str, dict] = {}
+    for item in items:
+        for pr in item.get("pull_requests") or []:
+            key = str(pr.get("number"))
+            if key not in prs:
+                prs[key] = _pr_prose(pr, caps)
+        for issue in item.get("issues") or []:
+            key = str(issue.get("number"))
+            if key not in issues:
+                issues[key] = _issue_prose(issue)
+    out["pull_requests"] = prs
+    out["issues"] = issues
     return out
 
 
@@ -1565,8 +1629,8 @@ def whygraph_evidence_for(
 
     See :data:`~whygraph.mcp.descriptions.EVIDENCE_FOR_DESCRIPTION` for the agent-facing summary.
 
-    :func:`evidence_payload` with each item passed through
-    :func:`shape_evidence_item` at ``detail``. For a project linked to a
+    :func:`evidence_payload` with its items passed through
+    :func:`shape_evidence` at ``detail``. For a project linked to a
     WhyGraph platform the answer comes from :func:`linked_evidence`
     instead, and carries a ``platform`` block.
     """
@@ -1578,10 +1642,7 @@ def whygraph_evidence_for(
         limit=limit,
         describe=describe,
     )
-    return {
-        **result,
-        "evidence": [shape_evidence_item(i, detail) for i in result["evidence"]],
-    }
+    return {**result, **shape_evidence(result["evidence"], detail)}
 
 
 def register(mcp: FastMCP) -> None:

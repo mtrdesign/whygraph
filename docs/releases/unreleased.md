@@ -30,6 +30,12 @@ fixes and additions.
       commit bodies or comments); pass `detail="full"` for the prose. The default `limit` is 10, and a
       call describes at most 5 missing commit descriptions within 20 seconds (`describe=false` skips
       the LLM).
+    - With `detail="full"`, pull request and issue prose comes **once per result**, in top-level
+      `pull_requests` / `issues` maps keyed by number, instead of on every commit of the same pull
+      request; the items keep the compact refs. Pull request and issue bodies are cut at 4000
+      characters (counted in `omitted.body_chars`).
+    - `whygraph_rationale_brief`'s `evidence_count` counts each pull request and issue once, not
+      once per commit that links it.
     - `whygraph_rationale_brief` gains `force_refresh` and `cached_only` (a miss returns `not_cached`
       at no cost), reports progress, and cites the top five commits with their PR and issue links.
       **`cached_only` is not honoured by linked projects**: their cards come from the platform.

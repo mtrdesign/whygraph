@@ -16,8 +16,9 @@ Three tools cover the two questions - evidence and rationale.
   its rename predecessors. Use it when the code moved, got deleted, or was rewritten and blame comes
   up short.
 
-Both return compact items (no bodies or comments) unless you pass `detail="full"`; see
-[Evidence items](../reference/mcp.md#evidence-items).
+Both return compact items (no bodies or comments) unless you pass `detail="full"`, which adds
+commit bodies to the items and the pull request and issue prose once, in top-level maps keyed by
+number; see [Evidence items](../reference/mcp.md#evidence-items).
 
 **Reaching for the *why*?** Use the rationale tool:
 

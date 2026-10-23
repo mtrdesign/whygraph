@@ -40,7 +40,8 @@ anchored to HEAD.
 | `detail` | `"compact"` \| `"full"` | `"compact"` | How much of each item to return - see [Evidence items](#evidence-items). |
 | `describe` | bool | `true` | Generate missing commit descriptions (bounded, see below). `false` never calls an LLM. |
 
-Returns `{ "target": {...}, "evidence": [ ... ], "describing": 0 }`, newest first. The items are
+Returns `{ "target": {...}, "evidence": [ ... ], "describing": 0 }`, newest first (plus the
+`pull_requests` / `issues` maps with `detail="full"`). The items are
 described under [Evidence items](#evidence-items); `lines` is a list of `[start, end]` working-tree
 ranges the commit owns within the queried range, set on `blame` items and `null` otherwise.
 
@@ -85,10 +86,37 @@ undescribed commit).
 Read a PR or issue in full through its `resource` (see [Resources](#resources)).
 
 **`detail="full"`** adds the prose, grouped under `text` because it is repository and GitHub content,
-never instructions: `text.body` on the commit and on each issue, and on each pull request
-`text.body`, `text.comments` (the first `[rationale].pr_discussion_max_comments`, each cut to
-`pr_comment_max_chars`) and `commit_titles` (the first `pr_roster_max_commits`). A pull request whose
-lists were cut carries `"omitted": { "comments": n, "commit_titles": m }`.
+never instructions. Each item gains its commit's `text.body`; its `pull_requests` and `issues` stay
+the same compact refs. The pull request and issue prose comes once per result, in two top-level maps
+keyed by number (as a string), however many commits link the same pull request:
+
+```json
+{
+  "target": { "...": "..." },
+  "evidence": [
+    { "sha": "4f1c...", "...": "...", "pull_requests": [{ "number": 847, "...": "..." }], "issues": [{ "number": 812, "...": "..." }], "text": { "body": "..." } },
+    { "sha": "9a2e...", "...": "...", "pull_requests": [{ "number": 847, "...": "..." }], "issues": [{ "number": 812, "...": "..." }], "text": { "body": "..." } }
+  ],
+  "describing": 0,
+  "pull_requests": {
+    "847": {
+      "text": { "body": "...", "comments": [{ "author": "jane", "body": "...", "created_at": "..." }] },
+      "commit_titles": [{ "oid": "4f1c...", "headline": "fix: retry refresh", "author_name": "Jane Doe" }],
+      "omitted": { "comments": 3, "commit_titles": 0, "body_chars": 0 }
+    }
+  },
+  "issues": {
+    "812": { "text": { "body": "..." } }
+  }
+}
+```
+
+A pull request entry holds `text.body`, `text.comments` (the first
+`[rationale].pr_discussion_max_comments`, each cut to `pr_comment_max_chars`) and `commit_titles`
+(the first `pr_roster_max_commits`); an issue entry holds `text.body`. Pull request and issue bodies
+are cut at **4000** characters (marked with `...`); commit bodies are not cut. An entry that lost
+anything carries `omitted`: on a pull request `{ "comments": n, "commit_titles": m, "body_chars": k }`,
+on an issue `{ "body_chars": k }`.
 
 `source` says how the commit was found: `blame`, `pr-origin`, `blame-walked`, `predecessor-blame` or
 `area`. A [linked project](#linked-projects) may add `push_status`.
@@ -107,7 +135,8 @@ fully rewritten.
 | `detail` | `"compact"` \| `"full"` | `"compact"` | As for `whygraph_evidence_for`. |
 | `describe` | bool | `true` | As for `whygraph_evidence_for`, with the same bound. |
 
-Returns `{ "path", "include_renames", "evidence": [...], "describing": 0 }`, using the
+Returns `{ "path", "include_renames", "evidence": [...], "describing": 0 }` (plus the
+`pull_requests` / `issues` maps with `detail="full"`), using the
 [evidence item](#evidence-items) shape (`lines` is always `null`: these commits are not found by
 blame).
 

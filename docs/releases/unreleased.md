@@ -42,16 +42,20 @@ fixes and additions.
   a failed researcher no longer stops the run, `verification` replaces the `impact` research lens, and
   `/whygraph-implement` takes `--fix-attempts N`.
 - **Cursor commands are now skills.** `/rationale`, `/whygraph-plan` and `/whygraph-implement` install
-  under `.cursor/skills/`. A project initialized earlier keeps its old `.cursor/commands/` files; delete
-  them by hand if you do not want duplicates.
+  under `.cursor/skills/`. A project initialized earlier has old `.cursor/commands/` files: **Update
+  agent files** removes them (it asks first if you edited one).
+- **Update agent files removes what WhyGraph no longer ships.** A bundled file that a newer version
+  dropped or renamed is removed when you have not edited it, and listed as **Edited** (removed only with
+  **Overwrite my edits too**) when you have. See
+  [Keeping the agent files up to date](../portal/agents.md#agent-files-upgrade).
 
 ## Upgrade path
 
 1. Re-run the installer and `whygraph up` as usual.
 2. **Open each project's Settings > Agents and use Update agent files, once per project.** It adds the
    `codegraph` entry and refreshes the bundled assets. The portal now records a hash of every file it
-   installed in `.whygraph/assets.json`, so files you have not edited update silently and edited ones are
-   listed with a diff; a project initialized before the manifest existed asks about each file once. Tick
+   installed in `.whygraph/assets.json`, so files you have not edited update silently (or are removed,
+   such as Cursor's old `.cursor/commands/`) and edited ones are listed with a diff; a project initialized before the manifest existed asks about each file once. Tick
    **Overwrite my edits too** to replace edited files as well.
 3. In Claude Code, approve the new `codegraph` server when asked.
 4. If you installed CodeGraph on your host, remove it with `codegraph uninstall --keep-cli`. See

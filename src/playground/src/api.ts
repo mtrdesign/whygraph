@@ -619,7 +619,7 @@ export interface KeyTestResponse {
   checked_at: string;
 }
 
-export type FileStatus = "write" | "overwrite" | "skip" | "refused" | "needs_confirmation";
+export type FileStatus = "write" | "overwrite" | "skip" | "refused" | "needs_confirmation" | "delete";
 
 export interface FileOutcome {
   file: string;

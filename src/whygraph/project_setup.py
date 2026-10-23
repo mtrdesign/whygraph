@@ -29,7 +29,7 @@ import json
 import os
 import re
 import shutil
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -106,7 +106,8 @@ class InitializeResult:
         One outcome per agent config file touched.
     asset_files : tuple[FileOutcome, ...]
         One outcome per bundled asset file (``write`` / ``skip`` /
-        ``overwrite`` / ``needs_confirmation``). An edited asset awaiting
+        ``overwrite`` / ``needs_confirmation``), plus ``delete`` for one
+        WhyGraph no longer ships. An edited asset awaiting
         confirmation (the upgrade manifest, :mod:`whygraph.assets`) never
         withholds the markers; only ``agent_files`` do.
     assets : dict[str, InstallResult]
@@ -201,7 +202,9 @@ def initialize_project(
         step runs (dry run included), every path the call could read or
         write in the work tree - ``.gitignore``, the hook helper, each
         agent config file and ``.whygraph/backups/``, each bundled asset
-        destination, the markers and their temp files - goes through
+        destination, each asset file WhyGraph no longer ships (which a
+        re-install may delete), the markers and their temp files - goes
+        through
         :func:`whygraph.core.safe_paths.check_inside`. The portal passes
         ``True`` (repo content is untrusted there).
 
@@ -303,14 +306,18 @@ def initialize_project(
 
 def _touched_paths(
     root: Path, actions: Mapping[str, AgentAction], marker: PortalMarker | None
-) -> list[Path]:
-    """Every work-tree path :func:`initialize_project` may read or write."""
+) -> Iterator[Path]:
+    """Every work-tree path :func:`initialize_project` may read, write or delete.
+
+    A generator: the manifest path is yielded (and so checked by the
+    caller) before the manifest is read for the retired asset paths.
+    """
+    yield root / assets_mod.MANIFEST_RELPATH
+    yield root / assets_mod.MANIFEST_RELPATH.with_name("assets.json.tmp")
     paths = [root / ".gitignore", root / _hooks.LEGACY_HELPER_RELPATH]
     paths.append(root / ".whygraph" / "backups")  # agent-file backups
-    paths += [
-        root / assets_mod.MANIFEST_RELPATH,
-        root / assets_mod.MANIFEST_RELPATH.with_name("assets.json.tmp"),
-    ]
+    manifest = assets_mod.read_manifest(root)
+    old_files = manifest["files"] if manifest else {}
     for name, action in actions.items():
         target = agents_mod.AGENTS[name]
         if target.scope == "project":
@@ -322,10 +329,12 @@ def _touched_paths(
             paths.extend(
                 _asset_destinations(assets_mod.packaged_assets_for(target), dest)
             )
+            for rel in assets_mod.retired_assets(target, old_files):
+                paths.append(dest.joinpath(*rel.split("/")))
     if marker is not None:
         for rel in (PORTAL_ENV, PORTAL_JSON):
             paths += [root / rel, root / rel.with_name(rel.name + ".tmp")]
-    return paths
+    yield from paths
 
 
 def _asset_destinations(src, dest: Path) -> list[Path]:
@@ -350,19 +359,28 @@ def _asset_outcomes(
         (result.overwritten, "overwrite"),
         (result.skipped, "skip"),
         (result.needs_confirmation, "needs_confirmation"),
+        (result.removed, "delete"),
     ):
         for p in paths:
             rel = Path(p).relative_to(root).as_posix()
+            if status == "delete":
+                reason: str | None = "no longer shipped by WhyGraph"
+            elif status == "needs_confirmation" and p in result.retired:
+                reason = (
+                    "no longer shipped by WhyGraph, and edited since it was installed"
+                )
+            elif status == "needs_confirmation":
+                reason = "edited since WhyGraph installed it"
+            else:
+                reason = None
             out.append(
                 FileOutcome(
                     rel,
                     status,  # type: ignore[arg-type]
                     agent,
-                    reason="edited since WhyGraph installed it"
-                    if status == "needs_confirmation"
-                    else None,
+                    reason=reason,
                     diff=result.diffs.get(p)
-                    if status in ("overwrite", "needs_confirmation")
+                    if status in ("overwrite", "needs_confirmation", "delete")
                     else None,
                 )
             )

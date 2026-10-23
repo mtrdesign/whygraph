@@ -258,7 +258,9 @@ DEFAULT_PORTAL_PORT = 8765
 _VSCODE_PORT_INPUT_ID = "whygraph-port"
 
 AgentAction = Literal["migrate", "remove"]
-FileStatus = Literal["write", "overwrite", "skip", "refused", "needs_confirmation"]
+FileStatus = Literal[
+    "write", "overwrite", "skip", "refused", "needs_confirmation", "delete"
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,14 +337,16 @@ class FileOutcome:
     ----------
     file : str
         Path relative to the project root, with ``/`` separators.
-    status : {"write", "overwrite", "skip", "refused", "needs_confirmation"}
+    status : {"write", "overwrite", "skip", "refused", "needs_confirmation", "delete"}
         ``write`` creates the file, ``overwrite`` changes an existing
         one, ``skip`` leaves it alone (already up to date, or an asset
         edited by the user that the bundle did not change), ``refused``
         means the file could not be merged safely and was not touched,
         and ``needs_confirmation`` means it is git-tracked and its path
         is not in ``confirm_tracked`` (an agent file) or, for a bundled
-        asset, that the user edited it and the bundle changed.
+        asset, that the user edited it and the bundle changed (or that
+        WhyGraph no longer ships it). ``delete`` removes an asset file
+        WhyGraph no longer ships.
     agent : str or None
         Canonical agent name the file belongs to, when it has one.
     reason : str or None
@@ -350,7 +354,8 @@ class FileOutcome:
     snippet : str or None
         For ``refused``: the exact entry to paste by hand.
     diff : str or None
-        For ``overwrite`` and ``needs_confirmation``: a unified diff.
+        For ``overwrite``, ``needs_confirmation`` and ``delete``: a
+        unified diff.
     foreign_codegraph : str or None
         A one-line description of a ``codegraph`` entry that is not
         WhyGraph's and was left byte-identical (never its ``command`` or

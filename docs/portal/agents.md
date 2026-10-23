@@ -53,8 +53,14 @@ Settings (and re-initializing) uses it per file:
 | You edited it, and this version's copy is the same as the one you started from | Left alone |
 | You edited it, and this version's copy changed | Left alone and listed as **Edited**, with the difference |
 | Installed before the manifest existed (a teammate's checkout, an older release) | Treated as edited |
+| No longer shipped by WhyGraph, and still the way WhyGraph wrote it | Removed (listed as **Remove**), with its folder when that is left empty |
+| No longer shipped by WhyGraph, and you edited it | Left alone and listed as **Edited**, with what removing it would delete |
 
-Tick **Overwrite my edits too** (shown only when edited files are listed) to replace those as well.
+Tick **Overwrite my edits too** (shown only when edited files are listed) to replace those as well, and
+to remove the edited files WhyGraph no longer ships. A file WhyGraph no longer ships is recognized from
+the manifest, or, for a project initialized before the manifest existed, from the exact content of
+every release that shipped it (Cursor's old `.cursor/commands/` files, for example). A symbolic link
+is never followed or removed.
 Settings shows `Agent files: v<installed> (current v<package>)` with an **Update** button when the
 recorded version is behind, and the project's Overview lists "Agent files are out of date" the same way.
 Removing an agent deletes only its MCP entry; the installed files and the manifest stay as they are.

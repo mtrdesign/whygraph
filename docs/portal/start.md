@@ -18,7 +18,8 @@ whygraph portal running at http://127.0.0.1:8765
 
 Open <http://127.0.0.1:8765>. Both containers restart with Docker (`--restart unless-stopped`), so you
 start them once, not per session. The database container has no published port: only the portal can
-reach it, over their private Docker network. Idle, it uses about 30 MiB of RAM.
+reach it, over their private Docker network. Idle, it uses about 30 MiB of RAM; the shared CodeGraph
+server adds about 130-300 MiB while it runs and is stopped after 10 idle minutes.
 
 !!! note "Native installs cannot run the portal"
     `pip` / `uv` installs provide headless `whygraph scan` only. The portal needs the Docker install.
@@ -91,6 +92,9 @@ Inside the data directory:
 | `secret.key` | The encryption key for the keys and tokens stored in the database |
 | `backups/` | Database dumps from `whygraph backup` and the automatic pre-upgrade dump |
 | `runs/` | Scan progress and log files |
+| `logs/codegraph.log` (and `.1`) | The hosted CodeGraph server's log, rotated at 1 MiB. Disposable |
+| `locks/codegraph/` | One small lock file per project, so a scan and the CodeGraph tools never write an index at once. Safe to leave in place; disposable |
+| `codegraph-home/` | The CodeGraph server's working directory and home. Empty, because its telemetry is off. Disposable |
 | `repos/` | Production mode only: the copies of the repositories imported from GitHub |
 
 The data directory is created with mode `0700`, owned by you, and the database files in it are owned
@@ -134,6 +138,8 @@ their values).
 
 - **A leftover `whygraph-serve` container** from 1.x may hold port 8765. `whygraph up` warns about it;
   remove it with `whygraph serve --stop`.
+- **CodeGraph crashed or will not start.** `whygraph logs` shows the tail of a crash; the full server
+  log is `logs/codegraph.log`, and a project's Overview opens it with **Open CodeGraph log**.
 - **A crash-looping portal** shows as `restarting` in `whygraph status`; `whygraph logs` has the reason.
   A portal that cannot reach its database within a minute exits, and Docker retries it; check the
   `database:` line of `whygraph status` and `docker logs whygraph-portal-postgres`.

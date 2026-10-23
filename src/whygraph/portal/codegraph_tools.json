@@ -1,0 +1,206 @@
+{
+  "codegraph_version": "1.4.1",
+  "protocol_version": "2024-11-05",
+  "tools": {
+    "codegraph_explore": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "PRIMARY TOOL \u2014 call FIRST for almost any question OR before an edit: how does X work, architecture, a bug, where/what is X, surveying an area, or the symbols you are about to change. Returns the verbatim source of the relevant symbols grouped by file in ONE capped call (Read-equivalent \u2014 treat the shown source as already Read; do NOT re-open those files), plus the call path among them. Query can be a natural-language question OR a bag of symbol/file names. Usually the ONLY call you need \u2014 more accurate context, in far fewer tokens and round-trips than a search/Read/Grep loop.",
+      "inputSchema": {
+        "properties": {
+          "maxFiles": {
+            "default": 12,
+            "description": "Maximum number of files to include source code from (default: 12)",
+            "type": "number"
+          },
+          "projectPath": {
+            "description": "Absolute path to the project to query (or any directory inside it) \u2014 codegraph uses the nearest .codegraph/ index at or above that path. Omit to use this session's default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project).",
+            "type": "string"
+          },
+          "query": {
+            "description": "Symbol names, file names, or short code terms to explore (e.g., \"AuthService loginUser session-manager\", \"GraphTraverser BFS impact traversal.ts\"). For a flow question, name the symbols spanning the flow (e.g. \"mutateElement renderScene\"). A natural-language question works too \u2014 no prior codegraph_search needed.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "projectPath"
+        ],
+        "type": "object"
+      },
+      "properties": {
+        "maxFiles": "number",
+        "projectPath": "string",
+        "query": "string"
+      },
+      "required": [
+        "query"
+      ]
+    },
+    "codegraph_impact": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "List symbols affected by changing <symbol>. Use before a refactor.",
+      "inputSchema": {
+        "properties": {
+          "depth": {
+            "default": 2,
+            "description": "How many levels of dependencies to traverse (default: 2)",
+            "type": "number"
+          },
+          "file": {
+            "description": "Narrow to the definition in this file (path or suffix) when several same-named symbols exist",
+            "type": "string"
+          },
+          "projectPath": {
+            "description": "Absolute path to the project to query (or any directory inside it) \u2014 codegraph uses the nearest .codegraph/ index at or above that path. Omit to use this session's default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project).",
+            "type": "string"
+          },
+          "symbol": {
+            "description": "Name of the symbol to analyze impact for",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "projectPath"
+        ],
+        "type": "object"
+      },
+      "properties": {
+        "depth": "number",
+        "file": "string",
+        "projectPath": "string",
+        "symbol": "string"
+      },
+      "required": [
+        "symbol"
+      ]
+    },
+    "codegraph_node": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Two modes. (1) READ A FILE \u2014 use INSTEAD of the Read tool: pass `file` (a path or basename) with no `symbol` and it returns that file's current on-disk source with line numbers, exactly the shape Read gives you (`<n>\\t<line>`, safe to Edit from), narrowable with `offset`/`limit` just like Read \u2014 PLUS a one-line note of which files depend on it. Same bytes as Read, faster (served from the index), with the blast radius attached. Use it whenever you would Read a source file. (2) ONE SYMBOL you can name \u2014 its location, signature, verbatim source (includeCode=true) and caller/callee trail in one call, so before changing it you see what calls it and what your edit would break. For an AMBIGUOUS name it returns EVERY matching definition's body in one call (so you never Read a file to find the right overload); pass `file`/`line` to pin one. Use codegraph_explore for several related symbols or the full flow.",
+      "inputSchema": {
+        "properties": {
+          "file": {
+            "description": "A file path or basename (e.g. \"harness.rs\", \"src/auth/session.ts\"). Pass it ALONE (no symbol) to READ the file like the Read tool \u2014 its full source with line numbers + which files depend on it. Or pass it WITH a symbol to disambiguate an overloaded name to the definition in this file.",
+            "type": "string"
+          },
+          "includeCode": {
+            "default": false,
+            "description": "Symbol mode: include the symbol's full body (default: false). Ignored in file mode, which always returns source unless `symbolsOnly` is set.",
+            "type": "boolean"
+          },
+          "limit": {
+            "description": "File mode: maximum number of lines to return, exactly like Read's limit. Defaults to the whole file (capped at 2000 lines, like Read).",
+            "type": "number"
+          },
+          "line": {
+            "description": "Symbol mode only: disambiguate to the definition at/around this line (use with the file:line a trail showed you).",
+            "type": "number"
+          },
+          "offset": {
+            "description": "File mode: 1-based line to start reading from, exactly like Read's offset. Defaults to the start of the file.",
+            "type": "number"
+          },
+          "projectPath": {
+            "description": "Absolute path to the project to query (or any directory inside it) \u2014 codegraph uses the nearest .codegraph/ index at or above that path. Omit to use this session's default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project).",
+            "type": "string"
+          },
+          "symbol": {
+            "description": "Name of the symbol to read (symbol mode). Omit it and pass `file` alone to read a whole file like Read.",
+            "type": "string"
+          },
+          "symbolsOnly": {
+            "default": false,
+            "description": "File mode: return just the file's symbol map + dependents (a cheap structural overview) instead of its source.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "projectPath"
+        ],
+        "type": "object"
+      },
+      "properties": {
+        "file": "string",
+        "includeCode": "boolean",
+        "limit": "number",
+        "line": "number",
+        "offset": "number",
+        "projectPath": "string",
+        "symbol": "string",
+        "symbolsOnly": "boolean"
+      },
+      "required": []
+    },
+    "codegraph_search": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Quick symbol search by name. Returns locations only (no code). Use codegraph_explore instead to get the actual source / understand an area in one call.",
+      "inputSchema": {
+        "properties": {
+          "kind": {
+            "description": "Filter by node kind",
+            "enum": [
+              "function",
+              "method",
+              "class",
+              "interface",
+              "type",
+              "variable",
+              "route",
+              "component"
+            ],
+            "type": "string"
+          },
+          "limit": {
+            "default": 10,
+            "description": "Maximum results (default: 10)",
+            "type": "number"
+          },
+          "projectPath": {
+            "description": "Absolute path to the project to query (or any directory inside it) \u2014 codegraph uses the nearest .codegraph/ index at or above that path. Omit to use this session's default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project).",
+            "type": "string"
+          },
+          "query": {
+            "description": "Symbol name or partial name (e.g., \"auth\", \"signIn\", \"UserService\")",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "projectPath"
+        ],
+        "type": "object"
+      },
+      "properties": {
+        "kind": "string",
+        "limit": "number",
+        "projectPath": "string",
+        "query": "string"
+      },
+      "required": [
+        "query"
+      ]
+    }
+  },
+  "upstream_instructions": "# Codegraph \u2014 available (per-project; pass projectPath)\n\nCodegraph is a SQLite knowledge graph of a codebase's symbols, edges, and\nfiles: one `codegraph_explore` call returns the verbatim, line-numbered source\nof the relevant symbols PLUS the call paths between them and a blast-radius\nsummary \u2014 replacing a grep + Read loop with one round-trip.\n\nThis server started somewhere with no `.codegraph/` of its own, so there is no\ndefault project \u2014 but the tools are available and work **per project**:\n\n- To query a project that HAS a `.codegraph/` index (e.g. a service inside a\n  monorepo, or a second repo), pass its path as `projectPath` to\n  `codegraph_explore` (and any other codegraph tool). Codegraph resolves the\n  nearest `.codegraph/` at or above that path and answers from it \u2014 for as many\n  projects as you like in one session.\n- For a project with no `.codegraph/`, use your built-in tools (Read/Grep/Glob)\n  for that project. Indexing is the user's decision \u2014 don't run it yourself, but\n  if it comes up they can run `codegraph init` in a project to enable codegraph\n  there (a new index is picked up live, no restart).\n"
+}

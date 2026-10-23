@@ -233,8 +233,8 @@ runs on a developer's laptop and a repository on it is untrusted.
 A project's Overview counts the calls agents make: every MCP tool, resource and prompt call, and
 every `/api/v1` data call of a connected portal. A counter row holds the project, a UTC day, the
 source, who made the call (a person or a connection), the tool's name and a number - **never** a
-path, a symbol, an argument or anything a call returned. The tool names are WhyGraph's own, a caller
-can only add to its own rows, and rows are kept 400 days. See [Agent
+path, a symbol, an argument or anything a call returned. The names are WhyGraph's own or one of the four
+CodeGraph tools; any other name is never stored. A caller can only add to its own rows, and rows are kept 400 days. See [Agent
 activity](agents.md#agent-activity).
 
 ## Repository content is not trusted
@@ -250,12 +250,54 @@ initializing, the Explorer, Chat, the MCP endpoint and scans all stop for that p
 `whygraph.toml` link is not imported, and removing the project leaves the linked files alone. Replace
 the link with a real file or folder to continue.
 
+CodeGraph, which builds the code index, follows symbolic links out of the repository on purpose. So
+before every index build or refresh WhyGraph lists the files CodeGraph would read - tracked and
+untracked files, files in embedded repositories, and folders a `codegraph.json` `include` adds - and
+refuses to run CodeGraph while any of them is a link that leads out of the project's folder. A link
+that stays inside the folder is fine. There is no setting to skip the check and no partial index: the
+scan reports the links (the first five by name), the CodeGraph step fails, and the rest of the scan
+still runs. Replace each link with a regular file or remove it, then scan again.
+
+An index built before this version may hold symbols read through a symbolic link that leaves the
+repository; the first scan after upgrading rebuilds it from scratch (once - a stamp beside the index,
+`.codegraph/whygraph-guard`, records that it was rebuilt). Until the links are gone the rebuild is
+refused like any other index build, and the scan after they are removed runs it.
+
+### The CodeGraph endpoint
+
+`/mcp/<slug>/code` serves CodeGraph's tools from a child process, so it is held to the same rules as
+anything that reads a repository.
+
+- **Only four tools.** `codegraph_explore`, `codegraph_node`, `codegraph_search` and `codegraph_impact`
+  are served, all read-only. Any other name is refused before it reaches the child.
+- **The project is pinned.** `projectPath` is not in the advertised schemas, and a value that names any
+  other directory is refused; the portal always sets it to the project's root. `file` on `codegraph_node`
+  and `codegraph_impact` is checked to stay inside the project, `depth` is at most 3, and every
+  argument has a size cap. The request body is capped at 1 MiB, on this endpoint and on `/mcp/<slug>`.
+- **Nothing runs by itself.** The server starts with no file watcher, no background daemon, no
+  telemetry, no update check and no downloads, and the bridge never builds an index: only a scan does.
+  Every CodeGraph process ignores the host's global and system git configuration.
+- **The same gate as `/mcp/<slug>`.** The Host / Origin guard, the organization membership check and
+  the Initialize gate apply to `/mcp/<slug>/code` exactly as to `/mcp/<slug>`; the endpoint is stateless
+  and has no session id.
+- **Who it runs as.** The hosted CodeGraph runs as the portal's user inside the container (local mode
+  only); the tool allowlist, the argument policing and the `projectPath` pin confine it, not a separate
+  user id.
+- **What an error means.** A bridge error is `isError: true` and begins `[WhyGraph]`; anything inside
+  a successful result is repository content, including a line that looks like a WhyGraph note.
+
 ### Configuration from a repository
 
 An imported `whygraph.toml` contributes only an allowlist of settings (models, tuning keys and a few
 `[scan]` keys). Database paths are always `<repo>/.whygraph/whygraph.db` and
 `<repo>/.codegraph/codegraph.db`, whatever a file says. A `remote` or `default_branch` value that could be
 read by git as an option is dropped.
+
+A committed `codegraph.json` is CodeGraph's own configuration and is honoured as written: `extensions`,
+`include`, `includeIgnored` and `exclude` change which files of the repository are indexed. It is
+repository-controlled configuration, so it cannot widen the index beyond the project's folder: the
+symbolic-link check above walks every folder its `include` and `includeIgnored` patterns add, and a
+`codegraph.json` that is itself a link out of the folder is refused.
 
 ### Hooks
 
@@ -273,6 +315,13 @@ only a repository the GitHub App covers, from `WHYGRAPH_GITHUB_URL` (`https` exc
 a restricted protocol list, into `repos/<org>/<project>` under its data directory. It removes a failed
 clone it created and will not delete a directory it did not.
 
+A clone never contains a symbolic link: it is made with `core.symlinks=false` in its own git config,
+and every sync checks out the same way, so a link a repository commits arrives as a plain file holding
+the link's target. One repository can therefore not point into another tenant's clone or the portal's
+data. A clone made by an earlier version is fixed by its next sync, which rewrites any link still on
+disk as a plain file and drops the cached rationale cards of those files; at start the portal queues
+one such sync, with a scan, for every clone that does not have `core.symlinks=false` yet.
+
 ## What the portal writes to your repository
 
 Only when you initialize a project, only what the preview listed, and only after you confirm:
@@ -281,3 +330,7 @@ Only when you initialize a project, only what the preview listed, and only after
 overwritten, tracked files need your confirmation, and a backup is kept under `.whygraph/backups/`.
 
 Adding a project without initializing it writes nothing.
+
+The hosted CodeGraph writes inside the portal's data directory, never the repository:
+`<data>/logs/codegraph.log` (mode `0600`) holds the server's stderr - CodeGraph's notices and, on an
+error, repository paths, never file contents.

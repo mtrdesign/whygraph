@@ -54,16 +54,16 @@ function AgentLine({ agent }: { agent: PortChangeAgent }) {
       return (
         <li data-testid={`port-manual-${agent.agent}`}>
           <p>
-            {file}: not changed{agent.reason ? ` (${agent.reason})` : ""}. Set this line yourself:
+            {file}: not changed{agent.reason ? ` (${agent.reason})` : ""}. Set {(agent.lines?.length ?? 1) > 1 ? "these lines" : "this line"} yourself:
           </p>
-          {agent.line && (
-            <div className="mt-1 flex flex-wrap items-center gap-2">
+          {(agent.lines ?? (agent.line ? [agent.line] : [])).map((line) => (
+            <div key={line} className="mt-1 flex flex-wrap items-center gap-2">
               <code className="min-w-0 flex-1 overflow-x-auto rounded-md bg-muted px-2 py-1 font-mono text-xs text-foreground">
-                {agent.line}
+                {line}
               </code>
-              <CopyButton text={agent.line} />
+              <CopyButton text={line} />
             </div>
-          )}
+          ))}
           {(agent.diff || agent.snippet) && (
             <details className="mt-1">
               <summary className="cursor-pointer text-xs">{agent.diff ? "Show the change" : "Show the entry"}</summary>

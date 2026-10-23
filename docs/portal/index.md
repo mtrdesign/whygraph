@@ -14,8 +14,9 @@ flowchart LR
     browser["Browser<br/>(Explorer + Chat)"]
     agents["Claude Code, Cursor,<br/>VS Code, Codex"]
     subgraph portal["whygraph-portal (Docker, 127.0.0.1 only)"]
-        api["API + MCP<br/>/api, /mcp/&lt;slug&gt;"]
+        api["API + MCP<br/>/api, /mcp/&lt;slug&gt;,<br/>/mcp/&lt;slug&gt;/code"]
         runner["Scan runner"]
+        cg["codegraph serve --mcp<br/>(one shared server)"]
     end
     subgraph pg["whygraph-portal-postgres (Docker, no published port)"]
         db[("Portal database<br/>projects, settings,<br/>encrypted keys, scan history")]
@@ -26,6 +27,8 @@ flowchart LR
     agents -- "HTTP MCP" --> api
     api --> db
     api --> runner
+    api -- "stdio MCP" --> cg
+    cg -- "reads .codegraph" --> repos
     runner -- "whygraph scan" --> repos
     api -- "reads .whygraph + .codegraph" --> repos
     hooks["git hooks"] -- "POST /api/projects/&lt;slug&gt;/scans" --> api
@@ -42,6 +45,7 @@ flowchart LR
 | A project's evidence, descriptions, rationale cache and chat history | The repository itself, in `.whygraph/whygraph.db` |
 | A project's CodeGraph index | The repository itself, in `.codegraph/` |
 | A [platform project](platform-projects.md)'s history, descriptions and rationale | The platform, never your machine. Your portal keeps only the link: the platform's address, the project's name and a **connection token**, encrypted |
+| The hosted CodeGraph server | One `codegraph serve --mcp` process inside the portal container, shared by every project: about 130-300 MiB while it runs, stopped after 10 idle minutes and started again by the next call |
 | The folders, port and image the portal was started with | `~/.config/whygraph` on your host |
 
 Because each project's databases stay in its own repository, removing a project from the portal

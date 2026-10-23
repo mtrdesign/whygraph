@@ -27,7 +27,11 @@ from whygraph.services.git import (
     pass_through_env,
     strip_userinfo,
 )
-from whygraph.services.git.commands import GitCloneCmd, GitFetchDefaultCmd
+from whygraph.services.git.commands import (
+    GitCheckoutResetCmd,
+    GitCloneCmd,
+    GitFetchDefaultCmd,
+)
 from whygraph.services.git.credentials import (
     GITHUB_URL_ENV,
     TOKEN_ENV_VAR,
@@ -360,9 +364,16 @@ def test_clone_argv_is_https_only_with_reset_then_inline_helper():
     assert helpers[0] == "credential.helper="  # reset comes first
     assert len(helpers) == 2
     assert "github.com" in helpers[1]
-    # `--` separates options from the URL and destination.
-    assert argv[-3:] == ["--", URL, "/data/x"]
-    assert argv[-4] == "clone"
+    # The clone's own config writes a tracked link as a plain file; `--`
+    # separates options from the URL and destination.
+    assert argv[argv.index("clone") :] == [
+        "clone",
+        "-c",
+        "core.symlinks=false",
+        "--",
+        URL,
+        "/data/x",
+    ]
     assert TOKEN not in " ".join(argv)
 
 
@@ -657,3 +668,96 @@ def test_fetch_default_failure_is_a_git_error(tmp_path: Path):
     env = git_env(None, environ={"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
     with pytest.raises(GitError, match="fetch in"):
         Repository(repo_dir).fetch_default(env=env)
+
+
+# --------------------------------------------------------------------------
+# Symbolic links (portal-hosted CodeGraph plan, Step 1)
+# --------------------------------------------------------------------------
+
+
+def _push_link(tmp_path: Path, bare: Path, name: str, target: str) -> None:
+    """Commit a symbolic link ``name -> target`` to ``bare``'s ``main``."""
+    work = tmp_path / "pusher"
+    _git(tmp_path, "clone", "-q", str(bare), str(work))
+    (work / name).parent.mkdir(parents=True, exist_ok=True)
+    (work / name).symlink_to(target)
+    _git(work, "add", name)
+    _git(
+        work,
+        "-c",
+        "user.email=t@example.com",
+        "-c",
+        "user.name=T",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-q",
+        "-m",
+        f"link {name}",
+    )
+    _git(work, "push", "-q", "origin", "HEAD:main")
+
+
+def test_a_clone_writes_a_tracked_link_as_a_plain_file(
+    tmp_path: Path, bare: Path
+) -> None:
+    (tmp_path / "secret.txt").write_text("SECRET_VALUE\n")
+    _push_link(tmp_path, bare, "app/evil.py", "../../secret.txt")
+    dest = tmp_path / "checkout"
+
+    Repository.clone(URL, dest, env=_env(tmp_path, bare))
+
+    evil = dest / "app" / "evil.py"
+    assert not evil.is_symlink() and evil.read_text() == "../../secret.txt"
+    assert _git(dest, "config", "--get", "core.symlinks").strip() == "false"
+    assert _git(dest, "status", "--porcelain").strip() == ""
+
+
+def test_checkout_reset_argv_writes_links_as_files():
+    argv = GitCheckoutResetCmd("main", "a" * 40).argv()
+    config = argv[: argv.index("checkout")]
+    assert "core.symlinks=false" in config
+    assert "core.hooksPath=/dev/null" in config
+
+
+def test_neutralize_symlinks_rewrites_an_existing_link(tmp_path: Path) -> None:
+    """A clone made before clones set core.symlinks=false (an older build)."""
+    secret = tmp_path / "secret.txt"
+    secret.write_text("SECRET_VALUE\n")
+    root = tmp_path / "old-clone"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "main")
+    (root / "a.txt").write_text("one\n")
+    (root / "app" / "deep").mkdir(parents=True)
+    (root / "app" / "deep" / "leak.py").symlink_to("../../../secret.txt")
+    (root / "abs.py").symlink_to(secret)
+    (root / "in [root].py").symlink_to("a.txt")  # glob characters, in-root
+    (root / "untracked.py").symlink_to(secret)  # not git's: left alone
+    _git(root, "add", "a.txt", "app", "abs.py", "in [root].py")
+    _git(
+        root,
+        "-c",
+        "user.email=t@example.com",
+        "-c",
+        "user.name=T",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-q",
+        "-m",
+        "links",
+    )
+
+    rewritten = Repository(root).neutralize_symlinks()
+
+    assert sorted(rewritten) == ["abs.py", "app/deep/leak.py", "in [root].py"]
+    for rel in rewritten:
+        assert not (root / rel).is_symlink(), rel
+    assert (root / "app" / "deep" / "leak.py").read_text() == "../../../secret.txt"
+    assert (root / "a.txt").read_text() == "one\n"  # untouched
+    assert secret.read_text() == "SECRET_VALUE\n"  # never through the link
+    assert (root / "untracked.py").is_symlink()
+    assert _git(root, "config", "--get", "core.symlinks").strip() == "false"
+    assert _git(root, "status", "--porcelain").strip() == "?? untracked.py"
+    # Idempotent: a clean clone changes nothing.
+    assert Repository(root).neutralize_symlinks() == ()

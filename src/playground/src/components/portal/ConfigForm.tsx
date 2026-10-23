@@ -67,13 +67,14 @@ type StoredConfig = Omit<ProjectConfigView, "import"> & {
  */
 export type ConfigScope = { kind: "project"; slug: string } | { kind: "global" };
 
-type SectionId = "models" | "github" | "hooks" | "limits";
+type SectionId = "models" | "github" | "hooks" | "scanning" | "limits";
 
 /** Each section's form fields; a section's Save writes these and nothing else. */
 const SECTION_FIELDS: Record<SectionId, (keyof ConfigFormValues)[]> = {
   models: ["defaultModel", "analyze", "rationale", "chat", "openaiBaseUrl", "ollamaHost"],
   github: ["forge"],
   hooks: ["hooks"],
+  scanning: ["serveCodegraph"],
   limits: ["agentGenerations", "agentDescriptions"],
 };
 
@@ -97,6 +98,7 @@ export function configSections(
       models,
       { id: "github", label: "GitHub" },
       ...(!production && source === "local" ? [{ id: "hooks", label: "Git hooks" }] : []),
+      ...(!production && source === "local" ? [{ id: "scanning", label: "Scanning" }] : []),
     ];
   }
   return [
@@ -670,6 +672,38 @@ export function ConfigForm({
                 />
               ))}
             </div>
+          </SectionForm>
+        </SettingsSection>
+      )}
+
+      {showHooks && (
+        <SettingsSection
+          id="scanning"
+          title="Scanning"
+          description="Hosted CodeGraph: the portal serves CodeGraph's code tools to this project's agents (codegraph_explore, codegraph_search and the rest), refreshing the code index before it answers."
+        >
+          <SectionForm
+            name="Scanning"
+            dirty={dirty("scanning")}
+            readOnly={readOnly}
+            onSave={() => saveSection("scanning")}
+            onDiscard={() => discard("scanning")}
+          >
+            <Controller
+              control={control}
+              name="serveCodegraph"
+              render={({ field }) => (
+                <div className="row-wrap justify-between gap-3">
+                  <Label htmlFor="serve-codegraph-switch">Serve CodeGraph tools to agents</Label>
+                  <Switch
+                    id="serve-codegraph-switch"
+                    checked={field.value}
+                    onCheckedChange={field.onChange}
+                    disabled={readOnly}
+                  />
+                </div>
+              )}
+            />
           </SectionForm>
         </SettingsSection>
       )}

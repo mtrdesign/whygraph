@@ -20,6 +20,6 @@ If no target was provided, respond with: `Usage: /rationale <qualified_name | pa
 
 Otherwise call the MCP tool `whygraph_rationale_brief` with those arguments, then present the result verbatim. The tool returns a structured object with `purpose`, `why`, `constraints[]`, `tradeoffs[]`, `risks[]`, `evidence_count`, and `cached_at`. Render it as readable markdown — do not paraphrase or editorialise the rationale fields themselves.
 
-If the tool returns `isError: true`, print the error message verbatim and stop.
+If the tool returns `isError: true`, print the error message verbatim and stop. If it is `code: budget_exceeded` or `generation_not_permitted`, do not retry: say that generation is paused for this project and that `whygraph_evidence_for` still lists the raw commits and PRs.
 
 Do not edit files or run other tools. This is a read-only lookup.

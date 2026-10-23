@@ -36,6 +36,8 @@ export interface ConfigFormValues {
   ollamaHost: string;
   forge: boolean;
   hooks: Record<HookName, boolean>;
+  /** `[scan].serve_codegraph`: the portal serves CodeGraph tools for this project (default on). */
+  serveCodegraph: boolean;
   /** Write-only; blank leaves the stored token alone. */
   githubToken: string;
   /** Write-only per provider; blank leaves the stored key alone. */
@@ -90,6 +92,11 @@ export function hooksFromLayer(layer: ConfigDict): Record<HookName, boolean> {
   return Object.fromEntries(HOOK_NAMES.map((h) => [h, list.includes(h)])) as Record<HookName, boolean>;
 }
 
+/** `[scan].serve_codegraph`; only an explicit `false` turns the hosted tools off. */
+export function serveCodegraphOn(layer: ConfigDict): boolean {
+  return obj(layer.scan).serve_codegraph !== false;
+}
+
 /** Whether `[scan].forge` turns the GitHub crawl on (`auto` / `github`). */
 export function forgeOn(layer: ConfigDict): boolean {
   const forge = str(obj(layer.scan).forge);
@@ -107,6 +114,7 @@ export function layerToValues(layer: ConfigDict): ConfigFormValues {
     ollamaHost: str(obj(llm.ollama).host),
     forge: forgeOn(layer),
     hooks: hooksFromLayer(layer),
+    serveCodegraph: serveCodegraphOn(layer),
     githubToken: "",
     keys: Object.fromEntries(KEYED_PROVIDERS.map((p) => [p, ""])),
     agentGenerations: limitText(obj(layer.rationale).agent_generations_per_hour),
@@ -184,6 +192,10 @@ export function valuesToLayer(
       if (hooks === undefined) delete scan.hooks;
       else scan.hooks = hooks;
     }
+    if (v.serveCodegraph !== serveCodegraphOn(base)) {
+      if (v.serveCodegraph) delete scan.serve_codegraph;
+      else scan.serve_codegraph = false;
+    }
     prune(layer, "scan");
   }
   return layer;
@@ -254,6 +266,7 @@ export const configFormSchema = z.object({
     "post-rewrite": z.boolean(),
     "post-checkout": z.boolean(),
   }),
+  serveCodegraph: z.boolean(),
   githubToken: z.string(),
   keys: z.record(z.string(), z.string()),
   agentGenerations: agentLimit,

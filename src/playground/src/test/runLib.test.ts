@@ -367,17 +367,30 @@ describe("mcpSnippet", () => {
   const url = "http://127.0.0.1:8765/mcp/alpha";
 
   it("renders the same per-agent port forms as the files Initialize writes", () => {
+    const claude = (suffix: string) => ({
+      type: "http",
+      url: `http://127.0.0.1:\${WHYGRAPH_PORT:-8765}/mcp/alpha${suffix}`,
+    });
     expect(JSON.parse(mcpSnippet("claude", url))).toEqual({
-      mcpServers: { whygraph: { type: "http", url: "http://127.0.0.1:${WHYGRAPH_PORT:-8765}/mcp/alpha" } },
+      mcpServers: { whygraph: claude(""), codegraph: claude("/code") },
     });
     expect(JSON.parse(mcpSnippet("cursor", url))).toEqual({
-      mcpServers: { whygraph: { url } },
+      mcpServers: { whygraph: { url }, codegraph: { url: `${url}/code` } },
+    });
+    // One port input serves both entries.
+    const vscode = (suffix: string) => ({
+      type: "http",
+      url: `http://127.0.0.1:\${input:whygraph-port}/mcp/alpha${suffix}`,
     });
     expect(JSON.parse(mcpSnippet("vscode", url))).toEqual({
       inputs: [{ id: "whygraph-port", type: "promptString", description: "WhyGraph portal port", default: "8765" }],
-      servers: { whygraph: { type: "http", url: "http://127.0.0.1:${input:whygraph-port}/mcp/alpha" } },
+      servers: { whygraph: vscode(""), codegraph: vscode("/code") },
     });
-    expect(mcpSnippet("codex", url)).toBe(`[mcp_servers.whygraph]\nurl = "${url}"\n`);
+    // Codex: the long tool timeout on both tables.
+    expect(mcpSnippet("codex", url)).toBe(
+      `[mcp_servers.whygraph]\nurl = "${url}"\ntool_timeout_sec = 120\n\n` +
+        `[mcp_servers.codegraph]\nurl = "${url}/code"\ntool_timeout_sec = 120\n`,
+    );
   });
 });
 

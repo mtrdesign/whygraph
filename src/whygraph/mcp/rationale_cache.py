@@ -33,7 +33,10 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timezone
-from typing import Sequence
+from typing import Iterable, Sequence
+
+from sqlalchemy import delete
+from sqlmodel import Session, col
 
 from whygraph.analyze import CommitEvidence, Rationale
 from whygraph.db import get_session
@@ -43,6 +46,9 @@ from .targets import Target
 
 
 _DEFAULT_MODEL_TAG = "default"
+
+_PURGE_CHUNK = 500
+"""Paths per ``DELETE ... WHERE path IN (...)`` (under SQLite's variable limit)."""
 
 
 def _fingerprint(evidence: Sequence[CommitEvidence]) -> str:
@@ -170,3 +176,34 @@ def store_cached(
             )
         )
     return cached_at
+
+
+def purge_paths(session: Session, paths: Iterable[str]) -> int:
+    """Delete every cached card for ``paths``, whatever its range, provider or model.
+
+    The scan runner calls it for the files it rewrote from symbolic links
+    into plain files: a card written while the path was a link may quote
+    what the link pointed to, and the evidence fingerprint (commit SHAs)
+    would not change to invalidate it.
+
+    Parameters
+    ----------
+    session : Session
+        A session on the project's WhyGraph DB; the caller commits.
+    paths : Iterable[str]
+        Repository-relative paths, as cards store them.
+
+    Returns
+    -------
+    int
+        The number of rows deleted.
+    """
+    unique = sorted(set(paths))
+    deleted = 0
+    for start in range(0, len(unique), _PURGE_CHUNK):
+        chunk = unique[start : start + _PURGE_CHUNK]
+        result = session.exec(  # type: ignore[call-overload]
+            delete(RationaleCache).where(col(RationaleCache.path).in_(chunk))
+        )
+        deleted += result.rowcount or 0
+    return deleted

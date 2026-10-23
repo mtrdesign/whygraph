@@ -26,10 +26,15 @@ from rich.progress import Progress
 from whygraph.services.codegraph import (
     CodeGraphBootstrapError,
     refresh_codegraph_index,
+    writer_lock,
 )
+from whygraph.services.codegraph.writer_lock import lock_dir
 from whygraph.services.codegraph.paths import CODEGRAPH_DB_RELPATH
 
 from .crawler import Crawler
+
+WRITER_LOCK_WAIT_SEC: float = 660.0
+"""How long the refresh waits for another CodeGraph writer on the same repository."""
 
 
 class CodeGraphCrawler(Crawler):
@@ -54,6 +59,10 @@ class CodeGraphCrawler(Crawler):
         Record a :class:`CodeGraphBootstrapError` on :attr:`Crawler.error`
         (failing the scan) instead of :attr:`warning`. Used by
         ``whygraph scan --codegraph-only``, where the index is the whole job.
+    require_lock_dir : bool, optional
+        A portal-managed child: refuse to run CodeGraph unless the writer
+        lock directory is configured (``WHYGRAPH_CODEGRAPH_LOCK_DIR``), so
+        it never writes the index unlocked. Default ``False`` (a headless scan).
 
     Attributes
     ----------
@@ -70,11 +79,13 @@ class CodeGraphCrawler(Crawler):
         project_root: Path,
         image: str | None,
         strict: bool = False,
+        require_lock_dir: bool = False,
     ) -> None:
         super().__init__("codegraph", progress, total=None)
         self._project_root = project_root
         self._image = image
         self._strict = strict
+        self._require_lock_dir = require_lock_dir
         self.warning: str | None = None
 
     def work(self) -> None:
@@ -83,7 +94,17 @@ class CodeGraphCrawler(Crawler):
         self.advance(0, description=f"codegraph {verb}")
 
         try:
-            refresh_codegraph_index(self._project_root, image=self._image, capture=True)
+            if self._require_lock_dir and lock_dir() is None:
+                raise CodeGraphBootstrapError("writer lock directory not configured")
+            with writer_lock(self._project_root, wait=WRITER_LOCK_WAIT_SEC) as held:
+                if not held:
+                    raise CodeGraphBootstrapError(
+                        "another CodeGraph writer held the lock for"
+                        f" {WRITER_LOCK_WAIT_SEC:g} s"
+                    )
+                refresh_codegraph_index(
+                    self._project_root, image=self._image, capture=True
+                )
         except CodeGraphBootstrapError as exc:
             if self._strict:
                 raise

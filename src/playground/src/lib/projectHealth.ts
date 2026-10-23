@@ -1,4 +1,4 @@
-import type { AccessLostReason, ProjectDetails, ProjectOverview, ProjectSummary } from "../api";
+import type { AccessLostReason, CodegraphOverview, ProjectDetails, ProjectOverview, ProjectSummary } from "../api";
 import { providerLabel } from "./labels";
 import { can } from "./permissions";
 import { linkNotice } from "./platformLink";
@@ -67,7 +67,10 @@ export type HealthActionKind =
   | "add_key"
   | "retry_scan"
   | "rescan"
-  | "describe";
+  | "describe"
+  | "update_agents"
+  | "codegraph_log"
+  | "codegraph_restart";
 
 export interface HealthAction {
   kind: HealthActionKind;
@@ -90,7 +93,14 @@ export type HealthId =
   | "behind"
   | "waiting"
   | "unscanned"
-  | "scanning";
+  | "scanning"
+  | "agent_files"
+  | "codegraph"
+  | "codegraph_guard"
+  | "codegraph_index"
+  | "codegraph_tools"
+  | "codegraph_off"
+  | "codegraph_missing";
 
 export interface HealthItem {
   id: HealthId;
@@ -114,6 +124,8 @@ export interface HealthOptions {
   waiting?: number | null;
   /** The project DB is behind a symbolic link (`409 unsafe_path`). */
   unsafePath?: boolean;
+  /** The Overview route's `codegraph` block (local mode with a CodeGraph host). */
+  codegraph?: CodegraphOverview | null;
 }
 
 /** Why GitHub no longer lets WhyGraph read a production project, and the fix. */
@@ -149,7 +161,7 @@ function budgetDetail(scope: string | null | undefined): string {
  */
 export function projectHealth(
   p: ProjectSummary | ProjectDetails,
-  { lastFailure = null, waiting = null, unsafePath = false }: HealthOptions = {},
+  { lastFailure = null, waiting = null, unsafePath = false, codegraph = null }: HealthOptions = {},
 ): ProjectHealth {
   const items: HealthItem[] = [];
   let status: ProjectStatus | null = null;
@@ -307,6 +319,68 @@ export function projectHealth(
     pill({ key: "failed", label: "Scan failed", tone: "error" });
   }
 
+  // 9b. Hosted CodeGraph (local mode), after "failed" and before "behind". No status pill.
+  if (usable && codegraph) {
+    const log: HealthAction = { kind: "codegraph_log", label: "Open CodeGraph log" };
+    const restart: HealthAction = { kind: "codegraph_restart", label: "Restart CodeGraph" };
+    const server = codegraph.server;
+    if (server.state === "restart_window" || server.state === "unavailable") {
+      items.push({
+        id: "codegraph",
+        tone: "error",
+        title: "CodeGraph is paused on this portal (every project)",
+        detail: "The shared CodeGraph server stopped after repeated crashes, so the codegraph_* tools answer with an error until it is restarted.",
+        actions: mayScan ? [restart, log] : [log],
+      });
+    }
+    if (codegraph.guard && !codegraph.guard.ok) {
+      items.push({
+        id: "codegraph_guard",
+        tone: "error",
+        title: "A symbolic link leaves the repository",
+        detail: `The code index is not refreshed while it is there: ${codegraph.guard.paths.join(", ")}`,
+        actions: [],
+      });
+    }
+    if ((codegraph.last_sync && codegraph.last_sync.result !== "ok") || codegraph.last_index_failure) {
+      const actions: HealthAction[] = [];
+      if (mayScan) actions.push({ kind: "rescan", label: "Rescan" });
+      actions.push(log);
+      items.push({
+        id: "codegraph_index",
+        tone: "warn",
+        title: "The code index could not be refreshed",
+        detail: codegraph.last_index_failure?.message,
+        actions,
+      });
+    }
+    if (codegraph.withheld_tools.length > 0) {
+      items.push({
+        id: "codegraph_tools",
+        tone: "warn",
+        title: `CodeGraph tool(s) withheld: ${codegraph.withheld_tools.join(", ")}`,
+        detail: "This portal's CodeGraph version differs from the one WhyGraph was built against.",
+        actions: [],
+      });
+    }
+    if (!codegraph.enabled) {
+      items.push({
+        id: "codegraph_off",
+        tone: "info",
+        title: "Hosted CodeGraph tools are off (Settings > Scanning)",
+        actions: [],
+      });
+    }
+    if (!server.available) {
+      items.push({
+        id: "codegraph_missing",
+        tone: "info",
+        title: "CodeGraph binary not found on this portal",
+        actions: [],
+      });
+    }
+  }
+
   // 10. Behind the checkout.
   if (usable && p.stale) {
     const n = p.stale.commits_behind;
@@ -317,7 +391,7 @@ export function projectHealth(
       title,
       detail: linked
         ? "The checkout is ahead of the code index on this machine, so your agent places the newest work less precisely."
-        : "The checkout is ahead of what WhyGraph last scanned, so the Explorer and Chat miss the newest work.",
+        : "The checkout is ahead of what WhyGraph last scanned, so the Explorer, Chat and the whygraph_* tools miss the newest commits; the CodeGraph tools stay current.",
       actions: mayScan ? [{ kind: "rescan", label: "Rescan" }] : [],
     });
     if (!scanning) pill({ key: "behind", label: "Behind", tone: "warn", tooltip: title });
@@ -334,6 +408,20 @@ export function projectHealth(
         ? "Describe them now, or let them fill in on demand as you browse."
         : "They fill in on demand as you browse. Ask a project admin to describe them all at once.",
       actions: canDescribe ? [{ kind: "describe", label: "Describe" }] : [],
+    });
+  }
+
+  // 12. Agent files installed by an older version (the upgrade manifest): low severity.
+  const agentFiles = "agent_files" in p ? p.agent_files : null;
+  if (usable && agentFiles?.outdated) {
+    items.push({
+      id: "agent_files",
+      tone: "info",
+      title: "Agent files are out of date",
+      detail: `Installed ${
+        agentFiles.installed_version ? `v${agentFiles.installed_version}` : "before versions were tracked"
+      }${agentFiles.current_version ? `, current v${agentFiles.current_version}` : ""}. Files you have not edited update silently.`,
+      actions: can(p, "project.setup") ? [{ kind: "update_agents", label: "Update" }] : [],
     });
   }
 

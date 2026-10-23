@@ -256,6 +256,8 @@ export interface PortalState {
   version?: string | null;
   // What the portal did when it started on a new port (computed once at start).
   port_change?: PortChange | null;
+  // Local mode: is CodeGraph hosted and running (counts only; the route is public).
+  codegraph?: { available: boolean; live: number };
   // Production, org host: set while the caller's membership in this org still shows
   // the first-visit banner (M2f-3); cleared by `DELETE /api/org/welcome`.
   welcome?: { org_name: string; role: MemberRole } | null;
@@ -313,6 +315,9 @@ export interface PortChangeAgent {
   // `line` is the entry to set (plus `diff` / `snippet`); skipped: see `reason`.
   action: "rewritten" | "up_to_date" | "env" | "manual" | "skipped";
   hint?: string;
+  // The lines to set: the whygraph entry first, then the codegraph one when the
+  // file carries ours. `line` (the first) is the fallback for an older portal.
+  lines?: string[];
   line?: string;
   diff?: string | null;
   snippet?: string | null;
@@ -427,6 +432,13 @@ export interface ProjectLink {
 
 export type AccessLostReason = "no_access" | "git_access_denied" | "repo_deleted" | "tracked_whygraph_state";
 
+export interface AgentFilesStatus {
+  /** `null` for a project initialized before the manifest existed. */
+  installed_version: string | null;
+  current_version: string | null;
+  outdated: boolean;
+}
+
 export interface ProjectDetails extends ProjectSummary {
   agents: string[];
   missing_key: string | null;
@@ -436,6 +448,9 @@ export interface ProjectDetails extends ProjectSummary {
   // the project folder is unusable.
   detected?: Detected | null;
   port_change?: ProjectPortChange | null;
+  // The installed vs packaged agent-file version (the upgrade manifest); `null`
+  // in production, without a configured agent or a usable folder.
+  agent_files?: AgentFilesStatus | null;
   stats: {
     commits: number;
     described: number;
@@ -475,6 +490,15 @@ export interface DetectedAgent {
   tracked: boolean;
 }
 
+// A `codegraph` entry that is not the portal's (`foreign` only).
+export interface DetectedCodegraphEntry {
+  agent: string;
+  file: string;
+  key: string;
+  shape: "stdio" | "http" | "unknown";
+  tracked: boolean;
+}
+
 export interface CustomDbPath {
   key: string;
   path: string;
@@ -488,6 +512,11 @@ export interface Detected {
   managed_hooks: string[];
   detected_agents: DetectedAgent[];
   custom_db_paths: CustomDbPath[];
+  // The user's own CodeGraph wiring (Step 4a); absent on older portals.
+  codegraph_entries?: DetectedCodegraphEntry[];
+  // Files holding a CodeGraph instruction section.
+  codegraph_sections?: string[];
+  codegraph_hooks?: string[];
 }
 
 export interface ImportReport {
@@ -607,6 +636,8 @@ export interface InitBody {
   dry_run?: boolean;
   confirm_tracked?: string[];
   agent_actions?: Record<string, "migrate" | "remove">;
+  // Files whose foreign `codegraph` entry becomes the portal's.
+  replace_codegraph?: string[];
 }
 
 export interface InitResult {
@@ -620,6 +651,9 @@ export interface InitResult {
   needs_confirmation: string[];
   refused: string[];
   marker_written: boolean;
+  // Non-blocking: a `codegraph` entry that is not the portal's (left as it was).
+  foreign_codegraph?: { file: string; description: string }[];
+  codegraph_hooks?: string[];
   initialized: boolean;
   custom_db_paths: CustomDbPath[];
   // A linked project's leftover `.whygraph/whygraph.db`, which is never opened.
@@ -1760,6 +1794,46 @@ export interface ProjectOverview {
     connections: { client_name: string; user_label: string | null; last_used_at: string | null }[] | null;
     last_call_day: string | null;
   };
+  // Local mode with a CodeGraph host; `null` / absent otherwise.
+  codegraph?: CodegraphOverview | null;
+}
+
+export type CodegraphServerState = "off" | "starting" | "live" | "restart_window" | "unavailable";
+
+/** The overview's `codegraph` block (portal/codegraph_host.py `snapshot` plus the overview's own reads). */
+export interface CodegraphOverview {
+  server: {
+    state: CodegraphServerState;
+    pid: number | null;
+    since: string | null;
+    shared: boolean;
+    available: boolean;
+  };
+  enabled: boolean;
+  last_call_at: string | null;
+  last_sync: {
+    at: string;
+    duration_ms: number;
+    result: "ok" | "failed" | "timeout" | "killed";
+    changed_files?: number;
+  } | null;
+  sync_failures_10m: number;
+  sync_paused_until: string | null;
+  guard: { ok: boolean; paths: string[]; checked_at: string } | null;
+  index: { present: boolean; files: number | null };
+  withheld_tools: string[];
+  last_index_failure: { run_id: number; at: string; message: string } | null;
+  since_start: {
+    calls: number;
+    waited: number;
+    still_updating: number;
+    refresh_failed: number;
+    busy: number;
+    refused: number;
+    timeouts: number;
+    sum_wait_ms: number;
+    max_wait_ms: number;
+  };
 }
 
 // ---- onboarding (portal/onboarding_routes.py; M2f-3) ---------------------------
@@ -1816,6 +1890,10 @@ export function projectApi(slug: string) {
     scan: (runId: number) => get<ScanRun>(`${base}/scans/${runId}`),
     // Named apart from the graph `overview(expanded)` below.
     projectOverview: () => get<ProjectOverview>(`${base}/overview`),
+    // The shared CodeGraph server's log tail; `404 not_found` without a host or a log.
+    codegraphLog: () => get<{ text: string; size: number; truncated: boolean }>(`${base}/codegraph/log`),
+    // Restarts the one server every project shares; `409 busy` while one is in progress.
+    codegraphRestart: () => send<{ was: string; shared: boolean }>("POST", `${base}/codegraph/restart`),
     // Tests the key the project would use for a provider.
     keyTest: (provider: string) =>
       send<KeyTestResponse>("POST", `${base}/keys/${encodeURIComponent(provider)}/test`),

@@ -63,14 +63,15 @@ read-only access to an organization cannot.
 | The rationale card of a symbol | The platform, from its shared cache |
 | Every commit that touched a path | The platform |
 | Symbols and the CodeGraph index | Your machine, your own index |
+| Graph tools (`codegraph_*`, at `/mcp/<slug>/code`) | Your machine, from your own index; nothing is sent to the platform |
 | Explorer, Chat, models, keys, descriptions | The platform. The local routes refuse and point there |
 
 A linked project **never opens a local WhyGraph database**: there is no `.whygraph/whygraph.db` in
 the checkout, and the code that would open one refuses. Its scans are **CodeGraph only**: no git
 crawl, no LLM and no database. A scan request that asks for descriptions is refused.
 
-The only setting a linked project keeps locally is `[scan].hooks`, which git hooks rescan the
-checkout. Every other setting is the platform's, and the portal answers a change with `403
+The only settings a linked project keeps locally are `[scan].hooks`, which git hooks rescan the
+checkout, and `[scan].serve_codegraph`, whether the portal serves the CodeGraph tools. Every other setting is the platform's, and the portal answers a change with `403
 managed_on_platform` and the platform's address. The Explorer and Chat open on the platform.
 
 ## What leaves your machine

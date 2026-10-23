@@ -241,7 +241,9 @@ def test_a_session_serves_only_its_own_orgs(world: SimpleNamespace) -> None:
     assert world.client.get(at("narwhal") + "/api/projects").status_code == 404
 
 
-@pytest.mark.parametrize("path", ["/mcp/api", "/mcp", "/mcp/api/extra"])
+@pytest.mark.parametrize(
+    "path", ["/mcp/api", "/mcp", "/mcp/api/extra", "/mcp/api/code"]
+)
 @pytest.mark.parametrize("with_session", [False, True])
 def test_mcp_does_not_exist_in_production(
     world: SimpleNamespace, path: str, with_session: bool

@@ -14,6 +14,7 @@ import type { ScanBody } from "../../lib/scanActions";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { ProblemAlert, ProjectUnavailable } from "./EdgeStates";
+import { CodegraphLogButton, CodegraphRestartButton } from "./CodegraphActions";
 import { QUICK_SCAN, ScanMenu } from "./ScanMenu";
 
 const ICON: Record<HealthTone, ReactNode> = {
@@ -133,6 +134,16 @@ export function HealthPanel({
             {a.label}
           </Button>
         );
+      case "update_agents":
+        return (
+          <Button size="sm" variant="outline" render={<Link to="/p/$slug/settings" params={{ slug }} search={{ section: "agents" }} />}>
+            {a.label}
+          </Button>
+        );
+      case "codegraph_log":
+        return <CodegraphLogButton slug={slug} label={a.label} />;
+      case "codegraph_restart":
+        return <CodegraphRestartButton slug={slug} label={a.label} />;
       case "rescan":
         // The behind item offers the same menu as the header; "Scan now" is the first scan.
         return a.label === "Rescan" ? (

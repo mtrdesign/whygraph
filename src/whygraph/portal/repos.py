@@ -21,7 +21,13 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 
-from whygraph.agents import detect_entries, is_git_tracked
+from whygraph.agents import (
+    detect_codegraph_entries,
+    detect_codegraph_hooks,
+    detect_codegraph_sections,
+    detect_entries,
+    is_git_tracked,
+)
 from whygraph.hooks import managed_hook_names
 from whygraph.services.git import GitError, Repository
 from whygraph.services.github import GitHubClient
@@ -317,8 +323,13 @@ def detect_existing(root: Path, custom_db_paths: list[dict] | None = None) -> di
     -------
     dict
         ``{"existing_db", "managed_hooks", "detected_agents",
-        "custom_db_paths"}``; each ``detected_agents`` item is
+        "custom_db_paths", "codegraph_entries", "codegraph_sections",
+        "codegraph_hooks"}``; each ``detected_agents`` item is
         ``{"agent", "file", "key", "shape", "stale", "tracked"}``.
+        ``codegraph_entries`` lists only **foreign** ``codegraph`` entries
+        (same item shape, no ``stale``), ``codegraph_sections`` the files
+        with a CodeGraph instructions section and ``codegraph_hooks``
+        CodeGraph's own git hooks; all three are report-only.
     """
     agents = [
         {
@@ -336,6 +347,19 @@ def detect_existing(root: Path, custom_db_paths: list[dict] | None = None) -> di
         "managed_hooks": list(managed_hook_names(root)),
         "detected_agents": agents,
         "custom_db_paths": list(custom_db_paths or []),
+        "codegraph_entries": [
+            {
+                "agent": entry.agent,
+                "file": entry.file,
+                "key": entry.key,
+                "shape": entry.transport,
+                "tracked": is_git_tracked(root, entry.file),
+            }
+            for entry in detect_codegraph_entries(root)
+            if not entry.ours
+        ],
+        "codegraph_sections": detect_codegraph_sections(root),
+        "codegraph_hooks": detect_codegraph_hooks(root),
     }
 
 

@@ -50,7 +50,7 @@ def _pin_clock(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("whygraph.portal.agent_calls._utcnow", lambda: NOW)
 
 
-_KEYS = {"coverage", "events", "last_failure", "usage", "agents"}
+_KEYS = {"coverage", "events", "last_failure", "usage", "agents", "codegraph"}
 _AGENT_KEYS = {
     "days",
     "total_calls",

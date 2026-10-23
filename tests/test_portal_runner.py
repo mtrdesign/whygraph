@@ -70,6 +70,8 @@ from whygraph.portal.models import Project, ScanRun, UsageEvent, User
 from whygraph.portal.prices import BUNDLED_AS_OF
 from whygraph.portal.secrets import LLM_API_KEY, put_secret
 from whygraph.portal.usage_store import UsageRow
+from whygraph.services.codegraph import GUARD_STAMP_RELPATH
+from whygraph.services.codegraph.bootstrap import GUARD_VERSION
 from whygraph.portal.runner import (
     LOG_TAIL_BYTES,
     MAX_EVENT_LINE,
@@ -335,7 +337,10 @@ def test_trigger_precedence() -> None:
     assert merge_trigger("push", "sync") == "sync"
 
 
-def test_child_env_allowlist_and_injected_secrets(tmp_path: Path) -> None:
+def test_child_env_allowlist_and_injected_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WHYGRAPH_DATA", str(tmp_path / "data"))
     portal_env = {
         "PATH": "/bin",
         "HOME": "/home/me",
@@ -373,6 +378,10 @@ def test_child_env_allowlist_and_injected_secrets(tmp_path: Path) -> None:
     assert sorted(secrets) == ["ghp_project", "sk-proj"]
 
     assert "GIT_CONFIG_GLOBAL" not in env and "GIT_CONFIG_NOSYSTEM" not in env
+    # The CodeGraph writer-lock directory, in both modes; never the watcher switch.
+    lock_dir = str(tmp_path / "data" / "locks" / "codegraph")
+    assert env["WHYGRAPH_CODEGRAPH_LOCK_DIR"] == lock_dir
+    assert "CODEGRAPH_NO_WATCH" not in env and "CODEGRAPH_NO_DAEMON" not in env
 
     # A GitHub (production) project: no personal access token at all - not
     # for gh, not for git - and git reads no global or system config.
@@ -394,6 +403,7 @@ def test_child_env_allowlist_and_injected_secrets(tmp_path: Path) -> None:
         config, layer, source="github", analyze=False, environ=portal_env
     )
     assert "WHYGRAPH_GITHUB_URL" not in no_url
+    assert no_url["WHYGRAPH_CODEGRAPH_LOCK_DIR"] == lock_dir
     # Production: the token file's path, never a token value.
     token_file = tmp_path / "runs" / "7.token"
     with_file, secrets = child_env(
@@ -417,6 +427,14 @@ def test_child_env_allowlist_and_injected_secrets(tmp_path: Path) -> None:
     )
     assert "GH_TOKEN" not in bare and "ANTHROPIC_API_KEY" not in bare
     assert secrets == []
+
+
+def test_start_creates_the_codegraph_lock_dir(
+    portal: TestClient, env: SimpleNamespace
+) -> None:
+    lock_dir = env.data / "locks" / "codegraph"
+    assert lock_dir.is_dir()
+    assert lock_dir.stat().st_mode & 0o777 == 0o700
 
 
 def test_redactor_replaces_secrets_with_hints() -> None:
@@ -1364,6 +1382,30 @@ def test_catch_up_on_start_only_when_head_moved(
         rs = wait_idle(client, "demo")
         assert len(rs) == 2 and rs[0]["trigger"] == "hook" and rs[0]["status"] == "ok"
         assert client.get("/api/projects").json()["projects"][0]["stale"] is None
+
+
+def test_an_index_from_before_the_symlink_guard_gets_one_hook_scan_at_start(
+    env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    """Plan Step 1 item 2b (R16): its CodeGraph step rebuilds the index, once."""
+    with client_for() as client:
+        client.post("/api/portal/setup", json={"display_name": "Tess"})
+        root = local_project(client, env, "demo")
+        first_scan(client, "demo")
+    (root / GUARD_STAMP_RELPATH).unlink()  # an index an older build wrote
+    with client_for(ScanRunner(sleep=FakeClock().sleep)) as client:
+        rs = wait_idle(client, "demo")
+        assert len(rs) == 2, rs
+        assert (rs[0]["trigger"], rs[0]["status"]) == ("hook", "ok")
+        assert runner_flags(scanner.calls()[-1])[3:] == [
+            "--skip-analyze",
+            "--no-remote",
+        ]
+    # The fake child runs no CodeGraph: stamp the index as the rebuild would.
+    (root / GUARD_STAMP_RELPATH).write_text(GUARD_VERSION + "\n")
+    with client_for(ScanRunner(sleep=FakeClock().sleep)) as client:
+        time.sleep(0.3)
+        assert len(runs(client, "demo")) == 2  # once: nothing queued again
 
 
 def test_stale_reports_commits_behind(

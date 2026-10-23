@@ -26,7 +26,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import shutil
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,6 +37,7 @@ from whygraph.services.codegraph import (
     CodeGraphError,
     Symbol,
     refresh_codegraph_index,
+    writer_lock,
 )
 from whygraph.services.git.credentials import pass_through_env
 
@@ -50,9 +50,6 @@ RESYNC_TIMEOUT_SEC = 30.0
 
 RESYNC_LOCK_WAIT_SEC = 5.0
 """How long a tool call waits for another call's re-sync of the same repo."""
-
-_RESYNC_LOCKS: dict[Path, threading.Lock] = {}
-_RESYNC_LOCKS_GUARD = threading.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,11 +257,6 @@ def _is_stale(graph: CodeGraph, root: Path, symbol: Symbol) -> bool:
     return current != recorded
 
 
-def _resync_lock(root: Path) -> threading.Lock:
-    with _RESYNC_LOCKS_GUARD:
-        return _RESYNC_LOCKS.setdefault(root.resolve(), threading.Lock())
-
-
 def _resync_and_lookup(
     root: Path, codegraph_db: Path | None, qualified_name: str
 ) -> tuple[Symbol | None, bool]:
@@ -290,25 +282,25 @@ def _resync_and_lookup(
         check_inside(root, CODEGRAPH_DB_RELPATH)
     except UnsafePathError:
         return None, False
-    lock = _resync_lock(root)
-    if not lock.acquire(timeout=RESYNC_LOCK_WAIT_SEC):
-        return None, False
     try:
-        with CodeGraph.for_repository(root, codegraph_db=codegraph_db) as graph:
-            symbol = graph.symbol(qualified_name)
-            if symbol is not None and not _is_stale(graph, root, symbol):
-                return symbol, True
-        refresh_codegraph_index(
-            root,
-            capture=True,
-            allow_rebuild=False,
-            timeout=RESYNC_TIMEOUT_SEC,
-            env=pass_through_env(),
-        )
-        with CodeGraph.for_repository(root, codegraph_db=codegraph_db) as graph:
-            symbol = graph.symbol(qualified_name)
-            # A sync that exits 0 without re-indexing the file leaves it stale.
-            return symbol, symbol is not None and not _is_stale(graph, root, symbol)
+        with writer_lock(root, wait=RESYNC_LOCK_WAIT_SEC) as held:
+            if not held:
+                return None, False
+            with CodeGraph.for_repository(root, codegraph_db=codegraph_db) as graph:
+                symbol = graph.symbol(qualified_name)
+                if symbol is not None and not _is_stale(graph, root, symbol):
+                    return symbol, True
+            refresh_codegraph_index(
+                root,
+                capture=True,
+                allow_rebuild=False,
+                timeout=RESYNC_TIMEOUT_SEC,
+                env=pass_through_env(),
+            )
+            with CodeGraph.for_repository(root, codegraph_db=codegraph_db) as graph:
+                symbol = graph.symbol(qualified_name)
+                # A sync that exits 0 without re-indexing the file leaves it stale.
+                return symbol, symbol is not None and not _is_stale(graph, root, symbol)
     except CodeGraphError as exc:  # includes CodeGraphBootstrapError
         _log.warning(
             "CodeGraph re-sync for %s failed; using the indexed range: %s",
@@ -316,5 +308,3 @@ def _resync_and_lookup(
             exc,
         )
         return None, False
-    finally:
-        lock.release()

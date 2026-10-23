@@ -118,6 +118,9 @@ printf 'def add(a, b):\n    return a + b\n' > "$R/src/calc.py"
 git -C "$R" add -A && commit -m "feat: add calc"
 printf '\n\ndef mul(a, b):\n    return a * b\n' >> "$R/src/calc.py"
 commit -am "feat: add mul"
+# A symbolic link out of the repository (untracked): no scan may index through it.
+printf 'def SECRET_VALUE():\n    return 1\n' > "$S/share/outside_secret.py"
+ln -s ../../outside_secret.py "$R/src/leak.py"
 
 echo "== portal"
 whygraph up --add-folder "$S/share" >/dev/null
@@ -141,6 +144,12 @@ check "claude MCP entry is HTTP" grep -q "/mcp/demo" "$R/.mcp.json"
 echo "== first scan"
 check "request a scan" test "$(code_of POST /api/projects/demo/scans -d '{"trigger":"manual"}')" = 202
 check "first scan is 'initial' and ends ok" test "$(wait_run initial)" = ok
+cg_warning=$(api GET /api/projects/demo/scans | json "next((c.get('warning', '') for r in d['runs'] if r['trigger'] == 'initial' for c in (r.get('summary') or {}).get('crawlers', []) if c['name'] == 'codegraph'), '')")
+check "the first scan refused to index through a symbolic link" \
+    sh -c 'printf "%s" "$1" | grep -q "symbolic link"' _ "$cg_warning"
+check "no SECRET_VALUE row in the CodeGraph index" \
+    sh -c '! cat "$1"/.codegraph/codegraph.db* 2>/dev/null | grep -qa SECRET_VALUE' _ "$R"
+rm "$R/src/leak.py"
 
 echo "== MCP"
 init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}'
@@ -149,6 +158,85 @@ check "MCP initialize" sh -c "curl -sS -X POST '$P/mcp/demo' -H 'Content-Type: a
 check "MCP tools/list has whygraph_evidence_for" sh -c "curl -sS -X POST '$P/mcp/demo' \
     -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
     -d '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}' | grep -q whygraph_evidence_for"
+
+echo "== CodeGraph MCP"
+# The first scan refused to index while the symbolic link existed; the portal's
+# follow-up scan (the link is gone now) builds the index the tools answer from.
+idx_wait() {
+    i=0
+    while [ $i -lt 120 ]; do
+        [ -f "$R/.codegraph/codegraph.db" ] && [ -z "$(api GET /api/projects/demo/scans | json '" ".join(str(r["id"]) for r in d["runs"] if r["status"] in ("queued", "running"))')" ] && return 0
+        i=$((i + 1)); sleep 1
+    done
+    return 1
+}
+check "the follow-up scan builds the CodeGraph index" idx_wait
+# One request against a project's /code endpoint; the reply (an SSE "data:" line
+# or plain JSON) is printed as one JSON line.
+rpc() {  # rpc <slug> <json-rpc body>
+    curl -sS -m 90 -X POST "$P/mcp/$1/code" -H 'Content-Type: application/json' \
+        -H 'Accept: application/json, text/event-stream' -d "$2" \
+        | python3 -c "import sys; t=sys.stdin.read(); l=[x[5:] for x in t.splitlines() if x.startswith('data:')]; print(l[-1].strip() if l else t.strip())"
+}
+tool() {  # tool <slug> <name> <arguments json>
+    rpc "$1" "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"$2\",\"arguments\":$3}}"
+}
+rpc_json() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
+tools=$(rpc demo '{"jsonrpc":"2.0","id":2,"method":"tools/list"}')
+check "code endpoint lists exactly the four CodeGraph tools" test \
+    "$(printf '%s' "$tools" | rpc_json '" ".join(sorted(t["name"] for t in d["result"]["tools"]))')" \
+    = "codegraph_explore codegraph_impact codegraph_node codegraph_search"
+check "every CodeGraph tool carries annotations" test \
+    "$(printf '%s' "$tools" | rpc_json 'all(t.get("annotations") for t in d["result"]["tools"])')" = True
+out=$(tool demo codegraph_impact '{"symbol":"mul"}')
+check "codegraph_impact {symbol: mul} answers" test \
+    "$(printf '%s' "$out" | rpc_json 'not d["result"].get("isError", False) and "mul" in d["result"]["content"][0]["text"]')" = True
+out=$(tool demo codegraph_search '{"query":"mul"}')
+check "codegraph_search {query: mul} mentions calc.py" sh -c 'printf "%s" "$1" | grep -q calc.py' _ "$out"
+out=$(tool demo codegraph_search '{"query":"mul","projectPath":"/data"}')
+check "an explicit projectPath is an error" test \
+    "$(printf '%s' "$out" | rpc_json 'd["result"].get("isError", False)')" = True
+out=$(tool demo codegraph_node '{"file":"/data/postgres.password"}')
+check "codegraph_node on a file outside the repo is an error without its contents" test \
+    "$(printf '%s' "$out" | rpc_json 'd["result"].get("isError", False)')" = True
+check "that error does not carry the file's contents" sh -c \
+    '! printf "%s" "$1" | grep -qi "BEGIN\|password="' _ "$out"
+out=$(tool demo codegraph_search '{"query":"SECRET_VALUE"}')
+check "the symbolic-link fixture yields no sentinel through the endpoint" \
+    sh -c '! printf "%s" "$1" | grep -q "outside_secret"' _ "$out"
+# An uncommitted edit is found; then it is restored so the hooks section's
+# `commit -am` commits only `sub`.
+printf '\n\ndef div(a, b):\n    return a / b\n' >> "$R/src/calc.py"
+out=$(tool demo codegraph_search '{"query":"div"}')
+check "an uncommitted function is found by codegraph_search" sh -c 'printf "%s" "$1" | grep -q "div"' _ "$out"
+git -C "$R" checkout -- src/calc.py
+# A second project answers from its own index through the same shared child.
+R2="$S/share/other"
+mkdir -p "$R2/src"
+git -C "$R2" init -q -b main
+printf 'def only_in_other(a):\n    return a\n' > "$R2/src/other.py"
+git -C "$R2" add -A && git -C "$R2" -c user.name=t -c user.email=t@x -c commit.gpgsign=false commit -q -m "feat: other"
+check "add a second local project" test "$(code_of POST /api/projects -d "$(printf '{"source":"local","path":"%s"}' "$R2")")" = 201
+check "initialize the second project" test "$(code_of POST /api/projects/other/init -d '{"agents":["claude"]}')" = 200
+check "request the second project's scan" test "$(code_of POST /api/projects/other/scans -d '{"trigger":"manual"}')" = 202
+i=0
+while [ $i -lt 120 ]; do
+    st=$(api GET /api/projects/other/scans | json "next((r['status'] for r in d['runs'] if r['status'] not in ('queued','running')), '')")
+    [ -z "$st" ] || break
+    i=$((i + 1)); sleep 1
+done
+check "the second project's scan ends ok" test "$st" = ok
+out=$(tool other codegraph_search '{"query":"only_in_other"}')
+check "the second project answers from its own index" sh -c 'printf "%s" "$1" | grep -q other.py' _ "$out"
+out=$(tool demo codegraph_search '{"query":"only_in_other"}')
+check "the first project does not see the second one's symbols" sh -c '! printf "%s" "$1" | grep -q other.py' _ "$out"
+check "one codegraph serve process serves both projects" test \
+    "$(docker top whygraph-portal-smoke 2>/dev/null | grep -c 'codegraph serve --mcp')" -eq 1
+check "no CodeGraph telemetry queue or home state is left behind" docker exec whygraph-portal-smoke \
+    sh -c 'test ! -e /tmp/.codegraph/telemetry-queue.jsonl && test -z "$(ls -A /data/codegraph-home/.codegraph 2>/dev/null)"'
+check "the claude MCP entry also carries the code endpoint" grep -q '/mcp/demo/code' "$R/.mcp.json"
+check "the overview reports the CodeGraph server live" test \
+    "$(api GET /api/projects/demo/overview | json 'd["codegraph"]["server"]["state"]')" = live
 
 echo "== host CLI in a managed repo"
 scan_rc=0; (cd "$R" && whygraph scan >/dev/null 2>&1) || scan_rc=$?
@@ -304,8 +392,16 @@ check "the import page lists the fixture installation" \
     test "$(pget "$PROD_BRAVO/api/github/installations" -b "$bjar" | json '" ".join(i["account_login"] + ":" + str(i["id"]) for i in d["installations"])')" = "ben:100"
 check "the listing has ben/demo" sh -c "curl -sS -H '$H' -b '$bjar' '$PROD_BRAVO/api/github/installations/100/repos' | grep -q '\"ben/demo\"'"
 check "import ben/demo" test "$(pcode POST "$PROD_BRAVO/api/projects" -b "$bjar" -d '{"source":"github","installation_id":100,"repo_id":700001}')" = 201
-check "the imported project is initialized" \
-    test "$(pget "$PROD_BRAVO/api/projects" -b "$bjar" | json '" ".join(p["slug"] + ":" + str(p["initialized"]) for p in d["projects"])')" = "demo:True"
+# The import runs in the background (M2f-3): wait for it to finish.
+imported() {
+    i=0
+    while [ $i -lt 120 ]; do
+        [ "$(pget "$PROD_BRAVO/api/projects" -b "$bjar" | json '" ".join(p["slug"] + ":" + str(p["initialized"]) for p in d["projects"])')" = "demo:True" ] && return 0
+        i=$((i + 1)); sleep 1
+    done
+    return 1
+}
+check "the imported project is initialized" imported
 prod_runs() { pget "$PROD_BRAVO/api/projects/demo/scans" -b "$bjar"; }
 prod_wait_run() {  # prod_wait_run <trigger>: until a run with that trigger finishes; prints its status
     i=0

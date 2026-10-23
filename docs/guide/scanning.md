@@ -79,7 +79,10 @@ sync -q` after - is a background task started before phase 1 and joined after th
 overlaps the whole crawl. An index built by a CodeGraph with a different *extraction version* (after
 a CodeGraph upgrade, or a `.codegraph/` left by WhyGraph 1.x) is rebuilt in full with `codegraph
 index` instead, since `sync` would keep it as it is. A failure warns rather than aborting, since only the rationale and evidence
-*tools* need CodeGraph.
+*tools* need CodeGraph. The warning also shows on the project's Overview, and until a refresh
+succeeds the `codegraph_*` tools answer that the index could not be refreshed. Every CodeGraph process
+ignores global and system git configuration, so a global `core.excludesFile` does not hide files from
+the index.
 
 Blame is *not* recorded at scan time. It's computed on demand when an evidence lookup needs it, which
 is why a scan doesn't have to re-blame the repo every run.

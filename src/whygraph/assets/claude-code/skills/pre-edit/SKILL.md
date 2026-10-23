@@ -27,8 +27,8 @@ conversation and the code hasn't changed; or the user told you to skip it.
 
 Identify the chunk one of two ways (pass one, not both):
 
-- **By location** (preferred): `path` + `line_start` + `line_end`.
-- **By name**: `qualified_name` (e.g. `auth.session.refresh_token`) — CodeGraph resolves it.
+- **By name** (preferred when CodeGraph resolves it): `qualified_name` (e.g. `auth.session.refresh_token`).
+- **By location** (fallback): `path` + `line_start` + `line_end`.
 
 Leave other args at their defaults unless you have a specific reason (`force_refresh=True`
 only when the code has clearly changed since the last card).
@@ -43,10 +43,10 @@ only when the code has clearly changed since the last card).
 - **`evidence_count`**: if it's empty or low, the card has little git history behind it —
   treat it as a weak signal and verify against the code yourself.
 
-If the call returns `isError: true`: no scan DB → surface verbatim (user runs `whygraph
-scan` first); calling by `qualified_name` failed (no CodeGraph DB, or stale graph) → retry
+If the call returns `isError: true`: no scan DB → surface verbatim (the user scans from the
+WhyGraph portal first); calling by `qualified_name` failed (no CodeGraph DB, or stale graph) → retry
 by `path` + `line_start` + `line_end`. Either way, proceed with the edit using your own
-judgment after flagging the cause.
+judgment after flagging the cause. If it errors with `code: budget_exceeded` or `generation_not_permitted`, do not retry; call `whygraph_evidence_for` instead (no LLM, always allowed) and tell the user generation is paused for this project.
 
 ## When to also call `whygraph_evidence_for`
 

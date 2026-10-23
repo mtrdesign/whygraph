@@ -40,8 +40,8 @@ Two things differ from a `whygraph.toml`:
   never sent to a project that overrides that provider's endpoint (its key card says so).
 - **Only some keys can be set.** Database paths are always `<repo>/.whygraph/whygraph.db` and
   `<repo>/.codegraph/codegraph.db`. Importing a repository's `whygraph.toml` takes models, the
-  `[analyze]` / `[rationale]` / `[chat]` tuning keys, and `[scan].forge`, `remote`, `default_branch` and
-  `hooks`. It never takes endpoints, database paths or the log file, drops any setting for the removed
+  `[analyze]` / `[rationale]` / `[chat]` tuning keys, and `[scan].forge`, `remote`, `default_branch`,
+  `hooks` and `serve_codegraph`. It never takes endpoints, database paths or the log file, drops any setting for the removed
   [`claude-cli` provider](llm-providers.md#claude-cli-removed), and reports what it dropped. Endpoints
   are set in the UI.
 
@@ -74,6 +74,9 @@ hooks = true                  # auto-rescan git hooks installed by the portal:
                               # resolved from origin/HEAD, else origin/main, else
                               # origin/master. Set for repos on develop / trunk.
                               # Must not start with "-".
+serve_codegraph = true        # serve CodeGraph's tools to agents at /mcp/<slug>/code.
+                              # false answers every call there with a "turned off" error.
+                              # Local and linked projects; not available in production.
 
 [llm]
 # model = "anthropic/claude-opus-4-7"  # default model for every role, "provider/model"
@@ -147,7 +150,7 @@ timeout_sec = 120
 | Section | What it controls |
 |---|---|
 | top-level `log_level` | Console log verbosity. |
-| `[scan]` | The crawl: which source-control forge to pull PRs and issues from, the git remote name, an optional pinned GitHub token (headless only), which [auto-rescan hooks](../guide/scanning.md#keep-it-fresh) to install, and which branch counts as [shipped history](../guide/scanning.md#how-whygraph-sees-branches). |
+| `[scan]` | The crawl: which source-control forge to pull PRs and issues from, the git remote name, an optional pinned GitHub token (headless only), which [auto-rescan hooks](../guide/scanning.md#keep-it-fresh) to install, which branch counts as [shipped history](../guide/scanning.md#how-whygraph-sees-branches), and `serve_codegraph`, whether the portal serves [CodeGraph's tools](mcp.md#the-codegraph-endpoint) to agents (default `true`). |
 | `[llm]` | `model` - the default `"provider/model"` for every role. See [Choosing models](#choosing-models). |
 | `[analyze]` | The per-commit LLM diff descriptions written during `scan` - provider, model, parallelism (`max_workers`), the truncation / per-file thresholds, and an [org-only agent limit](#agent-limits-organization-only). |
 | `[rationale]` | The `whygraph_rationale_brief` card - provider, model, how much of a squash-merged PR is rendered into the prompt, and an [org-only agent limit](#agent-limits-organization-only). |

@@ -1,8 +1,14 @@
+---
+name: whygraph-implement
+description: Execute a reviewed WhyGraph plan markdown step by step, running Verify after each step and halting on the first failure.
+disable-model-invocation: true
+---
+
 # /whygraph-implement — execute a reviewed WhyGraph plan
 
 Execute a reviewed WhyGraph plan markdown step by step. Reads the plan as a strict contract, runs Verify after each step, halts on first failure, appends an Implementation log to the plan.
 
-**Argument shape:** `<plan.md> [--from-step N] [--commit-each-step] [--model <model-id>]`
+**Argument shape:** `<plan.md> [--from-step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>]`
 
 ## Step 1 — Parse arguments
 
@@ -10,10 +16,11 @@ Strip and remember these flags if present (any order, anywhere in the user's inp
 
 - `--from-step <N>` → integer ≥ 1 (consume the next token as `N`). Default: `auto` — the implementor picks the first step not marked `[x]` in the plan's `## Implementation log`, or `1` if no log exists.
 - `--commit-each-step` → boolean flag (default `false`).
+- `--fix-attempts <N>` → integer 0-2 (consume the next token; default `0`, values above 2 become 2). On a failed Verify the implementor makes up to `N` bounded fixes of the same step's files, re-running Verify each time, before it halts.
 - `--model <model-id>` → optional override (consume the next token). Default: the implementor subagent's `model: inherit` setting.
 
 The first non-flag positional token is the **plan path**. If empty, respond with:
-`Usage: /whygraph-implement <plan.md> [--from-step N] [--commit-each-step] [--model <model-id>]` and stop.
+`Usage: /whygraph-implement <plan.md> [--from-step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>]` and stop.
 
 ## Step 2 — Pre-flight validation (read-only)
 
@@ -31,7 +38,7 @@ If validation passes, do not summarise the plan — the subagent will read it it
 
 ## Step 3 — Dispatch to the implementor subagent
 
-Delegate to the `whygraph-implementor` subagent (it lives in `.cursor/agents/implementor.md`). If `--model` was passed in Step 1, hand that off as the model override.
+Run the `whygraph-implementor` subagent (it lives in `.cursor/agents/implementor.md`; start it by name). If `--model` was passed in Step 1, hand that off as the model override.
 
 The handoff prompt body must be exactly:
 
@@ -39,6 +46,7 @@ The handoff prompt body must be exactly:
 PLAN_PATH: <absolute path to the plan>
 FROM_STEP: <integer or "auto">
 COMMIT_EACH_STEP: <true | false>
+FIX_ATTEMPTS: <0-2>
 ```
 
 The implementor has its own system prompt covering plan parsing, step iteration, verify cadence, and log mutation — do not inline implementation instructions here.

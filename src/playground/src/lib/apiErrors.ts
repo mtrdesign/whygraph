@@ -12,7 +12,7 @@ import { formatUsd } from "./format";
 // JSON (each code they add or remove, in both); SPA steps call `errorInfo`.
 
 /** Where the error is shown: a few codes mean different things on different pages. */
-export type ErrorContext = "generic" | "auth" | "add-project" | "github" | "link" | "chat" | "usage";
+export type ErrorContext = "generic" | "auth" | "add-project" | "github" | "link" | "chat" | "usage" | "codegraph";
 
 export type ErrorTone = "error" | "warn" | "info";
 
@@ -236,7 +236,9 @@ export const MESSAGES: Record<string, Resolver> = {
       ? "This token cannot read the repository. Grant it read access to the repository's contents (and pull requests and issues, for the GitHub crawl)."
       : "That repository is not available to you through this installation. Check that you can read it on GitHub and that the WhyGraph app covers it.",
   not_found: (_err, ctx) =>
-    ctx === "add-project" || ctx === "github"
+    ctx === "codegraph"
+      ? "This portal has no CodeGraph log yet, or does not host CodeGraph."
+      : ctx === "add-project" || ctx === "github"
       ? "WhyGraph can't find that repository, or it is not visible to this token. GitHub answers both the same way."
       : ctx === "link"
         ? "That connection no longer exists."
@@ -251,7 +253,9 @@ export const MESSAGES: Record<string, Resolver> = {
   github_app_not_configured: "This portal has no GitHub App configured. Ask an instance administrator.",
   start_from_portal: "Open your organization in WhyGraph and choose Import from GitHub.",
   busy: (_err, ctx) =>
-    ctx === "link"
+    ctx === "codegraph"
+      ? { message: "CodeGraph is already restarting. Try again in a moment.", action: RETRY }
+      : ctx === "link"
       ? { message: "The platform is busy right now. Try again in a moment.", action: RETRY }
       : ctx === "github" || ctx === "add-project"
         ? { message: "Another import took this name at the same moment. Try again.", action: RETRY }

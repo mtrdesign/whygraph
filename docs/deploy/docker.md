@@ -44,7 +44,8 @@ exec docker run --rm -i $tty \
 ```
 
 - **Everything's in the image** - Python and WhyGraph, `git`, the GitHub CLI, and Node with the
-  CodeGraph CLI. CodeGraph indexes from the in-image binary, so there's no docker-in-docker.
+  CodeGraph CLI. CodeGraph indexes from the in-image binary, and the portal runs CodeGraph's MCP server
+  from the same binary, so there's no docker-in-docker.
 - **Files come back as yours.** `--user "$(id -u):$(id -g)"` is what does it: generated files aren't
   root-owned and git sees matching ownership.
 - **Only the repo you stand in is visible** to an ephemeral command. The portal sees only the

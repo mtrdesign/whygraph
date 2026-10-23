@@ -498,7 +498,7 @@ class GitFetchRefsCmd(ShellCommand[None]):
 
 
 class GitCloneCmd(ShellCommand[None]):
-    """``git clone -- <url> <dest>`` with https-only transport and a host-scoped helper.
+    """``git clone -c core.symlinks=false -- <url> <dest>``, https-only, with a host-scoped helper.
 
     The argv carries :func:`~.credentials.github_git_config`: every other
     protocol is refused (``file://``, ``ext::``, ``ssh``), inherited
@@ -506,7 +506,10 @@ class GitCloneCmd(ShellCommand[None]):
     for the configured GitHub host (``github.com`` over https by default).
     The token is read from the child
     environment, never argv. The command does not validate ``url`` -
-    :meth:`Repository.clone` does, before building it.
+    :meth:`Repository.clone` does, before building it. ``-c
+    core.symlinks=false`` lands in the clone's own config, so this and
+    every later checkout writes a tracked symbolic link as a plain file
+    holding its target: a clone never has a link out of its folder.
 
     Parameters
     ----------
@@ -521,7 +524,16 @@ class GitCloneCmd(ShellCommand[None]):
         self.dest = dest
 
     def argv(self) -> list[str]:
-        return ["git", *github_git_config(), "clone", "--", self.url, str(self.dest)]
+        return [
+            "git",
+            *github_git_config(),
+            "clone",
+            "-c",
+            "core.symlinks=false",
+            "--",
+            self.url,
+            str(self.dest),
+        ]
 
     def parse(self, result: CompletedProcess[str]) -> None:
         return None
@@ -665,14 +677,15 @@ class GitResolveCommitCmd(ShellCommand[str | None]):
 
 
 class GitCheckoutResetCmd(ShellCommand[None]):
-    """``git -c core.hooksPath=/dev/null checkout -q -B <branch> <commit> --``.
+    """``git -c core.symlinks=false -c core.hooksPath=/dev/null checkout -q -B <branch> <commit> --``.
 
     Creates or resets ``branch`` to ``commit`` and checks it out, with git
     hooks disabled - purely local. Unlike ``merge --ff-only`` it follows a
     force-pushed history. Git still refuses to overwrite an untracked file
     in the way, which is what keeps a commit from replacing the portal's
     untracked ``.whygraph/`` / ``.codegraph/`` state. The trailing ``--``
-    keeps ``commit`` from being read as a path.
+    keeps ``commit`` from being read as a path. A tracked symbolic link is
+    written as a plain file whatever the clone's config says.
 
     Parameters
     ----------
@@ -690,6 +703,8 @@ class GitCheckoutResetCmd(ShellCommand[None]):
         return [
             "git",
             "-c",
+            "core.symlinks=false",
+            "-c",
             "core.hooksPath=/dev/null",
             "checkout",
             "-q",
@@ -697,6 +712,62 @@ class GitCheckoutResetCmd(ShellCommand[None]):
             self.branch,
             self.commit,
             "--",
+        ]
+
+    def parse(self, result: CompletedProcess[str]) -> None:
+        return None
+
+
+class GitSetConfigCmd(ShellCommand[None]):
+    """``git config <key> <value>`` - set a value in the repository's own config.
+
+    Parameters
+    ----------
+    key : str
+        The config key (a constant of the caller, never user input).
+    value : str
+        Its value.
+    """
+
+    def __init__(self, key: str, value: str) -> None:
+        self.key = key
+        self.value = value
+
+    def argv(self) -> list[str]:
+        return ["git", "config", self.key, self.value]
+
+    def parse(self, result: CompletedProcess[str]) -> None:
+        return None
+
+
+class GitCheckoutPathsCmd(ShellCommand[None]):
+    """``git --literal-pathspecs -c core.symlinks=false -c core.hooksPath=/dev/null checkout -q -- <paths>``.
+
+    Restores ``paths`` from the index, a tracked symbolic link as a plain
+    file holding its target, with git hooks disabled. ``--literal-pathspecs``
+    keeps a path with glob characters from matching other files.
+
+    Parameters
+    ----------
+    paths : Sequence[str]
+        Root-relative paths git tracks.
+    """
+
+    def __init__(self, paths: Sequence[str]) -> None:
+        self.paths = tuple(paths)
+
+    def argv(self) -> list[str]:
+        return [
+            "git",
+            "--literal-pathspecs",
+            "-c",
+            "core.symlinks=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "checkout",
+            "-q",
+            "--",
+            *self.paths,
         ]
 
     def parse(self, result: CompletedProcess[str]) -> None:

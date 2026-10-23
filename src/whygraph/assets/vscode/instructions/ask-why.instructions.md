@@ -22,12 +22,14 @@ The user is asking about the *intent* behind existing code. WhyGraph has a struc
 
 4. If the user suspects the cached rationale is stale, re-call with `force_refresh=True`.
 
+5. If it errors with `code: budget_exceeded` or `generation_not_permitted`, do not retry; call `whygraph_evidence_for` instead (no LLM, always allowed) and tell the user generation is paused for this project.
+
 ## When NOT to call `whygraph_rationale_brief`
 
 - The user is adding *new* code with no predecessor — no rationale exists yet.
 - The user is about to *edit* the symbol — the WhyGraph Pre-Edit Brief instructions already cover that path; you'll fetch the brief there.
 - The question is conceptual or domain-level rather than per-symbol ("how does authentication work?" — broader than one symbol).
-- WhyGraph hasn't been scanned in this project. Surface the tool's error verbatim and suggest scanning from the WhyGraph portal (or running `whygraph scan` outside it) first.
+- WhyGraph hasn't been scanned in this project. Surface the tool's error verbatim and suggest scanning from the WhyGraph portal first.
 
 ## What you should NOT do
 

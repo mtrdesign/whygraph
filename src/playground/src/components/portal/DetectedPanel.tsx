@@ -4,6 +4,7 @@ import { agentInfo } from "../../lib/agents";
 import { cn } from "@/lib/utils";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Badge } from "../ui/badge";
+import { Checkbox } from "../ui/checkbox";
 
 /** Custom DB path warnings (screen 3, shown again on Initialize while the file exists). */
 export function CustomDbWarnings({ paths }: { paths: readonly CustomDbPath[] }) {
@@ -45,6 +46,41 @@ function Item({
   );
 }
 
+const CODEGRAPH_NOTE = "Your own CodeGraph server - the portal serves CodeGraph for this project.";
+
+/**
+ * A `codegraph` entry in the user's own agent config that is not the portal's.
+ * Left as it is unless "Replace with the portal's CodeGraph" is ticked (the
+ * file's path then goes in `replace_codegraph`).
+ */
+export function ForeignCodegraphEntry({
+  file,
+  detail,
+  tracked,
+  replace,
+  onReplaceChange,
+}: {
+  file: string;
+  detail?: string;
+  tracked?: boolean;
+  replace: boolean;
+  onReplaceChange: (on: boolean) => void;
+}) {
+  return (
+    <Item icon={<TriangleAlertIcon />} title={CODEGRAPH_NOTE}>
+      <p className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground" data-testid="foreign-codegraph">
+        <span className="font-mono">{file}</span>
+        {detail && <span>{detail}</span>}
+        {tracked && <Badge variant="secondary">committed to git</Badge>}
+      </p>
+      <label className="mt-1 flex cursor-pointer items-center gap-2 text-xs">
+        <Checkbox checked={replace} onCheckedChange={(on) => onReplaceChange(on === true)} />
+        <span>Replace with the portal's CodeGraph</span>
+      </label>
+    </Item>
+  );
+}
+
 const SHAPE_LABEL = { stdio: "1.x stdio entry", http: "HTTP entry", unknown: "unrecognized entry" } as const;
 
 /**
@@ -58,14 +94,25 @@ export function DetectedPanel({
   detected,
   removed,
   onActionChange,
+  replaceCodegraph = [],
+  onReplaceCodegraph,
 }: {
   detected: Detected;
   removed: readonly string[];
+  /** Files whose foreign `codegraph` entry is replaced (`replace_codegraph`). */
+  replaceCodegraph?: readonly string[];
+  onReplaceCodegraph?: (file: string, on: boolean) => void;
   /** `migrate` selects the agent for HTTP wiring; `remove` strips its entry instead. */
   onActionChange: (agent: string, action: "migrate" | "remove") => void;
 }) {
   const { existing_db, managed_hooks, detected_agents, custom_db_paths } = detected;
+  const cgEntries = detected.codegraph_entries ?? [];
+  const cgSections = detected.codegraph_sections ?? [];
+  const cgHooks = detected.codegraph_hooks ?? [];
   if (
+    cgEntries.length === 0 &&
+    cgSections.length === 0 &&
+    cgHooks.length === 0 &&
     !existing_db &&
     managed_hooks.length === 0 &&
     detected_agents.length === 0 &&
@@ -144,6 +191,30 @@ export function DetectedPanel({
             </Item>
           );
         })}
+        {cgEntries.map((entry) => (
+          <ForeignCodegraphEntry
+            key={`${entry.file}:${entry.key}`}
+            file={entry.file}
+            detail={SHAPE_LABEL[entry.shape]}
+            tracked={entry.tracked}
+            replace={replaceCodegraph.includes(entry.file)}
+            onReplaceChange={(on) => onReplaceCodegraph?.(entry.file, on)}
+          />
+        ))}
+        {cgSections.map((file) => (
+          <Item key={`section:${file}`} icon={<TriangleAlertIcon />} title={CODEGRAPH_NOTE}>
+            <p className="text-xs text-muted-foreground" data-testid="foreign-codegraph-section">
+              <span className="font-mono">{file}</span> has a CodeGraph instruction section. It is left as it is.
+            </p>
+          </Item>
+        ))}
+        {cgHooks.map((hook) => (
+          <Item key={`hook:${hook}`} icon={<TriangleAlertIcon />} title={CODEGRAPH_NOTE}>
+            <p className="text-xs text-muted-foreground" data-testid="foreign-codegraph-hook">
+              <span className="font-mono break-all">{hook}</span> has CodeGraph's own git hook. It is left as it is.
+            </p>
+          </Item>
+        ))}
       </ul>
       <CustomDbWarnings paths={custom_db_paths} />
     </section>

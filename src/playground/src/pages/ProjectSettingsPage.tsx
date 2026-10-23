@@ -9,7 +9,7 @@ import { useSlug } from "../lib/project";
 import type { ProjectSettingsSearch } from "../lib/routeSearch";
 import { LinkNotice } from "../components/portal/LinkNotice";
 import { PlatformButtons } from "../components/portal/LinkedActions";
-import { LinkedHooks } from "../components/portal/LinkedHooks";
+import { LinkedCodegraph, LinkedHooks } from "../components/portal/LinkedHooks";
 import { ConfigForm, configSections } from "../components/portal/ConfigForm";
 import { ProjectConnectedPortals } from "../components/portal/ConnectedPortals";
 import { CopyButton } from "../components/portal/CopyButton";
@@ -231,6 +231,7 @@ export function ProjectSettingsPage() {
         { id: "general", label: "General" },
         { id: "agents", label: "Agents" },
         { id: "hooks", label: "Git hooks" },
+        { id: "scanning", label: "Scanning" },
       ]
     : [
         { id: "general", label: "General" },
@@ -270,6 +271,13 @@ export function ProjectSettingsPage() {
             description="After each of these git events this portal rescans the checkout's code structure. It is the one setting a linked project keeps here; the rest belongs to the platform."
           >
             <LinkedHooks slug={slug} readOnly={!configurer} />
+          </SettingsSection>
+          <SettingsSection
+            id="scanning"
+            title="Scanning"
+            description="Whether this portal serves CodeGraph's code tools for this checkout to your agents."
+          >
+            <LinkedCodegraph slug={slug} readOnly={!configurer} />
           </SettingsSection>
         </>
       ) : (

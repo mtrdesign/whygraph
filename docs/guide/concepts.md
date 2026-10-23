@@ -84,8 +84,10 @@ WhyGraph sits on top of CodeGraph and stays out of its lane:
 When you target a symbol by `qualified_name`, WhyGraph asks CodeGraph to resolve it to a file and line
 range, then layers its own history on top.
 
-**Its MCP surface exposes no graph-traversal tools** - three tools, all about history. To walk callers
-and callees from your editor, install CodeGraph's own MCP server alongside. WhyGraph's other surfaces
-do traverse the graph, because they read CodeGraph directly rather than over MCP: the
+**WhyGraph's own MCP server exposes no graph-traversal tools** - three tools, all about history. To
+walk callers and callees from your editor you do not install anything: the portal runs CodeGraph's own
+MCP server for you and serves it at a second endpoint, `/mcp/<slug>/code`, which your agent sees as a
+second server named `codegraph`. WhyGraph never adds graph tools to its own server. WhyGraph's other
+surfaces traverse the graph by reading CodeGraph directly rather than over MCP: the
 [Explorer](playground.md) draws it, and the [chat assistant](chat.md) can search symbols and query the
-index. The narrow MCP surface is a deliberate boundary, not a limitation of the underlying data.
+index. The narrow `whygraph` server is a deliberate boundary, not a limitation of the underlying data.

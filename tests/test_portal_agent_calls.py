@@ -14,13 +14,16 @@ route, ``DELETE .../token``, a ``429`` and Explorer / chat calls add none.
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Iterator
 
 import anyio
+import mcp.types as mcp_types
 import pytest
 from mcp.server.fastmcp import FastMCP
+from mcp.shared.exceptions import McpError
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlmodel import select
 
@@ -43,6 +46,7 @@ from whygraph.portal import agent_calls
 from whygraph.portal import app as portal_app
 from whygraph.portal import db as portal_db
 from whygraph.portal.agent_calls import AgentCallBook, CallKey
+from whygraph.portal.codegraph_host import BRIDGED_TOOLS, build_codegraph_server
 from whygraph.portal.models import AgentCallDay, ConnectionToken, Organization, Project
 from whygraph.portal.throttle import Throttle
 from whygraph.portal.usage import Attribution, PortalUsageSink
@@ -160,6 +164,30 @@ def test_the_mcp_kinds_are_the_ten_registered_names(
     # Resources and prompts register private functions: never their names.
     assert not any(kind.startswith("_") for kind, _ in seen)
     assert any(name.startswith("_") for _, name in seen)
+
+
+def test_codegraph_kinds_are_code_defined() -> None:
+    """The bridge counts only its own constants, never a requested name."""
+    for kind in BRIDGED_TOOLS:
+        assert re.fullmatch(r"codegraph_[a-z]+", kind) and len(kind) <= 64
+    sink = _CountingSink()
+    handler = build_codegraph_server(SimpleNamespace(codegraph_host=None))  # type: ignore[arg-type]
+    call = handler.request_handlers[mcp_types.CallToolRequest]
+
+    async def _run() -> None:
+        with use_usage_sink(sink):  # type: ignore[arg-type]
+            for name in ("codegraph_search", "codegraph_callers", "x" * 100):
+                request = mcp_types.CallToolRequest(
+                    params=mcp_types.CallToolRequestParams(name=name, arguments={})
+                )
+                try:
+                    await call(request)
+                except McpError as exc:
+                    assert exc.error.code == mcp_types.INVALID_PARAMS
+
+    asyncio.run(_run())
+    assert sink.kinds == ["codegraph_search"]
+    assert sink.kinds[0] is BRIDGED_TOOLS[BRIDGED_TOOLS.index("codegraph_search")]
 
 
 def test_offload_counts_before_the_body_runs() -> None:

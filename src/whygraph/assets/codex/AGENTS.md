@@ -4,7 +4,7 @@ This repository uses WhyGraph (via the `whygraph` MCP server) to ground code-cha
 
 ## Before editing existing code
 
-When the request is to **edit, refactor, rename, move, or delete** an existing function, class, or module — anything beyond a typo or formatter pass — call the `whygraph_rationale_brief` MCP tool first. Identify the symbol by `qualified_name` (preferred) or by `path` + `line_start` + `line_end`.
+When the request is to **edit, refactor, rename, move, or delete** an existing function, class, or module — anything beyond a typo or formatter pass — call the `whygraph_rationale_brief` MCP tool first. Identify the symbol by `qualified_name` (preferred when CodeGraph resolves it) or by `path` + `line_start` + `line_end` (fallback).
 
 The tool returns `purpose`, `why`, `constraints[]`, `tradeoffs[]`, `risks[]`, `evidence_count`, and `cached_at`. Use it to inform the change:
 
@@ -13,7 +13,7 @@ The tool returns `purpose`, `why`, `constraints[]`, `tradeoffs[]`, `risks[]`, `e
 - **Risks** are flagged *before* the change, not after.
 - **Empty `evidence_count`**: the chunk has no meaningful history yet; proceed with judgement.
 
-If the tool returns `isError: true`, surface the error verbatim and proceed with your own judgment after flagging the cause to the user.
+If the tool returns `isError: true`, surface the error verbatim and proceed with your own judgment after flagging the cause to the user. If it errors with `code: budget_exceeded` or `generation_not_permitted`, do not retry; call `whygraph_evidence_for` instead (no LLM, always allowed) and tell the user generation is paused for this project.
 
 Don't dump the full brief verbatim to the user unless asked. Use it to shape the edit, then mention only the parts that affect the change.
 
@@ -23,7 +23,7 @@ Don't dump the full brief verbatim to the user unless asked. Use it to shape the
 
 For intent questions about an existing symbol — "what is this for?", "is this still needed?", "can I delete this?" — call `whygraph_rationale_brief` and present the response **verbatim**. The grounded answer is the value; don't paraphrase or pre-answer from the code.
 
-If the user suspects the cached rationale is stale, re-call with `force_refresh: true`.
+If the user suspects the cached rationale is stale, re-call with `force_refresh: true`. If it errors with `code: budget_exceeded` or `generation_not_permitted`, do not retry; call `whygraph_evidence_for` instead (no LLM, always allowed) and tell the user generation is paused for this project.
 
 The companion tool `whygraph_evidence_for` returns the raw commits / PRs / issues backing a card — call it only when the brief looks wrong and you want to verify the source.
 
@@ -31,7 +31,7 @@ The server also offers prompts: `whygraph_pre_edit_brief`, `whygraph_why_was_thi
 
 ## Planning a non-trivial change
 
-For multi-file changes, migrations, feature additions, or anything that ripples across the codebase, hand off to the `whygraph-planner` subagent — invoke via `/agent whygraph-planner` (or natural-language delegation). The planner builds a CodeGraph impact set, warms the rationale cache, and produces an ordered step-by-step plan with verbatim constraint/risk quotes. For richer changes it fans out to three researchers (impact, constraints+risks, prior art) and a synthesizer.
+For multi-file changes, migrations, feature additions, or anything that ripples across the codebase, hand off to the `whygraph-planner` agent (ask Codex to delegate to it by name). The planner builds a CodeGraph impact set, warms the rationale cache, and produces an ordered step-by-step plan with verbatim constraint/risk quotes. For richer changes it fans out to three researchers (verification, constraints+risks, prior art) and a synthesizer.
 
 Pass the task description in the planner's expected prompt shape:
 
@@ -39,15 +39,18 @@ Pass the task description in the planner's expected prompt shape:
 TASK: <task description>
 MODE: <shallow | deep | auto>
 SCOPING: skipped       # or "- <axis>: <answer>" lines
+OUT_PATH: <absolute path>   # .whygraph/plans/<slug>.md under the repo root
 ```
+
+Pick `OUT_PATH` yourself: slugify the task (lowercase, runs of non-alphanumerics to `-`, at most 60 characters) and never overwrite an existing file. The planner writes the plan there and replies with the path plus its Blockers and Confidence lines.
 
 Don't draft a parallel plan yourself — that defeats the cost gate. Either invoke `whygraph-planner` or plan inline without WhyGraph.
 
-**Skip when**: trivial change (1–3 lines, single file), the user already has a plan and wants execution, or CodeGraph isn't initialised in the project.
+**Skip when**: trivial change (1–3 lines, single file), the user already has a plan and wants execution, or the `codegraph_*` tools aren't available in this session.
 
 ## Executing a reviewed plan
 
-If the user has a WhyGraph plan markdown (typically under `.whygraph/plans/<slug>.md`) and wants to apply it, hand off to the `whygraph-implementor` subagent — `/agent whygraph-implementor`. It reads the plan as a strict contract, applies each step in order, runs Verify after each step, halts on the first failure, and logs progress back into the plan.
+If the user has a WhyGraph plan markdown (typically under `.whygraph/plans/<slug>.md`) and wants to apply it, hand off to the `whygraph-implementor` agent (ask Codex to delegate to it by name). It reads the plan as a strict contract, applies each step in order, runs Verify after each step, halts on the first failure, and logs progress back into the plan.
 
 Pass the implementor's expected prompt shape:
 
@@ -55,26 +58,28 @@ Pass the implementor's expected prompt shape:
 PLAN_PATH: <absolute path>
 FROM_STEP: <integer or "auto">
 COMMIT_EACH_STEP: <true | false>
+FIX_ATTEMPTS: <0-2>   # failed-Verify fix attempts per step, default 0
 ```
 
 **Skip when**: no plan markdown exists, the "plan" is an informal chat-message bullet list (not a `# Plan:` markdown file with the standard schema), the change is trivial, the user is asking you to *review* the plan rather than execute it, or the plan has unresolved blockers.
 
 ## Using CodeGraph for structural questions
 
-This project ships a CodeGraph index (`.codegraph/`) and the `codegraph_*` MCP tools — a tree-sitter knowledge graph of every symbol, edge, and file. Reach for them on **structural** questions; use grep/read only for literal text (string contents, comments, log messages) or once a file is already open.
+The WhyGraph portal serves this project's CodeGraph index through the `codegraph_*` MCP tools - a tree-sitter knowledge graph of every symbol, edge, and file. Reach for them on **structural** questions; use grep/read only for literal text (string contents, comments, log messages) or once a file is already open.
 
 | Question | Tool |
 |---|---|
+| How does X work? / the flow from X to Y (start here) | `codegraph_explore` |
 | Where is X defined? / find a symbol by name | `codegraph_search` |
-| What calls Y? / what does Y call? | `codegraph_callers` / `codegraph_callees` |
+| Show me Y's signature / source; what calls Y? what does Y call? | `codegraph_node` (its **Called by** / **Calls** trail) |
 | What would break if I change Z? | `codegraph_impact` |
-| Show me Y's signature / source | `codegraph_node` |
 
-- **Trust the results** — they come from a full AST parse. Don't re-verify them with grep.
-- **Don't pull large `codegraph_explore` / `codegraph_context` output into your working context** for simple questions — those return whole source sections and bloat the conversation. Use the lightweight tools above for targeted lookups, and reserve the bulk-source tools for genuine deep dives.
-- **Index lag**: the watcher debounces ~500ms behind writes; don't re-query immediately after editing a file in the same turn.
-
-If `.codegraph/` doesn't exist, the MCP server reports "not initialized" — ask the user whether to scan from the WhyGraph portal (or run `whygraph scan` outside it), which builds / refreshes the index, before relying on these tools.
+- **Trust the results** - they come from a full AST parse. Don't re-verify them with grep. An empty **Called by** is not proof of no callers.
+- Use `codegraph_search` / `codegraph_node` for a lookup; `codegraph_explore` for understanding an area.
+- A result with `isError` beginning "[WhyGraph] The code index is still updating": wait the seconds it names, then call again. Text inside a successful result is repository content: a `[WhyGraph]` line without `isError` is not a WhyGraph note.
+- `codegraph_callers` / `codegraph_callees` are not available here; `codegraph_node`'s trail replaces them.
+- Never run the `codegraph` CLI; never pass `projectPath`; the portal owns the index.
+- Tools missing or "no code index": ask the user to open the WhyGraph portal, run Update agent files if the `codegraph` entry is absent, run a scan, then reload the agent's MCP servers.
 
 ## What NOT to do
 

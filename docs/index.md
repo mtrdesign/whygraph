@@ -72,7 +72,8 @@ it there - and serves that story to any AI editor over MCP, or to you in the Why
     ---
 
     CodeGraph answers "what's connected to what". WhyGraph answers "why it exists and when it
-    changed". Run both; each stays focused on its own job.
+    changed". The portal runs CodeGraph's own MCP server for you, beside WhyGraph's; each stays focused
+    on its own job.
 
     [:octicons-arrow-right-24: Getting started](getting-started/index.md)
 

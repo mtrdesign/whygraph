@@ -396,6 +396,12 @@ class PortalState:
         Set when the lifespan exits, so open streams end.
     session_manager : object or None
         This app's MCP ``StreamableHTTPSessionManager``.
+    codegraph_host : CodeGraphHost or None
+        The shared ``codegraph serve --mcp`` child
+        (:class:`~whygraph.portal.codegraph_host.CodeGraphHost`); local mode
+        on a healthy portal only, ``None`` otherwise.
+    codegraph_session_manager : object or None
+        The stateless session manager of ``/mcp/<slug>/code`` (local mode).
     setup_lock : threading.Lock
         Serializes first-run setup.
     port_change : dict or None
@@ -550,6 +556,8 @@ class PortalState:
         self.discovery = DiscoveryCache()
         self.shutdown_event: anyio.Event | None = None
         self.session_manager: Any = None
+        self.codegraph_host: Any = None
+        self.codegraph_session_manager: Any = None
         self.setup_lock = threading.Lock()
         self.port_change: dict | None = None
         self.instance_lock: InstanceLock | None = None

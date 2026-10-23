@@ -41,6 +41,7 @@ from sqlmodel import select
 from github_fake import _git as fixture_git
 from test_portal_app import (  # noqa: F401
     CLIENT_HEADER,
+    manual_ctx,
     PROD_BASE,
     at,
     claim_instance,
@@ -68,6 +69,9 @@ from test_portal_identity_routes import (  # noqa: F401 -- `audit_log` is a fixt
     events,
 )
 from test_portal_runner import TERMINAL, FakeClock, scanner, wait_for  # noqa: F401
+from whygraph.core.context import use_project
+from whygraph.db import get_session as project_session
+from whygraph.db.models import RationaleCache
 from whygraph.portal import db as portal_db
 from whygraph.portal import runner as runner_mod
 from whygraph.portal.app import create_portal_app
@@ -684,3 +688,127 @@ def test_a_missing_clone_is_reported_without_its_path(
     assert str(w.env.data) not in json.dumps(run)
     assert "server copy is missing" in run["summary"]["error"]
     assert "server copy is missing" in run_log(w, run_id)
+
+
+# ---------------------------------------------------------------------------
+# Symbolic links in clones (portal-hosted CodeGraph plan, Step 1)
+# ---------------------------------------------------------------------------
+
+
+def push_link(w: World, name: str, target: str) -> str:
+    """Commit a symbolic link ``name -> target`` on top of ``acme/api``'s ``main``; its SHA."""
+    path = bare(w)
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp) / "work"
+        fixture_git("clone", "-q", str(path), str(work))
+        (work / name).parent.mkdir(parents=True, exist_ok=True)
+        (work / name).symlink_to(target)
+        fixture_git("-c", "core.symlinks=true", "add", name, cwd=work)
+        fixture_git("commit", "-q", "-m", f"Link {name}", cwd=work)
+        fixture_git("push", "-q", str(path), "HEAD:refs/heads/main", cwd=work)
+        sha = fixture_git("rev-parse", "HEAD", cwd=work)
+    fixture_git("--git-dir", str(path), "update-server-info")
+    return sha
+
+
+def as_an_older_clone(root: Path, name: str, target: str) -> None:
+    """What a clone of an older build looks like: links on, the link on disk."""
+    fixture_git("config", "--unset", "core.symlinks", cwd=root)
+    (root / name).unlink()
+    (root / name).symlink_to(target)
+
+
+def card(path: str) -> RationaleCache:
+    return RationaleCache(
+        path=path,
+        line_start=1,
+        line_end=2,
+        provider="anthropic",
+        model="default",
+        evidence_fingerprint="fp",
+        cached_at="2026-10-22T00:00:00+00:00",
+        purpose="p",
+        why="w",
+        constraints="[]",
+        tradeoffs="[]",
+        risks="[]",
+    )
+
+
+def card_paths(root: Path) -> list[str]:
+    with use_project(manual_ctx(root)), project_session() as session:
+        return sorted(r.path for r in session.exec(select(RationaleCache)).all())
+
+
+def test_a_new_clone_writes_links_as_files(
+    world: World, scanner: SimpleNamespace
+) -> None:
+    w = world
+    push_link(w, "app/evil.py", "../../../../postgres.password")
+    root = imported(w)
+    assert git_out(root, "config", "--get", "core.symlinks") == "false"
+    evil = root / "app" / "evil.py"
+    assert not evil.is_symlink()
+    assert evil.read_text() == "../../../../postgres.password"
+
+
+def test_a_sync_rewrites_an_older_clones_links_and_drops_their_cards(
+    world: World, scanner: SimpleNamespace
+) -> None:
+    w = world
+    root = imported(w)
+    push_link(w, "app/evil.py", "../../other/secret.py")
+    assert wait_run(w, scan(w))["status"] == "ok"
+    as_an_older_clone(root, "app/evil.py", "../../other/secret.py")
+    with use_project(manual_ctx(root)), project_session() as session:
+        session.add(card("app/evil.py"))
+        session.add(card("README.md"))
+
+    run = wait_run(w, scan(w))
+
+    assert run["status"] == "ok", run
+    evil = root / "app" / "evil.py"
+    assert not evil.is_symlink()
+    assert evil.read_text() == "../../other/secret.py"
+    assert git_out(root, "config", "--get", "core.symlinks") == "false"
+    assert git_out(root, "status", "--porcelain", "--untracked-files=no") == ""
+    assert card_paths(root) == ["README.md"]
+
+
+def test_a_start_syncs_each_clone_that_may_still_hold_links_once(
+    app_env: object,
+    production_env: SimpleNamespace,
+    scanner: SimpleNamespace,
+) -> None:
+    """Plan Step 1 item 5: decided from the clone's config, no column."""
+    with prod_portal() as client:
+        w = World(client, app_env, production_env)  # type: ignore[arg-type]
+        claim_instance(client)
+        client.cookies.clear()
+        assert github_sign_in(client, "ben").status_code == 200
+        assert create_org(client, "acme", "Acme").status_code == 201
+        push_link(w, "app/evil.py", "../../other/secret.py")
+        root = imported(w)
+    as_an_older_clone(root, "app/evil.py", "../../other/secret.py")
+
+    def reconcile_runs() -> list[tuple[str, str, dict]]:
+        """``(status, kind, summary)`` of every reconcile run."""
+        with portal_db.get_session() as session:
+            rows = session.exec(select(ScanRun).where(ScanRun.trigger == "reconcile"))
+            return [(r.status, r.kind, json.loads(r.summary or "{}")) for r in rows]
+
+    def start() -> None:
+        app = create_portal_app(runner=ScanRunner(sleep=FakeClock().sleep))
+        with TestClient(app, base_url=PROD_BASE, headers=CLIENT_HEADER):
+            time.sleep(0.3)
+            wait_for(lambda: all(r[0] in TERMINAL for r in reconcile_runs()), 30)
+
+    start()
+    ((status, kind, summary),) = reconcile_runs()
+    assert (status, kind) == ("ok", "sync")
+    assert summary.get("scanned") is True
+    assert not (root / "app" / "evil.py").is_symlink()
+    assert git_out(root, "config", "--get", "core.symlinks") == "false"
+
+    start()  # the clone is fixed: nothing more is queued
+    assert len(reconcile_runs()) == 1

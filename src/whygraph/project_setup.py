@@ -106,7 +106,9 @@ class InitializeResult:
         One outcome per agent config file touched.
     asset_files : tuple[FileOutcome, ...]
         One outcome per bundled asset file (``write`` / ``skip`` /
-        ``overwrite``).
+        ``overwrite`` / ``needs_confirmation``). An edited asset awaiting
+        confirmation (the upgrade manifest, :mod:`whygraph.assets`) never
+        withholds the markers; only ``agent_files`` do.
     assets : dict[str, InstallResult]
         Raw asset-install result per agent name.
     configured_agents : tuple[str, ...]
@@ -149,6 +151,7 @@ def initialize_project(
     agent_actions: Mapping[str, AgentAction] | None = None,
     dry_run: bool = False,
     contained: bool = False,
+    replace_codegraph: Iterable[str | Path] = (),
 ) -> InitializeResult:
     """Wire a repository for WhyGraph: gitignore, hooks, agent configs, assets.
 
@@ -188,6 +191,11 @@ def initialize_project(
     dry_run : bool
         Compute and return the per-file outcomes without writing,
         backing up or creating anything.
+    replace_codegraph : Iterable[str or Path]
+        Relative paths of agent config files whose foreign ``codegraph``
+        entry (for example CodeGraph's own stdio one) the caller agreed
+        to replace with the portal's. Any other foreign entry is left
+        byte-identical and reported on the file's outcome.
     contained : bool
         Refuse to follow a symlink out of the repository: before any
         step runs (dry run included), every path the call could read or
@@ -219,6 +227,7 @@ def initialize_project(
         actions.setdefault(agents_mod.resolve_agent(name).name, "migrate")
     for name, action in (agent_actions or {}).items():
         actions[agents_mod.resolve_agent(name).name] = action
+    replace_files = {Path(p).as_posix() for p in replace_codegraph}
     if contained:
         for path in _touched_paths(root, actions, marker):
             check_inside(root, path)
@@ -238,6 +247,7 @@ def initialize_project(
     asset_files: list[FileOutcome] = []
     asset_results: dict[str, assets_mod.InstallResult] = {}
     configured: list[str] = []
+    manifest_before = None if dry_run else assets_mod.read_manifest(root)
     for name, action in actions.items():
         target = agents_mod.AGENTS[name]
         if action == "remove":
@@ -248,7 +258,12 @@ def initialize_project(
             continue
 
         outcome = agents_mod.apply_http_entry(
-            target, root, mcp, confirm_tracked=confirm_tracked, dry_run=dry_run
+            target,
+            root,
+            mcp,
+            confirm_tracked=confirm_tracked,
+            dry_run=dry_run,
+            replace_foreign="/".join(target.relative_path) in replace_files,
         )
         agent_files.append(outcome)
         if outcome.status in ("write", "overwrite", "skip"):
@@ -259,6 +274,14 @@ def initialize_project(
             )
             asset_results[name] = installed
             asset_files.extend(_asset_outcomes(root, name, installed))
+
+    if (
+        manifest_before is not None
+        and any(r.needs_confirmation for r in asset_results.values())
+        and assets_mod.read_manifest(root) is not None
+    ):
+        # An edited file is still stale: keep the version the manifest had.
+        assets_mod.set_manifest_version(root, manifest_before["version"])
 
     result = InitializeResult(
         dry_run=dry_run,
@@ -284,6 +307,10 @@ def _touched_paths(
     """Every work-tree path :func:`initialize_project` may read or write."""
     paths = [root / ".gitignore", root / _hooks.LEGACY_HELPER_RELPATH]
     paths.append(root / ".whygraph" / "backups")  # agent-file backups
+    paths += [
+        root / assets_mod.MANIFEST_RELPATH,
+        root / assets_mod.MANIFEST_RELPATH.with_name("assets.json.tmp"),
+    ]
     for name, action in actions.items():
         target = agents_mod.AGENTS[name]
         if target.scope == "project":
@@ -322,10 +349,23 @@ def _asset_outcomes(
         (result.written, "write"),
         (result.overwritten, "overwrite"),
         (result.skipped, "skip"),
+        (result.needs_confirmation, "needs_confirmation"),
     ):
         for p in paths:
             rel = Path(p).relative_to(root).as_posix()
-            out.append(FileOutcome(rel, status, agent))  # type: ignore[arg-type]
+            out.append(
+                FileOutcome(
+                    rel,
+                    status,  # type: ignore[arg-type]
+                    agent,
+                    reason="edited since WhyGraph installed it"
+                    if status == "needs_confirmation"
+                    else None,
+                    diff=result.diffs.get(p)
+                    if status in ("overwrite", "needs_confirmation")
+                    else None,
+                )
+            )
     return sorted(out, key=lambda o: o.file)
 
 

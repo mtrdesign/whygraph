@@ -640,10 +640,14 @@ def test_every_org_scoped_route_is_isolated_over_real_sessions(
             assert response.status_code == status, (where, response.text)
             assert response.json() == body, where
             continue
-        assert response.status_code == spec.status, (where, response.text)
+        assert response.status_code == (spec.prod_status or spec.status), (
+            where,
+            response.text,
+        )
         assert_no_leak(response.text, other, where=where)
-        for expected in spec.shows(org):
-            assert expected.lower() in response.text.lower(), (where, expected)
+        if spec.prod_status is None:
+            for expected in spec.shows(org):
+                assert expected.lower() in response.text.lower(), (where, expected)
         if response.status_code == 404:  # a domain 404, not the binding's
             assert response.json() != NOT_FOUND, where
         if spec.check is not None:

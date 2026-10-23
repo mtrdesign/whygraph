@@ -50,10 +50,12 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
+from whygraph import assets as assets_mod
 from whygraph.agents import AGENTS as AGENT_TARGETS
 from whygraph.agents import (
     UnknownAgentError,
     config_path_for,
+    detect_codegraph_hooks,
     remove_entry,
     resolve_agent,
 )
@@ -186,6 +188,7 @@ from .repos import (
 )
 from .estimate import compact_estimate
 from .estimate import scan_estimate as _scan_estimate
+from .codegraph_host import HostBusy
 from .runner import (
     COST_SUMMARY_KEYS,
     ProjectAccessLost,
@@ -360,6 +363,7 @@ class InitBody(_Strict):
     dry_run: bool = False
     confirm_tracked: list[str] = Field(default_factory=list)
     agent_actions: dict[str, Literal["migrate", "remove"]] = Field(default_factory=dict)
+    replace_codegraph: list[str] = Field(default_factory=list)
 
 
 class ScanBody(_Strict):
@@ -1051,10 +1055,30 @@ def _details(state: PortalState, project: BoundProject) -> dict:
     )
     body["detected"] = _detected(project) if body["root_status"] == "ok" else None
     body["port_change"] = _port_change_for(state, project)
+    body["agent_files"] = _agent_files_status(state, project, body)
     body["stats"] = (
         _project_stats(state, project) if body["root_status"] == "ok" else None
     )
     return body
+
+
+def _agent_files_status(
+    state: PortalState, project: BoundProject, body: dict
+) -> dict | None:
+    """The installed vs packaged agent-file version (the upgrade manifest).
+
+    ``None`` in production, for a project with no configured agent or a
+    missing folder, or when the manifest path is a symbolic link out of
+    the root; otherwise ``installed_version`` (``None`` before the
+    manifest existed), ``current_version`` and ``outdated``.
+    """
+    if state.mode == "production" or not body["agents"] or body["root_status"] != "ok":
+        return None
+    try:
+        check_inside(project.root, project.root / assets_mod.MANIFEST_RELPATH)
+    except UnsafePathError:
+        return None
+    return assets_mod.manifest_status(project.root)
 
 
 def _port_change_for(state: PortalState, project: BoundProject) -> dict | None:
@@ -1091,7 +1115,7 @@ def _hooks_dict(result: HooksResult | None) -> dict | None:
     }
 
 
-def _init_dict(result: InitializeResult) -> dict:
+def _init_dict(result: InitializeResult, root: Path | None = None) -> dict:
     return {
         "dry_run": result.dry_run,
         "gitignore_added": list(result.gitignore_added),
@@ -1103,6 +1127,14 @@ def _init_dict(result: InitializeResult) -> dict:
         "needs_confirmation": [f.file for f in result.needs_confirmation],
         "refused": [f.file for f in result.refused],
         "marker_written": result.marker_written,
+        # Non-blocking warnings: a codegraph entry that is not the portal's
+        # (left as it was) and CodeGraph's own git hooks (read-only).
+        "foreign_codegraph": [
+            {"file": f.file, "description": f.foreign_codegraph}
+            for f in result.agent_files
+            if f.foreign_codegraph
+        ],
+        "codegraph_hooks": detect_codegraph_hooks(root) if root is not None else [],
     }
 
 
@@ -1189,6 +1221,12 @@ def get_state(request: Request) -> dict:
     if state.mode == "local":
         # The machine name the link page prefills (M2e section 4.8).
         body["hostname"] = default_client_name()
+        # Counts only (the route is public): is CodeGraph hosted and running.
+        host = state.codegraph_host
+        body["codegraph"] = {
+            "available": bool(host is not None and host.available),
+            "live": 1 if host is not None and host.state == "live" else 0,
+        }
     if state.mode == "production":
         # Production-only fields, so the local body stays exactly as it was.
         assert state.base_url is not None
@@ -2264,6 +2302,9 @@ def _remove_project(
             for t in targets
         ]
 
+    if state.codegraph_host is not None:
+        # Drops the project's bridge state; the shared child stays.
+        anyio.from_thread.run(state.codegraph_host.retire, project.id)
     dispose_engine(project.db_path)
     state.migrations.forget(project.db_path)
     state.contexts.invalidate(project.id)
@@ -2555,6 +2596,7 @@ def init_project(
             agent_actions=actions,
             dry_run=body.dry_run,
             contained=True,
+            replace_codegraph=body.replace_codegraph,
         )
     except UnsafePathError as exc:
         raise unsafe_path_error(exc) from exc
@@ -2596,7 +2638,7 @@ def init_project(
                     first = True
                 initialized = True
 
-    response = _init_dict(result)
+    response = _init_dict(result, project.root)
     response["initialized"] = initialized
     preview = (
         preview_import(project.root) if project.source == "local" else ImportPreview()
@@ -3254,6 +3296,50 @@ def scan_log(
         return log_tail(project.id, run_id)
     except RunNotFound as exc:
         raise ApiError(404, f"run {run_id} not found") from exc
+
+
+def _codegraph_host(request: Request):
+    """The app's CodeGraph host, or ``404 not_found`` (production, degraded, none)."""
+    host = portal_state(request).codegraph_host
+    if host is None:
+        raise ApiError(404, "CodeGraph is not hosted by this portal", code="not_found")
+    return host
+
+
+@projects_router.get("/{slug}/codegraph/log")
+def codegraph_log(
+    request: Request,
+    project: BoundProject = Depends(project_access(Action.PROJECT_READ)),
+) -> dict:
+    """The tail of the shared CodeGraph log: ``{text, size, truncated}``.
+
+    At most the last 64 KiB, starting at a line boundary when cut, redacted
+    at read time (the file itself is not). ``404 not_found`` when there is
+    no log yet or the portal does not host CodeGraph (production).
+    """
+    tail = _codegraph_host(request).log_tail()
+    if tail is None:
+        raise ApiError(404, "no CodeGraph log yet", code="not_found")
+    return tail
+
+
+@projects_router.post("/{slug}/codegraph/restart")
+async def codegraph_restart(
+    request: Request,
+    project: BoundProject = Depends(project_access(Action.PROJECT_SCAN)),
+) -> dict:
+    """Restart the **shared** CodeGraph server (every project's calls retry).
+
+    Clears this project's sync-failure window; never kills an in-flight
+    index refresh. ``{"was": <server.state before>, "shared": true}``;
+    ``409 busy`` while another restart is in progress.
+    """
+    host = _codegraph_host(request)
+    try:
+        was = await host.restart(project.id)
+    except HostBusy as exc:
+        raise ApiError(409, "CodeGraph is already restarting", code="busy") from exc
+    return {"was": was, "shared": True}
 
 
 @projects_router.get("/{slug}/scan-estimate")

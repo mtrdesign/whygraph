@@ -22,6 +22,8 @@ Modules
   ``org_access`` / ``project_access`` / ``project_db_access`` dependencies.
 * :mod:`~whygraph.portal.routes` - the management endpoints.
 * :mod:`~whygraph.portal.mcp_mount` - the per-project ``/mcp/<slug>`` endpoint.
+* :mod:`~whygraph.portal.codegraph_host` - CodeGraph's own tools at
+  ``/mcp/<slug>/code``, from one shared ``codegraph serve --mcp`` child.
 * :mod:`~whygraph.portal.policy` - the config allowlists and the
   ``whygraph.toml`` import.
 * :mod:`~whygraph.portal.repos` - shared folders, path checks, discovery.

@@ -1,8 +1,11 @@
 # MCP surface
 
-Each project's MCP endpoint on the [portal](../portal/index.md) serves three tools, four resources, and
-three prompts. That's the whole surface - deliberately narrow. WhyGraph owns "why this exists and when it changed"; graph traversal
-("what's connected to what") stays with CodeGraph.
+Each project has two MCP endpoints on the [portal](../portal/index.md). WhyGraph's own, at
+`/mcp/<slug>`, serves three tools, four resources, and three prompts. That's the whole WhyGraph surface -
+deliberately narrow. WhyGraph owns "why this exists and when it changed"; graph traversal ("what's
+connected to what") is CodeGraph's own MCP server, which the portal hosts and serves at a second
+endpoint, `/mcp/<slug>/code`, described under [The CodeGraph endpoint](#the-codegraph-endpoint).
+WhyGraph never adds graph tools to `/mcp/<slug>`.
 
 For a usage-first walkthrough of how an agent calls these mid-task, see
 [Using WhyGraph](../guide/mcp-usage.md).
@@ -281,17 +284,77 @@ team), and fails with "no pushed history" while the target's lines are not on a 
 `whygraph_area_history` answers for a path only when a pushed default-branch revision tracks it.
 `whygraph_evidence_for` never writes a description locally, so `describing` is always `0`.
 
+## The CodeGraph endpoint
+
+`http://127.0.0.1:<port>/mcp/<slug>/code` is CodeGraph's own MCP server, run by the portal as one shared
+child process (`codegraph serve --mcp`) and bridged per project. Agents see it as a second server named
+`codegraph`, written next to `whygraph` when you [set up a project](../portal/agents.md#what-gets-written).
+It is stateless Streamable HTTP like the first endpoint, with the same gate: local mode only (a
+production portal answers `404`), the same `Host` and `Origin` checks, the project must be
+initialized (otherwise `409`), and a request body over 1 MiB is refused with `413`.
+
+**Tools.** Four read-only tools are served. All four are annotated `readOnlyHint`, `idempotentHint`,
+not destructive and not open-world, and the descriptions are CodeGraph's own.
+
+| Tool | Arguments | Use |
+|---|---|---|
+| `codegraph_explore` | `query` (required), `maxFiles` (1-20) | How a feature works: the line-numbered source of the relevant symbols grouped by file, the call paths among them and a blast-radius summary, in one call |
+| `codegraph_search` | `query` (required), `kind`, `limit` (1-100) | Where a symbol is defined: locations only, no source |
+| `codegraph_node` | `symbol`, `file`, `line`, `includeCode`, `symbolsOnly`, `offset`, `limit` (1-2000 lines) | One symbol's signature, source and **Called by** / **Calls** trail, or a whole file with line numbers (pass `file` alone) |
+| `codegraph_impact` | `symbol` (required), `file`, `depth` (1-3) | What changing a symbol affects, transitively |
+
+`codegraph_callers` and `codegraph_callees` are not served; the call fails with `-32602` and a message
+naming the replacement (read the **Called by** / **Calls** trail of `codegraph_node`, or use
+`codegraph_impact`). Any other tool name fails the same way and is never counted.
+
+**Arguments are policed.** The advertised schemas reject unknown properties. `projectPath` is removed
+from them: the portal always pins it to the project's root, and a value that names anything else is
+refused with "this endpoint serves only <slug>". `file` (on `codegraph_node` and `codegraph_impact`)
+must stay inside the project, `depth` is at most 3, and strings and numbers have size caps. A refused
+call is never forwarded.
+
+**Results and errors.** A forwarded result passes through unedited, with a note appended when it is
+cut at 256 KiB. Every message the portal itself writes begins `[WhyGraph]`; match on that prefix and on
+`isError`, never on text inside a successful result, which is repository content.
+
+| Situation | Result | Text begins |
+|---|---|---|
+| Argument refused | error | `[WhyGraph] <argument> ...` |
+| No index yet | **success** (not an error) | `[WhyGraph] This project has no code index yet. Run a scan ...` |
+| Index still refreshing after 45 s | error | `[WhyGraph] The code index is still updating: ...` (names the seconds to wait) |
+| Refresh failed | error | `[WhyGraph] The code index could not be refreshed. ...` |
+| A symbolic link leaves the repository | error | `[WhyGraph] Indexing is refused: ...` |
+| More calls than the server can take | error | `[WhyGraph] CodeGraph is busy. ...` |
+| A call exceeded 60 s | error | `[WhyGraph] The CodeGraph call took longer than 60 s ...` |
+| The shared server crashed and restarted | error | `[WhyGraph] CodeGraph restarted; call again.` or `... is paused on this portal ...` |
+| `[scan].serve_codegraph` is false | error | `[WhyGraph] The CodeGraph tools are turned off for this project ...` |
+| No `codegraph` command on the portal | error | `[WhyGraph] CodeGraph is not available on this portal ...` |
+
+**Freshness and progress.** Each call first makes sure the index has caught up with the working tree,
+waiting up to 45 seconds; see [Freshness](../guide/mcp-usage.md#freshness). While it waits, a client
+that sent a progress token receives a progress notification every 3 seconds ("Refreshing the code index
+(3 changed files, 6s)", or a message that it is waiting for another project's refresh or for a scan).
+
+**Instructions and schema pin.** The server's instructions are WhyGraph's (short, and they tell the
+agent how to read the errors above); CodeGraph's own are never sent. The portal pins the tool schemas it
+was built against. If the installed CodeGraph lists a tool whose arguments or annotations differ, that
+tool is withheld and the project's Overview says so.
+
+The server stops after 10 idle minutes and starts again on the next call. Only the four tool names and
+counts are recorded; see [Agent activity](../portal/agents.md#agent-activity) and the
+[security model](../portal/security.md#the-codegraph-endpoint).
+
 ## Composition with CodeGraph
 
-**This MCP surface** exposes no graph-traversal tools on purpose. The split:
+**The `whygraph` server** exposes no graph-traversal tools on purpose. The split:
 
 | Layer | Owns |
 |---|---|
 | **CodeGraph** | "what is connected to what" - callers, callees, symbol resolution, type hierarchy. |
 | **WhyGraph** | "why does this exist and when did it change" - evidence, rationale, history. |
 
-For traversal mid-conversation, call CodeGraph's own tools directly - install its MCP server
-alongside WhyGraph's.
+For traversal mid-conversation, call the `codegraph` server's tools: the portal serves them for you
+(see above), so there is nothing to install alongside WhyGraph's.
 
 This is a boundary on the MCP surface, not on WhyGraph's access to the graph. The
 [Explorer](../guide/playground.md) and the [chat assistant](../guide/chat.md) both traverse it,

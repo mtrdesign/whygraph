@@ -31,24 +31,44 @@ Examples
 from .bootstrap import (
     DEFAULT_CODEGRAPH_IMAGE,
     ensure_codegraph_db,
+    hosted_env,
+    index_predates_guard,
     refresh_codegraph_index,
 )
 from .context import SymbolContext
-from .exceptions import CodeGraphBootstrapError, CodeGraphError
+from .exceptions import (
+    CodeGraphBootstrapError,
+    CodeGraphError,
+    CodeGraphUnsafeSymlinkError,
+)
 from .graph import CodeGraph
-from .paths import CODEGRAPH_DB_RELPATH
+from .paths import CODEGRAPH_DB_RELPATH, GUARD_STAMP_RELPATH
 from .relation import Relation
 from .symbol import Symbol
+from .symlinks import escaping_symlinks
+from .writer_lock import (
+    async_writer_lock,
+    configure_lock_dir,
+    writer_lock,
+)
 
 __all__ = [
     "CODEGRAPH_DB_RELPATH",
     "CodeGraph",
     "CodeGraphBootstrapError",
     "CodeGraphError",
+    "CodeGraphUnsafeSymlinkError",
     "DEFAULT_CODEGRAPH_IMAGE",
+    "GUARD_STAMP_RELPATH",
     "Relation",
     "Symbol",
     "SymbolContext",
+    "async_writer_lock",
+    "configure_lock_dir",
     "ensure_codegraph_db",
+    "escaping_symlinks",
+    "hosted_env",
+    "index_predates_guard",
     "refresh_codegraph_index",
+    "writer_lock",
 ]

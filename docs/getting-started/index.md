@@ -20,8 +20,9 @@ The two tools stay in their lanes:
 | **CodeGraph** | "What's connected to what?" | callers, callees, symbol resolution, type hierarchy |
 | **WhyGraph** | "Why does this exist, and when did it change?" | evidence, rationale cards, area history |
 
-Run both. WhyGraph reads CodeGraph's index to resolve a symbol to a file and line range, then layers
-its own history on top.
+You get both from one install. WhyGraph reads CodeGraph's index to resolve a symbol to a file and line
+range, then layers its own history on top, and the portal runs CodeGraph's own MCP server for you, as a
+second server named `codegraph` beside `whygraph`.
 
 ## Prerequisites
 

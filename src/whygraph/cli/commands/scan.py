@@ -273,7 +273,10 @@ def scan_cmd(
         # failures land on .warning, not .error.
         codegraph_crawler = (
             CodeGraphCrawler(
-                progress, project_root=repository.root, image=codegraph_image
+                progress,
+                project_root=repository.root,
+                image=codegraph_image,
+                require_lock_dir=managed_by_portal,
             )
             if refresh_codegraph
             else None
@@ -407,6 +410,7 @@ def scan_cmd(
                 phase_timings=phase_timings,
                 total_elapsed=total_elapsed,
                 analyze_skip=analyze_skip,
+                codegraph=_codegraph_summary(codegraph_crawler, repository.root),
             )
         )
     for c in failed:
@@ -445,7 +449,11 @@ def _scan_codegraph_only(json_mode: bool, codegraph_image: str | None) -> None:
             progress.start_event(1, ["Code index"])
         _emit_phase(progress, 1, "CodeGraph")
         crawler = CodeGraphCrawler(
-            progress, project_root=root, image=codegraph_image, strict=True
+            progress,
+            project_root=root,
+            image=codegraph_image,
+            strict=True,
+            require_lock_dir=True,
         )
         crawler.start()
         crawler.join()
@@ -459,6 +467,7 @@ def _scan_codegraph_only(json_mode: bool, codegraph_image: str | None) -> None:
                 phase_timings={"CodeGraph": elapsed},
                 total_elapsed=elapsed,
                 analyze_skip="--codegraph-only",
+                codegraph=_codegraph_summary(crawler, root),
             )
         )
     if crawler.error is not None:
@@ -472,17 +481,60 @@ def _emit_phase(progress: object, phase: int, title: str) -> None:
         progress.phase(phase, title)
 
 
+def _codegraph_summary(crawler: "Crawler | None", root: Path) -> dict:
+    """The ``codegraph`` block of the ``result`` event (the run's ``summary.codegraph``).
+
+    ``{"status": "skipped"}`` when the step did not run;
+    ``{"status": "failed", "error": ...}`` when it failed, including a
+    non-strict failure the scan itself survives (its ``warning``);
+    ``{"status": "ok", "files": n}`` otherwise, ``n`` being the indexed
+    file count (``None`` when it cannot be read). The portal reads it to
+    tell whether the index is current after the run.
+    """
+    if crawler is None:
+        return {"status": "skipped"}
+    error = (
+        crawler.error
+        if crawler.error is not None
+        else getattr(crawler, "warning", None)
+    )
+    if error:
+        return {"status": "failed", "error": str(error)}
+    return {"status": "ok", "files": _index_file_count(root)}
+
+
+def _index_file_count(root: Path) -> int | None:
+    """``SELECT count(*) FROM files`` of ``root``'s CodeGraph index, read-only."""
+    import sqlite3
+
+    from whygraph.core.safe_paths import UnsafePathError, check_inside
+    from whygraph.services.codegraph.paths import CODEGRAPH_DB_RELPATH
+
+    try:
+        db = check_inside(root, CODEGRAPH_DB_RELPATH)
+        if not db.is_file():
+            return None
+        with contextlib.closing(
+            sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+        ) as conn:
+            return int(conn.execute("SELECT count(*) FROM files").fetchone()[0])
+    except (UnsafePathError, OSError, sqlite3.Error, TypeError, ValueError):
+        return None
+
+
 def _result_event(
     *,
     crawlers: "list[Crawler]",
     phase_timings: "dict[str, float]",
     total_elapsed: float,
     analyze_skip: str | None,
+    codegraph: dict | None = None,
 ) -> dict:
     """Build the closing ``result`` event of ``--progress json``.
 
     Mirrors the results panel: overall status, elapsed time, per-phase
-    timings and one entry per crawler (status, summary, error / warning).
+    timings and one entry per crawler (status, summary, error / warning),
+    plus the CodeGraph step's outcome (:func:`_codegraph_summary`).
     """
     entries = []
     for c in crawlers:
@@ -504,6 +556,7 @@ def _result_event(
         "phase_timings": {k: round(v, 3) for k, v in phase_timings.items()},
         "crawlers": entries,
         "analyze_skipped": analyze_skip,
+        "codegraph": codegraph if codegraph is not None else {"status": "skipped"},
     }
 
 

@@ -28,6 +28,9 @@ Composition (plan section 4.5.1)::
                                   project.chat) + serve.chat.router (/chat,
                                   project.chat), via project_db_access
     /mcp/{slug}                   per-project MCP dispatcher (portal/mcp_mount.py)
+    /mcp/{slug}/code              CodeGraph's own tools from the one shared
+                                  `codegraph serve --mcp` child, per project
+                                  (portal/codegraph_host.py; local mode only)
     POST /github/webhook          the GitHub App's webhook, base host, outside /api
                                   (portal/webhook.py; 404 in local mode)
     /api/*, /mcp/* not matched    404 {"error"} - never the SPA's index.html
@@ -47,9 +50,11 @@ the :class:`~whygraph.portal.security.PortalOrigins`, marks runs left
 into the managed repos (:mod:`whygraph.portal.port_change`), starts the
 usage writer (after production's audit writer), the runner, the daily
 ledger and agent-call counter prunes, the agent-call flush watcher and
-this app's own MCP session manager and the lock's liveness check (a lost
-lock shuts the portal down), and turns strict project-context mode on. On
-exit it sets the shutdown event (open streams end), stops the runner, flushes
+this app's own MCP session managers and the lock's liveness check (a lost
+lock shuts the portal down), starts local mode's shared CodeGraph child
+(:class:`~whygraph.portal.codegraph_host.CodeGraphHost`, pre-warmed), and
+turns strict project-context mode on. On exit it sets the shutdown event
+(open streams end), stops the CodeGraph child, then the runner, flushes
 the agent-call counters, turns
 strict mode off again and releases the lock - on every path, including a
 failed start.
@@ -94,7 +99,8 @@ from whygraph.serve.chat import router as chat_router
 from whygraph.serve.errors import whygraph_error_handler
 from whygraph.serve.routes import generate_router
 from whygraph.serve.routes import router as data_router
-
+from whygraph.services.codegraph import configure_lock_dir
+from whygraph.services.codegraph.writer_lock import portal_lock_dir
 from . import agent_calls, audit_store, budgets, connections, usage_store
 from . import db as portal_db
 from .access_routes import access_router
@@ -121,6 +127,7 @@ from .hosts import (
     parse_trusted_proxies,
     self_check,
 )
+from .codegraph_host import CodeGraphDispatcher, CodeGraphHost, build_codegraph_server
 from .linked import refresh_links
 from .mcp_mount import McpDispatcher, build_session_manager
 from .key_routes import key_local_router, key_router
@@ -342,6 +349,10 @@ def create_portal_app(
         ],
     )
     app.add_route("/mcp/{slug}", McpDispatcher(state), include_in_schema=False)
+    # Before the /mcp/{rest:path} catch-all, which would answer 404.
+    app.add_route(
+        "/mcp/{slug}/code", CodeGraphDispatcher(state), include_in_schema=False
+    )
 
     for path in ("/api", "/api/{rest:path}"):
         app.add_api_route(
@@ -388,7 +399,8 @@ async def _serving(state: PortalState) -> AsyncIterator[None]:
     """Serve one lifespan; what runs depends on the mode (plan section 4.2).
 
     Local mode: shared folders, the loopback origins, the port reconcile,
-    the MCP session manager, the runner and the linked projects' status
+    the two MCP session managers (``/mcp/<slug>`` and ``/mcp/<slug>/code``),
+    the runner, the shared CodeGraph child and the linked projects' status
     refresh (:func:`_refresh_link_statuses`). Production: the base URL's
     origins, no shared folders, no port reconcile, no MCP manager, the
     runner and the DNS self-check. Degraded (no stored mode): the origins
@@ -417,6 +429,11 @@ async def _serving(state: PortalState) -> AsyncIterator[None]:
             manager = build_session_manager(origins)
             await stack.enter_async_context(manager.run())
             state.session_manager = manager
+            code_manager = build_session_manager(
+                origins, app=build_codegraph_server(state)
+            )
+            await stack.enter_async_context(code_manager.run())
+            state.codegraph_session_manager = code_manager
         if state.github is not None:
             stack.callback(state.github.close)
         if state.github_app is not None:
@@ -433,7 +450,17 @@ async def _serving(state: PortalState) -> AsyncIterator[None]:
                 stack.push_async_callback(_stop_audit_writer, writer)
             state.usage_writer.start()
             stack.push_async_callback(_stop_usage_writer, state.usage_writer)
+            configure_lock_dir(portal_lock_dir(state.data_dir))
+            stack.callback(configure_lock_dir, None)
             await state.runner.start(state)
+        if state.mode == "local" and not state.degraded:
+            host = CodeGraphHost(state.data_dir)
+            try:
+                await host.start()
+            except Exception:  # noqa: BLE001 -- never fail the portal start
+                _log.exception("could not start the CodeGraph host")
+            else:
+                state.codegraph_host = host
         watcher = anyio.create_task_group()
         await watcher.__aenter__()
         if not state.degraded and state.instance_lock is not None:
@@ -458,6 +485,8 @@ async def _serving(state: PortalState) -> AsyncIterator[None]:
             watcher.cancel_scope.cancel()
             await watcher.__aexit__(None, None, None)
             try:
+                if state.codegraph_host is not None:
+                    await state.codegraph_host.shutdown(grace=5.0)
                 if not state.degraded:
                     await state.runner.shutdown(grace=5.0)
                     # The last counts, after the runner (and every stream) ended.
@@ -465,6 +494,8 @@ async def _serving(state: PortalState) -> AsyncIterator[None]:
             finally:
                 set_strict(False)
                 state.session_manager = None
+                state.codegraph_session_manager = None
+                state.codegraph_host = None
 
 
 def _degraded_origins(state: PortalState) -> PortalOrigins:

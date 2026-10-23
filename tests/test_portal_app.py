@@ -64,6 +64,7 @@ from whygraph.portal.deps import (
 )
 from whygraph.portal.github_app import APP_ENV_VARS
 from whygraph.portal.github_auth import GitHubAuthConfig, GitHubOAuth
+from whygraph.portal.codegraph_host import CodeGraphDispatcher
 from whygraph.portal.mcp_mount import McpDispatcher
 from whygraph.portal.models import Project, ScanRun, User
 from whygraph.portal.orgs import add_member, create_org
@@ -71,6 +72,8 @@ from whygraph.portal.platform_routes import default_client_name
 from whygraph.portal.runner import ScanRunner
 from whygraph.portal.security import PortalGuard, build_origins
 from whygraph.serve import chat as serve_chat
+from whygraph.services.codegraph import GUARD_STAMP_RELPATH
+from whygraph.services.codegraph.bootstrap import GUARD_VERSION
 from whygraph.services.github import GitHubError, RepoAccessError
 from whygraph.services.llm.chat import TextDelta, TurnDone
 
@@ -151,10 +154,12 @@ def manual_ctx(root: Path, slug: str = "manual") -> ProjectContext:
 
 
 def seed_codegraph(root: Path) -> None:
+    """A CodeGraph index, stamped as built behind the symbolic-link guard."""
     (root / ".codegraph").mkdir(exist_ok=True)
     build_fake_codegraph_db(
         root / ".codegraph" / "codegraph.db", nodes=_NODES, edges=_EDGES
     )
+    (root / GUARD_STAMP_RELPATH).write_text(GUARD_VERSION + "\n")
 
 
 @pytest.fixture
@@ -184,6 +189,9 @@ def env(
     monkeypatch.setenv(
         "WHYGRAPH_SCAN_CMD", shlex.join([sys.executable, str(FAKE_SCAN)])
     )
+    # No real `codegraph serve --mcp` is ever started (nor pre-warmed): the
+    # CodeGraph bridge tests point this at their fake.
+    monkeypatch.setenv("WHYGRAPH_CODEGRAPH_CMD", str(tmp_path / "no-codegraph"))
     portal_db._reset_engine()
     return SimpleNamespace(
         data=data, shared=Path(os.path.realpath(shared)), tmp=tmp_path
@@ -626,6 +634,8 @@ def test_setup_flow(client: TestClient, env: SimpleNamespace) -> None:
         "usage": None,
         # The machine name the platform link page prefills (M2e section 4.8)
         "hostname": default_client_name(),
+        # Counts only: no `codegraph` on the test PATH
+        "codegraph": {"available": False, "live": 0},
     }
     assert client.get("/api/projects").json() == {
         "error": "setup required",
@@ -743,6 +753,9 @@ def test_a_failing_portal_migration_serves_a_degraded_app(
         assert state.status_code == 200
         assert "disk on fire" in state.json()["error"]
         assert client.get("/api/projects").status_code == 503
+        # A degraded local portal starts no CodeGraph child.
+        assert client.app.state.portal.codegraph_host is None
+        assert client.post("/mcp/demo/code", json={}).status_code == 503
         assert (
             client.post("/api/portal/setup", json={"display_name": "x"}).status_code
             == 503
@@ -870,7 +883,9 @@ def test_every_api_request_needs_the_client_header(ready: TestClient) -> None:
     assert ready.get("/api/portal/state", headers=bare).status_code == 403
 
 
-@pytest.mark.parametrize("path", ["/api/portal/state", "/mcp/demo", "/"])
+@pytest.mark.parametrize(
+    "path", ["/api/portal/state", "/mcp/demo", "/mcp/demo/code", "/"]
+)
 def test_a_foreign_host_is_rejected(ready: TestClient, path: str) -> None:
     response = ready.get(path, headers={"host": "evil.example:8765"})
     assert response.status_code == 421
@@ -887,7 +902,7 @@ def test_a_foreign_host_is_rejected(ready: TestClient, path: str) -> None:
         {"Sec-Fetch-Site": "same-site"},
     ],
 )
-@pytest.mark.parametrize("path", ["/api/portal/state", "/mcp/demo"])
+@pytest.mark.parametrize("path", ["/api/portal/state", "/mcp/demo", "/mcp/demo/code"])
 def test_cross_origin_requests_are_rejected(
     ready: TestClient, path: str, headers: dict
 ) -> None:
@@ -1346,6 +1361,9 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     (f"{_P}/scans/{{run_id}}", "GET"): _READ,
     (f"{_P}/scans/{{run_id}}/events", "GET"): _READ,
     (f"{_P}/scans/{{run_id}}/log", "GET"): _READ,
+    # The shared CodeGraph server's ops surface (portal-hosted CodeGraph 4.2c)
+    (f"{_P}/codegraph/log", "GET"): _READ,
+    (f"{_P}/codegraph/restart", "POST"): _SCAN,
     # The describe estimate: project_db_access(...) (the unsafe-path probe)
     (f"{_P}/scan-estimate", "GET"): _READ,
     # The Explorer router: include_router(..., project_db_access(PROJECT_READ))
@@ -1474,9 +1492,19 @@ def test_only_the_mcp_routes_have_no_dependant(client: TestClient) -> None:
         if (rc.path or "").startswith(("/api", "/mcp"))
         and getattr(rc, "dependant", None) is None
     ]
-    assert sorted(rc.path for rc in bare) == ["/mcp", "/mcp/{rest:path}", "/mcp/{slug}"]
+    assert sorted(rc.path for rc in bare) == [
+        "/mcp",
+        "/mcp/{rest:path}",
+        "/mcp/{slug}",
+        "/mcp/{slug}/code",
+    ]
     (dispatcher,) = (rc for rc in bare if rc.path == "/mcp/{slug}")
     assert isinstance(dispatcher.endpoint, McpDispatcher)
+    (bridge,) = (rc for rc in bare if rc.path == "/mcp/{slug}/code")
+    assert isinstance(bridge.endpoint, CodeGraphDispatcher)
+    # Registered before the catch-all, which would answer 404.
+    paths = [rc.path for rc in iter_route_contexts(client.app.routes)]
+    assert paths.index("/mcp/{slug}/code") < paths.index("/mcp/{rest:path}")
 
 
 _FILL = {
@@ -1603,7 +1631,7 @@ def test_unscoped_api_paths_are_json_404s_not_the_spa(
         assert tree.headers["content-type"].startswith("application/json")
         assert "error" in tree.json()
         assert client.get("/api").status_code == 404
-        for path in ("/mcp", "/mcp/demo/extra", "/mcp/"):
+        for path in ("/mcp", "/mcp/demo/extra", "/mcp/demo/code/extra", "/mcp/"):
             response = client.post(path, json={})
             assert response.status_code == 404, path
             assert response.headers["content-type"].startswith("application/json")
@@ -1642,6 +1670,9 @@ def test_add_local_writes_nothing_and_detects_state(
         "managed_hooks": [],
         "detected_agents": [],
         "custom_db_paths": [],
+        "codegraph_entries": [],
+        "codegraph_sections": [],
+        "codegraph_hooks": [],
     }
     assert _git(root, "status", "--porcelain", "--ignored") == before
     assert not (root / ".whygraph").exists()
@@ -1937,12 +1968,13 @@ def test_uninitialized_project_gates_data_routes_and_creates_no_db(
             "error": "not initialized",
             "code": "not_initialized",
         }
-    mcp = ready.post(
-        "/mcp/demo",
-        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
-        headers={"Accept": "application/json, text/event-stream"},
-    )
-    assert mcp.status_code == 409
+    for path in ("/mcp/demo", "/mcp/demo/code"):
+        mcp = ready.post(
+            path,
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            headers={"Accept": "application/json, text/event-stream"},
+        )
+        assert mcp.status_code == 409, path
     assert ready.post("/api/projects/demo/scans").status_code == 409
 
     assert ready.get("/api/projects/demo/config").status_code == 200
@@ -1972,10 +2004,39 @@ def test_uninitialized_project_gates_data_routes_and_creates_no_db(
         "type": "http",
         "url": "http://127.0.0.1:${WHYGRAPH_PORT:-8765}/mcp/demo",
     }
+    code = json.loads((root / ".mcp.json").read_text())["mcpServers"]["codegraph"]
+    assert code == {
+        "type": "http",
+        "url": "http://127.0.0.1:${WHYGRAPH_PORT:-8765}/mcp/demo/code",
+    }
     details = ready.get("/api/projects/demo").json()
     assert details["agents"] == ["claude"]
     assert details["stats"]["commits"] == 0
+    assert details["agent_files"]["outdated"] is False
     assert ready.get("/api/projects/demo/chat/sessions").json() == []
+
+    # The upgrade manifest (plan section 6.4): an edited asset whose bundled copy
+    # changed is reported with its diff, and only `force` replaces it.
+    manifest = root / ".whygraph" / "assets.json"
+    data = json.loads(manifest.read_text())
+    data["version"] = "0.0.1"
+    data["files"]["claude/agents/planner.md"] = "0" * 64
+    manifest.write_text(json.dumps(data))
+    planner = root / ".claude" / "agents" / "planner.md"
+    planner.write_text("MINE")
+    assert ready.get("/api/projects/demo").json()["agent_files"] == {
+        "installed_version": "0.0.1",
+        "current_version": details["agent_files"]["current_version"],
+        "outdated": True,
+    }
+    plan = init_project(ready, "demo", agents=["claude"], dry_run=True)
+    edited = [f for f in plan["asset_files"] if f["status"] == "needs_confirmation"]
+    assert [f["file"] for f in edited] == [".claude/agents/planner.md"]
+    assert "-MINE" in edited[0]["diff"] and plan["needs_confirmation"] == []
+    assert planner.read_text() == "MINE"
+    init_project(ready, "demo", agents=["claude"], force=True)
+    assert planner.read_text() != "MINE"
+    assert ready.get("/api/projects/demo").json()["agent_files"]["outdated"] is False
 
 
 def test_project_details_recompute_detected_and_last_scan_status(
@@ -2028,7 +2089,40 @@ def test_init_waits_for_tracked_agent_files(
     done = init_project(ready, "demo", agents=["claude"], confirm_tracked=[".mcp.json"])
     assert done["initialized"] is True
     servers = json.loads((root / ".mcp.json").read_text())["mcpServers"]
-    assert set(servers) == {"other", "whygraph"}
+    assert set(servers) == {"other", "whygraph", "codegraph"}
+
+
+def test_init_reports_a_foreign_codegraph_and_replaces_it_only_when_asked(
+    ready: TestClient, env: SimpleNamespace
+) -> None:
+    root = make_repo(env.shared, "demo")
+    foreign = {"type": "stdio", "command": "codegraph", "args": ["serve", "--mcp"]}
+    (root / ".mcp.json").write_text(json.dumps({"mcpServers": {"codegraph": foreign}}))
+    hooks = root / ".git" / "hooks"
+    hooks.mkdir(exist_ok=True)
+    (hooks / "post-commit").write_text("#!/bin/sh\n# >>> codegraph sync hook >>>\n")
+    detected = add_local(ready, root)["detected"]
+    assert [
+        (e["agent"], e["shape"], e["tracked"]) for e in detected["codegraph_entries"]
+    ] == [("claude", "stdio", False)]
+    assert detected["detected_agents"] == []  # the whygraph-only list is unchanged
+    assert detected["codegraph_hooks"] == [str(hooks / "post-commit")]
+
+    kept = init_project(ready, "demo", agents=["claude"])
+    assert kept["foreign_codegraph"] == [
+        {"file": ".mcp.json", "description": "a local command (stdio) server"}
+    ]
+    assert kept["codegraph_hooks"] == [str(hooks / "post-commit")]
+    assert "--mcp" not in json.dumps(kept["foreign_codegraph"])
+    servers = json.loads((root / ".mcp.json").read_text())["mcpServers"]
+    assert servers["codegraph"] == foreign and "whygraph" in servers
+
+    replaced = init_project(
+        ready, "demo", agents=["claude"], replace_codegraph=[".mcp.json"]
+    )
+    assert replaced["foreign_codegraph"] == []
+    servers = json.loads((root / ".mcp.json").read_text())["mcpServers"]
+    assert servers["codegraph"]["url"].endswith("/mcp/demo/code")
 
 
 def test_an_older_revision_db_opens_cleanly_with_a_backup(

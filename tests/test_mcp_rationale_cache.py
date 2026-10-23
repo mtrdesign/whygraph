@@ -19,7 +19,7 @@ from whygraph.analyze import CommitEvidence, Rationale
 from whygraph.db import get_session
 from whygraph.db.models import Commit, RationaleCache
 from whygraph.mcp.rationale import whygraph_rationale_brief
-from whygraph.mcp.rationale_cache import _fingerprint, lookup_cached
+from whygraph.mcp.rationale_cache import _fingerprint, lookup_cached, lookup_overlapping
 from whygraph.mcp.targets import Target
 from whygraph.services.codegraph import SymbolContext
 from whygraph.services.git import Repository
@@ -195,6 +195,80 @@ def test_fingerprint_independent_of_evidence_order() -> None:
     ]
     e2 = list(reversed(e1))
     assert _fingerprint(e1) == _fingerprint(e2)
+
+
+def test_lookup_overlapping_ranks_rows(whygraph_db_initialized: Path) -> None:
+    """Same path / provider / model and an overlapping range, ranked:
+    the symbol's name, then the smallest containing range, then the
+    longest overlap; ties to the newest row."""
+
+    def row(
+        line_start: int,
+        line_end: int,
+        purpose: str,
+        *,
+        path: str = "a.py",
+        provider: str = "fake",
+        model: str = "default",
+        qualified_name: str | None = None,
+        cached_at: str = "2026-01-01T00:00:00+00:00",
+    ) -> RationaleCache:
+        return RationaleCache(
+            path=path,
+            line_start=line_start,
+            line_end=line_end,
+            provider=provider,
+            model=model,
+            evidence_fingerprint="fp-" + purpose,
+            cached_at=cached_at,
+            purpose=purpose,
+            why="why",
+            constraints=json.dumps(["c"]),
+            tradeoffs=json.dumps([]),
+            risks=json.dumps([]),
+            qualified_name=qualified_name,
+        )
+
+    def best(line_start: int, line_end: int, qualified_name: str | None = None):
+        target = Target("a.py", line_start, line_end, qualified_name)
+        return lookup_overlapping(target, "fake", None)
+
+    with get_session() as session:
+        session.add(row(10, 30, "outer"))
+        session.add(row(12, 20, "inner"))
+        session.add(row(15, 40, "overlap long"))
+        session.add(row(5, 16, "overlap short", qualified_name="mod.f"))
+        session.add(row(14, 18, "other path", path="b.py"))
+        session.add(row(14, 18, "other provider", provider="other"))
+        session.add(row(14, 18, "other model", model="pinned"))
+        session.add(row(50, 60, "disjoint"))
+
+    found = best(14, 18)
+    assert found is not None
+    assert (found.rationale.purpose, found.line_start, found.line_end) == (
+        "inner",
+        12,
+        20,
+    )
+    assert found.rationale.constraints == ("c",)
+    assert found.evidence_fingerprint == "fp-inner"
+    # The symbol's own card first, even though it only overlaps.
+    assert best(14, 18, "mod.f").rationale.purpose == "overlap short"
+    # Nothing contains 25-35: the longest overlap wins (15-40 over 10-30).
+    assert best(25, 35).rationale.purpose == "overlap long"
+    assert best(41, 49) is None
+    assert best(14, 18, "pinned") is not None  # an unknown name ranks normally
+
+    with get_session() as session:
+        session.add(row(1, 2, "older"))
+        session.add(row(2, 3, "newer", cached_at="2026-02-01T00:00:00+00:00"))
+    assert best(2, 2).rationale.purpose == "newer"
+    assert (
+        lookup_overlapping(
+            Target("a.py", 14, 18, None), "fake", "pinned"
+        ).rationale.purpose
+        == "other model"
+    )
 
 
 def test_cache_key_follows_config_v2_model_resolution(

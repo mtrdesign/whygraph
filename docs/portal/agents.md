@@ -137,10 +137,12 @@ symbol's rationale card, and reports exactly one verdict - **Constraint at risk*
   without one reports **No rationale**. `--generate` lets WhyGraph generate the missing cards, one LLM
   call each, charged to the project's [budget](usage.md); a `budget_exceeded` refusal stops further
   generation for the rest of the review.
-- **A card matches exact lines.** A card is cached for a symbol's line range and the commits blamed on
-  it. An edit that changes the symbol's length, or a commit that lands on its lines, means the earlier
-  card no longer matches, so that hunk reports **No rationale** until a card is made for the code as it
-  stands (`--generate`, or the next `/rationale` or `/whygraph-plan` that reaches it).
+- **Cards survive moved and changed code.** A card is cached for a symbol's line range and the commits
+  blamed on it. When the symbol has moved or changed length, the review still reads the card cached for
+  an overlapping range of the same file, and when commits have landed on its lines since, it reads the
+  earlier card and says so: that card is the rationale from before the change, which is what a review
+  checks against. A hunk reports **No rationale** only when no cached card overlaps its symbol (see
+  [Cached-only lookups](../reference/mcp.md#cached-only-lookups)).
 - **Linked projects.** On a checkout [linked to a platform](platform-projects.md) the platform serves the
   cards and does not honour `cached_only`, so without `--generate` the reviewer does not ask for cards
   at all: every hunk with a symbol reports **No rationale** and confidence is `low`. The one evidence

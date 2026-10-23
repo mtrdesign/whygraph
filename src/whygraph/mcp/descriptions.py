@@ -49,8 +49,9 @@ RATIONALE_BRIEF_DESCRIPTION = (
     "Target by `qualified_name` (CodeGraph's bare or `Class::method` form, "
     "not dotted) or `path` + `line_start` / `line_end`. "
     "Cost: one LLM call on a cache miss (seconds), cached after; "
-    "`force_refresh=True` regenerates; `cached_only=True` never generates "
-    "(`status: not_cached` on a miss). "
+    "`force_refresh=True` regenerates; `cached_only=True` never generates, "
+    "but may return an overlapping card (`card_range`) or a `stale: true` one, "
+    "else `status: not_cached`. "
     "Scan from the WhyGraph portal first."
 )
 

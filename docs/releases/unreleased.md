@@ -33,6 +33,11 @@ fixes and additions.
     - `whygraph_rationale_brief` gains `force_refresh` and `cached_only` (a miss returns `not_cached`
       at no cost), reports progress, and cites the top five commits with their PR and issue links.
       **`cached_only` is not honoured by linked projects**: their cards come from the platform.
+    - A `cached_only` rationale call is looser than a generating one: it returns a card whose lines got
+      new commits since (`stale: true`) or the card of an overlapping range of the same file
+      (`match: "overlap"`, `card_range`), so `/whygraph-review` finds the card of a symbol that moved or
+      changed instead of reporting no rationale. See
+      [Cached-only lookups](../reference/mcp.md#cached-only-lookups).
     - Errors read `[WhyGraph] ... (code: ..., scope: ...)` with a documented
       [code table](../reference/mcp.md#errors), every tool declares an output schema, and tools carry
       annotations and titles.

@@ -126,7 +126,7 @@ switching `[rationale].provider` or `model` regenerates rather than returning th
 | `line_end` | int | Last line of the chunk. |
 | `qualified_name` | str | Fully-qualified symbol name, instead of `path`/lines. |
 | `force_refresh` | bool (default `false`) | Skip the cache and generate a new card (still stored; the same permission and budget checks apply). |
-| `cached_only` | bool (default `false`) | On a cache miss return `{ "status": "not_cached", "target": {...} }` at once: no generation, no description backfill, no LLM spend. Use it to read what is already known. Has no effect with `force_refresh`, nor on a [linked](#linked-projects) project, whose card the platform serves. |
+| `cached_only` | bool (default `false`) | Never generate: no generation, no description backfill, no LLM spend. Use it to read what is already known. It is looser than a normal lookup: it also returns a card whose lines changed since it was written, or the card of an overlapping range, and `{ "status": "not_cached", "target": {...} }` only when there is none (see [Cached-only lookups](#cached-only-lookups)). Has no effect with `force_refresh`, nor on a [linked](#linked-projects) project, whose card the platform serves. |
 
 Returns the card:
 
@@ -159,6 +159,32 @@ plus provenance (`model`, `provider`, `cached_at`) and an `evidence_count` summa
 the top five commits (newest first) with their PR and issue links, so you can name "PR #847" without
 an evidence call; it is derived on each call, not stored with the card. `generated` is `true` when
 this call paid for the card and `false` when it was read from the cache.
+
+#### Cached-only lookups { #cached-only-lookups }
+
+A `cached_only` call is meant for reading what is already known, such as a review of a branch whose
+symbols have moved or gained commits, so it accepts cards a generating call would replace. In order:
+
+1. The card cached for exactly this range, with unchanged evidence.
+2. The card cached for exactly this range whose lines got new commits since it was written: it is
+   returned with `stale: true` instead of being regenerated.
+3. Otherwise, the best card of the same file (same provider and model) whose range overlaps the
+   requested one: first a card for the same `qualified_name`, then the smallest range that contains
+   the request, then the longest overlap, the newest on a tie. `stale` compares the card's own range
+   with its current evidence.
+4. Otherwise `{ "status": "not_cached", "target": {...} }`.
+
+Every card a `cached_only` call returns carries two more keys, and an overlap a third:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `match` | `"exact"` or `"overlap"` | Whether the card was cached for the requested range or for an overlapping one. |
+| `stale` | bool | `true` when the card's lines got new commits since it was written: it is the rationale from before that change. |
+| `card_range` | `{ "line_start", "line_end" }` | With `match: "overlap"` only: the range the card was written for. `target` stays the requested range. |
+
+`generated` is always `false`. For an overlap card, `evidence_count` and `evidence` describe the
+card's own range. A call without `cached_only` never returns these keys, and treats a stale or
+overlapping card as a miss.
 
 !!! note "Calls the LLM on a cache miss"
     On a miss, this hits the configured provider and may take several seconds. A hit is sub-second.

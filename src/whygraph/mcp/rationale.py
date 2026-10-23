@@ -41,7 +41,12 @@ from .evidence import (
     pushed_target,
     split_by_push_status,
 )
-from .rationale_cache import lookup_cached, store_cached
+from .rationale_cache import (
+    lookup_cached,
+    lookup_exact,
+    lookup_overlapping,
+    store_cached,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -79,9 +84,11 @@ class RationaleCard(_RationaleCardRequired, total=False):
     """The ``whygraph_rationale_brief`` result, for FastMCP's output schema.
 
     A card carries every key but ``status``; a ``cached_only`` miss is
-    ``{"status": "not_cached", "target"}``; a project linked to a platform
-    gets the platform's card (no ``evidence`` / ``generated``) plus
-    ``platform``. Everything but ``target`` is therefore optional.
+    ``{"status": "not_cached", "target"}``; a ``cached_only`` card adds
+    ``match`` (``"exact"`` / ``"overlap"``), ``stale`` and, for an
+    overlap, ``card_range``; a project linked to a platform gets the
+    platform's card (no ``evidence`` / ``generated``) plus ``platform``.
+    Everything but ``target`` is therefore optional.
     """
 
     status: str
@@ -96,6 +103,9 @@ class RationaleCard(_RationaleCardRequired, total=False):
     evidence_count: dict[str, int]
     evidence: list[dict[str, Any]]
     generated: bool
+    match: str
+    stale: bool
+    card_range: dict[str, int]
     platform: dict[str, Any]
 
 
@@ -289,6 +299,62 @@ def linked_rationale(remote: RemoteProject, target: Target) -> dict:
     return {**card, "platform": platform_block(remote)}
 
 
+def _cached_only_card(
+    target: Target,
+    evidence: list[CommitEvidence],
+    provider: str,
+    pinned_model: str | None,
+    *,
+    mark_generated: bool,
+) -> dict | None:
+    """The looser lookup behind ``cached_only``: a stale or overlapping card.
+
+    Reads only the cache and git - no LLM call, no backfill, no store.
+    The exact key's row is returned whatever its fingerprint (``stale``
+    when the lines got new commits since); without one, the best row of
+    the same file whose range overlaps ``target``
+    (:func:`~whygraph.mcp.rationale_cache.lookup_overlapping`), whose
+    ``stale`` is checked against the evidence of its own range.
+
+    Returns
+    -------
+    dict or None
+        The card plus ``match``, ``stale`` and (overlap) ``card_range``;
+        ``None`` when no row matches.
+    """
+    generated = False if mark_generated else None
+    row = lookup_exact(target, provider, pinned_model)
+    if row is not None:
+        card = _format_response(
+            target, row.rationale, evidence, row.cached_at, generated=generated
+        )
+        return {**card, "match": "exact", "stale": row.is_stale(evidence)}
+    row = lookup_overlapping(target, provider, pinned_model)
+    if row is None:
+        return None
+    card_target = Target(
+        path=target.path,
+        line_start=row.line_start,
+        line_end=row.line_end,
+        qualified_name=row.qualified_name,
+    )
+    try:
+        card_evidence = collect_evidence(card_target, limit=20)
+    except WhyGraphError:
+        # The card's range no longer blames (the file shrank past it):
+        # its lines certainly changed since.
+        card_evidence = []
+    card = _format_response(
+        target, row.rationale, card_evidence, row.cached_at, generated=generated
+    )
+    return {
+        **card,
+        "match": "overlap",
+        "stale": row.is_stale(card_evidence),
+        "card_range": {"line_start": row.line_start, "line_end": row.line_end},
+    }
+
+
 def rationale_card(
     target: Target,
     evidence: list[CommitEvidence],
@@ -323,9 +389,13 @@ def rationale_card(
         Skip the cache lookup and generate a new card (still stored, and
         still subject to the generation gates and ``before_generate``).
     cached_only : bool, default False
-        On a cache miss return ``{"status": "not_cached", "target"}`` at
-        once - no generation gate, no backfill, no LLM call. Ignored with
-        ``force_refresh``.
+        Never generate: a hit gets ``match: "exact"`` and ``stale: false``;
+        on a miss, return the key's row even with a stale fingerprint
+        (``stale: true``) or the best overlapping row of the same file
+        (``match: "overlap"`` plus ``card_range``, see
+        :func:`_cached_only_card`), and otherwise
+        ``{"status": "not_cached", "target"}`` - no generation gate, no
+        backfill, no LLM call. Ignored with ``force_refresh``.
     mark_generated : bool, default False
         Add ``evidence`` (:func:`card_evidence_refs`) and ``generated`` to
         the card (the MCP tool's shape; ``/api/v1`` leaves them out).
@@ -368,17 +438,28 @@ def rationale_card(
         rationale, cached_at = cached
         if note is not None:
             note("rationale cache hit")
-        return _format_response(
+        card = _format_response(
             target,
             rationale,
             evidence,
             cached_at,
             generated=False if mark_generated else None,
         )
+        return {**card, "match": "exact", "stale": False} if cached_only else card
+    if cached_only and not force_refresh:
+        loose = _cached_only_card(
+            target, evidence, provider, pinned_model, mark_generated=mark_generated
+        )
+        if note is not None:
+            note(
+                "rationale cache miss"
+                if loose is None
+                else f"rationale cache hit ({loose['match']}"
+                + (", stale)" if loose["stale"] else ")")
+            )
+        return loose or {"status": "not_cached", "target": target_dict(target)}
     if note is not None:
         note("rationale cache " + ("bypassed" if force_refresh else "miss"))
-    if cached_only and not force_refresh:
-        return {"status": "not_cached", "target": target_dict(target)}
 
     ctx = current_project()
     if ctx is not None and not ctx.llm_allowed:
@@ -506,9 +587,12 @@ def whygraph_rationale_brief(
     (see :mod:`whygraph.mcp.rationale_cache`) when the same target,
     provider, model, and evidence fingerprint are all unchanged.
     ``force_refresh=True`` skips that lookup and generates (and stores) a
-    new card. ``cached_only=True`` returns ``{"status": "not_cached",
-    "target"}`` on a miss instead of generating (a linked project's card
-    is the platform's, which ignores it). The card carries the top
+    new card. ``cached_only=True`` never generates: it also accepts the
+    key's card with a stale fingerprint (``stale: true``) or the card of
+    an overlapping range (``match: "overlap"``, ``card_range``), and
+    returns ``{"status": "not_cached", "target"}`` only when there is
+    none (a linked project's card is the platform's, which ignores it).
+    The card carries the top
     :data:`CARD_EVIDENCE_REFS` commits as ``evidence`` and ``generated``
     (whether this call paid for it).
 

@@ -56,12 +56,18 @@ Before the first card, call `whygraph_evidence_for(path=<path>, line_start=<sym_
 
 Read the answer:
 
-- `status: "not_cached"` -> **No rationale**, reason `no cached card; --generate would create one`.
+- `status: "not_cached"` -> **No rationale**, reason `no cached card; --generate would create one`. A `cached_only` call already looks past exact ranges (below), so do not retry it with other line numbers.
 - A card whose `purpose` and `why` are both empty -> **No rationale**, reason `the card is empty`.
 - `isError` with `code: no_evidence` -> **No rationale**, reason `no committed history for these lines` (on a linked project: not pushed yet).
 - `isError` with `code: budget_exceeded` or `generation_not_permitted` -> do not retry. This hunk is **No rationale** with reason `generation is paused for this project`; call every later card with `cached_only=True`.
 - Any other `isError` -> **No rationale** with the error's message as the reason.
 - A card -> judge the hunk against it (Step 4). With GENERATE true, count the cards whose `generated` is true for the Confidence line.
+
+A `cached_only` card also carries `match` and `stale`:
+
+- `match: "exact"` - the card was cached for `<sym_start>`-`<sym_end>`.
+- `match: "overlap"` - the card was cached for `card_range`, a range of the same file that overlaps the symbol (usually the same symbol before it moved or changed length). It is still the symbol's rationale: judge the hunk against it as usual. If the hunk falls outside `card_range`, the card may describe a neighbouring symbol, so say so and lower the confidence.
+- `stale: true` - the card was written before the latest commits on those lines. It is the rationale from before the change, which is exactly what a review checks against: judge as usual, and end the verdict line with `(card predates the latest commits on these lines)`.
 
 ## Step 4 - Judge each hunk
 

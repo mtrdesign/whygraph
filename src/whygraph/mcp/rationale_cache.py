@@ -26,17 +26,24 @@ The fingerprint is computed only over commit SHAs — PR/issue updates
 that don't change the underlying commit set do not invalidate the cache.
 That matches :func:`collect_evidence`'s own derivation: PRs and issues
 are looked up *from* the commit set.
+
+A ``cached_only`` call (``/whygraph-review``) is looser than a generating
+one: :func:`lookup_exact` returns the key's row whatever its fingerprint,
+and :func:`lookup_overlapping` the best row of the same file whose range
+overlaps the request, so a card survives its symbol drifting by a few
+lines. Both return a :class:`CachedCard`, which says whether it is stale.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable, Sequence
 
 from sqlalchemy import delete
-from sqlmodel import Session, col
+from sqlmodel import Session, col, select
 
 from whygraph.analyze import CommitEvidence, Rationale
 from whygraph.db import get_session
@@ -74,6 +81,77 @@ def _now_iso() -> str:
     :attr:`Issue.created_at`, and the rest of the WhyGraph schema.
     """
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _rationale_from_row(row: RationaleCache) -> Rationale:
+    """Rebuild the :class:`~whygraph.analyze.Rationale` a cache row holds."""
+    return Rationale(
+        purpose=row.purpose,
+        why=row.why,
+        constraints=tuple(json.loads(row.constraints)),
+        tradeoffs=tuple(json.loads(row.tradeoffs)),
+        risks=tuple(json.loads(row.risks)),
+        model=row.actual_model or row.model,
+        provider=row.actual_provider or row.provider,
+        input_tokens=row.input_tokens,
+        output_tokens=row.output_tokens,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class CachedCard:
+    """A cache row read without its fingerprint check (a ``cached_only`` lookup).
+
+    Attributes
+    ----------
+    rationale : Rationale
+        The cached card.
+    cached_at : str
+        When the row was cached (ISO-8601).
+    line_start : int
+        First line of the range the card was generated for.
+    line_end : int
+        Last line of that range.
+    qualified_name : str or None
+        The symbol the card was generated for, when it was targeted by one.
+    evidence_fingerprint : str
+        The row's fingerprint (see :func:`_fingerprint`).
+    """
+
+    rationale: Rationale
+    cached_at: str
+    line_start: int
+    line_end: int
+    qualified_name: str | None
+    evidence_fingerprint: str
+
+    @classmethod
+    def from_row(cls, row: RationaleCache) -> "CachedCard":
+        """Detach a :class:`RationaleCache` row from its session."""
+        return cls(
+            rationale=_rationale_from_row(row),
+            cached_at=row.cached_at,
+            line_start=row.line_start,
+            line_end=row.line_end,
+            qualified_name=row.qualified_name,
+            evidence_fingerprint=row.evidence_fingerprint,
+        )
+
+    def is_stale(self, evidence: Sequence[CommitEvidence]) -> bool:
+        """Whether ``evidence`` (of the card's range) differs from what the card saw.
+
+        Parameters
+        ----------
+        evidence : Sequence[CommitEvidence]
+            The current evidence for the card's own range.
+
+        Returns
+        -------
+        bool
+            ``True`` when the fingerprint of ``evidence`` is not the row's,
+            i.e. the lines got new commits since the card was written.
+        """
+        return _fingerprint(evidence) != self.evidence_fingerprint
 
 
 def lookup_cached(
@@ -119,19 +197,111 @@ def lookup_cached(
         )
         if row is None or row.evidence_fingerprint != fp:
             return None
-        rationale = Rationale(
-            purpose=row.purpose,
-            why=row.why,
-            constraints=tuple(json.loads(row.constraints)),
-            tradeoffs=tuple(json.loads(row.tradeoffs)),
-            risks=tuple(json.loads(row.risks)),
-            model=row.actual_model or row.model,
-            provider=row.actual_provider or row.provider,
-            input_tokens=row.input_tokens,
-            output_tokens=row.output_tokens,
-        )
+        rationale = _rationale_from_row(row)
         cached_at = row.cached_at
     return rationale, cached_at
+
+
+def lookup_exact(
+    target: Target, provider: str, config_model: str | None
+) -> CachedCard | None:
+    """The row keyed exactly by ``target``, whatever its evidence fingerprint.
+
+    For ``cached_only`` calls only: a stale row is still the rationale the
+    lines had before their latest commits. A generating call must use
+    :func:`lookup_cached`, which treats a stale row as a miss.
+
+    Parameters
+    ----------
+    target : Target
+        Resolved target; its path and range are the key.
+    provider : str
+        LLM provider tag from ``Config.cache_identity("rationale")``.
+    config_model : str or None
+        Pinned model name (or ``None``), as for :func:`lookup_cached`.
+
+    Returns
+    -------
+    CachedCard or None
+        The row, or ``None`` when the key has none.
+    """
+    model_key = _model_key(config_model)
+    with get_session() as session:
+        row = session.get(
+            RationaleCache,
+            (target.path, target.line_start, target.line_end, provider, model_key),
+        )
+        return None if row is None else CachedCard.from_row(row)
+
+
+def lookup_overlapping(
+    target: Target, provider: str, config_model: str | None
+) -> CachedCard | None:
+    """The best cached card of ``target``'s file whose range overlaps it.
+
+    For ``cached_only`` calls only, when the exact key has no row: a
+    symbol whose lines moved, or a hunk inside a cached symbol, still
+    finds the card. Rows are matched on ``path``, ``provider`` and the
+    model key (resolved as in :func:`lookup_cached`) with
+    ``line_start <= target.line_end AND line_end >= target.line_start``;
+    the fingerprint is not checked (see :meth:`CachedCard.is_stale`).
+
+    Parameters
+    ----------
+    target : Target
+        Resolved target (path + line range + optional symbol name).
+    provider : str
+        LLM provider tag from ``Config.cache_identity("rationale")``.
+    config_model : str or None
+        Pinned model name (or ``None`` for the provider default).
+
+    Returns
+    -------
+    CachedCard or None
+        The best row, or ``None`` when no row overlaps.
+
+    Notes
+    -----
+    Ranking, best first:
+
+    1. rows whose ``qualified_name`` is the target's (when it has one);
+    2. rows whose range contains the target's, smallest span first;
+    3. the rest, by overlap length, longest first.
+
+    Ties go to the newest ``cached_at``. The composite primary key leads
+    with ``path``, so the query needs no extra index.
+    """
+    model_key = _model_key(config_model)
+    with get_session() as session:
+        rows = session.exec(
+            select(RationaleCache).where(
+                RationaleCache.path == target.path,
+                RationaleCache.provider == provider,
+                RationaleCache.model == model_key,
+                col(RationaleCache.line_start) <= target.line_end,
+                col(RationaleCache.line_end) >= target.line_start,
+            )
+        ).all()
+        if not rows:
+            return None
+
+        def rank(row: RationaleCache) -> tuple[int, int, int]:
+            named = (
+                target.qualified_name is not None
+                and row.qualified_name == target.qualified_name
+            )
+            contains = (
+                row.line_start <= target.line_start and row.line_end >= target.line_end
+            )
+            if contains:
+                return (0 if named else 1, 0, row.line_end - row.line_start)
+            overlap = min(row.line_end, target.line_end) - max(
+                row.line_start, target.line_start
+            )
+            return (0 if named else 1, 1, -overlap)
+
+        newest_first = sorted(rows, key=lambda row: row.cached_at, reverse=True)
+        return CachedCard.from_row(min(newest_first, key=rank))
 
 
 def store_cached(

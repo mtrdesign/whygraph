@@ -8,12 +8,15 @@ repos. The MCP transport has its own module, ``test_portal_mcp.py``.
 
 from __future__ import annotations
 
+import atexit
 import functools
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -123,9 +126,30 @@ def _git(root: Path, *args: str) -> str:
     ).stdout
 
 
+_REPO_TEMPLATE: dict[str, Path] = {}
+"""The per-process repo :func:`make_repo` copies (built once: eight ``git`` runs)."""
+
+
 def make_repo(parent: Path, name: str, *, remote: str | None = None) -> Path:
-    """A git repo with ``sample.py`` committed across two commits."""
+    """A git repo with ``sample.py`` committed across two commits.
+
+    Copied from a template built once per process, as
+    ``test_portal_tenancy``'s marked repos are, so every copy has the same
+    commits.
+    """
+    if "repo" not in _REPO_TEMPLATE:
+        holder = Path(tempfile.mkdtemp(prefix="whygraph-repo-"))
+        atexit.register(shutil.rmtree, holder, True)
+        _REPO_TEMPLATE["repo"] = _build_repo(holder / "repo")
     root = parent / name
+    root.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(_REPO_TEMPLATE["repo"], root, symlinks=True)
+    if remote:
+        _git(root, "remote", "add", "origin", remote)
+    return Path(os.path.realpath(root))
+
+
+def _build_repo(root: Path) -> Path:
     root.mkdir(parents=True)
     _git(root, "init", "-q")
     _git(root, "config", "user.email", "tester@example.com")
@@ -137,9 +161,7 @@ def make_repo(parent: Path, name: str, *, remote: str | None = None) -> Path:
     (root / "sample.py").write_text("line one\nline two\nline three\n")
     _git(root, "add", "sample.py")
     _git(root, "commit", "-q", "-m", "second commit")
-    if remote:
-        _git(root, "remote", "add", "origin", remote)
-    return Path(os.path.realpath(root))
+    return root
 
 
 def history_db(slug: str, org: str = "local") -> Path:

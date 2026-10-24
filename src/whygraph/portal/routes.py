@@ -165,6 +165,7 @@ from .history import (
     find_history,
     foreign_history,
     release_sidecar,
+    remove_history,
     write_sidecar,
 )
 from .paths import BACKUPS_DIR, project_db_path
@@ -351,11 +352,19 @@ class PatchProjectBody(_Strict):
 
 
 class DeleteProjectBody(_Strict):
-    """``DELETE /api/projects/{slug}``."""
+    """``DELETE /api/projects/{slug}``.
+
+    ``delete_history`` deletes the project's history directory
+    (``<data dir>/projects/<org>/<slug>/``); omitted, it is ``True`` in
+    production and ``False`` locally, and it is ignored for a linked project,
+    which has none. Deleting history, like deleting a GitHub clone, needs
+    ``confirm_name``.
+    """
 
     strip_agent_entries: bool = False
     confirm_tracked: list[str] = Field(default_factory=list)
     confirm_name: str | None = None
+    delete_history: bool | None = None
 
 
 class InitBody(_Strict):
@@ -2342,14 +2351,21 @@ def delete_project(
     Strips the managed
     hooks, optionally the ``whygraph`` agent entries (tracked files only
     with ``confirm_tracked``; all-or-nothing), and the portal markers;
-    never deletes a local repo or the rest of its ``.whygraph/``, and
-    keeps the project's history (``<data dir>/projects/<org>/<slug>/``). A
-    GitHub clone's checkout is deleted only when ``confirm_name`` equals
-    the project name and the checkout sits directly under
+    never deletes a local repo or the rest of its ``.whygraph/``. The
+    project's history (``<data dir>/projects/<org>/<slug>/``) is deleted
+    when ``delete_history`` resolves true (omitted: true in production,
+    false locally; always false for a linked project) and ``confirm_name``
+    equals the project name, after the row is gone and only when the
+    directory passes the data-dir guard; ``history_deleted`` says whether
+    it was, and a refused delete adds a ``warnings`` entry. A kept history
+    is re-attached when the same repository is added again. A GitHub
+    clone's checkout is deleted only when ``confirm_name`` equals the
+    project name and the checkout sits directly under
     ``<data dir>/repos``. The project's run files (``runs/<id>.jsonl``,
     ``.log``, ``.token``) are deleted with its row, and its connection
     tokens are revoked (``project_deleted``) in the row's transaction.
-    A completed removal is audited as ``project_removed``.
+    A completed removal is audited as ``project_removed`` (with
+    ``checkout_deleted`` and ``history_deleted``).
 
     For a **linked** project this is "Remove from this machine" (plan
     section 4.11): this machine's connection token is revoked on the
@@ -2376,6 +2392,7 @@ def delete_project(
         project=project.slug,
         source=project.source,
         checkout_deleted=result["checkout_deleted"],
+        history_deleted=result["history_deleted"],
     )
     return result
 
@@ -2385,7 +2402,18 @@ def _remove_project(
 ) -> dict:
     """The body of :func:`delete_project`, run under the runner's removal reservation."""
     production = state.mode == "production"
-    if project.source == "github" and body.confirm_name != project.name:
+    # Omitted: delete in production, keep locally (D9); a linked project has
+    # no history, so the field is ignored for it (D14).
+    delete_history = project.source != "platform" and (
+        production if body.delete_history is None else body.delete_history
+    )
+    if (
+        project.source == "github" or delete_history
+    ) and body.confirm_name != project.name:
+        if project.source != "github":
+            raise ApiError(
+                409, "type the project name to delete its history", code="confirm_name"
+            )
         # Production never names the server clone's path (MODE-1).
         raise ApiError(
             409,
@@ -2500,11 +2528,30 @@ def _remove_project(
         if not checkout_deleted and project.root.exists():
             where = "the server copy" if production else str(project.root)
             warnings.append(f"refused to delete {where}: not a portal clone")
+
+    history_deleted = False
+    if delete_history:
+        # After the row delete: a failed delete must not lose the history of
+        # a project that stays. The directory is the row's own (D22), so no
+        # identity is compared (D14); never reached for a linked row.
+        history = project.db_path.parent
+        try:
+            history_deleted = remove_history(history)
+        except OSError:
+            _log.exception("could not delete the history at %s", history)
+        if not history_deleted and (history.exists() or history.is_symlink()):
+            warnings.append("refused to delete the project's history")
+        # A request in flight since the first dispose may have cached an
+        # engine or a migration memo for the deleted file; a re-add to the
+        # same slug must create the DB again.
+        dispose_engine(project.db_path)
+        state.migrations.forget(project.db_path)
     return {
         "removed": project.slug,
         "hooks": hooks,
         "agent_files": agent_files,
         "checkout_deleted": checkout_deleted,
+        "history_deleted": history_deleted,
         # Whether this machine holds no connection token for the project any
         # more: the platform confirmed the revoke, or there never was one.
         "token_revoked": token_revoked,

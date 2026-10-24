@@ -4,7 +4,8 @@ The path seam (:mod:`whygraph.portal.paths`): where a project's WhyGraph DB
 lives, and the check that refuses a symlink inside the data directory. The
 identity sidecar (:mod:`whygraph.portal.history`): an exclusive reservation
 of a history directory, and the slug choice that re-attaches a repository's
-own kept history and never another's.
+own kept history and never another's. Removal: the guarded delete of a
+history directory, by mode and on request.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,13 +36,16 @@ from test_portal_app import (  # noqa: F401 -- fixtures
 )
 
 from whygraph.core.safe_paths import UnsafePathError
+from whygraph.db import engine as db_engine
 from whygraph.portal import db as portal_db
+from whygraph.portal.clones import portal_dir_is_safe
 from whygraph.portal.history import (
     SIDECAR,
     find_history,
     foreign_history,
     history_owner,
     release_sidecar,
+    remove_history,
     write_sidecar,
 )
 from whygraph.portal.models import Project
@@ -547,3 +552,206 @@ def test_a_slug_a_concurrent_link_committed_first_is_released_and_retried(
     # The linked row has no history: the reservation under its slug is gone.
     assert not project_data_dir(portal_db.data_dir(), "local", "api").exists()
     assert _owner("api-2")["identity"] == {"path": str(root)}
+
+
+# ---------------------------------------------------------------------------
+# The rmtree guard and remove_history (plan section 4.6)
+# ---------------------------------------------------------------------------
+
+
+def test_the_generalized_guard_at_projects(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    (data / "projects" / "acme" / "api").mkdir(parents=True)
+    (data / "repos" / "acme" / "api").mkdir(parents=True)
+    projects = data / "projects"
+    assert portal_dir_is_safe(projects / "acme" / "api", data, base="projects", depth=2)
+    assert portal_dir_is_safe(projects / "acme", data, base="projects", depth=1)
+    assert not portal_dir_is_safe(projects / "acme", data, base="projects", depth=2)
+    assert not portal_dir_is_safe(
+        projects / "acme" / "api", data, base="projects", depth=1
+    )
+    # One base never vouches for the other.
+    assert not portal_dir_is_safe(
+        data / "repos" / "acme" / "api", data, base="projects", depth=2
+    )
+    assert not portal_dir_is_safe(
+        projects / "acme" / "api", data, base="repos", depth=2
+    )
+    assert not portal_dir_is_safe(
+        tmp_path / "elsewhere" / "x" / "y", data, base="projects", depth=2
+    )
+    for base, depth in (("runs", 1), ("", 1), ("projects", 0)):
+        with pytest.raises(ValueError):
+            portal_dir_is_safe(projects / "acme", data, base=base, depth=depth)
+
+
+def test_remove_history_deletes_a_history_directory() -> None:
+    db = seed_history(None, "api", {"origin": "github.com/acme/api"})
+    slug_dir = db.parent
+    assert remove_history(slug_dir) is True
+    assert not slug_dir.exists()
+    assert slug_dir.parent.is_dir()  # the org's folder stays
+    assert remove_history(slug_dir) is False  # already gone
+
+
+def test_remove_history_refuses_a_symlink(tmp_path: Path) -> None:
+    data = portal_db.data_dir()
+    victim = tmp_path / "victim"
+    (victim / "inner").mkdir(parents=True)
+    (victim / "inner" / "keep.txt").write_text("keep")
+    org_dir = data / "projects" / "local"
+    org_dir.mkdir(parents=True)
+    # The history directory itself is a symlink.
+    (org_dir / "api").symlink_to(victim / "inner")
+    assert remove_history(org_dir / "api") is False
+    # A symlinked org folder in between.
+    (data / "projects" / "evil").symlink_to(victim)
+    assert remove_history(data / "projects" / "evil" / "inner") is False
+    assert (victim / "inner" / "keep.txt").read_text() == "keep"
+
+
+def test_remove_history_refuses_a_wrong_depth_or_a_path_outside(
+    tmp_path: Path,
+) -> None:
+    data = portal_db.data_dir()
+    org_dir = data / "projects" / "local"
+    (org_dir / "api" / "nested").mkdir(parents=True)
+    assert remove_history(org_dir) is False  # depth 1
+    assert remove_history(data / "projects") is False  # depth 0
+    assert remove_history(org_dir / "api" / "nested") is False  # depth 3
+    repos_dir = data / "repos" / "local" / "api"
+    repos_dir.mkdir(parents=True)
+    assert remove_history(repos_dir) is False  # right depth, not under projects/
+    outside = tmp_path / "x" / "y" / "z"
+    outside.mkdir(parents=True)
+    assert remove_history(outside) is False
+    assert (org_dir / "api" / "nested").is_dir()
+    assert repos_dir.is_dir() and outside.is_dir()
+
+
+# ---------------------------------------------------------------------------
+# Remove by mode and on request (plan section 4.6, criteria 3 and 5)
+# ---------------------------------------------------------------------------
+
+
+def test_a_local_remove_keeps_history_unless_asked(
+    ready: TestClient, env: SimpleNamespace
+) -> None:
+    root = make_repo(env.shared, "api")
+    seed_codegraph(root)
+    add_local(ready, root)
+    init_project(ready, "api")
+    db = history_db("api")
+    assert db.is_file()
+
+    # Omitted: a local remove keeps the history (D9).
+    kept = ready.request("DELETE", "/api/projects/api", json={})
+    assert kept.status_code == 200, kept.text
+    assert kept.json()["history_deleted"] is False
+    assert kept.json()["warnings"] == []
+    assert db.is_file()
+
+
+def test_a_local_history_delete_needs_the_project_name(
+    ready: TestClient, env: SimpleNamespace
+) -> None:
+    root = make_repo(env.shared, "api")
+    seed_codegraph(root)
+    add_local(ready, root)
+    assert ready.patch("/api/projects/api", json={"name": "My API"}).status_code == 200
+    init_project(ready, "api")
+    db = history_db("api")
+    hooks_before = sorted(p.name for p in (root / ".git" / "hooks").iterdir())
+
+    for body in (
+        {"delete_history": True},
+        {"delete_history": True, "confirm_name": "api"},  # the slug is not the name
+    ):
+        refused = ready.request("DELETE", "/api/projects/api", json=body)
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["code"] == "confirm_name"
+        assert refused.json()["error"] == (
+            "type the project name to delete its history"
+        )
+        assert "folder" not in refused.json()
+    # Nothing changed.
+    assert ready.get("/api/projects/api").status_code == 200
+    assert ready.get("/api/projects/api/tree").status_code == 200
+    assert db.is_file()
+    assert (root / ".whygraph" / "portal.json").is_file()
+    assert sorted(p.name for p in (root / ".git" / "hooks").iterdir()) == hooks_before
+
+    removed = ready.request(
+        "DELETE",
+        "/api/projects/api",
+        json={"delete_history": True, "confirm_name": "My API"},
+    )
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["history_deleted"] is True
+    assert removed.json()["warnings"] == []
+    assert not db.parent.exists()
+    assert (root / "sample.py").is_file()  # the repository itself stays
+
+
+def test_a_history_delete_needs_no_checkout(
+    ready: TestClient, env: SimpleNamespace
+) -> None:
+    """No identity is recomputed from the checkout (D14): a deleted one still works."""
+    root = make_repo(env.shared, "api", remote="https://github.com/acme/api.git")
+    seed_codegraph(root)
+    add_local(ready, root)
+    init_project(ready, "api")
+    db = history_db("api")
+    shutil.rmtree(root)
+
+    removed = ready.request(
+        "DELETE",
+        "/api/projects/api",
+        json={"delete_history": True, "confirm_name": "api"},
+    )
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["history_deleted"] is True
+    assert not db.parent.exists()
+
+
+def test_a_readd_after_a_history_delete_creates_the_db_again(
+    ready: TestClient, env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A request in flight during the remove cannot leave a stale engine or memo."""
+    from whygraph.portal import routes
+
+    state = ready.app.state.portal
+    root = make_repo(env.shared, "api")
+    seed_codegraph(root)
+    add_local(ready, root)
+    init_project(ready, "api")
+    db = history_db("api")
+    key = db.resolve()
+    real = routes.remove_history
+
+    def in_flight(slug_dir: Path) -> bool:
+        # Between the first dispose / forget and the rmtree, a request still
+        # running opens the DB and records its migration.
+        with db_engine._engines_lock:
+            db_engine._engines[key] = db_engine._build_engine(db)
+        state.migrations._done.add(key)
+        return real(slug_dir)
+
+    monkeypatch.setattr(routes, "remove_history", in_flight)
+    removed = ready.request(
+        "DELETE",
+        "/api/projects/api",
+        json={"delete_history": True, "confirm_name": "api"},
+    )
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["history_deleted"] is True
+    assert key not in db_engine._engines
+    assert key not in state.migrations._done
+    assert not db.parent.exists()
+
+    again = add_local(ready, root)
+    assert again["project"]["slug"] == "api"
+    assert again["detected"]["existing_db"] is False
+    init_project(ready, "api")
+    assert db.is_file()
+    assert ready.get("/api/projects/api/tree").status_code == 200

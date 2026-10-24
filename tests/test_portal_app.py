@@ -2299,6 +2299,7 @@ def test_remove_strips_hooks_markers_and_only_whygraph_entries(
         "DELETE", "/api/projects/demo", json={"strip_agent_entries": True}
     )
     assert removed.status_code == 200, removed.text
+    assert removed.json()["history_deleted"] is False  # kept locally (D9)
     assert db_path not in db_engine._engines
     assert managed_hook_names(root) == ()
     assert not (root / ".whygraph" / "portal.json").exists()
@@ -2468,6 +2469,7 @@ def test_a_local_github_row_is_listed_unsupported_unscannable_and_removable(
     )
     assert removed.status_code == 200, removed.text
     assert removed.json()["checkout_deleted"] is True
+    assert removed.json()["history_deleted"] is False  # kept locally (D9)
     assert not clone.exists()
 
 

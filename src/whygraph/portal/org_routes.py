@@ -60,7 +60,7 @@ from whygraph.db.engine import dispose_engine
 from . import audit_store, connections
 from .audit import audit
 from .authz import DEFAULT_PROJECT_ROLES, Action, OrgAccess, Role
-from .clones import remove_clone
+from .clones import remove_clone, remove_portal_dir
 from .db import data_dir, get_session
 from .deps import (
     ApiError,
@@ -85,7 +85,7 @@ from .models import (
     User,
 )
 from .orgs import lock_org_slug
-from .paths import project_db_path
+from .paths import PROJECTS_DIR, project_db_path
 from .runner import ProjectBusy, remove_run_files, run_files
 from .security import Principal
 
@@ -197,7 +197,11 @@ def _delete_rows(org_id: int, slug: str) -> _Deleted:
 
 
 def _clean_up(state: PortalState, slug: str, deleted: _Deleted) -> None:
-    """Step 3, after the commit: engines, contexts, run files, ``repos/<org>/``."""
+    """Step 3, after the commit: engines, contexts, run files, the org's folders.
+
+    The folders are ``repos/<org>/`` (clones) and ``projects/<org>/``
+    (history), each removed only through the data-dir rmtree guard.
+    """
     for project_id, db_path in zip(deleted.project_ids, deleted.project_dbs):
         dispose_engine(db_path)
         state.migrations.forget(db_path)
@@ -212,6 +216,23 @@ def _clean_up(state: PortalState, slug: str, deleted: _Deleted) -> None:
             )
     except OSError:
         _log.exception("org deletion: could not delete %s", org_dir)
+    history_dir = state.data_dir / PROJECTS_DIR / slug
+    try:
+        # The org's history: one level under <data>/projects, no symlink.
+        if (
+            not remove_portal_dir(history_dir, state.data_dir, base="projects", depth=1)
+            and history_dir.exists()
+        ):
+            _log.warning(
+                "org deletion: refused to delete %s: not a portal folder", history_dir
+            )
+    except OSError:
+        _log.exception("org deletion: could not delete %s", history_dir)
+    # A request in flight may have cached an engine or a migration memo for
+    # a deleted file since the first dispose.
+    for db_path in deleted.project_dbs:
+        dispose_engine(db_path)
+        state.migrations.forget(db_path)
 
 
 @org_router.delete("/api/org")
@@ -221,7 +242,7 @@ async def delete_org(
     principal: Principal = Depends(current_user),
     body: DeleteOrgBody | None = Body(default=None),
 ) -> dict:
-    """Delete the org, its projects, clones, run files, members, config and keys.
+    """Delete the org, its projects, clones, history, run files, members, config and keys.
 
     ``409 confirm_slug`` unless ``confirm_slug`` equals the org's slug;
     ``409 busy`` while a run cannot be stopped yet (a sync still fetching)

@@ -39,6 +39,7 @@ from pathlib import Path
 
 from whygraph.core.safe_paths import UnsafePathError, check_inside
 
+from .clones import remove_portal_dir
 from .db import data_dir as _portal_data_dir
 from .paths import PROJECTS_DIR, project_data_dir
 from .projects import is_valid_slug
@@ -378,6 +379,40 @@ def release_sidecar(reservation: Reservation, *, data_dir: Path) -> bool:
     return False
 
 
+def remove_history(slug_dir: Path, *, data_dir: Path | None = None) -> bool:
+    """Delete a project's history directory, ``<data>/projects/<org>/<slug>``.
+
+    Only when it exists and passes the rmtree guard
+    (:func:`~whygraph.portal.clones.portal_dir_is_safe` at
+    ``base="projects", depth=2``: neither ``<org>/`` nor ``<slug>/`` is a
+    symlink, and the real path is exactly two levels under ``projects/``). No identity comparison: a committed
+    local or GitHub row's directory always names that row (the exclusive
+    reservation), and an identity recomputed from a moved or deleted
+    checkout would be unreliable exactly when removal matters. Never called
+    for a linked (``platform``) row, which owns no history.
+
+    Parameters
+    ----------
+    slug_dir : Path
+        The directory (the parent of the row's ``whygraph_db``).
+    data_dir : Path, optional
+        The portal's data directory; :func:`whygraph.portal.db.data_dir` by
+        default (real paths are compared, so the spelling does not matter).
+
+    Returns
+    -------
+    bool
+        Whether it was deleted.
+
+    Raises
+    ------
+    OSError
+        When the ``rmtree`` itself fails.
+    """
+    root = data_dir if data_dir is not None else _portal_data_dir()
+    return remove_portal_dir(slug_dir, root, base="projects", depth=2)
+
+
 __all__ = [
     "IDENTITY_KEYS",
     "Reservation",
@@ -387,5 +422,6 @@ __all__ = [
     "foreign_history",
     "history_owner",
     "release_sidecar",
+    "remove_history",
     "write_sidecar",
 ]

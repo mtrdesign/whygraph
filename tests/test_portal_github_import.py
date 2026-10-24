@@ -1103,16 +1103,71 @@ def test_production_config_fixes_the_branch_remote_and_hooks(world: World) -> No
     assert response.json()["config"] == {"scan": {"forge": "off"}}
 
 
-def test_removing_an_imported_project_deletes_its_clone(world: World) -> None:
+def test_removing_an_imported_project_deletes_its_clone(
+    world: World, audit_log: pytest.LogCaptureFixture
+) -> None:
     w = world
     connected(w)
     imported_ok(w)
+    history = history_db("api", "acme")
+    assert history.is_file()
     response = w.client.request(
         "DELETE", at("acme") + "/api/projects/api", json={"confirm_name": "api"}
     )
     assert response.status_code == 200, response.text
-    assert response.json()["checkout_deleted"] is True
+    body = response.json()
+    assert body["checkout_deleted"] is True
     assert clone_dirs(w) == [] and (w.repos / "acme").is_dir()
+    # delete_history omitted: production deletes the history too (D9).
+    assert body["history_deleted"] is True and body["warnings"] == []
+    assert not history.parent.exists() and history.parent.parent.is_dir()
+    (event,) = [e for e in events(audit_log) if e["event"] == "project_removed"]
+    assert (event["checkout_deleted"], event["history_deleted"]) == (True, True)
+
+
+def test_keep_history_on_a_production_remove(world: World) -> None:
+    """**Keep history**: the clone goes, the history stays and re-attaches."""
+    w = world
+    connected(w)
+    imported_ok(w)
+    history = history_db("api", "acme")
+    refused = w.client.request(
+        "DELETE", at("acme") + "/api/projects/api", json={"delete_history": False}
+    )
+    # The server copy still needs the typed name.
+    assert (refused.status_code, refused.json()["code"]) == (409, "confirm_name")
+    response = w.client.request(
+        "DELETE",
+        at("acme") + "/api/projects/api",
+        json={"confirm_name": "api", "delete_history": False},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["checkout_deleted"] is True
+    assert response.json()["history_deleted"] is False
+    assert history.is_file()
+
+    again = imported_ok(w)
+    assert again.json()["project"]["slug"] == "api"
+    assert history_db("api", "acme") == history and history.is_file()
+
+
+def test_a_reimport_after_a_history_delete_creates_the_db_again(world: World) -> None:
+    w = world
+    connected(w)
+    imported_ok(w)
+    history = history_db("api", "acme")
+    response = w.client.request(
+        "DELETE", at("acme") + "/api/projects/api", json={"confirm_name": "api"}
+    )
+    assert response.json()["history_deleted"] is True
+    assert not history.parent.exists()
+
+    again = imported_ok(w)
+    assert again.json()["project"]["slug"] == "api"
+    assert history.is_file()
+    assert history_owner(history.parent)["identity"] == {"github_repo_id": API_REPO}
+    sessions = w.client.get(at("acme") + "/api/projects/api/chat/sessions")
+    assert sessions.status_code == 200, sessions.text
 
 
 # ---------------------------------------------------------------------------

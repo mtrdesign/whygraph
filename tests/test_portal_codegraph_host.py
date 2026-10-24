@@ -1464,7 +1464,8 @@ def test_a_dropped_http_connection_does_not_kill_the_sync_or_the_host(
                 await _until(lambda: len(_starts(fake_cg)) == 1)
                 tg.cancel_scope.cancel()  # what a dropped connection does
             await _until(lambda: len(_ends(fake_cg)) == 1)
-            await anyio.sleep(0.1)
+            # The host records the sync after the child exits: wait for it.
+            await _until(lambda: host._fresh[1].synced_fp is not None)
             synced = host._fresh[1].synced_fp
             after = await _search(host, root)
             return host.state, synced, after

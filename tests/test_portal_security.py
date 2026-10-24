@@ -18,6 +18,7 @@ One section per finding:
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sqlite3
 import threading
@@ -177,7 +178,7 @@ def test_symlinked_codegraph_db_is_refused(
     response = ready.post("/api/projects/beta/init", json={"agents": []})
     assert response.status_code == 409 and response.json()["code"] == "unsafe_path"
     _mark_initialized("beta")
-    history_db("beta").parent.mkdir(parents=True)
+    history_db("beta").parent.mkdir(parents=True, exist_ok=True)  # the add reserved it
     sqlite3.connect(history_db("beta")).close()
     assert ready.get("/api/projects/beta/tree").json()["code"] == "unsafe_path"
 
@@ -222,7 +223,8 @@ def test_a_symlink_inside_the_data_dir_is_refused(
     before_bytes = victim.read_bytes()
     root = make_repo(env.shared, "sneaky")
     add_local(ready, root)
-    history_db("sneaky").parent.parent.mkdir(parents=True, exist_ok=True)
+    # Swap the directory the add reserved for a link.
+    shutil.rmtree(history_db("sneaky").parent)
     history_db("sneaky").parent.symlink_to(victim_dir)
 
     response = ready.post("/api/projects/sneaky/init", json={"agents": []})

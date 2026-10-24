@@ -1998,9 +1998,10 @@ def test_a_1x_repo_migrates_through_the_wizard_and_its_db_is_ignored(
         json.dumps({"mcpServers": {"whygraph": _STDIO}})
     )
 
-    # Add: everything is detected, nothing is touched.
+    # Add: everything is detected, nothing is touched. The in-repo DB is not
+    # history the portal keeps, so it is not reported (D4, D18).
     detected = add_local(portal, root)["detected"]
-    assert detected["existing_db"] is True
+    assert detected["existing_db"] is False
     assert detected["managed_hooks"] == ["post-commit"]
     agents = {d["agent"]: d for d in detected["detected_agents"]}
     assert set(agents) == {"claude", "vscode"}

@@ -164,6 +164,48 @@ def manual_ctx(root: Path, slug: str, org: str = "local") -> ProjectContext:
     )
 
 
+def seed_history(
+    root: Path | None,
+    slug: str,
+    identity: dict | None = None,
+    *,
+    org: str = "local",
+    source: str = "local",
+    revision: str = "head",
+) -> Path:
+    """Seed project ``org/slug``'s kept history: a migrated DB plus a matching sidecar.
+
+    What a removed project leaves in the data dir, so the next add of the
+    same repository re-attaches it (without the sidecar the directory is
+    foreign and the add takes ``<slug>-2``). ``identity`` defaults to a
+    local checkout without an ``origin``: ``{"path": <root>}``.
+
+    Returns
+    -------
+    Path
+        The history DB.
+    """
+    from whygraph.portal.history import write_sidecar
+
+    if identity is None:
+        assert root is not None
+        identity = {"path": str(root)}
+    db = history_db(slug, org)
+    stored = (
+        f"repos/{org}/{slug}" if source == "github" else str(root) if root else None
+    )
+    assert write_sidecar(portal_db.data_dir(), org, slug, source, identity, stored)
+    ctx = ProjectContext(
+        slug=slug,
+        root=root or db.parent,
+        config=Config(whygraph_db=db, codegraph_db=db.parent / "codegraph.db"),
+    )
+    with use_project(ctx):
+        command.upgrade(bootstrap.alembic_config(), revision)
+    db_engine._reset_engine()
+    return db
+
+
 def seed_codegraph(root: Path) -> None:
     """A CodeGraph index, stamped as built behind the symbolic-link guard."""
     (root / ".codegraph").mkdir(exist_ok=True)
@@ -1729,8 +1771,11 @@ def test_import_keeps_the_allowlist_and_moves_secrets(
     root = make_repo(env.shared, "demo")
     custom_db = root / "custom.db"
     custom_db.write_bytes(b"")
+    custom_index = root / "custom-index.db"
+    custom_index.write_bytes(b"")
     (root / "whygraph.toml").write_text(
         'whygraph_db = "custom.db"\n'
+        'codegraph_db = "custom-index.db"\n'
         "[llm]\n"
         'model = "openai/gpt-4o"\n'
         "[llm.openai]\n"
@@ -1754,19 +1799,26 @@ def test_import_keeps_the_allowlist_and_moves_secrets(
     assert {d["key"] for d in report["dropped"]} == {
         "llm.openai.base_url",
         "whygraph_db",
+        "codegraph_db",
         "logging",
     }
+    hints = {d["key"]: d["hint"] for d in report["dropped"]}
+    # History is in the portal's data dir: a custom whygraph_db is only dropped,
+    # never offered as something to move into the repository.
+    assert "data directory" in hints["whygraph_db"]
+    assert hints["codegraph_db"] != hints["whygraph_db"]
     assert sorted(report["secrets_moved"]) == ["llm.openai.api_key", "scan.token"]
     custom = body["detected"]["custom_db_paths"]
     assert custom == [
         {
-            "key": "whygraph_db",
-            "path": str(custom_db),
+            "key": "codegraph_db",
+            "path": str(custom_index),
             "exists": True,
             "message": custom[0]["message"],
         }
     ]
-    assert str(custom_db) in custom[0]["message"]
+    assert str(custom_index) in custom[0]["message"]
+    assert report["custom_db_paths"] == custom
 
     config = ready.get("/api/projects/demo/config").json()
     assert config["config"] == {
@@ -1780,6 +1832,7 @@ def test_import_keeps_the_allowlist_and_moves_secrets(
     assert {d["key"] for d in config["import"]["dropped"]} == {
         "llm.openai.base_url",
         "whygraph_db",
+        "codegraph_db",
         "logging",
     }
     # The context never sees the imported endpoint, and DB paths are forced.
@@ -2067,10 +2120,14 @@ def test_project_details_recompute_detected_and_last_scan_status(
 
     # Recomputed on every read (a new tab's Initialize step sees the truth).
     (root / ".mcp.json").unlink()
+    # An in-repo DB is never reported (nor opened); the data-dir history is.
     (root / ".whygraph").mkdir()
     (root / ".whygraph" / "whygraph.db").touch()
     detected = ready.get("/api/projects/demo").json()["detected"]
-    assert detected["detected_agents"] == [] and detected["existing_db"] is True
+    assert detected["detected_agents"] == [] and detected["existing_db"] is False
+    history_db("demo").touch()
+    detected = ready.get("/api/projects/demo").json()["detected"]
+    assert detected["existing_db"] is True
 
     pid = _project_id("demo")
     with portal_db.get_session() as session:
@@ -2142,12 +2199,12 @@ def test_an_older_revision_db_opens_cleanly_with_a_backup(
 ) -> None:
     root = make_repo(env.shared, "demo")
     old_revision = "4e231ec6f0e1"  # before the chat tables
-    # The history the portal keeps for project "demo" (a re-add finds it).
-    with use_project(manual_ctx(root, "demo")):
-        command.upgrade(bootstrap.alembic_config(), old_revision)
-    db_engine._reset_engine()
+    # The history the portal kept for project "demo": the add re-attaches it.
+    seed_history(root, "demo", revision=old_revision)
 
-    add_local(ready, root)
+    body = add_local(ready, root)
+    assert body["project"]["slug"] == "demo"
+    assert body["detected"]["existing_db"] is True
     with portal_db.get_session() as session:
         project = session.exec(select(Project)).one()
         project.initialized_at = "2026-01-01T00:00:00+00:00"
@@ -2253,9 +2310,11 @@ def test_remove_strips_hooks_markers_and_only_whygraph_entries(
     assert db_path.is_file() and (root / "sample.py").is_file()
     assert ready.get("/api/projects/demo").status_code == 404
 
-    # Re-add: a fresh registration, not initialized, fresh context.
+    # Re-add: a fresh registration, not initialized, fresh context; the
+    # kept history is re-attached.
     again = add_local(ready, root)
     assert again["project"]["slug"] == "demo"
+    assert again["detected"]["existing_db"] is True
     assert ready.get("/api/projects/demo/tree").status_code == 409
     init_project(ready, "demo")
     assert ready.get("/api/projects/demo/tree").status_code == 200

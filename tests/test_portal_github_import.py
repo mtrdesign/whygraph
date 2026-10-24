@@ -61,6 +61,7 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     portal_client,
     prod_portal,
     production_env,
+    seed_history,
     wait_scan,
 )
 from test_portal_identity_routes import (  # noqa: F401 -- `audit_log` is a fixture
@@ -75,6 +76,7 @@ from whygraph.portal import webhook as webhook_mod
 from whygraph.portal.clones import clone_dir_is_safe, sweep_clone_dirs
 from whygraph.portal.github_app import GitHubApp, UserTokens
 from whygraph.portal.github_auth import GitHubOAuth
+from whygraph.portal.history import history_owner
 from whygraph.portal.models import Membership, Organization, Project, User
 from whygraph.portal.orgs import add_member
 from whygraph.portal.repo_cache import RepoListCache
@@ -888,6 +890,62 @@ def test_a_taken_folder_retries_the_slug(world: World) -> None:
     assert (leftover / "stray").exists()  # never merged into or removed
     assert (w.repos / "acme" / "api-2" / "README.md").is_file()
     assert clone_dirs(w) == ["api", "api-2"]
+
+
+def test_a_kept_history_reattaches_by_github_repo_id(world: World) -> None:
+    """Criterion 3: a re-import finds its history by the App's repository id."""
+    w = world
+    connected(w)
+    db = seed_history(
+        None, "api", {"github_repo_id": API_REPO}, org="acme", source="github"
+    )
+    seed_history(
+        None, "api-2", {"github_repo_id": OTHER_PUBLIC}, org="acme", source="github"
+    )
+    response = w.client.post(
+        at("acme") + "/api/projects",
+        json={
+            "source": "github",
+            "installation_id": INSTALLATION,
+            "repo_id": API_REPO,
+            "name": "Renamed",  # the slug follows the history, not the name
+        },
+    )
+    assert wait_import(w, response)["status"] == "ok"
+    assert response.json()["project"]["slug"] == "api"
+    assert history_db("api", "acme") == db and db.is_file()
+    detail = w.client.get(at("acme") + "/api/projects/api").json()
+    assert detail["detected"]["existing_db"] is True
+
+
+def test_another_repositorys_history_gets_a_suffix_in_production(world: World) -> None:
+    w = world
+    connected(w)
+    seed_history(
+        None, "api", {"github_repo_id": OTHER_PUBLIC}, org="acme", source="github"
+    )
+    response = imported_ok(w)
+    assert response.json()["project"]["slug"] == "api-2"
+    owner = history_owner(history_db("api-2", "acme").parent)
+    assert owner is not None and owner["identity"] == {"github_repo_id": API_REPO}
+    assert owner["source"] == "github" and owner["root"] == "repos/acme/api-2"
+    kept = history_owner(history_db("api", "acme").parent)
+    assert kept is not None and kept["identity"] == {"github_repo_id": OTHER_PUBLIC}
+
+
+def test_a_kept_history_is_skipped_when_a_leftover_clone_has_its_name(
+    world: World,
+) -> None:
+    """The clone would collide with the leftover folder: no re-attach to that slug."""
+    w = world
+    connected(w)
+    (w.repos / "acme" / "api").mkdir(parents=True)
+    seed_history(None, "api", {"github_repo_id": API_REPO}, org="acme", source="github")
+    response = imported_ok(w)
+    assert response.json()["project"]["slug"] == "api-2"
+    detail = w.client.get(at("acme") + "/api/projects/api-2").json()
+    assert detail["detected"]["existing_db"] is True  # its own, fresh DB by now
+    assert history_db("api", "acme").is_file()  # the kept one is untouched
 
 
 def test_a_slug_race_in_the_database_retries(

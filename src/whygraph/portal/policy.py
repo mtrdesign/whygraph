@@ -242,6 +242,9 @@ def _filter(layer: Mapping, spec: Spec, prefix: str, kept: dict, dropped: list) 
 
 _ENDPOINT_HINT = "endpoint not imported from a repo file; re-enter it under Settings"
 _DB_PATH_HINT = "the portal always uses the repository's default database path"
+_HISTORY_DB_HINT = (
+    "the portal keeps project history in its data directory; this setting is not used"
+)
 _DEFAULT_HINT = "not imported"
 
 
@@ -268,8 +271,10 @@ class ImportPreview:
     dropped : list[dict]
         ``{"key", "hint"}`` per key rule 1a dropped.
     custom_db_paths : list[dict]
-        ``{"key", "path", "exists", "message"}`` per custom
-        ``whygraph_db`` / ``codegraph_db`` that the portal will not use.
+        ``{"key", "path", "exists", "message"}`` for a custom
+        ``codegraph_db`` the portal will not use. A ``whygraph_db`` is only
+        reported in ``dropped``: history lives in the portal's data
+        directory, whatever the file says.
     warnings : list[str]
         Deprecation messages from :func:`normalize_v2`.
     """
@@ -349,24 +354,18 @@ def preview_import(root: Path) -> ImportPreview:
         if isinstance(value, str) and value.strip():
             preview.github_token = value.strip()
 
-    for key, default in (
-        ("whygraph_db", root / ".whygraph" / "whygraph.db"),
-        ("codegraph_db", root / ".codegraph" / "codegraph.db"),
-    ):
-        value = layer.get(key)
-        if value is None or Path(value) == default:
-            continue
+    default = root / ".codegraph" / "codegraph.db"
+    value = layer.get("codegraph_db")
+    if value is not None and Path(value) != default:
         custom = Path(value)
         preview.custom_db_paths.append(
             {
-                "key": key,
+                "key": "codegraph_db",
                 "path": str(custom),
                 "exists": custom.exists(),
                 "message": (
-                    f"WhyGraph data at {custom} will not be used; the portal reads "
-                    f"{default.relative_to(root)}. Move the file there before "
-                    "initializing to keep its descriptions, rationale cache and "
-                    "chat history."
+                    f"The CodeGraph index at {custom} will not be used; the portal "
+                    f"reads {default.relative_to(root)}, which a scan builds."
                 ),
             }
         )
@@ -377,7 +376,9 @@ def preview_import(root: Path) -> ImportPreview:
     for key in sorted(dropped):
         if key.startswith("llm.") and key.rsplit(".", 1)[-1] in ("base_url", "host"):
             hint = _ENDPOINT_HINT
-        elif key in ("whygraph_db", "codegraph_db"):
+        elif key == "whygraph_db":
+            hint = _HISTORY_DB_HINT
+        elif key == "codegraph_db":
             hint = _DB_PATH_HINT
         elif key in _GIT_NAME_CHECKS:
             hint = _GIT_NAME_HINT

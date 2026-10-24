@@ -184,10 +184,9 @@ def _reconcile_branch_membership(
 
     Notes
     -----
-    The demoted SHAs are logged at ``INFO``, which
-    :func:`whygraph.core.logger.scan_log_redirect` lands in
-    ``.whygraph/scan.log``. The console warning stays a count — an
-    unbounded SHA list has no place in a one-line-per-phase panel.
+    The demoted SHAs are logged at ``DEBUG``, below the scan child's
+    ``INFO`` run log: an unbounded SHA list has no place there. The
+    warning stays a count.
     """
     if not default_shas or skip:
         return (0, 0)
@@ -205,7 +204,7 @@ def _reconcile_branch_membership(
     _set_flag(session, demoted_shas, 0)
 
     if demoted_shas:
-        _log.info(
+        _log.debug(
             "demoted %d commits off the default branch: %s",
             len(demoted_shas),
             " ".join(sorted(demoted_shas)),

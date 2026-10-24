@@ -463,14 +463,14 @@ def test_rewritten_history_demotes_and_warns(cloned: Path) -> None:
 
 @contextmanager
 def _capture(logger_name: str) -> Iterator[list[str]]:
-    """Capture a single logger's INFO records, independently of the root.
+    """Capture a single logger's DEBUG records, independently of the root.
 
     Deliberately not ``caplog``: several CLI tests earlier in the session
     invoke the ``whygraph`` group, whose callback runs ``configure_logging``
     and replaces the root logger's handlers — taking pytest's capture handler
     with it. Attaching to the module logger asserts exactly what D9 promises
-    (this logger emits the SHAs at INFO; ``scan_log_redirect`` does the rest)
-    without depending on global logging state.
+    (this logger emits the SHAs at DEBUG) without depending on global
+    logging state.
     """
     messages: list[str] = []
 
@@ -479,10 +479,10 @@ def _capture(logger_name: str) -> Iterator[list[str]]:
             messages.append(record.getMessage())
 
     logger = logging.getLogger(logger_name)
-    handler = _Collect(level=logging.INFO)
+    handler = _Collect(level=logging.DEBUG)
     previous = logger.level
     logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
     try:
         yield messages
     finally:
@@ -491,7 +491,7 @@ def _capture(logger_name: str) -> Iterator[list[str]]:
 
 
 def test_demoted_shas_are_logged(cloned: Path) -> None:
-    """Case 47d (D9) — the SHAs land in the scan log, not the panel."""
+    """Case 47d (D9) — the SHAs are logged at DEBUG, not in the warning."""
     sha = _commit_file(cloned, "local.txt")
     GitCrawler(Progress(), repository=Repository(cloned)).run()
     _git(cloned, "reset", "-q", "--hard", "HEAD~1")

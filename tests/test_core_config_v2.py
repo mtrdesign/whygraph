@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import tomllib
 from pathlib import Path
+from typing import Iterator
 
 import pytest
 
+from whygraph import core
 from whygraph.core import config as config_mod
 from whygraph.core.config import (
     CHAT_PROVIDERS,
@@ -573,3 +576,78 @@ def test_from_toml_equals_from_dict_of_the_same_table(tmp_path: Path) -> None:
     assert from_file.analyze.provider == "ollama"
     assert from_file.scan_hooks == ("post-commit", "post-merge")
     assert Config.from_dict({}, tmp_path).scan_hooks is True
+
+
+# --------------------------------------------------------------------------- #
+# WHYGRAPH_CONFIG_JSON (how the portal hands its scan child the config)
+# --------------------------------------------------------------------------- #
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True)
+
+
+@pytest.fixture
+def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    _git(tmp_path, "init", "-q", "-b", "main")
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+@pytest.fixture
+def fresh_config(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.delenv("WHYGRAPH_CONFIG_JSON", raising=False)
+    core._reset_config()
+    try:
+        yield
+    finally:
+        core._reset_config()
+
+
+def test_config_json_wins_over_whygraph_toml(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, fresh_config: None
+) -> None:
+    (repo / "whygraph.toml").write_text("[analyze]\nmax_workers = 3\n")
+    assert core.get_config().analyze.max_workers == 3
+
+    core._reset_config()
+    monkeypatch.setenv(
+        "WHYGRAPH_CONFIG_JSON", json.dumps({"analyze": {"max_workers": 7}})
+    )
+
+    assert core.get_config().analyze.max_workers == 7
+
+
+def test_config_json_without_a_toml_and_relative_paths_use_the_root(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, fresh_config: None
+) -> None:
+    monkeypatch.setenv(
+        "WHYGRAPH_CONFIG_JSON",
+        json.dumps({"scan": {"forge": "off"}, "whygraph_db": "x/w.db"}),
+    )
+
+    config = core.get_config()
+
+    assert config.scan_forge == "off"
+    assert config.whygraph_db == (repo / "x" / "w.db").resolve()
+
+
+def test_empty_config_json_falls_back_to_the_toml(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, fresh_config: None
+) -> None:
+    (repo / "whygraph.toml").write_text("[analyze]\nmax_workers = 3\n")
+    monkeypatch.setenv("WHYGRAPH_CONFIG_JSON", "  ")
+
+    assert core.get_config().analyze.max_workers == 3
+
+
+@pytest.mark.parametrize("payload", ["{not json", "[1, 2]", '"str"'])
+def test_bad_config_json_raises_config_error_without_echoing_it(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, fresh_config: None, payload: str
+) -> None:
+    monkeypatch.setenv("WHYGRAPH_CONFIG_JSON", payload)
+
+    with pytest.raises(ConfigError, match="WHYGRAPH_CONFIG_JSON") as exc:
+        core.get_config()
+
+    assert payload not in str(exc.value)

@@ -11,7 +11,6 @@ link flow is a later step); the child scanner is ``fake_scan.py``.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 

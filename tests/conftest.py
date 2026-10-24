@@ -403,22 +403,15 @@ def _wait_until_ready(url: URL, container: str) -> None:
     )
 
 
-@pytest.fixture(scope="session")
-def postgres_admin_url() -> Iterator[str]:
-    """An admin URL: ``$WHYGRAPH_TEST_DATABASE_URL``, else a throwaway container.
+def _start_pg_container() -> tuple[str, str]:
+    """Start a throwaway, labelled Postgres; return ``(admin URL, container)``.
 
-    The container (``$WHYGRAPH_TEST_POSTGRES_IMAGE`` or the pinned
-    ``POSTGRES_IMAGE``) is labelled with this process's pid, so a later
-    session sweeps it if this one is killed; it is removed at teardown and,
-    as a second line, at interpreter exit. Without Docker or a URL the
-    requesting tests **fail** - a portal test is never skipped.
+    Raises :class:`RuntimeError` with a readable message when it cannot.
+    The container is labelled with this process's pid, so a later session
+    sweeps it if this one is killed, and removed at interpreter exit too.
     """
-    configured = os.environ.get(TEST_DATABASE_URL_ENV, "").strip()
-    if configured:
-        yield _url_string(_pg_url(configured))
-        return
     if shutil.which("docker") is None:
-        pytest.fail(_NO_POSTGRES, pytrace=False)
+        raise RuntimeError(_NO_POSTGRES)
     _sweep_stale_pg_containers()
     image = os.environ.get(TEST_POSTGRES_IMAGE_ENV, "").strip() or POSTGRES_IMAGE
     name = f"whygraph-test-pg-{os.getpid()}"
@@ -447,19 +440,65 @@ def postgres_admin_url() -> Iterator[str]:
         "full_page_writes=off",
     )
     if started.returncode != 0:
-        pytest.fail(
-            f"{_NO_POSTGRES}\n(docker run {image} failed: {started.stderr.strip()})",
-            pytrace=False,
+        raise RuntimeError(
+            f"{_NO_POSTGRES}\n(docker run {image} failed: {started.stderr.strip()})"
         )
     atexit.register(_docker, "rm", "-f", name)
     try:
         mapped = _docker("port", name, "5432/tcp").stdout.split()
         if not mapped:
-            pytest.fail(f"docker port {name} reported no mapping", pytrace=False)
+            raise RuntimeError(f"docker port {name} reported no mapping")
         port = int(mapped[0].rsplit(":", 1)[1])
         url = make_url(f"postgresql+psycopg://postgres:test@127.0.0.1:{port}/postgres")
         _wait_until_ready(url, name)
-        yield _url_string(url)
+    except BaseException:
+        _docker("rm", "-f", name)
+        raise
+    return _url_string(url), name
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Under xdist, start one Postgres in the controller for every worker.
+
+    Each worker would otherwise start its own container. The URL reaches
+    the workers through ``$WHYGRAPH_TEST_DATABASE_URL`` (they inherit the
+    environment); every test still gets its own cloned database, and each
+    worker its own template, so sharing the server shares no state. A
+    failure here is not fatal: the workers then fail the portal tests with
+    the usual message.
+    """
+    if hasattr(config, "workerinput") or not getattr(config.option, "numprocesses", 0):
+        return
+    if os.environ.get(TEST_DATABASE_URL_ENV, "").strip():
+        return
+    try:
+        url, name = _start_pg_container()
+    except (RuntimeError, pytest.fail.Exception):
+        return
+    os.environ[TEST_DATABASE_URL_ENV] = url
+    config.add_cleanup(lambda: _docker("rm", "-f", name))
+
+
+@pytest.fixture(scope="session")
+def postgres_admin_url() -> Iterator[str]:
+    """An admin URL: ``$WHYGRAPH_TEST_DATABASE_URL``, else a throwaway container.
+
+    The container (``$WHYGRAPH_TEST_POSTGRES_IMAGE`` or the pinned
+    ``POSTGRES_IMAGE``) runs on a tmpfs with durability off; under xdist the
+    controller starts one for every worker (:func:`pytest_configure`).
+    Without Docker or a URL the requesting tests **fail** - a portal test is
+    never skipped.
+    """
+    configured = os.environ.get(TEST_DATABASE_URL_ENV, "").strip()
+    if configured:
+        yield _url_string(_pg_url(configured))
+        return
+    try:
+        url, name = _start_pg_container()
+    except RuntimeError as exc:
+        pytest.fail(str(exc), pytrace=False)
+    try:
+        yield url
     finally:
         _docker("rm", "-f", name)
 

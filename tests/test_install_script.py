@@ -269,7 +269,8 @@ def test_empty_generator_output_fails_loudly(tmp_path: Path) -> None:
     result, _, bin_dir = _run(tmp_path, docker_body="exit 0")
     assert result.returncode != 0
     assert "empty installer" in result.stderr
-    assert "uv tool install whygraph==" in result.stderr  # the escape hatch
+    assert "uv tool install" not in result.stderr  # no PyPI channel (R10)
+    assert "release from 1.0.0 on" in result.stderr
     assert not bin_dir.exists()
 
 
@@ -338,7 +339,8 @@ def test_blocked_registry_is_not_reported_as_a_missing_version(
     assert "Check the version exists" not in result.stderr
     assert "crane pull ghcr.io/mtrdesign/whygraph:1.1.1" in result.stderr
     assert "WHYGRAPH_IMAGE_REPO=" in result.stderr
-    assert "whygraph.git@v1.1.1" in result.stderr
+    assert "whygraph.git@v" not in result.stderr
+    assert "uv tool install" not in result.stderr
 
 
 def test_blocked_mirror_names_the_mirror_registry(tmp_path: Path) -> None:

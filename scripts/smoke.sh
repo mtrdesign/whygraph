@@ -242,7 +242,7 @@ check "the overview reports the CodeGraph server live" test \
 
 echo "== host CLI in a managed repo"
 scan_rc=0; (cd "$R" && whygraph scan >/dev/null 2>&1) || scan_rc=$?
-check "host 'whygraph scan' refuses (exit 2)" test "$scan_rc" -eq 2
+check "host 'whygraph scan' is removed (exit 2)" test "$scan_rc" -eq 2
 
 echo "== hooks"
 printf '\n\ndef sub(a, b):\n    return a - b\n' >> "$R/src/calc.py"

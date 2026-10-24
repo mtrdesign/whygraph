@@ -168,7 +168,7 @@ def _triage_commit(sha: str) -> str:
     ----------
     sha : str
         Full or short commit SHA to triage. Must be a commit that
-        ``whygraph scan`` has indexed.
+        a portal scan has indexed.
     """
     return (
         f"Triage commit {sha}.\n"

@@ -45,8 +45,8 @@ def _open_graph() -> Iterator[CodeGraph]:
     """Open a per-request read-only CodeGraph handle, or 503 if there is none.
 
     A missing/unopenable ``.codegraph/`` DB is a setup failure (the user must scan
-    from the WhyGraph portal, or run ``whygraph scan`` outside it), surfaced as HTTP 503 so the UI can show a clear banner
-    rather than a 500.
+    from the WhyGraph portal), surfaced as HTTP 503 so the UI can show a clear
+    banner rather than a 500.
     """
     try:
         graph = CodeGraph.for_repository(
@@ -55,8 +55,7 @@ def _open_graph() -> Iterator[CodeGraph]:
     except CodeGraphError as exc:
         raise ServeError(
             503,
-            "CodeGraph index unavailable - scan from the WhyGraph portal "
-            f"(or run `whygraph scan` outside it): {exc}",
+            f"CodeGraph index unavailable - scan from the WhyGraph portal: {exc}",
             code="not_indexed",
         ) from exc
     try:

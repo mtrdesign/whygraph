@@ -672,7 +672,7 @@ def test_the_production_log_is_path_free_and_starts_with_the_flags(
     text += (w.env.data / "runs" / f"{run_id}.jsonl").read_text()
     assert str(w.env.data) not in text and str(root) not in text
     assert ".clone-" not in text
-    assert "$ whygraph scan --skip-analyze" in text
+    assert "$ scan --skip-analyze" in text
     assert "--managed-by-portal" not in text and "-m whygraph" not in text
 
 

@@ -1,9 +1,8 @@
 """SQLAlchemy engine and session factory for WhyGraph's SQLModel layer.
 
 Module-level lazy engines bound to the WhyGraph SQLite database
-(``.whygraph/whygraph.db`` by default, overridable via
-``whygraph.toml``'s ``whygraph_db`` key — see
-:class:`whygraph.core.Config`). One engine is cached per resolved DB
+(the path in :class:`whygraph.core.Config`'s ``whygraph_db``; with none
+configured, opening one raises). One engine is cached per resolved DB
 path, so a process serving several projects through
 :func:`whygraph.core.context.use_project` gets one engine per project;
 a CLI process only ever resolves one path and so still has one engine.
@@ -35,16 +34,8 @@ from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, create_engine
 
-from whygraph.core import _resolve_root, get_config
+from whygraph.core import get_config
 from whygraph.core.context import ProjectContextError, current_project
-
-# Path constants duplicated locally to honor the "leave scan/db.py
-# alone" constraint of the initial DB-layer plumbing PR. If the
-# duplication ever drifts from scan/db.py, lift these (and
-# ``default_db_path``) into ``whygraph.core.config`` in a focused
-# follow-up.
-_DB_DIR_NAME = ".whygraph"
-_DB_FILE_NAME = "whygraph.db"
 
 _engines: dict[Path, Engine] = {}
 _engines_lock = threading.Lock()
@@ -76,18 +67,19 @@ def _refuse_linked() -> None:
 
 
 def _resolved_db_path() -> Path:
-    """Return the configured DB path or the project-relative default.
+    """Return the configured DB path.
 
     Raises
     ------
     whygraph.core.context.ProjectContextError
-        If the bound project is linked to a platform (:func:`_refuse_linked`).
+        If the bound project is linked to a platform (:func:`_refuse_linked`),
+        or no WhyGraph database is configured for this process.
     """
     _refuse_linked()
     override = get_config().whygraph_db
-    if override is not None:
-        return override
-    return _resolve_root() / _DB_DIR_NAME / _DB_FILE_NAME
+    if override is None:
+        raise ProjectContextError("no WhyGraph database is configured for this process")
+    return override
 
 
 def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:  # noqa: ANN001
@@ -100,7 +92,7 @@ def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:  # noqa: 
 
     ``busy_timeout`` makes a second writer wait (up to 5s) instead of
     failing immediately with ``SQLITE_BUSY`` — relevant once a background
-    git-hook rescan can overlap a manual ``whygraph scan``. WAL already
+    git-hook rescan can overlap another writer. WAL already
     lets a reader (e.g. a live MCP container) run alongside the writer.
     """
     cursor = dbapi_connection.cursor()

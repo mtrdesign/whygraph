@@ -12,7 +12,7 @@ sees, ``git diff-tree -M -C`` produces per-file structural records
 (``A``/``M``/``D``/``R``/``C``, ``renamed_from``, line counts) that
 become rows keyed by ``commit_sha``. Existence of file-change rows is
 checked independently of the commit row, so upgrading from a pre-Phase-2
-WhyGraph DB and re-running ``whygraph scan`` backfills the index without
+WhyGraph DB and re-running a scan backfills the index without
 needing a separate command.
 
 Branch membership is computed, not assumed. Every row records whether it

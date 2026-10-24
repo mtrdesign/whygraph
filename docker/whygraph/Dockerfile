@@ -98,6 +98,6 @@ COPY --from=playground-build /playground/dist ./src/whygraph/serve/static
 RUN pip install --no-cache-dir .
 
 # The host shim bind-mounts the current repo here and sets the command
-# (e.g. `whygraph scan`). A bare `docker run IMAGE` prints CLI help.
+# (e.g. `whygraph version`). A bare `docker run IMAGE` prints CLI help.
 WORKDIR /workspace
 CMD ["whygraph", "--help"]

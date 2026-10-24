@@ -430,13 +430,13 @@ def test_resource_errors_on_uninitialized_db(whygraph_db: Path) -> None:
     don't exist — SQLAlchemy will raise ``OperationalError``, which the
     resource bodies translate into the actionable WhyGraph error.
     """
-    with pytest.raises(WhyGraphError, match="whygraph scan"):
+    with pytest.raises(WhyGraphError, match="scan from the WhyGraph portal first"):
         _repo_overview_resource()
-    with pytest.raises(WhyGraphError, match="whygraph scan"):
+    with pytest.raises(WhyGraphError, match="scan from the WhyGraph portal first"):
         _commit_resource("a" * 40)
-    with pytest.raises(WhyGraphError, match="whygraph scan"):
+    with pytest.raises(WhyGraphError, match="scan from the WhyGraph portal first"):
         _pr_resource(1)
-    with pytest.raises(WhyGraphError, match="whygraph scan"):
+    with pytest.raises(WhyGraphError, match="scan from the WhyGraph portal first"):
         _issue_resource(1)
 
 

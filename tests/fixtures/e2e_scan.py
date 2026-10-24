@@ -1,4 +1,4 @@
-"""A slow stand-in for ``whygraph scan --progress json``, for the Playwright suite.
+"""A slow stand-in for the portal's scan child, for the Playwright suite.
 
 Used through ``WHYGRAPH_SCAN_CMD="python3 tests/fixtures/e2e_scan.py --control DIR"``
 (``make e2e`` sets it). Unlike ``fake_scan.py`` (instant, for runner tests) this
@@ -8,7 +8,7 @@ index into ``<cwd>/.codegraph/codegraph.db`` (the runner starts the child in the
 project root). The symbols are named after the repo folder, so two projects
 never share one - which is what the project-switch test relies on.
 
-Options (before the runner's own ``--progress json --managed-by-portal ...``):
+Options (before the runner's own flags):
 
 ``--control DIR``   look for ``DIR/fail`` (the ``git`` crawler fails in phase
                     1, the later phases never start, exit 1, with a stderr
@@ -22,7 +22,7 @@ seeds the CodeGraph index and touches nothing else; ``DIR/fail`` fails it.
 With ``--real-git`` (the production portal, so a platform has real evidence to
 answer a linked project's questions with) it seeds the CodeGraph index and then
 **hands over to the real scanner** for the git crawl, offline: ``python -m
-whygraph scan`` with the runner's own arguments plus ``--skip-analyze``
+whygraph.scan.child`` with the runner's own arguments plus ``--skip-analyze``
 ``--no-remote`` ``--no-codegraph``, its progress stream inherited. That child
 needs a real interpreter for the checkout (``E2E_SCAN_PYTHON``), unlike every
 other path here. ``DIR/fail`` fails it without running anything.
@@ -232,7 +232,7 @@ def real_git(args: list[str], fail: bool) -> int:
     # Seeded first: the real scanner runs with --no-codegraph, and the portal
     # may read the index as soon as the child's result event arrives.
     seed_codegraph(Path(os.getcwd()))
-    cmd = [sys.executable, "-P", "-m", "whygraph", "scan", *forwarded(args)]
+    cmd = [sys.executable, "-P", "-m", "whygraph.scan.child", *forwarded(args)]
     return subprocess.run(cmd).returncode
 
 

@@ -1,4 +1,4 @@
-"""The scan runner: ``whygraph scan`` child processes, GitHub sync and catch-up.
+"""The scan runner: scan child processes (``python -m whygraph.scan.child``), GitHub sync and catch-up.
 
 A small in-process queue (plan section 4.6), living in the single portal
 process:
@@ -134,7 +134,7 @@ recorded. Request-driven work enters through ``request_scan`` /
 (:func:`~whygraph.portal.deps.bind_project`).
 
 The test seam :data:`SCAN_CMD_ENV` (``WHYGRAPH_SCAN_CMD``) replaces the
-``whygraph scan`` prefix of the child argv (``shlex.split``, so it may
+scan-child prefix of the child argv (``shlex.split``, so it may
 carry extra flags).
 """
 
@@ -223,7 +223,7 @@ if TYPE_CHECKING:  # pragma: no cover
 _log = logging.getLogger(__name__)
 
 SCAN_CMD_ENV = "WHYGRAPH_SCAN_CMD"
-"""Test-only override of the child's ``whygraph scan`` prefix (``shlex.split``)."""
+"""Test-only override of the child's argv prefix (``shlex.split``)."""
 
 MAX_CONCURRENT = 2
 """Jobs running at once across all projects."""
@@ -489,7 +489,7 @@ def resolve_analyze(trigger: str, analyze: bool | None, source: str = "local") -
 
 
 def scan_flags(trigger: str, analyze: bool, source: str = "local") -> list[str]:
-    """The ``whygraph scan`` flags of the section 4.6 trigger-to-flags table.
+    """The scan-child flags of the section 4.6 trigger-to-flags table.
 
     Parameters
     ----------
@@ -535,8 +535,8 @@ def scan_argv(
     Returns
     -------
     list[str]
-        ``$WHYGRAPH_SCAN_CMD`` (``shlex.split``) or ``<python> -P -m whygraph
-        scan``, then ``--progress json --managed-by-portal`` and the flags.
+        ``$WHYGRAPH_SCAN_CMD`` (``shlex.split``) or ``<python> -P -m
+        whygraph.scan.child``, then the flags.
 
     Notes
     -----
@@ -550,13 +550,10 @@ def scan_argv(
     prefix = (
         shlex.split(override)
         if override
-        else [sys.executable, "-P", "-m", "whygraph", "scan"]
+        else [sys.executable, "-P", "-m", "whygraph.scan.child"]
     )
     return [
         *prefix,
-        "--progress",
-        "json",
-        "--managed-by-portal",
         *scan_flags(trigger, analyze, source),
     ]
 
@@ -2570,7 +2567,7 @@ class ScanRunner:
                     "scan runner: run %s argv %s", spec.run_id, redact(shlex.join(argv))
                 )
                 flags = scan_flags(spec.trigger, analyze, source)
-                log(" ".join(["$ whygraph scan", *flags]))
+                log(" ".join(["$ scan", *flags]))
             else:
                 log(f"$ {shlex.join(argv)}")
             refresher: _TokenRefresher | None = None

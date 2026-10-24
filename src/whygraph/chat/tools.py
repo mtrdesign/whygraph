@@ -75,10 +75,7 @@ MAX_RESULT_CHARS = 30_000
 
 TRUNCATION_MARKER = "...[truncated]"
 
-_NO_CODEGRAPH = (
-    "CodeGraph index unavailable — scan from the WhyGraph portal "
-    "(or run `whygraph scan` outside it)"
-)
+_NO_CODEGRAPH = "CodeGraph index unavailable — scan from the WhyGraph portal"
 """Mirrors the Explorer's 503 message (``serve/routes.py``), but as tool
 content: the WhyGraph and file tools still work without an index, so a
 missing index degrades the conversation rather than ending it."""
@@ -524,7 +521,7 @@ def _open_graph() -> CodeGraph:
 
     Cheap (a read-only SQLite connection), so it follows the serve layer's
     per-request pattern rather than being held open across a whole turn —
-    a chat turn can run for minutes and a background ``whygraph scan``
+    a chat turn can run for minutes and a background scan
     may replace the index underneath it.
     """
     return CodeGraph.for_repository(repo_root(), codegraph_db=get_config().codegraph_db)

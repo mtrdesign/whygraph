@@ -59,9 +59,7 @@ Access Management) or a proxy blocking $registry - or, for a private mirror,
 a missing 'docker login $registry'. Workarounds:
   - fetch the image outside Docker, load it, then re-run this installer:
       crane pull $image whygraph.tar && docker load -i whygraph.tar
-  - use a mirror Docker may pull from:  … | WHYGRAPH_IMAGE_REPO=<mirror>/whygraph sh
-  - install without Docker:
-      uv tool install \"git+https://github.com/mtrdesign/whygraph.git@v$VERSION\"" ;;
+  - use a mirror Docker may pull from:  … | WHYGRAPH_IMAGE_REPO=<mirror>/whygraph sh" ;;
         *) die \
             "could not pull $image, and no local image by that name (docker's
 error is above). Check the version exists: $RELEASES_URL" ;;
@@ -87,8 +85,7 @@ install_shims() {
         || die "'$image' could not emit the installer."
     [ -s "$tmp" ] || die \
         "'$image' emitted an empty installer — it may predate the 'whygraph
-install' command (added in 1.0.0). Install natively instead:
-  uv tool install whygraph==$VERSION"
+install' command (added in 1.0.0). Use a release from 1.0.0 on."
     sh "$tmp"
 }
 

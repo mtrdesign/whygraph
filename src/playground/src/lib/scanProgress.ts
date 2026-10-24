@@ -115,7 +115,7 @@ function shape(state: ScanRunState) {
   // The portal never passes `--no-codegraph`: every run with scan phases refreshes
   // the code index beside them, so its share and its (pending) row are there from
   // the start, not only once a task or result names it. A result that lists its
-  // crawlers without CodeGraph (a headless `--no-codegraph` scan) drops both.
+  // crawlers without CodeGraph (a `--no-codegraph` test run) drops both.
   const resultWithout = !!source?.crawlers?.length && codegraphResult === null;
   const hasCodegraph =
     codegraphOnly || codegraphTask !== null || codegraphResult !== null || (scan.length > 0 && !resultWithout);

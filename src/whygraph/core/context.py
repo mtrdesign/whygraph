@@ -107,7 +107,7 @@ class ProjectContext:
         SHA of its last finished scan) as the portal's database holds it
         *now*, or ``None``. A callable rather than a value because the
         context is cached across scans. ``None`` (the default) where
-        there is no portal row (headless, tests).
+        there is no portal row (tests).
     """
 
     slug: str

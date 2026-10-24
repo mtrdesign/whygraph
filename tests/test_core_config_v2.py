@@ -546,14 +546,6 @@ def test_chat_client_default_model_follows_llm_model() -> None:
     assert make_chat_client("openai", config=llm, client=object()).model == "gpt-4o"
 
 
-def test_scan_panel_label_reads_model_for(tmp_path: Path) -> None:
-    from whygraph.cli.commands.scan import _analyze_model_label
-
-    assert _analyze_model_label(Config.defaults()) == "anthropic · claude-opus-4-7"
-    cfg = _from('[llm]\nmodel = "deepseek/deepseek-reasoner"\n', tmp_path)
-    assert _analyze_model_label(cfg) == "deepseek · deepseek-reasoner"
-
-
 def test_from_toml_equals_from_dict_of_the_same_table(tmp_path: Path) -> None:
     # Kept from the retired scaffolding tests: a whygraph.toml and the dict
     # the portal would store for it build the same Config, and a round trip

@@ -1,12 +1,9 @@
-"""The 2.0 CLI surface: removal stubs and the refusal in portal-managed repos.
+"""The 2.0 CLI surface: removal stubs and the portal marker reader.
 
-* ``whygraph init`` / ``whygraph serve`` / ``whygraph-mcp`` print their
-  removal message to stderr and exit ``2``; ``whygraph analyze`` is gone.
-* ``whygraph scan`` refuses (exit ``2``, a message built only from the
-  validated slug and port) in a repo whose ``.whygraph/portal.json`` is a
-  valid, untracked marker; ignores a tracked or malformed one with a
-  warning; runs normally without one; and ``--managed-by-portal`` (the
-  portal's own child scans) bypasses the check.
+* ``whygraph init`` / ``whygraph serve`` / ``whygraph scan`` /
+  ``whygraph-mcp`` print their removal message to stderr and exit ``2``;
+  ``whygraph analyze`` is gone.
+* ``read_portal_marker`` validates ``.whygraph/portal.json``.
 """
 
 from __future__ import annotations
@@ -20,14 +17,8 @@ import pytest
 from click.testing import CliRunner
 
 from whygraph.cli import main as whygraph_main
-from whygraph.cli.commands import scan as scan_mod
-from whygraph.cli.stubs import INIT_REMOVED, MCP_REMOVED, SERVE_REMOVED
+from whygraph.cli.stubs import INIT_REMOVED, MCP_REMOVED, SCAN_REMOVED, SERVE_REMOVED
 from whygraph.project_setup import PortalMarker, read_portal_marker
-
-REFUSAL = (
-    "This project is managed by the WhyGraph portal "
-    "(http://127.0.0.1:8765/p/demo). Run scans from the portal."
-)
 
 
 @pytest.fixture(autouse=True)
@@ -69,6 +60,9 @@ def _invoke(*args: str):
         (["init", "--help"], INIT_REMOVED),
         (["serve"], SERVE_REMOVED),
         (["serve", "--port", "9000"], SERVE_REMOVED),
+        (["scan"], SCAN_REMOVED),
+        (["scan", "--skip-analyze", "--no-remote"], SCAN_REMOVED),
+        (["scan", "--help"], SCAN_REMOVED),
     ],
 )
 def test_removed_commands_exit_2_with_their_message(
@@ -82,7 +76,7 @@ def test_removed_commands_exit_2_with_their_message(
 
 
 def test_messages_point_at_whygraph_up_only() -> None:
-    for message in (INIT_REMOVED, SERVE_REMOVED, MCP_REMOVED):
+    for message in (INIT_REMOVED, SERVE_REMOVED, SCAN_REMOVED, MCP_REMOVED):
         assert "whygraph up" in message
         assert "whygraph portal" not in message
         assert "'" not in message  # baked into single-quoted shell strings
@@ -97,8 +91,7 @@ def test_analyze_is_an_unknown_command() -> None:
 def test_removed_commands_are_hidden_from_help() -> None:
     result = _invoke("--help")
     assert result.exit_code == 0
-    assert "scan" in result.output
-    for name in ("init", "serve", "analyze"):
+    for name in ("init", "serve", "scan", "analyze"):
         assert f"  {name} " not in result.output
 
 
@@ -158,94 +151,3 @@ def test_a_symlinked_marker_is_ignored(repo: Path, tmp_path: Path) -> None:
     (repo / ".whygraph" / "portal.json").symlink_to(elsewhere)
     marker, warning = read_portal_marker(repo)
     assert marker is None and "symbolic link" in (warning or "")
-
-
-# ---- whygraph scan in a portal-managed repo --------------------------------
-
-
-@pytest.fixture
-def no_real_scan(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Stop ``scan`` right after the refusal check (no DB, no crawl)."""
-    reached: list[str] = []
-
-    def _stop() -> None:
-        reached.append("db")
-        raise SystemExit(0)
-
-    monkeypatch.setattr("whygraph.db.ensure_initialized", _stop)
-    return reached
-
-
-def test_scan_refuses_with_an_untracked_marker(repo: Path, no_real_scan) -> None:
-    _write_marker(repo, {"slug": "demo", "port": 8765})
-
-    result = _invoke("scan", "--no-codegraph")
-
-    assert result.exit_code == 2
-    assert REFUSAL in result.stderr
-    assert "delete .whygraph/portal.json" in result.stderr
-    assert no_real_scan == []  # refused before any DB access
-    assert not (repo / ".whygraph" / "whygraph.db").exists()
-
-
-def test_scan_refuses_from_a_subdirectory(
-    repo: Path, no_real_scan, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _write_marker(repo, {"slug": "demo", "port": 8765})
-    (repo / "src").mkdir()
-    monkeypatch.chdir(repo / "src")
-    assert _invoke("scan").exit_code == 2
-
-
-def test_scan_message_uses_only_validated_fields(repo: Path, no_real_scan) -> None:
-    _write_marker(repo, {"slug": "demo", "port": 9100, "note": "$(rm -rf /) evil"})
-    result = _invoke("scan")
-    assert result.exit_code == 2
-    assert "http://127.0.0.1:9100/p/demo" in result.stderr
-    assert "evil" not in result.stderr
-
-
-def test_scan_ignores_a_tracked_marker_with_a_warning(repo: Path, no_real_scan) -> None:
-    _write_marker(repo, {"slug": "demo", "port": 8765})
-    _git(repo, "add", "-f", ".whygraph/portal.json")
-
-    result = _invoke("scan")
-
-    assert "tracked by git" in result.stderr
-    assert "managed by the WhyGraph portal" not in result.stderr
-    assert no_real_scan == ["db"]  # the scan went ahead
-
-
-def test_scan_ignores_a_malformed_marker_with_a_warning(
-    repo: Path, no_real_scan
-) -> None:
-    _write_marker(repo, {"slug": "../../x", "port": 8765})
-    result = _invoke("scan")
-    assert "not a valid portal marker" in result.stderr
-    assert no_real_scan == ["db"]
-
-
-def test_scan_runs_normally_without_a_marker(repo: Path, no_real_scan) -> None:
-    result = _invoke("scan")
-    assert result.stderr == ""
-    assert no_real_scan == ["db"]
-
-
-def test_managed_by_portal_bypasses_the_check(
-    repo: Path, no_real_scan, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _write_marker(repo, {"slug": "demo", "port": 8765})
-    called: list[bool] = []
-    monkeypatch.setattr(
-        scan_mod, "_refuse_if_portal_managed", lambda: called.append(True)
-    )
-
-    _invoke("scan", "--managed-by-portal")
-
-    assert called == []
-    assert no_real_scan == ["db"]
-
-
-def test_managed_by_portal_stays_hidden() -> None:
-    result = _invoke("scan", "--help")
-    assert "--managed-by-portal" not in result.output

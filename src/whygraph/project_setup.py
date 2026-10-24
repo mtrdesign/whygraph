@@ -51,7 +51,7 @@ GITIGNORE_ENTRIES = ("whygraph.toml", ".whygraph/", ".codegraph/")
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 
 PORTAL_JSON = Path(".whygraph") / "portal.json"
-"""Marker that makes ``whygraph scan`` refuse (relative to the repo root)."""
+"""Marker naming the portal that manages a repo (relative to the repo root)."""
 
 PORTAL_ENV = Path(".whygraph") / "portal.env"
 """Marker parsed - never sourced - by the git hook helper."""
@@ -416,7 +416,7 @@ def write_portal_marker(root: Path, marker: PortalMarker) -> None:
 
 
 def read_portal_marker(root: Path) -> tuple[PortalMarker | None, str | None]:
-    """Read ``.whygraph/portal.json`` the way ``whygraph scan`` trusts it.
+    """Read ``.whygraph/portal.json`` the way the hook helper trusts it.
 
     Only the validated ``slug`` and ``port`` are returned (never free
     text), so a message built from them cannot carry anything else from

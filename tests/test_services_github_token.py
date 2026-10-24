@@ -11,11 +11,9 @@ import logging
 import os
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-from whygraph.cli.commands.scan import _apply_github_token
 from whygraph.services.git import Repository
 from whygraph.services.git.credentials import (
     TOKEN_ENV_VAR,
@@ -151,17 +149,3 @@ def test_pr_ref_fetches_hand_the_file_token_to_git(
     repo.fetch_refs(["refs/pull/2/head:refs/whygraph/pull/2"])
     assert [e[TOKEN_ENV_VAR] for e in shell.envs] == [FIRST, SECOND]  # type: ignore[index]
     assert TOKEN_ENV_VAR not in os.environ
-
-
-def test_apply_github_token_leaves_the_environment_alone_with_a_file(
-    token_file: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Recorded so teardown removes what _apply_github_token writes.
-    monkeypatch.setenv("GH_TOKEN", "placeholder")
-    monkeypatch.delenv("GH_TOKEN")
-    config = SimpleNamespace(scan_forge="auto", scan_token="ghp_from_toml")
-    _apply_github_token(config)  # type: ignore[arg-type]
-    assert "GH_TOKEN" not in os.environ
-    monkeypatch.delenv(TOKEN_FILE_ENV)
-    _apply_github_token(config)  # type: ignore[arg-type]
-    assert os.environ["GH_TOKEN"] == "ghp_from_toml"

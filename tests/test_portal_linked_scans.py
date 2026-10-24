@@ -2,7 +2,7 @@
 
 A ``platform`` project is a local checkout whose evidence lives on the
 platform: it has **no** local WhyGraph DB, its scans are
-``whygraph scan --codegraph-only``, and its config context never reads the
+the scan child's ``--codegraph-only``, and its config context never reads the
 org layer or any secret. Rows are inserted straight into the portal DB (the
 link flow is a later step); the child scanner is ``fake_scan.py``.
 """
@@ -11,12 +11,10 @@ link flow is a later step); the child scanner is ``fake_scan.py``.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from click.testing import CliRunner
 from fastapi.testclient import TestClient
 from sqlmodel import select
 
@@ -38,8 +36,6 @@ from test_portal_runner import (  # noqa: F401 -- `scanner` is a fixture
     wait_idle,
     wait_run,
 )
-from whygraph import core
-from whygraph.cli import main as whygraph_main
 from whygraph.core.config import Config
 from whygraph.hooks import managed_hook_names
 from whygraph.portal import db as portal_db
@@ -54,9 +50,8 @@ from whygraph.portal.runner import (
     scan_flags,
 )
 from whygraph.portal.secrets import GITHUB_TOKEN, encrypt
-from whygraph.services.codegraph import CodeGraphBootstrapError
 
-CODEGRAPH_ONLY_FLAGS = ["--progress", "json", "--managed-by-portal", "--codegraph-only"]
+CODEGRAPH_ONLY_FLAGS = ["--codegraph-only"]
 
 
 def linked_row(root: Path, slug: str, *, initialized: bool = False) -> int:
@@ -106,82 +101,6 @@ def whygraph_db(root: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# The CLI
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    root = tmp_path / "repo"
-    root.mkdir()
-    _git(root, "init", "-q", "-b", "main")
-    monkeypatch.chdir(root)
-    # The portal hands every scan child a writer-lock directory.
-    monkeypatch.setenv("WHYGRAPH_CODEGRAPH_LOCK_DIR", str(tmp_path / "locks"))
-    monkeypatch.setattr("whygraph.cli.configure_logging", lambda *a, **kw: None)
-    monkeypatch.setattr(core, "_config", Config())
-    return root
-
-
-def _events(text: str) -> list[dict]:
-    return [json.loads(line) for line in text.splitlines() if line.strip()]
-
-
-def test_codegraph_only_requires_managed_by_portal(repo: Path) -> None:
-    result = CliRunner().invoke(whygraph_main, ["scan", "--codegraph-only"])
-    assert result.exit_code == 2
-    assert "--codegraph-only requires --managed-by-portal" in result.output
-    help_out = CliRunner().invoke(whygraph_main, ["scan", "--help"]).output
-    assert "--codegraph-only" not in help_out
-
-
-def test_codegraph_only_scan_creates_no_whygraph_db(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[Path] = []
-    monkeypatch.setattr(
-        "whygraph.scan.codegraph_crawler.refresh_codegraph_index",
-        lambda root, **kw: calls.append(root),
-    )
-    result = CliRunner().invoke(
-        whygraph_main,
-        ["scan", "--progress", "json", "--managed-by-portal", "--codegraph-only"],
-    )
-    assert result.exit_code == 0, result.output
-    assert calls == [repo]
-    events = _events(result.stdout)
-    assert events[0] == {
-        "type": "start",
-        "phase_total": 1,
-        "phases": ["Code index"],
-    }
-    assert events[-1]["type"] == "result" and events[-1]["status"] == "ok"
-    assert [c["name"] for c in events[-1]["crawlers"]] == ["codegraph"]
-    assert (repo / ".whygraph" / "scan.log").is_file()
-    assert not whygraph_db(repo).exists()
-
-
-def test_codegraph_only_scan_fails_on_codegraph_error(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def boom(root: Path, **kw: object) -> None:
-        raise CodeGraphBootstrapError("codegraph exited with status 3")
-
-    monkeypatch.setattr("whygraph.scan.codegraph_crawler.refresh_codegraph_index", boom)
-    result = CliRunner().invoke(
-        whygraph_main,
-        ["scan", "--progress", "json", "--managed-by-portal", "--codegraph-only"],
-    )
-    assert result.exit_code == 1, result.output
-    last = _events(result.stdout)[-1]
-    assert last["type"] == "result" and last["status"] == "failed"
-    assert last["crawlers"][0]["status"] == "failed"
-    assert "status 3" in last["crawlers"][0]["error"]
-    assert "status 3" in result.stderr
-    assert not whygraph_db(repo).exists()
-
-
-# ---------------------------------------------------------------------------
 # The runner's argv, env and refusals
 # ---------------------------------------------------------------------------
 
@@ -193,8 +112,8 @@ def test_platform_flags_are_always_codegraph_only(trigger: str) -> None:
     assert resolve_analyze(trigger, None, "platform") is False
     assert resolve_analyze(trigger, True, "platform") is False
     assert scan_flags(trigger, False, "platform") == ["--codegraph-only"]
-    argv = scan_argv(trigger, False, {"WHYGRAPH_SCAN_CMD": "whygraph scan"}, "platform")
-    assert argv == ["whygraph", "scan", *CODEGRAPH_ONLY_FLAGS]
+    argv = scan_argv(trigger, False, {"WHYGRAPH_SCAN_CMD": "scanner"}, "platform")
+    assert argv == ["scanner", *CODEGRAPH_ONLY_FLAGS]
 
 
 def test_linked_manual_scan_is_codegraph_only(

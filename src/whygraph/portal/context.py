@@ -195,7 +195,7 @@ def _linked_remote(
 def resolved_layer(session: Session, project: Project) -> dict:
     """The project's merged config v2 dict with forced DB paths and **no** secrets.
 
-    This is what a child ``whygraph scan`` receives as
+    This is what the scan child receives as
     ``WHYGRAPH_CONFIG_JSON``; secrets reach it only as environment
     variables (plan section 4.6).
 

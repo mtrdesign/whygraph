@@ -331,7 +331,7 @@ def test_a_missing_index_degrades_instead_of_raising(tmp_path: Path) -> None:
     )
     assert result["layer"] == "connection"
     assert result["error"] == graph_stats_sql._NO_CODEGRAPH
-    assert "whygraph scan" in result["error"]
+    assert "whygraph scan" not in result["error"]
 
 
 # ---------------------------------------------------------------------------

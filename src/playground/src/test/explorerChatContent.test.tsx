@@ -333,16 +333,8 @@ describe("the Rationale tab states", () => {
     expect(screen.queryByRole("button", { name: "Generate rationale" })).toBeNull();
     const hint = screen.getByTestId("rationale-scan-hint");
     expect(hint).toHaveTextContent("project Overview");
-    expect(within(hint).getByText("whygraph scan").tagName).toBe("CODE");
-    expect(hint.textContent).not.toContain("`");
-  });
-
-  it("leaves whygraph scan out of the hint in production", async () => {
-    fake.mode = "production";
-    fake.rationale = { status: "no_evidence" };
-    await open();
-    const hint = await screen.findByTestId("rationale-scan-hint");
     expect(hint).not.toHaveTextContent("whygraph scan");
+    expect(hint.textContent).not.toContain("`");
   });
 
   it("counts a card's evidence with plurals: 1 commit, not 1 commits", async () => {

@@ -9,7 +9,7 @@ WhyGraph is run:
   the pinned npm package — it is invoked directly. No Docker, so this
   works headless and avoids docker-in-docker. This is the only path the
   container delivery ever takes.
-* **Docker fallback.** On a native (e.g. ``uv tool install``) host
+* **Docker fallback.** On a native host
   without ``codegraph`` installed, the WhyGraph image
   (``ghcr.io/mtrdesign/whygraph``) is run as ``docker run … codegraph
   …`` with the project root bind-mounted to ``/workspace``. That single
@@ -18,7 +18,7 @@ WhyGraph is run:
 
 :func:`ensure_codegraph_db` is idempotent (the 1.x init step used it);
 :func:`refresh_codegraph_index` re-syncs an existing index (used by
-``whygraph scan``). Both are usable standalone (e.g. from tests).
+the scan child). Both are usable standalone (e.g. from tests).
 
 Neither runs CodeGraph while the repository holds a symbolic link that
 CodeGraph would read and that leads out of it
@@ -52,9 +52,8 @@ DEFAULT_CODEGRAPH_IMAGE: str = "ghcr.io/mtrdesign/whygraph:latest"
 """Default image run by the Docker fallback when no override is given.
 
 The self-contained WhyGraph image bakes in the CodeGraph CLI, so the
-fallback runs ``codegraph`` inside it. ``whygraph scan`` exposes
-``--codegraph-image`` for ad-hoc overrides; tests and CI pipelines can
-also pass an explicit ``image=`` to the functions here. Ignored when a
+fallback runs ``codegraph`` inside it. Tests and CI pipelines can
+pass an explicit ``image=`` to the functions here. Ignored when a
 local ``codegraph`` binary is used instead.
 """
 
@@ -148,7 +147,7 @@ def refresh_codegraph_index(
     When the database is missing, behaves like :func:`ensure_codegraph_db`
     (full ``init -i``). When it already exists, runs ``codegraph sync -q``
     — an incremental update of just the changes since the last index,
-    which is what ``whygraph scan`` wants on each run — unless the index
+    which is what the scan child wants on each run — unless the index
     was built by a CodeGraph with a different *extraction version* than
     the binary about to run: ``sync`` keeps such an index as is ("Already
     up to date"), so it is rebuilt with ``codegraph index -q`` instead. An
@@ -164,7 +163,7 @@ def refresh_codegraph_index(
         :data:`DEFAULT_CODEGRAPH_IMAGE`.
     capture : bool, optional
         When ``True``, capture the subprocess output instead of streaming
-        it (see :func:`ensure_codegraph_db`). ``whygraph scan`` passes this
+        it (see :func:`ensure_codegraph_db`). the scan child passes this
         so the refresh can run concurrently under a live progress display.
         Default ``False``.
     allow_rebuild : bool, optional
@@ -172,7 +171,7 @@ def refresh_codegraph_index(
         foreign extraction version or an index that predates the guard
         (and skip the ``status`` check): the MCP read path passes this so a
         tool call only ever does a quick ``sync``. Default ``True`` (what
-        ``whygraph scan`` wants).
+        the scan child wants).
     timeout : float, optional
         Seconds before a ``codegraph`` subprocess is killed and a
         :class:`CodeGraphBootstrapError` raised. Default ``None`` (no limit).

@@ -1,7 +1,7 @@
 """Removal stubs for the 1.x entry points dropped in 2.0.0.
 
-``whygraph init``, ``whygraph serve`` and the ``whygraph-mcp`` console
-script were replaced by the WhyGraph portal. Each still exists, so a 1.x
+``whygraph init``, ``whygraph serve``, ``whygraph scan`` and the
+``whygraph-mcp`` console script were replaced by the WhyGraph portal. Each still exists, so a 1.x
 habit (or a 1.x agent config that runs ``whygraph-mcp``) gets a clear
 message instead of "no such command": the message goes to **stderr** and
 the exit status is ``2``. The same strings are baked into the host shim
@@ -27,6 +27,12 @@ SERVE_REMOVED = (
     " and add this repo from the Projects page."
 )
 """Printed by ``whygraph serve`` (in the image and by the host shim)."""
+
+SCAN_REMOVED = (
+    "`whygraph scan` was removed. Add the repository in the portal"
+    " (`whygraph up`) and scan it there."
+)
+"""Printed by ``whygraph scan`` (in the image and by the host shim)."""
 
 MCP_REMOVED = (
     "whygraph-mcp was removed in 2.0.0. Add this repo in the WhyGraph portal"
@@ -86,6 +92,7 @@ __all__ = [
     "INIT_REMOVED",
     "MCP_REMOVED",
     "REMOVED_EXIT_CODE",
+    "SCAN_REMOVED",
     "SERVE_REMOVED",
     "removed_command",
     "whygraph_mcp",

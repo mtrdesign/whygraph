@@ -248,8 +248,8 @@ class GenerationNotPermitted(WhyGraphError):
 
 _NO_EVIDENCE_MESSAGE = (
     "no historical evidence for this target — the lines map to no "
-    "scanned commit. Scan from the WhyGraph portal (or run `whygraph scan` "
-    "outside it) to populate the database."
+    "scanned commit. Scan from the WhyGraph portal to populate the "
+    "database."
 )
 
 _NOT_PUSHED_MESSAGE = (
@@ -476,7 +476,7 @@ def rationale_card(
     if before_generate is not None:
         before_generate()
     # Cache miss — lazily backfill any commit whose `llm_description` is
-    # NULL (e.g. after `whygraph scan --skip-analyze`) so the
+    # NULL (e.g. after a `--skip-analyze` scan) so the
     # rationale prompt sees the richer per-commit summaries. Bulk commits
     # are described per-file against the target's path instead. The cache
     # fingerprint is sha256-over-sorted-SHAs, so backfilling here does

@@ -6,14 +6,14 @@
 # on a temp data dir OUTSIDE the checkout (a data dir inside it would make the
 # checkout un-addable), with the temp `shared/` folder as its only shared folder
 # and the fake scanner (tests/fixtures/e2e_scan.py) standing in for
-# `whygraph scan`; runs the suite; tears everything down. Needs Docker.
+# the scan child; runs the suite; tears everything down. Needs Docker.
 #
 # Environment (all optional):
 #   E2E_PORTAL_CMD     how to launch whygraph (default: uv run --no-sync whygraph)
 #   E2E_SCAN_PYTHON    interpreter for the fake scanner (default: the checkout's
 #                      .venv/bin/python, else python3). The production portal's
 #                      scanner runs `--real-git`, which hands over to the real
-#                      `python -m whygraph scan`, so it must be able to import
+#                      `python -m whygraph.scan.child`, so it must be able to import
 #                      whygraph (see tests/fixtures/e2e_scan.py)
 #   E2E_PORT           portal port (default: 18765)
 #   E2E_PROD_PORT      production-mode portal port (default: 18766)

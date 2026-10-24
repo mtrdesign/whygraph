@@ -535,15 +535,22 @@ def scan_argv(
     Returns
     -------
     list[str]
-        ``$WHYGRAPH_SCAN_CMD`` (``shlex.split``) or ``<python> -m whygraph
+        ``$WHYGRAPH_SCAN_CMD`` (``shlex.split``) or ``<python> -P -m whygraph
         scan``, then ``--progress json --managed-by-portal`` and the flags.
+
+    Notes
+    -----
+    The child runs with the project's checkout as its cwd, and ``python -m``
+    would put that cwd first on ``sys.path``: a repository that commits a
+    ``whygraph/`` package would replace WhyGraph's code. ``-P`` keeps it off,
+    and :func:`child_env`'s ``PYTHONSAFEPATH=1`` covers an override too.
     """
     env_source = os.environ if environ is None else environ
     override = (env_source.get(SCAN_CMD_ENV) or "").strip()
     prefix = (
         shlex.split(override)
         if override
-        else [sys.executable, "-m", "whygraph", "scan"]
+        else [sys.executable, "-P", "-m", "whygraph", "scan"]
     )
     return [
         *prefix,
@@ -594,6 +601,9 @@ def child_env(
     source_env = os.environ if environ is None else environ
     env = pass_through_env(source_env)
     env["GIT_TERMINAL_PROMPT"] = "0"
+    # The child's cwd is the (untrusted) checkout: never import from it, even
+    # through a $WHYGRAPH_SCAN_CMD override or a Python grandchild.
+    env["PYTHONSAFEPATH"] = "1"
     env["WHYGRAPH_CONFIG_JSON"] = json.dumps(layer, default=str, sort_keys=True)
     # The directory of the CodeGraph writer lock (both modes): the child's
     # CodeGraph step never runs unlocked.

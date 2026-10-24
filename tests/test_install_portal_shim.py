@@ -1359,7 +1359,7 @@ def test_dev_src_runs_the_checkout_through_the_dev_wrapper(shim: Shim) -> None:
     assert "PYTHONPATH=/opt/whygraph-dev/src" in call
     # Scan children get the checkout too, without widening the env allowlist.
     assert (
-        "WHYGRAPH_SCAN_CMD=env PYTHONPATH=/opt/whygraph-dev/src python -m whygraph scan"
+        "WHYGRAPH_SCAN_CMD=env PYTHONPATH=/opt/whygraph-dev/src python -P -m whygraph scan"
         in call
     )
     assert "WHYGRAPH_DEV_ORIGINS=http://localhost:5174,http://127.0.0.1:5174" in call

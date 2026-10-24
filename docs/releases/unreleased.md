@@ -60,6 +60,14 @@ fixes and additions.
   **Overwrite my edits too**) when you have. See
   [Keeping the agent files up to date](../portal/agents.md#agent-files-upgrade).
 
+## Security fixes
+
+- **A scan no longer imports Python code from the repository it scans.** The portal's scan child runs
+  inside the project's folder, and Python looked there first for its own modules, so a repository that
+  committed a `whygraph/` package could run code in the portal. The child now starts with Python's safe
+  path mode (`-P`, `PYTHONSAFEPATH=1`), which leaves the working folder off the module search path. See
+  [Repository content is not trusted](../portal/security.md#repository-content-is-not-trusted).
+
 ## Upgrade path
 
 1. Re-run the installer and `whygraph up` as usual.

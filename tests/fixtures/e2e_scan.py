@@ -232,7 +232,7 @@ def real_git(args: list[str], fail: bool) -> int:
     # Seeded first: the real scanner runs with --no-codegraph, and the portal
     # may read the index as soon as the child's result event arrives.
     seed_codegraph(Path(os.getcwd()))
-    cmd = [sys.executable, "-m", "whygraph", "scan", *forwarded(args)]
+    cmd = [sys.executable, "-P", "-m", "whygraph", "scan", *forwarded(args)]
     return subprocess.run(cmd).returncode
 
 

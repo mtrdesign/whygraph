@@ -241,6 +241,10 @@ activity](agents.md#agent-activity).
 
 A repository - a GitHub clone above all - can contain anything. The portal treats it that way.
 
+A scan runs as a child process inside the project's folder, in Python's safe path mode (`-P`,
+`PYTHONSAFEPATH=1`): the folder is never on the module search path, so a repository that commits a
+`whygraph/` package cannot replace the portal's code.
+
 ### Symbolic links
 
 The portal never follows a symbolic link out of a project's folder. When `.whygraph/`, `.codegraph/`,

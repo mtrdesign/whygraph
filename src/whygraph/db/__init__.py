@@ -1,7 +1,7 @@
 """SQLModel + Alembic layer for WhyGraph-owned tables.
 
 This package is a *parallel* DB layer to :mod:`whygraph.scan.db`. Both
-operate on the same SQLite file (``.whygraph/whygraph.db`` by default),
+operate on the same SQLite file (the configured ``whygraph_db``),
 but they manage disjoint sets of tables:
 
 * :mod:`whygraph.scan.db` — hand-rolled schema for scan/evidence data

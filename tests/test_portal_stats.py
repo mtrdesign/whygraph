@@ -50,7 +50,7 @@ def _state() -> SimpleNamespace:
 
 def test_rationale_cards_count_distinct_ranges(tmp_path: Path) -> None:
     """Two providers (or models) on one range are one card (BUG-26)."""
-    ctx = manual_ctx(tmp_path)
+    ctx = manual_ctx(tmp_path, "demo")
     with use_project(ctx):
         ensure_initialized()
         with project_session() as session:
@@ -76,9 +76,10 @@ def test_rationale_cards_count_distinct_ranges(tmp_path: Path) -> None:
 
 
 def test_no_counts_without_a_db_or_for_a_linked_project(tmp_path: Path) -> None:
-    ctx = manual_ctx(tmp_path)
+    ctx = manual_ctx(tmp_path, "demo")
     assert project_counts(_state(), ctx) is None  # not created yet
     assert not (tmp_path / ".whygraph").exists()
+    assert not Path(ctx.config.whygraph_db).parent.exists()
 
     linked = replace(ctx, remote=object())  # type: ignore[arg-type]
     with use_project(ctx):

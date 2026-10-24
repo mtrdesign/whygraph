@@ -7,11 +7,13 @@ portal database:
    goes through :func:`whygraph.core.config.normalize_v2`, then the two
    are deep-merged with :func:`~whygraph.core.config.merge_v2` (the
    project wins).
-2. The DB paths are **forced** to ``<root>/.whygraph/whygraph.db`` and
-   ``<root>/.codegraph/codegraph.db``, whatever the rows say (plan rule
-   4.2.1 #2): a config pointing at another project's database, or at the
-   portal's own, is never opened. A *symlink* at those paths is refused
-   where the DB is opened (:mod:`whygraph.portal.paths`).
+2. The DB paths are **forced** to the data directory's
+   ``projects/<org>/<slug>/whygraph.db`` and ``<root>/.codegraph/codegraph.db``,
+   whatever the rows say (plan rule 4.2.1 #2): a config pointing at another
+   project's database, or at the portal's own, is never opened, and a
+   repository cannot influence where its history lives. A *symlink* at
+   those paths is refused where the DB is opened
+   (:mod:`whygraph.portal.paths`).
 3. Decrypted secrets are injected **in memory only**: the project's key
    for a provider, else its org's default (never another org's) - except
    that an org-default key is never injected into a project that
@@ -51,8 +53,8 @@ from whygraph.core.context import ProjectContext
 from .config_layers import endpoint_of, load_layer
 from .db import data_dir, get_session
 from .linked import LinkedProject
-from .models import PlatformLink, Project, Secret
-from .paths import db_paths
+from .models import Organization, PlatformLink, Project, Secret
+from .paths import codegraph_db_path, project_db_path
 from .platform_client import PlatformHttp
 from .secrets import (
     GITHUB_TOKEN,
@@ -210,10 +212,14 @@ def resolved_layer(session: Session, project: Project) -> dict:
     -------
     dict
         The global layer deep-merged with the project layer (each
-        normalized), with ``whygraph_db`` / ``codegraph_db`` forced to the
-        root defaults.
+        normalized), with ``codegraph_db`` forced to the root's and
+        ``whygraph_db`` to the project's data-dir DB - except that a linked
+        (``platform``) project's has **no** ``whygraph_db``: its child never
+        sees a history path (plan decision D23).
     """
     _, merged = _merged_layer(session, project, resolve_root(project))
+    if project.source == "platform":
+        merged.pop("whygraph_db", None)
     return merged
 
 
@@ -236,12 +242,16 @@ def _merged_layer(session: Session, project: Project, root: Path) -> tuple[dict,
     project_layer, _ = normalize_v2(project_raw, root)
     merged = merge_v2(global_layer, project_layer)
 
-    # Rule 4.2.1 #2: DB paths are the root's defaults, never a row's value.
-    # They are the paths .paths.check_project_paths examines before a DB
-    # is opened (the initialized gate, migrations, the runner).
-    whygraph_db, codegraph_db = db_paths(root)
-    merged["whygraph_db"] = str(whygraph_db)
-    merged["codegraph_db"] = str(codegraph_db)
+    # Rule 4.2.1 #2: the DB paths are forced, never a row's value: the
+    # history in the data directory (absolute, since data_dir() is), the
+    # index in the root. .paths.check_project_db / check_project_paths
+    # examine them before a DB is opened (the initialized gate, migrations,
+    # the runner).
+    org = session.get(Organization, project.org_id)
+    if org is None:
+        raise ProjectNotFound(f"the org of project {project.slug!r} is gone")
+    merged["whygraph_db"] = str(project_db_path(data_dir(), org.slug, project.slug))
+    merged["codegraph_db"] = str(codegraph_db_path(root))
     return project_layer, merged
 
 

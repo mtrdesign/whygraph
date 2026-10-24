@@ -36,6 +36,7 @@ from sqlmodel import select
 from platform_fake import ORG, SLUG, TOKEN, FakePlatform, status_body
 from test_portal_app import (  # noqa: F401 -- `env` is a fixture
     env,
+    history_db,
     init_project,
     make_repo,
 )
@@ -865,5 +866,6 @@ def test_no_platform_content_in_portal_tables(
         assert leaked not in haystack, leaked
     # ...and the project still has no WhyGraph database of its own.
     assert not (root / ".whygraph" / "whygraph.db").exists()
+    assert not history_db(SLUG).parent.exists()
     with portal_db.get_session() as session:
         assert session.exec(select(PlatformLink.last_platform_head)).all() == ["c" * 40]

@@ -69,7 +69,9 @@ from whygraph.mcp.resources import (
     _pr_resource,
     _repo_overview_resource,
 )
+from whygraph.portal import db as portal_db
 from whygraph.portal.linked import LinkedProject
+from whygraph.portal.paths import project_db_path
 from whygraph.portal.platform_client import PlatformHttp, api_origin_for
 
 API_ORIGIN = api_origin_for(PLATFORM_ORIGIN, ORG)
@@ -204,7 +206,9 @@ def linked(repo: SimpleNamespace, remote: LinkedProject) -> ProjectContext:
         slug="demo",
         root=repo.root,
         config=Config(
-            whygraph_db=repo.root / ".whygraph" / "whygraph.db",
+            # What the portal forces (its side keeps the key; _refuse_linked
+            # guards it). The child's config has none (plan decision D23).
+            whygraph_db=project_db_path(portal_db.data_dir(), "local", "demo"),
             codegraph_db=repo.root / ".codegraph" / "codegraph.db",
         ),
         remote=remote,
@@ -714,7 +718,8 @@ def test_mcp_linked_never_creates_whygraph_db(
     ``tests/test_portal_linked_scans.py::test_linked_project_never_creates_whygraph_db``;
     this is the MCP half - the tool bodies and the engine guard they rely on.
     """
-    db = repo.root / ".whygraph" / "whygraph.db"
+    db = linked.config.whygraph_db
+    assert db is not None
 
     def forbidden(*args: object, **kwargs: object) -> None:
         raise AssertionError("a linked project must not reach this")
@@ -744,15 +749,13 @@ def test_mcp_linked_never_creates_whygraph_db(
 
     assert not db.exists()
     assert not db.parent.exists()
+    assert not (repo.root / ".whygraph" / "whygraph.db").exists()
 
 
 def test_engine_opens_normally_without_a_remote(repo: SimpleNamespace) -> None:
     """The control: the same context without a ``remote`` still opens its DB."""
-    plain = ProjectContext(
-        slug="demo",
-        root=repo.root,
-        config=Config(whygraph_db=repo.root / ".whygraph" / "whygraph.db"),
-    )
+    db = project_db_path(portal_db.data_dir(), "local", "demo")
+    plain = ProjectContext(slug="demo", root=repo.root, config=Config(whygraph_db=db))
     with use_project(plain):
         assert get_engine() is not None
-    assert (repo.root / ".whygraph").is_dir()
+    assert db.parent.is_dir()

@@ -68,6 +68,7 @@ from whygraph.portal.codegraph_host import CodeGraphDispatcher
 from whygraph.portal.mcp_mount import McpDispatcher
 from whygraph.portal.models import Project, ScanRun, User
 from whygraph.portal.orgs import add_member, create_org
+from whygraph.portal.paths import project_db_path
 from whygraph.portal.platform_routes import default_client_name
 from whygraph.portal.runner import ScanRunner
 from whygraph.portal.security import PortalGuard, build_origins
@@ -141,13 +142,23 @@ def make_repo(parent: Path, name: str, *, remote: str | None = None) -> Path:
     return Path(os.path.realpath(root))
 
 
-def manual_ctx(root: Path, slug: str = "manual") -> ProjectContext:
-    """A context over ``root``'s default DB paths, for seeding test data."""
+def history_db(slug: str, org: str = "local") -> Path:
+    """The data-dir WhyGraph DB the portal forces for project ``org/slug``."""
+    return project_db_path(portal_db.data_dir(), org, slug)
+
+
+def manual_ctx(root: Path, slug: str, org: str = "local") -> ProjectContext:
+    """A context over project ``org/slug``'s forced DB paths, for seeding test data.
+
+    The WhyGraph DB is the project's data-dir history DB (under the
+    ``$WHYGRAPH_DATA`` the test set), the index the repo's ``.codegraph/``:
+    pass the row's real slug, and its org in production.
+    """
     return ProjectContext(
         slug=slug,
         root=root,
         config=Config(
-            whygraph_db=root / ".whygraph" / "whygraph.db",
+            whygraph_db=history_db(slug, org),
             codegraph_db=root / ".codegraph" / "codegraph.db",
         ),
     )
@@ -1774,7 +1785,7 @@ def test_import_keeps_the_allowlist_and_moves_secrets(
     # The context never sees the imported endpoint, and DB paths are forced.
     ctx = ready.app.state.portal.contexts.get(_project_id("demo"))
     assert ctx.config.llm.openai.base_url is None
-    assert ctx.config.whygraph_db == root / ".whygraph" / "whygraph.db"
+    assert ctx.config.whygraph_db == history_db("demo")
     # And the repo file was not modified.
     assert "attacker.example" in (root / "whygraph.toml").read_text()
 
@@ -1993,7 +2004,8 @@ def test_uninitialized_project_gates_data_routes_and_creates_no_db(
 
     done = init_project(ready, "demo", agents=["claude"])
     assert done["initialized"] is True and done["marker_written"] is True
-    assert (root / ".whygraph" / "whygraph.db").is_file()
+    assert history_db("demo").is_file()
+    assert not (root / ".whygraph" / "whygraph.db").exists()
     assert not (root / "whygraph.toml").exists()  # acceptance #4: config is portal-side
     assert json.loads((root / ".whygraph" / "portal.json").read_text()) == {
         "slug": "demo",
@@ -2130,13 +2142,12 @@ def test_an_older_revision_db_opens_cleanly_with_a_backup(
 ) -> None:
     root = make_repo(env.shared, "demo")
     old_revision = "4e231ec6f0e1"  # before the chat tables
-    with use_project(manual_ctx(root)):
-        (root / ".whygraph").mkdir()
+    # The history the portal keeps for project "demo" (a re-add finds it).
+    with use_project(manual_ctx(root, "demo")):
         command.upgrade(bootstrap.alembic_config(), old_revision)
     db_engine._reset_engine()
 
-    body = add_local(ready, root)
-    assert body["detected"]["existing_db"] is True
+    add_local(ready, root)
     with portal_db.get_session() as session:
         project = session.exec(select(Project)).one()
         project.initialized_at = "2026-01-01T00:00:00+00:00"
@@ -2145,8 +2156,9 @@ def test_an_older_revision_db_opens_cleanly_with_a_backup(
     response = ready.get("/api/projects/demo/chat/sessions")
     assert response.status_code == 200, response.text
     assert response.json() == []
-    backup = root / ".whygraph" / "backups" / f"whygraph-{old_revision}.db"
+    backup = history_db("demo").parent / "backups" / f"whygraph-{old_revision}.db"
     assert backup.is_file()
+    assert not (root / ".whygraph").exists()
     assert ready.get("/api/projects/demo").json()["stats"] is not None
 
 
@@ -2188,8 +2200,8 @@ def test_two_projects_side_by_side_do_not_bleed(
         assert f"hello from {slug}" in stream.text
 
     assert seen == [
-        ("alpha", root_a, root_a / ".whygraph" / "whygraph.db"),
-        ("beta", root_b, root_b / ".whygraph" / "whygraph.db"),
+        ("alpha", root_a, history_db("alpha")),
+        ("beta", root_b, history_db("beta")),
     ]
     alpha = ready.get("/api/projects/alpha/chat/sessions").json()
     beta = ready.get("/api/projects/beta/chat/sessions").json()
@@ -2222,8 +2234,9 @@ def test_remove_strips_hooks_markers_and_only_whygraph_entries(
     add_local(ready, root)
     init_project(ready, "demo", agents=["claude"])
     assert ready.get("/api/projects/demo/chat/sessions").status_code == 200
-    db_path = (root / ".whygraph" / "whygraph.db").resolve()
+    db_path = history_db("demo").resolve()
     assert db_path in db_engine._engines
+    assert not (root / ".whygraph" / "whygraph.db").exists()
 
     removed = ready.request(
         "DELETE", "/api/projects/demo", json={"strip_agent_entries": True}
@@ -2236,14 +2249,13 @@ def test_remove_strips_hooks_markers_and_only_whygraph_entries(
     assert json.loads((root / ".mcp.json").read_text()) == {
         "mcpServers": {"other": {"command": "x"}}
     }
-    # The repo and the rest of .whygraph/ stay.
+    # The repo and the project's history in the data dir stay.
     assert db_path.is_file() and (root / "sample.py").is_file()
     assert ready.get("/api/projects/demo").status_code == 404
 
     # Re-add: a fresh registration, not initialized, fresh context.
     again = add_local(ready, root)
     assert again["project"]["slug"] == "demo"
-    assert again["detected"]["existing_db"] is True
     assert ready.get("/api/projects/demo/tree").status_code == 409
     init_project(ready, "demo")
     assert ready.get("/api/projects/demo/tree").status_code == 200

@@ -85,10 +85,13 @@ process:
   global or system config, the configured GitHub URL and (production)
   the token file. Never a portal-env API key or token.
 * **Path check.** Before a sync and before spawning the child scan, the
-  project's DB paths go through
-  :func:`~whygraph.portal.paths.check_project_paths`; a symlinked
-  ``.whygraph/`` / ``.codegraph/`` / DB file fails the run with an
-  ``error`` event instead of scanning.
+  project's repository paths go through
+  :func:`~whygraph.portal.paths.check_project_paths` and (but for a linked
+  project, which has none) its data-dir WhyGraph DB through
+  :func:`~whygraph.portal.paths.check_project_db`; a symlinked
+  ``.whygraph/`` / ``.codegraph/`` / DB file, or a symlink inside the
+  project's history directory, fails the run with an ``error`` event
+  instead of scanning. The child itself checks nothing.
 * **Log.** ``runs/<id>.log`` (redacted like the events) is served as a
   bounded tail by :func:`log_tail` (``GET .../scans/<id>/log``).
 * **Events.** The events file is the single source of the SSE stream
@@ -206,7 +209,12 @@ from .db import data_dir, get_session
 from .github_app import GitHubAccessLost, GitHubRepo, InstallationToken
 from .github_auth import GitHubUnavailable
 from .models import Project, ScanRun, User
-from .paths import TRACKED_STATE_PATHS, check_project_paths
+from .paths import (
+    TRACKED_STATE_PATHS,
+    check_project_db,
+    check_project_paths,
+    project_db_path,
+)
 from .policy import allowed_sources
 from .repos import root_status
 from .secrets import hint_for
@@ -2447,6 +2455,10 @@ class ScanRunner:
         ctx = state.contexts.get(spec.project_id)
         job.ctx = ctx
         config = ctx.config
+        # Forced by the portal for every project (a linked one's child never
+        # receives it: resolved_layer drops it).
+        assert config.whygraph_db is not None
+        history_db = Path(config.whygraph_db)
         usage_spec = _usage_spec(spec.project_id, who, ctx.key_scopes, config)
         base = data_dir()
         token_path = base / "runs" / f"{spec.run_id}.token" if github else None
@@ -2488,11 +2500,13 @@ class ScanRunner:
                 else:
                     try:
                         check_project_paths(root)
+                        if source != "platform":
+                            check_project_db(base, history_db)
                         return None
                     except UnsafePathError as exc:
                         message = (
-                            f"refusing to scan: {exc} (WhyGraph never follows a "
-                            "symbolic link out of the repository)"
+                            f"refusing to scan: {exc} (WhyGraph never opens a "
+                            "project's files through a symbolic link)"
                         )
                 log(message)
                 event({"type": "error", "message": message})
@@ -2657,9 +2671,7 @@ class ScanRunner:
                     refresher.stop()
                 if token_path is not None:
                     token_path.unlink(missing_ok=True)
-            state.migrations.forget(
-                Path(config.whygraph_db or root / ".whygraph/whygraph.db")
-            )
+            state.migrations.forget(history_db)
 
             if job.result is not None:
                 summary.update({k: v for k, v in job.result.items() if k != "type"})
@@ -3014,11 +3026,14 @@ class ScanRunner:
         try:
             production_initialize(state.migrations, state.contexts.get(project_id))
         except Exception as exc:  # noqa: BLE001 -- a failed import keeps no folder
-            discard_clone(root, base, state.migrations)
+            # Without a context: contexts.get may be what failed. The root is
+            # repos/<org>/<slug>, so it names the history DB too.
+            db_path = project_db_path(data_dir(), root.parent.name, root.name)
+            discard_clone(root, db_path, base, state.migrations)
             if isinstance(exc, UnsafePathError):
                 raise _SyncFailed(
-                    f"refusing to initialize: {exc} (WhyGraph never follows a "
-                    "symbolic link out of the repository)"
+                    f"refusing to initialize: {exc} (WhyGraph never opens a "
+                    "project's files through a symbolic link)"
                 ) from exc
             raise _SyncFailed(f"could not initialize the project: {exc}") from exc
         _mark_initialized(project_id)
@@ -3632,7 +3647,7 @@ def _purge_rewritten_links(
     """Drop the cached rationale cards of files that were links (worker thread, best effort).
 
     A card written while the path was a link may quote what it pointed to.
-    Nothing is opened through a symlinked ``.whygraph/`` or before the
+    Nothing is opened through a symlink or before the
     project has a WhyGraph DB.
     """
     _log.warning(
@@ -3640,11 +3655,12 @@ def _purge_rewritten_links(
         project_id,
         len(paths),
     )
-    if ctx is None or ctx.remote is not None:
+    if ctx is None or ctx.remote is not None or ctx.config.whygraph_db is None:
         return
     try:
+        db_path = Path(ctx.config.whygraph_db)
         check_project_paths(ctx.root)
-        db_path = Path(ctx.config.whygraph_db or ctx.root / ".whygraph/whygraph.db")
+        check_project_db(data_dir(), db_path)
         if not db_path.is_file():
             return
         with use_project(ctx), project_session() as session:

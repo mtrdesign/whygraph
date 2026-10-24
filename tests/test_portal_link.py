@@ -36,6 +36,7 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     add_local,
     at,
     env,
+    history_db,
     init_project,
     make_repo,
     prod_portal,
@@ -580,6 +581,7 @@ def test_link_full_flow(
     assert run["status"] == "ok", run
     assert "--codegraph-only" in runner_flags(scanner.calls()[-1])
     assert not (root / ".whygraph" / "whygraph.db").exists()
+    assert not history_db(SLUG).parent.exists()
 
 
 def test_relinking_a_former_local_checkout_notes_its_leftover_db(
@@ -595,6 +597,7 @@ def test_relinking_a_former_local_checkout_notes_its_leftover_db(
         init = init_project(portal, SLUG, dry_run=dry_run)
         assert init["ignored_db"] == ".whygraph/whygraph.db", dry_run
     assert leftover.read_bytes() == b"not a database"
+    assert not history_db(SLUG).parent.exists()
 
 
 def test_link_token_never_exposed(

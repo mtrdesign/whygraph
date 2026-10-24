@@ -89,19 +89,25 @@ def remove_clone(path: Path, data_dir: Path, *, depth: int) -> bool:
     return False
 
 
-def discard_clone(path: Path, data_dir: Path, migrations: ProjectMigrations) -> None:
+def discard_clone(
+    path: Path, db_path: Path, data_dir: Path, migrations: ProjectMigrations
+) -> None:
     """Remove a production clone (``depth`` 2) and forget its project DB.
+
+    The project's history directory in the data dir is kept, so a retried
+    import finds it again.
 
     Parameters
     ----------
     path : Path
         ``repos/<org slug>/<slug>`` under ``data_dir``.
+    db_path : Path
+        The project's WhyGraph DB (its cached engine is disposed).
     data_dir : Path
         The portal's data directory.
     migrations : ProjectMigrations
         The portal's migration memo (the DB's entry is dropped).
     """
-    db_path = path / ".whygraph" / "whygraph.db"
     dispose_engine(db_path)
     migrations.forget(db_path)
     remove_clone(path, data_dir, depth=2)

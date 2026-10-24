@@ -99,7 +99,7 @@ class V1World:
 
     def ctx(self):
         """A manual context over the project's own DB paths (in-process reads)."""
-        return manual_ctx(self.root, slug=SLUG)
+        return manual_ctx(self.root, slug=SLUG, org=ORG)
 
 
 def _git(root: Path, *args: str, when: str | None = None) -> str:

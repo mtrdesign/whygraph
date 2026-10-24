@@ -15,10 +15,10 @@ carries the action as ``whygraph_action``:
 * :func:`project_db_access` - the same, plus the initialized gate
   (``409 {"code": "not_initialized"}`` until ``projects.initialized_at``
   is set **and** the DB file exists, so nothing creates an empty
-  ``.whygraph/whygraph.db`` in the user's repo) plus the memoized
-  migration (:mod:`whygraph.portal.migrate`). The data routers and the
-  scan endpoints use it; the MCP dispatcher calls the same steps. A DB
-  path that is a symlink (or leaves the root) is a
+  history DB before Initialize) plus the memoized migration
+  (:mod:`whygraph.portal.migrate`). The data routers and the scan
+  endpoints use it; the MCP dispatcher calls the same steps. A DB path
+  that is a symlink (or leaves the repository or the data directory) is a
   ``409 {"code": "unsafe_path"}`` (:func:`checked_db_paths`).
 * :func:`org_access` - portal-level routes: the caller's
   :class:`~whygraph.portal.authz.OrgAccess`, authorized for the action.
@@ -91,14 +91,14 @@ from .authz import (
 )
 from .context import ContextCache, ProjectNotFound, resolve_root
 from . import connections, sessions
-from .db import InstanceLock, get_session
+from .db import InstanceLock, data_dir, get_session
 from .github_app import UserTokens
 from .hosts import BaseUrl, classify
 from .linked import LinkRefresh
 from .migrate import ProjectMigrations
 from .models import Membership, Organization, Project, ProjectGrant, User
 from .orgs import is_valid_org_slug
-from .paths import check_project_paths
+from .paths import check_project_db, check_project_paths
 from .platform_pending import PendingConnects, PendingLinks
 from .projects import is_valid_slug
 from .repo_cache import RepoListCache
@@ -914,8 +914,10 @@ class BoundProject:
 
     @property
     def db_path(self) -> Path:
-        """The project's WhyGraph DB (forced to the root default)."""
-        return Path(self.ctx.config.whygraph_db or self.root / ".whygraph/whygraph.db")
+        """The project's WhyGraph DB (forced to its data-dir path)."""
+        db = self.ctx.config.whygraph_db
+        assert db is not None, "the portal always sets whygraph_db"
+        return Path(db)
 
 
 def _grant_role(role: str | None) -> ProjectRole | None:
@@ -1101,11 +1103,11 @@ def bound_from(
 
 
 def unsafe_path_error(exc: UnsafePathError) -> ApiError:
-    """The ``409 {"code": "unsafe_path"}`` for a refused repository path."""
+    """The ``409 {"code": "unsafe_path"}`` for a refused project path (repository or data dir)."""
     return ApiError(
         409,
-        f"refusing to use {exc}: WhyGraph never follows a symbolic link out of "
-        "the repository",
+        f"refusing to use {exc}: WhyGraph never opens a project's files "
+        "through a symbolic link",
         code="unsafe_path",
         path=str(exc.path),
     )
@@ -1114,14 +1116,20 @@ def unsafe_path_error(exc: UnsafePathError) -> ApiError:
 def checked_db_paths(project: BoundProject) -> None:
     """Refuse (``409 unsafe_path``) a project whose DB paths are symlinked.
 
+    The repository's paths always; the data-dir WhyGraph DB for every
+    project but a linked one, which has none.
+
     Raises
     ------
     ApiError
         ``409 {"code": "unsafe_path"}`` - see
-        :func:`whygraph.portal.paths.check_project_paths`.
+        :func:`whygraph.portal.paths.check_project_paths` and
+        :func:`whygraph.portal.paths.check_project_db`.
     """
     try:
         check_project_paths(project.root)
+        if project.source != "platform":
+            check_project_db(data_dir(), project.db_path)
     except UnsafePathError as exc:
         raise unsafe_path_error(exc) from exc
 

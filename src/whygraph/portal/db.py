@@ -4,13 +4,15 @@ The portal keeps its own tables (:mod:`whygraph.portal.models`) in
 Postgres, reached through ``$WHYGRAPH_DATABASE_URL`` (plus an optional
 ``$WHYGRAPH_DATABASE_PASSWORD_FILE``), with its own Alembic chain
 (``portal/migrations``). It is deliberately separate from every project's
-``.whygraph/whygraph.db``, which stays SQLite in its repo: the two have
-unrelated lifecycles.
+``whygraph.db``, which stays SQLite in the data directory
+(``projects/<org>/<slug>/``, :func:`whygraph.portal.paths.project_db_path`):
+the two have unrelated lifecycles.
 
 The data directory is ``$WHYGRAPH_DATA`` when set, else
 ``~/.local/share/whygraph``. It holds ``secret.key``
-(:mod:`whygraph.portal.secrets`), cloned repositories and scan run files,
-which is why the paths stored in the database are relative to it.
+(:mod:`whygraph.portal.secrets`), project histories, cloned repositories
+and scan run files, which is why the paths stored in the database are
+relative to it.
 """
 
 from __future__ import annotations
@@ -92,10 +94,15 @@ def data_dir() -> Path:
     -------
     Path
         ``$WHYGRAPH_DATA`` when set and non-empty, else
-        ``~/.local/share/whygraph``. An existing directory keeps its mode.
+        ``~/.local/share/whygraph``, made absolute against the current
+        directory (``os.path.abspath``, not ``resolve()``, so a symlinked
+        mount keeps its spelling). Absolute because a project DB path built
+        from it reaches the scan child, whose ``cwd`` is the repository. An
+        existing directory keeps its mode.
     """
     override = os.environ.get(DATA_ENV_VAR)
     path = Path(override).expanduser() if override else _default_data_dir()
+    path = Path(os.path.abspath(path))
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     return path
 

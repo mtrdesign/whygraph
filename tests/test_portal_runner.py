@@ -41,6 +41,7 @@ from test_portal_app import (  # noqa: F401 -- `env` is a fixture
     _git,
     add_local,
     env,
+    history_db,
     init_project,
     make_repo,
     manual_ctx,
@@ -49,7 +50,7 @@ from test_portal_app import (  # noqa: F401 -- `env` is a fixture
 from test_portal_mcp import _free_port
 from whygraph.cli.commands.portal import GRACEFUL_SHUTDOWN_SEC
 from whygraph.core.config import Config
-from whygraph.core.context import use_project
+from whygraph.core.context import ProjectContext, use_project
 from whygraph.db import ensure_initialized
 from whygraph.db import get_session as project_session
 from whygraph.db.models import Commit
@@ -818,7 +819,7 @@ def test_child_env_passes_allowlist_not_portal_credentials(
         assert "WHYGRAPH_DATABASE_URL" not in child
         assert "WHYGRAPH_DATABASE_PASSWORD_FILE" not in child
         config = json.loads(child["WHYGRAPH_CONFIG_JSON"])
-        assert config["whygraph_db"].endswith(".whygraph/whygraph.db")
+        assert config["whygraph_db"] == str(history_db("demo"))
 
 
 def test_injected_secrets_never_reach_run_files(
@@ -1420,7 +1421,7 @@ def test_scan_estimate_endpoint(portal: TestClient, env: SimpleNamespace) -> Non
         ("f" * 40, 1, 10, 0, None, "refs/pull/7/head"),  # PR-origin: never described
         ("0" * 40, 1, 10, 0, None, "feature/x"),  # a local branch still counts
     ]
-    with use_project(manual_ctx(root)), project_session() as session:
+    with use_project(manual_ctx(root, "demo")), project_session() as session:
         for sha, files, ins, dels, desc, ref in rows:
             session.add(
                 Commit(
@@ -1638,6 +1639,58 @@ def test_real_scan_child_with_hook_trigger(
     assert portal.get("/api/projects/demo").json()["stats"]["commits"] == 2
 
 
+def test_a_full_local_flow_never_creates_an_in_repo_db(
+    portal: TestClient, env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan R3: every portal site reads the data-dir DB, none rebuilds the repo path.
+
+    Add, Initialize, the first scan and a rescan through the **real** child
+    (the fake scanner writes no DB), then an Explorer read, an MCP tool call
+    and a statistics query: the history is in the data dir and the repo
+    never gets a ``.whygraph/whygraph.db``.
+    """
+    from whygraph.chat.stats_sql import run_stats_query
+
+    monkeypatch.setenv(
+        "WHYGRAPH_SCAN_CMD",
+        f"{shlex.quote(sys.executable)} -P -m whygraph.scan.child --no-codegraph",
+    )
+    root = local_project(portal, env, "demo")
+    first = wait_run(portal, "demo", runs(portal, "demo")[0]["id"], timeout=120)
+    assert (first["status"], first["trigger"]) == ("ok", "initial"), first
+    again = wait_run(portal, "demo", scan(portal, "demo", trigger="hook"), timeout=120)
+    assert again["status"] == "ok", again
+
+    assert portal.get("/api/projects/demo/tree").status_code == 200
+    assert portal.get("/api/projects/demo").json()["stats"]["commits"] == 2
+    assert portal.get("/api/projects/demo/overview").status_code == 200
+    mcp = portal.post(
+        "/mcp/demo",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "whygraph_evidence_for",
+                "arguments": {"path": "sample.py", "line_start": 1, "line_end": 2},
+            },
+        },
+        headers={"Accept": "application/json, text/event-stream"},
+    )
+    assert mcp.status_code == 200, mcp.text
+    assert '"isError":false' in mcp.text.replace(" ", ""), mcp.text
+    with portal_db.get_session() as session:
+        demo_id = session.exec(select(Project.id).where(Project.slug == "demo")).one()
+    ctx = portal.app.state.portal.contexts.get(demo_id)
+    with use_project(ctx):
+        stats = run_stats_query('SELECT COUNT(*) AS n FROM "commit"')
+    assert stats["rows"] == [[2]], stats
+
+    assert history_db("demo").is_file()
+    assert ctx.config.whygraph_db == history_db("demo")
+    assert not (root / ".whygraph" / "whygraph.db").exists()
+
+
 def test_a_scan_never_imports_a_whygraph_package_the_repo_commits(
     portal: TestClient, env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1725,8 +1778,10 @@ def test_runner_refuses_a_symlinked_db_instead_of_scanning(
     first_scan(portal, "demo")
     running = _queue_behind_a_held_scan(portal, scanner, "demo")
     queued = scan(portal, "demo", trigger="manual")
-    # The link lands after the request passed the HTTP gate.
-    _swap_for_symlink(root / ".whygraph" / "whygraph.db", env.tmp / "elsewhere.db")
+    # The link lands after the request passed the HTTP gate, inside the
+    # data dir (the history DB lives there, never in the repo).
+    assert not (root / ".whygraph" / "whygraph.db").exists()
+    _swap_for_symlink(history_db("demo"), env.tmp / "elsewhere.db")
     scanner.hold.unlink()
 
     # The scans endpoints now answer 409 unsafe_path too; read the rows.
@@ -1896,7 +1951,7 @@ _V1_HELPER = "#!/bin/sh\nwhygraph scan --skip-analyze --no-remote --lock\n"
 _STDIO = {"command": "whygraph-mcp"}
 
 
-def test_a_1x_repo_migrates_through_the_wizard_and_keeps_its_commits(
+def test_a_1x_repo_migrates_through_the_wizard_and_its_db_is_ignored(
     portal: TestClient, env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import sqlite3
@@ -1912,13 +1967,13 @@ def test_a_1x_repo_migrates_through_the_wizard_and_keeps_its_commits(
     first, second = _git(root, "rev-list", "--reverse", "HEAD").split()
 
     # A 1.x `.whygraph/whygraph.db` at an older revision, holding the first
-    # commit (with a description a rescan must not throw away).
+    # commit. The portal keeps history in its data dir: it never opens this.
     old_revision = "4e231ec6f0e1"
-    with use_project(manual_ctx(root)):
-        (root / ".whygraph").mkdir()
+    db = root / ".whygraph" / "whygraph.db"
+    in_repo = ProjectContext(slug="legacy", root=root, config=Config(whygraph_db=db))
+    with use_project(in_repo):
         command.upgrade(bootstrap.alembic_config(), old_revision)
     db_engine._reset_engine()
-    db = root / ".whygraph" / "whygraph.db"
     with sqlite3.connect(db) as conn:
         conn.execute(
             'INSERT INTO "commit" (sha, parent_shas, author_name, author_email,'
@@ -1970,10 +2025,11 @@ def test_a_1x_repo_migrates_through_the_wizard_and_keeps_its_commits(
     done = response.json()
     assert done["initialized"] is True, done
     assert not (root / "whygraph.toml").exists()  # acceptance #4
-    assert (root / ".whygraph" / "backups" / f"whygraph-{old_revision}.db").is_file()
+    # The in-repo DB was neither migrated nor backed up.
+    assert not (root / ".whygraph" / "backups" / f"whygraph-{old_revision}.db").exists()
     with sqlite3.connect(db) as conn:
         head = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-    assert head != old_revision
+    assert head == old_revision
     text = hook.read_text()
     assert "--git-common-dir" in text and ".whygraph/hooks" not in text
     assert not legacy.exists() and helper_path(root).is_file()
@@ -1985,15 +2041,18 @@ def test_a_1x_repo_migrates_through_the_wizard_and_keeps_its_commits(
     entry = vscode["servers"]["whygraph"]  # VS Code's own form (an input for the port)
     assert entry["type"] == "http" and entry["url"].endswith("/mcp/legacy")
 
-    # The first scan (the real child) adds only the new commit.
+    # The first scan (the real child) writes both commits to the data-dir
+    # history; the in-repo DB is untouched.
     run = wait_run(portal, "legacy", done["initial_run_id"], timeout=120)
     assert (run["status"], run["trigger"]) == ("ok", "initial"), run
-    with sqlite3.connect(db) as conn:
+    with sqlite3.connect(history_db("legacy")) as conn:
         rows = dict(
             conn.execute('SELECT sha, llm_description FROM "commit"').fetchall()
         )
     assert set(rows) == {first, second}
-    assert rows[first] == "described by 1.x"
+    assert rows[first] is None
+    with sqlite3.connect(db) as conn:
+        assert conn.execute('SELECT sha FROM "commit"').fetchall() == [(first,)]
 
 
 # ---------------------------------------------------------------------------
@@ -3131,3 +3190,4 @@ def test_run_routes_answer_for_an_uninitialized_project(
     assert refused.status_code == 409
     assert refused.json()["code"] == "not_initialized"
     assert not (root / ".whygraph" / "whygraph.db").exists()
+    assert not history_db("fresh").exists()

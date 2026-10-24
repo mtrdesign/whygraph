@@ -2189,9 +2189,10 @@ def delete_project(
     Strips the managed
     hooks, optionally the ``whygraph`` agent entries (tracked files only
     with ``confirm_tracked``; all-or-nothing), and the portal markers;
-    never deletes a local repo or the rest of its ``.whygraph/``. A GitHub
-    clone's checkout is deleted only when ``confirm_name`` equals the
-    project name and the checkout sits directly under
+    never deletes a local repo or the rest of its ``.whygraph/``, and
+    keeps the project's history (``<data dir>/projects/<org>/<slug>/``). A
+    GitHub clone's checkout is deleted only when ``confirm_name`` equals
+    the project name and the checkout sits directly under
     ``<data dir>/repos``. The project's run files (``runs/<id>.jsonl``,
     ``.log``, ``.token``) are deleted with its row, and its connection
     tokens are revoked (``project_deleted``) in the row's transaction.

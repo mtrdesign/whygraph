@@ -88,7 +88,7 @@ def _setup_project(client, root: Path) -> None:
 
 def _seed_commits(root: Path) -> None:
     newest, oldest = list(Repository(root).commits)
-    with use_project(manual_ctx(root)), get_session() as session:
+    with use_project(manual_ctx(root, "demo")), get_session() as session:
         for commit, when in ((oldest, "2026-01-01"), (newest, "2026-02-01")):
             session.add(
                 Commit(

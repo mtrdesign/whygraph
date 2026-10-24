@@ -56,6 +56,7 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     github_app_key,
     github_git_server,
     github_sign_in,
+    history_db,
     log_in,
     portal_client,
     prod_portal,
@@ -778,7 +779,9 @@ def test_import_answers_at_once_then_its_run_clones_initializes_and_scans(
     ] == [("acme/api", "acme", None, False)]
     root = w.repos / "acme" / "api"
     assert (root / "README.md").read_text() == "api\n"
-    assert (root / ".whygraph" / "whygraph.db").is_file()
+    # The history is in the data dir, not in the clone (a re-clone keeps it).
+    assert history_db("api", "acme").is_file()
+    assert not (root / ".whygraph" / "whygraph.db").exists()
     assert clone_dirs(w) == ["api"]  # no .clone-* left behind
     assert w.server.url in (root / ".git" / "config").read_text()
     assert "ghs_" not in (root / ".git" / "config").read_text()
@@ -1119,6 +1122,53 @@ def test_retry_requeues_the_import_hits_the_throttle_and_clears_a_failed_mint(
     assert row.access_lost_at is None and row.initialized_at is not None
     assert w.state.import_org.remaining(org_id) == 29  # the Retry counted
     assert (w.repos / "acme" / "api" / "README.md").is_file()
+
+
+def test_a_failed_initialize_discards_the_clone_and_keeps_the_history(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan section 4.3 / criterion 2: the discard needs no context, a retry re-attaches.
+
+    The clone's Initialize fails *in* ``contexts.get``: had the failure path
+    asked for the context again, it would fail again and keep the clone.
+    """
+    import sqlite3
+    import sys
+
+    w = world
+    connected(w)
+    history = history_db("api", "acme")
+    real_get = w.state.contexts.get
+    asked: list[str] = []
+
+    def get(project_id: int):  # noqa: ANN202
+        caller = sys._getframe(1).f_code.co_name
+        if caller == "_github_clone":
+            asked.append(caller)
+            # What the first Initialize would have left: a migrated DB.
+            w.state.migrations.ensure(real_get(project_id))
+            raise RuntimeError("the context could not be built")
+        return real_get(project_id)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(w.state.contexts, "get", get)
+        run = wait_import(w, import_repo(w, API_REPO))
+    assert run["status"] == "failed", run
+    assert "could not initialize" in run["summary"]["error"], run
+    assert asked == ["_github_clone"]  # never asked again on the way out
+    assert clone_dirs(w) == []
+    assert history.is_file()  # the history directory is kept
+    with sqlite3.connect(history) as conn:
+        conn.execute("PRAGMA user_version = 42")
+
+    url = at("acme") + "/api/projects/api"
+    retry = w.client.post(f"{url}/scans", json={})
+    assert retry.status_code == 202, retry.text
+    run = wait_scan(w.client, url, retry.json()["run_id"])
+    assert (run["status"], run["summary"]["cloned"]) == ("ok", True), run
+    with sqlite3.connect(history) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone() == (42,)
+    assert not (w.repos / "acme" / "api" / ".whygraph" / "whygraph.db").exists()
 
 
 def test_a_failed_import_is_removed_without_a_path_warning(world: World) -> None:

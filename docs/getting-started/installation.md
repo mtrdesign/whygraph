@@ -8,10 +8,10 @@ The host needs **only Docker** - no Python, Node, `gh`, or CodeGraph. One comman
 published image and installs the shims from inside it:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v2.0.0/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v2.1.0/scripts/install.sh | sh
 ```
 
-**The tag in that URL is the version.** `v2.0.0` installs 2.0.0 - no second flag to keep in
+**The tag in that URL is the version.** `v2.1.0` installs 2.1.0 - no second flag to keep in
 sync. This drops a `whygraph` shim on your `PATH` (plus a `whygraph-mcp` stub that only prints a
 removal message). The `version` and `install` commands wrap a `docker run --rm -v "$PWD:/workspace" … ghcr.io/mtrdesign/whygraph`
 against the current repo and are ephemeral. The exception is the portal:
@@ -23,11 +23,11 @@ story.
 *which installer* runs:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v2.0.0/scripts/install.sh | sh -s 2.0.0
-curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v2.0.0/scripts/install.sh | sh -s latest
+curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v2.1.0/scripts/install.sh | sh -s 2.1.0
+curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v2.1.0/scripts/install.sh | sh -s latest
 ```
 
-`WHYGRAPH_VERSION=2.0.0` does the same and wins over the argument. `WHYGRAPH_BIN_DIR` picks the
+`WHYGRAPH_VERSION=2.1.0` does the same and wins over the argument. `WHYGRAPH_BIN_DIR` picks the
 install directory (default `~/.local/bin`), and `WHYGRAPH_IMAGE_REPO` points at a private mirror.
 
 Two more are read by the installed shim rather than the installer: `WHYGRAPH_IMAGE` overrides
@@ -45,7 +45,7 @@ with `whygraph up --port`.
     you want a visible failure (or want to read the script first), download it separately:
 
     ```bash
-    curl -fsSL -o install.sh https://raw.githubusercontent.com/mtrdesign/whygraph/v2.0.0/scripts/install.sh
+    curl -fsSL -o install.sh https://raw.githubusercontent.com/mtrdesign/whygraph/v2.1.0/scripts/install.sh
     sh install.sh
     ```
 
@@ -53,7 +53,7 @@ with `whygraph up --port`.
 above delegates to, and dropping the pipe prints exactly what would be written:
 
 ```bash
-docker run --rm ghcr.io/mtrdesign/whygraph:2.0.0 whygraph install | sh
+docker run --rm ghcr.io/mtrdesign/whygraph:2.1.0 whygraph install | sh
 ```
 
 ## Verify

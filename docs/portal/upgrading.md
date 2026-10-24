@@ -3,8 +3,11 @@
 To upgrade, re-run the [installer](../getting-started/installation.md), then `whygraph up`. What else
 happens depends on where you come from:
 
-- **From 1.x**, you add your repositories to the portal; their data is reused. See
+- **From 1.x**, you add your repositories to the portal; each starts with empty history. See
   [From 1.x](#from-1x).
+- **From 2.0.0**, `whygraph scan` is gone and each project's history moves out of its repository into
+  the portal's data directory; the old in-repo database is not read, so history starts empty. See
+  [WhyGraph 2.1.0](../releases/2.1.0.md#breaking-changes).
 - **Agent files in your repositories** are not rewritten by an upgrade. Open each project's Settings >
   Agents and use **Update agent files**, once per project: it adds the `codegraph` MCP entry, files you
   have not edited update silently and edited ones are listed first (a project set up before the

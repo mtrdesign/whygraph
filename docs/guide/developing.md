@@ -1,6 +1,6 @@
 # Developing WhyGraph
 
-Working on WhyGraph itself (not using it) takes five `make` targets from a checkout:
+Working on WhyGraph itself (not using it) takes these `make` targets from a checkout:
 
 | Command | Mode | What it runs |
 |---|---|---|
@@ -8,7 +8,8 @@ Working on WhyGraph itself (not using it) takes five `make` targets from a check
 | `make dev-docker` | Development, in Docker | The same, inside the WhyGraph image through the real `whygraph up` shim, with your checkout mounted read-only over the installed package. |
 | `make prod` | Production | The image built exactly like a release (pinned CodeGraph, the `pyproject.toml` version), run through the shim with no source mounted: what users get. |
 | `make dev-production` | Development, native, production mode | The portal's [production mode](../deploy/production.md) from your checkout on `:8778`, with Vite on `:5173` in front of it, on its own `whygraph_prod` database in the `make dev-db` Postgres. For work on sign-in, organizations and the host checks, and the platform `dev-local` links to. See below. |
-| `make check` | Before a pull request | Both `ruff` checks, `pytest`, the frontend typecheck / tests / build, the Playwright suite, then the release smoke test against a freshly built image. Stops at the first failure. |
+| `make check` | Before a pull request | Both `ruff` checks, `pytest`, the frontend typecheck / tests / build then the Playwright suite, and the release smoke test against a freshly built image. The four chains run at once, each into its own log; it prints one line per stage and the log of each one that failed. |
+| `make check-fast` | While working | `make check` without the image build and the smoke test. |
 
 `dev-local` and `dev-docker` run in the foreground: open `http://localhost:5174`, and press
 Ctrl-C to stop everything. `prod` serves the built UI itself on `http://127.0.0.1:8777`.
@@ -154,7 +155,8 @@ itself, not to your `dev-production`. Link from `make dev-local`. `make e2e` run
   container through the mount.
 - **`dev-production`** for anything that only exists in production mode: accounts, sessions,
   organization hosts, the admin page, projects imported from GitHub and the webhook.
-- **`make check`** always, before pushing. Its smoke test catches what `dev-local` cannot see.
+- **`make check-fast`** while working, and **`make check`** before pushing: its smoke test catches
+  what `dev-local` cannot see.
 
 ## What stays isolated
 
@@ -177,7 +179,8 @@ so it can run beside any of them.
 
 | Command | What it does |
 |---|---|
-| `make test` | `pytest` only |
+| `make test` | `pytest` only, on every core (`ARGS="-n0 tests/test_x.py"` for one file, serially - a debugger needs `-n0`) |
+| `make test-fast` | The tests that failed last time first, then the rest; stops at the first failure |
 | `make e2e` | The Playwright suite against a throwaway portal and a fake scanner, both themes (`ARGS="--project=light"` for one) |
 | `make audit` | The screenshot audit: walks every screen of both portals (local, production, linked) at desktop and phone width in light and dark, and writes PNGs, `manifest.json` and `gaps.md` under `src/playground/e2e/.artifacts/audit/` (`ARGS="--project=local"` for one). About 30 minutes, run by hand before a merge, never in CI; see `src/playground/e2e/audit/README.md` |
 | `make inspect SLUG=<slug>` | The MCP Inspector against a project's `/mcp/<slug>` on the running dev portal; add `MCP_PATH=code` for its CodeGraph endpoint, `/mcp/<slug>/code` |
@@ -205,10 +208,15 @@ horizontally (except an element marked `data-scroll-x`, an opted-in scroller) an
   throwaway container of the pinned image for the session (on a random loopback port, in memory) and
   gives every test its own database, so plain `uv run pytest` needs Docker. Without Docker, set
   `WHYGRAPH_TEST_DATABASE_URL` to an **admin** URL of a Postgres you run (the role needs `CREATEDB`),
-  for example `postgresql+psycopg://postgres:test@127.0.0.1:5432/postgres`; CI does exactly that with
-  a service container. `WHYGRAPH_TEST_POSTGRES_IMAGE` replaces the throwaway server's image, for a
+  for example `postgresql+psycopg://postgres:test@127.0.0.1:5432/postgres`. CI starts the
+  throwaway container like a laptop does. `WHYGRAPH_TEST_POSTGRES_IMAGE` replaces the throwaway server's image, for a
   registry mirror. With neither Docker nor the URL, the portal tests **fail** with a message saying
   so - they are never skipped.
+- **The tests run in parallel.** `pytest` runs with `-n auto` (pytest-xdist): one worker per core,
+  or per performance core on a Mac, each with its own throwaway Postgres. Pass `-n0` to run serially,
+  for example under a debugger. CI splits the suite into three shards by the durations stored in
+  `.test_durations`; refresh that file with `uv run pytest --store-durations` after adding many slow
+  tests (an unlisted test only counts as average).
 - **`uv run` syncs first**, which fails behind a TLS-intercepting proxy. Run the targets with
   `UV_NO_SYNC=1 make ...` (or `UV_RUN="uv run --no-sync"`) there.
 - The Docker modes use two development-only shim settings, `WHYGRAPH_DEV_SRC` and

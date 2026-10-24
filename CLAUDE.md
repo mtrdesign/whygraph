@@ -22,13 +22,14 @@ The project is uv-managed (Python ≥ 3.11, pinned via `.python-version`).
 
 ```bash
 uv sync                       # bootstrap .venv and install deps
-uv run pytest                 # all tests (the portal tests need Docker or WHYGRAPH_TEST_DATABASE_URL)
-uv run pytest tests/test_smoke.py::test_imports   # single test
+uv run pytest                 # all tests, in parallel (-n auto); the portal tests need Docker or WHYGRAPH_TEST_DATABASE_URL
+uv run pytest -n0 tests/test_smoke.py::test_imports   # single test, serially
 uv run whygraph version       # CLI sanity check
 make dev-local                # develop natively: portal (:8777, auto-restart) + Vite HMR (:5174) on `make dev-db`'s Postgres; open :5174
 make dev-docker               # the same inside the image via the real shim (checkout mounted over the package)
 make prod                     # the image built like the release, through the shim, no mount
-make check                    # lint + pytest + frontend + e2e + scripts/smoke.sh on a fresh image
+make check                    # lint + pytest + frontend + e2e + scripts/smoke.sh on a fresh image, in parallel (scripts/check.sh)
+make check-fast               # the same without the image build and the smoke test
 make docs                     # serve the documentation site locally with live reload
 make docs-build               # build it strictly (what CI runs)
 ```
@@ -48,7 +49,7 @@ Prose style: **plain hyphens, not em dashes** (enforced by convention, not a lin
 
 ## Before pushing
 
-CI (`ci-code-checks`) gates every PR on three parallel jobs: **lint** (`uv run ruff check src/ tests/ scripts/` *and* `uv run ruff format --check src/ tests/ scripts/` — both, not just the first), **tests** (`uv run pytest`), and **frontend** (in `src/playground/`, Node 22: `npm ci`, `npm run typecheck`, `npm test` (Vitest), `npm run build`). `scripts/` is linted but **not** collected by pytest (`testpaths` is `tests/`) — it holds live-provider tooling that must never gate CI. The **tests** job runs against a `postgres` service container (`WHYGRAPH_TEST_DATABASE_URL`, image gated against `POSTGRES_IMAGE`); locally, `uv run pytest` starts a throwaway Postgres container itself, so it needs Docker or `WHYGRAPH_TEST_DATABASE_URL` (an admin URL) - without either the portal tests fail, never skip. Run the three Python commands locally before pushing or opening a PR - and, when you touched `src/playground/`, the frontend ones too (Node >= 22.12, so `nvm use 22` first):
+CI (`ci-code-checks`) gates every PR on three parallel jobs: **lint** (`uv run ruff check src/ tests/ scripts/` *and* `uv run ruff format --check src/ tests/ scripts/` — both, not just the first), **tests** (`uv run pytest`, three shards by `.test_durations` via pytest-split, each on every core via pytest-xdist, gathered by one `Unit Tests (pytest)` job), and **frontend** (in `src/playground/`, Node 22: `npm ci`, `npm run typecheck`, `npm test` (Vitest), `npm run build`). `scripts/` is linted but **not** collected by pytest (`testpaths` is `tests/`) — it holds live-provider tooling that must never gate CI. Each xdist worker starts its own throwaway Postgres container of `POSTGRES_IMAGE` (tmpfs, durability off), in CI as locally - there is no service container, so CI tests the pinned image by construction. `uv run pytest` therefore needs Docker or `WHYGRAPH_TEST_DATABASE_URL` (an admin URL) - without either the portal tests fail, never skip. Run the three Python commands locally before pushing or opening a PR - and, when you touched `src/playground/`, the frontend ones too (Node >= 22.12, so `nvm use 22` first):
 
 ```bash
 uv run ruff check src/ tests/ scripts/

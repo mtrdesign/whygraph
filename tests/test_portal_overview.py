@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from sqlmodel import delete
+from sqlmodel import delete, select
 
 from test_portal_app import (  # noqa: F401 -- fixtures
     at,
@@ -28,6 +28,7 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     production_env,
     signed_in,
 )
+from test_portal_runner import TERMINAL, wait_for
 from test_portal_usage import local, stub_llm  # noqa: F401 -- fixtures
 from test_portal_v1 import V1World, _mint, call, v1  # noqa: F401
 from whygraph.portal import db as portal_db
@@ -168,8 +169,30 @@ def _calls(w: Any, day: str, kind: str, calls: int, source: str = "mcp") -> None
 # ---------------------------------------------------------------------------
 
 
-def test_an_empty_overview(local: SimpleNamespace) -> None:
-    body = _overview(local.client)
+@pytest.fixture
+def quiet(local: SimpleNamespace) -> SimpleNamespace:
+    """``local`` with no scan history: its initial scan ended, then cleared.
+
+    Adding the project starts that scan on its own; under load (xdist) it
+    could end before an assertion and chart a point of its own.
+    """
+    pid = local.project_id
+
+    def ended() -> bool:
+        with portal_db.get_session() as session:
+            statuses = session.exec(
+                select(ScanRun.status).where(ScanRun.project_id == pid)
+            ).all()
+        return all(status in TERMINAL for status in statuses)
+
+    wait_for(ended)
+    with portal_db.get_session() as session:
+        session.exec(delete(ScanRun).where(ScanRun.project_id == pid))
+    return local
+
+
+def test_an_empty_overview(quiet: SimpleNamespace) -> None:
+    body = _overview(quiet.client)
     assert body["coverage"] == {"points": []}
     assert body["events"] == []
     assert body["last_failure"] is None
@@ -191,8 +214,8 @@ def test_an_empty_overview(local: SimpleNamespace) -> None:
     assert agents["people"] is None and agents["connections"] is None
 
 
-def test_coverage_points_and_events(local: SimpleNamespace) -> None:
-    pid = local.project_id
+def test_coverage_points_and_events(quiet: SimpleNamespace) -> None:
+    pid = quiet.project_id
     _run(pid, trigger="initial", summary=_coverage(10, 0, "old"), days_ago=200)
     imported = _run(
         pid, trigger="initial", summary=_coverage(10, 0, _stamp(9)), days_ago=9
@@ -220,7 +243,7 @@ def test_coverage_points_and_events(local: SimpleNamespace) -> None:
     failed = _run(pid, status="failed", summary={"error": "boom"}, days_ago=3)
     with portal_db.get_session() as session:  # queued / running: never charted
         session.add(ScanRun(project_id=pid, trigger="manual", status="queued"))
-    body = _overview(local.client)
+    body = _overview(quiet.client)
     assert body["coverage"]["points"] == [
         {
             "run_id": imported,
@@ -263,17 +286,17 @@ def test_coverage_points_and_events(local: SimpleNamespace) -> None:
     }
     # A newer interruption is the last failure; an ok run after it clears it.
     interrupted = _run(pid, status="interrupted", days_ago=2)
-    assert _overview(local.client)["last_failure"] == {
+    assert _overview(quiet.client)["last_failure"] == {
         "run_id": interrupted,
         "at": _stamp(2),
         "message": "The scan was interrupted.",
     }
     _run(pid, trigger="hook", days_ago=1)
-    assert _overview(local.client)["last_failure"] is None
+    assert _overview(quiet.client)["last_failure"] is None
 
 
-def test_coverage_points_are_thinned_to_120(local: SimpleNamespace) -> None:
-    pid = local.project_id
+def test_coverage_points_are_thinned_to_120(quiet: SimpleNamespace) -> None:
+    pid = quiet.project_id
     with portal_db.get_session() as session:
         # Only these runs (not the first Initialize's own scan).
         session.exec(delete(ScanRun).where(ScanRun.project_id == pid))
@@ -291,7 +314,7 @@ def test_coverage_points_are_thinned_to_120(local: SimpleNamespace) -> None:
         session.add_all(runs)
         session.flush()
         ids = [run.id for run in runs]
-    points = _overview(local.client)["coverage"]["points"]
+    points = _overview(quiet.client)["coverage"]["points"]
     assert len(points) == 120
     assert points[0]["run_id"] == ids[0] and points[-1]["run_id"] == ids[-1]
     assert [p["run_id"] for p in points] == sorted({p["run_id"] for p in points})

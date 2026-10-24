@@ -1342,7 +1342,8 @@ def test_a_sync_past_the_hard_limit_is_killed(
     root = _indexed_repo(tmp_path)
 
     async def main() -> Any:
-        host = _host(fake_cg, tmp_path / "data", sync_wait=10, sync_hard_limit=2)
+        # Long enough for the fake to record its start under xdist load.
+        host = _host(fake_cg, tmp_path / "data", sync_wait=10, sync_hard_limit=5)
         await host.start()
         try:
             return await _search(host, root)
@@ -1464,7 +1465,8 @@ def test_a_dropped_http_connection_does_not_kill_the_sync_or_the_host(
                 await _until(lambda: len(_starts(fake_cg)) == 1)
                 tg.cancel_scope.cancel()  # what a dropped connection does
             await _until(lambda: len(_ends(fake_cg)) == 1)
-            await anyio.sleep(0.1)
+            # The host records the sync after the child exits: wait for it.
+            await _until(lambda: host._fresh[1].synced_fp is not None)
             synced = host._fresh[1].synced_fp
             after = await _search(host, root)
             return host.state, synced, after

@@ -90,6 +90,7 @@ Inside the data directory:
 | `postgres/` | The portal database's files (projects, settings, encrypted keys, scan history), one subdirectory per Postgres major version |
 | `postgres.password` | The database password, generated on the first `whygraph up` (mode `0600`) |
 | `secret.key` | The encryption key for the keys and tokens stored in the database |
+| `projects/` | Each project's WhyGraph history, `projects/<org>/<slug>/whygraph.db` (`projects/local/<slug>/` in local mode), with its `project.json` identity file and migration `backups/`. Back it up with the rest of the data directory |
 | `backups/` | Database dumps from `whygraph backup` and the automatic pre-upgrade dump |
 | `runs/` | Scan progress and log files |
 | `logs/codegraph.log` (and `.1`) | The hosted CodeGraph server's log, rotated at 1 MiB. Disposable |
@@ -114,10 +115,10 @@ the database container too. See [Upgrading](upgrading.md).
 There is no uninstall command. To remove WhyGraph from a machine:
 
 1. Remove each project in the portal and let it strip what it wrote to the repository (the git hooks
-   and markers; see [Adding projects](projects.md)). Your repositories keep their `.whygraph/` and
-   `.codegraph/` data either way.
+   and markers; see [Adding projects](projects.md)). Your repositories keep their `.codegraph/` index and
+   the history stays in the data directory either way, until you delete the data directory in step 3.
 2. `whygraph down`.
-3. Delete the data directory (`~/.local/share/whygraph`), `~/.config/whygraph`, and the `whygraph`
+3. Delete the data directory (`~/.local/share/whygraph`; this deletes **all project history** too, so copy `projects/` first if you want it), `~/.config/whygraph`, and the `whygraph`
    and `whygraph-mcp` scripts the installer put on your `PATH` (`~/.local/bin` by default).
 4. Optionally, remove the images (`docker image ls ghcr.io/mtrdesign/whygraph`, then
    `docker image rm` the ones listed, and the same for `postgres`) and the network

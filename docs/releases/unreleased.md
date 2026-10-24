@@ -70,6 +70,8 @@ fixes and additions.
 
 ## Breaking changes
 
+This release removes `whygraph scan`, and moves each project's WhyGraph history out of the repository into the portal's data directory.
+
 - **`whygraph scan` is removed.** It is now a stub like `whygraph init` and `whygraph serve`: it prints a
   pointer to the portal on stderr and exits with status `2`. The portal runs every scan itself, as an
   internal child process that nobody types; use **Scan now** (Quick rescan or Full rescan) or the git
@@ -87,6 +89,23 @@ fixes and additions.
 - **The production run log's first line changed.** It reads `$ scan <flags>` (for example
   `$ scan --skip-analyze --no-remote`) instead of `$ whygraph scan <flags>`. Local mode logs the real
   command line of the scan child.
+- **A project's history moves to the data directory.** Commit descriptions, rationale cards and chats
+  (`whygraph.db`) are now in `<data>/projects/<org>/<slug>/` (`~/.local/share/whygraph/projects/local/<slug>/`
+  locally, `/data/projects/<org>/<slug>/` in production), in both modes, so `git clean -xdf`, a re-clone
+  or a moved checkout no longer loses them. `.codegraph/` stays in the repository. Migration backups go
+  to `projects/<org>/<slug>/backups/`.
+- **An in-repo `.whygraph/whygraph.db` is never read.** A database from 2.0.0 or 1.x left in a
+  repository is ignored, so a project added after this release starts with empty history.
+- **Removing a project differs by mode.** Local mode keeps the history unless you tick **Also delete
+  history** (typed name required); production deletes it unless an admin ticks **Keep history**. Adding
+  the same repository again re-attaches kept history (matched by its `origin` remote, by path when there
+  is none, or by GitHub repository id in production); an unrelated repository with the same name gets
+  `<name>-2`. A production re-import does not restore access restrictions. A linked project has no
+  history and never deletes any; deleting an organization removes `projects/<org>/`.
+- **Back up the whole data directory.** `whygraph backup` is still `pg_dump` only, so it no longer covers
+  everything: the data directory holds both `postgres/` and `projects/`.
+- **`make db`** opens the project's data-directory database; re-copy `docker-compose.example.yml` to
+  `docker-compose.yml` to get it.
 
 ## Upgrade path
 

@@ -39,8 +39,8 @@ Two things differ from a `whygraph.toml`:
   are started with none of your shell's variables - `ANTHROPIC_API_KEY`, `GH_TOKEN` and the rest do not
   reach them. A project's own key for a provider wins over the inherited one, and an inherited key is
   never sent to a project that overrides that provider's endpoint (its key card says so).
-- **Only some keys can be set.** Database paths are always `<repo>/.whygraph/whygraph.db` and
-  `<repo>/.codegraph/codegraph.db`. Importing a repository's `whygraph.toml` takes models, the
+- **Only some keys can be set.** The WhyGraph database is always in the portal's data directory (`projects/<org>/<slug>/whygraph.db`) and the
+  CodeGraph index always at `<repo>/.codegraph/codegraph.db`. Importing a repository's `whygraph.toml` takes models, the
   `[analyze]` / `[rationale]` / `[chat]` tuning keys, and `[scan].forge`, `remote`, `default_branch`,
   `hooks` and `serve_codegraph`. It never takes endpoints, database paths or the log file, drops any setting for the removed
   [`claude-cli` provider](llm-providers.md#claude-cli-removed), and reports what it dropped. Endpoints

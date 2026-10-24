@@ -22,6 +22,7 @@ flowchart LR
         db[("Portal database<br/>projects, settings,<br/>encrypted keys, scan history")]
     end
     repos[("Your repos<br/>(shared folders)")]
+    hist[("Project history<br/>(data directory,<br/>projects/)")]
 
     browser --> api
     agents -- "HTTP MCP" --> api
@@ -30,7 +31,8 @@ flowchart LR
     api -- "stdio MCP" --> cg
     cg -- "reads .codegraph" --> repos
     runner -- "scan child" --> repos
-    api -- "reads .whygraph + .codegraph" --> repos
+    api -- "reads .codegraph" --> repos
+    api -- "reads and writes history" --> hist
     hooks["git hooks"] -- "POST /api/projects/&lt;slug&gt;/scans" --> api
 ```
 
@@ -42,16 +44,19 @@ flowchart LR
 | The encryption key for those keys and tokens, and database backups | The data directory, as `secret.key` and `backups/` |
 | The [usage ledger](usage.md): one row per LLM call (counts, cost, model, who and which project - never prompt or chat text), budgets, and price overrides | The portal database, kept 400 days |
 | [Agent activity](agents.md#agent-activity): how many MCP and connected-portal calls each project got per day, by call name and caller - counts only | The portal database, kept 400 days |
-| A project's evidence, descriptions, rationale cache and chat history | The repository itself, in `.whygraph/whygraph.db` |
+| A project's evidence, descriptions, rationale cache and chat history | The portal's data directory, in `projects/<org>/<slug>/whygraph.db` (`projects/local/<slug>/` in local mode), beside a small `project.json` that says which repository it belongs to |
 | A project's CodeGraph index | The repository itself, in `.codegraph/` |
 | A [platform project](platform-projects.md)'s history, descriptions and rationale | The platform, never your machine. Your portal keeps only the link: the platform's address, the project's name and a **connection token**, encrypted |
 | The hosted CodeGraph server | One `codegraph serve --mcp` process inside the portal container, shared by every project: about 130-300 MiB while it runs, stopped after 10 idle minutes and started again by the next call |
 | The folders, port and image the portal was started with | `~/.config/whygraph` on your host |
 
-Because each project's databases stay in its own repository, removing a project from the portal
-never deletes your history, and a 1.x repository keeps the data it already has. See
-[Upgrading](upgrading.md). The portal's own database is the one thing to back up; see
-[Backup and restore](backup.md).
+A project's history lives in the data directory, not in the repository, so `git clean -xdf`, a fresh
+clone or a moved checkout does not lose it. Removing a project keeps its history in local mode (unless
+you tick **Also delete history**) and deletes it in production (unless you tick **Keep history**), and
+adding the same repository again re-attaches what was kept; see [Adding projects](projects.md). A
+`.whygraph/whygraph.db` that an earlier release left in a repository is not read; see
+[Upgrading](upgrading.md). Back up the **whole data directory**, which holds both the portal database
+and the project history; see [Backup and restore](backup.md).
 
 ## Where to next
 

@@ -114,7 +114,9 @@ the checks change:
   ignored. Projects are found by GitHub's numeric repository and installation ids, never by name.
 - **A repository that tracks WhyGraph's state is refused.** A repository whose commits contain
   `.whygraph/` or `.codegraph/` is not imported, and a fetch that finds them on the default branch
-  fails before the checkout: a committed database would otherwise be served to every member. See
+  fails before the checkout: a committed index, marker or backup would otherwise be served to every
+  member. (A repository cannot influence where a project's WhyGraph database is: it is always in the
+  portal's data directory.) See
   [Run in production](../deploy/production.md#repositories-that-track-whygraphs-state).
 - **Git ignores global and system config.** Every git process for a server copy runs with
   `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`, so an `insteadOf`, `http.*` or `include`
@@ -248,7 +250,7 @@ A scan runs as a child process inside the project's folder, in Python's safe pat
 ### Symbolic links
 
 The portal never follows a symbolic link out of a project's folder. When `.whygraph/`, `.codegraph/`,
-either database, `.gitignore`, `whygraph.toml`, a portal marker, an agent config file or a bundled
+the CodeGraph index, `.gitignore`, `whygraph.toml`, a portal marker, an agent config file or a bundled
 agent folder (such as `.claude/`) is a link, the portal refuses it with an `unsafe_path` error:
 initializing, the Explorer, Chat, the MCP endpoint and scans all stop for that project, a
 `whygraph.toml` link is not imported, and removing the project leaves the linked files alone. Replace
@@ -293,8 +295,8 @@ anything that reads a repository.
 ### Configuration from a repository
 
 An imported `whygraph.toml` contributes only an allowlist of settings (models, tuning keys and a few
-`[scan]` keys). Database paths are always `<repo>/.whygraph/whygraph.db` and
-`<repo>/.codegraph/codegraph.db`, whatever a file says. A `remote` or `default_branch` value that could be
+`[scan]` keys). The WhyGraph database is always in the portal's data directory and the CodeGraph index
+always at `<repo>/.codegraph/codegraph.db`, whatever a file says. A `remote` or `default_branch` value that could be
 read by git as an option is dropped.
 
 A committed `codegraph.json` is CodeGraph's own configuration and is honoured as written: `extensions`,
@@ -317,7 +319,9 @@ and never runs a scan itself.
 Local mode clones nothing: a local project is a folder you shared. In production the portal clones
 only a repository the GitHub App covers, from `WHYGRAPH_GITHUB_URL` (`https` except on loopback), with
 a restricted protocol list, into `repos/<org>/<project>` under its data directory. It removes a failed
-clone it created and will not delete a directory it did not.
+clone it created and will not delete a directory it did not. The code that deletes a project's history
+works the same way: it only removes a real directory (never a symbolic link) at the expected depth
+under `projects/`.
 
 A clone never contains a symbolic link: it is made with `core.symlinks=false` in its own git config,
 and every sync checks out the same way, so a link a repository commits arrives as a plain file holding

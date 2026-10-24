@@ -66,13 +66,22 @@ read-only access to an organization cannot.
 | Graph tools (`codegraph_*`, at `/mcp/<slug>/code`) | Your machine, from your own index; nothing is sent to the platform |
 | Explorer, Chat, models, keys, descriptions | The platform. The local routes refuse and point there |
 
-A linked project **never opens a local WhyGraph database**: there is no `.whygraph/whygraph.db` in
-the checkout, and the code that would open one refuses. Its scans are **CodeGraph only**: no git
+A linked project **never opens a local WhyGraph database**: it has no `whygraph.db` anywhere (not in the
+checkout and not in the data directory), and the code that would open one refuses. It never has
+history to delete either. Its scans are **CodeGraph only**: no git
 crawl, no LLM and no database. A scan request that asks for descriptions is refused.
 
 The only settings a linked project keeps locally are `[scan].hooks`, which git hooks rescan the
 checkout, and `[scan].serve_codegraph`, whether the portal serves the CodeGraph tools. Every other setting is the platform's, and the portal answers a change with `403
 managed_on_platform` and the platform's address. The Explorer and Chat open on the platform.
+
+## Moving a local project to a platform
+
+To link a checkout that is already a local project, **remove** the local project first, then link
+the checkout. Leave **Also delete history** unticked when you remove it: the local history stays in
+the portal's data directory (`projects/local/<slug>/`) and is yours to keep or delete by hand. A linked
+project never opens that history and never deletes it, so linking and later removing the link leave it
+alone. The platform builds its own history from the repository on GitHub.
 
 ## What leaves your machine
 

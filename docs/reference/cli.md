@@ -63,7 +63,7 @@ command the Docker runtime runs inside the image.
 |---|---|---|
 | `--host` | `127.0.0.1` | Bind address. Outside the image, anything but a loopback address needs `--dev-expose`. |
 | `--port` | `$WHYGRAPH_PORT` or `8765` | Port to bind. It is also the port the browser and agents use, so the allowed `Host` / `Origin` values and the agent MCP URLs are built from it. |
-| `--data DIR` | `$WHYGRAPH_DATA` or `~/.local/share/whygraph` | Portal data directory: the encryption key, scan run files, cloned repositories. Keep it outside every project folder. |
+| `--data DIR` | `$WHYGRAPH_DATA` or `~/.local/share/whygraph` | Portal data directory: the encryption key, scan run files, cloned repositories, each project's history (`projects/`). Keep it outside every project folder. |
 | `--dev-expose` | off | Allow a non-loopback `--host` outside the image. |
 
 The portal keeps its own data in Postgres, named by `WHYGRAPH_DATABASE_URL` (plus an optional
@@ -99,7 +99,7 @@ an organization's subdomain, and the guard described above is replaced by the on
 [security model](../portal/security.md#production-mode) page.
 
 The portal never follows a symbolic link out of a project's folder, since a repository's content
-(especially a production portal's copy of a GitHub repository) is not trusted. When `.whygraph/`, `.codegraph/`, either database,
+(especially a production portal's copy of a GitHub repository) is not trusted. When `.whygraph/`, `.codegraph/`, the CodeGraph index,
 `.gitignore`, `whygraph.toml`, a portal marker, an agent config file or a bundled agent folder
 (such as `.claude/`) is a symlink, the portal refuses it with an `unsafe_path` error: Initialize,
 the Explorer, Chat, the MCP endpoint and scans all stop for that project, a `whygraph.toml` link is

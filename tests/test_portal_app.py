@@ -149,6 +149,10 @@ def make_repo(parent: Path, name: str, *, remote: str | None = None) -> Path:
     return Path(os.path.realpath(root))
 
 
+_NO_MAINTENANCE = ("-c", "maintenance.auto=false", "-c", "gc.auto=0")
+"""For a template's commits: no detached auto-maintenance writing into it mid-copy."""
+
+
 def _build_repo(root: Path) -> Path:
     root.mkdir(parents=True)
     _git(root, "init", "-q")
@@ -157,10 +161,10 @@ def _build_repo(root: Path) -> Path:
     _git(root, "config", "commit.gpgsign", "false")
     (root / "sample.py").write_text("line one\nline two\n")
     _git(root, "add", "sample.py")
-    _git(root, "commit", "-q", "-m", "first commit")
+    _git(root, *_NO_MAINTENANCE, "commit", "-q", "-m", "first commit")
     (root / "sample.py").write_text("line one\nline two\nline three\n")
     _git(root, "add", "sample.py")
-    _git(root, "commit", "-q", "-m", "second commit")
+    _git(root, *_NO_MAINTENANCE, "commit", "-q", "-m", "second commit")
     return root
 
 

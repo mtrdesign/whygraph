@@ -1084,6 +1084,7 @@ describe("Project settings (screen 10)", () => {
       hooks: null,
       agent_files: [],
       checkout_deleted: false,
+      history_deleted: false,
       warnings: ["left .mcp.json: symbolic link"],
     });
     const user = userEvent.setup();
@@ -1092,7 +1093,9 @@ describe("Project settings (screen 10)", () => {
     const dialog = await screen.findByTestId("remove-dialog");
     // Plain copy (SET-9): no "whygraph scan works in it again".
     expect(dialog).toHaveTextContent("Your repository stays as it is.");
-    expect(dialog).toHaveTextContent(".whygraph/");
+    expect(dialog).toHaveTextContent("history stays in the portal");
+    expect(within(dialog).getByRole("checkbox", { name: /Also delete history/ })).not.toBeChecked();
+    expect(within(dialog).queryByLabelText(/to confirm deleting/)).toBeNull();
     expect(dialog).not.toHaveTextContent("whygraph scan");
     await user.click(within(dialog).getByRole("checkbox", { name: /Also remove the agent MCP entries/ }));
     await user.click(within(dialog).getByRole("button", { name: "Remove project" }));
@@ -1100,11 +1103,45 @@ describe("Project settings (screen 10)", () => {
     expect(calls("DELETE", "/api/projects/alpha")[0].body).toEqual({
       strip_agent_entries: true,
       confirm_tracked: [],
+      delete_history: false,
     });
     const done = await screen.findByTestId("remove-done");
     expect(done).toHaveTextContent("symbolic link");
     await user.click(within(done).getByRole("button", { name: "Back to projects" }));
     await waitFor(() => expect(here(router)).toBe("/"));
+  });
+
+  it("ticking Also delete history requires the typed name and sends delete_history", async () => {
+    handlers["DELETE /api/projects/alpha"] = () => ({
+      removed: "alpha",
+      hooks: null,
+      agent_files: [],
+      checkout_deleted: false,
+      history_deleted: false,
+      warnings: ["history not deleted: refused"],
+    });
+    const user = userEvent.setup();
+    mount("/p/alpha/settings");
+    await user.click(await screen.findByRole("button", { name: "Remove project" }));
+    const dialog = await screen.findByTestId("remove-dialog");
+    const remove = within(dialog).getByRole("button", { name: "Remove project" });
+    await waitFor(() => expect(remove).toBeEnabled());
+    await user.click(within(dialog).getByRole("checkbox", { name: /Also delete history/ }));
+    expect(dialog).toHaveTextContent(/this cannot be undone/);
+    expect(remove).toBeDisabled();
+    const name = (await screen.findByTestId("remove-dialog")).querySelector("#confirm-name") as HTMLInputElement;
+    await user.type(name, "Alpha");
+    expect(remove).toBeEnabled();
+    await user.click(remove);
+    await waitFor(() => expect(calls("DELETE", "/api/projects/alpha")).toHaveLength(1));
+    expect(calls("DELETE", "/api/projects/alpha")[0].body).toEqual({
+      strip_agent_entries: false,
+      confirm_tracked: [],
+      delete_history: true,
+      confirm_name: "Alpha",
+    });
+    // The server refused the delete it was asked for: a failure, not done.
+    expect(await screen.findByTestId("history-not-deleted")).toBeInTheDocument();
   });
 
   it("a GitHub project needs its name typed, and a tracked file is confirmed from the 409", async () => {
@@ -1125,7 +1162,7 @@ describe("Project settings (screen 10)", () => {
           },
         };
       }
-      return { removed: "alpha", hooks: null, agent_files: [], checkout_deleted: true, warnings: [], echo: body };
+      return { removed: "alpha", hooks: null, agent_files: [], checkout_deleted: true, history_deleted: false, warnings: [], echo: body };
     };
     const user = userEvent.setup();
     mount("/p/alpha/settings");
@@ -1147,6 +1184,7 @@ describe("Project settings (screen 10)", () => {
     expect(calls("DELETE", "/api/projects/alpha")[1].body).toEqual({
       strip_agent_entries: true,
       confirm_tracked: [".mcp.json"],
+      delete_history: false,
       confirm_name: "Alpha",
     });
     expect(await screen.findByTestId("remove-done")).toHaveTextContent("The checkout was deleted");

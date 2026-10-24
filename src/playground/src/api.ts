@@ -748,6 +748,8 @@ export interface DeleteProjectBody {
   strip_agent_entries?: boolean;
   confirm_tracked?: string[];
   confirm_name?: string;
+  /** Omitted: the server resolves it from the mode. Ignored for a linked project. */
+  delete_history?: boolean;
 }
 
 export interface DeleteProjectResult {
@@ -755,6 +757,7 @@ export interface DeleteProjectResult {
   hooks: unknown;
   agent_files: FileOutcome[];
   checkout_deleted: boolean;
+  history_deleted: boolean;
   warnings: string[];
   // A removed linked project (M2e): whether this machine's token was revoked on the platform.
   token_revoked?: boolean;

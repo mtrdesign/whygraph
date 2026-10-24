@@ -297,10 +297,10 @@ export function ProjectSettingsPage() {
           danger
           description={
             production
-              ? "Removes the server copy and every scan. The repository on GitHub is not changed."
+              ? "The server copy and the project's history are deleted unless you keep the history. The repository on GitHub is not changed."
               : linked
                 ? "Revokes this machine's access to the platform project and removes its git hooks. The project on the platform and your repository are not changed."
-                : "Unregisters the project and removes its git hooks. Your repository and its .whygraph folder are not deleted."
+                : "Unregisters the project and removes its git hooks. Your repository is not deleted. Its history stays in the portal and comes back if you add the repository again."
           }
         >
           <div>

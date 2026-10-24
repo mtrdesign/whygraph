@@ -113,6 +113,7 @@ const FIELD_LABELS: Record<string, string> = {
   projects: "Projects",
   tokens_revoked: "Connection tokens revoked",
   checkout_deleted: "Checkout deleted",
+  history_deleted: "History deleted",
   arrival: "How",
   input_per_mtok: "Input price",
   output_per_mtok: "Output price",

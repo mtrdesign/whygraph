@@ -298,19 +298,22 @@ describe("DetectedPanel", () => {
     ],
     custom_db_paths: [
       {
-        key: "whygraph_db",
-        path: "/data/old/whygraph.db",
+        key: "codegraph_db",
+        path: "/data/old/codegraph.db",
         exists: true,
-        message: "WhyGraph data at /data/old/whygraph.db will not be used; the portal reads .whygraph/whygraph.db.",
+        message: "CodeGraph data at /data/old/codegraph.db will not be used; the portal reads .codegraph/codegraph.db.",
       },
-      { key: "codegraph_db", path: "/gone/codegraph.db", exists: false, message: "gone" },
+      { key: "codegraph_db", path: "/gone/codegraph2.db", exists: false, message: "gone" },
     ],
   };
 
   it("lists the existing db, the hooks, each agent entry and the custom path warning", () => {
     render(<DetectedPanel detected={detected} removed={[]} onActionChange={() => {}} />);
     const panel = screen.getByTestId("detected-panel");
-    expect(panel).toHaveTextContent("Existing database");
+    expect(panel).toHaveTextContent("Existing history");
+    expect(panel).toHaveTextContent("History found in the portal (re-attached)");
+    expect(panel).not.toHaveTextContent("reused and migrated");
+    expect(panel).toHaveTextContent("earlier WhyGraph");
     expect(panel).toHaveTextContent("post-commit, post-merge");
     expect(panel).toHaveTextContent("Claude Code entry");
     expect(panel).toHaveTextContent("committed to git");
@@ -318,8 +321,21 @@ describe("DetectedPanel", () => {
     // Only a custom DB that still exists is warned about, with its path.
     const warnings = screen.getAllByTestId("custom-db-warning");
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toHaveTextContent("/data/old/whygraph.db");
+    expect(warnings[0]).toHaveTextContent("/data/old/codegraph.db");
     expect(warnings[0]).toHaveTextContent(/will not be used/);
+  });
+
+  it("a re-attached history alone does not claim an earlier WhyGraph", () => {
+    render(
+      <DetectedPanel
+        detected={{ existing_db: true, managed_hooks: [], detected_agents: [], custom_db_paths: [] }}
+        removed={[]}
+        onActionChange={() => {}}
+      />,
+    );
+    const panel = screen.getByTestId("detected-panel");
+    expect(panel).toHaveTextContent("History found in the portal (re-attached)");
+    expect(panel).not.toHaveTextContent("earlier WhyGraph");
   });
 
   it("offers migrate / remove per entry and reports the choice", async () => {

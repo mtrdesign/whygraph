@@ -1342,7 +1342,8 @@ def test_a_sync_past_the_hard_limit_is_killed(
     root = _indexed_repo(tmp_path)
 
     async def main() -> Any:
-        host = _host(fake_cg, tmp_path / "data", sync_wait=10, sync_hard_limit=2)
+        # Long enough for the fake to record its start under xdist load.
+        host = _host(fake_cg, tmp_path / "data", sync_wait=10, sync_hard_limit=5)
         await host.start()
         try:
             return await _search(host, root)

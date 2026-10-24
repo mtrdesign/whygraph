@@ -29,7 +29,6 @@ What is **not** recorded:
 - **A call that failed or was interrupted.** A provider error, a stream that dropped, or a closed
   browser tab writes nothing, so the ledger slightly under-counts. A call that finished but reported no
   usage is recorded with no tokens and no cost.
-- **Headless `whygraph scan`** (CI, a plain checkout): it has no portal to write to.
 - **A [linked project](platform-projects.md)'s calls** on your local portal. They run on the platform,
   which records them against the connection's owner. Your local portal records nothing for them.
 - **Anything the provider bills you for outside WhyGraph**, and your own provider's discounts.

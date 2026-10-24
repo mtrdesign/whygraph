@@ -3,7 +3,7 @@
 Wraps the SQLModel-via-Alembic schema management behind one idempotent
 ``ensure_initialized()`` entry point.
 
-Used by ``whygraph scan`` and the portal (which bootstraps a project DB
+Used by the scan child and the portal (which bootstraps a project DB
 on Initialize, under the project context), and reusable from tests that
 need a fully-materialized DB on disk.
 """
@@ -25,8 +25,7 @@ def alembic_config() -> AlembicConfig:
     Does *not* depend on the repo-root ``alembic.ini`` — that file is
     not shipped in the wheel (packaging is ``packages = ["src/whygraph"]``).
     The ``script_location`` is resolved at runtime from the installed
-    package location, so this works both in-tree and after
-    ``uv tool install``.
+    package location, so this works both in-tree and in the image.
 
     Returns
     -------

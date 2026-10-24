@@ -13,7 +13,7 @@ bound with :func:`use_usage_sink` receives a :class:`UsageRecord` per call.
   beside :func:`whygraph.core.context.use_project`.
 - In a scan child the portal manages, the sink turns each record into a
   ``usage`` event on the JSON progress stream.
-- Unbound (a headless ``whygraph scan``, a test) every function here is a
+- Unbound (a test) every function here is a
   no-op. Strict mode does not apply: spending without a sink is allowed.
 
 The binding lives in a :class:`contextvars.ContextVar`, like the project

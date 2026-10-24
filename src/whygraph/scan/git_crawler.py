@@ -12,7 +12,7 @@ sees, ``git diff-tree -M -C`` produces per-file structural records
 (``A``/``M``/``D``/``R``/``C``, ``renamed_from``, line counts) that
 become rows keyed by ``commit_sha``. Existence of file-change rows is
 checked independently of the commit row, so upgrading from a pre-Phase-2
-WhyGraph DB and re-running ``whygraph scan`` backfills the index without
+WhyGraph DB and re-running a scan backfills the index without
 needing a separate command.
 
 Branch membership is computed, not assumed. Every row records whether it
@@ -184,10 +184,9 @@ def _reconcile_branch_membership(
 
     Notes
     -----
-    The demoted SHAs are logged at ``INFO``, which
-    :func:`whygraph.core.logger.scan_log_redirect` lands in
-    ``.whygraph/scan.log``. The console warning stays a count — an
-    unbounded SHA list has no place in a one-line-per-phase panel.
+    The demoted SHAs are logged at ``DEBUG``, below the scan child's
+    ``INFO`` run log: an unbounded SHA list has no place there. The
+    warning stays a count.
     """
     if not default_shas or skip:
         return (0, 0)
@@ -205,7 +204,7 @@ def _reconcile_branch_membership(
     _set_flag(session, demoted_shas, 0)
 
     if demoted_shas:
-        _log.info(
+        _log.debug(
             "demoted %d commits off the default branch: %s",
             len(demoted_shas),
             " ".join(sorted(demoted_shas)),

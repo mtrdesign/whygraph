@@ -68,6 +68,26 @@ fixes and additions.
   path mode (`-P`, `PYTHONSAFEPATH=1`), which leaves the working folder off the module search path. See
   [Repository content is not trusted](../portal/security.md#repository-content-is-not-trusted).
 
+## Breaking changes
+
+- **`whygraph scan` is removed.** It is now a stub like `whygraph init` and `whygraph serve`: it prints a
+  pointer to the portal on stderr and exits with status `2`. The portal runs every scan itself, as an
+  internal child process that nobody types; use **Scan now** (Quick rescan or Full rescan) or the git
+  hooks. A CI job that ran `whygraph scan` has no replacement.
+- **Docker is the only install.** The `uv tool install`, `pipx` and `git+https` routes (which only ever
+  gave the headless scan) are gone. The PyPI name `whygraph` belongs to an unrelated project.
+- **Credentials from your environment no longer apply anywhere.** The one-shot shim no longer passes
+  `GH_TOKEN`, `GITHUB_TOKEN` or the provider API keys into its container, and ambient `GH_TOKEN` /
+  `GITHUB_TOKEN` are not read by any scan. A `[scan].token` in a `whygraph.toml` is imported **once**,
+  into the project's encrypted GitHub token, and is never read at scan time.
+- **`whygraph.toml` is only an import.** The portal reads it once when you add a project; nothing else
+  reads it. The `whygraph_db` and `codegraph_db` overrides, the top-level `log_level` and the `[logging]`
+  table are gone.
+- **`.whygraph/scan.log` is gone.** A run's full log is on its page under **Scans**.
+- **The production run log's first line changed.** It reads `$ scan <flags>` (for example
+  `$ scan --skip-analyze --no-remote`) instead of `$ whygraph scan <flags>`. Local mode logs the real
+  command line of the scan child.
+
 ## Upgrade path
 
 1. Re-run the installer and `whygraph up` as usual.

@@ -5,8 +5,7 @@ Postgres, reached through ``$WHYGRAPH_DATABASE_URL`` (plus an optional
 ``$WHYGRAPH_DATABASE_PASSWORD_FILE``), with its own Alembic chain
 (``portal/migrations``). It is deliberately separate from every project's
 ``.whygraph/whygraph.db``, which stays SQLite in its repo: the two have
-unrelated lifecycles, and a project database must stay usable by the
-headless CLI without a portal.
+unrelated lifecycles.
 
 The data directory is ``$WHYGRAPH_DATA`` when set, else
 ``~/.local/share/whygraph``. It holds ``secret.key``

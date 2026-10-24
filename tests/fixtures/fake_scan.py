@@ -1,7 +1,7 @@
-"""A stand-in for ``whygraph scan --progress json``, for the scan runner tests.
+"""A stand-in for the portal's scan child, for the scan runner tests.
 
 Used through ``WHYGRAPH_SCAN_CMD="<python> tests/fixtures/fake_scan.py <options>"``;
-the runner appends ``--progress json --managed-by-portal <flags>``, which
+the runner appends its ``<flags>``, which
 land in the recorded argv. Options (all before the runner's own flags):
 
 ``--record FILE``        append ``{"argv", "env", "cwd"}`` as one JSON line

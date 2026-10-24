@@ -58,11 +58,11 @@ class CodeGraphCrawler(Crawler):
     strict : bool, optional
         Record a :class:`CodeGraphBootstrapError` on :attr:`Crawler.error`
         (failing the scan) instead of :attr:`warning`. Used by
-        ``whygraph scan --codegraph-only``, where the index is the whole job.
+        the scan child's ``--codegraph-only``, where the index is the whole job.
     require_lock_dir : bool, optional
         A portal-managed child: refuse to run CodeGraph unless the writer
         lock directory is configured (``WHYGRAPH_CODEGRAPH_LOCK_DIR``), so
-        it never writes the index unlocked. Default ``False`` (a headless scan).
+        it never writes the index unlocked. Default ``False`` (tests).
 
     Attributes
     ----------

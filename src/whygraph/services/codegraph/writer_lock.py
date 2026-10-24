@@ -18,7 +18,7 @@ root, bounded by the number of projects.
 
 The lock directory comes from :func:`configure_lock_dir` (the portal), else
 ``$WHYGRAPH_CODEGRAPH_LOCK_DIR`` (a scan child), else there is no file lock
-and only the thread lock applies (tests, a headless scan).
+and only the thread lock applies (tests).
 """
 
 from __future__ import annotations

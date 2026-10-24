@@ -2,7 +2,7 @@
 
 The child scanner is ``tests/fixtures/fake_scan.py``, injected through
 ``WHYGRAPH_SCAN_CMD`` (the runner ``shlex.split``s it and appends its own
-``--progress json --managed-by-portal <flags>``). The fake records each
+``<flags>``). The fake records each
 invocation's argv / env / cwd to a JSONL file and can be held while a
 "hold" file exists, which is how the tests keep a scan running.
 """
@@ -121,6 +121,7 @@ def scanner(
         for key, value in opts.items():
             flag = f"--{key.replace('_', '-')}"
             parts += [flag] if value is True else [flag, str(value)]
+        parts.append("--")  # what follows is the runner's own flags
         monkeypatch.setenv("WHYGRAPH_SCAN_CMD", shlex.join(parts))
 
     def calls() -> list[dict]:
@@ -135,9 +136,9 @@ def scanner(
 
 
 def runner_flags(call: dict) -> list[str]:
-    """The part of a recorded argv the runner added (from ``--progress`` on)."""
+    """The part of a recorded argv the runner added (after the ``--`` sentinel)."""
     argv = call["argv"]
-    return argv[argv.index("--progress") :]
+    return argv[argv.index("--") + 1 :]
 
 
 def wait_for(predicate: Callable[[], Any], timeout: float = 20.0) -> Any:
@@ -290,30 +291,14 @@ def test_trigger_to_flags(trigger: str, analyze: bool | None, flags: list[str]) 
     resolved = resolve_analyze(trigger, analyze)
     assert scan_flags(trigger, resolved) == flags
     assert resolved is (flags == [])
-    argv = scan_argv(
-        trigger, resolved, {"WHYGRAPH_SCAN_CMD": "whygraph scan --no-codegraph"}
-    )
-    assert argv == [
-        "whygraph",
-        "scan",
-        "--no-codegraph",
-        "--progress",
-        "json",
-        "--managed-by-portal",
-        *flags,
-    ]
+    argv = scan_argv(trigger, resolved, {"WHYGRAPH_SCAN_CMD": "scanner --no-codegraph"})
+    assert argv == ["scanner", "--no-codegraph", *flags]
 
 
 def test_default_argv_runs_this_interpreter() -> None:
     argv = scan_argv("hook", False, {})
-    assert argv[:5] == [sys.executable, "-P", "-m", "whygraph", "scan"]
-    assert argv[5:] == [
-        "--progress",
-        "json",
-        "--managed-by-portal",
-        "--skip-analyze",
-        "--no-remote",
-    ]
+    assert argv[:4] == [sys.executable, "-P", "-m", "whygraph.scan.child"]
+    assert argv[4:] == ["--skip-analyze", "--no-remote"]
 
 
 def test_trigger_precedence() -> None:
@@ -644,7 +629,7 @@ def test_first_scan_is_initial_and_argv_per_trigger(
         assert (by["label"] if by else None) == (None if trigger == "hook" else "Tess")
     calls = scanner.calls()
     assert [runner_flags(c) for c in calls] == [
-        ["--progress", "json", "--managed-by-portal", *flags]
+        list(flags)
         for flags in (
             ["--skip-analyze"],
             ["--skip-analyze"],
@@ -764,8 +749,8 @@ def test_single_flight_and_union_coalescing(
     assert wait_run(portal, "demo", pending)["status"] == "ok"
     calls = scanner.calls()
     assert len(calls) == 3  # the burst became exactly one follow-up
-    assert runner_flags(calls[1])[3:] == ["--skip-analyze", "--no-remote"]
-    assert runner_flags(calls[2])[3:] == []  # the merged run analyzes and is remote
+    assert runner_flags(calls[1]) == ["--skip-analyze", "--no-remote"]
+    assert runner_flags(calls[2]) == []  # the merged run analyzes and is remote
 
 
 def test_global_cap_of_two(
@@ -1056,7 +1041,7 @@ def test_restart_interrupts_running_and_requeues_queued(
         with portal_db.get_session() as session:
             assert session.get(ScanRun, ids[2]).status == "cancelled"
     # After the two Initializes' first scans, only the requeued run.
-    assert [runner_flags(c)[3:] for c in scanner.calls()][2:] == [[]]
+    assert [runner_flags(c) for c in scanner.calls()][2:] == [[]]
 
 
 def test_recover_queued_reads_the_persisted_scan_flag(
@@ -1312,7 +1297,7 @@ def test_poll_loop_runs_the_catch_up(
         wait_for(lambda: len(runs(client, "loc")) == 2)
         catch_up = wait_idle(client, "loc")[0]
         assert (catch_up["trigger"], catch_up["status"]) == ("hook", "ok")
-        assert runner_flags(scanner.calls()[-1])[3:] == [
+        assert runner_flags(scanner.calls()[-1]) == [
             "--skip-analyze",
             "--no-remote",
         ]
@@ -1398,7 +1383,7 @@ def test_an_index_from_before_the_symlink_guard_gets_one_hook_scan_at_start(
         rs = wait_idle(client, "demo")
         assert len(rs) == 2, rs
         assert (rs[0]["trigger"], rs[0]["status"]) == ("hook", "ok")
-        assert runner_flags(scanner.calls()[-1])[3:] == [
+        assert runner_flags(scanner.calls()[-1]) == [
             "--skip-analyze",
             "--no-remote",
         ]
@@ -1626,13 +1611,13 @@ def test_open_stream_gets_the_shutdown_frame_without_holding_the_stop(
 def test_real_scan_child_with_hook_trigger(
     portal: TestClient, env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Plan section 11.2 #3: the real `whygraph scan` as the child, so the argv
+    # Plan section 11.2 #3: the real scan child, so the argv
     # is the runner's own, on a repo that carries the portal markers.
     root = local_project(portal, env, "demo")
     assert (root / ".whygraph" / "portal.json").is_file()
     monkeypatch.setenv(
         "WHYGRAPH_SCAN_CMD",
-        f"{shlex.quote(sys.executable)} -m whygraph scan --no-codegraph",
+        f"{shlex.quote(sys.executable)} -P -m whygraph.scan.child --no-codegraph",
     )
     with portal_db.get_session() as session:  # pretend a first scan happened
         project = session.exec(select(Project).where(Project.slug == "demo")).one()
@@ -1642,7 +1627,7 @@ def test_real_scan_child_with_hook_trigger(
     run = wait_run(portal, "demo", scan(portal, "demo", trigger="hook"), timeout=120)
     assert (run["status"], run["trigger"]) == ("ok", "hook"), run
     log = (env.data / "runs" / f"{run['id']}.log").read_text()
-    assert "--progress json --managed-by-portal --skip-analyze --no-remote" in log
+    assert "-m whygraph.scan.child --no-codegraph --skip-analyze --no-remote" in log
     events = [
         json.loads(line)
         for line in (env.data / "runs" / f"{run['id']}.jsonl").read_text().splitlines()
@@ -1686,7 +1671,7 @@ def test_a_scan_never_imports_a_whygraph_package_the_repo_commits(
     # An override without -P is still covered by the child's PYTHONSAFEPATH.
     monkeypatch.setenv(
         "WHYGRAPH_SCAN_CMD",
-        f"{shlex.quote(sys.executable)} -m whygraph scan --no-codegraph",
+        f"{shlex.quote(sys.executable)} -m whygraph.scan.child --no-codegraph",
     )
     with portal_db.get_session() as session:  # a hook scan: structure only, offline
         project = session.exec(select(Project).where(Project.slug == "hostile")).one()
@@ -1972,7 +1957,7 @@ def test_a_1x_repo_migrates_through_the_wizard_and_keeps_its_commits(
     # child (below).
     monkeypatch.setenv(
         "WHYGRAPH_SCAN_CMD",
-        f"{shlex.quote(sys.executable)} -m whygraph scan --no-codegraph",
+        f"{shlex.quote(sys.executable)} -m whygraph.scan.child --no-codegraph",
     )
     response = portal.post(
         "/api/projects/legacy/init",

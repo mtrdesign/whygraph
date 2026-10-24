@@ -6,7 +6,7 @@ through a 0600 file named by
 that file before the token expires (M2d-2 plan section 0.2 #5). Every
 ``gh`` and network ``git`` subprocess the child starts therefore re-reads
 the file and gets the token in its own environment. Without the variable
-(a local folder, or a headless ``whygraph scan``) nothing changes: the
+(a local folder) nothing changes: the
 subprocess inherits the process environment, as before.
 """
 

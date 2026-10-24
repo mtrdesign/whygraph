@@ -42,7 +42,7 @@ def project_counts(
         for the reads, so a caller in a worker thread need not bind it.
     migrate : bool
         Whether to bring the DB to head first (the request path). The scan
-        runner passes ``False``: it reads right after a ``whygraph scan``
+        runner passes ``False``: it reads right after a scan
         child that migrated the DB itself, and Alembic's module-global
         state makes a migration off the request path a needless risk.
 

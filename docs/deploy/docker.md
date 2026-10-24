@@ -31,23 +31,20 @@ that the stdio server was removed. The shim does two different things:
 - **The portal verbs** - `up`, `down`, `status`, `logs`, `folders` and `backup` - manage two **named,
   long-lived** containers, `whygraph-portal` and its database, `whygraph-portal-postgres`. They are
   the one exception to "ephemeral per command".
-- **Every other command** runs the image against the current directory and exits:
+- **Every other command** (`version` and `install`) runs the image against the current directory and exits:
 
 ```bash
 exec docker run --rm -i $tty \
     --user "$(id -u):$(id -g)" -e HOME=/tmp \
     -v "$PWD:/workspace" -w /workspace \
-    -e GH_TOKEN -e GITHUB_TOKEN \
-    -e ANTHROPIC_API_KEY -e OPENAI_API_KEY -e DEEPSEEK_API_KEY \
-    -e OPENROUTER_API_KEY \
     "$IMAGE" whygraph "$@"
 ```
 
 - **Everything's in the image** - Python and WhyGraph, `git`, the GitHub CLI, and Node with the
   CodeGraph CLI. CodeGraph indexes from the in-image binary, and the portal runs CodeGraph's MCP server
   from the same binary, so there's no docker-in-docker.
-- **Files come back as yours.** `--user "$(id -u):$(id -g)"` is what does it: generated files aren't
-  root-owned and git sees matching ownership.
+- **Files come back as yours.** `--user "$(id -u):$(id -g)"` is what does it: a file the command
+  writes isn't root-owned and git sees matching ownership.
 - **Only the repo you stand in is visible** to an ephemeral command. The portal sees only the
   [folders you share](../portal/shared-folders.md).
 
@@ -94,8 +91,8 @@ The portal container is started with **none of your environment**. Keys and toke
 portal's Settings and stored encrypted in its database - see the
 [security model](../portal/security.md#keys-and-tokens).
 
-The ephemeral shim path still forwards `GH_TOKEN` / `GITHUB_TOKEN` and the four provider API keys, for
-headless `whygraph scan` in a repository the portal does not manage (a CI job, say).
+The one-shot shim path forwards none of them either: `GH_TOKEN`, `GITHUB_TOKEN` and the provider API
+keys in your shell reach nothing, because there is no headless scan to use them.
 
 !!! warning "Never bake a token into the image"
     Pass credentials at run time, never at build time.

@@ -165,8 +165,7 @@ rather than by reading the cache table.
 ### Reading files
 
 `read_file` returns at most **400 lines or 100 KB** per call, `list_dir` at most **200 entries**, and
-both refuse anything under `.git/`, `.whygraph/`, or `.codegraph/`, plus `whygraph.toml` itself - a
-headless config may hold real API keys. WhyGraph's own storage is reachable only through the knowledge tools,
+both refuse anything under `.git/`, `.whygraph/`, or `.codegraph/`, plus `whygraph.toml` itself - it may hold real API keys. WhyGraph's own storage is reachable only through the knowledge tools,
 which present it in a curated shape instead of as raw database rows.
 
 ## Charts
@@ -187,7 +186,7 @@ Every chart ships with a **Table** toggle showing the underlying rows, and a PNG
 
 ## Bounds on a turn
 
-Tuned under `[chat]` - imported from a repository's `whygraph.toml` when you add the project, or set in a headless one:
+Tuned under `[chat]` - imported from a repository's `whygraph.toml` when you add the project:
 
 | Key | Default | What it bounds |
 |---|---|---|

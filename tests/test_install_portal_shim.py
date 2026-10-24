@@ -1246,14 +1246,15 @@ def test_env_hint_also_shows_when_the_portal_is_already_running(shim: Shim) -> N
 
 
 def test_other_commands_still_run_ephemerally(shim: Shim) -> None:
-    result = shim.run("scan", "--help")
+    result = shim.run("version")
     assert result.returncode == 0
     call = shim.run_call(None)
     assert call[:3] == ["run", "--rm", "-i"]
-    assert call[-4:] == [IMAGE, "whygraph", "scan", "--help"]
+    assert call[-3:] == [IMAGE, "whygraph", "version"]
     assert f"{shim.tmp.resolve()}:/workspace" in call
-    # The ephemeral path keeps its credential passthrough.
-    assert "GH_TOKEN" in call
+    # No one-shot command uses a key or a token, so none is passed in.
+    assert [a for a in call if a == "-e"] == ["-e"]  # only HOME=/tmp
+    assert not [a for a in call if "_KEY" in a or "TOKEN" in a]
 
 
 def test_serve_branch_still_present(shim: Shim) -> None:
@@ -1359,7 +1360,7 @@ def test_dev_src_runs_the_checkout_through_the_dev_wrapper(shim: Shim) -> None:
     assert "PYTHONPATH=/opt/whygraph-dev/src" in call
     # Scan children get the checkout too, without widening the env allowlist.
     assert (
-        "WHYGRAPH_SCAN_CMD=env PYTHONPATH=/opt/whygraph-dev/src python -P -m whygraph scan"
+        "WHYGRAPH_SCAN_CMD=env PYTHONPATH=/opt/whygraph-dev/src python -P -m whygraph.scan.child"
         in call
     )
     assert "WHYGRAPH_DEV_ORIGINS=http://localhost:5174,http://127.0.0.1:5174" in call

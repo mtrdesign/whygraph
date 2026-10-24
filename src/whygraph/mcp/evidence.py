@@ -274,8 +274,7 @@ def collect_evidence(target: Target, *, limit: int = 20) -> list[CommitEvidence]
         return evidence_from_hunks(repo, target, initial, limit=limit).evidence
     except OperationalError as exc:
         raise WhyGraphError(
-            "WhyGraph DB is missing or unscanned — scan from the WhyGraph portal "
-            "(or run `whygraph scan` outside it) first"
+            "WhyGraph DB is missing or unscanned — scan from the WhyGraph portal first"
         ) from exc
 
 
@@ -813,7 +812,7 @@ def backfill_evidence_descriptions(
         return 0
     if max_commits <= 0:
         return len(pending)
-    # Lazy imports mirror the pattern in `whygraph.cli.commands.scan.scan_cmd`
+    # Lazy imports mirror the pattern in `whygraph.scan.child`
     # and keep the module's import-time surface free of analyze/LLM deps.
     from whygraph.analyze import (
         LlmDescriptor,

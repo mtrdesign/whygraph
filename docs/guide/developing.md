@@ -13,6 +13,20 @@ Working on WhyGraph itself (not using it) takes five `make` targets from a check
 `dev-local` and `dev-docker` run in the foreground: open `http://localhost:5174`, and press
 Ctrl-C to stop everything. `prod` serves the built UI itself on `http://127.0.0.1:8777`.
 
+## The `whygraph` command from a checkout
+
+To get the `whygraph` command with your edits live (for `whygraph version`, `whygraph portal` and the
+stubs), install the checkout in editable mode. This is for development only; users install with
+Docker ([Installation](../getting-started/installation.md)).
+
+```bash
+git clone https://github.com/mtrdesign/whygraph.git
+uv tool install --editable ./whygraph
+```
+
+`--editable` skips the reinstall on every change. To run the portal from a checkout, use
+`make dev-local` or `make dev-docker` as above.
+
 ## The portal database in development
 
 The portal keeps its own data in Postgres, so every mode needs one:
@@ -153,8 +167,7 @@ Every mode keeps to itself, so none of them touches your own portal:
   offline on first use: a copy of your checkout (`git clone --no-hardlinks`, real history to
   dogfood) and a tiny three-commit demo repo. Delete one to get a fresh copy next time.
 
-Your checkout itself is never added to a dev portal, so it never gets WhyGraph's hooks or markers
-and `whygraph scan` keeps working in it.
+Your checkout itself is never added to a dev portal, so it never gets WhyGraph's hooks or markers.
 
 `dev-local`, `dev-docker` and `prod` share port `8777`, so run one of those three at a time.
 Override it with `DEV_PORT=...`. `dev-production` uses `:8778` for the portal and `:5173` for Vite,

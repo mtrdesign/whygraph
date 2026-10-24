@@ -45,9 +45,12 @@ def test_render_installer_carries_the_shim_and_the_mcp_stub() -> None:
     assert 'cat > "$BIN_DIR/whygraph-mcp"' in script
     # ...the shim baking the ref as an overridable default (the stub has none)...
     assert script.count(f'IMAGE="${{WHYGRAPH_IMAGE:-{IMAGE_REPO}:1.2.3}}"') == 1
-    # ...and running the image ephemerally against the cwd with token passthrough.
+    # ...and running the image ephemerally against the cwd, with no key or
+    # token passed in (no one-shot command uses one).
     assert '-v "$PWD:/workspace" -w /workspace' in script
-    assert "-e GH_TOKEN -e GITHUB_TOKEN" in script
+    assert "-e GH_TOKEN" not in script
+    for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"):
+        assert f"-e {key}" not in script
     assert '"$IMAGE" whygraph "$@"' in script
     # The 1.x docker shim for whygraph-mcp is gone.
     assert 'whygraph-mcp "$@"' not in script

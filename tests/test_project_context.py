@@ -83,7 +83,7 @@ def _make_git_repo(root: Path) -> None:
 
 @pytest.fixture
 def projects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Projects:
-    """Two initialized repos: ``a`` on the default DB path, ``b`` on an override.
+    """Two initialized repos: ``a`` on a DB outside its repo, ``b`` on one inside.
 
     ``cwd`` is a third directory with no ``.git``, so any lookup that
     ignored the context would land somewhere neither project owns.
@@ -96,7 +96,11 @@ def projects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Projects:
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
 
-    a = ProjectContext(slug="a", root=root_a, config=Config())
+    a = ProjectContext(
+        slug="a",
+        root=root_a,
+        config=Config(whygraph_db=tmp_path / "dbs" / "a.db"),
+    )
     b = ProjectContext(
         slug="b",
         root=root_b,
@@ -131,7 +135,7 @@ def test_interleaved_projects_read_their_own_config_root_and_db(
         assert get_config() is a.config
         assert _resolve_root() == a.root
         assert repo_root() == a.root
-        assert get_engine().url.database == str(a.root / ".whygraph" / "whygraph.db")
+        assert get_engine().url.database == str(tmp_path / "dbs" / "a.db")
         assert _marker() == "a"
 
         with use_project(b):
@@ -153,8 +157,9 @@ def test_interleaved_projects_read_their_own_config_root_and_db(
 
     assert current_project() is None
     # Both DBs were migrated in place; nothing was created around cwd.
-    assert (a.root / ".whygraph" / "whygraph.db").exists()
+    assert (tmp_path / "dbs" / "a.db").exists()
     assert (b.root / "custom" / "b.db").exists()
+    assert not (a.root / ".whygraph").exists()
     assert not (b.root / ".whygraph").exists()
     assert not (tmp_path / "elsewhere" / ".whygraph").exists()
 
@@ -216,10 +221,10 @@ def test_no_context_without_strict_falls_back_to_cwd(
     assert not is_strict()
     assert current_project() is None
     assert _resolve_root() == projects.a.root
-    assert get_engine().url.database == str(
-        projects.a.root / ".whygraph" / "whygraph.db"
-    )
-    assert _marker() == "a"
+    # The config fallback still reads cwd, but there is no default DB any more.
+    assert get_config().whygraph_db is None
+    with pytest.raises(ProjectContextError, match="no WhyGraph database"):
+        get_engine()
 
 
 def test_strict_mode_raises_without_context(projects: _Projects) -> None:

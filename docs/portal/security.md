@@ -122,7 +122,7 @@ the checks change:
   every fetch, and the checkout runs with hooks disabled.
 - **No server paths.** API answers never name a server path: a project imported from GitHub has no
   `root` in its payload, and removing one names no clone folder. A run's log starts with the
-  user-level command (`$ whygraph scan <flags>`; the full command line goes to the portal's own log
+  user-level command (`$ scan <flags>`; the full command line goes to the portal's own log
   at debug level), and every log line and event, git's error text included, has the clone rewritten
   to `.` and the data directory to `<data>`. Local mode keeps the full paths and command line: they
   are your own machine's.

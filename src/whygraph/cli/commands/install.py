@@ -285,7 +285,7 @@ portal_up() {
             --label "whygraph.dev_src=$DEV_SRC" \
             -p "127.0.0.1:5174:5174" \
             -e PYTHONPATH=/opt/whygraph-dev/src \
-            -e "WHYGRAPH_SCAN_CMD=env PYTHONPATH=/opt/whygraph-dev/src python -P -m whygraph scan" \
+            -e "WHYGRAPH_SCAN_CMD=env PYTHONPATH=/opt/whygraph-dev/src python -P -m whygraph.scan.child" \
             -e WHYGRAPH_DEV_ORIGINS=http://localhost:5174,http://127.0.0.1:5174
         set -- "$@" "$IMAGE" python /opt/whygraph-dev/scripts/dev_portal.py --vite-host 0.0.0.0 --
     else
@@ -548,9 +548,6 @@ tty=""
 exec docker run --rm -i $tty \\
     --user "$(id -u):$(id -g)" -e HOME=/tmp \\
     -v "$PWD:/workspace" -w /workspace \\
-    -e GH_TOKEN -e GITHUB_TOKEN \\
-    -e ANTHROPIC_API_KEY -e OPENAI_API_KEY -e DEEPSEEK_API_KEY \\
-    -e OPENROUTER_API_KEY \\
     "$IMAGE" whygraph "$@"
 """
 

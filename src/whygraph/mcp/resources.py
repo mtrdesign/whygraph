@@ -84,8 +84,7 @@ from .targets import repo_root
 _log = logging.getLogger(__name__)
 
 _DB_UNSCANNED_MESSAGE = (
-    "WhyGraph DB is missing or unscanned — scan from the WhyGraph portal "
-    "(or run `whygraph scan` outside it) first"
+    "WhyGraph DB is missing or unscanned — scan from the WhyGraph portal first"
 )
 _TOP_CONTRIBUTORS_LIMIT = 10
 

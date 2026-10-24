@@ -1060,8 +1060,9 @@ class Config:
         judge" and is reported in the scan panel. A value starting with
         ``-`` is (:func:`check_default_branch`).
     whygraph_db : Path or None
-        Override path to the WhyGraph SQLite DB. If ``None``, callers
-        use the project-relative default ``.whygraph/whygraph.db``.
+        Override path to the WhyGraph SQLite DB. If ``None``, no
+        WhyGraph database is configured and opening one raises (the portal
+        always sets it, to the project's history under its data directory).
     codegraph_db : Path or None
         Override path to the CodeGraph SQLite DB. If ``None``, callers
         use the project-relative default ``.codegraph/codegraph.db``.

@@ -1,6 +1,6 @@
 """JsonProgress - a machine-readable stand-in for the scan's Rich progress bars.
 
-``whygraph scan --progress json`` swaps the shared
+The portal's scan child (``whygraph.scan.child``) swaps the shared
 :class:`rich.progress.Progress` for :class:`JsonProgress`, which emits one
 JSON object per line on stdout instead of drawing bars. The portal's scan
 runner (a parent process) reads that stream and re-serves it to the browser.
@@ -20,8 +20,7 @@ Event contract (one JSON object per line, ``type`` discriminates):
     task registration and on (throttled) progress updates. ``name`` is the
     crawler's stable label; ``description`` is its current status text.
 ``usage``
-    Only in a scan the portal manages (``--managed-by-portal`` with
-    ``--progress json``; :class:`JsonUsageSink`): one per successful LLM
+    Bound in every scan child (:class:`JsonUsageSink`): one per successful LLM
     call, always before ``result``: ``{"type": "usage", "task",
     "model_served", "input_tokens", "output_tokens", "cache_read_tokens",
     "cache_write_tokens", "reasoning_tokens", "provider_cost_usd",
@@ -199,11 +198,8 @@ def _capped(text: str | None) -> str | None:
 class JsonUsageSink:
     """A :class:`~whygraph.core.usage.UsageSink` that emits ``usage`` events.
 
-    Bound by ``whygraph scan`` only when the portal manages the scan
-    (``--managed-by-portal`` with ``--progress json``), before any crawler
-    is built, so every metered call of the scan child becomes one ``usage``
-    line on the progress stream. A headless scan binds nothing and records
-    nothing.
+    Bound by the scan child before any crawler is built, so every metered
+    call of the scan becomes one ``usage`` line on the progress stream.
 
     Parameters
     ----------

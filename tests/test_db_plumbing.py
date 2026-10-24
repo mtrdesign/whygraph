@@ -69,6 +69,21 @@ def test_engine_resolves_configured_path(_isolate_config_and_engine: Path) -> No
     assert engine.url.database == str(db_path)
 
 
+def test_no_configured_path_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from whygraph.core.context import ProjectContextError
+    from whygraph.db.bootstrap import ensure_initialized
+
+    monkeypatch.setattr(core, "_config", Config())
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ProjectContextError, match="no WhyGraph database"):
+        db_engine.get_engine()
+    with pytest.raises(ProjectContextError, match="no WhyGraph database"):
+        ensure_initialized()
+    assert not (tmp_path / ".whygraph").exists()
+
+
 def test_alembic_upgrade_on_empty_db(_isolate_config_and_engine: Path) -> None:
     db_path = _isolate_config_and_engine
     assert not db_path.exists()

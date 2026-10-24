@@ -24,8 +24,8 @@ class WhyGraphError(ToolError):
     """Raised by an MCP tool when a request cannot be served.
 
     Surfaces to the agent as the tool's error message — phrased for a
-    reader who will act on it (e.g. "scan from the WhyGraph portal (or run
-    ``whygraph scan`` outside it) first").
+    reader who will act on it (e.g. "scan from the WhyGraph portal
+    first").
 
     Parameters
     ----------

@@ -198,7 +198,7 @@ def test_evidence_for_errors_when_db_not_initialized(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(temp_git_repo)
-    with pytest.raises(WhyGraphError, match="whygraph scan"):
+    with pytest.raises(WhyGraphError, match="scan from the WhyGraph portal first"):
         whygraph_evidence_for(path="sample.py", line_start=1, line_end=3)
 
 

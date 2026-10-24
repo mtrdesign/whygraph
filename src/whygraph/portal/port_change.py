@@ -1,7 +1,7 @@
 """Follow a portal port change into the repos it manages (plan sections 4.8, 4.13).
 
 The port is baked into each initialized repo's markers
-(``.whygraph/portal.json`` / ``.env``, read by ``whygraph scan`` and the
+(``.whygraph/portal.json`` / ``.env``, read by the
 hook helper) and into agent MCP configs. When the portal starts on a new
 port, :func:`reconcile_port` runs once, before the portal serves requests:
 

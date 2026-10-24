@@ -390,7 +390,8 @@ def test_a_missing_database_is_an_error_result(tmp_path: Path) -> None:
         'SELECT count(*) FROM "commit"', db_path=tmp_path / "nope.db"
     )
     assert result["layer"] == "connection"
-    assert "whygraph scan" in result["error"]
+    assert "WhyGraph portal" in result["error"]
+    assert "whygraph scan" not in result["error"]
 
 
 # ---------------------------------------------------------------------------

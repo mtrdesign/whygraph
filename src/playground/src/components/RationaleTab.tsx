@@ -3,7 +3,6 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { portalApi, projectKey, type RationaleCard } from "../api";
-import { isProduction, usePortalState } from "../lib/identity";
 import { providerLabel } from "../lib/labels";
 import { formatDateTime } from "../lib/format";
 import { plural } from "../lib/plural";
@@ -68,16 +67,10 @@ function Card({ card }: { card: RationaleCard }) {
 }
 
 /** The one line under "no rationale yet": what to do to get history in. */
-function RescanHint({ production }: { production: boolean }) {
+function RescanHint() {
   return (
     <p className="mt-2 text-xs text-muted-foreground" data-testid="rationale-scan-hint">
-      Rescan after new commits from the project Overview
-      {production ? "." : (
-        <>
-          {" "}
-          (or run <code className="font-mono text-foreground">whygraph scan</code> outside the portal).
-        </>
-      )}
+      Rescan after new commits from the project Overview.
     </p>
   );
 }
@@ -95,7 +88,6 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
   const canGenerate = useProjectCan("project.chat");
   const canConfigure = useProjectCan("project.configure");
   const project = useQuery({ queryKey: projectKey(slug, "project"), queryFn: () => portalApi.project(slug) });
-  const production = isProduction(usePortalState().data);
   const llm = useLlmBlock();
   // A hard-stopped budget: the button stays, disabled, with the reason beside it.
   const budgetBlocked = llm.block === "budget_exceeded";
@@ -132,7 +124,7 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
         <p className="text-sm text-muted-foreground" data-testid="rationale-no-evidence">
           No history to explain yet: this symbol has no commits in the scanned history.
         </p>
-        <RescanHint production={production} />
+        <RescanHint />
       </>
     );
   } else if (!canGenerate) {

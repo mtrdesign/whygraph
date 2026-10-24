@@ -36,8 +36,6 @@ they're missing.
   portal. Without it, the GitHub phase is skipped.
 - **An LLM API key** (or a local Ollama) - for per-commit descriptions, rationale cards and chat.
   Enter it in the portal. Both phases skip cleanly without one.
-- **[uv](https://docs.astral.sh/uv/)** *(optional)* - only for a native install, which provides
-  headless `whygraph scan` and no portal.
 
 Ready to install?
 

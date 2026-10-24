@@ -469,13 +469,14 @@ CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-code-checks.yml"
 
 
 def test_ci_postgres_service_matches_the_pinned_image() -> None:
-    # CI's Postgres service is a literal (a workflow cannot import Python), so
-    # it is gated against the shim's pin: the tests must run on the server
-    # users run. The variant suffix is asserted literally on purpose - a base
-    # OS switch changes collations under existing text indexes, so changing it
-    # needs a deliberate edit here, not just a new pin.
+    # CI's tests start POSTGRES_IMAGE themselves (tests/conftest.py), so they
+    # run on the server users run. A service container would be a literal (a
+    # workflow cannot import Python), so one that comes back is gated against
+    # the shim's pin. The variant suffix is asserted literally on purpose - a
+    # base OS switch changes collations under existing text indexes, so
+    # changing it needs a deliberate edit here, not just a new pin.
     images = re.findall(r"^\s+image:\s*(\S+)\s*$", CI_WORKFLOW.read_text(), re.M)
-    assert images == [POSTGRES_IMAGE], (
+    assert images in ([], [POSTGRES_IMAGE]), (
         f"ci-code-checks.yml service image(s) {images} != POSTGRES_IMAGE "
         f"{POSTGRES_IMAGE}"
     )

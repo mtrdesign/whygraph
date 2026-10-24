@@ -5,6 +5,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -51,6 +52,24 @@ CREATE TABLE files (
     language TEXT
 );
 """
+
+
+def pytest_xdist_auto_num_workers(config: pytest.Config) -> int | None:
+    """``-n auto`` on a Mac: one worker per performance core, not per core.
+
+    The suite forks ``git`` and scan children all the time; on efficiency
+    cores the extra workers only queue behind them. Elsewhere xdist decides.
+    """
+    if sys.platform != "darwin":
+        return None
+    probe = subprocess.run(
+        ["sysctl", "-n", "hw.perflevel0.physicalcpu"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    count = probe.stdout.strip()
+    return int(count) if probe.returncode == 0 and count.isdigit() else None
 
 
 @pytest.fixture(autouse=True)

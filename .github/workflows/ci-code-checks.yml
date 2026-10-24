@@ -1,8 +1,8 @@
 name: CI Code Checks
 
 # Runs on every pull request: lints with ruff (lint + format check), runs the
-# pytest suite, and typechecks / tests / builds the playground frontend. The
-# three jobs run in parallel and gate the PR.
+# pytest suite (three shards), and typechecks / tests / builds the playground
+# frontend. The jobs run in parallel and gate the PR.
 
 on:
   pull_request:
@@ -33,23 +33,16 @@ jobs:
         run: uv run ruff format --check src/ tests/ scripts/
 
   test:
-    name: Unit Tests (pytest)
+    name: Unit Tests (pytest ${{ matrix.group }}/3)
     runs-on: ubuntu-latest
-    # The portal tests need a Postgres. The image literal must equal
-    # POSTGRES_IMAGE in src/whygraph/cli/commands/install.py
-    # (tests/test_install_script.py gates it).
-    services:
-      postgres:
-        image: postgres:18.6-trixie
-        env:
-          POSTGRES_PASSWORD: test
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
+    # Three shards by stored duration (pytest-split, `.test_durations`), each
+    # on every core (xdist). The portal tests start their own Postgres
+    # (POSTGRES_IMAGE on a tmpfs, durability off) through Docker on the
+    # runner, so CI runs the server users run - no service literal to drift.
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [1, 2, 3]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -63,10 +56,17 @@ jobs:
         run: uv sync --dev
 
       - name: Run pytest
-        env:
-          # An admin URL: the fixtures create one database per test from it.
-          WHYGRAPH_TEST_DATABASE_URL: postgresql+psycopg://postgres:test@localhost:5432/postgres
-        run: uv run pytest
+        run: uv run pytest --splits 3 --group ${{ matrix.group }}
+
+  tests-passed:
+    # One stable name for every shard, for a required status check.
+    name: Unit Tests (pytest)
+    runs-on: ubuntu-latest
+    needs: test
+    if: always()
+    steps:
+      - name: Every shard passed
+        run: test "${{ needs.test.result }}" = success
 
   frontend:
     name: Frontend (typecheck, Vitest, build)

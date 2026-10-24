@@ -211,6 +211,8 @@ def _offline_llms(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 _GIT_ID = ("-c", "user.email=tester@example.com", "-c", "user.name=Test User")
+_NO_MAINTENANCE = ("-c", "maintenance.auto=false", "-c", "gc.auto=0")
+"""For a template's commits: no detached auto-maintenance writing into it mid-copy."""
 
 
 _TEMPLATES: dict[str, Path] = {}
@@ -234,12 +236,14 @@ def _build_marked_repo(root: Path, mark: str) -> Path:
     _git(root, "config", "commit.gpgsign", "false")
     (root / "sample.py").write_text("line one\nline two\n")
     _git(root, "add", "sample.py")
-    _git(root, *_GIT_ID, "commit", "-q", "-m", "first commit")
+    _git(root, *_GIT_ID, *_NO_MAINTENANCE, "commit", "-q", "-m", "first commit")
     (root / "sample.py").write_text("line one\nline two\nline three\n")
-    _git(root, *_GIT_ID, "commit", "-q", "-am", "second commit")
+    _git(root, *_GIT_ID, *_NO_MAINTENANCE, "commit", "-q", "-am", "second commit")
     (root / f"{mark}.py").write_text(f"def {mark}_fn():\n    return '{mark}'\n")
     _git(root, "add", f"{mark}.py")
-    _git(root, *_GIT_ID, "commit", "-q", "-m", f"{mark} marker commit")
+    _git(
+        root, *_GIT_ID, *_NO_MAINTENANCE, "commit", "-q", "-m", f"{mark} marker commit"
+    )
     return root
 
 

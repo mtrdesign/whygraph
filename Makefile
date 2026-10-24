@@ -4,7 +4,8 @@
 #   make dev-production  the same in production mode (whygraph.localhost:5173; runs beside dev-local)
 #   make dev-docker   develop in Docker (the same, inside the image via the real shim)
 #   make prod         the image exactly as released, through the shim (:8777)
-#   make check        everything CI runs, plus e2e and the release smoke test
+#   make check        everything CI runs, plus e2e and the release smoke test (in parallel)
+#   make check-fast   the same without the image build and the smoke test
 #
 # Every mode is isolated from your own portal (`whygraph up`): its own
 # container name, data dir and HOME under $(DEV), and it shares only the
@@ -63,7 +64,7 @@ CODEGRAPH_VERSION := $(shell sed -n "s/^ *CODEGRAPH_VERSION: *'\([^']*\)'.*/\1/p
 # What the image is built from besides src/: a change here means `dev-docker` rebuilds.
 DEPS_HASH = $(shell cat pyproject.toml uv.lock hatch_build.py docker/whygraph/Dockerfile src/playground/package-lock.json | git hash-object --stdin | cut -c1-16)
 
-.PHONY: help dev dev-local dev-production dev-docker prod check test e2e audit docs docs-build db db-down dev-db dev-db-down inspect image sync playground node-check playground-deps dev-fixtures dev-image dev-github-check
+.PHONY: help dev dev-local dev-production dev-docker prod check check-fast test test-fast e2e audit docs docs-build db db-down dev-db dev-db-down inspect image sync playground node-check playground-deps dev-fixtures dev-image dev-github-check
 
 help:  ## List available targets
 	@echo "Run WhyGraph:"
@@ -130,25 +131,22 @@ dev-docker: dev-fixtures dev-image  ## Develop in Docker: the same, inside the i
 prod: dev-fixtures image  ## The image exactly as released, through the shim - open :8777
 	sh scripts/dev_docker.sh prod "$(IMAGE)" "$(DEV)" $(DEV_PORT)
 
-check: node-check  ## Before a PR: lint, pytest, frontend, e2e, then the smoke test on a fresh image
-	$(UV_RUN) ruff check src/ tests/ scripts/
-	$(UV_RUN) ruff format --check src/ tests/ scripts/
-	$(UV_RUN) pytest -q
-	npm --prefix src/playground ci
-	npm --prefix src/playground run typecheck
-	npm --prefix src/playground test
-	npm --prefix src/playground run build
-	sh src/playground/e2e/run.sh
-	$(MAKE) image
-	sh scripts/smoke.sh "$(IMAGE)"
+check: node-check  ## Before a PR: lint, pytest, frontend + e2e, image + smoke test - the stages in parallel
+	UV_RUN="$(UV_RUN)" sh scripts/check.sh "$(IMAGE)"
+
+check-fast: node-check  ## make check without the image build and the smoke test (everyday; CI runs no image smoke either)
+	UV_RUN="$(UV_RUN)" sh scripts/check.sh --fast
 
 # --- helpers ---------------------------------------------------------------
 
 sync:  ## Install / refresh the uv environment
 	uv sync
 
-test:  ## Run the Python test suite
-	$(UV_RUN) pytest
+test:  ## Run the Python test suite on every core (ARGS="-n0 tests/test_x.py" for one file, serially)
+	$(UV_RUN) pytest $(ARGS)
+
+test-fast:  ## Re-run the tests that failed last time, then the rest; stop at the first failure
+	$(UV_RUN) pytest --ff -x $(ARGS)
 
 e2e: playground  ## Playwright suite vs a throwaway portal + fake scanner (extra args: ARGS="--project=light")
 	sh src/playground/e2e/run.sh $(ARGS)

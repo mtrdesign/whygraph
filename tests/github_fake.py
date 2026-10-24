@@ -70,7 +70,6 @@ import os
 import re
 import secrets
 import subprocess
-import tempfile
 import threading
 import time
 import uuid
@@ -1327,41 +1326,60 @@ def push_commit(
 ) -> str:
     """Commit ``files`` (default: a line appended to ``CHANGES.txt``) onto a branch.
 
-    The commit is made in a throw-away work tree and pushed into the bare
-    repository at ``path``, then ``git update-server-info`` refreshes what
-    dumb HTTP serves.
+    The commit is written straight into the bare repository at ``path`` by
+    one ``git fast-import`` (on top of the branch's tip, whose other files
+    it keeps), then ``git update-server-info`` refreshes what dumb HTTP
+    serves.
 
     Returns
     -------
     str
         The new commit's SHA.
     """
-    with tempfile.TemporaryDirectory() as tmp:
-        work = Path(tmp) / "work"
-        _git("init", "-q", f"--initial-branch={branch}", str(work))
-        if _git(
-            "--git-dir",
-            str(path),
-            "rev-parse",
-            "-q",
-            "--verify",
-            f"refs/heads/{branch}",
+    parent = _git(
+        "--git-dir",
+        str(path),
+        "rev-parse",
+        "-q",
+        "--verify",
+        f"refs/heads/{branch}^{{commit}}",
+        check=False,
+    )
+    if files is None:
+        shown = subprocess.run(
+            ["git", "--git-dir", str(path), "show", f"{parent}:CHANGES.txt"],
+            env={**os.environ, **GIT_ENV},
+            capture_output=True,
+            text=True,
             check=False,
-        ):
-            _git("fetch", "-q", str(path), branch, cwd=work)
-            _git("reset", "-q", "--hard", "FETCH_HEAD", cwd=work)
-        if files is None:
-            changes = work / "CHANGES.txt"
-            old = changes.read_text() if changes.exists() else ""
-            files = {"CHANGES.txt": old + message + "\n"}
-        for name, content in files.items():
-            target = work / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content)
-        _git("add", "-A", cwd=work)
-        _git("commit", "-q", "-m", message, cwd=work)
-        _git("push", "-q", str(path), f"HEAD:refs/heads/{branch}", cwd=work)
-        sha = _git("rev-parse", "HEAD", cwd=work)
+        )
+        old = shown.stdout if parent and shown.returncode == 0 else ""
+        files = {"CHANGES.txt": old + message + "\n"}
+
+    def data(text: str) -> bytes:
+        raw = text.encode()
+        return b"data %d\n%s\n" % (len(raw), raw)
+
+    who = b"%s <%s> %d +0000" % (
+        GIT_ENV["GIT_COMMITTER_NAME"].encode(),
+        GIT_ENV["GIT_COMMITTER_EMAIL"].encode(),
+        int(time.time()),
+    )
+    stream = [b"commit refs/heads/%s\nmark :1\n" % branch.encode()]
+    stream += [b"author " + who + b"\n", b"committer " + who + b"\n", data(message)]
+    if parent:
+        stream.append(b"from %s\n" % parent.encode())
+    for name, content in files.items():
+        stream += [b"M 100644 inline %s\n" % name.encode(), data(content)]
+    stream.append(b"get-mark :1\n")
+    result = subprocess.run(
+        ["git", "--git-dir", str(path), "fast-import", "--quiet"],
+        input=b"".join(stream),
+        env={**os.environ, **GIT_ENV},
+        capture_output=True,
+        check=True,
+    )
+    sha = result.stdout.decode().strip()
     _git("--git-dir", str(path), "update-server-info")
     return sha
 

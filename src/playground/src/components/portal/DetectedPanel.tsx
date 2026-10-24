@@ -120,6 +120,15 @@ export function DetectedPanel({
   ) {
     return null;
   }
+  // The earlier-install wording applies to 1.x leftovers, not to a re-attached history.
+  const earlier = !(
+    cgEntries.length === 0 &&
+    cgSections.length === 0 &&
+    cgHooks.length === 0 &&
+    managed_hooks.length === 0 &&
+    detected_agents.length === 0 &&
+    !custom_db_paths.some((p) => p.exists)
+  );
   return (
     <section
       aria-label="Existing WhyGraph data"
@@ -129,16 +138,17 @@ export function DetectedPanel({
       <div>
         <h3 className="text-sm font-semibold">Existing WhyGraph data</h3>
         <p className="text-xs text-muted-foreground">
-          This repository was set up with an earlier WhyGraph. Adding it is like adding a new
-          project; here is what carries over.
+          {earlier
+            ? "This repository was set up with an earlier WhyGraph. Adding it is like adding a new project; here is what carries over."
+            : "The portal kept this project's history from an earlier add."}
         </p>
       </div>
       <ul className="flex flex-col divide-y divide-border">
         {existing_db && (
-          <Item icon={<DatabaseIcon />} title="Existing database">
+          <Item icon={<DatabaseIcon />} title="Existing history">
             <p className="text-xs text-muted-foreground">
-              <span className="font-mono">.whygraph/whygraph.db</span> is reused and migrated in
-              place (a backup is made first). Already-described commits cost nothing to scan again.
+              History found in the portal (re-attached). Already-described commits cost nothing to
+              scan again.
             </p>
           </Item>
         )}

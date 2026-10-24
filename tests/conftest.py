@@ -68,6 +68,24 @@ def _reset_process_globals() -> Iterator[None]:
     portal_db._reset_engine()
 
 
+@pytest.fixture(autouse=True)
+def _isolated_data_dir(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Point ``$WHYGRAPH_DATA`` at a fresh directory for every test.
+
+    A portal context puts a project's history DB under the data directory,
+    so a test that builds one outside an app fixture would otherwise write
+    under the developer's real ``~/.local/share/whygraph``. Through
+    ``monkeypatch``, so the variable that ``create_portal_app(data_dir=)``
+    writes directly is restored too. Tests that set their own data
+    directory override it.
+    """
+    data = tmp_path_factory.mktemp("whygraph-data")
+    monkeypatch.setenv(portal_db.DATA_ENV_VAR, str(data))
+    return data
+
+
 class KeyTestNetwork:
     """The network every portal's key tests see in a test: never the real one.
 

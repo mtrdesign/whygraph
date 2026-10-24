@@ -603,7 +603,7 @@ describe("production project pages", () => {
     expect(screen.queryByRole("button", { name: "Sync now" })).toBeNull();
     expect(screen.queryByRole("region", { name: "Agents" })).toBeNull();
     expect(screen.getByRole("region", { name: "Danger zone" })).toHaveTextContent(
-      "Removes the server copy and every scan.",
+      "The server copy and the project's history are deleted unless you keep the history.",
     );
     expect(screen.queryByText(/removes its git hooks/)).toBeNull();
   });
@@ -614,32 +614,77 @@ describe("production project pages", () => {
       hooks: null,
       agent_files: [],
       checkout_deleted: true,
+      history_deleted: true,
       warnings: [],
     });
     const user = userEvent.setup();
     mount("/p/api/settings");
     await user.click(await screen.findByRole("button", { name: "Remove project" }));
     const dialog = await screen.findByTestId("remove-dialog");
-    expect(dialog).toHaveTextContent("This removes the server copy and every scan.");
+    expect(dialog).toHaveTextContent("This removes the server copy and the project's scans.");
     // No server path in production (MODE-1, SET-9).
     expect(dialog).toHaveTextContent("The server copy of the repository.");
     expect(dialog).not.toHaveTextContent("/data/");
     expect(dialog).toHaveTextContent("The repository on GitHub; nothing is changed there.");
     expect(dialog).not.toHaveTextContent(/git hooks|portal\.\*|MCP entries|checkout/);
-    expect(within(dialog).queryByRole("checkbox")).toBeNull();
+    expect(within(dialog).getByRole("checkbox", { name: /Keep history/ })).not.toBeChecked();
+    expect(within(dialog).queryByRole("checkbox", { name: /agent MCP/ })).toBeNull();
 
     const remove = within(dialog).getByRole("button", { name: "Remove project" });
     expect(remove).toBeDisabled();
-    await user.type(within(dialog).getByLabelText(/to confirm deleting the server copy/), "Api");
+    await user.type(within(dialog).getByLabelText(/to confirm deleting the server copy and history/), "Api");
     expect(remove).toBeEnabled();
     await user.click(remove);
     await waitFor(() => expect(calls("DELETE", "/api/projects/api")).toHaveLength(1));
     expect(calls("DELETE", "/api/projects/api")[0].body).toEqual({
       strip_agent_entries: false,
       confirm_tracked: [],
+      delete_history: true,
       confirm_name: "Api",
     });
     expect(await screen.findByTestId("remove-done")).toHaveTextContent("The server copy was deleted.");
+  });
+
+  it("Keep history sends delete_history false and the done state says it was kept", async () => {
+    handlers["DELETE /api/projects/api"] = () => ({
+      removed: "api",
+      hooks: null,
+      agent_files: [],
+      checkout_deleted: true,
+      history_deleted: false,
+      warnings: ["history not deleted: refused"],
+    });
+    const user = userEvent.setup();
+    mount("/p/api/settings");
+    await user.click(await screen.findByRole("button", { name: "Remove project" }));
+    const dialog = await screen.findByTestId("remove-dialog");
+    await user.click(within(dialog).getByRole("checkbox", { name: /Keep history/ }));
+    await user.type(within(dialog).getByLabelText(/to confirm deleting the server copy/), "Api");
+    await user.click(within(dialog).getByRole("button", { name: "Remove project" }));
+    await waitFor(() => expect(calls("DELETE", "/api/projects/api")).toHaveLength(1));
+    expect(calls("DELETE", "/api/projects/api")[0].body).toMatchObject({ delete_history: false });
+    // Deleting was requested (the default) and refused: not "done".
+    const done = await screen.findByTestId("remove-done");
+    expect(done).not.toHaveTextContent("history was deleted");
+    expect(done).toHaveTextContent("history was kept");
+  });
+
+  it("a refused history delete is a failure, not done", async () => {
+    handlers["DELETE /api/projects/api"] = () => ({
+      removed: "api",
+      hooks: null,
+      agent_files: [],
+      checkout_deleted: true,
+      history_deleted: false,
+      warnings: ["history not deleted: refused"],
+    });
+    const user = userEvent.setup();
+    mount("/p/api/settings");
+    await user.click(await screen.findByRole("button", { name: "Remove project" }));
+    const dialog = await screen.findByTestId("remove-dialog");
+    await user.type(within(dialog).getByLabelText(/to confirm deleting the server copy/), "Api");
+    await user.click(within(dialog).getByRole("button", { name: "Remove project" }));
+    expect(await screen.findByTestId("history-not-deleted")).toBeInTheDocument();
   });
 });
 

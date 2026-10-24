@@ -1,7 +1,7 @@
 """Refusing paths that leave a repository through a symbolic link.
 
 A repository's content is not trusted: a GitHub clone (or any repo under a
-shared folder) can commit ``.whygraph/whygraph.db``, ``.whygraph/``,
+shared folder) can commit ``.codegraph/codegraph.db``, ``.whygraph/``,
 ``.gitignore`` or ``whygraph.toml`` as a symlink to another project's
 files or to the portal's own data. :func:`check_inside` is the one check
 every portal read or write of a repo path goes through: no component

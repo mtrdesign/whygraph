@@ -25,7 +25,7 @@ flowchart LR
         scan["Scan runner"]
     end
     pg[("whygraph-portal-postgres<br/>(container, no published port)<br/>projects, settings, keys")]
-    repo[("Shared folder<br/>.whygraph + .codegraph")]
+    repo[("Project history (data directory)<br/>+ shared folder .codegraph")]
 
     app -- "MCP over HTTP" --> mcp
     mcp -- "reads cached evidence + rationale" --> repo

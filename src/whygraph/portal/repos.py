@@ -307,8 +307,13 @@ class DiscoveryCache:
         return list(repos)
 
 
-def detect_existing(root: Path, custom_db_paths: list[dict] | None = None) -> dict:
-    """Report the 1.x WhyGraph state a repository already carries.
+def detect_existing(
+    root: Path,
+    custom_db_paths: list[dict] | None = None,
+    *,
+    history_db: Path | None,
+) -> dict:
+    """Report the WhyGraph state a repository and its project already carry.
 
     Read-only: this is the ``detected`` block of the add response.
 
@@ -318,10 +323,17 @@ def detect_existing(root: Path, custom_db_paths: list[dict] | None = None) -> di
         Repository root.
     custom_db_paths : list of dict, optional
         From :func:`whygraph.portal.policy.preview_import`.
+    history_db : Path or None
+        The project's history DB in the portal's data directory
+        (``None`` for a linked project, which has none). A
+        ``.whygraph/whygraph.db`` in the repository is never reported: the
+        portal does not open it.
 
     Returns
     -------
     dict
+        ``existing_db`` is whether ``history_db`` exists (on add: the
+        project re-attached its kept history). Keys:
         ``{"existing_db", "managed_hooks", "detected_agents",
         "custom_db_paths", "codegraph_entries", "codegraph_sections",
         "codegraph_hooks"}``; each ``detected_agents`` item is
@@ -343,7 +355,7 @@ def detect_existing(root: Path, custom_db_paths: list[dict] | None = None) -> di
         for entry in detect_entries(root)
     ]
     return {
-        "existing_db": (root / ".whygraph" / "whygraph.db").is_file(),
+        "existing_db": history_db is not None and history_db.is_file(),
         "managed_hooks": list(managed_hook_names(root)),
         "detected_agents": agents,
         "custom_db_paths": list(custom_db_paths or []),

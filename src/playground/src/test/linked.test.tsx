@@ -657,7 +657,11 @@ describe("linked project pages", () => {
     mount("/p/alpha/settings");
     await user.click(await screen.findByRole("button", { name: "Remove from this machine" }));
     const dialog = await screen.findByTestId("remove-dialog");
+    // A linked project has no history here: no history checkbox, no typed name.
+    expect(within(dialog).queryByRole("checkbox", { name: /history/i })).toBeNull();
+    expect(within(dialog).queryByLabelText(/to confirm deleting/)).toBeNull();
     await user.click(within(dialog).getByRole("button", { name: "Remove from this machine" }));
+    expect(fake.calls.find((c) => c.method === "DELETE")?.body).not.toHaveProperty("delete_history");
     const failed = await screen.findByTestId("revoke-failed");
     expect(within(failed).getByRole("link")).toHaveAttribute("href", "https://whygraph.example.com/account");
   });

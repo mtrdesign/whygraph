@@ -56,10 +56,12 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     github_app_key,
     github_git_server,
     github_sign_in,
+    history_db,
     log_in,
     portal_client,
     prod_portal,
     production_env,
+    seed_history,
     wait_scan,
 )
 from test_portal_identity_routes import (  # noqa: F401 -- `audit_log` is a fixture
@@ -74,6 +76,7 @@ from whygraph.portal import webhook as webhook_mod
 from whygraph.portal.clones import clone_dir_is_safe, sweep_clone_dirs
 from whygraph.portal.github_app import GitHubApp, UserTokens
 from whygraph.portal.github_auth import GitHubOAuth
+from whygraph.portal.history import history_owner
 from whygraph.portal.models import Membership, Organization, Project, User
 from whygraph.portal.orgs import add_member
 from whygraph.portal.repo_cache import RepoListCache
@@ -778,7 +781,9 @@ def test_import_answers_at_once_then_its_run_clones_initializes_and_scans(
     ] == [("acme/api", "acme", None, False)]
     root = w.repos / "acme" / "api"
     assert (root / "README.md").read_text() == "api\n"
-    assert (root / ".whygraph" / "whygraph.db").is_file()
+    # The history is in the data dir, not in the clone (a re-clone keeps it).
+    assert history_db("api", "acme").is_file()
+    assert not (root / ".whygraph" / "whygraph.db").exists()
     assert clone_dirs(w) == ["api"]  # no .clone-* left behind
     assert w.server.url in (root / ".git" / "config").read_text()
     assert "ghs_" not in (root / ".git" / "config").read_text()
@@ -885,6 +890,62 @@ def test_a_taken_folder_retries_the_slug(world: World) -> None:
     assert (leftover / "stray").exists()  # never merged into or removed
     assert (w.repos / "acme" / "api-2" / "README.md").is_file()
     assert clone_dirs(w) == ["api", "api-2"]
+
+
+def test_a_kept_history_reattaches_by_github_repo_id(world: World) -> None:
+    """Criterion 3: a re-import finds its history by the App's repository id."""
+    w = world
+    connected(w)
+    db = seed_history(
+        None, "api", {"github_repo_id": API_REPO}, org="acme", source="github"
+    )
+    seed_history(
+        None, "api-2", {"github_repo_id": OTHER_PUBLIC}, org="acme", source="github"
+    )
+    response = w.client.post(
+        at("acme") + "/api/projects",
+        json={
+            "source": "github",
+            "installation_id": INSTALLATION,
+            "repo_id": API_REPO,
+            "name": "Renamed",  # the slug follows the history, not the name
+        },
+    )
+    assert wait_import(w, response)["status"] == "ok"
+    assert response.json()["project"]["slug"] == "api"
+    assert history_db("api", "acme") == db and db.is_file()
+    detail = w.client.get(at("acme") + "/api/projects/api").json()
+    assert detail["detected"]["existing_db"] is True
+
+
+def test_another_repositorys_history_gets_a_suffix_in_production(world: World) -> None:
+    w = world
+    connected(w)
+    seed_history(
+        None, "api", {"github_repo_id": OTHER_PUBLIC}, org="acme", source="github"
+    )
+    response = imported_ok(w)
+    assert response.json()["project"]["slug"] == "api-2"
+    owner = history_owner(history_db("api-2", "acme").parent)
+    assert owner is not None and owner["identity"] == {"github_repo_id": API_REPO}
+    assert owner["source"] == "github" and owner["root"] == "repos/acme/api-2"
+    kept = history_owner(history_db("api", "acme").parent)
+    assert kept is not None and kept["identity"] == {"github_repo_id": OTHER_PUBLIC}
+
+
+def test_a_kept_history_is_skipped_when_a_leftover_clone_has_its_name(
+    world: World,
+) -> None:
+    """The clone would collide with the leftover folder: no re-attach to that slug."""
+    w = world
+    connected(w)
+    (w.repos / "acme" / "api").mkdir(parents=True)
+    seed_history(None, "api", {"github_repo_id": API_REPO}, org="acme", source="github")
+    response = imported_ok(w)
+    assert response.json()["project"]["slug"] == "api-2"
+    detail = w.client.get(at("acme") + "/api/projects/api-2").json()
+    assert detail["detected"]["existing_db"] is True  # its own, fresh DB by now
+    assert history_db("api", "acme").is_file()  # the kept one is untouched
 
 
 def test_a_slug_race_in_the_database_retries(
@@ -1042,16 +1103,71 @@ def test_production_config_fixes_the_branch_remote_and_hooks(world: World) -> No
     assert response.json()["config"] == {"scan": {"forge": "off"}}
 
 
-def test_removing_an_imported_project_deletes_its_clone(world: World) -> None:
+def test_removing_an_imported_project_deletes_its_clone(
+    world: World, audit_log: pytest.LogCaptureFixture
+) -> None:
     w = world
     connected(w)
     imported_ok(w)
+    history = history_db("api", "acme")
+    assert history.is_file()
     response = w.client.request(
         "DELETE", at("acme") + "/api/projects/api", json={"confirm_name": "api"}
     )
     assert response.status_code == 200, response.text
-    assert response.json()["checkout_deleted"] is True
+    body = response.json()
+    assert body["checkout_deleted"] is True
     assert clone_dirs(w) == [] and (w.repos / "acme").is_dir()
+    # delete_history omitted: production deletes the history too (D9).
+    assert body["history_deleted"] is True and body["warnings"] == []
+    assert not history.parent.exists() and history.parent.parent.is_dir()
+    (event,) = [e for e in events(audit_log) if e["event"] == "project_removed"]
+    assert (event["checkout_deleted"], event["history_deleted"]) == (True, True)
+
+
+def test_keep_history_on_a_production_remove(world: World) -> None:
+    """**Keep history**: the clone goes, the history stays and re-attaches."""
+    w = world
+    connected(w)
+    imported_ok(w)
+    history = history_db("api", "acme")
+    refused = w.client.request(
+        "DELETE", at("acme") + "/api/projects/api", json={"delete_history": False}
+    )
+    # The server copy still needs the typed name.
+    assert (refused.status_code, refused.json()["code"]) == (409, "confirm_name")
+    response = w.client.request(
+        "DELETE",
+        at("acme") + "/api/projects/api",
+        json={"confirm_name": "api", "delete_history": False},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["checkout_deleted"] is True
+    assert response.json()["history_deleted"] is False
+    assert history.is_file()
+
+    again = imported_ok(w)
+    assert again.json()["project"]["slug"] == "api"
+    assert history_db("api", "acme") == history and history.is_file()
+
+
+def test_a_reimport_after_a_history_delete_creates_the_db_again(world: World) -> None:
+    w = world
+    connected(w)
+    imported_ok(w)
+    history = history_db("api", "acme")
+    response = w.client.request(
+        "DELETE", at("acme") + "/api/projects/api", json={"confirm_name": "api"}
+    )
+    assert response.json()["history_deleted"] is True
+    assert not history.parent.exists()
+
+    again = imported_ok(w)
+    assert again.json()["project"]["slug"] == "api"
+    assert history.is_file()
+    assert history_owner(history.parent)["identity"] == {"github_repo_id": API_REPO}
+    sessions = w.client.get(at("acme") + "/api/projects/api/chat/sessions")
+    assert sessions.status_code == 200, sessions.text
 
 
 # ---------------------------------------------------------------------------
@@ -1119,6 +1235,53 @@ def test_retry_requeues_the_import_hits_the_throttle_and_clears_a_failed_mint(
     assert row.access_lost_at is None and row.initialized_at is not None
     assert w.state.import_org.remaining(org_id) == 29  # the Retry counted
     assert (w.repos / "acme" / "api" / "README.md").is_file()
+
+
+def test_a_failed_initialize_discards_the_clone_and_keeps_the_history(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan section 4.3 / criterion 2: the discard needs no context, a retry re-attaches.
+
+    The clone's Initialize fails *in* ``contexts.get``: had the failure path
+    asked for the context again, it would fail again and keep the clone.
+    """
+    import sqlite3
+    import sys
+
+    w = world
+    connected(w)
+    history = history_db("api", "acme")
+    real_get = w.state.contexts.get
+    asked: list[str] = []
+
+    def get(project_id: int):  # noqa: ANN202
+        caller = sys._getframe(1).f_code.co_name
+        if caller == "_github_clone":
+            asked.append(caller)
+            # What the first Initialize would have left: a migrated DB.
+            w.state.migrations.ensure(real_get(project_id))
+            raise RuntimeError("the context could not be built")
+        return real_get(project_id)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(w.state.contexts, "get", get)
+        run = wait_import(w, import_repo(w, API_REPO))
+    assert run["status"] == "failed", run
+    assert "could not initialize" in run["summary"]["error"], run
+    assert asked == ["_github_clone"]  # never asked again on the way out
+    assert clone_dirs(w) == []
+    assert history.is_file()  # the history directory is kept
+    with sqlite3.connect(history) as conn:
+        conn.execute("PRAGMA user_version = 42")
+
+    url = at("acme") + "/api/projects/api"
+    retry = w.client.post(f"{url}/scans", json={})
+    assert retry.status_code == 202, retry.text
+    run = wait_scan(w.client, url, retry.json()["run_id"])
+    assert (run["status"], run["summary"]["cloned"]) == ("ok", True), run
+    with sqlite3.connect(history) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone() == (42,)
+    assert not (w.repos / "acme" / "api" / ".whygraph" / "whygraph.db").exists()
 
 
 def test_a_failed_import_is_removed_without_a_path_warning(world: World) -> None:

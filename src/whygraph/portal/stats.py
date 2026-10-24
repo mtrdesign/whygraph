@@ -21,7 +21,8 @@ from whygraph.db.models import RationaleCache
 from whygraph.mcp.errors import WhyGraphError
 from whygraph.mcp.resources import _repo_overview_resource
 
-from .paths import check_project_paths
+from .db import data_dir
+from .paths import check_project_db, check_project_paths
 
 if TYPE_CHECKING:
     from .deps import PortalState
@@ -57,13 +58,14 @@ def project_counts(
         a symlink (nothing is opened), when the DB does not exist yet, or
         when it cannot be read.
     """
-    if ctx.remote is not None:
+    if ctx.remote is not None or ctx.config.whygraph_db is None:
         return None
+    db_path = Path(ctx.config.whygraph_db)
     try:
         check_project_paths(ctx.root)
+        check_project_db(data_dir(), db_path)
     except UnsafePathError:
         return None
-    db_path = Path(ctx.config.whygraph_db or ctx.root / ".whygraph/whygraph.db")
     if not db_path.is_file():
         return None
     if migrate:

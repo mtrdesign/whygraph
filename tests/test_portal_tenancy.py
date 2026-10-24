@@ -281,12 +281,15 @@ def _seed_codegraph(root: Path, mark: str) -> None:
     )
 
 
-def _seed_history(root: Path) -> None:
-    """The repo's commits and file changes as scanned, described rows."""
+def _seed_history(root: Path, org: str) -> None:
+    """The repo's commits and file changes as scanned, described rows (``org``'s ``api``)."""
     log = _git(
         root, "log", "--name-status", "--format=%x1e%H%x1f%P%x1f%aI%x1f%cI%x1f%s"
     )
-    with use_project(manual_ctx(root, slug="api")), project_session() as session:
+    with (
+        use_project(manual_ctx(root, slug="api", org=org)),
+        project_session() as session,
+    ):
         for record in filter(None, log.split("\x1e")):
             header, *rows = record.strip("\n").split("\n")
             sha, parents, authored, committed, subject = header.split("\x1f")
@@ -374,7 +377,7 @@ def _add_org_project(world: World, org: OrgWorld, defaults: dict) -> None:
     # The first Initialize queues the project's first scan (M2f-3 R2).
     org.run_id = init.json()["initial_run_id"]
     assert isinstance(org.run_id, int)
-    _seed_history(org.root)
+    _seed_history(org.root, org.slug)
     org.marker_sha = _git(org.root, "rev-parse", "HEAD").strip()
     org.first_sha = _git(org.root, "rev-list", "--max-parents=0", "HEAD").strip()
     session = client.post(
@@ -2046,7 +2049,7 @@ def test_system_scans_get_only_their_own_orgs_secrets(
         for org in (w.local, w.beta):
             wait_idle(w.client, org.owner)
         by_root = {
-            org.slug: next(s for s in seen if s["db"].startswith(str(org.root)))
+            org.slug: next(s for s in seen if f"/projects/{org.slug}/api/" in s["db"])
             for org in (w.local, w.beta)
         }
         for org in (w.local, w.beta):
@@ -2079,7 +2082,7 @@ def test_nothing_answers_signed_out_in_production(
     env = production_env
     root = _marked_repo(env, "narwhal")
     _seed_codegraph(root, "narwhal")
-    with use_project(manual_ctx(root, slug="api")):
+    with use_project(manual_ctx(root, slug="api", org="bravo")):
         ensure_initialized()
     with prod_portal() as client:
         state = client.app.state.portal

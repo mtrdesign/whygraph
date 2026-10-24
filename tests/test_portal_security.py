@@ -2,8 +2,9 @@
 
 One section per finding:
 
-1. a symlinked project DB (or ``.whygraph/`` / ``.codegraph/``) must never
-   let one project open another project's DB or the portal's own;
+1. a symlinked ``.whygraph/`` / ``.codegraph/`` (or a link inside the data
+   directory) must never let one project open another project's DB or the
+   portal's own, and a symlinked in-repo ``whygraph.db`` is ignored;
 2. an imported or stored ``[scan].remote`` must never become a git option;
 3. init / import / delete never read or write through a symlink out of the
    repository root;
@@ -17,6 +18,7 @@ One section per finding:
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sqlite3
 import threading
@@ -32,6 +34,7 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     add_local,
     client,
     env,
+    history_db,
     initialized_repo,
     make_repo,
     manual_ctx,
@@ -107,28 +110,23 @@ def test_check_inside(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("link", ["db", "dir"])
-def test_symlinked_db_to_other_project_is_refused(
-    ready: TestClient, env: SimpleNamespace, link: str
+def test_symlinked_whygraph_dir_to_other_project_is_refused(
+    ready: TestClient, env: SimpleNamespace
 ) -> None:
+    # `.whygraph/backups` is still a repo path the portal writes, so a
+    # symlinked `.whygraph/` directory is still refused (acceptance #7).
     alpha = initialized_repo(ready, env, "alpha")
     assert ready.post("/api/projects/alpha/chat/sessions", json={}).status_code == 201
     beta = make_repo(env.shared, "beta")
     seed_codegraph(beta)
-    if link == "db":
-        (beta / ".whygraph").mkdir()
-        (beta / ".whygraph" / "whygraph.db").symlink_to(
-            alpha / ".whygraph" / "whygraph.db"
-        )
-    else:
-        (beta / ".whygraph").symlink_to(alpha / ".whygraph")
+    (beta / ".whygraph").symlink_to(alpha / ".whygraph")
     add_local(ready, beta)
 
     response = ready.post("/api/projects/beta/init", json={"agents": []})
     assert response.status_code == 409, response.text
     assert response.json()["code"] == "unsafe_path"
 
-    # Even when the row claims it is initialized, nothing opens alpha's DB.
+    # Even when the row claims it is initialized, nothing opens a DB.
     _mark_initialized("beta")
     for path in ("/api/projects/beta/chat/sessions", "/api/projects/beta/tree"):
         response = ready.get(path)
@@ -140,6 +138,31 @@ def test_symlinked_db_to_other_project_is_refused(
     assert ready.post("/api/projects/beta/scans").json()["code"] == "unsafe_path"
     details = ready.get("/api/projects/beta")
     assert details.status_code == 200 and details.json()["stats"] is None
+    assert not history_db("beta").exists()
+
+
+def test_symlinked_in_repo_db_to_other_project_is_ignored(
+    ready: TestClient, env: SimpleNamespace
+) -> None:
+    # The history DB is in the data dir: a committed `.whygraph/whygraph.db`
+    # link (here to alpha's history) is never opened.
+    initialized_repo(ready, env, "alpha")
+    assert ready.post("/api/projects/alpha/chat/sessions", json={}).status_code == 201
+    alpha_db = history_db("alpha")
+    before = alpha_db.read_bytes()
+    beta = make_repo(env.shared, "beta")
+    seed_codegraph(beta)
+    (beta / ".whygraph").mkdir()
+    (beta / ".whygraph" / "whygraph.db").symlink_to(alpha_db)
+    add_local(ready, beta)
+
+    response = ready.post("/api/projects/beta/init", json={"agents": []})
+    assert response.status_code == 200, response.text
+    assert ready.get("/api/projects/beta/chat/sessions").json() == []
+    assert len(ready.get("/api/projects/alpha/chat/sessions").json()) == 1
+    assert history_db("beta").is_file() and not history_db("beta").is_symlink()
+    assert (beta / ".whygraph" / "whygraph.db").is_symlink()
+    assert alpha_db.read_bytes() == before
 
 
 def test_symlinked_codegraph_db_is_refused(
@@ -155,16 +178,16 @@ def test_symlinked_codegraph_db_is_refused(
     response = ready.post("/api/projects/beta/init", json={"agents": []})
     assert response.status_code == 409 and response.json()["code"] == "unsafe_path"
     _mark_initialized("beta")
-    (beta / ".whygraph").mkdir()
-    sqlite3.connect(beta / ".whygraph" / "whygraph.db").close()
+    history_db("beta").parent.mkdir(parents=True, exist_ok=True)  # the add reserved it
+    sqlite3.connect(history_db("beta")).close()
     assert ready.get("/api/projects/beta/tree").json()["code"] == "unsafe_path"
 
 
-def test_symlinked_db_never_backs_up_or_migrates_a_data_dir_file(
+def test_symlinked_in_repo_db_never_backs_up_or_migrates_a_data_dir_file(
     ready: TestClient, env: SimpleNamespace
 ) -> None:
-    # The portal's own DB is Postgres; what a symlink can still reach is any
-    # SQLite file inside the data directory.
+    # The portal's own DB is Postgres; what a symlink could still reach is
+    # any SQLite file inside the data directory. The in-repo link is ignored.
     portal_file = env.data / "victim.db"
     conn = sqlite3.connect(portal_file)
     conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -179,20 +202,66 @@ def test_symlinked_db_never_backs_up_or_migrates_a_data_dir_file(
     )
     add_local(ready, root)
     response = ready.post("/api/projects/sneaky/init", json={"agents": []})
-    assert response.status_code == 409 and response.json()["code"] == "unsafe_path"
+    assert response.status_code == 200, response.text
     assert not (root / ".whygraph" / "backups").exists()
     assert _tables(portal_file) == before
     assert portal_file.read_bytes() == before_bytes
 
 
+def test_a_symlink_inside_the_data_dir_is_refused(
+    ready: TestClient, env: SimpleNamespace
+) -> None:
+    # A history directory that is a link (to another SQLite file's folder)
+    # is refused wherever the DB would be opened, migrated or backed up.
+    victim_dir = env.tmp / "victim"
+    victim_dir.mkdir()
+    victim = victim_dir / "whygraph.db"
+    conn = sqlite3.connect(victim)
+    conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+    conn.commit()
+    conn.close()
+    before_bytes = victim.read_bytes()
+    root = make_repo(env.shared, "sneaky")
+    add_local(ready, root)
+    # Swap the directory the add reserved for a link.
+    shutil.rmtree(history_db("sneaky").parent)
+    history_db("sneaky").parent.symlink_to(victim_dir)
+
+    response = ready.post("/api/projects/sneaky/init", json={"agents": []})
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "unsafe_path"
+    _mark_initialized("sneaky")
+    assert ready.get("/api/projects/sneaky/tree").json()["code"] == "unsafe_path"
+    assert ready.post("/api/projects/sneaky/scans").json()["code"] == "unsafe_path"
+    assert ready.get("/api/projects/sneaky").json()["stats"] is None
+    assert not (victim_dir / "backups").exists()
+    assert victim.read_bytes() == before_bytes
+
+
 def test_migrations_refuse_a_symlinked_db(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    ctx = manual_ctx(root, "repo")
+    db = Path(ctx.config.whygraph_db)
+    db.parent.mkdir(parents=True)
+    victim = tmp_path / "victim.db"
+    sqlite3.connect(victim).close()
+    db.symlink_to(victim)
+    with pytest.raises(UnsafePathError):
+        ProjectMigrations().ensure(ctx)
+    assert not (db.parent / "backups").exists()
+    assert _tables(victim) == set()
+
+
+def test_migrations_ignore_a_symlinked_in_repo_db(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     (root / ".whygraph").mkdir(parents=True)
     victim = tmp_path / "victim.db"
     sqlite3.connect(victim).close()
     (root / ".whygraph" / "whygraph.db").symlink_to(victim)
-    with pytest.raises(UnsafePathError):
-        ProjectMigrations().ensure(manual_ctx(root))
+    ctx = manual_ctx(root, "repo")
+    ProjectMigrations().ensure(ctx)
+    assert Path(ctx.config.whygraph_db).is_file()
     assert not (root / ".whygraph" / "backups").exists()
     assert _tables(victim) == set()
 

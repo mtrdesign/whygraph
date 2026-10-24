@@ -18,6 +18,7 @@ UV_RUN ?= uv run
 
 # Scratch state for all dev modes (canonical path: Docker shares it at the same path).
 DEV ?= $(shell cd "$${TMPDIR:-/tmp}" && pwd -P)/whygraph-dev
+DEV_LOCAL_DATA := $(DEV)/local/data
 DEV_PORT ?= 8777
 DEV_PROD_PORT ?= 8778
 DEV_GITHUB_PORT ?= 18767
@@ -50,6 +51,9 @@ DEV_GITHUB_MODE = if [ -f "$(DEV_ENV_FILE)" ]; then echo "loading $(DEV_ENV_FILE
 # endpoint on the running dev portal; `MCP_PATH=code` picks its CodeGraph
 # endpoint (/mcp/<slug>/code) instead.
 SLUG ?= whygraph
+# `make db` reads the project's WhyGraph DB from the dev data dir (SLUG is the
+# project slug) and its CodeGraph index from the scratch repo folder REPO.
+REPO ?= $(SLUG)
 MCP_PATH ?=
 
 # Local image tag. `make image` builds it with the release's build args.
@@ -76,7 +80,7 @@ dev-local: node-check dev-fixtures dev-db  ## Develop natively: portal :8777 (au
 	WHYGRAPH_DATABASE_URL="$(DEV_DATABASE_URL)" \
 	WHYGRAPH_SHARED_FOLDERS="$(DEV)/repos" WHYGRAPH_DEV_ORIGINS=http://localhost:5174,http://127.0.0.1:5174 \
 	WHYGRAPH_DEV_PLATFORM_HTTP=1 NO_PROXY=.localhost \
-		$(UV_RUN) python scripts/dev_portal.py -- --data "$(DEV)/local/data" --port $(DEV_PORT)
+		$(UV_RUN) python scripts/dev_portal.py -- --data "$(DEV_LOCAL_DATA)" --port $(DEV_PORT)
 
 dev-production: dev-github-check node-check dev-fixtures dev-db  ## Develop in production mode: portal :8778 + Vite :5173 on whygraph.localhost:5173 (runs beside dev-local)
 	@docker exec $(PG_DEV_NAME) psql -U whygraph -d whygraph -tAc "SELECT 1 FROM pg_database WHERE datname='whygraph_prod'" | grep -q 1 \
@@ -174,14 +178,14 @@ inspect:  ## MCP Inspector vs a project's endpoint on the running dev portal (SL
 	@node -e 'process.exit(+process.versions.node.split(".")[0]>=20?0:1)' 2>/dev/null || { echo "error: MCP Inspector needs Node >= 20 (have $$(node -v 2>/dev/null || echo none)) - try 'nvm use 22'"; exit 1; }
 	npx @modelcontextprotocol/inspector --transport http --server-url http://127.0.0.1:$(DEV_PORT)/mcp/$(SLUG)$(if $(MCP_PATH),/$(MCP_PATH))
 
-db:  ## DBGate viewer for a scratch repo's two databases and the dev portal DB (http://localhost:8081; SLUG=<repo>)
+db:  ## DBGate viewer for a project's two databases and the dev portal DB (http://localhost:8081; SLUG=<project slug>, REPO=<folder>, default SLUG)
 	@test -f docker-compose.yml || { echo "error: docker-compose.yml missing - run: cp docker-compose.example.yml docker-compose.yml"; exit 1; }
-	@test -f "$(DEV)/repos/$(SLUG)/.whygraph/whygraph.db" || echo "warning: $(DEV)/repos/$(SLUG)/.whygraph/whygraph.db missing - add and scan the project in a dev portal"
-	DB_REPO="$(DEV)/repos/$(SLUG)" docker compose up -d
+	@test -f "$(DEV_LOCAL_DATA)/projects/local/$(SLUG)/whygraph.db" || echo "warning: $(DEV_LOCAL_DATA)/projects/local/$(SLUG)/whygraph.db missing - add and scan the project in a dev portal"
+	DB_HISTORY="$(DEV_LOCAL_DATA)/projects/local/$(SLUG)" DB_REPO="$(DEV)/repos/$(REPO)" docker compose up -d
 	@echo "DBGate -> http://localhost:8081  (WhyGraph + CodeGraph, and Portal while make dev-db runs)"
 
 db-down:  ## Stop the DBGate database viewer
-	docker compose down
+	DB_HISTORY="$(DEV_LOCAL_DATA)/projects/local/$(SLUG)" DB_REPO="$(DEV)/repos/$(REPO)" docker compose down
 
 # Same layout as the shim's database container: the host dir mounted at
 # /var/lib/postgresql (never .../data), a per-major PGDATA, the host user, and

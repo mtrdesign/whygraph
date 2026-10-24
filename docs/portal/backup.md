@@ -2,10 +2,13 @@
 
 The portal's own data - the project list, settings, encrypted keys and tokens, and scan history - is
 in its Postgres database, in the `whygraph-portal-postgres` container, with the database's files in
-`postgres/` under the data directory (`~/.local/share/whygraph`). That database is what to back up.
+`postgres/` under the data directory (`~/.local/share/whygraph`).
 
-Your projects' evidence, descriptions, rationale cache and chat history are **not** in it: they stay in
-each repository, in `.whygraph/whygraph.db` and `.codegraph/`, and are backed up with the repository.
+Your projects' evidence, descriptions, rationale cache and chat history are **not** in that database:
+each project's `whygraph.db` is in the same data directory, under `projects/<org>/<slug>/`. A
+`whygraph backup` dump covers Postgres only (`pg_dump`), so to back up everything, back up the **whole
+data directory** (see [Copying the whole data directory](#copying-the-whole-data-directory)).
+`.codegraph/` stays in each repository and is rebuilt by a scan.
 
 ## Make a backup
 
@@ -124,12 +127,15 @@ cp -a ~/.local/share/whygraph /somewhere/safe/whygraph-data
 whygraph up
 ```
 
-`logs/`, `locks/` and `codegraph-home/` are disposable; a copy without them restores fine.
+The copy includes `postgres/` and `projects/`. `projects/` is the only place the project history lives,
+so a dump alone does not back it up. `logs/`, `locks/` and `codegraph-home/` are disposable; a copy
+without them restores fine.
 
 To restore, `whygraph down`, put the copy back in place of the data directory, and `whygraph up`. A
 copy holds `secret.key` and `postgres.password` too, so it is as sensitive as the live data
-directory. Prefer dumps: they are smaller, can be made while WhyGraph runs, and survive a Postgres
-upgrade.
+directory. A dump is smaller, can be made while WhyGraph runs and survives a Postgres upgrade, but it
+leaves the project history out: use a dump for the portal database and a copy of `projects/` (or the
+whole data directory) for the history.
 
 ## Removing WhyGraph
 

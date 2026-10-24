@@ -724,7 +724,7 @@ describe("Set up (Initialize)", () => {
     const user = userEvent.setup();
     const { router } = mount("/p/alpha/init?step=setup");
 
-    expect(await screen.findByTestId("detected-panel")).toHaveTextContent("Existing database");
+    expect(await screen.findByTestId("detected-panel")).toHaveTextContent("Existing history");
     expect(screen.getByRole("checkbox", { name: /Claude Code/ })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: /VS Code/ })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: /Cursor/ })).not.toBeChecked();

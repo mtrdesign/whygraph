@@ -265,6 +265,7 @@ def test_deleting_an_org_removes_everything_it_owns_and_nothing_else(
     (w.env.data / "runs" / f"{acme_run}.token").write_text("left over")
     in_flight = w.repos / "acme" / ".clone-api-0123456789ab"
     in_flight.mkdir()
+    assert (w.env.data / "projects" / "acme" / "api" / "whygraph.db").is_file()
     acme, bravo = org_id("acme"), org_id("bravo")
     assert acme is not None and bravo is not None
     before = rows_of(acme)
@@ -285,6 +286,7 @@ def test_deleting_an_org_removes_everything_it_owns_and_nothing_else(
     assert org_id("acme") is None
     assert rows_of(acme) == dict.fromkeys(before, 0)
     assert not (w.repos / "acme").exists()
+    assert not (w.env.data / "projects" / "acme").exists()
     assert not any(p.exists() for p in run_files(w, acme_run))
     assert not (w.env.data / "runs" / f"{acme_run}.token").exists()
     with portal_db.get_session() as session:
@@ -308,6 +310,7 @@ def test_deleting_an_org_removes_everything_it_owns_and_nothing_else(
     # Another org is untouched: rows, clone, run files, config and keys.
     assert rows_of(bravo) == bravo_before
     assert (w.repos / "bravo" / "api" / ".git").is_dir()
+    assert (w.env.data / "projects" / "bravo" / "api" / "whygraph.db").is_file()
     assert all(p.is_file() for p in run_files(w, bravo_run))
     defaults = w.client.get(at("bravo") + "/api/portal/defaults")
     assert "bravo-model" in defaults.text

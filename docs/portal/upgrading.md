@@ -68,9 +68,11 @@ The restore runs in the new major's image on purpose: `pg_restore` must be at le
 
 ## From 1.x { #from-1x }
 
-2.0.0 replaces per-repo setup with the [portal](index.md). **Your data carries over**: each repository
-keeps its `.whygraph/whygraph.db` and `.codegraph/` index, and the portal reuses them. What changes is
-how you start WhyGraph, where configuration and keys live, and how your agents connect.
+2.0.0 replaces per-repo setup with the [portal](index.md). What changes is how you start WhyGraph,
+where configuration and keys live, and how your agents connect. The portal does **not** reuse a
+`.whygraph/whygraph.db` that 1.x left in a repository: it keeps each project's history in its own data
+directory and never reads the in-repo file, so a project starts with empty history. The repository's
+`.codegraph/` index is rebuilt by the first scan.
 
 ### Breaking changes
 
@@ -102,8 +104,9 @@ portal and exit with status `2`, so an old habit, a stale script or a 1.x agent 
 3. **Add each repository** from the Projects page, exactly like a new project. The portal detects what
    1.x left behind and reports it:
 
-    - an existing `.whygraph/whygraph.db` is kept and migrated (with a backup in
-      `.whygraph/backups/`) when you initialize;
+    - an existing `.whygraph/whygraph.db` is ignored (it is left in place, never read or migrated); a
+      database the portal creates and later migrates is backed up in
+      `projects/<org>/<slug>/backups/` in the data directory;
     - 1.x git hooks are recognized and replaced by the portal's versions;
     - `whygraph` entries in agent config files are listed, with a choice per file to **migrate** the
       entry to HTTP (the default) or **remove** it.
@@ -127,10 +130,9 @@ portal and exit with status `2`, so an old habit, a stale script or a 1.x agent 
 
 ### Custom database paths
 
-The portal always uses `<repo>/.whygraph/whygraph.db` and `<repo>/.codegraph/codegraph.db`. If a 1.x
-`whygraph.toml` set `whygraph_db` or `codegraph_db` to somewhere else, the portal will not use it and
-says so when you add the project. Move the file to the default location **before you initialize** to
-keep your descriptions, rationale cache and chat history.
+The portal always uses `<repo>/.codegraph/codegraph.db` for the CodeGraph index, and keeps the WhyGraph
+database in its data directory. If a 1.x `whygraph.toml` set `codegraph_db` (or the old `whygraph_db`)
+to somewhere else, the portal will not use it and says so when you add the project.
 
 ### Configuration keys
 
@@ -140,6 +142,6 @@ same providers, models and timeouts it did before.
 
 ### Going back to 1.x
 
-Your history stays in your repositories, and the project database is backed up before it is migrated.
+Your 1.x `.whygraph/whygraph.db` is still in your repository, because the portal never touches it.
 To use a repository without the portal again, remove it from the Projects page (or delete
 `.whygraph/portal.json`), then install 1.x again.

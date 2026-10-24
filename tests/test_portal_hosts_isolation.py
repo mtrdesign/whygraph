@@ -347,7 +347,9 @@ def _insert_project(
     scan syncs against the fake's git server; without it the row serves
     every route but a scan. Its root stays absolute (no clone is made).
     """
-    with use_project(manual_ctx(root, slug=slug)):
+    with portal_db.get_session() as session:
+        org_slug = session.get(Organization, org_id).slug
+    with use_project(manual_ctx(root, slug=slug, org=org_slug)):
         ensure_initialized()
     with portal_db.get_session() as session:
         project = Project(
@@ -422,7 +424,7 @@ def _add_prod_project(
             },
         )
     )
-    _seed_history(org.root)
+    _seed_history(org.root, org.slug)
     org.marker_sha = _git(org.root, "rev-parse", "HEAD").strip()
     org.first_sha = _git(org.root, "rev-list", "--max-parents=0", "HEAD").strip()
     org.run_id = _ok(client.post(prefix + "/api/projects/api/scans"), 202)["run_id"]
@@ -1184,7 +1186,10 @@ def test_memberships_cannot_store_the_reader_role(prod_world: ProdWorld) -> None
 
 def _chat_row_owner(org: OrgWorld, session_id: int) -> str | None:
     """The ``owner_uid`` stored on one of ``org``'s ``api`` chat sessions."""
-    with use_project(manual_ctx(org.root, slug="api")), project_session() as session:
+    with (
+        use_project(manual_ctx(org.root, slug="api", org=org.slug)),
+        project_session() as session,
+    ):
         return session.get(ChatSessionRow, session_id).owner_uid
 
 
@@ -1199,7 +1204,10 @@ def test_each_member_sees_and_touches_only_their_own_chat_sessions(
     assert _chat_row_owner(w.quokka, bobs) == w.uids["bob"]
     assert _chat_row_owner(w.quokka, w.quokka.session_id) == w.uids["ann"]
     # A row with no owner (pre-M2d-1) belongs to nobody in production.
-    with use_project(manual_ctx(w.quokka.root, slug="api")), project_session() as s:
+    with (
+        use_project(manual_ctx(w.quokka.root, slug="api", org="quokka")),
+        project_session() as s,
+    ):
         ownerless = ChatSessionRow(
             title="ownerless",
             provider="openai",

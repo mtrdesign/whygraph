@@ -48,8 +48,8 @@ def _refuse_linked() -> None:
     shared data on the laptop"), so resolving a path for one is a
     programming error, not a user error. The check sits here - the one
     function both :func:`get_engine` and :func:`get_session` go through -
-    so it fires *before* :func:`_build_engine` can create
-    ``.whygraph/`` and an empty SQLite file in the checkout.
+    so it fires *before* :func:`_build_engine` can create a history
+    directory and an empty SQLite file for it.
 
     Raises
     ------
@@ -117,10 +117,9 @@ def _build_engine(path: Path) -> Engine:
 def get_engine() -> Engine:
     """Return the SQLAlchemy :class:`Engine` for the current project's DB.
 
-    The engine is bound to the path derived from
-    :func:`whygraph.core.get_config` (``whygraph_db`` override, else the
-    project-relative default ``.whygraph/whygraph.db``). Both lookups
-    honour a bound :func:`whygraph.core.context.use_project` context, so
+    The engine is bound to :func:`whygraph.core.get_config`'s
+    ``whygraph_db`` (no default: unset, it raises). The lookup
+    honours a bound :func:`whygraph.core.context.use_project` context, so
     the path is the bound project's DB when there is one. The PRAGMA
     listener (WAL + foreign keys) is registered before the engine is
     returned, so the very first checkout already has them applied.

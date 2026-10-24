@@ -36,8 +36,10 @@ from sqlmodel import select
 from platform_fake import ORG, SLUG, TOKEN, FakePlatform, status_body
 from test_portal_app import (  # noqa: F401 -- `env` is a fixture
     env,
+    history_db,
     init_project,
     make_repo,
+    seed_history,
 )
 from test_portal_link import (  # noqa: F401 -- `fake` / `portal` are fixtures
     _transport,
@@ -329,6 +331,29 @@ def test_remove_from_machine_revokes_token(
     assert root.is_dir()
     assert not (root / ".whygraph" / "portal.json").exists()
     assert portal.get(f"/api/projects/{SLUG}").status_code == 404
+
+
+def test_remove_from_machine_never_deletes_a_same_slug_history(
+    portal: TestClient,
+    fake: FakePlatform,
+    env: SimpleNamespace,
+    scanner: SimpleNamespace,
+) -> None:
+    """D14: ``delete_history`` is ignored for a linked project, without a typed name."""
+    linked_project(portal, fake, env)
+    # A local project's kept history under the slug the platform gave the link.
+    kept = seed_history(None, SLUG, {"origin": "github.com/other/demo"})
+    sidecar = (kept.parent / "project.json").read_bytes()
+
+    response = portal.request(
+        "DELETE", f"/api/projects/{SLUG}", json={"delete_history": True}
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["history_deleted"] is False
+    assert body["warnings"] == []
+    assert kept.is_file()
+    assert (kept.parent / "project.json").read_bytes() == sidecar
 
 
 def test_remove_from_machine_when_unreachable(
@@ -865,5 +890,6 @@ def test_no_platform_content_in_portal_tables(
         assert leaked not in haystack, leaked
     # ...and the project still has no WhyGraph database of its own.
     assert not (root / ".whygraph" / "whygraph.db").exists()
+    assert not history_db(SLUG).parent.exists()
     with portal_db.get_session() as session:
         assert session.exec(select(PlatformLink.last_platform_head)).all() == ["c" * 40]

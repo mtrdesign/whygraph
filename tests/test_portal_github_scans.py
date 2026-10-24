@@ -41,6 +41,7 @@ from sqlmodel import select
 from github_fake import _git as fixture_git
 from test_portal_app import (  # noqa: F401
     CLIENT_HEADER,
+    history_db,
     manual_ctx,
     PROD_BASE,
     at,
@@ -327,8 +328,9 @@ def test_a_force_push_is_checked_out_and_noted(
     assert (root / "README.md").read_text() == "rewritten\n"
     assert run["summary"]["moved"] is True
     assert run["summary"]["history_rewritten"] is True
-    # The portal's own untracked state survived the checkout.
-    assert (root / ".whygraph" / "whygraph.db").is_file()
+    # The project's history lives in the data dir, never in the clone.
+    assert history_db("api", ORG).is_file()
+    assert not (root / ".whygraph" / "whygraph.db").exists()
 
 
 def test_a_new_default_branch_is_followed(
@@ -736,7 +738,7 @@ def card(path: str) -> RationaleCache:
 
 
 def card_paths(root: Path) -> list[str]:
-    with use_project(manual_ctx(root)), project_session() as session:
+    with use_project(manual_ctx(root, "api", ORG)), project_session() as session:
         return sorted(r.path for r in session.exec(select(RationaleCache)).all())
 
 
@@ -760,7 +762,7 @@ def test_a_sync_rewrites_an_older_clones_links_and_drops_their_cards(
     push_link(w, "app/evil.py", "../../other/secret.py")
     assert wait_run(w, scan(w))["status"] == "ok"
     as_an_older_clone(root, "app/evil.py", "../../other/secret.py")
-    with use_project(manual_ctx(root)), project_session() as session:
+    with use_project(manual_ctx(root, "api", ORG)), project_session() as session:
         session.add(card("app/evil.py"))
         session.add(card("README.md"))
 

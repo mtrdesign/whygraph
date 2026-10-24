@@ -113,7 +113,7 @@ from .config_layers import (
     save_layer,
 )
 from .context import build_project_context, resolve_root
-from .db import get_session
+from .db import data_dir, get_session
 from .deps import (
     ApiError,
     BoundProject,
@@ -160,7 +160,15 @@ from .models import (
     User,
 )
 from .orgs import add_member
-from .paths import BACKUPS_DIR
+from .history import (
+    Reservation,
+    find_history,
+    foreign_history,
+    release_sidecar,
+    remove_history,
+    write_sidecar,
+)
+from .paths import BACKUPS_DIR, project_db_path
 from .platform_pending import PendingLink
 from .platform_routes import (
     default_client_name,
@@ -344,11 +352,19 @@ class PatchProjectBody(_Strict):
 
 
 class DeleteProjectBody(_Strict):
-    """``DELETE /api/projects/{slug}``."""
+    """``DELETE /api/projects/{slug}``.
+
+    ``delete_history`` deletes the project's history directory
+    (``<data dir>/projects/<org>/<slug>/``); omitted, it is ``True`` in
+    production and ``False`` locally, and it is ignored for a linked project,
+    which has none. Deleting history, like deleting a GitHub clone, needs
+    ``confirm_name``.
+    """
 
     strip_agent_entries: bool = False
     confirm_tracked: list[str] = Field(default_factory=list)
     confirm_name: str | None = None
+    delete_history: bool | None = None
 
 
 class InitBody(_Strict):
@@ -1097,12 +1113,19 @@ def _port_change_for(state: PortalState, project: BoundProject) -> dict | None:
 
 
 def _detected(project: BoundProject) -> dict:
-    """The add response's ``detected`` block, recomputed from the repo (blocking)."""
+    """The add response's ``detected`` block, recomputed from the repo (blocking).
+
+    ``existing_db`` is whether the project's data-dir history DB exists; a
+    linked project has none.
+    """
+    history_db = None if project.source == "platform" else project.db_path
     if project.source == "local":
         return detect_existing(
-            project.root, preview_import(project.root).custom_db_paths
+            project.root,
+            preview_import(project.root).custom_db_paths,
+            history_db=history_db,
         )
-    return detect_existing(project.root)
+    return detect_existing(project.root, history_db=history_db)
 
 
 def _hooks_dict(result: HooksResult | None) -> dict | None:
@@ -1521,7 +1544,7 @@ def add_project(
         detected, preview = None, ImportPreview()
     else:
         project_id, detected, preview = _add_local(
-            state, body, principal, access.org_id
+            state, body, principal, access.org_id, access.org_slug
         )
     ctx = state.contexts.get(project_id)
     with get_session() as session:
@@ -1603,8 +1626,79 @@ def _checked_path(state: PortalState, path: str) -> dict:
     return check
 
 
+def _local_identity(root: Path) -> dict:
+    """A local checkout's history identity (plan section 4.4).
+
+    ``{"origin": "host/owner/name"}`` from its ``origin`` remote (so a
+    renamed folder re-attaches), else ``{"path": <root>}`` (a moved
+    checkout starts with empty history).
+    """
+    origin = origin_identity(root)
+    return {"origin": "/".join(origin)} if origin else {"path": str(root)}
+
+
+def _history_slug(
+    session: Session,
+    *,
+    org_id: int,
+    org_slug: str,
+    name: str,
+    identity: dict,
+    root: str | None,
+    avoid: set[str],
+) -> str:
+    """Choose a new project's slug: its own kept history, else a fresh one.
+
+    Step 1 re-attaches the history directory this identity owns
+    (:func:`~whygraph.portal.history.find_history`, never one a row uses or
+    one in ``avoid``); step 2 picks a free slug that is no other
+    identity's history directory either.
+    """
+    data = data_dir()
+    used = set(session.exec(select(Project.slug).where(Project.org_id == org_id)).all())
+    match = find_history(data, org_slug, identity, root, used | avoid)
+    if match is not None:
+        return match
+    return unique_slug(
+        session,
+        name,
+        org_id=org_id,
+        exclude=foreign_history(data, org_slug, identity) | avoid,
+    )
+
+
+def _release_reservation(reservation: Reservation | None, org_id: int) -> None:
+    """Undo a history reservation whose row was not inserted (D22).
+
+    Only what the reservation created goes, never a directory holding a DB,
+    and nothing while a local or GitHub row holds the slug (a concurrent add
+    of the same identity may have committed it, and relies on the sidecar).
+    A linked row has no history, so its slug does not keep a reservation.
+    Best-effort: the caller's error wins.
+    """
+    if reservation is None or not reservation.created_sidecar:
+        return
+    try:
+        with get_session() as session:
+            taken = session.exec(
+                select(Project.id).where(
+                    Project.org_id == org_id,
+                    Project.slug == reservation.slug_dir.name,
+                    Project.source != "platform",
+                )
+            ).first()
+        if taken is None:
+            release_sidecar(reservation, data_dir=data_dir())
+    except Exception:  # noqa: BLE001 -- never mask the insert's own failure
+        _log.warning("could not release %s", reservation.slug_dir, exc_info=True)
+
+
 def _add_local(
-    state: PortalState, body: LocalProjectBody, principal: Principal, org_id: int
+    state: PortalState,
+    body: LocalProjectBody,
+    principal: Principal,
+    org_id: int,
+    org_slug: str,
 ) -> tuple[int, dict, ImportPreview]:
     check = _checked_path(state, body.path)
     root = Path(check["path"])
@@ -1624,51 +1718,92 @@ def _add_local(
     layer = copy.deepcopy(preview.layer)
     if link is not None:
         layer.setdefault("scan", {}).setdefault("forge", "auto")
-    detected = detect_existing(root, preview.custom_db_paths)
     name = (body.name or "").strip() or root.name
-    try:
-        with get_session() as session:
-            if session.exec(
-                select(Project.id).where(Project.root == str(root))
-            ).first():
-                raise ApiError(
-                    409, "this repository is already registered", code="duplicate"
-                )
-            project_id = _insert_project(
-                session,
-                org_id=org_id,
-                slug=unique_slug(session, name, org_id=org_id),
-                name=name,
-                source="local",
-                root=str(root),
-                remote_url=strip_userinfo(link["remote_url"]) if link else None,
-                principal=principal,
-            )
-            if layer:
-                save_layer(session, project_id, layer, org_id=org_id)
-            for tag, key in preview.llm_keys.items():
-                put_secret(
+    identity = _local_identity(root)
+    tried: set[str] = set()
+    project_id: int | None = None
+    slug = ""
+    for _ in range(IMPORT_SLUG_ATTEMPTS):
+        reservation: Reservation | None = None
+        try:
+            with get_session() as session:
+                if session.exec(
+                    select(Project.id).where(Project.root == str(root))
+                ).first():
+                    raise ApiError(
+                        409, "this repository is already registered", code="duplicate"
+                    )
+                slug = _history_slug(
                     session,
-                    kind=LLM_API_KEY,
-                    value=key,
-                    provider=tag,
-                    project_id=project_id,
                     org_id=org_id,
+                    org_slug=org_slug,
+                    name=name,
+                    identity=identity,
+                    root=str(root),
+                    avoid=tried,
                 )
-            github_token = token or preview.github_token
-            if github_token:
-                put_secret(
+                tried.add(slug)
+                reservation = write_sidecar(
+                    data_dir(), org_slug, slug, "local", identity, str(root)
+                )
+                if not reservation:
+                    continue  # another identity's directory: pick again
+                project_id = _insert_project(
                     session,
-                    kind=GITHUB_TOKEN,
-                    value=github_token,
-                    project_id=project_id,
                     org_id=org_id,
+                    slug=slug,
+                    name=name,
+                    source="local",
+                    root=str(root),
+                    remote_url=strip_userinfo(link["remote_url"]) if link else None,
+                    principal=principal,
                 )
-    except IntegrityError as exc:
+                if layer:
+                    save_layer(session, project_id, layer, org_id=org_id)
+                for tag, key in preview.llm_keys.items():
+                    put_secret(
+                        session,
+                        kind=LLM_API_KEY,
+                        value=key,
+                        provider=tag,
+                        project_id=project_id,
+                        org_id=org_id,
+                    )
+                github_token = token or preview.github_token
+                if github_token:
+                    put_secret(
+                        session,
+                        kind=GITHUB_TOKEN,
+                        value=github_token,
+                        project_id=project_id,
+                        org_id=org_id,
+                    )
+            break
+        except IntegrityError as exc:
+            project_id = None
+            _release_reservation(reservation, org_id)
+            if _constraint(exc) == "uq_projects_org_slug":
+                continue
+            raise ApiError(
+                409, "this repository is already registered", code="duplicate"
+            ) from exc
+        except UnsafePathError as exc:
+            _release_reservation(reservation, org_id)
+            raise unsafe_path_error(exc) from exc
+        except BaseException:
+            _release_reservation(reservation, org_id)
+            raise
+    if project_id is None:
         raise ApiError(
-            409, "this repository is already registered", code="duplicate"
-        ) from exc
+            409, "could not find a free slug for this project; try again", code="busy"
+        )
     state.contexts.invalidate(project_id)
+    # After the slug is chosen (D18): a history DB there means a re-attach.
+    detected = detect_existing(
+        root,
+        preview.custom_db_paths,
+        history_db=project_db_path(data_dir(), org_slug, slug),
+    )
     return project_id, detected, preview
 
 
@@ -1879,7 +2014,7 @@ def _reconnect(state: PortalState, project_id: int, entry: PendingLink) -> None:
 
 
 IMPORT_SLUG_ATTEMPTS = 3
-"""Slugs an import tries when a concurrent one takes its first choice."""
+"""Slugs an add or import tries when a concurrent one takes its first choice."""
 
 
 def _no_access() -> ApiError:
@@ -1964,11 +2099,16 @@ def _insert_import_row(
     """Step 3 of the import: the row (not initialized) and the forge layer, one transaction.
 
     The org row is locked ``FOR SHARE`` first, so an org deletion cannot
-    interleave. The slug avoids every name already present in
-    ``repos/<org>/`` (a leftover folder never collides with the clone the
-    runner makes); a concurrent import that commits the same slug first
-    (``uq_projects_org_slug``) makes it try the next one, up to
-    :data:`IMPORT_SLUG_ATTEMPTS` times.
+    interleave. The slug re-attaches the repository's kept history
+    (``github_repo_id`` match, :func:`_history_slug`), else avoids every
+    other identity's history directory; either way it avoids every name
+    already present in ``repos/<org>/`` (a leftover folder never collides
+    with the clone the runner makes). The history directory is reserved
+    (:func:`~whygraph.portal.history.write_sidecar`) before the row is
+    added; another identity's reservation, or a concurrent import that
+    commits the same slug first (``uq_projects_org_slug``), makes it try
+    the next one, up to :data:`IMPORT_SLUG_ATTEMPTS` times. A failed insert
+    releases only what its reservation created.
 
     Returns
     -------
@@ -1984,8 +2124,10 @@ def _insert_import_row(
     """
     web = require_github_app(state).config.web_url
     org_dir = state.data_dir / "repos" / access.org_slug
+    identity = {"github_repo_id": repo.id}
     tried: set[str] = set()
     for _ in range(IMPORT_SLUG_ATTEMPTS):
+        reservation: Reservation | None = None
         try:
             with get_session() as session:
                 org = session.exec(
@@ -1995,13 +2137,26 @@ def _insert_import_row(
                 ).first()
                 if org is None:
                     raise ApiError(404, "not found")
-                slug = unique_slug(
+                slug = _history_slug(
                     session,
-                    name,
                     org_id=access.org_id,
-                    exclude=tried | _folder_names(org_dir),
+                    org_slug=access.org_slug,
+                    name=name,
+                    identity=identity,
+                    root=None,
+                    avoid=tried | _folder_names(org_dir),
                 )
                 tried.add(slug)
+                reservation = write_sidecar(
+                    data_dir(),
+                    access.org_slug,
+                    slug,
+                    "github",
+                    identity,
+                    f"repos/{access.org_slug}/{slug}",
+                )
+                if not reservation:
+                    continue  # another identity's directory: pick again
                 project = Project(
                     org_id=access.org_id,
                     slug=slug,
@@ -2025,11 +2180,18 @@ def _insert_import_row(
                 )
                 return project.id
         except IntegrityError as exc:
+            _release_reservation(reservation, access.org_id)
             if _constraint(exc) == "uq_projects_org_slug":
                 continue
             raise ApiError(
                 409, "this repository is already a project here", code="duplicate"
             ) from exc
+        except UnsafePathError as exc:
+            _release_reservation(reservation, access.org_id)
+            raise unsafe_path_error(exc) from exc
+        except BaseException:
+            _release_reservation(reservation, access.org_id)
+            raise
     raise ApiError(
         409, "could not find a free slug for this project; try again", code="busy"
     )
@@ -2189,13 +2351,21 @@ def delete_project(
     Strips the managed
     hooks, optionally the ``whygraph`` agent entries (tracked files only
     with ``confirm_tracked``; all-or-nothing), and the portal markers;
-    never deletes a local repo or the rest of its ``.whygraph/``. A GitHub
+    never deletes a local repo or the rest of its ``.whygraph/``. The
+    project's history (``<data dir>/projects/<org>/<slug>/``) is deleted
+    when ``delete_history`` resolves true (omitted: true in production,
+    false locally; always false for a linked project) and ``confirm_name``
+    equals the project name, after the row is gone and only when the
+    directory passes the data-dir guard; ``history_deleted`` says whether
+    it was, and a refused delete adds a ``warnings`` entry. A kept history
+    is re-attached when the same repository is added again. A GitHub
     clone's checkout is deleted only when ``confirm_name`` equals the
     project name and the checkout sits directly under
     ``<data dir>/repos``. The project's run files (``runs/<id>.jsonl``,
     ``.log``, ``.token``) are deleted with its row, and its connection
     tokens are revoked (``project_deleted``) in the row's transaction.
-    A completed removal is audited as ``project_removed``.
+    A completed removal is audited as ``project_removed`` (with
+    ``checkout_deleted`` and ``history_deleted``).
 
     For a **linked** project this is "Remove from this machine" (plan
     section 4.11): this machine's connection token is revoked on the
@@ -2222,6 +2392,7 @@ def delete_project(
         project=project.slug,
         source=project.source,
         checkout_deleted=result["checkout_deleted"],
+        history_deleted=result["history_deleted"],
     )
     return result
 
@@ -2231,7 +2402,18 @@ def _remove_project(
 ) -> dict:
     """The body of :func:`delete_project`, run under the runner's removal reservation."""
     production = state.mode == "production"
-    if project.source == "github" and body.confirm_name != project.name:
+    # Omitted: delete in production, keep locally (D9); a linked project has
+    # no history, so the field is ignored for it (D14).
+    delete_history = project.source != "platform" and (
+        production if body.delete_history is None else body.delete_history
+    )
+    if (
+        project.source == "github" or delete_history
+    ) and body.confirm_name != project.name:
+        if project.source != "github":
+            raise ApiError(
+                409, "type the project name to delete its history", code="confirm_name"
+            )
         # Production never names the server clone's path (MODE-1).
         raise ApiError(
             409,
@@ -2346,11 +2528,30 @@ def _remove_project(
         if not checkout_deleted and project.root.exists():
             where = "the server copy" if production else str(project.root)
             warnings.append(f"refused to delete {where}: not a portal clone")
+
+    history_deleted = False
+    if delete_history:
+        # After the row delete: a failed delete must not lose the history of
+        # a project that stays. The directory is the row's own (D22), so no
+        # identity is compared (D14); never reached for a linked row.
+        history = project.db_path.parent
+        try:
+            history_deleted = remove_history(history)
+        except OSError:
+            _log.exception("could not delete the history at %s", history)
+        if not history_deleted and (history.exists() or history.is_symlink()):
+            warnings.append("refused to delete the project's history")
+        # A request in flight since the first dispose may have cached an
+        # engine or a migration memo for the deleted file; a re-add to the
+        # same slug must create the DB again.
+        dispose_engine(project.db_path)
+        state.migrations.forget(project.db_path)
     return {
         "removed": project.slug,
         "hooks": hooks,
         "agent_files": agent_files,
         "checkout_deleted": checkout_deleted,
+        "history_deleted": history_deleted,
         # Whether this machine holds no connection token for the project any
         # more: the platform confirmed the revoke, or there never was one.
         "token_revoked": token_revoked,

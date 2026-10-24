@@ -25,11 +25,14 @@
 # it's only a dev viewer. On amd64 hosts this pin is a no-op; drop it once
 # DBGate ships a correct arm64 image.
 #
-# `make db` sets DB_REPO to the scratch repo named by SLUG (default: the
-# dev modes' clone of this checkout); without it, this checkout is used.
+# `make db` sets DB_HISTORY to the project's WhyGraph DB directory in the dev
+# portal data dir (<data>/projects/local/<SLUG>), and DB_REPO to the scratch repo
+# folder named by REPO (default: SLUG) for the CodeGraph index. Both are required
+# by the interpolation below, so run `docker compose` by hand only with both set.
 #
-# If whygraph.toml overrides `whygraph_db` / `codegraph_db`, update the
-# bind-mount source paths below to match.
+# If whygraph.toml overrides `codegraph_db`, update the .codegraph bind-mount
+# source below to match. A `whygraph_db` override no longer matters here: the
+# WhyGraph DB lives in the portal data dir, not in the repo.
 
 services:
   dbgate:
@@ -43,7 +46,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ${DB_REPO:-.}/.whygraph:/data/whygraph
+      - ${DB_HISTORY:?set by make db}:/data/whygraph
       - ${DB_REPO:-.}/.codegraph:/data/codegraph
       - dbgate-data:/root/.dbgate
     environment:

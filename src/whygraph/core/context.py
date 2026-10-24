@@ -65,9 +65,9 @@ class ProjectContext:
         Stable project identifier (the portal's URL slug).
     root : Path
         The repository root - what :func:`whygraph.core._resolve_root`
-        returns while this context is bound. The default WhyGraph DB
-        (``<root>/.whygraph/whygraph.db``) is derived from it unless
-        ``config.whygraph_db`` overrides it.
+        returns while this context is bound. The WhyGraph DB is not derived
+        from it: it is ``config.whygraph_db`` (in the portal, the project's
+        data-dir history DB).
     config : Config
         The project's configuration - what :func:`whygraph.core.get_config`
         returns while this context is bound. ``whygraph_db`` and

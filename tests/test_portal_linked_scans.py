@@ -11,6 +11,7 @@ link flow is a later step); the child scanner is ``fake_scan.py``.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +23,7 @@ from conftest import builtin_org_id
 from test_portal_app import (  # noqa: F401 -- `env` is a fixture
     _git,
     env,
+    history_db,
     make_repo,
     seed_codegraph,
 )
@@ -97,6 +99,7 @@ def linked_project(client: TestClient, env: SimpleNamespace, slug: str) -> Path:
 
 
 def whygraph_db(root: Path) -> Path:
+    """The in-repo DB path of a 1.x (or earlier 2.0) build, never opened."""
     return root / ".whygraph" / "whygraph.db"
 
 
@@ -134,6 +137,11 @@ def test_linked_manual_scan_is_codegraph_only(
     assert len(calls) == 4
     assert all(runner_flags(c) == CODEGRAPH_ONLY_FLAGS for c in calls)
     assert all(c["cwd"] == str(root) for c in calls)
+    # Plan decision D23: the child never sees a history path.
+    for call in calls:
+        config = json.loads(call["env"]["WHYGRAPH_CONFIG_JSON"])
+        assert "whygraph_db" not in config
+        assert config["codegraph_db"] == str(root / ".codegraph" / "codegraph.db")
 
 
 def test_linked_first_initialize_queues_its_codegraph_only_scan(
@@ -159,6 +167,7 @@ def test_linked_first_initialize_queues_its_codegraph_only_scan(
     (call,) = scanner.calls()
     assert runner_flags(call) == CODEGRAPH_ONLY_FLAGS
     assert not whygraph_db(root).exists()
+    assert not history_db("lnk").exists()
 
 
 def _scan(client: TestClient, slug: str, **body: object) -> int:
@@ -286,6 +295,7 @@ def test_linked_project_never_creates_whygraph_db(
         assert client.get("/api/projects/lnk/config").status_code == 200
         assert client.get("/api/projects/lnk/scans").status_code == 200
     assert not whygraph_db(root).exists()
+    assert not history_db("lnk").parent.exists()
 
 
 def test_relink_of_a_former_local_checkout_ignores_its_db(
@@ -307,6 +317,7 @@ def test_relink_of_a_former_local_checkout_ignores_its_db(
         first_scan(client, "old")
         assert client.get("/api/projects/old").json()["stats"] is None
     assert leftover.read_bytes() == before
+    assert not history_db("old").exists()
 
 
 # ---------------------------------------------------------------------------

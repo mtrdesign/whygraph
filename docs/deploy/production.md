@@ -437,8 +437,8 @@ Sessions last 30 days at most and expire after 7 days idle.
 ## Projects
 
 A production project is a repository on GitHub. The portal keeps its own copy under the data
-directory, at `repos/<org>/<project>`, scans its **default branch**, and keeps the project's WhyGraph
-and CodeGraph databases in that copy. Nothing is ever written to the repository on GitHub.
+directory, at `repos/<org>/<project>`, scans its **default branch**, and keeps the project's CodeGraph
+index in that copy. The project's WhyGraph database is under `projects/<org>/<slug>/` in the data directory, not in the copy. Nothing is ever written to the repository on GitHub.
 
 ### Importing a repository
 
@@ -529,17 +529,20 @@ history is evidence. **Remove** works as usual.
 
 ### Repositories that track WhyGraph's state
 
-A repository that commits `.whygraph/` or `.codegraph/` is refused at import: those folders hold the
-databases the portal builds and serves to every member, and a committed copy would be served as if
-the portal had built it. If the default branch starts tracking them later, the next fetch fails and
+A repository that commits `.whygraph/` or `.codegraph/` is refused at import: those folders hold what
+the portal builds and serves to every member (the CodeGraph index, markers and backups), and a
+committed copy would be served as if the portal had built it. If the default branch starts tracking them later, the next fetch fails and
 the project is marked "The default branch tracks .whygraph/ or .codegraph/". Remove them from the
 repository and push; the next fetch checks again and clears the mark.
 
 ### Removing a project
 
 Only organization admins and owners remove a project (a project admin who is only a project role holder cannot), from its settings, by typing the project's name. That deletes the
-server copy - with its history, descriptions, rationale cards and chat sessions - and every scan of
-it. The repository on GitHub is not touched; importing it again starts from scratch.
+server copy, the project's history (descriptions, rationale cards and chat sessions) and every scan of
+it. The repository on GitHub is not touched. To keep the history, tick **Keep history** in the dialog:
+only the server copy and the scans go, and importing the same repository again (matched by its GitHub
+repository id, not its name) re-attaches the history. A re-import does not restore the project's
+access restrictions; set them again.
 
 ## Connected portals
 
@@ -721,9 +724,10 @@ Two things hold the instance's state, and both must be backed up:
   encrypted keys. See [Backup and restore](../portal/backup.md) for dumping and restoring.
 - **`/data` in the portal container** (the `portal-data` volume). It holds **`secret.key`**, the key to
   every stored secret: a database dump without it is unreadable for the secrets, and without it the
-  keys have to be entered again. It also holds the projects' server copies (`repos/`), and with them
-  each project's WhyGraph database: its descriptions, rationale cards and chat sessions. Those cannot
-  be fetched from GitHub again; a re-import starts from scratch.
+  keys have to be entered again. It also holds each project's WhyGraph database, under
+  `projects/<org>/<slug>/`: its descriptions, rationale cards and chat sessions. Those cannot be
+  fetched from GitHub again, so a copy of `projects/` is the only backup of them (`pg_dump` does not
+  include it). The server copies of the repositories (`repos/`) can be cloned again.
 
 Back up `secret.key` together with each dump, and treat the pair as sensitive as the live data.
 

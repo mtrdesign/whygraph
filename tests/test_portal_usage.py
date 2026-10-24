@@ -805,7 +805,7 @@ def _seed_undescribed(root: Path) -> list[str]:
     """The repo's two commits as WhyGraph rows, without descriptions."""
     shas = []
     newest, oldest = list(Repository(root).commits)
-    with use_project(manual_ctx(root)), project_session() as session:
+    with use_project(manual_ctx(root, "demo")), project_session() as session:
         for commit, when in ((oldest, "2026-01-01"), (newest, "2026-02-01")):
             shas.append(commit.sha)
             session.add(
@@ -963,7 +963,7 @@ def test_a_chat_turn_records_one_row_per_round(
         ("openai", "gpt-4o", "gpt-4o-2026-01-01")
     }
     assert {r.key_scope for r in rows} == {"project"}
-    with use_project(manual_ctx(local.root)), project_session() as session:
+    with use_project(manual_ctx(local.root, "demo")), project_session() as session:
         assert session.get(ChatSessionRow, session_id) is not None
 
 

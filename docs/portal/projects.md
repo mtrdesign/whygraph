@@ -60,7 +60,7 @@ file:
   Claude Code, `.cursor/` for Cursor, `.vscode/mcp.json` and `.github/` for VS Code, and
   `.codex/config.toml`, `AGENTS.md` and `.codex/agents/` for Codex. Each card names the port the
   entry uses - the portal's own. See [Connecting agents](agents.md).
-- The project database is created, or migrated if it is from 1.x (with a backup first).
+- The project database is created in the portal's data directory (`projects/<org>/<slug>/whygraph.db`), never in the repository. A `.whygraph/whygraph.db` left by 1.x or 2.0.0 is ignored.
 - Two small marker files, `.whygraph/portal.json` and `.whygraph/portal.env`, record that the
   portal manages this project. They are gitignored.
 
@@ -295,4 +295,21 @@ scan picks up where it stopped.
 
 Removing a project (Settings, **Danger zone**) offers to strip what the portal wrote: the git hooks,
 the markers, and the `whygraph` entries in agent config files it created. It never deletes your
-repository or its `.whygraph/` history, so adding the folder again later picks the history up.
+repository.
+
+What happens to the project's history depends on the mode:
+
+- **Local mode keeps it.** The history stays in the data directory unless you tick **Also delete
+  history** (you then type the project's name to confirm).
+- **Production deletes it,** with the server copy of the repository, unless an owner or admin ticks
+  **Keep history**.
+- **A [linked project](platform-projects.md)** has no local history, so there is nothing to keep and
+  removing it never deletes any.
+
+Adding the same repository again **re-attaches** the history that was kept. The match is made by the
+repository's identity, written beside the history in `project.json`: in local mode the `origin` remote
+(or the folder's path when there is no `origin`, so a repository without one that you moved starts
+empty), in production the GitHub repository id. An unrelated repository that happens to have the same
+name never gets another repository's history; it is added as `<name>-2`. In production, a re-import
+brings the history back but **not** the project's access restrictions (Restricted, project roles), so
+set them again.

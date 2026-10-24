@@ -4,8 +4,11 @@ A production GitHub project's checkout lives at ``repos/<org slug>/<slug>``
 under the portal's data directory; the runner clones it into a dot-named
 ``repos/<org slug>/.clone-*`` temp folder first and renames it into place
 (M2f-3 plan section 4.8). Every ``rmtree`` of such a folder goes through
-:func:`clone_dir_is_safe`. Used by the routes (removal, org deletion,
-production Initialize) and the runner (the import's clone): this module
+:func:`clone_dir_is_safe`, and of a project's history directory under
+``<data>/projects`` through the same guard (:func:`portal_dir_is_safe`).
+Used by the routes (removal, org deletion, production Initialize), the
+history module (:func:`~whygraph.portal.history.remove_history`) and the
+runner (the import's clone): this module
 imports neither ``deps`` nor ``routes`` (``deps`` imports the runner), so it
 raises :class:`~whygraph.core.safe_paths.UnsafePathError` and each caller
 maps it to its own error.
@@ -35,8 +38,79 @@ CLONE_PREFIX = ".clone-"
 """The name prefix of an import's temp folder (a dot-name is never a slug)."""
 
 
+PORTAL_DIR_BASES = frozenset({"repos", "projects"})
+"""The data-dir folders whose subtrees the portal deletes (``base`` below)."""
+
+
+def portal_dir_is_safe(root: Path, data_dir: Path, *, base: str, depth: int) -> bool:
+    """Whether ``root`` sits exactly ``depth`` levels under ``<data dir>/<base>`` (rmtree guard).
+
+    Parameters
+    ----------
+    root : Path
+        The folder to check; it need not exist yet.
+    data_dir : Path
+        The portal's data directory (any spelling: real paths are compared).
+    base : {"repos", "projects"}
+        ``repos`` for clones and an org's clone folder, ``projects`` for a
+        project's history directory and an org's history folder.
+    depth : int
+        How many levels below ``<data dir>/<base>`` ``root`` must be.
+
+    Returns
+    -------
+    bool
+        ``True`` when neither ``root`` nor any directory between it and
+        ``<base>`` is a symlink and its real path's parent chain reaches
+        ``realpath(<data dir>/<base>)``.
+
+    Raises
+    ------
+    ValueError
+        When ``base`` is not one of :data:`PORTAL_DIR_BASES` or ``depth`` is
+        below 1.
+    """
+    if base not in PORTAL_DIR_BASES or depth < 1:
+        raise ValueError(f"not a portal folder guard: base={base!r}, depth={depth}")
+    top = Path(os.path.realpath(data_dir / base))
+    real = Path(os.path.realpath(root))
+    path = Path(root)
+    for _ in range(depth):
+        if path.is_symlink():
+            return False
+        path, real = path.parent, real.parent
+    return real == top and Path(os.path.realpath(path)) == top
+
+
+def remove_portal_dir(path: Path, data_dir: Path, *, base: str, depth: int) -> bool:
+    """Delete ``path`` when it exists and passes :func:`portal_dir_is_safe`.
+
+    Parameters
+    ----------
+    path : Path
+        The folder to delete.
+    data_dir : Path
+        The portal's data directory.
+    base : {"repos", "projects"}
+        As for :func:`portal_dir_is_safe`.
+    depth : int
+        As for :func:`portal_dir_is_safe`.
+
+    Returns
+    -------
+    bool
+        Whether it was deleted.
+    """
+    if path.exists() and portal_dir_is_safe(path, data_dir, base=base, depth=depth):
+        shutil.rmtree(path)
+        return True
+    return False
+
+
 def clone_dir_is_safe(root: Path, data_dir: Path, *, depth: int) -> bool:
     """Whether ``root`` sits exactly ``depth`` levels under ``<data dir>/repos`` (rmtree guard).
+
+    :func:`portal_dir_is_safe` with ``base="repos"``.
 
     Parameters
     ----------
@@ -52,18 +126,9 @@ def clone_dir_is_safe(root: Path, data_dir: Path, *, depth: int) -> bool:
     Returns
     -------
     bool
-        ``True`` when neither ``root`` nor any directory between it and
-        ``repos`` is a symlink and its real path's parent chain reaches
-        ``realpath(<data dir>/repos)``.
+        As for :func:`portal_dir_is_safe`.
     """
-    repos = Path(os.path.realpath(data_dir / "repos"))
-    real = Path(os.path.realpath(root))
-    path = Path(root)
-    for _ in range(depth):
-        if path.is_symlink():
-            return False
-        path, real = path.parent, real.parent
-    return real == repos and Path(os.path.realpath(path)) == repos
+    return portal_dir_is_safe(root, data_dir, base="repos", depth=depth)
 
 
 def remove_clone(path: Path, data_dir: Path, *, depth: int) -> bool:
@@ -83,25 +148,28 @@ def remove_clone(path: Path, data_dir: Path, *, depth: int) -> bool:
     bool
         Whether it was deleted.
     """
-    if path.exists() and clone_dir_is_safe(path, data_dir, depth=depth):
-        shutil.rmtree(path)
-        return True
-    return False
+    return remove_portal_dir(path, data_dir, base="repos", depth=depth)
 
 
-def discard_clone(path: Path, data_dir: Path, migrations: ProjectMigrations) -> None:
+def discard_clone(
+    path: Path, db_path: Path, data_dir: Path, migrations: ProjectMigrations
+) -> None:
     """Remove a production clone (``depth`` 2) and forget its project DB.
+
+    The project's history directory in the data dir is kept, so a retried
+    import finds it again.
 
     Parameters
     ----------
     path : Path
         ``repos/<org slug>/<slug>`` under ``data_dir``.
+    db_path : Path
+        The project's WhyGraph DB (its cached engine is disposed).
     data_dir : Path
         The portal's data directory.
     migrations : ProjectMigrations
         The portal's migration memo (the DB's entry is dropped).
     """
-    db_path = path / ".whygraph" / "whygraph.db"
     dispose_engine(db_path)
     migrations.forget(db_path)
     remove_clone(path, data_dir, depth=2)

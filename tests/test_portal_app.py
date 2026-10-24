@@ -68,6 +68,7 @@ from whygraph.portal.codegraph_host import CodeGraphDispatcher
 from whygraph.portal.mcp_mount import McpDispatcher
 from whygraph.portal.models import Project, ScanRun, User
 from whygraph.portal.orgs import add_member, create_org
+from whygraph.portal.paths import project_db_path
 from whygraph.portal.platform_routes import default_client_name
 from whygraph.portal.runner import ScanRunner
 from whygraph.portal.security import PortalGuard, build_origins
@@ -141,16 +142,68 @@ def make_repo(parent: Path, name: str, *, remote: str | None = None) -> Path:
     return Path(os.path.realpath(root))
 
 
-def manual_ctx(root: Path, slug: str = "manual") -> ProjectContext:
-    """A context over ``root``'s default DB paths, for seeding test data."""
+def history_db(slug: str, org: str = "local") -> Path:
+    """The data-dir WhyGraph DB the portal forces for project ``org/slug``."""
+    return project_db_path(portal_db.data_dir(), org, slug)
+
+
+def manual_ctx(root: Path, slug: str, org: str = "local") -> ProjectContext:
+    """A context over project ``org/slug``'s forced DB paths, for seeding test data.
+
+    The WhyGraph DB is the project's data-dir history DB (under the
+    ``$WHYGRAPH_DATA`` the test set), the index the repo's ``.codegraph/``:
+    pass the row's real slug, and its org in production.
+    """
     return ProjectContext(
         slug=slug,
         root=root,
         config=Config(
-            whygraph_db=root / ".whygraph" / "whygraph.db",
+            whygraph_db=history_db(slug, org),
             codegraph_db=root / ".codegraph" / "codegraph.db",
         ),
     )
+
+
+def seed_history(
+    root: Path | None,
+    slug: str,
+    identity: dict | None = None,
+    *,
+    org: str = "local",
+    source: str = "local",
+    revision: str = "head",
+) -> Path:
+    """Seed project ``org/slug``'s kept history: a migrated DB plus a matching sidecar.
+
+    What a removed project leaves in the data dir, so the next add of the
+    same repository re-attaches it (without the sidecar the directory is
+    foreign and the add takes ``<slug>-2``). ``identity`` defaults to a
+    local checkout without an ``origin``: ``{"path": <root>}``.
+
+    Returns
+    -------
+    Path
+        The history DB.
+    """
+    from whygraph.portal.history import write_sidecar
+
+    if identity is None:
+        assert root is not None
+        identity = {"path": str(root)}
+    db = history_db(slug, org)
+    stored = (
+        f"repos/{org}/{slug}" if source == "github" else str(root) if root else None
+    )
+    assert write_sidecar(portal_db.data_dir(), org, slug, source, identity, stored)
+    ctx = ProjectContext(
+        slug=slug,
+        root=root or db.parent,
+        config=Config(whygraph_db=db, codegraph_db=db.parent / "codegraph.db"),
+    )
+    with use_project(ctx):
+        command.upgrade(bootstrap.alembic_config(), revision)
+    db_engine._reset_engine()
+    return db
 
 
 def seed_codegraph(root: Path) -> None:
@@ -1718,8 +1771,11 @@ def test_import_keeps_the_allowlist_and_moves_secrets(
     root = make_repo(env.shared, "demo")
     custom_db = root / "custom.db"
     custom_db.write_bytes(b"")
+    custom_index = root / "custom-index.db"
+    custom_index.write_bytes(b"")
     (root / "whygraph.toml").write_text(
         'whygraph_db = "custom.db"\n'
+        'codegraph_db = "custom-index.db"\n'
         "[llm]\n"
         'model = "openai/gpt-4o"\n'
         "[llm.openai]\n"
@@ -1743,19 +1799,26 @@ def test_import_keeps_the_allowlist_and_moves_secrets(
     assert {d["key"] for d in report["dropped"]} == {
         "llm.openai.base_url",
         "whygraph_db",
+        "codegraph_db",
         "logging",
     }
+    hints = {d["key"]: d["hint"] for d in report["dropped"]}
+    # History is in the portal's data dir: a custom whygraph_db is only dropped,
+    # never offered as something to move into the repository.
+    assert "data directory" in hints["whygraph_db"]
+    assert hints["codegraph_db"] != hints["whygraph_db"]
     assert sorted(report["secrets_moved"]) == ["llm.openai.api_key", "scan.token"]
     custom = body["detected"]["custom_db_paths"]
     assert custom == [
         {
-            "key": "whygraph_db",
-            "path": str(custom_db),
+            "key": "codegraph_db",
+            "path": str(custom_index),
             "exists": True,
             "message": custom[0]["message"],
         }
     ]
-    assert str(custom_db) in custom[0]["message"]
+    assert str(custom_index) in custom[0]["message"]
+    assert report["custom_db_paths"] == custom
 
     config = ready.get("/api/projects/demo/config").json()
     assert config["config"] == {
@@ -1769,12 +1832,13 @@ def test_import_keeps_the_allowlist_and_moves_secrets(
     assert {d["key"] for d in config["import"]["dropped"]} == {
         "llm.openai.base_url",
         "whygraph_db",
+        "codegraph_db",
         "logging",
     }
     # The context never sees the imported endpoint, and DB paths are forced.
     ctx = ready.app.state.portal.contexts.get(_project_id("demo"))
     assert ctx.config.llm.openai.base_url is None
-    assert ctx.config.whygraph_db == root / ".whygraph" / "whygraph.db"
+    assert ctx.config.whygraph_db == history_db("demo")
     # And the repo file was not modified.
     assert "attacker.example" in (root / "whygraph.toml").read_text()
 
@@ -1993,7 +2057,8 @@ def test_uninitialized_project_gates_data_routes_and_creates_no_db(
 
     done = init_project(ready, "demo", agents=["claude"])
     assert done["initialized"] is True and done["marker_written"] is True
-    assert (root / ".whygraph" / "whygraph.db").is_file()
+    assert history_db("demo").is_file()
+    assert not (root / ".whygraph" / "whygraph.db").exists()
     assert not (root / "whygraph.toml").exists()  # acceptance #4: config is portal-side
     assert json.loads((root / ".whygraph" / "portal.json").read_text()) == {
         "slug": "demo",
@@ -2055,10 +2120,14 @@ def test_project_details_recompute_detected_and_last_scan_status(
 
     # Recomputed on every read (a new tab's Initialize step sees the truth).
     (root / ".mcp.json").unlink()
+    # An in-repo DB is never reported (nor opened); the data-dir history is.
     (root / ".whygraph").mkdir()
     (root / ".whygraph" / "whygraph.db").touch()
     detected = ready.get("/api/projects/demo").json()["detected"]
-    assert detected["detected_agents"] == [] and detected["existing_db"] is True
+    assert detected["detected_agents"] == [] and detected["existing_db"] is False
+    history_db("demo").touch()
+    detected = ready.get("/api/projects/demo").json()["detected"]
+    assert detected["existing_db"] is True
 
     pid = _project_id("demo")
     with portal_db.get_session() as session:
@@ -2130,12 +2199,11 @@ def test_an_older_revision_db_opens_cleanly_with_a_backup(
 ) -> None:
     root = make_repo(env.shared, "demo")
     old_revision = "4e231ec6f0e1"  # before the chat tables
-    with use_project(manual_ctx(root)):
-        (root / ".whygraph").mkdir()
-        command.upgrade(bootstrap.alembic_config(), old_revision)
-    db_engine._reset_engine()
+    # The history the portal kept for project "demo": the add re-attaches it.
+    seed_history(root, "demo", revision=old_revision)
 
     body = add_local(ready, root)
+    assert body["project"]["slug"] == "demo"
     assert body["detected"]["existing_db"] is True
     with portal_db.get_session() as session:
         project = session.exec(select(Project)).one()
@@ -2145,8 +2213,9 @@ def test_an_older_revision_db_opens_cleanly_with_a_backup(
     response = ready.get("/api/projects/demo/chat/sessions")
     assert response.status_code == 200, response.text
     assert response.json() == []
-    backup = root / ".whygraph" / "backups" / f"whygraph-{old_revision}.db"
+    backup = history_db("demo").parent / "backups" / f"whygraph-{old_revision}.db"
     assert backup.is_file()
+    assert not (root / ".whygraph").exists()
     assert ready.get("/api/projects/demo").json()["stats"] is not None
 
 
@@ -2188,8 +2257,8 @@ def test_two_projects_side_by_side_do_not_bleed(
         assert f"hello from {slug}" in stream.text
 
     assert seen == [
-        ("alpha", root_a, root_a / ".whygraph" / "whygraph.db"),
-        ("beta", root_b, root_b / ".whygraph" / "whygraph.db"),
+        ("alpha", root_a, history_db("alpha")),
+        ("beta", root_b, history_db("beta")),
     ]
     alpha = ready.get("/api/projects/alpha/chat/sessions").json()
     beta = ready.get("/api/projects/beta/chat/sessions").json()
@@ -2222,13 +2291,15 @@ def test_remove_strips_hooks_markers_and_only_whygraph_entries(
     add_local(ready, root)
     init_project(ready, "demo", agents=["claude"])
     assert ready.get("/api/projects/demo/chat/sessions").status_code == 200
-    db_path = (root / ".whygraph" / "whygraph.db").resolve()
+    db_path = history_db("demo").resolve()
     assert db_path in db_engine._engines
+    assert not (root / ".whygraph" / "whygraph.db").exists()
 
     removed = ready.request(
         "DELETE", "/api/projects/demo", json={"strip_agent_entries": True}
     )
     assert removed.status_code == 200, removed.text
+    assert removed.json()["history_deleted"] is False  # kept locally (D9)
     assert db_path not in db_engine._engines
     assert managed_hook_names(root) == ()
     assert not (root / ".whygraph" / "portal.json").exists()
@@ -2236,11 +2307,12 @@ def test_remove_strips_hooks_markers_and_only_whygraph_entries(
     assert json.loads((root / ".mcp.json").read_text()) == {
         "mcpServers": {"other": {"command": "x"}}
     }
-    # The repo and the rest of .whygraph/ stay.
+    # The repo and the project's history in the data dir stay.
     assert db_path.is_file() and (root / "sample.py").is_file()
     assert ready.get("/api/projects/demo").status_code == 404
 
-    # Re-add: a fresh registration, not initialized, fresh context.
+    # Re-add: a fresh registration, not initialized, fresh context; the
+    # kept history is re-attached.
     again = add_local(ready, root)
     assert again["project"]["slug"] == "demo"
     assert again["detected"]["existing_db"] is True
@@ -2397,6 +2469,7 @@ def test_a_local_github_row_is_listed_unsupported_unscannable_and_removable(
     )
     assert removed.status_code == 200, removed.text
     assert removed.json()["checkout_deleted"] is True
+    assert removed.json()["history_deleted"] is False  # kept locally (D9)
     assert not clone.exists()
 
 

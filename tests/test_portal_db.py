@@ -46,6 +46,7 @@ from whygraph.portal.context import (
     ContextCache,
     ProjectNotFound,
     build_project_context,
+    resolved_layer,
 )
 from whygraph.portal.models import (
     Membership,
@@ -2233,8 +2234,15 @@ def test_db_paths_in_a_project_row_are_ignored(
             org_id=org,
         )
         ctx = _build(s, p)
-    assert ctx.config.whygraph_db == root / ".whygraph" / "whygraph.db"
+        layer = resolved_layer(s, p)
+    # The history is the project's data-dir DB, the index the repo's.
+    assert (
+        ctx.config.whygraph_db == data / "projects" / "local" / "demo" / "whygraph.db"
+    )
     assert ctx.config.codegraph_db == root / ".codegraph" / "codegraph.db"
+    # The scan child gets the same forced, absolute paths.
+    assert layer["whygraph_db"] == str(ctx.config.whygraph_db)
+    assert layer["codegraph_db"] == str(ctx.config.codegraph_db)
 
 
 def test_github_clone_root_resolves_under_the_data_dir(data: Path) -> None:
@@ -2242,10 +2250,19 @@ def test_github_clone_root_resolves_under_the_data_dir(data: Path) -> None:
         p = _project(s, "cloned", root="repos/cloned", source="github")
         ctx = _build(s, p)
     assert ctx.root == data / "repos" / "cloned"
+    # The history is not in the clone: a re-clone keeps it.
     assert (
-        ctx.config.whygraph_db
-        == data / "repos" / "cloned" / ".whygraph" / "whygraph.db"
+        ctx.config.whygraph_db == data / "projects" / "local" / "cloned" / "whygraph.db"
     )
+
+
+def test_a_linked_projects_child_config_has_no_whygraph_db(data: Path) -> None:
+    """Plan decision D23: a linked child never sees a history path."""
+    with portal_db.get_session() as s:
+        p = _project(s, "linked", source="platform")
+        layer = resolved_layer(s, p)
+    assert "whygraph_db" not in layer
+    assert layer["codegraph_db"] == str(Path("/repos/linked/.codegraph/codegraph.db"))
 
 
 def test_context_injects_secrets_in_memory_only(org: int) -> None:

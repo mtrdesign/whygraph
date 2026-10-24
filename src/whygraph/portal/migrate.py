@@ -1,7 +1,7 @@
 """Who migrates a project's ``whygraph.db`` inside the portal, and when.
 
 The 1.x single-project server migrated its one DB at startup; the portal serves many
-projects and may meet a 1.x database at any revision. So the first
+projects and may meet a database from an earlier release at any revision. So the first
 request that needs a project's data (a data route, ``/mcp/<slug>``, a
 scan) runs :meth:`ProjectMigrations.ensure` once for that project:
 
@@ -9,15 +9,17 @@ scan) runs :meth:`ProjectMigrations.ensure` once for that project:
   ``context`` / ``op`` proxies are module globals, so two upgrades must
   never run at the same time, in any thread;
 * when the DB is not at head, it is first copied to
-  ``.whygraph/backups/whygraph-<revision>.db`` (SQLite's online backup,
-  so a WAL database is copied consistently), so a 1.x DB migrated in
-  place can be restored;
+  ``backups/whygraph-<revision>.db`` beside it, in the project's
+  data-dir history directory (SQLite's online backup, so a WAL database
+  is copied consistently), so a DB migrated in place can be restored;
 * memoized per DB path; :meth:`ProjectMigrations.forget` makes the next
   request check again (after a scan child exits, or when a project is
   removed);
 * never through a symlink: :func:`whygraph.portal.paths.check_project_paths`
-  runs first on every call, so a committed ``.whygraph/whygraph.db`` link
-  can neither migrate nor back up another project's DB or a file in the data directory.
+  and :func:`whygraph.portal.paths.check_project_db` run first on every
+  call, so a symlink in the repository or inside the data directory can
+  neither migrate nor back up another project's DB or a file in the data
+  directory.
 """
 
 from __future__ import annotations
@@ -30,10 +32,10 @@ from pathlib import Path
 from alembic.script import ScriptDirectory
 
 from whygraph.core.context import ProjectContext, use_project
-from whygraph.core.safe_paths import check_inside
 from whygraph.db import bootstrap
 
-from .paths import check_project_paths
+from .db import data_dir
+from .paths import check_project_db, check_project_paths
 
 MIGRATION_LOCK = threading.Lock()
 """Serializes every Alembic run in the process (project and portal chains)."""
@@ -93,13 +95,15 @@ class ProjectMigrations:
         Raises
         ------
         whygraph.core.safe_paths.UnsafePathError
-            When the DB path (or ``.whygraph/``, ``.whygraph/backups/``,
-            ``.codegraph/``) is a symlink or resolves outside the root.
+            When the DB path passes through a symlink or leaves the data
+            directory, or ``.whygraph/``, ``.whygraph/backups/`` or
+            ``.codegraph/`` is a symlink or resolves outside the root.
             Checked on every call, memoized or not.
         """
-        db_path = Path(ctx.config.whygraph_db or ctx.root / ".whygraph/whygraph.db")
+        assert ctx.config.whygraph_db is not None, "the portal always sets it"
+        db_path = Path(ctx.config.whygraph_db)
         check_project_paths(ctx.root)
-        check_inside(ctx.root, db_path)
+        check_project_db(data_dir(), db_path)
         key = db_path.resolve()
         with self._lock:
             if key in self._done:

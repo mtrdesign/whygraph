@@ -20,3 +20,9 @@
   confirmation (**Connect** on your machine); the platform's Allow page is skipped. The card says
   what the link grants, and the approval it carries works once, for the same person, project and
   port, within 15 minutes.
+
+## Fixes
+
+- **Linking with your organization's address.** Entering your organization's address (instead of
+  the platform's) in **From a platform** no longer fails after you approve; the organization is
+  preselected.

@@ -69,7 +69,7 @@ export function ConnectForm({
     >
       <Field
         label="Platform address"
-        hint="The address of your organization's WhyGraph platform, for example https://whygraph.example.com."
+        hint="Your WhyGraph platform's address, for example https://whygraph.example.com. Your organization's address (https://acme.whygraph.example.com) works too."
       >
         {(p) => (
           <Input

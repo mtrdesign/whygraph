@@ -55,6 +55,7 @@ from whygraph.api_v1 import (
 )
 from whygraph.services.git.credentials import redact_tokens
 
+from .hosts import BaseUrl, classify
 from .orgs import is_valid_org_slug
 
 logger = logging.getLogger(__name__)
@@ -120,6 +121,29 @@ class PlatformRefused(PlatformError):
 
 class UpdateRequired(PlatformError):
     """The platform's ``api_version`` is not ours, or we are below ``min_client``."""
+
+
+class PlatformAddressMismatch(Exception):
+    """The address answers as a platform whose own address is another one.
+
+    Deliberately not a :class:`ValueError` (nor a :class:`PlatformError`), so
+    a caller that maps those to "bad reply" cannot swallow it.
+
+    Parameters
+    ----------
+    claimed : str
+        The normalized origin the platform named for itself; unverified, so
+        a caller may show it but must never follow it on its own.
+
+    Attributes
+    ----------
+    claimed : str
+        As above.
+    """
+
+    def __init__(self, claimed: str) -> None:
+        super().__init__("this is not the platform's own address")
+        self.claimed = claimed
 
 
 def _redact(text: str) -> str:
@@ -193,6 +217,72 @@ def parse_platform_url(raw: str, *, allow_http: bool) -> str:
     if port is not None and port != _DEFAULT_PORTS[parts.scheme]:
         shown = f"{shown}:{port}"
     return f"{parts.scheme}://{shown}"
+
+
+def resolve_platform_origin(
+    entered: str, claimed: str | None, *, allow_http: bool
+) -> tuple[str, str | None]:
+    """The platform origin to connect to, given the address typed and its ``meta``.
+
+    A platform serves ``GET /api/v1/meta`` on its base host and on every org
+    host, naming its base in ``base_origin``. An org's address is followed
+    up to that base only when the platform's own routing rule
+    (:func:`~whygraph.portal.hosts.classify`) makes the typed host one of the
+    base's org hosts. Pure: the caller must still ask the returned base for
+    its ``meta`` and refuse it unless it names itself.
+
+    Parameters
+    ----------
+    entered : str
+        The typed address, already normalized by :func:`parse_platform_url`.
+    claimed : str or None
+        The ``base_origin`` that address answered with; ``None`` from a
+        platform that predates the field.
+    allow_http : bool
+        As for :func:`parse_platform_url` (the dev switch).
+
+    Returns
+    -------
+    tuple[str, str or None]
+        ``(origin, org)``: ``(entered, None)`` when nothing is claimed or the
+        claim is ``entered`` itself; ``(base, org slug)`` when ``entered`` is
+        exactly one org label under the claimed base.
+
+    Raises
+    ------
+    ValueError
+        ``claimed`` is not an acceptable platform address.
+    PlatformAddressMismatch
+        ``entered`` is neither the claimed base nor one of its org hosts:
+        not a DNS base, another scheme or port, ``www``-style never-org
+        hosts, two labels deep, or a lookalike suffix.
+
+    Notes
+    -----
+    Security: only the immediate parent is ever followed, and only when
+    the platform's own host rule names the typed host one of its org hosts;
+    the base must then confirm itself (a hostile subdomain, or a
+    public-suffix parent such as ``github.io``, cannot); scheme and port
+    must match, so there is no downgrade; and :class:`PlatformHttp` refuses
+    redirects and other origins. Nothing is gained over handing someone a
+    ``/link?platform=<base>`` link, which is already possible.
+    """
+    if claimed is None:
+        return entered, None
+    origin = parse_platform_url(claimed, allow_http=allow_http)
+    if origin == entered:
+        return entered, None
+    try:
+        base = BaseUrl.parse(origin)
+    except ValueError:
+        raise PlatformAddressMismatch(origin) from None
+    parts = urlsplit(entered)
+    if parts.scheme != base.scheme:
+        raise PlatformAddressMismatch(origin)
+    kind = classify(parts.netloc, base)
+    if kind is None or kind.slug is None:
+        raise PlatformAddressMismatch(origin)
+    return origin, kind.slug
 
 
 def api_origin_for(platform_origin: str, org_slug: str) -> str:
@@ -659,6 +749,7 @@ __all__ = [
     "MAX_TITLE_CHARS",
     "REMOVED_REASONS",
     "LocalhostTransport",
+    "PlatformAddressMismatch",
     "PlatformError",
     "PlatformHttp",
     "PlatformRefused",
@@ -669,4 +760,5 @@ __all__ = [
     "dev_platform_http_enabled",
     "link_status_for",
     "parse_platform_url",
+    "resolve_platform_origin",
 ]

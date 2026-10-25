@@ -290,6 +290,13 @@ export const MESSAGES: Record<string, Resolver> = {
   bad_platform_reply: "The platform sent an answer WhyGraph could not use. Check the address and try again.",
   bad_connect_request:
     "This connection request is not valid. Start it again from your local WhyGraph; do not edit the address.",
+  platform_address_mismatch: (err) => {
+    // The claimed address is unverified: shown as text, never filled in.
+    const claimed = str(err.extra.platform_origin);
+    return claimed
+      ? `This address belongs to a WhyGraph platform whose own address is ${claimed}. If you trust ${claimed}, connect to that address.`
+      : "This is not the platform's own address. Check the address with your admin.";
+  },
   platform_unreachable: { message: "Couldn't reach the platform. Check the address and try again.", action: RETRY },
   update_required: "This platform needs a newer WhyGraph on this machine. Update it, then link again.",
   invalid_grant: "This connection request has expired. Start the link again from your local portal.",

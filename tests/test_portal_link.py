@@ -244,7 +244,8 @@ def test_connect_checks_the_platform_and_names_the_machine(
     assert params["client_name"] == "laptop"
     assert params["redirect_uri"] == started["redirect_uri"]
     assert len(params["state"]) >= 32
-    # The version check happened, and no credential was sent with it.
+    # The version check happened, once, and no credential was sent with it.
+    assert len(fake.requests) == 1
     meta = fake.requests[0]
     assert (meta.method, meta.url.path) == ("GET", "/api/v1/meta")
     assert "authorization" not in meta.headers
@@ -433,6 +434,181 @@ def test_redirect_uri_follows_browser_port(
             headers={"Origin": "http://127.0.0.1:9999"},
         )
         assert refused.status_code == 403, refused.text
+
+
+# ---------------------------------------------------------------------------
+# Connecting with an organization's address
+# ---------------------------------------------------------------------------
+
+ORG_URL = f"https://{ORG}.wg.example.com"
+"""The ``acme`` org's address on :func:`fake`'s platform."""
+
+
+def meta_body(fake: FakePlatform, **over: Any) -> dict:
+    """A ``MetaOut``-shaped dict for ``fake``; ``base_origin=None`` drops it."""
+    body: dict[str, Any] = {
+        "api_version": 1,
+        "min_client": "0.0.0",
+        "capabilities": ["evidence"],
+        "base_origin": fake.platform_origin,
+    }
+    body.update(over)
+    return {k: v for k, v in body.items() if v is not None}
+
+
+def metas(fake: FakePlatform) -> list[str]:
+    """The hosts that were asked for ``meta``, in order."""
+    return [r.headers["host"] for r in fake.requests if r.url.path == "/api/v1/meta"]
+
+
+def pending_connects(client: TestClient) -> list:
+    """The pending connects the portal holds."""
+    return list(client.app.state.portal.pending_connects._entries.values())
+
+
+def test_connect_with_an_org_address_goes_to_the_platform(
+    portal: TestClient, fake: FakePlatform
+) -> None:
+    """The org host names its base; the base confirms; the org is preselected."""
+    started = connect(portal, fake, platform_url=ORG_URL)
+    assert started["platform_origin"] == fake.platform_origin
+    assert started["authorize_url"].startswith(fake.platform_origin + "/connect?")
+    assert query_of(started)["org"] == ORG
+    # Exactly two unauthenticated meta requests: the org host, then the base.
+    assert metas(fake) == [f"{ORG}.wg.example.com", "wg.example.com"]
+    assert len(fake.requests) == 2
+    assert all("authorization" not in r.headers for r in fake.requests)
+    [entry] = pending_connects(portal)
+    assert entry.platform_origin == fake.platform_origin
+
+
+def test_org_address_links_end_to_end(
+    portal: TestClient, fake: FakePlatform, env: SimpleNamespace
+) -> None:
+    """The callback's ``iss`` is the base, so the link completes as from the base."""
+    root = mirror(env, "demo-checkout")
+    started = connect(portal, fake, platform_url=ORG_URL)
+    allow(fake, started)
+    response = callback(portal, started, iss=fake.platform_origin)
+    assert response.status_code == 200, response.text
+    link_id = response.json()["link_id"]
+    assert pending_of(portal, link_id)["platform_origin"] == fake.platform_origin
+    added = link(portal, link_id, root)
+    assert added.status_code == 201, added.text
+    saved = link_row(SLUG)
+    assert saved.platform_origin == fake.platform_origin
+    assert saved.api_origin == f"https://{ORG}.wg.example.com"
+    assert saved.org_slug == ORG
+
+
+def test_org_address_and_an_explicit_org(
+    portal: TestClient, fake: FakePlatform
+) -> None:
+    """The same org is fine; another one is refused before any consent."""
+    assert query_of(connect(portal, fake, platform_url=ORG_URL, org=ORG))["org"] == ORG
+    before = len(pending_connects(portal))
+    response = portal.post(
+        "/api/platform/connect",
+        json={"platform_url": ORG_URL, "client_name": "laptop", "org": "other"},
+    )
+    assert response.status_code == 422, response.text
+    assert response.json() == {
+        "error": "the address names another organization",
+        "code": "bad_connect_request",
+    }
+    assert len(pending_connects(portal)) == before
+
+
+def test_org_address_claiming_another_platform_is_refused(
+    portal: TestClient, fake: FakePlatform
+) -> None:
+    """A host that is not an org host of the base it names is refused before consent."""
+    fake.responses["org_meta"] = (
+        200,
+        meta_body(fake, base_origin="https://whygraph.other.example"),
+    )
+    response = portal.post(
+        "/api/platform/connect", json={"platform_url": ORG_URL, "client_name": "a"}
+    )
+    assert response.status_code == 422, response.text
+    assert response.json() == {
+        "error": "this is not the platform's own address",
+        "code": "platform_address_mismatch",
+        "platform_origin": "https://whygraph.other.example",
+    }
+    assert pending_connects(portal) == []
+    assert metas(fake) == [f"{ORG}.wg.example.com"]  # the claim was not followed
+
+
+@pytest.mark.parametrize(
+    ("org_says", "base_says", "error"),
+    [
+        # The base names another address for itself.
+        (
+            "https://wg.example.com",
+            "https://elsewhere.example.com",
+            "the platform's address did not confirm itself",
+        ),
+        # The base names nothing.
+        (
+            "https://wg.example.com",
+            None,
+            "the platform's address did not confirm itself",
+        ),
+        # The org host names an unusable address.
+        (
+            "not a url",
+            "https://wg.example.com",
+            "the platform named an invalid address for itself",
+        ),
+    ],
+)
+def test_org_address_needs_a_base_that_confirms_itself(
+    portal: TestClient,
+    fake: FakePlatform,
+    org_says: str,
+    base_says: str | None,
+    error: str,
+) -> None:
+    fake.responses["org_meta"] = (200, meta_body(fake, base_origin=org_says))
+    fake.responses["meta"] = (200, meta_body(fake, base_origin=base_says))
+    response = portal.post(
+        "/api/platform/connect", json={"platform_url": ORG_URL, "client_name": "a"}
+    )
+    assert response.status_code == 502, response.text
+    assert response.json() == {"error": error, "code": "bad_platform_reply"}
+    assert pending_connects(portal) == []
+    assert len(metas(fake)) <= 2  # one hop at most
+
+
+def test_connect_to_a_platform_without_base_origin(
+    portal: TestClient, fake: FakePlatform
+) -> None:
+    """An older platform names no base: the typed address is used, as before."""
+    fake.responses["meta"] = (200, meta_body(fake, base_origin=None))
+    started = connect(portal, fake)
+    assert started["platform_origin"] == fake.platform_origin
+    assert "org" not in query_of(started)
+    assert len(fake.requests) == 1
+    fake.responses["org_meta"] = (200, meta_body(fake, base_origin=None))
+    assert connect(portal, fake, platform_url=ORG_URL)["platform_origin"] == ORG_URL
+
+
+def test_org_address_of_a_known_platform_is_known(
+    portal: TestClient, fake: FakePlatform, env: SimpleNamespace
+) -> None:
+    root = mirror(env, "demo-checkout")
+    assert link(portal, linked(portal, fake), root).status_code == 201
+    assert connect(portal, fake, platform_url=ORG_URL)["known_platform"] is True
+
+
+def test_org_address_keeps_the_cards_intent(
+    portal: TestClient, fake: FakePlatform
+) -> None:
+    intent = "Ab-_" + "x" * 39
+    started = connect(portal, fake, platform_url=ORG_URL, project=SLUG, intent=intent)
+    params = query_of(started)
+    assert (params["org"], params["project"], params["intent"]) == (ORG, SLUG, intent)
 
 
 # ---------------------------------------------------------------------------

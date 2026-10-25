@@ -6,15 +6,18 @@ function, which pytest plugs into ``httpx.MockTransport`` (the shape of
 ``tests/github_fake.py``'s ``FakeGitHub.handle``). It serves what
 :class:`whygraph.portal.platform_client.PlatformHttp` calls:
 
-* base host: ``GET /api/v1/meta``, ``POST /api/connect/token`` (single-use
-  codes, S256 PKCE, byte-equal ``redirect_uri``);
-* org host (``<org>.<base host>``, bearer only): ``GET /api/v1/projects/{slug}``,
+* base host: ``GET /api/v1/meta`` (naming the base in ``base_origin``),
+  ``POST /api/connect/token`` (single-use codes, S256 PKCE, byte-equal
+  ``redirect_uri``);
+* org host (``<org>.<base host>``): ``GET /api/v1/meta`` without credentials,
+  as a platform serves it on every host, then, bearer only:
+  ``GET /api/v1/projects/{slug}``,
   ``POST .../evidence`` and ``.../rationale``, ``GET .../history``,
   ``.../commits/{sha}``, ``.../prs/{n}``, ``.../issues/{n}``, ``.../overview``
   and ``DELETE .../token``.
 
 Replies are **table-driven**: :attr:`FakePlatform.responses` maps a route name
-(``meta``, ``token``, ``status``, ``evidence``, ``rationale``, ``history``,
+(``meta``, ``org_meta``, ``token``, ``status``, ``evidence``, ``rationale``, ``history``,
 ``commit``, ``pr``, ``issue``, ``overview``, ``revoke``) to a
 ``(status, body)`` pair that replaces the hand-written default, so step 4's
 contract recorder can swap in recorded fixtures (:meth:`FakePlatform.from_fixtures`).
@@ -208,17 +211,21 @@ class FakePlatform:
         status, body = self.responses.get(route, (default_status, default_body))
         return httpx.Response(status, json=body)
 
+    def _meta(self) -> httpx.Response:
+        return self._out(
+            "meta",
+            200,
+            {
+                "api_version": self.api_version,
+                "min_client": self.min_client,
+                "capabilities": ["evidence", "rationale", "history", "resources"],
+                "base_origin": self.platform_origin,
+            },
+        )
+
     def _base(self, request: httpx.Request, path: str) -> httpx.Response:
         if request.method == "GET" and path == "/api/v1/meta":
-            return self._out(
-                "meta",
-                200,
-                {
-                    "api_version": self.api_version,
-                    "min_client": self.min_client,
-                    "capabilities": ["evidence", "rationale", "history", "resources"],
-                },
-            )
+            return self._meta()
         if request.method == "POST" and path == "/api/connect/token":
             return self._token(request)
         return httpx.Response(404, json=error_body("not_found"))
@@ -248,6 +255,11 @@ class FakePlatform:
         )
 
     def _org(self, request: httpx.Request, org: str, path: str) -> httpx.Response:
+        if request.method == "GET" and path == "/api/v1/meta":
+            # Public on every host; ``org_meta`` lets an org host disagree.
+            if "org_meta" in self.responses:
+                return self._out("org_meta", 200, None)
+            return self._meta()
         auth = request.headers.get("authorization", "")
         token = auth[7:] if auth.startswith("Bearer ") else ""
         entry = self.tokens.get(token)

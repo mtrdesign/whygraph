@@ -99,6 +99,7 @@
   "origin_mismatch",
   "owner_required",
   "path_missing",
+  "platform_address_mismatch",
   "platform_unreachable",
   "protected",
   "provider_error",

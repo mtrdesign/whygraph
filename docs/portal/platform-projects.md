@@ -35,7 +35,9 @@ There are two ways in, and both end at the same wizard:
   checkout per project on each machine).
 - From the local portal: **New project**, then **From a platform**. Enter the platform's address
   and a **machine name**, and press **Connect**. If a project of this portal is already linked to a
-  platform, its address is filled in; with several, each is offered as a button.
+  platform, its address is filled in; with several, each is offered as a button. Your
+  organization's address (for example `https://acme.whygraph.example.com`) works too: the consent
+  then opens on the platform's main address with that organization preselected.
 
 The machine name is what the platform lists for this connection; it defaults to your host's name
 (`whygraph up` passes it to the container) and you can edit it, with letters, digits, `.`, `_`,

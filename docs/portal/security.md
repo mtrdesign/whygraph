@@ -157,7 +157,10 @@ runs on a developer's laptop and a repository on it is untrusted.
   person, project and port.
 - **The `iss` check.** Every redirect carries the platform's own address (RFC 9207), and the local
   portal refuses a callback whose `iss` is not the platform it started with, **before** it uses the
-  code. PKCE alone does not stop a rogue platform from being swapped in mid-flow; this does.
+  code. PKCE alone does not stop a rogue platform from being swapped in mid-flow; this does. The
+  local portal also asks the address you entered for the platform's own address and follows it only
+  to the immediate parent (an organization's address under the platform), which must confirm itself;
+  any other answer is refused before consent.
 - **`/api/v1` takes a bearer token and nothing else.** On that path the platform reads the
   `Authorization: Bearer` header and **never a cookie**, and everywhere else it ignores a bearer
   header and reads only the session cookie. A bearer token is not ambient, so a web page cannot use

@@ -265,12 +265,18 @@ def _not_found() -> ApiError:
 
 
 @connect_router.get("/api/v1/meta")
-def get_meta() -> dict:
-    """What this platform speaks: ``api_version``, ``min_client``, ``capabilities``."""
+def get_meta(request: Request) -> dict:
+    """What this platform speaks: ``api_version``, ``min_client``, ``capabilities``.
+
+    ``base_origin`` is the platform's own (base) origin, the same answer on
+    the base host and on every org host, so a local portal handed an org's
+    address can find the base its consent and ``iss`` live on.
+    """
     return MetaOut(
         api_version=API_VERSION,
         min_client=MIN_CLIENT_VERSION,
         capabilities=list(CAPABILITIES),
+        base_origin=_base(portal_state(request)).origin,
     ).model_dump()
 
 

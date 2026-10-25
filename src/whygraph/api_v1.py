@@ -451,11 +451,16 @@ class MetaOut(_Out):
     capabilities : list[str]
         Route families the platform offers (``evidence``, ``rationale``,
         ``history``, ``resources``).
+    base_origin : str or None
+        The platform's own (base) origin, the same on its base host and
+        every org host, so a client given an org's address can find the
+        platform it belongs to. ``None`` from a platform that predates it.
     """
 
     api_version: int
     min_client: str
     capabilities: list[str] = Field(default_factory=list)
+    base_origin: str | None = Field(default=None, max_length=2048)
 
 
 class TokenReply(_Out):

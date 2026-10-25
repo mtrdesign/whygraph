@@ -425,6 +425,17 @@ def test_discovery_cache_is_keyed_by_needle(
     assert walks == ["alp", "beta", "", "pha"]
 
 
+def test_discovery_cache_clear_walks_again(tmp_path: Path) -> None:
+    shared = (tmp_path / "shared",)
+    make_repo(shared[0], "alpha")
+    cache = portal_repos.DiscoveryCache()
+    assert [p.name for p in cache.get(shared)] == ["alpha"]
+    make_repo(shared[0], "beta")
+    assert [p.name for p in cache.get(shared)] == ["alpha"]  # still cached
+    cache.clear()
+    assert [p.name for p in cache.get(shared)] == ["alpha", "beta"]
+
+
 def test_repos_route_searches_past_the_cap(
     ready: TestClient, env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:

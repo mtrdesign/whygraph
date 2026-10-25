@@ -1,16 +1,18 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { StrictMode } from "react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { PROJECT_ACTIONS } from "../lib/permissions";
 import userEvent from "@testing-library/user-event";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, focusManager } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError, setBaseUrl, type ConnectRequest } from "../api";
+import { ApiError, portalKey, setBaseUrl, type ConnectRequest } from "../api";
 import { UseWithAgent } from "../components/portal/UseWithAgent";
 import { LOCAL_PORT_KEY, localLinkUrl, parsePort, readStoredPort, revokedLabel } from "../lib/connections";
 import { linkError } from "../lib/errors";
 import { hardNavigate } from "../lib/navigation";
 import { layerToValues, valuesToLayer, configFormSchema } from "../lib/configForm";
 import { safeLinkNext } from "../lib/linkNext";
+import { complete } from "../pages/ConnectPage";
 import { baseHostRedirect, createAppRouter, setupRedirect } from "../router";
 import { ThemeProvider } from "../theme";
 import { useUi } from "../store";
@@ -92,21 +94,23 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
         cancel_url: SERVER_CANCEL,
       }),
     );
+  if (path === "/api/projects/alpha/connections/mine") return Promise.resolve(json([]));
   if (path === "/api/connect/projects") return Promise.resolve(json(PROJECTS));
   if (path === "/api/connect/authorize") return Promise.resolve(json({ redirect: SERVER_ALLOW, access_lost: false }));
   return Promise.resolve(json({ error: "unhandled", detail: path }, 500));
 }
 
-function mount(path: string) {
+function mount(path: string, { strict = false }: { strict?: boolean } = {}) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 30_000 } } });
   const router = createAppRouter({ queryClient, history: createMemoryHistory({ initialEntries: [path] }) });
-  render(
+  const app = (
     <ThemeProvider>
       <QueryClientProvider client={queryClient}>
         <RouterProvider router={router} />
       </QueryClientProvider>
-    </ThemeProvider>,
+    </ThemeProvider>
   );
+  render(strict ? <StrictMode>{app}</StrictMode> : app);
   return router;
 }
 
@@ -219,7 +223,158 @@ describe("connect page", () => {
   });
 });
 
+describe("pre-approved consent", () => {
+  const INTENT = "i".repeat(43);
+  const HINTED = { org: "acme", project: "alpha" };
+  const validated = (over: Record<string, unknown> = {}) =>
+    json({
+      ok: true,
+      client_name: "my-laptop",
+      port: 8765,
+      ...HINTED,
+      orgs: [{ slug: "acme", name: "Acme", role: "member" }],
+      cancel_url: SERVER_CANCEL,
+      pre_approved: true,
+      ...over,
+    });
+  const authorizes = () => fake.calls.filter((c) => c.path === "/api/connect/authorize");
+  const EXPIRED = "This one-time approval expired or was already used. Approve this connection below.";
+
+  it("submits once by itself on pre_approved and never shows Allow, even under StrictMode", async () => {
+    fake.state = baseState({ user: { ...ada, github_login: "ada" } });
+    fake.routes["POST /api/connect/validate"] = () => validated();
+    let sawAllow = false;
+    const watch = new MutationObserver(() => {
+      if (Array.from(document.querySelectorAll("button")).some((b) => b.textContent === "Allow")) sawAllow = true;
+    });
+    watch.observe(document.body, { childList: true, subtree: true, characterData: true });
+    mount(`/connect${query({ ...HINTED, intent: INTENT })}`, { strict: true });
+
+    const auto = await screen.findByTestId("connect-auto");
+    expect(auto).toHaveAttribute("role", "status");
+    expect(auto).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("heading", { name: "Connecting my-laptop…" })).toBeInTheDocument();
+    await waitFor(() => expect(hard).toHaveBeenCalledWith(SERVER_ALLOW));
+    expect(screen.getByTestId("connect-auto")).toHaveTextContent("to Acme / Alpha as @ada");
+    await new Promise((r) => setTimeout(r, 50));
+    watch.disconnect();
+    expect(authorizes()).toHaveLength(1);
+    expect(authorizes()[0].body).toEqual({ ...REQUEST, ...HINTED, intent: INTENT });
+    expect(hard).toHaveBeenCalledTimes(1);
+    expect(sawAllow).toBe(false);
+    expect(window.sessionStorage.getItem("whygraph.connect.done")).toBe("1");
+    expect(window.sessionStorage.getItem("whygraph.connect")).toBeNull();
+  });
+
+  it("falls back to Allow on intent_expired with a notice, focus on Allow, and no intent on the manual Allow", async () => {
+    let n = 0;
+    fake.routes["POST /api/connect/validate"] = () => validated();
+    fake.routes["POST /api/connect/authorize"] = () =>
+      ++n === 1
+        ? json({ detail: "this connection needs your approval", code: "intent_expired" }, 409)
+        : json({ redirect: SERVER_ALLOW, access_lost: false });
+    const user = userEvent.setup();
+    mount(`/connect${query({ ...HINTED, intent: INTENT })}`);
+    expect(await screen.findByTestId("connect-intent-expired")).toHaveTextContent(EXPIRED);
+    expect(screen.queryByTestId("connect-error")).toBeNull();
+    expect(screen.queryByTestId("connect-auto")).toBeNull();
+    const allow = screen.getByRole("button", { name: "Allow" });
+    await waitFor(() => expect(allow).toHaveFocus());
+    expect(authorizes()).toHaveLength(1);
+    expect(authorizes()[0].body).toMatchObject({ intent: INTENT });
+    expect(hard).not.toHaveBeenCalled();
+
+    await user.click(allow);
+    await waitFor(() => expect(hard).toHaveBeenCalledWith(SERVER_ALLOW));
+    expect(authorizes()).toHaveLength(2);
+    expect(authorizes()[1].body).toEqual({ ...REQUEST, ...HINTED });
+  });
+
+  it("another auto failure keeps the error alert, and Allow then sends no intent", async () => {
+    let n = 0;
+    fake.routes["POST /api/connect/validate"] = () => validated();
+    fake.routes["POST /api/connect/authorize"] = () =>
+      ++n === 1 ? json({ detail: "boom" }, 500) : json({ redirect: SERVER_ALLOW, access_lost: false });
+    const user = userEvent.setup();
+    mount(`/connect${query({ ...HINTED, intent: INTENT })}`);
+    await screen.findByTestId("connect-error");
+    expect(screen.queryByTestId("connect-intent-expired")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Allow" }));
+    await waitFor(() => expect(hard).toHaveBeenCalledWith(SERVER_ALLOW));
+    expect(authorizes()).toHaveLength(2);
+    expect(authorizes()[1].body).not.toHaveProperty("intent");
+  });
+
+  it("a manual Allow never sends the intent when the server did not vouch for it", async () => {
+    fake.routes["POST /api/connect/validate"] = () => validated({ pre_approved: false });
+    const user = userEvent.setup();
+    mount(`/connect${query({ ...HINTED, intent: INTENT })}`);
+    const allow = await screen.findByRole("button", { name: "Allow" });
+    expect(screen.queryByTestId("connect-auto")).toBeNull();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(authorizes()).toEqual([]);
+    await user.click(allow);
+    await waitFor(() => expect(hard).toHaveBeenCalledWith(SERVER_ALLOW));
+    expect(authorizes()).toHaveLength(1);
+    expect(authorizes()[0].body).toEqual({ ...REQUEST, ...HINTED });
+  });
+
+  it("shows the normal page when the hinted project is not in the list", async () => {
+    fake.routes["POST /api/connect/validate"] = () => validated({ project: "gamma" });
+    mount(`/connect${query({ org: "acme", project: "gamma", intent: INTENT })}`);
+    expect(await screen.findByRole("button", { name: "Allow" })).toBeInTheDocument();
+    expect(screen.queryByTestId("connect-auto")).toBeNull();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(authorizes()).toEqual([]);
+  });
+
+  it("keeps the intent through the sessionStorage round trip", async () => {
+    mount(`/connect${query({ ...HINTED, intent: INTENT })}`);
+    await screen.findByTestId("connect-client");
+    expect(JSON.parse(window.sessionStorage.getItem("whygraph.connect")!)).toMatchObject({ intent: INTENT });
+    cleanup();
+    fake.calls.length = 0;
+    // A reload after the address was cleaned (or the sign-in round trip) reads the saved copy.
+    mount("/connect");
+    await screen.findByTestId("connect-client");
+    expect(fake.calls.find((c) => c.path === "/api/connect/validate")?.body).toMatchObject({ intent: INTENT });
+    expect(complete({ ...REQUEST, intent: INTENT })).toEqual({ ...REQUEST, intent: INTENT });
+    expect(complete({ ...REQUEST })).not.toHaveProperty("intent");
+  });
+
+  it("Back after a finished consent says so instead of refused, and a new request forgets it", async () => {
+    window.sessionStorage.setItem("whygraph.connect.done", "1");
+    mount("/connect");
+    expect(await screen.findByRole("heading", { name: "Connection finished" })).toBeInTheDocument();
+    expect(screen.getByText("You can close this tab.")).toBeInTheDocument();
+    expect(screen.queryByTestId("connect-refused")).toBeNull();
+    expect(fake.calls.some((c) => c.path === "/api/connect/validate")).toBe(false);
+    cleanup();
+    mount(`/connect${query()}`);
+    await screen.findByTestId("connect-client");
+    expect(window.sessionStorage.getItem("whygraph.connect.done")).toBeNull();
+  });
+
+  it("reloads a page restored from the back-forward cache", async () => {
+    const reload = vi.fn();
+    vi.stubGlobal("location", { ...window.location, reload });
+    mount(`/connect${query()}`);
+    await screen.findByTestId("connect-client");
+    window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: false }));
+    expect(reload).not.toHaveBeenCalled();
+    window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("router gates", () => {
+  it("/connect keeps intent in its search and the page sends it to validate", async () => {
+    const INTENT = "x".repeat(43);
+    mount(`/connect${query({ intent: INTENT })}`);
+    await screen.findByTestId("connect-client");
+    expect(fake.calls.find((c) => c.path === "/api/connect/validate")?.body).toEqual({ ...REQUEST, intent: INTENT });
+  });
+
   it("baseHostRedirect keeps /connect with next", () => {
     const href = `${BASE}/connect${query()}`;
     const out = baseHostRedirect(baseState({ user: null }) as never, "/connect", href);
@@ -433,32 +588,91 @@ describe("agent limits", () => {
 
 // ---- "Use with your agent" ---------------------------------------------------------------
 
+const MINE_PATH = "/api/projects/alpha/connections/mine";
+const machine = (over: Record<string, unknown> = {}) => ({
+  uid: "m1",
+  client_name: "my-laptop",
+  created_at: "2026-01-01T00:00:00Z",
+  last_used_at: "2026-01-02T00:00:00Z",
+  ...over,
+});
+const LINK = { name: "Open in my local WhyGraph" };
+const INTENT_PATH = "/api/projects/alpha/connect-intent";
+const INTENT_A = "a".repeat(43);
+const INTENT_B = "b".repeat(43);
+
+/** `UseWithAgent` needs a query client (the "mine" list); the app defaults are kept. */
+function renderCard(props: Partial<React.ComponentProps<typeof UseWithAgent>> = {}, seed?: (qc: QueryClient) => void) {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 30_000 } } });
+  seed?.(queryClient);
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <UseWithAgent baseUrl={BASE} org="acme" slug="alpha" repo="acme/alpha" {...props} />
+    </QueryClientProvider>,
+  );
+  return { queryClient, ...view };
+}
+
 describe("Use with your agent", () => {
-  it("links to the local portal's /link page with the platform, org and project", () => {
-    render(<UseWithAgent baseUrl={`${BASE}/`} org="acme" slug="alpha" />);
-    const link = screen.getByRole("link", { name: "Open in my local WhyGraph" });
+  it("links to the local portal's /link page with the platform, org and project", async () => {
+    renderCard({ baseUrl: `${BASE}/` });
+    const link = await screen.findByRole("link", LINK);
     const url = new URL(link.getAttribute("href")!);
     expect(url.origin).toBe("http://127.0.0.1:8765");
     expect(url.pathname).toBe("/link");
     expect(Object.fromEntries(url.searchParams)).toEqual({ platform: BASE, org: "acme", project: "alpha" });
-    expect(screen.getByText(/Nothing opened\?/)).toHaveTextContent("whygraph up");
+    expect(screen.getByText(/If the new tab says the site can't be reached/)).toHaveTextContent("whygraph up");
+    expect(screen.getByText(/On another port\?/)).toHaveTextContent("whygraph status");
+    expect(screen.getByTestId("local-port-summary")).toHaveTextContent("Port 8765 · Change");
+    expect(screen.queryByLabelText("Port of your local WhyGraph")).toBeNull();
   });
 
-  it("remembers the port, and falls back when storage throws", async () => {
-    const user = userEvent.setup();
-    render(<UseWithAgent baseUrl={BASE} org="acme" slug="alpha" />);
-    const port = screen.getByLabelText("Your local portal's port");
-    await user.clear(port);
-    await user.type(port, "9100");
-    expect(window.localStorage.getItem(LOCAL_PORT_KEY)).toBe("9100");
-    expect(screen.getByRole("link", { name: "Open in my local WhyGraph" })).toHaveAttribute(
-      "href",
-      localLinkUrl(9100, BASE, "acme", "alpha"),
+  it("names the repository to clone, and shares its folder in the one start step", async () => {
+    renderCard();
+    await screen.findByRole("link", LINK);
+    expect(screen.getByTestId("clone-step")).toHaveTextContent(
+      "Clone acme/alpha into the folder where you keep your repositories, if it is not there yet.",
     );
+    expect(screen.getByText(/Start WhyGraph with that folder shared:/)).toHaveTextContent("whygraph up --add-folder ~/Work");
+    expect(screen.getByText("Press the button below, then pick that clone on your machine.")).toBeInTheDocument();
+  });
+
+  it("reads 'this repository' when the project has no repository name", async () => {
+    renderCard({ repo: null });
+    await screen.findByRole("link", LINK);
+    expect(screen.getByTestId("clone-step")).toHaveTextContent("Clone this repository into the folder");
+  });
+
+  it("changes and remembers the port with the keyboard, and falls back when storage throws", async () => {
+    const user = userEvent.setup();
+    renderCard();
+    await screen.findByRole("link", LINK);
+    await user.click(screen.getByRole("button", { name: "Change" }));
+    const port = screen.getByLabelText("Port of your local WhyGraph");
+    expect(port).toHaveFocus();
     await user.clear(port);
-    await user.type(port, "abc");
-    expect(screen.queryByRole("link", { name: "Open in my local WhyGraph" })).toBeNull();
-    expect(window.localStorage.getItem(LOCAL_PORT_KEY)).toBe("9100"); // an invalid port is not kept
+    await user.type(port, "9100{Enter}");
+    expect(window.localStorage.getItem(LOCAL_PORT_KEY)).toBe("9100");
+    expect(screen.getByRole("link", LINK)).toHaveAttribute("href", localLinkUrl(9100, BASE, "acme", "alpha"));
+    expect(screen.queryByLabelText("Port of your local WhyGraph")).toBeNull();
+    expect(screen.getByRole("button", { name: "Change" })).toHaveFocus();
+    expect(screen.getByTestId("local-port-summary")).toHaveTextContent("Port 9100");
+
+    // An invalid draft shows the error, keeps the last committed port, and is not stored.
+    await user.click(screen.getByRole("button", { name: "Change" }));
+    const again = screen.getByLabelText("Port of your local WhyGraph");
+    await user.clear(again);
+    await user.type(again, "abc{Enter}");
+    expect(again).toHaveAttribute("aria-describedby", "local-port-error");
+    expect(screen.getByText("Enter a port from 1 to 65535.")).toBeInTheDocument();
+    expect(screen.getByRole("link", LINK)).toHaveAttribute("href", localLinkUrl(9100, BASE, "acme", "alpha"));
+    expect(window.localStorage.getItem(LOCAL_PORT_KEY)).toBe("9100");
+
+    // Escape reverts and returns to Change.
+    await user.keyboard("{Escape}");
+    expect(screen.queryByLabelText("Port of your local WhyGraph")).toBeNull();
+    expect(screen.getByRole("button", { name: "Change" })).toHaveFocus();
+    expect(screen.getByTestId("local-port-summary")).toHaveTextContent("Port 9100");
 
     const get = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
       throw new Error("blocked");
@@ -469,9 +683,175 @@ describe("Use with your agent", () => {
     expect(parsePort("65535")).toBe(65535);
   });
 
-  it("makes no request to the local portal", () => {
-    render(<UseWithAgent baseUrl={BASE} org="acme" slug="alpha" />);
-    expect(fetch).not.toHaveBeenCalled();
+  it("commits the port on blur and starts from the remembered one", async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(LOCAL_PORT_KEY, "5174");
+    renderCard();
+    expect(await screen.findByTestId("local-port-summary")).toHaveTextContent("Port 5174");
+    await user.click(screen.getByRole("button", { name: "Change" }));
+    const port = screen.getByLabelText("Port of your local WhyGraph");
+    await user.clear(port);
+    await user.type(port, "9200");
+    await user.tab();
+    expect(screen.getByRole("link", LINK)).toHaveAttribute("href", localLinkUrl(9200, BASE, "acme", "alpha"));
+    expect(window.localStorage.getItem(LOCAL_PORT_KEY)).toBe("9200");
+  });
+
+  it("makes no request whose host is 127.0.0.1", async () => {
+    renderCard();
+    await screen.findByRole("link", LINK);
+    const urls = vi.mocked(fetch).mock.calls.map(([u]) => String(u));
+    expect(urls.some((u) => u.endsWith(MINE_PATH))).toBe(true);
+    // Our own API calls are relative; none may name the local portal's host.
+    expect(urls.filter((u) => /^https?:/.test(u) && new URL(u).hostname === "127.0.0.1")).toEqual([]);
+  });
+
+  it("shows the steps when no machine is linked, and a machine with a closed disclosure when one is", async () => {
+    const user = userEvent.setup();
+    fake.routes[`GET ${MINE_PATH}`] = () => json([machine()]);
+    renderCard();
+    const rows = await screen.findAllByTestId("my-machine-row");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent("Connected on my-laptop");
+    expect(rows[0]).toHaveTextContent("linked");
+    expect(rows[0]).toHaveTextContent("last used");
+    expect(rows[0]).not.toHaveAttribute("data-state");
+    expect(within(rows[0]).getByRole("link", { name: "Manage in Account" })).toHaveAttribute("href", `${BASE}/account`);
+    // A closed disclosure renders no steps (so nothing inside can mint or fetch).
+    const another = screen.getByTestId("connect-another");
+    expect(another).toHaveTextContent("Connect another machine");
+    expect(screen.queryByRole("link", LINK)).toBeNull();
+    expect(screen.queryByTestId("local-port-summary")).toBeNull();
+    await user.click(within(another).getByText("Connect another machine"));
+    expect(await screen.findByRole("link", LINK)).toBeInTheDocument();
+  });
+
+  it("lists two machines, newest first as served", async () => {
+    fake.routes[`GET ${MINE_PATH}`] = () =>
+      json([machine({ uid: "m2", client_name: "desktop" }), machine({ uid: "m1", client_name: "laptop" })]);
+    renderCard();
+    const rows = await screen.findAllByTestId("my-machine-row");
+    expect(rows.map((r) => r.textContent)).toEqual([
+      expect.stringContaining("Connected on desktop"),
+      expect.stringContaining("Connected on laptop"),
+    ]);
+    expect(screen.getByTestId("connect-another")).toBeInTheDocument();
+  });
+
+  it("reads a never-used machine as approved, not linked yet, and keeps the steps open", async () => {
+    fake.routes[`GET ${MINE_PATH}`] = () => json([machine({ last_used_at: null, client_name: "a-very-long-hostname.local" })]);
+    renderCard();
+    const row = await screen.findByTestId("my-machine-row");
+    expect(row).toHaveAttribute("data-state", "pending");
+    expect(row).toHaveTextContent("Approved for a-very-long-hostname.local");
+    expect(row).toHaveTextContent("not linked yet - finish on that machine");
+    expect(row.firstElementChild!.className).toContain("break-words");
+    expect(row.firstElementChild!.className).toContain("min-w-0");
+    expect(await screen.findByRole("link", LINK)).toBeInTheDocument();
+    expect(screen.queryByTestId("connect-another")).toBeNull();
+  });
+
+  it("treats a failed list as no machine", async () => {
+    fake.routes[`GET ${MINE_PATH}`] = () => json({ error: "boom" }, 500);
+    renderCard();
+    expect(await screen.findByRole("link", LINK)).toBeInTheDocument();
+    expect(screen.queryByTestId("my-machines")).toBeNull();
+  });
+
+  it("shows the machine after the tab regains focus, without a reload", async () => {
+    renderCard();
+    await screen.findByRole("link", LINK);
+    expect(screen.queryByTestId("my-machines")).toBeNull();
+    fake.routes[`GET ${MINE_PATH}`] = () => json([machine()]);
+    act(() => {
+      focusManager.setFocused(false);
+      focusManager.setFocused(true);
+    });
+    expect(await screen.findByTestId("my-machines")).toHaveTextContent("Connected on my-laptop");
+    focusManager.setFocused(undefined);
+  });
+
+  it("variant=dialog renders the steps with no card title", async () => {
+    renderCard({ variant: "dialog" });
+    expect(await screen.findByRole("link", LINK)).toBeInTheDocument();
+    expect(screen.queryByTestId("use-with-agent")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Connect local WhyGraph" })).toBeNull();
+  });
+
+  it("variant=card has the title; variant=embedded is only the steps and asks for nothing", async () => {
+    const card = renderCard();
+    expect(await screen.findByRole("heading", { name: "Connect local WhyGraph" })).toBeInTheDocument();
+    card.unmount();
+    fake.calls.length = 0;
+    renderCard({ variant: "embedded" });
+    expect(screen.getByRole("link", LINK)).toBeInTheDocument();
+    expect(screen.queryByTestId("use-with-agent")).toBeNull();
+    expect(fake.calls.some((c) => c.path === MINE_PATH)).toBe(false);
+  });
+
+  it("puts the minted intent in the link and says what the click grants", async () => {
+    const user = userEvent.setup();
+    fake.routes[`POST ${INTENT_PATH}`] = (_m, body) =>
+      json({ intent: (body as { port: number }).port === 9100 ? INTENT_B : INTENT_A, expires_in: 900 });
+    renderCard();
+    const link = await screen.findByRole("link", LINK);
+    await waitFor(() => expect(link).toHaveAttribute("href", localLinkUrl(8765, BASE, "acme", "alpha", INTENT_A)));
+    expect(new URL(link.getAttribute("href")!).searchParams.get("intent")).toBe(INTENT_A);
+    expect(fake.calls.find((c) => c.path === INTENT_PATH)).toMatchObject({ method: "POST", body: { port: 8765 } });
+    expect(screen.getByTestId("connect-scope")).toHaveTextContent(
+      "This lets WhyGraph on port 8765 of this computer read this project as you and, if your role allows, ask for rationale cards with your organization's AI keys. You confirm once more on your machine.",
+    );
+    // The intent is bound to the port: a new port gets its own.
+    await user.click(screen.getByRole("button", { name: "Change" }));
+    const port = screen.getByLabelText("Port of your local WhyGraph");
+    await user.clear(port);
+    await user.type(port, "9100{Enter}");
+    await waitFor(() =>
+      expect(screen.getByRole("link", LINK)).toHaveAttribute("href", localLinkUrl(9100, BASE, "acme", "alpha", INTENT_B)),
+    );
+    expect(fake.calls.filter((c) => c.path === INTENT_PATH).map((c) => c.body)).toEqual([{ port: 8765 }, { port: 9100 }]);
+    expect(screen.getByTestId("connect-scope")).toHaveTextContent("port 9100 of this computer");
+  });
+
+  it("leaves the intent out of the link when the mint fails", async () => {
+    fake.routes[`POST ${INTENT_PATH}`] = () => json({ detail: "slow down", code: "throttled" }, 429);
+    renderCard();
+    const link = await screen.findByRole("link", LINK);
+    await waitFor(() => expect(fake.calls.some((c) => c.path === INTENT_PATH)).toBe(true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(link).toHaveAttribute("href", localLinkUrl(8765, BASE, "acme", "alpha"));
+    expect(new URL(link.getAttribute("href")!).searchParams.has("intent")).toBe(false);
+  });
+
+  it("a click asks for a fresh intent, since each is single use", async () => {
+    let n = 0;
+    fake.routes[`POST ${INTENT_PATH}`] = () => json({ intent: ++n === 1 ? INTENT_A : INTENT_B, expires_in: 900 });
+    renderCard();
+    const link = await screen.findByRole("link", LINK);
+    await waitFor(() => expect(link).toHaveAttribute("href", localLinkUrl(8765, BASE, "acme", "alpha", INTENT_A)));
+    link.addEventListener("click", (e) => e.preventDefault()); // jsdom does not open tabs
+    await userEvent.setup().click(link);
+    await waitFor(() => expect(link).toHaveAttribute("href", localLinkUrl(8765, BASE, "acme", "alpha", INTENT_B)));
+    expect(fake.calls.filter((c) => c.path === INTENT_PATH)).toHaveLength(2);
+  });
+
+  it("a closed Connect another machine mints no intent until it is opened", async () => {
+    const user = userEvent.setup();
+    fake.routes[`GET ${MINE_PATH}`] = () => json([machine()]);
+    fake.routes[`POST ${INTENT_PATH}`] = () => json({ intent: INTENT_A, expires_in: 900 });
+    renderCard();
+    const another = await screen.findByTestId("connect-another");
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fake.calls.some((c) => c.path === INTENT_PATH)).toBe(false);
+    await user.click(within(another).getByText("Connect another machine"));
+    await waitFor(() => expect(fake.calls.some((c) => c.path === INTENT_PATH)).toBe(true));
+  });
+
+  it("a reader makes no request for the machine list and mints no intent", async () => {
+    renderCard({}, (qc) => qc.setQueryData(portalKey("state"), orgState("reader")));
+    expect(await screen.findByRole("link", LINK)).toBeInTheDocument();
+    expect(fake.calls).toEqual([]);
+    expect(screen.getByRole("link", LINK)).toHaveAttribute("href", localLinkUrl(8765, BASE, "acme", "alpha"));
   });
 });
 

@@ -320,6 +320,179 @@ class PendingCodes:
             return len(self._entries)
 
 
+INTENT_TTL_SEC = 15 * 60.0
+"""How long a connect intent from ``POST /api/projects/{slug}/connect-intent`` works."""
+
+INTENT_MAX = 10_000
+"""Most intents in flight; past it the oldest is evicted."""
+
+INTENT_PER_USER = 20
+"""Most intents of one user in flight; past it that user's oldest is evicted."""
+
+
+@dataclass(frozen=True)
+class ConnectIntent:
+    """What a connect intent was minted for (production-local-connect-ux plan 7.2).
+
+    An intent lets the platform's own consent page skip its Allow click for
+    the same person, project and port, once. It grants nothing on its own.
+
+    Attributes
+    ----------
+    user_id, org_id, project_id : int
+        Who minted it, and the one project it is for.
+    port : int
+        The platform card's local port; the consent's ``redirect_uri`` must
+        name the same one.
+    expires_at : float
+        Clock reading after which the intent is dead.
+    """
+
+    user_id: int
+    org_id: int
+    project_id: int
+    port: int
+    expires_at: float
+
+
+class ConnectIntents:
+    """In-memory map of connect intents in flight, keyed by the intent's SHA-256.
+
+    A copy of :class:`PendingCodes`: thread-safe, entries live
+    :data:`INTENT_TTL_SEC` and are single use (:meth:`pop`), past
+    :data:`INTENT_PER_USER` entries of one user that user's oldest is
+    evicted, and past :data:`INTENT_MAX` entries the oldest overall is.
+    Only the hash of an intent is held. :meth:`matches` peeks and
+    :meth:`pop` consumes only on a full match, so a mismatched attempt
+    never burns the owner's intent.
+
+    Parameters
+    ----------
+    clock : callable, optional
+        Returns seconds; injectable for tests (default ``time.monotonic``).
+    ttl : float
+        Entry lifetime in seconds.
+    max_entries : int
+        Capacity before the oldest entry is evicted.
+    per_user : int
+        Capacity per ``user_id`` before that user's oldest entry is evicted.
+    """
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        ttl: float = INTENT_TTL_SEC,
+        max_entries: int = INTENT_MAX,
+        per_user: int = INTENT_PER_USER,
+    ) -> None:
+        self._clock = clock
+        self._ttl = ttl
+        self._max = max_entries
+        self._per_user = per_user
+        self._entries: OrderedDict[str, ConnectIntent] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def put(self, *, user_id: int, org_id: int, project_id: int, port: int) -> str:
+        """Mint a new intent; return it (the raw intent, once).
+
+        Expired entries are purged first.
+
+        Returns
+        -------
+        str
+            ``secrets.token_urlsafe(32)``: 43 URL-safe characters.
+        """
+        intent = secrets.token_urlsafe(32)
+        now = self._clock()
+        entry = ConnectIntent(
+            user_id=user_id,
+            org_id=org_id,
+            project_id=project_id,
+            port=port,
+            expires_at=now + self._ttl,
+        )
+        key = hash_token(intent)
+        with self._lock:
+            for dead in [k for k, e in self._entries.items() if e.expires_at <= now]:
+                del self._entries[dead]
+            mine = [k for k, e in self._entries.items() if e.user_id == user_id]
+            for old in mine[: max(0, len(mine) - self._per_user + 1)]:
+                del self._entries[old]
+            self._entries[key] = entry
+            while len(self._entries) > self._max:
+                self._entries.popitem(last=False)
+        return intent
+
+    def _live(
+        self, key: str, *, user_id: int, org_id: int, project_id: int, port: int
+    ) -> bool:
+        entry = self._entries.get(key)
+        return (
+            entry is not None
+            and entry.expires_at > self._clock()
+            and entry.user_id == user_id
+            and entry.org_id == org_id
+            and entry.project_id == project_id
+            and entry.port == port
+        )
+
+    def matches(
+        self, intent: str, *, user_id: int, org_id: int, project_id: int, port: int
+    ) -> bool:
+        """Whether ``intent`` is live and was minted for exactly these values.
+
+        A peek: it never consumes the intent.
+
+        Parameters
+        ----------
+        intent : str
+            The raw intent.
+        user_id, org_id, project_id, port : int
+            What the consent is for; all four must equal the minted values.
+
+        Returns
+        -------
+        bool
+            ``True`` only for a known, unexpired intent with equal fields.
+        """
+        key = hash_token(intent)
+        with self._lock:
+            return self._live(
+                key, user_id=user_id, org_id=org_id, project_id=project_id, port=port
+            )
+
+    def pop(
+        self, intent: str, *, user_id: int, org_id: int, project_id: int, port: int
+    ) -> bool:
+        """Consume ``intent`` if it :meth:`matches`; else leave it untouched.
+
+        Parameters
+        ----------
+        intent : str
+            The raw intent.
+        user_id, org_id, project_id, port : int
+            What the consent is for; all four must equal the minted values.
+
+        Returns
+        -------
+        bool
+            ``True`` when the intent matched and is now spent.
+        """
+        key = hash_token(intent)
+        with self._lock:
+            if not self._live(
+                key, user_id=user_id, org_id=org_id, project_id=project_id, port=port
+            ):
+                return False
+            del self._entries[key]
+            return True
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -339,6 +512,20 @@ def _expired(now: datetime):  # noqa: ANN202 -- a SQL expression
         and_(
             col(ConnectionToken.last_used_at).is_(None),
             col(ConnectionToken.created_at) < _iso(now - UNUSED),
+        ),
+    )
+
+
+def _unexpired(now: datetime):  # noqa: ANN202 -- a SQL expression
+    """Rows :func:`_expired` would not match, NULL-safe (a never-used token is ``last_used_at IS NULL``)."""
+    return or_(
+        and_(
+            col(ConnectionToken.last_used_at).is_not(None),
+            col(ConnectionToken.last_used_at) >= _iso(now - IDLE),
+        ),
+        and_(
+            col(ConnectionToken.last_used_at).is_(None),
+            col(ConnectionToken.created_at) >= _iso(now - UNUSED),
         ),
     )
 
@@ -835,6 +1022,38 @@ def list_for_project(
     )
 
 
+def list_for_project_user(
+    db: Session, project_id: int, user_id: int
+) -> list[TokenInfo]:
+    """The live, unexpired tokens ``user_id`` holds for ``project_id``, newest first.
+
+    A token the sweep has not revoked yet but that is already idle-expired
+    (:data:`IDLE`, or never used within :data:`UNUSED`) is left out, and a
+    never-used fresh one is kept.
+
+    Parameters
+    ----------
+    db : Session
+        A portal DB session.
+    project_id : int
+        The project.
+    user_id : int
+        The token owner.
+
+    Returns
+    -------
+    list[TokenInfo]
+        Newest first.
+    """
+    return _infos(
+        db,
+        col(ConnectionToken.project_id) == project_id,
+        col(ConnectionToken.user_id) == user_id,
+        *_live(),
+        _unexpired(_now()),
+    )
+
+
 def sweep() -> tuple[int, int]:
     """Revoke expired tokens as ``idle``; delete rows revoked :data:`PURGE_AFTER` ago.
 
@@ -859,12 +1078,17 @@ __all__ = [
     "CODE_MAX",
     "CODE_TTL_SEC",
     "IDLE",
+    "INTENT_MAX",
+    "INTENT_PER_USER",
+    "INTENT_TTL_SEC",
     "INVALID",
     "PURGE_AFTER",
     "TOKEN_PREFIX",
     "TOKEN_RE",
     "TOUCH_EVERY",
     "UNUSED",
+    "ConnectIntent",
+    "ConnectIntents",
     "PendingCode",
     "PendingCodes",
     "Refusal",
@@ -874,6 +1098,7 @@ __all__ = [
     "is_valid_client_name",
     "issue",
     "list_for_project",
+    "list_for_project_user",
     "list_for_user",
     "lookup",
     "member_access_select",

@@ -26,6 +26,19 @@ answers ``404``:
   /api/projects/{slug}/connections/{uid}`` (org host,
   ``project.configure``): every member's live tokens of one project, which
   an owner or admin may revoke (``admin_revoked``).
+* ``GET /api/projects/{slug}/connections/mine`` (org host,
+  ``project.read``): the caller's own live, unexpired tokens of one
+  project, so the Overview can show which of their machines are connected.
+* ``POST /api/projects/{slug}/connect-intent`` (org host, ``project.read``):
+  mints a one-time *intent* for the platform card's link to the local
+  portal (:class:`~whygraph.portal.connections.ConnectIntents`, 15 min,
+  bound to the caller, the project and the card's port). It grants
+  nothing: when the consent that follows carries it for the same person,
+  project and ``redirect_uri`` port, ``validate`` answers
+  ``pre_approved: true`` and the page skips its Allow click; ``authorize``
+  spends it (``409 intent_expired`` when it no longer matches). PKCE,
+  ``redirect_uri``, ``iss`` and the exchange are unchanged. An intent is
+  never audited, logged or echoed in an error.
 * ``DELETE /api/v1/projects/{slug}/token`` (org host, bearer,
   ``project.read``): a connected portal revokes its own token
   (``removed_locally``).
@@ -107,6 +120,9 @@ CODE_VERIFIER_RE = re.compile(r"[A-Za-z0-9._~-]{43,128}")
 STATE_RE = re.compile(r"[A-Za-z0-9_-]{16,128}")
 """The local portal's ``state``."""
 
+INTENT_RE = re.compile(r"[A-Za-z0-9_-]{43}")
+"""A connect intent: ``secrets.token_urlsafe(32)``, 43 base64url characters."""
+
 _PUBLIC_BASE = [Depends(require_mode_and_host("base"))]
 
 connect_router = APIRouter(dependencies=[Depends(require_production)])
@@ -132,6 +148,7 @@ class ConnectBody(_Strict):
     client_name: str = Field(max_length=256)
     org: str | None = Field(default=None, max_length=100)
     project: str | None = Field(default=None, max_length=100)
+    intent: str | None = Field(default=None, max_length=256)
 
 
 class AuthorizeBody(ConnectBody):
@@ -139,6 +156,12 @@ class AuthorizeBody(ConnectBody):
 
     org: str = Field(max_length=100)
     project: str = Field(max_length=100)
+
+
+class IntentBody(_Strict):
+    """``POST /api/projects/{slug}/connect-intent``: the card's local port."""
+
+    port: int = Field(ge=1, le=65535)
 
 
 class TokenBody(_Strict):
@@ -268,9 +291,15 @@ def post_validate(
     ``project`` one of its projects the caller has access to (``422
     bad_connect_request`` otherwise, the same answer for an org or a
     project that does not exist). ``orgs`` lists the caller's member orgs.
+    ``pre_approved`` is true only when ``intent`` is one the caller minted
+    for the hinted project and the ``redirect_uri`` port, still live, and
+    the project has not lost its GitHub access; the intent is only peeked
+    at here, and no ``intent`` value is ever an error.
     """
     port = checked_request(body)
-    base = _base(portal_state(request))
+    state = portal_state(request)
+    base = _base(state)
+    pre_approved = False
     with get_session() as db:
         orgs = _member_orgs(db, principal.user_id)
         if body.org is not None:
@@ -279,12 +308,24 @@ def post_validate(
                 raise _bad("org", "that is not one of your organizations")
             if body.project is not None:
                 found = db.exec(
-                    member_access_select(Project.id, user_id=principal.user_id).where(
-                        Project.org_id == org_id, Project.slug == body.project
-                    )
+                    member_access_select(
+                        Project.id, Project.access_lost_at, user_id=principal.user_id
+                    ).where(Project.org_id == org_id, Project.slug == body.project)
                 ).first()
-                if found is None or member_project_role(*found[1:]) is None:
+                if found is None or member_project_role(*found[2:]) is None:
                     raise _bad("project", "no such project in that organization")
+                pre_approved = (
+                    body.intent is not None
+                    and INTENT_RE.fullmatch(body.intent) is not None
+                    and found[1] is None
+                    and state.connect_intents.matches(
+                        body.intent,
+                        user_id=principal.user_id,
+                        org_id=org_id,
+                        project_id=found[0],
+                        port=port,
+                    )
+                )
         elif body.project is not None:
             raise _bad("project", "a project needs its org")
     return {
@@ -296,6 +337,7 @@ def post_validate(
         "orgs": [
             {"slug": slug, "name": name, "role": role} for _, slug, name, role in orgs
         ],
+        "pre_approved": pre_approved,
         "cancel_url": callback_url(
             body.redirect_uri,
             {"error": "access_denied", "state": body.state, "iss": base.origin},
@@ -344,7 +386,11 @@ def post_authorize(
     as :func:`post_validate`; ``404`` unless the caller holds a real
     membership of ``org``, it has ``project`` and the caller has access to
     it (the same ``404`` for a Restricted project). ``redirect`` is
-    ``redirect_uri?code=...&state=...&iss=<base origin>``.
+    ``redirect_uri?code=...&state=...&iss=<base origin>``. With an
+    ``intent`` (the page's automatic submit after ``pre_approved``), the
+    intent is spent first and must match the caller, the project and the
+    ``redirect_uri`` port; otherwise ``409 intent_expired`` and no code is
+    issued (the page then shows Allow). The audit records ``pre_approved``.
     """
     state = portal_state(request)
     _throttled(state.connect_user.hit(principal.user_id))
@@ -362,6 +408,16 @@ def post_authorize(
     if row is None or member_project_role(*row[3:]) is None:
         raise ApiError(404, "not found")
     project_id, org_id, access_lost_at = row[:3]
+    if body.intent is not None and not state.connect_intents.pop(
+        body.intent,
+        user_id=principal.user_id,
+        org_id=org_id,
+        project_id=project_id,
+        port=port,
+    ):
+        raise ApiError(
+            409, "this connection needs your approval", code="intent_expired"
+        )
     code = state.connect_codes.put(
         user_id=principal.user_id,
         org_id=org_id,
@@ -379,6 +435,7 @@ def post_authorize(
         project=body.project,
         client_name=repr(body.client_name),
         port=port,
+        pre_approved=body.intent is not None,
     )
     return {
         "redirect": callback_url(
@@ -571,6 +628,72 @@ def get_project_connections(
     return rows
 
 
+@connect_router.get("/api/projects/{slug}/connections/mine")
+def get_my_project_connections(
+    project: BoundProject = Depends(project_access(Action.PROJECT_READ)),
+    principal: Principal = Depends(current_user),
+) -> list[dict]:
+    """The caller's own live, unexpired tokens of the project, newest first."""
+    with get_session() as db:
+        infos = connections.list_for_project_user(db, project.id, principal.user_id)
+    return [
+        {
+            "uid": i.uid,
+            "client_name": i.client_name,
+            "created_at": i.created_at,
+            "last_used_at": i.last_used_at,
+        }
+        for i in infos
+    ]
+
+
+@connect_router.post("/api/projects/{slug}/connect-intent")
+def post_connect_intent(
+    body: IntentBody,
+    request: Request,
+    project: BoundProject = Depends(project_access(Action.PROJECT_READ)),
+    principal: Principal = Depends(current_user),
+) -> dict:
+    """Mint a one-time intent for the platform card's link to a local portal.
+
+    The intent only lets this platform's consent page skip its Allow click
+    for the same caller, project and port, once, within
+    :data:`~whygraph.portal.connections.INTENT_TTL_SEC`; it grants nothing
+    on its own and is not audited (the authorize that spends it is).
+
+    Parameters
+    ----------
+    body : IntentBody
+        The card's local port (1-65535, else ``422``).
+    request : Request
+        The request (for the portal state).
+    project : BoundProject
+        The project the caller can read (``404`` for one they cannot see;
+        an instance admin's ``reader`` access is refused by ``current_org``).
+    principal : Principal
+        The signed-in caller.
+
+    Returns
+    -------
+    dict
+        ``{"intent": <43 characters>, "expires_in": <seconds>}``.
+
+    Raises
+    ------
+    ApiError
+        ``429 throttled`` past 120 mints per user an hour.
+    """
+    state = portal_state(request)
+    _throttled(state.connect_intent_user.hit(principal.user_id))
+    intent = state.connect_intents.put(
+        user_id=principal.user_id,
+        org_id=project.org_id,
+        project_id=project.id,
+        port=body.port,
+    )
+    return {"intent": intent, "expires_in": int(connections.INTENT_TTL_SEC)}
+
+
 @connect_router.delete("/api/projects/{slug}/connections/{uid}", status_code=204)
 def delete_project_connection(
     uid: str,
@@ -655,6 +778,7 @@ __all__ = [
     "CAPABILITIES",
     "CODE_CHALLENGE_RE",
     "CODE_VERIFIER_RE",
+    "INTENT_RE",
     "MIN_CLIENT_VERSION",
     "REDIRECT_URI_RE",
     "STATE_RE",

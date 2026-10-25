@@ -37,7 +37,7 @@ import { ProjectStatusBadge } from "../components/portal/ProjectStatusBadge";
 import { RunStatusBadge } from "../components/portal/RunStatusBadge";
 import { EstimateBody } from "../components/portal/ScanEstimateCard";
 import { ScanMenu } from "../components/portal/ScanMenu";
-import { UseWithAgent } from "../components/portal/UseWithAgent";
+import { MyMachines, UseWithAgent, useMyMachines } from "../components/portal/UseWithAgent";
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton, TableSkeleton } from "../components/state/Skeletons";
 import { Badge } from "../components/ui/badge";
@@ -279,12 +279,20 @@ function AgentActivity({
   codegraph,
   production,
   setup,
+  embeddedSetup,
+  setupSummary,
+  machines,
 }: {
   agents: ProjectOverview["agents"];
   codegraph?: ProjectOverview["codegraph"];
   production: boolean;
   setup: ReactNode;
+  embeddedSetup?: ReactNode;
+  setupSummary: string;
+  machines?: ReactNode;
 }) {
+  // Closed, the disclosure mounts nothing (so nothing inside fetches or mints).
+  const [setupOpen, setSetupOpen] = useState(false);
   const cg = codegraph && codegraph.server.available ? <CodegraphLines codegraph={codegraph} /> : null;
   if (agents.total_calls === 0) {
     return (
@@ -349,7 +357,7 @@ function AgentActivity({
       )}
       {agents.connections && agents.connections.length > 0 && (
         <div className="flex flex-col gap-1">
-          <h3 className="text-xs font-medium text-muted-foreground">Connected portals</h3>
+          <h3 className="text-xs font-medium text-muted-foreground">Machines</h3>
           <ul className="flex flex-col gap-1 text-xs" data-testid="agent-connections">
             {agents.connections.map((c, i) => (
               <li key={`${c.client_name}-${i}`} className="flex items-center justify-between gap-3">
@@ -365,12 +373,13 @@ function AgentActivity({
           </ul>
         </div>
       )}
+      {machines}
       {setup && (
-        <details className="text-sm">
+        <details className="text-sm" onToggle={(e) => setSetupOpen(e.currentTarget.open)}>
           <summary className="cursor-pointer text-xs text-primary-text select-none hover:underline">
-            Connect another agent
+            {setupSummary}
           </summary>
-          <div className="mt-3">{setup}</div>
+          {setupOpen && <div className="mt-3 flex flex-col gap-3">{embeddedSetup ?? setup}</div>}
         </details>
       )}
     </section>
@@ -532,6 +541,8 @@ export function ProjectHome() {
   const portal = usePortalState().data;
   const production = isProduction(portal);
   const [dismissed, setDismissed] = useState(false);
+  // The caller's own machines (production): above the early returns, like every hook here.
+  const mine = useMyMachines(slug, production && ready && !readOnly);
 
   if (project.isLoading) return <PageSkeleton label="Loading the project" width="narrow" className="sm:py-8" />;
   if (!p) return null;
@@ -562,14 +573,33 @@ export function ProjectHome() {
     : health;
 
   // "Connect your agent": hidden for a dead link or a missing folder (it could not work).
+  const canSetUp =
+    !deadLink && p.root_status === "ok" && !p.importing && ready && !readOnly && !!portal?.org && !!portal.base_url;
   const setup: ReactNode =
     deadLink || p.root_status !== "ok" || p.importing ? null : production ? (
-      ready && !readOnly && portal?.org && portal.base_url ? (
-        <UseWithAgent baseUrl={portal.base_url} org={portal.org.slug} slug={slug} />
+      canSetUp && portal?.org && portal.base_url ? (
+        <UseWithAgent baseUrl={portal.base_url} org={portal.org.slug} slug={slug} repo={p.github_full_name ?? null} />
       ) : null
     ) : p.initialized && p.mcp_url ? (
       <ConnectAgent mcpUrl={p.mcp_url} configured={p.agents} />
     ) : null;
+  // The same card inside the Overview's disclosure: only the steps (the machines sit above it).
+  const setupEmbedded: ReactNode =
+    production && canSetUp && portal?.org && portal.base_url ? (
+      <UseWithAgent
+        baseUrl={portal.base_url}
+        org={portal.org.slug}
+        slug={slug}
+        repo={p.github_full_name ?? null}
+        variant="embedded"
+      />
+    ) : undefined;
+  const hasMachines = !!mine.data?.length;
+  const setupSummary = production
+    ? hasMachines
+      ? "Connect another machine"
+      : "Connect local WhyGraph"
+    : "Connect another agent";
 
   // The header's actions by state (OVW-3): a dead link offers only Reconnect.
   const actions: ReactNode = deadLink ? (
@@ -670,7 +700,20 @@ export function ProjectHome() {
       {overview.data?.usage && <UsageCard usage={overview.data.usage} slug={slug} />}
 
       {overview.isSuccess ? (
-        <AgentActivity agents={overview.data.agents} codegraph={overview.data.codegraph} production={production} setup={setup} />
+        <AgentActivity
+          agents={overview.data.agents}
+          codegraph={overview.data.codegraph}
+          production={production}
+          setup={setup}
+          embeddedSetup={setupEmbedded}
+          setupSummary={setupSummary}
+          // An admin already sees every member's machines (their own included) under "Machines".
+          machines={
+            hasMachines && mine.data && !overview.data.agents.connections ? (
+              <MyMachines machines={mine.data} baseUrl={portal?.base_url} />
+            ) : null
+          }
+        />
       ) : overview.isError ? (
         <>
           <ErrorState

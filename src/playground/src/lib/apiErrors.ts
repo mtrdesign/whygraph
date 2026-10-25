@@ -182,7 +182,7 @@ export const MESSAGES: Record<string, Resolver> = {
       : "Use 1-40 lowercase letters, digits and dashes, not starting or ending with a dash.",
   slug_taken: (_err, ctx) =>
     ctx === "link"
-      ? "A project with this name already exists on this machine. Choose another name."
+      ? "A project with this name already exists on this machine, and a linked project keeps the platform's name."
       : "That URL name is already taken.",
   bad_name: (err) =>
     /at most/.test(err.serverMessage)
@@ -282,17 +282,18 @@ export const MESSAGES: Record<string, Resolver> = {
   origin_mismatch:
     "This checkout's origin is not the platform project's repository, so it cannot be linked to it.",
   connect_expired: "The connection request expired. Start again from the local portal.",
-  link_expired: "The link request expired. Start again from the platform.",
+  link_expired: "The link request expired. Start again.",
   connect_failed: "The platform didn't complete the connection. Start the link again.",
   issuer_mismatch: "The sign-in answer came from an unexpected server. Start the link again.",
   access_denied: "The connection was cancelled on the platform.",
   bad_platform_url: "That is not a valid platform address. Use the https address of your WhyGraph platform.",
   bad_platform_reply: "The platform sent an answer WhyGraph could not use. Check the address and try again.",
   bad_connect_request:
-    "This connection request is not valid. Start it again from the local portal; do not edit the address.",
+    "This connection request is not valid. Start it again from your local WhyGraph; do not edit the address.",
   platform_unreachable: { message: "Couldn't reach the platform. Check the address and try again.", action: RETRY },
   update_required: "This platform needs a newer WhyGraph on this machine. Update it, then link again.",
   invalid_grant: "This connection request has expired. Start the link again from your local portal.",
+  intent_expired: "This one-time approval expired or was already used. Approve this connection below.",
   invalid_token: "This connection token is not valid. Link the project again.",
   token_revoked: (err) => {
     const reason = str(err.extra.reason);

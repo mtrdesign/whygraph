@@ -750,6 +750,10 @@ def _no_connections(body: list, w: World, o: OrgWorld) -> None:
     assert body == []
 
 
+def _has_intent(body: dict, w: World, o: OrgWorld) -> None:
+    assert len(body["intent"]) == 43 and body["expires_in"] == 900
+
+
 def _access_check(body: dict, w: World, o: OrgWorld) -> None:
     assert body["restricted"] is False
     assert o.owner_uid in [p["uid"] for p in body["people"]]
@@ -978,6 +982,10 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     # which holds no token: the list is empty and a user's uid is no token's;
     # test_portal_connect.py drives both with tokens)
     ("GET", "/api/projects/{slug}/connections"): Call(200, check=_no_connections),
+    ("GET", "/api/projects/{slug}/connections/mine"): Call(200, check=_no_connections),
+    ("POST", "/api/projects/{slug}/connect-intent"): Call(
+        200, body=lambda w, o: {"port": 8765}, check=_has_intent
+    ),
     ("DELETE", "/api/projects/{slug}/connections/{uid}"): Call(
         404, shows=lambda o: ["no such connection"]
     ),

@@ -3,7 +3,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { connectApi, type ConnectionRow, type MyConnection } from "../../api";
 import { revokedLabel, revokedLabelForAdmin } from "../../lib/connections";
 import { linkError } from "../../lib/errors";
-import { timeAgo } from "../../lib/projectStatus";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Skeleton } from "../ui/skeleton";
@@ -11,18 +10,10 @@ import { ConnectAgentDialog } from "../onboarding/ConnectAgentDialog";
 import { SettingsSection } from "../settings/SettingsLayout";
 import { ErrorState } from "../state/ErrorState";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { When } from "./When";
 
 const MINE = ["@account", "connections"] as const;
 const projectConnections = (slug: string) => ["@project", slug, "connections"] as const;
-
-function When({ label, iso }: { label: string; iso: string | null }) {
-  const ago = timeAgo(iso);
-  return ago ? (
-    <span>
-      {label} {ago}
-    </span>
-  ) : null;
-}
 
 /**
  * Account -> Connected portals: the caller's own connection tokens, one per
@@ -47,26 +38,26 @@ export function MyConnectedPortals() {
 
   return (
     <section
-      aria-label="Connected portals"
+      aria-label="Connected machines"
       className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5 shadow-card"
       data-testid="my-connections"
     >
       <div>
-        <h2 className="text-sm font-semibold">Connected portals</h2>
+        <h2 className="text-sm font-semibold">Connected machines</h2>
         <p className="mt-0.5 text-xs text-muted-foreground">
-          Local WhyGraph portals linked to a project with your account. Revoking one cuts that machine
-          off at once; it can be linked again.
+          Machines running WhyGraph that you linked to a project. Revoking one cuts that machine off at
+          once; it can be linked again.
         </p>
       </div>
       {list.isLoading && <Skeleton className="h-12" />}
       {list.isError && (
-        <ErrorState error={list.error} context="link" title="Couldn't load your connected portals" onRetry={() => void list.refetch()} />
+        <ErrorState error={list.error} context="link" title="Couldn't load your connected machines" onRetry={() => void list.refetch()} />
       )}
       {list.isSuccess && !anyLive && (
         <div className="row-wrap" data-testid="no-connections">
-          <p className="min-w-0 flex-1 text-sm text-muted-foreground">No local portal is connected.</p>
+          <p className="min-w-0 flex-1 text-sm text-muted-foreground">No machine is connected.</p>
           <Button size="sm" variant="outline" onClick={() => setAgentOpen(true)}>
-            Connect your agent
+            Connect local WhyGraph
           </Button>
         </div>
       )}
@@ -113,8 +104,12 @@ export function MyConnectedPortals() {
         onOpenChange={(open) => {
           if (!open) setRevoking(null);
         }}
-        title={`Revoke ${revoking?.client_name ?? "this connection"}?`}
-        description="That machine loses access at once. You can link it again from the local portal."
+        title={
+          revoking?.org && revoking.project
+            ? `Revoke ${revoking.client_name}'s access to ${revoking.org}/${revoking.project}?`
+            : `Revoke ${revoking?.client_name ?? "this connection"}?`
+        }
+        description="That machine loses access at once. You can link it again from WhyGraph on that machine."
         confirmLabel="Revoke"
         pending={revoke.isPending}
         error={revoke.isError ? linkError(revoke.error) : null}
@@ -158,16 +153,16 @@ export function ProjectConnectedPortals({ slug }: { slug: string }) {
   return (
     <SettingsSection
       id="connections"
-      title="Connected portals"
+      title="Connected machines"
       testId="project-connections"
-      description="Members' local portals linked to this project. Revoking one cuts that machine off at once."
+      description="Members' machines linked to this project. Revoking one cuts that machine off at once."
     >
       {list.isLoading && <Skeleton className="h-12" />}
       {list.isError && (
-        <ErrorState error={list.error} context="link" title="Couldn't load the connected portals" onRetry={() => void list.refetch()} />
+        <ErrorState error={list.error} context="link" title="Couldn't load the connected machines" onRetry={() => void list.refetch()} />
       )}
       {list.isSuccess && live.length === 0 && (
-        <p className="text-sm text-muted-foreground">No local portal is connected to this project.</p>
+        <p className="text-sm text-muted-foreground">No machine is connected to this project.</p>
       )}
       {live.length > 0 && (
         <ul className="flex flex-col divide-y divide-border">

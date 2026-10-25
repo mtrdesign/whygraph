@@ -1122,6 +1122,9 @@ def test_a_linked_project_is_served_and_makes_no_platform_request(
     env: SimpleNamespace,  # noqa: F811
 ) -> None:
     root = mirror(env, "demo-checkout")
+    # A new link schedules a status refresh (drained every 2 s); its platform
+    # calls are not the bridge's, so keep them out of the count.
+    portal.app.state.portal.link_refresh.schedule = lambda project_id: None
     assert link(portal, linked(portal, fake), root).status_code == 201
     init_project(portal, "demo")
     before = len(fake.requests)

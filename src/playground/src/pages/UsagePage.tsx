@@ -129,7 +129,7 @@ const SOURCES = [
   { value: "explorer", label: "Explorer" },
   { value: "chat", label: "Chat" },
   { value: "mcp", label: "MCP (local agents)" },
-  { value: "agent", label: "Agents (linked portals)" },
+  { value: "agent", label: "Agents (connected machines)" },
 ];
 
 /** A task or source key as people read it. */
@@ -308,7 +308,7 @@ const GROUP_INTRO: Partial<Record<UsageGroup, string>> = {
     "Who triggered the spend: interactive is chat, Explorer Generate, agent calls and on-demand descriptions; scans are the full scans they started. This shows who started the spend, not who gained from it, so it is not a ranking. System covers webhook, reconcile and hook scans.",
   model: "Spend per model, as the provider served it.",
   machine:
-    "Agent calls through a linked portal, per machine. Everything made in this portal itself is under Portal.",
+    "Agent calls from connected machines, one row per machine. Everything made in this portal itself is under Portal.",
 };
 
 function GroupTab({

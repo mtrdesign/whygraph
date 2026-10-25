@@ -7,7 +7,14 @@ const SRC = resolve(import.meta.dirname, "..");
 const EM_DASH = "—";
 
 /** Wording the portal must not show (MODE-6). Matched case-insensitively. */
-const BANNED = [/structural crawl/i, /folds? into the same run/i, /triggered is not benefited/i];
+const BANNED = [
+  /structural crawl/i,
+  /folds? into the same run/i,
+  /triggered is not benefited/i,
+  /use with your agent/i,
+  /connected portals?/i,
+  /linked portals?/i,
+];
 
 /**
  * Protocol identifiers that must equal what the scan child emits. They are matched
@@ -25,7 +32,7 @@ function tsxFiles(dir: string): string[] {
 
 /** Every string literal, template chunk and JSX text of a file (comments are not nodes). */
 function texts(path: string): string[] {
-  const source = ts.createSourceFile(path, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const source = ts.createSourceFile(path, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, true, path.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
   const found: string[] = [];
   const visit = (node: ts.Node) => {
     if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) found.push(node.text);

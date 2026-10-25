@@ -61,7 +61,7 @@ export const AUDIT_EVENTS: Record<string, EventInfo> = {
   github_login_released: { label: "GitHub username released", group: "Security" },
   github_app_authorized: { label: "GitHub App authorized", group: "Security" },
   github_account_mismatch: { label: "GitHub account mismatch", group: "Security" },
-  connection_authorized: { label: "Connected portal allowed", group: "Security" },
+  connection_authorized: { label: "Connected machine allowed", group: "Security" },
   connection_token_issued: { label: "Connection token issued", group: "Security" },
   connection_token_refused: { label: "Connection token refused", group: "Security" },
   connection_revoked: { label: "Connection revoked", group: "Security" },
@@ -144,7 +144,7 @@ const REASONS: Record<string, string> = {
   user_disabled: "The account is disabled",
   already_member: "Already a member",
   already_invited: "Already invited",
-  // Connected portals
+  // Connected machines
   unknown_code: "Unknown, used or expired code",
   pkce: "The verifier did not match",
   redirect_uri: "The return address did not match",
@@ -153,7 +153,7 @@ const REASONS: Record<string, string> = {
   project_access_removed: "No longer has access to the project",
   user_revoked: "Revoked by its owner",
   admin_revoked: "Revoked by an admin",
-  removed_locally: "Removed on the connected portal",
+  removed_locally: "Removed on the connected machine",
   // GitHub access
   no_access: "The GitHub App has no access to the repository",
   git_access_denied: "GitHub refused the fetch",

@@ -129,9 +129,9 @@ the checks change:
   to `.` and the data directory to `<data>`. Local mode keeps the full paths and command line: they
   are your own machine's.
 - **What is off.** No shared folders, no local repositories, no `/mcp`, no git-hook scans. Agents
-  reach a production portal's projects through a [connected portal](#connected-portals), not directly.
+  reach a production portal's projects through a [connected machine](#connected-portals), not directly.
 
-## Connected portals
+## Connected machines { #connected-portals }
 
 A [platform project](platform-projects.md) lets a local portal read a platform's history for one
 project. The credential for that is a **connection token**, and the design assumes the local portal
@@ -153,7 +153,8 @@ runs on a developer's laptop and a repository on it is untrusted.
   `http://127.0.0.1:<port>/connect/callback`. The code lasts 60 seconds, works once, and is spent even
   when its verification fails. The platform builds the redirect itself, from a request it validated
   before rendering anything, so the consent page can only send the browser to a URL the server
-  returned.
+  returned. Allow is skipped only when the platform vouches for an intent it issued to the same
+  person, project and port.
 - **The `iss` check.** Every redirect carries the platform's own address (RFC 9207), and the local
   portal refuses a callback whose `iss` is not the platform it started with, **before** it uses the
   code. PKCE alone does not stop a rogue platform from being swapped in mid-flow; this does.
@@ -178,13 +179,23 @@ runs on a developer's laptop and a repository on it is untrusted.
 - **The local pages cannot be framed.** In local mode every page the portal serves, not only
   `/api`, carries `X-Frame-Options: DENY` and `frame-ancestors 'none'`, so `/link` and
   `/connect/callback` cannot be clickjacked. Local mode still sets no CORS headers.
-- **The deep link carries no secret.** **Use with your agent** links to
-  `http://127.0.0.1:<port>/link` with the platform, organization and project names in the query. It
-  grants nothing: the local portal still runs the consent flow, and the platform page never contacts
-  the local one.
+- **The deep link carries no credential.** **Connect local WhyGraph** links to
+  `http://127.0.0.1:<port>/link` with the platform, organization, project and a one-time *intent*.
+  The intent only lets the platform skip its Allow page for the same signed-in person, the same
+  project and the same port, once, within 15 minutes; it grants nothing on its own, your local
+  portal still asks you to press Connect, and the platform page never contacts the local one.
+  Because that click on the platform is the approval, the card says under the button what it
+  grants: WhyGraph on that port reads the project as you and, if your role allows, asks for
+  rationale cards with the organization's AI keys. A made-up or expired intent, another person,
+  another project or another port, and a project that lost its GitHub access, all get the normal
+  Allow page.
+- **A pre-approved link is bound to the port on the card.** That port must be your own WhyGraph's:
+  whatever answers there receives the link, and the platform will not ask again. Your local portal
+  keeps the intent out of its access log (the `/link` and `/setup` queries are blanked), and the
+  platform keeps it out of its own (`/connect` and the `/signin` round trip).
 - **Visible to admins.** An owner or admin of a project sees the machine name each member gave
   their connection, and can revoke it. See [Connected
-  portals](../deploy/production.md#connected-portals).
+  machines](../deploy/production.md#connected-portals).
 
 ## Keys and tokens
 
@@ -233,7 +244,7 @@ runs on a developer's laptop and a repository on it is untrusted.
 ## What agent activity records
 
 A project's Overview counts the calls agents make: every MCP tool, resource and prompt call, and
-every `/api/v1` data call of a connected portal. A counter row holds the project, a UTC day, the
+every `/api/v1` data call of a connected machine. A counter row holds the project, a UTC day, the
 source, who made the call (a person or a connection), the tool's name and a number - **never** a
 path, a symbol, an argument or anything a call returned. The names are WhyGraph's own or one of the four
 CodeGraph tools; any other name is never stored. A caller can only add to its own rows, and rows are kept 400 days. See [Agent

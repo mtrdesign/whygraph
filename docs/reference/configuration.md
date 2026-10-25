@@ -146,7 +146,7 @@ timeout_sec = 120
 
 ## Agent limits (organization only)
 
-Four keys bound the LLM spend that agents on [connected portals](../portal/platform-projects.md) can
+Four keys bound the LLM spend that agents on [connected machines](../portal/platform-projects.md) can
 cause on a [production](../deploy/production.md) portal: an organization-wide limit and a per-member
 limit for each of the two kinds of work. They are different from every other key:
 
@@ -172,7 +172,7 @@ agents only; Explorer and Chat spend is bounded by [budgets](../portal/usage.md#
 - **Never imported from a repository.** A `whygraph.toml` that sets them has them dropped and
   reported on import, because a repository is untrusted input and must not raise its own organization's
   spend.
-- **Production only.** Local mode has no connected portals, so they have no effect there.
+- **Production only.** Local mode has no connected machines, so they have no effect there.
 
 ## Choosing models
 

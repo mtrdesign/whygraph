@@ -1,7 +1,7 @@
 import { DisabledReason } from "../state/DisabledReason";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2Icon } from "lucide-react";
 import {
   ApiError,
@@ -19,6 +19,7 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { CommandBlock } from "../layout/CommandBlock";
 import { PathText } from "../layout/PathText";
+import { CheckoutHint } from "./CheckoutHint";
 import { Field } from "./Field";
 
 /**
@@ -37,14 +38,20 @@ export function ConnectForm({
   org?: string;
   project?: string;
 }) {
-  const state = useQuery({ queryKey: portalKey("state"), queryFn: portalApi.state });
-  const [url, setUrl] = useState(initialUrl);
+  // Refetched on focus, so coming back from the terminal re-checks the shared folders.
+  const state = useQuery({ queryKey: portalKey("state"), queryFn: portalApi.state, refetchOnWindowFocus: true });
+  const shared = state.data?.shared_folders;
+  const projects = useQuery({ queryKey: portalKey("projects"), queryFn: portalApi.projects });
+  // The platforms this portal already links projects to: one is offered as the address, several as buttons.
+  const origins = [...new Set((projects.data?.projects ?? []).flatMap((p) => p.link?.platform_origin ?? []))];
+  const [url, setUrl] = useState<string | null>(initialUrl || null);
+  const shownUrl = url ?? (origins.length === 1 ? origins[0] : "");
   const [name, setName] = useState<string | null>(initialName ?? null);
   const shownName = name ?? state.data?.hostname ?? "";
   const connect = useMutation({
     mutationFn: () =>
       platformApi.connect({
-        platform_url: url.trim(),
+        platform_url: shownUrl.trim(),
         client_name: shownName.trim() || undefined,
         ...(org && { org }),
         ...(project && { project }),
@@ -57,7 +64,7 @@ export function ConnectForm({
       className="flex flex-col gap-4"
       onSubmit={(e) => {
         e.preventDefault();
-        if (url.trim()) connect.mutate();
+        if (shownUrl.trim()) connect.mutate();
       }}
     >
       <Field
@@ -69,14 +76,36 @@ export function ConnectForm({
             {...p}
             type="url"
             placeholder="https://whygraph.example.com"
-            value={url}
+            value={shownUrl}
             onChange={(e) => setUrl(e.target.value)}
           />
         )}
       </Field>
+      {origins.length > 1 && (
+        <div
+          data-testid="known-platforms"
+          role="group"
+          aria-label="Platforms you already use"
+          className="flex flex-wrap gap-2"
+        >
+          {origins.map((origin) => (
+            <Button
+              key={origin}
+              type="button"
+              variant="outline"
+              size="sm"
+              className="max-w-full truncate"
+              onClick={() => setUrl(origin)}
+            >
+              {platformHost(origin)}
+            </Button>
+          ))}
+        </div>
+      )}
       <Field label="Machine name" hint="Shown on the platform, so you can tell this machine's connection apart.">
         {(p) => <Input {...p} value={shownName} onChange={(e) => setName(e.target.value)} />}
       </Field>
+      <CheckoutHint shared={shared} onCheckAgain={() => void state.refetch()} checking={state.isFetching} />
       {connect.isError && (
         <Alert variant="destructive" data-testid="connect-error">
           <AlertTitle>Could not connect</AlertTitle>
@@ -87,7 +116,11 @@ export function ConnectForm({
         <Button variant="ghost" render={<Link to="/" />}>
           Cancel
         </Button>
-        <Button type="submit" disabled={!url.trim() || !shownName.trim() || connect.isPending}>
+        <Button
+          type="submit"
+          disabled={!shownUrl.trim() || !shownName.trim() || connect.isPending || shared?.length === 0}
+          aria-describedby={shared?.length === 0 ? "no-shared-folders" : undefined}
+        >
           {connect.isPending ? "Connecting…" : "Connect"}
         </Button>
       </div>
@@ -101,6 +134,8 @@ function PathRow({
   note,
   selected,
   onSelect,
+  disabled = false,
+  footer,
 }: {
   path: string;
   name: string;
@@ -108,25 +143,44 @@ function PathRow({
   note?: string;
   selected: boolean;
   onSelect: () => void;
+  /** A row that is shown but cannot be picked (a checkout that is already a project here). */
+  disabled?: boolean;
+  /** A line under the row, outside its label (a link cannot sit inside one). */
+  footer?: ReactNode;
 }) {
   return (
-    <label className="flex cursor-pointer items-center gap-3 border-b border-border px-3.5 py-2.5 last:border-b-0 hover:bg-muted/50">
-      <input type="radio" name="checkout" className="accent-primary" checked={selected} onChange={onSelect} />
-      <span className="flex min-w-0 flex-1 flex-col">
-        <span className="font-medium">
-          {name}
-          {note && (
-            <span className="ml-2 rounded-full bg-muted px-2 py-0.5 text-xs font-normal text-muted-foreground">
-              {note}
-            </span>
-          )}
+    <div className="border-b border-border last:border-b-0">
+      <label
+        className={`flex items-center gap-3 px-3.5 py-2.5 ${
+          disabled ? "cursor-not-allowed opacity-70" : "cursor-pointer hover:bg-muted/50"
+        }`}
+      >
+        <input
+          type="radio"
+          name="checkout"
+          className="accent-primary"
+          checked={selected}
+          onChange={onSelect}
+          disabled={disabled}
+          aria-disabled={disabled || undefined}
+        />
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className="font-medium">
+            {name}
+            {note && (
+              <span className="ml-2 rounded-full bg-muted px-2 py-0.5 text-xs font-normal text-muted-foreground">
+                {note}
+              </span>
+            )}
+          </span>
+          {/* Truncated from the start, so the distinguishing tail stays (PH-8). */}
+          <span className="flex min-w-0 text-muted-foreground">
+            <PathText path={path} />
+          </span>
         </span>
-        {/* Truncated from the start, so the distinguishing tail stays (PH-8). */}
-        <span className="flex min-w-0 text-muted-foreground">
-          <PathText path={path} />
-        </span>
-      </span>
-    </label>
+      </label>
+      {footer && <div className="px-3.5 pb-2.5 pl-10">{footer}</div>}
+    </div>
   );
 }
 
@@ -143,10 +197,11 @@ function Picker({
 }) {
   const navigate = useNavigate();
   const reconnect = pending.reconnect;
-  // The one sensible pick when this link reconnects, so it starts selected.
-  const [path, setPath] = useState(reconnect?.path ?? "");
+  // Picked by the user, else the one sensible default: the reconnect target, or the only origin match.
+  const [path, setPath] = useState<string | null>(null);
+  const picked = path ?? reconnect?.path ?? (pending.candidates.length === 1 ? pending.candidates[0].path : "");
   const [typed, setTyped] = useState("");
-  const chosen = typed.trim() || path;
+  const chosen = typed.trim() || picked;
   const reconnecting = !!reconnect && chosen === reconnect.path;
   // A name collision this link cannot reconnect is the only dead end.
   const blocked = pending.slug_taken && !reconnect;
@@ -159,7 +214,11 @@ function Picker({
     // Gone either way (an expired link has nothing left to revoke): back to a clean form.
     onSettled: () => void navigate({ to: "/projects/new", search: { source: "platform" } }),
   });
-  const none = pending.candidates.length === 0 && !reconnect;
+  // A checkout that is already a project here is not "not found".
+  const none = pending.candidates.length === 0 && !reconnect && pending.already_projects.length === 0;
+  const several = pending.clone_commands.length > 1;
+  const where = several ? "your shared folders" : "your shared folder";
+  const others = pending.other_repos.length > 0;
 
   return (
     <div className="flex flex-col gap-4" data-testid="platform-picker">
@@ -202,7 +261,7 @@ function Picker({
               path={reconnect.path}
               name={reconnect.slug}
               note="already linked"
-              selected={path === reconnect.path && !typed.trim()}
+              selected={picked === reconnect.path && !typed.trim()}
               onSelect={() => {
                 setPath(reconnect.path);
                 setTyped("");
@@ -213,27 +272,63 @@ function Picker({
             <PathRow
               key={c.path}
               {...c}
-              selected={path === c.path && !typed.trim()}
+              selected={picked === c.path && !typed.trim()}
               onSelect={() => {
                 setPath(c.path);
                 setTyped("");
               }}
             />
           ))}
+          {pending.already_projects.map((a) => (
+            <PathRow
+              key={a.path}
+              path={a.path}
+              name={a.path.split("/").filter(Boolean).pop() ?? a.path}
+              note="already a project here"
+              selected={false}
+              onSelect={() => {}}
+              disabled
+              footer={
+                <p className="text-xs text-muted-foreground" data-testid="already-project-note">
+                  This is the project{" "}
+                  <Link
+                    to="/p/$slug/settings"
+                    params={{ slug: a.slug }}
+                    search={{ section: "danger" }}
+                    className="text-primary-text hover:underline"
+                  >
+                    {a.slug}
+                  </Link>{" "}
+                  on this portal. Remove it first (leave Also delete history unticked to keep its history), then
+                  link again.
+                </p>
+              }
+            />
+          ))}
           {none && (
             <div className="flex flex-col gap-2 p-3.5 text-sm" data-testid="no-candidates">
               <p className="text-muted-foreground">
-                No checkout of {pending.project.name} found under your shared folders.{" "}
-                {pending.other_repos.length > 0
-                  ? "If one of the other repositories below is a checkout of it, pick it there. Otherwise clone it into a shared folder, then check again:"
-                  : "Clone it into a shared folder, then check again:"}
+                {pending.clone_commands.length === 0
+                  ? "No folder is shared with the portal."
+                  : `No checkout of ${pending.project.name} found under ${where}. ${
+                      others
+                        ? "If one of the other repositories below is a checkout of it, pick it there. Otherwise clone it"
+                        : "Clone it"
+                    } ${several ? "into one of them" : "there"}, then check again:`}
               </p>
-              <CommandBlock command={pending.clone_command} />
+              {pending.clone_commands.map((c) => (
+                <CommandBlock key={c.folder} command={c.command} />
+              ))}
               <div>
                 <Button variant="outline" size="sm" onClick={onRefresh} disabled={refreshing}>
                   {refreshing ? "Checking…" : "Check again"}
                 </Button>
               </div>
+              <p className="text-xs text-muted-foreground" data-testid="add-folder-note">
+                Cloning somewhere else? Share that folder first with{" "}
+                <code>whygraph up --add-folder &lt;folder&gt;</code>. That restarts the portal and drops this
+                connection, so you connect again afterwards.
+              </p>
             </div>
           )}
         </div>
@@ -251,7 +346,7 @@ function Picker({
               <PathRow
                 key={c.path}
                 {...c}
-                selected={path === c.path && !typed.trim()}
+                selected={picked === c.path && !typed.trim()}
                 onSelect={() => {
                   setPath(c.path);
                   setTyped("");
@@ -320,12 +415,20 @@ export function PlatformSource({
   linkId?: string;
   onAdded: (r: AddProjectResult) => void;
 }) {
+  const queryClient = useQueryClient();
+  const pendingKey = portalKey("platform-pending", linkId ?? "");
   const pending = useQuery({
-    queryKey: portalKey("platform-pending", linkId ?? ""),
+    queryKey: pendingKey,
     queryFn: () => platformApi.pending(linkId!),
     enabled: !!linkId,
     retry: false,
     refetchOnWindowFocus: false,
+  });
+  // Check again: search the shared folders afresh and re-match origins (the server clears its cache).
+  const refresh = useMutation({
+    mutationFn: () => platformApi.pending(linkId!, true),
+    onSuccess: (data) => queryClient.setQueryData(pendingKey, data),
+    onError: () => void pending.refetch(), // an expired link then shows the pending-error state
   });
   if (!linkId) {
     return (
@@ -344,18 +447,36 @@ export function PlatformSource({
             <AlertDescription>{linkError(pending.error)}</AlertDescription>
           </Alert>
           <div>
-            <Button variant="outline" render={<Link to="/projects/new" search={{ source: "platform" }} />}>
-              Start again
-            </Button>
+            {pending.data ? (
+              <Button
+                variant="outline"
+                render={
+                  <Link
+                    to="/link"
+                    search={{
+                      platform: pending.data.platform_origin,
+                      org: pending.data.org,
+                      project: pending.data.project.slug,
+                    }}
+                  />
+                }
+              >
+                Start again
+              </Button>
+            ) : (
+              <Button variant="outline" render={<Link to="/projects/new" search={{ source: "platform" }} />}>
+                Start again
+              </Button>
+            )}
           </div>
         </div>
       )}
-      {pending.data && (
+      {pending.data && !pending.isError && (
         <Picker
           pending={pending.data}
           onAdded={onAdded}
-          onRefresh={() => void pending.refetch()}
-          refreshing={pending.isFetching}
+          onRefresh={() => refresh.mutate()}
+          refreshing={refresh.isPending}
         />
       )}
     </div>

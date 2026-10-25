@@ -19,6 +19,8 @@ production.
 
 from __future__ import annotations
 
+import logging
+import shlex
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterator
@@ -189,6 +191,24 @@ def mirror(env: SimpleNamespace, name: str, remote: str | None = CLONE_URL) -> P
     return root
 
 
+def record_link_refreshes(client: TestClient) -> list[int]:
+    """The project ids ``state.link_refresh.schedule`` is asked for from now on.
+
+    The lifespan refresher drains the queue every two seconds, so a test reads
+    what was scheduled rather than racing ``pending()``.
+    """
+    queue = client.app.state.portal.link_refresh
+    asked: list[int] = []
+    real = queue.schedule
+
+    def schedule(project_id: int) -> None:
+        asked.append(project_id)
+        real(project_id)
+
+    queue.schedule = schedule
+    return asked
+
+
 def head_of(root: Path) -> str:
     return _git(root, "rev-parse", "HEAD").strip()
 
@@ -253,6 +273,45 @@ def test_connect_refuses_a_bad_url_or_machine_name(
     assert bad_name.status_code == 422
     assert bad_name.json()["code"] == "bad_client_name"
     assert fake.requests == []  # neither reached the platform
+
+
+def test_connect_passes_the_cards_intent_on(
+    portal: TestClient, fake: FakePlatform, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A platform card's intent rides in ``authorize_url``, nowhere else."""
+    caplog.set_level(logging.DEBUG)
+    intent = "Ab-_" + "x" * 39
+    started = connect(portal, fake, org="acme", project="api", intent=intent)
+    query = urlsplit(started["authorize_url"]).query
+    assert list(dict(parse_qsl(query)))[-3:] == ["org", "project", "intent"]
+    assert query_of(started)["intent"] == intent
+    state = portal.app.state.portal
+    assert intent not in repr(list(state.pending_connects._entries.values()))
+    assert intent not in caplog.text
+    # Absent: the URL is as before, with no intent parameter.
+    plain = query_of(connect(portal, fake, org="acme", project="api"))
+    assert "intent" not in plain and plain["project"] == "api"
+    # Set but malformed: refused before the platform is asked, not echoed.
+    asked = len(fake.requests)
+    for bad in ("", "x" * 42, "x" * 44, "!" * 43, "x" * 42 + "="):
+        response = portal.post(
+            "/api/platform/connect",
+            json={
+                "platform_url": fake.platform_origin,
+                "client_name": "laptop",
+                "intent": bad,
+            },
+        )
+        assert response.status_code == 422, (bad, response.text)
+        assert response.json()["code"] == "bad_connect_request", bad
+        if bad:
+            assert bad not in response.text
+    too_long = portal.post(
+        "/api/platform/connect",
+        json={"platform_url": fake.platform_origin, "intent": "x" * 257},
+    )
+    assert too_long.status_code == 422 and "x" * 257 not in too_long.text
+    assert len(fake.requests) == asked
 
 
 def test_callback_refuses_iss_mismatch(portal: TestClient, fake: FakePlatform) -> None:
@@ -393,13 +452,73 @@ def test_pending_lists_the_matching_checkouts(
     assert pending["link_id"] == link_id
     assert pending["org"] == ORG
     assert pending["clone_url"] == CLONE_URL
-    assert pending["clone_command"] == f"git clone {CLONE_URL}"
+    assert pending["clone_commands"] == [
+        {
+            "folder": str(env.shared),
+            "command": f"cd {shlex.quote(str(env.shared))} && git clone {CLONE_URL}",
+        }
+    ]
     assert pending["slug_taken"] is False
     assert pending["reconnect"] is None  # nothing is linked yet
     assert [c["path"] for c in pending["candidates"]] == [str(root)]
     assert pending["candidates"][0]["match"] == "origin"
     assert str(other) in [r["path"] for r in pending["other_repos"]]
     assert str(root) not in [r["path"] for r in pending["other_repos"]]
+
+
+def test_pending_quotes_the_clone_commands(
+    portal: TestClient, fake: FakePlatform, env: SimpleNamespace, tmp_path: Path
+) -> None:
+    """One command per shared folder, quoted for the shell, never built by the UI."""
+    spaced = tmp_path / "my repos"
+    spaced.mkdir()
+    portal.app.state.portal.shared_folders = (env.shared, spaced)
+    fake.projects[SLUG] = status_body(clone_url="https://git.example.com/a b/demo.git")
+    commands = pending_of(portal, linked(portal, fake))["clone_commands"]
+    assert [c["folder"] for c in commands] == [str(env.shared), str(spaced)]
+    for entry in commands:
+        words = shlex.split(entry["command"])
+        assert words[:2] == ["cd", entry["folder"]]
+        assert words[2:5] == ["&&", "git", "clone"]
+        assert words[5] == "https://git.example.com/a b/demo.git"
+        assert len(words) == 6
+
+
+def test_check_again_finds_a_clone_made_after_the_callback(
+    portal: TestClient, fake: FakePlatform, env: SimpleNamespace
+) -> None:
+    """``?refresh=1`` searches again; a plain read re-matches origins live."""
+    link_id = linked(portal, fake)
+    before = pending_of(portal, link_id)
+    assert before["candidates"] == [] and before["other_repos"] == []
+
+    late = mirror(env, "late")
+    pending_of(portal, link_id)  # may still miss it: the discovery cache is 60 s
+    fresh = portal.get(f"/api/platform/pending/{link_id}?refresh=1")
+    assert fresh.status_code == 200, fresh.text
+    body = fresh.json()
+    assert [(c["path"], c["match"]) for c in body["candidates"]] == [
+        (str(late), "origin")
+    ]
+    assert str(late) not in [r["path"] for r in body["other_repos"]]
+    # Not only on refresh: a remount must not fall back to the frozen list.
+    again = pending_of(portal, link_id)
+    assert [c["path"] for c in again["candidates"]] == [str(late)]
+    assert str(late) not in [r["path"] for r in again["other_repos"]]
+    assert link(portal, link_id, late).status_code == 201
+
+
+def test_pending_lists_a_checkout_that_is_already_a_project(
+    portal: TestClient, fake: FakePlatform, env: SimpleNamespace
+) -> None:
+    """A local project of the same repository is shown, not hidden, and not offered."""
+    root = mirror(env, "demo-checkout")
+    added = add_local(portal, root)
+    slug = added["project"]["slug"]
+    body = pending_of(portal, linked(portal, fake))
+    assert body["already_projects"] == [{"path": str(root), "slug": slug}]
+    assert body["candidates"] == []
+    assert str(root) not in [r["path"] for r in body["other_repos"]]
 
 
 def test_pending_link_expiry_revokes(
@@ -539,6 +658,7 @@ def test_link_full_flow(
     """Connect -> callback -> pending -> link -> Initialize -> CodeGraph-only scan."""
     root = mirror(env, "demo-checkout")
     link_id = linked(portal, fake)
+    scheduled = record_link_refreshes(portal)
     added = link(portal, link_id, root)
     assert added.status_code == 201, added.text
     project = added.json()["project"]
@@ -558,6 +678,8 @@ def test_link_full_flow(
     assert decrypt(saved.token_ciphertext) == TOKEN
     assert saved.token_hint == "…" + TOKEN[-4:]
 
+    # The platform confirms the new link at once (plan section 6.12).
+    assert project_id(SLUG) in scheduled
     # The pending link is consumed, and its token was not revoked.
     assert portal.get(f"/api/platform/pending/{link_id}").status_code == 410
     assert fake.tokens[TOKEN]["revoked"] is None

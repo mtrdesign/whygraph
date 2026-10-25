@@ -207,6 +207,8 @@ ORG_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/github/installations", "GET"),
         ("/api/github/installations/{installation_id}/repos", "GET"),
         ("/api/projects/{slug}/connections", "GET"),
+        ("/api/projects/{slug}/connections/mine", "GET"),
+        ("/api/projects/{slug}/connect-intent", "POST"),
         ("/api/projects/{slug}/connections/{uid}", "DELETE"),
         ("/api/projects/{slug}/access", "GET"),
         ("/api/projects/{slug}/access", "PATCH"),

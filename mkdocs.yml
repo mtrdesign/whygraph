@@ -74,6 +74,9 @@ plugins:
       type: timeago
       fallback_to_build_date: true    # don't fail --strict on uncommitted pages
 
+validation:
+  anchors: warn      # --strict then fails on a broken #anchor (mkdocs 1.6 defaults to info)
+
 nav:
   - Home: index.md
   - Getting Started:
@@ -113,6 +116,7 @@ nav:
       - LLM providers: reference/llm-providers.md
       - Source control providers: reference/providers.md
   - Releases:
+      - Unreleased: releases/unreleased.md
       - WhyGraph 2.1.0: releases/2.1.0.md
       - WhyGraph 2.0.0: releases/2.0.0.md
   - Roadmap: roadmap.md

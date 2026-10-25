@@ -1,13 +1,14 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { PROJECT_ACTIONS } from "../lib/permissions";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
+import { RouterProvider, createMemoryHistory, createRootRoute, createRouter } from "@tanstack/react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LinkStatus, ProjectLink } from "../api";
 import { linkError } from "../lib/errors";
 import { hardNavigate } from "../lib/navigation";
 import { accountUrl, linkNotice, safeHref } from "../lib/platformLink";
+import { ConnectForm } from "../components/portal/PlatformSource";
 import { parseLinkPlatform } from "../pages/LinkPage";
 import { createAppRouter } from "../router";
 import { ThemeProvider } from "../theme";
@@ -76,6 +77,8 @@ interface Fake {
   projects: Json[];
   routes: Record<string, (body: Json | null) => Response>;
   config: Json;
+  /** Every request URL with its query, for the cases the route table cannot see. */
+  urls: string[];
 }
 let fake: Fake;
 
@@ -85,12 +88,25 @@ const PENDING = {
   org: "acme",
   project: { slug: "alpha", name: "Alpha" },
   clone_url: "https://github.com/acme/alpha.git",
-  clone_command: "git clone https://github.com/acme/alpha.git",
+  clone_commands: [{ folder: "/repos", command: "cd /repos && git clone https://github.com/acme/alpha.git" }],
   slug_taken: false,
   reconnect: null,
   candidates: [{ path: "/repos/alpha", name: "alpha", match: "origin" }],
   other_repos: [{ path: "/repos/other", name: "other" }],
+  already_projects: [],
 };
+
+/** A `GET /api/portal/state` answer; `shared` is the list of shared folders. */
+const portalState = (shared: string[]) =>
+  json({
+    mode: "local",
+    setup_complete: true,
+    user: { uid: "u1", display_name: "Ada", role: "owner" },
+    port: 8765,
+    shared_folders: shared,
+    hostname: "ada-laptop",
+    port_change: null,
+  });
 
 function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const url = new URL(String(input), "http://127.0.0.1:8765");
@@ -98,6 +114,7 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
   const method = init?.method ?? "GET";
   const body = init?.body ? (JSON.parse(String(init.body)) as Json) : null;
   fake.calls.push({ method, path, body });
+  fake.urls.push(`${method} ${path}${url.search}`);
   const route = fake.routes[`${method} ${path}`];
   if (route) return Promise.resolve(route(body));
   if (path === "/api/portal/state")
@@ -148,7 +165,7 @@ function mount(path: string) {
 const mutations = () => fake.calls.filter((c) => c.method !== "GET");
 
 beforeEach(() => {
-  fake = { calls: [], projects: [project()], routes: {}, config: {} };
+  fake = { calls: [], projects: [project()], routes: {}, config: {}, urls: [] };
   hard.mockClear();
   window.localStorage.clear();
   useUi.setState({ paletteOpen: false, navOpen: false });
@@ -169,6 +186,7 @@ describe("link page", () => {
 
   it("link page does not act on load", async () => {
     const user = userEvent.setup();
+    fake.projects = []; // nothing of that project on this machine yet
     mount(LINK);
     // It renders what it was asked to do, in full ...
     expect(await screen.findByTestId("link-platform")).toHaveTextContent("https://whygraph.example.com");
@@ -203,10 +221,65 @@ describe("link page", () => {
     expect(parseLinkPlatform(undefined)).toBeNull();
   });
 
+  it("router: forwards a valid intent on Connect, strips it from the address, and says to cancel if not started there", async () => {
+    const user = userEvent.setup();
+    const INTENT = "i".repeat(43);
+    fake.projects = [];
+    fake.routes["POST /api/platform/connect"] = () =>
+      json({ authorize_url: AUTHORIZE, platform_origin: "https://whygraph.example.com", known_platform: false });
+    const router = mount(`${LINK}&intent=${INTENT}`);
+    await screen.findByTestId("link-platform");
+    await waitFor(() => expect(router.state.location.search).toEqual({ platform: "https://whygraph.example.com", org: "acme", project: "alpha" }));
+    expect(router.state.location.searchStr).not.toContain("intent");
+    expect(
+      screen.getByText(
+        "You may need to sign in on the platform. Check the address above is one you trust - if you did not start this there, press Cancel.",
+      ),
+    ).toBeInTheDocument();
+    // Nothing acts on load, the intent included.
+    expect(mutations()).toEqual([]);
+    await waitFor(() => expect(screen.getByLabelText("Machine name")).toHaveValue("ada-laptop"));
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(hard).toHaveBeenCalledWith(AUTHORIZE));
+    expect(mutations()).toEqual([
+      {
+        method: "POST",
+        path: "/api/platform/connect",
+        body: {
+          platform_url: "https://whygraph.example.com",
+          client_name: "ada-laptop",
+          org: "acme",
+          project: "alpha",
+          intent: INTENT,
+        },
+      },
+    ]);
+  });
+
+  it("drops a malformed intent silently and still strips it", async () => {
+    const user = userEvent.setup();
+    fake.projects = [];
+    fake.routes["POST /api/platform/connect"] = () =>
+      json({ authorize_url: AUTHORIZE, platform_origin: "https://whygraph.example.com", known_platform: false });
+    const router = mount(`${LINK}&intent=${"i".repeat(42)}%2B`);
+    await screen.findByTestId("link-platform");
+    await waitFor(() => expect(router.state.location.searchStr).not.toContain("intent"));
+    expect(
+      screen.getByText(
+        "You will sign in on the platform and allow this machine to read that project's history. Check the address above is one you trust.",
+      ),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("Machine name")).toHaveValue("ada-laptop"));
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(hard).toHaveBeenCalledWith(AUTHORIZE));
+    expect(mutations()[0].body).not.toHaveProperty("intent");
+  });
+
   it("shows a refused connect through the shared link messages", async () => {
     const user = userEvent.setup();
     fake.routes["POST /api/platform/connect"] = () =>
       json({ detail: "x", code: "bad_platform_url" }, 422);
+    fake.projects = [];
     mount(LINK);
     await user.click(await screen.findByRole("button", { name: "Connect" }));
     expect(await screen.findByTestId("connect-error")).toHaveTextContent(
@@ -252,6 +325,7 @@ describe("connect callback page", () => {
 describe("platform source", () => {
   it("prefills the machine name and sends the form to Connect", async () => {
     const user = userEvent.setup();
+    fake.projects = []; // no remembered platform: the address is typed
     fake.routes["POST /api/platform/connect"] = () =>
       json({ authorize_url: AUTHORIZE, platform_origin: "https://whygraph.example.com", known_platform: true });
     mount("/projects/new?source=platform");
@@ -263,6 +337,56 @@ describe("platform source", () => {
     await user.type(screen.getByLabelText("Platform address"), "https://whygraph.example.com");
     await user.click(screen.getByRole("button", { name: "Connect" }));
     await waitFor(() => expect(hard).toHaveBeenCalledWith(AUTHORIZE));
+  });
+
+  it("prefills the address with the one platform a project here is already linked to", async () => {
+    const user = userEvent.setup();
+    fake.routes["POST /api/platform/connect"] = () =>
+      json({ authorize_url: AUTHORIZE, platform_origin: "https://whygraph.example.com", known_platform: true });
+    mount("/projects/new?source=platform");
+    await waitFor(() => expect(screen.getByLabelText("Platform address")).toHaveValue("https://whygraph.example.com"));
+    expect(screen.queryByTestId("known-platforms")).toBeNull();
+    await waitFor(() => expect(screen.getByLabelText("Machine name")).toHaveValue("ada-laptop"));
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(hard).toHaveBeenCalledWith(AUTHORIZE));
+    expect(mutations()[0].body).toMatchObject({ platform_url: "https://whygraph.example.com" });
+  });
+
+  it("offers each platform already in use as a button when there are several", async () => {
+    const user = userEvent.setup();
+    fake.projects = [
+      project(),
+      project({
+        slug: "beta",
+        name: "Beta",
+        link: link({ platform_origin: "https://other.example.org", remote_slug: "beta" }),
+      }),
+      project({ slug: "gamma", name: "Gamma", link: link({ remote_slug: "gamma" }) }),
+    ];
+    mount("/projects/new?source=platform");
+    const group = await screen.findByRole("group", { name: "Platforms you already use" });
+    expect(screen.getByTestId("known-platforms")).toBe(group);
+    expect(within(group).getAllByRole("button").map((b) => b.textContent)).toEqual([
+      "whygraph.example.com",
+      "other.example.org",
+    ]);
+    expect(screen.getByLabelText("Platform address")).toHaveValue("");
+    await user.click(within(group).getByRole("button", { name: "other.example.org" }));
+    expect(screen.getByLabelText("Platform address")).toHaveValue("https://other.example.org");
+  });
+
+  it("never overrides an address it was given with a remembered platform", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 30_000 } } });
+    const root = createRootRoute({ component: () => <ConnectForm initialUrl="https://new.example.net" /> });
+    const router = createRouter({ routeTree: root, history: createMemoryHistory({ initialEntries: ["/"] }) });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(fake.calls.some((c) => c.path === "/api/projects")).toBe(true));
+    await waitFor(() => expect(screen.getByLabelText("Machine name")).toHaveValue("ada-laptop"));
+    expect(screen.getByLabelText("Platform address")).toHaveValue("https://new.example.net");
   });
 
   it("lists candidates and other repos, links the pick and goes to Initialize", async () => {
@@ -290,9 +414,9 @@ describe("platform source", () => {
     expect(connected.className).not.toContain("items-center");
     expect(connected.querySelector("svg")?.getAttribute("class")).toContain("shrink-0");
     expect(connected.querySelector("span")?.className).toContain("min-w-0");
-    const submit = screen.getByRole("button", { name: "Link this checkout" });
-    expect(submit).toBeDisabled();
-    await user.click(screen.getByRole("radio", { name: /alpha/ }));
+    // The only origin match starts selected (plan section 6.8), so linking is one click.
+    expect(screen.getByRole("radio", { name: /alpha/ })).toBeChecked();
+    expect(screen.getByRole("button", { name: "Link this checkout" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "Link this checkout" }));
     await waitFor(() => expect(router.state.location.pathname).toBe("/p/alpha/init"));
     expect(router.state.location.search).toMatchObject({ step: "setup" });
@@ -303,12 +427,34 @@ describe("platform source", () => {
     });
   });
 
+  it("selects nothing for two origin matches until one is picked", async () => {
+    const user = userEvent.setup();
+    fake.routes["GET /api/platform/pending/L1"] = () =>
+      json({
+        ...PENDING,
+        candidates: [
+          { path: "/repos/alpha", name: "alpha", match: "origin" },
+          { path: "/repos/alpha-2", name: "alpha-2", match: "origin" },
+        ],
+      });
+    mount("/projects/new?source=platform&link=L1");
+    await screen.findByTestId("platform-picker");
+    expect(screen.getByRole("button", { name: "Link this checkout" })).toBeDisabled();
+    expect(screen.queryAllByRole("radio", { checked: true })).toEqual([]);
+    await user.click(screen.getByRole("radio", { name: /alpha-2/ }));
+    expect(screen.getByRole("button", { name: "Link this checkout" })).toBeEnabled();
+  });
+
   it("shows the clone command when nothing matches and a refused link", async () => {
     const user = userEvent.setup();
     fake.routes["GET /api/platform/pending/L1"] = () => json({ ...PENDING, candidates: [] });
     fake.routes["POST /api/projects"] = () => json({ detail: "x", code: "origin_mismatch" }, 422);
     mount("/projects/new?source=platform&link=L1");
-    expect(await screen.findByTestId("no-candidates")).toHaveTextContent("git clone https://github.com/acme/alpha.git");
+    const none = await screen.findByTestId("no-candidates");
+    expect(none).toHaveTextContent("cd /repos && git clone https://github.com/acme/alpha.git");
+    expect(within(none).getByTestId("add-folder-note")).toHaveTextContent(
+      "Cloning somewhere else? Share that folder first with whygraph up --add-folder <folder>. That restarts the portal and drops this connection, so you connect again afterwards.",
+    );
     await user.click(screen.getByRole("radio", { name: /other/ }));
     await user.click(screen.getByRole("button", { name: "Link this checkout" }));
     expect(await screen.findByTestId("link-error")).toHaveTextContent("origin is not the platform project");
@@ -393,6 +539,270 @@ describe("platform source", () => {
     await screen.findByTestId("reconnect-notice");
     await user.click(screen.getByRole("radio", { name: /other/ }));
     expect(screen.getByRole("button", { name: "Link this checkout" })).toBeEnabled();
+  });
+});
+
+// ---- checkout readiness (plan sections 6.5-6.11) ---------------------------------------
+
+describe("checkout readiness", () => {
+  const LINK = "/link?platform=https%3A%2F%2Fwhygraph.example.com&org=acme&project=alpha";
+  const ADD_FOLDER = "whygraph up --add-folder ~/Work";
+
+  /** Serve `GET /api/portal/state` from `shared`, which a test may change between reads. */
+  function sharing(initial: string[]) {
+    const box = { shared: initial };
+    fake.routes["GET /api/portal/state"] = () => portalState(box.shared);
+    return box;
+  }
+
+  it("the wizard's connect form names the shared folder in a hint", async () => {
+    fake.projects = [];
+    mount("/projects/new?source=platform");
+    const hint = await screen.findByTestId("checkout-hint");
+    expect(hint).toHaveTextContent("Next you pick a clone of the project's repository in /repos.");
+    expect(screen.queryByTestId("no-shared-folders")).toBeNull();
+  });
+
+  it("several shared folders are not listed in the hint", async () => {
+    fake.projects = [];
+    sharing(["/repos", "/work"]);
+    mount("/projects/new?source=platform");
+    expect(await screen.findByTestId("checkout-hint")).toHaveTextContent("in one of your shared folders.");
+  });
+
+  it("with no shared folder the connect form says so and Connect is disabled", async () => {
+    const user = userEvent.setup();
+    fake.projects = [];
+    sharing([]);
+    mount("/projects/new?source=platform");
+    const alert = await screen.findByTestId("no-shared-folders");
+    expect(alert).toHaveTextContent("Share a folder first");
+    expect(alert).toHaveTextContent(ADD_FOLDER);
+    expect(screen.queryByTestId("checkout-hint")).toBeNull();
+    await user.type(screen.getByLabelText("Platform address"), "https://whygraph.example.com");
+    await waitFor(() => expect(screen.getByLabelText("Machine name")).toHaveValue("ada-laptop"));
+    const connect = screen.getByRole("button", { name: "Connect" });
+    expect(connect).toBeDisabled();
+    expect(connect).toHaveAttribute("aria-describedby", "no-shared-folders");
+  });
+
+  it("a loading portal state never disables Connect", async () => {
+    const user = userEvent.setup();
+    fake.projects = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+        new URL(String(input), "http://127.0.0.1:8765").pathname === "/api/portal/state"
+          ? new Promise<Response>(() => {})
+          : fakeFetch(input, init),
+      ),
+    );
+    // The form alone: the app shell itself waits for the portal state.
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 30_000 } } });
+    const root = createRootRoute({ component: () => <ConnectForm /> });
+    const router = createRouter({ routeTree: root, history: createMemoryHistory({ initialEntries: ["/"] }) });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+    await user.type(await screen.findByLabelText("Platform address"), "https://whygraph.example.com");
+    await user.type(screen.getByLabelText("Machine name"), "box");
+    expect(screen.queryByTestId("no-shared-folders")).toBeNull();
+    expect(screen.queryByTestId("checkout-hint")).toBeNull();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeEnabled();
+  });
+
+  it("/link: Check again re-reads the shared folders and enables Connect", async () => {
+    const user = userEvent.setup();
+    fake.projects = [];
+    const box = sharing([]);
+    mount(LINK);
+    expect(await screen.findByTestId("no-shared-folders")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeDisabled();
+    box.shared = ["/repos"];
+    await user.click(screen.getByRole("button", { name: "Check again" }));
+    expect(await screen.findByTestId("checkout-hint")).toHaveTextContent("/repos");
+    expect(screen.queryByTestId("no-shared-folders")).toBeNull();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeEnabled();
+  });
+
+  it("/link: a project already linked here says so and offers to open it", async () => {
+    mount(LINK);
+    const notice = await screen.findByTestId("already-linked");
+    expect(notice).toHaveTextContent("Already linked on this machine");
+    expect(notice).toHaveTextContent("acme/alpha is the project alpha here.");
+    expect(within(notice).getByRole("link", { name: "Open project" })).toHaveAttribute("href", "/p/alpha");
+    // Connecting again is still allowed (it replaces the token in place), as the quiet choice.
+    expect(screen.getByRole("button", { name: "Connect again" })).toBeEnabled();
+    expect(screen.queryByTestId("slug-clash")).toBeNull();
+  });
+
+  it("/link: a revoked link reads Reconnect, with no alert and no checkout hint", async () => {
+    fake.projects = [project({ link: link({ status: "revoked", status_reason: "admin_revoked" }) })];
+    sharing([]); // even with no shared folder: the checkout is already there
+    mount(LINK);
+    const button = await screen.findByRole("button", { name: "Reconnect" });
+    expect(button).toBeEnabled();
+    expect(screen.queryByTestId("already-linked")).toBeNull();
+    expect(screen.queryByTestId("no-shared-folders")).toBeNull();
+    expect(screen.queryByTestId("checkout-hint")).toBeNull();
+  });
+
+  it("/link: a project of that name on this machine blocks Connect and says why", async () => {
+    fake.projects = [project({ source: "local", link: null })];
+    mount(LINK);
+    const clash = await screen.findByTestId("slug-clash");
+    expect(clash).toHaveTextContent("A project named alpha is already on this machine");
+    expect(clash).toHaveTextContent("A linked project keeps the platform's name");
+    expect(within(clash).getByRole("link")).toHaveAttribute("href", "/p/alpha/settings?section=danger");
+    const connect = screen.getByRole("button", { name: "Connect" });
+    expect(connect).toBeDisabled();
+    expect(connect).toHaveAttribute("aria-describedby", "slug-clash");
+    expect(screen.queryByTestId("already-linked")).toBeNull();
+  });
+
+  it("/link: a failing projects list neither warns nor blocks", async () => {
+    fake.routes["GET /api/projects"] = () => json({ error: "x", code: "internal" }, 500);
+    mount(LINK);
+    expect(await screen.findByRole("button", { name: "Connect" })).toBeInTheDocument();
+    await waitFor(() => expect(fake.calls.some((c) => c.path === "/api/projects")).toBe(true));
+    expect(screen.queryByTestId("already-linked")).toBeNull();
+    expect(screen.queryByTestId("slug-clash")).toBeNull();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeEnabled();
+  });
+
+  it("two folders get two clone commands", async () => {
+    fake.routes["GET /api/platform/pending/L1"] = () =>
+      json({
+        ...PENDING,
+        candidates: [],
+        other_repos: [],
+        clone_commands: [
+          { folder: "/repos", command: "cd /repos && git clone https://github.com/acme/alpha.git" },
+          { folder: "/my repos", command: "cd '/my repos' && git clone https://github.com/acme/alpha.git" },
+        ],
+      });
+    mount("/projects/new?source=platform&link=L1");
+    const none = await screen.findByTestId("no-candidates");
+    expect(none).toHaveTextContent("cd /repos && git clone https://github.com/acme/alpha.git");
+    expect(none).toHaveTextContent("cd '/my repos' && git clone https://github.com/acme/alpha.git");
+  });
+
+  it("says which of four ways nothing matched", async () => {
+    const two = [
+      { folder: "/repos", command: "cd /repos && git clone u" },
+      { folder: "/work", command: "cd /work && git clone u" },
+    ];
+    const cases: [string, Json][] = [
+      [
+        "No checkout of Alpha found under your shared folder. Clone it there, then check again:",
+        { other_repos: [] },
+      ],
+      [
+        "No checkout of Alpha found under your shared folder. If one of the other repositories below is a checkout of it, pick it there. Otherwise clone it there, then check again:",
+        {},
+      ],
+      [
+        "No checkout of Alpha found under your shared folders. Clone it into one of them, then check again:",
+        { other_repos: [], clone_commands: two },
+      ],
+      [
+        "No checkout of Alpha found under your shared folders. If one of the other repositories below is a checkout of it, pick it there. Otherwise clone it into one of them, then check again:",
+        { clone_commands: two },
+      ],
+    ];
+    for (const [text, over] of cases) {
+      fake.routes["GET /api/platform/pending/L1"] = () => json({ ...PENDING, candidates: [], ...over });
+      const view = mount("/projects/new?source=platform&link=L1");
+      expect(await screen.findByTestId("no-candidates")).toHaveTextContent(text);
+      void view;
+      cleanup();
+    }
+  });
+
+  it("with no folder shared the picker says so instead of a command", async () => {
+    fake.routes["GET /api/platform/pending/L1"] = () =>
+      json({ ...PENDING, candidates: [], other_repos: [], clone_commands: [] });
+    mount("/projects/new?source=platform&link=L1");
+    const none = await screen.findByTestId("no-candidates");
+    expect(none).toHaveTextContent("No folder is shared with the portal.");
+    expect(within(none).getByTestId("add-folder-note")).toBeInTheDocument();
+  });
+
+  it("Check again asks for a refresh and lists the new clone, selected", async () => {
+    const user = userEvent.setup();
+    fake.routes["GET /api/platform/pending/L1"] = () =>
+      fake.urls.some((u) => u.endsWith("?refresh=1")) && fake.urls.length > 0
+        ? json(PENDING)
+        : json({ ...PENDING, candidates: [], other_repos: [] });
+    mount("/projects/new?source=platform&link=L1");
+    await screen.findByTestId("no-candidates");
+    expect(screen.queryAllByRole("radio")).toEqual([]);
+    await user.click(screen.getByRole("button", { name: "Check again" }));
+    await waitFor(() => expect(fake.urls).toContain("GET /api/platform/pending/L1?refresh=1"));
+    const radio = await screen.findByRole("radio", { name: /alpha/ });
+    expect(radio).toBeChecked();
+    expect(screen.queryByTestId("no-candidates")).toBeNull();
+    expect(screen.getByRole("button", { name: "Link this checkout" })).toBeEnabled();
+  });
+
+  it("an expired link on Check again hides the picker and Start again keeps the request", async () => {
+    const user = userEvent.setup();
+    fake.routes["GET /api/platform/pending/L1"] = () =>
+      fake.urls.some((u) => u.endsWith("?refresh=1"))
+        ? json({ detail: "x", code: "link_expired" }, 410)
+        : json({ ...PENDING, candidates: [], other_repos: [] });
+    mount("/projects/new?source=platform&link=L1");
+    await screen.findByTestId("no-candidates");
+    await user.click(screen.getByRole("button", { name: "Check again" }));
+    expect(await screen.findByTestId("pending-error")).toHaveTextContent("link request expired");
+    expect(screen.queryByTestId("platform-picker")).toBeNull();
+    const again = screen.getByRole("link", { name: "Start again" });
+    const href = new URL(again.getAttribute("href")!, "http://x");
+    expect(href.pathname).toBe("/link");
+    expect(Object.fromEntries(href.searchParams)).toEqual({
+      platform: "https://whygraph.example.com",
+      org: "acme",
+      project: "alpha",
+    });
+  });
+
+  it("a checkout that is already a project here is a disabled row with the way out", async () => {
+    fake.routes["GET /api/platform/pending/L1"] = () =>
+      json({
+        ...PENDING,
+        candidates: [],
+        other_repos: [],
+        already_projects: [{ path: "/repos/alpha", slug: "mine" }],
+      });
+    mount("/projects/new?source=platform&link=L1");
+    const group = await screen.findByRole("radiogroup", { name: "Checkout" });
+    const radio = within(group).getByRole("radio");
+    expect(radio).toBeDisabled();
+    expect(radio).not.toBeChecked();
+    expect(group).toHaveTextContent("already a project here");
+    const note = within(group).getByTestId("already-project-note");
+    expect(note).toHaveTextContent("This is the project mine on this portal.");
+    expect(within(note).getByRole("link", { name: "mine" })).toHaveAttribute("href", "/p/mine/settings?section=danger");
+    expect(screen.queryByTestId("no-candidates")).toBeNull();
+    expect(screen.getByRole("button", { name: "Link this checkout" })).toBeDisabled();
+  });
+
+  it("the callback page's Start again keeps the platform that answered", async () => {
+    fake.routes["POST /api/platform/callback"] = () => json({ detail: "x", code: "issuer_mismatch" }, 422);
+    mount("/connect/callback?code=C1&state=S1&iss=https%3A%2F%2Fwhygraph.example.com");
+    const again = await screen.findByRole("link", { name: "Start again" });
+    const href = new URL(again.getAttribute("href")!, "http://x");
+    expect(href.pathname).toBe("/link");
+    expect(Object.fromEntries(href.searchParams)).toEqual({ platform: "https://whygraph.example.com" });
+  });
+
+  it("the callback page's Start again opens the blank form when iss is not an address", async () => {
+    fake.routes["POST /api/platform/callback"] = () => json({ detail: "x", code: "issuer_mismatch" }, 422);
+    mount("/connect/callback?code=C1&state=S1&iss=nonsense");
+    const again = await screen.findByRole("link", { name: "Start again" });
+    expect(new URL(again.getAttribute("href")!, "http://x").pathname).toBe("/projects/new");
   });
 });
 
@@ -482,6 +892,12 @@ describe("linked project Set up", () => {
     await user.click(await screen.findByRole("button", { name: "Finish" }));
     expect(await screen.findByRole("heading", { name: "First scan complete" })).toBeInTheDocument();
     expect(screen.getByTestId("connect-agent")).toBeInTheDocument();
+    expect(screen.getByTestId("linked-to")).toHaveTextContent(
+      "Linked to acme/alpha on whygraph.example.com. The platform's page for this project now lists this machine.",
+    );
+    expect(screen.getByTestId("linked-next")).toHaveTextContent(
+      "Next: open your coding agent in /repos/alpha - restart it if it is already running - and ask it about this code.",
+    );
     await user.click(screen.getByRole("button", { name: "Open project" }));
     await waitFor(() => expect(router.state.location.pathname).toBe("/p/alpha"));
     window.sessionStorage.clear();

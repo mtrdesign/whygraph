@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Iterator
@@ -837,6 +837,78 @@ def test_member_cannot_list_project_tokens(cn: SimpleNamespace) -> None:
         assert (response.status_code, response.json()) == (404, NOT_FOUND)
 
 
+def _age(token: str, *, created: timedelta, used: timedelta | None = None) -> None:
+    """Backdate a token's ``created_at`` (and ``last_used_at``) by the given ages."""
+    now = datetime.now(timezone.utc)
+    with portal_db.get_session() as session:
+        row = session.exec(
+            select(ConnectionToken).where(
+                ConnectionToken.token_hash == connections.hash_token(token)
+            )
+        ).one()
+        row.created_at = (now - created).isoformat(timespec="seconds")
+        row.last_used_at = (
+            None if used is None else (now - used).isoformat(timespec="seconds")
+        )
+        session.add(row)
+
+
+def test_mine_lists_only_the_callers_live_tokens_of_the_project(
+    cn: SimpleNamespace,
+) -> None:
+    mine = issue(cn, "cy", "api", "cys-box")
+    issue(cn, "ben", "api")  # another member's
+    issue(cn, "cy", "web")  # another project's
+    revoked = issue(cn, "cy", "api", "gone")
+    stale = issue(cn, "cy", "api", "stale")  # idle-expired, not swept yet
+    with portal_db.get_session() as session:
+        assert connections.revoke(
+            session, reason="user_revoked", uid=uid_of_token(revoked)
+        )
+    _age(stale, created=timedelta(days=200), used=timedelta(days=100))
+    be(cn, "cy")
+    response = cn.client.get(at("acme") + "/api/projects/api/connections/mine")
+    assert response.status_code == 200, response.text
+    rows = response.json()
+    assert [r["uid"] for r in rows] == [uid_of_token(mine)]
+    assert set(rows[0]) == {"uid", "client_name", "created_at", "last_used_at"}
+    assert rows[0]["client_name"] == "cys-box"
+    for token in (mine, stale, revoked):
+        assert token not in response.text
+    # A viewer reads it too (viewers may connect agents).
+    _grant(cn, "cy", "api", "viewer")
+    viewer = cn.client.get(at("acme") + "/api/projects/api/connections/mine")
+    assert viewer.status_code == 200, viewer.text
+    assert [r["uid"] for r in viewer.json()] == [uid_of_token(mine)]
+    # Ben's own list holds only his.
+    be(cn, "ben")
+    ben = cn.client.get(at("acme") + "/api/projects/api/connections/mine").json()
+    assert [r["client_name"] for r in ben] == ["laptop"]
+    # Not on the base host, and not in an org one is no member of.
+    for prefix in (at(), at("bravo")):
+        response = cn.client.get(prefix + "/api/projects/api/connections/mine")
+        assert (response.status_code, response.json()) == (404, NOT_FOUND)
+
+
+def test_mine_keeps_a_never_used_token_and_hides_the_expired(
+    cn: SimpleNamespace,
+) -> None:
+    """``last_used_at IS NULL`` is the just-linked machine (I18), not an expired one."""
+    fresh = issue(cn, "cy", "api", "fresh")  # never used, just issued
+    unused = issue(cn, "cy", "api", "unused")
+    idle = issue(cn, "cy", "api", "idle")
+    used = issue(cn, "cy", "api", "used")
+    _age(unused, created=timedelta(hours=2))
+    _age(idle, created=timedelta(days=200), used=timedelta(days=91))
+    _age(used, created=timedelta(days=200), used=timedelta(days=89))
+    be(cn, "cy")
+    response = cn.client.get(at("acme") + "/api/projects/api/connections/mine")
+    assert response.status_code == 200, response.text
+    assert {r["client_name"] for r in response.json()} == {"fresh", "used"}
+    (row,) = [r for r in response.json() if r["client_name"] == "fresh"]
+    assert row["uid"] == uid_of_token(fresh) and row["last_used_at"] is None
+
+
 def test_admin_cannot_revoke_other_projects_token(cn: SimpleNamespace) -> None:
     web, lib = issue(cn, "cy", "web"), issue(cn, "dee", "lib")
     be(cn, "ben")
@@ -894,6 +966,237 @@ def test_self_revoke_removed_locally(
 
 
 # ---------------------------------------------------------------------------
+# Pre-approved consent: connect intents (production-local-connect-ux plan 7)
+# ---------------------------------------------------------------------------
+
+
+def mint(
+    n: SimpleNamespace, slug: str = "api", port: object = LOCAL_PORT, org: str = "acme"
+) -> httpx.Response:
+    """``POST /api/projects/{slug}/connect-intent`` as the signed-in user."""
+    return n.client.post(
+        at(org) + f"/api/projects/{slug}/connect-intent", json={"port": port}
+    )
+
+
+def intent_for(n: SimpleNamespace, who: str = "ben", **kwargs) -> str:
+    """Mint an intent as ``who`` and return it."""
+    be(n, who)
+    response = mint(n, **kwargs)
+    assert response.status_code == 200, response.text
+    return response.json()["intent"]
+
+
+def pre_approved(n: SimpleNamespace, intent: object, **over) -> bool:
+    """``validate``'s ``pre_approved`` for ``acme/api`` (or ``over``), never an error."""
+    hint = {"org": "acme", "project": "api", **over}
+    response = validate(n, intent=intent, **hint)
+    assert response.status_code == 200, response.text
+    return response.json()["pre_approved"]
+
+
+def test_connect_intent_is_minted_for_project_readers(cn: SimpleNamespace) -> None:
+    for who in ("ben", "cy", "fay"):
+        be(cn, who)
+        response = mint(cn)
+        assert response.status_code == 200, (who, response.text)
+        body = response.json()
+        assert set(body) == {"intent", "expires_in"}
+        assert len(body["intent"]) == 43 and body["expires_in"] == 900
+        assert connections.hash_token(body["intent"]) in (
+            cn.state.connect_intents._entries
+        )
+        assert body["intent"] not in cn.state.connect_intents._entries
+    # A viewer may connect agents, so may mint.
+    _grant(cn, "cy", "api", "viewer")
+    be(cn, "cy")
+    assert mint(cn).status_code == 200
+    # An instance admin's reader access never mints (current_org: 403).
+    be(cn, "ada")
+    refused = mint(cn)
+    assert refused.status_code == 403 and refused.json()["code"] == "forbidden"
+    # A Restricted project without a grant is a 404, like a missing one.
+    _grant(cn, "cy", "api", None)
+    _restrict(cn, "api")
+    be(cn, "cy")
+    assert mint(cn).status_code == mint(cn, slug="nosuch").status_code == 404
+    # Not on the base host, and not in an org one is no member of.
+    assert (
+        cn.client.post(
+            at() + "/api/projects/api/connect-intent", json={"port": LOCAL_PORT}
+        ).status_code
+        == 404
+    )
+    assert mint(cn, slug="lib", org="bravo").status_code == 404
+    for port in (0, 70000, "x", None):
+        response = mint(cn, slug="web", port=port)
+        assert response.status_code == 422, (port, response.text)
+
+
+def test_connect_intent_is_throttled_per_user(cn: SimpleNamespace) -> None:
+    be(cn, "cy")
+    for n in range(120):
+        assert mint(cn).status_code == 200, n
+    refused = mint(cn)
+    assert refused.status_code == 429 and refused.json()["code"] == "throttled"
+    assert int(refused.headers["retry-after"]) > 0
+    # The per-user cap kept only that user's 20 newest; another user is free.
+    assert len(cn.state.connect_intents) == connections.INTENT_PER_USER
+    be(cn, "ben")
+    assert mint(cn).status_code == 200
+
+
+def test_validate_pre_approves_only_the_minted_consent(cn: SimpleNamespace) -> None:
+    clock = Clock()
+    cn.state.connect_intents = connections.ConnectIntents(clock=clock)
+    intent = intent_for(cn, "cy")
+    other_port = f"http://127.0.0.1:{LOCAL_PORT + 1}/connect/callback"
+    assert pre_approved(cn, intent) is True
+    assert pre_approved(cn, intent) is True  # a peek: never consumed
+    # No hint, a hint without the project, another project: false.
+    plain = validate(cn, intent=intent)
+    assert plain.status_code == 200 and plain.json()["pre_approved"] is False
+    assert validate(cn, intent=intent, org="acme").json()["pre_approved"] is False
+    assert pre_approved(cn, intent, project="web") is False
+    # Another port.
+    assert pre_approved(cn, intent, redirect_uri=other_port) is False
+    # Malformed, 256 characters, unknown: false, never an error.
+    for bad in ("", "x", intent[:-1], intent + "x", "!" * 43, "a" * 256):
+        assert pre_approved(cn, bad) is False, bad
+    assert pre_approved(cn, "A" * 43) is False
+    # No intent at all.
+    response = validate(cn, org="acme", project="api")
+    assert response.json()["pre_approved"] is False
+    # Another user (Ben is a member with access too).
+    be(cn, "ben")
+    assert pre_approved(cn, intent) is False
+    # An access-lost project is never pre-approved (the page must warn).
+    be(cn, "cy")
+    with portal_db.get_session() as session:
+        row = session.get(Project, cn.projects["api"])
+        row.access_lost_at = "2026-10-01T00:00:00+00:00"
+        session.add(row)
+    assert pre_approved(cn, intent) is False
+    with portal_db.get_session() as session:
+        session.get(Project, cn.projects["api"]).access_lost_at = None
+    assert pre_approved(cn, intent) is True
+    # Expired.
+    clock.now += connections.INTENT_TTL_SEC
+    assert pre_approved(cn, intent) is False
+    # Past 256 characters pydantic refuses the body, without echoing it.
+    long = validate(cn, intent="a" * 257, org="acme", project="api")
+    assert long.status_code == 422 and "a" * 257 not in long.text
+
+
+def test_validate_intent_never_bypasses_a_restricted_hint(cn: SimpleNamespace) -> None:
+    """The hinted-project path still refuses a Restricted project (the slice)."""
+    intent = intent_for(cn, "cy")
+    _restrict(cn, "api")
+    hidden = validate(cn, intent=intent, org="acme", project="api")
+    missing = validate(cn, intent=intent, org="acme", project="nosuch")
+    assert hidden.status_code == missing.status_code == 422, hidden.text
+    assert hidden.json() == missing.json() and hidden.json()["field"] == "project"
+    assert intent not in hidden.text
+    _grant(cn, "cy", "api", "viewer")
+    assert pre_approved(cn, intent) is True
+
+
+def test_authorize_spends_the_intent_once(
+    cn: SimpleNamespace,
+    audit_log: pytest.LogCaptureFixture,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    intent = intent_for(cn, "cy")
+    # A mismatched attempt (another user, port or project) never burns it.
+    other_port = f"http://127.0.0.1:{LOCAL_PORT + 1}/connect/callback"
+    for who, kwargs in (
+        ("ben", {}),
+        ("cy", {"redirect_uri": other_port}),
+        ("cy", {"project": "web"}),
+        ("cy", {"intent": "A" * 43}),
+        ("cy", {"intent": "not an intent"}),
+    ):
+        be(cn, who)
+        response = authorize(cn, **{"intent": intent, **kwargs})
+        assert response.status_code == 409, (who, kwargs, response.text)
+        assert response.json()["code"] == "intent_expired"
+        assert intent not in response.text
+    assert len(cn.state.connect_codes) == 0
+    # The owner's matching authorize issues a code and spends the intent.
+    audit_log.clear()
+    be(cn, "cy")
+    response = authorize(cn, intent=intent)
+    assert response.status_code == 200, response.text
+    code = query_of(response.json()["redirect"])["code"]
+    assert len(cn.state.connect_intents) == 0
+    (record,) = [r for r in events(audit_log) if r["event"] == "connection_authorized"]
+    assert record["pre_approved"] is True
+    assert intent not in json.dumps(record)
+    again = authorize(cn, intent=intent)
+    assert again.status_code == 409 and again.json()["code"] == "intent_expired"
+    assert again.json()["error"] == "this connection needs your approval"
+    # The code is an ordinary one: the exchange is unchanged.
+    assert exchange(cn, code).status_code == 200
+    # Without an intent, authorize is unchanged and audits pre_approved false.
+    audit_log.clear()
+    be(cn, "cy")
+    assert authorize(cn).status_code == 200
+    (record,) = [r for r in events(audit_log) if r["event"] == "connection_authorized"]
+    assert record["pre_approved"] is False
+    assert intent not in caplog.text
+
+
+def test_connect_intents_match_pop_and_caps() -> None:
+    clock = Clock()
+    store = connections.ConnectIntents(clock=clock, ttl=60, max_entries=5, per_user=2)
+    fields = dict(user_id=1, org_id=2, project_id=3, port=LOCAL_PORT)
+    first = store.put(**fields)
+    assert len(first) == 43 and first not in store._entries  # only the hash
+    assert store.matches(first, **fields) and store.matches(first, **fields)
+    # A pop that differs in any field leaves the intent in place.
+    for field, value in (
+        ("user_id", 9),
+        ("org_id", 9),
+        ("project_id", 9),
+        ("port", 9),
+    ):
+        wrong = {**fields, field: value}
+        assert not store.matches(first, **wrong)
+        assert not store.pop(first, **wrong)
+    assert store.pop("x" * 43, **fields) is False
+    assert store.pop(first, **fields) is True
+    assert store.pop(first, **fields) is False and len(store) == 0
+    # TTL.
+    late = store.put(**fields)
+    clock.now += 59
+    assert store.matches(late, **fields)
+    clock.now += 1
+    assert not store.matches(late, **fields) and not store.pop(late, **fields)
+    # put purges expired entries.
+    assert len(store) == 1
+    fresh = store.put(**fields)
+    assert len(store) == 1 and store.matches(fresh, **fields)
+    # Per user: past 2, that user's oldest goes; another user's stay.
+    other = dict(fields, user_id=7)
+    theirs = store.put(**other)
+    second = store.put(**fields)
+    third = store.put(**fields)
+    assert not store.matches(fresh, **fields)
+    assert store.matches(second, **fields) and store.matches(third, **fields)
+    assert store.matches(theirs, **other) and len(store) == 3
+    # Global: past 5, the oldest overall goes.
+    extra = [store.put(**dict(fields, user_id=20 + n)) for n in range(3)]
+    assert len(store) == 5 and not store.matches(theirs, **other)
+    assert all(
+        store.matches(e, **dict(fields, user_id=20 + n)) for n, e in enumerate(extra)
+    )
+    # The module's limits (plan D6, 7.2).
+    assert connections.INTENT_TTL_SEC == 900
+    assert (connections.INTENT_MAX, connections.INTENT_PER_USER) == (10_000, 20)
+
+
+# ---------------------------------------------------------------------------
 # Meta
 # ---------------------------------------------------------------------------
 
@@ -924,6 +1227,8 @@ def test_meta_public_and_404_in_local_mode(env: SimpleNamespace) -> None:
                 ("POST", "/api/connect/token"),
                 ("GET", "/api/connect/tokens"),
                 ("GET", "/api/projects/demo/connections"),
+                ("GET", "/api/projects/demo/connections/mine"),
+                ("POST", "/api/projects/demo/connect-intent"),
                 ("DELETE", "/api/v1/projects/demo/token"),
             ):
                 response = client.request(method, path, json={})
@@ -1014,6 +1319,24 @@ def test_pending_codes_expire_are_single_use_and_capped() -> None:
         ("/connect/callback?code=abc&state=xyz&iss=i", "/connect/callback?<redacted>"),
         ("/connect", "/connect"),
         ("/api/connect/token", "/api/connect/token"),
+        (
+            "/link?platform=https%3A%2F%2Fp.example&org=acme&project=api"
+            "&intent=" + "i" * 43,
+            "/link?<redacted>",
+        ),
+        (
+            "/setup?next=%2Flink%3Fplatform%3Dx%26intent%3D" + "i" * 43,
+            "/setup?<redacted>",
+        ),
+        (
+            "/signin?next=https%3A%2F%2Fp.example%2Fconnect%3Fstate%3Ds%26intent%3D"
+            + "i" * 43
+            + "&reauth=1",
+            "/signin?<redacted>",
+        ),
+        ("/link", "/link"),
+        ("/linked", "/linked"),
+        ("/signin", "/signin"),
     ],
 )
 def test_access_log_redacts_the_connect_queries(path: str, expected: str) -> None:

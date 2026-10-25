@@ -278,14 +278,16 @@ Projects page instead of an empty list: **Connect GitHub** (a bootstrap admin, w
 password, is asked to sign in with GitHub to import repositories; anyone else is offered **Install the
 WhyGraph GitHub App** when it is not yet installed for them), **Import a repository**, **Add an LLM
 key** (an admin who cannot change organization keys sees "Ask an owner"), **Invite your team** and
-**Connect your agent**. Steps tick themselves off, **Dismiss** hides the list in that browser for that
+**Connect local WhyGraph** (while the organization has no project, this step links to importing a
+repository first). Steps tick themselves off, **Dismiss** hides the list in that browser for that
 person and organization, **Getting started** in the header brings it back, and it is gone once every
 step is done. When every project is linked from a local portal, the key step is left out - such
 projects use the platform's keys.
 
 **The welcome banner.** A person added to an organization (by an invitation they redeemed or by being
-added directly) sees "You've been added to Acme as a Member." once, with **Connect your agent** and
-**Dismiss**. If the dismissal could not be saved, the next page load retries it without showing the
+added directly) sees "You've been added to Acme as a Member." once, with **Connect local WhyGraph** and
+**Dismiss**; while they can read no project, it says projects shared with them will appear there
+and offers only **Dismiss**. If the dismissal could not be saved, the next page load retries it without showing the
 banner again. A person in several organizations also sees a **New** marker on that organization in the
 picker and the switcher until they dismiss that banner.
 
@@ -325,7 +327,7 @@ A member's role on a project is the one granted to them on it, or else the organ
 |---|---|---|---|
 | See the project, its overview and scan history | yes | yes | yes |
 | Explorer: graph, evidence, history and **existing** rationale cards | yes | yes | yes |
-| Connect agents ("Use with your agent", linked local portals) | yes | yes | yes |
+| Connect local WhyGraph (link a checkout as a connected machine) | yes | yes | yes |
 | Explorer: generate a **new** rationale card | - | yes | yes |
 | Chat | - | yes | yes |
 | Quick rescan (git and CodeGraph, no LLM) | - | yes | yes |
@@ -334,7 +336,7 @@ A member's role on a project is the one granted to them on it, or else the organ
 | The project's **usage** and its budget: this month's spend, each person's share, the project budget | - | - | yes |
 
 A viewer never causes LLM spend: no chat, no new rationale card and no lazy description backfill,
-whether they use the Explorer, a connected portal or an agent.
+whether they use the Explorer, a connected machine or an agent.
 
 ### Usage and budgets
 
@@ -544,22 +546,26 @@ only the server copy and the scans go, and importing the same repository again (
 repository id, not its name) re-attaches the history. A re-import does not restore the project's
 access restrictions; set them again.
 
-## Connected portals
+## Connected machines { #connected-portals }
 
 People on your team can link a checkout on their own machine to a project here, so their coding
 agent reads the project's history through their **local** WhyGraph, with their uncommitted work kept
 on the laptop. Nothing about this needs setup beyond a working production portal: the project's home
-page has a **Use with your agent** panel that walks a member through it, and the member-side steps
-are in [Projects from a platform](../portal/platform-projects.md).
+page has a **Connect local WhyGraph** card that walks a member through it, and the member-side steps
+are in [Projects from a platform](../portal/platform-projects.md). The card also lists each member's
+**own** machines for that project, with a link to the Account list.
 
 Each link is a **connection token**: one project, one person, with that person's role re-checked on
-every call. A member **allows** it on a consent page on the base host, signed in as themselves. Their
+every call. A member **allows** it on a consent page on the base host, signed in as themselves;
+when they started from the project's card, the platform skips that page once (see [Projects from a
+platform](../portal/platform-projects.md#link-a-checkout)), and their **Connect** on their own
+machine is the confirmation. Their
 local portal then calls this one over `/api/v1`, on the organization's host, with the token as a
 bearer. Only members can connect: an instance admin's read-only access to an organization cannot.
 
-There are two lists, both called **Connected portals**:
+There are two lists, both called **Connected machines**:
 
-- **Your own**, on your Account page: every portal you have linked, across projects, with the
+- **Your own**, on your Account page: every machine you have linked, across projects, with the
   machine name, when it was linked and when it was last used. You can revoke any of them.
 - **A project's**, in its settings, for **owners and admins**: every member's connection to that
   project, with the **machine name each member gave it**, their name and when it was last used. An
@@ -584,11 +590,12 @@ not the revocation had run.
 
 Connections are written to the [event log](#the-security-event-log) (`connection_authorized`,
 `connection_token_issued`, `connection_token_refused`, `connection_revoked`), never with a token or a
-code.
+code. `connection_authorized` carries `pre_approved`: true when the project's own **Connect local
+WhyGraph** card started the link and the Allow page was skipped.
 
 ### Agent limits
 
-An agent on a connected portal can cause work here: a rationale card nobody has generated yet, and
+An agent on a connected machine can cause work here: a rationale card nobody has generated yet, and
 the lazy description of commits that have none. Both spend the organization's own model keys, so an
 **owner** bounds them in the organization's **Settings**, under **Agent limits**:
 
@@ -655,7 +662,7 @@ plus these GitHub, member, project and organization events:
 | `github_app_authorized` | Someone authorized the GitHub App, or installed it, from the import page. |
 | `github_account_mismatch` | That authorization was for a different GitHub account than the signed-in one, and was refused. |
 | `project_imported`, `project_removed` | A repository was imported, or a project was removed. |
-| `connection_authorized`, `connection_token_issued`, `connection_token_refused`, `connection_revoked` | A member allowed a connected portal, its token was issued, a token exchange was refused, or a token was revoked (with the reason). |
+| `connection_authorized`, `connection_token_issued`, `connection_token_refused`, `connection_revoked` | A member allowed a connected machine (`pre_approved` is true when the platform's own card started the link and Allow was skipped), its token was issued, a token exchange was refused, or a token was revoked (with the reason). |
 | `project_access_lost`, `project_access_restored` | A project lost its GitHub access (with the reason), or got it back. |
 | `webhook_rejected` | A webhook delivery had a missing or wrong signature. |
 | `org_deleted` | An owner deleted an organization (with its project count). |
@@ -690,7 +697,7 @@ portal's database**, where they are kept for **400 days** and then deleted.
 - **Email**: no verification and no reset mail (GitHub sign-in needs none). An invitation sends no mail either: the person has to be told to sign in.
 - **Agents and MCP**: there is no `/mcp` endpoint in production, and a server copy gets no agent
   files or git hooks. Agents reach a production portal's projects through a developer's
-  [connected portal](#connected-portals).
+  [connected machine](#connected-portals).
 - **Projects from anywhere but GitHub**: shared folders and local repositories are refused, and
   only the default branch is scanned. On GitHub Enterprise Server the pull request and issue crawl
   is skipped.

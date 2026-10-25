@@ -113,11 +113,12 @@ A platform project is linked from a local portal, so trying one out means runnin
 another. They no longer collide - the local portal's Vite is on `:5174`, the platform's on `:5173`.
 
 1. In `dev-production`, sign in to the fake GitHub as `ben`, import `ben/demo` and scan it.
-2. Open the project's **Use with your agent** and enter your local portal's port. In the dev loop
-   that is **5174** - Vite's port, not the portal's `8777`, because the browser talks to Vite (it
+2. Open the project's **Connect local WhyGraph** card, press **Change** next to the port and enter
+   **5174**. In the dev loop that is Vite's port, not the portal's `8777`, because the browser talks to Vite (it
    serves the `/link` and `/connect/callback` pages and proxies `/api` to the portal).
-3. The button lands on the local portal's `/link` page. Press **Connect**, allow it on the platform,
-   and the browser comes back to `http://127.0.0.1:5174/connect/callback`.
+3. The button lands on the local portal's `/link` page. Press **Connect**; because the platform
+   started the link, it skips its Allow page and the browser comes back to
+   `http://127.0.0.1:5174/connect/callback`.
 4. Point the link at a checkout under `make dev-local`'s shared folder,
    `$TMPDIR/whygraph-dev/repos`, whose `origin` names the platform's repository (or which holds the
    commit the platform scanned). The fake GitHub serves git only to an installation token, so the

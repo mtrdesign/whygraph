@@ -38,6 +38,7 @@ from __future__ import annotations
 import logging
 import re
 import secrets
+import shlex
 import socket
 from pathlib import Path
 from urllib.parse import quote, urlencode, urlsplit
@@ -100,6 +101,10 @@ _ADD = org_access(Action.ORG_ADD_PROJECT)
 # ---------------------------------------------------------------------------
 
 
+_INTENT_RE = re.compile(r"[A-Za-z0-9_-]{43}")
+"""A platform card's connect intent (the platform's ``INTENT_RE``)."""
+
+
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -111,6 +116,7 @@ class ConnectBody(_Strict):
     client_name: str | None = Field(default=None, max_length=256)
     org: str | None = Field(default=None, max_length=100)
     project: str | None = Field(default=None, max_length=100)
+    intent: str | None = Field(default=None, max_length=256)
 
 
 class CallbackBody(_Strict):
@@ -288,10 +294,13 @@ def reconnect_target(
     return row if same else None
 
 
-def _registered_roots(org_id: int) -> set[str]:
+def _registered(org_id: int) -> dict[str, str]:
+    """Every project root of this org, mapped to its slug."""
     with get_session() as session:
-        return set(
-            session.exec(select(Project.root).where(Project.org_id == org_id)).all()
+        return dict(
+            session.exec(
+                select(Project.root, Project.slug).where(Project.org_id == org_id)
+            ).all()
         )
 
 
@@ -351,7 +360,10 @@ def post_connect(
     ``known_platform`` is false when no project of this portal links to that
     platform yet (the page warns). Errors: ``422 bad_platform_url`` /
     ``bad_client_name`` / ``bad_connect_request``, ``409 update_required``,
-    ``502 platform_unreachable`` / ``bad_platform_reply``.
+    ``502 platform_unreachable`` / ``bad_platform_reply``. An ``intent``
+    (the platform card's one-time hint, 43 base64url characters, else
+    ``422 bad_connect_request``) is only passed on in ``authorize_url``;
+    it is never logged or kept in the pending connect.
     """
     state = portal_state(request)
     sweep_links(state)
@@ -377,6 +389,8 @@ def post_connect(
         raise ApiError(422, "not a valid org", code="bad_connect_request")
     if body.project is not None and not is_valid_slug(body.project):
         raise ApiError(422, "not a valid project", code="bad_connect_request")
+    if body.intent is not None and _INTENT_RE.fullmatch(body.intent) is None:
+        raise ApiError(422, "not a valid intent", code="bad_connect_request")
     redirect_uri = _redirect_uri(request, state)
 
     client = platform_http(state, platform_origin)
@@ -410,6 +424,8 @@ def post_connect(
         params["org"] = body.org
     if body.project is not None:
         params["project"] = body.project
+    if body.intent is not None:
+        params["intent"] = body.intent
     with get_session() as session:
         known = (
             session.exec(
@@ -518,14 +534,26 @@ def post_callback(
 
 @platform_router.get("/pending/{link_id}")
 def get_pending(
-    link_id: str, request: Request, access: OrgAccess = Depends(_ADD)
+    link_id: str,
+    request: Request,
+    refresh: bool = False,
+    access: OrgAccess = Depends(_ADD),
 ) -> dict:
     """What the wizard's checkout picker shows for a pending link.
 
-    ``{link_id, platform_origin, org, project, clone_url, clone_command,
-    slug_taken, reconnect, candidates: [{path, name, match: "origin"}],
-    other_repos: [{path, name}]}`` - registered checkouts are left out of
-    both lists. ``410 link_expired`` for an unknown or expired link.
+    ``{link_id, platform_origin, org, project, clone_url,
+    clone_commands: [{folder, command}], slug_taken, reconnect,
+    candidates: [{path, name, match: "origin"}], other_repos: [{path, name}],
+    already_projects: [{path, slug}]}`` - registered checkouts are left out
+    of both lists. ``410 link_expired`` for an unknown or expired link.
+
+    ``clone_commands`` holds one shell-quoted ``cd <folder> && git clone
+    <url>`` per shared folder. The origin matches are computed live on every
+    call and unioned with the ones found at the callback, so a clone made
+    since then is a candidate; ``?refresh=1`` searches the shared folders
+    again (the discovery cache is cleared first). ``already_projects``:
+    origin-matching checkouts that are already a project here (remove it
+    first); the reconnect target keeps its own row instead.
 
     ``reconnect`` is ``{"path": ..., "slug": ...}`` when a project of this
     org is the very same link target (:func:`reconnect_target`, minus the
@@ -546,14 +574,19 @@ def get_pending(
     entry = state.pending_links.get(link_id, access.org_id)
     if entry is None:
         raise _link_expired()
-    registered = _registered_roots(access.org_id)
-    candidates = [p for p in entry.candidates if p not in registered]
+    project = entry.reply.project
+    clone_url = project.clone_url or ""
+    if refresh:
+        state.discovery.clear()
+    roots = _registered(access.org_id)
+    registered = set(roots)
+    matched = list(dict.fromkeys((*entry.candidates, *_candidates(state, clone_url))))
+    candidates = [p for p in matched if p not in registered]
     others = [
         str(root)
         for root in state.discovery.get(state.shared_folders)
-        if str(root) not in registered and str(root) not in entry.candidates
+        if str(root) not in registered and str(root) not in matched
     ]
-    project = entry.reply.project
     with get_session() as session:
         target = reconnect_target(session, access.org_id, entry)
         reconnect = (
@@ -573,13 +606,24 @@ def get_pending(
         "org": entry.reply.org,
         "project": project.model_dump(mode="json"),
         "clone_url": project.clone_url,
-        "clone_command": f"git clone {project.clone_url}",
+        "clone_commands": [
+            {
+                "folder": str(folder),
+                "command": f"cd {shlex.quote(str(folder))} && git clone {shlex.quote(clone_url)}",
+            }
+            for folder in state.shared_folders
+        ],
         "slug_taken": slug_taken,
         "reconnect": reconnect,
         "candidates": [
             {"path": p, "name": Path(p).name, "match": "origin"} for p in candidates
         ],
         "other_repos": [{"path": p, "name": Path(p).name} for p in others],
+        "already_projects": [
+            {"path": p, "slug": roots[p]}
+            for p in matched
+            if p in roots and (reconnect is None or p != reconnect["path"])
+        ],
     }
 
 

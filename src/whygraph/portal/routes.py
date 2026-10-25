@@ -1943,6 +1943,7 @@ def _add_platform(
         ) from exc
     state.pending_links.pop(body.link_id, org_id)
     state.contexts.invalidate(project_id)
+    state.link_refresh.schedule(project_id)
     return project_id
 
 
@@ -2009,6 +2010,7 @@ def _reconnect(state: PortalState, project_id: int, entry: PendingLink) -> None:
         if local is not None and local.name != reply.project.name:
             local.name = reply.project.name
             session.add(local)
+    state.link_refresh.schedule(project_id)
     if superseded is not None:
         revoke_token(superseded, transport=state.platform_transport)
 
@@ -2451,7 +2453,7 @@ def _remove_project(
             origin = link.platform_origin if link is not None else "the platform"
             warnings.append(
                 f"this machine's access was not given up on {origin} ({failure}); "
-                "revoke it there under Connected portals"
+                "revoke it there on your Account page, under Connected machines"
             )
     if body.strip_agent_entries and root_ok:
         targets = []

@@ -457,6 +457,7 @@ const connectRoute = createRoute({
     client_name: text(search.client_name),
     org: text(search.org),
     project: text(search.project),
+    intent: text(search.intent),
   }),
   component: ConnectPage,
 });
@@ -510,6 +511,7 @@ const linkRoute = createRoute({
     platform: text(search.platform),
     org: text(search.org),
     project: text(search.project),
+    intent: text(search.intent),
   }),
   component: () => (
     <LocalOnly>

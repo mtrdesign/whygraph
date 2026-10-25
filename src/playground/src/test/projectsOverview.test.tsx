@@ -70,6 +70,7 @@ function details(over: Partial<ProjectDetails> = {}): ProjectDetails {
 const perms = (...actions: ProjectAction[]) => actions;
 const CONTRIBUTOR = perms("project.read", "project.chat", "project.scan");
 const VIEWER = perms("project.read");
+const MY_MACHINE = { uid: "m1", client_name: "my-laptop", created_at: "2026-10-01T00:00:00Z", last_used_at: "2026-10-09T00:00:00Z" };
 
 function overview(over: Partial<ProjectOverview> = {}): ProjectOverview {
   return {
@@ -295,7 +296,7 @@ describe("Overview chart data", () => {
     const days = [{ day: "2026-10-09", mcp: 4, agent: 7 }];
     expect(agentChart(days, false)).toMatchObject({ title: "MCP calls", columns: ["Day", "MCP calls"] });
     expect(agentChart(days, false).rows[0][1]).toBe(4);
-    expect(agentChart(days, true)).toMatchObject({ title: "Calls from linked portals" });
+    expect(agentChart(days, true)).toMatchObject({ title: "Calls from connected machines" });
     expect(agentChart(days, true).rows[0][1]).toBe(7);
     expect(agentKindLabel("whygraph_evidence_for")).toBe("Evidence lookups");
     expect(agentKindLabel("v1:pr")).toBe("Pull request lookups");
@@ -387,6 +388,8 @@ interface Fake {
   details: Record<string, ProjectDetails>;
   overview: ProjectOverview | { status: number; body: Json };
   estimate: Json | { status: number; body: Json };
+  /** `GET /api/projects/{slug}/connections/mine`. */
+  mine: Json[];
   log: { method: string; path: string; body: Json | null }[];
 }
 let fake: Fake;
@@ -443,6 +446,7 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     if (rest === "/codegraph/restart" && method === "POST") return Promise.resolve(json({ was: "unavailable", shared: true }));
     if (rest === "/overview") return Promise.resolve(reply(fake.overview));
     if (rest === "/scan-estimate") return Promise.resolve(reply(fake.estimate));
+    if (rest === "/connections/mine") return Promise.resolve(json(fake.mine));
     if (rest.endsWith("/events")) return Promise.resolve(new Response("", { status: 200, headers: { "content-type": "text/event-stream" } }));
   }
   return Promise.resolve(json({ error: `unhandled ${method} ${path}` }, 500));
@@ -470,6 +474,7 @@ beforeEach(() => {
     details: {},
     overview: overview(),
     estimate: { status: 404, body: { error: "no estimate" } },
+    mine: [],
     log: [],
   };
   window.localStorage.clear();
@@ -693,6 +698,7 @@ describe("Overview", () => {
 
   it("draws coverage with markers, usage by task and agent activity with people and connections", async () => {
     fake.state = orgState("owner");
+    fake.mine = [MY_MACHINE];
     fake.details.alpha = details({ source: "github", root: null, github_full_name: "acme/alpha", mcp_url: null });
     fake.overview = overview({
       coverage: {
@@ -732,12 +738,95 @@ describe("Overview", () => {
     expect(within(agents).getByTestId("agent-kinds")).toHaveTextContent("Evidence lookups");
     expect(within(agents).getByTestId("agent-people")).toHaveTextContent("Ada (@ada)");
     expect(within(agents).getByTestId("agent-connections")).toHaveTextContent("ada-laptop");
-    // Production's series is the calls from linked portals.
+    // An admin gets one machine list (every member's, their own included), never a second one.
+    expect(within(agents).queryByTestId("my-machines")).toBeNull();
+    // Production's series is the calls from connected machines.
     const bars = seen.options.find((o) => (o.series as Array<{ type: string }>)[0].type === "bar")!;
     expect((bars.series as Array<{ data: unknown[] }>)[0].data).toEqual([2, { value: 3, label: expect.anything() }]);
     // The server path is never printed in production.
     expect(screen.getByTestId("overview-subtitle")).toHaveTextContent("acme/alpha");
     expect(screen.getByTestId("overview-subtitle")).not.toHaveTextContent("/data/");
+  });
+
+  describe("the project's agent section in production, with calls", () => {
+    const called = () =>
+      overview({
+        agents: {
+          days: [{ day: "2026-10-09", mcp: 0, agent: 2 }],
+          total_calls: 2,
+          llm_calls: 0,
+          llm_cost_usd: null,
+          by_kind: [],
+          people: null,
+          connections: null,
+          last_call_day: "2026-10-09",
+        },
+      });
+    const open = async (label: string) => {
+      const agents = await screen.findByTestId("agent-activity");
+      const summary = within(agents).getByText(label);
+      expect(summary.closest("details")).not.toHaveAttribute("open");
+      return { agents, summary };
+    };
+
+    it("keeps the machines visible and the closed disclosure mounts nothing until opened", async () => {
+      const user = userEvent.setup();
+      fake.state = orgState("member");
+      fake.mine = [MY_MACHINE];
+      fake.details.alpha = details({ source: "github", root: null, github_full_name: "acme/alpha", mcp_url: null });
+      fake.overview = called();
+      mount("/p/alpha");
+      const { agents, summary } = await open("Connect another machine");
+      expect(within(agents).getByTestId("my-machines")).toHaveTextContent("Connected on my-laptop");
+      expect(within(agents).queryByRole("link", { name: "Open in my local WhyGraph" })).toBeNull();
+      expect(within(agents).queryByTestId("local-port-summary")).toBeNull();
+      // Closed, it mints no one-time intent either.
+      const minted = () => fake.log.some((c) => c.method === "POST" && c.path === "/api/projects/alpha/connect-intent");
+      expect(minted()).toBe(false);
+      await user.click(summary);
+      expect(await within(agents).findByRole("link", { name: "Open in my local WhyGraph" })).toBeInTheDocument();
+      await waitFor(() => expect(minted()).toBe(true));
+      // Only the steps: no nested card, no second machine list or disclosure.
+      expect(within(agents).queryByTestId("use-with-agent")).toBeNull();
+      expect(within(agents).queryByTestId("connect-another")).toBeNull();
+      expect(within(agents).getAllByTestId("my-machines")).toHaveLength(1);
+    });
+
+    it("labels it Connect local WhyGraph when no machine is linked", async () => {
+      const user = userEvent.setup();
+      fake.state = orgState("member");
+      fake.details.alpha = details({ source: "github", root: null, github_full_name: "acme/alpha", mcp_url: null });
+      fake.overview = called();
+      mount("/p/alpha");
+      const { agents, summary } = await open("Connect local WhyGraph");
+      expect(within(agents).queryByTestId("my-machines")).toBeNull();
+      expect(within(agents).queryByRole("link", { name: "Open in my local WhyGraph" })).toBeNull();
+      await user.click(summary);
+      expect(await within(agents).findByRole("link", { name: "Open in my local WhyGraph" })).toBeInTheDocument();
+    });
+
+    it("a reader's Overview asks for no machine list and shows no setup", async () => {
+      fake.state = orgState("reader");
+      fake.details.alpha = details({ source: "github", root: null, github_full_name: "acme/alpha", mcp_url: null });
+      fake.overview = called();
+      mount("/p/alpha");
+      await screen.findByTestId("agent-activity");
+      expect(fake.log.some((c) => c.path.endsWith("/connections/mine"))).toBe(false);
+      expect(fake.log.some((c) => c.path.endsWith("/connect-intent"))).toBe(false);
+      expect(screen.queryByText(/Connect (another machine|local WhyGraph)/)).toBeNull();
+    });
+
+    it("keeps local mode's Connect another agent, with the same deferral", async () => {
+      const user = userEvent.setup();
+      fake.details.alpha = details();
+      fake.overview = called();
+      mount("/p/alpha");
+      const { agents, summary } = await open("Connect another agent");
+      expect(within(agents).queryByTestId("connect-agent")).toBeNull();
+      await user.click(summary);
+      expect(await within(agents).findByTestId("connect-agent")).toBeInTheDocument();
+      expect(fake.log.some((c) => c.path.endsWith("/connections/mine"))).toBe(false);
+    });
   });
 
   it("a failed last scan offers Retry and Open log from the Overview route's last_failure", async () => {

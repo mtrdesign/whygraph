@@ -128,11 +128,11 @@ export function coverageChart(overview: Pick<ProjectOverview, "coverage" | "even
 
 /**
  * The 30-day bars of agent calls, one series per mode: MCP calls locally
- * (`/mcp/<slug>` is local-only), calls from linked portals in production
+ * (`/mcp/<slug>` is local-only), calls from connected machines in production
  * (`/api/v1` is production-only).
  */
 export function agentChart(days: ProjectOverview["agents"]["days"], production: boolean): ChartPayload {
-  const series = production ? "Calls from linked portals" : "MCP calls";
+  const series = production ? "Calls from connected machines" : "MCP calls";
   return {
     kind: "bar",
     title: series,

@@ -658,6 +658,10 @@ describe("connected portals and the project budget", () => {
     mount("/p/alpha/settings");
     const section = await screen.findByTestId("project-connections");
     await waitFor(() => expect(section).toHaveTextContent("grace-mbp"));
+    expect(within(section).getByRole("heading", { name: "Connected machines" })).toBeInTheDocument();
+    expect(section).toHaveTextContent("Members' machines linked to this project.");
+    // The section nav names it too.
+    expect(screen.getAllByText("Connected machines").length).toBeGreaterThan(1);
     expect(calls("GET", "/api/projects/alpha/connections?include=revoked")).not.toHaveLength(0);
     const revoked = within(section).getByTestId("revoked-connections");
     expect(revoked).toHaveTextContent("Revoked (last 30 days)");

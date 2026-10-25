@@ -306,6 +306,11 @@ class DiscoveryCache:
                 self._entries.popitem(last=False)
         return list(repos)
 
+    def clear(self) -> None:
+        """Forget every cached search, so the next :meth:`get` walks the folders again."""
+        with self._lock:
+            self._entries.clear()
+
 
 def detect_existing(
     root: Path,

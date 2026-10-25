@@ -1076,15 +1076,43 @@ describe("account page", () => {
     expect(within(screen.getByTestId("account-org-rocket")).getByText("Member")).toBeInTheDocument();
   });
 
-  it("offers Connect your agent when no local portal is connected, and not otherwise", async () => {
+  it("offers Connect local WhyGraph when no machine is connected, and not otherwise", async () => {
     fake.routes["/api/account"] = () => json(account({}));
     fake.routes["/api/connect/tokens"] = () => json([]);
     mount("/account");
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "Connect your agent" }));
+    const list = await screen.findByTestId("my-connections");
+    expect(within(list).getByRole("heading", { name: "Connected machines" })).toBeInTheDocument();
+    expect(await within(list).findByText("No machine is connected.")).toBeInTheDocument();
+    await user.click(within(list).getByRole("button", { name: "Connect local WhyGraph" }));
     expect(await screen.findByTestId("connect-agent-dialog")).toBeInTheDocument();
     // The base host has no projects to pick from.
     expect(fake.calls.some((c) => c.path === "/api/projects")).toBe(false);
+  });
+
+  it("names the machine, organization and project when revoking a connection", async () => {
+    fake.routes["/api/account"] = () => json(account({}));
+    fake.routes["/api/connect/tokens"] = () =>
+      json([
+        {
+          uid: "c1",
+          org: "acme",
+          project: "alpha",
+          project_name: "Alpha",
+          client_name: "ada-laptop",
+          created_at: "2026-10-01T00:00:00Z",
+          last_used_at: null,
+          revoked_at: null,
+          revoked_reason: null,
+        },
+      ]);
+    mount("/account");
+    const user = userEvent.setup();
+    const row = within(await screen.findByTestId("connection-row"));
+    await user.click(row.getByRole("button", { name: "Revoke" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Revoke ada-laptop's access to acme/alpha?")).toBeInTheDocument();
+    expect(within(dialog).getByText(/link it again from WhyGraph on that machine/)).toBeInTheDocument();
   });
 
   it("says what still works under a hard stop, with the reset date", async () => {
@@ -1741,7 +1769,7 @@ describe("sign-in copy", () => {
   it("says a local portal's connect is waiting", async () => {
     fake.state = baseState({ user: null });
     mount(`/signin?next=${encodeURIComponent(`${BASE}/connect?state=s&client_name=laptop`)}`);
-    expect(await screen.findByText("Sign in to connect your local portal.")).toBeInTheDocument();
+    expect(await screen.findByText("Sign in to connect your local WhyGraph.")).toBeInTheDocument();
   });
 
   it("says the session ended when an org host sent the person back", async () => {

@@ -54,6 +54,7 @@ from test_portal_link import (  # noqa: F401 -- `fake` / `portal` are fixtures
     pending_of,
     portal,
     project_id,
+    record_link_refreshes,
 )
 from test_portal_runner import scanner  # noqa: F401 -- a fixture
 from whygraph.api_v1 import StatusOut
@@ -374,7 +375,7 @@ def test_remove_from_machine_when_unreachable(
     assert len(body["warnings"]) == 1
     warning = body["warnings"][0]
     assert fake.platform_origin in warning
-    assert "Connected portals" in warning
+    assert "Connected machines" in warning
     assert TOKEN not in warning
 
     # Removed here all the same, and the platform still holds the token.
@@ -454,8 +455,10 @@ def test_reconnect_replaces_a_revoked_link(
     allow(fake, started, code="second", token=fresh)
     reply = callback(portal, started, code="second")
     assert reply.status_code == 200, reply.text
+    scheduled = record_link_refreshes(portal)
     again = link(portal, reply.json()["link_id"], root)
     assert again.status_code == 201, again.text
+    assert was in scheduled  # plan section 6.12: confirmed with the platform at once
 
     # The same project row, a new token, the status cleared.
     assert project_id(SLUG) == was
@@ -542,6 +545,7 @@ def test_pending_offers_the_checkout_a_reconnect_replaces(
     assert body["slug_taken"] is False
     assert str(root) not in [c["path"] for c in body["candidates"]]
     assert str(root) not in [r["path"] for r in body["other_repos"]]
+    assert body["already_projects"] == []  # the reconnect target keeps its own row
 
     again = link(portal, link_id, Path(body["reconnect"]["path"]))
     assert again.status_code == 201, again.text

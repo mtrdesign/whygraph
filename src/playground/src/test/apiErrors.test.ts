@@ -92,6 +92,19 @@ describe("extras", () => {
     );
   });
 
+  it("names the platform's own address on a mismatch, as text only", () => {
+    expect(
+      errorMessage(
+        new ApiError(422, "x", "platform_address_mismatch", { platform_origin: "https://wg.example.com" }),
+      ),
+    ).toBe(
+      "This address belongs to a WhyGraph platform whose own address is https://wg.example.com. If you trust https://wg.example.com, connect to that address.",
+    );
+    expect(errorMessage(new ApiError(422, "x", "platform_address_mismatch"))).toBe(
+      "This is not the platform's own address. Check the address with your admin.",
+    );
+  });
+
   it("turns Retry-After into minutes", () => {
     expect(errorMessage(new ApiError(429, "x", "throttled", { retry_after: 600 }))).toBe(
       "Too many attempts. Try again in 10 minutes.",

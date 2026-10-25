@@ -19,6 +19,8 @@ production.
 
 from __future__ import annotations
 
+import logging
+import shlex
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterator
@@ -189,6 +191,24 @@ def mirror(env: SimpleNamespace, name: str, remote: str | None = CLONE_URL) -> P
     return root
 
 
+def record_link_refreshes(client: TestClient) -> list[int]:
+    """The project ids ``state.link_refresh.schedule`` is asked for from now on.
+
+    The lifespan refresher drains the queue every two seconds, so a test reads
+    what was scheduled rather than racing ``pending()``.
+    """
+    queue = client.app.state.portal.link_refresh
+    asked: list[int] = []
+    real = queue.schedule
+
+    def schedule(project_id: int) -> None:
+        asked.append(project_id)
+        real(project_id)
+
+    queue.schedule = schedule
+    return asked
+
+
 def head_of(root: Path) -> str:
     return _git(root, "rev-parse", "HEAD").strip()
 
@@ -224,7 +244,8 @@ def test_connect_checks_the_platform_and_names_the_machine(
     assert params["client_name"] == "laptop"
     assert params["redirect_uri"] == started["redirect_uri"]
     assert len(params["state"]) >= 32
-    # The version check happened, and no credential was sent with it.
+    # The version check happened, once, and no credential was sent with it.
+    assert len(fake.requests) == 1
     meta = fake.requests[0]
     assert (meta.method, meta.url.path) == ("GET", "/api/v1/meta")
     assert "authorization" not in meta.headers
@@ -253,6 +274,45 @@ def test_connect_refuses_a_bad_url_or_machine_name(
     assert bad_name.status_code == 422
     assert bad_name.json()["code"] == "bad_client_name"
     assert fake.requests == []  # neither reached the platform
+
+
+def test_connect_passes_the_cards_intent_on(
+    portal: TestClient, fake: FakePlatform, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A platform card's intent rides in ``authorize_url``, nowhere else."""
+    caplog.set_level(logging.DEBUG)
+    intent = "Ab-_" + "x" * 39
+    started = connect(portal, fake, org="acme", project="api", intent=intent)
+    query = urlsplit(started["authorize_url"]).query
+    assert list(dict(parse_qsl(query)))[-3:] == ["org", "project", "intent"]
+    assert query_of(started)["intent"] == intent
+    state = portal.app.state.portal
+    assert intent not in repr(list(state.pending_connects._entries.values()))
+    assert intent not in caplog.text
+    # Absent: the URL is as before, with no intent parameter.
+    plain = query_of(connect(portal, fake, org="acme", project="api"))
+    assert "intent" not in plain and plain["project"] == "api"
+    # Set but malformed: refused before the platform is asked, not echoed.
+    asked = len(fake.requests)
+    for bad in ("", "x" * 42, "x" * 44, "!" * 43, "x" * 42 + "="):
+        response = portal.post(
+            "/api/platform/connect",
+            json={
+                "platform_url": fake.platform_origin,
+                "client_name": "laptop",
+                "intent": bad,
+            },
+        )
+        assert response.status_code == 422, (bad, response.text)
+        assert response.json()["code"] == "bad_connect_request", bad
+        if bad:
+            assert bad not in response.text
+    too_long = portal.post(
+        "/api/platform/connect",
+        json={"platform_url": fake.platform_origin, "intent": "x" * 257},
+    )
+    assert too_long.status_code == 422 and "x" * 257 not in too_long.text
+    assert len(fake.requests) == asked
 
 
 def test_callback_refuses_iss_mismatch(portal: TestClient, fake: FakePlatform) -> None:
@@ -377,6 +437,181 @@ def test_redirect_uri_follows_browser_port(
 
 
 # ---------------------------------------------------------------------------
+# Connecting with an organization's address
+# ---------------------------------------------------------------------------
+
+ORG_URL = f"https://{ORG}.wg.example.com"
+"""The ``acme`` org's address on :func:`fake`'s platform."""
+
+
+def meta_body(fake: FakePlatform, **over: Any) -> dict:
+    """A ``MetaOut``-shaped dict for ``fake``; ``base_origin=None`` drops it."""
+    body: dict[str, Any] = {
+        "api_version": 1,
+        "min_client": "0.0.0",
+        "capabilities": ["evidence"],
+        "base_origin": fake.platform_origin,
+    }
+    body.update(over)
+    return {k: v for k, v in body.items() if v is not None}
+
+
+def metas(fake: FakePlatform) -> list[str]:
+    """The hosts that were asked for ``meta``, in order."""
+    return [r.headers["host"] for r in fake.requests if r.url.path == "/api/v1/meta"]
+
+
+def pending_connects(client: TestClient) -> list:
+    """The pending connects the portal holds."""
+    return list(client.app.state.portal.pending_connects._entries.values())
+
+
+def test_connect_with_an_org_address_goes_to_the_platform(
+    portal: TestClient, fake: FakePlatform
+) -> None:
+    """The org host names its base; the base confirms; the org is preselected."""
+    started = connect(portal, fake, platform_url=ORG_URL)
+    assert started["platform_origin"] == fake.platform_origin
+    assert started["authorize_url"].startswith(fake.platform_origin + "/connect?")
+    assert query_of(started)["org"] == ORG
+    # Exactly two unauthenticated meta requests: the org host, then the base.
+    assert metas(fake) == [f"{ORG}.wg.example.com", "wg.example.com"]
+    assert len(fake.requests) == 2
+    assert all("authorization" not in r.headers for r in fake.requests)
+    [entry] = pending_connects(portal)
+    assert entry.platform_origin == fake.platform_origin
+
+
+def test_org_address_links_end_to_end(
+    portal: TestClient, fake: FakePlatform, env: SimpleNamespace
+) -> None:
+    """The callback's ``iss`` is the base, so the link completes as from the base."""
+    root = mirror(env, "demo-checkout")
+    started = connect(portal, fake, platform_url=ORG_URL)
+    allow(fake, started)
+    response = callback(portal, started, iss=fake.platform_origin)
+    assert response.status_code == 200, response.text
+    link_id = response.json()["link_id"]
+    assert pending_of(portal, link_id)["platform_origin"] == fake.platform_origin
+    added = link(portal, link_id, root)
+    assert added.status_code == 201, added.text
+    saved = link_row(SLUG)
+    assert saved.platform_origin == fake.platform_origin
+    assert saved.api_origin == f"https://{ORG}.wg.example.com"
+    assert saved.org_slug == ORG
+
+
+def test_org_address_and_an_explicit_org(
+    portal: TestClient, fake: FakePlatform
+) -> None:
+    """The same org is fine; another one is refused before any consent."""
+    assert query_of(connect(portal, fake, platform_url=ORG_URL, org=ORG))["org"] == ORG
+    before = len(pending_connects(portal))
+    response = portal.post(
+        "/api/platform/connect",
+        json={"platform_url": ORG_URL, "client_name": "laptop", "org": "other"},
+    )
+    assert response.status_code == 422, response.text
+    assert response.json() == {
+        "error": "the address names another organization",
+        "code": "bad_connect_request",
+    }
+    assert len(pending_connects(portal)) == before
+
+
+def test_org_address_claiming_another_platform_is_refused(
+    portal: TestClient, fake: FakePlatform
+) -> None:
+    """A host that is not an org host of the base it names is refused before consent."""
+    fake.responses["org_meta"] = (
+        200,
+        meta_body(fake, base_origin="https://whygraph.other.example"),
+    )
+    response = portal.post(
+        "/api/platform/connect", json={"platform_url": ORG_URL, "client_name": "a"}
+    )
+    assert response.status_code == 422, response.text
+    assert response.json() == {
+        "error": "this is not the platform's own address",
+        "code": "platform_address_mismatch",
+        "platform_origin": "https://whygraph.other.example",
+    }
+    assert pending_connects(portal) == []
+    assert metas(fake) == [f"{ORG}.wg.example.com"]  # the claim was not followed
+
+
+@pytest.mark.parametrize(
+    ("org_says", "base_says", "error"),
+    [
+        # The base names another address for itself.
+        (
+            "https://wg.example.com",
+            "https://elsewhere.example.com",
+            "the platform's address did not confirm itself",
+        ),
+        # The base names nothing.
+        (
+            "https://wg.example.com",
+            None,
+            "the platform's address did not confirm itself",
+        ),
+        # The org host names an unusable address.
+        (
+            "not a url",
+            "https://wg.example.com",
+            "the platform named an invalid address for itself",
+        ),
+    ],
+)
+def test_org_address_needs_a_base_that_confirms_itself(
+    portal: TestClient,
+    fake: FakePlatform,
+    org_says: str,
+    base_says: str | None,
+    error: str,
+) -> None:
+    fake.responses["org_meta"] = (200, meta_body(fake, base_origin=org_says))
+    fake.responses["meta"] = (200, meta_body(fake, base_origin=base_says))
+    response = portal.post(
+        "/api/platform/connect", json={"platform_url": ORG_URL, "client_name": "a"}
+    )
+    assert response.status_code == 502, response.text
+    assert response.json() == {"error": error, "code": "bad_platform_reply"}
+    assert pending_connects(portal) == []
+    assert len(metas(fake)) <= 2  # one hop at most
+
+
+def test_connect_to_a_platform_without_base_origin(
+    portal: TestClient, fake: FakePlatform
+) -> None:
+    """An older platform names no base: the typed address is used, as before."""
+    fake.responses["meta"] = (200, meta_body(fake, base_origin=None))
+    started = connect(portal, fake)
+    assert started["platform_origin"] == fake.platform_origin
+    assert "org" not in query_of(started)
+    assert len(fake.requests) == 1
+    fake.responses["org_meta"] = (200, meta_body(fake, base_origin=None))
+    assert connect(portal, fake, platform_url=ORG_URL)["platform_origin"] == ORG_URL
+
+
+def test_org_address_of_a_known_platform_is_known(
+    portal: TestClient, fake: FakePlatform, env: SimpleNamespace
+) -> None:
+    root = mirror(env, "demo-checkout")
+    assert link(portal, linked(portal, fake), root).status_code == 201
+    assert connect(portal, fake, platform_url=ORG_URL)["known_platform"] is True
+
+
+def test_org_address_keeps_the_cards_intent(
+    portal: TestClient, fake: FakePlatform
+) -> None:
+    intent = "Ab-_" + "x" * 39
+    started = connect(portal, fake, platform_url=ORG_URL, project=SLUG, intent=intent)
+    params = query_of(started)
+    assert (params["org"], params["project"], params["intent"]) == (ORG, SLUG, intent)
+
+
+# ---------------------------------------------------------------------------
 # The pending link
 # ---------------------------------------------------------------------------
 
@@ -393,13 +628,73 @@ def test_pending_lists_the_matching_checkouts(
     assert pending["link_id"] == link_id
     assert pending["org"] == ORG
     assert pending["clone_url"] == CLONE_URL
-    assert pending["clone_command"] == f"git clone {CLONE_URL}"
+    assert pending["clone_commands"] == [
+        {
+            "folder": str(env.shared),
+            "command": f"cd {shlex.quote(str(env.shared))} && git clone {CLONE_URL}",
+        }
+    ]
     assert pending["slug_taken"] is False
     assert pending["reconnect"] is None  # nothing is linked yet
     assert [c["path"] for c in pending["candidates"]] == [str(root)]
     assert pending["candidates"][0]["match"] == "origin"
     assert str(other) in [r["path"] for r in pending["other_repos"]]
     assert str(root) not in [r["path"] for r in pending["other_repos"]]
+
+
+def test_pending_quotes_the_clone_commands(
+    portal: TestClient, fake: FakePlatform, env: SimpleNamespace, tmp_path: Path
+) -> None:
+    """One command per shared folder, quoted for the shell, never built by the UI."""
+    spaced = tmp_path / "my repos"
+    spaced.mkdir()
+    portal.app.state.portal.shared_folders = (env.shared, spaced)
+    fake.projects[SLUG] = status_body(clone_url="https://git.example.com/a b/demo.git")
+    commands = pending_of(portal, linked(portal, fake))["clone_commands"]
+    assert [c["folder"] for c in commands] == [str(env.shared), str(spaced)]
+    for entry in commands:
+        words = shlex.split(entry["command"])
+        assert words[:2] == ["cd", entry["folder"]]
+        assert words[2:5] == ["&&", "git", "clone"]
+        assert words[5] == "https://git.example.com/a b/demo.git"
+        assert len(words) == 6
+
+
+def test_check_again_finds_a_clone_made_after_the_callback(
+    portal: TestClient, fake: FakePlatform, env: SimpleNamespace
+) -> None:
+    """``?refresh=1`` searches again; a plain read re-matches origins live."""
+    link_id = linked(portal, fake)
+    before = pending_of(portal, link_id)
+    assert before["candidates"] == [] and before["other_repos"] == []
+
+    late = mirror(env, "late")
+    pending_of(portal, link_id)  # may still miss it: the discovery cache is 60 s
+    fresh = portal.get(f"/api/platform/pending/{link_id}?refresh=1")
+    assert fresh.status_code == 200, fresh.text
+    body = fresh.json()
+    assert [(c["path"], c["match"]) for c in body["candidates"]] == [
+        (str(late), "origin")
+    ]
+    assert str(late) not in [r["path"] for r in body["other_repos"]]
+    # Not only on refresh: a remount must not fall back to the frozen list.
+    again = pending_of(portal, link_id)
+    assert [c["path"] for c in again["candidates"]] == [str(late)]
+    assert str(late) not in [r["path"] for r in again["other_repos"]]
+    assert link(portal, link_id, late).status_code == 201
+
+
+def test_pending_lists_a_checkout_that_is_already_a_project(
+    portal: TestClient, fake: FakePlatform, env: SimpleNamespace
+) -> None:
+    """A local project of the same repository is shown, not hidden, and not offered."""
+    root = mirror(env, "demo-checkout")
+    added = add_local(portal, root)
+    slug = added["project"]["slug"]
+    body = pending_of(portal, linked(portal, fake))
+    assert body["already_projects"] == [{"path": str(root), "slug": slug}]
+    assert body["candidates"] == []
+    assert str(root) not in [r["path"] for r in body["other_repos"]]
 
 
 def test_pending_link_expiry_revokes(
@@ -539,6 +834,7 @@ def test_link_full_flow(
     """Connect -> callback -> pending -> link -> Initialize -> CodeGraph-only scan."""
     root = mirror(env, "demo-checkout")
     link_id = linked(portal, fake)
+    scheduled = record_link_refreshes(portal)
     added = link(portal, link_id, root)
     assert added.status_code == 201, added.text
     project = added.json()["project"]
@@ -558,6 +854,8 @@ def test_link_full_flow(
     assert decrypt(saved.token_ciphertext) == TOKEN
     assert saved.token_hint == "…" + TOKEN[-4:]
 
+    # The platform confirms the new link at once (plan section 6.12).
+    assert project_id(SLUG) in scheduled
     # The pending link is consumed, and its token was not revoked.
     assert portal.get(f"/api/platform/pending/{link_id}").status_code == 410
     assert fake.tokens[TOKEN]["revoked"] is None

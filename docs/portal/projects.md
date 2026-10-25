@@ -116,7 +116,7 @@ the page at that section. The section ids are `general`, `models`, `github`, `sc
 | **Scanning** | One switch, **Serve CodeGraph tools to agents** (`[scan].serve_codegraph`, on by default; local folders and linked projects). Off, the project's `/mcp/<slug>/code` endpoint answers every call with a "turned off" error and the Overview says so. It stops nothing that is running: the CodeGraph server is shared by every project |
 | **Usage** | This month's spend on the project and, for owners and admins, its monthly budget |
 | **Agents** | The coding agents connected to the project, and **Update agent files** (unedited files update silently, edited ones wait for your say, and **Overwrite my edits too** replaces those as well; a line shows the installed version of the agent files against the current one; see [Keeping the agent files up to date](agents.md#agent-files-upgrade)) |
-| **Access** and **Connected portals** | Production only: who may open the project, and the members' local portals linked to it |
+| **Access** and **Connected machines** | Production only: who may open the project, and the members' machines linked to it |
 | **Danger zone** | Remove the project |
 
 **Each section saves on its own.** Edits wait for that section's **Save** (or **Discard**), which
@@ -268,10 +268,10 @@ link to the project's usage and budgets.
 ### Agent activity
 
 **Agent activity** counts the calls agents made to this project over the last 30 days: MCP calls
-locally, calls from linked portals in production. It says how many used the LLM (and what they cost,
+locally, calls from connected machines in production. It says how many used the LLM (and what they cost,
 for people who see usage), which kinds of call they were ("Evidence lookups", "Rationale cards",
 "Area history", "Code exploration", ...), when the last one was and, in production, who made them and through which
-connected portal. With no call in 30 days the section shows **Connect your agent** instead; see
+machine. With no call in 30 days the section shows the setup card instead (**Connect local WhyGraph** on a platform, **Connect your agent** locally); see
 [Agent activity](agents.md#agent-activity).
 
 ## After setup

@@ -1,4 +1,4 @@
-import type { RevokedReason } from "../api";
+import type { ProjectSummary, RevokedReason } from "../api";
 
 /** What a revoked connection token's reason means to the person reading the list. */
 const REASONS: Record<RevokedReason, string> = {
@@ -69,8 +69,20 @@ export function storePort(port: string): void {
   }
 }
 
-/** `http://127.0.0.1:<port>/link?platform=<origin>&org=<org>&project=<slug>`. */
-export function localLinkUrl(port: number, platformOrigin: string, org: string, project: string): string {
+/** `http://127.0.0.1:<port>/link?platform=<origin>&org=<org>&project=<slug>[&intent=<intent>]`. */
+export function localLinkUrl(
+  port: number,
+  platformOrigin: string,
+  org: string,
+  project: string,
+  intent?: string,
+): string {
   const q = new URLSearchParams({ platform: platformOrigin, org, project });
+  if (intent) q.set("intent", intent);
   return `http://127.0.0.1:${port}/link?${q.toString()}`;
+}
+
+/** Projects a person can link a local WhyGraph to: imported and readable (as ProjectHome shows the card). */
+export function connectableProjects(projects: readonly ProjectSummary[]): ProjectSummary[] {
+  return projects.filter((p) => !p.importing && (!p.permissions || p.permissions.includes("project.read")));
 }

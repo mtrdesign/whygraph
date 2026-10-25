@@ -1413,6 +1413,8 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/github/installations/{installation_id}/repos", "GET"): "org.add_project",
     # A project's connected portals: project_access(...) (M2e section 4.4)
     (f"{_P}/connections", "GET"): _CONFIGURE,
+    (f"{_P}/connections/mine", "GET"): _READ,
+    (f"{_P}/connect-intent", "POST"): _READ,
     (f"{_P}/connections/{{uid}}", "DELETE"): _CONFIGURE,
     # A connected portal revokes its own token: v1_project_access(...)
     (f"{_V1}/token", "DELETE"): _READ,
@@ -1626,6 +1628,8 @@ PRODUCTION_ORG_ROUTES = {
     ("/api/github/installations", "GET"),
     ("/api/github/installations/{installation_id}/repos", "GET"),
     ("/api/projects/{slug}/connections", "GET"),
+    ("/api/projects/{slug}/connections/mine", "GET"),
+    ("/api/projects/{slug}/connect-intent", "POST"),
     ("/api/projects/{slug}/connections/{uid}", "DELETE"),
     ("/api/projects/{slug}/access", "GET"),
     ("/api/projects/{slug}/access", "PATCH"),

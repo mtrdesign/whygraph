@@ -160,13 +160,14 @@ symbol's rationale card, and reports exactly one verdict - **Constraint at risk*
   `.claude/skills/`, so with Claude Code selected `/whygraph-review` shows up in Cursor's slash menu too;
   it is untested there.
 
-## Connect your agent outside a project
+## Connecting from the Projects page { #connect-your-agent-outside-a-project }
 
-You do not need to open a project first. On a production portal the **Connect your agent** button on
+You do not need to open a project first. On a production portal the **Connect local WhyGraph** button on
 the Projects page checklist, and on the banner a new member sees, opens a short dialog: install
 WhyGraph and run `whygraph up` on your machine, choose one of the projects you can read (a lone project
-is chosen for you), then follow the **Use with your agent** link for it. With no project yet the dialog
-says to open a project and use that card there. A local portal's checklist sends you to the first
+is chosen for you), then follow the **Connect local WhyGraph** card for it. In an organization with no
+project, the checklist step links to importing a repository instead, and the banner offers no connect
+button until you can read a project. A local portal's checklist sends you to the first
 project's Overview instead, where the agent card lives.
 
 ## Agent activity
@@ -179,7 +180,7 @@ whether an agent is actually connected and what it asks for. What is counted:
 - every call to one of the four CodeGraph tools on `/mcp/<slug>/code` (`codegraph_explore`,
   `codegraph_node`, `codegraph_search`, `codegraph_impact`), which the Overview groups as **Code
   exploration**. A call to any other name is refused and never counted;
-- on a production portal, every **data call** a [connected portal](platform-projects.md) makes for one
+- on a production portal, every **data call** a [connected machine](platform-projects.md) makes for one
   of its agents (evidence, rationale, area history, a commit, a pull request, an issue, the repository
   overview).
 
@@ -187,7 +188,7 @@ A call counts even when the answer came from the cache. Protocol chatter (listin
 prompts), the linked-project **status check** a local portal makes, a call refused by a rate limit,
 and the Explorer and Chat views are not agent activity and are not counted.
 
-The counter stores **counts only**: the project, the UTC day, the source (MCP or a connected portal),
+The counter stores **counts only**: the project, the UTC day, the source (MCP or a connected machine),
 who made the call and through which connection, the call's name, and how many calls. Never a path, a
 symbol name, an argument or anything from the answer. The names are WhyGraph's own or one of the four
 CodeGraph tools. Counts are written to the portal database

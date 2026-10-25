@@ -16,6 +16,7 @@ import { errorInfo } from "../../lib/apiErrors";
 import { loadDetected } from "../../lib/detected";
 import { usePortalState } from "../../lib/identity";
 import { agentLabel } from "../../lib/labels";
+import { platformHost } from "../../lib/platformLink";
 import { cn } from "@/lib/utils";
 import { ErrorState } from "../state/ErrorState";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
@@ -536,6 +537,22 @@ function LinkedDone({
   return (
     <div className="flex flex-col gap-5">
       <InitDone result={result} title="Project linked" />
+      {project?.link && (
+        <>
+          <p data-testid="linked-to">
+            Linked to{" "}
+            <strong>
+              {project.link.org}/{project.link.remote_slug}
+            </strong>{" "}
+            on {platformHost(project.link.platform_origin)}. The platform's page for this project now lists this
+            machine.
+          </p>
+          <p data-testid="linked-next">
+            Next: open your coding agent in <span className="font-mono break-all">{project.root}</span> - restart it
+            if it is already running - and ask it about this code.
+          </p>
+        </>
+      )}
       {runId !== null ? (
         <RunCard slug={slug} runId={runId} />
       ) : (

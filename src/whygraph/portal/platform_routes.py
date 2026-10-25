@@ -38,6 +38,7 @@ from __future__ import annotations
 import logging
 import re
 import secrets
+import shlex
 import socket
 from pathlib import Path
 from urllib.parse import quote, urlencode, urlsplit
@@ -46,6 +47,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlmodel import Session, col, select
 
+from whygraph.api_v1 import MetaOut
 from whygraph.services.git import GitError, Repository, strip_userinfo
 from whygraph.services.github import remote_identity
 
@@ -64,6 +66,7 @@ from .github_auth import pkce_challenge
 from .models import PlatformLink, Project
 from .orgs import is_valid_org_slug
 from .platform_client import (
+    PlatformAddressMismatch,
     PlatformError,
     PlatformHttp,
     PlatformRefused,
@@ -72,6 +75,7 @@ from .platform_client import (
     api_origin_for,
     dev_platform_http_enabled,
     parse_platform_url,
+    resolve_platform_origin,
 )
 from .platform_pending import PendingLink
 from .projects import is_valid_slug
@@ -100,6 +104,10 @@ _ADD = org_access(Action.ORG_ADD_PROJECT)
 # ---------------------------------------------------------------------------
 
 
+_INTENT_RE = re.compile(r"[A-Za-z0-9_-]{43}")
+"""A platform card's connect intent (the platform's ``INTENT_RE``)."""
+
+
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -111,6 +119,7 @@ class ConnectBody(_Strict):
     client_name: str | None = Field(default=None, max_length=256)
     org: str | None = Field(default=None, max_length=100)
     project: str | None = Field(default=None, max_length=100)
+    intent: str | None = Field(default=None, max_length=256)
 
 
 class CallbackBody(_Strict):
@@ -288,10 +297,13 @@ def reconnect_target(
     return row if same else None
 
 
-def _registered_roots(org_id: int) -> set[str]:
+def _registered(org_id: int) -> dict[str, str]:
+    """Every project root of this org, mapped to its slug."""
     with get_session() as session:
-        return set(
-            session.exec(select(Project.root).where(Project.org_id == org_id)).all()
+        return dict(
+            session.exec(
+                select(Project.root, Project.slug).where(Project.org_id == org_id)
+            ).all()
         )
 
 
@@ -330,6 +342,28 @@ def _unreachable(exc: PlatformError) -> ApiError:
     return ApiError(502, str(exc), code="platform_unreachable")
 
 
+def _checked_meta(state: PortalState, origin: str) -> MetaOut:
+    """``origin``'s ``meta``, its failures mapped to the connect's API errors.
+
+    Raises
+    ------
+    ApiError
+        ``409 update_required``, ``502 platform_unreachable``, or ``502
+        bad_platform_reply`` when the address refuses as a platform would not.
+    """
+    client = platform_http(state, origin)
+    try:
+        return client.meta()
+    except UpdateRequired as exc:
+        raise ApiError(409, str(exc), code="update_required") from exc
+    except PlatformUnreachable as exc:
+        raise _unreachable(exc) from exc
+    except PlatformRefused as exc:
+        raise _bad_reply("that address does not answer as a WhyGraph platform") from exc
+    finally:
+        client.close()
+
+
 def _link_expired() -> ApiError:
     return ApiError(
         410, "this link expired or was used; connect again", code="link_expired"
@@ -350,15 +384,28 @@ def post_connect(
     Returns ``{authorize_url, platform_origin, redirect_uri, known_platform}``;
     ``known_platform`` is false when no project of this portal links to that
     platform yet (the page warns). Errors: ``422 bad_platform_url`` /
-    ``bad_client_name`` / ``bad_connect_request``, ``409 update_required``,
-    ``502 platform_unreachable`` / ``bad_platform_reply``.
+    ``bad_client_name`` / ``bad_connect_request`` (also an ``org`` other
+    than the one the address names), ``422 platform_address_mismatch``
+    (with the claimed ``platform_origin``), ``409 update_required``,
+    ``502 platform_unreachable`` / ``bad_platform_reply``. An ``intent``
+    (the platform card's one-time hint, 43 base64url characters, else
+    ``422 bad_connect_request``) is only passed on in ``authorize_url``;
+    it is never logged or kept in the pending connect.
+
+    An organization's address is accepted: its ``meta`` names the platform's
+    base (``base_origin``), which is followed only when the typed host is
+    one org label under it (:func:`~whygraph.portal.platform_client.resolve_platform_origin`)
+    and only after the base names itself in its own ``meta`` - exactly one
+    extra request, never a loop. The base is then the origin of the pending
+    connect, the consent URL and the response, and that org is the consent's
+    ``org`` hint. Any other ``base_origin`` is refused before the consent;
+    the claimed address is returned for display only, never followed.
     """
     state = portal_state(request)
     sweep_links(state)
+    allow_http = dev_platform_http_enabled()
     try:
-        platform_origin = parse_platform_url(
-            body.platform_url, allow_http=dev_platform_http_enabled()
-        )
+        entered = parse_platform_url(body.platform_url, allow_http=allow_http)
     except ValueError as exc:
         raise ApiError(422, str(exc), code="bad_platform_url") from exc
     client_name = (
@@ -377,19 +424,39 @@ def post_connect(
         raise ApiError(422, "not a valid org", code="bad_connect_request")
     if body.project is not None and not is_valid_slug(body.project):
         raise ApiError(422, "not a valid project", code="bad_connect_request")
+    if body.intent is not None and _INTENT_RE.fullmatch(body.intent) is None:
+        raise ApiError(422, "not a valid intent", code="bad_connect_request")
     redirect_uri = _redirect_uri(request, state)
 
-    client = platform_http(state, platform_origin)
+    meta = _checked_meta(state, entered)
     try:
-        client.meta()
-    except UpdateRequired as exc:
-        raise ApiError(409, str(exc), code="update_required") from exc
-    except PlatformUnreachable as exc:
-        raise _unreachable(exc) from exc
-    except PlatformRefused as exc:
-        raise _bad_reply("that address does not answer as a WhyGraph platform") from exc
-    finally:
-        client.close()
+        platform_origin, org_hint = resolve_platform_origin(
+            entered, meta.base_origin, allow_http=allow_http
+        )
+    except PlatformAddressMismatch as exc:
+        raise ApiError(
+            422,
+            "this is not the platform's own address",
+            code="platform_address_mismatch",
+            platform_origin=exc.claimed,
+        ) from None
+    except ValueError as exc:
+        raise _bad_reply("the platform named an invalid address for itself") from exc
+    org = body.org
+    if org_hint is not None:
+        if org is None:
+            org = org_hint
+        elif org != org_hint:
+            raise ApiError(
+                422,
+                "the address names another organization",
+                code="bad_connect_request",
+            )
+    if platform_origin != entered:
+        # One hop up, once: the base must name itself.
+        confirmed = _checked_meta(state, platform_origin).base_origin
+        if confirmed is None or not _same_origin(confirmed, platform_origin):
+            raise _bad_reply("the platform's address did not confirm itself")
 
     verifier = secrets.token_urlsafe(48)
     oauth_state = state.pending_connects.put(
@@ -406,10 +473,12 @@ def post_connect(
         "state": oauth_state,
         "client_name": client_name,
     }
-    if body.org is not None:
-        params["org"] = body.org
+    if org is not None:
+        params["org"] = org
     if body.project is not None:
         params["project"] = body.project
+    if body.intent is not None:
+        params["intent"] = body.intent
     with get_session() as session:
         known = (
             session.exec(
@@ -518,14 +587,26 @@ def post_callback(
 
 @platform_router.get("/pending/{link_id}")
 def get_pending(
-    link_id: str, request: Request, access: OrgAccess = Depends(_ADD)
+    link_id: str,
+    request: Request,
+    refresh: bool = False,
+    access: OrgAccess = Depends(_ADD),
 ) -> dict:
     """What the wizard's checkout picker shows for a pending link.
 
-    ``{link_id, platform_origin, org, project, clone_url, clone_command,
-    slug_taken, reconnect, candidates: [{path, name, match: "origin"}],
-    other_repos: [{path, name}]}`` - registered checkouts are left out of
-    both lists. ``410 link_expired`` for an unknown or expired link.
+    ``{link_id, platform_origin, org, project, clone_url,
+    clone_commands: [{folder, command}], slug_taken, reconnect,
+    candidates: [{path, name, match: "origin"}], other_repos: [{path, name}],
+    already_projects: [{path, slug}]}`` - registered checkouts are left out
+    of both lists. ``410 link_expired`` for an unknown or expired link.
+
+    ``clone_commands`` holds one shell-quoted ``cd <folder> && git clone
+    <url>`` per shared folder. The origin matches are computed live on every
+    call and unioned with the ones found at the callback, so a clone made
+    since then is a candidate; ``?refresh=1`` searches the shared folders
+    again (the discovery cache is cleared first). ``already_projects``:
+    origin-matching checkouts that are already a project here (remove it
+    first); the reconnect target keeps its own row instead.
 
     ``reconnect`` is ``{"path": ..., "slug": ...}`` when a project of this
     org is the very same link target (:func:`reconnect_target`, minus the
@@ -546,14 +627,19 @@ def get_pending(
     entry = state.pending_links.get(link_id, access.org_id)
     if entry is None:
         raise _link_expired()
-    registered = _registered_roots(access.org_id)
-    candidates = [p for p in entry.candidates if p not in registered]
+    project = entry.reply.project
+    clone_url = project.clone_url or ""
+    if refresh:
+        state.discovery.clear()
+    roots = _registered(access.org_id)
+    registered = set(roots)
+    matched = list(dict.fromkeys((*entry.candidates, *_candidates(state, clone_url))))
+    candidates = [p for p in matched if p not in registered]
     others = [
         str(root)
         for root in state.discovery.get(state.shared_folders)
-        if str(root) not in registered and str(root) not in entry.candidates
+        if str(root) not in registered and str(root) not in matched
     ]
-    project = entry.reply.project
     with get_session() as session:
         target = reconnect_target(session, access.org_id, entry)
         reconnect = (
@@ -573,13 +659,24 @@ def get_pending(
         "org": entry.reply.org,
         "project": project.model_dump(mode="json"),
         "clone_url": project.clone_url,
-        "clone_command": f"git clone {project.clone_url}",
+        "clone_commands": [
+            {
+                "folder": str(folder),
+                "command": f"cd {shlex.quote(str(folder))} && git clone {shlex.quote(clone_url)}",
+            }
+            for folder in state.shared_folders
+        ],
         "slug_taken": slug_taken,
         "reconnect": reconnect,
         "candidates": [
             {"path": p, "name": Path(p).name, "match": "origin"} for p in candidates
         ],
         "other_repos": [{"path": p, "name": Path(p).name} for p in others],
+        "already_projects": [
+            {"path": p, "slug": roots[p]}
+            for p in matched
+            if p in roots and (reconnect is None or p != reconnect["path"])
+        ],
     }
 
 

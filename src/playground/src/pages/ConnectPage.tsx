@@ -1,5 +1,5 @@
 import { errorInfo } from "../lib/apiErrors";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ApiError, connectApi, type ConnectRequest } from "../api";
@@ -10,12 +10,15 @@ import { Button } from "../components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Skeleton } from "../components/ui/skeleton";
 import { linkError } from "../lib/errors";
+import { usePortalState } from "../lib/identity";
 import { hardNavigate } from "../lib/navigation";
 
 /** The consent query's keys: what `/connect?...` carries from the local portal. */
 export type ConnectSearch = Partial<Record<keyof ConnectRequest, string>>;
 
 const SAVED_KEY = "whygraph.connect";
+// Set when a consent finished here, so Back to this page says so instead of "refused".
+const DONE_KEY = "whygraph.connect.done";
 
 // The query survives the GitHub sign-in round trip in `sessionStorage` (best
 // effort: storage may be blocked), and is stripped from the address only once the
@@ -23,6 +26,7 @@ const SAVED_KEY = "whygraph.connect";
 function saveRequest(req: ConnectRequest): void {
   try {
     window.sessionStorage.setItem(SAVED_KEY, JSON.stringify(req));
+    window.sessionStorage.removeItem(DONE_KEY); // a new request: no longer finished
   } catch {
     // the address itself still carries the request
   }
@@ -45,6 +49,22 @@ function forgetRequest(): void {
   }
 }
 
+function markDone(): void {
+  try {
+    window.sessionStorage.setItem(DONE_KEY, "1");
+  } catch {
+    // Back then shows the refused page, as before
+  }
+}
+
+function isDone(): boolean {
+  try {
+    return window.sessionStorage.getItem(DONE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 /** The request when every required field is present, else `null` (the server judges validity). */
 export function complete(q: ConnectSearch): ConnectRequest | null {
   const { redirect_uri, code_challenge, code_challenge_method, state, client_name } = q;
@@ -52,6 +72,7 @@ export function complete(q: ConnectSearch): ConnectRequest | null {
   const req: ConnectRequest = { redirect_uri, code_challenge, code_challenge_method, state, client_name };
   if (q.org) req.org = q.org;
   if (q.project) req.project = q.project;
+  if (q.intent) req.intent = q.intent;
   return req;
 }
 
@@ -81,6 +102,12 @@ function Refused({ error }: { error: unknown }) {
  * URL**: Cancel goes to the `cancel_url` the validate call returned and Allow to
  * the `redirect` the authorize call returned, so the page can never send the
  * browser (or a code) anywhere the server did not name.
+ *
+ * When the platform's own card started the flow, the request carries a one-time
+ * intent and validate answers `pre_approved`: the page then submits once by itself
+ * ("Connecting ...") instead of showing Allow. Anything short of that (an expired
+ * intent, another project, a failed list) falls back to the normal page, and the
+ * manual Allow never sends the intent.
  */
 export function ConnectPage() {
   const search = useSearch({ strict: false }) as ConnectSearch;
@@ -88,10 +115,27 @@ export function ConnectPage() {
   // Fixed on first render: the address is cleaned up below, and a reload reads the saved copy.
   const [request] = useState<ConnectRequest | null>(() => complete(search) ?? savedRequest());
   const [choice, setChoice] = useState<string | null>(null);
+  const login = usePortalState().data?.user?.github_login;
+  // Set once the auto path is abandoned; `intentExpired` when the server refused the intent.
+  const [dropped, setDropped] = useState(false);
+  const [intentExpired, setIntentExpired] = useState(false);
+  const sent = useRef(false);
+  const allowRef = useRef<HTMLButtonElement>(null);
+  // Fixed on first render, like `request`: Back after a finished consent reads it.
+  const [done] = useState(() => request === null && isDone());
 
   useEffect(() => {
     if (request) saveRequest(request);
   }, [request]);
+
+  // A page restored from the back-forward cache is frozen on "Connecting...": reload it.
+  useEffect(() => {
+    const onShow = (e: PageTransitionEvent) => {
+      if (e.persisted) window.location.reload();
+    };
+    window.addEventListener("pageshow", onShow);
+    return () => window.removeEventListener("pageshow", onShow);
+  }, []);
 
   const validated = useQuery({
     queryKey: ["@connect", "validate", request],
@@ -122,19 +166,63 @@ export function ConnectPage() {
     (list.length === 1 ? keyOf(list[0].org, list[0].slug) : "");
   const selected = list.find((p) => keyOf(p.org, p.slug) === selectedKey);
 
+  // Only the auto path sends the intent; the Allow button calls `allow.mutate(false)`.
   const allow = useMutation({
-    mutationFn: () => connectApi.authorize({ ...request!, org: selected!.org, project: selected!.slug }),
+    mutationFn: (withIntent: boolean) => {
+      const { intent: carried, ...base } = request!;
+      return connectApi.authorize({
+        ...base,
+        ...(withIntent && carried ? { intent: carried } : {}),
+        org: selected!.org,
+        project: selected!.slug,
+      });
+    },
     onSuccess: ({ redirect }) => {
       forgetRequest();
+      markDone();
       void hardNavigate(redirect);
     },
   });
+
+  const preApproved = !!v?.pre_approved && !dropped;
+  const autoOk = preApproved && hinted !== null && choice === null && projects.isSuccess && selectedKey === hinted;
+  // `sent` is a ref, so StrictMode's double effect never submits twice. Keyed on
+  // `autoOk` alone: `allow` is a new object every render.
+  useEffect(() => {
+    if (!autoOk || sent.current) return;
+    sent.current = true;
+    allow.mutate(true, {
+      onError: (err) => {
+        setDropped(true);
+        if (err instanceof ApiError && err.code === "intent_expired") {
+          setIntentExpired(true);
+          allow.reset();
+        }
+      },
+    });
+  }, [autoOk]);
+  useEffect(() => {
+    if (preApproved && (projects.isError || (projects.isSuccess && selectedKey !== hinted))) setDropped(true);
+  }, [preApproved, projects.isError, projects.isSuccess, selectedKey, hinted]);
+  // Back on the normal page after a refused intent: the next step is Allow.
+  useEffect(() => {
+    if (intentExpired) allowRef.current?.focus();
+  }, [intentExpired]);
   const cancel = () => {
     forgetRequest();
     void hardNavigate(v!.cancel_url);
   };
 
   if (request === null) {
+    if (done) {
+      return (
+        <AuthLayout title="Connection finished">
+          <p className="text-sm text-muted-foreground" data-testid="connect-done">
+            You can close this tab.
+          </p>
+        </AuthLayout>
+      );
+    }
     return <Refused error={new ApiError(422, "The address is missing parts of the request.", "bad_connect_request")} />;
   }
   if (validated.isError) return <Refused error={validated.error} />;
@@ -142,6 +230,19 @@ export function ConnectPage() {
     return (
       <AuthLayout title="Connect a local WhyGraph">
         <Skeleton className="h-24" />
+      </AuthLayout>
+    );
+  }
+  if (preApproved && (projects.isLoading || autoOk || allow.isPending || allow.isSuccess)) {
+    const orgName = selected?.org_name ?? v.orgs.find((o) => o.slug === v.org)?.name;
+    const place = [orgName, selected?.name].filter(Boolean).join(" / ");
+    const who = [place && `to ${place}`, login && `as @${login}`].filter(Boolean).join(" ");
+    return (
+      <AuthLayout title={`Connecting ${v.client_name}…`}>
+        <div role="status" aria-busy="true" data-testid="connect-auto" className="flex flex-col gap-3">
+          {who && <p className="text-sm text-muted-foreground">{who}</p>}
+          <Skeleton className="h-10" />
+        </div>
       </AuthLayout>
     );
   }
@@ -210,17 +311,25 @@ export function ConnectPage() {
           </AlertDescription>
         </Alert>
       )}
+      {intentExpired && (
+        <Alert data-testid="connect-intent-expired">
+          <AlertDescription>
+            This one-time approval expired or was already used. Approve this connection below.
+          </AlertDescription>
+        </Alert>
+      )}
       {allow.isError && (
         <Alert variant="destructive" data-testid="connect-error">
           <AlertDescription>{linkError(allow.error)}</AlertDescription>
         </Alert>
       )}
       <p className="text-xs text-muted-foreground">
-        Allowing gives that machine read-only access to this project. You can revoke it any time in the
-        project's Settings &gt; Connected portals.
+        Allowing lets that machine read this project's history as you and, if your role allows, ask for
+        rationale cards, which use the organization's AI keys within its hourly limit. You can revoke it
+        any time on your Account page, under Connected machines.
       </p>
       <div className="flex flex-wrap gap-2">
-        <Button onClick={() => allow.mutate()} disabled={!selected || allow.isPending}>
+        <Button ref={allowRef} onClick={() => allow.mutate(false)} disabled={!selected || allow.isPending}>
           {allow.isPending ? "Connecting…" : "Allow"}
         </Button>
         <Button variant="outline" onClick={cancel}>

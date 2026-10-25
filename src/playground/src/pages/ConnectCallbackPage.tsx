@@ -6,6 +6,7 @@ import { platformApi } from "../api";
 import { linkError } from "../lib/errors";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
+import { parseLinkPlatform } from "./LinkPage";
 
 export interface CallbackSearch {
   code?: string;
@@ -62,9 +63,16 @@ export function ConnectCallbackPage() {
       )}
       {(!search.state || finish.isError) && (
         <div>
-          <Button variant="outline" render={<Link to="/projects/new" search={{ source: "platform" }} />}>
-            Start again
-          </Button>
+          {/* The platform that answered, when it named itself: the same request, not a blank form. */}
+          {parseLinkPlatform(search.iss) ? (
+            <Button variant="outline" render={<Link to="/link" search={{ platform: parseLinkPlatform(search.iss)! }} />}>
+              Start again
+            </Button>
+          ) : (
+            <Button variant="outline" render={<Link to="/projects/new" search={{ source: "platform" }} />}>
+              Start again
+            </Button>
+          )}
         </div>
       )}
     </PageContainer>

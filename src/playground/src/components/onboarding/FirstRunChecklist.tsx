@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { CheckIcon, FolderGit2Icon } from "lucide-react";
 import type { OnboardingItemId, ProjectSummary } from "../../api";
+import { connectableProjects } from "../../lib/connections";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { ConnectAgentDialog } from "./ConnectAgentDialog";
@@ -81,12 +82,18 @@ export function FirstRunChecklist({
         action: link("Invite", "/members"),
       }),
       agent: () => ({
-        title: "Connect your agent",
+        title: production ? "Connect local WhyGraph" : "Connect your agent",
         why: "Your coding agent then reads the history while it works.",
         action: production ? (
-          <Button size="sm" variant="outline" onClick={() => setAgentOpen(true)}>
-            Connect your agent
-          </Button>
+          connectableProjects(projects).length > 0 ? (
+            <Button size="sm" variant="outline" onClick={() => setAgentOpen(true)}>
+              Connect local WhyGraph
+            </Button>
+          ) : projects.some((p) => p.importing) ? (
+            <span className="text-sm text-muted-foreground">Available once the import finishes</span>
+          ) : (
+            link("Import a repository first", "/projects/new")
+          )
         ) : first ? (
           link("Open the Overview", "/p/$slug", { params: { slug: first.slug } })
         ) : (

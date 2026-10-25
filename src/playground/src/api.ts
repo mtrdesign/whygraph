@@ -1133,6 +1133,8 @@ export interface ConnectRequest {
   client_name: string;
   org?: string;
   project?: string;
+  /** The platform card's one-time intent (Phase 4): lets this page skip Allow when the server vouches for it. */
+  intent?: string;
 }
 
 /** `POST /api/connect/validate`. Both URLs the page navigates to come from the server. */
@@ -1144,6 +1146,8 @@ export interface ConnectValidated {
   project: string | null;
   orgs: { slug: string; name: string; role: string }[];
   cancel_url: string;
+  /** True only when the request's intent was issued to this user for the hinted project and port. */
+  pre_approved: boolean;
 }
 
 export interface ConnectProject {
@@ -1197,6 +1201,14 @@ export interface ProjectConnection {
 /** The plan's name for a project's connection row. */
 export type ConnectionRow = ProjectConnection;
 
+/** `GET /api/projects/{slug}/connections/mine`: the caller's own machines linked to one project. */
+export interface MyProjectConnection {
+  uid: string;
+  client_name: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
 export const connectApi = {
   validate: (body: ConnectRequest) => send<ConnectValidated>("POST", "/connect/validate", body),
   projects: () => get<ConnectProject[]>("/connect/projects"),
@@ -1208,6 +1220,12 @@ export const connectApi = {
     get<ProjectConnection[]>(
       `/projects/${encodeURIComponent(slug)}/connections${opts.includeRevoked ? "?include=revoked" : ""}`,
     ),
+  myProjectConnections: (slug: string) =>
+    get<MyProjectConnection[]>(`/projects/${encodeURIComponent(slug)}/connections/mine`),
+  connectIntent: (slug: string, port: number) =>
+    send<{ intent: string; expires_in: number }>("POST", `/projects/${encodeURIComponent(slug)}/connect-intent`, {
+      port,
+    }),
   revokeProjectConnection: (slug: string, uid: string) =>
     sendEmpty("DELETE", `/projects/${encodeURIComponent(slug)}/connections/${encodeURIComponent(uid)}`),
 };
@@ -1219,6 +1237,7 @@ export interface PlatformConnectBody {
   client_name?: string;
   org?: string;
   project?: string;
+  intent?: string;
 }
 
 /** What the platform sent back to `/connect/callback`. */
@@ -1235,13 +1254,16 @@ export interface PendingPlatformLink {
   org: string;
   project: { slug: string; name: string; [key: string]: unknown };
   clone_url: string;
-  clone_command: string;
+  /** One shell-quoted `cd <folder> && git clone <url>` per shared folder (built by the server). */
+  clone_commands: { folder: string; command: string }[];
   /** A genuine name collision: that slug is a project here this link cannot reconnect. */
   slug_taken: boolean;
   /** The already-linked project this link reconnects (a new token), when it is one. */
   reconnect: { path: string; slug: string } | null;
   candidates: { path: string; name: string; match: "origin" }[];
   other_repos: { path: string; name: string }[];
+  /** Origin-matching checkouts that are already a project here (remove it first). */
+  already_projects: { path: string; slug: string }[];
 }
 
 export const platformApi = {
@@ -1252,7 +1274,8 @@ export const platformApi = {
       body,
     ),
   callback: (body: PlatformCallbackBody) => send<{ link_id: string }>("POST", "/platform/callback", body),
-  pending: (linkId: string) => get<PendingPlatformLink>(`/platform/pending/${encodeURIComponent(linkId)}`),
+  pending: (linkId: string, refresh = false) =>
+    get<PendingPlatformLink>(`/platform/pending/${encodeURIComponent(linkId)}${refresh ? "?refresh=1" : ""}`),
   abandon: (linkId: string) =>
     send<{ revoked: boolean }>("DELETE", `/platform/pending/${encodeURIComponent(linkId)}`),
 };

@@ -336,7 +336,9 @@ def _record(path: str) -> logging.LogRecord:
             "/auth/github-app?<redacted>",
         ),
         ("/auth/github-app", "/auth/github-app"),
-        ("/signin?next=/orgs", "/signin?next=/orgs"),
+        # A consent that needs a sign-in carries its intent in `next`.
+        ("/signin?next=/orgs", "/signin?<redacted>"),
+        ("/orgs?next=/x", "/orgs?next=/x"),
         ("/api/auth/github/callback", "/api/auth/github/callback"),
     ],
 )

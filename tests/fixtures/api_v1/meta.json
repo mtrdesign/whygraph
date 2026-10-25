@@ -1,6 +1,7 @@
 {
   "body": {
     "api_version": 1,
+    "base_origin": "http://whygraph.localhost:8765",
     "capabilities": [
       "evidence",
       "rationale",

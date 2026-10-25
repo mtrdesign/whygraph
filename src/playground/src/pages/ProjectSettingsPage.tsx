@@ -239,7 +239,7 @@ export function ProjectSettingsPage() {
         ...(showUsage ? [{ id: "budgets", label: "Usage" }] : []),
         ...(showAgents ? [{ id: "agents", label: "Agents" }] : []),
         ...(showAccess ? [{ id: "access", label: "Access" }] : []),
-        ...(showConnections ? [{ id: "connections", label: "Connected portals" }] : []),
+        ...(showConnections ? [{ id: "connections", label: "Connected machines" }] : []),
       ];
   if (showDanger) sections.push({ id: "danger", label: "Danger zone" });
 

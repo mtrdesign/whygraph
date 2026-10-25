@@ -21,6 +21,7 @@ from whygraph.portal.platform_client import (
     MAX_RESPONSE_BYTES,
     MAX_TITLE_CHARS,
     LocalhostTransport,
+    PlatformAddressMismatch,
     PlatformHttp,
     PlatformRefused,
     PlatformUnreachable,
@@ -30,6 +31,7 @@ from whygraph.portal.platform_client import (
     dev_platform_http_enabled,
     link_status_for,
     parse_platform_url,
+    resolve_platform_origin,
 )
 
 VERIFIER = "v" * 43
@@ -120,6 +122,81 @@ def test_api_origin_for():
     for bad in ("", "Acme", "a.b", "-x", "x/y", "a" * 80):
         with pytest.raises(ValueError):
             api_origin_for("https://wg.example.com", bad)
+
+
+@pytest.mark.parametrize(
+    ("entered", "claimed", "allow_http", "expected"),
+    [
+        # An older platform names no base: the address is used as typed.
+        ("https://wg.example.com", None, False, ("https://wg.example.com", None)),
+        # The base names itself (case and the default port normalized).
+        (
+            "https://wg.example.com",
+            "https://WG.example.com:443/",
+            False,
+            ("https://wg.example.com", None),
+        ),
+        # An org's address resolves to its base, with the org as a hint.
+        (
+            "https://acme.wg.example.com",
+            "https://wg.example.com",
+            False,
+            ("https://wg.example.com", "acme"),
+        ),
+        (
+            "http://acme.whygraph.localhost:5173",
+            "http://whygraph.localhost:5173",
+            True,
+            ("http://whygraph.localhost:5173", "acme"),
+        ),
+    ],
+)
+def test_resolve_platform_origin(entered, claimed, allow_http, expected):
+    assert resolve_platform_origin(entered, claimed, allow_http=allow_http) == expected
+
+
+@pytest.mark.parametrize(
+    ("entered", "claimed"),
+    [
+        ("https://www.wg.example.com", "https://wg.example.com"),  # never an org
+        ("https://a.acme.wg.example.com", "https://wg.example.com"),  # two deep
+        ("https://acme.wg.example.com:8443", "https://wg.example.com"),  # port
+        ("https://acme.wg.example.com", "https://wg.example.com:8443"),  # port
+        # A scheme downgrade (and upgrade) is refused.
+        ("https://acme.whygraph.localhost:5173", "http://whygraph.localhost:5173"),
+        ("http://acme.whygraph.localhost:5173", "https://whygraph.localhost:5173"),
+        ("https://acme.wg.example.com.evil", "https://wg.example.com"),  # lookalike
+        ("https://acme.evilwg.example.com", "https://wg.example.com"),  # lookalike
+        ("https://acme.wg.example.com", "https://other.example.org"),  # unrelated
+        ("https://wg.example.com", "https://acme.wg.example.com"),  # a child, not up
+        ("https://acme.wg.example.com", "https://192.0.2.1"),  # an IP base
+        ("http://acme.whygraph.localhost:5173", "http://127.0.0.1:5173"),  # IP base
+        ("https://acme.example.com", "https://com"),  # a single-label base
+    ],
+)
+def test_resolve_platform_origin_mismatch(entered, claimed):
+    with pytest.raises(PlatformAddressMismatch) as caught:
+        resolve_platform_origin(entered, claimed, allow_http=True)
+    assert caught.value.claimed == parse_platform_url(claimed, allow_http=True)
+    assert not isinstance(caught.value, ValueError)
+
+
+@pytest.mark.parametrize(
+    "claimed",
+    [
+        "",
+        "not a url",
+        "https://wg.example.com/x",
+        "https://user@wg.example.com",
+        "http://wg.example.com",  # http without the dev switch
+        "ftp://wg.example.com",
+    ],
+)
+def test_resolve_platform_origin_unparsable_claim(claimed):
+    with pytest.raises(ValueError):
+        resolve_platform_origin(
+            "https://acme.wg.example.com", claimed, allow_http=False
+        )
 
 
 def test_client_refuses_http_platform_without_dev_switch(monkeypatch):

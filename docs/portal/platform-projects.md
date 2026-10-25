@@ -11,25 +11,46 @@ that history, along with your own uncommitted work, without running a full local
 
 !!! note "Local mode only"
     Linking is done from a **local** portal. A production portal serves platform projects to
-    linked portals over `/api/v1`; it never links to another one.
+    connected machines over `/api/v1`; it never links to another one.
 
 ## Link a checkout
 
+**Before you start**, clone the repository into one of your [shared folders](shared-folders.md) and
+start WhyGraph with that folder shared (`whygraph up --add-folder <folder>`). If you have not cloned
+it, the wizard waits for you: it shows a `git clone` command for each shared folder and a **Check
+again** button. Sharing a new folder restarts the portal and drops a link in progress, so share it
+first.
+
 There are two ways in, and both end at the same wizard:
 
-- From the platform: open the project's home page and use **Use with your agent**. Enter your local
-  portal's port (`8765` unless you changed it) and press **Open in my local WhyGraph**. The link
-  opens your local portal's `/link` page with the platform, organization and project filled in.
-  The platform's page never calls your portal, so it cannot tell whether yours is running.
+- From the platform: open the project's home page and use **Connect local WhyGraph**. The card shows
+  the port it will open (`8765` unless you changed it); press **Change** to use another, then
+  **Open in my local WhyGraph**. The link opens your local portal's `/link` page with the platform,
+  organization and project filled in. The platform's page never calls your portal, so it cannot tell
+  whether yours is running. The card names the repository to clone, and says under the button what
+  it grants: WhyGraph on that port reads the project as you and, if your role allows, asks for
+  rationale cards with the organization's AI keys. If this machine already links
+  the project, your local WhyGraph says so before it connects. Once linked, the card lists your machine ("Connected on {machine}", with
+  when it was last used) and keeps **Connect another machine** for linking another machine (one
+  checkout per project on each machine).
 - From the local portal: **New project**, then **From a platform**. Enter the platform's address
-  and a **machine name**, and press **Connect**.
+  and a **machine name**, and press **Connect**. If a project of this portal is already linked to a
+  platform, its address is filled in; with several, each is offered as a button. Your
+  organization's address (for example `https://acme.whygraph.example.com`) works too: the consent
+  then opens on the platform's main address with that organization preselected.
 
 The machine name is what the platform lists for this connection; it defaults to your host's name
 (`whygraph up` passes it to the container) and you can edit it, with letters, digits, `.`, `_`,
 `-` and spaces, up to 64 characters.
 
 **Connect** sends your browser to the platform's consent page. Sign in there if you are not
-already, check the project and the machine name, and press **Allow**. The browser returns to your
+already, check the project and the machine name, and press **Allow**. When you started from the
+platform's **Connect local WhyGraph** card, signed in as the same person, the platform skips its
+Allow page ("Connecting {machine}...") and returns at once; your local **Connect** was the one
+confirmation. That skip works once, within 15 minutes, for the port on the card; otherwise (an
+expired or used approval, another account, another port) the platform shows its Allow page as
+usual, with a note when the approval expired. Going back to the platform's tab after the consent
+shows **Connection finished**: close it. The browser returns to your
 portal, which exchanges the one-time code for a **connection token** for that one project, held
 encrypted in the portal's own database (see [Security](security.md#connected-portals)). Then:
 
@@ -38,7 +59,11 @@ encrypted in the portal's own database (see [Security](security.md#connected-por
    `origin` names the platform project's repository (host, owner and name, so a mirror or an SSH
    host alias works), **or** the commit the platform last scanned exists in it; other repositories
    are listed below the matches for that second case. A project the platform has not scanned yet
-   needs the `origin` match. Anything else is refused with `origin_mismatch`.
+   needs the `origin` match. Anything else is refused with `origin_mismatch`. When exactly one
+   checkout matches, it is selected. **Check again** searches the shared folders again, so a clone
+   you just made is found at once. A checkout that is already a project on this portal is listed
+   but cannot be picked: remove that project first (see [Moving a local project to a
+   platform](#moving-a-local-project-to-a-platform)).
 2. **Set up.** The same preview as for a local project: `.gitignore` entries, the git hooks, the
    MCP entry and bundled files for each agent you select, and the two marker files. No database is
    created. The agents the checkout already has are ticked; with none ticked, the step warns that
@@ -47,7 +72,8 @@ encrypted in the portal's own database (see [Security](security.md#connected-por
    as the platform's project.
 
 **Finish** also starts the first scan, a CodeGraph index of your checkout (it reads no history and
-calls no LLM), and the last panel follows it, with **Connect your agent** below. There is no
+calls no LLM), the last panel follows it and names what was linked (organization/project on the platform), with
+**Connect your agent** below. There is no
 Configure step: the project's models and keys are the platform's.
 
 The slug is the platform's slug. If a project with that slug already exists on your portal, linking
@@ -81,7 +107,8 @@ To link a checkout that is already a local project, **remove** the local project
 the checkout. Leave **Also delete history** unticked when you remove it: the local history stays in
 the portal's data directory (`projects/local/<slug>/`) and is yours to keep or delete by hand. A linked
 project never opens that history and never deletes it, so linking and later removing the link leave it
-alone. The platform builds its own history from the repository on GitHub.
+alone. The platform builds its own history from the repository on GitHub. Pick the same folder in
+the wizard; the Set up step writes the hooks, markers and agent entries again for the linked project.
 
 ## What leaves your machine
 
@@ -161,5 +188,5 @@ status and keeps the project, its slug and its agent files. Any other collision 
 
 **Settings**, then **Remove**, does what removing any project does (hooks, markers, optional agent
 entries; your repository is never deleted) and first **revokes the connection token on the
-platform**. It tells you when that failed, so you can revoke it yourself under **Connected portals**
+platform**. It tells you when that failed, so you can revoke it yourself under **Connected machines**
 on the platform. The platform's project is untouched, and removal is refused while a scan is running.

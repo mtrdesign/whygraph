@@ -262,37 +262,57 @@ describe("FirstRunChecklist - production", () => {
     expect(fake.log.some((c) => c.path === "/api/onboarding")).toBe(false);
   });
 
-  it("opens Connect your agent, with the hint when there is no project", async () => {
-    const user = userEvent.setup();
+  it("an empty production org shows Import a repository first", async () => {
     mount("/");
-    await user.click(await screen.findByRole("button", { name: "Connect your agent" }));
-    const dialog = await screen.findByTestId("connect-agent-dialog");
-    expect(within(dialog).getByText("whygraph up")).toBeInTheDocument();
-    expect(await within(dialog).findByTestId("connect-agent-no-projects")).toHaveTextContent(
-      "Open a project, then Use with your agent.",
+    const agent = await screen.findByTestId("first-run-agent");
+    expect(within(agent).getByRole("link", { name: "Import a repository first" })).toHaveAttribute(
+      "href",
+      "/projects/new",
     );
-    expect(within(dialog).queryByTestId("use-with-agent")).toBeNull();
+    expect(within(agent).queryByRole("button", { name: "Connect local WhyGraph" })).toBeNull();
+  });
+
+  it("an org whose only project is importing says it is available once the import finishes", async () => {
+    fake.projects = [project("alpha", { source: "github", importing: true } as Partial<ProjectSummary>)];
+    mount("/");
+    const agent = await screen.findByTestId("first-run-agent");
+    expect(agent).toHaveTextContent("Available once the import finishes");
+    expect(within(agent).queryByRole("button")).toBeNull();
+    expect(within(agent).queryByRole("link")).toBeNull();
   });
 
   it("picks a project for the per-project link", async () => {
     const user = userEvent.setup();
     fake.projects = [project("alpha", { source: "github" }), project("beta", { source: "github" })];
     mount("/");
-    await user.click(await screen.findByRole("button", { name: "Connect your agent" }));
+    await user.click(await screen.findByRole("button", { name: "Connect local WhyGraph" }));
     const dialog = await screen.findByTestId("connect-agent-dialog");
-    expect(within(dialog).queryByTestId("use-with-agent")).toBeNull();
+    expect(within(dialog).queryByTestId("use-with-agent-dialog")).toBeNull();
     await user.selectOptions(await within(dialog).findByLabelText("Project"), "beta");
-    expect(await within(dialog).findByTestId("use-with-agent")).toBeInTheDocument();
+    expect(await within(dialog).findByTestId("use-with-agent-dialog")).toBeInTheDocument();
   });
 
   it("uses the only project without asking", async () => {
     const user = userEvent.setup();
     fake.projects = [project("alpha", { source: "github" })];
     mount("/");
-    await user.click(await screen.findByRole("button", { name: "Connect your agent" }));
+    await user.click(await screen.findByRole("button", { name: "Connect local WhyGraph" }));
     const dialog = await screen.findByTestId("connect-agent-dialog");
-    expect(await within(dialog).findByTestId("use-with-agent")).toBeInTheDocument();
+    expect(await within(dialog).findByTestId("use-with-agent-dialog")).toBeInTheDocument();
     expect(within(dialog).queryByLabelText("Project")).toBeNull();
+  });
+
+  it("shows the install and start steps once on an org host (no card title, no second list)", async () => {
+    const user = userEvent.setup();
+    fake.projects = [project("alpha", { source: "github" })];
+    mount("/");
+    await user.click(await screen.findByRole("button", { name: "Connect local WhyGraph" }));
+    const dialog = await screen.findByTestId("connect-agent-dialog");
+    expect(await within(dialog).findByRole("link", { name: "Open in my local WhyGraph" })).toBeInTheDocument();
+    expect(within(dialog).getAllByRole("list")).toHaveLength(1);
+    expect(within(dialog).getAllByText("whygraph up --add-folder ~/Work", { selector: "code" })).toHaveLength(1);
+    expect(within(dialog).getAllByRole("link", { name: "installation guide" })).toHaveLength(1);
+    expect(within(dialog).getAllByRole("heading", { name: "Connect local WhyGraph" })).toHaveLength(1);
   });
 });
 
@@ -307,7 +327,7 @@ describe("WelcomeBanner", () => {
     mount("/");
     const banner = await screen.findByTestId("welcome-banner");
     expect(banner).toHaveTextContent("You've been added to Acme as a Member.");
-    expect(banner).toHaveTextContent("Next: connect your agent");
+    expect(banner).toHaveTextContent("Next: connect your local WhyGraph so your coding agent can use this organization's projects.");
     // The text has a real basis, so on a phone the buttons wrap under it (no 140px column).
     expect(banner.className).toContain("flex-wrap");
     expect(within(banner).getByTestId("welcome-text").className).toContain("flex-[1_1_20rem]");
@@ -322,8 +342,26 @@ describe("WelcomeBanner", () => {
     mount("/");
     const banner = await screen.findByTestId("welcome-banner");
     expect(banner).toHaveTextContent("as an Admin.");
-    await user.click(within(banner).getByRole("button", { name: "Connect your agent" }));
+    await user.click(await within(banner).findByRole("button", { name: "Connect local WhyGraph" }));
     expect(await screen.findByTestId("connect-agent-dialog")).toBeInTheDocument();
+  });
+
+  it("keeps the Connect button when a readable project exists", async () => {
+    mount("/");
+    const banner = await screen.findByTestId("welcome-banner");
+    expect(await within(banner).findByRole("button", { name: "Connect local WhyGraph" })).toBeInTheDocument();
+    expect(fake.log.some((c) => c.path === "/api/projects")).toBe(true);
+  });
+
+  it("offers only Dismiss when no project can be connected yet", async () => {
+    fake.projects = [];
+    mount("/");
+    const banner = await screen.findByTestId("welcome-banner");
+    await waitFor(() => expect(banner).toHaveTextContent("Projects shared with you will appear here."));
+    expect(banner).toHaveTextContent("You've been added to Acme as a Member.");
+    expect(banner).not.toHaveTextContent("Next: connect your local WhyGraph");
+    expect(within(banner).queryByRole("button", { name: "Connect local WhyGraph" })).toBeNull();
+    expect(within(banner).getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
   });
 
   it("retries a failed dismissal on the next load without showing the banner again", async () => {

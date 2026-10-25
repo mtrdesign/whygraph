@@ -481,6 +481,14 @@ class PortalState:
     connect_ip : Throttle
         Failed ``POST /api/connect/token`` exchanges, per ``ip_key``:
         60 / 10 min (a successful exchange is never counted).
+    connect_intents : ConnectIntents
+        The intents of ``POST /api/projects/{slug}/connect-intent`` in
+        flight, single use, 15 min, bound to user, org, project and port;
+        they only let the consent page skip its Allow click
+        (production-local-connect-ux plan section 7.2).
+    connect_intent_user : Throttle
+        Every ``POST /api/projects/{slug}/connect-intent``, per user id:
+        120 / hour.
     v1_token : Throttle
         ``/api/v1`` status, history and resource reads, per connection
         token: 600 / min (M2e plan section 4.5).
@@ -589,6 +597,8 @@ class PortalState:
         self.connect_codes = connections.PendingCodes()
         self.connect_user = Throttle(30, 60 * 60)
         self.connect_ip = Throttle(60, 10 * 60)
+        self.connect_intents = connections.ConnectIntents()
+        self.connect_intent_user = Throttle(120, 60 * 60)
         self.v1_token = Throttle(600, 60)
         self.v1_heavy = Throttle(60, 60)
         self.v1_in_flight = InFlight(2)

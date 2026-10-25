@@ -67,7 +67,7 @@ each view:
 | **Projects** | Spend, calls and tokens for each project |
 | **Members** | Each person's spend, tokens, calls, the split, and their top project. Production only |
 | **Models** | The same, per provider and model |
-| **Machines** | Calls made through [connected portals](../deploy/production.md#connected-portals), per machine. Production only |
+| **Machines** | Calls made through [connected machines](../deploy/production.md#connected-portals), per machine. Production only |
 | **Calls** | Every call, 50 to a page, newest first or costliest first, filterable by project, member, task, source, model, scan run or chat session |
 | **Budgets** | Budgets, this month's crossings and the unpriced warning. See [Budgets](#budgets-and-the-hard-stop) |
 | **Prices** | The price table and your overrides. See [Prices](#prices-and-overrides) |
@@ -103,7 +103,7 @@ prefixed with `'` so a spreadsheet does not run it.
 |---|---|
 | Chat, Explorer **Generate**, the lazy backfill | The person using it |
 | A full rescan or **Describe now** | The person who started it. When requests merge, the first person who asked for analysis |
-| A connected portal's agent | The connection's owner, with the connection and machine name |
+| A connected machine's agent | The connection's owner, with the connection and machine name |
 | A webhook, reconcile, hook or catch-up scan | **System** |
 
 **System is nearly empty by design.** Webhook, reconcile, hook and catch-up scans are structure-only
@@ -126,7 +126,7 @@ and the top budget is called the **Portal budget** (the **Organization budget** 
     own past rows for it, by name, without a link. A removed member's rows stay, labelled with the
     name they had.
 
-    **Machines** has one row per connected portal. Calls that did not come through one (chat, the
+    **Machines** has one row per connected machine. Calls that did not come through one (chat, the
     Explorer, scans) are grouped as **Portal**. A connection that has since been deleted shows its
     machine name, or **Unknown machine** when even that is gone.
 

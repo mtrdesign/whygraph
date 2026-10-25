@@ -79,7 +79,7 @@ export function signInDescription(next: string | undefined, reauth: boolean, bas
   const url = new URL(next);
   const base = new URL(baseUrl!);
   if (url.host === base.host && url.pathname.replace(/\/+$/, "") === "/connect") {
-    return "Sign in to connect your local portal.";
+    return "Sign in to connect your local WhyGraph.";
   }
   const path = url.pathname === "/" ? "" : url.pathname.replace(/\/+$/, "");
   return `Sign in to continue to ${url.host}${path}.`;

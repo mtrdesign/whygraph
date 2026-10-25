@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
-import { onboardingApi, portalKey, type PortalState } from "../../api";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { onboardingApi, portalApi, portalKey, type PortalState } from "../../api";
+import { connectableProjects } from "../../lib/connections";
 import { usePortalState } from "../../lib/identity";
 import { orgRoleLabel } from "../../lib/labels";
 import { alertVariants } from "../ui/alert";
@@ -61,9 +62,21 @@ export function WelcomeBanner() {
     if (!retry) return;
     onboardingApi
       .dismissWelcome()
-      .then(() => store(key, false))
+      .then(() => {
+        store(key, false);
+        // The pending marker is gone, so `retry` reads false on the next render: stay hidden.
+        setHidden(true);
+      })
       .catch(() => undefined);
   }, [retry, key]);
+
+  // The same key as the Projects page, so no extra request there. Off on the base host (no welcome).
+  const projects = useQuery({
+    queryKey: portalKey("projects"),
+    queryFn: portalApi.projects,
+    enabled: !!welcome && !hidden && !retry,
+  });
+  const canConnect = connectableProjects(projects.data?.projects ?? []).length > 0;
 
   if (!welcome || hidden || retry) return null;
   const role = orgRoleLabel(welcome.role);
@@ -84,12 +97,16 @@ export function WelcomeBanner() {
           <strong className="font-medium">
             You've been added to {welcome.org_name} as {article} {role}.
           </strong>{" "}
-          Next: connect your agent so it can use this organization's projects.
+          {projects.isPending || canConnect
+            ? "Next: connect your local WhyGraph so your coding agent can use this organization's projects."
+            : "Projects shared with you will appear here."}
         </p>
         <div className="flex shrink-0 gap-2">
-          <Button size="sm" onClick={() => setDialog(true)}>
-            Connect your agent
-          </Button>
+          {canConnect && (
+            <Button size="sm" onClick={() => setDialog(true)}>
+              Connect local WhyGraph
+            </Button>
+          )}
           <Button size="sm" variant="ghost" onClick={() => void dismiss()}>
             Dismiss
           </Button>

@@ -290,13 +290,26 @@ class AccessLogRedactor(logging.Filter):
     carry the single-use ``code`` and the ``state`` in that query; so do a
     connected portal's consent page ``/connect`` (its PKCE ``state``) and
     the local portal's ``/connect/callback`` (the platform's code, M2e).
-    uvicorn's access records carry the request line as ``args[2]``; this
-    filter rewrites ``/auth/github?...`` to ``/auth/github?<redacted>``
-    (and the same for ``/auth/github-app``) and always lets the record
-    through.
+    The local portal's ``/link`` and its ``/setup?next=/link...`` round
+    trip carry the platform card's one-time connect intent
+    (production-local-connect-ux plan section 7.5), so their queries are
+    blanked too, and so is the platform's ``/signin?next=...``: a consent
+    that needs a sign-in carries the whole ``/connect`` query, intent
+    included, in ``next``. uvicorn's access records carry the request line as
+    ``args[2]``; this filter rewrites ``/auth/github?...`` to
+    ``/auth/github?<redacted>`` (and the same for every path in
+    :attr:`PATHS`) and always lets the record through.
     """
 
-    PATHS = ("/auth/github", "/auth/github-app", "/connect", "/connect/callback")
+    PATHS = (
+        "/auth/github",
+        "/auth/github-app",
+        "/connect",
+        "/connect/callback",
+        "/link",
+        "/setup",
+        "/signin",
+    )
 
     def filter(self, record: logging.LogRecord) -> bool:
         """Redact the callback query in place; never drops a record."""

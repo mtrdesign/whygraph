@@ -11,7 +11,7 @@ from collections.abc import Collection, Iterator
 
 from whygraph.core import Shell
 
-from .commands import GhApiGraphqlCmd, paginate_graphql
+from .commands import GhApiGraphqlCmd, floor_for, format_github_ts, paginate_graphql
 from .exceptions import GitHubError
 from .issue import Issue
 from .token import GH_TOKEN_ENV, token_env
@@ -23,7 +23,29 @@ query($owner: String!, $name: String!, $cursor: String) {
       first: 100
       after: $cursor
       states: [OPEN, CLOSED]
-      orderBy: {field: CREATED_AT, direction: ASC}
+      orderBy: {field: UPDATED_AT, direction: DESC}
+    ) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number title body state url
+        createdAt updatedAt closedAt
+        author { login }
+        labels(first: 20) { nodes { name } }
+      }
+    }
+  }
+}
+"""
+
+_SINCE_QUERY = """
+query($owner: String!, $name: String!, $cursor: String, $since: DateTime!) {
+  repository(owner: $owner, name: $name) {
+    issues(
+      first: 100
+      after: $cursor
+      states: [OPEN, CLOSED]
+      filterBy: {since: $since}
+      orderBy: {field: UPDATED_AT, direction: DESC}
     ) {
       pageInfo { hasNextPage endCursor }
       nodes {
@@ -122,6 +144,36 @@ class Issues(Collection[Issue]):
             query=_LIST_QUERY,
             path=("repository", "issues"),
             variables={"owner": self.owner, "name": self.name},
+        ):
+            yield Issue.from_graphql_node(node)
+
+    def updated_since(self, watermark: str) -> Iterator[Issue]:
+        """Yield issues updated at or after ``watermark`` minus the lookback.
+
+        The filter is server-side (``filterBy: {since: ...}``), so every
+        issue GitHub returns is wanted and there is no client-side stop.
+
+        Parameters
+        ----------
+        watermark : str
+            A stored GitHub timestamp (``2026-10-26T12:00:00Z``).
+
+        Yields
+        ------
+        Issue
+            Each matching issue, newest update first.
+
+        Raises
+        ------
+        GitHubError
+            If ``gh`` fails or the response is malformed.
+        """
+        since = format_github_ts(floor_for(watermark))
+        for node in paginate_graphql(
+            self._shell,
+            query=_SINCE_QUERY,
+            path=("repository", "issues"),
+            variables={"owner": self.owner, "name": self.name, "since": since},
         ):
             yield Issue.from_graphql_node(node)
 

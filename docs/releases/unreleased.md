@@ -20,9 +20,18 @@
   confirmation (**Connect** on your machine); the platform's Allow page is skipped. The card says
   what the link grants, and the approval it carries works once, for the same person, project and
   port, within 15 minutes.
+- **Faster rescans.** After a repository's first scan, a scan asks GitHub only for pull requests and
+  issues created or updated since the previous one, so *Describe now*, *Scan now* and GitHub push
+  syncs no longer download the whole history again.
 
 ## Fixes
 
 - **Linking with your organization's address.** Entering your organization's address (instead of
   the platform's) in **From a platform** no longer fails after you approve; the organization is
   preselected.
+- **Pull requests and issues stay current.** A pull request that was open when first scanned and
+  merged later is now updated (state, comments, closed issues). The first full scan after upgrading
+  walks the GitHub history once more to bring older rows up to date.
+- **Squash-merge recovery no longer stalls.** One pull request whose branch ref is gone from GitHub
+  no longer stops every other squash-merged pull request from being recovered, and it is not retried
+  on every scan.

@@ -15,26 +15,16 @@ and the ``totalCount`` count query.
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterator
+from collections.abc import Collection, Iterator, Sequence
 
-from whygraph.core import Shell
+from whygraph.core import Shell, ShellError
 
-from .commands import GhApiGraphqlCmd, paginate_graphql
+from .commands import GhApiGraphqlCmd, floor_for, paginate_graphql, parse_github_ts
 from .exceptions import GitHubError
 from .pull_request import PullRequest
 from .token import GH_TOKEN_ENV, token_env
 
-_LIST_QUERY = """
-query($owner: String!, $name: String!, $cursor: String) {
-  repository(owner: $owner, name: $name) {
-    pullRequests(
-      first: 100
-      after: $cursor
-      states: [OPEN, CLOSED, MERGED]
-      orderBy: {field: CREATED_AT, direction: ASC}
-    ) {
-      pageInfo { hasNextPage endCursor }
-      nodes {
+_PR_FIELDS = """\
         number title body state isDraft url
         createdAt updatedAt closedAt mergedAt
         mergeCommit { oid }
@@ -58,10 +48,50 @@ query($owner: String!, $name: String!, $cursor: String) {
         comments(first: 100) {
           nodes { author { login } body createdAt }
         }
-      }
+"""
+
+_LIST_QUERY = (
+    """
+query($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(
+      first: 100
+      after: $cursor
+      states: [OPEN, CLOSED, MERGED]
+      orderBy: {field: UPDATED_AT, direction: DESC}
+    ) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+"""
+    + _PR_FIELDS
+    + """      }
     }
   }
 }
+"""
+)
+
+_UPDATES_QUERY = """
+query($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(
+      first: 100
+      after: $cursor
+      states: [OPEN, CLOSED, MERGED]
+      orderBy: {field: UPDATED_AT, direction: DESC}
+    ) {
+      pageInfo { hasNextPage endCursor }
+      nodes { number updatedAt }
+    }
+  }
+}
+"""
+
+DETAILS_BATCH = 20
+"""PRs per details request.
+
+20 x (250 commits + 100 comments + 50 refs + 20 labels) stays far under
+GitHub's 500k-node limit and its 10 s query timeout.
 """
 
 _COUNT_QUERY = """
@@ -155,6 +185,87 @@ class PullRequests(Collection[PullRequest]):
             variables={"owner": self.owner, "name": self.name},
         ):
             yield PullRequest.from_graphql_node(node)
+
+    def updates_since(self, watermark: str) -> Iterator[tuple[int, str]]:
+        """Yield ``(number, updatedAt)`` of PRs updated since ``watermark``.
+
+        Lists PRs newest-update first, light (``number updatedAt`` only),
+        and stops paginating at the first node older than ``watermark``
+        minus the lookback.
+
+        Parameters
+        ----------
+        watermark : str
+            A stored GitHub timestamp (``2026-10-26T12:00:00Z``).
+
+        Yields
+        ------
+        tuple[int, str]
+            The PR number and its ``updatedAt`` as GitHub sent it.
+
+        Raises
+        ------
+        GitHubError
+            If ``gh`` fails or the response is malformed.
+        """
+        floor = floor_for(watermark)
+        for node in paginate_graphql(
+            self._shell,
+            query=_UPDATES_QUERY,
+            path=("repository", "pullRequests"),
+            variables={"owner": self.owner, "name": self.name},
+        ):
+            if parse_github_ts(node["updatedAt"]) < floor:
+                return
+            yield int(node["number"]), node["updatedAt"]
+
+    def by_numbers(self, numbers: Sequence[int]) -> Iterator[PullRequest]:
+        """Yield the full details of the given PRs, in the order asked.
+
+        Sends :data:`DETAILS_BATCH` PRs per request as aliased
+        ``pullRequest(number:)`` fields. An empty sequence sends nothing.
+
+        Parameters
+        ----------
+        numbers : Sequence[int]
+            PR numbers to fetch.
+
+        Yields
+        ------
+        PullRequest
+            One per number; a null alias is skipped.
+
+        Raises
+        ------
+        GitHubError
+            If ``gh`` fails (including a number GitHub cannot resolve,
+            which makes ``gh`` exit non-zero) or the response is malformed.
+        """
+        nums = [int(n) for n in numbers]
+        for start in range(0, len(nums), DETAILS_BATCH):
+            batch = nums[start : start + DETAILS_BATCH]
+            aliases = "".join(
+                f"    pr{n}: pullRequest(number: {n}) {{\n{_PR_FIELDS}    }}\n"
+                for n in batch
+            )
+            query = (
+                "query($owner: String!, $name: String!) {\n"
+                "  repository(owner: $owner, name: $name) {\n"
+                f"{aliases}  }}\n}}\n"
+            )
+            try:
+                data = self._shell.run(
+                    GhApiGraphqlCmd(query, {"owner": self.owner, "name": self.name}),
+                    env=token_env(GH_TOKEN_ENV),
+                )
+            except ShellError as exc:
+                detail = exc.stderr.strip() or exc.stdout.strip()
+                raise GitHubError(f"gh api graphql failed: {detail}") from exc
+            repo = (data or {}).get("repository") or {}
+            for n in batch:
+                node = repo.get(f"pr{n}")
+                if node is not None:
+                    yield PullRequest.from_graphql_node(node)
 
     def __contains__(self, item: object) -> bool:
         if not isinstance(item, PullRequest):

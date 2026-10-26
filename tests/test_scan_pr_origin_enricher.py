@@ -90,9 +90,26 @@ class _StubRepo:
     def __init__(self, metadata: dict[str, CommitDC]) -> None:
         self._metadata = metadata
         self.fetched: list[list[str]] = []
+        self.present: set[str] | None = None
+        self.ls_remote_error: str | None = None
+        self.remote_ref_calls: list[list[str]] = []
+        self.fetch_failures = 0
 
     def fetch_refs(self, refspecs: list[str], *, remote: str | None = None) -> None:
+        from whygraph.services.git import GitError
+
         self.fetched.append(list(refspecs))
+        if self.fetch_failures > 0:
+            self.fetch_failures -= 1
+            raise GitError("fetch failed")
+
+    def remote_refs(self, refs: list[str]) -> set[str]:
+        from whygraph.services.git import GitError
+
+        self.remote_ref_calls.append(list(refs))
+        if self.ls_remote_error is not None:
+            raise GitError(self.ls_remote_error)
+        return self.present if self.present is not None else set(refs)
 
     def commit_metadata(self, ref: str) -> CommitDC:
         from whygraph.services.git import GitError
@@ -321,6 +338,157 @@ def test_work_skips_scan_when_fetch_fails(whygraph_db_initialized: Path) -> None
     with get_session() as session:
         assert session.get(Commit, "f1") is None
         assert session.get(Commit, "f2") is None
+
+
+# --- missing refs are remembered (plan §4.3, tests 19-25) --------------------
+
+
+def _three_squash_prs() -> None:
+    with get_session() as session:
+        for n in (1, 2, 3):
+            session.add(_commit(f"sq{n}", files_changed=40))
+            session.add(_pr(n, oids=[f"o{n}"], merge_commit_sha=f"sq{n}"))
+        session.commit()
+
+
+def _enrich(repo: _StubRepo) -> PROriginEnricher:
+    enricher = PROriginEnricher(
+        Progress(), repository=repo, min_commits=5, large_commit_file_count=30
+    )
+    enricher.run()
+    assert enricher.error is None
+    return enricher
+
+
+def _skips() -> dict[int, tuple[str, str]]:
+    from sqlmodel import select
+
+    from whygraph.db.models import PROriginSkip
+
+    with get_session() as session:
+        rows = session.exec(select(PROriginSkip)).all()
+        return {r.pr_number: (r.reason, r.pr_updated_at) for r in rows}
+
+
+def _refspec(n: int) -> str:
+    return f"refs/pull/{n}/head:refs/whygraph/pull/{n}"
+
+
+def _repo_missing_pr3() -> _StubRepo:
+    repo = _StubRepo({f"o{n}": _dc(f"o{n}") for n in (1, 2, 3)})
+    repo.fetch_failures = 1
+    repo.present = {"refs/pull/1/head", "refs/pull/2/head"}
+    return repo
+
+
+def test_missing_ref_is_recorded_and_the_rest_recovered(
+    whygraph_db_initialized: Path,
+) -> None:
+    _three_squash_prs()
+    repo = _repo_missing_pr3()
+    enricher = _enrich(repo)
+
+    assert repo.fetched == [
+        [_refspec(1), _refspec(2), _refspec(3)],
+        [_refspec(1), _refspec(2)],
+    ]
+    assert _skips() == {3: ("missing_ref", "2026-01-01T00:00:00+00:00")}
+    with get_session() as session:
+        assert session.get(Commit, "o1") is not None
+        assert session.get(Commit, "o2") is not None
+        assert session.get(Commit, "o3") is None
+    assert enricher.summary == "2 commits recovered · 1 PR refs missing"
+
+
+def test_skipped_pr_is_not_fetched_again(whygraph_db_initialized: Path) -> None:
+    _three_squash_prs()
+    _enrich(_repo_missing_pr3())
+
+    repo = _StubRepo({})
+    _enrich(repo)
+    assert repo.fetched == []
+    assert repo.remote_ref_calls == []
+
+
+def test_skipped_pr_is_a_candidate_again_once_it_changes(
+    whygraph_db_initialized: Path,
+) -> None:
+    _three_squash_prs()
+    _enrich(_repo_missing_pr3())
+    with get_session() as session:
+        pr = session.get(PullRequest, 3)
+        pr.updated_at = "2026-02-01T00:00:00+00:00"
+        session.add(pr)
+        session.commit()
+
+    repo = _StubRepo({"o3": _dc("o3")})
+    _enrich(repo)
+    assert repo.fetched == [[_refspec(3)]]
+
+
+def test_ls_remote_failure_records_nothing(whygraph_db_initialized: Path) -> None:
+    _three_squash_prs()
+    repo = _repo_missing_pr3()
+    repo.ls_remote_error = "network down"
+    enricher = _enrich(repo)
+
+    assert enricher.summary == "fetch skipped"
+    assert len(repo.fetched) == 1
+    assert _skips() == {}
+
+
+def test_failed_retry_keeps_the_proven_missing_pr(
+    whygraph_db_initialized: Path,
+) -> None:
+    _three_squash_prs()
+    repo = _repo_missing_pr3()
+    repo.fetch_failures = 2
+    enricher = _enrich(repo)
+
+    assert enricher.summary == "fetch skipped"
+    assert len(repo.fetched) == 2
+    assert _skips() == {3: ("missing_ref", "2026-01-01T00:00:00+00:00")}
+    with get_session() as session:
+        assert session.get(Commit, "o1") is None  # still candidates (E3)
+
+    repo = _StubRepo({"o1": _dc("o1"), "o2": _dc("o2")})
+    _enrich(repo)
+    assert repo.fetched == [[_refspec(1), _refspec(2)]]
+
+
+def test_all_refs_present_but_fetch_failed_is_not_retried(
+    whygraph_db_initialized: Path,
+) -> None:
+    _three_squash_prs()
+    repo = _StubRepo({})
+    repo.fetch_failures = 5
+    enricher = _enrich(repo)
+
+    assert enricher.summary == "fetch skipped"
+    assert len(repo.fetched) == 1
+    assert len(repo.remote_ref_calls) == 1
+    assert _skips() == {}
+
+
+def test_unreadable_commit_is_recorded_after_a_good_fetch(
+    whygraph_db_initialized: Path,
+) -> None:
+    with get_session() as session:
+        session.add(_commit("sqU", files_changed=40))
+        session.add(_pr(7, oids=["good", "bad"], merge_commit_sha="sqU"))
+        session.commit()
+
+    repo = _StubRepo({"good": _dc("good")})
+    enricher = _enrich(repo)
+
+    with get_session() as session:
+        assert session.get(Commit, "good") is not None
+    assert _skips() == {7: ("unreadable_commit", "2026-01-01T00:00:00+00:00")}
+    assert enricher.summary == "1 commits recovered · 1 PRs unreadable"
+
+    repo = _StubRepo({})
+    _enrich(repo)
+    assert repo.fetched == []
 
 
 # --- §4.10 main-walk-only query guards (unit test 5) -------------------------

@@ -38,8 +38,10 @@ from whygraph.db.models.chat_message import ChatMessage
 from whygraph.db.models.chat_session import ChatSession
 from whygraph.db.models.commit import Commit
 from whygraph.db.models.commit_file_change import CommitFileChange
+from whygraph.db.models.forge_crawl_state import ForgeCrawlState
 from whygraph.db.models.issue import Issue
 from whygraph.db.models.pr_issue_link import PRIssueLink
+from whygraph.db.models.pr_origin_skip import PROriginSkip
 from whygraph.db.models.pull_request import PullRequest
 from whygraph.db.models.rationale_cache import RationaleCache
 
@@ -49,8 +51,10 @@ __all__ = [
     "ChatSession",
     "Commit",
     "CommitFileChange",
+    "ForgeCrawlState",
     "Issue",
     "PRIssueLink",
+    "PROriginSkip",
     "PullRequest",
     "RationaleCache",
 ]

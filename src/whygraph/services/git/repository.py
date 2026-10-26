@@ -31,6 +31,7 @@ from .commands import (
     GitIsShallowCmd,
     GitLogCommitCmd,
     GitLsRemoteBranchCmd,
+    GitLsRemoteRefsCmd,
     GitLsTreeNamesCmd,
     GitRefExistsCmd,
     GitRemoteRefsContainingCmd,
@@ -696,6 +697,53 @@ class Repository:
             raise GitError(
                 f"failed to fetch {len(refspecs)} refspec(s) from {target!r}"
             ) from exc
+
+    def remote_refs(self, refs: list[str]) -> set[str]:
+        """Return which of ``refs`` exist on the origin remote.
+
+        One ``git ls-remote`` (it downloads the remote's whole ref list and
+        filters on the client). The squash-origin enricher calls it after a
+        failed batched fetch to tell a ref that is gone upstream from a
+        network failure.
+
+        Parameters
+        ----------
+        refs : list[str]
+            Full ref names, e.g. ``refs/pull/12/head``. An empty list
+            returns an empty set (no ``git`` is invoked).
+
+        Returns
+        -------
+        set[str]
+            The subset of ``refs`` the remote has (exact matches only).
+
+        Raises
+        ------
+        GitError
+            If ``git ls-remote`` fails - an unknown remote or no network.
+
+        Notes
+        -----
+        In a portal scan child with a token file
+        (:data:`~.credentials.TOKEN_FILE_ENV`), the file is re-read for
+        this call and its token handed to the credential helper through
+        this one process's environment, as in :meth:`fetch_refs`.
+        """
+        if not refs:
+            return set()
+        target = self._origin_remote
+        env = None
+        if os.environ.get(TOKEN_FILE_ENV):
+            # Imported here: the github service imports this package.
+            from whygraph.services.github.token import token_env
+
+            env = token_env(TOKEN_ENV_VAR)
+        try:
+            return self._shell.run(
+                GitLsRemoteRefsCmd(*refs, remote=target), cwd=self.root, env=env
+            )
+        except ShellError as exc:
+            raise GitError(f"failed to list {len(refs)} ref(s) on {target!r}") from exc
 
     @classmethod
     def clone(

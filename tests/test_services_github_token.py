@@ -149,3 +149,16 @@ def test_pr_ref_fetches_hand_the_file_token_to_git(
     repo.fetch_refs(["refs/pull/2/head:refs/whygraph/pull/2"])
     assert [e[TOKEN_ENV_VAR] for e in shell.envs] == [FIRST, SECOND]  # type: ignore[index]
     assert TOKEN_ENV_VAR not in os.environ
+
+
+def test_remote_refs_hand_the_file_token_to_git(
+    token_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = Repository(tmp_path)
+    shell = RecordingShell([{"refs/pull/1/head"}, set()], token_file=token_file)
+    monkeypatch.setattr(repo, "_shell", shell)
+    assert repo.remote_refs(["refs/pull/1/head"]) == {"refs/pull/1/head"}
+    assert repo.remote_refs(["refs/pull/2/head"]) == set()
+    assert repo.remote_refs([]) == set()  # no git for an empty list
+    assert [e[TOKEN_ENV_VAR] for e in shell.envs] == [FIRST, SECOND]  # type: ignore[index]
+    assert TOKEN_ENV_VAR not in os.environ

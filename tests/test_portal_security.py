@@ -349,6 +349,49 @@ def test_pr_ref_fetch_uses_the_token_helper_only_with_a_token(
     assert token not in (root / ".git" / "config").read_text()
 
 
+def test_ls_remote_refs_uses_the_token_helper_only_with_a_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from whygraph.services.git.commands import GitLsRemoteRefsCmd
+    from whygraph.services.git.credentials import TOKEN_FILE_ENV
+
+    monkeypatch.delenv(TOKEN_ENV_VAR, raising=False)
+    monkeypatch.delenv(TOKEN_FILE_ENV, raising=False)
+    refs = ("refs/pull/1/head", "refs/pull/2/head")
+    assert GitLsRemoteRefsCmd(*refs).argv() == [
+        "git",
+        "ls-remote",
+        "--",
+        "origin",
+        *refs,
+    ]
+
+    config = list(github_git_config())
+    monkeypatch.setenv(TOKEN_ENV_VAR, "ghp_lsremote_secret_1234")
+    argv = GitLsRemoteRefsCmd(*refs).argv()
+    assert argv == ["git", *config, "ls-remote", "--", "origin", *refs]
+
+    monkeypatch.delenv(TOKEN_ENV_VAR)
+    monkeypatch.setenv(TOKEN_FILE_ENV, str(tmp_path / "x.token"))
+    assert GitLsRemoteRefsCmd(*refs).argv()[: 1 + len(config)] == ["git", *config]
+
+
+def test_ls_remote_refs_parse_keeps_exact_matches_only() -> None:
+    from subprocess import CompletedProcess
+
+    from whygraph.services.git.commands import GitLsRemoteRefsCmd
+
+    cmd = GitLsRemoteRefsCmd("refs/pull/1/head", "refs/pull/2/head")
+    out = (
+        "aaa\trefs/pull/1/head\n"
+        "bbb\trefs/pull/11/head\n"
+        "ccc\tx/refs/pull/2/head\n"
+        "\n"
+        "\trefs/pull/2/head\n"
+    )
+    assert cmd.parse(CompletedProcess([], 0, out, "")) == {"refs/pull/1/head"}
+
+
 def test_option_like_remote_never_executes(tmp_path: Path) -> None:
     root = make_repo(tmp_path, "repo")
     marker = tmp_path / "pwned"

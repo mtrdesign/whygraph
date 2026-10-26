@@ -47,8 +47,9 @@ made it. A later price change never rewrites old months.
 | **Estimated** | The tokens reported times the price for that model, with cache reads and writes at their own rates | Yes |
 | **Unpriced** | No price applies: the tokens are kept, the cost is not | No: tokens only |
 
-A model with no price is **unpriced**. That includes every DeepSeek model by default (the bundled
-table has no DeepSeek rows), Ollama, and any model that is not in the table. **A provider whose
+A model with no price is **unpriced**. That includes Ollama and any model that is not in the
+table. DeepSeek models are priced at DeepSeek's **peak** rates, so an off-peak call is estimated at
+up to twice what it cost; an override can set a different rate. **A provider whose
 `base_url` or `host` you changed is never priced from the bundled table**, because the other end may
 be a different service with other rates; only your own [price override](#prices-and-overrides)
 applies. The Usage & cost page and the Budgets tab say how many calls were unpriced, and unpriced
@@ -221,13 +222,14 @@ Nothing is sent outside the portal: no email, no Slack, no webhook.
 
 ## Prices and overrides
 
-WhyGraph ships a price table with each release (the Prices tab shows its date) for the Anthropic and
-OpenAI models it knows, per million tokens: input, output, cache reads and cache writes. An owner or
-admin can **override** the price of any provider and model for their organization (to match a
-negotiated rate, to price a DeepSeek or custom-endpoint model, or to correct a model the table
-lacks), and **revert** it to the bundled value. Overrides apply to calls made **from then on**: past
-rows keep the price they were written with. The first-scan estimate on a project uses the same table
-and your overrides, and says "your organization's prices" when an override applied.
+WhyGraph ships a price table with each release (the Prices tab shows its date) for the Anthropic,
+OpenAI and DeepSeek models it knows (DeepSeek at its peak rates), per million tokens: input, output,
+cache reads and cache writes. An owner or admin can **override** the price of any provider and model
+for their organization (to match a negotiated rate, to price DeepSeek at its off-peak rate or a
+custom-endpoint model, or to correct a model the table lacks), and **revert** it to the bundled
+value. Overrides apply to calls made **from then on**: past rows keep the price they were written
+with. The first-scan estimate on a project uses the same table and your overrides, and says "your
+organization's prices" when an override applied.
 
 ## Retention and deletion
 

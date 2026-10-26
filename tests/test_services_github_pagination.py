@@ -1,0 +1,170 @@
+"""Incremental iteration in the GitHub service (incremental-scan plan, step 1)."""
+
+from __future__ import annotations
+
+import re
+
+import pytest
+from test_services_github_token import RecordingShell
+
+from whygraph.core import ShellError
+from whygraph.services.github import GitHubError
+from whygraph.services.github import issues as issues_mod
+from whygraph.services.github import pull_requests as prs_mod
+from whygraph.services.github.commands import (
+    LOOKBACK,
+    floor_for,
+    format_github_ts,
+    parse_github_ts,
+)
+from whygraph.services.github.issues import Issues
+from whygraph.services.github.pull_request import PullRequest
+from whygraph.services.github.pull_requests import DETAILS_BATCH, PullRequests
+
+MARK = "2026-10-26T12:00:00Z"
+
+
+class CmdShell(RecordingShell):
+    """``RecordingShell`` that also records each command it was asked to run."""
+
+    def __init__(self, responses: list) -> None:
+        super().__init__(responses)
+        self.cmds: list = []
+
+    def run(self, cmd, *, env=None, **kwargs):  # noqa: ANN001, ANN201
+        self.cmds.append(cmd)
+        return super().run(cmd, env=env, **kwargs)
+
+    def args(self, index: int) -> dict[str, str]:
+        argv = self.cmds[index].argv()
+        pairs = [a for a in argv if "=" in a and not a.startswith("query=")]
+        return dict(p.split("=", 1) for p in pairs)
+
+    def query(self, index: int) -> str:
+        return next(
+            a for a in self.cmds[index].argv() if a.startswith("query=")
+        ).removeprefix("query=")
+
+
+def _node(number: int, updated: str = MARK) -> dict:
+    return {
+        "number": number,
+        "state": "OPEN",
+        "createdAt": "2026-01-01T00:00:00Z",
+        "updatedAt": updated,
+        "url": f"https://example.test/{number}",
+    }
+
+
+def _page(path: str, nodes: list[dict], *, more: bool = False) -> dict:
+    return {
+        "repository": {
+            path: {
+                "pageInfo": {"hasNextPage": more, "endCursor": "c1" if more else None},
+                "nodes": nodes,
+            }
+        }
+    }
+
+
+def test_updates_since_stops_at_the_floor_and_requests_no_further_page() -> None:
+    nodes = [
+        {"number": 9, "updatedAt": "2026-10-26T12:30:00Z"},
+        {"number": 8, "updatedAt": "2026-10-26T11:55:00Z"},  # inside the lookback
+        {"number": 7, "updatedAt": "2026-10-26T11:49:59Z"},  # older than the floor
+        {"number": 6, "updatedAt": "2026-10-26T11:00:00Z"},
+    ]
+    shell = CmdShell([_page("pullRequests", nodes, more=True)])
+    got = list(PullRequests("o", "r", shell=shell).updates_since(MARK))
+    assert got == [(9, "2026-10-26T12:30:00Z"), (8, "2026-10-26T11:55:00Z")]
+    assert len(shell.cmds) == 1
+
+
+def test_updates_query_is_light_and_newest_first() -> None:
+    q = prs_mod._UPDATES_QUERY
+    assert "nodes { number updatedAt }" in q
+    assert "UPDATED_AT, direction: DESC" in q
+    assert "title" not in q and "commits" not in q
+
+
+def test_by_numbers_batches_and_declares_only_owner_and_name() -> None:
+    assert list(PullRequests("o", "r", shell=CmdShell([])).by_numbers([])) == []
+    numbers = list(range(1, 46))
+    shell = CmdShell([])
+    shell.responses = [
+        {"repository": {f"pr{n}": _node(n) for n in numbers[i : i + DETAILS_BATCH]}}
+        for i in range(0, len(numbers), DETAILS_BATCH)
+    ]
+    got = list(PullRequests("o", "r", shell=shell).by_numbers(numbers))
+    assert len(shell.cmds) == 3
+    assert DETAILS_BATCH == 20
+    sizes = [
+        len(re.findall(r"pr\d+: pullRequest\(number: \d+\)", shell.query(i)))
+        for i in range(3)
+    ]
+    assert sizes == [20, 20, 5]
+    for i in range(3):
+        q = shell.query(i)
+        assert "$cursor" not in q
+        assert q.startswith("query($owner: String!, $name: String!) {")
+    assert "pr1: pullRequest(number: 1)" in shell.query(0)
+    assert "pr45: pullRequest(number: 45)" in shell.query(2)
+    assert got == [PullRequest.from_graphql_node(_node(n)) for n in numbers]
+
+
+def test_by_numbers_skips_a_null_alias_and_wraps_shell_errors() -> None:
+    shell = CmdShell([{"repository": {"pr1": _node(1), "pr2": None, "pr3": _node(3)}}])
+    got = [
+        pr.number for pr in PullRequests("o", "r", shell=shell).by_numbers([1, 2, 3])
+    ]
+    assert got == [1, 3]
+
+    class Failing(CmdShell):
+        def run(self, cmd, *, env=None, **kwargs):  # noqa: ANN001, ANN201
+            raise ShellError(["gh"], 1, "", "Could not resolve to a PullRequest")
+
+    with pytest.raises(GitHubError, match="Could not resolve"):
+        list(PullRequests("o", "r", shell=Failing([])).by_numbers([1]))
+
+
+def test_list_queries_share_pr_fields_and_walk_newest_first() -> None:
+    fields = prs_mod._PR_FIELDS
+    assert fields in prs_mod._LIST_QUERY
+    shell = CmdShell([{"repository": {"pr7": _node(7)}}])
+    list(PullRequests("o", "r", shell=shell).by_numbers([7]))
+    assert fields in shell.query(0)
+    for needle in (
+        "closingIssuesReferences(first: 50)",
+        "commits(first: 250)",
+        "comments(first: 100)",
+        "labels(first: 20)",
+        "mergeCommit { oid }",
+    ):
+        assert needle in prs_mod._LIST_QUERY
+    for q in (prs_mod._LIST_QUERY, issues_mod._LIST_QUERY):
+        assert "UPDATED_AT, direction: DESC" in q
+        assert "CREATED_AT" not in q
+
+
+def test_issues_updated_since_sends_the_floor_and_follows_every_page() -> None:
+    shell = CmdShell(
+        [
+            _page("issues", [_node(2, "2026-10-26T12:30:00Z")], more=True),
+            _page("issues", [_node(1, "2000-01-01T00:00:00Z")]),
+        ]
+    )
+    got = [i.number for i in Issues("o", "r", shell=shell).updated_since(MARK)]
+    assert got == [2, 1]  # no client-side stop
+    assert len(shell.cmds) == 2
+    assert shell.args(0)["since"] == "2026-10-26T11:50:00Z"
+    assert shell.args(1)["since"] == "2026-10-26T11:50:00Z"
+    assert "filterBy: {since: $since}" in shell.query(0)
+    assert "$since: DateTime!" in shell.query(0)
+    assert format_github_ts(floor_for(MARK)) == "2026-10-26T11:50:00Z"
+
+
+def test_timestamp_helpers_round_trip() -> None:
+    parsed = parse_github_ts(MARK)
+    assert parsed.utcoffset() is not None
+    assert format_github_ts(parsed) == MARK
+    assert parsed - floor_for(MARK) == LOOKBACK

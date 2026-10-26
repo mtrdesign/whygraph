@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator, Mapping
+from datetime import datetime, timedelta, timezone
 from subprocess import CompletedProcess
 from typing import Any
 
@@ -62,6 +63,58 @@ class GhApiGraphqlCmd(ShellCommand[dict]):
             msgs = "; ".join(e.get("message", "") for e in payload["errors"])
             raise GitHubError(f"GraphQL errors: {msgs}")
         return payload.get("data") or {}
+
+
+LOOKBACK = timedelta(minutes=10)
+"""How far below a stored watermark an incremental crawl starts (late-visible updates)."""
+
+
+def parse_github_ts(value: str) -> datetime:
+    """Parse a GitHub ``DateTime`` into an aware UTC datetime.
+
+    Parameters
+    ----------
+    value : str
+        A timestamp such as ``2026-10-26T12:00:00Z``.
+
+    Returns
+    -------
+    datetime
+        The same instant, timezone-aware.
+    """
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def format_github_ts(value: datetime) -> str:
+    """Format an aware datetime as GitHub's ``YYYY-MM-DDTHH:MM:SSZ``.
+
+    Parameters
+    ----------
+    value : datetime
+        A timezone-aware datetime.
+
+    Returns
+    -------
+    str
+        The instant in UTC, to whole seconds.
+    """
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def floor_for(watermark: str) -> datetime:
+    """Return ``watermark`` minus :data:`LOOKBACK`.
+
+    Parameters
+    ----------
+    watermark : str
+        A stored GitHub timestamp.
+
+    Returns
+    -------
+    datetime
+        The oldest ``updatedAt`` an incremental crawl reads.
+    """
+    return parse_github_ts(watermark) - LOOKBACK
 
 
 def paginate_graphql(

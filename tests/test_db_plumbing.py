@@ -25,8 +25,10 @@ SQLMODEL_TABLES = {
     "chat_session",
     "commit",
     "commit_file_change",
+    "forge_crawl_state",
     "issue",
     "pr_issue_link",
+    "pr_origin_skip",
     "pull_request",
     "rationale_cache",
 }
@@ -294,6 +296,23 @@ def test_chat_message_error_column_round_trips(
         assert conn.execute("SELECT COUNT(*) FROM chat_message").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+def test_forge_and_pr_origin_tables_upgrade_and_downgrade(
+    _isolate_config_and_engine: Path,
+) -> None:
+    """Both revisions create their table; explicit targets drop them in turn."""
+    db_path = _isolate_config_and_engine
+    command.upgrade(alembic_config(), "head")
+
+    assert {"forge_crawl_state", "pr_origin_skip"} <= _table_names(db_path)
+    db_engine._reset_engine()
+    command.downgrade(alembic_config(), "6b2e9d4f7a1c")
+    assert "pr_origin_skip" not in _table_names(db_path)
+    assert "forge_crawl_state" in _table_names(db_path)
+    db_engine._reset_engine()
+    command.downgrade(alembic_config(), "d5a8e1f03b72")
+    assert "forge_crawl_state" not in _table_names(db_path)
 
 
 def test_chat_message_rejects_unknown_session(_isolate_config_and_engine: Path) -> None:

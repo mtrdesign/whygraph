@@ -55,9 +55,14 @@ actually run this time, so a Quick rescan shows "Phase 1 of 2" and "Phase 2 of 2
    running concurrently. Records commits and the files each one touched, links PRs and issues to
    commits, and flags [branch membership](#how-whygraph-sees-branches). The history walk deliberately
    is **not** first-parent, so work merged from feature branches is not skipped.
+   After a repository's first crawl, the GitHub crawler asks only for the pull requests and issues
+   created or updated since the previous crawl (with a 10-minute overlap) and updates the changed
+   ones in place.
 2. **PR-origin recovery** *(optional)* - squash-merge recovery. When a PR was squash-merged, one
    targeted `git fetch` of the PR's original head brings its feature-branch commits into the evidence
    without polluting area history. Needs the network, so it is skipped in a Quick rescan.
+   A pull request whose branch ref is gone from GitHub is set aside and not retried until it changes
+   on GitHub; the others are still recovered.
 3. **Author identity** - resolves commit addresses into one row per human. Local-only, no network and
    no token, so it runs on every scan including the offline git-hook path.
 4. **LLM descriptions** *(optional)* - writes a short description of each commit's diff with the
@@ -92,7 +97,7 @@ In the portal, **Scan now** offers two kinds of run:
 | Run | What it does |
 |---|---|
 | **Quick rescan** | Git history and the CodeGraph index only: no LLM and no remote calls (no GitHub PRs or issues), so it is fast, offline and token-free. This is also what the git hooks ask for. |
-| **Full rescan** | Everything a Quick rescan does, plus the GitHub crawl, squash-merge recovery and the LLM description of each commit. |
+| **Full rescan** | Everything a Quick rescan does, plus the GitHub crawl (after the first one, only what changed since), squash-merge recovery and the LLM description of each commit. |
 
 !!! tip "Lazy backfill"
     Skipping descriptions doesn't lose them. The MCP tools backfill a commit's description on demand

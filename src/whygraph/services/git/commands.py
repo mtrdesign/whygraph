@@ -601,6 +601,48 @@ class GitLsRemoteBranchCmd(ShellCommand[str | None]):
         return None
 
 
+class GitLsRemoteRefsCmd(ShellCommand[set[str]]):
+    """``git ls-remote -- <remote> <ref...>`` - which of these refs exist upstream.
+
+    Used when a batched PR-ref fetch fails, to tell a ref that is gone from
+    one that is merely unreachable. Exits 0 when nothing matches (no
+    ``--exit-code``). ``ls-remote`` patterns match a ref's tail on ``/``
+    boundaries and the remote's whole ref list is sent, so :meth:`parse`
+    keeps exact matches only.
+
+    Like :class:`GitFetchRefsCmd` (and unlike :class:`GitLsRemoteBranchCmd`)
+    the argv carries :func:`~.credentials.github_git_config` only when
+    :data:`~.credentials.TOKEN_ENV_VAR` or :data:`~.credentials.TOKEN_FILE_ENV`
+    is set: that config allows https only, so adding it unconditionally
+    would break a local project's ssh / file remote.
+
+    Parameters
+    ----------
+    *refs : str
+        Full ref names, e.g. ``"refs/pull/12/head"``.
+    remote : str, optional
+        Remote to ask. Default ``"origin"``.
+    """
+
+    def __init__(self, *refs: str, remote: str = "origin") -> None:
+        self.refs = refs
+        self.remote = remote
+
+    def argv(self) -> list[str]:
+        portal = os.environ.get(TOKEN_ENV_VAR) or os.environ.get(TOKEN_FILE_ENV)
+        config = github_git_config() if portal else ()
+        return ["git", *config, "ls-remote", "--", self.remote, *self.refs]
+
+    def parse(self, result: CompletedProcess[str]) -> set[str]:
+        wanted = set(self.refs)
+        found: set[str] = set()
+        for line in result.stdout.splitlines():
+            sha, _, ref = line.partition("\t")
+            if ref.strip() in wanted and sha.strip():
+                found.add(ref.strip())
+        return found
+
+
 class GitSetRemoteUrlCmd(ShellCommand[None]):
     """``git remote set-url -- <remote> <url>`` - point a remote somewhere else.
 

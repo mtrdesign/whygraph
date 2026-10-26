@@ -65,6 +65,9 @@ def test_bundled_table_covers_the_defaults() -> None:
     # The OpenAI defaults (config + the chat picker's fallback list).
     assert ("openai", "gpt-4o") in rows
     assert ("openai", "gpt-4o-mini") in rows
+    # DeepSeek's models, at its peak rates (off-peak is half).
+    assert ("deepseek", "deepseek-flash") in rows
+    assert ("deepseek", "deepseek-v4-pro") in rows
 
 
 def test_bundled_price_and_version() -> None:
@@ -213,6 +216,7 @@ def test_cost_missing_counts_are_zero_and_rounding() -> None:
         ("anthropic", "claude-opus-4-7", True),
         ("openai", "gpt-4o", True),
         ("openrouter", "anthropic/claude-haiku-4-5", True),
+        ("deepseek", "deepseek-flash", True),
         ("ollama", "llama3", False),
     ],
 )

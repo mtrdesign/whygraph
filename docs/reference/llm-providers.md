@@ -128,7 +128,7 @@ provider reported, and a cost. What a provider reports decides how that cost is 
 |---|---|---|
 | `anthropic` | Input (cache reads and cache writes included), output, and the cache read and write counts | **Estimated** from the price table |
 | `openai` | Input, output, cached input, and reasoning tokens when the model reports them | **Estimated** from the price table |
-| `deepseek` | Input, output, cache hits, and reasoning tokens when reported | **Unpriced** unless your organization adds a price: the bundled table has no DeepSeek rows, because DeepSeek bills peak and off-peak rates for its current models (`deepseek-flash`, `deepseek-v4-pro`) |
+| `deepseek` | Input, output, cache hits, and reasoning tokens when reported | **Estimated** from the bundled table for `deepseek-flash` and `deepseek-v4-pro`, at DeepSeek's **peak** rates: off-peak is half price, so an off-peak call is estimated at up to twice what it cost. An override can set another rate |
 | `openrouter` | Input, output, cache reads and writes, reasoning tokens | **Provider-reported**: the `cost` OpenRouter charged. On a BYOK request OpenRouter's own charge excludes the upstream provider's, so WhyGraph adds the upstream inference cost to it |
 | `ollama` | Input and output tokens only | **Unpriced**: a local model has no bill |
 

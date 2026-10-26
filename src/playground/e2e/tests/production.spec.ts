@@ -177,13 +177,14 @@ test("projects from GitHub: connect, import, scan, members, a push, deleting the
   // navigation that could race the sign-in's own).
   await page.goto(`${orgUrl("acme")}/projects/new`);
   await expect(page).toHaveURL(new RegExp(`^${base.origin}/signin\\?next=`));
-  const refused = page.waitForResponse((r) => r.url().endsWith("/api/github/installations"));
+  const installationCalls: string[] = [];
+  page.on("request", (r) => {
+    if (r.url().endsWith("/api/github/installations")) installationCalls.push(r.url());
+  });
   await signIn(page, "ada@example.com");
   await expect(page).toHaveURL(`${orgUrl("acme")}/projects/new`);
-  const answer = await refused;
-  expect(answer.status()).toBe(403);
-  expect(((await answer.json()) as { code?: string }).code).toBe("github_required");
   await expect(page.getByTestId("github-required")).toContainText("Importing needs a GitHub sign-in");
+  expect(installationCalls).toHaveLength(0);
 
   // cy signs in once, Ben adds him as a member (M2d-1's flow): cy sees the
   // project, without the owners' and admins' New project.

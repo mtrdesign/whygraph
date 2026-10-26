@@ -517,8 +517,15 @@ describe("inherited values", () => {
     expect(keyTestText("unreachable")).toBe("Couldn't reach the provider");
     expect(keyTestText("rate_limited")).toBe("Rate limited - try again later");
     expect(tasksWithoutKey({ chat: { provider: "openai" } }, { anthropic: { set: true, hint: null } })).toEqual([
-      "Chat uses OpenAI, which has no key",
+      "Chat is set to OpenAI, which has no key; new chats start on Anthropic",
     ]);
+    // Nothing set for Chat while another provider has a key: Chat starts on it, no line.
+    expect(tasksWithoutKey({}, { openrouter: { set: true, hint: null } })).toEqual([
+      "Commit descriptions uses Anthropic, which has no key",
+      "Rationale cards uses Anthropic, which has no key",
+    ]);
+    // No key at all: today's line.
+    expect(tasksWithoutKey({ chat: { provider: "openai" } }, {})).toContain("Chat uses OpenAI, which has no key");
   });
 });
 
@@ -533,7 +540,7 @@ describe("org and global settings", () => {
     });
     mount("/settings");
     const warning = await screen.findByTestId("task-key-warnings");
-    expect(warning).toHaveTextContent("Chat uses OpenAI, which has no key.");
+    expect(warning).toHaveTextContent("Chat is set to OpenAI, which has no key; new chats start on Anthropic.");
     expect(warning.className).toContain("bg-warning-soft");
   });
 
@@ -570,6 +577,125 @@ describe("org and global settings", () => {
       "You're viewing this organization as an instance administrator. Everything here is read-only.",
     );
     expect(screen.queryByTestId("settings-owner-only")).toBeNull();
+  });
+});
+
+// ---- model suggestions (datalist) ---------------------------------------------------------------
+
+describe("model suggestions", () => {
+  const LIVE = {
+    provider: "anthropic",
+    source: "live",
+    result: "ok",
+    models: [
+      { id: "claude-opus-5-5", display_name: "Claude Opus 5.5" },
+      { id: "claude-haiku-4-5", display_name: "claude-haiku-4-5" },
+    ],
+  };
+  const modelCalls = () => log.filter((c) => c.path.includes("/models/"));
+  const listed = (container: ParentNode = document) =>
+    Array.from(container.querySelectorAll("datalist option")).map((o) => (o as HTMLOptionElement).value);
+
+  const owner = () => {
+    handlers["GET /api/portal/defaults"] = () => ({
+      config: {},
+      secrets: secrets({ anthropic: { set: true, hint: "...a1b2" } }),
+      no_provider_key: false,
+      read_only: false,
+      can_test_keys: true,
+    });
+    handlers["GET /api/portal/defaults/models/anthropic"] = () => LIVE;
+  };
+
+  it("an owner who picks a keyed provider gets a datalist of the listed ids", async () => {
+    owner();
+    const user = userEvent.setup();
+    mount("/settings");
+    await screen.findByTestId("config-form");
+    expect(document.querySelector("datalist")).toBeNull();
+    await user.selectOptions(screen.getByLabelText("Default model provider"), "anthropic");
+    await waitFor(() => expect(listed()).toEqual(["claude-opus-5-5", "claude-haiku-4-5"]));
+    const input = screen.getByLabelText("Default model model");
+    expect(input).toHaveAttribute("list", document.querySelector("datalist")!.id);
+    expect(screen.queryByTestId("model-suggest-fallback")).toBeNull();
+  });
+
+  it("a fallback answer says why, in words", async () => {
+    owner();
+    handlers["GET /api/portal/defaults/models/anthropic"] = () => ({ ...LIVE, source: "fallback", result: "rejected" });
+    const user = userEvent.setup();
+    mount("/settings");
+    await screen.findByTestId("config-form");
+    await user.selectOptions(screen.getByLabelText("Default model provider"), "anthropic");
+    const hint = await screen.findByTestId("model-suggest-fallback");
+    expect(hint).toHaveTextContent(
+      "Suggestions are a short built-in list (the key cannot list models). Any model id works.",
+    );
+    expect(listed()).toContain("claude-opus-5-5");
+  });
+
+  it("a blank provider renders no datalist and asks for nothing", async () => {
+    owner();
+    mount("/settings");
+    await screen.findByTestId("config-form");
+    expect(document.querySelector("datalist")).toBeNull();
+    expect(modelCalls()).toHaveLength(0);
+  });
+
+  it("a member view (can_test_keys false) makes no listing request", async () => {
+    handlers["GET /api/projects/alpha/config"] = () => ({
+      config: { llm: { model: "anthropic/claude-opus-5-5" } },
+      secrets: secrets({ anthropic: { set: true, hint: "...a1b2" } }),
+      import: IMPORT,
+      read_only: false,
+      can_test_keys: false,
+    });
+    mount("/p/alpha/settings");
+    await screen.findByTestId("config-form");
+    expect(screen.getByLabelText("Default model provider")).toHaveValue("anthropic");
+    expect(document.querySelector("datalist")).toBeNull();
+    expect(modelCalls()).toHaveLength(0);
+  });
+
+  it("a reader makes no listing request", async () => {
+    handlers["GET /api/portal/state"] = () => prodState("reader");
+    handlers["GET /api/portal/defaults"] = () => ({
+      config: { llm: { model: "anthropic/claude-opus-5-5" } },
+      secrets: secrets({ anthropic: { set: true, hint: null } }),
+      no_provider_key: false,
+      read_only: true,
+      can_test_keys: true,
+    });
+    mount("/settings");
+    await screen.findByTestId("config-form");
+    expect(screen.getByLabelText("Default model provider")).toHaveValue("anthropic");
+    expect(document.querySelector("datalist")).toBeNull();
+    expect(modelCalls()).toHaveLength(0);
+  });
+
+  it("a project admin gets the project's listing, and a key save asks again (AC 4)", async () => {
+    handlers["GET /api/projects/alpha/config"] = () => ({
+      config: {},
+      secrets: secrets({ anthropic: { set: true, hint: "...a1b2" } }),
+      import: IMPORT,
+      read_only: false,
+      can_test_keys: true,
+      effective_keys: { anthropic: "project", openai: "none", deepseek: "none", openrouter: "none" },
+    });
+    handlers["GET /api/projects/alpha/models/anthropic"] = () => LIVE;
+    const user = userEvent.setup();
+    mount("/p/alpha/settings");
+    await screen.findByTestId("config-form");
+    await user.selectOptions(screen.getByLabelText("Default model provider"), "anthropic");
+    await waitFor(() => expect(listed()).toHaveLength(2));
+    expect(calls("GET", "/api/projects/alpha/models/anthropic")).toHaveLength(1);
+
+    await user.click(within(keyCard("anthropic")).getByRole("button", { name: "Replace" }));
+    await user.type(within(keyCard("anthropic")).getByLabelText("New Anthropic key"), "sk-ant-new-1234");
+    await user.click(within(keyCard("anthropic")).getByRole("button", { name: "Save key" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Replace" }));
+    await waitFor(() => expect(calls("PUT", "/api/projects/alpha/config")).toHaveLength(1));
+    await waitFor(() => expect(calls("GET", "/api/projects/alpha/models/anthropic").length).toBeGreaterThan(1));
   });
 });
 

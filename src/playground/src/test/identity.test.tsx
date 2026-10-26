@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { portalApi, setBaseUrl } from "../api";
 import { RationaleTab } from "../components/RationaleTab";
 import { authMessage } from "../lib/authErrors";
-import { isSafeNext, signInUrl } from "../lib/identity";
+import { isSafeNext, needsGitHubToImport, signInUrl } from "../lib/identity";
 import { hardNavigate } from "../lib/navigation";
 import { ProjectProvider } from "../lib/project";
 import { createAppRouter } from "../router";
@@ -668,6 +668,43 @@ describe("reader role (instance admin in a foreign org)", () => {
 });
 
 // ---- project roles (M2f-1) -----------------------------------------------------------
+
+describe("sidebar account menu avatar", () => {
+  it("shows the GitHub avatar in the org account menu", async () => {
+    fake.state = orgState("member", { user: { ...ada, avatar_url: "https://avatars.example/ada.png" } });
+    mount("/");
+    const trigger = await screen.findByRole("button", { name: "Account menu" });
+    expect(trigger.querySelector('img[src="https://avatars.example/ada.png"]')).not.toBeNull();
+  });
+
+  it("shows the initial in the org account menu when there is no avatar", async () => {
+    fake.state = orgState("member", { user: { ...ada, avatar_url: null } });
+    mount("/");
+    const trigger = await screen.findByRole("button", { name: "Account menu" });
+    expect(trigger.querySelector("img")).toBeNull();
+    expect(within(trigger).getByText("A")).toBeInTheDocument();
+  });
+});
+
+describe("needsGitHubToImport", () => {
+  it("is true only for a production password account", () => {
+    const pw = { ...ada, github_login: null, has_password: true };
+    expect(needsGitHubToImport({ mode: "local", user: pw } as never)).toBe(false);
+    expect(needsGitHubToImport(orgState("owner", { user: { ...ada, has_password: false } }) as never)).toBe(false);
+    expect(needsGitHubToImport(orgState("owner", { user: pw }) as never)).toBe(true);
+    expect(needsGitHubToImport(orgState("owner", { user: null }) as never)).toBe(false);
+    expect(needsGitHubToImport(undefined)).toBe(false);
+  });
+
+  it("hides Import a repository in a password owner's project switcher", async () => {
+    fake.state = orgState("owner", { user: { ...ada, github_login: null, has_password: true } });
+    mount("/");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Switch project" }));
+    await screen.findByRole("menuitem", { name: /Project alpha/ });
+    expect(screen.queryByRole("menuitem", { name: "Import a repository" })).toBeNull();
+  });
+});
 
 describe("project roles", () => {
   const asViewer = () => {

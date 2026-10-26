@@ -19,7 +19,7 @@ export type TaskName = "analyze" | "rationale" | "chat";
 export const TASKS: { id: TaskName; label: string; hint: string }[] = [
   { id: "analyze", label: "Commit descriptions", hint: "Describes each commit's diff during a scan." },
   { id: "rationale", label: "Rationale cards", hint: "Writes the why behind a symbol on demand." },
-  { id: "chat", label: "Chat", hint: "The default model for new chat sessions." },
+  { id: "chat", label: "Chat", hint: "The default for new chat sessions. Without a key for it, new chats start on the first provider that has one." },
 ];
 
 export interface ModelPick {

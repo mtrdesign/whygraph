@@ -867,6 +867,14 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     ("POST", "/api/projects/{slug}/keys/{provider}/test"): Call(
         409, shows=lambda o: ["key_missing"]
     ),
+    # Model suggestions (plan 36 section 4.1.2): no openrouter key, so the
+    # built-in list and no outbound call
+    ("GET", "/api/portal/defaults/models/{provider}"): Call(
+        200, shows=lambda o: ["openrouter/auto"]
+    ),
+    ("GET", "/api/projects/{slug}/models/{provider}"): Call(
+        200, shows=lambda o: ["openrouter/auto"]
+    ),
     # (local-only; the marked repos have no GitHub origin)
     ("POST", "/api/projects/{slug}/github-token/test"): Call(
         422, shows=lambda o: ["not_github"]
@@ -1511,6 +1519,7 @@ def context_calls(two_orgs: World, monkeypatch: pytest.MonkeyPatch) -> list[int]
 def test_the_admin_routes_are_the_planned_ones() -> None:
     # Org settings and org-level keys are the owner's (M2d-1 plan section 0.1).
     assert OWNER_ROUTES == [
+        ("GET", "/api/portal/defaults/models/{provider}"),
         ("POST", "/api/portal/defaults/keys/{provider}/test"),
         ("PUT", "/api/portal/defaults"),
     ]
@@ -1552,6 +1561,8 @@ def test_the_admin_routes_are_the_planned_ones() -> None:
         # Testing the project's keys (M2f-3 section 4.13)
         ("POST", "/api/projects/{slug}/keys/{provider}/test"),
         ("POST", "/api/projects/{slug}/github-token/test"),
+        # Listing models with the project's key (plan 36 section 4.1.2)
+        ("GET", "/api/projects/{slug}/models/{provider}"),
     }
     # Everyone reads the price table (it prices their own estimates).
     assert ("GET", "/api/prices") in MEMBER_ROUTES

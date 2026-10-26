@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Controller, useForm, useWatch, type FieldPath, type UseFormRegister } from "react-hook-form";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { Controller, useForm, useWatch, type Control, type FieldPath, type UseFormRegister } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { TriangleAlertIcon } from "lucide-react";
@@ -10,6 +10,7 @@ import {
   projectKey,
   type ConfigDict,
   type ConfigPut,
+  type ModelListResponse,
   type ProjectConfigView,
   type SecretsPatch,
 } from "../../api";
@@ -35,6 +36,7 @@ import {
   inheritedFrom,
   inheritedModelText,
   inheritedTokenText,
+  invalidateKeyDependents,
   keySetText,
   projectKeyStatus,
   revertKeyLabel,
@@ -108,6 +110,14 @@ export function configSections(
   ];
 }
 
+const FALLBACK_REASONS: Record<string, string> = {
+  rejected: "the key cannot list models",
+  key_missing: "no key set",
+  throttled: "listing is rate limited",
+  rate_limited: "listing is rate limited",
+};
+const FALLBACK_REASON_DEFAULT = "the provider could not be reached";
+
 function ModelRow({
   name,
   label,
@@ -116,6 +126,9 @@ function ModelRow({
   emptyLabel,
   placeholder,
   register,
+  control,
+  scope,
+  canList,
   error,
   overridden,
   onReset,
@@ -127,11 +140,28 @@ function ModelRow({
   emptyLabel: string;
   placeholder: string;
   register: UseFormRegister<ConfigFormValues>;
+  /** The parent's `form.control` (there is no FormProvider). */
+  control: Control<ConfigFormValues>;
+  scope: ConfigScope;
+  /** The form's `canTest`: only people the listing routes admit ask for suggestions. */
+  canList: boolean;
   error?: string;
   /** A project's own value over an inherited one: "Overridden here" with Reset. */
   overridden?: boolean;
   onReset?: () => void;
 }) {
+  const listId = useId();
+  const provider = (useWatch({ control, name: `${name}.provider` as FieldPath<ConfigFormValues> }) ?? "") as string;
+  const listing = useQuery<ModelListResponse>({
+    queryKey: scope.kind === "project" ? projectKey(scope.slug, "models", provider) : portalKey("models", provider),
+    queryFn: () => (scope.kind === "project" ? projectApi(scope.slug).models(provider) : portalApi.defaultsModels(provider)),
+    enabled: canList && KEYED_PROVIDERS.includes(provider),
+    // Model catalogues barely move within a session, and OpenRouter's is a
+    // ~370-entry payload - no need to refetch on every mount.
+    staleTime: 10 * 60 * 1000,
+    retry: false,
+  });
+  const suggestions = canList && KEYED_PROVIDERS.includes(provider) ? listing.data : undefined;
   return (
     <Field label={label} hint={hint} error={error}>
       {(p) => (
@@ -155,9 +185,27 @@ function ModelRow({
               placeholder={placeholder}
               title={placeholder}
               className="min-w-48 flex-1 font-mono"
+              // Known limitation: a model id left over from another provider
+              // filters the native datalist to nothing until the field is cleared.
+              list={suggestions ? listId : undefined}
               {...register(`${name}.model` as FieldPath<ConfigFormValues>)}
             />
+            {suggestions && (
+              <datalist id={listId}>
+                {suggestions.models.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.display_name !== m.id ? m.display_name : null}
+                  </option>
+                ))}
+              </datalist>
+            )}
           </div>
+          {suggestions?.source === "fallback" && (
+            <span className="text-xs text-muted-foreground" data-testid="model-suggest-fallback">
+              Suggestions are a short built-in list ({FALLBACK_REASONS[suggestions.result] ?? FALLBACK_REASON_DEFAULT}). Any
+              model id works.
+            </span>
+          )}
           {overridden && onReset && <OverriddenHere onReset={onReset} label={label} />}
         </div>
       )}
@@ -277,6 +325,7 @@ export function ConfigForm({
             q.queryKey[0] !== "@portal" && (q.queryKey[1] === "project" || q.queryKey[1] === "config"),
         }),
       queryClient.invalidateQueries({ queryKey: portalKey("projects") }),
+      invalidateKeyDependents(queryClient),
     ]);
   };
   const put = useMutation({
@@ -499,6 +548,9 @@ export function ConfigForm({
               emptyLabel={isProject ? "Inherited" : "Provider default"}
               placeholder={inheritedModelText({ task: null, projectLayer: isProject ? layer : null, orgLayer, mode })}
               register={register}
+              control={control}
+              scope={scope}
+              canList={canTest}
               error={errors.defaultModel?.model?.message ?? errors.defaultModel?.root?.message}
               overridden={isProject && !!(values.defaultModel?.provider || values.defaultModel?.model)}
               onReset={() => resetFields(["defaultModel", { provider: "", model: "" }])}
@@ -513,6 +565,9 @@ export function ConfigForm({
                 emptyLabel={isProject ? "Inherited" : "Default model's"}
                 placeholder={inheritedModelText({ task: t.id, projectLayer: isProject ? layer : null, orgLayer, mode })}
                 register={register}
+                control={control}
+                scope={scope}
+                canList={canTest}
                 error={errors[t.id]?.model?.message ?? errors[t.id]?.provider?.message ?? errors[t.id]?.root?.message}
                 overridden={isProject && !!(values[t.id]?.provider || values[t.id]?.model)}
                 onReset={() => resetFields([t.id, { provider: "", model: "" }])}

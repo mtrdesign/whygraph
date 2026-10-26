@@ -21,6 +21,7 @@ later milestone can add an external key and rotate without restructuring.
 from __future__ import annotations
 
 import os
+from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Any
 
@@ -305,7 +306,44 @@ def secret_status(
     return status
 
 
+AMBIENT_LLM_VARS: tuple[str, ...] = (
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "OPENROUTER_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "OPENAI_BASE_URL",
+)
+"""LLM credentials and endpoints the provider SDKs read from the environment when none is passed."""
+
+
+def drop_ambient_llm_vars(environ: MutableMapping[str, str] = os.environ) -> list[str]:
+    """Remove :data:`AMBIENT_LLM_VARS` from ``environ``.
+
+    The portal uses only the keys and endpoints stored under Settings, so
+    ``whygraph portal`` calls this once at start-up: the provider SDKs would
+    otherwise read these variables whenever no key or base URL is passed.
+
+    Parameters
+    ----------
+    environ : MutableMapping[str, str], optional
+        The mapping to clean; ``os.environ`` by default.
+
+    Returns
+    -------
+    list[str]
+        The names that were set (never their values), in
+        :data:`AMBIENT_LLM_VARS` order.
+    """
+    dropped = [name for name in AMBIENT_LLM_VARS if name in environ]
+    for name in dropped:
+        del environ[name]
+    return dropped
+
+
 __all__ = [
+    "AMBIENT_LLM_VARS",
     "GITHUB_TOKEN",
     "InvalidToken",
     "KEY_FILE_NAME",
@@ -313,6 +351,7 @@ __all__ = [
     "LLM_KEY_PROVIDERS",
     "decrypt",
     "delete_secret",
+    "drop_ambient_llm_vars",
     "encrypt",
     "ensure_key",
     "hint_for",

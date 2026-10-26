@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from collections.abc import Iterator
 from datetime import datetime, timezone
 
@@ -51,7 +50,7 @@ from whygraph.chat.harness import (
     run_turn,
 )
 from whygraph.chat.tools import ToolRegistry
-from whygraph.core import ConfigError, get_config
+from whygraph.core import Config, ConfigError, get_config
 from whygraph.core.context import current_project
 from whygraph.core.usage import BUDGET_EXCEEDED, UsageBlocked, set_scope_field
 from whygraph.db import get_session
@@ -65,7 +64,6 @@ from whygraph.services.llm.chat import (
     TextDelta,
     ToolCall,
     TurnDone,
-    chat_provider_env_var,
     fallback_models,
     make_chat_client,
 )
@@ -179,31 +177,76 @@ def _frame(payload: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _is_configured(provider: str) -> bool:
-    """Whether ``provider`` has a key, from config or the environment."""
-    llm = get_config().llm
+def _is_configured(provider: str, config: Config | None = None) -> bool:
+    """Whether ``provider`` has a stored key in the merged config.
+
+    Parameters
+    ----------
+    provider : str
+        A chat provider tag.
+    config : Config, optional
+        The merged config to read; defaults to the bound project's.
+
+    Returns
+    -------
+    bool
+        ``True`` when ``[llm.<provider>].api_key`` is set. Ambient
+        environment variables never count.
+    """
+    llm = (config or get_config()).llm
     section = getattr(llm, provider, None)
-    if section is not None and getattr(section, "api_key", None):
-        return True
-    env_var = chat_provider_env_var(provider)
-    return bool(env_var and os.environ.get(env_var))
+    return bool(section is not None and getattr(section, "api_key", None))
+
+
+def default_chat_provider(config: Config) -> str | None:
+    """The provider a new chat session starts on.
+
+    Parameters
+    ----------
+    config : Config
+        The merged config of the project.
+
+    Returns
+    -------
+    str or None
+        The configured Chat provider when it has a stored key, else the
+        first of ``CHAT_PROVIDERS`` that has one, else ``None``.
+    """
+    try:
+        configured = config.model_for("chat").provider
+    except ConfigError:
+        configured = None
+    if configured and _is_configured(configured, config):
+        return configured
+    return next((p for p in CHAT_PROVIDERS if _is_configured(p, config)), None)
+
+
+def _require_key(provider: str) -> None:
+    """409 ``no_llm_key`` unless ``provider`` has a stored key (raised before any write)."""
+    if not _is_configured(provider):
+        raise ServeError(
+            409,
+            f"no stored key for the chat provider ({provider})",
+            code="no_llm_key",
+        )
 
 
 @router.get("/providers")
 def providers() -> list[dict]:
-    """The four chat providers, each flagged configured or not.
+    """The four chat providers, each flagged configured and default or not.
 
-    The picker shows unconfigured providers *disabled with their env-var
-    name* rather than hiding them — "openrouter needs OPENROUTER_API_KEY"
-    is actionable, a missing entry is a mystery.
+    Keyless providers are listed with ``configured: false`` so the UI can
+    show an existing session's own provider; the UI hides the rest. Exactly
+    one entry (at most) has ``default: true``: where a new session starts.
     """
     config = get_config()
+    default = default_chat_provider(config)
     return [
         {
             "provider": provider,
-            "configured": _is_configured(provider),
+            "configured": _is_configured(provider, config),
             "default_model": config.model_for("chat", provider=provider).model,
-            "env_var": chat_provider_env_var(provider),
+            "default": provider == default,
         }
         for provider in CHAT_PROVIDERS
     ]
@@ -317,6 +360,15 @@ def create_session(request: Request, body: CreateSessionBody | None = None) -> d
         )
     except ConfigError as exc:
         raise ServeError(400, str(exc), code="bad_config") from exc
+    if body.provider:
+        _require_key(body.provider)
+    else:
+        provider = default_chat_provider(get_config())
+        if provider is None:
+            raise ServeError(
+                409, "no LLM key is configured for chat", code="no_llm_key"
+            )
+        default_model = get_config().model_for("chat", provider=provider).model
     model = body.model or default_model
 
     now = _now_iso()
@@ -387,6 +439,7 @@ def update_session(session_id: int, body: UpdateSessionBody, request: Request) -
             row.title = title[:TITLE_MAX_CHARS]
 
         if body.provider is not None and body.provider != row.provider:
+            _require_key(body.provider)
             row.provider = body.provider
             # Switching provider invalidates the old model id, so resolve a
             # default for the new one unless this same request names a model.
@@ -823,6 +876,7 @@ def send_message(
     if ctx is not None and ctx.llm_block == BUDGET_EXCEEDED:
         raise UsageBlocked(ctx.llm_block_scope)
 
+    _require_key(provider)
     _persist_user_message(session_id, content)
 
     return StreamingResponse(

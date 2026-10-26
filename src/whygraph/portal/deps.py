@@ -543,9 +543,14 @@ class PortalState:
         Key and token tests (M2f-3 plan section 4.13), one hour window, per
         key limits through ``hit_all``: ``("u", org_id, user_id)`` 10 and
         ``("o", org_id)`` 60.
+    model_list : Throttle
+        Settings' model listings (plan 36 section 4.1.3), separate from
+        ``key_test``, one hour window, per key limits through ``hit_all``:
+        ``("u", org_id, user_id)`` 30 and ``("o", org_id)`` 120.
     key_test_transport : httpx.BaseTransport or None
-        Replaces the network of the LLM key probe
-        (:func:`whygraph.portal.key_test.probe_llm_key`; tests plug an
+        Replaces the network of the LLM key probe and the model listing
+        (:func:`whygraph.portal.key_test.probe_llm_key`,
+        :func:`whygraph.portal.model_list.list_llm_models`; tests plug an
         ``httpx.MockTransport`` in); ``None`` in a real run.
     """
 
@@ -615,6 +620,7 @@ class PortalState:
         self.agent_calls = AgentCallBook()
         self.repo_cache = RepoListCache()
         self.key_test = Throttle(60, 60 * 60)
+        self.model_list = Throttle(120, 60 * 60)
         self.slug_check = Throttle(60, 60)
         self.github_listing: dict[int, tuple[float, bool]] = {}
         self.key_test_transport: Any = None

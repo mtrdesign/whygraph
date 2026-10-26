@@ -49,6 +49,11 @@ export function isProduction(state: PortalState | undefined): boolean {
   return state?.mode === "production" && !!state.host_kind && state.host_kind !== "local";
 }
 
+/** Production password (bootstrap) accounts have no GitHub identity, so they cannot import (github_required). */
+export function needsGitHubToImport(state: PortalState | undefined): boolean {
+  return isProduction(state) && !!state?.user?.has_password;
+}
+
 /** `host[:port]` of the base URL, or `""` when it does not parse. */
 export function baseHostOf(baseUrl: string | undefined): string {
   try {

@@ -107,6 +107,7 @@ USAGE_SOURCES: tuple[str, ...] = ("scan", "explorer", "chat", "mcp", "agent")
 ``scan`` is interactive."""
 USAGE_TASKS: tuple[str, ...] = ("analyze", "rationale", "chat")
 """The task an LLM call served (``usage_events.task``)."""
+# "environment": historical usage rows only; no longer written
 KEY_SCOPES: tuple[str, ...] = ("project", "org", "environment", "none")
 """Whose key paid for an LLM call (``usage_events.key_scope``)."""
 COST_SOURCES: tuple[str, ...] = ("provider", "estimated", "unpriced")

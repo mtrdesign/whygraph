@@ -22,6 +22,7 @@ from typing import Any, Iterator
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 from sqlmodel import func, select
 
 from test_portal_app import (  # noqa: F401 -- fixtures
@@ -34,8 +35,12 @@ from test_portal_app import (  # noqa: F401 -- fixtures
 )
 from test_portal_hosts_isolation import _insert_project
 from test_portal_identity_routes import audit_log, events  # noqa: F401 -- fixture
+from test_portal_link import fake, portal  # noqa: F401 -- fixtures
+from test_portal_linked_manage import linked_project
 from test_portal_members import be, team, with_roles  # noqa: F401 -- fixture
+from test_portal_runner import scanner  # noqa: F401 -- fixture
 from whygraph.portal import db as portal_db
+from whygraph.portal.key_routes import MODEL_LIST_ORG_LIMIT, MODEL_LIST_USER_LIMIT
 from whygraph.portal.key_test import (
     BODY_CAP,
     PROBES,
@@ -43,6 +48,7 @@ from whygraph.portal.key_test import (
     probe_llm_key,
     probe_url,
 )
+from whygraph.portal.model_list import fallback_listing
 from whygraph.portal.models import (
     ConnectionToken,
     Project,
@@ -51,7 +57,7 @@ from whygraph.portal.models import (
     UsageEvent,
     User,
 )
-from whygraph.portal.secrets import LLM_API_KEY, put_secret
+from whygraph.portal.secrets import LLM_API_KEY, drop_ambient_llm_vars, put_secret
 from whygraph.portal.throttle import Throttle
 from whygraph.services.github import GitHubError, RepoAccessError
 
@@ -431,18 +437,28 @@ def test_the_project_key_test_uses_the_key_in_effect(
     assert _ledger_rows() == before  # not ledgered
 
 
-def test_an_environment_key_is_tested_as_such(
+def test_an_environment_key_is_never_tested(
     local: SimpleNamespace,
     key_test_network: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-from-env")
     local.state.contexts.invalidate()
-    body = local.client.post("/api/projects/demo/keys/openrouter/test").json()
-    assert body["scope_tested"] == "environment"
-    assert key_test_network.requests[-1].headers["authorization"] == (
-        "Bearer sk-or-v1-from-env"
-    )
+    before = len(key_test_network.requests)
+    response = local.client.post("/api/projects/demo/keys/openrouter/test")
+    assert (response.status_code, response.json()["code"]) == (409, "key_missing")
+    assert len(key_test_network.requests) == before
+
+
+def test_drop_ambient_llm_vars_removes_only_the_llm_variables() -> None:
+    environ = {
+        "ANTHROPIC_API_KEY": "sk-secret",
+        "OPENAI_BASE_URL": "http://x",
+        "GH_TOKEN": "ghp_x",
+        "PATH": "/bin",
+    }
+    assert drop_ambient_llm_vars(environ) == ["ANTHROPIC_API_KEY", "OPENAI_BASE_URL"]
+    assert environ == {"GH_TOKEN": "ghp_x", "PATH": "/bin"}
 
 
 def test_the_defaults_key_test(local: SimpleNamespace, key_test_network: Any) -> None:
@@ -530,6 +546,190 @@ def test_key_tests_are_throttled_per_user(
     assert len(key_test_network.requests) == 10
     # A refusal before the probe (no key) is not counted and not throttled.
     assert w.client.post("/api/projects/demo/keys/openrouter/test").status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Model listing (plan 36 section 9.2 "Model listing")
+# ---------------------------------------------------------------------------
+
+ANTHROPIC_LISTING = {
+    "data": [
+        {"id": "claude-opus-5-5", "display_name": "Claude Opus 5.5"},
+        {"id": "<script>", "display_name": "dropped"},
+    ]
+}
+
+
+def _fallback(provider: str) -> list[dict]:
+    return [
+        {"id": m.id, "display_name": m.display_name} for m in fallback_listing(provider)
+    ]
+
+
+def _model_list_hits(w: SimpleNamespace) -> tuple[int, int]:
+    """How many listings the throttle has left for the user and the org."""
+    throttle = w.state.model_list
+    return (
+        throttle.remaining(("u", w.org_id, w.user_id), limit=MODEL_LIST_USER_LIMIT),
+        throttle.remaining(("o", w.org_id), limit=MODEL_LIST_ORG_LIMIT),
+    )
+
+
+def test_the_defaults_listing_is_live_with_the_org_key(
+    local: SimpleNamespace, key_test_network: Any
+) -> None:
+    w = local
+    key_test_network.respond = lambda r: httpx.Response(200, json=ANTHROPIC_LISTING)
+    before = _ledger_rows()
+    response = w.client.get("/api/portal/defaults/models/anthropic")
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "provider": "anthropic",
+        "source": "live",
+        "result": "ok",
+        "models": [{"id": "claude-opus-5-5", "display_name": "Claude Opus 5.5"}],
+    }
+    (request,) = key_test_network.requests
+    assert str(request.url) == "https://api.anthropic.com/v1/models?limit=1000"
+    assert request.headers["x-api-key"] == ORG_ANTHROPIC
+    # Counted on its own throttle, never the key tests'; not ledgered.
+    assert _model_list_hits(w) == (
+        MODEL_LIST_USER_LIMIT - 1,
+        MODEL_LIST_ORG_LIMIT - 1,
+    )
+    assert w.state.key_test.remaining(("o", w.org_id), limit=60) == 60
+    assert _ledger_rows() == before
+    # A listing the provider refuses is the fallback, still a 200.
+    key_test_network.respond = lambda r: httpx.Response(401, json={"error": "scoped"})
+    refused = w.client.get("/api/portal/defaults/models/anthropic")
+    assert refused.status_code == 200
+    assert refused.json() == {
+        "provider": "anthropic",
+        "source": "fallback",
+        "result": "rejected",
+        "models": _fallback("anthropic"),
+    }
+    assert "scoped" not in refused.text
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openrouter"])
+def test_a_listing_without_a_key_calls_nothing(
+    local: SimpleNamespace, key_test_network: Any, provider: str
+) -> None:
+    w = local
+    # The org's Anthropic key removed; OpenRouter never had one (its /models
+    # would answer without a key, but no key means no call for every provider).
+    w.client.put("/api/portal/defaults", json={"secrets": {"llm": {"anthropic": None}}})
+    for path in (
+        f"/api/portal/defaults/models/{provider}",
+        f"/api/projects/demo/models/{provider}",
+    ):
+        response = w.client.get(path)
+        assert response.status_code == 200, (path, response.text)
+        assert response.json() == {
+            "provider": provider,
+            "source": "fallback",
+            "result": "key_missing",
+            "models": _fallback(provider),
+        }, path
+    assert key_test_network.requests == []
+    assert _model_list_hits(w) == (MODEL_LIST_USER_LIMIT, MODEL_LIST_ORG_LIMIT)
+
+
+def test_a_throttled_listing_is_the_fallback(
+    local: SimpleNamespace, key_test_network: Any
+) -> None:
+    w = local
+    pairs = [
+        (("u", w.org_id, w.user_id), MODEL_LIST_USER_LIMIT),
+        (("o", w.org_id), MODEL_LIST_ORG_LIMIT),
+    ]
+    for _ in range(MODEL_LIST_USER_LIMIT):
+        assert w.state.model_list.hit_all(pairs) is None
+    for path in (
+        "/api/portal/defaults/models/openai",
+        "/api/projects/demo/models/deepseek",
+    ):
+        response = w.client.get(path)
+        assert response.status_code == 200, (path, response.text)
+        body = response.json()
+        assert (body["source"], body["result"]) == ("fallback", "throttled"), path
+        assert body["models"] == _fallback(body["provider"])
+    assert key_test_network.requests == []
+    # The key tests have their own budget.
+    assert w.client.post("/api/portal/defaults/keys/openai/test").status_code == 200
+
+
+@pytest.mark.parametrize("provider", ["ollama", "nope"])
+def test_a_provider_that_cannot_be_listed_is_refused(
+    local: SimpleNamespace, key_test_network: Any, provider: str
+) -> None:
+    w = local
+    for path in (
+        f"/api/portal/defaults/models/{provider}",
+        f"/api/projects/demo/models/{provider}",
+    ):
+        response = w.client.get(path)
+        assert (response.status_code, response.json()["code"]) == (
+            422,
+            "bad_provider",
+        ), path
+    assert key_test_network.requests == []
+
+
+def test_the_project_listing_uses_the_key_in_effect(
+    local: SimpleNamespace, key_test_network: Any
+) -> None:
+    w = local
+    key_test_network.respond = lambda r: httpx.Response(
+        200, json={"data": [{"id": "deepseek-v4-pro"}]}
+    )
+    # An org DeepSeek key too: the project's own key wins.
+    w.client.put(
+        "/api/portal/defaults", json={"secrets": {"llm": {"deepseek": "sk-ds-org"}}}
+    )
+    own = w.client.get("/api/projects/demo/models/deepseek")
+    assert own.status_code == 200, own.text
+    assert own.json()["source"] == "live"
+    assert own.json()["models"] == [
+        {"id": "deepseek-v4-pro", "display_name": "deepseek-v4-pro"}
+    ]
+    # The project's own OpenAI endpoint with no project key: the org key never
+    # follows an endpoint override, so there is nothing to list with.
+    missing = w.client.get("/api/projects/demo/models/openai")
+    assert missing.status_code == 200, missing.text
+    assert (missing.json()["source"], missing.json()["result"]) == (
+        "fallback",
+        "key_missing",
+    )
+    # With the project's own OpenAI key, listed at the project's own endpoint.
+    saved = w.client.put(
+        "/api/projects/demo/config",
+        json={"secrets": {"llm": {"openai": PROJECT_OPENAI}}},
+    )
+    assert saved.status_code == 200, saved.text
+    custom = w.client.get("/api/projects/demo/models/openai")
+    assert custom.json()["source"] == "live", custom.text
+    sent = [(str(r.url), r.headers["authorization"]) for r in key_test_network.requests]
+    assert sent == [
+        ("https://api.deepseek.com/models", f"Bearer {PROJECT_DEEPSEEK}"),
+        ("http://gw.example/v1/models", f"Bearer {PROJECT_OPENAI}"),
+    ]
+
+
+def test_a_linked_project_lists_no_models(
+    portal: TestClient,
+    fake: Any,
+    env: SimpleNamespace,
+    scanner: SimpleNamespace,
+    key_test_network: Any,
+) -> None:
+    linked_project(portal, fake, env)
+    for provider in ("anthropic", "nope"):
+        response = portal.get(f"/api/projects/demo/models/{provider}")
+        assert response.status_code == 403, response.text
+        assert response.json()["code"] == "managed_on_platform"
+    assert key_test_network.requests == []
 
 
 # ---------------------------------------------------------------------------

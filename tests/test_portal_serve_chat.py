@@ -35,12 +35,21 @@ from whygraph.chat.harness import (
     ToolCallStarted,
     ToolResultReady,
 )
-from whygraph.core.config import ChatConfig, Config, LlmConfig, OpenAIConfig
+from whygraph.core.config import (
+    AnthropicConfig,
+    ChatConfig,
+    Config,
+    DeepSeekConfig,
+    LlmConfig,
+    OpenAIConfig,
+    OpenRouterConfig,
+)
 from whygraph.core.context import use_project
 from whygraph.db import get_session as project_session
 from whygraph.db.models import ChatSession as ChatSessionRow
 from whygraph.portal import db as portal_db
-from whygraph.portal.models import User
+from whygraph.portal.models import Project, User
+from whygraph.portal.secrets import LLM_API_KEY, put_secret
 from whygraph.serve import chat as serve_chat
 from whygraph.services.llm.chat import (
     ModelInfo,
@@ -52,9 +61,50 @@ from whygraph.services.llm.chat import (
 from whygraph.services.llm.exceptions import LlmError, LlmKeyMissing
 
 
+CHAT_PROVIDER_TAGS = ("anthropic", "openai", "deepseek", "openrouter")
+
+
+def _store_org_keys(client: ScopedClient, providers=CHAT_PROVIDER_TAGS) -> None:
+    """Store an org-level LLM key per provider, then drop the context cache."""
+    with portal_db.get_session() as session:
+        org_id = session.exec(
+            select(Project.org_id).where(Project.slug == "demo")
+        ).one()
+        for provider in providers:
+            put_secret(
+                session,
+                kind=LLM_API_KEY,
+                value=f"sk-{provider}",
+                provider=provider,
+                org_id=org_id,
+            )
+    client.app.state.portal.contexts.invalidate()
+
+
+def _llm(*providers: str, **kwargs) -> LlmConfig:
+    """An ``LlmConfig`` with a stored key for each of ``providers``."""
+    sections = {
+        "anthropic": AnthropicConfig,
+        "openai": OpenAIConfig,
+        "deepseek": DeepSeekConfig,
+        "openrouter": OpenRouterConfig,
+    }
+    for provider in providers:
+        kwargs[provider] = sections[provider](api_key=f"sk-{provider}")
+    return LlmConfig(**kwargs)
+
+
 @pytest.fixture
 def chat_client(env: SimpleNamespace) -> Iterator[ScopedClient]:  # noqa: F811
-    """The portal, scoped to ``demo``, with an isolated, migrated DB."""
+    """The portal, scoped to ``demo``, with a stored org key for every chat provider."""
+    with portal_with_project(env, codegraph=False) as client:
+        _store_org_keys(client)
+        yield client
+
+
+@pytest.fixture
+def keyless_chat_client(env: SimpleNamespace) -> Iterator[ScopedClient]:  # noqa: F811
+    """The portal, scoped to ``demo``, with no LLM key stored anywhere."""
     with portal_with_project(env, codegraph=False) as client:
         yield client
 
@@ -96,46 +146,80 @@ def _stub_harness(monkeypatch: pytest.MonkeyPatch, events) -> None:
 
 def test_providers_lists_the_four_chat_providers(chat_client) -> None:
     payload = chat_client.get("/api/chat/providers").json()
-    assert [p["provider"] for p in payload] == [
-        "anthropic",
-        "openai",
-        "deepseek",
-        "openrouter",
-    ]
+    assert [p["provider"] for p in payload] == list(CHAT_PROVIDER_TAGS)
     assert all(p["default_model"] for p in payload)
-    assert {p["env_var"] for p in payload} == {
-        "ANTHROPIC_API_KEY",
-        "OPENAI_API_KEY",
-        "DEEPSEEK_API_KEY",
-        "OPENROUTER_API_KEY",
-    }
+    assert all("env_var" not in p for p in payload)
+    assert all(p["configured"] for p in payload)
+    assert {p["provider"] for p in payload if p["default"]} == {"anthropic"}
 
 
-def test_provider_is_configured_from_config_or_env(
+def test_provider_is_configured_from_stored_keys_only(
     chat_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    for var in (
-        "ANTHROPIC_API_KEY",
-        "OPENAI_API_KEY",
-        "DEEPSEEK_API_KEY",
-        "OPENROUTER_API_KEY",
-    ):
-        monkeypatch.delenv(var, raising=False)
-    use_project_config(
-        chat_client,
-        monkeypatch,
-        Config(llm=LlmConfig(openai=OpenAIConfig(api_key="sk-in-config"))),
-    )
+    use_project_config(chat_client, monkeypatch, Config(llm=_llm("openai")))
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-in-env")
 
     flags = {
         p["provider"]: p["configured"]
         for p in chat_client.get("/api/chat/providers").json()
     }
-    assert flags["openai"] is True  # from whygraph.toml
-    assert flags["deepseek"] is True  # from the environment
+    assert flags["openai"] is True  # a stored key
+    assert flags["deepseek"] is False  # the environment never counts
     assert flags["anthropic"] is False
     assert flags["openrouter"] is False
+
+
+def _defaults(client) -> dict[str, bool]:
+    return {
+        p["provider"]: p["default"] for p in client.get("/api/chat/providers").json()
+    }
+
+
+def test_keyless_providers_have_no_default(
+    keyless_chat_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for _ in range(2):
+        payload = keyless_chat_client.get("/api/chat/providers").json()
+        assert not any(p["configured"] or p["default"] for p in payload)
+        assert all("env_var" not in p for p in payload)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-in-env")
+
+
+def test_the_only_keyed_provider_is_the_default(
+    chat_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    use_project_config(chat_client, monkeypatch, Config(llm=_llm("openrouter")))
+    assert _defaults(chat_client) == {
+        "anthropic": False,
+        "openai": False,
+        "deepseek": False,
+        "openrouter": True,
+    }
+
+
+def test_the_configured_chat_provider_is_the_default_only_with_a_key(
+    chat_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    use_project_config(
+        chat_client,
+        monkeypatch,
+        Config(
+            llm=_llm("anthropic", "openrouter"),
+            chat=ChatConfig(provider="openrouter"),
+        ),
+    )
+    assert _defaults(chat_client)["openrouter"] is True
+
+    use_project_config(
+        chat_client,
+        monkeypatch,
+        Config(
+            llm=_llm("anthropic", "openrouter"),
+            chat=ChatConfig(provider="deepseek"),
+        ),
+    )
+    defaults = _defaults(chat_client)
+    assert defaults["anthropic"] is True and defaults["deepseek"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +257,10 @@ def test_create_session_defaults_from_chat_config(
     use_project_config(
         chat_client,
         monkeypatch,
-        Config(chat=ChatConfig(provider="deepseek", model="deepseek-reasoner")),
+        Config(
+            llm=_llm("deepseek"),
+            chat=ChatConfig(provider="deepseek", model="deepseek-reasoner"),
+        ),
     )
     created = _new_session(chat_client)
     assert (created["provider"], created["model"]) == ("deepseek", "deepseek-reasoner")
@@ -190,7 +277,9 @@ def test_create_session_defaults_from_llm_model(
 ) -> None:
     """Config v2: with no ``[chat]``, the session follows ``[llm].model``."""
     use_project_config(
-        chat_client, monkeypatch, Config(llm=LlmConfig(model="openai/gpt-4o-mini"))
+        chat_client,
+        monkeypatch,
+        Config(llm=_llm("openai", "anthropic", model="openai/gpt-4o-mini")),
     )
     created = _new_session(chat_client)
     assert (created["provider"], created["model"]) == ("openai", "gpt-4o-mini")
@@ -213,6 +302,58 @@ def test_create_session_rejects_a_configured_non_chat_provider(
     assert response.status_code == 400
     assert response.json()["code"] == "bad_config"
     assert "not a chat provider" in response.json()["error"]
+
+
+def test_create_session_without_a_key_is_refused_and_writes_nothing(
+    keyless_chat_client,
+) -> None:
+    response = keyless_chat_client.post("/api/chat/sessions", json={})
+    assert response.status_code == 409
+    assert response.json()["code"] == "no_llm_key"
+    assert keyless_chat_client.get("/api/chat/sessions").json() == []
+
+
+def test_create_session_for_a_keyless_provider_is_refused(
+    chat_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    use_project_config(chat_client, monkeypatch, Config(llm=_llm("anthropic")))
+    response = chat_client.post("/api/chat/sessions", json={"provider": "deepseek"})
+    assert response.status_code == 409
+    assert response.json()["code"] == "no_llm_key"
+    assert "(deepseek)" in response.json()["error"]
+    assert chat_client.get("/api/chat/sessions").json() == []
+
+
+def test_patch_to_a_keyless_provider_is_refused_but_a_model_change_is_not(
+    chat_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = _new_session(chat_client, provider="anthropic")
+    use_project_config(chat_client, monkeypatch, Config(llm=_llm("anthropic")))
+    url = f"/api/chat/sessions/{session['id']}"
+
+    refused = chat_client.patch(url, json={"provider": "deepseek"})
+    assert refused.status_code == 409
+    assert refused.json()["code"] == "no_llm_key"
+    assert chat_client.get(url).json()["provider"] == "anthropic"
+
+    ok = chat_client.patch(url, json={"model": "claude-x"})
+    assert ok.status_code == 200 and ok.json()["model"] == "claude-x"
+
+
+def test_send_to_a_keyless_session_is_refused_and_persists_nothing(
+    chat_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = _new_session(chat_client, provider="deepseek")
+    use_project_config(chat_client, monkeypatch, Config(llm=_llm("anthropic")))
+
+    response = chat_client.post(
+        f"/api/chat/sessions/{session['id']}/messages", json={"content": "hi"}
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "no_llm_key"
+    assert (
+        chat_client.get(f"/api/chat/sessions/{session['id']}").json()["messages"] == []
+    )
 
 
 def test_create_session_rejects_a_non_chat_provider(chat_client) -> None:
@@ -814,6 +955,8 @@ def test_unconfigured_provider_yields_a_single_error_frame(
         raise LlmKeyMissing("openrouter is not configured - set OPENROUTER_API_KEY")
 
     monkeypatch.setattr(serve_chat, "make_chat_client", _boom)
+    # A stored key passes the up-front gate; the in-band frame is the backstop
+    # for a client that still cannot be built.
     session = _new_session(chat_client, provider="openrouter")
 
     response = chat_client.post(
@@ -1059,7 +1202,9 @@ def test_models_fallback_includes_a_configured_model_absent_from_the_static_list
     use_project_config(
         chat_client,
         monkeypatch,
-        Config(llm=LlmConfig(openai=OpenAIConfig(model="gpt-9-custom"))),
+        Config(
+            llm=_llm(openai=OpenAIConfig(api_key="sk-openai", model="gpt-9-custom"))
+        ),
     )
     _stub_list_models(monkeypatch, error="network down")
     payload = chat_client.get("/api/chat/models", params={"provider": "openai"}).json()

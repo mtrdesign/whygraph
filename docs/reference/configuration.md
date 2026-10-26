@@ -232,8 +232,11 @@ A 1.x file resolves to exactly the same providers, models, and timeouts it did b
 
 The portal and its scans read none of your shell's credential variables: its container is started with
 none of your environment, so provider keys and GitHub tokens are entered under Settings instead, and an
-ambient `GH_TOKEN` / `GITHUB_TOKEN` or `*_API_KEY` no longer applies to anything. The variables below are
-the ones the shim and the portal read.
+ambient `GH_TOKEN` / `GITHUB_TOKEN` or `*_API_KEY` no longer applies to anything. A portal started
+outside Docker removes `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`,
+`OPENROUTER_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL` from its
+environment at start and logs their names: only keys and endpoints stored under Settings are used.
+The variables below are the ones the shim and the portal read.
 
 One variable is internal:
 

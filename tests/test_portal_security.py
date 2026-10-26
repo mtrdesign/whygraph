@@ -116,6 +116,9 @@ def test_symlinked_whygraph_dir_to_other_project_is_refused(
     # `.whygraph/backups` is still a repo path the portal writes, so a
     # symlinked `.whygraph/` directory is still refused (acceptance #7).
     alpha = initialized_repo(ready, env, "alpha")
+    ready.put(
+        "/api/portal/defaults", json={"secrets": {"llm": {"anthropic": "sk-a-0001"}}}
+    )
     assert ready.post("/api/projects/alpha/chat/sessions", json={}).status_code == 201
     beta = make_repo(env.shared, "beta")
     seed_codegraph(beta)
@@ -147,6 +150,9 @@ def test_symlinked_in_repo_db_to_other_project_is_ignored(
     # The history DB is in the data dir: a committed `.whygraph/whygraph.db`
     # link (here to alpha's history) is never opened.
     initialized_repo(ready, env, "alpha")
+    ready.put(
+        "/api/portal/defaults", json={"secrets": {"llm": {"anthropic": "sk-a-0001"}}}
+    )
     assert ready.post("/api/projects/alpha/chat/sessions", json={}).status_code == 201
     alpha_db = history_db("alpha")
     before = alpha_db.read_bytes()

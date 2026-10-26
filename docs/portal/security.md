@@ -217,6 +217,13 @@ runs on a developer's laptop and a repository on it is untrusted.
   address serves. Tests are limited to 10 per person and 60 per organization an hour, are not
   counted as usage, and in production each one is a `key_tested` security event naming the scope,
   provider and result, never the key.
+- **Model suggestions use the stored key and return only model names.** A model field's suggestions
+  come from the provider's model listing, called with the stored key - never one you type - with no
+  redirect followed and a 10-second limit. Only strings shaped like model ids are returned, at most
+  2,000, so a custom address cannot be used to read what it serves. Listings are limited to 30 per
+  person and 120 per organization an hour (past that, a short built-in list is shown), are not
+  counted as usage, and are open only to whoever can change that key: organization owners for the
+  organization's keys, project admins for a project's.
 - **A custom endpoint is tested where it points.** When a provider has a custom `base_url`, the test
   calls that address with the key - the address the portal already sends that key to for every model
   call - so a test learns nothing an owner could not see from Chat's model list for the same
@@ -230,7 +237,10 @@ runs on a developer's laptop and a repository on it is untrusted.
   `0700` and the portal will not share a folder that contains it. A dump together with `secret.key` is
   as sensitive as the live data directory; `backups/` is `0700` too.
 - **Nothing from your shell environment enters the container.** Keys you export in your shell are not
-  passed to the portal.
+  passed to the portal. A portal started outside Docker removes `ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+  `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL` from its environment at start and logs their names:
+  only keys and endpoints stored under Settings are used.
 - A scan runs as a child process with an allowlisted environment (`PATH`, `HOME`, locale, `TZ`, TLS and
   proxy variables). Keys and tokens reach it only as the variables that one scan needs, and any key
   that appears in a run's progress or log file is masked to its last four characters. Anything

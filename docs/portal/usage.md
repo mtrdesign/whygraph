@@ -19,9 +19,9 @@ One row per **successful provider round trip**:
 - each **round** of a chat turn, not one row per turn, since a turn with tool calls makes several.
 
 A row holds the organization, project, task (`analyze`, `rationale` or `chat`), who triggered it, the
-provider, the model asked for and the model that answered, which key paid (the project's, the
-organization's, or the portal's environment), the tokens (input, output, cache reads and writes,
-reasoning), the cost and where it came from, and a short **subject**: a commit hash, a file path or a
+provider, the model asked for and the model that answered, which key paid (the project's or the
+organization's; older rows may say the portal's environment), the tokens (input, output, cache reads
+and writes, reasoning), the cost and where it came from, and a short **subject**: a commit hash, a file path or a
 qualified name. **Never prompt text, never completion text, never chat content.**
 
 What is **not** recorded:

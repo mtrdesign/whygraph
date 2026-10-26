@@ -18,12 +18,13 @@ import {
   UsersIcon,
 } from "lucide-react";
 import { ApiError, portalApi, portalKey, projectApi, projectKey, type PortalState, type ProjectSummary } from "../../api";
-import { canAdmin, canOwn, isProduction, signedInAs, useSignOut } from "../../lib/identity";
+import { canAdmin, canOwn, isProduction, needsGitHubToImport, signedInAs, useSignOut } from "../../lib/identity";
 import { projectStatus, type StatusTone } from "../../lib/projectStatus";
 import { hardNavigate } from "../../lib/navigation";
 import { can } from "../../lib/permissions";
 import { useUi } from "../../store";
 import { ThemeToggle } from "../ThemeToggle";
+import { UserAvatar } from "../auth/UserAvatar";
 import { ChatsSection } from "./ChatsSection";
 import { OrgSwitcher, orgRoleText } from "./OrgSwitcher";
 import {
@@ -162,7 +163,7 @@ function ProjectSwitcher({ slug, name }: { slug?: string; name?: string }) {
   const state = useQuery({ queryKey: portalKey("state"), queryFn: portalApi.state }).data;
   const production = isProduction(state);
   // Local mode's user may always add; in production `org.add_project` is the org's owners and admins.
-  const canAdd = !production || canAdmin(state?.org?.role ?? undefined);
+  const canAdd = (!production || canAdmin(state?.org?.role ?? undefined)) && !needsGitHubToImport(state);
   const projects = useQuery({ queryKey: portalKey("projects"), queryFn: portalApi.projects });
   const label = slug ? (name ?? slug) : "All projects";
   return (
@@ -334,9 +335,7 @@ export function Sidebar({
               aria-label="Account menu"
               className="flex items-center gap-2.5 rounded-md px-2 pb-0.5 pt-2 text-left outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
             >
-              <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary text-[11px] font-semibold text-primary-foreground">
-                {(user?.display_name ?? "?").charAt(0).toUpperCase()}
-              </span>
+              <UserAvatar name={user?.display_name ?? "?"} url={user?.avatar_url} className="size-6" />
               <div className="flex min-w-0 flex-1 flex-col leading-tight">
                 <span className="truncate text-[13px] font-medium">{user?.display_name}</span>
                 {(() => {

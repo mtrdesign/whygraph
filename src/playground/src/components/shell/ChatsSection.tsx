@@ -7,6 +7,7 @@ import { errorMessage } from "../../lib/apiErrors";
 import { formatDateTime, formatRelative } from "../../lib/format";
 import { useActiveSessionId } from "../../lib/nav";
 import { plural } from "../../lib/plural";
+import { useProjectQuery } from "../../lib/project";
 import { useUi } from "../../store";
 import { ConfirmDialog } from "../portal/ConfirmDialog";
 import { DisabledReason } from "../state/DisabledReason";
@@ -179,6 +180,11 @@ export function ChatsSection({ slug, budgetStopped }: { slug: string; budgetStop
   const remove = useDeleteSession(slug);
   const startChat = useStartChat(slug);
   const activeId = useActiveSessionId();
+  // Same key as the thread's and the picker's: a key saved anywhere flips all three.
+  const providers = useProjectQuery(["chat", "providers"], (api) => api.chatProviders(), {
+    refetchOnWindowFocus: true,
+  });
+  const noKeys = !!providers.data && !providers.data.some((p) => p.configured);
   const streamingId = useUi((s) => s.streamingSessionId);
   const [shown, setShown] = useState(CHATS_PAGE);
   const [renamingId, setRenamingId] = useState<number | null>(null);
@@ -191,7 +197,7 @@ export function ChatsSection({ slug, budgetStopped }: { slug: string; budgetStop
       variant="ghost"
       size="icon-xs"
       aria-label="New chat"
-      disabled={budgetStopped}
+      disabled={budgetStopped || noKeys}
       onClick={startChat}
       className="text-muted-foreground hover:text-foreground"
     >
@@ -217,7 +223,13 @@ export function ChatsSection({ slug, budgetStopped }: { slug: string; budgetStop
         <h2 id={headingId} className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
           Chats
         </h2>
-        {budgetStopped ? <DisabledReason reason="Monthly budget reached">{plus}</DisabledReason> : plus}
+        {budgetStopped ? (
+          <DisabledReason reason="Monthly budget reached">{plus}</DisabledReason>
+        ) : noKeys ? (
+          <DisabledReason reason="No LLM key is set for Chat">{plus}</DisabledReason>
+        ) : (
+          plus
+        )}
       </div>
 
       {sessions.isPending && (

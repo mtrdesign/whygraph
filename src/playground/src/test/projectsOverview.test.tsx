@@ -605,6 +605,19 @@ describe("Projects list", () => {
     await waitFor(() => expect(fake.log.some((c) => c.path.startsWith("/api/onboarding"))).toBe(true));
   });
 
+  it("a production password owner sees no Import button, and the explainer once the checklist is not showing", async () => {
+    fake.state = {
+      ...orgState("owner"),
+      user: { uid: "u1", display_name: "Ada", email: "ada@example.com", role: null, is_instance_admin: false, github_login: null, has_password: true },
+    };
+    mount("/");
+    expect(await screen.findByText("No projects yet")).toBeInTheDocument();
+    const box = await screen.findByTestId("github-required");
+    expect(within(screen.getByTestId("first-run-slot")).getByTestId("github-required")).toBe(box);
+    expect(screen.queryByRole("link", { name: /^Import/ })).toBeNull();
+    expect(screen.queryByRole("link", { name: "New project" })).toBeNull();
+  });
+
   it.each([
     ["member", "No projects shared with you yet", "An owner or admin can give you access."],
     ["reader", "No projects", "This organization has no projects."],

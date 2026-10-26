@@ -2,8 +2,9 @@
 // which layer a value is inherited from, what a key card says, what a key test
 // answered, and which tasks of the org defaults resolve to a provider without a key.
 
+import type { QueryClient } from "@tanstack/react-query";
 import type { ConfigDict, KeyScope, KeyTestResult, SecretStatus } from "../api";
-import { KEYED_PROVIDERS, TASKS, splitModel, type ModelPick, type TaskName } from "./configForm";
+import { CHAT_PROVIDER_TAGS, KEYED_PROVIDERS, TASKS, splitModel, type ModelPick, type TaskName } from "./configForm";
 import { providerLabel } from "./labels";
 
 const obj = (v: unknown): Record<string, unknown> =>
@@ -68,7 +69,6 @@ export function projectKeyStatus({
 }): string {
   if (own?.set || scope === "project") return keySetText(own);
   if (scope === "org") return `${inheritedKeyText(mode)}${inheritedHint ? ` ${inheritedHint}` : ""}`;
-  if (scope === "environment") return "Using a key from the portal's environment";
   if (endpoint) return `No key: this project uses its own ${providerLabel(provider)} endpoint`;
   return "No key";
 }
@@ -129,8 +129,17 @@ export function taskProvider(layer: ConfigDict, task: TaskName): string {
  */
 export function tasksWithoutKey(layer: ConfigDict, llmKeys: Record<string, SecretStatus | undefined>): string[] {
   const lines: string[] = [];
+  const keyed = CHAT_PROVIDER_TAGS.filter((p) => llmKeys[p]?.set);
   for (const t of TASKS) {
     const provider = taskProvider(layer, t.id);
+    if (t.id === "chat" && keyed.length > 0) {
+      // Chat starts on its own provider when that has a key, else on the first that has one.
+      const own = taskPick(layer, "chat").provider || splitModel(str(obj(layer.llm).model)).provider;
+      if (own && KEYED_PROVIDERS.includes(own) && !llmKeys[own]?.set) {
+        lines.push(`Chat is set to ${providerLabel(own)}, which has no key; new chats start on ${providerLabel(keyed[0])}`);
+      }
+      continue;
+    }
     if (!KEYED_PROVIDERS.includes(provider) || llmKeys[provider]?.set) continue;
     lines.push(`${t.label} uses ${providerLabel(provider)}, which has no key`);
   }
@@ -174,4 +183,12 @@ export function inheritedEndpointText(
   mode: string | null | undefined,
 ): string {
   return inherited ? `Inherited: ${inherited} ${inheritedFrom(mode)}` : fallback;
+}
+
+/** After a key or endpoint change: refetch model suggestions and Chat's provider/model lists, every scope. */
+export function invalidateKeyDependents(qc: QueryClient) {
+  return qc.invalidateQueries({
+    predicate: ({ queryKey: k }) =>
+      k[1] === "models" || (k[1] === "chat" && (k[2] === "providers" || k[2] === "models")),
+  });
 }

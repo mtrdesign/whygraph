@@ -153,7 +153,7 @@ export interface ChatProvider {
   provider: string;
   configured: boolean;
   default_model: string;
-  env_var: string | null;
+  default: boolean;
 }
 
 export interface ChatModel {
@@ -612,6 +612,13 @@ export type KeyTestResult =
   | "unexpected";
 
 /** `POST .../keys/{provider}/test` and `.../github-token/test`. */
+export interface ModelListResponse {
+  provider: string;
+  source: "live" | "fallback";
+  result: string;
+  models: { id: string; display_name: string }[];
+}
+
 export interface KeyTestResponse {
   ok: boolean;
   result: KeyTestResult;
@@ -1016,6 +1023,9 @@ export const portalApi = {
   // Tests the organization layer's (local: the portal default) key for a provider.
   defaultsKeyTest: (provider: string) =>
     send<KeyTestResponse>("POST", `/portal/defaults/keys/${encodeURIComponent(provider)}/test`),
+  // Model-id suggestions for the organization layer's key (owners; always 200).
+  defaultsModels: (provider: string) =>
+    get<ModelListResponse>(`/portal/defaults/models/${encodeURIComponent(provider)}`),
   putDefaults: (body: ConfigPut) => send<DefaultsView>("PUT", "/portal/defaults", body),
   addProject: (body: AddProjectBody) => send<AddProjectResult>("POST", "/projects", body),
 };
@@ -1923,6 +1933,8 @@ export function projectApi(slug: string) {
     // Tests the key the project would use for a provider.
     keyTest: (provider: string) =>
       send<KeyTestResponse>("POST", `${base}/keys/${encodeURIComponent(provider)}/test`),
+    // Model-id suggestions for the key the project would use (always 200; linked projects get 403).
+    models: (provider: string) => get<ModelListResponse>(`${base}/models/${encodeURIComponent(provider)}`),
     // Local mode only: tests the effective GitHub token against the project's remote.
     githubTokenTest: () => send<KeyTestResponse>("POST", `${base}/github-token/test`),
     scanLog: (runId: number) => get<ScanLog>(`${base}/scans/${runId}/log`),

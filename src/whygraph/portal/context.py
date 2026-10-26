@@ -37,7 +37,6 @@ does its database and Fernet work on a worker thread
 from __future__ import annotations
 
 import logging
-import os
 import threading
 from pathlib import Path
 from typing import Any, Callable
@@ -255,11 +254,6 @@ def _merged_layer(session: Session, project: Project, root: Path) -> tuple[dict,
     return project_layer, merged
 
 
-def _key_env_var(tag: str) -> str:
-    """The environment variable an adapter falls back to (``ANTHROPIC_API_KEY``)."""
-    return f"{tag.replace('-', '_').upper()}_API_KEY"
-
-
 def _inject_secrets(
     session: Session, project: Project, project_layer: dict, merged: dict
 ) -> dict[str, str]:
@@ -270,8 +264,7 @@ def _inject_secrets(
     project secret when the project has one, else the org default.
 
     Returns the key decision per LLM provider (``project`` / ``org`` /
-    ``environment`` / ``none``): with no stored key injected, the adapter
-    falls back to its environment variable in this process.
+    ``none``): only stored keys count, never the portal's environment.
     """
     rows = session.exec(
         select(Secret).where(
@@ -311,7 +304,7 @@ def _inject_secrets(
         if key is not None:
             llm.setdefault(attr, {})["api_key"] = key
         else:
-            scope = "environment" if os.environ.get(_key_env_var(tag)) else "none"
+            scope = "none"
         key_scopes[tag] = scope
 
     if (False, GITHUB_TOKEN, None) in by_scope:

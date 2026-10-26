@@ -22,6 +22,7 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     at,
     env,
     github_fake,
+    log_in,
     production_env,
 )
 from test_portal_github_import import (  # noqa: F401 -- fixtures
@@ -32,6 +33,7 @@ from test_portal_github_import import (  # noqa: F401 -- fixtures
     github_app_key,
     world,
 )
+from test_portal_identity_routes import create_org  # noqa: F401 -- helper
 from test_portal_members import (  # noqa: F401 -- fixtures
     add,
     be,
@@ -94,6 +96,16 @@ def test_a_production_owner_sees_every_item_open(
     assert all(not i["done"] for i in got.values())
     assert all(set(i) == {"id", "done", "can_act"} for i in got.values())
     assert all(i["can_act"] for i in got.values())
+    assert got["project"]["can_act"] is True
+
+
+def test_a_password_owner_cannot_act_on_the_project_item(world: World) -> None:
+    w = world
+    w.client.cookies.clear()
+    assert log_in(w.client, "ada@example.com").status_code == 200
+    assert create_org(w.client, "adas", "Ada's").status_code == 201
+    got = items(w.client.get(at("adas") + "/api/onboarding"))
+    assert got["project"]["can_act"] is False
 
 
 def test_each_production_item_closes_on_its_own_rule(
@@ -262,11 +274,11 @@ def test_a_local_portal_has_three_items_and_omits_the_key_for_linked_orgs(
     assert "llm_key" not in items(w.client.get("/api/onboarding"))
 
 
-def test_an_environment_key_closes_the_key_item(
+def test_an_environment_key_does_not_close_the_key_item(
     local: SimpleNamespace, no_env_keys: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-env")
-    assert items(local.client.get("/api/onboarding"))["llm_key"]["done"]
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
+    assert items(local.client.get("/api/onboarding"))["llm_key"]["done"] is False
 
 
 # ---------------------------------------------------------------------------

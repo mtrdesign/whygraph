@@ -11,6 +11,7 @@ from __future__ import annotations
 import atexit
 import functools
 import json
+import logging
 import os
 import shlex
 import shutil
@@ -1352,6 +1353,9 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/portal/defaults/keys/{provider}/test", "POST"): "org.configure",
     (f"{_P}/keys/{{provider}}/test", "POST"): _CONFIGURE,
     (f"{_P}/github-token/test", "POST"): _CONFIGURE,
+    # Model suggestions (plan 36 section 4.1.2): who can change the key
+    ("/api/portal/defaults/models/{provider}", "GET"): "org.configure",
+    (f"{_P}/models/{{provider}}", "GET"): _CONFIGURE,
     ("/api/projects", "GET"): "org.read",
     ("/api/projects", "POST"): "org.add_project",
     # Production's members page: org_access(...) (M2d-1 section 4.5)
@@ -1980,6 +1984,24 @@ def test_endpoint_change_clears_the_project_key_and_blocks_the_global_one(
     )  # no global key into an overridden endpoint
 
 
+def test_missing_key_for_chat_follows_the_default_chat_provider() -> None:
+    from whygraph.core.config import AnthropicConfig, Config, LlmConfig
+    from whygraph.core.config import OpenRouterConfig
+    from whygraph.portal.routes import _missing_key
+
+    keyless = Config()
+    assert _missing_key(keyless, ("chat",)) == "anthropic"  # unchanged: no keys
+    only_openrouter = Config(
+        llm=LlmConfig(openrouter=OpenRouterConfig(api_key="sk-or"))
+    )
+    # Chat is unset (-> Anthropic, keyless) but starts on OpenRouter: no warning.
+    assert _missing_key(only_openrouter, ("chat",)) is None
+    # The other tasks still resolve to the keyless default.
+    assert _missing_key(only_openrouter, ("analyze",)) == "anthropic"
+    only_anthropic = Config(llm=LlmConfig(anthropic=AnthropicConfig(api_key="sk-a")))
+    assert _missing_key(only_anthropic, ("chat",)) is None
+
+
 def test_config_and_secret_writes_invalidate_the_context(
     ready: TestClient, env: SimpleNamespace
 ) -> None:
@@ -2265,6 +2287,9 @@ def test_two_projects_side_by_side_do_not_bleed(
 
     root_a = initialized_repo(ready, env, "alpha")
     root_b = initialized_repo(ready, env, "beta")
+    ready.put(
+        "/api/portal/defaults", json={"secrets": {"llm": {"anthropic": "sk-a-0001"}}}
+    )
     seen: list[tuple[str, Path, Path]] = []
 
     def _fake_run_turn(*, client, history, registry=None, **kwargs):
@@ -2631,6 +2656,40 @@ def test_portal_cli_refuses_a_public_bind_outside_the_image(
         assert kw["timeout_graceful_shutdown"] == 10
         assert kw["workers"] == 1
     assert runs[1]["port"] == 9001
+
+
+def test_portal_cli_drops_ambient_llm_variables(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from whygraph.cli import main
+
+    runs: list[dict] = []
+    _record_server_runs(monkeypatch, runs)
+    monkeypatch.setenv("WHYGRAPH_DATA", str(tmp_path / "data"))
+    monkeypatch.setenv("WHYGRAPH_DATABASE_URL", CLI_DATABASE_URL)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://x")
+    monkeypatch.chdir(tmp_path)
+
+    # The CLI configures the `whygraph` logger with propagate=False, so attach
+    # caplog's handler to it directly.
+    whygraph_log = logging.getLogger("whygraph")
+    whygraph_log.addHandler(caplog.handler)
+    try:
+        with caplog.at_level("WARNING", logger="whygraph"):
+            result = CliRunner().invoke(main, ["portal"])
+    finally:
+        whygraph_log.removeHandler(caplog.handler)
+    assert result.exit_code == 0, result.output
+    assert "ANTHROPIC_API_KEY" not in os.environ
+    assert "OPENAI_BASE_URL" not in os.environ
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "ANTHROPIC_API_KEY" in message and "OPENAI_BASE_URL" in message
+    assert "sk-test" not in message
 
 
 def test_portal_cli_refuses_a_data_dir_another_portal_holds(

@@ -18,6 +18,7 @@ import { canOwn, isProduction, usePortalState, useReadOnly, useRole } from "../.
 import { inheritedLayerLabel, providerLabel } from "../../lib/labels";
 import { can } from "../../lib/permissions";
 import { plural } from "../../lib/plural";
+import { invalidateKeyDependents } from "../../lib/settings";
 import { scanAvailability } from "../../lib/scanAvailability";
 import { costPhrase, modelLabel } from "../../lib/scanFormat";
 import { useScanRun, type ScanRunState } from "../../lib/scanRun";
@@ -244,6 +245,7 @@ function DescriptionsNeed({
       void queryClient.invalidateQueries({ queryKey: projectKey(slug, "config") });
       void queryClient.invalidateQueries({ queryKey: projectKey(slug, "project") });
       void queryClient.invalidateQueries({ queryKey: projectKey(slug, "scan-estimate") });
+      void invalidateKeyDependents(queryClient);
     },
   });
 
@@ -260,8 +262,8 @@ function DescriptionsNeed({
       <div>
         <h2 className="text-sm font-semibold">What descriptions need</h2>
         <p className="text-xs text-muted-foreground">
-          Describing commits is the only part that calls an LLM. It can wait: the Explorer and Chat work
-          without it.
+          Describing commits is the only part that calls an LLM. It can wait: the Explorer works without
+          it. Chat needs a key too.
         </p>
       </div>
       <p className="text-sm" data-testid="describe-model">
@@ -276,9 +278,7 @@ function DescriptionsNeed({
             ? `${name} needs no key.`
             : scope === "project"
               ? `Uses this project's ${name} key.`
-              : scope === "environment"
-                ? `Uses the ${name} key from the portal's environment.`
-                : `Uses the ${name} key from ${layer}.`}
+              : `Uses the ${name} key from ${layer}.`}
         </p>
       ) : mayConfigure ? (
         <Alert variant="info" data-testid="key-missing">

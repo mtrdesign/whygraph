@@ -34,6 +34,8 @@ from pathlib import Path
 
 import click
 
+_log = logging.getLogger(__name__)
+
 IN_IMAGE_ENV = "WHYGRAPH_IN_IMAGE"
 """Baked ``=1`` into the Docker image (``docker/whygraph/Dockerfile``)."""
 
@@ -95,6 +97,7 @@ def portal_cmd(host: str, port: int, data_dir: Path | None, dev_expose: bool) ->
     from whygraph.portal.github_auth import AccessLogRedactor
     from whygraph.portal.app import PortalServer, PortalStartupError, create_portal_app
     from whygraph.portal.hosts import TRUSTED_PROXIES_ENV, parse_trusted_proxies
+    from whygraph.portal.secrets import drop_ambient_llm_vars
 
     try:
         # Unset trusts no proxy - not uvicorn's default of 127.0.0.1.
@@ -119,6 +122,12 @@ def portal_cmd(host: str, port: int, data_dir: Path | None, dev_expose: bool) ->
     if data_dir is not None:
         os.environ[portal_db.DATA_ENV_VAR] = str(data_dir.expanduser())
     lock = _lock_data_dir(portal_db.data_dir())
+    dropped = drop_ambient_llm_vars()
+    if dropped:
+        _log.warning(
+            "ignoring %s from the environment: the portal uses only keys and endpoints stored under Settings",
+            ", ".join(dropped),
+        )
     try:
         app = create_portal_app(port=port)
         # GitHub's redirect puts a one-time code and the state in the query.

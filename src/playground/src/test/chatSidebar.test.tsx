@@ -30,6 +30,8 @@ interface Fake {
   stream: ReadableStreamDefaultController<Uint8Array> | null;
   /** Messages the transcript returns, per session. */
   transcripts: Record<number, unknown[]>;
+  /** The provider list the project answers (default: one keyed OpenAI). */
+  providers?: { provider: string; configured: boolean; default_model: string; default: boolean }[];
 }
 let fake: Fake;
 
@@ -102,7 +104,9 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     if (!p) return Promise.resolve(json({ error: "project not found", code: "not_found" }, 404));
     if (!rest) return Promise.resolve(json(p));
     if (rest === "/chat/providers") {
-      return Promise.resolve(json([{ provider: "openai", configured: true, default_model: "gpt-x", env_var: null }]));
+      return Promise.resolve(
+        json(fake.providers ?? [{ provider: "openai", configured: true, default_model: "gpt-x", default: true }]),
+      );
     }
     if (rest === "/chat/models") {
       return Promise.resolve(
@@ -319,6 +323,16 @@ describe("the Chats section", () => {
     await waitFor(() => expect(plus).toBeDisabled());
     const reason = document.getElementById(plus.getAttribute("aria-describedby") ?? "");
     expect(reason).toHaveTextContent("Monthly budget reached");
+  });
+
+  it("disables + with a reason when no provider has a key", async () => {
+    fake.providers = [{ provider: "openai", configured: false, default_model: "gpt-x", default: false }];
+    mount("/p/alpha/scans");
+    const section = await chats();
+    const plus = within(section).getByRole("button", { name: "New chat" });
+    await waitFor(() => expect(plus).toBeDisabled());
+    const reason = document.getElementById(plus.getAttribute("aria-describedby") ?? "");
+    expect(reason).toHaveTextContent("No LLM key is set for Chat");
   });
 
   it("shows a spinner on the session that is streaming", async () => {

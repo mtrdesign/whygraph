@@ -54,13 +54,13 @@ providers can drive it:
 still works for `[analyze]` and `[rationale]`. See
 [LLM providers](../reference/llm-providers.md).
 
-Providers you haven't configured still appear in the picker, greyed out, labelled with what they
-need - so a missing key looks like a missing key rather than a missing feature. Keys come from the
-portal's Settings; variables in your shell do not reach the portal.
-
-If the chosen provider has no key, a notice under the message box says so (with a link to Settings,
-or "Ask an owner to add one" when you are not allowed to add keys) and the box is disabled until you
-pick a provider that has one. The model pickers are also disabled while a monthly budget is hard-stopped.
+Chat needs a key stored in Settings; keys in your shell do not count. With no key for any chat
+provider, **New chat** is disabled and the Chat page says what to do. A new chat starts on the
+provider set in Settings > Models and keys > **Chat** when it has a key, otherwise on the first
+provider that has one, and the picker lists only providers with a key. An older chat whose provider
+has lost its key still shows that provider, greyed out, with a note under the message box. Sending
+there is refused until you switch to a provider that has a key. The model pickers are also disabled
+while a monthly budget is hard-stopped.
 
 The chat header shows what the session has cost so far ("This chat: ~$0.84") when you are allowed to
 see usage, and each reply ends with its token counts ("31,500 in · 2,250 out").
@@ -80,13 +80,13 @@ model.
 
 ```toml
 [chat]
-# provider = "anthropic"      # default: the provider of [llm].model, else anthropic
+# provider = "anthropic"      # default: the provider of [llm].model; without a key for it, the first provider that has one
 # model = "claude-opus-4-7"   # default: [llm].model, then the provider's default
 ```
 
 Leave `[chat]` out and new sessions follow `[llm].model`, the default for every role. If that names a
-provider that cannot chat (`ollama`), chat falls back to `anthropic`; naming it in `[chat]` itself is
-refused.
+provider that cannot chat (`ollama`), chat falls back to the first provider with a stored key; naming
+it in `[chat]` itself is refused.
 
 If OpenRouter is your provider, pin a tool-capable model rather than leaving `openrouter/auto` -
 automatic routing can land on a model that does not support tool calling.

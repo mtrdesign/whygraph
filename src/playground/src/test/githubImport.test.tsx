@@ -478,6 +478,19 @@ describe("Import from GitHub", () => {
     expect(within(box).getByRole("button", { name: "Sign in with GitHub" })).toBeInTheDocument();
   });
 
+  it("a password account sees the explainer at once, without asking GitHub, Open Members first", async () => {
+    state = orgState("owner", {
+      user: { ...ada, github_login: null, has_password: true },
+    });
+    mount("/projects/new");
+    const box = await screen.findByTestId("github-required");
+    expect(box).toHaveTextContent("invite your GitHub account as an owner");
+    const members = within(box).getByRole("link", { name: "Open Members" });
+    const signIn = within(box).getByRole("button", { name: "Sign in with GitHub" });
+    expect(members.compareDocumentPosition(signIn) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(log.some((c) => c.path.startsWith("/api/github"))).toBe(false);
+  });
+
   it("is for owners and admins: a member goes back to Projects, which has no New project", async () => {
     handlers["GET /api/projects"] = () => ({ projects: [project("api")] });
     state = orgState("member");

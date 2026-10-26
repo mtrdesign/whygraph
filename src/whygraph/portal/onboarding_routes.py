@@ -28,7 +28,6 @@
 
 from __future__ import annotations
 
-import os
 import time
 from datetime import datetime, timezone
 
@@ -37,7 +36,6 @@ from sqlalchemy import func, update
 from sqlmodel import col, select
 
 from .authz import Action, OrgAccess, allowed
-from .context import _key_env_var
 from .db import get_session
 from .deps import (
     PortalState,
@@ -54,7 +52,7 @@ from .models import (
     Project,
     Secret,
 )
-from .secrets import LLM_API_KEY, LLM_KEY_PROVIDERS
+from .secrets import LLM_API_KEY
 from .security import Principal
 
 onboarding_router = APIRouter()
@@ -98,10 +96,6 @@ def _can_list_installation(state: PortalState, principal: Principal) -> bool:
         memo.clear()
     memo[session_id] = (now, found)
     return found
-
-
-def _env_key() -> bool:
-    return any(os.environ.get(_key_env_var(tag)) for tag in LLM_KEY_PROVIDERS)
 
 
 @onboarding_router.get("/api/onboarding")
@@ -174,12 +168,18 @@ def get_onboarding(
     if not (sources and all(s == "platform" for s in sources)):
         key_item = {
             "id": "llm_key",
-            "done": has_key or _env_key(),
+            "done": has_key,
             "can_act": allowed(access.role, Action.ORG_CONFIGURE),
         }
     if key_item is not None and not production:
         items.append(key_item)
-    items.append({"id": "project", "done": bool(sources), "can_act": True})
+    items.append(
+        {
+            "id": "project",
+            "done": bool(sources),
+            "can_act": not production or not principal.has_password,
+        }
+    )
     if key_item is not None and production:
         items.append(key_item)
     if production:

@@ -181,7 +181,7 @@ class UsageRow:
     provider, model_requested : str
         The provider tag and the model asked for.
     key_scope : str
-        ``"project"``, ``"org"``, ``"environment"`` or ``"none"``.
+        ``"project"``, ``"org"``, ``"environment"`` (historical) or ``"none"``.
     cost_source : str
         ``"provider"``, ``"estimated"`` or ``"unpriced"``.
     created_at : str

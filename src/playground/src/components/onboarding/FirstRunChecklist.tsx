@@ -55,7 +55,7 @@ export function FirstRunChecklist({
         title: "Connect GitHub",
         why: "WhyGraph imports repositories through the WhyGraph GitHub App.",
         action: item.done ? null : !githubLogin ? (
-          <span className="text-sm text-muted-foreground">Sign in with GitHub to import repositories</span>
+          link("How to import", "/projects/new")
         ) : item.can_act ? (
           link("Install the WhyGraph GitHub App", "/projects/new")
         ) : null,
@@ -65,7 +65,11 @@ export function FirstRunChecklist({
         why: production
           ? "WhyGraph indexes its history; the first scan is free."
           : "Pick a repository from a shared folder; the first scan is free.",
-        action: link(production ? "Import a repository" : "Add project", "/projects/new"),
+        action: item.can_act ? (
+          link(production ? "Import a repository" : "Add project", "/projects/new")
+        ) : (
+          <span className="text-sm text-muted-foreground">Connect GitHub first</span>
+        ),
       }),
       llm_key: () => ({
         title: "Add an LLM key",
@@ -91,6 +95,8 @@ export function FirstRunChecklist({
             </Button>
           ) : projects.some((p) => p.importing) ? (
             <span className="text-sm text-muted-foreground">Available once the import finishes</span>
+          ) : items.find((i) => i.id === "project")?.can_act === false ? (
+            <span className="text-sm text-muted-foreground">Connect GitHub first</span>
           ) : (
             link("Import a repository first", "/projects/new")
           )

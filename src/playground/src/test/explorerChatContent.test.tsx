@@ -21,12 +21,14 @@ vi.mock("../components/Overview", () => ({ Overview: () => <div data-testid="gra
 interface Fake {
   mode: "local" | "production";
   project: Record<string, unknown>;
-  providers: { provider: string; configured: boolean; default_model: string; env_var: string | null }[];
+  providers: { provider: string; configured: boolean; default_model: string; default: boolean }[];
   rationale: Record<string, unknown>;
   calls: string[];
   usage: Response | null;
   /** Session costs the usage API answers in turn (the last one repeats). */
   costs?: number[];
+  /** A send answers this refusal instead of a stream. */
+  sendRefusal?: { status: number; code: string };
   /** The provider list answers this status instead (ER-4). */
   providersStatus?: number;
   stream: string[];
@@ -178,6 +180,10 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     return Promise.resolve(json({ id: 4, title: "Costly chat", provider: "openai", model: "gpt-x", created_at: "", updated_at: "", messages: fake.transcript }));
   }
   if (rest === "/chat/sessions/4/messages") {
+    if (fake.sendRefusal)
+      return Promise.resolve(
+        json({ error: "no stored key for the chat provider (openai)", code: fake.sendRefusal.code }, fake.sendRefusal.status),
+      );
     // The server persists a failed turn with the provider's raw text on its row.
     if (fake.stream.some((f) => f.includes('"error"')))
       fake.transcript = [
@@ -227,7 +233,7 @@ beforeEach(() => {
   fake = {
     mode: "local",
     project: baseProject(),
-    providers: [{ provider: "openai", configured: true, default_model: "gpt-x", env_var: null }],
+    providers: [{ provider: "openai", configured: true, default_model: "gpt-x", default: true }],
     rationale: { status: "not_generated" },
     calls: [],
     usage: null,
@@ -401,11 +407,18 @@ describe("Evidence and History empty states", () => {
 
 describe("Chat content", () => {
   it("shows the no-key notice, a disabled composer and the reason", async () => {
-    fake.providers = [{ provider: "openai", configured: false, default_model: "gpt-x", env_var: "OPENAI_API_KEY" }];
-    mount("/p/alpha/chat");
+    fake.providers = [{ provider: "openai", configured: false, default_model: "gpt-x", default: false }];
+    mount("/p/alpha/chat/4");
     const notice = await screen.findByTestId("chat-no-key");
-    expect(notice).toHaveTextContent("No OpenAI key. Add one in Settings > Models and keys.");
-    expect(within(notice).getByRole("link", { name: /Settings/ })).toHaveAttribute("href", "/settings");
+    expect(notice).toHaveTextContent("No OpenAI key. Add one in this project's Settings or in the portal's Settings.");
+    expect(within(notice).getByRole("link", { name: "this project's Settings" })).toHaveAttribute(
+      "href",
+      "/p/alpha/settings?section=models",
+    );
+    expect(within(notice).getByRole("link", { name: "portal's Settings" })).toHaveAttribute(
+      "href",
+      "/settings?section=models",
+    );
     const box = screen.getByRole("textbox");
     expect(box).toBeDisabled();
     expect(box).toHaveAttribute("aria-describedby", "composer-notice");
@@ -419,9 +432,90 @@ describe("Chat content", () => {
   it("asks a non-owner in production to ask an owner", async () => {
     fake.mode = "production";
     fake.role = "member";
-    fake.providers = [{ provider: "openai", configured: false, default_model: "gpt-x", env_var: null }];
+    fake.project = baseProject({ permissions: ["project.read", "project.chat"] });
+    fake.providers = [{ provider: "openai", configured: false, default_model: "gpt-x", default: false }];
+    mount("/p/alpha/chat/4");
+    expect(await screen.findByTestId("chat-no-key")).toHaveTextContent(
+      "No OpenAI key. Ask a project admin or an owner to add one.",
+    );
+  });
+
+  it("gives a production project admin the project Settings link only", async () => {
+    fake.mode = "production";
+    fake.role = "member";
+    fake.providers = [{ provider: "openai", configured: false, default_model: "gpt-x", default: false }];
+    mount("/p/alpha/chat/4");
+    const notice = await screen.findByTestId("chat-no-key");
+    expect(within(notice).getByRole("link", { name: "this project's Settings" })).toBeInTheDocument();
+    expect(within(notice).queryByRole("link", { name: /organization's Settings/ })).toBeNull();
+  });
+
+  it("shows Chat needs an LLM key, and no composer, on a draft when nothing has a key", async () => {
+    fake.providers = [{ provider: "openai", configured: false, default_model: "gpt-x", default: false }];
     mount("/p/alpha/chat");
-    expect(await screen.findByTestId("chat-no-key")).toHaveTextContent("No OpenAI key. Ask an owner to add one.");
+    const state = await screen.findByTestId("chat-needs-key");
+    expect(state).toHaveTextContent("Chat needs an LLM key");
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.queryByTestId("chat-empty")).toBeNull();
+  });
+
+  it("tells a contributor to ask a project admin or an owner on the no-key draft", async () => {
+    fake.mode = "production";
+    fake.role = "member";
+    fake.project = baseProject({ permissions: ["project.read", "project.chat"] });
+    fake.providers = [{ provider: "openai", configured: false, default_model: "gpt-x", default: false }];
+    mount("/p/alpha/chat");
+    expect(await screen.findByTestId("chat-needs-key")).toHaveTextContent("Ask a project admin or an owner to add one.");
+  });
+
+  it("gives a project admin the project Settings link on the no-key draft", async () => {
+    fake.mode = "production";
+    fake.role = "member";
+    fake.providers = [{ provider: "openai", configured: false, default_model: "gpt-x", default: false }];
+    mount("/p/alpha/chat");
+    const state = await screen.findByTestId("chat-needs-key");
+    expect(within(state).getByRole("link", { name: "this project's Settings" })).toHaveAttribute(
+      "href",
+      "/p/alpha/settings?section=models",
+    );
+  });
+
+  it("offers only the keyed provider on a draft, defaulting to it (OpenRouter, no Anthropic)", async () => {
+    fake.providers = [
+      { provider: "anthropic", configured: false, default_model: "claude-x", default: false },
+      { provider: "openrouter", configured: true, default_model: "or/model", default: true },
+    ];
+    mount("/p/alpha/chat");
+    const provider = await screen.findByRole("combobox", { name: "Provider" });
+    await waitFor(() => expect(provider).toHaveTextContent("OpenRouter"));
+    await userEvent.click(provider);
+    expect(await screen.findByRole("option", { name: "OpenRouter" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /Anthropic/ })).toBeNull();
+  });
+
+  it("shows an existing session's keyless provider, disabled", async () => {
+    fake.providers = [
+      { provider: "openai", configured: false, default_model: "gpt-x", default: false },
+      { provider: "anthropic", configured: true, default_model: "claude-x", default: true },
+    ];
+    mount("/p/alpha/chat/4");
+    const provider = await screen.findByRole("combobox", { name: "Provider" });
+    await waitFor(() => expect(provider).toHaveTextContent("OpenAI (no key)"));
+    await userEvent.click(provider);
+    expect(await screen.findByRole("option", { name: "OpenAI (no key)" })).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("keeps the typed turn on screen with the error when a send is refused for want of a key", async () => {
+    fake.sendRefusal = { status: 409, code: "no_llm_key" };
+    mount("/p/alpha/chat/4");
+    await userEvent.type(await screen.findByRole("textbox"), "hello there{Enter}");
+    expect(await screen.findByText(/No OpenAI key\. Add one in Settings/)).toBeInTheDocument();
+    expect(screen.getByText("hello there")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(fake.calls.filter((c) => c === "GET /api/projects/alpha/chat/providers").length).toBeGreaterThanOrEqual(2),
+    );
+    // The refetch of the transcript did not wipe the refused turn.
+    expect(screen.getByText("hello there")).toBeInTheDocument();
   });
 
   it("leaves the composer alone when the provider has a key", async () => {
@@ -487,10 +581,10 @@ describe("Chat content", () => {
   });
 
   it("disables the starter prompts when the provider has no key", async () => {
-    fake.providers = [{ provider: "openai", configured: false, default_model: "gpt-x", env_var: null }];
-    mount("/p/alpha/chat");
+    fake.providers = [{ provider: "openai", configured: false, default_model: "gpt-x", default: false }];
+    mount("/p/alpha/chat/4");
     await screen.findByTestId("chat-no-key");
-    expect(screen.getByRole("button", { name: "Which areas have no rationale yet?" })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: "Which areas have no rationale yet?" })).toBeDisabled();
   });
 
   it("reads /api/usage/me in production and hides the cost on a 403", async () => {

@@ -450,7 +450,7 @@ describe("Chat under a hard stop", () => {
   // A thread sends only once its provider list loaded (a failed list disables the composer, ER-4).
   beforeEach(() => {
     fake.routes["/api/projects/alpha/chat/providers"] = () =>
-      json([{ provider: "openai", configured: true, default_model: "gpt", env_var: null }]);
+      json([{ provider: "openai", configured: true, default_model: "gpt", default: true }]);
   });
 
   it("replaces the composer with the notice, keeping the history readable", async () => {

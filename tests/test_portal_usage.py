@@ -878,10 +878,9 @@ def _assert_local_member(rows: list[UsageEvent], w: SimpleNamespace) -> None:
 
 
 def test_an_explorer_evidence_read_records_its_backfill(
-    local: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+    local: SimpleNamespace,
 ) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-from-the-environment")
-    local.state.contexts.invalidate()
+    _key(local, "anthropic", project=False)
     response = local.client.get(
         "/api/projects/demo/node/evidence", params={"qualified_name": "sample.fn"}
     )
@@ -890,7 +889,7 @@ def test_an_explorer_evidence_read_records_its_backfill(
     assert sorted(r.subject for r in rows) == sorted(local.shas)
     _assert_local_member(rows, local)
     assert {(r.source, r.task) for r in rows} == {("explorer", "analyze")}
-    assert {r.key_scope for r in rows} == {"environment"}
+    assert {r.key_scope for r in rows} == {"org"}
     assert {r.provider for r in rows} == {"anthropic"}
     assert all(r.cost_source == "estimated" and r.cost_usd for r in rows)
     assert local.state.spend.spent(local.org_id, user_id=local.user_id) == sum(

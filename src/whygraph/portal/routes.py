@@ -70,6 +70,7 @@ from whygraph.hooks import (
     resolve_hook_names,
     sync_hooks,
 )
+from whygraph.serve.chat import default_chat_provider
 from whygraph.project_setup import (
     PORTAL_ENV,
     PORTAL_JSON,
@@ -814,6 +815,8 @@ def _missing_key(
 ) -> str | None:
     """The provider of the resolved model of ``tasks`` when it has no key."""
     for task in tasks:
+        if task == "chat" and default_chat_provider(config) is not None:
+            continue
         try:
             provider = config.model_for(task).provider
         except ConfigError:

@@ -3,7 +3,7 @@ import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { CloudIcon, FolderGit2Icon, GitBranchIcon, LockIcon, MoreHorizontalIcon, PlusIcon, SearchIcon } from "lucide-react";
 import { portalApi, portalKey, type ProjectSummary } from "../api";
-import { canAdmin, isProduction, usePortalState, useRole } from "../lib/identity";
+import { canAdmin, isProduction, needsGitHubToImport, usePortalState, useRole } from "../lib/identity";
 import { formatDate, formatNumber, formatUsd, timeAgo } from "../lib/format";
 import { projectRoleLabel, sourceLabel } from "../lib/labels";
 import { platformHost } from "../lib/platformLink";
@@ -16,6 +16,7 @@ import { AccessLostNotice, UnsupportedSourceNotice } from "../components/portal/
 import { LinkNotice } from "../components/portal/LinkNotice";
 import { FirstRunChecklist } from "../components/onboarding/FirstRunChecklist";
 import { useFirstRun } from "../components/onboarding/firstRun";
+import { GitHubRequired } from "../components/portal/GitHubImport";
 import { PortChangeBanner } from "../components/portal/PortChangeNotice";
 import { ProjectStatusBadge as StatusBadge } from "../components/portal/ProjectStatusBadge";
 import { ScanMenuItems } from "../components/portal/ScanMenu";
@@ -226,7 +227,21 @@ function ProjectCard({
  * not showing (dismissed, done, loading or unavailable): "No projects yet" with the
  * add action.
  */
-function ChecklistPlaceholder({ production }: { production: boolean }) {
+function ChecklistPlaceholder({ production, canImport }: { production: boolean; canImport: boolean }) {
+  if (!canImport) {
+    // A bootstrap password account cannot import: the explainer replaces the action.
+    return (
+      <div data-testid="first-run-slot" className="rounded-lg border border-dashed border-border">
+        <EmptyState
+          icon={<FolderGit2Icon />}
+          title="No projects yet"
+          description="Importing needs a GitHub sign-in."
+          className="py-10"
+        />
+        <GitHubRequired />
+      </div>
+    );
+  }
   return (
     <div data-testid="first-run-slot">
       <EmptyState
@@ -267,6 +282,7 @@ export function ProjectsPage() {
   const role = useRole();
   // Local mode's single user always may; in production owners and admins import.
   const canAdd = !production || canAdmin(role);
+  const canImport = canAdd && !needsGitHubToImport(state);
   const firstRun = useFirstRun(canAdd);
   const showChecklist = canAdd && firstRun.open && !firstRun.dismissed;
   const search = useSearch({ strict: false }) as ProjectsSearch;
@@ -285,7 +301,7 @@ export function ProjectsPage() {
   const setSearch = (next: ProjectsSearch) =>
     void navigate({ to: "/", search: { q: search.q, sort: search.sort, ...next }, replace: true });
 
-  const addButton = canAdd && (
+  const addButton = canImport && (
     <Button render={<Link to="/projects/new" />}>
       <PlusIcon data-icon="inline-start" />
       {production ? "Import" : "New project"}
@@ -399,7 +415,7 @@ export function ProjectsPage() {
               />
             </div>
           ) : (
-            <ChecklistPlaceholder production={production} />
+            <ChecklistPlaceholder production={production} canImport={canImport} />
           )
         ) : role === "reader" ? (
           <EmptyState

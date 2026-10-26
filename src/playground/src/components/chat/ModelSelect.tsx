@@ -37,7 +37,9 @@ export function ModelSelect({
 }) {
   const [filter, setFilter] = useState("");
 
-  const providers = useProjectQuery(["chat", "providers"], (api) => api.chatProviders());
+  const providers = useProjectQuery(["chat", "providers"], (api) => api.chatProviders(), {
+    refetchOnWindowFocus: true,
+  });
 
   const models = useProjectQuery(["chat", "models", provider], (api) => api.chatModels(provider), {
     enabled: !!provider,
@@ -63,13 +65,16 @@ export function ModelSelect({
   // silently reports a different model than the session is actually using.
   const missingCurrent = !!model && !visible.some((m) => m.id === model);
 
-  // A provider without a key is listed but disabled; what to do about it is the
-  // composer's notice (mode-aware, MODE-4), never an environment variable name.
-  const providerItems = (providers.data ?? []).map((p) => ({
-    value: p.provider,
-    label: p.configured ? providerLabel(p.provider) : `${providerLabel(p.provider)} (no key)`,
-    disabled: !p.configured,
-  }));
+  // Only providers with a key are offered. The one exception is the current session's own provider,
+  // kept (disabled when keyless) so the picker never misreports what the session uses; what to do
+  // about it is the composer's notice (role-aware), never an environment variable name.
+  const providerItems = (providers.data ?? [])
+    .filter((p) => p.configured || p.provider === provider)
+    .map((p) => ({
+      value: p.provider,
+      label: p.configured ? providerLabel(p.provider) : `${providerLabel(p.provider)} (no key)`,
+      disabled: !p.configured,
+    }));
   const modelItems = [
     ...(models.isLoading && model ? [{ value: model, label: "loading models…" }] : []),
     ...(missingCurrent && !models.isLoading ? [{ value: model, label: model }] : []),

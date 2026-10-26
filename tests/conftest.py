@@ -26,6 +26,7 @@ from whygraph.core.context import set_strict
 from whygraph.db import ensure_initialized
 from whygraph.db import engine as db_engine
 from whygraph.portal import db as portal_db
+from whygraph.portal.secrets import AMBIENT_LLM_VARS
 
 _CODEGRAPH_SCHEMA = """\
 CREATE TABLE nodes (
@@ -85,6 +86,13 @@ def _reset_process_globals() -> Iterator[None]:
     set_strict(False)
     db_engine._reset_engine()
     portal_db._reset_engine()
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_llm_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A developer's exported LLM keys or endpoints never reach a test (stored keys only)."""
+    for name in AMBIENT_LLM_VARS:
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)

@@ -23,6 +23,10 @@
 - **Faster rescans.** After a repository's first scan, a scan asks GitHub only for pull requests and
   issues created or updated since the previous one, so *Describe now*, *Scan now* and GitHub push
   syncs no longer download the whole history again.
+- **Model suggestions.** Model fields in Settings suggest the provider's model ids while you type;
+  any id can still be entered.
+- **Chat follows your keys.** A new chat starts on the provider set for Chat when it has a key,
+  otherwise on the first provider that has one, and the picker lists only providers with a key.
 
 ## Fixes
 
@@ -35,3 +39,11 @@
 - **Squash-merge recovery no longer stalls.** One pull request whose branch ref is gone from GitHub
   no longer stops every other squash-merged pull request from being recovered, and it is not retried
   on every scan.
+- **No key, no chat.** Without a stored key for any chat provider, New chat is disabled and messages
+  are refused before they are saved, instead of failing after you send them.
+- **Only stored keys count.** A portal run outside Docker ignores LLM keys and endpoints exported in
+  its shell.
+- **GitHub avatar in the sidebar.** The account menu inside an organization shows your GitHub
+  picture.
+- **Clearer import for the bootstrap admin.** A password account no longer sees Import buttons; the
+  page explains how to invite a GitHub owner first.

@@ -110,7 +110,7 @@ the page at that section. The section ids are `general`, `models`, `github`, `sc
 | Section | What you set |
 |---|---|
 | **General** | The display name (the URL name never changes) and where the project comes from |
-| **Models and keys** | One key card per provider; a default model with optional overrides for per-commit descriptions, rationale cards and chat; a base URL for OpenAI-compatible gateways and the Ollama host. Changing an endpoint clears the key stored for it - a key must not follow you to a different server |
+| **Models and keys** | One key card per provider; a default model with optional overrides for per-commit descriptions, rationale cards and chat; a base URL for OpenAI-compatible gateways and the Ollama host. Changing an endpoint clears the key stored for it - a key must not follow you to a different server. Each model field suggests the provider's model ids, listed with the stored key; any id can still be typed. |
 | **GitHub** | Whether to crawl pull requests and issues at all, and (locally) the GitHub token card |
 | **Git hooks** | Which of `post-commit`, `post-merge`, `post-rewrite` and `post-checkout` refresh the project (local folders only) |
 | **Scanning** | One switch, **Serve CodeGraph tools to agents** (`[scan].serve_codegraph`, on by default; local folders and linked projects). Off, the project's `/mcp/<slug>/code` endpoint answers every call with a "turned off" error and the Overview says so. It stops nothing that is running: the CodeGraph server is shared by every project |

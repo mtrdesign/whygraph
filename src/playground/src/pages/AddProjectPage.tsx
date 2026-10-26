@@ -3,7 +3,7 @@ import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, githubApi, portalKey, projectKey, type AddProjectResult } from "../api";
 import { saveDetected } from "../lib/detected";
-import { isProduction, usePortalState } from "../lib/identity";
+import { isProduction, needsGitHubToImport, usePortalState } from "../lib/identity";
 import { cn } from "@/lib/utils";
 import { GitHubImport } from "../components/portal/GitHubImport";
 import { LocalSource } from "../components/portal/LocalSource";
@@ -26,7 +26,9 @@ export interface NewProjectSearch {
 export function AddProjectPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const production = isProduction(usePortalState().data);
+  const state = usePortalState().data;
+  const production = isProduction(state);
+  const passwordAccount = needsGitHubToImport(state);
   const search = useSearch({ strict: false }) as NewProjectSearch;
   // A pending link only exists on the platform source; local mode only (M2e).
   const platform = !production && (search.source === "platform" || !!search.link);
@@ -35,11 +37,12 @@ export function AddProjectPage() {
   const installations = useQuery({
     queryKey: portalKey("github", "installations"),
     queryFn: githubApi.installations,
-    enabled: production,
+    enabled: production && !passwordAccount,
     retry: false,
   });
   const githubRequired =
-    installations.error instanceof ApiError && installations.error.code === "github_required";
+    passwordAccount ||
+    (installations.error instanceof ApiError && installations.error.code === "github_required");
 
   const onAdded = (result: AddProjectResult) => {
     const { slug } = result.project;

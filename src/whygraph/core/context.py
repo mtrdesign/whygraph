@@ -97,8 +97,7 @@ class ProjectContext:
     key_scopes : Mapping[str, str]
         Where each LLM provider's API key comes from, per provider tag:
         ``"project"`` (the project's own key), ``"org"`` (its org's
-        default), ``"environment"`` (no stored key, but the provider's
-        environment variable is set in this process) or ``"none"``. Filled
+        default) or ``"none"``. Filled
         by the portal when it builds the context (usage attribution, M2f-2
         plan section 0.2 #8); empty elsewhere. Per project, so safe to
         cache; never mutated.

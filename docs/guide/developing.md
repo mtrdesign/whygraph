@@ -4,7 +4,7 @@ Working on WhyGraph itself (not using it) takes these `make` targets from a chec
 
 | Command | Mode | What it runs |
 |---|---|---|
-| `make dev-local` | Development, native | The portal from your checkout on `:8777`, restarted on every backend change, plus the Vite dev server with hot reload on `:5174`, against the dev Postgres from `make dev-db` (started for you). Fastest; your IDE's debugger works. |
+| `make dev-local` | Development, native | The portal from your checkout on `:8777`, restarted on every backend change, plus the Vite dev server with hot reload on `:5174`, against the dev Postgres from `make dev-db` (started for you). Fastest; your IDE's debugger works. Keys and endpoints exported in your shell are ignored, as in a real install: enter keys under Settings. |
 | `make dev-docker` | Development, in Docker | The same, inside the WhyGraph image through the real `whygraph up` shim, with your checkout mounted read-only over the installed package. |
 | `make prod` | Production | The image built exactly like a release (pinned CodeGraph, the `pyproject.toml` version), run through the shim with no source mounted: what users get. |
 | `make dev-production` | Development, native, production mode | The portal's [production mode](../deploy/production.md) from your checkout on `:8778`, with Vite on `:5173` in front of it, on its own `whygraph_prod` database in the `make dev-db` Postgres. For work on sign-in, organizations and the host checks, and the platform `dev-local` links to. See below. |

@@ -4,11 +4,12 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import { ApiError, projectKey, type BudgetScope, type ChatSession, type ChatTranscript } from "../../api";
 import { chatSessionsKey } from "../../lib/chatSessions";
 import { useUi } from "../../store";
-import { useLlmBlock } from "../../lib/permissions";
+import { useLlmBlock, useProjectCan } from "../../lib/permissions";
 import { useSlug } from "../../lib/project";
 import { BudgetNotice } from "../portal/BudgetNotice";
 import { useProjectApi, useProjectKey, useProjectQuery } from "../../lib/project";
 import { Loading } from "../Loading";
+import { EmptyState } from "../state/EmptyState";
 import { ErrorState } from "../state/ErrorState";
 import { Button } from "../ui/button";
 import { errorInfo, errorMessage } from "../../lib/apiErrors";
@@ -105,9 +106,12 @@ export function MessageThread({
     { enabled: currentId !== null },
   );
 
-  // The draft's pickers start on the first configured provider and its default model.
-  const providers = useProjectQuery(["chat", "providers"], (api) => api.chatProviders());
-  const defaultProvider = providers.data?.find((p) => p.configured) ?? providers.data?.[0];
+  // The draft's pickers start on the server's default provider (the Chat setting when it has a key,
+  // else the first provider that has one) and its default model; none when no provider has a key.
+  const providers = useProjectQuery(["chat", "providers"], (api) => api.chatProviders(), {
+    refetchOnWindowFocus: true,
+  });
+  const defaultProvider = providers.data?.find((p) => p.default) ?? null;
   const draftChoice =
     draft ?? (defaultProvider ? { provider: defaultProvider.provider, model: defaultProvider.default_model } : null);
   // An existing session shows its own pair once the list has it; the draft (and the
@@ -116,24 +120,48 @@ export function MessageThread({
 
   // The provider list failed (ER-4): nothing can be chosen, so nothing is sent until it loads.
   const providersFailed = providers.isError && !providers.data;
+  // No provider has a key at all: a new chat cannot start, so the draft says so instead of a composer.
+  const noKeys = !!providers.data && !providers.data.some((p) => p.configured);
+  const needsKey = noKeys && currentId === null;
   // The chosen provider has no key (EXC-2, MODE-4): the composer is dead and says why.
   const noKeyProvider = choice
     ? (providers.data?.find((p) => p.provider === choice.provider && !p.configured)?.provider ?? null)
     : null;
-  const noKeyNotice = noKeyProvider ? (
+  // Who can add a key: project admins (and owners) hold `project.configure`; locally everyone does.
+  const mayConfigure = useProjectCan("project.configure");
+  const canFix = !production || mayConfigure;
+  const fixLine = canFix ? (
     <>
-      No {providerLabel(noKeyProvider)} key.{" "}
-      {production && !isOwner ? (
-        "Ask an owner to add one."
-      ) : (
+      Add one in{" "}
+      <Link
+        to="/p/$slug/settings"
+        params={{ slug }}
+        search={{ section: "models" }}
+        className="text-primary-text underline-offset-4 hover:underline"
+      >
+        this project&apos;s Settings
+      </Link>
+      {(!production || isOwner) && (
         <>
-          Add one in{" "}
-          <Link to="/settings" className="text-primary-text underline-offset-4 hover:underline">
-            Settings &gt; Models and keys
+          {" "}
+          or in the{" "}
+          <Link
+            to="/settings"
+            search={{ section: "models" }}
+            className="text-primary-text underline-offset-4 hover:underline"
+          >
+            {production ? "organization's Settings" : "portal's Settings"}
           </Link>
-          .
         </>
       )}
+      .
+    </>
+  ) : (
+    "Ask a project admin or an owner to add one."
+  );
+  const noKeyNotice = noKeyProvider ? (
+    <>
+      No {providerLabel(noKeyProvider)} key. {fixLine}
     </>
   ) : null;
 
@@ -141,7 +169,7 @@ export function MessageThread({
     ? "Chat can't send until the provider list loads. Retry above."
     : noKeyNotice;
   // The composer is disabled or replaced: a starter prompt would fill a box that cannot send.
-  const cannotSend = budgetBlocked || noKeyProvider !== null || providersFailed;
+  const cannotSend = budgetBlocked || noKeys || noKeyProvider !== null || providersFailed;
 
   const update = useMutation({
     mutationFn: (vars: { provider?: string; model?: string }) =>
@@ -216,6 +244,10 @@ export function MessageThread({
           });
           id = created.id;
         } catch (err) {
+          // No key after all (changed elsewhere): refetch so the draft flips to the no-key state.
+          if (err instanceof ApiError && err.status === 409 && err.code === "no_llm_key") {
+            void queryClient.invalidateQueries({ queryKey: key("chat", "providers") });
+          }
           setLiveTurns([]);
           setStreaming(false);
           abortRef.current = null;
@@ -240,6 +272,8 @@ export function MessageThread({
       const sid = id;
       setStreamingSessionId(sid);
       let listed = false;
+      // The server refused the send for want of a key: the live turn stays, with the reason.
+      let refused = false;
 
       try {
         await api.streamChat(
@@ -315,6 +349,15 @@ export function MessageThread({
           setStopped({ scope });
           void refreshProject();
           updateLive((t) => ({ ...settleActivities(t), budgetStop: { scope } }));
+        } else if (err instanceof ApiError && err.status === 409 && err.code === "no_llm_key") {
+          refused = true;
+          void queryClient.invalidateQueries({ queryKey: key("chat", "providers") });
+          const info = errorInfo(err, "chat");
+          updateLive((t) => ({
+            ...settleActivities(t),
+            error: info.message,
+            errorDetail: info.detail ?? undefined,
+          }));
         } else if ((err as Error).name === "AbortError") {
           updateLive((t) => ({ ...settleActivities(t), error: "Stopped." }));
         } else {
@@ -342,9 +385,10 @@ export function MessageThread({
             staleTime: 0,
           })
           .catch(() => null);
-        if (fresh) {
+        // A refused send wrote nothing, so the transcript has no copy of it: keep the live turn.
+        if (fresh && !refused) {
           setLiveTurns([]);
-        } else {
+        } else if (!fresh) {
           // Keep the streamed copy — it's the only record on screen — but say
           // so, and settle it: a stream that died without a terminal frame
           // never ran settleActivities from the event switch.
@@ -373,7 +417,15 @@ export function MessageThread({
             onRetry={() => void transcript.refetch()}
           />
         )}
-        {!transcript.isLoading && !transcript.isError && turns.length === 0 && (
+        {needsKey && (
+          <div data-testid="chat-needs-key">
+            <EmptyState
+              title="Chat needs an LLM key"
+              description={<>Chat runs on a provider key stored in Settings. {fixLine}</>}
+            />
+          </div>
+        )}
+        {!needsKey && !transcript.isLoading && !transcript.isError && turns.length === 0 && (
           <div className="mx-auto flex max-w-xl flex-col items-center gap-4 py-10 text-center" data-testid="chat-empty">
             <div className="flex flex-col gap-1">
               <p className="text-base font-medium text-foreground">Ask about this codebase</p>
@@ -457,7 +509,7 @@ export function MessageThread({
         </div>
       )}
 
-      {budgetBlocked && !streaming ? (
+      {needsKey ? null : budgetBlocked && !streaming ? (
         <div className="border-t border-border p-3">
           <BudgetNotice scope={blockedScope} testId="chat-budget-notice" />
         </div>

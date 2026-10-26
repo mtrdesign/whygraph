@@ -275,7 +275,7 @@ you submit.
 
 **The checklist.** An owner or admin of an organization with no projects sees five steps on the
 Projects page instead of an empty list: **Connect GitHub** (a bootstrap admin, who signs in with a
-password, is asked to sign in with GitHub to import repositories; anyone else is offered **Install the
+password, sees **How to import** instead, which explains the way in; anyone else is offered **Install the
 WhyGraph GitHub App** when it is not yet installed for them), **Import a repository**, **Add an LLM
 key** (an admin who cannot change organization keys sees "Ask an owner"), **Invite your team** and
 **Connect local WhyGraph** (while the organization has no project, this step links to importing a
@@ -480,8 +480,8 @@ organization: whoever can see a repository through it can import it into an orga
 administer, and the same repository can be a project in two organizations, each with its own copy.
 Within one organization a repository can be imported once. Imports are throttled to 30 an hour per
 organization, one per repository. The bootstrap admin signs in with a password, not GitHub, so it
-cannot import: the page offers **Sign in with GitHub** and **Open Members** (make a GitHub user an
-owner there).
+cannot import: it sees no Import buttons, only an explanation. Invite a GitHub account as an owner in
+**Members**, then **Sign in with GitHub** as that account.
 
 A production project's settings show its repository and installation account read-only. Its
 remote, default branch and hooks cannot be changed, and a personal access token is refused (the

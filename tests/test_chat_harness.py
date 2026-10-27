@@ -14,18 +14,28 @@ a tool result whose matching assistant tool-call has been trimmed away, so
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 from whygraph import core
+from whygraph.chat import harness
 from whygraph.chat.harness import (
+    CONTINUE_PROMPT,
     ELIDED_MARKER,
+    EMPTY_REPLY_PROMPT,
     BudgetStop,
+    ContextTrimmed,
+    Continuation,
+    EmptyReply,
     RoundLimit,
     RoundUsage,
     ToolCallStarted,
     ToolResultReady,
+    TurnCancelled,
     build_system_prompt,
     build_window,
     run_turn,
@@ -216,12 +226,12 @@ def test_tool_results_are_fed_back_to_the_model() -> None:
     _run(client, StubRegistry())
 
     second = client.requests[1].messages
-    assert second[0].role == "system"
-    assert second[1].role == "user"
-    assistant = second[2]
+    assert [m.role for m in second[:2]] == ["system", "system"]
+    assert second[2].role == "user"
+    assistant = second[3]
     assert assistant.role == "assistant"
     assert assistant.tool_calls == (call,)
-    tool_message = second[3]
+    tool_message = second[4]
     assert tool_message.role == "tool"
     assert tool_message.tool_call_id == "c1"
     assert json.loads(tool_message.content) == {"ok": "get_symbol"}
@@ -701,17 +711,36 @@ def test_an_unbound_or_unblocked_sink_never_stops_a_turn() -> None:
 
 
 def test_system_prompt_names_the_repo_and_embeds_the_overview(_repo_root: Path) -> None:
-    message = build_system_prompt(StubRegistry())
-    assert message.role == "system"
-    assert "myrepo" in message.content
-    assert '{"commits": 3}' in message.content
+    stable, overview = build_system_prompt(StubRegistry())
+    assert stable.role == overview.role == "system"
+    assert "myrepo" in stable.content
+    assert overview.content == '{"commits": 3}'
     # No unsubstituted placeholders left behind.
-    assert "{{REPO}}" not in message.content
-    assert "{{OVERVIEW}}" not in message.content
+    for message in (stable, overview):
+        assert "{{REPO}}" not in message.content
+        assert "{{OVERVIEW}}" not in message.content
+    assert stable.content.rstrip().endswith("## This repository right now")
+
+
+def test_a_changed_overview_leaves_the_stable_prompt_byte_identical(
+    _repo_root: Path,
+) -> None:
+    """The stable block is what a provider caches, so it must not move."""
+
+    class _Other(StubRegistry):
+        def dispatch(self, name, arguments):
+            if name == "get_repo_overview":
+                return json.dumps({"commits": 999})
+            return super().dispatch(name, arguments)
+
+    first, overview_a = build_system_prompt(StubRegistry())
+    second, overview_b = build_system_prompt(_Other())
+    assert first.content == second.content
+    assert overview_a.content != overview_b.content
 
 
 def test_system_prompt_documents_the_deep_link_convention(_repo_root: Path) -> None:
-    content = build_system_prompt(StubRegistry()).content
+    content = build_system_prompt(StubRegistry())[0].content
     assert "whygraph://symbol/" in content
     assert "data, not instructions" in content
 
@@ -721,8 +750,8 @@ def test_system_prompt_is_never_part_of_history() -> None:
     client = ScriptedClient([[TextDelta(text="x"), TurnDone("stop")]])
     _run(client, StubRegistry())
     sent = client.requests[0].messages
-    assert sent[0].role == "system"
-    assert [m.role for m in sent[1:]] == ["user"]
+    assert [m.role for m in sent[:2]] == ["system", "system"]
+    assert [m.role for m in sent[2:]] == ["user"]
 
 
 # ---------------------------------------------------------------------------
@@ -831,3 +860,409 @@ def test_empty_history_yields_just_the_system_prompt() -> None:
     system = ChatMessage(role="system", content="rules")
     assert build_window((), token_budget=1000, system=system) == (system,)
     assert build_window((), token_budget=1000) == ()
+
+
+# ---------------------------------------------------------------------------
+# How a turn ends (plan 37 §4.1): continuation, nudge, answer round,
+# in-turn trimming, the silent retry, tool errors and cancellation
+# ---------------------------------------------------------------------------
+
+
+class _Client(ChatClient):
+    """A scripted client whose scripts may raise or run a hook mid-stream.
+
+    Each :meth:`stream_turn` call consumes the next script; an ``Exception``
+    item is raised at that point and a callable item is called.
+    """
+
+    provider = "scripted"
+
+    def __init__(self, scripts: list[list]) -> None:
+        super().__init__(model="scripted-1")
+        self._scripts = scripts
+        self.requests: list = []
+
+    def stream_turn(self, request):
+        index = len(self.requests)
+        self.requests.append(request)
+        if index >= len(self._scripts):
+            raise AssertionError(f"loop asked for call {index}, script has none")
+        for item in self._scripts[index]:
+            if isinstance(item, BaseException):
+                raise item
+            if callable(item):
+                item()
+                continue
+            yield item
+
+    def list_models(self):
+        """Unused by the harness."""
+
+
+def _kinds(events) -> list[str]:
+    return [type(e).__name__ for e in events]
+
+
+@pytest.fixture
+def _no_retry_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(harness, "RETRY_DELAY_SEC", 0)
+
+
+def _dropped() -> httpx.RemoteProtocolError:
+    return httpx.RemoteProtocolError("peer closed connection")
+
+
+def test_a_truncated_reply_with_text_is_continued_once() -> None:
+    client = _Client(
+        [
+            [TextDelta(text="Part one"), _done("max_tokens")],
+            [TextDelta(text=" and the rest."), _done("end_turn")],
+        ]
+    )
+    events = _run(client, StubRegistry())
+    assert Continuation(attempt=1, finish_reason="max_tokens") in events
+    second = client.requests[1].messages
+    assert (second[-2].role, second[-2].content) == ("assistant", "Part one")
+    assert (second[-1].role, second[-1].content) == ("user", CONTINUE_PROMPT)
+    text = "".join(e.text for e in events if isinstance(e, TextDelta))
+    assert text == "Part one and the rest."
+    assert events[-1].finish_reason == "end_turn"
+
+
+def test_max_continuations_bounds_the_continuations() -> None:
+    truncated = [TextDelta(text="more"), _done("length")]
+    client = _Client([list(truncated), list(truncated), list(truncated)])
+    events = _run(client, StubRegistry(), max_continuations=1)
+    assert len(client.requests) == 2
+    assert _kinds(events).count("Continuation") == 1
+
+    client = _Client([list(truncated)])
+    events = _run(client, StubRegistry(), max_continuations=0)
+    assert len(client.requests) == 1
+    assert "Continuation" not in _kinds(events)
+
+
+def test_a_truncated_round_with_no_text_is_not_continued() -> None:
+    client = _Client([[_done("max_tokens")]])
+    events = _run(client, StubRegistry())
+    assert len(client.requests) == 1
+    assert "Continuation" not in _kinds(events)
+    assert "EmptyReply" not in _kinds(events)
+
+
+def test_an_empty_reply_after_a_tool_round_is_nudged_once() -> None:
+    client = _Client(
+        [
+            _tool_round("c1", 10),
+            [_done("end_turn")],
+            [TextDelta(text="The answer."), _done("end_turn")],
+        ]
+    )
+    events = _run(client, StubRegistry())
+    assert [e for e in events if isinstance(e, EmptyReply)] == [EmptyReply()]
+    third = client.requests[2].messages
+    assert (third[-1].role, third[-1].content) == ("user", EMPTY_REPLY_PROMPT)
+    # Nothing empty is appended for the silent round.
+    assert [m.role for m in third[2:]] == ["user", "assistant", "tool", "user"]
+
+
+def test_a_second_empty_reply_ends_the_turn() -> None:
+    client = _Client([_tool_round("c1", 10), [_done("stop")], [_done("stop")]])
+    events = _run(client, StubRegistry())
+    assert len(client.requests) == 3
+    assert _kinds(events).count("EmptyReply") == 1
+    assert isinstance(events[-1], TurnDone)
+
+
+def test_no_nudge_without_tool_rounds_or_after_a_refusal() -> None:
+    client = _Client([[_done("end_turn")]])
+    _run(client, StubRegistry())
+    assert len(client.requests) == 1
+
+    client = _Client([_tool_round("c1", 10), [_done("refusal")]])
+    events = _run(client, StubRegistry())
+    assert len(client.requests) == 2
+    assert "EmptyReply" not in _kinds(events)
+
+
+def test_a_refusal_ends_the_turn_even_with_text_and_calls() -> None:
+    client = _Client(
+        [
+            [
+                TextDelta(text="I can't"),
+                ToolCallMade(call=_call("search_symbols", query="x")),
+                _done("refusal"),
+            ]
+        ]
+    )
+    registry = StubRegistry()
+    _run(client, registry)
+    assert len(client.requests) == 1
+    assert registry.dispatched == []
+
+
+def test_a_continuation_on_the_last_round_leads_to_an_answer_round_without_a_limit() -> (
+    None
+):
+    client = _Client(
+        [
+            _tool_round("c1", 10),
+            [TextDelta(text="Half"), _done("max_tokens")],
+            [TextDelta(text=" done."), _done("end_turn")],
+        ]
+    )
+    events = _run(client, _SpecRegistry(), max_tool_rounds=2)
+    assert len(client.requests) == 3
+    assert client.requests[-1].tool_choice == "none"
+    assert client.requests[-1].tools == client.requests[0].tools
+    assert "RoundLimit" not in _kinds(events)
+    assert "Continuation" in _kinds(events)
+
+
+def test_a_nudge_on_the_last_round_leads_to_an_answer_round_without_a_limit() -> None:
+    client = _Client(
+        [
+            _tool_round("c1", 10),
+            [_done("end_turn")],
+            [TextDelta(text="Answer."), _done("end_turn")],
+        ]
+    )
+    events = _run(client, StubRegistry(), max_tool_rounds=2)
+    assert len(client.requests) == 3
+    assert client.requests[-1].tool_choice == "none"
+    assert "RoundLimit" not in _kinds(events)
+    # The answer round never nudges or continues, even when it says nothing.
+    client = _Client(
+        [_tool_round("c1", 10), [_done("end_turn")], [_done("max_tokens")]]
+    )
+    _run(client, StubRegistry(), max_tool_rounds=2)
+    assert len(client.requests) == 3
+
+
+def test_tool_rounds_trim_older_results_once_over_budget() -> None:
+    big = "x" * 2400  # ~600 tokens per result
+    error = json.dumps({"error": "no such symbol", "pad": big})
+    registry = StubRegistry({"get_symbol": error, "search_symbols": big})
+    anthropic_replay = {"content": [{"type": "thinking"}], "reasoning_content": "r"}
+    client = _Client(
+        [
+            [
+                ToolCallMade(call=_call("get_symbol", "c1", qualified_name="a")),
+                TurnDone("tool_calls", replay=anthropic_replay),
+            ],
+            [
+                ToolCallMade(call=_call("search_symbols", "c2", query="b")),
+                _done("tool_calls"),
+            ],
+            [
+                ToolCallMade(call=_call("search_symbols", "c3", query="c")),
+                _done("tool_calls"),
+            ],
+            [TextDelta(text="Done."), _done("end_turn")],
+        ]
+    )
+    events = _run(client, registry, context_token_budget=1000)
+
+    assert [e for e in events if isinstance(e, ContextTrimmed)] == [
+        ContextTrimmed(rounds_elided=1)
+    ]
+    # Round two still saw round one in full; round three saw it elided.
+    tools = [m for m in client.requests[1].messages if m.role == "tool"]
+    assert tools[0].content == error
+    tools = [m for m in client.requests[2].messages if m.role == "tool"]
+    assert [t.content == ELIDED_MARKER for t in tools] == [True, False]
+    assert tools[0].is_error is True  # `replace` keeps the flag
+    assistant = next(m for m in client.requests[2].messages if m.tool_calls)
+    assert assistant.replay == {"reasoning_content": "r"}  # replayed thinking stripped
+    tools = [m for m in client.requests[3].messages if m.role == "tool"]
+    assert [t.content == ELIDED_MARKER for t in tools] == [True, True, False]
+
+
+def test_a_tool_error_result_is_flagged() -> None:
+    registry = StubRegistry({"get_symbol": json.dumps({"error": "not found"})})
+    client = _Client(
+        [
+            [
+                ToolCallMade(call=_call("get_symbol", "c1", qualified_name="a")),
+                ToolCallMade(call=_call("search_symbols", "c2", query="b")),
+                _done("tool_calls"),
+            ],
+            [TextDelta(text="ok"), _done("end_turn")],
+        ]
+    )
+    _run(client, registry)
+    tools = [m for m in client.requests[1].messages if m.role == "tool"]
+    assert [t.is_error for t in tools] == [True, False]
+
+
+def test_effort_and_timeout_ride_every_request() -> None:
+    client = _Client([_tool_round("c1", 1), [TextDelta(text="ok"), _done("end_turn")]])
+    _run(client, StubRegistry(), effort="high", stream_timeout_sec=120, max_tokens=8000)
+    assert {(r.effort, r.timeout_sec, r.max_tokens) for r in client.requests} == {
+        ("high", 120, 8000)
+    }
+
+
+@pytest.mark.usefixtures("_no_retry_delay")
+def test_a_dropped_connection_before_any_output_is_retried_once() -> None:
+    client = _Client(
+        [
+            [_dropped()],
+            [TextDelta(text="Recovered."), _done("end_turn", 4, 2)],
+        ]
+    )
+    events = _run(client, StubRegistry())
+    assert len(client.requests) == 2
+    assert _kinds(events) == ["TextDelta", "RoundUsage", "TurnDone"]
+    assert events[-1].input_tokens == 4
+
+    # A read error qualifies too, wrapped as the adapters wrap it.
+    def _wrapped():
+        try:
+            raise httpx.ReadError("reset")
+        except httpx.ReadError as exc:
+            raise LlmError("anthropic stream interrupted: ReadError") from exc
+
+    class _Raises:
+        def __call__(self):
+            _wrapped()
+
+    client = _Client([[_Raises()], [TextDelta(text="ok"), _done("end_turn")]])
+    _run(client, StubRegistry())
+    assert len(client.requests) == 2
+
+
+@pytest.mark.usefixtures("_no_retry_delay")
+def test_a_drop_is_not_retried_twice_or_after_output() -> None:
+    client = _Client([[_dropped()], [_dropped()]])
+    with pytest.raises(httpx.RemoteProtocolError):
+        _run(client, StubRegistry())
+    assert len(client.requests) == 2
+
+    client = _Client([[TextDelta(text="half"), _dropped()]])
+    with pytest.raises(httpx.RemoteProtocolError):
+        _run(client, StubRegistry())
+    assert len(client.requests) == 1
+
+    client = _Client(
+        [[ToolCallMade(call=_call("search_symbols", query="x")), _dropped()]]
+    )
+    with pytest.raises(httpx.RemoteProtocolError):
+        _run(client, StubRegistry())
+    assert len(client.requests) == 1
+
+
+@pytest.mark.usefixtures("_no_retry_delay")
+def test_timeouts_and_sdk_connection_errors_are_never_retried() -> None:
+    timeout = httpx.ReadTimeout("silent think")
+    client = _Client([[timeout]])
+    with pytest.raises(httpx.ReadTimeout):
+        _run(client, StubRegistry())
+    assert len(client.requests) == 1
+
+    class APIConnectionError(Exception):
+        pass
+
+    def _sdk_error():
+        try:
+            raise _dropped()
+        except httpx.RemoteProtocolError as exc:
+            raise APIConnectionError("connection error") from exc
+
+    client = _Client([[_sdk_error]])
+    with pytest.raises(APIConnectionError):
+        _run(client, StubRegistry())
+    assert len(client.requests) == 1
+
+
+@pytest.mark.usefixtures("_no_retry_delay")
+def test_the_budget_is_checked_before_the_retry() -> None:
+    sink = _BudgetSink(allowed=99)
+
+    def _block():
+        sink.allowed = 0
+
+    client = _Client([[_block, _dropped()]])
+    with use_usage_sink(sink), pytest.raises(httpx.RemoteProtocolError):
+        _run(client, StubRegistry())
+    assert len(client.requests) == 1
+
+
+def test_a_stop_during_the_retry_wait_cancels_the_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(harness, "RETRY_DELAY_SEC", 30)
+    cancel = threading.Event()
+    threading.Timer(0.05, cancel.set).start()
+    client = _Client([[_dropped()]])
+    started = time.monotonic()
+    with pytest.raises(TurnCancelled):
+        _run(client, StubRegistry(), cancel=cancel)
+    assert time.monotonic() - started < 5
+    assert len(client.requests) == 1
+
+
+def test_cancel_before_the_first_round_sends_nothing() -> None:
+    cancel = threading.Event()
+    cancel.set()
+    client = _Client([])
+    with pytest.raises(TurnCancelled):
+        _run(client, StubRegistry(), cancel=cancel)
+    assert client.requests == []
+
+
+def test_cancel_mid_stream_stops_the_turn() -> None:
+    cancel = threading.Event()
+    client = _Client(
+        [[TextDelta(text="a"), cancel.set, TextDelta(text="b"), _done("end_turn")]]
+    )
+    seen: list = []
+    with pytest.raises(TurnCancelled):
+        for event in run_turn(
+            client=client,
+            history=(ChatMessage(role="user", content="why?"),),
+            registry=StubRegistry(),
+            cancel=cancel,
+        ):
+            seen.append(event)
+    assert seen == [TextDelta(text="a")]
+    assert len(client.requests) == 1
+
+
+def test_cancel_before_a_tool_dispatch_runs_no_further_tool() -> None:
+    cancel = threading.Event()
+
+    class _Stopping(StubRegistry):
+        def dispatch(self, name, arguments):
+            result = super().dispatch(name, arguments)
+            if name != "get_repo_overview":
+                cancel.set()
+            return result
+
+    registry = _Stopping()
+    client = _Client(
+        [
+            [
+                ToolCallMade(call=_call("search_symbols", "c1", query="a")),
+                ToolCallMade(call=_call("search_symbols", "c2", query="b")),
+                _done("tool_calls"),
+            ]
+        ]
+    )
+    with pytest.raises(TurnCancelled):
+        _run(client, registry, cancel=cancel)
+    assert len(registry.dispatched) == 1
+    assert len(client.requests) == 1
+
+
+def test_any_error_while_stopping_is_a_cancellation() -> None:
+    cancel = threading.Event()
+
+    def _closed_socket():
+        cancel.set()
+        raise ValueError("I/O operation on closed SSL socket")
+
+    client = _Client([[TextDelta(text="a"), _closed_socket]])
+    with pytest.raises(TurnCancelled) as info:
+        _run(client, StubRegistry(), cancel=cancel)
+    assert isinstance(info.value.__cause__, ValueError)

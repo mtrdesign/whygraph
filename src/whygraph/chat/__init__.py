@@ -30,11 +30,15 @@ which keeps the loop unit-testable against a scripted fake client.
 from __future__ import annotations
 
 from .harness import (
+    ContextTrimmed,
+    Continuation,
+    EmptyReply,
     HarnessEvent,
     RoundLimit,
     RoundUsage,
     ToolCallStarted,
     ToolResultReady,
+    TurnCancelled,
     build_system_prompt,
     build_window,
     run_turn,
@@ -42,12 +46,16 @@ from .harness import (
 from .tools import ToolRegistry
 
 __all__ = [
+    "ContextTrimmed",
+    "Continuation",
+    "EmptyReply",
     "HarnessEvent",
     "RoundLimit",
     "RoundUsage",
     "ToolCallStarted",
     "ToolRegistry",
     "ToolResultReady",
+    "TurnCancelled",
     "build_system_prompt",
     "build_window",
     "run_turn",

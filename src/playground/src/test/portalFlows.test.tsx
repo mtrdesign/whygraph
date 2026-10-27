@@ -657,7 +657,8 @@ describe("ConfigForm (project settings)", () => {
     await waitFor(() => expect(puts()).toHaveLength(1));
     expect(puts()[0].body).toEqual({ secrets: { llm: { anthropic: "sk-ant-1234" } } });
 
-    await user.selectOptions(screen.getByLabelText("Default model provider"), "anthropic");
+    await user.click(screen.getByRole("combobox", { name: "Default model provider" }));
+    await user.click(await screen.findByRole("option", { name: "Anthropic" }));
     await user.type(screen.getByLabelText("Default model model"), "claude-sonnet-4-5");
     await user.click(within(screen.getByRole("region", { name: "Models and keys" })).getByRole("button", { name: "Save" }));
 

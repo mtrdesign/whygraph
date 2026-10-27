@@ -111,7 +111,7 @@ export function LinkedCodegraph({ slug, readOnly: readOnlyProp = false }: { slug
       onDiscard={() => setPicked(null)}
     >
       <div className="row-wrap justify-between gap-3">
-        <Label htmlFor="linked-serve-codegraph">Serve CodeGraph tools to agents</Label>
+        <Label htmlFor="linked-serve-codegraph" className="cursor-pointer">Serve CodeGraph tools to agents</Label>
         <Switch id="linked-serve-codegraph" checked={on} disabled={readOnly} onCheckedChange={(v) => setPicked(v)} />
       </div>
     </SectionForm>

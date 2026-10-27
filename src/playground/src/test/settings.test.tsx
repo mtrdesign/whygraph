@@ -5,6 +5,8 @@ import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PROJECT_ACTIONS } from "../lib/permissions";
 import { inheritedModelText, keyTestText, projectKeyStatus, tasksWithoutKey } from "../lib/settings";
+import { EFFORT_LEVELS } from "../lib/configForm";
+import { effortLabel } from "../lib/labels";
 import { createAppRouter } from "../router";
 import { ThemeProvider } from "../theme";
 import { useUi } from "../store";
@@ -108,6 +110,17 @@ function mount(path: string) {
 }
 
 const region = (name: string) => screen.getByRole("region", { name });
+// The model rows' Provider / Effort are Base UI Selects: open the trigger, click the option.
+const pick = async (user: ReturnType<typeof userEvent.setup>, name: string, option: string) => {
+  await user.click(screen.getByRole("combobox", { name }));
+  await user.click(await screen.findByRole("option", { name: option }));
+};
+const optionNames = async (user: ReturnType<typeof userEvent.setup>, name: string) => {
+  await user.click(screen.getByRole("combobox", { name }));
+  const names = (await screen.findAllByRole("option")).map((o) => o.textContent);
+  await user.keyboard("{Escape}");
+  return names;
+};
 const keyCard = (provider: string) => screen.getByTestId(`key-${provider}`);
 
 // A controllable IntersectionObserver: the test says which sections are on screen.
@@ -475,19 +488,18 @@ describe("Chat effort", () => {
     const user = userEvent.setup();
     mount("/p/alpha/settings");
     await screen.findByTestId("config-form");
-    expect(effort()).toHaveValue("");
-    expect(within(effort()).getByRole("option", { name: "Inherited: Medium from portal defaults" })).toBeInTheDocument();
+    expect(effort()).toHaveTextContent("Inherited: Medium from portal defaults");
     expect(effort()).toHaveAttribute("title", "Default effort for chats that have no level of their own.");
     expect(within(region("Models and keys")).queryByTestId("overridden-here")).toBeNull();
 
-    await user.selectOptions(effort(), "low");
+    await pick(user, "Effort", "Low");
     expect(within(region("Models and keys")).getByTestId("overridden-here")).toBeInTheDocument();
     await user.click(within(region("Models and keys")).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(calls("PUT", "/api/projects/alpha/config")).toHaveLength(1));
     expect(calls("PUT", "/api/projects/alpha/config")[0].body).toEqual({ config: { chat: { effort: "low" } } });
 
     await user.click(within(region("Models and keys")).getByRole("button", { name: "Reset Chat" }));
-    expect(effort()).toHaveValue("");
+    expect(effort()).toHaveTextContent("Inherited: Medium from portal defaults");
     await user.click(within(region("Models and keys")).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(calls("PUT", "/api/projects/alpha/config")).toHaveLength(2));
     // The key is gone, not null: the layer inherits again.
@@ -504,9 +516,9 @@ describe("Chat effort", () => {
     const user = userEvent.setup();
     mount("/p/alpha/settings");
     await screen.findByTestId("config-form");
-    expect(effort()).toHaveValue("high");
+    expect(effort()).toHaveTextContent("High");
     await user.click(within(region("Models and keys")).getByRole("button", { name: "Reset Chat" }));
-    expect(effort()).toHaveValue("");
+    expect(effort()).not.toHaveTextContent("High");
     expect(screen.getByLabelText("Chat model")).toHaveValue("");
   });
 
@@ -519,16 +531,12 @@ describe("Chat effort", () => {
     const user = userEvent.setup();
     mount("/settings");
     await screen.findByTestId("config-form");
-    expect(within(effort()).getByRole("option", { name: "Provider default" })).toBeInTheDocument();
-    expect(Array.from(effort().querySelectorAll("option")).map((o) => o.getAttribute("value"))).toEqual([
-      "",
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-      "max",
+    expect(effort()).toHaveTextContent("Provider default");
+    expect(await optionNames(user, "Effort")).toEqual([
+      "Provider default",
+      ...EFFORT_LEVELS.map((level) => effortLabel(level)),
     ]);
-    await user.selectOptions(effort(), "low");
+    await pick(user, "Effort", "Low");
     await user.click(within(region("Models and keys")).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(calls("PUT", "/api/portal/defaults")).toHaveLength(1));
     expect(calls("PUT", "/api/portal/defaults")[0].body).toEqual({ config: { chat: { effort: "low" } } });
@@ -562,7 +570,7 @@ describe("inherited values", () => {
       "Inherited: http://gw.internal/v1 from portal defaults",
     );
     // Provider names, not ids.
-    expect(within(screen.getByLabelText("Chat provider")).getByRole("option", { name: "OpenAI" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Chat provider" })).toHaveTextContent("OpenAI");
     const models = within(region("Models and keys"));
     expect(models.getAllByTestId("overridden-here")).toHaveLength(1);
     await user.click(models.getByRole("button", { name: "Reset Chat" }));
@@ -654,7 +662,7 @@ describe("org and global settings", () => {
   });
 });
 
-// ---- model suggestions (datalist) ---------------------------------------------------------------
+// ---- model suggestions (autocomplete) ------------------------------------------------------------
 
 describe("model suggestions", () => {
   const LIVE = {
@@ -667,8 +675,9 @@ describe("model suggestions", () => {
     ],
   };
   const modelCalls = () => log.filter((c) => c.path.includes("/models/"));
-  const listed = (container: ParentNode = document) =>
-    Array.from(container.querySelectorAll("datalist option")).map((o) => (o as HTMLOptionElement).value);
+  // The id is each option's first span; a differing display name follows it.
+  const listed = () => screen.queryAllByRole("option").map((o) => o.firstElementChild?.textContent);
+  const modelInput = () => screen.getByLabelText("Default model model");
 
   const owner = () => {
     handlers["GET /api/portal/defaults"] = () => ({
@@ -681,17 +690,49 @@ describe("model suggestions", () => {
     handlers["GET /api/portal/defaults/models/anthropic"] = () => LIVE;
   };
 
-  it("an owner who picks a keyed provider gets a datalist of the listed ids", async () => {
+  it("an owner who picks a keyed provider gets the listed ids on a click", async () => {
     owner();
     const user = userEvent.setup();
     mount("/settings");
     await screen.findByTestId("config-form");
-    expect(document.querySelector("datalist")).toBeNull();
-    await user.selectOptions(screen.getByLabelText("Default model provider"), "anthropic");
+    await user.click(modelInput());
+    expect(screen.queryByRole("listbox")).toBeNull();
+    await pick(user, "Default model provider", "Anthropic");
+    await user.click(modelInput());
     await waitFor(() => expect(listed()).toEqual(["claude-opus-5-5", "claude-haiku-4-5"]));
-    const input = screen.getByLabelText("Default model model");
-    expect(input).toHaveAttribute("list", document.querySelector("datalist")!.id);
+    expect(screen.getByRole("option", { name: /claude-opus-5-5/ })).toHaveTextContent("Claude Opus 5.5");
     expect(screen.queryByTestId("model-suggest-fallback")).toBeNull();
+  });
+
+  it("typing filters the list; a listed id still shows all of it; any id is accepted", async () => {
+    owner();
+    const user = userEvent.setup();
+    mount("/settings");
+    await screen.findByTestId("config-form");
+    await pick(user, "Default model provider", "Anthropic");
+    await waitFor(() => expect(modelCalls()).toHaveLength(1));
+    await user.type(modelInput(), "opus");
+    await waitFor(() => expect(listed()).toEqual(["claude-opus-5-5"]));
+    await user.clear(modelInput());
+    await user.type(modelInput(), "claude-haiku-4-5");
+    await waitFor(() => expect(listed()).toEqual(["claude-opus-5-5", "claude-haiku-4-5"]));
+    await user.clear(modelInput());
+    await user.type(modelInput(), "gpt-9");
+    expect(await screen.findByText("No listed model matches. Any model id works.")).toBeInTheDocument();
+    expect(modelInput()).toHaveValue("gpt-9");
+  });
+
+  it("picking a model fills the field and stages the section", async () => {
+    owner();
+    const user = userEvent.setup();
+    mount("/settings");
+    await screen.findByTestId("config-form");
+    await pick(user, "Default model provider", "Anthropic");
+    await user.click(modelInput());
+    await user.click(await screen.findByRole("option", { name: /claude-haiku-4-5/ }));
+    expect(modelInput()).toHaveValue("claude-haiku-4-5");
+    await waitFor(() => expect(screen.queryByRole("listbox")).toBeNull());
+    expect(within(region("Models and keys")).getByRole("button", { name: "Save" })).toBeEnabled();
   });
 
   it("a fallback answer says why, in words", async () => {
@@ -700,19 +741,22 @@ describe("model suggestions", () => {
     const user = userEvent.setup();
     mount("/settings");
     await screen.findByTestId("config-form");
-    await user.selectOptions(screen.getByLabelText("Default model provider"), "anthropic");
+    await pick(user, "Default model provider", "Anthropic");
     const hint = await screen.findByTestId("model-suggest-fallback");
     expect(hint).toHaveTextContent(
       "Suggestions are a short built-in list (the key cannot list models). Any model id works.",
     );
-    expect(listed()).toContain("claude-opus-5-5");
+    await user.click(modelInput());
+    await waitFor(() => expect(listed()).toContain("claude-opus-5-5"));
   });
 
-  it("a blank provider renders no datalist and asks for nothing", async () => {
+  it("a blank provider opens no list and asks for nothing", async () => {
     owner();
+    const user = userEvent.setup();
     mount("/settings");
     await screen.findByTestId("config-form");
-    expect(document.querySelector("datalist")).toBeNull();
+    await user.click(modelInput());
+    expect(screen.queryByRole("listbox")).toBeNull();
     expect(modelCalls()).toHaveLength(0);
   });
 
@@ -726,8 +770,8 @@ describe("model suggestions", () => {
     });
     mount("/p/alpha/settings");
     await screen.findByTestId("config-form");
-    expect(screen.getByLabelText("Default model provider")).toHaveValue("anthropic");
-    expect(document.querySelector("datalist")).toBeNull();
+    expect(screen.getByLabelText("Default model provider")).toHaveTextContent("Anthropic");
+    expect(screen.queryByRole("listbox")).toBeNull();
     expect(modelCalls()).toHaveLength(0);
   });
 
@@ -742,8 +786,8 @@ describe("model suggestions", () => {
     });
     mount("/settings");
     await screen.findByTestId("config-form");
-    expect(screen.getByLabelText("Default model provider")).toHaveValue("anthropic");
-    expect(document.querySelector("datalist")).toBeNull();
+    expect(screen.getByLabelText("Default model provider")).toHaveTextContent("Anthropic");
+    expect(screen.queryByRole("listbox")).toBeNull();
     expect(modelCalls()).toHaveLength(0);
   });
 
@@ -760,9 +804,11 @@ describe("model suggestions", () => {
     const user = userEvent.setup();
     mount("/p/alpha/settings");
     await screen.findByTestId("config-form");
-    await user.selectOptions(screen.getByLabelText("Default model provider"), "anthropic");
+    await pick(user, "Default model provider", "Anthropic");
+    await user.click(modelInput());
     await waitFor(() => expect(listed()).toHaveLength(2));
     expect(calls("GET", "/api/projects/alpha/models/anthropic")).toHaveLength(1);
+    await user.keyboard("{Escape}");
 
     await user.click(within(keyCard("anthropic")).getByRole("button", { name: "Replace" }));
     await user.type(within(keyCard("anthropic")).getByLabelText("New Anthropic key"), "sk-ant-new-1234");
@@ -794,6 +840,7 @@ describe("project settings by audience and mode", () => {
     await screen.findByTestId("config-form");
     expect(screen.getByLabelText("Display name")).toBeDisabled();
     expect(screen.getByLabelText("Default model model")).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "Default model provider" })).toBeDisabled();
     // SET-4: every control, including the ones `<fieldset disabled>` does not
     // reach (Base UI's Switch and Checkbox are spans).
     for (const select of Array.from(document.querySelectorAll("select"))) {

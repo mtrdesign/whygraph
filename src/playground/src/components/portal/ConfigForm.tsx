@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { Controller, useForm, useWatch, type Control, type FieldPath, type UseFormRegister } from "react-hook-form";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Controller, useForm, useWatch, type Control, type FieldPath } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { TriangleAlertIcon } from "lucide-react";
@@ -54,8 +54,10 @@ import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Checkbox } from "../ui/checkbox";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
-import { Field, nativeSelect } from "./Field";
+import { Field } from "./Field";
+import { ModelIdInput } from "./ModelIdInput";
 
 // The project config and the defaults differ in `import` / the key fields
 // (project) and `no_provider_key` (defaults).
@@ -120,6 +122,52 @@ const FALLBACK_REASONS: Record<string, string> = {
 };
 const FALLBACK_REASON_DEFAULT = "the provider could not be reached";
 
+// A Select item cannot carry "" (the form's "inherit"), so it travels as this.
+const INHERIT = "inherit";
+
+/** A styled `Select` bound to a form string where "" means inherit, like the model field beside it. */
+function FormSelect({
+  value,
+  onChange,
+  items,
+  disabled,
+  className,
+  ...trigger
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  /** The options; the one with value "" is the inherit choice. */
+  items: { value: string; label: string }[];
+  disabled?: boolean;
+  className: string;
+  id?: string;
+  "aria-label": string;
+  title?: string;
+}) {
+  const selectItems = items.map((item) => ({ ...item, value: item.value || INHERIT }));
+  return (
+    <Select
+      items={selectItems}
+      value={value || INHERIT}
+      disabled={disabled}
+      onValueChange={(next) => {
+        if (next) onChange(next === INHERIT ? "" : next);
+      }}
+    >
+      <SelectTrigger {...trigger} className={className}>
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent alignItemWithTrigger={false}>
+        {selectItems.map((item) => (
+          <SelectItem key={item.value} value={item.value}>
+            {item.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
 function ModelRow({
   name,
   label,
@@ -127,8 +175,8 @@ function ModelRow({
   providers,
   emptyLabel,
   placeholder,
-  register,
   control,
+  readOnly,
   scope,
   canList,
   error,
@@ -142,9 +190,10 @@ function ModelRow({
   providers: string[];
   emptyLabel: string;
   placeholder: string;
-  register: UseFormRegister<ConfigFormValues>;
   /** The parent's `form.control` (there is no FormProvider). */
   control: Control<ConfigFormValues>;
+  /** Base UI's Select is not a native select: `<fieldset disabled>` alone leaves it looking enabled (SET-4). */
+  readOnly: boolean;
   scope: ConfigScope;
   /** The form's `canTest`: only people the listing routes admit ask for suggestions. */
   canList: boolean;
@@ -155,7 +204,6 @@ function ModelRow({
   /** Set on the Chat row only: shows the Effort select, whose empty option reads this. */
   effortEmptyLabel?: string;
 }) {
-  const listId = useId();
   const provider = (useWatch({ control, name: `${name}.provider` as FieldPath<ConfigFormValues> }) ?? "") as string;
   const listing = useQuery<ModelListResponse>({
     queryKey: scope.kind === "project" ? projectKey(scope.slug, "models", provider) : portalKey("models", provider),
@@ -172,38 +220,39 @@ function ModelRow({
       {(p) => (
         <div className="flex flex-col gap-1.5">
           <div className="flex flex-wrap gap-2">
-            <select
-              aria-label={`${label} provider`}
-              className={nativeSelect("sm:w-44")}
-              {...register(`${name}.provider` as FieldPath<ConfigFormValues>)}
-            >
-              <option value="">{emptyLabel}</option>
-              {providers.map((prov) => (
-                <option key={prov} value={prov}>
-                  {providerLabel(prov)}
-                </option>
-              ))}
-            </select>
-            <Input
-              {...p}
-              aria-label={`${label} model`}
-              placeholder={placeholder}
-              title={placeholder}
-              className="min-w-48 flex-1 font-mono"
-              // Known limitation: a model id left over from another provider
-              // filters the native datalist to nothing until the field is cleared.
-              list={suggestions ? listId : undefined}
-              {...register(`${name}.model` as FieldPath<ConfigFormValues>)}
+            <Controller
+              control={control}
+              name={`${name}.provider` as FieldPath<ConfigFormValues>}
+              render={({ field }) => (
+                <FormSelect
+                  aria-label={`${label} provider`}
+                  className="w-full sm:w-44"
+                  value={(field.value ?? "") as string}
+                  onChange={field.onChange}
+                  disabled={readOnly}
+                  items={[
+                    { value: "", label: emptyLabel },
+                    ...providers.map((prov) => ({ value: prov, label: providerLabel(prov) })),
+                  ]}
+                />
+              )}
             />
-            {suggestions && (
-              <datalist id={listId}>
-                {suggestions.models.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.display_name !== m.id ? m.display_name : null}
-                  </option>
-                ))}
-              </datalist>
-            )}
+            <Controller
+              control={control}
+              name={`${name}.model` as FieldPath<ConfigFormValues>}
+              render={({ field }) => (
+                <ModelIdInput
+                  fieldProps={p}
+                  value={(field.value ?? "") as string}
+                  onChange={field.onChange}
+                  onBlur={field.onBlur}
+                  inputRef={field.ref}
+                  models={suggestions?.models}
+                  label={label}
+                  placeholder={placeholder}
+                />
+              )}
+            />
           </div>
           {suggestions?.source === "fallback" && (
             <span className="text-xs text-muted-foreground" data-testid="model-suggest-fallback">
@@ -216,20 +265,25 @@ function ModelRow({
               <label htmlFor={`${p.id}-effort`} className="text-xs text-muted-foreground">
                 Effort
               </label>
-              <select
-                id={`${p.id}-effort`}
-                aria-label="Effort"
-                title="Default effort for chats that have no level of their own."
-                className={nativeSelect("sm:w-64")}
-                {...register("chat.effort")}
-              >
-                <option value="">{effortEmptyLabel}</option>
-                {EFFORT_LEVELS.map((level) => (
-                  <option key={level} value={level}>
-                    {effortLabel(level)}
-                  </option>
-                ))}
-              </select>
+              <Controller
+                control={control}
+                name="chat.effort"
+                render={({ field }) => (
+                  <FormSelect
+                    id={`${p.id}-effort`}
+                    aria-label="Effort"
+                    title="Default effort for chats that have no level of their own."
+                    className="w-full sm:w-64"
+                    value={(field.value ?? "") as string}
+                    onChange={field.onChange}
+                    disabled={readOnly}
+                    items={[
+                      { value: "", label: effortEmptyLabel },
+                      ...EFFORT_LEVELS.map((level) => ({ value: level as string, label: effortLabel(level) })),
+                    ]}
+                  />
+                )}
+              />
             </div>
           )}
           {overridden && onReset && <OverriddenHere onReset={onReset} label={label} />}
@@ -573,8 +627,8 @@ export function ConfigForm({
               providers={PROVIDERS}
               emptyLabel={isProject ? "Inherited" : "Provider default"}
               placeholder={inheritedModelText({ task: null, projectLayer: isProject ? layer : null, orgLayer, mode })}
-              register={register}
               control={control}
+              readOnly={readOnly}
               scope={scope}
               canList={canTest}
               error={errors.defaultModel?.model?.message ?? errors.defaultModel?.root?.message}
@@ -590,8 +644,8 @@ export function ConfigForm({
                 providers={t.id === "chat" ? CHAT_PROVIDER_TAGS : PROVIDERS}
                 emptyLabel={isProject ? "Inherited" : "Default model's"}
                 placeholder={inheritedModelText({ task: t.id, projectLayer: isProject ? layer : null, orgLayer, mode })}
-                register={register}
                 control={control}
+                readOnly={readOnly}
                 scope={scope}
                 canList={canTest}
                 error={errors[t.id]?.model?.message ?? errors[t.id]?.provider?.message ?? errors[t.id]?.root?.message}
@@ -684,7 +738,7 @@ export function ConfigForm({
               name="forge"
               render={({ field }) => (
                 <div className="row-wrap justify-between gap-3">
-                  <Label htmlFor="forge-switch">Fetch pull requests and issues from GitHub</Label>
+                  <Label htmlFor="forge-switch" className="cursor-pointer">Fetch pull requests and issues from GitHub</Label>
                   {/* Base UI's Switch is a span: `<fieldset disabled>` does not reach it (SET-4). */}
                   <Switch
                     id="forge-switch"
@@ -785,7 +839,7 @@ export function ConfigForm({
               name="serveCodegraph"
               render={({ field }) => (
                 <div className="row-wrap justify-between gap-3">
-                  <Label htmlFor="serve-codegraph-switch">Serve CodeGraph tools to agents</Label>
+                  <Label htmlFor="serve-codegraph-switch" className="cursor-pointer">Serve CodeGraph tools to agents</Label>
                   <Switch
                     id="serve-codegraph-switch"
                     checked={field.value}

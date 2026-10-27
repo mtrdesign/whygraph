@@ -152,7 +152,7 @@ export function BudgetEditor({
           </Field>
           <div className="flex h-8 items-center gap-2">
             <Switch id={`${id}-hard`} checked={hardStop} onCheckedChange={(v) => setHardStop(!!v)} />
-            <Label htmlFor={`${id}-hard`} className="font-normal">
+            <Label htmlFor={`${id}-hard`} className="cursor-pointer font-normal">
               Hard stop
             </Label>
           </div>
@@ -239,7 +239,7 @@ function AddBudget({
       </Field>
       <div className="flex h-8 items-center gap-2">
         <Switch id={`${id}-hard`} checked={hardStop} onCheckedChange={(v) => setHardStop(!!v)} />
-        <Label htmlFor={`${id}-hard`} className="font-normal">
+        <Label htmlFor={`${id}-hard`} className="cursor-pointer font-normal">
           Hard stop
         </Label>
       </div>

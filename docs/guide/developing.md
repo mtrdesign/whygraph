@@ -87,7 +87,8 @@ production mode:
   (see [GitHub sign-in](../deploy/production.md#github-sign-in) and
   [The GitHub App](../deploy/production.md#the-github-app)), then copy `.env.dev.example` to
   `.env.dev` (gitignored) and fill in all seven variables. `make dev-production` loads `.env.dev` (or
-  the file `DEV_ENV_FILE=...` names) when it exists; values in it win over your shell's.
+  the file `DEV_ENV_FILE=...` names) when it exists; values in it win over your shell's. The same
+  file can also hold `DEV_FOLDERS` ([Sharing more folders](#sharing-more-folders)).
 - **Webhooks from a real GitHub** cannot reach `whygraph.localhost`, so relay them through a
   [smee.io](https://smee.io) channel: set the dev app's webhook URL to the channel, then run
   `npx smee-client -u https://smee.io/<channel> -t http://whygraph.localhost:5173/github/webhook`
@@ -170,11 +171,35 @@ Every mode keeps to itself, so none of them touches your own portal:
   offline on first use: a copy of your checkout (`git clone --no-hardlinks`, real history to
   dogfood) and a tiny three-commit demo repo. Delete one to get a fresh copy next time.
 
-Your checkout itself is never added to a dev portal, so it never gets WhyGraph's hooks or markers.
+Your checkout itself is never added to a dev portal, so it never gets WhyGraph's hooks or markers -
+unless you share a folder that holds it (below).
 
 `dev-local`, `dev-docker` and `prod` share port `8777`, so run one of those three at a time.
 Override it with `DEV_PORT=...`. `dev-production` uses `:8778` for the portal and `:5173` for Vite,
 so it can run beside any of them.
+
+### Sharing more folders
+
+To try a dev portal on repos outside the scratch folder, list their folders in `DEV_FOLDERS` in
+`.env.dev` (template: `.env.dev.example`), `:`-separated:
+
+```bash
+DEV_FOLDERS=$HOME/Projects/demos:$HOME/work/clones
+```
+
+`make dev-local`, `make dev-docker` and `make prod` share them beside `$TMPDIR/whygraph-dev/repos`;
+`make dev-production` ignores them (production mode has no shared folders). For one run, pass
+`make dev-local DEV_FOLDERS=...` instead; a non-empty value there or in your shell wins over the
+file. A folder that is missing, relative, `/`, holds a `,` or `"`, or overlaps
+`$TMPDIR/whygraph-dev` stops the target before anything starts. The Docker modes match their shared
+folders to the list on every run, so a folder you remove from it is no longer mounted. Under Docker
+Desktop the folder must also be in its file-sharing settings (`/Users` is by default).
+
+!!! warning "These are your real repos"
+    Adding a project from such a folder writes into that repo what any portal does: the git hooks,
+    `.whygraph/portal.env` (naming the dev port, `8777`), and the agent entries and files. If your own
+    portal (`whygraph up`) also serves that repo, whichever initialized it last owns those. To keep
+    your checkouts untouched, share a folder of throwaway clones instead.
 
 ## Helpers
 

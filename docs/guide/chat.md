@@ -91,6 +91,31 @@ it in `[chat]` itself is refused.
 If OpenRouter is your provider, pin a tool-capable model rather than leaving `openrouter/auto` -
 automatic routing can land on a model that does not support tool calling.
 
+### Effort
+
+The **Effort** select sits beside the model picker above the composer. It sets how hard the model
+thinks, for this chat, from the next reply on. The levels are `low`, `medium`, `high`, `xhigh` and
+`max`.
+
+**Default** uses the level set for chats under Settings > Models and keys > **Chat**, or the
+provider's own default when none is set.
+
+Each provider receives the level in its own parameter:
+
+| Provider | Sent as |
+|---|---|
+| `anthropic` | `output_config.effort` |
+| `openai` | `reasoning_effort` |
+| `deepseek` | `reasoning_effort`, passed through as it is |
+| `openrouter` | `reasoning.effort` |
+
+Some models have no effort setting: Claude Haiku 4.5, GPT-4o and GPT-4o mini. With a level chosen, a
+reply from one of them fails with an error saying the model does not take an effort level. Set
+Effort to **Default** for that chat.
+
+On Anthropic, changing the effort starts a fresh prompt cache for that reply, so the first reply after
+a change costs a little more.
+
 ## Sessions
 
 Your conversations are listed in the sidebar's **Chats** section, below **All projects**, newest
@@ -111,6 +136,27 @@ The Chats section appears only where you can chat: not for the Viewer role, not 
 [linked project](../portal/platform-projects.md) (its chat lives on the platform), and not for a
 project that is not set up yet. When a hard-stopped budget is used up, **+** is disabled with the
 reason, and earlier chats stay readable.
+
+### Editing and regenerating
+
+Hover a question and choose **Edit** to change it and get a new answer. Hover the last reply and
+choose **Regenerate** for another answer. Both keep the earlier version: a `‹ 2/3 ›` arrow beside the
+message switches between the versions. A new version uses the chat's current provider, model and
+effort.
+
+**Copy** works on any message and copies its text. For a reply, that is the answer text, never its
+reasoning.
+
+The actions and arrows are hidden while a reply is being written.
+
+### Stop
+
+Choose **Stop** while a reply is being written to end it at once. The text written so far stays in
+the chat, marked "Stopped." A tool call that is already running finishes first, so Stop can wait for
+that tool.
+
+If you send right after stopping, the chat shows "Stopping the previous reply…" and sends your
+message as soon as the stopped reply has ended. A chat runs one reply at a time.
 
 ## What it can look at
 
@@ -194,6 +240,8 @@ Tuned under `[chat]` - imported from a repository's `whygraph.toml` when you add
 | `max_rationale_generations` | `2` | Uncached rationale cards one turn may generate. `0` makes the assistant cache-only. |
 | `context_token_budget` | `60000` | Conversation history sent to the model. |
 | `stream_timeout_sec` | `300` | How long (30-1800 seconds) the provider may stay silent mid-reply - a long think or a large prompt - before the turn fails. |
+| `max_tokens` | unset | Output one model call may write, 2048-128000 tokens. Unset means 32000 on Anthropic and the provider's own default elsewhere. |
+| `max_continuations` | `1` | Automatic continuations (0-3) of a reply cut off by the output limit. |
 
 Two behaviours worth knowing:
 
@@ -206,6 +254,22 @@ Two behaviours worth knowing:
 
 When history outgrows `context_token_budget`, WhyGraph first elides stale tool results, then drops
 whole turns from the top - never splitting a tool call from its result.
+
+### How a turn ends
+
+Most turns end with a reply. These cases are handled for you:
+
+- A reply cut off by the output limit is continued, up to `max_continuations` times. If it is still
+  cut off, it ends with "The reply hit the output limit."
+- If the model writes nothing after using tools, WhyGraph asks it once to answer from what it gathered.
+- In a long turn, the bodies of older tool results are shortened to fit `context_token_budget`, and
+  the reply says "Older tool results in this turn were shortened to fit the context."
+- When the provider declines to answer, the reply says "The provider declined to answer."
+- A reply that ends without any text says "The model ended its turn without a reply." and offers
+  **Regenerate**.
+
+The keys `max_tokens` and `max_continuations` come from a repository's `whygraph.toml` on import, or
+from the API, the same way as `max_tool_rounds`. Only **Effort** has a field in Settings.
 
 ### When a turn fails
 

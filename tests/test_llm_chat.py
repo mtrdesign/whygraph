@@ -1708,3 +1708,165 @@ def test_abort_wakes_a_reader_blocked_on_a_silent_stream() -> None:
     for conn in held:
         conn.close()
     server.close()
+
+
+# ---------------------------------------------------------------------------
+# OpenAI-compatible adapter: effort, output cap, abort
+# ---------------------------------------------------------------------------
+
+
+def _effort_request(effort="high", **kwargs) -> ChatRequest:
+    return ChatRequest(messages=(user("go"),), effort=effort, **kwargs)
+
+
+def test_openai_effort_rides_reasoning_effort_only_when_set() -> None:
+    adapter, fake = _compat_adapter("openai", [_oa_chunk(finish_reason="stop")])
+    list(adapter.stream_turn(_effort_request("high")))
+    assert fake.last_kwargs["reasoning_effort"] == "high"
+    assert "extra_body" not in fake.last_kwargs
+
+    adapter, fake = _compat_adapter("openai", [_oa_chunk(finish_reason="stop")])
+    list(adapter.stream_turn(_request()))
+    assert "reasoning_effort" not in fake.last_kwargs
+
+
+def test_openai_output_cap_is_max_completion_tokens() -> None:
+    adapter, fake = _compat_adapter("openai", [_oa_chunk(finish_reason="stop")])
+    list(adapter.stream_turn(_effort_request(None, max_tokens=4096)))
+    assert fake.last_kwargs["max_completion_tokens"] == 4096
+    assert "max_tokens" not in fake.last_kwargs
+
+
+def test_openrouter_effort_rides_extra_body_reasoning() -> None:
+    adapter, fake = _compat_adapter("openrouter", [_oa_chunk(finish_reason="stop")])
+    list(adapter.stream_turn(_effort_request("high", max_tokens=2048)))
+    assert fake.last_kwargs["extra_body"] == {"reasoning": {"effort": "high"}}
+    assert "reasoning_effort" not in fake.last_kwargs
+    assert fake.last_kwargs["max_tokens"] == 2048
+    assert "max_completion_tokens" not in fake.last_kwargs
+
+
+def test_deepseek_effort_is_passed_unclamped() -> None:
+    adapter, fake = _compat_adapter("deepseek", [_oa_chunk(finish_reason="stop")])
+    list(adapter.stream_turn(_effort_request("max", max_tokens=2048)))
+    assert fake.last_kwargs["reasoning_effort"] == "max"
+    assert "extra_body" not in fake.last_kwargs
+    assert fake.last_kwargs["max_tokens"] == 2048
+    assert "max_completion_tokens" not in fake.last_kwargs
+
+
+def test_deepseek_legacy_fallback_omits_reasoning_effort() -> None:
+    adapter, fake = _compat_adapter("deepseek", [_oa_chunk(finish_reason="stop")])
+    request = ChatRequest(
+        messages=(
+            user("first"),
+            ChatMessage(role="assistant", content="from before replay"),
+            user("second"),
+        ),
+        tools=(SEARCH_TOOL,),
+        effort="high",
+    )
+    list(adapter.stream_turn(request))
+    assert fake.last_kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning_effort" not in fake.last_kwargs
+
+
+def _openai_bad_request(message: str, body):
+    import httpx
+
+    return openai.BadRequestError(
+        message,
+        response=httpx.Response(400, request=httpx.Request("POST", "https://x")),
+        body=body,
+    )
+
+
+def _effort_error(exc, request: ChatRequest):
+    adapter, _ = _openai_adapter([], raise_on_create=exc)
+    with pytest.raises(LlmError) as info:
+        list(adapter.stream_turn(request))
+    return info.value
+
+
+def test_openai_bad_request_param_is_read_from_the_unwrapped_body() -> None:
+    # The SDK unwraps `{"error": {...}}` before building the exception, so
+    # `.param` is a top-level key of the body the exception receives.
+    exc = _openai_bad_request(
+        "Error code: 400", {"param": "reasoning_effort", "message": "nope"}
+    )
+    assert exc.param == "reasoning_effort"
+    wrapped = _openai_bad_request("x", {"error": {"param": "reasoning_effort"}})
+    assert wrapped.param is None
+
+
+def test_openai_effort_rejection_by_param_is_effort_unsupported() -> None:
+    exc = _openai_bad_request(
+        "Error code: 400 - bad", {"param": "reasoning_effort", "message": "bad"}
+    )
+    assert _effort_error(exc, _effort_request("max")).code == "effort_unsupported"
+
+
+def test_openrouter_effort_rejection_by_param_is_effort_unsupported() -> None:
+    exc = _openai_bad_request("Error code: 400", {"param": "reasoning"})
+    assert _effort_error(exc, _effort_request("max")).code == "effort_unsupported"
+
+
+def test_deepseek_effort_rejection_by_message_is_effort_unsupported() -> None:
+    exc = _openai_bad_request(
+        "Unsupported value: 'reasoning_effort' does not support 'max'", None
+    )
+    assert exc.param is None
+    assert _effort_error(exc, _effort_request("max")).code == "effort_unsupported"
+
+
+def test_openai_effort_rejection_needs_an_effort_on_the_request() -> None:
+    exc = _openai_bad_request("x", {"param": "reasoning_effort"})
+    assert _effort_error(exc, _request()).code is None
+
+
+def test_openai_unrelated_bad_request_is_not_an_effort_error() -> None:
+    exc = _openai_bad_request(
+        "Invalid value for messages[1].role", {"param": "messages"}
+    )
+    assert _effort_error(exc, _effort_request("high")).code is None
+
+
+def test_openai_effort_code_is_only_for_bad_request_errors() -> None:
+    exc = openai.APIStatusError(
+        "reasoning_effort is broken",
+        response=_status_response("x-request-id", "req_1"),
+        body={"param": "reasoning_effort"},
+    )
+    assert _effort_error(exc, _effort_request("high")).code is None
+
+
+def test_openai_abort_without_a_live_stream_is_a_silent_no_op() -> None:
+    adapter, _ = _compat_adapter("openai", [])
+    adapter.abort()  # nothing in flight
+    adapter._active = SimpleNamespace()  # a fake stream with no response
+    adapter.abort()
+
+
+def test_openai_active_stream_is_cleared_after_completion_and_failure() -> None:
+    chunks = [_oa_chunk(content="hi"), _oa_chunk(finish_reason="stop")]
+    adapter, _ = _compat_adapter("openai", chunks)
+    assert adapter._active is None
+    events = adapter.stream_turn(_request())
+    next(events)
+    assert adapter._active is not None  # mid-stream
+    list(events)
+    assert adapter._active is None
+
+    adapter = OpenAIChatAdapter(
+        model="gpt-4o",
+        client=_FakeOpenAI([], raise_on_create=openai.OpenAIError("boom")),
+    )
+    with pytest.raises(LlmError):
+        list(adapter.stream_turn(_request()))
+    assert adapter._active is None
+
+    adapter, fake = _openai_adapter([])
+    fake._chunks = _raising_after([_oa_chunk(content="hi")], _read_timeout())
+    with pytest.raises(LlmError):
+        list(adapter.stream_turn(_request()))
+    assert adapter._active is None

@@ -22,6 +22,12 @@ reasoning **echoed back** on the assistant message: DeepSeek as
 fails without it), OpenRouter as ``reasoning_details``, unmodified. The
 adapter captures each into :attr:`TurnDone.replay` and sends it back only to
 the provider that produced it.
+
+Effort (``request.effort``) maps per provider: ``reasoning_effort`` for
+``openai`` and ``deepseek`` (DeepSeek's passed through unclamped, and omitted
+on a request that runs with thinking disabled), ``extra_body.reasoning.effort``
+for ``openrouter``. A 400 that names the parameter becomes
+``LlmError(code="effort_unsupported")``.
 """
 
 from __future__ import annotations
@@ -29,6 +35,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -49,6 +56,7 @@ from .chat import (
     ToolSpec,
     TurnDone,
 )
+from ._abort import shutdown_stream
 from .exceptions import LlmError, LlmKeyMissing
 from .usage import UsageFields, openai_usage_fields
 
@@ -57,6 +65,12 @@ _log = logging.getLogger(__name__)
 _MERGED_DETAIL_FIELDS = ("text", "summary", "data")
 """``reasoning_details`` fields whose fragments are concatenated; every other
 field (``signature`` among them) takes the last non-null value."""
+
+_EFFORT_PARAMS = frozenset({"reasoning_effort", "reasoning", "thinking"})
+"""Values of a 400's structured ``param`` that name the effort parameter."""
+
+_EFFORT_MESSAGE = re.compile(r"reasoning_effort|reasoning\.effort")
+"""Fallback when a compat endpoint names the parameter only in the message."""
 
 
 @dataclass(slots=True)
@@ -228,6 +242,26 @@ def _deepseek_needs_fallback(request: ChatRequest) -> bool:
     )
 
 
+def _effort_code(exc: Exception, request: ChatRequest) -> str | None:
+    """``"effort_unsupported"`` when a 400 rejects the effort parameter.
+
+    Narrow on purpose: only with an effort on the request, only a
+    ``BadRequestError``, and only when the structured ``param`` names the
+    parameter (``reasoning_effort`` / ``reasoning`` / ``thinking``) or, as a
+    fallback for endpoints that fill only the message, the message mentions
+    ``reasoning_effort`` / ``reasoning.effort``. A broader match would
+    mislabel unrelated 400s. A non-reasoning model such as ``gpt-4o`` or
+    ``gpt-4o-mini`` (both in ``FALLBACK_MODELS``) lands here by design.
+    """
+    if not request.effort or not isinstance(exc, openai.BadRequestError):
+        return None
+    if getattr(exc, "param", None) in _EFFORT_PARAMS:
+        return "effort_unsupported"
+    if _EFFORT_MESSAGE.search(str(exc)):
+        return "effort_unsupported"
+    return None
+
+
 def _finished_calls(
     accumulators: dict[int, _CallAccumulator], finish_reason: str | None
 ) -> Iterator[ToolCallMade]:
@@ -310,6 +344,8 @@ class OpenAIChatAdapter(ChatClient):
         self._env_var = env_var
         self._default_timeout = timeout_sec
         self.__sdk_client: openai.OpenAI | None = None
+        # The stream being read, for `abort()` from another thread.
+        self._active: Any = None
 
     @property
     def _client(self) -> openai.OpenAI:
@@ -348,6 +384,14 @@ class OpenAIChatAdapter(ChatClient):
         except openai.OpenAIError as exc:
             raise LlmError(f"{self.provider} model listing failed: {exc}") from exc
 
+    def abort(self) -> None:
+        """Wake the reader of the in-flight stream by shutting its socket down.
+
+        See :meth:`whygraph.services.llm.chat.ChatClient.abort`. Never
+        closes the stream from this thread and never raises.
+        """
+        shutdown_stream(self._active)
+
     def stream_turn(self, request: ChatRequest) -> Iterator[ChatStreamEvent]:
         """Stream one turn from the chat-completions endpoint.
 
@@ -368,6 +412,8 @@ class OpenAIChatAdapter(ChatClient):
             "stream_options": {"include_usage": True},
             "timeout": request.timeout_sec or self._default_timeout,
         }
+        extra_body: dict[str, Any] = {}
+        thinking_disabled = False
         if request.tools:
             kwargs["tools"] = _tool_payload(request.tools)
             if request.tool_choice == "none":
@@ -377,9 +423,21 @@ class OpenAIChatAdapter(ChatClient):
                 # from before replay existed, an errored round, a session
                 # switched from another provider) would fail the request in
                 # thinking mode, so this request runs without thinking.
-                kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+                extra_body["thinking"] = {"type": "disabled"}
+                thinking_disabled = True
+        if request.effort:
+            if self.provider == "openrouter":
+                extra_body["reasoning"] = {"effort": request.effort}
+            elif not thinking_disabled:
+                # `openai`, and `deepseek` unclamped (it maps unknown levels
+                # itself); omitted when this request runs without thinking.
+                kwargs["reasoning_effort"] = request.effort
+        if extra_body:
+            kwargs["extra_body"] = extra_body
         if request.max_tokens is not None:
-            kwargs["max_tokens"] = request.max_tokens
+            # Reasoning models on OpenAI reject `max_tokens`.
+            cap = "max_completion_tokens" if self.provider == "openai" else "max_tokens"
+            kwargs[cap] = request.max_tokens
         if request.temperature is not None:
             kwargs["temperature"] = request.temperature
 
@@ -393,6 +451,7 @@ class OpenAIChatAdapter(ChatClient):
 
         try:
             stream = self._client.chat.completions.create(**kwargs)
+            self._active = stream
             for chunk in stream:
                 chunk_model = getattr(chunk, "model", None)
                 if isinstance(chunk_model, str) and chunk_model:
@@ -439,6 +498,7 @@ class OpenAIChatAdapter(ChatClient):
             raise LlmError(
                 f"openai API error: {exc}",
                 request_id=getattr(exc, "request_id", None),
+                code=_effort_code(exc, request),
             ) from exc
         except httpx.TransportError as exc:
             # Once a stream has started the SDK no longer wraps transport
@@ -446,6 +506,8 @@ class OpenAIChatAdapter(ChatClient):
             raise LlmError(
                 f"{self.provider} stream interrupted: {type(exc).__name__}"
             ) from exc
+        finally:
+            self._active = None
 
         # Defensive: a stream that ends without a finish_reason (a
         # truncated connection) still owes its accumulated calls.

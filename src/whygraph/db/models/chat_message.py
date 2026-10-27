@@ -71,6 +71,19 @@ class ChatMessage(WhygraphTable, table=True):
         sends back on later turns (DeepSeek's ``reasoning_content``). Only
         the keys in :data:`whygraph.serve.chat.PERSISTED_REPLAY_KEYS` are
         written. ``None`` when there is nothing to replay.
+    parent_id : int or None
+        The row this one follows in the same session; ``None`` for a root
+        row. The transcript is a tree of these pointers, and a parent
+        always has a lower id than its child. Indexed; no foreign key
+        (SQLite's ``ADD COLUMN`` cannot add one).
+    finish_reason : str or None
+        The provider's raw stop reason for the round that produced this
+        assistant row. ``None`` for other roles and pre-branching rows.
+    effort : str or None
+        The effort level the turn ran at. ``None`` when not recorded.
+    reasoning : str or None
+        Reasoning summary text for display, filled from phase 2. ``None``
+        until then.
     created_at : str
         ISO-8601 UTC timestamp, stored as text.
 
@@ -98,4 +111,8 @@ class ChatMessage(WhygraphTable, table=True):
     model: str | None = Field(default=None, sa_type=Text)
     error: str | None = Field(default=None, sa_type=Text)
     replay: str | None = Field(default=None, sa_type=Text)
+    parent_id: int | None = Field(default=None, index=True)
+    finish_reason: str | None = Field(default=None, sa_type=Text)
+    effort: str | None = Field(default=None, sa_type=Text)
+    reasoning: str | None = Field(default=None, sa_type=Text)
     created_at: str = Field(sa_type=Text)

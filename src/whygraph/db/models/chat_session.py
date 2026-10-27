@@ -50,6 +50,13 @@ class ChatSession(WhygraphTable, table=True):
         ``users.uid`` of the portal user who started the session (M2d-1),
         written in both modes but only enforced in production; ``None`` for
         rows from before M2d-1 (visible in local mode, never in production).
+    active_leaf_id : int or None
+        The :class:`~whygraph.db.models.ChatMessage` row the visible
+        transcript ends at; the transcript is the parent chain from it.
+        ``None`` for an empty session.
+    effort : str or None
+        The session's effort level for its next turn. ``None`` means the
+        ``[chat].effort`` default.
     """
 
     id: int | None = Field(default=None, primary_key=True)
@@ -59,3 +66,5 @@ class ChatSession(WhygraphTable, table=True):
     created_at: str = Field(sa_type=Text)
     updated_at: str = Field(sa_type=Text)
     owner_uid: str | None = Field(default=None, sa_type=Text)
+    active_leaf_id: int | None = Field(default=None)
+    effort: str | None = Field(default=None, sa_type=Text)

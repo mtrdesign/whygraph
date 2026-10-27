@@ -164,7 +164,7 @@ describe("MessageBubble: actions", () => {
     expect(screen.getByRole("button", { name: "Regenerate reply" })).toBeInTheDocument();
     unmount();
 
-    // An older turn: the thread passes no handler. (A later plan step turns this on for any turn.)
+    // A turn the thread gives no handler (a live turn, or one whose question is not persisted): no button.
     render(<MessageBubble turn={assistant({ segments: ["Older."], id: 10 })} />);
     expect(screen.queryByRole("button", { name: "Regenerate reply" })).toBeNull();
     expect(screen.getByRole("button", { name: "Copy reply" })).toBeInTheDocument();

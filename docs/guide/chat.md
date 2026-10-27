@@ -139,7 +139,7 @@ reason, and earlier chats stay readable.
 
 ### Editing and regenerating
 
-Hover a question and choose **Edit** to change it and get a new answer. Hover the last reply and
+Hover a question and choose **Edit** to change it and get a new answer. Hover any reply and
 choose **Regenerate** for another answer. Both keep the earlier version: a `‹ 2/3 ›` arrow beside the
 message switches between the versions. A new version uses the chat's current provider, model and
 effort.

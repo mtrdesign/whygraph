@@ -27,7 +27,7 @@
   any id can still be entered.
 - **Chat follows your keys.** A new chat starts on the provider set for Chat when it has a key,
   otherwise on the first provider that has one, and the picker lists only providers with a key.
-- **Edit and regenerate in Chat.** Edit a question, or regenerate the last reply, and the earlier
+- **Edit and regenerate in Chat.** Edit a question, or regenerate any reply, and the earlier
   version stays: switch between versions with the `‹ 2/3 ›` arrows. **Copy** works on any message.
 - **Continue a cut-off reply.** When a reply hits the output limit, **Continue** in the notice
   carries on from where it stopped, with no new question.

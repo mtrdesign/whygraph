@@ -263,20 +263,22 @@ export function MessageThread({
   const turns = [...shown, ...liveTurns];
   // Nothing may start, switch or edit while a turn is in flight.
   const busy = streaming || branching;
-  // Regenerate belongs to the last assistant turn only, and only once it is persisted: it needs the
-  // question's id. (A later step may offer it on any turn.)
-  const lastTurn = turns[turns.length - 1];
-  const lastQuestion = turns[turns.length - 2];
-  const regenerableIndex =
-    liveTurns.length === 0 &&
-    lastTurn?.kind === "assistant" &&
-    lastTurn.id !== undefined &&
-    lastQuestion?.kind === "user" &&
-    lastQuestion.id !== undefined
-      ? turns.length - 1
-      : -1;
+  // Regenerate belongs to every reply that is persisted and whose question is persisted too: it needs
+  // the question's id. A live turn never offers it.
+  const regenerable = (index: number) => {
+    const reply = turns[index];
+    const question = turns[index - 1];
+    return (
+      liveTurns.length === 0 &&
+      reply?.kind === "assistant" &&
+      reply.id !== undefined &&
+      question?.kind === "user" &&
+      question.id !== undefined
+    );
+  };
 
   // Continue belongs to the last turn too, when it is persisted and the output limit cut it off.
+  const lastTurn = turns[turns.length - 1];
   const continuableIndex =
     liveTurns.length === 0 && lastTurn?.kind === "assistant" && lastTurn.continuableId !== undefined
       ? turns.length - 1
@@ -564,14 +566,15 @@ export function MessageThread({
     });
   };
 
-  // A new reply to the last question: the old reply is hidden until the refetch brings it back as a version.
-  const regenerate = () => {
-    const question = shown[shown.length - 2];
-    if (currentId === null || regenerableIndex < 0 || question?.kind !== "user" || question.id === undefined) return;
+  // A new reply to the question before the reply at `index`: that reply and everything after it are hidden
+  // until the refetch brings the old one back as a version.
+  const regenerate = (index: number) => {
+    const question = shown[index - 1];
+    if (currentId === null || question?.kind !== "user" || question.id === undefined) return;
     const messageId = question.id;
     void runTurn({
       kind: "regenerate",
-      keep: shown.length - 1,
+      keep: index,
       live: [emptyAssistantTurn()],
       open: (sid, onEvent, signal) => api.chatRegenerate(sid, messageId, onEvent, signal),
     });
@@ -663,7 +666,7 @@ export function MessageThread({
                 ? (content) => edit(turn, content)
                 : undefined
             }
-            onRegenerate={i === regenerableIndex && !cannotSend ? regenerate : undefined}
+            onRegenerate={regenerable(i) && !cannotSend ? () => regenerate(i) : undefined}
             onContinue={i === continuableIndex && !cannotSend ? continueReply : undefined}
             onBranch={(id) => void branchTo(id)}
           />

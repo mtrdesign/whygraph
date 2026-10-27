@@ -90,6 +90,7 @@ from test_portal_tenancy import (
     _url,
     assert_no_leak,
     newcomer_github_id,
+    seed_question,
     seed_usage,
     wait_for,
 )
@@ -434,6 +435,7 @@ def _add_prod_project(
         prefix + "/api/projects/api/chat/sessions", json={"title": org.session_title}
     )
     org.session_id = _ok(created, 201)["id"]
+    seed_question(client, org, prefix=prefix)
 
 
 def _wait_idle(world: ProdWorld, org: OrgWorld) -> list[dict]:
@@ -1236,6 +1238,9 @@ def test_each_member_sees_and_touches_only_their_own_chat_sessions(
                 ("PATCH", "", {"title": "taken over"}),
                 ("DELETE", "", None),
                 ("POST", "/messages", {"content": "hello"}),
+                ("POST", "/messages/1/edit", {"content": "hello"}),
+                ("POST", "/messages/1/regenerate", None),
+                ("POST", "/branch", {"message_id": 1}),
             ):
                 refused = w.client.request(method, f"{chat}/{other}{suffix}", json=body)
                 where = (name, method, suffix, other)
@@ -1247,7 +1252,10 @@ def test_each_member_sees_and_touches_only_their_own_chat_sessions(
     assert seen == {"bob": [bobs], "ann": [w.quokka.session_id]}
     # Nothing the refused calls aimed at changed.
     anns = _ok(w.client.get(f"{chat}/{w.quokka.session_id}"))
-    assert (anns["title"], anns["messages"]) == (w.quokka.session_title, [])
+    assert anns["title"] == w.quokka.session_title
+    assert [m["content"] for m in anns["messages"] if m["role"] == "user"] == [
+        "quokka question"  # only the world's seeded question
+    ]
     w.sign_in("bob")
     mine = _ok(w.client.get(f"{chat}/{bobs}"))
     assert (mine["title"], mine["messages"]) == ("bob's chat", [])
@@ -1263,6 +1271,8 @@ def test_a_reader_has_no_chat(prod_world: ProdWorld) -> None:
         ("POST", chat, {"title": "a reader's"}),
         ("GET", f"{chat}/{w.quokka.session_id}", None),
         ("POST", f"{chat}/{w.quokka.session_id}/messages", {"content": "hi"}),
+        ("POST", f"{chat}/{w.quokka.session_id}/messages/1/regenerate", None),
+        ("POST", f"{chat}/{w.quokka.session_id}/branch", {"message_id": 1}),
     ):
         refused = w.client.request(method, url, json=body)
         assert refused.status_code == 403, (method, url, refused.text)

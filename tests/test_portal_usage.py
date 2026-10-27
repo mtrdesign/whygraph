@@ -965,6 +965,21 @@ def test_a_chat_turn_records_one_row_per_round(
     with use_project(manual_ctx(local.root, "demo")), project_session() as session:
         assert session.get(ChatSessionRow, session_id) is not None
 
+    # The turn runs on its own worker thread; a regenerate (also on a worker)
+    # is attributed to the same project and chat session.
+    question = local.client.get(
+        f"/api/projects/demo/chat/sessions/{session_id}"
+    ).json()["messages"][0]["id"]
+    monkeypatch.setattr(serve_chat, "make_chat_client", lambda *a, **k: _TwoRounds())
+    again = local.client.post(
+        f"/api/projects/demo/chat/sessions/{session_id}/messages/{question}/regenerate"
+    )
+    assert again.status_code == 200, again.text
+    rows = _flushed(local.state)
+    _assert_local_member(rows, local)
+    assert len(rows) == 4
+    assert {(r.source, r.chat_session_id) for r in rows} == {("chat", session_id)}
+
 
 def test_a_local_mcp_call_records_with_source_mcp(local: SimpleNamespace) -> None:
     response = local.client.post(

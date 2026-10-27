@@ -11,6 +11,8 @@ happens depends on where you come from:
 - **From 2.1.0**, nothing to do: each project's database is upgraded on first use, with a backup kept
   beside it for rolling back, and the first full scan walks the GitHub history once more. See
   [WhyGraph 2.2.0](../releases/2.2.0.md#fixes).
+- **From 2.2.0**, nothing to do: 2.2.1 changes only the portal's UI. See
+  [WhyGraph 2.2.1](../releases/2.2.1.md).
 - **Agent files in your repositories** are not rewritten by an upgrade. Open each project's Settings >
   Agents and use **Update agent files**, once per project: it adds the `codegraph` MCP entry, files you
   have not edited update silently and edited ones are listed first (a project set up before the

@@ -11,27 +11,33 @@ ways this adapter absorbs, so the harness sees one uniform event stream:
    carries ``tool_use`` blocks alongside its ``text`` blocks, and results
    come back as ``tool_result`` blocks inside a **``user``** message —
    there is no ``role="tool"``.
-4. **``max_tokens`` is required**, so a request that omits it gets 4096
-   (matching :class:`~whygraph.services.llm.AnthropicAdapter`).
+4. **``max_tokens`` is required**, so a request that omits it gets
+   :data:`DEFAULT_MAX_TOKENS` (32000: thinking counts against it, so the
+   old 4096 could end a round with thinking and nothing else).
 
-Unlike the OpenAI dialect, tool-call arguments arrive as
-``input_json_delta`` fragments attached to a known block index, and the
-SDK signals block completion explicitly (``content_block_stop``) — so
-each call flushes as soon as its own block ends rather than waiting for
-the whole turn.
+Tool-call arguments arrive as ``input_json_delta`` fragments attached to a
+known block index, and the SDK signals block completion explicitly
+(``content_block_stop``). Calls are still emitted only **at the end of the
+message**, once the stop reason is known: a ``max_tokens`` stop cuts the
+last block off mid-input, and a refusal can cut a ``tool_use`` short, and
+neither may reach the dispatcher. The harness dispatches only after the
+stream ends, so nothing visible changes.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
 import anthropic
+import httpx
 
 from .chat import (
+    REFUSAL_REASONS,
     ChatClient,
     ChatMessage,
     ChatRequest,
@@ -46,7 +52,12 @@ from .chat import (
 from .exceptions import LlmError, LlmKeyMissing
 from .usage import ANTHROPIC_USAGE_KEYS, anthropic_raw_usage, anthropic_usage_fields
 
+_log = logging.getLogger(__name__)
+
 _ENV_VAR = "ANTHROPIC_API_KEY"
+
+DEFAULT_MAX_TOKENS = 32_000
+"""Output cap when a request sets none. Thinking counts against it."""
 
 
 @dataclass(slots=True)
@@ -140,6 +151,16 @@ def _message_payload(messages: tuple[ChatMessage, ...]) -> list[dict]:
                 payload.append({"role": "user", "content": [block]})
             continue
 
+        if message.role == "assistant" and not (
+            message.content
+            or message.tool_calls
+            or (message.replay or {}).get("content")
+        ):
+            # Anthropic rejects an empty non-final assistant message, so one
+            # such row would fail every later turn of the session. The
+            # history sanitizer drops them first; this is defence in depth.
+            continue
+
         if message.role == "assistant" and message.tool_calls:
             blocks: list[dict] = []
             if message.content:
@@ -158,6 +179,38 @@ def _message_payload(messages: tuple[ChatMessage, ...]) -> list[dict]:
 
         payload.append({"role": message.role, "content": message.content})
     return payload
+
+
+def _finished_calls(
+    completed: list[tuple[int, _BlockAccumulator]],
+    finish_reason: str | None,
+    last_index: int | None,
+) -> Iterator[ToolCallMade]:
+    """Emit the message's tool calls once its stop reason is known.
+
+    A refusal dispatches nothing. On ``max_tokens`` the message's last block
+    was cut off, so a ``tool_use`` there is dropped, as is any other call
+    whose input does not parse; with any other stop reason malformed input
+    still raises :class:`LlmError`.
+    """
+    if finish_reason in REFUSAL_REASONS:
+        return
+    truncated = finish_reason == "max_tokens"
+    for index, accumulator in completed:
+        if truncated and index == last_index:
+            _log.info(
+                "anthropic: dropped tool call %s cut off by max_tokens",
+                accumulator.name,
+            )
+            continue
+        try:
+            call = accumulator.flush()
+        except LlmError:
+            if not truncated:
+                raise
+            _log.info("anthropic: dropped malformed tool call %s", accumulator.name)
+            continue
+        yield ToolCallMade(call=call)
 
 
 class AnthropicChatAdapter(ChatClient):
@@ -258,17 +311,22 @@ class AnthropicChatAdapter(ChatClient):
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "max_tokens": request.max_tokens or 4096,
+            "max_tokens": request.max_tokens or DEFAULT_MAX_TOKENS,
             "timeout": request.timeout_sec or self._default_timeout,
         }
         if system_parts:
             kwargs["system"] = "\n\n".join(system_parts)
         if request.tools:
             kwargs["tools"] = _tool_payload(request.tools)
+            if request.tool_choice == "none":
+                kwargs["tool_choice"] = {"type": "none"}
         if request.temperature is not None:
             kwargs["temperature"] = request.temperature
 
         blocks: dict[int, _BlockAccumulator] = {}
+        # Finished `tool_use` blocks, held until the stop reason is known.
+        completed: list[tuple[int, _BlockAccumulator]] = []
+        last_index: int | None = None
         finish_reason: str | None = None
         # Usage arrives in pieces: `message_start` carries the prompt side,
         # each `message_delta` a *cumulative* snapshot that can also carry
@@ -300,8 +358,9 @@ class AnthropicChatAdapter(ChatClient):
 
                     if event_type == "content_block_start":
                         block = getattr(event, "content_block", None)
+                        last_index = getattr(event, "index", 0) or 0
                         if getattr(block, "type", None) == "tool_use":
-                            blocks[getattr(event, "index", 0) or 0] = _BlockAccumulator(
+                            blocks[last_index] = _BlockAccumulator(
                                 call_id=getattr(block, "id", "") or "",
                                 name=getattr(block, "name", "") or "",
                             )
@@ -326,7 +385,7 @@ class AnthropicChatAdapter(ChatClient):
                         index = getattr(event, "index", 0) or 0
                         accumulator = blocks.pop(index, None)
                         if accumulator is not None:
-                            yield ToolCallMade(call=accumulator.flush())
+                            completed.append((index, accumulator))
                         continue
 
                     if event_type == "message_delta":
@@ -346,12 +405,21 @@ class AnthropicChatAdapter(ChatClient):
         except LlmError:
             raise
         except anthropic.AnthropicError as exc:
-            raise LlmError(f"anthropic API error: {exc}") from exc
+            raise LlmError(
+                f"anthropic API error: {exc}",
+                request_id=getattr(exc, "request_id", None),
+            ) from exc
+        except httpx.TransportError as exc:
+            # Once a stream has started the SDK no longer wraps transport
+            # errors: a read timeout or a dropped connection arrives raw.
+            raise LlmError(
+                f"anthropic stream interrupted: {type(exc).__name__}"
+            ) from exc
 
         # A stream cut short before content_block_stop still owes its
         # accumulated calls.
-        for index in sorted(blocks):
-            yield ToolCallMade(call=blocks[index].flush())
+        completed.extend(sorted(blocks.items()))
+        yield from _finished_calls(completed, finish_reason, last_index)
 
         yield TurnDone(
             finish_reason=finish_reason,

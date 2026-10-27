@@ -335,3 +335,54 @@ def test_chat_message_rejects_unknown_session(_isolate_config_and_engine: Path) 
                 )
             )
             session.commit()
+
+
+def test_chat_message_replay_column_round_trips(
+    _isolate_config_and_engine: Path,
+) -> None:
+    """``replay`` lands at head and downgrades cleanly off a seeded DB."""
+    from whygraph.db import get_session
+    from whygraph.db.models import ChatMessage as ChatMessageRow
+    from whygraph.db.models import ChatSession as ChatSessionRow
+
+    db_path = _isolate_config_and_engine
+    command.upgrade(alembic_config(), "head")
+    assert "replay" in _column_names(db_path, "chat_message")
+
+    with get_session() as session:
+        row = ChatSessionRow(
+            title="New chat",
+            provider="deepseek",
+            model="deepseek-flash",
+            created_at="2026-10-27T00:00:00Z",
+            updated_at="2026-10-27T00:00:00Z",
+        )
+        session.add(row)
+        session.commit()
+        session.add(
+            ChatMessageRow(
+                session_id=row.id,
+                role="assistant",
+                content="answer",
+                replay='{"reasoning_content": "thought"}',
+                created_at="2026-10-27T00:00:01Z",
+            )
+        )
+        session.commit()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("SELECT replay FROM chat_message").fetchone() == (
+            '{"reasoning_content": "thought"}',
+        )
+    finally:
+        conn.close()
+
+    db_engine._reset_engine()
+    command.downgrade(alembic_config(), "8d3f1a5c2e7b")
+    assert "replay" not in _column_names(db_path, "chat_message")
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM chat_message").fetchone()[0] == 1
+    finally:
+        conn.close()

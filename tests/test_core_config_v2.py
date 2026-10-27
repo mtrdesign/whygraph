@@ -287,6 +287,22 @@ def test_task_timeout_still_wins_and_warns(
 # ---- chat -----------------------------------------------------------------
 
 
+def test_chat_stream_timeout_default_bounds_and_no_deprecation(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    assert _from("", tmp_path).chat.stream_timeout_sec == 300
+    with caplog.at_level(logging.WARNING, logger="whygraph.core.config"):
+        cfg = _from("[chat]\nstream_timeout_sec = 900\n", tmp_path)
+    assert cfg.chat.stream_timeout_sec == 900
+    # Not the deprecated `[chat].timeout_sec`, so nothing warns.
+    assert _deprecations(caplog) == []
+    for value in (29, 1801, '"300"', "true"):
+        with pytest.raises(ConfigError, match="stream_timeout_sec"):
+            _from(f"[chat]\nstream_timeout_sec = {value}\n", tmp_path)
+    for value in (30, 1800):
+        assert _from(f"[chat]\nstream_timeout_sec = {value}\n", tmp_path)
+
+
 def test_chat_refuses_an_explicit_non_chat_provider(tmp_path: Path) -> None:
     for body in ('[chat]\nprovider = "ollama"\n', '[chat]\nmodel = "ollama/x"\n'):
         cfg = _from(body, tmp_path)

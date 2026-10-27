@@ -190,9 +190,10 @@ Tuned under `[chat]` - imported from a repository's `whygraph.toml` when you add
 
 | Key | Default | What it bounds |
 |---|---|---|
-| `max_tool_rounds` | `8` | Tool rounds per user turn. On the last round the assistant is called once more without tools, so a turn always ends in prose rather than mid-investigation. |
+| `max_tool_rounds` | `8` | Tool rounds per user turn. On the last round the assistant is called once more with tool calls turned off, so a turn always ends in prose rather than mid-investigation. |
 | `max_rationale_generations` | `2` | Uncached rationale cards one turn may generate. `0` makes the assistant cache-only. |
 | `context_token_budget` | `60000` | Conversation history sent to the model. |
+| `stream_timeout_sec` | `300` | How long (30-1800 seconds) the provider may stay silent mid-reply - a long think or a large prompt - before the turn fails. |
 
 Two behaviours worth knowing:
 
@@ -205,6 +206,26 @@ Two behaviours worth knowing:
 
 When history outgrows `context_token_budget`, WhyGraph first elides stale tool results, then drops
 whole turns from the top - never splitting a tool call from its result.
+
+### When a turn fails
+
+A failed reply stays in the transcript with its reason, and the next question works normally: the
+model never sees an empty, failed or stopped reply again, nor a tool call whose result never arrived,
+so one bad turn cannot break the rest of the chat. A reply that ends without any text (after tool
+cards, or with nothing at all) says "The model ended its turn without a reply." instead of showing
+*Thinking…* forever. A reply cut off by the output limit or declined by the provider never runs a
+half-written tool call.
+
+A dropped connection or a silence longer than `stream_timeout_sec` shows as the provider being
+unreachable, and when the provider answered with an error the message ends with its request id
+("request id: ..."), which you can quote to its support.
+
+### Reasoning models
+
+DeepSeek and some OpenRouter models think before they answer and expect that reasoning sent back
+while they call tools. WhyGraph does that within a turn and, for DeepSeek, across turns too. A
+DeepSeek chat that has replies from before this was supported (or from another provider) runs
+without thinking until those replies leave the history the model sees.
 
 ## Limits
 

@@ -108,6 +108,7 @@ max_workers = 2               # parallel LLM calls in the diff-analyzer crawler
 # max_rationale_generations = 2  # uncached rationale cards one turn may generate
                               # (0 = cache-only). Bounds nested LLM spend.
 # context_token_budget = 60000   # history sent to the model, ~chars/4 estimate
+# stream_timeout_sec = 300    # how long a reply may stay silent (30-1800 s)
 
 # Per-provider connection settings - key, endpoint, timeout. No model here:
 # pick models with [llm].model or a role's own model.

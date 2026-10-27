@@ -82,11 +82,12 @@ function AssistantBubble({ turn }: { turn: AssistantTurn }) {
   // exactly when the two happened to share a round, which is the case that does
   // not survive a reload.
   const turnActivities = turn.activityGroups.flat();
-  const isEmpty =
-    !turn.error &&
-    !turn.budgetStop &&
-    turn.segments.every((s) => !s) &&
-    turn.activityGroups.every((g) => g.length === 0);
+  // Settled: not waiting on the model and no tool still running. A settled
+  // turn with no text said nothing - with or without tool cards - and must
+  // say so rather than look like it is still thinking.
+  const settled = !turn.thinking && turn.activityGroups.every((g) => g.every((a) => !a.running));
+  const noReply =
+    settled && !turn.error && !turn.budgetStop && turn.segments.every((s) => !s.trim());
 
   return (
     <div className="flex justify-start">
@@ -124,12 +125,17 @@ function AssistantBubble({ turn }: { turn: AssistantTurn }) {
           </div>
         ))}
 
-        {/* `isEmpty` covers a bubble with nothing in it at all; `thinking` also
-            covers the inter-round gap, where segments and cards are present but
-            the model hasn't spoken yet. */}
-        {(turn.thinking || isEmpty) && (
+        {/* `thinking` is live-only: the pre-first-token prologue and the gap
+            between a tool result and the next round. */}
+        {turn.thinking && (
           <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
             <span className="animate-pulse">Thinking…</span>
+          </div>
+        )}
+
+        {noReply && (
+          <div className="mt-1 text-xs text-muted-foreground" data-testid="no-reply">
+            The model ended its turn without a reply.
           </div>
         )}
 

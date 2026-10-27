@@ -66,6 +66,11 @@ class ChatMessage(WhygraphTable, table=True):
         the failure survives a refresh instead of living only in the SSE
         stream; an error that arrives before the first token still writes a
         row (with empty ``content``) so no user message is left unanswered.
+    replay : str or None
+        JSON object of the provider reasoning payload this assistant row
+        sends back on later turns (DeepSeek's ``reasoning_content``). Only
+        the keys in :data:`whygraph.serve.chat.PERSISTED_REPLAY_KEYS` are
+        written. ``None`` when there is nothing to replay.
     created_at : str
         ISO-8601 UTC timestamp, stored as text.
 
@@ -92,4 +97,5 @@ class ChatMessage(WhygraphTable, table=True):
     provider: str | None = Field(default=None, sa_type=Text)
     model: str | None = Field(default=None, sa_type=Text)
     error: str | None = Field(default=None, sa_type=Text)
+    replay: str | None = Field(default=None, sa_type=Text)
     created_at: str = Field(sa_type=Text)

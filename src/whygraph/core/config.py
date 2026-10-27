@@ -494,6 +494,11 @@ class ChatConfig:
         Approximate token ceiling for the history sent to the model
         (estimated as chars/4). Must be ``>= 1000``. Older messages stay
         in the DB and the UI — only the model's view is windowed.
+    stream_timeout_sec : int
+        Per-read timeout of a chat call's stream, in seconds: how long the
+        provider may stay silent (a long think, a large prefill) before the
+        round fails. From 30 to 1800. Named apart from the deprecated
+        ``[chat].timeout_sec``, which :func:`normalize_v2` warns about.
     """
 
     provider: str | None = None
@@ -501,6 +506,7 @@ class ChatConfig:
     max_tool_rounds: int = 8
     max_rationale_generations: int = 2
     context_token_budget: int = 60_000
+    stream_timeout_sec: int = 300
 
 
 @dataclass(frozen=True, slots=True)
@@ -1198,6 +1204,16 @@ class Config:
             raise ConfigError(
                 "chat.context_token_budget must be >= 1000, "
                 f"got {self.chat.context_token_budget}"
+            )
+        timeout = self.chat.stream_timeout_sec
+        if (
+            not isinstance(timeout, int)
+            or isinstance(timeout, bool)
+            or not 30 <= timeout <= 1800
+        ):
+            raise ConfigError(
+                f"chat.stream_timeout_sec must be an integer from 30 to 1800, "
+                f"got {timeout!r}"
             )
 
     @classmethod

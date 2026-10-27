@@ -1,4 +1,4 @@
-import type { ChatMessage } from "../../api";
+import type { ChatMessage, ChatVersions } from "../../api";
 import type { AssistantTurn, Turn } from "./MessageBubble";
 
 // Persisted rows and live SSE frames describe the same thing in two shapes, and
@@ -29,8 +29,18 @@ function addTokens(a: number | null | undefined, b: number | null): number | nul
  * Tool rows are matched to their announcing assistant row by `tool_call_id`, so
  * a result whose call is missing (shouldn't happen, but a hand-edited DB could)
  * is dropped rather than rendered orphaned.
+ *
+ * `messages` is the transcript's active path. `versions` (the transcript's, keyed
+ * by message id) is looked up by a turn's FIRST row, so `‹ 2/3 ›` sits on the user
+ * question or on the reply's opening row. A reply cut by the output limit and
+ * continued is two consecutive assistant rows with no tool row between them: the
+ * text-joining below already renders them as one turn. `finishReason` is the
+ * turn's last assistant row's.
  */
-export function turnsFromMessages(messages: ChatMessage[]): Turn[] {
+export function turnsFromMessages(
+  messages: ChatMessage[],
+  versions?: Record<string, ChatVersions>,
+): Turn[] {
   const turns: Turn[] = [];
   let current: AssistantTurn | null = null;
 
@@ -42,14 +52,24 @@ export function turnsFromMessages(messages: ChatMessage[]): Turn[] {
   for (const message of messages) {
     if (message.role === "user") {
       flush();
-      turns.push({ kind: "user", content: message.content, id: message.id });
+      const userVersions = versions?.[String(message.id)];
+      turns.push({
+        kind: "user",
+        content: message.content,
+        id: message.id,
+        ...(userVersions && { versions: userVersions }),
+      });
       continue;
     }
 
     if (message.role === "assistant") {
       // A persisted row is finished by definition — never show it thinking.
       // The first row's id becomes the turn's stable React key.
-      if (!current) current = { ...emptyAssistantTurn(), thinking: false, id: message.id };
+      if (!current) {
+        current = { ...emptyAssistantTurn(), thinking: false, id: message.id };
+        const replyVersions = versions?.[String(message.id)];
+        if (replyVersions) current.versions = replyVersions;
+      }
       // The row a budget hard stop wrote (its content is the notice's line): a notice, not text.
       if (message.error === "budget_exceeded") {
         current.budgetStop = { message: message.content || undefined };
@@ -90,6 +110,10 @@ export function turnsFromMessages(messages: ChatMessage[]): Turn[] {
       // A failed turn carries why it failed on its row, so the rose banner
       // survives a refresh instead of dying with the SSE stream.
       if (message.error) current.error = message.error;
+      // The last assistant row decides how the turn ended (a continued reply's first row said
+      // "output limit" and its last row said "stop").
+      if (message.finish_reason) current.finishReason = message.finish_reason;
+      else delete current.finishReason;
       continue;
     }
 

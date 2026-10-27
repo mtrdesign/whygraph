@@ -179,6 +179,9 @@ export interface ChatSession {
   created_at: string;
   updated_at: string;
   message_count?: number;
+  // Chat harness v2: the session's own effort level (null = inherit) and whether a turn holds its lease right now.
+  effort?: string | null;
+  streaming?: boolean;
 }
 
 export interface ChatToolCall {
@@ -203,10 +206,26 @@ export interface ChatMessage {
   // survives a refresh instead of living only in the SSE stream.
   error: string | null;
   created_at: string;
+  // Chat harness v2. `finish_reason` is why the provider stopped this row (`max_tokens` / `length` =
+  // the output limit, `refusal` / `content_filter` = declined); `parent_id` is its place in the tree.
+  finish_reason?: string | null;
+  effort?: string | null;
+  parent_id?: number | null;
+}
+
+/** The versions of one message: its siblings in the tree (same parent), ids ascending, `index` 1-based. */
+export interface ChatVersions {
+  index: number;
+  count: number;
+  siblings: number[];
 }
 
 export interface ChatTranscript extends ChatSession {
+  /** The active path only, root to leaf. */
   messages: ChatMessage[];
+  active_leaf_id?: number | null;
+  /** Keyed by message id; only path rows that have siblings are present. */
+  versions?: Record<string, ChatVersions>;
 }
 
 // The SSE frame union from serve/chat.py §7.2. `error` and `done` are both
@@ -216,6 +235,11 @@ export type ChatEvent =
   | { type: "tool_call"; id: string; name: string; arguments: Record<string, unknown> }
   | { type: "tool_result"; id: string; name: string; result: string }
   | { type: "round_limit"; rounds: number }
+  // Chat harness v2: the reply hit the output limit and continues (its text keeps appending to the same
+  // bubble); the model was nudged once after saying nothing; older tool results of this turn were elided.
+  | { type: "continuation"; attempt: number }
+  | { type: "empty_reply" }
+  | { type: "context_trimmed"; rounds_elided: number }
   // A hard stop ended the turn (M2f-2); the terminal `done` frame follows it.
   | { type: "budget_exceeded"; scope: BudgetScope | null; message_id: number | null; message: string }
   | {
@@ -2000,7 +2024,39 @@ export function projectApi(slug: string) {
       content: string,
       onEvent: (event: ChatEvent) => void,
       signal?: AbortSignal,
-    ) => streamChat(`${base}/chat/sessions/${sessionId}/messages`, content, onEvent, signal),
+    ) => streamChat(`${base}/chat/sessions/${sessionId}/messages`, { content }, onEvent, signal),
+    // A sibling version of a user message, streamed like a send.
+    chatEditMessage: (
+      sessionId: number,
+      messageId: number,
+      content: string,
+      onEvent: (event: ChatEvent) => void,
+      signal?: AbortSignal,
+    ) =>
+      streamChat(
+        `${base}/chat/sessions/${sessionId}/messages/${messageId}/edit`,
+        { content },
+        onEvent,
+        signal,
+      ),
+    // `messageId` is the user question whose reply is written again.
+    chatRegenerate: (
+      sessionId: number,
+      messageId: number,
+      onEvent: (event: ChatEvent) => void,
+      signal?: AbortSignal,
+    ) =>
+      streamChat(
+        `${base}/chat/sessions/${sessionId}/messages/${messageId}/regenerate`,
+        undefined,
+        onEvent,
+        signal,
+      ),
+    // Switches the visible version; answers with the transcript of the new path.
+    chatBranch: (sessionId: number, messageId: number) =>
+      send<ChatTranscript>("POST", `${base}/chat/sessions/${sessionId}/branch`, {
+        message_id: messageId,
+      }),
   };
 }
 
@@ -2016,7 +2072,8 @@ export const projectKey = (slug: string, ...parts: unknown[]) => [slug, ...parts
 export const portalKey = (...parts: unknown[]) => ["@portal", ...parts] as const;
 
 /**
- * POST a chat message and consume the SSE response, calling `onEvent` per frame.
+ * POST to a turn-starting chat route (send, edit, regenerate) and consume the SSE
+ * response, calling `onEvent` per frame. `body` is the JSON payload, or none.
  *
  * Hand-rolled rather than `EventSource`, which is GET-only and so cannot carry
  * the message body - and adding a dependency for ~20 lines of framing isn't
@@ -2033,11 +2090,11 @@ export const portalKey = (...parts: unknown[]) => ["@portal", ...parts] as const
  */
 async function streamChat(
   path: string,
-  content: string,
+  body: unknown,
   onEvent: (event: ChatEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const res = await request(`/api${path}`, init("POST", { content }, signal));
+  const res = await request(`/api${path}`, init("POST", body, signal));
   if (!res.ok) throw await failure(res);
   if (!res.body) throw new ApiError(res.status, "streaming is unsupported here");
 

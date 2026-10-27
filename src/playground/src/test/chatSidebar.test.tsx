@@ -30,6 +30,12 @@ interface Fake {
   stream: ReadableStreamDefaultController<Uint8Array> | null;
   /** Messages the transcript returns, per session. */
   transcripts: Record<number, unknown[]>;
+  /** Extra top-level fields of a session's transcript (`versions`, `streaming`, ...), per session. */
+  transcriptExtra: Record<number, Record<string, unknown>>;
+  /** A turn holds the session's lease: turn routes answer 409 until `gets` transcript reads have passed. */
+  lease: { gets: number } | null;
+  /** What `POST .../branch` answers with (a transcript's messages + extra), per session. */
+  branched: Record<number, { messages: unknown[]; extra: Record<string, unknown> }>;
   /** The provider list the project answers (default: one keyed OpenAI). */
   providers?: { provider: string; configured: boolean; default_model: string; default: boolean }[];
 }
@@ -123,6 +129,16 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
       fake.sessions = [row, ...fake.sessions];
       return Promise.resolve(json(row, 201));
     }
+    // Edit / regenerate stream like a send; branch answers with the transcript of the new path.
+    const t = /^\/chat\/sessions\/(\d+)\/messages\/(\d+)\/(edit|regenerate)$/.exec(rest ?? "");
+    if (t && method === "POST") return Promise.resolve(turnStream(init));
+    const br = /^\/chat\/sessions\/(\d+)\/branch$/.exec(rest ?? "");
+    if (br && method === "POST") {
+      const id = Number(br[1]);
+      const next = fake.branched[id];
+      const row = fake.sessions.find((x) => x.id === id) ?? session(id, "t");
+      return Promise.resolve(json({ ...row, messages: next.messages, ...next.extra }));
+    }
     const s = /^\/chat\/sessions\/(\d+)(\/messages)?$/.exec(rest ?? "");
     if (s) {
       const id = Number(s[1]);
@@ -130,16 +146,7 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
         // The server titles a "New chat" from its first message before the first frame.
         const content = (body as { content: string }).content;
         fake.sessions = fake.sessions.map((x) => (x.id === id && x.title === "New chat" ? { ...x, title: content } : x));
-        return Promise.resolve(
-          new Response(
-            new ReadableStream<Uint8Array>({
-              start(c) {
-                fake.stream = c;
-              },
-            }),
-            { status: 200, headers: { "content-type": "text/event-stream" } },
-          ),
-        );
+        return Promise.resolve(turnStream(init));
       }
       if (method === "PATCH") {
         const title = (body as { title?: string }).title;
@@ -151,10 +158,31 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
         return Promise.resolve(new Response(null, { status: 204 }));
       }
       const row = fake.sessions.find((x) => x.id === id) ?? session(id, "t");
-      return Promise.resolve(json({ ...row, messages: fake.transcripts[id] ?? [] }));
+      // Each read counts down the lease: the stopped turn lets go of the session after `gets` of them.
+      const leased = !!fake.lease && --fake.lease.gets > 0;
+      if (fake.lease && !leased) fake.lease = null;
+      return Promise.resolve(
+        json({ ...row, messages: fake.transcripts[id] ?? [], streaming: leased, ...fake.transcriptExtra[id] }),
+      );
     }
   }
   return Promise.resolve(json({ error: "unhandled" }, 500));
+}
+
+/** A turn's SSE answer (or the 409 of a busy session). Aborting errors the stream, as a real fetch does. */
+function turnStream(init?: RequestInit): Response {
+  if (fake.lease) {
+    return json({ error: "A turn is already running in this chat.", code: "turn_in_progress" }, 409);
+  }
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(c) {
+        fake.stream = c;
+        init?.signal?.addEventListener("abort", () => c.error(new DOMException("Aborted", "AbortError")));
+      },
+    }),
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  );
 }
 
 function mount(path: string) {
@@ -186,6 +214,9 @@ beforeEach(() => {
     calls: [],
     stream: null,
     transcripts: {},
+    transcriptExtra: {},
+    lease: null,
+    branched: {},
   };
   window.localStorage.clear();
   useUi.setState({ paletteOpen: false, navOpen: false, streamingSessionId: null });
@@ -442,6 +473,215 @@ describe("the chat view", () => {
     const post = fake.calls.find((c) => c.path === "/api/projects/alpha/chat/sessions/7/messages");
     await act(() => router.navigate({ to: "/p/$slug/chat/{-$id}", params: { slug: "alpha", id: "3" } }));
     await waitFor(() => expect(post?.signal?.aborted).toBe(true));
+  });
+});
+
+// Edit, regenerate and the version arrows (chat harness v2, step 7a), on a session with two exchanges.
+describe("the chat view: edit, regenerate and versions", () => {
+  const row = (id: number, role: string, content: string, over: Record<string, unknown> = {}) => ({
+    id,
+    role,
+    content,
+    tool_calls: [],
+    tool_call_id: null,
+    input_tokens: null,
+    output_tokens: null,
+    provider: "openai",
+    model: "gpt-x",
+    error: null,
+    created_at: "",
+    ...over,
+  });
+  const exchanges = () => [
+    row(1, "user", "first q"),
+    row(2, "assistant", "first a"),
+    row(3, "user", "second q"),
+    row(4, "assistant", "second a"),
+  ];
+  const turnPosts = () =>
+    fake.calls.filter((c) => c.method === "POST" && /\/chat\/sessions\/3\/(messages|branch)/.test(c.path));
+  const done = (id: number) => frame({ type: "done", message_id: id, input_tokens: 1, output_tokens: 1, finish_reason: "stop" });
+
+  beforeEach(() => {
+    fake.sessions = [session(3, "Two exchanges")];
+    fake.transcripts[3] = exchanges();
+  });
+
+  it("offers Regenerate on the last reply only, and Edit on every question", async () => {
+    mount("/p/alpha/chat/3");
+    await screen.findByText("second a");
+    expect(screen.getAllByRole("button", { name: "Regenerate reply" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Edit message" })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "Copy reply" })).toHaveLength(2);
+  });
+
+  it("edits a question: the edit route gets the content, later turns give way, the refetch brings the version", async () => {
+    mount("/p/alpha/chat/3");
+    const user = userEvent.setup();
+    await screen.findByText("second a");
+    await user.click(screen.getAllByRole("button", { name: "Edit message" })[1]);
+    const box = screen.getByRole("textbox", { name: "Edit message" });
+    await user.clear(box);
+    await user.type(box, "second q, better");
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => expect(fake.stream).not.toBeNull());
+    expect(turnPosts().at(-1)).toMatchObject({
+      path: "/api/projects/alpha/chat/sessions/3/messages/3/edit",
+      body: { content: "second q, better" },
+    });
+    // The question and everything after it are replaced by the live view; the earlier exchange stays.
+    expect(screen.getByText("first a")).toBeInTheDocument();
+    expect(screen.queryByText("second a")).toBeNull();
+    expect(screen.getByText("second q, better")).toBeInTheDocument();
+    expect(screen.getByText(/Thinking/)).toBeInTheDocument();
+    // Nothing else can be started meanwhile.
+    expect(screen.queryByRole("button", { name: "Edit message" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Regenerate reply" })).toBeNull();
+
+    act(() => fake.stream!.enqueue(frame({ type: "text_delta", text: "A better " })));
+    await screen.findByText(/A better/);
+    fake.transcripts[3] = [
+      row(1, "user", "first q"),
+      row(2, "assistant", "first a"),
+      row(5, "user", "second q, better"),
+      row(6, "assistant", "A better answer."),
+    ];
+    fake.transcriptExtra[3] = { versions: { "5": { index: 2, count: 2, siblings: [3, 5] } } };
+    act(() => {
+      fake.stream!.enqueue(frame({ type: "text_delta", text: "answer." }));
+      fake.stream!.enqueue(done(6));
+      fake.stream!.close();
+    });
+    await screen.findByText("A better answer.");
+    expect(screen.getByTestId("version-arrows")).toHaveTextContent("2/2");
+  });
+
+  it("regenerates the last reply: the regenerate route, no body, the old reply gives way", async () => {
+    mount("/p/alpha/chat/3");
+    const user = userEvent.setup();
+    await screen.findByText("second a");
+    await user.click(screen.getByRole("button", { name: "Regenerate reply" }));
+
+    await waitFor(() => expect(fake.stream).not.toBeNull());
+    expect(turnPosts().at(-1)).toMatchObject({
+      path: "/api/projects/alpha/chat/sessions/3/messages/3/regenerate",
+      body: undefined,
+    });
+    expect(screen.queryByText("second a")).toBeNull();
+    expect(screen.getByText("second q")).toBeInTheDocument();
+    expect(screen.getByText(/Thinking/)).toBeInTheDocument();
+
+    fake.transcripts[3] = [...exchanges().slice(0, 3), row(7, "assistant", "Second try.")];
+    fake.transcriptExtra[3] = { versions: { "7": { index: 2, count: 2, siblings: [4, 7] } } };
+    act(() => {
+      fake.stream!.enqueue(frame({ type: "text_delta", text: "Second try." }));
+      fake.stream!.enqueue(done(7));
+      fake.stream!.close();
+    });
+    await screen.findByText("Second try.");
+    expect(screen.getByTestId("version-arrows")).toHaveTextContent("2/2");
+  });
+
+  it.each([
+    ["edit", async (user: ReturnType<typeof userEvent.setup>) => {
+      await user.click(screen.getAllByRole("button", { name: "Edit message" })[1]);
+      await user.type(screen.getByRole("textbox", { name: "Edit message" }), "!{Enter}");
+    }],
+    ["regenerate", async (user: ReturnType<typeof userEvent.setup>) => {
+      await user.click(screen.getByRole("button", { name: "Regenerate reply" }));
+    }],
+  ])("Stop during %s aborts the stream and ends the turn", async (_name, start) => {
+    mount("/p/alpha/chat/3");
+    const user = userEvent.setup();
+    await screen.findByText("second a");
+    await start(user);
+    await waitFor(() => expect(fake.stream).not.toBeNull());
+    const post = turnPosts().at(-1);
+    expect(post?.signal?.aborted).toBe(false);
+    await user.click(screen.getByRole("button", { name: "Stop" }));
+    expect(post?.signal?.aborted).toBe(true);
+    // The turn ends and the refetch brings the persisted transcript back (the real server writes a
+    // "Stopped." row; the fake has none): the thread is whole again and the composer usable.
+    await screen.findByRole("button", { name: "Send" });
+    await screen.findByText("second a");
+    expect(screen.getByText("second q")).toBeInTheDocument();
+    expect(screen.queryByText(/Thinking/)).toBeNull();
+  });
+
+  it("a 409 right after the person's own Stop says so, retries on its own, then sends", async () => {
+    mount("/p/alpha/chat/3");
+    const user = userEvent.setup();
+    const box = await screen.findByRole("textbox");
+    await screen.findByText("second a");
+    await user.type(box, "one");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(fake.stream).not.toBeNull());
+    await user.click(screen.getByRole("button", { name: "Stop" }));
+    await screen.findByRole("button", { name: "Send" });
+
+    // The stopped turn is still finishing a tool call: the session stays leased for two reads.
+    fake.lease = { gets: 2 };
+    fake.stream = null;
+    await user.type(screen.getByRole("textbox"), "two");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByText("Stopping the previous reply…");
+    // No error is shown while it waits.
+    expect(screen.queryByText(/still being written/)).toBeNull();
+    await waitFor(() => expect(fake.stream).not.toBeNull(), { timeout: 4000 });
+    expect(turnPosts().filter((c) => c.path.endsWith("/messages"))).toHaveLength(3);
+    expect(screen.queryByText("Stopping the previous reply…")).toBeNull();
+    act(() => {
+      fake.stream!.enqueue(frame({ type: "text_delta", text: "ok" }));
+      fake.stream!.enqueue(done(9));
+      fake.stream!.close();
+    });
+    await screen.findByRole("button", { name: "Send" });
+  }, 15_000);
+
+  it("a 409 with no Stop before it is an ordinary error", async () => {
+    mount("/p/alpha/chat/3");
+    const user = userEvent.setup();
+    const box = await screen.findByRole("textbox");
+    await screen.findByText("second a");
+    fake.lease = { gets: 99 };
+    await user.type(box, "hello");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByText(/still being written in this chat/);
+    expect(screen.queryByText("Stopping the previous reply…")).toBeNull();
+  });
+
+  it("an edit turned away before it wrote anything puts the thread back and says why", async () => {
+    mount("/p/alpha/chat/3");
+    const user = userEvent.setup();
+    await screen.findByText("second a");
+    fake.lease = { gets: 99 };
+    await user.click(screen.getAllByRole("button", { name: "Edit message" })[1]);
+    await user.type(screen.getByRole("textbox", { name: "Edit message" }), "!{Enter}");
+    await screen.findByText(/still being written in this chat/);
+    expect(screen.getByText("second a")).toBeInTheDocument();
+    expect(screen.getByText("second q")).toBeInTheDocument();
+  });
+
+  it("the version arrows branch, then show the path the server answers with", async () => {
+    fake.transcripts[3] = [row(1, "user", "first q"), row(4, "assistant", "second a")];
+    fake.transcriptExtra[3] = { versions: { "1": { index: 2, count: 3, siblings: [1, 5, 9] } } };
+    fake.branched[3] = {
+      messages: [row(1, "user", "first q"), row(6, "assistant", "the other answer")],
+      extra: { versions: { "1": { index: 3, count: 3, siblings: [1, 5, 9] } } },
+    };
+    mount("/p/alpha/chat/3");
+    const user = userEvent.setup();
+    await screen.findByText("second a");
+    expect(screen.getByTestId("version-arrows")).toHaveTextContent("2/3");
+    await user.click(screen.getByRole("button", { name: "Next version" }));
+    await screen.findByText("the other answer");
+    expect(turnPosts().at(-1)).toMatchObject({
+      path: "/api/projects/alpha/chat/sessions/3/branch",
+      body: { message_id: 9 },
+    });
+    expect(screen.getByTestId("version-arrows")).toHaveTextContent("3/3");
+    expect(screen.getByRole("button", { name: "Next version" })).toBeDisabled();
   });
 });
 

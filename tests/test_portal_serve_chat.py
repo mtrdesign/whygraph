@@ -2107,3 +2107,37 @@ def test_effort_unsupported_is_coded(chat_client, monkeypatch) -> None:
     sid = _new_session(chat_client)["id"]
     frames = _frames(chat_client.post(_url(sid, "/messages"), json={"content": "q"}))
     assert frames[-1]["code"] == "effort_unsupported"
+
+
+def test_reasoning_is_framed_and_kept_per_round(chat_client, monkeypatch) -> None:
+    from whygraph.services.llm.chat import ReasoningDelta
+
+    call = ToolCall(id="c1", name="get_symbol", arguments={})
+    _stub_harness(
+        monkeypatch,
+        [
+            ReasoningDelta(text="look "),
+            ReasoningDelta(text="it up"),
+            RoundUsage(finish_reason="tool_use"),
+            ToolCallStarted(call=call),
+            ToolResultReady(call=call, result="{}"),
+            ReasoningDelta(text="now answer"),
+            TextDelta(text="Done."),
+            RoundUsage(finish_reason="end_turn"),
+            TurnDone("end_turn"),
+        ],
+    )
+    sid = _new_session(chat_client)["id"]
+    frames = _frames(chat_client.post(_url(sid, "/messages"), json={"content": "q"}))
+    assert [f["text"] for f in frames if f["type"] == "reasoning_delta"] == [
+        "look ",
+        "it up",
+        "now answer",
+    ]
+    rows = _transcript(chat_client, sid)["messages"]
+    assert [(m["role"], m["reasoning"]) for m in rows] == [
+        ("user", None),
+        ("assistant", "look it up"),
+        ("tool", None),
+        ("assistant", "now answer"),
+    ]

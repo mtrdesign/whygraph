@@ -271,3 +271,37 @@ describe("MessageBubble: version arrows", () => {
     expect(screen.getByRole("button", { name: "Next version" })).toBeDisabled();
   });
 });
+
+describe("MessageBubble: reasoning", () => {
+  it("renders reasoning collapsed above its round's text, and Copy leaves it out", async () => {
+    window.localStorage.removeItem("whygraph.chat.reasoningOpen");
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    render(
+      <MessageBubble
+        turn={{
+          kind: "assistant",
+          segments: ["The answer."],
+          activityGroups: [[]],
+          reasoning: ["private chain of thought"],
+        }}
+      />,
+    );
+    const block = screen.getByTestId("reasoning") as HTMLDetailsElement;
+    expect(block.open).toBe(false);
+    expect(block).toHaveTextContent("Reasoning");
+    fireEvent.click(screen.getByRole("button", { name: "Copy reply" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("The answer."));
+  });
+
+  it("remembers that this viewer opened reasoning", () => {
+    window.localStorage.setItem("whygraph.chat.reasoningOpen", "1");
+    render(
+      <MessageBubble
+        turn={{ kind: "assistant", segments: ["a"], activityGroups: [[]], reasoning: ["r"] }}
+      />,
+    );
+    expect((screen.getByTestId("reasoning") as HTMLDetailsElement).open).toBe(true);
+    window.localStorage.removeItem("whygraph.chat.reasoningOpen");
+  });
+});

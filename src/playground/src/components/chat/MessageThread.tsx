@@ -27,6 +27,7 @@ import { Composer } from "./Composer";
 import { EffortSelect } from "./EffortSelect";
 import { ModelSelect } from "./ModelSelect";
 import {
+  applyReasoningDelta,
   applyTextDelta,
   applyToolCall,
   applyToolResult,
@@ -367,6 +368,9 @@ export function MessageThread({
             void queryClient.invalidateQueries({ queryKey: chatSessionsKey(slug) });
           }
           switch (event.type) {
+            case "reasoning_delta":
+              updateLive((t) => applyReasoningDelta(t, event.text));
+              break;
             case "text_delta":
               updateLive((t) => applyTextDelta(t, event.text));
               break;

@@ -247,6 +247,24 @@ class TextDelta:
 
 
 @dataclass(frozen=True, slots=True)
+class ReasoningDelta:
+    """An incremental chunk of the model's reasoning, for display only.
+
+    Anthropic's summarized thinking, DeepSeek's ``reasoning_content``,
+    OpenRouter's ``reasoning_details`` text. Never part of the reply's text
+    and never sent back as text (what a provider needs echoed rides
+    :attr:`TurnDone.replay`).
+
+    Attributes
+    ----------
+    text : str
+        The fragment.
+    """
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class ToolCallMade:
     """A tool call finished accumulating and is ready to dispatch.
 
@@ -312,7 +330,7 @@ class TurnDone:
     replay: Mapping[str, Any] | None = None
 
 
-ChatStreamEvent = TextDelta | ToolCallMade | TurnDone
+ChatStreamEvent = TextDelta | ReasoningDelta | ToolCallMade | TurnDone
 """What :meth:`ChatClient.stream_turn` yields."""
 
 
@@ -574,6 +592,7 @@ __all__ = [
     "ChatStreamEvent",
     "ModelInfo",
     "REFUSAL_REASONS",
+    "ReasoningDelta",
     "TextDelta",
     "ToolCall",
     "ToolCallMade",

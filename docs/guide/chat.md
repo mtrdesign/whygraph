@@ -291,6 +291,13 @@ while they call tools. WhyGraph does that within a turn and, for DeepSeek, acros
 DeepSeek chat that has replies from before this was supported (or from another provider) runs
 without thinking until those replies leave the history the model sees.
 
+What a model reasons shows in a collapsed **Reasoning** block above that step of its reply: open it
+to read along. The block stays open or closed the way you last left it (in this browser), survives a
+reload, and is never part of **Copy**. On Anthropic, WhyGraph asks for summarized thinking on every
+model that supports it; a model that does not is asked again without it, once. On a model where
+thinking is optional (Claude Opus 4.8, for example) this turns thinking on, which uses more output
+tokens per reply.
+
 ## Limits
 
 - One project per conversation - the project whose Chat you opened.

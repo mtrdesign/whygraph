@@ -73,6 +73,7 @@ from whygraph.services.llm.chat import (
     EFFORT_LEVELS,
     ChatMessage,
     ModelInfo,
+    ReasoningDelta,
     TextDelta,
     ToolCall,
     TurnDone,
@@ -202,6 +203,7 @@ def _message_dict(row: ChatMessageRow) -> dict:
         "error": row.error,
         "finish_reason": row.finish_reason,
         "effort": row.effort,
+        "reasoning": row.reasoning,
         "parent_id": row.parent_id,
         "created_at": row.created_at,
     }
@@ -855,6 +857,7 @@ def _persist_assistant_turn(
     provider: str,
     model: str,
     effort: str | None = None,
+    reasoning: str | None = None,
     error: str | None = None,
 ) -> int:
     """Write one assistant row (one provider round) and return its row id.
@@ -875,6 +878,8 @@ def _persist_assistant_turn(
         error or an abort), whose row then carries no tokens.
     effort : str or None, optional
         The effort level the turn ran at.
+    reasoning : str or None, optional
+        The round's reasoning text, for display only (never sent back).
     error : str or None, optional
         Why the turn failed, if it did. Stored alongside whatever text did
         arrive, so a refresh replays the failure instead of showing a user
@@ -899,6 +904,7 @@ def _persist_assistant_turn(
             replay=_persisted_replay(usage.replay) if usage else None,
             finish_reason=usage.finish_reason if usage else None,
             effort=effort,
+            reasoning=reasoning,
             created_at=now,
         ),
         now=now,
@@ -1120,6 +1126,7 @@ BUDGET_STOP_MESSAGE = (
 
 _ROUND_FLUSH_EVENTS: tuple[type, ...] = (
     TextDelta,
+    ReasoningDelta,
     RoundUsage,
     RoundLimit,
     Continuation,
@@ -1229,6 +1236,7 @@ def _turn_frames(job: TurnJob) -> Iterator[str]:
     # round's provider call ends; its tool events still follow, and the next
     # flushing event (or the end of the turn) writes it as rows.
     text_parts: list[str] = []
+    reasoning_parts: list[str] = []
     round_calls: list[ToolCall] = []
     round_results: list[tuple[ToolCall, str]] = []
     round_usage: RoundUsage | None = None
@@ -1244,17 +1252,18 @@ def _turn_frames(job: TurnJob) -> Iterator[str]:
         message with no reply at all. So does a finished round that
         reported tokens, so the rows add up to the turn's total.
         """
-        nonlocal text_parts, round_calls, round_results, round_usage
+        nonlocal text_parts, reasoning_parts, round_calls, round_results, round_usage
         reported = round_usage is not None and (
             round_usage.input_tokens or round_usage.output_tokens
         )
-        if not (text_parts or round_calls or error or reported):
+        if not (text_parts or reasoning_parts or round_calls or error or reported):
             round_usage = None
             return None
         message_id = _write_assistant(
             text="".join(text_parts),
             calls=round_calls,
             usage=round_usage,
+            reasoning="".join(reasoning_parts) or None,
             error=error,
         )
         for call, result in round_results:
@@ -1262,6 +1271,7 @@ def _turn_frames(job: TurnJob) -> Iterator[str]:
                 session_id, call, result, parent_id=job.parent_id
             )
         text_parts = []
+        reasoning_parts = []
         round_calls = []
         round_results = []
         round_usage = None
@@ -1282,6 +1292,10 @@ def _turn_frames(job: TurnJob) -> Iterator[str]:
             if isinstance(event, TextDelta):
                 text_parts.append(event.text)
                 yield _frame({"type": "text_delta", "text": event.text})
+
+            elif isinstance(event, ReasoningDelta):
+                reasoning_parts.append(event.text)
+                yield _frame({"type": "reasoning_delta", "text": event.text})
 
             elif isinstance(event, ToolCallStarted):
                 round_calls.append(event.call)

@@ -35,6 +35,9 @@
   quiet after its tool calls is asked for an answer, and older tool results in a long turn are
   shortened to fit. Anthropic prompt caching makes long tool-heavy turns cheaper, and a keepalive
   keeps slow replies connected through proxies.
+- **Reasoning in Chat.** What the model reasons (Anthropic thinking summaries, DeepSeek and
+  OpenRouter reasoning) shows in a collapsed **Reasoning** block above each step of a reply. On
+  models where thinking is optional, such as Claude Opus 4.8, this turns thinking on.
 - **Stop is immediate.** Stop ends the reply at once and keeps what was written, marked "Stopped."
   Sending right after a Stop waits for the stopped reply to end, then sends.
 

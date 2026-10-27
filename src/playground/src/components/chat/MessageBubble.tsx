@@ -41,6 +41,11 @@ export interface AssistantTurn {
   /** Text segments in order, interleaved with `activities` of the same index. */
   segments: string[];
   activityGroups: ToolActivity[][];
+  /**
+   * The model's reasoning per round, at the index of the segment it precedes. Shown collapsed,
+   * never copied.
+   */
+  reasoning?: string[];
   usage?: { input: number | null; output: number | null };
   /** Which model produced this turn — shown because it can differ per turn. */
   model?: string | null;
@@ -247,6 +252,40 @@ function UserBubble({ turn, busy, onEdit, onBranch }: { turn: UserTurn } & TurnA
   );
 }
 
+const REASONING_OPEN_KEY = "whygraph.chat.reasoningOpen";
+
+/** Whether this viewer last left reasoning blocks open (a per-viewer convenience). */
+function readReasoningOpen(): boolean {
+  try {
+    return window.localStorage.getItem(REASONING_OPEN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function storeReasoningOpen(open: boolean): void {
+  try {
+    window.localStorage.setItem(REASONING_OPEN_KEY, open ? "1" : "0");
+  } catch {
+    // Private windows and blocked storage: the block still works, it just isn't remembered.
+  }
+}
+
+/** One round's reasoning, collapsed unless this viewer last left it open. */
+export function ReasoningBlock({ text }: { text: string }) {
+  return (
+    <details
+      className="mb-1.5 rounded-sm border border-border/60 bg-background/40 px-2 py-1 text-xs text-muted-foreground"
+      open={readReasoningOpen()}
+      onToggle={(e) => storeReasoningOpen(e.currentTarget.open)}
+      data-testid="reasoning"
+    >
+      <summary className="cursor-pointer select-none hover:text-foreground">Reasoning</summary>
+      <p className="mt-1 whitespace-pre-wrap break-words">{text}</p>
+    </details>
+  );
+}
+
 function AssistantBubble({ turn, busy, onRegenerate, onBranch }: { turn: AssistantTurn } & TurnActions) {
   const rows = Math.max(turn.segments.length, turn.activityGroups.length);
   // Flattened across groups on purpose. `render_chart` and the stats call that
@@ -276,6 +315,7 @@ function AssistantBubble({ turn, busy, onRegenerate, onBranch }: { turn: Assista
       <div className="min-w-0 max-w-full rounded-lg bg-muted px-3 py-2">
         {Array.from({ length: rows }, (_, i) => (
           <div key={i} className="min-w-0">
+            {turn.reasoning?.[i] ? <ReasoningBlock text={turn.reasoning[i]} /> : null}
             {turn.segments[i] ? <Markdown>{turn.segments[i]}</Markdown> : null}
             {(turn.activityGroups[i] ?? []).map((activity) => {
               // A `render_chart` card renders its chart as a sibling, so the

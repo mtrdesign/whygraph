@@ -176,3 +176,42 @@ describe("turnsFromMessages", () => {
     expect(plain(turnsFromMessages(fixture, {}))).toEqual(baseline);
   });
 });
+
+describe("reasoning (plan 37 §7.1.1)", () => {
+  it("places each round's reasoning above that round's text, persisted and live alike", async () => {
+    const { applyReasoningDelta, applyTextDelta, applyToolCall, applyToolResult, emptyAssistantTurn } =
+      await import("../components/chat/turns");
+    const persisted = turnsFromMessages([
+      row({ role: "user", content: "why?" }),
+      row({ content: "Looking.", tool_calls: [call("c1")], reasoning: "plan the search" }),
+      row({ role: "tool", content: "{}", tool_call_id: "c1" }),
+      row({ content: "Found it.", reasoning: "read the result" }),
+    ])[1] as AssistantTurn;
+    expect(persisted.segments).toEqual(["Looking.", "Found it."]);
+    expect(persisted.reasoning).toEqual(["plan the search", "read the result"]);
+
+    let live = emptyAssistantTurn();
+    live = applyReasoningDelta(live, "plan the ");
+    live = applyReasoningDelta(live, "search");
+    live = applyTextDelta(live, "Looking.");
+    live = applyToolCall(live, call("c1"));
+    live = applyToolResult(live, "c1", "{}");
+    live = applyReasoningDelta(live, "read the result");
+    live = applyTextDelta(live, "Found it.");
+    expect(live.segments).toEqual(persisted.segments);
+    expect(live.reasoning).toEqual(persisted.reasoning);
+  });
+
+  it("a tool-only round's reasoning opens a segment after its cards", () => {
+    const turn = turnsFromMessages([
+      row({ role: "user", content: "q" }),
+      row({ content: "", tool_calls: [call("c1")] }),
+      row({ role: "tool", content: "{}", tool_call_id: "c1" }),
+      row({ content: "", tool_calls: [call("c2")], reasoning: "one more lookup" }),
+      row({ role: "tool", content: "{}", tool_call_id: "c2" }),
+      row({ content: "Done." }),
+    ])[1] as AssistantTurn;
+    expect(turn.reasoning).toEqual(["", "one more lookup"]);
+    expect(turn.activityGroups.map((g) => g.map((a) => a.id))).toEqual([["c1"], ["c2"], []]);
+  });
+});

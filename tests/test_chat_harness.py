@@ -1266,3 +1266,20 @@ def test_any_error_while_stopping_is_a_cancellation() -> None:
     with pytest.raises(TurnCancelled) as info:
         _run(client, StubRegistry(), cancel=cancel)
     assert isinstance(info.value.__cause__, ValueError)
+
+
+def test_reasoning_is_forwarded_and_blocks_the_silent_retry(monkeypatch) -> None:
+    from whygraph.services.llm.chat import ReasoningDelta
+
+    monkeypatch.setattr(harness, "RETRY_DELAY_SEC", 0)
+    client = _Client(
+        [[ReasoningDelta(text="hm"), TextDelta(text="ok"), _done("end_turn")]]
+    )
+    events = _run(client, StubRegistry())
+    assert events[0] == ReasoningDelta(text="hm")
+
+    # Reasoning already shown: a drop after it is not retried silently.
+    client = _Client([[ReasoningDelta(text="hm"), _dropped()]])
+    with pytest.raises(httpx.RemoteProtocolError):
+        _run(client, StubRegistry())
+    assert len(client.requests) == 1

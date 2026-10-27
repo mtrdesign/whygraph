@@ -81,12 +81,16 @@ export function turnsFromMessages(
       // same way the live stream renders it.
       const lastGroup = current.activityGroups[current.activityGroups.length - 1];
       if (lastGroup && lastGroup.length > 0) {
-        if (message.content) {
+        // Reasoning opens the round too, so it shows after the cards it follows.
+        if (message.content || message.reasoning) {
           current.segments.push(message.content);
           current.activityGroups.push([]);
         }
       } else {
         current.segments[current.segments.length - 1] += message.content;
+      }
+      if (message.reasoning) {
+        current.reasoning = addReasoning(current.reasoning, current.segments.length - 1, message.reasoning);
       }
       for (const call of message.tool_calls) {
         current.activityGroups[current.activityGroups.length - 1].push({
@@ -131,6 +135,33 @@ export function turnsFromMessages(
 
   flush();
   return turns;
+}
+
+/** Put `text` at segment `index` of a turn's reasoning (rounds that share a segment join). */
+function addReasoning(reasoning: string[] | undefined, index: number, text: string): string[] {
+  const next = [...(reasoning ?? [])];
+  while (next.length <= index) next.push("");
+  next[index] = next[index] ? `${next[index]}\n\n${text}` : text;
+  return next;
+}
+
+/**
+ * Append a reasoning delta. Like text, reasoning after a completed tool group opens the next
+ * segment, so it sits above the round's own text rather than above the previous round's.
+ */
+export function applyReasoningDelta(turn: AssistantTurn, text: string): AssistantTurn {
+  const segments = [...turn.segments];
+  const groups = turn.activityGroups.map((g) => [...g]);
+  const lastGroup = groups[groups.length - 1];
+  if (lastGroup && lastGroup.length > 0 && lastGroup.every((a) => !a.running)) {
+    segments.push("");
+    groups.push([]);
+  }
+  const index = segments.length - 1;
+  const reasoning = [...(turn.reasoning ?? [])];
+  while (reasoning.length <= index) reasoning.push("");
+  reasoning[index] += text;
+  return { ...turn, segments, activityGroups: groups, reasoning };
 }
 
 /** Append a text delta to the turn's newest segment. */

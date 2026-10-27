@@ -50,6 +50,7 @@ from .chat import (
     ChatRequest,
     ChatStreamEvent,
     ModelInfo,
+    ReasoningDelta,
     TextDelta,
     ToolCall,
     ToolCallMade,
@@ -189,6 +190,19 @@ def _merge_reasoning_details(merged: list[dict], fragments: Any) -> None:
                 target[key] = (target.get(key) or "") + value
             else:
                 target[key] = value
+
+
+def _reasoning_text(fragments: Any) -> Iterator[str]:
+    """The readable text of ``reasoning_details`` fragments (``text`` or ``summary``).
+
+    Encrypted entries carry ``data`` only and show nothing.
+    """
+    for raw in fragments or []:
+        fragment = _as_dict(raw)
+        for key in ("text", "summary"):
+            value = fragment.get(key)
+            if isinstance(value, str) and value:
+                yield value
 
 
 def _message_payload(
@@ -474,10 +488,12 @@ class OpenAIChatAdapter(ChatClient):
                         reasoning = getattr(delta, "reasoning_content", None)
                         if isinstance(reasoning, str) and reasoning:
                             reasoning_parts.append(reasoning)
+                            yield ReasoningDelta(text=reasoning)
                     elif self.provider == "openrouter":
-                        _merge_reasoning_details(
-                            reasoning_details, getattr(delta, "reasoning_details", None)
-                        )
+                        fragments = getattr(delta, "reasoning_details", None)
+                        _merge_reasoning_details(reasoning_details, fragments)
+                        for shown in _reasoning_text(fragments):
+                            yield ReasoningDelta(text=shown)
                     text = getattr(delta, "content", None)
                     if text:
                         yield TextDelta(text=text)

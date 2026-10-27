@@ -1870,3 +1870,131 @@ def test_openai_active_stream_is_cleared_after_completion_and_failure() -> None:
     with pytest.raises(LlmError):
         list(adapter.stream_turn(_request()))
     assert adapter._active is None
+
+
+# ---------------------------------------------------------------------------
+# Reasoning display (plan 37 §7.1.1): thinking deltas, the thinking probe,
+# DeepSeek / OpenRouter reasoning as ReasoningDelta
+# ---------------------------------------------------------------------------
+
+
+def _an_thinking_delta(text, index=0):
+    return SimpleNamespace(
+        type="content_block_delta",
+        index=index,
+        delta=SimpleNamespace(type="thinking_delta", thinking=text),
+    )
+
+
+@pytest.fixture
+def _fresh_thinking(monkeypatch: pytest.MonkeyPatch) -> None:
+    from whygraph.services.llm import anthropic_chat
+
+    monkeypatch.setattr(anthropic_chat, "_NO_THINKING", set())
+
+
+@pytest.mark.usefixtures("_fresh_thinking")
+def test_anthropic_requests_summarized_thinking_and_streams_it_as_reasoning() -> None:
+    from whygraph.services.llm import ReasoningDelta
+
+    adapter, fake = _anthropic_adapter(
+        [
+            _an_thinking_delta("Let me "),
+            _an_thinking_delta("check."),
+            _an_text_delta("Answer."),
+            _an_message_delta(),
+        ]
+    )
+    events = list(adapter.stream_turn(_request()))
+    assert fake.last_kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert events[:3] == [
+        ReasoningDelta(text="Let me "),
+        ReasoningDelta(text="check."),
+        TextDelta(text="Answer."),
+    ]
+
+
+class _RejectsThinkingOnce:
+    """An ``anthropic.Anthropic`` stand-in that 400s while ``thinking`` is sent."""
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+        self.calls: list[dict] = []
+        self.messages = SimpleNamespace(stream=self._stream)
+
+    def _stream(self, **kwargs):
+        self.calls.append(kwargs)
+        if "thinking" in kwargs:
+            raise _bad_request(self.message)
+        return _FakeAnthropicStream([_an_text_delta("ok"), _an_message_delta()])
+
+
+@pytest.mark.usefixtures("_fresh_thinking")
+def test_anthropic_retries_once_without_thinking_and_remembers_the_model() -> None:
+    fake = _RejectsThinkingOnce(
+        "thinking.type: adaptive thinking is not supported on this model"
+    )
+    adapter = AnthropicChatAdapter(model="claude-haiku-4-5", client=fake)
+    events = list(adapter.stream_turn(_request()))
+    assert events[0] == TextDelta(text="ok")
+    assert ["thinking" in c for c in fake.calls] == [True, False]
+
+    # The next request to that model never sends it.
+    list(adapter.stream_turn(_request()))
+    assert ["thinking" in c for c in fake.calls] == [True, False, False]
+    # Another model still does.
+    other = AnthropicChatAdapter(model="claude-opus-5", client=fake)
+    list(other.stream_turn(_request()))
+    assert "thinking" in fake.calls[3]
+
+
+@pytest.mark.usefixtures("_fresh_thinking")
+def test_anthropic_a_signature_400_is_not_a_thinking_probe() -> None:
+    fake = _RejectsThinkingOnce(
+        "messages.1.content.0: thinking block signature is not supported (block_binding)"
+    )
+    adapter = AnthropicChatAdapter(model="claude-opus-5", client=fake)
+    with pytest.raises(LlmError):
+        list(adapter.stream_turn(_request()))
+    assert len(fake.calls) == 1
+
+
+def test_deepseek_reasoning_content_streams_as_reasoning() -> None:
+    from whygraph.services.llm import ReasoningDelta
+
+    adapter, _ = _compat_adapter(
+        "deepseek",
+        [
+            _reasoning_chunk(reasoning_content="Hmm."),
+            _reasoning_chunk(content="Answer.", finish_reason="stop"),
+        ],
+    )
+    events = list(adapter.stream_turn(_request()))
+    assert events[:2] == [ReasoningDelta(text="Hmm."), TextDelta(text="Answer.")]
+
+
+def test_openrouter_reasoning_details_text_streams_as_reasoning() -> None:
+    from whygraph.services.llm import ReasoningDelta
+
+    adapter, _ = _compat_adapter(
+        "openrouter",
+        [
+            _reasoning_chunk(
+                reasoning_details=[
+                    {"type": "reasoning.text", "index": 0, "text": "Think"}
+                ]
+            ),
+            _reasoning_chunk(
+                reasoning_details=[{"type": "reasoning.encrypted", "data": "xyz"}]
+            ),
+            _reasoning_chunk(
+                reasoning_details=[{"type": "reasoning.summary", "summary": "Sum"}]
+            ),
+            _reasoning_chunk(finish_reason="stop"),
+        ],
+    )
+    events = list(adapter.stream_turn(_request()))
+    assert [e for e in events if isinstance(e, ReasoningDelta)] == [
+        ReasoningDelta(text="Think"),
+        ReasoningDelta(text="Sum"),
+    ]

@@ -54,6 +54,7 @@ from whygraph.services.llm.chat import (
     ChatClient,
     ChatMessage,
     ChatRequest,
+    ReasoningDelta,
     TextDelta,
     ToolCall,
     ToolCallMade,
@@ -264,6 +265,7 @@ class ContextTrimmed:
 
 HarnessEvent = (
     TextDelta
+    | ReasoningDelta
     | ToolCallStarted
     | ToolResultReady
     | RoundUsage
@@ -732,6 +734,7 @@ def run_turn(
         for attempt in range(2):
             text_parts: list[str] = []
             calls: list[ToolCall] = []
+            reasoned = False
             done = TurnDone()
             started = time.monotonic()
             stream = client.stream_turn(request)
@@ -740,6 +743,9 @@ def run_turn(
                     _check(cancel)
                     if isinstance(event, TextDelta):
                         text_parts.append(event.text)
+                        yield event
+                    elif isinstance(event, ReasoningDelta):
+                        reasoned = True
                         yield event
                     elif isinstance(event, ToolCallMade):
                         calls.append(event.call)
@@ -751,7 +757,13 @@ def run_turn(
             except Exception as exc:
                 if cancel is not None and cancel.is_set():
                     raise TurnCancelled from exc
-                if attempt or text_parts or calls or not _is_dropped_stream(exc):
+                if (
+                    attempt
+                    or text_parts
+                    or calls
+                    or reasoned
+                    or not _is_dropped_stream(exc)
+                ):
                     raise
                 _log.warning(
                     "chat round retry after %s (request id %s)",

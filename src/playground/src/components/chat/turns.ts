@@ -70,6 +70,7 @@ export function turnsFromMessages(
         const replyVersions = versions?.[String(message.id)];
         if (replyVersions) current.versions = replyVersions;
       }
+      current.lastId = message.id;
       // The row a budget hard stop wrote (its content is the notice's line): a notice, not text.
       if (message.error === "budget_exceeded") {
         current.budgetStop = { message: message.content || undefined };
@@ -129,6 +130,7 @@ export function turnsFromMessages(
 
     // role === "tool": attach the result to its already-rendered card.
     if (current) {
+      current.lastId = message.id;
       delete current.continuableId;
       for (const group of current.activityGroups) {
         const activity = group.find((a) => a.id === message.tool_call_id);

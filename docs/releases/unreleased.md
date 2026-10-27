@@ -29,6 +29,8 @@
   otherwise on the first provider that has one, and the picker lists only providers with a key.
 - **Edit and regenerate in Chat.** Edit a question, or regenerate any reply, and the earlier
   version stays: switch between versions with the `‹ 2/3 ›` arrows. **Copy** works on any message.
+- **Branch from here in Chat.** A hover action on any question or reply starts a new chat with the
+  conversation up to that message and opens it; the original stays as it was.
 - **Continue a cut-off reply.** When a reply hits the output limit, **Continue** in the notice
   carries on from where it stopped, with no new question.
 - **Effort level in Chat.** The **Effort** select beside the model picker sets how hard the model

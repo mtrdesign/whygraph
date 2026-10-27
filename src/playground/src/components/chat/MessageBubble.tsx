@@ -1,5 +1,13 @@
 import { Suspense, lazy, useEffect, useRef, useState } from "react";
-import { CheckIcon, ChevronLeftIcon, ChevronRightIcon, CopyIcon, PencilIcon, RefreshCwIcon } from "lucide-react";
+import {
+  CheckIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  CopyIcon,
+  GitBranchIcon,
+  PencilIcon,
+  RefreshCwIcon,
+} from "lucide-react";
 import type { ChatVersions } from "../../api";
 import { BudgetNotice } from "../portal/BudgetNotice";
 import { writeClipboard } from "../portal/CopyButton";
@@ -38,6 +46,11 @@ export interface AssistantTurn {
    * live turns, which key off their position instead.
    */
   id?: number;
+  /**
+   * Persisted turns only: the id of the turn's last row (tool rows included), what "Branch from
+   * here" copies up to so the whole reply comes along.
+   */
+  lastId?: number;
   /** Text segments in order, interleaved with `activities` of the same index. */
   segments: string[];
   activityGroups: ToolActivity[][];
@@ -104,6 +117,8 @@ export interface TurnActions {
   onRegenerate?: () => void;
   /** Passed for the LAST assistant turn only, when the output limit cut it off: carry on from there. */
   onContinue?: () => void;
+  /** Persisted turns: start a new chat with the conversation up to and including this turn. */
+  onFork?: () => void;
   /** Version arrows: switch to the sibling with this message id. */
   onBranch?: (messageId: number) => void;
 }
@@ -132,6 +147,21 @@ function CopyAction({ text, what }: { text: string; what: string }) {
       }}
     >
       {copied ? <CheckIcon /> : <CopyIcon />}
+    </Button>
+  );
+}
+
+function ForkAction({ onFork }: { onFork: () => void }) {
+  return (
+    <Button
+      type="button"
+      size="icon-xs"
+      variant="ghost"
+      aria-label="Branch from here"
+      title="Branch from here"
+      onClick={onFork}
+    >
+      <GitBranchIcon />
     </Button>
   );
 }
@@ -174,7 +204,7 @@ export function VersionArrows({
   );
 }
 
-function UserBubble({ turn, busy, onEdit, onBranch }: { turn: UserTurn } & TurnActions) {
+function UserBubble({ turn, busy, onEdit, onFork, onBranch }: { turn: UserTurn } & TurnActions) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(turn.content);
 
@@ -250,6 +280,7 @@ function UserBubble({ turn, busy, onEdit, onBranch }: { turn: UserTurn } & TurnA
                     <PencilIcon />
                   </Button>
                 )}
+                {onFork && <ForkAction onFork={onFork} />}
               </div>
             )}
           </div>
@@ -293,7 +324,14 @@ export function ReasoningBlock({ text }: { text: string }) {
   );
 }
 
-function AssistantBubble({ turn, busy, onRegenerate, onContinue, onBranch }: { turn: AssistantTurn } & TurnActions) {
+function AssistantBubble({
+  turn,
+  busy,
+  onRegenerate,
+  onContinue,
+  onFork,
+  onBranch,
+}: { turn: AssistantTurn } & TurnActions) {
   const rows = Math.max(turn.segments.length, turn.activityGroups.length);
   // Flattened across groups on purpose. `render_chart` and the stats call that
   // minted its `chart_ref` are separate tool *rounds*, and a new round opens a new
@@ -315,7 +353,7 @@ function AssistantBubble({ turn, busy, onRegenerate, onContinue, onBranch }: { t
   // The no-reply line carries its own Regenerate, so the hover one would be a twin.
   const regenerate = !!onRegenerate && !noReply;
   // A turn still thinking or running a tool has nothing to act on yet; `busy` covers the rest.
-  const actions = !busy && settled && (!!copyText || regenerate);
+  const actions = !busy && settled && (!!copyText || regenerate || !!onFork);
 
   return (
     <div className="group flex min-w-0 max-w-[92%] flex-col items-start">
@@ -467,6 +505,7 @@ function AssistantBubble({ turn, busy, onRegenerate, onContinue, onBranch }: { t
                   <RefreshCwIcon />
                 </Button>
               )}
+              {onFork && <ForkAction onFork={onFork} />}
             </div>
           )}
         </div>

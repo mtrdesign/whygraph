@@ -144,6 +144,11 @@ choose **Regenerate** for another answer. Both keep the earlier version: a `‹ 
 message switches between the versions. A new version uses the chat's current provider, model and
 effort.
 
+**Branch from here** (on any question or reply) starts a new chat with the conversation up to and
+including that message, named after the original with "(branch)", and opens it. The original chat stays
+exactly as it was. Nothing is sent to the model, so it works even without a key; the new chat waits for
+your next message (or **Regenerate**, if you branched from a question).
+
 **Copy** works on any message and copies its text. For a reply, that is the answer text, never its
 reasoning.
 

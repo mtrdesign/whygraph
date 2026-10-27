@@ -1242,6 +1242,7 @@ def test_each_member_sees_and_touches_only_their_own_chat_sessions(
                 ("POST", "/messages/1/regenerate", None),
                 ("POST", "/messages/1/continue", None),
                 ("POST", "/branch", {"message_id": 1}),
+                ("POST", "/fork", {"message_id": 1}),
             ):
                 refused = w.client.request(method, f"{chat}/{other}{suffix}", json=body)
                 where = (name, method, suffix, other)
@@ -1275,6 +1276,7 @@ def test_a_reader_has_no_chat(prod_world: ProdWorld) -> None:
         ("POST", f"{chat}/{w.quokka.session_id}/messages/1/regenerate", None),
         ("POST", f"{chat}/{w.quokka.session_id}/messages/1/continue", None),
         ("POST", f"{chat}/{w.quokka.session_id}/branch", {"message_id": 1}),
+        ("POST", f"{chat}/{w.quokka.session_id}/fork", {"message_id": 1}),
     ):
         refused = w.client.request(method, url, json=body)
         assert refused.status_code == 403, (method, url, refused.text)

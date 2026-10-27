@@ -177,12 +177,14 @@ describe("MessageBubble: actions", () => {
           turn={user({ versions })}
           busy
           onEdit={() => {}}
+          onFork={() => {}}
           onBranch={() => {}}
         />
         <MessageBubble
           turn={assistant({ segments: ["Hi."], versions })}
           busy
           onRegenerate={() => {}}
+          onFork={() => {}}
           onBranch={() => {}}
         />
       </>,
@@ -192,12 +194,30 @@ describe("MessageBubble: actions", () => {
       "Edit message",
       "Copy reply",
       "Regenerate reply",
+      "Branch from here",
       "Previous version",
       "Next version",
     ]) {
       expect(screen.queryByRole("button", { name })).toBeNull();
     }
     expect(screen.queryByTestId("version-arrows")).toBeNull();
+  });
+
+  it("shows Branch from here on a question and on a reply where the thread passes it", () => {
+    const onFork = vi.fn();
+    const { unmount } = render(<MessageBubble turn={user()} onFork={onFork} />);
+    fireEvent.click(screen.getByRole("button", { name: "Branch from here" }));
+    expect(onFork).toHaveBeenCalledTimes(1);
+    unmount();
+
+    // A reply with nothing to copy or regenerate still offers it.
+    const reply = render(<MessageBubble turn={assistant({ segments: ["Hi."], id: 2, lastId: 4 })} onFork={onFork} />);
+    fireEvent.click(screen.getByRole("button", { name: "Branch from here" }));
+    expect(onFork).toHaveBeenCalledTimes(2);
+    reply.unmount();
+
+    render(<MessageBubble turn={user()} />);
+    expect(screen.queryByRole("button", { name: "Branch from here" })).toBeNull();
   });
 
   it("shows no actions on a live turn that is still thinking", () => {

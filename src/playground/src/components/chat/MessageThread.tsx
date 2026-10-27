@@ -277,6 +277,12 @@ export function MessageThread({
     );
   };
 
+  // Branch from here belongs to every persisted turn; a live one has no row to copy up to yet. It
+  // needs no key or budget: it calls no provider.
+  const forkId = (turn: Turn) => (turn.kind === "user" ? turn.id : turn.lastId) as number;
+  const forkable = (turn: Turn) =>
+    liveTurns.length === 0 && currentId !== null && (turn.kind === "user" ? turn.id : turn.lastId) !== undefined;
+
   // Continue belongs to the last turn too, when it is persisted and the output limit cut it off.
   const lastTurn = turns[turns.length - 1];
   const continuableIndex =
@@ -609,6 +615,23 @@ export function MessageThread({
     }
   };
 
+  // Branch from here: a new chat with the conversation up to a persisted row, then open it. The
+  // original stays as it was, so this is a push (Back returns to it), not a replace.
+  const forkFrom = async (messageId: number) => {
+    if (currentId === null) return;
+    setBranching(true);
+    setCreateError(null);
+    try {
+      const created = await api.chatFork(currentId, messageId);
+      void queryClient.invalidateQueries({ queryKey: chatSessionsKey(slug) });
+      void navigate({ to: "/p/$slug/chat/{-$id}", params: { slug, id: String(created.id) } });
+    } catch (err) {
+      setCreateError(err);
+    } finally {
+      setBranching(false);
+    }
+  };
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-auto p-4">
@@ -668,6 +691,7 @@ export function MessageThread({
             }
             onRegenerate={regenerable(i) && !cannotSend ? () => regenerate(i) : undefined}
             onContinue={i === continuableIndex && !cannotSend ? continueReply : undefined}
+            onFork={forkable(turn) ? () => void forkFrom(forkId(turn)) : undefined}
             onBranch={(id) => void branchTo(id)}
           />
         ))}

@@ -145,6 +145,13 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     // Edit / regenerate / continue stream like a send; branch answers with the transcript of the new path.
     const t = /^\/chat\/sessions\/(\d+)\/messages\/(\d+)\/(edit|regenerate|continue)$/.exec(rest ?? "");
     if (t && method === "POST") return Promise.resolve(turnStream(init));
+    const fk = /^\/chat\/sessions\/(\d+)\/fork$/.exec(rest ?? "");
+    if (fk && method === "POST") {
+      const source = fake.sessions.find((x) => x.id === Number(fk[1])) ?? session(Number(fk[1]), "t");
+      const row = { ...session(9, `${source.title} (branch)`, 0), message_count: 2 };
+      fake.sessions = [row, ...fake.sessions];
+      return Promise.resolve(json(row, 201));
+    }
     const br = /^\/chat\/sessions\/(\d+)\/branch$/.exec(rest ?? "");
     if (br && method === "POST") {
       const id = Number(br[1]);
@@ -755,6 +762,40 @@ describe("the chat view: edit, regenerate and versions", () => {
     await screen.findByText(/still being written in this chat/);
     expect(screen.getByText("second a")).toBeInTheDocument();
     expect(screen.getByText("second q")).toBeInTheDocument();
+  });
+
+  it("Branch from here forks at the turn's last row, refreshes the list and opens the new chat", async () => {
+    fake.transcripts[3] = [
+      row(1, "user", "first q"),
+      row(2, "assistant", "looking", { tool_calls: [{ id: "c1", name: "get_symbol", arguments: {} }] }),
+      row(3, "tool", "{}", { tool_call_id: "c1" }),
+      row(4, "assistant", "first a"),
+    ];
+    const router = mount("/p/alpha/chat/3");
+    const user = userEvent.setup();
+    await screen.findByText("first a");
+    expect(screen.getAllByRole("button", { name: "Branch from here" })).toHaveLength(2);
+
+    // The reply's last row is the tool-bearing turn's row 4, so the whole reply comes along.
+    await user.click(screen.getAllByRole("button", { name: "Branch from here" })[1]);
+    await waitFor(() => expect(router.state.location.pathname).toBe("/p/alpha/chat/9"));
+    const forks = fake.calls.filter((c) => c.method === "POST" && c.path.endsWith("/fork"));
+    expect(forks).toHaveLength(1);
+    expect(forks[0]).toMatchObject({
+      path: "/api/projects/alpha/chat/sessions/3/fork",
+      body: { message_id: 4 },
+    });
+    // The new chat is in the sidebar.
+    expect(await within(await chats()).findByText("Two exchanges (branch)")).toBeInTheDocument();
+  });
+
+  it("Branch from here on a question forks at that question", async () => {
+    const router = mount("/p/alpha/chat/3");
+    const user = userEvent.setup();
+    await screen.findByText("second a");
+    await user.click(screen.getAllByRole("button", { name: "Branch from here" })[2]);
+    await waitFor(() => expect(router.state.location.pathname).toBe("/p/alpha/chat/9"));
+    expect(fake.calls.filter((c) => c.path.endsWith("/fork")).at(-1)?.body).toEqual({ message_id: 3 });
   });
 
   it("the version arrows branch, then show the path the server answers with", async () => {

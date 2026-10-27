@@ -2071,6 +2071,11 @@ export function projectApi(slug: string) {
         onEvent,
         signal,
       ),
+    // Starts a new chat from the active path up to `messageId`; answers with the new session.
+    chatFork: (sessionId: number, messageId: number) =>
+      send<ChatSession>("POST", `${base}/chat/sessions/${sessionId}/fork`, {
+        message_id: messageId,
+      }),
     // Switches the visible version; answers with the transcript of the new path.
     chatBranch: (sessionId: number, messageId: number) =>
       send<ChatTranscript>("POST", `${base}/chat/sessions/${sessionId}/branch`, {

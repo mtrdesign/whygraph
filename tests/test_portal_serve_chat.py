@@ -2237,3 +2237,204 @@ def test_reasoning_is_framed_and_kept_per_round(chat_client, monkeypatch) -> Non
         ("tool", None),
         ("assistant", "now answer"),
     ]
+
+
+# ---------------------------------------------------------------------------
+# Branch in new chat (plan 37 section 7.1.4)
+# ---------------------------------------------------------------------------
+
+
+def _no_provider(monkeypatch) -> None:
+    """Make any attempt to build a chat client (a provider call) fail the test."""
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("a fork must not build a chat client")
+
+    monkeypatch.setattr(serve_chat, "make_chat_client", _boom)
+
+
+def _rows(client, session_id: int) -> list[dict]:
+    """Every stored row of a session, ascending, as plain dicts."""
+    from whygraph.db.models import ChatMessage as ChatMessageRow
+
+    with use_project(client.context()), project_session() as session:
+        return [
+            row.model_dump()
+            for row in session.exec(
+                select(ChatMessageRow)
+                .where(ChatMessageRow.session_id == session_id)
+                .order_by(ChatMessageRow.id)
+            ).all()
+        ]
+
+
+def test_fork_copies_the_active_path_up_to_the_message(
+    chat_client, monkeypatch
+) -> None:
+    from whygraph.services.llm.chat import ReasoningDelta
+
+    call = ToolCall(id="c1", name="get_symbol", arguments={})
+    _stub_harness(
+        monkeypatch,
+        [
+            ReasoningDelta(text="think"),
+            RoundUsage(finish_reason="tool_use", input_tokens=7, output_tokens=3),
+            ToolCallStarted(call=call),
+            ToolResultReady(call=call, result="{}"),
+            TextDelta(text="a1"),
+            RoundUsage(finish_reason="end_turn"),
+            TurnDone("end_turn"),
+        ],
+    )
+    source = _new_session(chat_client, effort="high")
+    sid = source["id"]
+    chat_client.post(_url(sid, "/messages"), json={"content": "q1"})
+    _stub_harness(monkeypatch, _reply("a2"))
+    chat_client.post(_url(sid, "/messages"), json={"content": "q2"})
+    before = _transcript(chat_client, sid)
+    ids = [m["id"] for m in before["messages"]]
+    assert [m["role"] for m in before["messages"]] == [
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    cut = ids[3]  # the last row of the first reply
+
+    _no_provider(monkeypatch)
+    response = chat_client.post(_url(sid, "/fork"), json={"message_id": cut})
+    assert response.status_code == 201, response.text
+    forked = response.json()
+    assert forked["id"] != sid
+    assert forked["title"] == f"{before['title']} (branch)"
+    assert (forked["provider"], forked["model"], forked["effort"]) == (
+        source["provider"],
+        source["model"],
+        "high",
+    )
+    assert forked["message_count"] == 4
+    assert forked["streaming"] is False
+
+    # The caller owns it, and the rows are fresh with a rebuilt parent chain.
+    with use_project(chat_client.context()), project_session() as session:
+        mine = session.get(ChatSessionRow, forked["id"])
+        assert mine.owner_uid == session.get(ChatSessionRow, sid).owner_uid
+        assert mine.owner_uid is not None
+    copies = _rows(chat_client, forked["id"])
+    originals = {r["id"]: r for r in _rows(chat_client, sid)}
+    assert len(copies) == 4
+    assert not {c["id"] for c in copies} & set(originals)
+    assert copies[0]["parent_id"] is None
+    assert [c["parent_id"] for c in copies[1:]] == [c["id"] for c in copies[:-1]]
+    for copy, old_id in zip(copies, ids[:4]):
+        old = originals[old_id]
+        for column in serve_chat._COPIED_COLUMNS:
+            assert copy[column] == old[column], column
+    # The interesting columns really were there to copy.
+    assert (copies[1]["reasoning"], copies[1]["input_tokens"]) == ("think", 7)
+    assert copies[1]["tool_calls"] != "[]" and copies[2]["role"] == "tool"
+
+    transcript = _transcript(chat_client, forked["id"])
+    assert transcript["active_leaf_id"] == copies[-1]["id"]
+    assert [(m["role"], m["content"]) for m in transcript["messages"]] == [
+        (m["role"], m["content"]) for m in before["messages"][:4]
+    ]
+
+    # The source did not change, and the new chat is independent of it.
+    assert _transcript(chat_client, sid) == before
+    listed = {s["id"]: s for s in chat_client.get("/api/chat/sessions").json()}
+    assert listed[forked["id"]]["message_count"] == 4
+
+
+def test_fork_at_a_user_row_ends_with_the_question(chat_client, monkeypatch) -> None:
+    _stub_harness(monkeypatch, _reply("a1"))
+    sid = _new_session(chat_client)["id"]
+    chat_client.post(_url(sid, "/messages"), json={"content": "q1"})
+    _stub_harness(monkeypatch, _reply("a2"))
+    chat_client.post(_url(sid, "/messages"), json={"content": "q2"})
+    q2 = _transcript(chat_client, sid)["messages"][2]["id"]
+
+    _no_provider(monkeypatch)
+    forked = chat_client.post(_url(sid, "/fork"), json={"message_id": q2}).json()
+    assert forked["message_count"] == 3
+    assert _path(chat_client, forked["id"]) == [
+        ("user", "q1"),
+        ("assistant", "a1"),
+        ("user", "q2"),
+    ]
+
+
+def test_fork_copies_only_the_active_version(chat_client, monkeypatch) -> None:
+    _stub_harness(monkeypatch, _reply("a1"))
+    sid = _new_session(chat_client)["id"]
+    chat_client.post(_url(sid, "/messages"), json={"content": "q1"})
+    q1 = _transcript(chat_client, sid)["messages"][0]["id"]
+    # A second version of the reply, then the first one is no longer active.
+    _stub_harness(monkeypatch, _reply("a1b"))
+    chat_client.post(_url(sid, f"/messages/{q1}/regenerate"))
+    transcript = _transcript(chat_client, sid)
+    new_reply = transcript["messages"][1]["id"]
+    old_reply = transcript["versions"][str(new_reply)]["siblings"][0]
+    assert old_reply != new_reply
+
+    _no_provider(monkeypatch)
+    forked = chat_client.post(_url(sid, "/fork"), json={"message_id": new_reply}).json()
+    assert _path(chat_client, forked["id"]) == [("user", "q1"), ("assistant", "a1b")]
+    assert _transcript(chat_client, forked["id"])["versions"] == {}
+    assert forked["message_count"] == 2
+
+    # The superseded version is off the active path now.
+    refused = chat_client.post(_url(sid, "/fork"), json={"message_id": old_reply})
+    assert refused.status_code == 404
+    assert refused.json()["code"] == "not_found"
+
+
+def test_fork_refuses_a_message_off_the_path_or_not_the_sessions(
+    chat_client, monkeypatch
+) -> None:
+    _stub_harness(monkeypatch, _reply("a1"))
+    sid = _new_session(chat_client)["id"]
+    chat_client.post(_url(sid, "/messages"), json={"content": "q1"})
+    q1 = _transcript(chat_client, sid)["messages"][0]["id"]
+    _stub_harness(monkeypatch, _reply("q1 edited"))
+    chat_client.post(_url(sid, f"/messages/{q1}/edit"), json={"content": "q1b"})
+    other = _new_session(chat_client)["id"]
+    chat_client.post(_url(other, "/messages"), json={"content": "elsewhere"})
+    foreign = _transcript(chat_client, other)["messages"][0]["id"]
+    sessions_before = len(chat_client.get("/api/chat/sessions").json())
+
+    _no_provider(monkeypatch)
+    # The original question lost the path to the edit; the rest never belonged.
+    for target in (q1, foreign, 99999):
+        response = chat_client.post(_url(sid, "/fork"), json={"message_id": target})
+        assert response.status_code == 404, target
+        assert response.json()["code"] == "not_found"
+    unknown = chat_client.post(_url(99999, "/fork"), json={"message_id": q1})
+    assert unknown.status_code == 404
+    # Nothing was created by any refusal.
+    assert len(chat_client.get("/api/chat/sessions").json()) == sessions_before
+
+
+def test_fork_is_refused_while_a_turn_holds_the_lease(chat_client, monkeypatch) -> None:
+    _stub_harness(monkeypatch, _reply("a1"))
+    sid = _new_session(chat_client)["id"]
+    chat_client.post(_url(sid, "/messages"), json={"content": "q1"})
+    q1 = _transcript(chat_client, sid)["messages"][0]["id"]
+    holder = object()
+    with use_project(chat_client.context()):
+        lease = serve_chat._lease_key(sid)
+        serve_chat._acquire(lease, holder)
+    try:
+        response = chat_client.post(_url(sid, "/fork"), json={"message_id": q1})
+        assert response.status_code == 409
+        assert response.json()["code"] == "turn_in_progress"
+    finally:
+        serve_chat._release(lease, holder)
+    assert len(chat_client.get("/api/chat/sessions").json()) == 1
+    # The lease is free again once the fork is done.
+    assert (
+        chat_client.post(_url(sid, "/fork"), json={"message_id": q1}).status_code == 201
+    )
+    assert _transcript(chat_client, sid)["streaming"] is False

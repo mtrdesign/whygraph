@@ -145,6 +145,12 @@ class BranchBody(BaseModel):
     message_id: int
 
 
+class ForkBody(BaseModel):
+    """Body for ``POST /api/chat/sessions/{id}/fork``."""
+
+    message_id: int
+
+
 def _check_effort(effort: str | None) -> None:
     """400 ``bad_effort`` unless ``effort`` is unset or one of the levels."""
     if effort is not None and effort not in EFFORT_LEVELS:
@@ -1633,6 +1639,87 @@ def branch_session(session_id: int, body: BranchBody, request: Request) -> dict:
     finally:
         _release(key, holder)
     return get_transcript(session_id, request)
+
+
+_COPIED_COLUMNS = (
+    "role",
+    "content",
+    "tool_calls",
+    "tool_call_id",
+    "input_tokens",
+    "output_tokens",
+    "provider",
+    "model",
+    "error",
+    "replay",
+    "finish_reason",
+    "effort",
+    "reasoning",
+    "created_at",
+)
+"""Every message column a fork copies verbatim (ids and the tree are rebuilt)."""
+
+
+@router.post("/sessions/{session_id}/fork", status_code=201)
+def fork_session(session_id: int, body: ForkBody, request: Request) -> dict:
+    """Branch in a new chat: copy the active path up to a message.
+
+    The new session is the caller's, with the source's provider, model and
+    effort and the title ``"<title> (branch)"``. The rows from the root up to
+    and including ``message_id`` are copied with fresh ids and a rebuilt
+    ``parent_id`` chain, in one transaction, and the last copy is the new
+    session's leaf. No provider is called. 404 unless ``message_id`` is on
+    the source's active path; refused while a reply is being written in it.
+
+    Returns
+    -------
+    dict
+        The new session, with the number of rows copied.
+    """
+    source = _preflight(request, session_id, body.message_id, turn=False)
+    key = _lease_key(session_id)
+    holder = object()
+    _acquire(key, holder)
+    try:
+        with get_session() as session:
+            rows = _session_rows(session, session_id)
+            path = _path_ids(
+                rows, _leaf_id(_require_session(session, session_id), rows)
+            )
+            if body.message_id not in path:
+                raise ServeError(
+                    404, f"message {body.message_id} not found", code="not_found"
+                )
+            now = _now_iso()
+            branch = ChatSessionRow(
+                title=f"{source.title} (branch)"[:TITLE_MAX_CHARS],
+                provider=source.provider,
+                model=source.model,
+                effort=source.effort,
+                created_at=now,
+                updated_at=now,
+                owner_uid=_caller_uid(request),
+            )
+            session.add(branch)
+            session.flush()
+            copied: dict[int, int] = {}
+            for old_id in path[: path.index(body.message_id) + 1]:
+                old = rows[old_id]
+                copy = ChatMessageRow(
+                    session_id=branch.id,
+                    parent_id=copied.get(old.parent_id),
+                    **{column: getattr(old, column) for column in _COPIED_COLUMNS},
+                )
+                session.add(copy)
+                session.flush()
+                copied[old_id] = copy.id
+            branch.active_leaf_id = copied[body.message_id]
+            session.add(branch)
+            session.commit()
+            session.refresh(branch)
+            return _session_dict(branch, message_count=len(copied))
+    finally:
+        _release(key, holder)
 
 
 __all__ = ["router", "stop_all_turns"]

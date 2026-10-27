@@ -1183,6 +1183,11 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         body=lambda w, o: {"message_id": o.message_id},
         shows=lambda o: [o.session_title, f"{o.mark} question"],
     ),
+    ("POST", "/api/projects/{slug}/chat/sessions/{session_id}/fork"): Call(
+        201,
+        body=lambda w, o: {"message_id": o.message_id},
+        shows=lambda o: [f"{o.session_title} (branch)"],
+    ),
 }
 """How the sweep calls each route in its own org (plan section 5.2 item 2).
 

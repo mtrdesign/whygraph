@@ -150,6 +150,21 @@ describe("turnsFromMessages", () => {
     expect((turns[1] as AssistantTurn).versions).toEqual(replyVersions);
   });
 
+  it("gives a reply the id of its last row, tool rows included", () => {
+    const turns = turnsFromMessages([
+      row({ role: "user", content: "q" }),
+      row({ id: 2, content: "", tool_calls: [call("c1")] }),
+      row({ id: 3, role: "tool", content: "{}", tool_call_id: "c1" }),
+      row({ id: 4, content: "done" }),
+      row({ id: 5, role: "user", content: "q2" }),
+      row({ id: 6, content: "", tool_calls: [call("c2")] }),
+      row({ id: 7, role: "tool", content: "{}", tool_call_id: "c2" }),
+    ]);
+    expect((turns[1] as AssistantTurn).id).toBe(2);
+    expect((turns[1] as AssistantTurn).lastId).toBe(4);
+    expect((turns[3] as AssistantTurn).lastId).toBe(7);
+  });
+
   it("leaves versions off turns that have none", () => {
     const turns = turnsFromMessages([row({ role: "user", content: "q" }), row({ content: "a" })], {});
     expect("versions" in turns[0]).toBe(false);
@@ -185,7 +200,9 @@ describe("turnsFromMessages", () => {
       { ...base, id: 13, role: "assistant", content: "" },
     ];
     // Strict equality on the serialized form: `toEqual` would let a new `undefined` key through.
-    const plain = (value: unknown) => JSON.parse(JSON.stringify(value));
+    // `lastId` (branch in new chat) postdates the baseline, so it is dropped here and has its own test.
+    const plain = (value: unknown) =>
+      JSON.parse(JSON.stringify(value, (k, v) => (k === "lastId" ? undefined : v)));
     expect(plain(turnsFromMessages(fixture))).toEqual(baseline);
     expect(plain(turnsFromMessages(fixture, {}))).toEqual(baseline);
   });

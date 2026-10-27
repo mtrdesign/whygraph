@@ -20,6 +20,8 @@ which rows land, disconnect behaviour - be tested without a provider.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from types import SimpleNamespace
 from typing import Iterator
 
@@ -30,10 +32,14 @@ from test_portal_app import env  # noqa: F401 -- `env` is a fixture
 from test_portal_serve_api import ScopedClient, portal_with_project, use_project_config
 from whygraph.chat.harness import (
     BudgetStop,
+    ContextTrimmed,
+    Continuation,
+    EmptyReply,
     RoundLimit,
     RoundUsage,
     ToolCallStarted,
     ToolResultReady,
+    TurnCancelled,
 )
 from whygraph.core.config import (
     AnthropicConfig,
@@ -116,12 +122,23 @@ def _new_session(client, **body) -> dict:
 
 
 def _frames(response) -> list[dict]:
-    """Parse an SSE response body into decoded event payloads."""
+    """Parse an SSE response body into decoded event payloads.
+
+    Comment blocks (``: heartbeat``) and empty chunks carry no event.
+    """
     return [
         json.loads(block.removeprefix("data: "))
         for block in response.text.split("\n\n")
-        if block.strip()
+        if block.strip() and not block.startswith(":")
     ]
+
+
+def _wait_released(key, timeout: float = 5.0) -> None:
+    """Wait until the worker gave the session's lease back."""
+    deadline = time.monotonic() + timeout
+    while key in serve_chat._LEASES:
+        assert time.monotonic() < deadline, "the worker never released the lease"
+        time.sleep(0.01)
 
 
 def _stub_harness(monkeypatch: pytest.MonkeyPatch, events) -> None:
@@ -388,6 +405,8 @@ def test_local_mode_writes_the_owner_but_filters_nothing(chat_client) -> None:
         "title",
         "provider",
         "model",
+        "effort",
+        "streaming",
         "created_at",
         "updated_at",
         "message_count",
@@ -1066,30 +1085,38 @@ def test_an_unreachable_provider_is_coded_llm_unavailable(
 
 
 def test_client_disconnect_persists_a_stopped_marker(chat_client, monkeypatch) -> None:
-    """Abandoning the stream mid-turn records ``"Stopped."`` beside the partial.
+    """Abandoning the stream mid-turn stops the worker, which records ``"Stopped."``.
 
-    Closing the frame iterator early is what the Stop button does to the
-    generator, so the ``GeneratorExit`` handler is exercised directly rather
-    than through TestClient (which always drains the body).
+    The test client drains the body before it reports a disconnect, so the
+    job's frame generator is driven directly: closing it is what the server
+    does when the client goes away (plan 37 §9.31).
     """
-    _stub_harness(
-        monkeypatch,
-        [TextDelta(text="partial"), TextDelta(text=" more"), TurnDone("stop")],
-    )
+    gate = threading.Event()
+
+    def _slow(*, client, history, registry=None, cancel=None, **kwargs):
+        yield TextDelta(text="partial")
+        while not cancel.is_set():
+            gate.wait(0.01)
+        raise TurnCancelled
+
+    monkeypatch.setattr(serve_chat, "make_chat_client", lambda *a, **k: object())
+    monkeypatch.setattr(serve_chat, "run_turn", _slow)
     session = _new_session(chat_client)
-    chat_client.post(
-        f"/api/chat/sessions/{session['id']}/messages", json={"content": "hi"}
-    )
-    # Drop the assistant row the completed turn wrote; this test is about the
-    # abort path, which starts from a fresh turn.
     session_id = session["id"]
 
-    # Outside a request nothing binds the project; bind it like the route does.
     with use_project(chat_client.context()):
-        frames = serve_chat._turn_frames(session_id, "openai", "gpt-4o")
-        next(frames)  # consume the first text_delta, then walk away
-        frames.close()
+        user_id = serve_chat._persist_user_message(session_id, "hi")
+        key = serve_chat._lease_key(session_id)
+        job = serve_chat.TurnJob(key, session_id, "openai", "gpt-4o", start_id=user_id)
+        serve_chat._acquire(key, job)
+        job.start()
+        frames = job.frames()
+        first = next(f for f in frames if f)  # the text_delta, past empty chunks
+        assert json.loads(first.removeprefix("data: "))["text"] == "partial"
+        frames.close()  # the client went away
+        _wait_released(key)
 
+    assert job.cancel_event.is_set()
     messages = chat_client.get(f"/api/chat/sessions/{session_id}").json()["messages"]
     stopped = messages[-1]
     assert stopped["role"] == "assistant"
@@ -1322,20 +1349,33 @@ def test_assistant_rows_record_the_model_that_produced_them(
 # ---------------------------------------------------------------------------
 
 
-def _seed_rows(client, session_id: int, rows: list[dict]) -> None:
-    """Write raw transcript rows into the session, in order."""
+def _seed_rows(client, session_id: int, rows: list[dict]) -> list[int]:
+    """Write raw transcript rows into the session as one linear path.
+
+    Each row hangs under the previous one and the last becomes the leaf;
+    returns the new ids in order.
+    """
     from whygraph.db.models import ChatMessage as ChatMessageRow
 
+    ids: list[int] = []
     with use_project(client.context()), project_session() as session:
+        parent = session.get(ChatSessionRow, session_id).active_leaf_id
         for i, row in enumerate(rows):
-            session.add(
-                ChatMessageRow(
-                    session_id=session_id,
-                    created_at=f"2026-10-27T00:00:{i:02d}+00:00",
-                    **row,
-                )
+            message = ChatMessageRow(
+                session_id=session_id,
+                parent_id=parent,
+                created_at=f"2026-10-27T00:00:{i:02d}+00:00",
+                **row,
             )
+            session.add(message)
+            session.flush()
+            parent = message.id
+            ids.append(message.id)
+        chat = session.get(ChatSessionRow, session_id)
+        chat.active_leaf_id = parent
+        session.add(chat)
         session.commit()
+    return ids
 
 
 def test_history_sanitizer_drops_rows_a_provider_must_not_see(
@@ -1507,3 +1547,563 @@ def test_a_cut_stream_is_coded_llm_unavailable(chat_client, monkeypatch) -> None
     messages = chat_client.get(f"/api/chat/sessions/{session['id']}").json()["messages"]
     assert messages[-1]["content"] == "partial"
     assert messages[-1]["error"] == "anthropic stream interrupted: ReadTimeout"
+
+
+# ---------------------------------------------------------------------------
+# Branching, the lease, Stop, heartbeats and effort (plan 37 §4.5)
+# ---------------------------------------------------------------------------
+
+
+def _url(session_id: int, suffix: str = "") -> str:
+    return f"/api/chat/sessions/{session_id}{suffix}"
+
+
+def _transcript(client, session_id: int) -> dict:
+    response = client.get(_url(session_id))
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _path(client, session_id: int) -> list[tuple[str, str]]:
+    return [
+        (m["role"], m["content"]) for m in _transcript(client, session_id)["messages"]
+    ]
+
+
+def _reply(text: str) -> list:
+    return [
+        TextDelta(text=text),
+        RoundUsage(finish_reason="end_turn"),
+        TurnDone("end_turn"),
+    ]
+
+
+def test_edit_creates_a_sibling_version_with_arrows(chat_client, monkeypatch) -> None:
+    _stub_harness(monkeypatch, _reply("a1"))
+    session = _new_session(chat_client)
+    sid = session["id"]
+    chat_client.post(_url(sid, "/messages"), json={"content": "q1"})
+    q1 = _transcript(chat_client, sid)["messages"][0]["id"]
+
+    spy = _stub_harness(monkeypatch, _reply("a1b"))
+    response = chat_client.post(
+        _url(sid, f"/messages/{q1}/edit"), json={"content": "q1b"}
+    )
+    assert response.status_code == 200
+    assert [f["type"] for f in _frames(response)] == ["text_delta", "done"]
+    assert [(m.role, m.content) for m in spy.history] == [("user", "q1b")]
+
+    transcript = _transcript(chat_client, sid)
+    assert _path(chat_client, sid) == [("user", "q1b"), ("assistant", "a1b")]
+    edited = transcript["messages"][0]
+    # Root-level siblings: both versions of the first question have no parent.
+    assert edited["parent_id"] is None
+    assert transcript["versions"][str(edited["id"])] == {
+        "index": 2,
+        "count": 2,
+        "siblings": [q1, edited["id"]],
+    }
+    assert transcript["active_leaf_id"] == transcript["messages"][-1]["id"]
+    assert transcript["message_count"] == 4  # every row, on any branch
+    assert transcript["title"] == "q1"  # an edit never retitles
+
+    back = chat_client.post(_url(sid, "/branch"), json={"message_id": q1})
+    assert back.status_code == 200
+    assert [(m["role"], m["content"]) for m in back.json()["messages"]] == [
+        ("user", "q1"),
+        ("assistant", "a1"),
+    ]
+    assert back.json()["versions"][str(q1)]["index"] == 1
+    assert _path(chat_client, sid) == [("user", "q1"), ("assistant", "a1")]
+
+
+def test_editing_a_later_question_keeps_the_earlier_turns(
+    chat_client, monkeypatch
+) -> None:
+    _stub_harness(monkeypatch, _reply("a1"))
+    sid = _new_session(chat_client)["id"]
+    chat_client.post(_url(sid, "/messages"), json={"content": "q1"})
+    _stub_harness(monkeypatch, _reply("a2"))
+    chat_client.post(_url(sid, "/messages"), json={"content": "q2"})
+    q2 = _transcript(chat_client, sid)["messages"][2]["id"]
+
+    spy = _stub_harness(monkeypatch, _reply("a2b"))
+    chat_client.post(_url(sid, f"/messages/{q2}/edit"), json={"content": "q2b"})
+    assert [(m.role, m.content) for m in spy.history] == [
+        ("user", "q1"),
+        ("assistant", "a1"),
+        ("user", "q2b"),
+    ]
+    assert _path(chat_client, sid) == [
+        ("user", "q1"),
+        ("assistant", "a1"),
+        ("user", "q2b"),
+        ("assistant", "a2b"),
+    ]
+
+
+def test_regenerate_answers_the_question_again(chat_client, monkeypatch) -> None:
+    _stub_harness(monkeypatch, _reply("a1"))
+    sid = _new_session(chat_client)["id"]
+    chat_client.post(_url(sid, "/messages"), json={"content": "q1"})
+    q1 = _transcript(chat_client, sid)["messages"][0]["id"]
+
+    spy = _stub_harness(monkeypatch, _reply("a2"))
+    response = chat_client.post(_url(sid, f"/messages/{q1}/regenerate"))
+    assert response.status_code == 200
+    # The history ends with the question, never with the old reply.
+    assert [(m.role, m.content) for m in spy.history] == [("user", "q1")]
+
+    transcript = _transcript(chat_client, sid)
+    assert _path(chat_client, sid) == [("user", "q1"), ("assistant", "a2")]
+    reply = transcript["messages"][1]
+    assert reply["parent_id"] == q1
+    assert transcript["versions"][str(reply["id"])]["index"] == 2
+    assert transcript["versions"][str(reply["id"])]["count"] == 2
+
+
+def test_a_regenerate_that_writes_nothing_keeps_the_old_reply(
+    chat_client, monkeypatch
+) -> None:
+    _stub_harness(monkeypatch, _reply("a1"))
+    sid = _new_session(chat_client)["id"]
+    chat_client.post(_url(sid, "/messages"), json={"content": "q1"})
+    q1 = _transcript(chat_client, sid)["messages"][0]["id"]
+
+    _stub_harness(monkeypatch, [TurnDone("end_turn")])
+    chat_client.post(_url(sid, f"/messages/{q1}/regenerate"))
+    transcript = _transcript(chat_client, sid)
+    assert _path(chat_client, sid) == [("user", "q1"), ("assistant", "a1")]
+    assert transcript["versions"] == {}
+
+
+def test_a_tool_row_can_end_a_turn_and_versions_group_under_the_question(
+    chat_client, monkeypatch
+) -> None:
+    call = ToolCall(id="c1", name="get_symbol", arguments={})
+    _stub_harness(
+        monkeypatch,
+        [
+            RoundUsage(finish_reason="tool_use"),
+            ToolCallStarted(call=call),
+            ToolResultReady(call=call, result="{}"),
+            TurnDone("tool_use"),
+        ],
+    )
+    sid = _new_session(chat_client)["id"]
+    chat_client.post(_url(sid, "/messages"), json={"content": "q1"})
+    transcript = _transcript(chat_client, sid)
+    assert [m["role"] for m in transcript["messages"]] == ["user", "assistant", "tool"]
+    assert transcript["active_leaf_id"] == transcript["messages"][-1]["id"]
+    q1 = transcript["messages"][0]["id"]
+
+    _stub_harness(monkeypatch, _reply("prose"))
+    chat_client.post(_url(sid, f"/messages/{q1}/regenerate"))
+    transcript = _transcript(chat_client, sid)
+    assert [(m["role"], m["content"]) for m in transcript["messages"]] == [
+        ("user", "q1"),
+        ("assistant", "prose"),
+    ]
+    first_reply = q1 + 1
+    assert (
+        transcript["versions"][str(transcript["messages"][1]["id"])]["siblings"][0]
+        == first_reply
+    )
+
+    # Branching back to the tool reply follows it down to its tool row.
+    back = chat_client.post(
+        _url(sid, "/branch"), json={"message_id": first_reply}
+    ).json()
+    assert [m["role"] for m in back["messages"]] == ["user", "assistant", "tool"]
+
+
+def test_rows_record_finish_reason_effort_and_parent(chat_client, monkeypatch) -> None:
+    _stub_harness(monkeypatch, _reply("a1"))
+    sid = _new_session(chat_client, effort="high")["id"]
+    chat_client.post(_url(sid, "/messages"), json={"content": "q1"})
+    user_row, reply = _transcript(chat_client, sid)["messages"]
+    assert reply["finish_reason"] == "end_turn"
+    assert reply["effort"] == "high"
+    assert reply["parent_id"] == user_row["id"]
+    assert user_row["finish_reason"] is None
+
+
+def test_new_routes_check_the_message_belongs_and_has_the_right_role(
+    chat_client, monkeypatch
+) -> None:
+    _stub_harness(monkeypatch, _reply("a1"))
+    sid = _new_session(chat_client)["id"]
+    other = _new_session(chat_client)["id"]
+    chat_client.post(_url(sid, "/messages"), json={"content": "q1"})
+    chat_client.post(_url(other, "/messages"), json={"content": "elsewhere"})
+    q1, a1 = (m["id"] for m in _transcript(chat_client, sid)["messages"])
+    foreign = _transcript(chat_client, other)["messages"][0]["id"]
+
+    for path, body in (
+        (f"/messages/{a1}/edit", {"content": "x"}),  # an assistant row
+        (f"/messages/{a1}/regenerate", None),
+        (f"/messages/{foreign}/edit", {"content": "x"}),  # another session's row
+        (f"/messages/{foreign}/regenerate", None),
+        ("/messages/99999/regenerate", None),
+    ):
+        response = chat_client.post(_url(sid, path), json=body)
+        assert response.status_code == 404, path
+        assert response.json()["code"] == "not_found"
+    branch = chat_client.post(_url(sid, "/branch"), json={"message_id": foreign})
+    assert branch.status_code == 404
+    assert (
+        chat_client.post(_url(99999, f"/messages/{q1}/regenerate")).status_code == 404
+    )
+    # Nothing was written by any refusal.
+    assert _transcript(chat_client, sid)["message_count"] == 2
+    empty = chat_client.post(_url(sid, f"/messages/{q1}/edit"), json={"content": "  "})
+    assert empty.status_code == 400
+
+
+def test_a_budget_block_or_a_missing_key_refuses_edit_and_regenerate(
+    chat_client, monkeypatch
+) -> None:
+    from dataclasses import replace as dc_replace
+
+    from whygraph.core.usage import BUDGET_EXCEEDED
+
+    _stub_harness(monkeypatch, _reply("a1"))
+    sid = _new_session(chat_client)["id"]
+    chat_client.post(_url(sid, "/messages"), json={"content": "q1"})
+    q1 = _transcript(chat_client, sid)["messages"][0]["id"]
+
+    ctx = use_project_config(
+        chat_client, monkeypatch, Config(llm=_llm(*CHAT_PROVIDER_TAGS))
+    )
+    blocked = dc_replace(ctx, llm_block=BUDGET_EXCEEDED, llm_block_scope="project")
+    contexts = chat_client.app.state.portal.contexts
+
+    async def _aget(project_id: int):
+        return blocked
+
+    monkeypatch.setattr(contexts, "get", lambda project_id: blocked)
+    monkeypatch.setattr(contexts, "aget", _aget)
+    for path, body in (
+        (f"/messages/{q1}/edit", {"content": "x"}),
+        (f"/messages/{q1}/regenerate", None),
+    ):
+        response = chat_client.post(_url(sid, path), json=body)
+        assert response.status_code == 403, path
+        assert response.json()["code"] == "budget_exceeded"
+
+    provider = _transcript(chat_client, sid)["provider"]
+    others = [p for p in CHAT_PROVIDER_TAGS if p != provider]
+    use_project_config(chat_client, monkeypatch, Config(llm=_llm(*others)))
+    for path, body in (
+        (f"/messages/{q1}/edit", {"content": "x"}),
+        (f"/messages/{q1}/regenerate", None),
+    ):
+        response = chat_client.post(_url(sid, path), json=body)
+        assert response.status_code == 409, path
+        assert response.json()["code"] == "no_llm_key"
+    assert _transcript(chat_client, sid)["message_count"] == 2
+
+
+def _blocking_harness(monkeypatch, release: threading.Event, started: threading.Event):
+    def _blocked(*, client, history, registry=None, cancel=None, **kwargs):
+        started.set()
+        while not release.is_set():
+            if cancel is not None and cancel.is_set():
+                raise TurnCancelled
+            release.wait(0.01)
+        yield TextDelta(text="late")
+        yield RoundUsage(finish_reason="end_turn")
+        yield TurnDone("end_turn")
+
+    monkeypatch.setattr(serve_chat, "make_chat_client", lambda *a, **k: object())
+    monkeypatch.setattr(serve_chat, "run_turn", _blocked)
+
+
+def test_one_turn_per_session_and_delete_or_branch_wait(
+    chat_client, monkeypatch
+) -> None:
+    _stub_harness(monkeypatch, _reply("a1"))
+    sid = _new_session(chat_client)["id"]
+    chat_client.post(_url(sid, "/messages"), json={"content": "q1"})
+    q1 = _transcript(chat_client, sid)["messages"][0]["id"]
+
+    release, started = threading.Event(), threading.Event()
+    _blocking_harness(monkeypatch, release, started)
+    first: dict = {}
+    thread = threading.Thread(
+        target=lambda: first.setdefault(
+            "response", chat_client.post(_url(sid, "/messages"), json={"content": "q2"})
+        ),
+        daemon=True,  # never hold the test process if an assertion below fails
+    )
+    thread.start()
+    try:
+        assert started.wait(5)
+        assert _transcript(chat_client, sid)["streaming"] is True
+        listed = {s["id"]: s for s in chat_client.get("/api/chat/sessions").json()}
+        assert listed[sid]["streaming"] is True
+        for method, path, body in (
+            ("post", "/messages", {"content": "q3"}),
+            ("post", f"/messages/{q1}/edit", {"content": "x"}),
+            ("post", f"/messages/{q1}/regenerate", None),
+            ("post", "/branch", {"message_id": q1}),
+            ("delete", "", None),
+        ):
+            kwargs = {"json": body} if body is not None else {}
+            response = getattr(chat_client, method)(_url(sid, path), **kwargs)
+            assert response.status_code == 409, path
+            assert response.json()["code"] == "turn_in_progress"
+    finally:
+        release.set()
+        thread.join(10)
+    assert [f["type"] for f in _frames(first["response"])] == ["text_delta", "done"]
+    assert _transcript(chat_client, sid)["streaming"] is False
+    assert chat_client.delete(_url(sid)).status_code == 204
+
+
+def test_two_orgs_style_keys_do_not_collide() -> None:
+    """The lease key is the resolved DB path, so slugs and session ids may repeat."""
+    a = ("/data/projects/org-a/demo/whygraph.db", 1)
+    b = ("/data/projects/org-b/demo/whygraph.db", 1)
+    holder_a, holder_b = object(), object()
+    serve_chat._acquire(a, holder_a)
+    try:
+        serve_chat._acquire(b, holder_b)  # no 409
+        serve_chat._release(b, holder_b)
+    finally:
+        serve_chat._release(a, holder_a)
+    assert a not in serve_chat._LEASES and b not in serve_chat._LEASES
+
+
+def _job(client, sid: int, content: str = "q"):
+    with use_project(client.context()):
+        user_id = serve_chat._persist_user_message(sid, content)
+        key = serve_chat._lease_key(sid)
+        job = serve_chat.TurnJob(key, sid, "openai", "gpt-4o", start_id=user_id)
+        serve_chat._acquire(key, job)
+    return job, key
+
+
+def test_a_never_read_response_still_finishes_and_releases(
+    chat_client, monkeypatch
+) -> None:
+    _stub_harness(monkeypatch, _reply("written anyway"))
+    sid = _new_session(chat_client)["id"]
+    job, key = _job(chat_client, sid)
+    with use_project(chat_client.context()):
+        job.start()  # nobody iterates `job.frames()`
+        _wait_released(key)
+    assert _path(chat_client, sid)[-1] == ("assistant", "written anyway")
+
+
+def test_a_worker_whose_error_flush_fails_still_releases(
+    chat_client, monkeypatch
+) -> None:
+    def _fails(*, client, history, registry=None, **kwargs):
+        raise LlmError("boom")
+        yield  # pragma: no cover -- makes this a generator
+
+    def _gone(*args, **kwargs):
+        raise RuntimeError("project removed")
+
+    monkeypatch.setattr(serve_chat, "make_chat_client", lambda *a, **k: object())
+    monkeypatch.setattr(serve_chat, "run_turn", _fails)
+    sid = _new_session(chat_client)["id"]
+    job, key = _job(chat_client, sid)
+    monkeypatch.setattr(serve_chat, "_persist_assistant_turn", _gone)
+    with use_project(chat_client.context()):
+        job.start()
+        _wait_released(key)
+    assert job not in serve_chat._LIVE_TURNS
+
+
+def test_stop_aborts_the_stream_records_stopped_and_releases(
+    chat_client, monkeypatch
+) -> None:
+    release, started = threading.Event(), threading.Event()
+    _blocking_harness(monkeypatch, release, started)
+    aborted = threading.Event()
+
+    class _Client:
+        def abort(self):
+            aborted.set()
+            raise OSError("socket already gone")  # swallowed by stop()
+
+    monkeypatch.setattr(serve_chat, "make_chat_client", lambda *a, **k: _Client())
+    sid = _new_session(chat_client)["id"]
+    job, key = _job(chat_client, sid)
+    with use_project(chat_client.context()):
+        job.start()
+        assert started.wait(5)
+        job.stop()
+        _wait_released(key)
+    assert aborted.is_set()
+    messages = _transcript(chat_client, sid)["messages"]
+    assert (messages[-1]["role"], messages[-1]["error"]) == ("assistant", "Stopped.")
+    # A send right after Stop goes through.
+    _stub_harness(monkeypatch, _reply("next"))
+    assert (
+        chat_client.post(_url(sid, "/messages"), json={"content": "again"}).status_code
+        == 200
+    )
+
+
+def test_stop_all_turns_cancels_live_turns(chat_client, monkeypatch) -> None:
+    release, started = threading.Event(), threading.Event()
+    _blocking_harness(monkeypatch, release, started)
+    sid = _new_session(chat_client)["id"]
+    job, key = _job(chat_client, sid)
+    with use_project(chat_client.context()):
+        job.start()
+        assert started.wait(5)
+        assert job in serve_chat._LIVE_TURNS
+        serve_chat.stop_all_turns()
+        _wait_released(key)
+    assert job.cancel_event.is_set()
+    assert _transcript(chat_client, sid)["messages"][-1]["error"] == "Stopped."
+
+
+def test_a_silent_turn_carries_heartbeats(chat_client, monkeypatch) -> None:
+    monkeypatch.setattr(serve_chat, "HEARTBEAT_SEC", 0.2)
+    monkeypatch.setattr(serve_chat, "POLL_SEC", 0.05)
+
+    def _slow(*, client, history, registry=None, **kwargs):
+        time.sleep(1.0)
+        yield from _reply("finally")
+
+    monkeypatch.setattr(serve_chat, "make_chat_client", lambda *a, **k: object())
+    monkeypatch.setattr(serve_chat, "run_turn", _slow)
+    sid = _new_session(chat_client)["id"]
+    response = chat_client.post(_url(sid, "/messages"), json={"content": "q"})
+    assert ": heartbeat\n\n" in response.text
+    assert [f["type"] for f in _frames(response)] == ["text_delta", "done"]
+
+
+def test_effort_resolution_and_session_fields(chat_client, monkeypatch) -> None:
+    use_project_config(
+        chat_client,
+        monkeypatch,
+        Config(llm=_llm(*CHAT_PROVIDER_TAGS), chat=ChatConfig(effort="low")),
+    )
+    providers = chat_client.get("/api/chat/providers").json()
+    assert {p["default_effort"] for p in providers} == {"low"}
+
+    seen: list = []
+
+    def _record(*, client, history, registry=None, effort=None, **kwargs):
+        seen.append(effort)
+        yield from _reply("a")
+
+    monkeypatch.setattr(serve_chat, "make_chat_client", lambda *a, **k: object())
+    monkeypatch.setattr(serve_chat, "run_turn", _record)
+
+    session = _new_session(chat_client)
+    sid = session["id"]
+    assert session["effort"] is None and session["streaming"] is False
+    chat_client.post(_url(sid, "/messages"), json={"content": "q1"})
+    assert seen[-1] == "low"  # the [chat].effort default
+    assert _transcript(chat_client, sid)["messages"][-1]["effort"] == "low"
+
+    patched = chat_client.patch(_url(sid), json={"effort": "max"})
+    assert patched.status_code == 200 and patched.json()["effort"] == "max"
+    chat_client.post(_url(sid, "/messages"), json={"content": "q2"})
+    assert seen[-1] == "max"  # the session's level wins
+
+    # A PATCH without `effort` leaves it; an explicit null resets it.
+    assert chat_client.patch(_url(sid), json={"title": "t"}).json()["effort"] == "max"
+    assert chat_client.patch(_url(sid), json={"effort": None}).json()["effort"] is None
+    chat_client.post(_url(sid, "/messages"), json={"content": "q3"})
+    assert seen[-1] == "low"
+    assert _transcript(chat_client, sid)["effort"] is None
+
+    for bad in ("turbo", ""):
+        response = chat_client.patch(_url(sid), json={"effort": bad})
+        assert response.status_code == 400 and response.json()["code"] == "bad_effort"
+    response = chat_client.post("/api/chat/sessions", json={"effort": "turbo"})
+    assert response.status_code == 400 and response.json()["code"] == "bad_effort"
+    assert _new_session(chat_client, effort="xhigh")["effort"] == "xhigh"
+
+
+def test_a_continued_reply_is_one_message_next_turn(chat_client, monkeypatch) -> None:
+    _stub_harness(
+        monkeypatch,
+        [
+            TextDelta(text="Part"),
+            RoundUsage(
+                output_tokens=5,
+                finish_reason="max_tokens",
+                replay={"reasoning_content": "r1"},
+            ),
+            Continuation(attempt=1, finish_reason="max_tokens"),
+            TextDelta(text=" two."),
+            RoundUsage(
+                output_tokens=3,
+                finish_reason="end_turn",
+                replay={"reasoning_content": "r2"},
+            ),
+            TurnDone("end_turn"),
+        ],
+    )
+    sid = _new_session(chat_client)["id"]
+    frames = _frames(chat_client.post(_url(sid, "/messages"), json={"content": "q1"}))
+    assert {"type": "continuation", "attempt": 1} in frames
+    rows = _transcript(chat_client, sid)["messages"]
+    assert [(m["content"], m["finish_reason"]) for m in rows[1:]] == [
+        ("Part", "max_tokens"),
+        (" two.", "end_turn"),
+    ]
+
+    spy = _stub_harness(monkeypatch, _reply("ok"))
+    chat_client.post(_url(sid, "/messages"), json={"content": "q2"})
+    assistant = [m for m in spy.history if m.role == "assistant"]
+    assert [m.content for m in assistant] == ["Part two."]
+    assert assistant[0].replay == {"reasoning_content": "r1r2"}
+
+
+def test_an_errored_continuation_is_not_merged(chat_client, monkeypatch) -> None:
+    sid = _new_session(chat_client)["id"]
+    _seed_rows(
+        chat_client,
+        sid,
+        [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "Part", "finish_reason": "max_tokens"},
+            {"role": "assistant", "content": " cut", "error": "Stopped."},
+        ],
+    )
+    spy = _stub_harness(monkeypatch, _reply("ok"))
+    chat_client.post(_url(sid, "/messages"), json={"content": "q2"})
+    assert [m.content for m in spy.history if m.role == "assistant"] == ["Part", " cut"]
+
+
+def test_new_frames_for_the_turn_endings(chat_client, monkeypatch) -> None:
+    _stub_harness(
+        monkeypatch,
+        [
+            RoundUsage(input_tokens=1, finish_reason="end_turn"),
+            EmptyReply(),
+            ContextTrimmed(rounds_elided=2),
+            TextDelta(text="answer"),
+            RoundUsage(finish_reason="end_turn"),
+            TurnDone("end_turn"),
+        ],
+    )
+    sid = _new_session(chat_client)["id"]
+    frames = _frames(chat_client.post(_url(sid, "/messages"), json={"content": "q"}))
+    assert {"type": "empty_reply"} in frames
+    assert {"type": "context_trimmed", "rounds_elided": 2} in frames
+    # The silent round (it reported tokens) is its own row, before the answer.
+    rows = _transcript(chat_client, sid)["messages"]
+    assert [m["content"] for m in rows] == ["q", "", "answer"]
+
+
+def test_effort_unsupported_is_coded(chat_client, monkeypatch) -> None:
+    def _rejected(*, client, history, registry=None, **kwargs):
+        raise LlmError("output_config.effort: not supported", code="effort_unsupported")
+        yield  # pragma: no cover -- makes this a generator
+
+    monkeypatch.setattr(serve_chat, "make_chat_client", lambda *a, **k: object())
+    monkeypatch.setattr(serve_chat, "run_turn", _rejected)
+    sid = _new_session(chat_client)["id"]
+    frames = _frames(chat_client.post(_url(sid, "/messages"), json={"content": "q"}))
+    assert frames[-1]["code"] == "effort_unsupported"

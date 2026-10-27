@@ -96,6 +96,7 @@ from whygraph.core.usage import UsageBlocked
 from whygraph.mcp.errors import WhyGraphError
 from whygraph.serve.app import _mount_static
 from whygraph.serve.chat import router as chat_router
+from whygraph.serve.chat import stop_all_turns
 from whygraph.serve.errors import whygraph_error_handler
 from whygraph.serve.routes import generate_router
 from whygraph.serve.routes import router as data_router
@@ -212,10 +213,15 @@ class PortalServer(uvicorn.Server):
             state.server = self  # a lost instance lock sets our should_exit
 
     async def shutdown(self, sockets=None) -> None:  # noqa: ANN001 -- uvicorn's signature
-        """Set the portal's shutdown event, then run uvicorn's shutdown."""
+        """Set the portal's shutdown event, stop chat turns, then shut down.
+
+        Chat turns run on daemon worker threads; stopping them aborts their
+        provider streams so they persist "Stopped." within the grace period.
+        """
         state: PortalState | None = getattr(self._portal_app.state, "portal", None)
         if state is not None and state.shutdown_event is not None:
             state.shutdown_event.set()
+        stop_all_turns()
         await super().shutdown(sockets=sockets)
 
 

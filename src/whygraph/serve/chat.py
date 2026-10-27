@@ -31,22 +31,32 @@ filled, not from a ``portal`` import, so ``serve/`` stays below the portal.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
+import queue
+import threading
+import time
+from collections import defaultdict
 from collections.abc import Iterator
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlmodel import col, func, select
+from sqlmodel import col, delete, func, select
 
 from whygraph.chat.harness import (
     BudgetStop,
+    ContextTrimmed,
+    Continuation,
+    EmptyReply,
     RoundLimit,
     RoundUsage,
     ToolCallStarted,
     ToolResultReady,
+    TurnCancelled,
     run_turn,
 )
 from whygraph.chat.tools import ToolRegistry
@@ -60,6 +70,7 @@ from whygraph.services.llm import LlmError, LlmKeyMissing
 from whygraph.services.llm.exceptions import is_unreachable
 from whygraph.services.llm.chat import (
     CHAT_PROVIDERS,
+    EFFORT_LEVELS,
     ChatMessage,
     ModelInfo,
     TextDelta,
@@ -103,24 +114,44 @@ class CreateSessionBody(BaseModel):
     provider: str | None = None
     model: str | None = None
     title: str | None = None
+    effort: str | None = None
 
 
 class UpdateSessionBody(BaseModel):
     """Body for ``PATCH /api/chat/sessions/{id}``. Every field optional.
 
-    Provider and model are mutable so the header dropdowns can switch
-    models mid-conversation; the change applies from the next turn.
+    Provider, model and effort are mutable so the header dropdowns can
+    switch mid-conversation; the change applies from the next turn. An
+    explicit ``"effort": null`` resets the session to the ``[chat].effort``
+    default.
     """
 
     title: str | None = None
     provider: str | None = None
     model: str | None = None
+    effort: str | None = None
 
 
 class SendMessageBody(BaseModel):
-    """Body for ``POST /api/chat/sessions/{id}/messages``."""
+    """Body for ``POST /api/chat/sessions/{id}/messages`` (and ``.../edit``)."""
 
     content: str
+
+
+class BranchBody(BaseModel):
+    """Body for ``POST /api/chat/sessions/{id}/branch``."""
+
+    message_id: int
+
+
+def _check_effort(effort: str | None) -> None:
+    """400 ``bad_effort`` unless ``effort`` is unset or one of the levels."""
+    if effort is not None and effort not in EFFORT_LEVELS:
+        raise ServeError(
+            400,
+            f"{effort!r} is not an effort level; available: {EFFORT_LEVELS}",
+            code="bad_effort",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -129,12 +160,17 @@ class SendMessageBody(BaseModel):
 
 
 def _session_dict(row: ChatSessionRow, *, message_count: int | None = None) -> dict:
-    """Serialize a session row for the sidebar / detail responses."""
+    """Serialize a session row for the sidebar / detail responses.
+
+    ``streaming`` is true while a reply is being written in the session.
+    """
     payload = {
         "id": row.id,
         "title": row.title,
         "provider": row.provider,
         "model": row.model,
+        "effort": row.effort,
+        "streaming": _is_streaming(_lease_key(row.id)),
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }
@@ -164,6 +200,9 @@ def _message_dict(row: ChatMessageRow) -> dict:
         "provider": row.provider,
         "model": row.model,
         "error": row.error,
+        "finish_reason": row.finish_reason,
+        "effort": row.effort,
+        "parent_id": row.parent_id,
         "created_at": row.created_at,
     }
 
@@ -239,6 +278,7 @@ def providers() -> list[dict]:
     Keyless providers are listed with ``configured: false`` so the UI can
     show an existing session's own provider; the UI hides the rest. Exactly
     one entry (at most) has ``default: true``: where a new session starts.
+    Every entry carries ``default_effort``, the merged ``[chat].effort``.
     """
     config = get_config()
     default = default_chat_provider(config)
@@ -248,6 +288,8 @@ def providers() -> list[dict]:
             "configured": _is_configured(provider, config),
             "default_model": config.model_for("chat", provider=provider).model,
             "default": provider == default,
+            # The merged `[chat].effort`: what a chat with no level runs at.
+            "default_effort": config.chat.effort,
         }
         for provider in CHAT_PROVIDERS
     ]
@@ -349,6 +391,7 @@ def create_session(request: Request, body: CreateSessionBody | None = None) -> d
     later. The caller's uid is stored as ``owner_uid`` in both modes.
     """
     body = body or CreateSessionBody()
+    _check_effort(body.effort)
     if body.provider and body.provider not in CHAT_PROVIDERS:
         raise ServeError(
             400,
@@ -377,6 +420,7 @@ def create_session(request: Request, body: CreateSessionBody | None = None) -> d
         title=(body.title or DEFAULT_TITLE)[:TITLE_MAX_CHARS],
         provider=provider,
         model=model,
+        effort=body.effort,
         created_at=now,
         updated_at=now,
         owner_uid=_caller_uid(request),
@@ -400,23 +444,30 @@ def _require_session(
 
 @router.get("/sessions/{session_id}")
 def get_transcript(session_id: int, request: Request) -> dict:
-    """One session plus its full transcript, for replay after a restart."""
+    """One session plus its visible transcript, for replay after a restart.
+
+    ``messages`` is the **active path**: root to ``active_leaf_id``, every
+    row as stored (errors included - only the model's history is
+    sanitized). ``versions`` gives each path row that has siblings its
+    ``{index, count, siblings}``. ``message_count`` counts every row of the
+    session, on any branch.
+    """
     with get_session() as session:
         row = _require_session(session, session_id, _owner_filter(request))
-        messages = session.exec(
-            select(ChatMessageRow)
-            .where(ChatMessageRow.session_id == session_id)
-            .order_by(col(ChatMessageRow.id))
-        ).all()
+        rows = _session_rows(session, session_id)
+        leaf = _leaf_id(row, rows)
+        path = _path_ids(rows, leaf)
         return {
-            **_session_dict(row, message_count=len(messages)),
-            "messages": [_message_dict(m) for m in messages],
+            **_session_dict(row, message_count=len(rows)),
+            "active_leaf_id": leaf,
+            "versions": _versions(rows, path),
+            "messages": [_message_dict(rows[i]) for i in path],
         }
 
 
 @router.patch("/sessions/{session_id}")
 def update_session(session_id: int, body: UpdateSessionBody, request: Request) -> dict:
-    """Update a session's title, provider, and/or model.
+    """Update a session's title, provider, model and/or effort.
 
     A title set here always wins over first-message titling. A provider or
     model change takes effect on the **next** turn — turns already in the
@@ -453,6 +504,10 @@ def update_session(session_id: int, body: UpdateSessionBody, request: Request) -
                 raise ServeError(400, "model must not be empty", code="bad_model")
             row.model = model
 
+        if "effort" in body.model_fields_set:
+            _check_effort(body.effort)
+            row.effort = body.effort
+
         row.updated_at = _now_iso()
         session.add(row)
         session.commit()
@@ -466,17 +521,102 @@ def delete_session(session_id: int, request: Request) -> Response:
 
     Messages are removed explicitly rather than by cascade: the FK has no
     ``ON DELETE`` clause, and ``foreign_keys=ON`` would otherwise reject the
-    parent delete.
+    parent delete. Refused (``409 turn_in_progress``) while a reply is being
+    written: the lease is taken for the transaction.
     """
     with get_session() as session:
-        row = _require_session(session, session_id, _owner_filter(request))
-        for message in session.exec(
-            select(ChatMessageRow).where(ChatMessageRow.session_id == session_id)
-        ).all():
-            session.delete(message)
-        session.delete(row)
-        session.commit()
+        _require_session(session, session_id, _owner_filter(request))
+    key = _lease_key(session_id)
+    holder = object()
+    _acquire(key, holder)
+    try:
+        with get_session() as session:
+            row = _require_session(session, session_id)
+            session.execute(
+                delete(ChatMessageRow).where(
+                    col(ChatMessageRow.session_id) == session_id
+                )
+            )
+            session.delete(row)
+            session.commit()
+    finally:
+        _release(key, holder)
     return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# The conversation tree
+# ---------------------------------------------------------------------------
+
+
+def _session_rows(session, session_id: int) -> dict[int, ChatMessageRow]:
+    """Every row of one session, by id (tree queries never cross sessions)."""
+    return {
+        row.id: row
+        for row in session.exec(
+            select(ChatMessageRow).where(ChatMessageRow.session_id == session_id)
+        ).all()
+    }
+
+
+def _path_ids(rows: dict[int, ChatMessageRow], leaf_id: int | None) -> list[int]:
+    """The ids from the root to ``leaf_id``, following ``parent_id``.
+
+    Stops at a missing parent or a parent whose id is not lower (parents are
+    always written first), so corrupt data cannot loop.
+    """
+    path: list[int] = []
+    current = leaf_id
+    while current is not None and current in rows:
+        if path and current >= path[-1]:
+            break
+        path.append(current)
+        current = rows[current].parent_id
+    path.reverse()
+    return path
+
+
+def _leaf_id(row: ChatSessionRow, rows: dict[int, ChatMessageRow]) -> int | None:
+    """The session's active leaf, or its newest row when the leaf is unset."""
+    if row.active_leaf_id is not None and row.active_leaf_id in rows:
+        return row.active_leaf_id
+    return max(rows) if rows else None
+
+
+def _children(rows: dict[int, ChatMessageRow]) -> dict[int | None, list[int]]:
+    """Child ids per parent id (``None`` holds the roots), ascending."""
+    children: dict[int | None, list[int]] = defaultdict(list)
+    for row_id in sorted(rows):
+        children[rows[row_id].parent_id].append(row_id)
+    return children
+
+
+def _versions(rows: dict[int, ChatMessageRow], path: list[int]) -> dict[str, dict]:
+    """``{"<id>": {index, count, siblings}}`` for each path row with siblings.
+
+    ``index`` is 1-based and ``siblings`` ascending, so the UI can show
+    ``‹ 2/3 ›`` and branch to a neighbour.
+    """
+    children = _children(rows)
+    versions: dict[str, dict] = {}
+    for row_id in path:
+        siblings = children[rows[row_id].parent_id]
+        if len(siblings) > 1:
+            versions[str(row_id)] = {
+                "index": siblings.index(row_id) + 1,
+                "count": len(siblings),
+                "siblings": siblings,
+            }
+    return versions
+
+
+def _deepest(rows: dict[int, ChatMessageRow], start: int) -> int:
+    """The deepest descendant of ``start``, taking the newest child each level."""
+    children = _children(rows)
+    current = start
+    while children.get(current):
+        current = children[current][-1]
+    return current
 
 
 # ---------------------------------------------------------------------------
@@ -564,13 +704,64 @@ def _sanitize_history(rows: list[tuple[ChatMessage, str | None]]) -> list[ChatMe
     return history
 
 
-def _load_history(session_id: int) -> list[ChatMessage]:
-    """Read a session's persisted rows as port :class:`ChatMessage`s.
+def _merge_continuations(
+    rows: list[tuple[ChatMessage, str | None]],
+) -> list[tuple[ChatMessage, str | None]]:
+    """Join a reply that was continued after the output limit back into one.
+
+    A continuation is written as its own row right after the truncated one,
+    with no tool rows between them; the model saw (and must see again) one
+    reply. A row that has an ``error`` is never merged.
+    """
+    merged: list[tuple[ChatMessage, str | None]] = []
+    for message, error in rows:
+        if merged:
+            previous, previous_error = merged[-1]
+            if (
+                message.role == "assistant"
+                and previous.role == "assistant"
+                and not previous.tool_calls
+                and error is None
+                and previous_error is None
+            ):
+                merged[-1] = (
+                    ChatMessage(
+                        role="assistant",
+                        content=previous.content + message.content,
+                        tool_calls=message.tool_calls,
+                        replay=_merge_replay(previous.replay, message.replay),
+                    ),
+                    None,
+                )
+                continue
+        merged.append((message, error))
+    return merged
+
+
+def _merge_replay(first, second):
+    """Concatenate two rows' persisted ``reasoning_content``, in order."""
+    parts = [
+        r["reasoning_content"]
+        for r in (first, second)
+        if r and "reasoning_content" in r
+    ]
+    return {"reasoning_content": "".join(parts)} if parts else None
+
+
+def _load_history(session_id: int, start_id: int) -> list[ChatMessage]:
+    """Read the path from the root to ``start_id`` as port :class:`ChatMessage`s.
+
+    ``start_id`` is the row the new turn answers - the new user row for a
+    send or an edit, the question itself for a regenerate - never the
+    session's leaf: on a regenerate the leaf still points at the old reply
+    until the first new row is written, and walking from it would send that
+    reply as the conversation's last message.
 
     The system prompt is not among them — it is re-rendered per turn (see
-    :func:`whygraph.chat.harness.build_system_prompt`). The rows pass
-    through :func:`_sanitize_history`, so an errored or orphaned row never
-    reaches the provider.
+    :func:`whygraph.chat.harness.build_system_prompt`). Continued replies
+    are merged (:func:`_merge_continuations`), then the rows pass through
+    :func:`_sanitize_history`, so an errored or orphaned row never reaches
+    the provider.
 
     Rows are converted to port dataclasses **inside** the session: ``get_session``
     commits on exit, which expires every loaded attribute, so touching a row
@@ -578,12 +769,9 @@ def _load_history(session_id: int) -> list[ChatMessage]:
     """
     history: list[tuple[ChatMessage, str | None]] = []
     with get_session() as session:
-        rows = session.exec(
-            select(ChatMessageRow)
-            .where(ChatMessageRow.session_id == session_id)
-            .order_by(col(ChatMessageRow.id))
-        ).all()
-        for row in rows:
+        rows = _session_rows(session, session_id)
+        for row_id in _path_ids(rows, start_id):
+            row = rows[row_id]
             calls = tuple(
                 ToolCall(id=c["id"], name=c["name"], arguments=c["arguments"])
                 for c in json.loads(row.tool_calls)
@@ -600,51 +788,73 @@ def _load_history(session_id: int) -> list[ChatMessage]:
                     row.error,
                 )
             )
-    return _sanitize_history(history)
+    return _sanitize_history(_merge_continuations(history))
 
 
-def _persist_user_message(session_id: int, content: str) -> int:
-    """Write the user row and apply first-message titling.
+def _append_row(session_id: int, message: ChatMessageRow, *, now: str) -> int:
+    """Write one row as the session's new leaf and return its id.
 
-    Persisted **before** the model is called so a provider failure still
-    leaves the question in the transcript — the user can retry without
-    retyping.
+    Exclusivity comes from the turn lease (:func:`_acquire`), so moving the
+    leaf needs no compare-and-set.
     """
-    now = _now_iso()
     with get_session() as session:
         row = _require_session(session, session_id)
-        is_first = (
-            session.exec(
-                select(func.count())
-                .select_from(ChatMessageRow)
-                .where(ChatMessageRow.session_id == session_id)
-            ).one()
-            == 0
-        )
-        if is_first and row.title == DEFAULT_TITLE:
-            row.title = content.strip()[:TITLE_MAX_CHARS] or DEFAULT_TITLE
+        session.add(message)
+        session.flush()
+        row.active_leaf_id = message.id
         row.updated_at = now
         session.add(row)
-        message = ChatMessageRow(
-            session_id=session_id,
-            role="user",
-            content=content,
-            created_at=now,
-        )
-        session.add(message)
         session.commit()
         session.refresh(message)
         return message.id
 
 
+def _persist_user_message(
+    session_id: int, content: str, *, edit_of: int | None = None
+) -> int:
+    """Write the user row and apply first-message titling.
+
+    Persisted **before** the model is called so a provider failure still
+    leaves the question in the transcript — the user can retry without
+    retyping. A new message hangs under the session's leaf; an edit is a
+    sibling of the row it edits (same parent) and never retitles the
+    session. Called under the turn lease, so the leaf read here is current.
+    """
+    now = _now_iso()
+    with get_session() as session:
+        row = _require_session(session, session_id)
+        rows = _session_rows(session, session_id)
+        if edit_of is not None:
+            parent_id = rows[edit_of].parent_id
+        else:
+            parent_id = _leaf_id(row, rows)
+            if not rows and row.title == DEFAULT_TITLE:
+                row.title = content.strip()[:TITLE_MAX_CHARS] or DEFAULT_TITLE
+                session.add(row)
+                session.commit()
+    return _append_row(
+        session_id,
+        ChatMessageRow(
+            session_id=session_id,
+            parent_id=parent_id,
+            role="user",
+            content=content,
+            created_at=now,
+        ),
+        now=now,
+    )
+
+
 def _persist_assistant_turn(
     session_id: int,
     *,
+    parent_id: int | None,
     text: str,
     calls: list[ToolCall],
     usage: RoundUsage | None,
     provider: str,
     model: str,
+    effort: str | None = None,
     error: str | None = None,
 ) -> int:
     """Write one assistant row (one provider round) and return its row id.
@@ -653,25 +863,29 @@ def _persist_assistant_turn(
     from the session later: the session's pair can change between turns, so
     only the value in force *at this turn* is a truthful attribution. When
     the round reported the model it actually served, that wins over the
-    requested ``model``.
+    requested ``model``. The row becomes the session's leaf.
 
     Parameters
     ----------
+    parent_id : int or None
+        The row this one follows: the previous row the turn wrote, or the
+        question for its first row.
     usage : RoundUsage or None
         The round's usage; ``None`` for a round that never finished (an
         error or an abort), whose row then carries no tokens.
+    effort : str or None, optional
+        The effort level the turn ran at.
     error : str or None, optional
         Why the turn failed, if it did. Stored alongside whatever text did
         arrive, so a refresh replays the failure instead of showing a user
         message with no reply.
     """
     now = _now_iso()
-    with get_session() as session:
-        row = _require_session(session, session_id)
-        row.updated_at = now
-        session.add(row)
-        message = ChatMessageRow(
+    return _append_row(
+        session_id,
+        ChatMessageRow(
             session_id=session_id,
+            parent_id=parent_id,
             role="assistant",
             content=text,
             tool_calls=json.dumps(
@@ -683,27 +897,218 @@ def _persist_assistant_turn(
             model=(usage.model if usage and usage.model else model),
             error=error,
             replay=_persisted_replay(usage.replay) if usage else None,
+            finish_reason=usage.finish_reason if usage else None,
+            effort=effort,
             created_at=now,
-        )
-        session.add(message)
-        session.commit()
-        session.refresh(message)
-        return message.id
+        ),
+        now=now,
+    )
 
 
-def _persist_tool_result(session_id: int, call: ToolCall, result: str) -> None:
-    """Write one tool-result row."""
-    with get_session() as session:
-        session.add(
-            ChatMessageRow(
-                session_id=session_id,
-                role="tool",
-                content=result,
-                tool_call_id=call.id,
-                created_at=_now_iso(),
+def _persist_tool_result(
+    session_id: int, call: ToolCall, result: str, *, parent_id: int | None
+) -> int:
+    """Write one tool-result row as the session's leaf and return its id."""
+    now = _now_iso()
+    return _append_row(
+        session_id,
+        ChatMessageRow(
+            session_id=session_id,
+            parent_id=parent_id,
+            role="tool",
+            content=result,
+            tool_call_id=call.id,
+            created_at=now,
+        ),
+        now=now,
+    )
+
+
+# ---------------------------------------------------------------------------
+# One turn per session: the lease
+# ---------------------------------------------------------------------------
+
+_LEASES: dict[tuple[str, int], object] = {}
+"""Who holds each session: a running :class:`TurnJob`, or a branch / delete
+for the length of its transaction. Keyed on the resolved project DB path,
+because slugs repeat across orgs and session ids restart per project DB."""
+
+_LEASES_LOCK = threading.Lock()
+
+_LIVE_TURNS: set[TurnJob] = set()
+"""Turns whose worker is running, for :func:`stop_all_turns` at shutdown."""
+
+
+def _lease_key(session_id: int) -> tuple[str, int]:
+    """The lease key for a session of the bound project."""
+    return (str(Path(get_config().whygraph_db).resolve()), session_id)
+
+
+def _acquire(key: tuple[str, int], holder: object) -> None:
+    """Take the session's lease, or 409 ``turn_in_progress`` when it is held."""
+    with _LEASES_LOCK:
+        if key in _LEASES:
+            raise ServeError(
+                409,
+                "a reply is still being written in this chat",
+                code="turn_in_progress",
             )
-        )
-        session.commit()
+        _LEASES[key] = holder
+
+
+def _release(key: tuple[str, int], holder: object) -> None:
+    """Give the lease back, only if ``holder`` still has it."""
+    with _LEASES_LOCK:
+        if _LEASES.get(key) is holder:
+            del _LEASES[key]
+
+
+def _is_streaming(key: tuple[str, int]) -> bool:
+    """Whether the session's lease is held (a reply is being written)."""
+    with _LEASES_LOCK:
+        return key in _LEASES
+
+
+POLL_SEC = 1.0
+"""How long :meth:`TurnJob.frames` waits for a frame before yielding an
+empty chunk, which bounds how late a disconnect (and so a Stop) is noticed."""
+
+HEARTBEAT_SEC = 15.0
+"""Silence after which the stream carries an SSE comment, so an edge proxy
+(Cloudflare cuts silent streams at 100 s) keeps the connection."""
+
+_END = object()
+"""The sentinel the worker puts last on a turn's frame queue."""
+
+
+class TurnJob:
+    """One chat turn, run on its own worker thread.
+
+    The handler starts the worker and returns at once; the response streams
+    :meth:`frames`, which only reads the queue the worker fills. So the turn
+    finishes (and its rows land) even when nobody reads the response, and
+    the worker - never the response - releases the session's lease.
+
+    Parameters
+    ----------
+    key : tuple[str, int]
+        The lease key.
+    session_id : int
+        The session.
+    provider, model : str
+        The session's pair, recorded on every assistant row.
+    start_id : int
+        The row the turn answers (see :func:`_load_history`).
+    effort : str or None
+        The resolved effort level.
+
+    Attributes
+    ----------
+    cancel_event : threading.Event
+        Set by :meth:`stop`; the harness checks it.
+    client : ChatClient or None
+        The provider client, once built, for :meth:`stop` to abort.
+    """
+
+    def __init__(
+        self,
+        key: tuple[str, int],
+        session_id: int,
+        provider: str,
+        model: str,
+        *,
+        start_id: int = 0,
+        effort: str | None = None,
+    ) -> None:
+        self.key = key
+        self.session_id = session_id
+        self.provider = provider
+        self.model = model
+        self.start_id = start_id
+        self.parent_id: int | None = start_id
+        self.effort = effort
+        self.cancel_event = threading.Event()
+        self.client = None
+        self.queue: queue.Queue = queue.Queue()
+
+    def start(self) -> None:
+        """Run :meth:`run` on a daemon thread, in a copy of this context.
+
+        The handler runs in a copy of the request's context, where the
+        portal bound the project, strict mode and the usage sink; the copy
+        carries them to the worker.
+        """
+        _LIVE_TURNS.add(self)
+        threading.Thread(
+            target=contextvars.copy_context().run,
+            args=(self.run,),
+            name=f"chat-turn-{self.session_id}",
+            daemon=True,
+        ).start()
+
+    def run(self) -> None:
+        """Run the turn, persisting rows and queueing frames; always release."""
+        try:
+            for frame in _turn_frames(self):
+                self.queue.put(frame)
+        except Exception:  # noqa: BLE001 -- e.g. the project was removed mid-turn
+            _log.warning(
+                "chat turn for session %s ended without its rows",
+                self.session_id,
+                exc_info=True,
+            )
+        finally:
+            # Release before the sentinel: a client that reads the response to
+            # its end (the test client) may start the next turn at once.
+            _release(self.key, self)
+            _LIVE_TURNS.discard(self)
+            self.queue.put(_END)
+
+    def frames(self) -> Iterator[str]:
+        """The response body: queued frames, heartbeats, and empty chunks.
+
+        Every ``next()`` returns within about :data:`POLL_SEC` (an empty
+        chunk writes nothing), so a disconnect is noticed promptly. When the
+        response is abandoned the generator only signals :meth:`stop`: it may
+        be finalized on the event-loop thread, so no join and no DB work
+        happen here.
+        """
+        last = time.monotonic()
+        try:
+            while True:
+                try:
+                    item = self.queue.get(timeout=POLL_SEC)
+                except queue.Empty:
+                    if time.monotonic() - last >= HEARTBEAT_SEC:
+                        last = time.monotonic()
+                        yield ": heartbeat\n\n"
+                    else:
+                        yield ""
+                    continue
+                if item is _END:
+                    return
+                last = time.monotonic()
+                yield item
+        except GeneratorExit:
+            self.stop()
+            raise
+
+    def stop(self) -> None:
+        """Ask the turn to stop: set the cancel event and abort the stream."""
+        self.cancel_event.set()
+        abort = getattr(self.client, "abort", None)
+        if abort is None:
+            return
+        try:
+            abort()
+        except Exception:  # noqa: BLE001 -- runs during generator finalization
+            _log.warning("aborting the chat stream failed", exc_info=True)
+
+
+def stop_all_turns() -> None:
+    """Stop every running chat turn (portal shutdown)."""
+    for job in list(_LIVE_TURNS):
+        job.stop()
 
 
 BUDGET_STOP_MESSAGE = (
@@ -713,7 +1118,14 @@ BUDGET_STOP_MESSAGE = (
 """The assistant row a :class:`~whygraph.chat.harness.BudgetStop` writes
 (``error = "budget_exceeded"``), so a refresh replays why the turn ended."""
 
-_ROUND_FLUSH_EVENTS: tuple[type, ...] = (TextDelta, RoundUsage, RoundLimit, BudgetStop)
+_ROUND_FLUSH_EVENTS: tuple[type, ...] = (
+    TextDelta,
+    RoundUsage,
+    RoundLimit,
+    Continuation,
+    EmptyReply,
+    BudgetStop,
+)
 """Harness events that, once a round's :class:`RoundUsage` has arrived,
 start something new and so flush that round's buffer as its row. The turn's
 end flushes too. A new terminal or round-opening event joins this tuple."""
@@ -723,6 +1135,7 @@ def _sse_error_code(exc: BaseException) -> str:
     """The ``code`` of an in-band ``error`` frame for a failed turn.
 
     ``no_llm_key`` when the adapter found no key for the provider,
+    ``effort_unsupported`` when the model rejected the effort parameter,
     ``llm_unavailable`` when the provider could not be reached or the
     stream was cut (:func:`~whygraph.services.llm.exceptions.is_unreachable`),
     else ``provider_error``. ``tests/test_error_codes.py`` reads the
@@ -730,6 +1143,8 @@ def _sse_error_code(exc: BaseException) -> str:
     """
     if isinstance(exc, LlmKeyMissing):
         return "no_llm_key"
+    if getattr(exc, "code", None) == "effort_unsupported":
+        return "effort_unsupported"
     if is_unreachable(exc):
         return "llm_unavailable"
     return "provider_error"
@@ -768,40 +1183,47 @@ def _error_frame(exc: BaseException, provider: str, message: str) -> tuple[str, 
     return _frame(frame), message
 
 
-def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
-    """Run one turn, yielding SSE frames and persisting rows as they land.
+def _turn_frames(job: TurnJob) -> Iterator[str]:
+    """Run one turn on the worker, yielding SSE frames and persisting rows.
 
     Each provider round is flushed as **one** assistant row (plus its tool
     rows), so the stored transcript has the shape the harness saw:
     assistant(+calls) → tool results → assistant(+calls) → … → assistant,
-    with every row carrying its own round's tokens and served model. A round
+    with every row carrying its own round's tokens, served model, stop
+    reason and effort, and each row hanging under the previous one. A round
     ends at its :class:`RoundUsage`; the tool events after it still belong
     to it, and the next of :data:`_ROUND_FLUSH_EVENTS` (or the turn's end)
-    writes it.
+    writes it. A stopped turn keeps what arrived, marked ``"Stopped."``.
     """
-    # The portal bound a usage sink in the request task; this body runs in
-    # fresh context copies, so the session goes on the shared scope object.
+    session_id, provider, model = job.session_id, job.provider, job.model
+    # The portal bound a usage sink in the request task; this body runs in a
+    # context copy on the worker, so the session goes on the shared scope.
     set_scope_field(chat_session_id=session_id)
+
+    def _write_assistant(**fields) -> int:
+        job.parent_id = _persist_assistant_turn(
+            session_id,
+            parent_id=job.parent_id,
+            provider=provider,
+            model=model,
+            effort=job.effort,
+            **fields,
+        )
+        return job.parent_id
+
     try:
         client = make_chat_client(provider, model=model)
     except LlmError as exc:
         frame, message = _error_frame(exc, provider, str(exc))
         # Same contract as the mid-turn handlers below: the failure is a row,
         # not just a frame, so a refresh still shows why nothing was answered.
-        _persist_assistant_turn(
-            session_id,
-            text="",
-            calls=[],
-            usage=None,
-            provider=provider,
-            model=model,
-            error=message,
-        )
+        _write_assistant(text="", calls=[], usage=None, error=message)
         yield frame
         return
+    job.client = client
 
     registry = ToolRegistry()
-    history = _load_history(session_id)
+    history = _load_history(session_id, job.start_id)
 
     # One round's worth of buffered state. `round_usage` is set when the
     # round's provider call ends; its tool events still follow, and the next
@@ -829,17 +1251,16 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
         if not (text_parts or round_calls or error or reported):
             round_usage = None
             return None
-        message_id = _persist_assistant_turn(
-            session_id,
+        message_id = _write_assistant(
             text="".join(text_parts),
             calls=round_calls,
             usage=round_usage,
-            provider=provider,
-            model=model,
             error=error,
         )
         for call, result in round_results:
-            _persist_tool_result(session_id, call, result)
+            job.parent_id = _persist_tool_result(
+                session_id, call, result, parent_id=job.parent_id
+            )
         text_parts = []
         round_calls = []
         round_results = []
@@ -847,7 +1268,13 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
         return message_id
 
     try:
-        for event in run_turn(client=client, history=history, registry=registry):
+        for event in run_turn(
+            client=client,
+            history=history,
+            registry=registry,
+            effort=job.effort,
+            cancel=job.cancel_event,
+        ):
             if round_usage is not None and isinstance(event, _ROUND_FLUSH_EVENTS):
                 # The previous round is finished and something new starts.
                 _flush_round()
@@ -886,26 +1313,38 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
             elif isinstance(event, RoundLimit):
                 yield _frame({"type": "round_limit", "rounds": event.rounds})
 
+            elif isinstance(event, Continuation):
+                yield _frame({"type": "continuation", "attempt": event.attempt})
+
+            elif isinstance(event, EmptyReply):
+                yield _frame({"type": "empty_reply"})
+
+            elif isinstance(event, ContextTrimmed):
+                yield _frame(
+                    {"type": "context_trimmed", "rounds_elided": event.rounds_elided}
+                )
+
             elif isinstance(event, BudgetStop):
                 # The previous round (if any) was flushed above; the budget
                 # row is written after the loop, as the turn's last row.
                 budget_stop = event
 
-            else:  # TurnDone - the end-of-turn marker, carrying the total
+            elif isinstance(event, TurnDone):  # the end-of-turn marker, the total
                 last_done = event
 
         final_message_id = _flush_round()
         if budget_stop is not None:
-            final_message_id = _persist_assistant_turn(
-                session_id,
-                text=BUDGET_STOP_MESSAGE,
-                calls=[],
-                usage=None,
-                provider=provider,
-                model=model,
-                error=BUDGET_EXCEEDED,
+            final_message_id = _write_assistant(
+                text=BUDGET_STOP_MESSAGE, calls=[], usage=None, error=BUDGET_EXCEEDED
             )
+    except TurnCancelled:
+        # Stop or a closed tab: keep what arrived, marked so a refresh shows it.
+        _flush_round(error="Stopped.")
+        return
     except LlmError as exc:
+        if job.cancel_event.is_set():
+            _flush_round(error="Stopped.")
+            return
         _log.warning("chat turn failed for session %s: %s", session_id, exc)
         # Whatever arrived before the failure is worth keeping — the user can
         # see how far the model got, and the retry re-sends cleanly. The error
@@ -914,12 +1353,10 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
         _flush_round(error=message)
         yield frame
         return
-    except GeneratorExit:
-        # Client disconnected (Stop button, closed tab). Persist what we have
-        # and re-raise so the server tears the response down cleanly.
-        _flush_round(error="Stopped.")
-        raise
     except Exception as exc:  # noqa: BLE001 -- must not surface as a hung stream
+        if job.cancel_event.is_set():
+            _flush_round(error="Stopped.")
+            return
         _log.warning(
             "chat turn crashed for session %s: %s",
             session_id,
@@ -951,39 +1388,90 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
     )
 
 
-@router.post("/sessions/{session_id}/messages")
-def send_message(
-    session_id: int, body: SendMessageBody, request: Request
-) -> StreamingResponse:
-    """Send a user message and stream the assistant's turn as SSE.
+def _resolve_effort(session_effort: str | None) -> str | None:
+    """The effort a turn runs at: the session's, else ``[chat].effort``, else none."""
+    return session_effort or get_config().chat.effort
 
-    The user row is persisted (and the session titled) **before** streaming
-    starts, so the 404 for an unknown session and any config error still
-    surface as real HTTP failures. Everything after the first frame is
-    in-band — see the module docstring.
 
-    A project an exhausted hard-stopped budget blocks for the caller (the
-    bound context's ``llm_block``) is refused before anything is written:
-    :class:`~whygraph.core.usage.UsageBlocked`, which the portal answers
-    with ``403 budget_exceeded`` (M2f-2 plan section 4.7).
+def _preflight(
+    request: Request,
+    session_id: int,
+    message_id: int | None = None,
+    *,
+    role: str | None = None,
+    turn: bool = True,
+) -> ChatSessionRow:
+    """Check everything a turn or a branch needs, before anything is written.
+
+    1. The session exists and is the caller's (404 otherwise, as everywhere).
+    2. ``message_id``, when given, is a row of **this** session (and of
+       ``role`` when given); 404 ``not_found`` otherwise.
+    3. For a turn: an exhausted hard-stopped budget refuses it
+       (:class:`~whygraph.core.usage.UsageBlocked`, which the portal answers
+       with ``403 budget_exceeded``), and the provider needs a stored key.
+
+    Returns
+    -------
+    ChatSessionRow
+        The session row (expunged; read its plain columns only).
     """
-    content = body.content.strip()
-    if not content:
-        raise ServeError(400, "content must not be empty", code="bad_content")
-
     with get_session() as session:
         row = _require_session(session, session_id, _owner_filter(request))
-        provider, model = row.provider, row.model
+        if message_id is not None:
+            message = session.get(ChatMessageRow, message_id)
+            if (
+                message is None
+                or message.session_id != session_id
+                or (role is not None and message.role != role)
+            ):
+                raise ServeError(
+                    404, f"message {message_id} not found", code="not_found"
+                )
+        session.expunge(row)
+    if turn:
+        ctx = current_project()
+        if ctx is not None and ctx.llm_block == BUDGET_EXCEEDED:
+            raise UsageBlocked(ctx.llm_block_scope)
+        _require_key(row.provider)
+    return row
 
-    ctx = current_project()
-    if ctx is not None and ctx.llm_block == BUDGET_EXCEEDED:
-        raise UsageBlocked(ctx.llm_block_scope)
 
-    _require_key(provider)
-    _persist_user_message(session_id, content)
+def _start_turn(
+    request: Request,
+    session_id: int,
+    *,
+    content: str | None = None,
+    edit_of: int | None = None,
+    regenerate_of: int | None = None,
+) -> StreamingResponse:
+    """Start a turn: preflight, lease, user row, worker; then stream it.
 
+    The order is the contract: nothing is written before the preflight and
+    the lease, and any failure before the worker starts gives the lease
+    back. From then on the worker owns it.
+    """
+    target = edit_of if edit_of is not None else regenerate_of
+    row = _preflight(request, session_id, target, role="user")
+    key = _lease_key(session_id)
+    job = TurnJob(key, session_id, row.provider, row.model)
+    _acquire(key, job)
+    try:
+        if regenerate_of is not None:
+            # A sibling reply under the same question. The leaf moves when the
+            # first row is written, so a turn that writes nothing leaves the
+            # old reply on the path.
+            job.start_id = job.parent_id = regenerate_of
+        else:
+            user_id = _persist_user_message(session_id, content or "", edit_of=edit_of)
+            job.start_id = job.parent_id = user_id
+        job.effort = _resolve_effort(row.effort)
+        job.start()
+    except BaseException:
+        _release(key, job)
+        _LIVE_TURNS.discard(job)
+        raise
     return StreamingResponse(
-        _turn_frames(session_id, provider, model),
+        job.frames(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -993,4 +1481,81 @@ def send_message(
     )
 
 
-__all__ = ["router"]
+def _content(body: SendMessageBody) -> str:
+    """The message text, or 400 ``bad_content`` when it is blank."""
+    content = body.content.strip()
+    if not content:
+        raise ServeError(400, "content must not be empty", code="bad_content")
+    return content
+
+
+@router.post("/sessions/{session_id}/messages")
+def send_message(
+    session_id: int, body: SendMessageBody, request: Request
+) -> StreamingResponse:
+    """Send a user message and stream the assistant's turn as SSE.
+
+    The user row is persisted (and the session titled) **before** streaming
+    starts, so the 404 for an unknown session and any config error still
+    surface as real HTTP failures. Everything after the first frame is
+    in-band — see the module docstring. A second turn while one is running
+    is ``409 turn_in_progress``.
+
+    A project an exhausted hard-stopped budget blocks for the caller (the
+    bound context's ``llm_block``) is refused before anything is written:
+    :class:`~whygraph.core.usage.UsageBlocked`, which the portal answers
+    with ``403 budget_exceeded`` (M2f-2 plan section 4.7).
+    """
+    return _start_turn(request, session_id, content=_content(body))
+
+
+@router.post("/sessions/{session_id}/messages/{message_id}/edit")
+def edit_message(
+    session_id: int, message_id: int, body: SendMessageBody, request: Request
+) -> StreamingResponse:
+    """Edit a user message: a new sibling version of it, answered as SSE.
+
+    The original and everything after it stay reachable through the version
+    arrows. An edit never retitles the session.
+    """
+    return _start_turn(request, session_id, content=_content(body), edit_of=message_id)
+
+
+@router.post("/sessions/{session_id}/messages/{message_id}/regenerate")
+def regenerate_reply(
+    session_id: int, message_id: int, request: Request
+) -> StreamingResponse:
+    """Answer a user message again: a new sibling reply, streamed as SSE.
+
+    ``message_id`` is the question. The session's current provider, model
+    and effort apply. The old reply stays reachable through the arrows.
+    """
+    return _start_turn(request, session_id, regenerate_of=message_id)
+
+
+@router.post("/sessions/{session_id}/branch")
+def branch_session(session_id: int, body: BranchBody, request: Request) -> dict:
+    """Show another version: move the leaf to the newest end under a row.
+
+    The leaf becomes the deepest descendant of ``message_id``, taking the
+    newest child at each level. Refused while a reply is being written.
+    Returns the transcript.
+    """
+    _preflight(request, session_id, body.message_id, turn=False)
+    key = _lease_key(session_id)
+    holder = object()
+    _acquire(key, holder)
+    try:
+        with get_session() as session:
+            row = _require_session(session, session_id)
+            row.active_leaf_id = _deepest(
+                _session_rows(session, session_id), body.message_id
+            )
+            session.add(row)
+            session.commit()
+    finally:
+        _release(key, holder)
+    return get_transcript(session_id, request)
+
+
+__all__ = ["router", "stop_all_turns"]

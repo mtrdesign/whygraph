@@ -22,6 +22,18 @@ message**, once the stop reason is known: a ``max_tokens`` stop cuts the
 last block off mid-input, and a refusal can cut a ``tool_use`` short, and
 neither may reach the dispatcher. The harness dispatches only after the
 stream ends, so nothing visible changes.
+
+Three contracts shape what is sent back within a turn:
+
+* **Preserved thinking.** Every finished content block (thinking with its
+  signature, text, tool use) is captured from the SDK's accumulated block
+  into :attr:`TurnDone.replay` and the next round sends it back verbatim.
+  The blocks are bound to the exact request prefix, so they are never
+  persisted across turns and the harness strips them when it trims.
+* **Prompt caching.** Exactly three ``cache_control`` breakpoints: the last
+  tool, the stable system block, and the last block of the last message.
+* **Effort.** ``output_config.effort``; a 400 that names it (and is not a
+  thinking-signature error) becomes ``LlmError(code="effort_unsupported")``.
 """
 
 from __future__ import annotations
@@ -29,6 +41,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -49,6 +62,7 @@ from .chat import (
     ToolSpec,
     TurnDone,
 )
+from ._abort import shutdown_stream
 from .exceptions import LlmError, LlmKeyMissing
 from .usage import ANTHROPIC_USAGE_KEYS, anthropic_raw_usage, anthropic_usage_fields
 
@@ -58,6 +72,13 @@ _ENV_VAR = "ANTHROPIC_API_KEY"
 
 DEFAULT_MAX_TOKENS = 32_000
 """Output cap when a request sets none. Thinking counts against it."""
+
+_CACHE = {"type": "ephemeral"}
+"""The ``cache_control`` value every breakpoint carries."""
+
+_EFFORT_ERROR = re.compile(r"\b(effort|output_config)\b")
+_NOT_EFFORT_ERROR = re.compile(r"signature|block_binding|thinking\.type")
+"""A 400 naming the effort parameter, unless it is about replayed thinking."""
 
 
 @dataclass(slots=True)
@@ -106,8 +127,12 @@ class _BlockAccumulator:
 
 
 def _tool_payload(tools: tuple[ToolSpec, ...]) -> list[dict]:
-    """Render :class:`ToolSpec`s into Anthropic's ``tools`` array."""
-    return [
+    """Render :class:`ToolSpec`s into Anthropic's ``tools`` array.
+
+    The last tool carries a cache breakpoint: the tool set is a fixed module
+    tuple, so the whole array is a stable prefix.
+    """
+    payload = [
         {
             "name": spec.name,
             "description": spec.description,
@@ -115,6 +140,70 @@ def _tool_payload(tools: tuple[ToolSpec, ...]) -> list[dict]:
         }
         for spec in tools
     ]
+    if payload:
+        payload[-1]["cache_control"] = dict(_CACHE)
+    return payload
+
+
+def _system_payload(parts: list[str]) -> list[dict]:
+    """Render the system messages as text blocks, the first one cached.
+
+    The harness sends the stable prompt first and the volatile repository
+    overview second, so the breakpoint sits after the part that never
+    changes. Empty parts are skipped (the API refuses empty text blocks).
+    """
+    blocks = [{"type": "text", "text": part} for part in parts if part]
+    if blocks:
+        blocks[0]["cache_control"] = dict(_CACHE)
+    return blocks
+
+
+def _cache_last_block(messages: list[dict]) -> None:
+    """Put the third breakpoint on the last block of the last message.
+
+    A plain-string message becomes a one-block list so the block can carry
+    it. Blocks are copies (see :func:`_message_payload`), so a replayed
+    block never keeps a breakpoint into the next round.
+    """
+    if not messages:
+        return
+    last = messages[-1]
+    content = last["content"]
+    if isinstance(content, str):
+        last["content"] = [
+            {"type": "text", "text": content, "cache_control": dict(_CACHE)}
+        ]
+    elif content:
+        content[-1]["cache_control"] = dict(_CACHE)
+
+
+def _replay_block(block: Any) -> dict | None:
+    """One SDK content block as the dict sent back verbatim, or ``None``.
+
+    Built explicitly per type, so nothing the SDK adds (``citations``,
+    ``parsed_output``, ...) leaks into the request.
+    """
+    kind = getattr(block, "type", None)
+    if kind == "text":
+        return {"type": "text", "text": getattr(block, "text", "")}
+    if kind == "tool_use":
+        return {
+            "type": "tool_use",
+            "id": getattr(block, "id", ""),
+            "name": getattr(block, "name", ""),
+            "input": getattr(block, "input", None) or {},
+        }
+    if kind == "thinking":
+        # Keep the block even when its text is empty: the signature is what
+        # the API checks.
+        return {
+            "type": "thinking",
+            "thinking": getattr(block, "thinking", "") or "",
+            "signature": getattr(block, "signature", "") or "",
+        }
+    if kind == "redacted_thinking":
+        return {"type": "redacted_thinking", "data": getattr(block, "data", "")}
+    return None
 
 
 def _message_payload(messages: tuple[ChatMessage, ...]) -> list[dict]:
@@ -136,6 +225,8 @@ def _message_payload(messages: tuple[ChatMessage, ...]) -> list[dict]:
                 "tool_use_id": message.tool_call_id,
                 "content": message.content,
             }
+            if message.is_error:
+                block["is_error"] = True
             # Fold into the preceding user block-list when that message
             # is itself a run of tool results, so parallel calls answer
             # in a single user turn.
@@ -159,6 +250,16 @@ def _message_payload(messages: tuple[ChatMessage, ...]) -> list[dict]:
             # Anthropic rejects an empty non-final assistant message, so one
             # such row would fail every later turn of the session. The
             # history sanitizer drops them first; this is defence in depth.
+            continue
+
+        replayed = (message.replay or {}).get("content")
+        if message.role == "assistant" and replayed:
+            # Within a turn: the round's own blocks, thinking and signature
+            # included, exactly as they arrived. Copied, so adding a cache
+            # breakpoint never edits the harness's message.
+            payload.append(
+                {"role": "assistant", "content": [dict(b) for b in replayed]}
+            )
             continue
 
         if message.role == "assistant" and message.tool_calls:
@@ -213,6 +314,23 @@ def _finished_calls(
         yield ToolCallMade(call=call)
 
 
+def _effort_code(exc: Exception, request: ChatRequest) -> str | None:
+    """``"effort_unsupported"`` when a 400 rejects the effort parameter.
+
+    Narrow on purpose: only with an effort on the request, only a
+    ``BadRequestError`` whose message names ``effort`` / ``output_config``,
+    and never one about replayed thinking (``signature``,
+    ``block_binding``, ``thinking.type``), which a broad match would
+    mislabel. A model without the parameter (Claude Haiku 4.5) lands here.
+    """
+    if not request.effort or not isinstance(exc, anthropic.BadRequestError):
+        return None
+    message = str(exc)
+    if _EFFORT_ERROR.search(message) and not _NOT_EFFORT_ERROR.search(message):
+        return "effort_unsupported"
+    return None
+
+
 class AnthropicChatAdapter(ChatClient):
     """Streaming chat adapter for the ``anthropic`` SDK.
 
@@ -251,6 +369,8 @@ class AnthropicChatAdapter(ChatClient):
         self._api_key = api_key
         self._default_timeout = timeout_sec
         self.__sdk_client: anthropic.Anthropic | None = None
+        # The stream being read, for `abort()` from another thread.
+        self._active: Any = None
 
     @property
     def _client(self) -> anthropic.Anthropic:
@@ -295,6 +415,14 @@ class AnthropicChatAdapter(ChatClient):
         except anthropic.AnthropicError as exc:
             raise LlmError(f"anthropic model listing failed: {exc}") from exc
 
+    def abort(self) -> None:
+        """Wake the reader of the in-flight stream by shutting its socket down.
+
+        See :meth:`whygraph.services.llm.chat.ChatClient.abort`. Never
+        closes the stream from this thread and never raises.
+        """
+        shutdown_stream(self._active)
+
     def stream_turn(self, request: ChatRequest) -> Iterator[ChatStreamEvent]:
         """Stream one turn from the Messages API.
 
@@ -307,6 +435,7 @@ class AnthropicChatAdapter(ChatClient):
             raise LlmError(
                 "AnthropicChatAdapter requires at least one non-system message"
             )
+        _cache_last_block(messages)
 
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -314,8 +443,11 @@ class AnthropicChatAdapter(ChatClient):
             "max_tokens": request.max_tokens or DEFAULT_MAX_TOKENS,
             "timeout": request.timeout_sec or self._default_timeout,
         }
-        if system_parts:
-            kwargs["system"] = "\n\n".join(system_parts)
+        system = _system_payload(system_parts)
+        if system:
+            kwargs["system"] = system
+        if request.effort:
+            kwargs["output_config"] = {"effort": request.effort}
         if request.tools:
             kwargs["tools"] = _tool_payload(request.tools)
             if request.tool_choice == "none":
@@ -326,6 +458,8 @@ class AnthropicChatAdapter(ChatClient):
         blocks: dict[int, _BlockAccumulator] = {}
         # Finished `tool_use` blocks, held until the stop reason is known.
         completed: list[tuple[int, _BlockAccumulator]] = []
+        # Every finished block, as sent back next round (preserved thinking).
+        replay_blocks: list[dict] = []
         last_index: int | None = None
         finish_reason: str | None = None
         # Usage arrives in pieces: `message_start` carries the prompt side,
@@ -353,6 +487,7 @@ class AnthropicChatAdapter(ChatClient):
 
         try:
             with self._client.messages.stream(**kwargs) as stream:
+                self._active = stream
                 for event in stream:
                     event_type = getattr(event, "type", None)
 
@@ -386,6 +521,19 @@ class AnthropicChatAdapter(ChatClient):
                         accumulator = blocks.pop(index, None)
                         if accumulator is not None:
                             completed.append((index, accumulator))
+                        # The SDK's stream helper carries the accumulated
+                        # block, signature included; a hand-rolled copy
+                        # would lose the `signature_delta`.
+                        block = getattr(event, "content_block", None)
+                        if block is not None:
+                            replayed = _replay_block(block)
+                            if replayed is not None:
+                                replay_blocks.append(replayed)
+                            else:
+                                _log.debug(
+                                    "anthropic: not replaying a %s block",
+                                    getattr(block, "type", None),
+                                )
                         continue
 
                     if event_type == "message_delta":
@@ -408,6 +556,7 @@ class AnthropicChatAdapter(ChatClient):
             raise LlmError(
                 f"anthropic API error: {exc}",
                 request_id=getattr(exc, "request_id", None),
+                code=_effort_code(exc, request),
             ) from exc
         except httpx.TransportError as exc:
             # Once a stream has started the SDK no longer wraps transport
@@ -415,15 +564,27 @@ class AnthropicChatAdapter(ChatClient):
             raise LlmError(
                 f"anthropic stream interrupted: {type(exc).__name__}"
             ) from exc
+        finally:
+            self._active = None
 
         # A stream cut short before content_block_stop still owes its
         # accumulated calls.
         completed.extend(sorted(blocks.items()))
-        yield from _finished_calls(completed, finish_reason, last_index)
+        calls = list(_finished_calls(completed, finish_reason, last_index))
+        yield from calls
 
+        replay = None
+        sent = {event.call.id for event in calls}
+        announced = {b["id"] for b in replay_blocks if b["type"] == "tool_use"}
+        if replay_blocks and announced <= sent:
+            replay = {"content": replay_blocks}
+        # A dropped call's `tool_use` block would go back with no result, so
+        # a round that dropped one replays nothing and is rebuilt as text
+        # plus the calls that ran.
         yield TurnDone(
             finish_reason=finish_reason,
             model=served_model,
+            replay=replay,
             **anthropic_usage_fields(raw_usage),
         )
 

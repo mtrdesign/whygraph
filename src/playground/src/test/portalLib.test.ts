@@ -129,10 +129,26 @@ describe("config form mapping", () => {
 
   it("keeps a model id that contains a slash intact by writing provider and model separately", () => {
     const v = layerToValues({});
-    v.chat = { provider: "openrouter", model: "anthropic/claude-x" };
+    v.chat = { provider: "openrouter", model: "anthropic/claude-x", effort: "" };
     expect(valuesToLayer({}, v, { scan: false })).toEqual({
       chat: { provider: "openrouter", model: "anthropic/claude-x" },
     });
+  });
+
+  it("reads and writes [chat].effort, dropping the key when it is cleared", () => {
+    const stored = { chat: { provider: "openai", effort: "high", max_tool_rounds: 4 } };
+    const v = layerToValues(stored);
+    expect(v.chat.effort).toBe("high");
+    expect(layerToValues({}).chat.effort).toBe("");
+    v.chat.effort = "low";
+    expect(valuesToLayer(stored, v, { scan: false }).chat).toEqual({
+      provider: "openai",
+      effort: "low",
+      max_tool_rounds: 4,
+    });
+    v.chat.effort = "";
+    expect(valuesToLayer(stored, v, { scan: false }).chat).toEqual({ provider: "openai", max_tool_rounds: 4 });
+    expect(valuesToLayer({ chat: { effort: "max" } }, { ...v, chat: { ...v.chat, provider: "" } }, { scan: false })).toEqual({});
   });
 
   it("serializes hooks: all -> default, none -> false, some -> list", () => {

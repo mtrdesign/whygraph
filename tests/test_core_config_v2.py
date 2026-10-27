@@ -22,6 +22,7 @@ from whygraph import core
 from whygraph.core import config as config_mod
 from whygraph.core.config import (
     CHAT_PROVIDERS,
+    EFFORT_LEVELS,
     KNOWN_PROVIDERS,
     AnalyzeConfig,
     Config,
@@ -303,6 +304,40 @@ def test_chat_stream_timeout_default_bounds_and_no_deprecation(
         assert _from(f"[chat]\nstream_timeout_sec = {value}\n", tmp_path)
 
 
+def test_chat_output_and_effort_defaults(tmp_path: Path) -> None:
+    chat = _from("", tmp_path).chat
+    assert chat.max_tokens is None
+    assert chat.max_continuations == 1
+    assert chat.effort is None
+
+
+def test_chat_max_tokens_bounds(tmp_path: Path) -> None:
+    for value in (2047, 128001, "true", '"4096"'):
+        with pytest.raises(ConfigError, match="chat.max_tokens"):
+            _from(f"[chat]\nmax_tokens = {value}\n", tmp_path)
+    for value in (2048, 128000):
+        assert (
+            _from(f"[chat]\nmax_tokens = {value}\n", tmp_path).chat.max_tokens == value
+        )
+
+
+def test_chat_max_continuations_bounds(tmp_path: Path) -> None:
+    for value in (-1, 4, "true"):
+        with pytest.raises(ConfigError, match="chat.max_continuations"):
+            _from(f"[chat]\nmax_continuations = {value}\n", tmp_path)
+    for value in (0, 3):
+        cfg = _from(f"[chat]\nmax_continuations = {value}\n", tmp_path)
+        assert cfg.chat.max_continuations == value
+
+
+def test_chat_effort_levels(tmp_path: Path) -> None:
+    for value in ('"turbo"', '""', "1"):
+        with pytest.raises(ConfigError, match="chat.effort"):
+            _from(f"[chat]\neffort = {value}\n", tmp_path)
+    for level in EFFORT_LEVELS:
+        assert _from(f'[chat]\neffort = "{level}"\n', tmp_path).chat.effort == level
+
+
 def test_chat_refuses_an_explicit_non_chat_provider(tmp_path: Path) -> None:
     for body in ('[chat]\nprovider = "ollama"\n', '[chat]\nmodel = "ollama/x"\n'):
         cfg = _from(body, tmp_path)
@@ -338,6 +373,12 @@ def test_core_provider_lists_mirror_services() -> None:
 
     assert set(KNOWN_PROVIDERS) == set(LlmClientFactory.BUILTIN_PROVIDERS)
     assert tuple(CHAT_PROVIDERS) == tuple(SERVICE_CHAT)
+
+
+def test_core_effort_levels_mirror_services() -> None:
+    from whygraph.services.llm.chat import EFFORT_LEVELS as SERVICE_EFFORT
+
+    assert EFFORT_LEVELS == SERVICE_EFFORT == ("low", "medium", "high", "xhigh", "max")
 
 
 # ---- rationale-cache identity ---------------------------------------------

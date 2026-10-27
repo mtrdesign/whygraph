@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from whygraph.core import get_config
-from whygraph.core.config import LlmConfig
+from whygraph.core.config import EFFORT_LEVELS, LlmConfig
 
 from .exceptions import LlmError
 
@@ -180,6 +180,10 @@ class ChatMessage:
         ``reasoning_content``, OpenRouter's ``reasoning_details``). Each
         adapter reads only its own keys. ``None`` when there is nothing to
         replay.
+    is_error : bool
+        On a ``"tool"`` message, whether the result is a tool error. The
+        Anthropic adapter sends it as ``tool_result.is_error``. ``False``
+        for every other message.
     """
 
     role: ChatRole
@@ -187,6 +191,7 @@ class ChatMessage:
     tool_calls: tuple[ToolCall, ...] = ()
     tool_call_id: str | None = None
     replay: Mapping[str, Any] | None = None
+    is_error: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +218,9 @@ class ChatRequest:
         the tools on the request but forbids calling them - the shape of
         an answer round, because a request that carries tool history must
         never drop ``tools``.
+    effort : str or None
+        Effort level for this call, one of :data:`EFFORT_LEVELS`. ``None``
+        (default) sends no effort parameter.
     """
 
     messages: tuple[ChatMessage, ...]
@@ -221,6 +229,7 @@ class ChatRequest:
     temperature: float | None = None
     timeout_sec: int | None = None
     tool_choice: ToolChoice = "auto"
+    effort: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,6 +409,17 @@ class ChatClient(abc.ABC):
         """
         raise NotImplementedError
 
+    def abort(self) -> None:
+        """Wake a reader blocked on this client's in-flight stream, if any.
+
+        Called from another thread when the user stops a turn. Adapters
+        override it to shut the socket down, so a reader blocked on a
+        silent stream wakes at once instead of waiting out its timeout.
+        The base implementation does nothing, which keeps fakes and stubs
+        working. It never raises.
+        """
+        return None
+
 
 @dataclass(frozen=True, slots=True)
 class _ProviderWiring:
@@ -545,6 +565,7 @@ def make_chat_client(
 
 __all__ = [
     "CHAT_PROVIDERS",
+    "EFFORT_LEVELS",
     "FALLBACK_MODELS",
     "ChatClient",
     "ChatMessage",

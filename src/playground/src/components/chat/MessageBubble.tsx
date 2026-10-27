@@ -1,7 +1,12 @@
-import { Suspense, lazy } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
+import { CheckIcon, ChevronLeftIcon, ChevronRightIcon, CopyIcon, PencilIcon, RefreshCwIcon } from "lucide-react";
+import type { ChatVersions } from "../../api";
 import { BudgetNotice } from "../portal/BudgetNotice";
+import { writeClipboard } from "../portal/CopyButton";
 import { parseChart } from "../charts/chartSpec";
+import { Button } from "../ui/button";
 import { Skeleton } from "../ui/skeleton";
+import { Textarea } from "../ui/textarea";
 import { formatNumber } from "../../lib/format";
 import { Markdown } from "./Markdown";
 import { ToolCallCard, type ToolActivity } from "./ToolCallCard";
@@ -46,6 +51,17 @@ export interface AssistantTurn {
   budgetStop?: { scope?: string | null; message?: string };
   roundLimit?: number;
   /**
+   * Why the provider stopped the turn's last row: `max_tokens` / `length` (the output limit) and
+   * `refusal` / `content_filter` (declined) get a notice; anything else shows nothing.
+   */
+  finishReason?: string;
+  /** Older tool results of this turn were elided to fit the context. Live turns only: a transcript cannot know. */
+  trimmed?: boolean;
+  /** The turn's versions (it has siblings in the tree), looked up by its first row. */
+  versions?: ChatVersions;
+  /** A transient line shown in place of "Thinking…" (e.g. waiting for a stopped reply to wind down). */
+  statusNote?: string;
+  /**
    * Transient: the model is working and has nothing on screen yet — the
    * pre-first-token prologue, or the gap between a tool result and the next
    * round. Live turns only; `turnsFromMessages` never sets it, so a replayed
@@ -59,21 +75,179 @@ export interface UserTurn {
   content: string;
   /** See `AssistantTurn.id`. */
   id?: number;
+  /** The question's edited versions (it has siblings in the tree). */
+  versions?: ChatVersions;
 }
 
 export type Turn = UserTurn | AssistantTurn;
 
-function UserBubble({ content }: { content: string }) {
+/**
+ * What a bubble can do. Every handler is optional (a bubble with none renders no actions, which is
+ * how the live turn and the old fixtures stay as they were), and `busy` hides all of them and the
+ * version arrows while a turn streams: nothing may start a second turn on the session.
+ */
+export interface TurnActions {
+  busy?: boolean;
+  /** User turns: save an edited question as a new version. */
+  onEdit?: (content: string) => void;
+  /** Passed for the LAST assistant turn only: write its reply again. */
+  onRegenerate?: () => void;
+  /** Version arrows: switch to the sibling with this message id. */
+  onBranch?: (messageId: number) => void;
+}
+
+const ACTION_ROW = "mt-0.5 flex h-6 items-center gap-0.5";
+// Hover-revealed, but never hidden from a keyboard (focus-within) or a touch screen (no hover).
+const REVEAL =
+  "flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100";
+
+function CopyAction({ text, what }: { text: string; what: string }) {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
   return (
-    <div className="flex justify-end">
-      <div className="max-w-[80%] whitespace-pre-wrap rounded-lg bg-primary-soft px-3 py-2 text-sm text-primary-text">
-        {content}
+    <Button
+      type="button"
+      size="icon-xs"
+      variant="ghost"
+      aria-label={`Copy ${what}`}
+      title={copied ? "Copied" : `Copy ${what}`}
+      onClick={async () => {
+        if (!(await writeClipboard(text))) return;
+        setCopied(true);
+        clearTimeout(timer.current);
+        timer.current = setTimeout(() => setCopied(false), 1500);
+      }}
+    >
+      {copied ? <CheckIcon /> : <CopyIcon />}
+    </Button>
+  );
+}
+
+/** `‹ 2/3 ›`: step between the versions of a message. Rendered only when there is more than one. */
+export function VersionArrows({
+  versions,
+  onBranch,
+}: {
+  versions: ChatVersions;
+  onBranch: (messageId: number) => void;
+}) {
+  const { index, count, siblings } = versions;
+  return (
+    <div className="flex items-center text-[10px] text-muted-foreground" data-testid="version-arrows">
+      <Button
+        type="button"
+        size="icon-xs"
+        variant="ghost"
+        aria-label="Previous version"
+        disabled={index <= 1}
+        onClick={() => onBranch(siblings[index - 2])}
+      >
+        <ChevronLeftIcon />
+      </Button>
+      <span className="tabular-nums" aria-label={`Version ${index} of ${count}`}>
+        {index}/{count}
+      </span>
+      <Button
+        type="button"
+        size="icon-xs"
+        variant="ghost"
+        aria-label="Next version"
+        disabled={index >= count}
+        onClick={() => onBranch(siblings[index])}
+      >
+        <ChevronRightIcon />
+      </Button>
+    </div>
+  );
+}
+
+function UserBubble({ turn, busy, onEdit, onBranch }: { turn: UserTurn } & TurnActions) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(turn.content);
+
+  const save = () => {
+    const next = draft.trim();
+    setEditing(false);
+    // Unchanged is a cancel: saving it would only add a twin version.
+    if (!next || next === turn.content.trim() || busy) return;
+    onEdit?.(next);
+  };
+
+  if (editing) {
+    return (
+      <div className="flex justify-end">
+        <div className="w-full max-w-[80%]">
+          <Textarea
+            autoFocus
+            rows={3}
+            className="min-h-0"
+            aria-label="Edit message"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                save();
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                setEditing(false);
+              }
+            }}
+          />
+          <div className="mt-1 flex items-center justify-end gap-2">
+            <span className="text-[10px] text-muted-foreground">Enter to save · Esc to cancel</span>
+            <Button type="button" size="xs" variant="outline" onClick={() => setEditing(false)}>
+              Cancel
+            </Button>
+            <Button type="button" size="xs" onClick={save} disabled={busy || !draft.trim()}>
+              Save
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const arrows = !busy && onBranch && turn.versions && turn.versions.count > 1 ? turn.versions : null;
+  const actions = !busy && !!turn.content;
+  return (
+    <div className="group flex justify-end">
+      <div className="flex min-w-0 max-w-[80%] flex-col items-end">
+        <div className="whitespace-pre-wrap rounded-lg bg-primary-soft px-3 py-2 text-sm text-primary-text">
+          {turn.content}
+        </div>
+        {(arrows || actions) && (
+          <div className={ACTION_ROW}>
+            {arrows && <VersionArrows versions={arrows} onBranch={onBranch!} />}
+            {actions && (
+              <div className={REVEAL}>
+                <CopyAction text={turn.content} what="message" />
+                {onEdit && (
+                  <Button
+                    type="button"
+                    size="icon-xs"
+                    variant="ghost"
+                    aria-label="Edit message"
+                    title="Edit message"
+                    onClick={() => {
+                      setDraft(turn.content);
+                      setEditing(true);
+                    }}
+                  >
+                    <PencilIcon />
+                  </Button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-function AssistantBubble({ turn }: { turn: AssistantTurn }) {
+function AssistantBubble({ turn, busy, onRegenerate, onBranch }: { turn: AssistantTurn } & TurnActions) {
   const rows = Math.max(turn.segments.length, turn.activityGroups.length);
   // Flattened across groups on purpose. `render_chart` and the stats call that
   // minted its `chart_ref` are separate tool *rounds*, and a new round opens a new
@@ -88,10 +262,18 @@ function AssistantBubble({ turn }: { turn: AssistantTurn }) {
   const settled = !turn.thinking && turn.activityGroups.every((g) => g.every((a) => !a.running));
   const noReply =
     settled && !turn.error && !turn.budgetStop && turn.segments.every((s) => !s.trim());
+  // Copy takes the turn's text only: tool cards and notices are not part of the answer, and the
+  // reasoning never reaches a turn.
+  const copyText = turn.segments.filter((t) => t.trim()).join("\n\n");
+  const arrows = !busy && onBranch && turn.versions && turn.versions.count > 1 ? turn.versions : null;
+  // The no-reply line carries its own Regenerate, so the hover one would be a twin.
+  const regenerate = !!onRegenerate && !noReply;
+  // A turn still thinking or running a tool has nothing to act on yet; `busy` covers the rest.
+  const actions = !busy && settled && (!!copyText || regenerate);
 
   return (
-    <div className="flex justify-start">
-      <div className="min-w-0 max-w-[92%] rounded-lg bg-muted px-3 py-2">
+    <div className="group flex min-w-0 max-w-[92%] flex-col items-start">
+      <div className="min-w-0 max-w-full rounded-lg bg-muted px-3 py-2">
         {Array.from({ length: rows }, (_, i) => (
           <div key={i} className="min-w-0">
             {turn.segments[i] ? <Markdown>{turn.segments[i]}</Markdown> : null}
@@ -129,13 +311,19 @@ function AssistantBubble({ turn }: { turn: AssistantTurn }) {
             between a tool result and the next round. */}
         {turn.thinking && (
           <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
-            <span className="animate-pulse">Thinking…</span>
+            <span className="animate-pulse">{turn.statusNote ?? "Thinking…"}</span>
           </div>
         )}
 
         {noReply && (
-          <div className="mt-1 text-xs text-muted-foreground" data-testid="no-reply">
+          <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground" data-testid="no-reply">
             The model ended its turn without a reply.
+            {!busy && onRegenerate && (
+              <Button type="button" size="xs" variant="outline" onClick={onRegenerate}>
+                <RefreshCwIcon data-icon="inline-start" />
+                Regenerate
+              </Button>
+            )}
           </div>
         )}
 
@@ -143,6 +331,33 @@ function AssistantBubble({ turn }: { turn: AssistantTurn }) {
           <div className="mt-2 rounded-sm border border-warning/30 bg-warning/10 px-2 py-1 text-xs text-warning">
             Reached the {turn.roundLimit}-round tool limit - the assistant answered
             with what it had gathered. Ask a narrower question to go further.
+          </div>
+        )}
+
+        {(turn.finishReason === "max_tokens" || turn.finishReason === "length") && (
+          <div
+            className="mt-2 rounded-sm border border-warning/30 bg-warning/10 px-2 py-1 text-xs text-warning"
+            data-testid="output-limit-notice"
+          >
+            The reply hit the output limit.
+          </div>
+        )}
+
+        {(turn.finishReason === "refusal" || turn.finishReason === "content_filter") && (
+          <div
+            className="mt-2 rounded-sm border border-warning/30 bg-warning/10 px-2 py-1 text-xs text-warning"
+            data-testid="declined-notice"
+          >
+            The provider declined to answer.
+          </div>
+        )}
+
+        {turn.trimmed && (
+          <div
+            className="mt-2 rounded-sm border border-warning/30 bg-warning/10 px-2 py-1 text-xs text-warning"
+            data-testid="trimmed-notice"
+          >
+            Older tool results in this turn were shortened to fit the context.
           </div>
         )}
 
@@ -181,14 +396,37 @@ function AssistantBubble({ turn }: { turn: AssistantTurn }) {
           </div>
         )}
       </div>
+
+      {(arrows || actions) && (
+        <div className={ACTION_ROW}>
+          {arrows && <VersionArrows versions={arrows} onBranch={onBranch!} />}
+          {actions && (
+            <div className={REVEAL}>
+              {copyText && <CopyAction text={copyText} what="reply" />}
+              {regenerate && (
+                <Button
+                  type="button"
+                  size="icon-xs"
+                  variant="ghost"
+                  aria-label="Regenerate reply"
+                  title="Regenerate reply"
+                  onClick={onRegenerate}
+                >
+                  <RefreshCwIcon />
+                </Button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-export function MessageBubble({ turn }: { turn: Turn }) {
+export function MessageBubble({ turn, ...actions }: { turn: Turn } & TurnActions) {
   return turn.kind === "user" ? (
-    <UserBubble content={turn.content} />
+    <UserBubble turn={turn} {...actions} />
   ) : (
-    <AssistantBubble turn={turn} />
+    <AssistantBubble turn={turn} {...actions} />
   );
 }

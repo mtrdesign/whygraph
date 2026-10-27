@@ -119,6 +119,10 @@ the page at that section. The section ids are `general`, `models`, `github`, `sc
 | **Access** and **Connected machines** | Production only: who may open the project, and the members' machines linked to it |
 | **Danger zone** | Remove the project |
 
+The **Chat** row under **Models and keys** also has an **Effort** field: the default effort for chats
+that have no level of their own (see [Effort](../guide/chat.md#effort)). Set it in the defaults or for
+the project; **Reset** goes back to the inherited value.
+
 **Each section saves on its own.** Edits wait for that section's **Save** (or **Discard**), which
 stay disabled until you change something; a saved section says *Saved* in place. Leaving the page
 with unsaved changes asks first. Some things act at once, each after its own confirmation: replacing

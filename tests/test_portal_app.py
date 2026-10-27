@@ -1474,6 +1474,12 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     (f"{_P}/chat/sessions/{{session_id}}", "PATCH"): _CHAT,
     (f"{_P}/chat/sessions/{{session_id}}", "DELETE"): _CHAT,
     (f"{_P}/chat/sessions/{{session_id}}/messages", "POST"): _CHAT,
+    (f"{_P}/chat/sessions/{{session_id}}/messages/{{message_id}}/edit", "POST"): _CHAT,
+    (
+        f"{_P}/chat/sessions/{{session_id}}/messages/{{message_id}}/regenerate",
+        "POST",
+    ): _CHAT,
+    (f"{_P}/chat/sessions/{{session_id}}/branch", "POST"): _CHAT,
     # Production's account and org creation: user_access(...) (M2c section 4.7)
     ("/api/account", "GET"): "user.self",
     ("/api/account", "PATCH"): "user.self",
@@ -1596,6 +1602,7 @@ _FILL = {
     "{slug}": "demo",
     "{rest:path}": "x/y",
     "{session_id}": "1",
+    "{message_id}": "1",
     "{sha}": "abc",
     "{number}": "1",
     "{run_id}": "1",

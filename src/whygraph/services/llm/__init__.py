@@ -44,6 +44,7 @@ from .anthropic import AnthropicAdapter
 from .anthropic_chat import AnthropicChatAdapter
 from .chat import (
     CHAT_PROVIDERS,
+    EFFORT_LEVELS,
     FALLBACK_MODELS,
     ChatClient,
     ChatMessage,
@@ -72,6 +73,7 @@ from .types import CompletionRequest, CompletionResponse, Message
 
 __all__ = [
     "CHAT_PROVIDERS",
+    "EFFORT_LEVELS",
     "FALLBACK_MODELS",
     "AnthropicAdapter",
     "AnthropicChatAdapter",

@@ -114,6 +114,7 @@ class OrgWorld:
     marker_sha: str = ""
     run_id: int = 0
     session_id: int = 0
+    message_id: int = 0  # the session's first user row
     secrets: dict[str, str] = field(default_factory=dict)  # label -> value
     owner_uid: str = ""  # the owner's users.uid (production's members routes)
 
@@ -390,10 +391,23 @@ def _add_org_project(world: World, org: OrgWorld, defaults: dict) -> None:
         headers=owner,
     )
     org.session_id = _ok(session, 201)["id"]
+    seed_question(client, org, headers=owner)
     with portal_db.get_session() as db:
         org.project_id = db.exec(
             select(Project.id).where(Project.root == str(org.root))
         ).one()
+
+
+def seed_question(
+    client: TestClient, org: OrgWorld, *, prefix: str = "", headers: dict | None = None
+) -> None:
+    """Ask one question in ``org``'s session, so edit / regenerate / branch have a row."""
+    chat = f"{prefix}/api/projects/api/chat/sessions/{org.session_id}"
+    asked = client.post(
+        f"{chat}/messages", json={"content": f"{org.mark} question"}, headers=headers
+    )
+    assert asked.status_code == 200, asked.text  # an SSE body, not JSON
+    org.message_id = _ok(client.get(chat, headers=headers))["messages"][0]["id"]
 
 
 def seed_usage(client: TestClient, org: OrgWorld) -> None:
@@ -642,6 +656,7 @@ PATH_PARAMS: dict[str, Callable[[OrgWorld], str]] = {
     "{sha}": lambda o: o.marker_sha,
     "{number}": lambda o: "1",
     "{session_id}": lambda o: str(o.session_id),
+    "{message_id}": lambda o: str(o.message_id),
     "{uid}": lambda o: o.owner_uid,
     "{user_uid}": lambda o: o.owner_uid,  # an owner: 409 org_admin
     "{installation_id}": lambda o: "7",
@@ -1147,6 +1162,21 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     ("POST", "/api/projects/{slug}/chat/sessions/{session_id}/messages"): Call(
         200, body=lambda w, o: {"content": "hello"}, shows=lambda o: [str(o.root)]
     ),
+    (
+        "POST",
+        "/api/projects/{slug}/chat/sessions/{session_id}/messages/{message_id}/edit",
+    ): Call(
+        200, body=lambda w, o: {"content": "hello again"}, shows=lambda o: [str(o.root)]
+    ),
+    (
+        "POST",
+        "/api/projects/{slug}/chat/sessions/{session_id}/messages/{message_id}/regenerate",
+    ): Call(200, shows=lambda o: [str(o.root)]),
+    ("POST", "/api/projects/{slug}/chat/sessions/{session_id}/branch"): Call(
+        200,
+        body=lambda w, o: {"message_id": o.message_id},
+        shows=lambda o: [o.session_title, f"{o.mark} question"],
+    ),
 }
 """How the sweep calls each route in its own org (plan section 5.2 item 2).
 
@@ -1632,6 +1662,7 @@ def test_members_and_admins_can_read_chat_scan_and_use_mcp(
             headers=headers,
         )
         w.local.session_id = _ok(session, 201)["id"]
+        seed_question(w.client, w.local, headers=headers)
         for method, path in MEMBER_ROUTES:
             spec = ROUTE_REQUESTS[(method, path)]
             response = w.client.request(
@@ -2135,7 +2166,7 @@ def test_nothing_answers_signed_out_in_production(
             if (path, method) in LOCAL_ONLY_ROUTES:
                 continue
             org = SimpleNamespace(
-                run_id=1, marker_sha="abc", session_id=1, owner_uid="x"
+                run_id=1, marker_sha="abc", session_id=1, message_id=1, owner_uid="x"
             )
             url = _url(path, org)
             response = client.request(method, bravo + url)

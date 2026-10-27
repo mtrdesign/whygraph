@@ -386,3 +386,82 @@ def test_chat_message_replay_column_round_trips(
         assert conn.execute("SELECT COUNT(*) FROM chat_message").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+def test_chat_branching_backfills_parents_and_leaf(
+    _isolate_config_and_engine: Path,
+) -> None:
+    """The branching migration links each linear transcript and downgrades."""
+    db_path = _isolate_config_and_engine
+    prev = "4b774c7b092d"
+    command.upgrade(alembic_config(), prev)
+
+    # Raw SQL: the head ORM models carry columns this revision lacks.
+    conn = sqlite3.connect(db_path)
+    try:
+        ts = "2026-10-27T00:00:00Z"
+        for title in ("A", "B", "empty"):
+            conn.execute(
+                "INSERT INTO chat_session (title, provider, model, created_at, "
+                "updated_at) VALUES (?, 'deepseek', 'm', ?, ?)",
+                (title, ts, ts),
+            )
+        sessions = {
+            title: sid
+            for sid, title in conn.execute("SELECT id, title FROM chat_session")
+        }
+        ids: dict[str, int] = {}
+        # Interleaved across sessions so "same session" is exercised.
+        for name, session, role in (
+            ("A1", "A", "user"),
+            ("B1", "B", "user"),
+            ("A2", "A", "assistant"),
+            ("B2", "B", "assistant"),
+            ("A3", "A", "user"),
+        ):
+            cur = conn.execute(
+                "INSERT INTO chat_message (session_id, role, content, tool_calls, "
+                "created_at) VALUES (?, ?, 'x', '[]', ?)",
+                (sessions[session], role, ts),
+            )
+            ids[name] = cur.lastrowid
+        conn.commit()
+    finally:
+        conn.close()
+
+    command.upgrade(alembic_config(), "head")
+
+    new_message_cols = {"parent_id", "finish_reason", "effort", "reasoning"}
+    new_session_cols = {"active_leaf_id", "effort"}
+    assert new_message_cols <= _column_names(db_path, "chat_message")
+    assert new_session_cols <= _column_names(db_path, "chat_session")
+
+    conn = sqlite3.connect(db_path)
+    try:
+        parents = dict(conn.execute("SELECT id, parent_id FROM chat_message"))
+        assert parents == {
+            ids["A1"]: None,
+            ids["A2"]: ids["A1"],
+            ids["A3"]: ids["A2"],
+            ids["B1"]: None,
+            ids["B2"]: ids["B1"],
+        }
+        leaves = dict(conn.execute("SELECT title, active_leaf_id FROM chat_session"))
+        assert leaves == {"A": ids["A3"], "B": ids["B2"], "empty": None}
+        indexes = {r[1] for r in conn.execute("PRAGMA index_list(chat_message)")}
+        assert "ix_chat_message_parent_id" in indexes
+    finally:
+        conn.close()
+
+    db_engine._reset_engine()
+    command.downgrade(alembic_config(), prev)
+    assert not new_message_cols & _column_names(db_path, "chat_message")
+    assert not new_session_cols & _column_names(db_path, "chat_session")
+    conn = sqlite3.connect(db_path)
+    try:
+        indexes = {r[1] for r in conn.execute("PRAGMA index_list(chat_message)")}
+        assert "ix_chat_message_parent_id" not in indexes
+        assert conn.execute("SELECT COUNT(*) FROM chat_message").fetchone()[0] == 5
+        assert conn.execute("SELECT COUNT(*) FROM chat_session").fetchone()[0] == 3
+    finally:
+        conn.close()

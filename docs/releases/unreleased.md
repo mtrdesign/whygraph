@@ -27,6 +27,16 @@
   any id can still be entered.
 - **Chat follows your keys.** A new chat starts on the provider set for Chat when it has a key,
   otherwise on the first provider that has one, and the picker lists only providers with a key.
+- **Edit and regenerate in Chat.** Edit a question, or regenerate the last reply, and the earlier
+  version stays: switch between versions with the `‹ 2/3 ›` arrows. **Copy** works on any message.
+- **Effort level in Chat.** The **Effort** select beside the model picker sets how hard the model
+  thinks, per chat, from the next reply. **Default** uses the level set for chats in Settings.
+- **Steadier long replies.** A reply cut off by the output limit continues once, a model that goes
+  quiet after its tool calls is asked for an answer, and older tool results in a long turn are
+  shortened to fit. Anthropic prompt caching makes long tool-heavy turns cheaper, and a keepalive
+  keeps slow replies connected through proxies.
+- **Stop is immediate.** Stop ends the reply at once and keeps what was written, marked "Stopped."
+  Sending right after a Stop waits for the stopped reply to end, then sends.
 
 ## Fixes
 
@@ -37,7 +47,7 @@
   the provider being unreachable, provider errors show their request id, and DeepSeek and OpenRouter
   reasoning models keep working across tool calls. After a turn reaches its tool-round limit, the
   final answer keeps the tools on the request with calls turned off.
-- **Rolling back after this release.** This release adds a column to each project's WhyGraph
+- **Rolling back after this release.** This release adds columns to each project's WhyGraph
   database. An older image cannot open the upgraded database: to go back, restore each project's
   `backups/whygraph-<previous revision>.db`, which the portal writes beside its `whygraph.db` in
   the data directory before upgrading it.

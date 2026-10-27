@@ -41,7 +41,7 @@ METERED_FUNCTIONS = frozenset(
 )
 """Where a metered call may live; each records it with ``record_usage``."""
 
-UNMETERED_METHODS = frozenset({"preflight", "list_models", "from_config"})
+UNMETERED_METHODS = frozenset({"preflight", "list_models", "from_config", "abort"})
 """Public client methods that never call a provider for tokens."""
 
 ADAPTER_DIR = "services/llm/"

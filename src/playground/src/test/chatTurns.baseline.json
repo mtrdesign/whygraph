@@ -1,0 +1,100 @@
+[
+  {
+    "kind": "user",
+    "content": "why?",
+    "id": 1
+  },
+  {
+    "kind": "assistant",
+    "segments": [
+      "Looking. ",
+      "Found it."
+    ],
+    "activityGroups": [
+      [
+        {
+          "id": "c1",
+          "name": "search_symbols",
+          "arguments": {
+            "query": "c1"
+          },
+          "running": false,
+          "result": "{}"
+        },
+        {
+          "id": "c2",
+          "name": "search_symbols",
+          "arguments": {
+            "query": "c2"
+          },
+          "running": false,
+          "result": "r2"
+        }
+      ],
+      []
+    ],
+    "thinking": false,
+    "id": 2,
+    "usage": {
+      "input": 255,
+      "output": 31
+    },
+    "model": "gpt-y"
+  },
+  {
+    "kind": "user",
+    "content": "and then?",
+    "id": 7
+  },
+  {
+    "kind": "assistant",
+    "segments": [
+      "partial"
+    ],
+    "activityGroups": [
+      []
+    ],
+    "thinking": false,
+    "id": 8,
+    "error": "provider_error"
+  },
+  {
+    "kind": "user",
+    "content": "again",
+    "id": 9
+  },
+  {
+    "kind": "assistant",
+    "segments": [
+      "ok"
+    ],
+    "activityGroups": [
+      []
+    ],
+    "thinking": false,
+    "id": 10,
+    "usage": {
+      "input": 3,
+      "output": 4
+    },
+    "budgetStop": {
+      "message": "This chat has reached its monthly budget."
+    }
+  },
+  {
+    "kind": "user",
+    "content": "last",
+    "id": 12
+  },
+  {
+    "kind": "assistant",
+    "segments": [
+      ""
+    ],
+    "activityGroups": [
+      []
+    ],
+    "thinking": false,
+    "id": 13
+  }
+]

@@ -22,6 +22,7 @@ import {
   KEYED_PROVIDERS,
   PROVIDERS,
   TASKS,
+  EFFORT_LEVELS,
   configFormSchema,
   layerToValues,
   valuesToLayer,
@@ -29,9 +30,10 @@ import {
   type TaskName,
 } from "../../lib/configForm";
 import { isProduction, usePortalState, useReadOnly } from "../../lib/identity";
-import { providerLabel } from "../../lib/labels";
+import { effortLabel, providerLabel } from "../../lib/labels";
 import {
   endpointOverride,
+  inheritedEffortText,
   inheritedEndpointText,
   inheritedFrom,
   inheritedModelText,
@@ -132,6 +134,7 @@ function ModelRow({
   error,
   overridden,
   onReset,
+  effortEmptyLabel,
 }: {
   name: "defaultModel" | TaskName;
   label: string;
@@ -149,6 +152,8 @@ function ModelRow({
   /** A project's own value over an inherited one: "Overridden here" with Reset. */
   overridden?: boolean;
   onReset?: () => void;
+  /** Set on the Chat row only: shows the Effort select, whose empty option reads this. */
+  effortEmptyLabel?: string;
 }) {
   const listId = useId();
   const provider = (useWatch({ control, name: `${name}.provider` as FieldPath<ConfigFormValues> }) ?? "") as string;
@@ -205,6 +210,27 @@ function ModelRow({
               Suggestions are a short built-in list ({FALLBACK_REASONS[suggestions.result] ?? FALLBACK_REASON_DEFAULT}). Any
               model id works.
             </span>
+          )}
+          {effortEmptyLabel !== undefined && (
+            <div className="flex flex-wrap items-center gap-2">
+              <label htmlFor={`${p.id}-effort`} className="text-xs text-muted-foreground">
+                Effort
+              </label>
+              <select
+                id={`${p.id}-effort`}
+                aria-label="Effort"
+                title="Default effort for chats that have no level of their own."
+                className={nativeSelect("sm:w-64")}
+                {...register("chat.effort")}
+              >
+                <option value="">{effortEmptyLabel}</option>
+                {EFFORT_LEVELS.map((level) => (
+                  <option key={level} value={level}>
+                    {effortLabel(level)}
+                  </option>
+                ))}
+              </select>
+            </div>
           )}
           {overridden && onReset && <OverriddenHere onReset={onReset} label={label} />}
         </div>
@@ -569,8 +595,18 @@ export function ConfigForm({
                 scope={scope}
                 canList={canTest}
                 error={errors[t.id]?.model?.message ?? errors[t.id]?.provider?.message ?? errors[t.id]?.root?.message}
-                overridden={isProject && !!(values[t.id]?.provider || values[t.id]?.model)}
-                onReset={() => resetFields([t.id, { provider: "", model: "" }])}
+                overridden={
+                  isProject &&
+                  !!(values[t.id]?.provider || values[t.id]?.model || (t.id === "chat" && values.chat?.effort))
+                }
+                onReset={() =>
+                  resetFields([t.id, t.id === "chat" ? { provider: "", model: "", effort: "" } : { provider: "", model: "" }])
+                }
+                effortEmptyLabel={
+                  t.id === "chat"
+                    ? inheritedEffortText({ projectLayer: isProject ? layer : null, orgLayer, mode })
+                    : undefined
+                }
               />
             ))}
           </div>

@@ -109,6 +109,12 @@ max_workers = 2               # parallel LLM calls in the diff-analyzer crawler
                               # (0 = cache-only). Bounds nested LLM spend.
 # context_token_budget = 60000   # history sent to the model, ~chars/4 estimate
 # stream_timeout_sec = 300    # how long a reply may stay silent (30-1800 s)
+# max_tokens = 8192           # output cap per model call (2048-128000); unset = 32000 on
+                              # Anthropic, the provider's own default elsewhere
+# max_continuations = 1       # automatic continuations of a reply cut off by the output
+                              # limit (0-3)
+# effort = "medium"          # default effort for chats with no level of their own:
+                              # low | medium | high | xhigh | max (unset = the provider's default)
 
 # Per-provider connection settings - key, endpoint, timeout. No model here:
 # pick models with [llm].model or a role's own model.
@@ -142,7 +148,7 @@ timeout_sec = 120
 | `[llm]` | `model` - the default `"provider/model"` for every role. See [Choosing models](#choosing-models). |
 | `[analyze]` | The per-commit LLM diff descriptions written during a scan - provider, model, parallelism (`max_workers`), the truncation / per-file thresholds, and an [org-only agent limit](#agent-limits-organization-only). |
 | `[rationale]` | The `whygraph_rationale_brief` card - provider, model, how much of a squash-merged PR is rendered into the prompt, and an [org-only agent limit](#agent-limits-organization-only). |
-| `[chat]` | The [chat assistant](../guide/chat.md) - default provider and model for new sessions, plus the per-turn tool, generation, and context budgets. |
+| `[chat]` | The [chat assistant](../guide/chat.md) - default provider and model for new sessions, plus the per-turn tool, generation, and context budgets, the output limit, continuations, and the default [effort](../guide/chat.md#effort). |
 | `[llm.*]` | Per-provider **connection** settings - key, timeout, and `base_url` / `host` where relevant. Five adapters; only four can drive chat. See [LLM providers](llm-providers.md). |
 
 ## Agent limits (organization only)

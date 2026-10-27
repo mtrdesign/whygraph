@@ -18,7 +18,7 @@ build/
 # Local copy of the dev compose file (template: docker-compose.example.yml).
 /docker-compose.yml
 
-# Local settings for `make dev-production`, e.g. a real dev OAuth App (template: .env.dev.example).
+# Local settings for the dev targets, e.g. extra shared folders or a real dev OAuth App (template: .env.dev.example).
 /.env.dev
 
 # Personal Claude Configurations

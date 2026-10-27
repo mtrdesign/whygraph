@@ -9,7 +9,8 @@
 #
 # Every mode is isolated from your own portal (`whygraph up`): its own
 # container name, data dir and HOME under $(DEV), and it shares only the
-# scratch repos in $(DEV)/repos - never this checkout.
+# scratch repos in $(DEV)/repos - never this checkout - plus the folders you
+# list in DEV_FOLDERS (in .env.dev, see .env.dev.example).
 
 .DEFAULT_GOAL := help
 
@@ -24,6 +25,13 @@ DEV_PORT ?= 8777
 DEV_PROD_PORT ?= 8778
 DEV_GITHUB_PORT ?= 18767
 
+# Local dev settings (gitignored; template: .env.dev.example).
+DEV_ENV_FILE ?= ./.env.dev
+# Extra folders the local-mode dev portals share beside $(DEV)/repos, `:`-separated.
+# Read from $(DEV_ENV_FILE) unless set here or in the environment.
+DEV_FOLDERS ?=
+DEV_SHARED = folders=$$(DEV_FOLDERS="$(DEV_FOLDERS)" sh scripts/dev_folders.sh "$(DEV)" "$(DEV_ENV_FILE)") || exit 1
+
 # `make dev-db`: the dev portal's Postgres, laid out like the shim's
 # (`whygraph up`) but published on 127.0.0.1 with a dev-only password.
 PG_DEV_PORT ?= 55432
@@ -35,7 +43,6 @@ DEV_PROD_DATABASE_URL = postgresql+psycopg://whygraph:whygraph-dev@127.0.0.1:$(P
 # GitHub App variable is set (in $(DEV_ENV_FILE) or the environment), the fake
 # (tests/github_fake.py) for both when none is; a partial set stops before
 # anything starts. DEV_GITHUB_MODE loads the file and sets `github=real|fake`.
-DEV_ENV_FILE ?= ./.env.dev
 DEV_GITHUB_VARS := WHYGRAPH_GITHUB_OAUTH_CLIENT_ID WHYGRAPH_GITHUB_OAUTH_CLIENT_SECRET_FILE \
 	WHYGRAPH_GITHUB_APP_SLUG WHYGRAPH_GITHUB_APP_CLIENT_ID WHYGRAPH_GITHUB_APP_CLIENT_SECRET_FILE \
 	WHYGRAPH_GITHUB_APP_PRIVATE_KEY_FILE WHYGRAPH_GITHUB_APP_WEBHOOK_SECRET_FILE
@@ -78,8 +85,9 @@ dev:
 	@echo "pick one: 'make dev-local' (native, fastest) or 'make dev-docker' (inside the image)"; exit 2
 
 dev-local: node-check dev-fixtures dev-db  ## Develop natively: portal :8777 (auto-restart) + Vite HMR :5174 - open :5174
+	@set -e; $(DEV_SHARED); echo "shared folders: $$folders"; \
 	WHYGRAPH_DATABASE_URL="$(DEV_DATABASE_URL)" \
-	WHYGRAPH_SHARED_FOLDERS="$(DEV)/repos" WHYGRAPH_DEV_ORIGINS=http://localhost:5174,http://127.0.0.1:5174 \
+	WHYGRAPH_SHARED_FOLDERS="$$folders" WHYGRAPH_DEV_ORIGINS=http://localhost:5174,http://127.0.0.1:5174 \
 	WHYGRAPH_DEV_PLATFORM_HTTP=1 NO_PROXY=.localhost \
 		$(UV_RUN) python scripts/dev_portal.py -- --data "$(DEV_LOCAL_DATA)" --port $(DEV_PORT)
 
@@ -126,10 +134,10 @@ dev-production: dev-github-check node-check dev-fixtures dev-db  ## Develop in p
 		$(UV_RUN) python scripts/dev_portal.py --preserve-host --vite-port 5173 -- --data "$(DEV)/production/data" --port $(DEV_PROD_PORT)
 
 dev-docker: dev-fixtures dev-image  ## Develop in Docker: the same, inside the image via the real shim - open :5174
-	sh scripts/dev_docker.sh dev "$(IMAGE)" "$(DEV)" $(DEV_PORT)
+	@set -e; $(DEV_SHARED); sh scripts/dev_docker.sh dev "$(IMAGE)" "$(DEV)" $(DEV_PORT) "$$folders"
 
 prod: dev-fixtures image  ## The image exactly as released, through the shim - open :8777
-	sh scripts/dev_docker.sh prod "$(IMAGE)" "$(DEV)" $(DEV_PORT)
+	@set -e; $(DEV_SHARED); sh scripts/dev_docker.sh prod "$(IMAGE)" "$(DEV)" $(DEV_PORT) "$$folders"
 
 check: node-check  ## Before a PR: lint, pytest, frontend + e2e, image + smoke test - the stages in parallel
 	UV_RUN="$(UV_RUN)" sh scripts/check.sh "$(IMAGE)"

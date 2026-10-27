@@ -461,6 +461,80 @@ describe("KeyCard", () => {
   });
 });
 
+// ---- the Chat row's Effort select (chat harness v2, step 7b) ----------------------------------------------
+
+describe("Chat effort", () => {
+  const effort = () => within(region("Models and keys")).getByRole("combobox", { name: "Effort" });
+
+  it("at the project scope: shows the inherited level, PUTs [chat].effort, and Reset clears the override", async () => {
+    handlers["GET /api/portal/defaults"] = () => ({
+      config: { chat: { effort: "medium" } },
+      secrets: secrets(),
+      no_provider_key: false,
+    });
+    const user = userEvent.setup();
+    mount("/p/alpha/settings");
+    await screen.findByTestId("config-form");
+    expect(effort()).toHaveValue("");
+    expect(within(effort()).getByRole("option", { name: "Inherited: Medium from portal defaults" })).toBeInTheDocument();
+    expect(effort()).toHaveAttribute("title", "Default effort for chats that have no level of their own.");
+    expect(within(region("Models and keys")).queryByTestId("overridden-here")).toBeNull();
+
+    await user.selectOptions(effort(), "low");
+    expect(within(region("Models and keys")).getByTestId("overridden-here")).toBeInTheDocument();
+    await user.click(within(region("Models and keys")).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("PUT", "/api/projects/alpha/config")).toHaveLength(1));
+    expect(calls("PUT", "/api/projects/alpha/config")[0].body).toEqual({ config: { chat: { effort: "low" } } });
+
+    await user.click(within(region("Models and keys")).getByRole("button", { name: "Reset Chat" }));
+    expect(effort()).toHaveValue("");
+    await user.click(within(region("Models and keys")).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("PUT", "/api/projects/alpha/config")).toHaveLength(2));
+    // The key is gone, not null: the layer inherits again.
+    expect(calls("PUT", "/api/projects/alpha/config")[1].body).toEqual({ config: {} });
+  });
+
+  it("at the project scope: a stored level shows as overridden and keeps the chat model keys on Reset", async () => {
+    handlers["GET /api/projects/alpha/config"] = () => ({
+      config: { chat: { provider: "openai", model: "gpt-5", effort: "high" } },
+      secrets: secrets(),
+      import: IMPORT,
+      read_only: false,
+    });
+    const user = userEvent.setup();
+    mount("/p/alpha/settings");
+    await screen.findByTestId("config-form");
+    expect(effort()).toHaveValue("high");
+    await user.click(within(region("Models and keys")).getByRole("button", { name: "Reset Chat" }));
+    expect(effort()).toHaveValue("");
+    expect(screen.getByLabelText("Chat model")).toHaveValue("");
+  });
+
+  it("at the defaults scope: PUTs {chat: {effort}} and has no inherit text", async () => {
+    handlers["PUT /api/portal/defaults"] = (body) => ({
+      config: body?.config ?? {},
+      secrets: secrets(),
+      no_provider_key: false,
+    });
+    const user = userEvent.setup();
+    mount("/settings");
+    await screen.findByTestId("config-form");
+    expect(within(effort()).getByRole("option", { name: "Provider default" })).toBeInTheDocument();
+    expect(Array.from(effort().querySelectorAll("option")).map((o) => o.getAttribute("value"))).toEqual([
+      "",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+    await user.selectOptions(effort(), "low");
+    await user.click(within(region("Models and keys")).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("PUT", "/api/portal/defaults")).toHaveLength(1));
+    expect(calls("PUT", "/api/portal/defaults")[0].body).toEqual({ config: { chat: { effort: "low" } } });
+  });
+});
+
 // ---- inherited values ---------------------------------------------------------------------------
 
 describe("inherited values", () => {

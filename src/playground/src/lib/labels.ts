@@ -24,6 +24,11 @@ const PROVIDER: Record<string, string> = {
   ollama: "Ollama",
 };
 
+/** An effort level as the UI words it ("xhigh" reads "Extra high"). */
+export function effortLabel(level: string): string {
+  return level === "xhigh" ? "Extra high" : level.charAt(0).toUpperCase() + level.slice(1);
+}
+
 const SOURCE: Record<string, string> = {
   local: "Local folder",
   github: "GitHub",

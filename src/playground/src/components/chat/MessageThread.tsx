@@ -24,6 +24,7 @@ import { isProduction, usePortalState, useRole } from "../../lib/identity";
 import { providerLabel } from "../../lib/labels";
 import { MessageBubble, type AssistantTurn, type Turn, type UserTurn } from "./MessageBubble";
 import { Composer } from "./Composer";
+import { EffortSelect } from "./EffortSelect";
 import { ModelSelect } from "./ModelSelect";
 import {
   applyTextDelta,
@@ -127,6 +128,8 @@ export function MessageThread({
   const [createdId, setCreatedId] = useState<number | null>(null);
   const createdRef = useRef<number | null>(null);
   const [draft, setDraft] = useState<{ provider: string; model: string } | null>(null);
+  // The draft's effort level (null = the default), sent when the first Send creates the session.
+  const [draftEffort, setDraftEffort] = useState<string | null>(null);
   // A failure with no turn to hang it on: the draft's session could not be created, an edit or regenerate
   // was turned away before it wrote anything, or a version switch failed.
   const [createError, setCreateError] = useState<unknown>(null);
@@ -167,6 +170,9 @@ export function MessageThread({
   // An existing session shows its own pair once the list has it; the draft (and the
   // session it just became, until the list catches up) shows the draft's.
   const choice = session ?? (currentId === null || createdId !== null ? draftChoice : null);
+  // The same rule for the effort level; the default it falls back to is the chosen provider's.
+  const effortChoice = session ? (session.effort ?? null) : draftEffort;
+  const defaultEffort = providers.data?.find((p) => p.provider === choice?.provider)?.default_effort ?? null;
 
   // The provider list failed (ER-4): nothing can be chosen, so nothing is sent until it loads.
   const providersFailed = providers.isError && !providers.data;
@@ -222,7 +228,7 @@ export function MessageThread({
   const cannotSend = budgetBlocked || noKeys || noKeyProvider !== null || providersFailed;
 
   const update = useMutation({
-    mutationFn: (vars: { provider?: string; model?: string }) =>
+    mutationFn: (vars: { provider?: string; model?: string; effort?: string | null }) =>
       api.chatUpdateSession(currentId as number, vars),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: chatSessionsKey(slug) });
@@ -311,6 +317,7 @@ export function MessageThread({
           const created = await api.chatCreateSession({
             provider: choice?.provider || undefined,
             model: choice?.model || undefined,
+            effort: draftEffort ?? undefined,
           });
           id = created.id;
         } catch (err) {
@@ -331,6 +338,7 @@ export function MessageThread({
           title: "",
           provider: choice?.provider ?? "",
           model: choice?.model ?? "",
+          effort: draftEffort,
           created_at: "",
           updated_at: "",
           messages: [],
@@ -656,28 +664,43 @@ export function MessageThread({
 
       {choice && !providersFailed && (
         <div className="border-t border-border px-4 py-2">
-          <ModelSelect
-            compact
-            provider={choice.provider}
-            model={choice.model}
-            // Streaming is part of this: repointing the session mid-turn would
-            // change the row the in-flight turn is attributed to.
-            disabled={update.isPending || streaming || budgetBlocked}
-            onChange={(next) => {
-              if (currentId === null) {
-                // A draft: nothing to save yet, the first Send creates the session with it.
-                const fallback = providers.data?.find((p) => p.provider === next.provider)?.default_model ?? "";
-                setDraft({ provider: next.provider, model: next.model || fallback });
-                return;
-              }
-              update.mutate({
-                // Send provider only when it actually changed, so the server
-                // doesn't reset the model on a model-only switch.
-                provider: next.provider === choice.provider ? undefined : next.provider,
-                model: next.model || undefined,
-              });
-            }}
-          />
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <ModelSelect
+              compact
+              provider={choice.provider}
+              model={choice.model}
+              // Streaming is part of this: repointing the session mid-turn would
+              // change the row the in-flight turn is attributed to.
+              disabled={update.isPending || streaming || budgetBlocked}
+              onChange={(next) => {
+                if (currentId === null) {
+                  // A draft: nothing to save yet, the first Send creates the session with it.
+                  const fallback = providers.data?.find((p) => p.provider === next.provider)?.default_model ?? "";
+                  setDraft({ provider: next.provider, model: next.model || fallback });
+                  return;
+                }
+                update.mutate({
+                  // Send provider only when it actually changed, so the server
+                  // doesn't reset the model on a model-only switch.
+                  provider: next.provider === choice.provider ? undefined : next.provider,
+                  model: next.model || undefined,
+                });
+              }}
+            />
+            <EffortSelect
+              value={effortChoice}
+              defaultEffort={defaultEffort}
+              // Disabled wherever the model pickers are.
+              disabled={update.isPending || streaming || budgetBlocked}
+              onChange={(next) => {
+                if (currentId === null) {
+                  setDraftEffort(next);
+                  return;
+                }
+                update.mutate({ effort: next });
+              }}
+            />
+          </div>
           {update.isError && (
             <div className="mt-1 text-xs text-destructive">
               {errorMessage(update.error, "chat")}

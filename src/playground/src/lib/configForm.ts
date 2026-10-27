@@ -27,11 +27,20 @@ export interface ModelPick {
   model: string;
 }
 
+/** The effort levels a chat can run at (`EFFORT_LEVELS` in `core/config.py`), lowest first. */
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+
+/** The Chat task's pick: a model, plus `[chat].effort` ("" = unset, inherit). */
+export interface ChatPick extends ModelPick {
+  effort: string;
+}
+
 export interface ConfigFormValues {
   defaultModel: ModelPick;
   analyze: ModelPick;
   rationale: ModelPick;
-  chat: ModelPick;
+  chat: ChatPick;
   openaiBaseUrl: string;
   ollamaHost: string;
   forge: boolean;
@@ -109,7 +118,7 @@ export function layerToValues(layer: ConfigDict): ConfigFormValues {
     defaultModel: splitModel(str(llm.model)),
     analyze: readTask(layer, "analyze"),
     rationale: readTask(layer, "rationale"),
-    chat: readTask(layer, "chat"),
+    chat: { ...readTask(layer, "chat"), effort: str(obj(layer.chat).effort) },
     openaiBaseUrl: str(obj(llm.openai).base_url),
     ollamaHost: str(obj(llm.ollama).host),
     forge: forgeOn(layer),
@@ -170,6 +179,7 @@ export function valuesToLayer(
     // that itself contains a slash (OpenRouter's) must not be re-split.
     setOrDrop(table, "provider", pick.provider);
     setOrDrop(table, "model", pick.model);
+    if (task === "chat") setOrDrop(table, "effort", (pick as ChatPick).effort);
     // The org-only limits are written by the org defaults form alone; a project
     // layer is never given them (the server refuses them there).
     if (opts.limits && (task === "rationale" || task === "analyze")) {
@@ -227,10 +237,14 @@ export function secretsPatch(
 
 const modelText = z.string().regex(/^\S*$/, "No spaces in a model id");
 
-const pick = (chat = false) =>
+const effortText = z.string().refine((e) => e === "" || (EFFORT_LEVELS as readonly string[]).includes(e), "Unknown effort level");
+
+const pick = () => z.object({ provider: z.string(), model: modelText });
+
+const chatPick = () =>
   z
-    .object({ provider: z.string(), model: modelText })
-    .refine((p) => !chat || p.provider === "" || CHAT_PROVIDER_TAGS.includes(p.provider), {
+    .object({ provider: z.string(), model: modelText, effort: effortText })
+    .refine((p) => p.provider === "" || CHAT_PROVIDER_TAGS.includes(p.provider), {
       message: "This provider cannot run chat",
       path: ["provider"],
     });
@@ -252,7 +266,7 @@ export const configFormSchema = z.object({
     }),
   analyze: pick(),
   rationale: pick(),
-  chat: pick(true),
+  chat: chatPick(),
   openaiBaseUrl: z
     .string()
     .refine((s) => s.trim() === "" || /^https?:\/\/\S+$/.test(s.trim()), "Enter an http(s) URL"),

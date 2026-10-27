@@ -5,7 +5,7 @@
 import type { QueryClient } from "@tanstack/react-query";
 import type { ConfigDict, KeyScope, KeyTestResult, SecretStatus } from "../api";
 import { CHAT_PROVIDER_TAGS, KEYED_PROVIDERS, TASKS, splitModel, type ModelPick, type TaskName } from "./configForm";
-import { providerLabel } from "./labels";
+import { effortLabel, providerLabel } from "./labels";
 
 const obj = (v: unknown): Record<string, unknown> =>
   v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
@@ -174,6 +174,24 @@ export function inheritedModelText({
     if (pickText(orgDefault)) return `Inherited: ${pickText(orgDefault)} ${inheritedFrom(mode)}`;
   }
   return "Uses the default model";
+}
+
+/**
+ * The empty option of the Chat row's Effort select: on a project, the level it
+ * inherits and where from; otherwise "Provider default" (no level is sent).
+ */
+export function inheritedEffortText({
+  projectLayer,
+  orgLayer,
+  mode,
+}: {
+  projectLayer: ConfigDict | null;
+  orgLayer: ConfigDict | null;
+  mode: string | null | undefined;
+}): string {
+  const orgEffort = str(obj(orgLayer?.chat).effort);
+  if (projectLayer && orgEffort) return `Inherited: ${effortLabel(orgEffort)} ${inheritedFrom(mode)}`;
+  return projectLayer ? "Inherited: provider default" : "Provider default";
 }
 
 /** The placeholder of an empty endpoint: the inherited value, or the built-in default. */

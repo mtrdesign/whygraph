@@ -154,6 +154,8 @@ export interface ChatProvider {
   configured: boolean;
   default_model: string;
   default: boolean;
+  // The merged `[chat].effort`: what a chat with no level of its own runs at (null = the provider's own default).
+  default_effort?: string | null;
 }
 
 export interface ChatModel {
@@ -2008,12 +2010,13 @@ export function projectApi(slug: string) {
     chatModels: (provider: string) =>
       get<ChatModels>(`${base}/chat/models?provider=${encodeURIComponent(provider)}`),
     chatSessions: () => get<ChatSession[]>(`${base}/chat/sessions`),
-    chatCreateSession: (body: { provider?: string; model?: string; title?: string }) =>
+    chatCreateSession: (body: { provider?: string; model?: string; title?: string; effort?: string }) =>
       send<ChatSession>("POST", `${base}/chat/sessions`, body),
     chatTranscript: (id: number) => get<ChatTranscript>(`${base}/chat/sessions/${id}`),
     chatUpdateSession: (
       id: number,
-      body: { title?: string; provider?: string; model?: string },
+      // `effort: null` resets the session to the default; leaving the key out leaves it alone.
+      body: { title?: string; provider?: string; model?: string; effort?: string | null },
     ) => send<ChatSession>("PATCH", `${base}/chat/sessions/${id}`, body),
     chatDeleteSession: async (id: number): Promise<void> => {
       const res = await request(`/api${base}/chat/sessions/${id}`, init("DELETE"));

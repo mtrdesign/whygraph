@@ -20,6 +20,7 @@ interface Session {
   created_at: string;
   updated_at: string;
   message_count: number;
+  effort?: string | null;
 }
 
 interface Fake {
@@ -37,7 +38,13 @@ interface Fake {
   /** What `POST .../branch` answers with (a transcript's messages + extra), per session. */
   branched: Record<number, { messages: unknown[]; extra: Record<string, unknown> }>;
   /** The provider list the project answers (default: one keyed OpenAI). */
-  providers?: { provider: string; configured: boolean; default_model: string; default: boolean }[];
+  providers?: {
+    provider: string;
+    configured: boolean;
+    default_model: string;
+    default: boolean;
+    default_effort?: string | null;
+  }[];
 }
 let fake: Fake;
 
@@ -124,8 +131,14 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     }
     if (rest === "/chat/sessions" && method === "GET") return Promise.resolve(json(fake.sessions));
     if (rest === "/chat/sessions" && method === "POST") {
-      const b = (body ?? {}) as { provider?: string; model?: string };
-      const row = { ...session(7, "New chat", 0), provider: b.provider ?? "openai", model: b.model ?? "gpt-x", message_count: 0 };
+      const b = (body ?? {}) as { provider?: string; model?: string; effort?: string };
+      const row = {
+        ...session(7, "New chat", 0),
+        provider: b.provider ?? "openai",
+        model: b.model ?? "gpt-x",
+        message_count: 0,
+        effort: b.effort ?? null,
+      };
       fake.sessions = [row, ...fake.sessions];
       return Promise.resolve(json(row, 201));
     }
@@ -149,8 +162,14 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
         return Promise.resolve(turnStream(init));
       }
       if (method === "PATCH") {
-        const title = (body as { title?: string }).title;
-        fake.sessions = fake.sessions.map((x) => (x.id === id && title ? { ...x, title } : x));
+        const patch = body as { title?: string; effort?: string | null };
+        const title = patch.title;
+        fake.sessions = fake.sessions.map((x) => {
+          if (x.id !== id) return x;
+          // An explicit null resets the level; an absent key leaves it alone (the real server tells them apart).
+          const next = "effort" in patch ? { ...x, effort: patch.effort } : x;
+          return title ? { ...next, title } : next;
+        });
         return Promise.resolve(json(fake.sessions.find((x) => x.id === id)));
       }
       if (method === "DELETE") {
@@ -682,6 +701,77 @@ describe("the chat view: edit, regenerate and versions", () => {
     });
     expect(screen.getByTestId("version-arrows")).toHaveTextContent("3/3");
     expect(screen.getByRole("button", { name: "Next version" })).toBeDisabled();
+  });
+});
+
+// The effort select beside the model pickers (chat harness v2, step 7b).
+describe("the chat view: effort", () => {
+  const providers = (default_effort: string | null) => [
+    { provider: "openai", configured: true, default_model: "gpt-x", default: true, default_effort },
+  ];
+  const patches = () => fake.calls.filter((c) => c.method === "PATCH" && c.path === "/api/projects/alpha/chat/sessions/3");
+  const pick = async (user: ReturnType<typeof userEvent.setup>, option: string | RegExp) => {
+    await user.click(await screen.findByRole("combobox", { name: "Effort" }));
+    await user.click(await screen.findByRole("option", { name: option }));
+  };
+
+  it("labels Default with the inherited level, or with the provider default when none is set", async () => {
+    fake.providers = providers("medium");
+    fake.sessions = [session(3, "Chat")];
+    mount("/p/alpha/chat/3");
+    expect(await screen.findByRole("combobox", { name: "Effort" })).toHaveTextContent("Default (Medium)");
+    expect(screen.getByRole("combobox", { name: "Effort" })).toHaveAttribute(
+      "title",
+      "How hard the model thinks. Default uses the level set in Settings.",
+    );
+  });
+
+  it("says provider default when nothing is set", async () => {
+    fake.providers = providers(null);
+    fake.sessions = [session(3, "Chat")];
+    mount("/p/alpha/chat/3");
+    expect(await screen.findByRole("combobox", { name: "Effort" })).toHaveTextContent("Default (provider default)");
+  });
+
+  it("PATCHes the level on an existing session, and null for Default", async () => {
+    fake.providers = providers("low");
+    fake.sessions = [session(3, "Chat")];
+    mount("/p/alpha/chat/3");
+    const user = userEvent.setup();
+    await pick(user, "High");
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0].body).toEqual({ effort: "high" });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Effort" })).toHaveTextContent("High"));
+
+    await pick(user, /^Default/);
+    await waitFor(() => expect(patches()).toHaveLength(2));
+    expect(patches()[1].body).toEqual({ effort: null });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Effort" })).toHaveTextContent("Default (Low)"));
+  });
+
+  it("keeps a draft choice local and sends it in the create body on the first message", async () => {
+    mount("/p/alpha/chat");
+    const user = userEvent.setup();
+    await pick(user, "Extra high");
+    expect(fake.calls.some((c) => c.method === "POST" || c.method === "PATCH")).toBe(false);
+    await user.type(await screen.findByRole("textbox"), "why?");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(fake.stream).not.toBeNull());
+    const creates = fake.calls.filter((c) => c.method === "POST" && c.path === "/api/projects/alpha/chat/sessions");
+    expect(creates[0].body).toEqual({ provider: "openai", model: "gpt-x", effort: "xhigh" });
+    // The new session keeps the level the draft had.
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Effort" })).toHaveTextContent("Extra high"));
+  });
+
+  it("is disabled while a turn streams", async () => {
+    fake.sessions = [session(3, "Chat")];
+    mount("/p/alpha/chat/3");
+    const user = userEvent.setup();
+    expect(await screen.findByRole("combobox", { name: "Effort" })).toBeEnabled();
+    await user.type(await screen.findByRole("textbox"), "go");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(fake.stream).not.toBeNull());
+    expect(screen.getByRole("combobox", { name: "Effort" })).toBeDisabled();
   });
 });
 

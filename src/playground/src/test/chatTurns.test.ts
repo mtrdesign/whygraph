@@ -119,6 +119,20 @@ describe("turnsFromMessages", () => {
     expect(assistant.finishReason).toBe("stop");
   });
 
+  it("marks the last row of a turn as continuable only when the output limit cut it off", () => {
+    const cut = row({ content: "half", finish_reason: "length" });
+    const turns = turnsFromMessages([row({ role: "user", content: "q" }), cut]);
+    expect((turns[1] as AssistantTurn).continuableId).toBe(cut.id);
+    const continued = turnsFromMessages([
+      row({ role: "user", content: "q" }),
+      row({ content: "half", finish_reason: "max_tokens" }),
+      row({ content: " rest", finish_reason: "stop" }),
+    ]);
+    expect((continued[1] as AssistantTurn).continuableId).toBeUndefined();
+    const ended = turnsFromMessages([row({ role: "user", content: "q" }), row({ content: "a", finish_reason: "stop" })]);
+    expect((ended[1] as AssistantTurn).continuableId).toBeUndefined();
+  });
+
   it("looks versions up by the turn's FIRST row id", () => {
     const user = row({ role: "user", content: "q" });
     const first = row({ content: "", tool_calls: [call("c1")] });
@@ -134,6 +148,21 @@ describe("turnsFromMessages", () => {
     });
     expect(turns[0]).toMatchObject({ kind: "user", versions: userVersions });
     expect((turns[1] as AssistantTurn).versions).toEqual(replyVersions);
+  });
+
+  it("gives a reply the id of its last row, tool rows included", () => {
+    const turns = turnsFromMessages([
+      row({ role: "user", content: "q" }),
+      row({ id: 2, content: "", tool_calls: [call("c1")] }),
+      row({ id: 3, role: "tool", content: "{}", tool_call_id: "c1" }),
+      row({ id: 4, content: "done" }),
+      row({ id: 5, role: "user", content: "q2" }),
+      row({ id: 6, content: "", tool_calls: [call("c2")] }),
+      row({ id: 7, role: "tool", content: "{}", tool_call_id: "c2" }),
+    ]);
+    expect((turns[1] as AssistantTurn).id).toBe(2);
+    expect((turns[1] as AssistantTurn).lastId).toBe(4);
+    expect((turns[3] as AssistantTurn).lastId).toBe(7);
   });
 
   it("leaves versions off turns that have none", () => {
@@ -171,8 +200,49 @@ describe("turnsFromMessages", () => {
       { ...base, id: 13, role: "assistant", content: "" },
     ];
     // Strict equality on the serialized form: `toEqual` would let a new `undefined` key through.
-    const plain = (value: unknown) => JSON.parse(JSON.stringify(value));
+    // `lastId` (branch in new chat) postdates the baseline, so it is dropped here and has its own test.
+    const plain = (value: unknown) =>
+      JSON.parse(JSON.stringify(value, (k, v) => (k === "lastId" ? undefined : v)));
     expect(plain(turnsFromMessages(fixture))).toEqual(baseline);
     expect(plain(turnsFromMessages(fixture, {}))).toEqual(baseline);
+  });
+});
+
+describe("reasoning (plan 37 §7.1.1)", () => {
+  it("places each round's reasoning above that round's text, persisted and live alike", async () => {
+    const { applyReasoningDelta, applyTextDelta, applyToolCall, applyToolResult, emptyAssistantTurn } =
+      await import("../components/chat/turns");
+    const persisted = turnsFromMessages([
+      row({ role: "user", content: "why?" }),
+      row({ content: "Looking.", tool_calls: [call("c1")], reasoning: "plan the search" }),
+      row({ role: "tool", content: "{}", tool_call_id: "c1" }),
+      row({ content: "Found it.", reasoning: "read the result" }),
+    ])[1] as AssistantTurn;
+    expect(persisted.segments).toEqual(["Looking.", "Found it."]);
+    expect(persisted.reasoning).toEqual(["plan the search", "read the result"]);
+
+    let live = emptyAssistantTurn();
+    live = applyReasoningDelta(live, "plan the ");
+    live = applyReasoningDelta(live, "search");
+    live = applyTextDelta(live, "Looking.");
+    live = applyToolCall(live, call("c1"));
+    live = applyToolResult(live, "c1", "{}");
+    live = applyReasoningDelta(live, "read the result");
+    live = applyTextDelta(live, "Found it.");
+    expect(live.segments).toEqual(persisted.segments);
+    expect(live.reasoning).toEqual(persisted.reasoning);
+  });
+
+  it("a tool-only round's reasoning opens a segment after its cards", () => {
+    const turn = turnsFromMessages([
+      row({ role: "user", content: "q" }),
+      row({ content: "", tool_calls: [call("c1")] }),
+      row({ role: "tool", content: "{}", tool_call_id: "c1" }),
+      row({ content: "", tool_calls: [call("c2")], reasoning: "one more lookup" }),
+      row({ role: "tool", content: "{}", tool_call_id: "c2" }),
+      row({ content: "Done." }),
+    ])[1] as AssistantTurn;
+    expect(turn.reasoning).toEqual(["", "one more lookup"]);
+    expect(turn.activityGroups.map((g) => g.map((a) => a.id))).toEqual([["c1"], ["c2"], []]);
   });
 });

@@ -73,6 +73,7 @@ from whygraph.services.llm.chat import (
     EFFORT_LEVELS,
     ChatMessage,
     ModelInfo,
+    ReasoningDelta,
     TextDelta,
     ToolCall,
     TurnDone,
@@ -144,6 +145,12 @@ class BranchBody(BaseModel):
     message_id: int
 
 
+class ForkBody(BaseModel):
+    """Body for ``POST /api/chat/sessions/{id}/fork``."""
+
+    message_id: int
+
+
 def _check_effort(effort: str | None) -> None:
     """400 ``bad_effort`` unless ``effort`` is unset or one of the levels."""
     if effort is not None and effort not in EFFORT_LEVELS:
@@ -202,6 +209,7 @@ def _message_dict(row: ChatMessageRow) -> dict:
         "error": row.error,
         "finish_reason": row.finish_reason,
         "effort": row.effort,
+        "reasoning": row.reasoning,
         "parent_id": row.parent_id,
         "created_at": row.created_at,
     }
@@ -855,6 +863,7 @@ def _persist_assistant_turn(
     provider: str,
     model: str,
     effort: str | None = None,
+    reasoning: str | None = None,
     error: str | None = None,
 ) -> int:
     """Write one assistant row (one provider round) and return its row id.
@@ -875,6 +884,8 @@ def _persist_assistant_turn(
         error or an abort), whose row then carries no tokens.
     effort : str or None, optional
         The effort level the turn ran at.
+    reasoning : str or None, optional
+        The round's reasoning text, for display only (never sent back).
     error : str or None, optional
         Why the turn failed, if it did. Stored alongside whatever text did
         arrive, so a refresh replays the failure instead of showing a user
@@ -899,6 +910,7 @@ def _persist_assistant_turn(
             replay=_persisted_replay(usage.replay) if usage else None,
             finish_reason=usage.finish_reason if usage else None,
             effort=effort,
+            reasoning=reasoning,
             created_at=now,
         ),
         now=now,
@@ -1001,6 +1013,9 @@ class TurnJob:
         The row the turn answers (see :func:`_load_history`).
     effort : str or None
         The resolved effort level.
+    continue_from_assistant : bool
+        The turn carries on from a truncated reply (``start_id``) instead of
+        answering a user row; the harness appends its continue prompt.
 
     Attributes
     ----------
@@ -1019,6 +1034,7 @@ class TurnJob:
         *,
         start_id: int = 0,
         effort: str | None = None,
+        continue_from_assistant: bool = False,
     ) -> None:
         self.key = key
         self.session_id = session_id
@@ -1027,6 +1043,7 @@ class TurnJob:
         self.start_id = start_id
         self.parent_id: int | None = start_id
         self.effort = effort
+        self.continue_from_assistant = continue_from_assistant
         self.cancel_event = threading.Event()
         self.client = None
         self.queue: queue.Queue = queue.Queue()
@@ -1120,6 +1137,7 @@ BUDGET_STOP_MESSAGE = (
 
 _ROUND_FLUSH_EVENTS: tuple[type, ...] = (
     TextDelta,
+    ReasoningDelta,
     RoundUsage,
     RoundLimit,
     Continuation,
@@ -1229,6 +1247,7 @@ def _turn_frames(job: TurnJob) -> Iterator[str]:
     # round's provider call ends; its tool events still follow, and the next
     # flushing event (or the end of the turn) writes it as rows.
     text_parts: list[str] = []
+    reasoning_parts: list[str] = []
     round_calls: list[ToolCall] = []
     round_results: list[tuple[ToolCall, str]] = []
     round_usage: RoundUsage | None = None
@@ -1244,17 +1263,18 @@ def _turn_frames(job: TurnJob) -> Iterator[str]:
         message with no reply at all. So does a finished round that
         reported tokens, so the rows add up to the turn's total.
         """
-        nonlocal text_parts, round_calls, round_results, round_usage
+        nonlocal text_parts, reasoning_parts, round_calls, round_results, round_usage
         reported = round_usage is not None and (
             round_usage.input_tokens or round_usage.output_tokens
         )
-        if not (text_parts or round_calls or error or reported):
+        if not (text_parts or reasoning_parts or round_calls or error or reported):
             round_usage = None
             return None
         message_id = _write_assistant(
             text="".join(text_parts),
             calls=round_calls,
             usage=round_usage,
+            reasoning="".join(reasoning_parts) or None,
             error=error,
         )
         for call, result in round_results:
@@ -1262,6 +1282,7 @@ def _turn_frames(job: TurnJob) -> Iterator[str]:
                 session_id, call, result, parent_id=job.parent_id
             )
         text_parts = []
+        reasoning_parts = []
         round_calls = []
         round_results = []
         round_usage = None
@@ -1274,6 +1295,7 @@ def _turn_frames(job: TurnJob) -> Iterator[str]:
             registry=registry,
             effort=job.effort,
             cancel=job.cancel_event,
+            continue_from_assistant=job.continue_from_assistant,
         ):
             if round_usage is not None and isinstance(event, _ROUND_FLUSH_EVENTS):
                 # The previous round is finished and something new starts.
@@ -1282,6 +1304,10 @@ def _turn_frames(job: TurnJob) -> Iterator[str]:
             if isinstance(event, TextDelta):
                 text_parts.append(event.text)
                 yield _frame({"type": "text_delta", "text": event.text})
+
+            elif isinstance(event, ReasoningDelta):
+                reasoning_parts.append(event.text)
+                yield _frame({"type": "reasoning_delta", "text": event.text})
 
             elif isinstance(event, ToolCallStarted):
                 round_calls.append(event.call)
@@ -1436,6 +1462,30 @@ def _preflight(
     return row
 
 
+TRUNCATED_FINISH_REASONS = ("max_tokens", "length")
+"""The ``finish_reason`` values that mean the output limit cut a reply off."""
+
+
+def _require_truncated_leaf(session_id: int, message_id: int) -> None:
+    """404 ``not_found`` unless ``message_id`` is a reply the output limit cut off.
+
+    It must be the session's active leaf and carry a ``finish_reason`` of
+    ``max_tokens`` or ``length``; anything else cannot be continued. Read
+    before the lease is taken and before anything is written.
+    """
+    with get_session() as session:
+        rows = _session_rows(session, session_id)
+        row = _require_session(session, session_id)
+        message = rows.get(message_id)
+        if (
+            message is None
+            or _leaf_id(row, rows) != message_id
+            or message.role != "assistant"
+            or message.finish_reason not in TRUNCATED_FINISH_REASONS
+        ):
+            raise ServeError(404, f"message {message_id} not found", code="not_found")
+
+
 def _start_turn(
     request: Request,
     session_id: int,
@@ -1443,20 +1493,40 @@ def _start_turn(
     content: str | None = None,
     edit_of: int | None = None,
     regenerate_of: int | None = None,
+    continue_of: int | None = None,
 ) -> StreamingResponse:
     """Start a turn: preflight, lease, user row, worker; then stream it.
 
     The order is the contract: nothing is written before the preflight and
     the lease, and any failure before the worker starts gives the lease
-    back. From then on the worker owns it.
+    back. From then on the worker owns it. A continue writes no user row:
+    the turn picks up under the truncated reply (``continue_of``).
     """
-    target = edit_of if edit_of is not None else regenerate_of
-    row = _preflight(request, session_id, target, role="user")
+    target = next(
+        (t for t in (edit_of, regenerate_of, continue_of) if t is not None), None
+    )
+    row = _preflight(
+        request,
+        session_id,
+        target,
+        role="assistant" if continue_of is not None else "user",
+    )
+    if continue_of is not None:
+        _require_truncated_leaf(session_id, continue_of)
     key = _lease_key(session_id)
-    job = TurnJob(key, session_id, row.provider, row.model)
+    job = TurnJob(
+        key,
+        session_id,
+        row.provider,
+        row.model,
+        continue_from_assistant=continue_of is not None,
+    )
     _acquire(key, job)
     try:
-        if regenerate_of is not None:
+        if continue_of is not None:
+            # New rows chain under the truncated one; the history ends with it.
+            job.start_id = job.parent_id = continue_of
+        elif regenerate_of is not None:
             # A sibling reply under the same question. The leaf moves when the
             # first row is written, so a turn that writes nothing leaves the
             # old reply on the path.
@@ -1533,6 +1603,19 @@ def regenerate_reply(
     return _start_turn(request, session_id, regenerate_of=message_id)
 
 
+@router.post("/sessions/{session_id}/messages/{message_id}/continue")
+def continue_reply(
+    session_id: int, message_id: int, request: Request
+) -> StreamingResponse:
+    """Carry on a reply the output limit cut off, streamed as SSE.
+
+    ``message_id`` must be the session's active leaf, an assistant row whose
+    ``finish_reason`` is ``max_tokens`` or ``length``; otherwise 404. No user
+    row is written: the new rows chain under the truncated one.
+    """
+    return _start_turn(request, session_id, continue_of=message_id)
+
+
 @router.post("/sessions/{session_id}/branch")
 def branch_session(session_id: int, body: BranchBody, request: Request) -> dict:
     """Show another version: move the leaf to the newest end under a row.
@@ -1556,6 +1639,87 @@ def branch_session(session_id: int, body: BranchBody, request: Request) -> dict:
     finally:
         _release(key, holder)
     return get_transcript(session_id, request)
+
+
+_COPIED_COLUMNS = (
+    "role",
+    "content",
+    "tool_calls",
+    "tool_call_id",
+    "input_tokens",
+    "output_tokens",
+    "provider",
+    "model",
+    "error",
+    "replay",
+    "finish_reason",
+    "effort",
+    "reasoning",
+    "created_at",
+)
+"""Every message column a fork copies verbatim (ids and the tree are rebuilt)."""
+
+
+@router.post("/sessions/{session_id}/fork", status_code=201)
+def fork_session(session_id: int, body: ForkBody, request: Request) -> dict:
+    """Branch in a new chat: copy the active path up to a message.
+
+    The new session is the caller's, with the source's provider, model and
+    effort and the title ``"<title> (branch)"``. The rows from the root up to
+    and including ``message_id`` are copied with fresh ids and a rebuilt
+    ``parent_id`` chain, in one transaction, and the last copy is the new
+    session's leaf. No provider is called. 404 unless ``message_id`` is on
+    the source's active path; refused while a reply is being written in it.
+
+    Returns
+    -------
+    dict
+        The new session, with the number of rows copied.
+    """
+    source = _preflight(request, session_id, body.message_id, turn=False)
+    key = _lease_key(session_id)
+    holder = object()
+    _acquire(key, holder)
+    try:
+        with get_session() as session:
+            rows = _session_rows(session, session_id)
+            path = _path_ids(
+                rows, _leaf_id(_require_session(session, session_id), rows)
+            )
+            if body.message_id not in path:
+                raise ServeError(
+                    404, f"message {body.message_id} not found", code="not_found"
+                )
+            now = _now_iso()
+            branch = ChatSessionRow(
+                title=f"{source.title} (branch)"[:TITLE_MAX_CHARS],
+                provider=source.provider,
+                model=source.model,
+                effort=source.effort,
+                created_at=now,
+                updated_at=now,
+                owner_uid=_caller_uid(request),
+            )
+            session.add(branch)
+            session.flush()
+            copied: dict[int, int] = {}
+            for old_id in path[: path.index(body.message_id) + 1]:
+                old = rows[old_id]
+                copy = ChatMessageRow(
+                    session_id=branch.id,
+                    parent_id=copied.get(old.parent_id),
+                    **{column: getattr(old, column) for column in _COPIED_COLUMNS},
+                )
+                session.add(copy)
+                session.flush()
+                copied[old_id] = copy.id
+            branch.active_leaf_id = copied[body.message_id]
+            session.add(branch)
+            session.commit()
+            session.refresh(branch)
+            return _session_dict(branch, message_count=len(copied))
+    finally:
+        _release(key, holder)
 
 
 __all__ = ["router", "stop_all_turns"]

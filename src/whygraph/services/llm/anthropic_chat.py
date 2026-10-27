@@ -32,6 +32,9 @@ Three contracts shape what is sent back within a turn:
   persisted across turns and the harness strips them when it trims.
 * **Prompt caching.** Exactly three ``cache_control`` breakpoints: the last
   tool, the stable system block, and the last block of the last message.
+* **Thinking.** ``thinking={"type": "adaptive", "display": "summarized"}``;
+  its ``thinking_delta``s stream as :class:`ReasoningDelta`. A model that
+  refuses the parameter is asked once more without it and remembered.
 * **Effort.** ``output_config.effort``; a 400 that names it (and is not a
   thinking-signature error) becomes ``LlmError(code="effort_unsupported")``.
 """
@@ -56,6 +59,7 @@ from .chat import (
     ChatRequest,
     ChatStreamEvent,
     ModelInfo,
+    ReasoningDelta,
     TextDelta,
     ToolCall,
     ToolCallMade,
@@ -75,6 +79,13 @@ DEFAULT_MAX_TOKENS = 32_000
 
 _CACHE = {"type": "ephemeral"}
 """The ``cache_control`` value every breakpoint carries."""
+
+_NO_THINKING: set[str] = set()
+"""Models that refused adaptive thinking in this process (sent without it)."""
+
+_THINKING_UNSUPPORTED = re.compile(r"not supported|unsupported|budget_tokens")
+_NOT_THINKING_ERROR = re.compile(r"signature|block_binding")
+"""A 400 about the ``thinking`` parameter itself, never about replayed blocks."""
 
 _EFFORT_ERROR = re.compile(r"\b(effort|output_config)\b")
 _NOT_EFFORT_ERROR = re.compile(r"signature|block_binding|thinking\.type")
@@ -314,6 +325,23 @@ def _finished_calls(
         yield ToolCallMade(call=call)
 
 
+def _thinking_unsupported(exc: Exception) -> bool:
+    """Whether a 400 says this model takes no adaptive ``thinking`` parameter.
+
+    Narrow on purpose: the message must name ``thinking`` and say it is not
+    supported (or ask for ``budget_tokens``, an older model's form), and
+    must not be about a replayed block's signature.
+    """
+    if not isinstance(exc, anthropic.BadRequestError):
+        return False
+    message = str(exc)
+    return (
+        "thinking" in message
+        and bool(_THINKING_UNSUPPORTED.search(message))
+        and not _NOT_THINKING_ERROR.search(message)
+    )
+
+
 def _effort_code(exc: Exception, request: ChatRequest) -> str | None:
     """``"effort_unsupported"`` when a 400 rejects the effort parameter.
 
@@ -454,6 +482,10 @@ class AnthropicChatAdapter(ChatClient):
                 kwargs["tool_choice"] = {"type": "none"}
         if request.temperature is not None:
             kwargs["temperature"] = request.temperature
+        if self.model not in _NO_THINKING:
+            # Summarized thinking, shown as reasoning; the blocks themselves
+            # are replayed verbatim within the turn.
+            kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
 
         blocks: dict[int, _BlockAccumulator] = {}
         # Finished `tool_use` blocks, held until the stop reason is known.
@@ -485,87 +517,101 @@ class AnthropicChatAdapter(ChatClient):
                 served_model = model
             _absorb(getattr(message, "usage", None))
 
-        try:
-            with self._client.messages.stream(**kwargs) as stream:
-                self._active = stream
-                for event in stream:
-                    event_type = getattr(event, "type", None)
+        started = False
+        while True:
+            try:
+                with self._client.messages.stream(**kwargs) as stream:
+                    self._active = stream
+                    for event in stream:
+                        started = True
+                        event_type = getattr(event, "type", None)
 
-                    if event_type == "content_block_start":
-                        block = getattr(event, "content_block", None)
-                        last_index = getattr(event, "index", 0) or 0
-                        if getattr(block, "type", None) == "tool_use":
-                            blocks[last_index] = _BlockAccumulator(
-                                call_id=getattr(block, "id", "") or "",
-                                name=getattr(block, "name", "") or "",
-                            )
-                        continue
-
-                    if event_type == "content_block_delta":
-                        delta = getattr(event, "delta", None)
-                        delta_type = getattr(delta, "type", None)
-                        if delta_type == "text_delta":
-                            text = getattr(delta, "text", None)
-                            if text:
-                                yield TextDelta(text=text)
-                        elif delta_type == "input_json_delta":
-                            index = getattr(event, "index", 0) or 0
-                            accumulator = blocks.get(index)
-                            fragment = getattr(delta, "partial_json", None)
-                            if accumulator is not None and fragment:
-                                accumulator.json_parts.append(fragment)
-                        continue
-
-                    if event_type == "content_block_stop":
-                        index = getattr(event, "index", 0) or 0
-                        accumulator = blocks.pop(index, None)
-                        if accumulator is not None:
-                            completed.append((index, accumulator))
-                        # The SDK's stream helper carries the accumulated
-                        # block, signature included; a hand-rolled copy
-                        # would lose the `signature_delta`.
-                        block = getattr(event, "content_block", None)
-                        if block is not None:
-                            replayed = _replay_block(block)
-                            if replayed is not None:
-                                replay_blocks.append(replayed)
-                            else:
-                                _log.debug(
-                                    "anthropic: not replaying a %s block",
-                                    getattr(block, "type", None),
+                        if event_type == "content_block_start":
+                            block = getattr(event, "content_block", None)
+                            last_index = getattr(event, "index", 0) or 0
+                            if getattr(block, "type", None) == "tool_use":
+                                blocks[last_index] = _BlockAccumulator(
+                                    call_id=getattr(block, "id", "") or "",
+                                    name=getattr(block, "name", "") or "",
                                 )
-                        continue
+                            continue
 
-                    if event_type == "message_delta":
-                        delta = getattr(event, "delta", None)
-                        reason = getattr(delta, "stop_reason", None)
-                        if reason is not None:
-                            finish_reason = reason
-                        _absorb(getattr(event, "usage", None))
-                        continue
+                        if event_type == "content_block_delta":
+                            delta = getattr(event, "delta", None)
+                            delta_type = getattr(delta, "type", None)
+                            if delta_type == "text_delta":
+                                text = getattr(delta, "text", None)
+                                if text:
+                                    yield TextDelta(text=text)
+                            elif delta_type == "thinking_delta":
+                                thought = getattr(delta, "thinking", None)
+                                if thought:
+                                    yield ReasoningDelta(text=thought)
+                            elif delta_type == "input_json_delta":
+                                index = getattr(event, "index", 0) or 0
+                                accumulator = blocks.get(index)
+                                fragment = getattr(delta, "partial_json", None)
+                                if accumulator is not None and fragment:
+                                    accumulator.json_parts.append(fragment)
+                            continue
 
-                    if event_type in ("message_start", "message_stop"):
-                        # `message_stop` from the SDK's stream helper carries
-                        # the final message snapshot: its model is the one
-                        # actually served (it can change after a fallback).
-                        _absorb_message(getattr(event, "message", None))
-                        continue
-        except LlmError:
-            raise
-        except anthropic.AnthropicError as exc:
-            raise LlmError(
-                f"anthropic API error: {exc}",
-                request_id=getattr(exc, "request_id", None),
-                code=_effort_code(exc, request),
-            ) from exc
-        except httpx.TransportError as exc:
-            # Once a stream has started the SDK no longer wraps transport
-            # errors: a read timeout or a dropped connection arrives raw.
-            raise LlmError(
-                f"anthropic stream interrupted: {type(exc).__name__}"
-            ) from exc
-        finally:
-            self._active = None
+                        if event_type == "content_block_stop":
+                            index = getattr(event, "index", 0) or 0
+                            accumulator = blocks.pop(index, None)
+                            if accumulator is not None:
+                                completed.append((index, accumulator))
+                            # The SDK's stream helper carries the accumulated
+                            # block, signature included; a hand-rolled copy
+                            # would lose the `signature_delta`.
+                            block = getattr(event, "content_block", None)
+                            if block is not None:
+                                replayed = _replay_block(block)
+                                if replayed is not None:
+                                    replay_blocks.append(replayed)
+                                else:
+                                    _log.debug(
+                                        "anthropic: not replaying a %s block",
+                                        getattr(block, "type", None),
+                                    )
+                            continue
+
+                        if event_type == "message_delta":
+                            delta = getattr(event, "delta", None)
+                            reason = getattr(delta, "stop_reason", None)
+                            if reason is not None:
+                                finish_reason = reason
+                            _absorb(getattr(event, "usage", None))
+                            continue
+
+                        if event_type in ("message_start", "message_stop"):
+                            # `message_stop` from the SDK's stream helper carries
+                            # the final message snapshot: its model is the one
+                            # actually served (it can change after a fallback).
+                            _absorb_message(getattr(event, "message", None))
+                            continue
+                break
+            except LlmError:
+                raise
+            except anthropic.AnthropicError as exc:
+                if not started and "thinking" in kwargs and _thinking_unsupported(exc):
+                    # This model takes no adaptive thinking: ask once more without
+                    # it, and never send it to this model again in this process.
+                    _NO_THINKING.add(self.model)
+                    del kwargs["thinking"]
+                    continue
+                raise LlmError(
+                    f"anthropic API error: {exc}",
+                    request_id=getattr(exc, "request_id", None),
+                    code=_effort_code(exc, request),
+                ) from exc
+            except httpx.TransportError as exc:
+                # Once a stream has started the SDK no longer wraps transport
+                # errors: a read timeout or a dropped connection arrives raw.
+                raise LlmError(
+                    f"anthropic stream interrupted: {type(exc).__name__}"
+                ) from exc
+            finally:
+                self._active = None
 
         # A stream cut short before content_block_stop still owes its
         # accumulated calls.

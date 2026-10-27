@@ -142,9 +142,16 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
       fake.sessions = [row, ...fake.sessions];
       return Promise.resolve(json(row, 201));
     }
-    // Edit / regenerate stream like a send; branch answers with the transcript of the new path.
-    const t = /^\/chat\/sessions\/(\d+)\/messages\/(\d+)\/(edit|regenerate)$/.exec(rest ?? "");
+    // Edit / regenerate / continue stream like a send; branch answers with the transcript of the new path.
+    const t = /^\/chat\/sessions\/(\d+)\/messages\/(\d+)\/(edit|regenerate|continue)$/.exec(rest ?? "");
     if (t && method === "POST") return Promise.resolve(turnStream(init));
+    const fk = /^\/chat\/sessions\/(\d+)\/fork$/.exec(rest ?? "");
+    if (fk && method === "POST") {
+      const source = fake.sessions.find((x) => x.id === Number(fk[1])) ?? session(Number(fk[1]), "t");
+      const row = { ...session(9, `${source.title} (branch)`, 0), message_count: 2 };
+      fake.sessions = [row, ...fake.sessions];
+      return Promise.resolve(json(row, 201));
+    }
     const br = /^\/chat\/sessions\/(\d+)\/branch$/.exec(rest ?? "");
     if (br && method === "POST") {
       const id = Number(br[1]);
@@ -526,10 +533,10 @@ describe("the chat view: edit, regenerate and versions", () => {
     fake.transcripts[3] = exchanges();
   });
 
-  it("offers Regenerate on the last reply only, and Edit on every question", async () => {
+  it("offers Regenerate on every reply, and Edit on every question", async () => {
     mount("/p/alpha/chat/3");
     await screen.findByText("second a");
-    expect(screen.getAllByRole("button", { name: "Regenerate reply" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Regenerate reply" })).toHaveLength(2);
     expect(screen.getAllByRole("button", { name: "Edit message" })).toHaveLength(2);
     expect(screen.getAllByRole("button", { name: "Copy reply" })).toHaveLength(2);
   });
@@ -580,7 +587,7 @@ describe("the chat view: edit, regenerate and versions", () => {
     mount("/p/alpha/chat/3");
     const user = userEvent.setup();
     await screen.findByText("second a");
-    await user.click(screen.getByRole("button", { name: "Regenerate reply" }));
+    await user.click(screen.getAllByRole("button", { name: "Regenerate reply" })[1]);
 
     await waitFor(() => expect(fake.stream).not.toBeNull());
     expect(turnPosts().at(-1)).toMatchObject({
@@ -602,13 +609,88 @@ describe("the chat view: edit, regenerate and versions", () => {
     expect(screen.getByTestId("version-arrows")).toHaveTextContent("2/2");
   });
 
+  it("regenerates an older reply: its question is the route id, the reply and later turns give way", async () => {
+    mount("/p/alpha/chat/3");
+    const user = userEvent.setup();
+    await screen.findByText("second a");
+    await user.click(screen.getAllByRole("button", { name: "Regenerate reply" })[0]);
+
+    await waitFor(() => expect(fake.stream).not.toBeNull());
+    expect(turnPosts().at(-1)).toMatchObject({
+      path: "/api/projects/alpha/chat/sessions/3/messages/1/regenerate",
+      body: undefined,
+    });
+    // The first question stays; its old reply and everything after it give way to the new reply.
+    expect(screen.getByText("first q")).toBeInTheDocument();
+    expect(screen.queryByText("first a")).toBeNull();
+    expect(screen.queryByText("second q")).toBeNull();
+    expect(screen.queryByText("second a")).toBeNull();
+    expect(screen.getByText(/Thinking/)).toBeInTheDocument();
+
+    fake.transcripts[3] = [row(1, "user", "first q"), row(5, "assistant", "First, again.")];
+    fake.transcriptExtra[3] = { versions: { "5": { index: 2, count: 2, siblings: [2, 5] } } };
+    act(() => {
+      fake.stream!.enqueue(frame({ type: "text_delta", text: "First, again." }));
+      fake.stream!.enqueue(done(5));
+      fake.stream!.close();
+    });
+    await screen.findByText("First, again.");
+    expect(screen.queryByText("second q")).toBeNull();
+  });
+
+  it("continues a reply the output limit cut off: the continue route, no body, the reply stays and merges on refetch", async () => {
+    const cut = () => [...exchanges().slice(0, 3), row(4, "assistant", "second a, cut", { finish_reason: "max_tokens" })];
+    fake.transcripts[3] = cut();
+    mount("/p/alpha/chat/3");
+    const user = userEvent.setup();
+    await screen.findByText("second a, cut");
+    expect(screen.getAllByTestId("output-limit-notice")).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    await waitFor(() => expect(fake.stream).not.toBeNull());
+    expect(turnPosts().at(-1)).toMatchObject({
+      path: "/api/projects/alpha/chat/sessions/3/messages/4/continue",
+      body: undefined,
+    });
+    // No new question; the truncated reply stays while the rest streams in, and nothing else can start.
+    expect(screen.getByText("second a, cut")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Regenerate reply" })).toBeNull();
+
+    act(() => fake.stream!.enqueue(frame({ type: "text_delta", text: " and the rest." })));
+    await screen.findByText(/and the rest\./);
+    fake.transcripts[3] = [...cut(), row(5, "assistant", " and the rest.", { finish_reason: "stop" })];
+    act(() => {
+      fake.stream!.enqueue(done(5));
+      fake.stream!.close();
+    });
+    // The two rows are one reply now, with no output-limit notice and nothing left to continue.
+    await screen.findByText("second a, cut and the rest.");
+    expect(screen.queryByTestId("output-limit-notice")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+  });
+
+  it("offers Continue on the last reply only, and not on a reply that ended normally", async () => {
+    // An older cut-off reply is no longer the leaf; the last reply ended normally.
+    fake.transcripts[3] = [
+      row(1, "user", "first q"),
+      row(2, "assistant", "first a, cut", { finish_reason: "length" }),
+      row(3, "user", "second q"),
+      row(4, "assistant", "second a", { finish_reason: "stop" }),
+    ];
+    mount("/p/alpha/chat/3");
+    await screen.findByText("second a");
+    expect(screen.getByTestId("output-limit-notice")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+  });
+
   it.each([
     ["edit", async (user: ReturnType<typeof userEvent.setup>) => {
       await user.click(screen.getAllByRole("button", { name: "Edit message" })[1]);
       await user.type(screen.getByRole("textbox", { name: "Edit message" }), "!{Enter}");
     }],
     ["regenerate", async (user: ReturnType<typeof userEvent.setup>) => {
-      await user.click(screen.getByRole("button", { name: "Regenerate reply" }));
+      await user.click(screen.getAllByRole("button", { name: "Regenerate reply" })[1]);
     }],
   ])("Stop during %s aborts the stream and ends the turn", async (_name, start) => {
     mount("/p/alpha/chat/3");
@@ -680,6 +762,40 @@ describe("the chat view: edit, regenerate and versions", () => {
     await screen.findByText(/still being written in this chat/);
     expect(screen.getByText("second a")).toBeInTheDocument();
     expect(screen.getByText("second q")).toBeInTheDocument();
+  });
+
+  it("Branch from here forks at the turn's last row, refreshes the list and opens the new chat", async () => {
+    fake.transcripts[3] = [
+      row(1, "user", "first q"),
+      row(2, "assistant", "looking", { tool_calls: [{ id: "c1", name: "get_symbol", arguments: {} }] }),
+      row(3, "tool", "{}", { tool_call_id: "c1" }),
+      row(4, "assistant", "first a"),
+    ];
+    const router = mount("/p/alpha/chat/3");
+    const user = userEvent.setup();
+    await screen.findByText("first a");
+    expect(screen.getAllByRole("button", { name: "Branch from here" })).toHaveLength(2);
+
+    // The reply's last row is the tool-bearing turn's row 4, so the whole reply comes along.
+    await user.click(screen.getAllByRole("button", { name: "Branch from here" })[1]);
+    await waitFor(() => expect(router.state.location.pathname).toBe("/p/alpha/chat/9"));
+    const forks = fake.calls.filter((c) => c.method === "POST" && c.path.endsWith("/fork"));
+    expect(forks).toHaveLength(1);
+    expect(forks[0]).toMatchObject({
+      path: "/api/projects/alpha/chat/sessions/3/fork",
+      body: { message_id: 4 },
+    });
+    // The new chat is in the sidebar.
+    expect(await within(await chats()).findByText("Two exchanges (branch)")).toBeInTheDocument();
+  });
+
+  it("Branch from here on a question forks at that question", async () => {
+    const router = mount("/p/alpha/chat/3");
+    const user = userEvent.setup();
+    await screen.findByText("second a");
+    await user.click(screen.getAllByRole("button", { name: "Branch from here" })[2]);
+    await waitFor(() => expect(router.state.location.pathname).toBe("/p/alpha/chat/9"));
+    expect(fake.calls.filter((c) => c.path.endsWith("/fork")).at(-1)?.body).toEqual({ message_id: 3 });
   });
 
   it("the version arrows branch, then show the path the server answers with", async () => {

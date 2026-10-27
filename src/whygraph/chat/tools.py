@@ -508,6 +508,26 @@ _SPECS: tuple[ToolSpec, ...] = (
 )
 
 TOOL_SPECS: tuple[ToolSpec, ...] = _SPECS
+
+SERIAL_TOOLS: frozenset[str] = frozenset(
+    {
+        "get_rationale",
+        "get_evidence",
+        "get_area_history",
+        "render_chart",
+        "run_project_stats",
+        "run_graph_stats",
+    }
+)
+"""Tools a round must run one at a time, in the model's order.
+
+``get_rationale`` spends the turn's generation budget; ``get_evidence`` and
+``get_area_history`` run the lazy backfill, which writes and spends; the
+stats tools mint chart refs into the registry and ``render_chart`` reads
+them. Every other tool is a read with its own handle per call, so a round
+made only of those runs its calls concurrently (see
+:func:`whygraph.chat.harness.run_turn`).
+"""
 """The tools offered to the model, in the order they are presented."""
 
 
@@ -1014,6 +1034,7 @@ def _encode(result: object) -> str:
 
 __all__ = [
     "MAX_RESULT_CHARS",
+    "SERIAL_TOOLS",
     "TOOL_SPECS",
     "TRUNCATION_MARKER",
     "ToolRegistry",

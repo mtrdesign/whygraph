@@ -139,10 +139,15 @@ reason, and earlier chats stay readable.
 
 ### Editing and regenerating
 
-Hover a question and choose **Edit** to change it and get a new answer. Hover the last reply and
+Hover a question and choose **Edit** to change it and get a new answer. Hover any reply and
 choose **Regenerate** for another answer. Both keep the earlier version: a `‹ 2/3 ›` arrow beside the
 message switches between the versions. A new version uses the chat's current provider, model and
 effort.
+
+**Branch from here** (on any question or reply) starts a new chat with the conversation up to and
+including that message, named after the original with "(branch)", and opens it. The original chat stays
+exactly as it was. Nothing is sent to the model, so it works even without a key; the new chat waits for
+your next message (or **Regenerate**, if you branched from a question).
 
 **Copy** works on any message and copies its text. For a reply, that is the answer text, never its
 reasoning.
@@ -245,6 +250,11 @@ Tuned under `[chat]` - imported from a repository's `whygraph.toml` when you add
 
 Two behaviours worth knowing:
 
+- **Repeated calls are flagged.** From the third identical tool call in one turn (same tool, same
+  arguments) the call still runs, and its result tells the model how many times it asked.
+- **Lookups run side by side.** When a step asks for several plain lookups at once (symbols,
+  files, commits, pull requests), they run in parallel and the cards fill in in the model's order.
+  Rationale cards, evidence, area history and statistics still run one at a time.
 - **A failing tool never ends a turn.** Errors come back to the model as results, so it can correct
   course and try something else. Individual results are truncated at 30 000 characters with an
   explicit marker.
@@ -260,7 +270,8 @@ whole turns from the top - never splitting a tool call from its result.
 Most turns end with a reply. These cases are handled for you:
 
 - A reply cut off by the output limit is continued, up to `max_continuations` times. If it is still
-  cut off, it ends with "The reply hit the output limit."
+  cut off, it ends with "The reply hit the output limit." and, on the latest reply, a **Continue**
+  button that carries on from where it stopped. The rest is added to the same reply.
 - If the model writes nothing after using tools, WhyGraph asks it once to answer from what it gathered.
 - In a long turn, the bodies of older tool results are shortened to fit `context_token_budget`, and
   the reply says "Older tool results in this turn were shortened to fit the context."
@@ -290,6 +301,13 @@ DeepSeek and some OpenRouter models think before they answer and expect that rea
 while they call tools. WhyGraph does that within a turn and, for DeepSeek, across turns too. A
 DeepSeek chat that has replies from before this was supported (or from another provider) runs
 without thinking until those replies leave the history the model sees.
+
+What a model reasons shows in a collapsed **Reasoning** block above that step of its reply: open it
+to read along. The block stays open or closed the way you last left it (in this browser), survives a
+reload, and is never part of **Copy**. On Anthropic, WhyGraph asks for summarized thinking on every
+model that supports it; a model that does not is asked again without it, once. On a model where
+thinking is optional (Claude Opus 4.8, for example) this turns thinking on, which uses more output
+tokens per reply.
 
 ## Limits
 

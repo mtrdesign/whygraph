@@ -213,6 +213,8 @@ export interface ChatMessage {
   finish_reason?: string | null;
   effort?: string | null;
   parent_id?: number | null;
+  // The round's reasoning (summarized thinking), for display only; never copied or sent back.
+  reasoning?: string | null;
 }
 
 /** The versions of one message: its siblings in the tree (same parent), ids ascending, `index` 1-based. */
@@ -234,6 +236,7 @@ export interface ChatTranscript extends ChatSession {
 // terminal — the UI must stop its spinner on either.
 export type ChatEvent =
   | { type: "text_delta"; text: string }
+  | { type: "reasoning_delta"; text: string }
   | { type: "tool_call"; id: string; name: string; arguments: Record<string, unknown> }
   | { type: "tool_result"; id: string; name: string; result: string }
   | { type: "round_limit"; rounds: number }
@@ -2055,6 +2058,24 @@ export function projectApi(slug: string) {
         onEvent,
         signal,
       ),
+    // `messageId` is the truncated reply (the active leaf) to carry on from; no body, no user row.
+    chatContinue: (
+      sessionId: number,
+      messageId: number,
+      onEvent: (event: ChatEvent) => void,
+      signal?: AbortSignal,
+    ) =>
+      streamChat(
+        `${base}/chat/sessions/${sessionId}/messages/${messageId}/continue`,
+        undefined,
+        onEvent,
+        signal,
+      ),
+    // Starts a new chat from the active path up to `messageId`; answers with the new session.
+    chatFork: (sessionId: number, messageId: number) =>
+      send<ChatSession>("POST", `${base}/chat/sessions/${sessionId}/fork`, {
+        message_id: messageId,
+      }),
     // Switches the visible version; answers with the transcript of the new path.
     chatBranch: (sessionId: number, messageId: number) =>
       send<ChatTranscript>("POST", `${base}/chat/sessions/${sessionId}/branch`, {

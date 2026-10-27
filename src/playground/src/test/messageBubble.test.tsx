@@ -76,6 +76,19 @@ describe("MessageBubble: how a turn was cut short", () => {
     }
   });
 
+  it("offers Continue in the notice only with a handler and while nothing streams", () => {
+    const onContinue = vi.fn();
+    const turn = assistant({ segments: ["Half an ans"], finishReason: "max_tokens", id: 2 });
+    const { rerender } = render(<MessageBubble turn={turn} />);
+    expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+    rerender(<MessageBubble turn={turn} onContinue={onContinue} busy />);
+    expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+    rerender(<MessageBubble turn={turn} onContinue={onContinue} />);
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(onContinue).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("output-limit-notice")).toContainElement(screen.getByRole("button", { name: "Continue" }));
+  });
+
   it("says so when the provider declined (either spelling)", () => {
     for (const finishReason of ["refusal", "content_filter"]) {
       const { unmount } = render(<MessageBubble turn={assistant({ segments: ["I can't"], finishReason })} />);
@@ -151,7 +164,7 @@ describe("MessageBubble: actions", () => {
     expect(screen.getByRole("button", { name: "Regenerate reply" })).toBeInTheDocument();
     unmount();
 
-    // An older turn: the thread passes no handler. (A later plan step turns this on for any turn.)
+    // A turn the thread gives no handler (a live turn, or one whose question is not persisted): no button.
     render(<MessageBubble turn={assistant({ segments: ["Older."], id: 10 })} />);
     expect(screen.queryByRole("button", { name: "Regenerate reply" })).toBeNull();
     expect(screen.getByRole("button", { name: "Copy reply" })).toBeInTheDocument();
@@ -164,12 +177,14 @@ describe("MessageBubble: actions", () => {
           turn={user({ versions })}
           busy
           onEdit={() => {}}
+          onFork={() => {}}
           onBranch={() => {}}
         />
         <MessageBubble
           turn={assistant({ segments: ["Hi."], versions })}
           busy
           onRegenerate={() => {}}
+          onFork={() => {}}
           onBranch={() => {}}
         />
       </>,
@@ -179,12 +194,30 @@ describe("MessageBubble: actions", () => {
       "Edit message",
       "Copy reply",
       "Regenerate reply",
+      "Branch from here",
       "Previous version",
       "Next version",
     ]) {
       expect(screen.queryByRole("button", { name })).toBeNull();
     }
     expect(screen.queryByTestId("version-arrows")).toBeNull();
+  });
+
+  it("shows Branch from here on a question and on a reply where the thread passes it", () => {
+    const onFork = vi.fn();
+    const { unmount } = render(<MessageBubble turn={user()} onFork={onFork} />);
+    fireEvent.click(screen.getByRole("button", { name: "Branch from here" }));
+    expect(onFork).toHaveBeenCalledTimes(1);
+    unmount();
+
+    // A reply with nothing to copy or regenerate still offers it.
+    const reply = render(<MessageBubble turn={assistant({ segments: ["Hi."], id: 2, lastId: 4 })} onFork={onFork} />);
+    fireEvent.click(screen.getByRole("button", { name: "Branch from here" }));
+    expect(onFork).toHaveBeenCalledTimes(2);
+    reply.unmount();
+
+    render(<MessageBubble turn={user()} />);
+    expect(screen.queryByRole("button", { name: "Branch from here" })).toBeNull();
   });
 
   it("shows no actions on a live turn that is still thinking", () => {
@@ -269,5 +302,39 @@ describe("MessageBubble: version arrows", () => {
       />,
     );
     expect(screen.getByRole("button", { name: "Next version" })).toBeDisabled();
+  });
+});
+
+describe("MessageBubble: reasoning", () => {
+  it("renders reasoning collapsed above its round's text, and Copy leaves it out", async () => {
+    window.localStorage.removeItem("whygraph.chat.reasoningOpen");
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    render(
+      <MessageBubble
+        turn={{
+          kind: "assistant",
+          segments: ["The answer."],
+          activityGroups: [[]],
+          reasoning: ["private chain of thought"],
+        }}
+      />,
+    );
+    const block = screen.getByTestId("reasoning") as HTMLDetailsElement;
+    expect(block.open).toBe(false);
+    expect(block).toHaveTextContent("Reasoning");
+    fireEvent.click(screen.getByRole("button", { name: "Copy reply" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("The answer."));
+  });
+
+  it("remembers that this viewer opened reasoning", () => {
+    window.localStorage.setItem("whygraph.chat.reasoningOpen", "1");
+    render(
+      <MessageBubble
+        turn={{ kind: "assistant", segments: ["a"], activityGroups: [[]], reasoning: ["r"] }}
+      />,
+    );
+    expect((screen.getByTestId("reasoning") as HTMLDetailsElement).open).toBe(true);
+    window.localStorage.removeItem("whygraph.chat.reasoningOpen");
   });
 });

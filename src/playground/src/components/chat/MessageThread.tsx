@@ -27,6 +27,7 @@ import { Composer } from "./Composer";
 import { EffortSelect } from "./EffortSelect";
 import { ModelSelect } from "./ModelSelect";
 import {
+  applyReasoningDelta,
   applyTextDelta,
   applyToolCall,
   applyToolResult,
@@ -69,7 +70,7 @@ function pause(ms: number, signal: AbortSignal): Promise<void> {
 
 /** One turn about to run: what the screen shows meanwhile, and how its stream is opened. */
 interface TurnStart {
-  kind: "send" | "edit" | "regenerate";
+  kind: "send" | "edit" | "regenerate" | "continue";
   /** How many persisted turns stay on screen while it runs (`null`: all of them). */
   keep: number | null;
   /** The optimistic live view; the persisted rows replace it when the turn ends. */
@@ -262,16 +263,30 @@ export function MessageThread({
   const turns = [...shown, ...liveTurns];
   // Nothing may start, switch or edit while a turn is in flight.
   const busy = streaming || branching;
-  // Regenerate belongs to the last assistant turn only, and only once it is persisted: it needs the
-  // question's id. (A later step may offer it on any turn.)
+  // Regenerate belongs to every reply that is persisted and whose question is persisted too: it needs
+  // the question's id. A live turn never offers it.
+  const regenerable = (index: number) => {
+    const reply = turns[index];
+    const question = turns[index - 1];
+    return (
+      liveTurns.length === 0 &&
+      reply?.kind === "assistant" &&
+      reply.id !== undefined &&
+      question?.kind === "user" &&
+      question.id !== undefined
+    );
+  };
+
+  // Branch from here belongs to every persisted turn; a live one has no row to copy up to yet. It
+  // needs no key or budget: it calls no provider.
+  const forkId = (turn: Turn) => (turn.kind === "user" ? turn.id : turn.lastId) as number;
+  const forkable = (turn: Turn) =>
+    liveTurns.length === 0 && currentId !== null && (turn.kind === "user" ? turn.id : turn.lastId) !== undefined;
+
+  // Continue belongs to the last turn too, when it is persisted and the output limit cut it off.
   const lastTurn = turns[turns.length - 1];
-  const lastQuestion = turns[turns.length - 2];
-  const regenerableIndex =
-    liveTurns.length === 0 &&
-    lastTurn?.kind === "assistant" &&
-    lastTurn.id !== undefined &&
-    lastQuestion?.kind === "user" &&
-    lastQuestion.id !== undefined
+  const continuableIndex =
+    liveTurns.length === 0 && lastTurn?.kind === "assistant" && lastTurn.continuableId !== undefined
       ? turns.length - 1
       : -1;
 
@@ -367,6 +382,9 @@ export function MessageThread({
             void queryClient.invalidateQueries({ queryKey: chatSessionsKey(slug) });
           }
           switch (event.type) {
+            case "reasoning_delta":
+              updateLive((t) => applyReasoningDelta(t, event.text));
+              break;
             case "text_delta":
               updateLive((t) => applyTextDelta(t, event.text));
               break;
@@ -554,16 +572,31 @@ export function MessageThread({
     });
   };
 
-  // A new reply to the last question: the old reply is hidden until the refetch brings it back as a version.
-  const regenerate = () => {
-    const question = shown[shown.length - 2];
-    if (currentId === null || regenerableIndex < 0 || question?.kind !== "user" || question.id === undefined) return;
+  // A new reply to the question before the reply at `index`: that reply and everything after it are hidden
+  // until the refetch brings the old one back as a version.
+  const regenerate = (index: number) => {
+    const question = shown[index - 1];
+    if (currentId === null || question?.kind !== "user" || question.id === undefined) return;
     const messageId = question.id;
     void runTurn({
       kind: "regenerate",
-      keep: shown.length - 1,
+      keep: index,
       live: [emptyAssistantTurn()],
       open: (sid, onEvent, signal) => api.chatRegenerate(sid, messageId, onEvent, signal),
+    });
+  };
+
+  // Carry on a reply the output limit cut off: no new question, and the truncated reply stays on screen
+  // while the rest streams in below it; the refetch then shows the two as one reply.
+  const continueReply = () => {
+    const last = shown[shown.length - 1];
+    if (currentId === null || last?.kind !== "assistant" || last.continuableId === undefined) return;
+    const messageId = last.continuableId;
+    void runTurn({
+      kind: "continue",
+      keep: null,
+      live: [emptyAssistantTurn()],
+      open: (sid, onEvent, signal) => api.chatContinue(sid, messageId, onEvent, signal),
     });
   };
 
@@ -575,6 +608,23 @@ export function MessageThread({
     try {
       const next = await api.chatBranch(currentId, messageId);
       queryClient.setQueryData<ChatTranscript>(key("chat", "transcript", currentId), next);
+    } catch (err) {
+      setCreateError(err);
+    } finally {
+      setBranching(false);
+    }
+  };
+
+  // Branch from here: a new chat with the conversation up to a persisted row, then open it. The
+  // original stays as it was, so this is a push (Back returns to it), not a replace.
+  const forkFrom = async (messageId: number) => {
+    if (currentId === null) return;
+    setBranching(true);
+    setCreateError(null);
+    try {
+      const created = await api.chatFork(currentId, messageId);
+      void queryClient.invalidateQueries({ queryKey: chatSessionsKey(slug) });
+      void navigate({ to: "/p/$slug/chat/{-$id}", params: { slug, id: String(created.id) } });
     } catch (err) {
       setCreateError(err);
     } finally {
@@ -639,7 +689,9 @@ export function MessageThread({
                 ? (content) => edit(turn, content)
                 : undefined
             }
-            onRegenerate={i === regenerableIndex && !cannotSend ? regenerate : undefined}
+            onRegenerate={regenerable(i) && !cannotSend ? () => regenerate(i) : undefined}
+            onContinue={i === continuableIndex && !cannotSend ? continueReply : undefined}
+            onFork={forkable(turn) ? () => void forkFrom(forkId(turn)) : undefined}
             onBranch={(id) => void branchTo(id)}
           />
         ))}

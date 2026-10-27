@@ -1172,10 +1172,21 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         "POST",
         "/api/projects/{slug}/chat/sessions/{session_id}/messages/{message_id}/regenerate",
     ): Call(200, shows=lambda o: [str(o.root)]),
+    # The seeded message is the user's question, not a truncated reply: the
+    # route's own, org-specific 404 (the cross-org checks run before it).
+    (
+        "POST",
+        "/api/projects/{slug}/chat/sessions/{session_id}/messages/{message_id}/continue",
+    ): Call(404, shows=lambda o: ["not_found"]),
     ("POST", "/api/projects/{slug}/chat/sessions/{session_id}/branch"): Call(
         200,
         body=lambda w, o: {"message_id": o.message_id},
         shows=lambda o: [o.session_title, f"{o.mark} question"],
+    ),
+    ("POST", "/api/projects/{slug}/chat/sessions/{session_id}/fork"): Call(
+        201,
+        body=lambda w, o: {"message_id": o.message_id},
+        shows=lambda o: [f"{o.session_title} (branch)"],
     ),
 }
 """How the sweep calls each route in its own org (plan section 5.2 item 2).

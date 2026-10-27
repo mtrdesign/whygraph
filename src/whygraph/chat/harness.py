@@ -34,10 +34,13 @@ the **turn total**.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
@@ -54,6 +57,7 @@ from whygraph.services.llm.chat import (
     ChatClient,
     ChatMessage,
     ChatRequest,
+    ReasoningDelta,
     TextDelta,
     ToolCall,
     ToolCallMade,
@@ -61,7 +65,7 @@ from whygraph.services.llm.chat import (
 )
 from whygraph.services.llm.exceptions import UNREACHABLE_CAUSES
 
-from .tools import ToolRegistry
+from .tools import SERIAL_TOOLS, ToolRegistry
 
 _log = logging.getLogger(__name__)
 
@@ -70,6 +74,14 @@ _OVERVIEW_PLACEHOLDER = "{{OVERVIEW}}"
 
 ELIDED_MARKER = "[result elided]"
 """Replaces a stale tool-result body when trimming for the context budget."""
+
+REPEAT_CALL_LIMIT = 3
+"""From this many identical tool calls in one turn on, the result is annotated.
+
+Identical means the same tool name and the same arguments (key order does
+not matter). The call is still dispatched - a lazy backfill can change a
+result within a turn - but the model is told it is repeating itself.
+"""
 
 _ELIDE_KEEP_TURNS = 2
 """Tool results in the last N turns keep their bodies; older ones are elided.
@@ -264,6 +276,7 @@ class ContextTrimmed:
 
 HarnessEvent = (
     TextDelta
+    | ReasoningDelta
     | ToolCallStarted
     | ToolResultReady
     | RoundUsage
@@ -494,6 +507,51 @@ def build_window(
 # ---------------------------------------------------------------------------
 
 
+PARALLEL_TOOL_WORKERS = 4
+"""Most tool calls of one round that run at the same time."""
+
+_PARALLEL_POLL_SEC = 0.1
+"""How often a wait on a parallel tool call checks for a Stop."""
+
+
+def _dispatch_parallel(
+    registry: ToolRegistry,
+    calls: Sequence[ToolCall],
+    cancel: threading.Event | None,
+) -> Iterator[str]:
+    """Run ``calls`` concurrently; yield their results in submission order.
+
+    Each call runs in its own copy of the current context, so the bound
+    project, strict mode and the usage sink reach it. A Stop while waiting
+    raises :class:`TurnCancelled` and cancels the calls not yet started (a
+    running one finishes on its own, as a sequential one would).
+    """
+    executor = ThreadPoolExecutor(
+        max_workers=PARALLEL_TOOL_WORKERS, thread_name_prefix="chat-tool"
+    )
+    try:
+        futures = [
+            executor.submit(
+                contextvars.copy_context().run,
+                registry.dispatch,
+                call.name,
+                call.arguments,
+            )
+            for call in calls
+        ]
+        for future in futures:
+            while True:
+                _check(cancel)
+                try:
+                    result = future.result(timeout=_PARALLEL_POLL_SEC)
+                except TimeoutError:
+                    continue
+                break
+            yield result
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
 def _check(cancel: threading.Event | None) -> None:
     """Raise :class:`TurnCancelled` when the turn was stopped."""
     if cancel is not None and cancel.is_set():
@@ -536,6 +594,23 @@ def _is_error_result(result: str) -> bool:
     except ValueError:
         return False  # a truncated result does not decode; not flagged
     return isinstance(value, dict) and "error" in value
+
+
+def _note_repeat(result: str, count: int) -> str:
+    """Annotate the result of a call repeated ``count`` times in this turn.
+
+    A JSON object gains a ``note`` key (``repeat_note`` when it already has
+    one); any other result is prefixed with the same sentence in brackets.
+    """
+    text = f"identical call repeated {count} times in this turn"
+    try:
+        value = json.loads(result)
+    except ValueError:
+        value = None
+    if isinstance(value, dict):
+        value["repeat_note" if "note" in value else "note"] = text
+        return json.dumps(value)
+    return f"[{text}] {result}"
 
 
 def _trim_turn(
@@ -597,11 +672,12 @@ def run_turn(
     effort: str | None = None,
     cancel: threading.Event | None = None,
     max_continuations: int | None = None,
+    continue_from_assistant: bool = False,
 ) -> Iterator[HarnessEvent]:
     """Run one user turn to completion, yielding harness events.
 
     The loop: stream a round → forward its text → if it ended with tool
-    calls, dispatch them **sequentially in the order the model asked**,
+    calls, dispatch them (results **in the order the model asked**),
     append the assistant message and one tool message per result, and
     stream again. Every provider call goes through one call site, which is
     also where usage is recorded. A round ends the turn unless one of these
@@ -620,10 +696,17 @@ def run_turn(
     bare cap notice. A connection dropped mid-stream before anything arrived
     is retried once, silently.
 
-    Sequential dispatch rather than concurrent is a real choice: tool
-    latency here is dominated by local SQLite reads, so parallelism would
-    buy almost nothing while making event ordering nondeterministic and the
-    rationale budget racy.
+    A call repeated identically (same tool, same arguments) :data:`REPEAT_CALL_LIMIT`
+    times or more in the turn is still dispatched, but its result carries a
+    note saying how many times it has been made.
+
+    A round whose calls are all plain reads (none in
+    :data:`~whygraph.chat.tools.SERIAL_TOOLS`) runs them concurrently, each
+    in its own context copy: every :class:`ToolCallStarted` first, then the
+    results in the model's order, so events and rows stay deterministic. A
+    round with a serial tool (rationale generation, lazy backfill, the chart
+    tools) runs one call at a time, because those share the turn's budget
+    or the registry's chart refs.
 
     Parameters
     ----------
@@ -655,6 +738,12 @@ def run_turn(
     max_continuations : int, optional
         Continuations after a truncated reply. ``None`` reads
         ``[chat].max_continuations``.
+    continue_from_assistant : bool, optional
+        The history ends with a reply the output limit cut off, not with a
+        user message (the Continue button). :data:`CONTINUE_PROMPT` is
+        appended to the working messages before the first round, so the model
+        carries on from where it stopped. The prompt is never yielded or
+        persisted.
 
     Yields
     ------
@@ -700,10 +789,13 @@ def run_turn(
         build_window(history, token_budget=context_token_budget)
     )
     turn_start = len(messages)
+    if continue_from_assistant:
+        messages.append(ChatMessage(role="user", content=CONTINUE_PROMPT))
 
     # One TurnDone per provider call, in order; the turn total is their sum.
     rounds: list[TurnDone] = []
     rounds_used = continuations = tool_rounds = 0
+    seen_calls: Counter[tuple[str, str]] = Counter()
     nudged = trimmed = False
     latest_round = turn_start
     while True:
@@ -732,6 +824,7 @@ def run_turn(
         for attempt in range(2):
             text_parts: list[str] = []
             calls: list[ToolCall] = []
+            reasoned = False
             done = TurnDone()
             started = time.monotonic()
             stream = client.stream_turn(request)
@@ -740,6 +833,9 @@ def run_turn(
                     _check(cancel)
                     if isinstance(event, TextDelta):
                         text_parts.append(event.text)
+                        yield event
+                    elif isinstance(event, ReasoningDelta):
+                        reasoned = True
                         yield event
                     elif isinstance(event, ToolCallMade):
                         calls.append(event.call)
@@ -751,7 +847,13 @@ def run_turn(
             except Exception as exc:
                 if cancel is not None and cancel.is_set():
                     raise TurnCancelled from exc
-                if attempt or text_parts or calls or not _is_dropped_stream(exc):
+                if (
+                    attempt
+                    or text_parts
+                    or calls
+                    or reasoned
+                    or not _is_dropped_stream(exc)
+                ):
                     raise
                 _log.warning(
                     "chat round retry after %s (request id %s)",
@@ -799,10 +901,28 @@ def run_turn(
                     replay=done.replay,
                 )
             )
-            for call in calls:
+            parallel = None
+            if len(calls) > 1 and not any(c.name in SERIAL_TOOLS for c in calls):
+                # Every call is a read with its own handle: run them at once,
+                # but report results in the order the model asked for them.
                 _check(cancel)
-                yield ToolCallStarted(call=call)
-                result = registry.dispatch(call.name, call.arguments)
+                for call in calls:
+                    yield ToolCallStarted(call=call)
+                parallel = _dispatch_parallel(registry, calls, cancel)
+            for call in calls:
+                if parallel is None:
+                    _check(cancel)
+                    yield ToolCallStarted(call=call)
+                    result = registry.dispatch(call.name, call.arguments)
+                else:
+                    result = next(parallel)
+                key = (
+                    call.name,
+                    json.dumps(call.arguments, sort_keys=True, separators=(",", ":")),
+                )
+                seen_calls[key] += 1
+                if seen_calls[key] >= REPEAT_CALL_LIMIT:
+                    result = _note_repeat(result, seen_calls[key])
                 yield ToolResultReady(call=call, result=result)
                 messages.append(
                     ChatMessage(

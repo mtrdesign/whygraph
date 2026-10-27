@@ -1,5 +1,13 @@
 import { Suspense, lazy, useEffect, useRef, useState } from "react";
-import { CheckIcon, ChevronLeftIcon, ChevronRightIcon, CopyIcon, PencilIcon, RefreshCwIcon } from "lucide-react";
+import {
+  CheckIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  CopyIcon,
+  GitBranchIcon,
+  PencilIcon,
+  RefreshCwIcon,
+} from "lucide-react";
 import type { ChatVersions } from "../../api";
 import { BudgetNotice } from "../portal/BudgetNotice";
 import { writeClipboard } from "../portal/CopyButton";
@@ -38,9 +46,19 @@ export interface AssistantTurn {
    * live turns, which key off their position instead.
    */
   id?: number;
+  /**
+   * Persisted turns only: the id of the turn's last row (tool rows included), what "Branch from
+   * here" copies up to so the whole reply comes along.
+   */
+  lastId?: number;
   /** Text segments in order, interleaved with `activities` of the same index. */
   segments: string[];
   activityGroups: ToolActivity[][];
+  /**
+   * The model's reasoning per round, at the index of the segment it precedes. Shown collapsed,
+   * never copied.
+   */
+  reasoning?: string[];
   usage?: { input: number | null; output: number | null };
   /** Which model produced this turn — shown because it can differ per turn. */
   model?: string | null;
@@ -55,6 +73,11 @@ export interface AssistantTurn {
    * `refusal` / `content_filter` (declined) get a notice; anything else shows nothing.
    */
   finishReason?: string;
+  /**
+   * Persisted turns only: the id of the turn's last row when that row is an assistant row the output
+   * limit cut off - the one the server will continue. Absent when the turn ended any other way.
+   */
+  continuableId?: number;
   /** Older tool results of this turn were elided to fit the context. Live turns only: a transcript cannot know. */
   trimmed?: boolean;
   /** The turn's versions (it has siblings in the tree), looked up by its first row. */
@@ -92,6 +115,10 @@ export interface TurnActions {
   onEdit?: (content: string) => void;
   /** Passed for the LAST assistant turn only: write its reply again. */
   onRegenerate?: () => void;
+  /** Passed for the LAST assistant turn only, when the output limit cut it off: carry on from there. */
+  onContinue?: () => void;
+  /** Persisted turns: start a new chat with the conversation up to and including this turn. */
+  onFork?: () => void;
   /** Version arrows: switch to the sibling with this message id. */
   onBranch?: (messageId: number) => void;
 }
@@ -120,6 +147,21 @@ function CopyAction({ text, what }: { text: string; what: string }) {
       }}
     >
       {copied ? <CheckIcon /> : <CopyIcon />}
+    </Button>
+  );
+}
+
+function ForkAction({ onFork }: { onFork: () => void }) {
+  return (
+    <Button
+      type="button"
+      size="icon-xs"
+      variant="ghost"
+      aria-label="Branch from here"
+      title="Branch from here"
+      onClick={onFork}
+    >
+      <GitBranchIcon />
     </Button>
   );
 }
@@ -162,7 +204,7 @@ export function VersionArrows({
   );
 }
 
-function UserBubble({ turn, busy, onEdit, onBranch }: { turn: UserTurn } & TurnActions) {
+function UserBubble({ turn, busy, onEdit, onFork, onBranch }: { turn: UserTurn } & TurnActions) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(turn.content);
 
@@ -238,6 +280,7 @@ function UserBubble({ turn, busy, onEdit, onBranch }: { turn: UserTurn } & TurnA
                     <PencilIcon />
                   </Button>
                 )}
+                {onFork && <ForkAction onFork={onFork} />}
               </div>
             )}
           </div>
@@ -247,7 +290,48 @@ function UserBubble({ turn, busy, onEdit, onBranch }: { turn: UserTurn } & TurnA
   );
 }
 
-function AssistantBubble({ turn, busy, onRegenerate, onBranch }: { turn: AssistantTurn } & TurnActions) {
+const REASONING_OPEN_KEY = "whygraph.chat.reasoningOpen";
+
+/** Whether this viewer last left reasoning blocks open (a per-viewer convenience). */
+function readReasoningOpen(): boolean {
+  try {
+    return window.localStorage.getItem(REASONING_OPEN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function storeReasoningOpen(open: boolean): void {
+  try {
+    window.localStorage.setItem(REASONING_OPEN_KEY, open ? "1" : "0");
+  } catch {
+    // Private windows and blocked storage: the block still works, it just isn't remembered.
+  }
+}
+
+/** One round's reasoning, collapsed unless this viewer last left it open. */
+export function ReasoningBlock({ text }: { text: string }) {
+  return (
+    <details
+      className="mb-1.5 rounded-sm border border-border/60 bg-background/40 px-2 py-1 text-xs text-muted-foreground"
+      open={readReasoningOpen()}
+      onToggle={(e) => storeReasoningOpen(e.currentTarget.open)}
+      data-testid="reasoning"
+    >
+      <summary className="cursor-pointer select-none hover:text-foreground">Reasoning</summary>
+      <p className="mt-1 whitespace-pre-wrap break-words">{text}</p>
+    </details>
+  );
+}
+
+function AssistantBubble({
+  turn,
+  busy,
+  onRegenerate,
+  onContinue,
+  onFork,
+  onBranch,
+}: { turn: AssistantTurn } & TurnActions) {
   const rows = Math.max(turn.segments.length, turn.activityGroups.length);
   // Flattened across groups on purpose. `render_chart` and the stats call that
   // minted its `chart_ref` are separate tool *rounds*, and a new round opens a new
@@ -269,13 +353,14 @@ function AssistantBubble({ turn, busy, onRegenerate, onBranch }: { turn: Assista
   // The no-reply line carries its own Regenerate, so the hover one would be a twin.
   const regenerate = !!onRegenerate && !noReply;
   // A turn still thinking or running a tool has nothing to act on yet; `busy` covers the rest.
-  const actions = !busy && settled && (!!copyText || regenerate);
+  const actions = !busy && settled && (!!copyText || regenerate || !!onFork);
 
   return (
     <div className="group flex min-w-0 max-w-[92%] flex-col items-start">
       <div className="min-w-0 max-w-full rounded-lg bg-muted px-3 py-2">
         {Array.from({ length: rows }, (_, i) => (
           <div key={i} className="min-w-0">
+            {turn.reasoning?.[i] ? <ReasoningBlock text={turn.reasoning[i]} /> : null}
             {turn.segments[i] ? <Markdown>{turn.segments[i]}</Markdown> : null}
             {(turn.activityGroups[i] ?? []).map((activity) => {
               // A `render_chart` card renders its chart as a sibling, so the
@@ -340,6 +425,11 @@ function AssistantBubble({ turn, busy, onRegenerate, onBranch }: { turn: Assista
             data-testid="output-limit-notice"
           >
             The reply hit the output limit.
+            {!busy && onContinue && (
+              <Button type="button" size="xs" variant="outline" className="ml-2" onClick={onContinue}>
+                Continue
+              </Button>
+            )}
           </div>
         )}
 
@@ -415,6 +505,7 @@ function AssistantBubble({ turn, busy, onRegenerate, onBranch }: { turn: Assista
                   <RefreshCwIcon />
                 </Button>
               )}
+              {onFork && <ForkAction onFork={onFork} />}
             </div>
           )}
         </div>

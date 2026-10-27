@@ -27,14 +27,23 @@
   any id can still be entered.
 - **Chat follows your keys.** A new chat starts on the provider set for Chat when it has a key,
   otherwise on the first provider that has one, and the picker lists only providers with a key.
-- **Edit and regenerate in Chat.** Edit a question, or regenerate the last reply, and the earlier
+- **Edit and regenerate in Chat.** Edit a question, or regenerate any reply, and the earlier
   version stays: switch between versions with the `‹ 2/3 ›` arrows. **Copy** works on any message.
+- **Branch from here in Chat.** A hover action on any question or reply starts a new chat with the
+  conversation up to that message and opens it; the original stays as it was.
+- **Continue a cut-off reply.** When a reply hits the output limit, **Continue** in the notice
+  carries on from where it stopped, with no new question.
 - **Effort level in Chat.** The **Effort** select beside the model picker sets how hard the model
   thinks, per chat, from the next reply. **Default** uses the level set for chats in Settings.
 - **Steadier long replies.** A reply cut off by the output limit continues once, a model that goes
   quiet after its tool calls is asked for an answer, and older tool results in a long turn are
   shortened to fit. Anthropic prompt caching makes long tool-heavy turns cheaper, and a keepalive
   keeps slow replies connected through proxies.
+- **Reasoning in Chat.** What the model reasons (Anthropic thinking summaries, DeepSeek and
+  OpenRouter reasoning) shows in a collapsed **Reasoning** block above each step of a reply. On
+  models where thinking is optional, such as Claude Opus 4.8, this turns thinking on.
+- **Faster tool steps.** Several lookups asked for in one step run in parallel, and a tool call the
+  model repeats a third time in one reply carries a note saying so.
 - **Stop is immediate.** Stop ends the reply at once and keeps what was written, marked "Stopped."
   Sending right after a Stop waits for the stopped reply to end, then sends.
 

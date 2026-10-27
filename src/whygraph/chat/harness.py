@@ -34,10 +34,12 @@ the **turn total**.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -63,7 +65,7 @@ from whygraph.services.llm.chat import (
 )
 from whygraph.services.llm.exceptions import UNREACHABLE_CAUSES
 
-from .tools import ToolRegistry
+from .tools import SERIAL_TOOLS, ToolRegistry
 
 _log = logging.getLogger(__name__)
 
@@ -505,6 +507,51 @@ def build_window(
 # ---------------------------------------------------------------------------
 
 
+PARALLEL_TOOL_WORKERS = 4
+"""Most tool calls of one round that run at the same time."""
+
+_PARALLEL_POLL_SEC = 0.1
+"""How often a wait on a parallel tool call checks for a Stop."""
+
+
+def _dispatch_parallel(
+    registry: ToolRegistry,
+    calls: Sequence[ToolCall],
+    cancel: threading.Event | None,
+) -> Iterator[str]:
+    """Run ``calls`` concurrently; yield their results in submission order.
+
+    Each call runs in its own copy of the current context, so the bound
+    project, strict mode and the usage sink reach it. A Stop while waiting
+    raises :class:`TurnCancelled` and cancels the calls not yet started (a
+    running one finishes on its own, as a sequential one would).
+    """
+    executor = ThreadPoolExecutor(
+        max_workers=PARALLEL_TOOL_WORKERS, thread_name_prefix="chat-tool"
+    )
+    try:
+        futures = [
+            executor.submit(
+                contextvars.copy_context().run,
+                registry.dispatch,
+                call.name,
+                call.arguments,
+            )
+            for call in calls
+        ]
+        for future in futures:
+            while True:
+                _check(cancel)
+                try:
+                    result = future.result(timeout=_PARALLEL_POLL_SEC)
+                except TimeoutError:
+                    continue
+                break
+            yield result
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
 def _check(cancel: threading.Event | None) -> None:
     """Raise :class:`TurnCancelled` when the turn was stopped."""
     if cancel is not None and cancel.is_set():
@@ -630,7 +677,7 @@ def run_turn(
     """Run one user turn to completion, yielding harness events.
 
     The loop: stream a round → forward its text → if it ended with tool
-    calls, dispatch them **sequentially in the order the model asked**,
+    calls, dispatch them (results **in the order the model asked**),
     append the assistant message and one tool message per result, and
     stream again. Every provider call goes through one call site, which is
     also where usage is recorded. A round ends the turn unless one of these
@@ -653,10 +700,13 @@ def run_turn(
     times or more in the turn is still dispatched, but its result carries a
     note saying how many times it has been made.
 
-    Sequential dispatch rather than concurrent is a real choice: tool
-    latency here is dominated by local SQLite reads, so parallelism would
-    buy almost nothing while making event ordering nondeterministic and the
-    rationale budget racy.
+    A round whose calls are all plain reads (none in
+    :data:`~whygraph.chat.tools.SERIAL_TOOLS`) runs them concurrently, each
+    in its own context copy: every :class:`ToolCallStarted` first, then the
+    results in the model's order, so events and rows stay deterministic. A
+    round with a serial tool (rationale generation, lazy backfill, the chart
+    tools) runs one call at a time, because those share the turn's budget
+    or the registry's chart refs.
 
     Parameters
     ----------
@@ -851,10 +901,21 @@ def run_turn(
                     replay=done.replay,
                 )
             )
-            for call in calls:
+            parallel = None
+            if len(calls) > 1 and not any(c.name in SERIAL_TOOLS for c in calls):
+                # Every call is a read with its own handle: run them at once,
+                # but report results in the order the model asked for them.
                 _check(cancel)
-                yield ToolCallStarted(call=call)
-                result = registry.dispatch(call.name, call.arguments)
+                for call in calls:
+                    yield ToolCallStarted(call=call)
+                parallel = _dispatch_parallel(registry, calls, cancel)
+            for call in calls:
+                if parallel is None:
+                    _check(cancel)
+                    yield ToolCallStarted(call=call)
+                    result = registry.dispatch(call.name, call.arguments)
+                else:
+                    result = next(parallel)
                 key = (
                     call.name,
                     json.dumps(call.arguments, sort_keys=True, separators=(",", ":")),

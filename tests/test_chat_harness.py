@@ -238,9 +238,10 @@ def test_tool_results_are_fed_back_to_the_model() -> None:
 
 
 def test_parallel_calls_dispatch_sequentially_in_model_order() -> None:
+    """A round with a serial tool (here ``get_evidence``) runs one call at a time."""
     calls = [
         _call("search_symbols", "c1", query="a"),
-        _call("get_symbol", "c2", qualified_name="b"),
+        _call("get_evidence", "c2", qualified_name="b"),
         _call("read_file", "c3", path="x.py"),
     ]
     client = ScriptedClient(
@@ -254,7 +255,7 @@ def test_parallel_calls_dispatch_sequentially_in_model_order() -> None:
 
     assert [name for name, _ in registry.dispatched] == [
         "search_symbols",
-        "get_symbol",
+        "get_evidence",
         "read_file",
     ]
     # Each call's Started strictly precedes its own ResultReady.
@@ -1408,3 +1409,125 @@ def test_repeated_call_counter_is_per_turn() -> None:
         events = _run(client, registry)
         results = [e.result for e in events if isinstance(e, ToolResultReady)]
         assert all("note" not in json.loads(r) for r in results)
+
+
+# ---------------------------------------------------------------------------
+# Parallel read-only tools (plan 37 §7.1.6)
+# ---------------------------------------------------------------------------
+
+
+class _SlowRegistry(StubRegistry):
+    """Each call sleeps for its ``delay`` argument; records when calls overlap."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lock = threading.Lock()
+        self.running = 0
+        self.peak = 0
+
+    def dispatch(self, name, arguments):
+        if name == "get_repo_overview":
+            return super().dispatch(name, arguments)
+        with self.lock:
+            self.running += 1
+            self.peak = max(self.peak, self.running)
+        try:
+            time.sleep(arguments.get("delay", 0))
+            return super().dispatch(name, arguments)
+        finally:
+            with self.lock:
+                self.running -= 1
+
+
+def _round(*calls: ToolCall) -> list:
+    return [*(ToolCallMade(call=c) for c in calls), _done("tool_calls")]
+
+
+def test_a_round_of_reads_runs_concurrently_in_model_order() -> None:
+    calls = [
+        _call("get_symbol", "c1", qualified_name="a", delay=0.6),
+        _call("read_file", "c2", path="b.py", delay=0.3),
+        _call("search_symbols", "c3", query="c", delay=0.4),
+    ]
+    registry = _SlowRegistry()
+    client = _Client([_round(*calls), [TextDelta(text="ok"), _done("end_turn")]])
+    started = time.monotonic()
+    events = _run(client, registry)
+    elapsed = time.monotonic() - started
+
+    assert registry.peak >= 2
+    assert elapsed < 1.1  # not the 1.3 s a sequential round needs
+    tool_events = [
+        e for e in events if isinstance(e, (ToolCallStarted, ToolResultReady))
+    ]
+    assert [type(e).__name__ for e in tool_events] == ["ToolCallStarted"] * 3 + [
+        "ToolResultReady"
+    ] * 3
+    # Results in the order the model asked, though c1 finished last.
+    assert [e.call.id for e in tool_events[3:]] == ["c1", "c2", "c3"]
+    tools = [m for m in client.requests[1].messages if m.role == "tool"]
+    assert [m.tool_call_id for m in tools] == ["c1", "c2", "c3"]
+
+
+def test_a_round_with_a_serial_tool_runs_one_call_at_a_time() -> None:
+    calls = [
+        _call("get_symbol", "c1", qualified_name="a", delay=0.1),
+        _call("get_rationale", "c2", qualified_name="b", delay=0.1),
+    ]
+    registry = _SlowRegistry()
+    client = _Client([_round(*calls), [TextDelta(text="ok"), _done("end_turn")]])
+    events = _run(client, registry)
+    assert registry.peak == 1
+    kinds = [
+        type(e).__name__
+        for e in events
+        if isinstance(e, (ToolCallStarted, ToolResultReady))
+    ]
+    assert kinds == ["ToolCallStarted", "ToolResultReady"] * 2
+
+
+def test_each_parallel_call_runs_in_a_copy_of_the_turns_context() -> None:
+    import contextvars
+
+    marker: contextvars.ContextVar[str] = contextvars.ContextVar(
+        "marker", default="unset"
+    )
+    seen: list[str] = []
+
+    class _Peek(StubRegistry):
+        def dispatch(self, name, arguments):
+            if name != "get_repo_overview":
+                seen.append(marker.get())
+            return super().dispatch(name, arguments)
+
+    token = marker.set("bound")
+    try:
+        client = _Client(
+            [
+                _round(
+                    _call("get_symbol", "c1", qualified_name="a"),
+                    _call("list_dir", "c2", path="."),
+                ),
+                [TextDelta(text="ok"), _done("end_turn")],
+            ]
+        )
+        _run(client, _Peek())
+    finally:
+        marker.reset(token)
+    assert seen == ["bound", "bound"]
+
+
+def test_a_stop_while_parallel_tools_run_cancels_the_turn() -> None:
+    cancel = threading.Event()
+    registry = _SlowRegistry()
+    calls = [
+        _call("get_symbol", "c1", qualified_name="a", delay=1.5),
+        _call("get_symbol", "c2", qualified_name="b", delay=1.5),
+    ]
+    client = _Client([_round(*calls)])
+    threading.Timer(0.1, cancel.set).start()
+    started = time.monotonic()
+    with pytest.raises(TurnCancelled):
+        _run(client, registry, cancel=cancel)
+    assert time.monotonic() - started < 1.2  # well before the calls finish
+    assert len(client.requests) == 1

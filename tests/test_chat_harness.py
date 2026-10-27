@@ -40,6 +40,7 @@ from whygraph.services.llm.chat import (
     TextDelta,
     ToolCall,
     ToolCallMade,
+    ToolSpec,
     TurnDone,
 )
 from whygraph.services.llm.exceptions import LlmError
@@ -108,6 +109,14 @@ class StubRegistry:
         return self._results.get(name, json.dumps({"ok": name}))
 
 
+class _SpecRegistry(StubRegistry):
+    """A stub registry that offers one tool, for asserting what a request carries."""
+
+    @property
+    def specs(self):
+        return (ToolSpec(name="search_symbols", description="d", parameters={}),)
+
+
 def _call(name: str, call_id: str = "c1", **arguments) -> ToolCall:
     return ToolCall(id=call_id, name=name, arguments=arguments)
 
@@ -158,7 +167,7 @@ def test_turn_with_no_tool_calls_ends_after_one_round() -> None:
     assert events == [
         TextDelta(text="Because "),
         TextDelta(text="history."),
-        RoundUsage(input_tokens=5, output_tokens=7),
+        RoundUsage(input_tokens=5, output_tokens=7, finish_reason="stop"),
         TurnDone(finish_reason="stop", input_tokens=5, output_tokens=7),
     ]
     assert len(client.requests) == 1
@@ -182,12 +191,14 @@ def test_tool_round_then_text_round() -> None:
 
     assert events[0] == TextDelta(text="Looking… ")
     # The round's usage closes its provider call, before its tools run.
-    assert events[1] == RoundUsage()
+    assert events[1] == RoundUsage(finish_reason="tool_calls")
     assert events[2] == ToolCallStarted(call=call)
     assert isinstance(events[3], ToolResultReady)
     assert events[3].call is call
     assert events[4] == TextDelta(text="Found it.")
-    assert events[5] == RoundUsage(input_tokens=9, output_tokens=3)
+    assert events[5] == RoundUsage(
+        input_tokens=9, output_tokens=3, finish_reason="stop"
+    )
     assert events[6] == TurnDone(finish_reason="stop", input_tokens=9, output_tokens=3)
     assert len(events) == 7
     assert registry.dispatched == [("search_symbols", {"query": "run_turn"})]
@@ -291,12 +302,13 @@ def test_round_limit_of_one_still_dispatches_then_stops() -> None:
     assert isinstance(events[-1], TurnDone)
 
 
-def test_the_answer_round_offers_no_tools_and_yields_prose() -> None:
+def test_the_answer_round_forbids_tools_and_yields_prose() -> None:
     """A round-limited turn must not end as tool cards with no answer.
 
     The exhausted turn's last tool results are in the transcript but were
-    never sent; the extra call ships them with ``tools=()`` so the model can
-    only write up what it has.
+    never sent; the extra call ships them with ``tool_choice="none"`` so the
+    model can only write up what it has. The tools stay on the request: one
+    that carries tool history must never drop them.
     """
     forever = [
         ToolCallMade(call=_call("search_symbols", query="x")),
@@ -313,7 +325,7 @@ def test_the_answer_round_offers_no_tools_and_yields_prose() -> None:
             ],
         ]
     )
-    events = _run(client, StubRegistry(), max_tool_rounds=2)
+    events = _run(client, _SpecRegistry(), max_tool_rounds=2)
 
     kinds = [type(e).__name__ for e in events]
     assert kinds.count("RoundLimit") == 1
@@ -325,17 +337,20 @@ def test_the_answer_round_offers_no_tools_and_yields_prose() -> None:
     text = "".join(e.text for e in events if isinstance(e, TextDelta))
     assert text == "Short version: it's the cache."
 
-    # Two tool rounds plus the answer round, and that last one offers no tools
-    # (what the tool rounds offer is covered by the registry-specs test).
+    # Two tool rounds plus the answer round, which keeps the same tools but
+    # forbids calling them.
     assert len(client.requests) == 3
-    assert client.requests[-1].tools == ()
+    assert client.requests[-1].tools == client.requests[0].tools
+    assert client.requests[-1].tools
+    assert client.requests[-1].tool_choice == "none"
+    assert {r.tool_choice for r in client.requests[:-1]} == {"auto"}
     # It still carries the full transcript, including the last round's results.
     roles = [m.role for m in client.requests[-1].messages]
     assert roles.count("tool") == 2
 
 
 def test_a_tool_call_in_the_answer_round_is_dropped() -> None:
-    """A provider that returns a call despite ``tools=()`` can't loop us."""
+    """A provider that returns a call despite ``tool_choice="none"`` can't loop us."""
     client = ScriptedClient(
         [
             [
@@ -491,11 +506,21 @@ def test_three_round_turn_reports_each_round_and_the_total() -> None:
             cache_read_tokens=80,
             cache_write_tokens=5,
             model="served-a",
+            finish_reason="tool_calls",
         ),
         RoundUsage(
-            input_tokens=200, output_tokens=20, reasoning_tokens=7, model="served-b"
+            input_tokens=200,
+            output_tokens=20,
+            reasoning_tokens=7,
+            model="served-b",
+            finish_reason="tool_calls",
         ),
-        RoundUsage(input_tokens=300, output_tokens=30, cache_read_tokens=250),
+        RoundUsage(
+            input_tokens=300,
+            output_tokens=30,
+            cache_read_tokens=250,
+            finish_reason="stop",
+        ),
     ]
     assert len(usages) == len(client.requests) == 3
 
@@ -558,7 +583,9 @@ def test_post_limit_answer_round_reports_its_usage_and_joins_the_total() -> None
     assert kinds.count("RoundUsage") == 3
     limit = kinds.index("RoundLimit")
     assert kinds[limit:] == ["RoundLimit", "TextDelta", "RoundUsage", "TurnDone"]
-    assert events[-2] == RoundUsage(input_tokens=50, output_tokens=5)
+    assert events[-2] == RoundUsage(
+        input_tokens=50, output_tokens=5, finish_reason="stop"
+    )
     assert events[-1] == _done("stop", 70, 7)
 
 
@@ -574,7 +601,10 @@ def test_turn_total_is_none_only_when_no_round_reported() -> None:
     )
     events = _run(client, StubRegistry())
     assert events[-1] == TurnDone(finish_reason="stop")
-    assert [e for e in events if isinstance(e, RoundUsage)] == [RoundUsage()] * 2
+    assert [e for e in events if isinstance(e, RoundUsage)] == [
+        RoundUsage(finish_reason="tool_calls"),
+        RoundUsage(finish_reason="stop"),
+    ]
 
 
 def test_a_round_without_a_turn_done_still_reports_empty_usage() -> None:

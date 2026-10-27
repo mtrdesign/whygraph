@@ -30,6 +30,17 @@
 
 ## Fixes
 
+- **Chat turns that stopped without an answer.** A failed, empty or stopped reply no longer breaks
+  every later question in the same chat. A reply that ends with no text says so instead of showing
+  *Thinking…* forever. Long thinking no longer runs out of room or times out after 60 seconds (the
+  wait is now `[chat].stream_timeout_sec`, 300 seconds by default). A dropped connection shows as
+  the provider being unreachable, provider errors show their request id, and DeepSeek and OpenRouter
+  reasoning models keep working across tool calls. After a turn reaches its tool-round limit, the
+  final answer keeps the tools on the request with calls turned off.
+- **Rolling back after this release.** This release adds a column to each project's WhyGraph
+  database. An older image cannot open the upgraded database: to go back, restore each project's
+  `backups/whygraph-<previous revision>.db`, which the portal writes beside its `whygraph.db` in
+  the data directory before upgrading it.
 - **Linking with your organization's address.** Entering your organization's address (instead of
   the platform's) in **From a platform** no longer fails after you approve; the organization is
   preselected.

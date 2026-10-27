@@ -34,8 +34,9 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 from importlib import resources
 
 from whygraph.analyze.prompt import render as render_prompt
@@ -153,6 +154,12 @@ class RoundUsage:
         The reasoning subset of ``output_tokens``.
     model : str or None
         The model the provider served, when it said.
+    finish_reason : str or None
+        The round's raw provider stop reason.
+    replay : Mapping[str, Any] or None
+        The round's provider reasoning payload (see
+        :attr:`~whygraph.services.llm.chat.TurnDone.replay`), for the serve
+        layer to persist on the round's row.
     """
 
     input_tokens: int | None = None
@@ -161,6 +168,8 @@ class RoundUsage:
     cache_write_tokens: int | None = None
     reasoning_tokens: int | None = None
     model: str | None = None
+    finish_reason: str | None = None
+    replay: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +222,8 @@ def _round_usage(done: TurnDone) -> RoundUsage:
         cache_write_tokens=done.cache_write_tokens,
         reasoning_tokens=done.reasoning_tokens,
         model=done.model,
+        finish_reason=done.finish_reason,
+        replay=done.replay,
     )
 
 
@@ -413,6 +424,7 @@ def run_turn(
     max_tool_rounds: int | None = None,
     context_token_budget: int | None = None,
     max_tokens: int | None = None,
+    stream_timeout_sec: int | None = None,
 ) -> Iterator[HarnessEvent]:
     """Run one user turn to completion, yielding harness events.
 
@@ -421,8 +433,9 @@ def run_turn(
     append the assistant message and one tool message per result, and
     stream again. Stop when a turn ends with no tool calls, or when
     ``max_tool_rounds`` is reached — then a single :class:`RoundLimit`,
-    followed by one last call with **no tools offered** so the turn ends in
-    prose rather than a bare cap notice.
+    followed by one last call that keeps the tools on the request but
+    forbids calling them (``tool_choice="none"``), so the turn ends in prose
+    rather than a bare cap notice.
 
     Sequential dispatch rather than concurrent is a real choice: tool
     latency here is dominated by local SQLite reads, so parallelism would
@@ -446,6 +459,9 @@ def run_turn(
         History budget. ``None`` reads ``[chat].context_token_budget``.
     max_tokens : int, optional
         Per-turn output cap, forwarded to the provider.
+    stream_timeout_sec : int, optional
+        Per-read stream timeout sent on every request. ``None`` reads
+        ``[chat].stream_timeout_sec``.
 
     Yields
     ------
@@ -470,6 +486,8 @@ def run_turn(
         max_tool_rounds = config.max_tool_rounds
     if context_token_budget is None:
         context_token_budget = config.context_token_budget
+    if stream_timeout_sec is None:
+        stream_timeout_sec = config.stream_timeout_sec
 
     system = build_system_prompt(registry)
     # The working transcript: the windowed history plus whatever this turn
@@ -492,6 +510,7 @@ def run_turn(
             messages=(system, *messages),
             tools=registry.specs,
             max_tokens=max_tokens,
+            timeout_sec=stream_timeout_sec,
         )
 
         text_parts: list[str] = []
@@ -528,6 +547,9 @@ def run_turn(
                 role="assistant",
                 content="".join(text_parts),
                 tool_calls=tuple(calls),
+                # Round two must carry round one's reasoning (DeepSeek,
+                # OpenRouter): the provider expects it echoed back.
+                replay=done.replay,
             )
         )
         for call in calls:
@@ -543,8 +565,10 @@ def run_turn(
 
     # Rounds exhausted with the model still asking for tools. Its final round's
     # results are already in `messages` but were never sent anywhere, so ending
-    # here ships tool cards and no answer. One more call with no tools offered
-    # leaves the model nothing to do but write up what it already gathered.
+    # here ships tool cards and no answer. One more call that forbids tool use
+    # leaves the model nothing to do but write up what it already gathered. The
+    # tools stay on the request: a request carrying tool history must never
+    # drop them (a changed tool set also invalidates replayed thinking).
     _log.info("chat turn hit the %d-round tool limit", max_tool_rounds)
     if (blocked := usage_blocked()) is not None:
         yield BudgetStop(scope=blocked)
@@ -554,14 +578,21 @@ def run_turn(
     done = TurnDone()
     started = time.monotonic()
     for event in client.stream_turn(
-        ChatRequest(messages=(system, *messages), tools=(), max_tokens=max_tokens)
+        ChatRequest(
+            messages=(system, *messages),
+            tools=registry.specs,
+            tool_choice="none",
+            max_tokens=max_tokens,
+            timeout_sec=stream_timeout_sec,
+        )
     ):
         if isinstance(event, TextDelta):
             yield event
         elif isinstance(event, TurnDone):
             done = event
-        # A ToolCallMade cannot arrive with `tools=()`; if a provider sends one
-        # regardless, dropping it is correct — there is no round left to run it.
+        # A ToolCallMade should not arrive with `tool_choice="none"`; if a
+        # provider sends one regardless, dropping it is correct — there is no
+        # round left to run it.
     # The answer round is a provider call like any other: report it.
     rounds.append(done)
     record_usage(

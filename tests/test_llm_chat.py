@@ -548,7 +548,7 @@ def test_anthropic_hoists_system_and_uses_input_schema() -> None:
     assert [m["role"] for m in fake.last_kwargs["messages"]] == ["user"]
     tool = fake.last_kwargs["tools"][0]
     assert "input_schema" in tool and "parameters" not in tool
-    assert fake.last_kwargs["max_tokens"] == 4096  # API requires one
+    assert fake.last_kwargs["max_tokens"] == 32000  # API requires one; thinking counts
 
 
 def test_anthropic_encodes_tool_use_and_tool_result_blocks() -> None:
@@ -1038,3 +1038,369 @@ def test_deepseek_stream_reads_both_cache_hit_shapes(usage: dict) -> None:
     assert done.input_tokens == 500
     assert done.cost_usd is None
     assert done.model == "deepseek-chat"
+
+
+# ---------------------------------------------------------------------------
+# Turn-ending fixes (plan 37, phase 0): transport errors, truncation and
+# refusals, tool_choice, reasoning replay, request ids
+# ---------------------------------------------------------------------------
+
+
+def _raising_after(events, exc: BaseException):
+    """An event iterator that yields ``events`` and then raises ``exc``."""
+
+    def _gen():
+        yield from events
+        raise exc
+
+    return _gen()
+
+
+def _read_timeout():
+    import httpx
+
+    return httpx.ReadTimeout("timed out", request=httpx.Request("POST", "https://x"))
+
+
+def test_anthropic_read_timeout_mid_stream_becomes_llm_error() -> None:
+    import httpx
+
+    adapter, fake = _anthropic_adapter([])
+    fake._events = _raising_after([_an_text_delta("partial")], _read_timeout())
+    with pytest.raises(
+        LlmError, match="anthropic stream interrupted: ReadTimeout"
+    ) as info:
+        list(adapter.stream_turn(_request()))
+    assert isinstance(info.value.__cause__, httpx.ReadTimeout)
+
+
+def test_openai_read_timeout_mid_stream_becomes_llm_error() -> None:
+    import httpx
+
+    adapter, fake = _openai_adapter([])
+    fake._chunks = _raising_after([_oa_chunk(content="partial")], _read_timeout())
+    with pytest.raises(
+        LlmError, match="openai stream interrupted: ReadTimeout"
+    ) as info:
+        list(adapter.stream_turn(_request()))
+    assert isinstance(info.value.__cause__, httpx.ReadTimeout)
+
+
+def test_anthropic_max_tokens_inside_a_tool_use_dispatches_nothing() -> None:
+    adapter, _ = _anthropic_adapter(
+        [
+            _an_tool_block_start(0, "toolu_1", "search_symbols"),
+            _an_json_delta(0, '{"query": "unclo'),
+            _an_block_stop(0),
+            _an_message_delta(stop_reason="max_tokens"),
+        ]
+    )
+    events = list(adapter.stream_turn(_request()))
+    assert not [e for e in events if isinstance(e, ToolCallMade)]
+    assert events[-1].finish_reason == "max_tokens"
+
+
+def test_anthropic_max_tokens_keeps_complete_calls_before_the_cut_one() -> None:
+    adapter, _ = _anthropic_adapter(
+        [
+            _an_tool_block_start(0, "toolu_a", "search_symbols"),
+            _an_json_delta(0, '{"query": "x"}'),
+            _an_block_stop(0),
+            _an_tool_block_start(1, "toolu_b", "search_symbols"),
+            _an_json_delta(1, '{"query": "y"}'),
+            _an_block_stop(1),
+            _an_message_delta(stop_reason="max_tokens"),
+        ]
+    )
+    events = list(adapter.stream_turn(_request()))
+    # The last block is the one the cap cut off, even when its JSON parses.
+    assert [e.call.id for e in events if isinstance(e, ToolCallMade)] == ["toolu_a"]
+
+
+def test_anthropic_malformed_tool_input_with_tool_use_stop_still_raises() -> None:
+    adapter, _ = _anthropic_adapter(
+        [
+            _an_tool_block_start(0, "toolu_1", "search_symbols"),
+            _an_json_delta(0, '{"query": "unclosed'),
+            _an_block_stop(0),
+            _an_message_delta(stop_reason="tool_use"),
+        ]
+    )
+    with pytest.raises(LlmError, match="malformed input"):
+        list(adapter.stream_turn(_request()))
+
+
+def test_anthropic_refusal_dispatches_no_tool_call() -> None:
+    adapter, _ = _anthropic_adapter(
+        [
+            _an_tool_block_start(0, "toolu_1", "search_symbols"),
+            _an_json_delta(0, '{"query": "x"}'),
+            _an_block_stop(0),
+            _an_message_delta(stop_reason="refusal"),
+        ]
+    )
+    events = list(adapter.stream_turn(_request()))
+    assert not [e for e in events if isinstance(e, ToolCallMade)]
+    assert events[-1].finish_reason == "refusal"
+
+
+def test_openai_length_drops_the_cut_off_call() -> None:
+    adapter, _ = _openai_adapter(
+        [
+            _oa_chunk(
+                tool_calls=[
+                    _oa_tool_delta(
+                        0, call_id="c1", name="search_symbols", arguments='{"q'
+                    ),
+                ]
+            ),
+            _oa_chunk(finish_reason="length"),
+        ]
+    )
+    events = list(adapter.stream_turn(_request()))
+    assert not [e for e in events if isinstance(e, ToolCallMade)]
+    assert events[-1].finish_reason == "length"
+
+
+def test_openai_content_filter_dispatches_no_tool_call() -> None:
+    adapter, _ = _openai_adapter(
+        [
+            _oa_chunk(
+                tool_calls=[
+                    _oa_tool_delta(
+                        0,
+                        call_id="c1",
+                        name="search_symbols",
+                        arguments='{"query": "x"}',
+                    ),
+                ]
+            ),
+            _oa_chunk(finish_reason="content_filter"),
+        ]
+    )
+    events = list(adapter.stream_turn(_request()))
+    assert not [e for e in events if isinstance(e, ToolCallMade)]
+
+
+def test_anthropic_tool_choice_none_keeps_the_tools() -> None:
+    adapter, fake = _anthropic_adapter([_an_message_delta()])
+    request = ChatRequest(
+        messages=(user("go"),), tools=(SEARCH_TOOL,), tool_choice="none"
+    )
+    list(adapter.stream_turn(request))
+    assert fake.last_kwargs["tools"][0]["name"] == "search_symbols"
+    assert fake.last_kwargs["tool_choice"] == {"type": "none"}
+
+
+def test_openai_tool_choice_none_keeps_the_tools() -> None:
+    adapter, fake = _openai_adapter([_oa_chunk(finish_reason="stop")])
+    request = ChatRequest(
+        messages=(user("go"),), tools=(SEARCH_TOOL,), tool_choice="none"
+    )
+    list(adapter.stream_turn(request))
+    assert fake.last_kwargs["tools"][0]["function"]["name"] == "search_symbols"
+    assert fake.last_kwargs["tool_choice"] == "none"
+
+
+def test_tool_choice_auto_sends_no_tool_choice_key() -> None:
+    an_adapter, an_fake = _anthropic_adapter([_an_message_delta()])
+    list(an_adapter.stream_turn(_request()))
+    assert "tool_choice" not in an_fake.last_kwargs
+    oa_adapter, oa_fake = _openai_adapter([_oa_chunk(finish_reason="stop")])
+    list(oa_adapter.stream_turn(_request()))
+    assert "tool_choice" not in oa_fake.last_kwargs
+
+
+def test_anthropic_skips_an_empty_assistant_message() -> None:
+    adapter, fake = _anthropic_adapter([_an_message_delta()])
+    request = _request(
+        user("one"), ChatMessage(role="assistant", content=""), user("two")
+    )
+    list(adapter.stream_turn(request))
+    assert [m["role"] for m in fake.last_kwargs["messages"]] == ["user", "user"]
+
+
+def _reasoning_chunk(
+    *,
+    content=None,
+    reasoning_content=None,
+    reasoning_details=None,
+    tool_calls=None,
+    finish_reason=None,
+):
+    """An OpenAI-dialect chunk whose delta carries a provider's reasoning field."""
+    delta = SimpleNamespace(
+        content=content,
+        tool_calls=tool_calls,
+        reasoning_content=reasoning_content,
+        reasoning_details=reasoning_details,
+    )
+    return SimpleNamespace(
+        choices=[SimpleNamespace(delta=delta, finish_reason=finish_reason)], usage=None
+    )
+
+
+def test_deepseek_reasoning_content_is_captured_into_replay() -> None:
+    adapter, _ = _compat_adapter(
+        "deepseek",
+        [
+            _reasoning_chunk(reasoning_content="Let me "),
+            _reasoning_chunk(reasoning_content="look."),
+            _reasoning_chunk(
+                tool_calls=[
+                    _oa_tool_delta(
+                        0,
+                        call_id="c1",
+                        name="search_symbols",
+                        arguments='{"query": "x"}',
+                    )
+                ]
+            ),
+            _reasoning_chunk(finish_reason="tool_calls"),
+        ],
+    )
+    events = list(adapter.stream_turn(_request()))
+    assert events[-1].replay == {"reasoning_content": "Let me look."}
+
+
+def test_deepseek_sends_reasoning_content_back_on_the_assistant_message() -> None:
+    adapter, fake = _compat_adapter("deepseek", [_oa_chunk(finish_reason="stop")])
+    call = ToolCall(id="c1", name="search_symbols", arguments={"query": "x"})
+    request = _request(
+        user("why?"),
+        ChatMessage(
+            role="assistant",
+            tool_calls=(call,),
+            replay={"reasoning_content": "Let me look."},
+        ),
+        ChatMessage(role="tool", content="{}", tool_call_id="c1"),
+    )
+    list(adapter.stream_turn(request))
+    assistant = fake.last_kwargs["messages"][1]
+    assert assistant["reasoning_content"] == "Let me look."
+    # Every assistant message carries its reasoning: no fallback needed.
+    assert "extra_body" not in fake.last_kwargs
+
+
+def test_deepseek_legacy_assistant_row_disables_thinking_for_the_request() -> None:
+    adapter, fake = _compat_adapter("deepseek", [_oa_chunk(finish_reason="stop")])
+    request = _request(
+        user("first"),
+        ChatMessage(role="assistant", content="an answer from before replay"),
+        user("second"),
+    )
+    list(adapter.stream_turn(request))
+    assert fake.last_kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning_content" not in fake.last_kwargs["messages"][1]
+
+
+def test_openrouter_reasoning_details_are_merged_and_echoed() -> None:
+    adapter, _ = _compat_adapter(
+        "openrouter",
+        [
+            _reasoning_chunk(
+                reasoning_details=[
+                    {
+                        "type": "reasoning.text",
+                        "index": 0,
+                        "text": "Think",
+                        "signature": None,
+                    }
+                ]
+            ),
+            _reasoning_chunk(
+                reasoning_details=[
+                    {
+                        "type": "reasoning.text",
+                        "index": 0,
+                        "text": "ing.",
+                        "signature": "sig",
+                    }
+                ]
+            ),
+            _reasoning_chunk(
+                reasoning_details=[{"type": "reasoning.encrypted", "data": "xyz"}]
+            ),
+            _reasoning_chunk(finish_reason="stop"),
+        ],
+    )
+    done = list(adapter.stream_turn(_request()))[-1]
+    assert done.replay == {
+        "reasoning_details": [
+            {
+                "type": "reasoning.text",
+                "index": 0,
+                "text": "Thinking.",
+                "signature": "sig",
+            },
+            {"type": "reasoning.encrypted", "data": "xyz"},
+        ]
+    }
+
+    sent, fake = _compat_adapter("openrouter", [_oa_chunk(finish_reason="stop")])
+    list(
+        sent.stream_turn(
+            _request(
+                user("q"),
+                ChatMessage(role="assistant", content="a", replay=done.replay),
+                user("r"),
+            )
+        )
+    )
+    assert (
+        fake.last_kwargs["messages"][1]["reasoning_details"]
+        == done.replay["reasoning_details"]
+    )
+
+
+def test_openai_never_sends_another_providers_reasoning() -> None:
+    adapter, fake = _compat_adapter("openai", [_oa_chunk(finish_reason="stop")])
+    replay = {"reasoning_content": "r", "reasoning_details": [{"text": "t"}]}
+    list(
+        adapter.stream_turn(
+            _request(
+                user("q"), ChatMessage(role="assistant", content="a", replay=replay)
+            )
+        )
+    )
+    assistant = fake.last_kwargs["messages"][1]
+    assert "reasoning_content" not in assistant
+    assert "reasoning_details" not in assistant
+    assert "extra_body" not in fake.last_kwargs
+
+
+def test_turn_done_replay_is_none_when_nothing_was_captured() -> None:
+    adapter, _ = _compat_adapter(
+        "deepseek", [_oa_chunk(content="hi", finish_reason="stop")]
+    )
+    assert list(adapter.stream_turn(_request()))[-1].replay is None
+
+
+def _status_response(header: str, value: str):
+    import httpx
+
+    return httpx.Response(
+        400, request=httpx.Request("POST", "https://x"), headers={header: value}
+    )
+
+
+def test_anthropic_status_error_carries_the_request_id() -> None:
+    import anthropic
+
+    exc = anthropic.APIStatusError(
+        "bad request", response=_status_response("request-id", "req_an_1"), body=None
+    )
+    adapter, _ = _anthropic_adapter([], raise_on_stream=exc)
+    with pytest.raises(LlmError) as info:
+        list(adapter.stream_turn(_request()))
+    assert info.value.request_id == "req_an_1"
+
+
+def test_openai_status_error_carries_the_request_id() -> None:
+    exc = openai.APIStatusError(
+        "bad request", response=_status_response("x-request-id", "req_oa_1"), body=None
+    )
+    adapter, _ = _openai_adapter([], raise_on_create=exc)
+    with pytest.raises(LlmError) as info:
+        list(adapter.stream_turn(_request()))
+    assert info.value.request_id == "req_oa_1"

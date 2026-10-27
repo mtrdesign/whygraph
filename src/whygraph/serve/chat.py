@@ -57,6 +57,7 @@ from whygraph.db import get_session
 from whygraph.db.models import ChatMessage as ChatMessageRow
 from whygraph.db.models import ChatSession as ChatSessionRow
 from whygraph.services.llm import LlmError, LlmKeyMissing
+from whygraph.services.llm.exceptions import is_unreachable
 from whygraph.services.llm.chat import (
     CHAT_PROVIDERS,
     ChatMessage,
@@ -483,17 +484,99 @@ def delete_session(session_id: int, request: Request) -> Response:
 # ---------------------------------------------------------------------------
 
 
+PERSISTED_REPLAY_KEYS = frozenset({"reasoning_content"})
+"""The provider replay keys an assistant row keeps across turns.
+
+DeepSeek's ``reasoning_content`` must be passed back on later turns, so it
+is stored. Anthropic content blocks never are: the per-turn system prompt
+re-render would invalidate their signatures. OpenRouter's
+``reasoning_details`` are echoed within a turn only."""
+
+
+def _persisted_replay(replay) -> str | None:
+    """The JSON a row stores for a round's replay payload, or ``None``."""
+    kept = {k: v for k, v in (replay or {}).items() if k in PERSISTED_REPLAY_KEYS}
+    return json.dumps(kept) if kept else None
+
+
+def _sanitize_history(rows: list[tuple[ChatMessage, str | None]]) -> list[ChatMessage]:
+    """Drop the rows a provider must never see again from a loaded history.
+
+    A row that was fine to show the user can still poison every later turn
+    of the session: Anthropic rejects an empty non-final assistant message,
+    and every provider rejects a tool call with no result or a result with
+    no call. So, for the model's view only (the transcript route still shows
+    every row):
+
+    * a budget-stop row is dropped - its text is our notice, not model output;
+    * an assistant row keeps only the tool calls that a tool row answers
+      before the next user or assistant row, and a tool row whose call its
+      assistant row did not announce is dropped;
+    * an assistant row left with no text, no calls and no replay payload is
+      dropped (an error before the first token, a round that reported only
+      tokens, a "Stopped." row with nothing in it).
+
+    An errored row that has text keeps it; its ``error`` never reaches the
+    model, because only ``content`` is sent.
+
+    Parameters
+    ----------
+    rows : list of (ChatMessage, str or None)
+        The loaded messages in order, each with its row's ``error``.
+
+    Returns
+    -------
+    list[ChatMessage]
+        The history safe to send.
+    """
+    kept: list[tuple[ChatMessage, str | None]] = [
+        (m, e) for m, e in rows if e != BUDGET_EXCEEDED
+    ]
+    history: list[ChatMessage] = []
+    i = 0
+    while i < len(kept):
+        message, _error = kept[i]
+        i += 1
+        if message.role == "tool":
+            continue  # reached only when no assistant row announced it
+        if message.role != "assistant":
+            history.append(message)
+            continue
+        results: list[ChatMessage] = []
+        while i < len(kept) and kept[i][0].role == "tool":
+            results.append(kept[i][0])
+            i += 1
+        announced = {c.id for c in message.tool_calls}
+        results = [r for r in results if r.tool_call_id in announced]
+        answered = {r.tool_call_id for r in results}
+        calls = tuple(c for c in message.tool_calls if c.id in answered)
+        if not (message.content or calls or message.replay):
+            continue
+        history.append(
+            ChatMessage(
+                role="assistant",
+                content=message.content,
+                tool_calls=calls,
+                replay=message.replay,
+            )
+        )
+        history.extend(results)
+    return history
+
+
 def _load_history(session_id: int) -> list[ChatMessage]:
     """Read a session's persisted rows as port :class:`ChatMessage`s.
 
     The system prompt is not among them — it is re-rendered per turn (see
-    :func:`whygraph.chat.harness.build_system_prompt`).
+    :func:`whygraph.chat.harness.build_system_prompt`). The rows pass
+    through :func:`_sanitize_history`, so an errored or orphaned row never
+    reaches the provider.
 
     Rows are converted to port dataclasses **inside** the session: ``get_session``
     commits on exit, which expires every loaded attribute, so touching a row
     afterwards would raise ``DetachedInstanceError``.
     """
-    history: list[ChatMessage] = []
+    history: list[tuple[ChatMessage, str | None]] = []
     with get_session() as session:
         rows = session.exec(
             select(ChatMessageRow)
@@ -506,14 +589,18 @@ def _load_history(session_id: int) -> list[ChatMessage]:
                 for c in json.loads(row.tool_calls)
             )
             history.append(
-                ChatMessage(
-                    role=row.role,  # type: ignore[arg-type] -- constrained on write
-                    content=row.content,
-                    tool_calls=calls,
-                    tool_call_id=row.tool_call_id,
+                (
+                    ChatMessage(
+                        role=row.role,  # type: ignore[arg-type] -- constrained on write
+                        content=row.content,
+                        tool_calls=calls,
+                        tool_call_id=row.tool_call_id,
+                        replay=json.loads(row.replay) if row.replay else None,
+                    ),
+                    row.error,
                 )
             )
-    return history
+    return _sanitize_history(history)
 
 
 def _persist_user_message(session_id: int, content: str) -> int:
@@ -595,6 +682,7 @@ def _persist_assistant_turn(
             provider=provider,
             model=(usage.model if usage and usage.model else model),
             error=error,
+            replay=_persisted_replay(usage.replay) if usage else None,
             created_at=now,
         )
         session.add(message)
@@ -631,27 +719,37 @@ start something new and so flush that round's buffer as its row. The turn's
 end flushes too. A new terminal or round-opening event joins this tuple."""
 
 
-_UNREACHABLE_CAUSES = frozenset({"APIConnectionError", "APITimeoutError"})
-"""The SDK exceptions (``anthropic`` and ``openai`` name them alike) that mean
-the provider could not be reached, rather than that it answered with an error."""
-
-
 def _sse_error_code(exc: BaseException) -> str:
     """The ``code`` of an in-band ``error`` frame for a failed turn.
 
     ``no_llm_key`` when the adapter found no key for the provider,
-    ``llm_unavailable`` when the provider could not be reached, else
-    ``provider_error``. ``tests/test_error_codes.py`` reads the literals
-    returned here.
+    ``llm_unavailable`` when the provider could not be reached or the
+    stream was cut (:func:`~whygraph.services.llm.exceptions.is_unreachable`),
+    else ``provider_error``. ``tests/test_error_codes.py`` reads the
+    literals returned here.
     """
     if isinstance(exc, LlmKeyMissing):
         return "no_llm_key"
-    cause: BaseException | None = exc
-    while cause is not None:
-        if type(cause).__name__ in _UNREACHABLE_CAUSES:
-            return "llm_unavailable"
-        cause = cause.__cause__
+    if is_unreachable(exc):
+        return "llm_unavailable"
     return "provider_error"
+
+
+def _error_message(exc: BaseException) -> str:
+    """The text a failed turn shows, with the provider's request id when known."""
+    request_id = getattr(exc, "request_id", None)
+    message = str(exc)
+    return f"{message} (request id: {request_id})" if request_id else message
+
+
+def _cause_names(exc: BaseException) -> str:
+    """The class names along ``exc``'s ``__cause__`` chain, for a log line."""
+    names: list[str] = []
+    cause: BaseException | None = exc
+    while cause is not None and len(names) < 10:
+        names.append(type(cause).__name__)
+        cause = cause.__cause__
+    return " <- ".join(names)
 
 
 def _error_frame(exc: BaseException, provider: str, message: str) -> tuple[str, str]:
@@ -812,7 +910,7 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
         # Whatever arrived before the failure is worth keeping — the user can
         # see how far the model got, and the retry re-sends cleanly. The error
         # rides the same row so a refresh replays it.
-        frame, message = _error_frame(exc, provider, str(exc))
+        frame, message = _error_frame(exc, provider, _error_message(exc))
         _flush_round(error=message)
         yield frame
         return
@@ -822,7 +920,12 @@ def _turn_frames(session_id: int, provider: str, model: str) -> Iterator[str]:
         _flush_round(error="Stopped.")
         raise
     except Exception as exc:  # noqa: BLE001 -- must not surface as a hung stream
-        _log.exception("chat turn crashed for session %s", session_id)
+        _log.warning(
+            "chat turn crashed for session %s: %s",
+            session_id,
+            _cause_names(exc),
+            exc_info=True,
+        )
         message = f"{type(exc).__name__}: {exc}"
         _flush_round(error=message)
         yield _frame({"type": "error", "code": "provider_error", "message": message})

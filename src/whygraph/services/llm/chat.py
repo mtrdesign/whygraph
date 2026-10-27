@@ -37,9 +37,9 @@ reliability is unproven; it raises :class:`LlmError` from
 from __future__ import annotations
 
 import abc
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from whygraph.core import get_config
 from whygraph.core.config import LlmConfig
@@ -57,6 +57,17 @@ parameter and ``"tool"`` messages become a ``user`` message carrying
 
 CHAT_PROVIDERS: tuple[str, ...] = ("anthropic", "openai", "deepseek", "openrouter")
 """Provider tags :func:`make_chat_client` accepts, in picker order."""
+
+ToolChoice = Literal["auto", "none"]
+"""Allowed values for :attr:`ChatRequest.tool_choice`."""
+
+REFUSAL_REASONS: tuple[str, ...] = ("refusal", "content_filter")
+"""Finish reasons that mean the provider declined to answer.
+
+Anthropic says ``refusal``, the OpenAI dialect ``content_filter``. A round
+that ends with one dispatches no tool call (a refusal can cut a ``tool_use``
+off mid-input), and the harness ends the turn there.
+"""
 
 FALLBACK_MODELS: dict[str, tuple[tuple[str, str], ...]] = {
     # Anthropic's /models endpoint rejects scoped keys that are perfectly
@@ -163,12 +174,19 @@ class ChatMessage:
     tool_call_id : str or None
         On a ``"tool"`` message, the :attr:`ToolCall.id` this result
         answers. ``None`` for every other role.
+    replay : Mapping[str, Any] or None
+        On an assistant message, the provider-opaque payload the adapter
+        that produced it sends back verbatim (DeepSeek's
+        ``reasoning_content``, OpenRouter's ``reasoning_details``). Each
+        adapter reads only its own keys. ``None`` when there is nothing to
+        replay.
     """
 
     role: ChatRole
     content: str = ""
     tool_calls: tuple[ToolCall, ...] = ()
     tool_call_id: str | None = None
+    replay: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,11 +203,16 @@ class ChatRequest:
     max_tokens : int or None
         Per-call cap on output tokens. ``None`` lets the adapter pick a
         provider-appropriate default (Anthropic requires one, so its
-        adapter substitutes 4096).
+        adapter substitutes 32000 - thinking counts against it).
     temperature : float or None
         Sampling temperature; ``None`` uses the provider default.
     timeout_sec : int or None
         Per-call timeout; ``None`` uses the adapter's bound default.
+    tool_choice : ToolChoice
+        ``"auto"`` (default) lets the model call tools; ``"none"`` keeps
+        the tools on the request but forbids calling them - the shape of
+        an answer round, because a request that carries tool history must
+        never drop ``tools``.
     """
 
     messages: tuple[ChatMessage, ...]
@@ -197,6 +220,7 @@ class ChatRequest:
     max_tokens: int | None = None
     temperature: float | None = None
     timeout_sec: int | None = None
+    tool_choice: ToolChoice = "auto"
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +286,10 @@ class TurnDone:
         The model the provider says it served, which can differ from the
         requested one (an alias, a router such as ``openrouter/auto``, a
         server-side fallback). ``None`` when the stream did not say.
+    replay : Mapping[str, Any] or None
+        The round's provider reasoning payload to send back on the
+        assistant message (see :attr:`ChatMessage.replay`). ``None``, never
+        ``{}``, when nothing was captured.
     """
 
     finish_reason: str | None = None
@@ -272,6 +300,7 @@ class TurnDone:
     reasoning_tokens: int | None = None
     cost_usd: float | None = None
     model: str | None = None
+    replay: Mapping[str, Any] | None = None
 
 
 ChatStreamEvent = TextDelta | ToolCallMade | TurnDone
@@ -523,9 +552,11 @@ __all__ = [
     "ChatRole",
     "ChatStreamEvent",
     "ModelInfo",
+    "REFUSAL_REASONS",
     "TextDelta",
     "ToolCall",
     "ToolCallMade",
+    "ToolChoice",
     "ToolSpec",
     "TurnDone",
     "chat_provider_env_var",

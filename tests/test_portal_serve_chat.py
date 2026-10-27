@@ -1314,3 +1314,196 @@ def test_assistant_rows_record_the_model_that_produced_them(
     assert all(a["provider"] == "anthropic" for a in assistants)
     # User rows carry no attribution.
     assert all(m["model"] is None for m in messages if m["role"] == "user")
+
+
+# ---------------------------------------------------------------------------
+# Turn-ending fixes (plan 37, phase 0): the history sanitizer, replay
+# persistence, request ids and transport errors
+# ---------------------------------------------------------------------------
+
+
+def _seed_rows(client, session_id: int, rows: list[dict]) -> None:
+    """Write raw transcript rows into the session, in order."""
+    from whygraph.db.models import ChatMessage as ChatMessageRow
+
+    with use_project(client.context()), project_session() as session:
+        for i, row in enumerate(rows):
+            session.add(
+                ChatMessageRow(
+                    session_id=session_id,
+                    created_at=f"2026-10-27T00:00:{i:02d}+00:00",
+                    **row,
+                )
+            )
+        session.commit()
+
+
+def test_history_sanitizer_drops_rows_a_provider_must_not_see(
+    chat_client, monkeypatch
+) -> None:
+    """Empty, errored, budget-stop and orphaned rows never reach the model."""
+    from whygraph.core.usage import BUDGET_EXCEEDED
+
+    session = _new_session(chat_client)
+    dangling = json.dumps([{"id": "c9", "name": "get_symbol", "arguments": {}}])
+    answered = json.dumps([{"id": "c1", "name": "get_symbol", "arguments": {}}])
+    _seed_rows(
+        chat_client,
+        session["id"],
+        [
+            {"role": "user", "content": "q1"},
+            # A round that only reported tokens.
+            {"role": "assistant", "content": "", "input_tokens": 5},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "", "error": "401 invalid x-api-key"},
+            {"role": "user", "content": "q3"},
+            {"role": "assistant", "content": "", "error": "Stopped."},
+            {"role": "user", "content": "q4"},
+            {
+                "role": "assistant",
+                "content": "monthly budget",
+                "error": BUDGET_EXCEEDED,
+            },
+            {"role": "user", "content": "q5"},
+            # A tool call whose result never landed.
+            {"role": "assistant", "content": "", "tool_calls": dangling},
+            {"role": "user", "content": "q6"},
+            # A tool row no assistant row announced.
+            {"role": "tool", "content": "{}", "tool_call_id": "c7"},
+            # Partial text before a failure keeps its text; the error does not.
+            {
+                "role": "assistant",
+                "content": "I was saying",
+                "error": "connection reset",
+            },
+            {"role": "user", "content": "q7"},
+            {"role": "assistant", "content": "", "tool_calls": answered},
+            {"role": "tool", "content": "{}", "tool_call_id": "c1"},
+            {"role": "tool", "content": "{}", "tool_call_id": "c-unknown"},
+            {"role": "assistant", "content": "a7"},
+        ],
+    )
+
+    spy = _stub_harness(monkeypatch, [TextDelta(text="ok"), TurnDone("stop")])
+    chat_client.post(
+        f"/api/chat/sessions/{session['id']}/messages", json={"content": "q8"}
+    )
+
+    assert [(m.role, m.content, m.tool_call_id) for m in spy.history] == [
+        ("user", "q1", None),
+        ("user", "q2", None),
+        ("user", "q3", None),
+        ("user", "q4", None),
+        ("user", "q5", None),
+        ("user", "q6", None),
+        ("assistant", "I was saying", None),
+        ("user", "q7", None),
+        ("assistant", "", None),
+        ("tool", "{}", "c1"),
+        ("assistant", "a7", None),
+        ("user", "q8", None),
+    ]
+    assert [c.id for c in spy.history[8].tool_calls] == ["c1"]
+
+    # The transcript still shows the user every row.
+    messages = chat_client.get(f"/api/chat/sessions/{session['id']}").json()["messages"]
+    assert len(messages) == 18 + 2
+
+
+def test_reasoning_content_is_persisted_and_replayed_on_the_next_turn(
+    chat_client, monkeypatch
+) -> None:
+    replay = {"reasoning_content": "thought", "reasoning_details": [{"text": "t"}]}
+    _stub_harness(
+        monkeypatch,
+        [
+            TextDelta(text="a1"),
+            RoundUsage(finish_reason="stop", replay=replay),
+            TurnDone("stop"),
+        ],
+    )
+    session = _new_session(chat_client)
+    chat_client.post(
+        f"/api/chat/sessions/{session['id']}/messages", json={"content": "q1"}
+    )
+
+    from whygraph.db.models import ChatMessage as ChatMessageRow
+
+    with use_project(chat_client.context()), project_session() as db:
+        row = db.exec(
+            select(ChatMessageRow).where(ChatMessageRow.role == "assistant")
+        ).one()
+        # Only the persisted keys are written: OpenRouter's details are in-turn only.
+        assert json.loads(row.replay) == {"reasoning_content": "thought"}
+
+    spy = _stub_harness(monkeypatch, [TextDelta(text="a2"), TurnDone("stop")])
+    chat_client.post(
+        f"/api/chat/sessions/{session['id']}/messages", json={"content": "q2"}
+    )
+    assistant = next(m for m in spy.history if m.role == "assistant")
+    assert assistant.replay == {"reasoning_content": "thought"}
+
+
+def test_a_round_without_replay_stores_none(chat_client, monkeypatch) -> None:
+    _stub_harness(
+        monkeypatch,
+        [TextDelta(text="a1"), RoundUsage(finish_reason="stop"), TurnDone("stop")],
+    )
+    session = _new_session(chat_client)
+    chat_client.post(
+        f"/api/chat/sessions/{session['id']}/messages", json={"content": "q1"}
+    )
+
+    from whygraph.db.models import ChatMessage as ChatMessageRow
+
+    with use_project(chat_client.context()), project_session() as db:
+        row = db.exec(
+            select(ChatMessageRow).where(ChatMessageRow.role == "assistant")
+        ).one()
+        assert row.replay is None
+
+
+def test_a_provider_request_id_is_shown_with_the_error(
+    chat_client, monkeypatch
+) -> None:
+    def _rejected(*, client, history, registry=None, **kwargs):
+        raise LlmError("anthropic API error: 400", request_id="req_011")
+        yield  # pragma: no cover -- makes this a generator
+
+    monkeypatch.setattr(serve_chat, "make_chat_client", lambda *a, **k: object())
+    monkeypatch.setattr(serve_chat, "run_turn", _rejected)
+    session = _new_session(chat_client)
+
+    frames = _frames(
+        chat_client.post(
+            f"/api/chat/sessions/{session['id']}/messages", json={"content": "hi"}
+        )
+    )
+    assert frames[-1]["message"] == "anthropic API error: 400 (request id: req_011)"
+    messages = chat_client.get(f"/api/chat/sessions/{session['id']}").json()["messages"]
+    assert messages[-1]["error"] == frames[-1]["message"]
+
+
+def test_a_cut_stream_is_coded_llm_unavailable(chat_client, monkeypatch) -> None:
+    """A read timeout under the ``LlmError`` reads as ``llm_unavailable``."""
+    import httpx
+
+    def _timed_out(*, client, history, registry=None, **kwargs):
+        yield TextDelta(text="partial")
+        raise LlmError(
+            "anthropic stream interrupted: ReadTimeout"
+        ) from httpx.ReadTimeout("timed out")
+
+    monkeypatch.setattr(serve_chat, "make_chat_client", lambda *a, **k: object())
+    monkeypatch.setattr(serve_chat, "run_turn", _timed_out)
+    session = _new_session(chat_client)
+
+    frames = _frames(
+        chat_client.post(
+            f"/api/chat/sessions/{session['id']}/messages", json={"content": "hi"}
+        )
+    )
+    assert frames[-1]["code"] == "llm_unavailable"
+    messages = chat_client.get(f"/api/chat/sessions/{session['id']}").json()["messages"]
+    assert messages[-1]["content"] == "partial"
+    assert messages[-1]["error"] == "anthropic stream interrupted: ReadTimeout"

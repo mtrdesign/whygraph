@@ -12,19 +12,32 @@ carry slices of the argument JSON string. Nothing in the stream announces
 that a call is complete except the choice's ``finish_reason``. So this
 adapter accumulates per-index state and flushes it into
 :class:`ToolCallMade` events once the choice finishes — the port's
-contract is one event per *complete* call, never per fragment.
+contract is one event per *complete* call, never per fragment. A
+``content_filter`` finish dispatches nothing, and a ``length`` finish drops
+the call it cut off (and any other whose arguments do not parse).
+
+Two of the three providers reason across tool calls and expect that
+reasoning **echoed back** on the assistant message: DeepSeek as
+``reasoning_content`` (thinking is on by default, and a request with tools
+fails without it), OpenRouter as ``reasoning_details``, unmodified. The
+adapter captures each into :attr:`TurnDone.replay` and sends it back only to
+the provider that produced it.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
+import httpx
 import openai
 
 from .chat import (
+    REFUSAL_REASONS,
     ChatClient,
     ChatMessage,
     ChatRequest,
@@ -38,6 +51,12 @@ from .chat import (
 )
 from .exceptions import LlmError, LlmKeyMissing
 from .usage import UsageFields, openai_usage_fields
+
+_log = logging.getLogger(__name__)
+
+_MERGED_DETAIL_FIELDS = ("text", "summary", "data")
+"""``reasoning_details`` fields whose fragments are concatenated; every other
+field (``signature`` among them) takes the last non-null value."""
 
 
 @dataclass(slots=True)
@@ -124,16 +143,61 @@ def _tool_payload(tools: tuple[ToolSpec, ...]) -> list[dict]:
     ]
 
 
-def _message_payload(messages: tuple[ChatMessage, ...]) -> list[dict]:
+def _as_dict(entry: Any) -> dict:
+    """A ``reasoning_details`` entry as a plain dict (the SDK leaves extras raw)."""
+    if isinstance(entry, Mapping):
+        return dict(entry)
+    dump = getattr(entry, "model_dump", None)
+    return dict(dump()) if callable(dump) else {}
+
+
+def _merge_reasoning_details(merged: list[dict], fragments: Any) -> None:
+    """Fold one delta's ``reasoning_details`` fragments into ``merged``.
+
+    Fragments sharing an ``index`` build one entry: :data:`_MERGED_DETAIL_FIELDS`
+    are concatenated, every other field keeps its last non-null value (the
+    ``signature`` arrives on the last fragment and is never concatenated).
+    An entry without an ``index`` is kept as its own entry.
+    """
+    for raw in fragments or []:
+        fragment = _as_dict(raw)
+        index = fragment.get("index")
+        target = None
+        if index is not None:
+            target = next((e for e in merged if e.get("index") == index), None)
+        if target is None:
+            merged.append(fragment)
+            continue
+        for key, value in fragment.items():
+            if value is None:
+                continue
+            if key in _MERGED_DETAIL_FIELDS and isinstance(value, str):
+                target[key] = (target.get(key) or "") + value
+            else:
+                target[key] = value
+
+
+def _message_payload(
+    messages: tuple[ChatMessage, ...], provider: str = "openai"
+) -> list[dict]:
     """Render :class:`ChatMessage`s into the chat-completions wire shape.
 
     Assistant tool calls become a ``tool_calls`` array with each
     argument object re-serialized to the JSON *string* the API expects;
-    ``role="tool"`` messages carry their ``tool_call_id``.
+    ``role="tool"`` messages carry their ``tool_call_id``. An assistant
+    message's replay payload goes back only to the provider that produced
+    it: ``reasoning_content`` to ``deepseek``, ``reasoning_details`` to
+    ``openrouter``; plain ``openai`` gets neither.
     """
     payload: list[dict] = []
     for message in messages:
         entry: dict = {"role": message.role, "content": message.content}
+        replay = message.replay or {}
+        if message.role == "assistant":
+            if provider == "deepseek" and "reasoning_content" in replay:
+                entry["reasoning_content"] = replay["reasoning_content"]
+            if provider == "openrouter" and replay.get("reasoning_details"):
+                entry["reasoning_details"] = replay["reasoning_details"]
         if message.role == "tool":
             entry["tool_call_id"] = message.tool_call_id
         if message.tool_calls:
@@ -154,6 +218,44 @@ def _message_payload(messages: tuple[ChatMessage, ...]) -> list[dict]:
                 entry["content"] = None
         payload.append(entry)
     return payload
+
+
+def _deepseek_needs_fallback(request: ChatRequest) -> bool:
+    """Whether a DeepSeek request carries an assistant message with no reasoning."""
+    return any(
+        m.role == "assistant" and "reasoning_content" not in (m.replay or {})
+        for m in request.messages
+    )
+
+
+def _finished_calls(
+    accumulators: dict[int, _CallAccumulator], finish_reason: str | None
+) -> Iterator[ToolCallMade]:
+    """Emit the accumulated tool calls in index order, by the finish reason.
+
+    ``content_filter`` dispatches nothing. ``length`` cut the last call off,
+    so it is dropped, as is any other whose arguments do not parse; with any
+    other finish reason malformed arguments still raise :class:`LlmError`.
+    """
+    if finish_reason in REFUSAL_REASONS:
+        return
+    truncated = finish_reason == "length"
+    indices = sorted(accumulators)
+    for index in indices:
+        accumulator = accumulators[index]
+        if truncated and index == indices[-1]:
+            _log.info(
+                "dropped tool call %s cut off by the length limit", accumulator.name
+            )
+            continue
+        try:
+            call = accumulator.flush()
+        except LlmError:
+            if not truncated:
+                raise
+            _log.info("dropped malformed tool call %s", accumulator.name)
+            continue
+        yield ToolCallMade(call=call)
 
 
 class OpenAIChatAdapter(ChatClient):
@@ -255,7 +357,7 @@ class OpenAIChatAdapter(ChatClient):
         :class:`TurnDone` is emitted after the loop rather than at
         ``finish_reason``.
         """
-        messages = _message_payload(request.messages)
+        messages = _message_payload(request.messages, self.provider)
         if not messages:
             raise LlmError("OpenAIChatAdapter requires at least one message")
 
@@ -268,6 +370,14 @@ class OpenAIChatAdapter(ChatClient):
         }
         if request.tools:
             kwargs["tools"] = _tool_payload(request.tools)
+            if request.tool_choice == "none":
+                kwargs["tool_choice"] = "none"
+            if self.provider == "deepseek" and _deepseek_needs_fallback(request):
+                # An assistant message with no reasoning to pass back (a row
+                # from before replay existed, an errored round, a session
+                # switched from another provider) would fail the request in
+                # thinking mode, so this request runs without thinking.
+                kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
         if request.max_tokens is not None:
             kwargs["max_tokens"] = request.max_tokens
         if request.temperature is not None:
@@ -278,6 +388,8 @@ class OpenAIChatAdapter(ChatClient):
         usage_fields: UsageFields = openai_usage_fields(None, provider=self.provider)
         served_model: str | None = None
         flushed = False
+        reasoning_parts: list[str] = []
+        reasoning_details: list[dict] = []
 
         try:
             stream = self._client.chat.completions.create(**kwargs)
@@ -299,6 +411,14 @@ class OpenAIChatAdapter(ChatClient):
 
                 delta = getattr(choice, "delta", None)
                 if delta is not None:
+                    if self.provider == "deepseek":
+                        reasoning = getattr(delta, "reasoning_content", None)
+                        if isinstance(reasoning, str) and reasoning:
+                            reasoning_parts.append(reasoning)
+                    elif self.provider == "openrouter":
+                        _merge_reasoning_details(
+                            reasoning_details, getattr(delta, "reasoning_details", None)
+                        )
                     text = getattr(delta, "content", None)
                     if text:
                         yield TextDelta(text=text)
@@ -311,21 +431,38 @@ class OpenAIChatAdapter(ChatClient):
                     finish_reason = reason
                     # Flush at finish so parallel calls emit in index
                     # order — the order the model asked for them.
-                    for index in sorted(accumulators):
-                        yield ToolCallMade(call=accumulators[index].flush())
+                    yield from _finished_calls(accumulators, reason)
                     flushed = True
         except LlmError:
             raise
         except openai.OpenAIError as exc:
-            raise LlmError(f"openai API error: {exc}") from exc
+            raise LlmError(
+                f"openai API error: {exc}",
+                request_id=getattr(exc, "request_id", None),
+            ) from exc
+        except httpx.TransportError as exc:
+            # Once a stream has started the SDK no longer wraps transport
+            # errors: a read timeout or a dropped connection arrives raw.
+            raise LlmError(
+                f"{self.provider} stream interrupted: {type(exc).__name__}"
+            ) from exc
 
         # Defensive: a stream that ends without a finish_reason (a
         # truncated connection) still owes its accumulated calls.
         if not flushed:
-            for index in sorted(accumulators):
-                yield ToolCallMade(call=accumulators[index].flush())
+            yield from _finished_calls(accumulators, finish_reason)
 
-        yield TurnDone(finish_reason=finish_reason, model=served_model, **usage_fields)
+        replay: dict[str, Any] = {}
+        if reasoning_parts:
+            replay["reasoning_content"] = "".join(reasoning_parts)
+        if reasoning_details:
+            replay["reasoning_details"] = reasoning_details
+        yield TurnDone(
+            finish_reason=finish_reason,
+            model=served_model,
+            replay=replay or None,
+            **usage_fields,
+        )
 
 
 __all__ = ["OpenAIChatAdapter"]

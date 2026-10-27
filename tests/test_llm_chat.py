@@ -30,6 +30,7 @@ from whygraph.core.config import (
 from whygraph.services.llm import (
     CHAT_PROVIDERS,
     AnthropicChatAdapter,
+    ChatClient,
     ChatMessage,
     ChatRequest,
     LlmError,
@@ -1404,3 +1405,23 @@ def test_openai_status_error_carries_the_request_id() -> None:
     with pytest.raises(LlmError) as info:
         list(adapter.stream_turn(_request()))
     assert info.value.request_id == "req_oa_1"
+
+
+# ---------------------------------------------------------------------------
+# Port additions: abort, is_error, effort
+# ---------------------------------------------------------------------------
+
+
+def test_port_abort_default_is_a_noop_and_new_fields_default_off() -> None:
+    class _Stub(ChatClient):
+        provider = "stub"
+
+        def stream_turn(self, request):
+            yield from ()
+
+        def list_models(self):
+            return ()
+
+    assert _Stub(model="m").abort() is None
+    assert ChatMessage(role="tool").is_error is False
+    assert ChatRequest(messages=()).effort is None

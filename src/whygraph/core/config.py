@@ -70,6 +70,13 @@ CHAT_PROVIDERS: tuple[str, ...] = ("anthropic", "openai", "deepseek", "openroute
 
 Mirrors :data:`whygraph.services.llm.CHAT_PROVIDERS` (pinned by a test)."""
 
+EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+"""The effort levels a chat can run at.
+
+Mapped per provider: Anthropic ``output_config.effort``, OpenAI and
+DeepSeek ``reasoning_effort``, OpenRouter ``reasoning.effort``. Mirrors
+:data:`whygraph.services.llm.chat.EFFORT_LEVELS` (pinned by a test)."""
+
 TASKS: tuple[str, ...] = ("analyze", "rationale", "chat")
 """The tasks :meth:`Config.model_for` resolves a ``(provider, model)`` for."""
 
@@ -499,6 +506,17 @@ class ChatConfig:
         provider may stay silent (a long think, a large prefill) before the
         round fails. From 30 to 1800. Named apart from the deprecated
         ``[chat].timeout_sec``, which :func:`normalize_v2` warns about.
+    max_tokens : int or None
+        Output cap per chat call. ``None`` (default) lets the adapter pick:
+        Anthropic 32000, otherwise the provider's default. When set, an
+        integer from 2048 to 128000.
+    max_continuations : int
+        Automatic continuations after a reply cut off by the output limit.
+        From 0 to 3; ``0`` turns continuing off.
+    effort : str or None
+        Default effort level for chats that have none of their own. One
+        of :data:`EFFORT_LEVELS`, or ``None`` (default) to send no effort
+        parameter.
     """
 
     provider: str | None = None
@@ -507,6 +525,9 @@ class ChatConfig:
     max_rationale_generations: int = 2
     context_token_budget: int = 60_000
     stream_timeout_sec: int = 300
+    max_tokens: int | None = None
+    max_continuations: int = 1
+    effort: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1214,6 +1235,33 @@ class Config:
             raise ConfigError(
                 f"chat.stream_timeout_sec must be an integer from 30 to 1800, "
                 f"got {timeout!r}"
+            )
+        max_tokens = self.chat.max_tokens
+        if max_tokens is not None and (
+            not isinstance(max_tokens, int)
+            or isinstance(max_tokens, bool)
+            or not 2048 <= max_tokens <= 128000
+        ):
+            raise ConfigError(
+                f"chat.max_tokens must be an integer from 2048 to 128000, "
+                f"got {max_tokens!r}"
+            )
+        continuations = self.chat.max_continuations
+        if (
+            not isinstance(continuations, int)
+            or isinstance(continuations, bool)
+            or not 0 <= continuations <= 3
+        ):
+            raise ConfigError(
+                f"chat.max_continuations must be an integer from 0 to 3, "
+                f"got {continuations!r}"
+            )
+        effort = self.chat.effort
+        if effort is not None and (
+            not isinstance(effort, str) or effort not in EFFORT_LEVELS
+        ):
+            raise ConfigError(
+                f"chat.effort must be one of {', '.join(EFFORT_LEVELS)}, got {effort!r}"
             )
 
     @classmethod

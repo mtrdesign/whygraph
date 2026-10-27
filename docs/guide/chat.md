@@ -250,6 +250,11 @@ Tuned under `[chat]` - imported from a repository's `whygraph.toml` when you add
 
 Two behaviours worth knowing:
 
+- **Repeated calls are flagged.** From the third identical tool call in one turn (same tool, same
+  arguments) the call still runs, and its result tells the model how many times it asked.
+- **Lookups run side by side.** When a step asks for several plain lookups at once (symbols,
+  files, commits, pull requests), they run in parallel and the cards fill in in the model's order.
+  Rationale cards, evidence, area history and statistics still run one at a time.
 - **A failing tool never ends a turn.** Errors come back to the model as results, so it can correct
   course and try something else. Individual results are truncated at 30 000 characters with an
   explicit marker.

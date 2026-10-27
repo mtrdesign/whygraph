@@ -545,7 +545,10 @@ def test_anthropic_hoists_system_and_uses_input_schema() -> None:
     )
     list(adapter.stream_turn(request))
 
-    assert fake.last_kwargs["system"] == "First.\n\nSecond."
+    assert fake.last_kwargs["system"] == [
+        {"type": "text", "text": "First.", "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "Second."},
+    ]
     assert [m["role"] for m in fake.last_kwargs["messages"]] == ["user"]
     tool = fake.last_kwargs["tools"][0]
     assert "input_schema" in tool and "parameters" not in tool
@@ -1425,3 +1428,283 @@ def test_port_abort_default_is_a_noop_and_new_fields_default_off() -> None:
     assert _Stub(model="m").abort() is None
     assert ChatMessage(role="tool").is_error is False
     assert ChatRequest(messages=()).effort is None
+
+
+# ---------------------------------------------------------------------------
+# Anthropic: effort, prompt caching, preserved-thinking replay, tool errors,
+# the effort_unsupported mapping and abort (plan 37 §4.3)
+# ---------------------------------------------------------------------------
+
+
+def _an_stop_with(index, block):
+    """A ``content_block_stop`` as the SDK's stream helper emits it."""
+    return SimpleNamespace(type="content_block_stop", index=index, content_block=block)
+
+
+def _breakpoints(kwargs: dict) -> list[str]:
+    """Where the request's ``cache_control`` markers sit."""
+    found: list[str] = []
+    for i, block in enumerate(kwargs.get("system") or []):
+        if "cache_control" in block:
+            found.append(f"system[{i}]")
+    for i, tool in enumerate(kwargs.get("tools") or []):
+        if "cache_control" in tool:
+            found.append(f"tools[{i}]")
+    for i, message in enumerate(kwargs["messages"]):
+        content = message["content"]
+        if isinstance(content, list):
+            for j, block in enumerate(content):
+                if "cache_control" in block:
+                    found.append(f"messages[{i}][{j}]")
+    return found
+
+
+def _two_system(*messages: ChatMessage, **kwargs) -> ChatRequest:
+    return ChatRequest(
+        messages=(
+            ChatMessage(role="system", content="Stable prompt."),
+            ChatMessage(role="system", content='{"commits": 3}'),
+            *messages,
+        ),
+        tools=(
+            SEARCH_TOOL,
+            ToolSpec(name="get_symbol", description="d", parameters={}),
+        ),
+        **kwargs,
+    )
+
+
+def test_anthropic_effort_rides_output_config_only_when_set() -> None:
+    adapter, fake = _anthropic_adapter([_an_message_delta()])
+    list(adapter.stream_turn(_request()))
+    assert "output_config" not in fake.last_kwargs
+    list(adapter.stream_turn(ChatRequest(messages=(user("go"),), effort="high")))
+    assert fake.last_kwargs["output_config"] == {"effort": "high"}
+
+
+def test_anthropic_places_exactly_three_cache_breakpoints() -> None:
+    adapter, fake = _anthropic_adapter([_an_message_delta()])
+    list(
+        adapter.stream_turn(
+            _two_system(
+                user("first"), ChatMessage(role="assistant", content="a"), user("why?")
+            )
+        )
+    )
+    assert _breakpoints(fake.last_kwargs) == ["system[0]", "tools[1]", "messages[2][0]"]
+    # The string user message became a block so it could carry the marker.
+    assert fake.last_kwargs["messages"][2]["content"] == [
+        {"type": "text", "text": "why?", "cache_control": {"type": "ephemeral"}}
+    ]
+    assert fake.last_kwargs["messages"][0]["content"] == "first"
+
+
+def test_anthropic_caches_the_last_tool_result_block() -> None:
+    adapter, fake = _anthropic_adapter([_an_message_delta()])
+    calls = (
+        ToolCall(id="t1", name="search_symbols", arguments={"query": "a"}),
+        ToolCall(id="t2", name="search_symbols", arguments={"query": "b"}),
+    )
+    list(
+        adapter.stream_turn(
+            _two_system(
+                user("why?"),
+                ChatMessage(role="assistant", tool_calls=calls),
+                ChatMessage(role="tool", content="{}", tool_call_id="t1"),
+                ChatMessage(
+                    role="tool",
+                    content='{"error": "x"}',
+                    tool_call_id="t2",
+                    is_error=True,
+                ),
+            )
+        )
+    )
+    assert _breakpoints(fake.last_kwargs) == ["system[0]", "tools[1]", "messages[2][1]"]
+    results = fake.last_kwargs["messages"][2]["content"]
+    assert "is_error" not in results[0]
+    assert results[1]["is_error"] is True
+
+
+def _thinking_round():
+    thinking = SimpleNamespace(
+        type="thinking", thinking="Let me look.", signature="sig-1"
+    )
+    text = SimpleNamespace(type="text", text="Checking.", citations=None)
+    tool = SimpleNamespace(
+        type="tool_use", id="toolu_1", name="search_symbols", input={"query": "x"}
+    )
+    return [
+        _an_message_start(),
+        _an_stop_with(0, thinking),
+        _an_text_block_start(1),
+        _an_text_delta("Checking.", index=1),
+        _an_stop_with(1, text),
+        _an_tool_block_start(2, "toolu_1", "search_symbols"),
+        _an_json_delta(2, '{"query": "x"}'),
+        _an_stop_with(2, tool),
+        _an_message_delta(stop_reason="tool_use"),
+    ]
+
+
+def test_anthropic_replays_round_one_blocks_verbatim_in_round_two() -> None:
+    adapter, _ = _anthropic_adapter(_thinking_round())
+    events = list(adapter.stream_turn(_request()))
+    done = events[-1]
+    blocks = [
+        {"type": "thinking", "thinking": "Let me look.", "signature": "sig-1"},
+        {"type": "text", "text": "Checking."},
+        {
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "search_symbols",
+            "input": {"query": "x"},
+        },
+    ]
+    assert done.replay == {"content": blocks}
+
+    call = next(e.call for e in events if isinstance(e, ToolCallMade))
+    adapter, fake = _anthropic_adapter([_an_message_delta()])
+    list(
+        adapter.stream_turn(
+            _two_system(
+                user("why?"),
+                ChatMessage(
+                    role="assistant",
+                    content="Checking.",
+                    tool_calls=(call,),
+                    replay=done.replay,
+                ),
+                ChatMessage(role="tool", content="{}", tool_call_id="toolu_1"),
+            )
+        )
+    )
+    assert fake.last_kwargs["messages"][1] == {"role": "assistant", "content": blocks}
+    # The payload is a copy: the harness's replay never gains a breakpoint.
+    assert all("cache_control" not in b for b in done.replay["content"])
+    assert len(_breakpoints(fake.last_kwargs)) == 3
+
+
+def test_anthropic_replays_nothing_when_a_tool_use_was_dropped() -> None:
+    tool = SimpleNamespace(
+        type="tool_use", id="toolu_1", name="search_symbols", input={}
+    )
+    adapter, _ = _anthropic_adapter(
+        [
+            _an_tool_block_start(0, "toolu_1", "search_symbols"),
+            _an_json_delta(0, '{"query": "unclo'),
+            _an_stop_with(0, tool),
+            _an_message_delta(stop_reason="max_tokens"),
+        ]
+    )
+    events = list(adapter.stream_turn(_request()))
+    assert not [e for e in events if isinstance(e, ToolCallMade)]
+    assert events[-1].replay is None
+
+
+def test_anthropic_replay_is_none_without_blocks() -> None:
+    adapter, _ = _anthropic_adapter([_an_text_delta("hi"), _an_message_delta()])
+    assert list(adapter.stream_turn(_request()))[-1].replay is None
+
+
+def _bad_request(message: str):
+    import anthropic
+    import httpx
+
+    return anthropic.BadRequestError(
+        message,
+        response=httpx.Response(400, request=httpx.Request("POST", "https://x")),
+        body=None,
+    )
+
+
+def test_anthropic_effort_rejection_is_effort_unsupported() -> None:
+    exc = _bad_request("output_config.effort: Extra inputs are not permitted")
+    adapter, _ = _anthropic_adapter([], raise_on_stream=exc)
+    with pytest.raises(LlmError) as info:
+        list(adapter.stream_turn(ChatRequest(messages=(user("go"),), effort="max")))
+    assert info.value.code == "effort_unsupported"
+
+
+def test_anthropic_thinking_signature_400_is_not_an_effort_error() -> None:
+    exc = _bad_request(
+        "messages.1.content.0: invalid signature in thinking block (block_binding) for effort"
+    )
+    adapter, _ = _anthropic_adapter([], raise_on_stream=exc)
+    with pytest.raises(LlmError) as info:
+        list(adapter.stream_turn(ChatRequest(messages=(user("go"),), effort="high")))
+    assert info.value.code is None
+
+    # Without an effort on the request nothing is mapped at all.
+    exc = _bad_request("output_config.effort: Extra inputs are not permitted")
+    adapter, _ = _anthropic_adapter([], raise_on_stream=exc)
+    with pytest.raises(LlmError) as info:
+        list(adapter.stream_turn(_request()))
+    assert info.value.code is None
+
+
+def test_anthropic_abort_without_a_live_stream_is_a_silent_no_op() -> None:
+    adapter, _ = _anthropic_adapter([])
+    adapter.abort()  # nothing in flight
+    adapter._active = SimpleNamespace()  # a fake stream with no response
+    adapter.abort()
+    adapter._active = SimpleNamespace(response=SimpleNamespace(extensions={}))
+    adapter.abort()
+
+
+def test_abort_wakes_a_reader_blocked_on_a_silent_stream() -> None:
+    """A reader blocked in ``iter_bytes()`` wakes within a second of ``abort``."""
+    import socket
+    import threading
+    import time
+
+    import httpx
+
+    from whygraph.services.llm._abort import shutdown_stream
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+    held: list = []
+
+    def _serve() -> None:
+        conn, _ = server.accept()
+        held.append(conn)
+        conn.recv(65536)
+        conn.sendall(
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n"
+            b"transfer-encoding: chunked\r\n\r\n"
+        )  # then silence: a long think
+
+    threading.Thread(target=_serve, daemon=True).start()
+    outcome: dict = {}
+    opened = threading.Event()
+
+    with httpx.Client(timeout=30) as client:
+        with client.stream("POST", f"http://127.0.0.1:{port}/v1/messages") as response:
+            stream = SimpleNamespace(response=response)
+
+            def _read() -> None:
+                opened.set()
+                try:
+                    for _ in response.iter_bytes():
+                        pass
+                except Exception as exc:  # noqa: BLE001 -- the outcome under test
+                    outcome["exc"] = exc
+                outcome["at"] = time.monotonic()
+
+            reader = threading.Thread(target=_read, daemon=True)
+            reader.start()
+            opened.wait(5)
+            time.sleep(0.2)
+            assert reader.is_alive()  # blocked on the silent stream
+            started = time.monotonic()
+            shutdown_stream(stream)
+            reader.join(5)
+            assert not reader.is_alive()
+            assert outcome["at"] - started < 1.0
+            assert isinstance(outcome.get("exc"), httpx.TransportError)
+    for conn in held:
+        conn.close()
+    server.close()

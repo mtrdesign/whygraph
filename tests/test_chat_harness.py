@@ -1308,3 +1308,103 @@ def test_reasoning_is_forwarded_and_blocks_the_silent_retry(monkeypatch) -> None
     with pytest.raises(httpx.RemoteProtocolError):
         _run(client, StubRegistry())
     assert len(client.requests) == 1
+
+
+def _repeat_script(*calls_per_round: list[ToolCall]) -> list[list]:
+    """One tool round per entry, then a closing text round."""
+    rounds = [
+        [*(ToolCallMade(call=c) for c in calls), _done("tool_calls")]
+        for calls in calls_per_round
+    ]
+    return [*rounds, [TextDelta(text="ok"), _done("end_turn")]]
+
+
+def _tool_messages(request) -> list[ChatMessage]:
+    return [m for m in request.messages if m.role == "tool"]
+
+
+def test_the_third_identical_call_is_dispatched_with_a_repeated_note() -> None:
+    registry = StubRegistry()
+    calls = [_call("search_symbols", f"c{i}", query="a") for i in range(1, 5)]
+    client = _Client(_repeat_script(*([c] for c in calls)))
+    events = _run(client, registry)
+
+    assert len(registry.dispatched) == 4  # every repeat still runs
+    results = [e.result for e in events if isinstance(e, ToolResultReady)]
+    assert "note" not in json.loads(results[0])
+    assert "note" not in json.loads(results[1])
+    assert json.loads(results[2]) == {
+        "ok": "search_symbols",
+        "note": "identical call repeated 3 times in this turn",
+    }
+    assert json.loads(results[3])["note"] == (
+        "identical call repeated 4 times in this turn"
+    )
+    # The model sees exactly what the event carried.
+    seen = [_tool_messages(client.requests[3])[i].content for i in range(3)]
+    assert seen == results[:3]
+    assert _tool_messages(client.requests[4])[3].content == results[3]
+
+
+def test_repeated_calls_ignore_argument_order() -> None:
+    registry = StubRegistry()
+    client = _Client(
+        _repeat_script(
+            [_call("t", "c1", a=1, b=2)],
+            [_call("t", "c2", b=2, a=1)],
+            [_call("t", "c3", a=1, b=2)],
+        )
+    )
+    events = _run(client, registry)
+    results = [e.result for e in events if isinstance(e, ToolResultReady)]
+    assert json.loads(results[2])["note"].startswith("identical call repeated 3")
+
+
+def test_repeated_counts_are_per_tool_and_per_arguments() -> None:
+    registry = StubRegistry()
+    client = _Client(
+        _repeat_script(
+            [_call("t", "c1", q="a"), _call("t", "c2", q="b")],
+            [_call("t", "c3", q="a"), _call("u", "c4", q="a")],
+            [_call("t", "c5", q="b")],
+        )
+    )
+    events = _run(client, registry)
+    results = [e.result for e in events if isinstance(e, ToolResultReady)]
+    assert len(results) == 5
+    assert all("note" not in json.loads(r) for r in results)
+
+
+def test_repeated_non_json_results_get_a_prefix() -> None:
+    registry = StubRegistry({"t": "[1, 2, 3]"})
+    client = _Client(_repeat_script(*([_call("t", f"c{i}", q="a")] for i in (1, 2, 3))))
+    events = _run(client, registry)
+    results = [e.result for e in events if isinstance(e, ToolResultReady)]
+    assert results[1] == "[1, 2, 3]"
+    assert results[2] == "[identical call repeated 3 times in this turn] [1, 2, 3]"
+    assert _tool_messages(client.requests[3])[2].content == results[2]
+
+
+def test_repeated_error_results_stay_errors_and_keep_their_note_key() -> None:
+    registry = StubRegistry(
+        {"t": json.dumps({"error": "nope", "note": "original"})},
+    )
+    client = _Client(_repeat_script(*([_call("t", f"c{i}", q="a")] for i in (1, 2, 3))))
+    events = _run(client, registry)
+    results = [e.result for e in events if isinstance(e, ToolResultReady)]
+    third = json.loads(results[2])
+    assert third["note"] == "original"
+    assert third["repeat_note"] == "identical call repeated 3 times in this turn"
+    tools = _tool_messages(client.requests[3])
+    assert [m.is_error for m in tools] == [True, True, True]
+
+
+def test_repeated_call_counter_is_per_turn() -> None:
+    registry = StubRegistry()
+    for _ in range(2):
+        client = _Client(
+            _repeat_script(*([_call("t", f"c{i}", q="a")] for i in (1, 2)))
+        )
+        events = _run(client, registry)
+        results = [e.result for e in events if isinstance(e, ToolResultReady)]
+        assert all("note" not in json.loads(r) for r in results)

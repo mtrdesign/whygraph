@@ -38,6 +38,7 @@ import json
 import logging
 import threading
 import time
+from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
@@ -71,6 +72,14 @@ _OVERVIEW_PLACEHOLDER = "{{OVERVIEW}}"
 
 ELIDED_MARKER = "[result elided]"
 """Replaces a stale tool-result body when trimming for the context budget."""
+
+REPEAT_CALL_LIMIT = 3
+"""From this many identical tool calls in one turn on, the result is annotated.
+
+Identical means the same tool name and the same arguments (key order does
+not matter). The call is still dispatched - a lazy backfill can change a
+result within a turn - but the model is told it is repeating itself.
+"""
 
 _ELIDE_KEEP_TURNS = 2
 """Tool results in the last N turns keep their bodies; older ones are elided.
@@ -540,6 +549,23 @@ def _is_error_result(result: str) -> bool:
     return isinstance(value, dict) and "error" in value
 
 
+def _note_repeat(result: str, count: int) -> str:
+    """Annotate the result of a call repeated ``count`` times in this turn.
+
+    A JSON object gains a ``note`` key (``repeat_note`` when it already has
+    one); any other result is prefixed with the same sentence in brackets.
+    """
+    text = f"identical call repeated {count} times in this turn"
+    try:
+        value = json.loads(result)
+    except ValueError:
+        value = None
+    if isinstance(value, dict):
+        value["repeat_note" if "note" in value else "note"] = text
+        return json.dumps(value)
+    return f"[{text}] {result}"
+
+
 def _trim_turn(
     messages: list[ChatMessage],
     turn_start: int,
@@ -622,6 +648,10 @@ def run_turn(
     pending message is tool results, so the turn ends in prose rather than a
     bare cap notice. A connection dropped mid-stream before anything arrived
     is retried once, silently.
+
+    A call repeated identically (same tool, same arguments) :data:`REPEAT_CALL_LIMIT`
+    times or more in the turn is still dispatched, but its result carries a
+    note saying how many times it has been made.
 
     Sequential dispatch rather than concurrent is a real choice: tool
     latency here is dominated by local SQLite reads, so parallelism would
@@ -715,6 +745,7 @@ def run_turn(
     # One TurnDone per provider call, in order; the turn total is their sum.
     rounds: list[TurnDone] = []
     rounds_used = continuations = tool_rounds = 0
+    seen_calls: Counter[tuple[str, str]] = Counter()
     nudged = trimmed = False
     latest_round = turn_start
     while True:
@@ -824,6 +855,13 @@ def run_turn(
                 _check(cancel)
                 yield ToolCallStarted(call=call)
                 result = registry.dispatch(call.name, call.arguments)
+                key = (
+                    call.name,
+                    json.dumps(call.arguments, sort_keys=True, separators=(",", ":")),
+                )
+                seen_calls[key] += 1
+                if seen_calls[key] >= REPEAT_CALL_LIMIT:
+                    result = _note_repeat(result, seen_calls[key])
                 yield ToolResultReady(call=call, result=result)
                 messages.append(
                     ChatMessage(

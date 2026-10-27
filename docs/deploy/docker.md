@@ -5,7 +5,7 @@ image. Your host needs **only Docker**. One command installs the `whygraph` shim
 `whygraph up` then starts the [portal](../portal/index.md) in it.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v2.1.0/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v2.2.0/scripts/install.sh | sh
 
 whygraph up          # start the portal and its database (two background containers, loopback only)
 ```
@@ -13,7 +13,7 @@ whygraph up          # start the portal and its database (two background contain
 Then open <http://localhost:8765>, share the folder that holds your repos, and add them from the
 Projects page. See the [Quickstart](../getting-started/quickstart.md).
 
-**The tag in the URL picks the version** - `v2.1.0` installs 2.1.0. To install a different release
+**The tag in the URL picks the version** - `v2.2.0` installs 2.2.0. To install a different release
 with that same installer, pass it through the pipe: `… | sh -s latest`. Full override list and the
 no-`curl` alternative are in [Installation](../getting-started/installation.md).
 

@@ -8,6 +8,9 @@ happens depends on where you come from:
 - **From 2.0.0**, `whygraph scan` is gone and each project's history moves out of its repository into
   the portal's data directory; the old in-repo database is not read, so history starts empty. See
   [WhyGraph 2.1.0](../releases/2.1.0.md#breaking-changes).
+- **From 2.1.0**, nothing to do: each project's database is upgraded on first use, with a backup kept
+  beside it for rolling back, and the first full scan walks the GitHub history once more. See
+  [WhyGraph 2.2.0](../releases/2.2.0.md#fixes).
 - **Agent files in your repositories** are not rewritten by an upgrade. Open each project's Settings >
   Agents and use **Update agent files**, once per project: it adds the `codegraph` MCP entry, files you
   have not edited update silently and edited ones are listed first (a project set up before the

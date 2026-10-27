@@ -260,7 +260,8 @@ whole turns from the top - never splitting a tool call from its result.
 Most turns end with a reply. These cases are handled for you:
 
 - A reply cut off by the output limit is continued, up to `max_continuations` times. If it is still
-  cut off, it ends with "The reply hit the output limit."
+  cut off, it ends with "The reply hit the output limit." and, on the latest reply, a **Continue**
+  button that carries on from where it stopped. The rest is added to the same reply.
 - If the model writes nothing after using tools, WhyGraph asks it once to answer from what it gathered.
 - In a long turn, the bodies of older tool results are shortened to fit `context_token_budget`, and
   the reply says "Older tool results in this turn were shortened to fit the context."

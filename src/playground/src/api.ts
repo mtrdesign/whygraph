@@ -2058,6 +2058,19 @@ export function projectApi(slug: string) {
         onEvent,
         signal,
       ),
+    // `messageId` is the truncated reply (the active leaf) to carry on from; no body, no user row.
+    chatContinue: (
+      sessionId: number,
+      messageId: number,
+      onEvent: (event: ChatEvent) => void,
+      signal?: AbortSignal,
+    ) =>
+      streamChat(
+        `${base}/chat/sessions/${sessionId}/messages/${messageId}/continue`,
+        undefined,
+        onEvent,
+        signal,
+      ),
     // Switches the visible version; answers with the transcript of the new path.
     chatBranch: (sessionId: number, messageId: number) =>
       send<ChatTranscript>("POST", `${base}/chat/sessions/${sessionId}/branch`, {

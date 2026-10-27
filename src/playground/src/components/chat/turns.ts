@@ -118,11 +118,18 @@ export function turnsFromMessages(
       // "output limit" and its last row said "stop").
       if (message.finish_reason) current.finishReason = message.finish_reason;
       else delete current.finishReason;
+      // Only an assistant row that is still the turn's last can be continued.
+      if (message.finish_reason === "max_tokens" || message.finish_reason === "length") {
+        current.continuableId = message.id;
+      } else {
+        delete current.continuableId;
+      }
       continue;
     }
 
     // role === "tool": attach the result to its already-rendered card.
     if (current) {
+      delete current.continuableId;
       for (const group of current.activityGroups) {
         const activity = group.find((a) => a.id === message.tool_call_id);
         if (activity) {

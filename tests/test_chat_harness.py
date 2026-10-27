@@ -929,6 +929,31 @@ def test_a_truncated_reply_with_text_is_continued_once() -> None:
     assert events[-1].finish_reason == "end_turn"
 
 
+def test_continue_from_assistant_ends_the_first_request_with_the_prompt() -> None:
+    client = _Client([[TextDelta(text=" the rest."), _done("end_turn")]])
+    history = (
+        ChatMessage(role="user", content="why?"),
+        ChatMessage(role="assistant", content="Part one"),
+    )
+    events = list(
+        run_turn(
+            client=client,
+            history=history,
+            registry=StubRegistry(),
+            continue_from_assistant=True,
+        )
+    )
+    first = client.requests[0].messages
+    assert [(m.role, m.content) for m in first[-3:]] == [
+        ("user", "why?"),
+        ("assistant", "Part one"),
+        ("user", CONTINUE_PROMPT),
+    ]
+    # The prompt is never an event: only the reply's own text comes out.
+    assert "".join(e.text for e in events if isinstance(e, TextDelta)) == " the rest."
+    assert not any(isinstance(e, Continuation) for e in events)
+
+
 def test_max_continuations_bounds_the_continuations() -> None:
     truncated = [TextDelta(text="more"), _done("length")]
     client = _Client([list(truncated), list(truncated), list(truncated)])

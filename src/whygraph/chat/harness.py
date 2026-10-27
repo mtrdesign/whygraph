@@ -599,6 +599,7 @@ def run_turn(
     effort: str | None = None,
     cancel: threading.Event | None = None,
     max_continuations: int | None = None,
+    continue_from_assistant: bool = False,
 ) -> Iterator[HarnessEvent]:
     """Run one user turn to completion, yielding harness events.
 
@@ -657,6 +658,12 @@ def run_turn(
     max_continuations : int, optional
         Continuations after a truncated reply. ``None`` reads
         ``[chat].max_continuations``.
+    continue_from_assistant : bool, optional
+        The history ends with a reply the output limit cut off, not with a
+        user message (the Continue button). :data:`CONTINUE_PROMPT` is
+        appended to the working messages before the first round, so the model
+        carries on from where it stopped. The prompt is never yielded or
+        persisted.
 
     Yields
     ------
@@ -702,6 +709,8 @@ def run_turn(
         build_window(history, token_budget=context_token_budget)
     )
     turn_start = len(messages)
+    if continue_from_assistant:
+        messages.append(ChatMessage(role="user", content=CONTINUE_PROMPT))
 
     # One TurnDone per provider call, in order; the turn total is their sum.
     rounds: list[TurnDone] = []

@@ -70,7 +70,7 @@ function pause(ms: number, signal: AbortSignal): Promise<void> {
 
 /** One turn about to run: what the screen shows meanwhile, and how its stream is opened. */
 interface TurnStart {
-  kind: "send" | "edit" | "regenerate";
+  kind: "send" | "edit" | "regenerate" | "continue";
   /** How many persisted turns stay on screen while it runs (`null`: all of them). */
   keep: number | null;
   /** The optimistic live view; the persisted rows replace it when the turn ends. */
@@ -273,6 +273,12 @@ export function MessageThread({
     lastTurn.id !== undefined &&
     lastQuestion?.kind === "user" &&
     lastQuestion.id !== undefined
+      ? turns.length - 1
+      : -1;
+
+  // Continue belongs to the last turn too, when it is persisted and the output limit cut it off.
+  const continuableIndex =
+    liveTurns.length === 0 && lastTurn?.kind === "assistant" && lastTurn.continuableId !== undefined
       ? turns.length - 1
       : -1;
 
@@ -571,6 +577,20 @@ export function MessageThread({
     });
   };
 
+  // Carry on a reply the output limit cut off: no new question, and the truncated reply stays on screen
+  // while the rest streams in below it; the refetch then shows the two as one reply.
+  const continueReply = () => {
+    const last = shown[shown.length - 1];
+    if (currentId === null || last?.kind !== "assistant" || last.continuableId === undefined) return;
+    const messageId = last.continuableId;
+    void runTurn({
+      kind: "continue",
+      keep: null,
+      live: [emptyAssistantTurn()],
+      open: (sid, onEvent, signal) => api.chatContinue(sid, messageId, onEvent, signal),
+    });
+  };
+
   // Switch the visible version: the server moves the leaf and answers with the new path.
   const branchTo = async (messageId: number) => {
     if (currentId === null) return;
@@ -644,6 +664,7 @@ export function MessageThread({
                 : undefined
             }
             onRegenerate={i === regenerableIndex && !cannotSend ? regenerate : undefined}
+            onContinue={i === continuableIndex && !cannotSend ? continueReply : undefined}
             onBranch={(id) => void branchTo(id)}
           />
         ))}

@@ -142,8 +142,8 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
       fake.sessions = [row, ...fake.sessions];
       return Promise.resolve(json(row, 201));
     }
-    // Edit / regenerate stream like a send; branch answers with the transcript of the new path.
-    const t = /^\/chat\/sessions\/(\d+)\/messages\/(\d+)\/(edit|regenerate)$/.exec(rest ?? "");
+    // Edit / regenerate / continue stream like a send; branch answers with the transcript of the new path.
+    const t = /^\/chat\/sessions\/(\d+)\/messages\/(\d+)\/(edit|regenerate|continue)$/.exec(rest ?? "");
     if (t && method === "POST") return Promise.resolve(turnStream(init));
     const br = /^\/chat\/sessions\/(\d+)\/branch$/.exec(rest ?? "");
     if (br && method === "POST") {
@@ -600,6 +600,52 @@ describe("the chat view: edit, regenerate and versions", () => {
     });
     await screen.findByText("Second try.");
     expect(screen.getByTestId("version-arrows")).toHaveTextContent("2/2");
+  });
+
+  it("continues a reply the output limit cut off: the continue route, no body, the reply stays and merges on refetch", async () => {
+    const cut = () => [...exchanges().slice(0, 3), row(4, "assistant", "second a, cut", { finish_reason: "max_tokens" })];
+    fake.transcripts[3] = cut();
+    mount("/p/alpha/chat/3");
+    const user = userEvent.setup();
+    await screen.findByText("second a, cut");
+    expect(screen.getAllByTestId("output-limit-notice")).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    await waitFor(() => expect(fake.stream).not.toBeNull());
+    expect(turnPosts().at(-1)).toMatchObject({
+      path: "/api/projects/alpha/chat/sessions/3/messages/4/continue",
+      body: undefined,
+    });
+    // No new question; the truncated reply stays while the rest streams in, and nothing else can start.
+    expect(screen.getByText("second a, cut")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Regenerate reply" })).toBeNull();
+
+    act(() => fake.stream!.enqueue(frame({ type: "text_delta", text: " and the rest." })));
+    await screen.findByText(/and the rest\./);
+    fake.transcripts[3] = [...cut(), row(5, "assistant", " and the rest.", { finish_reason: "stop" })];
+    act(() => {
+      fake.stream!.enqueue(done(5));
+      fake.stream!.close();
+    });
+    // The two rows are one reply now, with no output-limit notice and nothing left to continue.
+    await screen.findByText("second a, cut and the rest.");
+    expect(screen.queryByTestId("output-limit-notice")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+  });
+
+  it("offers Continue on the last reply only, and not on a reply that ended normally", async () => {
+    // An older cut-off reply is no longer the leaf; the last reply ended normally.
+    fake.transcripts[3] = [
+      row(1, "user", "first q"),
+      row(2, "assistant", "first a, cut", { finish_reason: "length" }),
+      row(3, "user", "second q"),
+      row(4, "assistant", "second a", { finish_reason: "stop" }),
+    ];
+    mount("/p/alpha/chat/3");
+    await screen.findByText("second a");
+    expect(screen.getByTestId("output-limit-notice")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
   });
 
   it.each([

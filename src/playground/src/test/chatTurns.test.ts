@@ -119,6 +119,20 @@ describe("turnsFromMessages", () => {
     expect(assistant.finishReason).toBe("stop");
   });
 
+  it("marks the last row of a turn as continuable only when the output limit cut it off", () => {
+    const cut = row({ content: "half", finish_reason: "length" });
+    const turns = turnsFromMessages([row({ role: "user", content: "q" }), cut]);
+    expect((turns[1] as AssistantTurn).continuableId).toBe(cut.id);
+    const continued = turnsFromMessages([
+      row({ role: "user", content: "q" }),
+      row({ content: "half", finish_reason: "max_tokens" }),
+      row({ content: " rest", finish_reason: "stop" }),
+    ]);
+    expect((continued[1] as AssistantTurn).continuableId).toBeUndefined();
+    const ended = turnsFromMessages([row({ role: "user", content: "q" }), row({ content: "a", finish_reason: "stop" })]);
+    expect((ended[1] as AssistantTurn).continuableId).toBeUndefined();
+  });
+
   it("looks versions up by the turn's FIRST row id", () => {
     const user = row({ role: "user", content: "q" });
     const first = row({ content: "", tool_calls: [call("c1")] });

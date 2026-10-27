@@ -1240,6 +1240,7 @@ def test_each_member_sees_and_touches_only_their_own_chat_sessions(
                 ("POST", "/messages", {"content": "hello"}),
                 ("POST", "/messages/1/edit", {"content": "hello"}),
                 ("POST", "/messages/1/regenerate", None),
+                ("POST", "/messages/1/continue", None),
                 ("POST", "/branch", {"message_id": 1}),
             ):
                 refused = w.client.request(method, f"{chat}/{other}{suffix}", json=body)
@@ -1272,6 +1273,7 @@ def test_a_reader_has_no_chat(prod_world: ProdWorld) -> None:
         ("GET", f"{chat}/{w.quokka.session_id}", None),
         ("POST", f"{chat}/{w.quokka.session_id}/messages", {"content": "hi"}),
         ("POST", f"{chat}/{w.quokka.session_id}/messages/1/regenerate", None),
+        ("POST", f"{chat}/{w.quokka.session_id}/messages/1/continue", None),
         ("POST", f"{chat}/{w.quokka.session_id}/branch", {"message_id": 1}),
     ):
         refused = w.client.request(method, url, json=body)

@@ -76,6 +76,19 @@ describe("MessageBubble: how a turn was cut short", () => {
     }
   });
 
+  it("offers Continue in the notice only with a handler and while nothing streams", () => {
+    const onContinue = vi.fn();
+    const turn = assistant({ segments: ["Half an ans"], finishReason: "max_tokens", id: 2 });
+    const { rerender } = render(<MessageBubble turn={turn} />);
+    expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+    rerender(<MessageBubble turn={turn} onContinue={onContinue} busy />);
+    expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+    rerender(<MessageBubble turn={turn} onContinue={onContinue} />);
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(onContinue).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("output-limit-notice")).toContainElement(screen.getByRole("button", { name: "Continue" }));
+  });
+
   it("says so when the provider declined (either spelling)", () => {
     for (const finishReason of ["refusal", "content_filter"]) {
       const { unmount } = render(<MessageBubble turn={assistant({ segments: ["I can't"], finishReason })} />);

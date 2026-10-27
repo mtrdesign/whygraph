@@ -146,9 +146,11 @@ def _stub_harness(monkeypatch: pytest.MonkeyPatch, events) -> None:
 
     def _fake_run_turn(*, client, history, registry=None, **kwargs):
         _fake_run_turn.history = history
+        _fake_run_turn.kwargs = kwargs
         yield from events
 
     _fake_run_turn.history = ()
+    _fake_run_turn.kwargs = {}
     monkeypatch.setattr(serve_chat, "run_turn", _fake_run_turn)
     # The provider client is never used by the stub, but make_chat_client is
     # still called — keep it from needing a real key.
@@ -1817,6 +1819,100 @@ def _blocking_harness(monkeypatch, release: threading.Event, started: threading.
 
     monkeypatch.setattr(serve_chat, "make_chat_client", lambda *a, **k: object())
     monkeypatch.setattr(serve_chat, "run_turn", _blocked)
+
+
+def _truncated_reply(text: str, finish_reason: str = "max_tokens") -> list:
+    return [
+        TextDelta(text=text),
+        RoundUsage(finish_reason=finish_reason),
+        TurnDone(finish_reason),
+    ]
+
+
+def _truncated_session(chat_client, monkeypatch, finish_reason: str = "max_tokens"):
+    """A session whose only turn ended at the output limit; returns ids."""
+    _stub_harness(monkeypatch, _truncated_reply("cut off", finish_reason))
+    sid = _new_session(chat_client)["id"]
+    chat_client.post(_url(sid, "/messages"), json={"content": "q1"})
+    q1, a1 = (m["id"] for m in _transcript(chat_client, sid)["messages"])
+    return sid, q1, a1
+
+
+@pytest.mark.parametrize("finish_reason", ["max_tokens", "length"])
+def test_continue_extends_a_truncated_reply(
+    chat_client, monkeypatch, finish_reason
+) -> None:
+    sid, q1, a1 = _truncated_session(chat_client, monkeypatch, finish_reason)
+
+    spy = _stub_harness(monkeypatch, _reply(" and the rest"))
+    response = chat_client.post(_url(sid, f"/messages/{a1}/continue"))
+    assert response.status_code == 200
+    assert [f["type"] for f in _frames(response)] == ["text_delta", "done"]
+    # The history ends with the truncated reply and the harness is told to
+    # carry on from it; no user row was written.
+    assert [(m.role, m.content) for m in spy.history] == [
+        ("user", "q1"),
+        ("assistant", "cut off"),
+    ]
+    assert spy.kwargs["continue_from_assistant"] is True
+
+    transcript = _transcript(chat_client, sid)
+    assert [m["role"] for m in transcript["messages"]] == [
+        "user",
+        "assistant",
+        "assistant",
+    ]
+    tail = transcript["messages"][2]
+    assert tail["parent_id"] == a1
+    assert transcript["versions"] == {}
+    assert transcript["active_leaf_id"] == tail["id"]
+
+    # The next turn sees one merged reply.
+    spy = _stub_harness(monkeypatch, _reply("a2"))
+    chat_client.post(_url(sid, "/messages"), json={"content": "q2"})
+    assert [(m.role, m.content) for m in spy.history] == [
+        ("user", "q1"),
+        ("assistant", "cut off and the rest"),
+        ("user", "q2"),
+    ]
+    assert spy.kwargs["continue_from_assistant"] is False
+
+
+def test_continue_only_answers_for_a_truncated_active_leaf(
+    chat_client, monkeypatch
+) -> None:
+    sid, q1, a1 = _truncated_session(chat_client, monkeypatch)
+    # A finished reply (end_turn) on a second question is not continuable,
+    # and neither is the earlier truncated one that is no longer the leaf.
+    _stub_harness(monkeypatch, _reply("done"))
+    chat_client.post(_url(sid, "/messages"), json={"content": "q2"})
+    finished = _transcript(chat_client, sid)["messages"][-1]["id"]
+    other = _new_session(chat_client)["id"]
+    chat_client.post(_url(other, "/messages"), json={"content": "elsewhere"})
+    foreign = _transcript(chat_client, other)["messages"][0]["id"]
+
+    for target in (a1, q1, finished, foreign, 99999):
+        response = chat_client.post(_url(sid, f"/messages/{target}/continue"))
+        assert response.status_code == 404, target
+        assert response.json()["code"] == "not_found"
+    assert chat_client.post(_url(99999, f"/messages/{a1}/continue")).status_code == 404
+    # Nothing was written by any refusal.
+    assert _transcript(chat_client, sid)["message_count"] == 4
+
+
+def test_continue_is_refused_while_a_turn_runs(chat_client, monkeypatch) -> None:
+    sid, q1, a1 = _truncated_session(chat_client, monkeypatch)
+    holder = object()
+    with use_project(chat_client.context()):
+        lease = serve_chat._lease_key(sid)
+        serve_chat._acquire(lease, holder)
+    try:
+        response = chat_client.post(_url(sid, f"/messages/{a1}/continue"))
+        assert response.status_code == 409
+        assert response.json()["code"] == "turn_in_progress"
+    finally:
+        serve_chat._release(lease, holder)
+    assert _transcript(chat_client, sid)["message_count"] == 2
 
 
 def test_one_turn_per_session_and_delete_or_branch_wait(

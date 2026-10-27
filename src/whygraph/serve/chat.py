@@ -1007,6 +1007,9 @@ class TurnJob:
         The row the turn answers (see :func:`_load_history`).
     effort : str or None
         The resolved effort level.
+    continue_from_assistant : bool
+        The turn carries on from a truncated reply (``start_id``) instead of
+        answering a user row; the harness appends its continue prompt.
 
     Attributes
     ----------
@@ -1025,6 +1028,7 @@ class TurnJob:
         *,
         start_id: int = 0,
         effort: str | None = None,
+        continue_from_assistant: bool = False,
     ) -> None:
         self.key = key
         self.session_id = session_id
@@ -1033,6 +1037,7 @@ class TurnJob:
         self.start_id = start_id
         self.parent_id: int | None = start_id
         self.effort = effort
+        self.continue_from_assistant = continue_from_assistant
         self.cancel_event = threading.Event()
         self.client = None
         self.queue: queue.Queue = queue.Queue()
@@ -1284,6 +1289,7 @@ def _turn_frames(job: TurnJob) -> Iterator[str]:
             registry=registry,
             effort=job.effort,
             cancel=job.cancel_event,
+            continue_from_assistant=job.continue_from_assistant,
         ):
             if round_usage is not None and isinstance(event, _ROUND_FLUSH_EVENTS):
                 # The previous round is finished and something new starts.
@@ -1450,6 +1456,30 @@ def _preflight(
     return row
 
 
+TRUNCATED_FINISH_REASONS = ("max_tokens", "length")
+"""The ``finish_reason`` values that mean the output limit cut a reply off."""
+
+
+def _require_truncated_leaf(session_id: int, message_id: int) -> None:
+    """404 ``not_found`` unless ``message_id`` is a reply the output limit cut off.
+
+    It must be the session's active leaf and carry a ``finish_reason`` of
+    ``max_tokens`` or ``length``; anything else cannot be continued. Read
+    before the lease is taken and before anything is written.
+    """
+    with get_session() as session:
+        rows = _session_rows(session, session_id)
+        row = _require_session(session, session_id)
+        message = rows.get(message_id)
+        if (
+            message is None
+            or _leaf_id(row, rows) != message_id
+            or message.role != "assistant"
+            or message.finish_reason not in TRUNCATED_FINISH_REASONS
+        ):
+            raise ServeError(404, f"message {message_id} not found", code="not_found")
+
+
 def _start_turn(
     request: Request,
     session_id: int,
@@ -1457,20 +1487,40 @@ def _start_turn(
     content: str | None = None,
     edit_of: int | None = None,
     regenerate_of: int | None = None,
+    continue_of: int | None = None,
 ) -> StreamingResponse:
     """Start a turn: preflight, lease, user row, worker; then stream it.
 
     The order is the contract: nothing is written before the preflight and
     the lease, and any failure before the worker starts gives the lease
-    back. From then on the worker owns it.
+    back. From then on the worker owns it. A continue writes no user row:
+    the turn picks up under the truncated reply (``continue_of``).
     """
-    target = edit_of if edit_of is not None else regenerate_of
-    row = _preflight(request, session_id, target, role="user")
+    target = next(
+        (t for t in (edit_of, regenerate_of, continue_of) if t is not None), None
+    )
+    row = _preflight(
+        request,
+        session_id,
+        target,
+        role="assistant" if continue_of is not None else "user",
+    )
+    if continue_of is not None:
+        _require_truncated_leaf(session_id, continue_of)
     key = _lease_key(session_id)
-    job = TurnJob(key, session_id, row.provider, row.model)
+    job = TurnJob(
+        key,
+        session_id,
+        row.provider,
+        row.model,
+        continue_from_assistant=continue_of is not None,
+    )
     _acquire(key, job)
     try:
-        if regenerate_of is not None:
+        if continue_of is not None:
+            # New rows chain under the truncated one; the history ends with it.
+            job.start_id = job.parent_id = continue_of
+        elif regenerate_of is not None:
             # A sibling reply under the same question. The leaf moves when the
             # first row is written, so a turn that writes nothing leaves the
             # old reply on the path.
@@ -1545,6 +1595,19 @@ def regenerate_reply(
     and effort apply. The old reply stays reachable through the arrows.
     """
     return _start_turn(request, session_id, regenerate_of=message_id)
+
+
+@router.post("/sessions/{session_id}/messages/{message_id}/continue")
+def continue_reply(
+    session_id: int, message_id: int, request: Request
+) -> StreamingResponse:
+    """Carry on a reply the output limit cut off, streamed as SSE.
+
+    ``message_id`` must be the session's active leaf, an assistant row whose
+    ``finish_reason`` is ``max_tokens`` or ``length``; otherwise 404. No user
+    row is written: the new rows chain under the truncated one.
+    """
+    return _start_turn(request, session_id, continue_of=message_id)
 
 
 @router.post("/sessions/{session_id}/branch")

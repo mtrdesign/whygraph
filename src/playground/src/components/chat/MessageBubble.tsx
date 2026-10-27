@@ -60,6 +60,11 @@ export interface AssistantTurn {
    * `refusal` / `content_filter` (declined) get a notice; anything else shows nothing.
    */
   finishReason?: string;
+  /**
+   * Persisted turns only: the id of the turn's last row when that row is an assistant row the output
+   * limit cut off - the one the server will continue. Absent when the turn ended any other way.
+   */
+  continuableId?: number;
   /** Older tool results of this turn were elided to fit the context. Live turns only: a transcript cannot know. */
   trimmed?: boolean;
   /** The turn's versions (it has siblings in the tree), looked up by its first row. */
@@ -97,6 +102,8 @@ export interface TurnActions {
   onEdit?: (content: string) => void;
   /** Passed for the LAST assistant turn only: write its reply again. */
   onRegenerate?: () => void;
+  /** Passed for the LAST assistant turn only, when the output limit cut it off: carry on from there. */
+  onContinue?: () => void;
   /** Version arrows: switch to the sibling with this message id. */
   onBranch?: (messageId: number) => void;
 }
@@ -286,7 +293,7 @@ export function ReasoningBlock({ text }: { text: string }) {
   );
 }
 
-function AssistantBubble({ turn, busy, onRegenerate, onBranch }: { turn: AssistantTurn } & TurnActions) {
+function AssistantBubble({ turn, busy, onRegenerate, onContinue, onBranch }: { turn: AssistantTurn } & TurnActions) {
   const rows = Math.max(turn.segments.length, turn.activityGroups.length);
   // Flattened across groups on purpose. `render_chart` and the stats call that
   // minted its `chart_ref` are separate tool *rounds*, and a new round opens a new
@@ -380,6 +387,11 @@ function AssistantBubble({ turn, busy, onRegenerate, onBranch }: { turn: Assista
             data-testid="output-limit-notice"
           >
             The reply hit the output limit.
+            {!busy && onContinue && (
+              <Button type="button" size="xs" variant="outline" className="ml-2" onClick={onContinue}>
+                Continue
+              </Button>
+            )}
           </div>
         )}
 

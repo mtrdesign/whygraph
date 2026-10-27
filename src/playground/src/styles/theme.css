@@ -240,4 +240,20 @@
     font-size: 0.875rem; /* 14px base: dense like Linear, not a marketing site */
     -webkit-font-smoothing: antialiased;
   }
+  /* Tailwind 4's preflight resets buttons to `cursor: default`; every clickable control takes the hand.
+     `:where()` keeps it at zero specificity, so a `cursor-*` utility still wins. */
+  :where(
+      button,
+      select,
+      summary,
+      [role="button"],
+      [role="tab"],
+      [role="switch"],
+      [role="checkbox"],
+      [role="radio"],
+      [role="combobox"],
+      label:has(input, [role="switch"], [role="checkbox"], [role="radio"], select)
+    ):not(:disabled, [aria-disabled="true"], [data-disabled]) {
+    cursor: pointer;
+  }
 }

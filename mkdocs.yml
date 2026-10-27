@@ -116,7 +116,7 @@ nav:
       - LLM providers: reference/llm-providers.md
       - Source control providers: reference/providers.md
   - Releases:
-      - Unreleased: releases/unreleased.md
+      - WhyGraph 2.2.0: releases/2.2.0.md
       - WhyGraph 2.1.0: releases/2.1.0.md
       - WhyGraph 2.0.0: releases/2.0.0.md
   - Roadmap: roadmap.md

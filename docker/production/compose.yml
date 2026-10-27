@@ -27,7 +27,7 @@ services:
       - internal
 
   portal:
-    image: ghcr.io/mtrdesign/whygraph:2.1.0
+    image: ghcr.io/mtrdesign/whygraph:2.2.0
     command: whygraph portal --host 0.0.0.0 --port 8765
     restart: unless-stopped
     depends_on:

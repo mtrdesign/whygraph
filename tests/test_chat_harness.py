@@ -1219,8 +1219,9 @@ def test_a_stop_during_the_retry_wait_cancels_the_turn(
 ) -> None:
     monkeypatch.setattr(harness, "RETRY_DELAY_SEC", 30)
     cancel = threading.Event()
-    threading.Timer(0.05, cancel.set).start()
-    client = _Client([[_dropped()]])
+    # Started by the request itself: a timer started before the turn could fire
+    # before the first request on a slow runner, and the turn would stop there.
+    client = _Client([[lambda: threading.Timer(0.05, cancel.set).start(), _dropped()]])
     started = time.monotonic()
     with pytest.raises(TurnCancelled):
         _run(client, StubRegistry(), cancel=cancel)

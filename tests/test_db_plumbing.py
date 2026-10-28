@@ -27,10 +27,12 @@ SQLMODEL_TABLES = {
     "commit_file_change",
     "forge_crawl_state",
     "issue",
+    "milestone",
     "pr_issue_link",
     "pr_origin_skip",
     "pull_request",
     "rationale_cache",
+    "tag",
 }
 
 
@@ -396,7 +398,7 @@ def test_chat_mode_and_grounding_columns_round_trip(
 
     db_path = _isolate_config_and_engine
     head = ScriptDirectory.from_config(alembic_config()).get_current_head()
-    assert head == "22567728b72a"
+    assert head == "5e8a2c9d1f47"
 
     command.upgrade(alembic_config(), "head")
     assert "mode" in _column_names(db_path, "chat_session")
@@ -406,6 +408,55 @@ def test_chat_mode_and_grounding_columns_round_trip(
     command.downgrade(alembic_config(), "a3c7e91b4d25")
     assert "mode" not in _column_names(db_path, "chat_session")
     assert not {"mode", "grounding"} & _column_names(db_path, "chat_message")
+
+
+def test_forge_fields_milestone_tag_round_trip(
+    _isolate_config_and_engine: Path,
+) -> None:
+    """The phase 2 forge columns and tables land at head and downgrade cleanly."""
+    db_path = _isolate_config_and_engine
+    command.upgrade(alembic_config(), "head")
+    pr_cols = _column_names(db_path, "pull_request")
+    assert {
+        "milestone",
+        "assignees",
+        "review_decision",
+        "latest_reviews",
+        "review_requests",
+        "first_review_at",
+        "files",
+        "additions",
+        "deletions",
+        "changed_files",
+    } <= pr_cols
+    assert {"milestone", "assignees", "state_reason"} <= _column_names(db_path, "issue")
+    assert "fields_version" in _column_names(db_path, "forge_crawl_state")
+
+    conn = sqlite3.connect(db_path)
+    try:
+        defaults = {
+            (t, r[1]): r[4]
+            for t in ("pull_request", "issue")
+            for r in conn.execute(f"PRAGMA table_info({t})")
+        }
+        for t, c in (
+            ("pull_request", "assignees"),
+            ("pull_request", "latest_reviews"),
+            ("pull_request", "review_requests"),
+            ("pull_request", "files"),
+            ("issue", "assignees"),
+        ):
+            assert defaults[(t, c)] == "'[]'"
+    finally:
+        conn.close()
+    assert {"milestone", "tag"} <= _table_names(db_path)
+
+    db_engine._reset_engine()
+    command.downgrade(alembic_config(), "22567728b72a")
+    assert not {"milestone", "tag"} & _table_names(db_path)
+    assert "files" not in _column_names(db_path, "pull_request")
+    assert "state_reason" not in _column_names(db_path, "issue")
+    assert "fields_version" not in _column_names(db_path, "forge_crawl_state")
 
 
 def test_chat_branching_backfills_parents_and_leaf(

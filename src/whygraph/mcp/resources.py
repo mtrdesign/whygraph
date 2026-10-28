@@ -47,12 +47,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
 from mcp.server.fastmcp import FastMCP
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, col, select
 
@@ -386,13 +388,35 @@ def _issue_resource(number: int) -> dict:
         raise WhyGraphError(_DB_UNSCANNED_MESSAGE) from exc
 
 
+_MAX_SINCE_DAYS = 3650
+"""Upper clamp on a ``since_days`` window (ten years)."""
+
+
+def _clamp_since_days(since_days: int | None) -> int | None:
+    """Clamp a ``since_days`` window to ``[1, _MAX_SINCE_DAYS]``; ``None`` stays."""
+    if since_days is None:
+        return None
+    return max(1, min(int(since_days), _MAX_SINCE_DAYS))
+
+
+def _since_cutoff(since_days: int | None) -> str | None:
+    """ISO-8601 UTC lower bound for a ``since_days`` window, or ``None``.
+
+    Timestamps are stored as ISO strings, so the comparison is lexical; a
+    commit authored under a non-UTC offset can land a few hours either side.
+    """
+    if since_days is None:
+        return None
+    return (datetime.now(timezone.utc) - timedelta(days=since_days)).isoformat()
+
+
 _RECENT_DESCRIPTION_CHARS = 240
 """``llm_description`` is truncated in the recent-activity listing: the point
 is a cheap index the model can scan in one round, and a dozen full paragraphs
 would cost more context than the drill-down calls it replaces."""
 
 
-def _recent_activity_resource(limit: int = 10) -> dict:
+def _recent_activity_resource(limit: int = 10, since_days: int | None = None) -> dict:
     """Most recent commits, pull requests, and issues — a scannable index.
 
     Exists because every other history read needs an identifier the caller
@@ -415,11 +439,15 @@ def _recent_activity_resource(limit: int = 10) -> dict:
     ----------
     limit : int, optional
         Maximum rows per category (not in total). Default 10.
+    since_days : int, optional
+        Only rows authored (commits) or updated (pull requests, issues) in
+        the last this-many days, clamped to ``[1, _MAX_SINCE_DAYS]``.
 
     Returns
     -------
     dict
-        ``{"limit", "commits", "pull_requests", "issues"}``. A category
+        ``{"limit", "commits", "pull_requests", "issues"}``, plus
+        ``"since_days"`` when a window was applied. A category
         with nothing scanned comes back as an empty list rather than
         being omitted, so the model can tell "none" from "not asked".
 
@@ -437,25 +465,30 @@ def _recent_activity_resource(limit: int = 10) -> dict:
     """
     _log.debug("recent activity resource read: limit=%r", limit)
     limit = max(1, limit)
+    since_days = _clamp_since_days(since_days)
+    cutoff = _since_cutoff(since_days)
     try:
         with get_session() as session:
+            commit_stmt = select(Commit).where(Commit.on_default_branch == 1)
+            pr_stmt = select(PullRequest)
+            issue_stmt = select(Issue)
+            if cutoff is not None:
+                commit_stmt = commit_stmt.where(col(Commit.authored_at) >= cutoff)
+                pr_stmt = pr_stmt.where(col(PullRequest.updated_at) >= cutoff)
+                issue_stmt = issue_stmt.where(col(Issue.updated_at) >= cutoff)
             commits = session.exec(
-                select(Commit)
-                .where(Commit.on_default_branch == 1)
-                .order_by(col(Commit.authored_at).desc())
-                .limit(limit)
+                commit_stmt.order_by(col(Commit.authored_at).desc()).limit(limit)
             ).all()
             prs = session.exec(
-                select(PullRequest)
-                .order_by(col(PullRequest.updated_at).desc())
-                .limit(limit)
+                pr_stmt.order_by(col(PullRequest.updated_at).desc()).limit(limit)
             ).all()
             issues = session.exec(
-                select(Issue).order_by(col(Issue.updated_at).desc()).limit(limit)
+                issue_stmt.order_by(col(Issue.updated_at).desc()).limit(limit)
             ).all()
 
             return {
                 "limit": limit,
+                **({"since_days": since_days} if since_days is not None else {}),
                 "commits": [
                     {
                         "sha": c.sha,
@@ -558,6 +591,9 @@ def _find_changes_resource(
     query: str | None = None,
     path: str | None = None,
     limit: int = 15,
+    area: str | None = None,
+    area_predicates: list[tuple[str, str | None]] | None = None,
+    since_days: int | None = None,
 ) -> dict:
     """Commits found by *what they changed* — keyword and/or path.
 
@@ -585,11 +621,23 @@ def _find_changes_resource(
     limit : int, optional
         Maximum commits, newest first. Default 15, clamped to
         ``[1, _FIND_CHANGES_MAX_LIMIT]``.
+    area : str, optional
+        An already-resolved area name, echoed in the result and counted as a
+        filter. Mutually exclusive with ``path``.
+    area_predicates : list of tuple, optional
+        The area's ``(escaped LIKE pattern, exact)`` pairs from
+        :func:`whygraph.chat.areas.path_predicates`. Passed in rather than
+        imported because ``mcp`` must not depend on ``chat``. Rename aliases
+        are not applied to them.
+    since_days : int, optional
+        Only commits authored in the last this-many days, clamped to
+        ``[1, _MAX_SINCE_DAYS]``. A window alone is not a filter.
 
     Returns
     -------
     dict
-        ``{"query", "path", "count", "commits"}``. Each commit carries its
+        ``{"query", "path", "count", "commits"}`` (plus ``"area"`` and
+        ``"since_days"`` when given). Each commit carries its
         **full** ``llm_description`` — that is the payload, so it is never
         clipped — plus stats and ``linked_prs`` as number + title. PR bodies,
         comments, commit titles, and the commit ``body`` are omitted: together
@@ -610,16 +658,31 @@ def _find_changes_resource(
     _log.debug("find changes: query=%r path=%r limit=%r", query, path, limit)
     terms = (query or "").split()
     path = (path or "").strip().removeprefix("./").rstrip("/")
-    if not terms and not path:
+    area = (area or "").strip() or None
+    if area and path:
+        return {
+            "error": (
+                "pass `area` or `path`, not both: `area` already stands for "
+                "a configured set of paths."
+            )
+        }
+    if not terms and not path and not area:
         return {
             "error": (
                 "pass `query` (keywords matched against commit diff "
-                "descriptions and PR titles) and/or `path` (a file or "
-                "directory prefix). Without a filter this would return the "
-                "whole history."
+                "descriptions and PR titles), `path` (a file or "
+                "directory prefix) and/or `area` (a configured area). "
+                "Without a filter this would return the whole history."
             )
         }
     limit = max(1, min(int(limit), _FIND_CHANGES_MAX_LIMIT))
+    since_days = _clamp_since_days(since_days)
+    cutoff = _since_cutoff(since_days)
+    predicates = list(area_predicates or []) if area else []
+    echo = {
+        **({"area": area} if area else {}),
+        **({"since_days": since_days} if since_days is not None else {}),
+    }
 
     try:
         with get_session() as session:
@@ -630,9 +693,15 @@ def _find_changes_resource(
                 if path
                 else set()
             )
-            shas = _find_changes_shas(session, terms, path, aliases)
+            shas = _find_changes_shas(session, terms, path, aliases, predicates, cutoff)
             if not shas:
-                return {"query": query, "path": path or None, "count": 0, "commits": []}
+                return {
+                    "query": query,
+                    "path": path or None,
+                    **echo,
+                    "count": 0,
+                    "commits": [],
+                }
 
             commits = session.exec(
                 select(Commit)
@@ -647,7 +716,7 @@ def _find_changes_resource(
             rows: list[dict] = []
             spent = 0
             for commit in commits:
-                row = _find_changes_row(session, commit, path, aliases)
+                row = _find_changes_row(session, commit, path, aliases, predicates)
                 cost = len(json.dumps(row, default=str))
                 if rows and spent + cost > _FIND_CHANGES_PAYLOAD_BUDGET:
                     break
@@ -660,6 +729,7 @@ def _find_changes_resource(
     result = {
         "query": query,
         "path": path or None,
+        **echo,
         "count": len(rows),
         "commits": rows,
     }
@@ -676,8 +746,25 @@ def _find_changes_resource(
     return result
 
 
+def _area_clause(predicates: list[tuple[str, str | None]]):
+    """OR of an area's escaped path predicates over ``commit_file_change.path``."""
+    clauses = []
+    for pattern, exact in predicates:
+        clauses.append(
+            col(CommitFileChange.path).like(pattern, escape=LIKE_ESCAPE_CHAR)
+        )
+        if exact is not None:
+            clauses.append(col(CommitFileChange.path) == exact)
+    return or_(*clauses)
+
+
 def _find_changes_shas(
-    session: Session, terms: list[str], path: str, aliases: set[str]
+    session: Session,
+    terms: list[str],
+    path: str,
+    aliases: set[str],
+    predicates: list[tuple[str, str | None]] | None = None,
+    cutoff: str | None = None,
 ) -> set[str]:
     """The candidate SHA set for :func:`_find_changes_resource`.
 
@@ -720,21 +807,52 @@ def _find_changes_shas(
     else:
         shas = None  # path-only search: every commit touching the path
 
-    if not path:
-        return shas or set()
-
-    path_stmt = select(CommitFileChange.commit_sha).where(
-        col(CommitFileChange.path).in_(aliases)
-        | col(CommitFileChange.path).like(
-            f"{like_escape(path)}/%", escape=LIKE_ESCAPE_CHAR
+    if path:
+        path_stmt = select(CommitFileChange.commit_sha).where(
+            col(CommitFileChange.path).in_(aliases)
+            | col(CommitFileChange.path).like(
+                f"{like_escape(path)}/%", escape=LIKE_ESCAPE_CHAR
+            )
         )
-    )
-    touching = set(session.exec(path_stmt).all())
-    return touching if shas is None else shas & touching
+        touching = set(session.exec(path_stmt).all())
+        shas = touching if shas is None else shas & touching
+    if predicates:
+        area_stmt = select(CommitFileChange.commit_sha).where(_area_clause(predicates))
+        touching = set(session.exec(area_stmt).all())
+        shas = touching if shas is None else shas & touching
+    if shas and cutoff is not None:
+        shas = set(
+            session.exec(
+                select(Commit.sha)
+                .where(col(Commit.sha).in_(shas))
+                .where(col(Commit.authored_at) >= cutoff)
+            ).all()
+        )
+    return shas or set()
+
+
+def _matches_predicates(path: str, predicates: list[tuple[str, str | None]]) -> bool:
+    """Whether ``path`` satisfies any ``(escaped LIKE pattern, exact)`` predicate.
+
+    The Python twin of :func:`_area_clause`: the pattern ends in ``%`` and its
+    literal head is recovered by undoing the escaping.
+    """
+    for pattern, exact in predicates:
+        if exact is not None and path == exact:
+            return True
+        head = pattern.removesuffix("%")
+        literal = re.sub(re.escape(LIKE_ESCAPE_CHAR) + r"(.)", r"\1", head)
+        if path.startswith(literal):
+            return True
+    return False
 
 
 def _find_changes_row(
-    session: Session, commit: Commit, path: str, aliases: set[str]
+    session: Session,
+    commit: Commit,
+    path: str,
+    aliases: set[str],
+    predicates: list[tuple[str, str | None]] | None = None,
 ) -> dict:
     """One :func:`_find_changes_resource` result row — description first."""
     row = {
@@ -748,7 +866,7 @@ def _find_changes_row(
         "insertions": commit.insertions,
         "deletions": commit.deletions,
     }
-    if path:
+    if path or predicates:
         # Which of the commit's files the filter actually hit — so a directory
         # search shows *where*, and an alias hit shows the pre-rename name.
         touched = session.exec(
@@ -756,9 +874,12 @@ def _find_changes_row(
                 col(CommitFileChange.commit_sha) == commit.sha
             )
         ).all()
-        matched = sorted(
-            {p for p in touched if p in aliases or p.startswith(f"{path}/")}
-        )
+        if predicates:
+            matched = sorted({p for p in touched if _matches_predicates(p, predicates)})
+        else:
+            matched = sorted(
+                {p for p in touched if p in aliases or p.startswith(f"{path}/")}
+            )
         row["matched_paths"] = matched[:_FIND_CHANGES_MATCHED_PATHS]
     row["linked_prs"] = [
         # Number plus title only. The title is in the search haystack, so the

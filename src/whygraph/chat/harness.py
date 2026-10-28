@@ -65,12 +65,14 @@ from whygraph.services.llm.chat import (
 )
 from whygraph.services.llm.exceptions import UNREACHABLE_CAUSES
 
+from .modes import Mode, get_mode, mode_block
 from .tools import SERIAL_TOOLS, ToolRegistry
 
 _log = logging.getLogger(__name__)
 
 _REPO_PLACEHOLDER = "{{REPO}}"
 _OVERVIEW_PLACEHOLDER = "{{OVERVIEW}}"
+_MODE_PLACEHOLDER = "{{MODE}}"
 
 ELIDED_MARKER = "[result elided]"
 """Replaces a stale tool-result body when trimming for the context budget."""
@@ -350,19 +352,25 @@ def _overview_text(registry: ToolRegistry) -> str:
     return registry.dispatch("get_repo_overview", {})
 
 
-def build_system_prompt(registry: ToolRegistry) -> tuple[ChatMessage, ChatMessage]:
+def build_system_prompt(
+    registry: ToolRegistry, mode: Mode | None = None
+) -> tuple[ChatMessage, ChatMessage]:
     """Render the system prompt with this repository's live facts.
 
     Two messages: the **stable** prompt (everything before the overview,
-    with the repository name filled in), which is byte-identical from turn
-    to turn so a provider can cache it, then the **overview** of live repo
-    facts (counts, scan times), which changes as the repository does.
+    with the repository name and the mode's block filled in), which is
+    byte-identical from turn to turn within a mode so a provider can cache
+    it, then the **overview** of live repo facts (counts, scan times), which
+    changes as the repository does.
 
     Parameters
     ----------
     registry : ToolRegistry
         Used to fetch the repo overview through the same dispatch path the
         model uses.
+    mode : Mode, optional
+        The chat mode whose block fills ``{{MODE}}``. ``None`` (default)
+        uses the default mode.
 
     Returns
     -------
@@ -372,6 +380,9 @@ def build_system_prompt(registry: ToolRegistry) -> tuple[ChatMessage, ChatMessag
     """
     template = _packaged_prompt_text()
     text = render_prompt(template, repo_root().name, placeholder=_REPO_PLACEHOLDER)
+    text = render_prompt(
+        text, mode_block(mode or get_mode(None)), placeholder=_MODE_PLACEHOLDER
+    )
     stable, _, _ = text.partition(_OVERVIEW_PLACEHOLDER)
     return (
         ChatMessage(role="system", content=stable.rstrip() + "\n"),
@@ -673,6 +684,7 @@ def run_turn(
     cancel: threading.Event | None = None,
     max_continuations: int | None = None,
     continue_from_assistant: bool = False,
+    mode: str | None = None,
 ) -> Iterator[HarnessEvent]:
     """Run one user turn to completion, yielding harness events.
 
@@ -744,6 +756,10 @@ def run_turn(
         appended to the working messages before the first round, so the model
         carries on from where it stopped. The prompt is never yielded or
         persisted.
+    mode : str, optional
+        The chat mode id, already resolved by the caller (the session's
+        mode). It changes only the system prompt's mode block, never the
+        tools sent. ``None`` or an unknown id runs the default mode.
 
     Yields
     ------
@@ -780,7 +796,7 @@ def run_turn(
     if max_continuations is None:
         max_continuations = config.max_continuations
 
-    system = build_system_prompt(registry)
+    system = build_system_prompt(registry, get_mode(mode))
     # The working transcript: the windowed history plus whatever this turn
     # appends. Windowing between turns happens once, up front; inside the
     # turn only stale tool results are elided (`_trim_turn`), never a

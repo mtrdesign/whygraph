@@ -69,12 +69,16 @@ from whygraph.core.remote import (
 from whygraph.core.utils import LIKE_ESCAPE_CHAR, like_escape
 from whygraph.db import get_session
 from whygraph.db.models import (
+    Author,
     Commit,
     CommitFileChange,
+    ForgeCrawlState,
     Issue,
     PRIssueLink,
     PullRequest,
 )
+from whygraph.scan.authors import is_bot
+from whygraph.scan.refactor_score import BORING_THRESHOLD
 from whygraph.services.codegraph.paths import CODEGRAPH_DB_RELPATH
 from whygraph.services.git import GitError, Repository, git_env
 
@@ -446,10 +450,12 @@ def _recent_activity_resource(limit: int = 10, since_days: int | None = None) ->
     Returns
     -------
     dict
-        ``{"limit", "commits", "pull_requests", "issues"}``, plus
-        ``"since_days"`` when a window was applied. A category
-        with nothing scanned comes back as an empty list rather than
-        being omitted, so the model can tell "none" from "not asked".
+        ``{"limit", "commits", "pull_requests", "issues",
+        "forge_data_as_of"}``, plus ``"since_days"`` when a window was
+        applied. A category with nothing scanned comes back as an empty
+        list rather than being omitted, so the model can tell "none" from
+        "not asked". ``forge_data_as_of`` dates the pull request and issue
+        lists (see :func:`_forge_data_as_of`).
 
     Raises
     ------
@@ -485,6 +491,7 @@ def _recent_activity_resource(limit: int = 10, since_days: int | None = None) ->
             issues = session.exec(
                 issue_stmt.order_by(col(Issue.updated_at).desc()).limit(limit)
             ).all()
+            forge_as_of = _forge_data_as_of(session)
 
             return {
                 "limit": limit,
@@ -526,6 +533,7 @@ def _recent_activity_resource(limit: int = 10, since_days: int | None = None) ->
                     }
                     for i in issues
                 ],
+                "forge_data_as_of": forge_as_of,
             }
     except OperationalError as exc:
         raise WhyGraphError(_DB_UNSCANNED_MESSAGE) from exc
@@ -888,6 +896,582 @@ def _find_changes_row(
         for pr in _linked_prs(session, commit.sha)
     ]
     return row
+
+
+# ---- work in flight and area owners (chat-only reads) ---------------------
+
+
+def _utcnow() -> datetime:
+    """The current UTC time. A seam: tests freeze the clock here."""
+    return datetime.now(timezone.utc)
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    """Parse a stored ISO-8601 timestamp (``Z`` or an offset) to aware UTC."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _days_between(earlier: str | None, now: datetime) -> int | None:
+    """Whole days from ``earlier`` to ``now``; ``None`` when unparseable."""
+    parsed = _parse_ts(earlier)
+    if parsed is None:
+        return None
+    return max(0, int((now - parsed).total_seconds() // 86_400))
+
+
+def _forge_data_as_of(session: Session) -> str | None:
+    """When pull requests and issues were last crawled from GitHub.
+
+    The **older** :attr:`ForgeCrawlState.crawled_at` of the
+    ``"pull_request"`` and ``"issue"`` kinds, so a date it reports covers
+    both lists. ``None`` when neither kind has a row: GitHub access is off,
+    or the repository has no GitHub remote.
+    """
+    stamps = session.exec(
+        select(ForgeCrawlState.crawled_at).where(
+            col(ForgeCrawlState.kind).in_(("pull_request", "issue"))
+        )
+    ).all()
+    dated = [(parsed, raw) for raw in stamps if (parsed := _parse_ts(raw))]
+    return min(dated)[1] if dated else None
+
+
+_FORGE_STALE_HOURS = 24
+"""Past this age ``get_work_in_flight`` carries a ``freshness_warning``."""
+
+
+def _freshness_warning(forge_as_of: str | None, now: datetime) -> str | None:
+    """The warning that dates the forge data, or ``None`` when it is fresh."""
+    parsed = _parse_ts(forge_as_of)
+    if parsed is None:
+        return (
+            "No GitHub crawl is recorded for this project (GitHub access is "
+            "off or there is no GitHub remote), so open pull requests and "
+            "issues may be missing."
+        )
+    age = now - parsed
+    if age <= timedelta(hours=_FORGE_STALE_HOURS):
+        return None
+    days = age.days
+    unit = "day" if days == 1 else "days"
+    return (
+        f"GitHub data is {days} {unit} old; hook scans do not refresh PRs - "
+        "run a full scan"
+    )
+
+
+_WIP_MAX_DAYS = 365
+"""Upper clamp on ``stale_days`` / ``issue_stale_days``."""
+
+_WIP_MAX_LIMIT = 50
+"""Upper clamp on the per-category ``limit`` of ``get_work_in_flight``."""
+
+_WIP_COMMENT_PAGE = 100
+"""The crawl stores ``comments(first: 100)``, oldest first: a PR holding this
+many may have newer comments the crawl never saw, so its last activity falls
+back to ``updated_at``."""
+
+_WIP_NOT_TRACKED = (
+    "review_decision",
+    "assignees",
+    "milestone",
+    "pr_files",
+    "deployments",
+    "incidents",
+)
+"""Fields a lead would ask about that the crawl does not store (yet)."""
+
+_SQL_IN_CHUNK = 500
+"""Batch size for ``IN (...)`` lists, well under SQLite's variable limit."""
+
+
+def _clamp(value: int | None, default: int, high: int) -> int:
+    """Clamp ``value`` to ``[1, high]``; ``None`` means ``default``."""
+    if value is None:
+        return default
+    return max(1, min(int(value), high))
+
+
+def _pr_last_activity(pr: PullRequest) -> str:
+    """A PR's last activity: its newest non-bot comment, else ``updated_at``.
+
+    ``updated_at`` moves on bot comments and label edits, so a comment is the
+    better signal when there is one. Stored comments carry only the author
+    login, so a bot is recognized by its ``[bot]`` suffix alone.
+    """
+    comments = _json_list(pr.comments)
+    if len(comments) >= _WIP_COMMENT_PAGE:
+        return pr.updated_at
+    human = [
+        (parsed, c["created_at"])
+        for c in comments
+        if isinstance(c, dict)
+        and not is_bot("", c.get("author"))
+        and (parsed := _parse_ts(c.get("created_at")))
+    ]
+    return max(human)[1] if human else pr.updated_at
+
+
+def _paths_by_sha(session: Session, shas: set[str]) -> dict[str, set[str]]:
+    """Recorded file-change paths per commit, for the commits that have any."""
+    found: dict[str, set[str]] = {}
+    ordered = sorted(shas)
+    for start in range(0, len(ordered), _SQL_IN_CHUNK):
+        chunk = ordered[start : start + _SQL_IN_CHUNK]
+        rows = session.exec(
+            select(CommitFileChange.commit_sha, CommitFileChange.path).where(
+                col(CommitFileChange.commit_sha).in_(chunk)
+            )
+        ).all()
+        for sha, path in rows:
+            found.setdefault(sha, set()).add(path)
+    return found
+
+
+def _work_in_flight_resource(
+    area: str | None = None,
+    stale_days: int | None = 7,
+    issue_stale_days: int | None = 30,
+    limit: int | None = 20,
+    *,
+    labels_to_areas: Callable[[list[str]], list[str]] | None = None,
+    paths_to_areas: Callable[[list[str]], list[str]] | None = None,
+) -> dict:
+    """Open pull requests and issues, with idle time and stale flags.
+
+    The one read for "what is open / in flight / stuck". History reads
+    (:func:`_recent_activity_resource`, :func:`_find_changes_resource`) say
+    what happened; this says what is still open and for how long it has sat.
+
+    Parameters
+    ----------
+    area : str, optional
+        An already-resolved area name. Keeps only items attributed to it.
+    stale_days : int, optional
+        A non-draft PR idle this many days is ``stale``. Default 7, clamped
+        to ``[1, _WIP_MAX_DAYS]``.
+    issue_stale_days : int, optional
+        An issue idle this many days is ``stale``. Default 30, same clamp.
+    limit : int, optional
+        Maximum rows **per category**. Default 20, clamped to
+        ``[1, _WIP_MAX_LIMIT]``; the rest is counted in ``omitted``.
+    labels_to_areas, paths_to_areas : callable, optional
+        Map labels / repo paths to configured area names
+        (:func:`whygraph.chat.areas.areas_for_labels` /
+        :func:`~whygraph.chat.areas.areas_for_paths`). Passed in because
+        ``mcp`` must not depend on ``chat``; ``None`` (no areas configured)
+        leaves every item without an area.
+
+    Returns
+    -------
+    dict
+        ``{"as_of", "forge_data_as_of", "area", "summary", "pull_requests",
+        "issues", "not_tracked", "omitted"}``, plus ``"freshness_warning"``
+        when the forge data is missing or older than
+        :data:`_FORGE_STALE_HOURS`, and a ``"note"`` when rows were omitted.
+
+    Raises
+    ------
+    WhyGraphError
+        The DB is missing or unscanned.
+
+    Notes
+    -----
+    **Area attribution is labels first.** A PR whose labels map to an area
+    gets ``area_source="labels"``. Otherwise, when any of its commits has
+    recorded file changes (open-PR commits are not crawled, so only commits
+    already scanned locally qualify), its areas come from those paths with
+    ``area_source="commits"``. Otherwise ``area_source`` is ``None``. Issues
+    are attributed by labels only.
+
+    A PR's ``last_activity_at`` is its newest non-bot comment, else
+    ``updated_at`` (see :func:`_pr_last_activity`). Drafts are never
+    ``stale``; an idle draft counts in ``summary.stale_drafts``. Both lists
+    are sorted by ``idle_days``, longest first.
+
+    Not registered in :func:`register` — the chat tool is its only caller.
+    """
+    stale_days = _clamp(stale_days, 7, _WIP_MAX_DAYS)
+    issue_stale_days = _clamp(issue_stale_days, 30, _WIP_MAX_DAYS)
+    limit = _clamp(limit, 20, _WIP_MAX_LIMIT)
+    area = (area or "").strip() or None
+    now = _utcnow()
+    try:
+        with get_session() as session:
+            forge_as_of = _forge_data_as_of(session)
+            prs = session.exec(
+                select(PullRequest).where(col(PullRequest.state) == "open")
+            ).all()
+            issues = session.exec(select(Issue).where(col(Issue.state) == "open")).all()
+            open_numbers = {pr.number for pr in prs}
+            closes: dict[int, list[int]] = {}
+            closed_by: dict[int, list[int]] = {}
+            if open_numbers:
+                links = session.exec(
+                    select(PRIssueLink.pr_number, PRIssueLink.issue_number).where(
+                        col(PRIssueLink.pr_number).in_(sorted(open_numbers)),
+                        col(PRIssueLink.link_kind) == "closes",
+                    )
+                ).all()
+                for pr_number, issue_number in sorted(links):
+                    closes.setdefault(pr_number, []).append(issue_number)
+                    closed_by.setdefault(issue_number, []).append(pr_number)
+
+            pr_shas = {pr.number: _pr_commit_shas(pr) for pr in prs}
+            paths = (
+                _paths_by_sha(session, set().union(*pr_shas.values()))
+                if paths_to_areas is not None and pr_shas
+                else {}
+            )
+            pr_rows: list[dict] = []
+            for pr in prs:
+                labels = [str(label) for label in _json_list(pr.labels)]
+                areas = labels_to_areas(labels) if labels_to_areas is not None else []
+                source = "labels" if areas else None
+                if not areas and paths_to_areas is not None:
+                    touched = sorted(
+                        {p for sha in pr_shas[pr.number] for p in paths.get(sha, ())}
+                    )
+                    if touched:
+                        areas, source = paths_to_areas(touched), "commits"
+                if area is not None and area not in areas:
+                    continue
+                last_activity = _pr_last_activity(pr)
+                idle = _days_between(last_activity, now)
+                draft = bool(pr.draft)
+                pr_rows.append(
+                    {
+                        "number": pr.number,
+                        "title": pr.title,
+                        "author": pr.author,
+                        "draft": draft,
+                        "created_at": pr.created_at,
+                        "last_activity_at": last_activity,
+                        "age_days": _days_between(pr.created_at, now),
+                        "idle_days": idle,
+                        "stale": not draft and idle is not None and idle >= stale_days,
+                        "base_ref": pr.base_ref,
+                        "head_ref": pr.head_ref,
+                        "labels": labels,
+                        "areas": areas,
+                        "area_source": source,
+                        "closes_issues": closes.get(pr.number, []),
+                    }
+                )
+
+            issue_rows: list[dict] = []
+            for issue in issues:
+                labels = [str(label) for label in _json_list(issue.labels)]
+                areas = labels_to_areas(labels) if labels_to_areas is not None else []
+                if area is not None and area not in areas:
+                    continue
+                idle = _days_between(issue.updated_at, now)
+                issue_rows.append(
+                    {
+                        "number": issue.number,
+                        "title": issue.title,
+                        "author": issue.author,
+                        "created_at": issue.created_at,
+                        "idle_days": idle,
+                        "stale": idle is not None and idle >= issue_stale_days,
+                        "labels": labels,
+                        "areas": areas,
+                        "linked_open_prs": closed_by.get(issue.number, []),
+                    }
+                )
+    except OperationalError as exc:
+        raise WhyGraphError(_DB_UNSCANNED_MESSAGE) from exc
+
+    def _idle_first(row: dict) -> tuple[int, int]:
+        return (-(row["idle_days"] or 0), row["number"])
+
+    pr_rows.sort(key=_idle_first)
+    issue_rows.sort(key=_idle_first)
+    drafts = [r for r in pr_rows if r["draft"]]
+    summary = {
+        "open_prs": len(pr_rows),
+        "drafts": len(drafts),
+        "stale_prs": sum(1 for r in pr_rows if r["stale"]),
+        "stale_drafts": sum(
+            1
+            for r in drafts
+            if r["idle_days"] is not None and r["idle_days"] >= stale_days
+        ),
+        "open_issues": len(issue_rows),
+        "stale_issues": sum(1 for r in issue_rows if r["stale"]),
+    }
+    omitted = max(0, len(pr_rows) - limit) + max(0, len(issue_rows) - limit)
+    result: dict = {
+        "as_of": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "forge_data_as_of": forge_as_of,
+    }
+    warning = _freshness_warning(forge_as_of, now)
+    if warning:
+        result["freshness_warning"] = warning
+    result.update(
+        {
+            "area": area,
+            "stale_days": stale_days,
+            "issue_stale_days": issue_stale_days,
+            "summary": summary,
+            "pull_requests": pr_rows[:limit],
+            "issues": issue_rows[:limit],
+            "not_tracked": list(_WIP_NOT_TRACKED),
+            "omitted": omitted,
+        }
+    )
+    if omitted:
+        result["note"] = (
+            f"{omitted} more open item(s) are counted in summary but not "
+            f"listed (limit {limit} per list). Narrow with `area` or raise "
+            f"`limit` (max {_WIP_MAX_LIMIT})."
+        )
+    return result
+
+
+_OWNERS_DEFAULT_DAYS = 365
+"""Default ``since_days`` window for ``get_area_owners``."""
+
+_OWNERS_MAX_LIMIT = 50
+"""Upper clamp on the number of owners listed."""
+
+_OWNERS_ACTIVE_DAYS = 90
+"""An owner with a default-branch commit this recent counts as active."""
+
+_OWNERS_NOTE = (
+    "from commit history on the default branch; merges, bots and formatting "
+    "sweeps excluded; Co-authored-by and CODEOWNERS not read; ownership, not "
+    "performance"
+)
+
+
+def _absence_factor(commit_counts: list[int]) -> int:
+    """CHAOSS Contributor Absence Factor over per-person commit counts.
+
+    The fewest people whose commits add up to at least half of the total;
+    ``0`` when there are no commits.
+    """
+    total = sum(commit_counts)
+    running = 0
+    for people, count in enumerate(sorted(commit_counts, reverse=True), start=1):
+        running += count
+        if 2 * running >= total:
+            return people
+    return 0
+
+
+def _area_owners_resource(
+    scope: dict,
+    predicates: list[tuple[str, str | None]],
+    since_days: int | None = _OWNERS_DEFAULT_DAYS,
+    limit: int | None = 10,
+) -> dict:
+    """Who holds the commits under a set of paths, and how concentrated that is.
+
+    Parameters
+    ----------
+    scope : dict
+        What the predicates stand for, echoed back: ``{"area", "paths"}`` for
+        a configured area or ``{"path"}`` for a single path.
+        ``"since_days"`` is added.
+    predicates : list of tuple
+        ``(escaped LIKE pattern, exact)`` pairs from
+        :func:`whygraph.chat.areas.path_predicates`. Passed in rather than
+        imported because ``mcp`` must not depend on ``chat``.
+    since_days : int, optional
+        Window over ``authored_at``. Default 365, clamped to
+        ``[1, _MAX_SINCE_DAYS]``.
+    limit : int, optional
+        Owners listed. Default 10, clamped to ``[1, _OWNERS_MAX_LIMIT]``;
+        the absence factors always cover every owner.
+
+    Returns
+    -------
+    dict
+        ``{"scope", "total_commits", "excluded", "owners",
+        "contributor_absence_factor", "active_contributor_absence_factor",
+        "note"}``, plus ``"omitted"`` when owners were cut by ``limit``.
+        ``total_commits`` counts the commits left after the exclusions, and
+        each owner's ``share`` is a fraction of it.
+
+    Raises
+    ------
+    WhyGraphError
+        The DB is missing or unscanned.
+
+    Notes
+    -----
+    Counts default-branch commits (``on_default_branch = 1``) in the window
+    that touched a matching ``commit_file_change`` path. Each commit is
+    excluded at most once, in this order: a merge (more than one parent),
+    a bot (:func:`whygraph.scan.authors.is_bot` on the commit's address and
+    the resolved author's login), a formatting / refactor sweep
+    (``refactor_score >= BORING_THRESHOLD``).
+
+    Commits are grouped by resolved :class:`Author` through its ``emails``.
+    An address that sits in several authors' clusters (a shared one such as
+    ``noreply@github.com``), or in none, falls back to the commit's
+    ``author_name``.
+
+    ``contributor_absence_factor`` is the CHAOSS measure: the fewest owners
+    whose shares sum to at least 0.5. ``active_contributor_absence_factor``
+    is the same over owners with a default-branch commit anywhere in the
+    last :data:`_OWNERS_ACTIVE_DAYS` days, with shares taken among them;
+    ``0`` when nobody active holds any of these commits.
+
+    Not registered in :func:`register` — the chat tool is its only caller.
+    """
+    since_days = _clamp(since_days, _OWNERS_DEFAULT_DAYS, _MAX_SINCE_DAYS)
+    limit = _clamp(limit, 10, _OWNERS_MAX_LIMIT)
+    now = _utcnow()
+    cutoff = (now - timedelta(days=since_days)).isoformat()
+    active_cutoff = now - timedelta(days=_OWNERS_ACTIVE_DAYS)
+    try:
+        with get_session() as session:
+            rows = session.exec(
+                select(
+                    Commit.sha,
+                    Commit.author_name,
+                    Commit.author_email,
+                    Commit.authored_at,
+                    Commit.parent_shas,
+                    Commit.refactor_score,
+                    CommitFileChange.path,
+                )
+                .join(
+                    CommitFileChange,
+                    col(CommitFileChange.commit_sha) == col(Commit.sha),
+                )
+                .where(
+                    col(Commit.on_default_branch) == 1,
+                    col(Commit.authored_at) >= cutoff,
+                    _area_clause(predicates),
+                )
+            ).all()
+            authors = session.exec(select(Author)).all()
+
+            by_id = {a.id: a for a in authors}
+            clusters_of: dict[str, set[int]] = {}
+            for a in authors:
+                for email in _json_list(a.emails):
+                    clusters_of.setdefault(str(email), set()).add(a.id)
+
+            commits: dict[str, dict] = {}
+            for sha, name, email, authored_at, parents, score, path in rows:
+                entry = commits.get(sha)
+                if entry is None:
+                    entry = commits[sha] = {
+                        "name": name,
+                        "email": email,
+                        "authored_at": authored_at,
+                        "parents": parents,
+                        "score": score,
+                        "paths": set(),
+                    }
+                entry["paths"].add(path)
+
+            excluded = {"merges": 0, "bots": 0, "refactors": 0}
+            owners: dict[tuple, dict] = {}
+            for entry in commits.values():
+                ids = clusters_of.get(entry["email"], set())
+                author = by_id[next(iter(ids))] if len(ids) == 1 else None
+                login = author.primary_login if author is not None else None
+                if len((entry["parents"] or "").split()) > 1:
+                    excluded["merges"] += 1
+                    continue
+                if is_bot(entry["email"] or "", login):
+                    excluded["bots"] += 1
+                    continue
+                if (entry["score"] or 0) >= BORING_THRESHOLD:
+                    excluded["refactors"] += 1
+                    continue
+                if author is not None:
+                    key: tuple = ("author", author.id)
+                    display = (
+                        author.primary_name
+                        or author.primary_login
+                        or author.primary_email
+                        or entry["name"]
+                    )
+                    last_active = author.last_seen
+                else:
+                    key = ("name", entry["name"])
+                    display, last_active = entry["name"], None
+                owner = owners.get(key)
+                if owner is None:
+                    owner = owners[key] = {
+                        "name": display,
+                        "login": login,
+                        "commits": 0,
+                        "paths": set(),
+                        "last_touched_at": None,
+                        "last_active_at": last_active,
+                    }
+                owner["commits"] += 1
+                owner["paths"] |= entry["paths"]
+                touched = _parse_ts(entry["authored_at"])
+                newest = _parse_ts(owner["last_touched_at"])
+                if touched is not None and (newest is None or touched > newest):
+                    owner["last_touched_at"] = entry["authored_at"]
+
+            fallback = sorted(k[1] for k in owners if k[0] == "name")
+            if fallback:
+                latest = dict(
+                    session.exec(
+                        select(Commit.author_name, func.max(Commit.authored_at))
+                        .where(
+                            col(Commit.on_default_branch) == 1,
+                            col(Commit.author_name).in_(fallback),
+                        )
+                        .group_by(Commit.author_name)
+                    ).all()
+                )
+                for key, owner in owners.items():
+                    if key[0] == "name":
+                        owner["last_active_at"] = latest.get(key[1])
+    except OperationalError as exc:
+        raise WhyGraphError(_DB_UNSCANNED_MESSAGE) from exc
+
+    total = sum(o["commits"] for o in owners.values())
+    ordered = sorted(owners.values(), key=lambda o: (-o["commits"], o["name"] or ""))
+
+    def _active(owner: dict) -> bool:
+        seen = _parse_ts(owner["last_active_at"])
+        return seen is not None and seen >= active_cutoff
+
+    result: dict = {
+        "scope": {**scope, "since_days": since_days},
+        "total_commits": total,
+        "excluded": excluded,
+        "owners": [
+            {
+                "name": o["name"],
+                "login": o["login"],
+                "commits": o["commits"],
+                "share": round(o["commits"] / total, 2) if total else 0.0,
+                "files_touched": len(o["paths"]),
+                "last_touched_at": o["last_touched_at"],
+                "last_active_at": o["last_active_at"],
+            }
+            for o in ordered[:limit]
+        ],
+        "contributor_absence_factor": _absence_factor([o["commits"] for o in ordered]),
+        "active_contributor_absence_factor": _absence_factor(
+            [o["commits"] for o in ordered if _active(o)]
+        ),
+        "note": _OWNERS_NOTE,
+    }
+    if len(ordered) > limit:
+        result["omitted"] = len(ordered) - limit
+    return result
 
 
 def _git_out(root: Path, *args: str) -> str | None:

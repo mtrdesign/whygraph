@@ -24,7 +24,7 @@ from whygraph.db import get_session
 from whygraph.db.models import Author, Commit, Issue, PullRequest
 from whygraph.scan.authors import (
     AuthorResolver,
-    _is_bot,
+    is_bot,
     _json_list,
     _login_from_noreply,
     _Union,
@@ -184,7 +184,7 @@ def test_login_from_noreply(email: str, expected: str | None) -> None:
     ],
 )
 def test_is_bot(email: str, login: str | None, expected: bool) -> None:
-    assert _is_bot(email, login) is expected
+    assert is_bot(email, login) is expected
 
 
 @pytest.mark.parametrize("raw", [None, "", "{}", "not json", '"a string"'])

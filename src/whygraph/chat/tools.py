@@ -6,14 +6,15 @@ drift from the rest of WhyGraph, because there is one implementation per
 capability and both surfaces are adapters over it. No MCP protocol
 roundtrip is involved — these are plain in-process calls.
 
-The seventeen tools span **five sources**, and the system prompt tells the
+The nineteen tools span **five sources**, and the system prompt tells the
 model which to reach for:
 
 * **CodeGraph** answers *what the code is* — structure, relationships, and
   (via ``get_area_outline``) what a whole directory contains.
 * **WhyGraph** answers *why it is that way* and *what has happened* —
   rationale, evidence, path history, and content search over the
-  diff-derived commit descriptions.
+  diff-derived commit descriptions — plus *what is open now*
+  (``get_work_in_flight``) and *who knows the code* (``get_area_owners``).
 * **The statistics tools** answer *how much* — aggregate-only SQL, fenced so
   neither can become a record reader. There are **two**, because there are two
   databases: :mod:`.stats_sql` over commit history and :mod:`.graph_stats_sql`
@@ -46,6 +47,7 @@ from collections.abc import Callable
 from sqlalchemy.exc import SQLAlchemyError
 
 from whygraph.core import get_config
+from whygraph.core.config import AreaConfig
 from whygraph.mcp.area_history import whygraph_area_history
 from whygraph.mcp.descriptions import DESCRIPTION_AUTHORITY, QUALIFIED_NAME_DESC
 from whygraph.mcp.errors import WhyGraphError
@@ -54,19 +56,28 @@ from whygraph.mcp.path_history import path_commit_counts
 from whygraph.mcp.rationale import _format_response, whygraph_rationale_brief
 from whygraph.mcp.rationale_cache import lookup_cached
 from whygraph.mcp.resources import (
+    _area_owners_resource,
     _commit_resource,
     _find_changes_resource,
     _issue_resource,
     _pr_resource,
     _recent_activity_resource,
     _repo_overview_resource,
+    _work_in_flight_resource,
 )
 from whygraph.mcp.targets import repo_root, resolve_target, target_dict
 from whygraph.serve import graphdata
 from whygraph.services.codegraph import CodeGraph, CodeGraphError
 from whygraph.services.llm.chat import ToolSpec
 
-from .areas import configured_areas, overview_block, path_predicates, resolve_area
+from .areas import (
+    areas_for_labels,
+    areas_for_paths,
+    configured_areas,
+    overview_block,
+    path_predicates,
+    resolve_area,
+)
 from . import charts, files, graph_stats_sql, stats_sql
 
 _log = logging.getLogger(__name__)
@@ -365,7 +376,8 @@ _SPECS: tuple[ToolSpec, ...] = (
             "needs an identifier you would have to already know (a SHA, a PR "
             "number, an exact file path). Returns a compact index — subject "
             "or title, author, date, a truncated description — then use "
-            "get_commit / get_pr / get_issue on the entries that matter."
+            "get_commit / get_pr / get_issue on the entries that matter. "
+            "For what is still OPEN or stuck right now, use get_work_in_flight."
             + DESCRIPTION_AUTHORITY
         ),
         parameters={
@@ -378,6 +390,99 @@ _SPECS: tuple[ToolSpec, ...] = (
                 "since_days": {
                     "type": "integer",
                     "description": "Only entries from the last N days (1-3650).",
+                },
+            },
+        },
+    ),
+    ToolSpec(
+        name="get_work_in_flight",
+        description=(
+            "What is OPEN right now: open pull requests (drafts included) and "
+            "open issues, each with its idle time and a stale flag, plus counts. "
+            "THE one tool for 'what is in flight / in review / stuck / blocked'. "
+            "Not for history: list_recent_activity says what happened lately and "
+            "find_changes what changed in the code; never list open PRs with "
+            "run_project_stats. A PR's last activity is its newest comment, else "
+            "its last update; a PR with 100+ comments uses the update time, and "
+            "bot comments may count unless the login ends in [bot]. Drafts are "
+            "never stale. `area` keeps items whose LABELS map to a configured "
+            "area; a PR without such labels is placed by its commits only when "
+            "they are already scanned locally (`area_source` says which). PR "
+            "files are not tracked yet, so per-area grouping rests on labels "
+            "and many PRs have no area. State `forge_data_as_of` (when GitHub "
+            "was last crawled) and say 'not tracked' for anything in "
+            "`not_tracked`. Items past `limit` are counted in `omitted`: narrow "
+            "with `area` or raise `limit`."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "area": {
+                    "type": "string",
+                    "description": "A configured area name from the overview's areas.",
+                },
+                "stale_days": {
+                    "type": "integer",
+                    "description": (
+                        "A non-draft PR idle this many days is stale. "
+                        "Default 7 (1-365)."
+                    ),
+                },
+                "issue_stale_days": {
+                    "type": "integer",
+                    "description": (
+                        "An issue idle this many days is stale. Default 30 (1-365)."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max PRs and max issues listed. Default 20, max 50.",
+                },
+            },
+        },
+    ),
+    ToolSpec(
+        name="get_area_owners",
+        description=(
+            "Who knows the code under a configured area or a path: each "
+            "person's share of the commits that touched it, how many of its "
+            "files they touched, when they last touched it and when they were "
+            "last active anywhere, plus the CHAOSS Contributor Absence Factor "
+            "(the fewest people whose shares add up to half the commits) and "
+            "the same factor among people active in the last 90 days. For 'who "
+            "knows X', 'who could review X', 'how thin is the knowledge of X'. "
+            "It describes ownership of the code, not anyone's performance: "
+            "never present it as a ranking of people. Counts default-branch "
+            "commits in the window and excludes merges, bots and "
+            "formatting / refactor sweeps (counted in `excluded`); "
+            "Co-authored-by trailers and CODEOWNERS are not read. Pass exactly "
+            "one of `area` or `path`. For the commits themselves use "
+            "find_changes or get_area_history; for open work, get_work_in_flight."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "area": {
+                    "type": "string",
+                    "description": (
+                        "A configured area name from the overview's areas. "
+                        "Not with `path`."
+                    ),
+                },
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Repo-relative file or directory, e.g. 'src/whygraph/chat'. "
+                        "Not with `area`."
+                    ),
+                },
+                "since_days": {
+                    "type": "integer",
+                    "description": "Commits from the last N days. Default 365 (1-3650).",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max people listed. Default 10, max 50.",
                 },
             },
         },
@@ -530,6 +635,7 @@ _SPECS: tuple[ToolSpec, ...] = (
 )
 
 TOOL_SPECS: tuple[ToolSpec, ...] = _SPECS
+"""The tools offered to the model, in the order they are presented."""
 
 SERIAL_TOOLS: frozenset[str] = frozenset(
     {
@@ -550,7 +656,6 @@ them. Every other tool is a read with its own handle per call, so a round
 made only of those runs its calls concurrently (see
 :func:`whygraph.chat.harness.run_turn`).
 """
-"""The tools offered to the model, in the order they are presented."""
 
 
 # ---------------------------------------------------------------------------
@@ -797,6 +902,65 @@ def _list_recent_activity(limit: int = 10, since_days: int | None = None) -> dic
     return _recent_activity_resource(limit=int(limit), since_days=since_days)
 
 
+def _get_work_in_flight(
+    area: str | None = None,
+    stale_days: int | None = 7,
+    issue_stale_days: int | None = 30,
+    limit: int | None = 20,
+) -> dict:
+    """Handler for ``get_work_in_flight``.
+
+    Resolves the area here (an unknown name raises ``WhyGraphError`` naming
+    the configured ones) and hands the resource the label and path mappers,
+    which ``mcp`` cannot import from ``chat``.
+    """
+    name = resolve_area(area).name if area and area.strip() else None
+    mapped = bool(configured_areas())
+    return _work_in_flight_resource(
+        area=name,
+        stale_days=stale_days,
+        issue_stale_days=issue_stale_days,
+        limit=limit,
+        labels_to_areas=areas_for_labels if mapped else None,
+        paths_to_areas=areas_for_paths if mapped else None,
+    )
+
+
+def _get_area_owners(
+    area: str | None = None,
+    path: str | None = None,
+    since_days: int | None = 365,
+    limit: int | None = 10,
+) -> dict:
+    """Handler for ``get_area_owners``.
+
+    Exactly one of ``area`` / ``path``. A path is turned into predicates with
+    the same rule as an area entry (a trailing ``/`` is a prefix, anything
+    else that exact path or anything under it), so both are escaped alike.
+    """
+    has_area = bool(area and area.strip())
+    clean = (path or "").strip().removeprefix("./")
+    if has_area == bool(clean):
+        return {
+            "error": (
+                "pass exactly one of `area` (a configured area) or `path` "
+                "(a repo-relative file or directory)."
+            )
+        }
+    if has_area:
+        resolved = resolve_area(area)
+        scope: dict = {"area": resolved.name, "paths": list(resolved.paths)}
+    else:
+        resolved = AreaConfig(name="path", description="", paths=(clean,))
+        scope = {"path": clean}
+    return _area_owners_resource(
+        scope=scope,
+        predicates=path_predicates(resolved),
+        since_days=since_days,
+        limit=limit,
+    )
+
+
 def _run_project_stats(sql: str) -> dict:
     """Handler body for ``run_project_stats`` — no ref minting.
 
@@ -860,6 +1024,8 @@ class ToolRegistry:
             "get_issue": _get_issue,
             "get_repo_overview": _get_repo_overview,
             "list_recent_activity": _list_recent_activity,
+            "get_work_in_flight": _get_work_in_flight,
+            "get_area_owners": _get_area_owners,
             "run_project_stats": self._chartable_project_stats,
             "run_graph_stats": self._chartable_graph_stats,
             "render_chart": self._render_chart,

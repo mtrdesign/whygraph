@@ -25,7 +25,10 @@ class ForgeCrawlState(WhygraphTable, table=True):
         The newest ``updatedAt`` seen, as GitHub sent it. ``None`` when
         the repository had no items of this kind.
     crawled_at : str
-        ISO timestamp of the crawl, for debugging only.
+        ISO timestamp of the crawl. The chat's ``get_work_in_flight`` and
+        ``list_recent_activity`` report the older of the two kinds' stamps
+        as ``forge_data_as_of``, so a reader can tell how old the PR and
+        issue data is.
     """
 
     kind: str = Field(primary_key=True, sa_type=Text)

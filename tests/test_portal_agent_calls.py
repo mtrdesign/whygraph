@@ -6,7 +6,7 @@ offload wrapper's kinds, :meth:`PortalUsageSink.count_call` and the
 batched upsert, its retry when a project vanishes, the prune and the
 lifespan's flushes; and end to end: local MCP calls (a tool, a resource, a
 prompt) and ``/api/v1`` data calls each add one count, while the v1 status
-route, ``DELETE .../token``, a ``429`` and Explorer / chat calls add none.
+route, ``DELETE .../token``, a ``429`` and Explorer calls add none.
 """
 
 # ruff: noqa: F811 -- pytest fixtures (`env`, `local`, `v1`, ...) are imported
@@ -243,16 +243,18 @@ def _sink(source: str, book: AgentCallBook, **attribution: Any) -> PortalUsageSi
     )
 
 
-def test_the_portal_sink_counts_only_agent_sources() -> None:
+def test_the_portal_sink_counts_agent_and_chat_sources() -> None:
     book = AgentCallBook(
         clock=_Clock(datetime(2026, 10, 9, 23, 0, tzinfo=timezone.utc))
     )
     _sink("mcp", book).count_call("whygraph_evidence_for")
     _sink("agent", book, connection_id=7).count_call("v1:evidence")
-    for source in ("explorer", "chat", "scan"):
+    _sink("chat", book, connection_id=7).count_call("find_changes")
+    for source in ("explorer", "scan"):
         _sink(source, book).count_call("whygraph_evidence_for")
     assert sorted(book.pending(10)) == [
         (CallKey(1, 10, "2026-10-09", "agent", 100, 7, "v1:evidence"), 1),
+        (CallKey(1, 10, "2026-10-09", "chat", None, None, "find_changes"), 1),
         (CallKey(1, 10, "2026-10-09", "mcp", 100, None, "whygraph_evidence_for"), 1),
     ]
 
@@ -290,6 +292,14 @@ def test_has_any_names_only_its_own_org() -> None:
     assert not book.has_any(1)
     _add(book, org_id=2, project_id=20)
     assert book.has_any(2) and not book.has_any(1)
+
+
+def test_has_any_can_be_limited_to_sources() -> None:
+    book = AgentCallBook()
+    _add(book, source="chat", user_id=None)
+    assert book.has_any(1) and not book.has_any(1, sources=("mcp", "agent"))
+    _add(book, source="agent")
+    assert book.has_any(1, sources=("mcp", "agent"))
 
 
 def test_due_after_the_interval_or_above_the_key_cap() -> None:

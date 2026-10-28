@@ -45,6 +45,7 @@ from .deps import (
     require_production,
 )
 from .models import (
+    AGENT_CALL_SOURCES,
     AgentCallDay,
     ConnectionToken,
     Invitation,
@@ -120,7 +121,12 @@ def get_onboarding(
         )
         agent_row = (
             db.exec(
-                select(AgentCallDay.id).where(AgentCallDay.org_id == org_id).limit(1)
+                select(AgentCallDay.id)
+                .where(
+                    AgentCallDay.org_id == org_id,
+                    col(AgentCallDay.source).in_(AGENT_CALL_SOURCES),
+                )
+                .limit(1)
             ).first()
             is not None
         )
@@ -153,7 +159,11 @@ def get_onboarding(
                 ).first()
                 is not None
             )
-    agent = agent_row or connected or state.agent_calls.has_any(org_id)
+    agent = (
+        agent_row
+        or connected
+        or state.agent_calls.has_any(org_id, sources=AGENT_CALL_SOURCES)
+    )
     items: list[dict] = []
     if production:
         github = "github" in sources or _can_list_installation(state, principal)

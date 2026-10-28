@@ -87,6 +87,7 @@ function overview(over: Partial<ProjectOverview> = {}): ProjectOverview {
       people: null,
       connections: null,
       last_call_day: null,
+      chat_tools: { total_calls: 0, by_kind: [] },
     },
     ...over,
   };
@@ -665,6 +666,19 @@ describe("Overview", () => {
     expect(screen.getByRole("button", { name: "Rescan" })).toBeEnabled();
   });
 
+  it("shows chat tool calls when no agent called", async () => {
+    fake.details.alpha = details();
+    fake.overview = overview({
+      agents: {
+        ...overview().agents,
+        chat_tools: { total_calls: 4, by_kind: [{ kind: "find_changes", calls: 4 }] },
+      },
+    });
+    mount("/p/alpha");
+    expect(await screen.findByTestId("chat-tool-kinds")).toHaveTextContent("find_changes");
+    expect(screen.getByTestId("agent-summary")).toHaveTextContent("No agent called this project in the last 30 days.");
+  });
+
   it("shows the CodeGraph server line, the tallies, the log and a restart that names the shared server", async () => {
     const user = userEvent.setup();
     fake.details.alpha = details();
@@ -734,6 +748,7 @@ describe("Overview", () => {
         people: [{ label: "Ada (@ada)", calls: 5, last_day: "2026-10-09" }],
         connections: [{ client_name: "ada-laptop", user_label: "Ada", last_used_at: "2026-10-09T10:00:00Z" }],
         last_call_day: "2026-10-09",
+        chat_tools: { total_calls: 0, by_kind: [] },
       },
     });
     mount("/p/alpha");
@@ -773,6 +788,7 @@ describe("Overview", () => {
           people: null,
           connections: null,
           last_call_day: "2026-10-09",
+          chat_tools: { total_calls: 0, by_kind: [] },
         },
       });
     const open = async (label: string) => {

@@ -249,6 +249,27 @@ def test_a_local_portal_has_three_items_and_omits_the_key_for_linked_orgs(
     got = items(response)
     assert got["project"]["done"] and not got["llm_key"]["done"]
     assert not got["agent"]["done"] and got["llm_key"]["can_act"]
+    # Chat tool counts, flushed or pending, are not agent activity.
+    w.state.agent_calls.add(
+        org_id=w.org_id,
+        project_id=w.project_id,
+        source="chat",
+        user_id=None,
+        connection_id=None,
+        kind="find_changes",
+    )
+    with portal_db.get_session() as session:
+        session.add(
+            AgentCallDay(
+                org_id=w.org_id,
+                project_id=w.project_id,
+                day="2026-10-01",
+                source="chat",
+                kind="find_changes",
+                calls=1,
+            )
+        )
+    assert not items(w.client.get("/api/onboarding"))["agent"]["done"]
     # An unflushed count is enough.
     w.state.agent_calls.add(
         org_id=w.org_id,

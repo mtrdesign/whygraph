@@ -70,7 +70,7 @@ class CallKey(NamedTuple):
     day : str
         The UTC day, ``YYYY-MM-DD``.
     source : str
-        ``"mcp"`` or ``"agent"``.
+        ``"mcp"``, ``"agent"`` or ``"chat"``.
     user_id : int or None
         The calling member.
     connection_id : int or None
@@ -219,13 +219,15 @@ class AgentCallBook:
         with self._lock:
             self._counts[key] += 1
 
-    def has_any(self, org_id: int) -> bool:
+    def has_any(self, org_id: int, sources: Iterable[str] | None = None) -> bool:
         """Whether a call of ``org_id`` is waiting in the book (not yet flushed).
 
         Parameters
         ----------
         org_id : int
             The organization.
+        sources : iterable of str, optional
+            Count only these sources; every source when omitted.
 
         Returns
         -------
@@ -233,7 +235,11 @@ class AgentCallBook:
             ``True`` when the book holds a count for one of its projects.
         """
         with self._lock:
-            return any(key.org_id == org_id for key in self._counts)
+            wanted = None if sources is None else set(sources)
+            return any(
+                key.org_id == org_id and (wanted is None or key.source in wanted)
+                for key in self._counts
+            )
 
     def pending(self, project_id: int) -> list[tuple[CallKey, int]]:
         """The unflushed counts of one project.

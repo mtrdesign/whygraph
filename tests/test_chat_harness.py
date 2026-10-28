@@ -274,6 +274,71 @@ def test_parallel_calls_dispatch_sequentially_in_model_order() -> None:
     ]
 
 
+class _CountSink:
+    scope = UsageScope(source="chat")
+
+    def __init__(self) -> None:
+        self.counted: list[str] = []
+
+    def record(self, rec) -> None:  # noqa: ANN001
+        pass
+
+    def count_call(self, kind: str) -> None:
+        self.counted.append(kind)
+
+
+class _NamedRegistry(StubRegistry):
+    @property
+    def specs(self):
+        return tuple(
+            ToolSpec(name=n, description="d", parameters={})
+            for n in ("search_symbols", "get_evidence", "read_file")
+        )
+
+
+def _counted(rounds: list, registry=None) -> list[str]:
+    sink = _CountSink()
+    with use_usage_sink(sink):
+        _run(ScriptedClient(rounds), registry or _NamedRegistry())
+    return sink.counted
+
+
+def test_chat_tool_count_serial_round_counts_each_requested_call() -> None:
+    calls = [_call("search_symbols", "c1"), _call("get_evidence", "c2")]
+    rounds = [
+        [*(ToolCallMade(call=c) for c in calls), TurnDone("tool_calls")],
+        [TextDelta(text="ok"), TurnDone("stop")],
+    ]
+    assert _counted(rounds) == ["search_symbols", "get_evidence"]
+
+
+def test_chat_tool_count_parallel_round_counts_each_call() -> None:
+    calls = [_call("search_symbols", "c1"), _call("read_file", "c2")]
+    rounds = [
+        [*(ToolCallMade(call=c) for c in calls), TurnDone("tool_calls")],
+        [TextDelta(text="ok"), TurnDone("stop")],
+    ]
+    assert _counted(rounds) == ["search_symbols", "read_file"]
+
+
+def test_chat_tool_count_skips_unknown_names_and_the_overview() -> None:
+    calls = [_call("made_up_tool", "c1"), _call("get_repo_overview", "c2")]
+    rounds = [
+        [*(ToolCallMade(call=c) for c in calls), TurnDone("tool_calls")],
+        [TextDelta(text="ok"), TurnDone("stop")],
+    ]
+    assert _counted(rounds) == []
+
+
+def test_chat_tool_count_is_a_no_op_without_a_sink() -> None:
+    rounds = [
+        [ToolCallMade(call=_call("search_symbols")), TurnDone("tool_calls")],
+        [TextDelta(text="ok"), TurnDone("stop")],
+    ]
+    events = _run(ScriptedClient(rounds), _NamedRegistry())
+    assert any(isinstance(e, ToolResultReady) for e in events)
+
+
 def test_max_tool_rounds_cuts_the_loop_off() -> None:
     """A model that never stops calling tools still terminates.
 

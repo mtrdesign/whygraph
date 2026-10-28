@@ -50,7 +50,7 @@ from importlib import resources
 
 from whygraph.analyze.prompt import render as render_prompt
 from whygraph.core import get_config
-from whygraph.core.usage import record_usage, usage_blocked
+from whygraph.core.usage import count_agent_call, record_usage, usage_blocked
 from whygraph.mcp.targets import repo_root
 from whygraph.services.llm.chat import (
     REFUSAL_REASONS,
@@ -901,6 +901,7 @@ def run_turn(
                     replay=done.replay,
                 )
             )
+            tool_names = {spec.name for spec in registry.specs}
             parallel = None
             if len(calls) > 1 and not any(c.name in SERIAL_TOOLS for c in calls):
                 # Every call is a read with its own handle: run them at once,
@@ -916,6 +917,9 @@ def run_turn(
                     result = registry.dispatch(call.name, call.arguments)
                 else:
                     result = next(parallel)
+                if call.name in tool_names:
+                    # Names only; the harness's own overview call never gets here.
+                    count_agent_call(call.name)
                 key = (
                     call.name,
                     json.dumps(call.arguments, sort_keys=True, separators=(",", ":")),

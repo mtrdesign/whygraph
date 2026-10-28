@@ -82,7 +82,7 @@ from whygraph.services.git import redact_tokens
 
 CONNECTIONS_REVISION = "c4e7a19b52d8"
 PREVIOUS_REVISION = "73bf248ea6fd"
-HEAD_REVISION = "a7c3e91f5b20"
+HEAD_REVISION = "f2b8d4a60c13"
 
 
 # ---------------------------------------------------------------------------

@@ -243,7 +243,8 @@ ACCESS = "d8a31f6c07e5"
 REMOVE_CLAUDE_CLI = "bd0a25e6df74"
 USAGE = "e46b50366a4c"
 UX = "a7c3e91f5b20"
-HEAD = UX
+CHAT_TOOLS = "f2b8d4a60c13"
+HEAD = CHAT_TOOLS
 
 
 def _seed_m2a(conn) -> dict[str, int]:  # noqa: ANN001
@@ -1186,9 +1187,10 @@ def test_ux_constraints_hold(empty_portal_database: str) -> None:
             conn.execute(text("SELECT welcome_pending FROM memberships")).scalar()
             is not None
         )
+        _agent_call(conn, ids, source="chat", kind="find_changes")
     for bad in (
         {"day": "2026-10-9"},
-        {"source": "chat"},
+        {"source": "explorer"},
         {"kind": ""},
         {"kind": "k" * 65},
         {"calls": 0},
@@ -1226,6 +1228,35 @@ def test_ux_downgrade_refuses_counter_rows(empty_portal_database: str) -> None:
         assert conn.execute(
             text("SELECT version_num FROM alembic_version")
         ).scalar() == (HEAD)
+
+
+def test_chat_tools_downgrade_refuses_chat_rows(empty_portal_database: str) -> None:
+    portal_db.ensure_initialized()
+    with portal_db.get_engine().begin() as conn:
+        _agent_call(conn, _seed_usage_org(conn), source="chat")
+    portal_db._reset_engine()
+    with pytest.raises(RuntimeError, match="chat tool counter"):
+        command.downgrade(portal_db.alembic_config(), UX)
+    portal_db._reset_engine()
+    with portal_db.get_engine().connect() as conn:
+        assert conn.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar() == (HEAD)
+
+
+def test_chat_tools_downgrade_narrows_the_source_check(
+    empty_portal_database: str,
+) -> None:
+    portal_db.ensure_initialized()
+    portal_db._reset_engine()
+    command.downgrade(portal_db.alembic_config(), UX)
+    portal_db._reset_engine()
+    with portal_db.get_engine().begin() as conn:
+        ids = _seed_usage_org(conn)
+    with pytest.raises(IntegrityError), portal_db.get_engine().begin() as conn:
+        _agent_call(conn, ids, source="chat")
+    portal_db._reset_engine()
+    command.upgrade(portal_db.alembic_config(), "head")
 
 
 # ---------------------------------------------------------------------------

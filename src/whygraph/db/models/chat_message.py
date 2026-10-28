@@ -84,6 +84,12 @@ class ChatMessage(WhygraphTable, table=True):
     reasoning : str or None
         Reasoning summary text for display, filled from phase 2. ``None``
         until then.
+    mode : str or None
+        The chat mode the turn ran under. ``None`` means the default
+        engineer mode (also for pre-mode rows).
+    grounding : str or None
+        JSON of the References block shown for an assistant turn. ``None``
+        means the turn had no grounding.
     created_at : str
         ISO-8601 UTC timestamp, stored as text.
 
@@ -115,4 +121,6 @@ class ChatMessage(WhygraphTable, table=True):
     finish_reason: str | None = Field(default=None, sa_type=Text)
     effort: str | None = Field(default=None, sa_type=Text)
     reasoning: str | None = Field(default=None, sa_type=Text)
+    mode: str | None = Field(default=None, sa_type=Text)
+    grounding: str | None = Field(default=None, sa_type=Text)
     created_at: str = Field(sa_type=Text)

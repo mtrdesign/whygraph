@@ -388,6 +388,26 @@ def test_chat_message_replay_column_round_trips(
         conn.close()
 
 
+def test_chat_mode_and_grounding_columns_round_trip(
+    _isolate_config_and_engine: Path,
+) -> None:
+    """The mode and grounding columns land at the new head and downgrade cleanly."""
+    from alembic.script import ScriptDirectory
+
+    db_path = _isolate_config_and_engine
+    head = ScriptDirectory.from_config(alembic_config()).get_current_head()
+    assert head == "22567728b72a"
+
+    command.upgrade(alembic_config(), "head")
+    assert "mode" in _column_names(db_path, "chat_session")
+    assert {"mode", "grounding"} <= _column_names(db_path, "chat_message")
+
+    db_engine._reset_engine()
+    command.downgrade(alembic_config(), "a3c7e91b4d25")
+    assert "mode" not in _column_names(db_path, "chat_session")
+    assert not {"mode", "grounding"} & _column_names(db_path, "chat_message")
+
+
 def test_chat_branching_backfills_parents_and_leaf(
     _isolate_config_and_engine: Path,
 ) -> None:

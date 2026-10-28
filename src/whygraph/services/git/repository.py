@@ -231,8 +231,11 @@ class Repository:
         3. ``<remote>/main``, then ``<remote>/master``.
 
         The resulting short name is then expanded into **both** the
-        remote-tracking ref and the same-named *local* branch, when each
-        exists — so the answer is typically ``("origin/main", "main")``.
+        remote-tracking ref and the same-named *local* branch, as full
+        refnames, when each exists — so the answer is typically
+        ``("refs/remotes/origin/main", "refs/heads/main")``. Full names
+        keep a tag called ``main`` or ``origin/main`` from shadowing the
+        branch.
         The union matters in both directions: unpushed commits on local
         ``main`` are absent from ``origin/main``, and a colleague's
         fetched-but-unmerged work is absent from local ``main``. Judging
@@ -258,11 +261,12 @@ class Repository:
         if short is None:
             return ()
         refs = []
-        remote_ref = f"{self._origin_remote}/{short}"
+        remote_ref = f"refs/remotes/{self._origin_remote}/{short}"
         if self._ref_exists(remote_ref):
             refs.append(remote_ref)
-        if self._ref_exists(short):
-            refs.append(short)
+        local_ref = f"refs/heads/{short}"
+        if self._ref_exists(local_ref):
+            refs.append(local_ref)
         return tuple(refs)
 
     @cached_property

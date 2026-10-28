@@ -139,7 +139,10 @@ class GitCrawler(Crawler):
             parts.append(f"{promoted} promoted")
         if demoted:
             parts.append(f"{demoted} demoted")
-            refs = ", ".join(self._repository.default_branch_refs)
+            refs = ", ".join(
+                ref.removeprefix("refs/remotes/").removeprefix("refs/heads/")
+                for ref in self._repository.default_branch_refs
+            )
             are = "commit is" if demoted == 1 else "commits are"
             self.warning = (
                 f"{demoted} {are} no longer reachable from {refs} - "

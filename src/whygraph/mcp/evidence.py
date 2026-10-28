@@ -1180,10 +1180,9 @@ class PushSplit:
 def default_remote_refs(repo: Repository) -> tuple[str, ...]:
     """The full remote-tracking refs of ``repo``'s default branch.
 
-    :attr:`Repository.default_branch_refs` answers in short form
-    (``("origin/main", "main")``) while
-    :meth:`Repository.remote_refs_containing` answers in full form, so the
-    remote entries are expanded and the local branch dropped.
+    :attr:`Repository.default_branch_refs` answers in full refnames, local
+    branches (``refs/heads/*``) included. Only the remote-tracking entries
+    are kept: a local branch says nothing about what has been pushed.
 
     Returns
     -------
@@ -1192,9 +1191,7 @@ def default_remote_refs(repo: Repository) -> tuple[str, ...]:
         branch does not resolve (the caller must read that as "cannot
         judge", never as "off the default branch").
     """
-    return tuple(
-        f"refs/remotes/{ref}" for ref in repo.default_branch_refs if "/" in ref
-    )
+    return tuple(r for r in repo.default_branch_refs if r.startswith("refs/remotes/"))
 
 
 def split_by_push_status(repo: Repository, hunks: Sequence[BlameHunk]) -> PushSplit:

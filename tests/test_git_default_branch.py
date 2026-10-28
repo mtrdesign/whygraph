@@ -70,7 +70,7 @@ def test_symbolic_ref_resolves_remote_head(origin: Path, tmp_path: Path) -> None
 
     repo = Repository(work)
 
-    assert "origin/main" in repo.default_branch_refs
+    assert "refs/remotes/origin/main" in repo.default_branch_refs
 
 
 def test_falls_back_to_remote_main_when_head_unset(
@@ -83,7 +83,7 @@ def test_falls_back_to_remote_main_when_head_unset(
 
     repo = Repository(work)
 
-    assert repo.default_branch_refs == ("origin/main", "main")
+    assert repo.default_branch_refs == ("refs/remotes/origin/main", "refs/heads/main")
 
 
 def test_falls_back_to_remote_master(tmp_path: Path) -> None:
@@ -96,7 +96,10 @@ def test_falls_back_to_remote_master(tmp_path: Path) -> None:
 
     repo = Repository(work)
 
-    assert repo.default_branch_refs == ("origin/master", "master")
+    assert repo.default_branch_refs == (
+        "refs/remotes/origin/master",
+        "refs/heads/master",
+    )
 
 
 def test_union_includes_unpushed_local_commits(origin: Path, tmp_path: Path) -> None:
@@ -106,10 +109,12 @@ def test_union_includes_unpushed_local_commits(origin: Path, tmp_path: Path) -> 
 
     repo = Repository(work)
 
-    assert repo.default_branch_refs == ("origin/main", "main")
+    assert repo.default_branch_refs == ("refs/remotes/origin/main", "refs/heads/main")
     assert local_sha in repo.default_branch_shas
     # Guard the point of the union: the remote-tracking ref alone would miss it.
-    remote_only = Shell().run(GitRevListShasCmd(("origin/main",)), cwd=work)
+    remote_only = Shell().run(
+        GitRevListShasCmd(("refs/remotes/origin/main",)), cwd=work
+    )
     assert local_sha not in remote_only
 
 
@@ -132,10 +137,10 @@ def test_configured_override_replaces_resolution(origin: Path, tmp_path: Path) -
 
     repo = Repository(work, default_branch="develop")
 
-    assert repo.default_branch_refs == ("develop",)
+    assert repo.default_branch_refs == ("refs/heads/develop",)
     assert develop_sha in repo.default_branch_shas
     # origin/main is deliberately *not* consulted once the override is set.
-    assert "origin/main" not in repo.default_branch_refs
+    assert "refs/remotes/origin/main" not in repo.default_branch_refs
 
 
 def test_configured_override_that_resolves_to_nothing(
@@ -164,3 +169,25 @@ def test_is_shallow(origin: Path, tmp_path: Path) -> None:
 
     assert Repository(shallow).is_shallow is True
     assert Repository(full).is_shallow is False
+
+
+def test_tag_named_main_does_not_change_default_branch_shas(
+    origin: Path, tmp_path: Path
+) -> None:
+    """A tag called ``main`` or ``origin/main`` cannot shadow the branch."""
+    work = _clone(origin, tmp_path / "work")
+    before = Repository(work).default_branch_shas
+    assert before
+    _git(work, "switch", "-q", "-c", "side")
+    side_sha = _commit(work, "side.txt")
+    _git(work, "update-ref", "refs/tags/main", side_sha)
+    _git(work, "update-ref", "refs/tags/origin/main", side_sha)
+
+    repo = Repository(work)
+
+    assert repo.default_branch_refs == (
+        "refs/remotes/origin/main",
+        "refs/heads/main",
+    )
+    assert repo.default_branch_shas == before
+    assert side_sha not in repo.default_branch_shas

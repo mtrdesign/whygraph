@@ -178,7 +178,7 @@ class GitLsTreeNamesCmd(ShellCommand[tuple[str, ...]]):
 
 
 class GitRevListShasCmd(ShellCommand[frozenset[str]]):
-    """``git rev-list <ref>...`` — every SHA reachable from the given refs.
+    """``git rev-list --end-of-options <ref>...`` — every SHA reachable from the given refs.
 
     Multiple refs are **unioned**, which is exactly the semantics branch
     membership needs: a commit on either the local or the
@@ -198,7 +198,7 @@ class GitRevListShasCmd(ShellCommand[frozenset[str]]):
         self.refs = tuple(refs)
 
     def argv(self) -> list[str]:
-        return ["git", "rev-list", *self.refs]
+        return ["git", "rev-list", "--end-of-options", *self.refs]
 
     def parse(self, result: CompletedProcess[str]) -> frozenset[str]:
         return frozenset(result.stdout.split())

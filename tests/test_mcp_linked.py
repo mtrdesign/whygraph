@@ -175,6 +175,26 @@ def repo(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(root=root, c1=c1, c2=c2, c3=c3)
 
 
+def test_default_remote_refs_keeps_remote_tracking_only(
+    repo: SimpleNamespace,
+) -> None:
+    """Remote-tracking refs pass unchanged; ``refs/heads/*`` is dropped."""
+    from whygraph.mcp.evidence import default_remote_refs
+    from whygraph.services.git import Repository
+
+    _git(repo.root, "branch", "-f", "develop", repo.c3)
+    assert Repository(repo.root).default_branch_refs == (
+        "refs/remotes/origin/main",
+        "refs/heads/main",
+    )
+    assert default_remote_refs(Repository(repo.root)) == ("refs/remotes/origin/main",)
+
+    # A local-only default branch (override, no remote ref) yields ().
+    local_only = Repository(repo.root, default_branch="develop")
+    assert local_only.default_branch_refs == ("refs/heads/develop",)
+    assert default_remote_refs(local_only) == ()
+
+
 @pytest.fixture
 def fake() -> FakePlatform:
     """A platform holding the ``demo`` project and this machine's token."""

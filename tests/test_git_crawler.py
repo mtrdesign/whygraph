@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import time
 from contextlib import contextmanager
@@ -20,8 +21,9 @@ from whygraph.db import get_session
 from whygraph.db.bootstrap import ensure_initialized
 from whygraph.db.models.commit import Commit as CommitRow
 from whygraph.db.models.commit_file_change import CommitFileChange
+from whygraph.db.models.tag import Tag as TagRow
 from whygraph.scan.git_crawler import GitCrawler
-from whygraph.services.git import Repository
+from whygraph.services.git import GitError, Repository
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -567,3 +569,137 @@ def test_detached_head_records_the_literal_head(cloned: Path) -> None:
     GitCrawler(Progress(), repository=repo).run()
 
     assert _rows()[sha] == (0, "HEAD")
+
+
+# --------------------------------------------------------------------------
+# Tags (plan 38, C4): mirrored from refs/whygraph/tags/, else refs/tags/.
+# --------------------------------------------------------------------------
+
+
+def _tags() -> dict[str, tuple[str, str | None, str | None]]:
+    """``{name: (sha, tagged_at, subject)}`` for every tag row."""
+    with get_session() as session:
+        return {
+            r.name: (r.sha, r.tagged_at, r.subject)
+            for r in session.exec(select(TagRow)).all()
+        }
+
+
+def _tag_at(root: Path, *args: str, date: str) -> None:
+    """``git tag <args>`` with a fixed tagger date."""
+    subprocess.run(
+        ["git", "-C", str(root), "tag", *args],
+        check=True,
+        capture_output=True,
+        env={**os.environ, "GIT_COMMITTER_DATE": date},
+    )
+
+
+def test_local_tags_are_stored_peeled(repo_root: Path) -> None:
+    head = _git_out(repo_root, "rev-parse", "HEAD").strip()
+    first = _git_out(repo_root, "rev-list", "--max-parents=0", "HEAD").strip()
+    _git(repo_root, "tag", "v1", first)
+    _tag_at(
+        repo_root, "-a", "v2", "-m", "Release two", date="2026-01-02T03:04:05+02:00"
+    )
+
+    crawler = GitCrawler(Progress(), repository=Repository(repo_root))
+    crawler.run()
+
+    tags = _tags()
+    assert set(tags) == {"v1", "v2"}
+    assert tags["v1"][0] == first and tags["v1"][2] == "first"
+    # Annotated: the commit, not the tag object or both concatenated.
+    assert tags["v2"][0] == head and len(tags["v2"][0]) == 40
+    assert tags["v2"][1] == "2026-01-02T03:04:05+02:00"
+    assert tags["v2"][2] == "Release two"
+    assert crawler.summary == "3 commits (3 new) · 2 tags"
+
+
+def test_tags_mirror_the_refs_on_each_crawl(repo_root: Path) -> None:
+    _git(repo_root, "tag", "keep")
+    _git(repo_root, "tag", "drop")
+    GitCrawler(Progress(), repository=Repository(repo_root)).run()
+    assert set(_tags()) == {"keep", "drop"}
+
+    _git(repo_root, "tag", "-d", "drop")
+    first = _git_out(repo_root, "rev-list", "--max-parents=0", "HEAD").strip()
+    _git(repo_root, "tag", "-f", "keep", first)
+    GitCrawler(Progress(), repository=Repository(repo_root)).run()
+
+    assert set(_tags()) == {"keep"}
+    assert _tags()["keep"][0] == first
+
+
+def test_the_private_namespace_wins_when_present(repo_root: Path) -> None:
+    head = _git_out(repo_root, "rev-parse", "HEAD").strip()
+    _git(repo_root, "tag", "stale-clone-time-tag")
+    _git(repo_root, "update-ref", "refs/whygraph/tags/v9", head)
+
+    GitCrawler(Progress(), repository=Repository(repo_root)).run()
+
+    assert set(_tags()) == {"v9"}
+
+
+def test_hostile_tag_names_are_stored_as_data(repo_root: Path, tmp_path: Path) -> None:
+    head = _git_out(repo_root, "rev-parse", "HEAD").strip()
+    marker = tmp_path / "pwned"
+    hostile = [
+        f"$(touch${{IFS}}{marker})",
+        "--upload-pack=touch",
+        "main",
+        "origin/main",
+        "`id`;|&",
+    ]
+    for name in hostile:
+        _git(repo_root, "update-ref", f"refs/tags/{name}", head)
+    # Not UTF-8: stored with a replacement character, never a crash. Written
+    # to packed-refs, because some file systems refuse such a file name.
+    with (repo_root / ".git" / "packed-refs").open("ab") as packed:
+        packed.write(head.encode() + b" refs/tags/caf\xe9\n")
+    # A tag on a tree is not a release: skipped.
+    _git(repo_root, "update-ref", "refs/tags/tree", f"{head}^{{tree}}")
+
+    GitCrawler(Progress(), repository=Repository(repo_root)).run()
+
+    assert set(_tags()) == {*hostile, "caf�"}
+    assert all(sha == head for sha, _, _ in _tags().values())
+    assert not marker.exists()
+
+
+def test_a_multi_line_subject_does_not_split_records(repo_root: Path) -> None:
+    _tag_at(repo_root, "-a", "a", "-m", "one\ntwo\n\nbody", date="2026-01-01T00:00:00Z")
+    _tag_at(repo_root, "-a", "b", "-m", "plain", date="2026-01-02T00:00:00Z")
+
+    GitCrawler(Progress(), repository=Repository(repo_root)).run()
+
+    tags = _tags()
+    assert set(tags) == {"a", "b"}
+    assert tags["b"][2] == "plain"
+    assert tags["a"][2] is not None and tags["a"][2].startswith("one")
+
+
+def test_tags_are_capped_at_the_newest(repo_root: Path) -> None:
+    for day, name in ((1, "old"), (3, "newest"), (2, "middle")):
+        _tag_at(repo_root, "-a", name, "-m", name, date=f"2026-01-0{day}T00:00:00Z")
+
+    tags = Repository(repo_root).tags(limit=2)
+
+    assert [t.name for t in tags] == ["newest", "middle"]
+
+
+def test_a_failed_tag_listing_keeps_the_rows_and_the_crawl(
+    repo_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _git(repo_root, "tag", "v1")
+    GitCrawler(Progress(), repository=Repository(repo_root)).run()
+
+    def boom(self, limit: int = 500):  # noqa: ANN202 -- a stand-in
+        raise GitError("failed to list the tags: boom")
+
+    monkeypatch.setattr(Repository, "tags", boom)
+    crawler = GitCrawler(Progress(), repository=Repository(repo_root))
+    crawler.run()
+
+    assert crawler.error is None
+    assert set(_tags()) == {"v1"}

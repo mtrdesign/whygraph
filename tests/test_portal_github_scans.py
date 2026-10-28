@@ -333,6 +333,39 @@ def test_a_force_push_is_checked_out_and_noted(
     assert not (root / ".whygraph" / "whygraph.db").exists()
 
 
+def test_a_sync_mirrors_tags_privately_and_prunes_them(
+    world: World, scanner: SimpleNamespace
+) -> None:
+    """Tags land in ``refs/whygraph/tags/``; a deleted one goes, PR pins stay."""
+    w = world
+    root = imported(w)
+    path = bare(w)
+    fixture_git("--git-dir", str(path), "tag", "v1", "main")
+    fixture_git("--git-dir", str(path), "tag", "main", "main")  # hostile name
+    fixture_git("--git-dir", str(path), "update-server-info")
+
+    run = wait_run(w, scan(w))
+    assert run["status"] == "ok", run
+    tip = git_out(root, "rev-parse", "refs/remotes/origin/main")
+    assert git_out(root, "rev-parse", "refs/whygraph/tags/v1") == tip
+    assert git_out(root, "rev-parse", "refs/whygraph/tags/main") == tip
+    assert git_out(root, "for-each-ref", "refs/tags/") == ""  # --no-tags
+
+    git_out(root, "update-ref", "refs/whygraph/pull/7", tip)  # a PR pin
+    fixture_git("--git-dir", str(path), "tag", "-d", "v1")
+    fixture_git("--git-dir", str(path), "update-server-info")
+
+    run = wait_run(w, scan(w))
+    assert run["status"] == "ok", run
+    assert git_out(root, "for-each-ref", "--format=%(refname)", "refs/whygraph/") == (
+        "refs/whygraph/pull/7\nrefs/whygraph/tags/main"
+    )
+    assert git_out(root, "symbolic-ref", "refs/remotes/origin/HEAD") == (
+        "refs/remotes/origin/main"
+    )
+    assert git_out(root, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+
+
 def test_a_new_default_branch_is_followed(
     world: World, scanner: SimpleNamespace
 ) -> None:

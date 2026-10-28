@@ -381,7 +381,22 @@ def test_fetch_argv_carries_the_same_config():
     argv = GitFetchDefaultCmd().argv()
     config = github_git_config()
     assert list(config) == argv[1 : 1 + len(config)]
-    assert argv[-4:] == ["fetch", "--no-tags", "--", "origin"]
+    # Both refspecs are explicit (a CLI refspec replaces the configured
+    # one), tags go to the private namespace, and --prune is on.
+    assert argv[1 + len(config) :] == [
+        "fetch",
+        "--prune",
+        "--no-tags",
+        "--",
+        "origin",
+        "+refs/heads/*:refs/remotes/origin/*",
+        "+refs/tags/*:refs/whygraph/tags/*",
+    ]
+    assert GitFetchDefaultCmd("up").argv()[-3:] == [
+        "up",
+        "+refs/heads/*:refs/remotes/up/*",
+        "+refs/tags/*:refs/whygraph/tags/*",
+    ]
 
 
 @pytest.mark.parametrize("scheme", ["file", "path"])
@@ -641,6 +656,81 @@ def test_fetch_default_and_fast_forward(tmp_path: Path, bare: Path):
     assert (dest / "b.txt").exists()
     assert _git(dest, "rev-parse", "HEAD") != before
     assert not marker.exists()  # post-merge hook did not fire
+
+
+def _ref(root: Path, ref: str) -> str | None:
+    """The object ``ref`` names in ``root``, or ``None`` when it does not exist."""
+    result = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "-q", "--verify", ref],
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def test_fetch_default_mirrors_tags_privately_and_prunes(tmp_path: Path, bare: Path):
+    """Live check 5 as a test: moved, new and deleted tags; pins survive the prune."""
+    env = _env(tmp_path, bare)
+    for key, value in (
+        ("tag.gpgsign", "false"),
+        ("user.email", "t@example.com"),
+        ("user.name", "T"),
+    ):
+        _git(bare, "config", key, value)
+    _git(bare, "branch", "feat", "main")
+    _git(bare, "tag", "light", "main")
+    _git(bare, "tag", "-a", "ann", "-m", "annotated", "main")
+    _git(bare, "tag", "gone", "main")
+    first = _git(bare, "rev-parse", "main").strip()
+    dest = tmp_path / "checkout"
+    repo = Repository.clone(URL, dest, env=env)
+    _git(dest, "update-ref", "refs/whygraph/pull/7", first)  # a PR pin
+    assert _ref(dest, "refs/remotes/origin/HEAD") == first
+
+    repo.fetch_default(env=env)
+    for name in ("light", "ann", "gone"):
+        assert _ref(dest, f"refs/whygraph/tags/{name}^{{commit}}") == first
+
+    # Upstream: a new commit, both tags moved, one deleted, one new, a
+    # branch deleted, and hostile tags named like the default branch.
+    other = tmp_path / "other"
+    subprocess.run(
+        ["git", "clone", "-q", str(bare), str(other)], check=True, capture_output=True
+    )
+    _commit(other, "b.txt", "two\n")
+    _git(other, "push", "-q", "origin", "main")
+    second = _git(bare, "rev-parse", "main").strip()
+    _git(bare, "tag", "-f", "light", second)
+    _git(bare, "tag", "-f", "-a", "ann", "-m", "moved", second)
+    _git(bare, "tag", "-d", "gone")
+    _git(bare, "tag", "new", second)
+    _git(bare, "tag", "main", first)
+    _git(bare, "tag", "origin/main", first)
+    _git(bare, "branch", "-D", "feat")
+
+    repo.fetch_default(env=env)
+
+    assert _ref(dest, "refs/remotes/origin/main") == second
+    assert _ref(dest, "refs/whygraph/tags/light") == second
+    assert _ref(dest, "refs/whygraph/tags/ann^{commit}") == second
+    assert _ref(dest, "refs/whygraph/tags/new") == second
+    assert _ref(dest, "refs/whygraph/tags/gone") is None  # pruned
+    assert _ref(dest, "refs/remotes/origin/feat") is None  # pruned
+    # Outside both destinations: the pin and origin/HEAD survive the prune.
+    assert _ref(dest, "refs/whygraph/pull/7") == first
+    assert _ref(dest, "refs/remotes/origin/HEAD") == second
+    # --no-tags: nothing new in refs/tags/, so `new` and `main` never shadow.
+    assert _ref(dest, "refs/tags/new") is None
+    assert _ref(dest, "refs/tags/main") is None
+    assert repo.default_branch_refs == ("refs/remotes/origin/main", "refs/heads/main")
+    # The private namespace wins over the clone-time refs/tags/.
+    assert {t.name for t in Repository(dest).tags()} == {
+        "light",
+        "ann",
+        "new",
+        "main",
+        "origin/main",
+    }
 
 
 def test_fast_forward_refuses_a_diverged_branch(tmp_path: Path, bare: Path):

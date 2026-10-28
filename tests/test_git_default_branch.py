@@ -191,3 +191,43 @@ def test_tag_named_main_does_not_change_default_branch_shas(
     )
     assert repo.default_branch_shas == before
     assert side_sha not in repo.default_branch_shas
+
+
+def test_private_tag_named_main_does_not_change_default_branch_refs(
+    origin: Path, tmp_path: Path
+) -> None:
+    """Tags fetched into ``refs/whygraph/tags/`` cannot shadow the branch either."""
+    work = _clone(origin, tmp_path / "work")
+    before = Repository(work).default_branch_shas
+    _git(work, "switch", "-q", "-c", "side")
+    side_sha = _commit(work, "side.txt")
+    _git(work, "update-ref", "refs/whygraph/tags/main", side_sha)
+    _git(work, "update-ref", "refs/whygraph/tags/origin/main", side_sha)
+
+    repo = Repository(work)
+
+    assert repo.default_branch_refs == (
+        "refs/remotes/origin/main",
+        "refs/heads/main",
+    )
+    assert repo.default_branch_shas == before
+    assert side_sha not in repo.default_branch_shas
+
+
+def test_private_tag_named_origin_main_does_not_win_the_fallback(
+    tmp_path: Path,
+) -> None:
+    """With ``origin/HEAD`` unset, a private ``origin/main`` tag is not a ``main``."""
+    upstream = _init(tmp_path / "upstream", branch="master")
+    sha = _commit(upstream, "one.txt")
+    work = _clone(upstream, tmp_path / "work")
+    _git(work, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+    _git(work, "update-ref", "refs/whygraph/tags/origin/main", sha)
+    _git(work, "update-ref", "refs/whygraph/tags/main", sha)
+
+    repo = Repository(work)
+
+    assert repo.default_branch_refs == (
+        "refs/remotes/origin/master",
+        "refs/heads/master",
+    )

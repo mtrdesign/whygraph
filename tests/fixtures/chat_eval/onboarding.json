@@ -1,0 +1,103 @@
+{
+  "suite": "onboarding",
+  "cases": [
+    {
+      "id": "O1",
+      "question": "I'm new. What is WhyGraph, in five minutes?",
+      "expect": {
+        "tools_any": [
+          "get_repo_overview"
+        ]
+      }
+    },
+    {
+      "id": "O2",
+      "question": "What are the main packages under `src/whygraph`, and how do they depend on each other?",
+      "expect": {
+        "tools_any": [
+          "get_area_outline",
+          "get_repo_overview"
+        ]
+      }
+    },
+    {
+      "id": "O3",
+      "question": "Walk me through what happens when someone adds a project in the portal.",
+      "expect": {
+        "tools_any": [
+          "search_symbols",
+          "get_area_outline"
+        ]
+      }
+    },
+    {
+      "id": "O4",
+      "question": "What is a \"linked\" project and why does it have no database?",
+      "expect": {
+        "tools_any": [
+          "search_symbols",
+          "get_rationale"
+        ]
+      }
+    },
+    {
+      "id": "O5",
+      "question": "Which parts of the code should I read first to work on Chat?",
+      "expect": {
+        "tools_any": [
+          "get_area_outline"
+        ]
+      }
+    },
+    {
+      "id": "O6",
+      "question": "What are the rules I must not break when touching repo paths?",
+      "expect": {
+        "tools_any": [
+          "get_rationale",
+          "search_symbols"
+        ]
+      }
+    },
+    {
+      "id": "O7",
+      "question": "What does \"content-addressable cache key\" mean here, and why does it matter?",
+      "expect": {
+        "tools_any": [
+          "get_rationale",
+          "search_symbols"
+        ]
+      }
+    },
+    {
+      "id": "O8",
+      "question": "How do scans get triggered, end to end?",
+      "expect": {
+        "tools_any": [
+          "search_symbols",
+          "get_area_outline"
+        ]
+      }
+    },
+    {
+      "id": "O9",
+      "question": "Who are the people to ask about the portal runner?",
+      "expect": {
+        "tools_any": [
+          "get_area_history",
+          "run_project_stats"
+        ]
+      }
+    },
+    {
+      "id": "O10",
+      "question": "Explain the difference between the Explorer and the Chat.",
+      "expect": {
+        "tools_any": [
+          "get_repo_overview",
+          "get_area_outline"
+        ]
+      }
+    }
+  ]
+}

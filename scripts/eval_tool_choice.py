@@ -75,9 +75,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
+import time
 import urllib.error
 import urllib.request
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
 
 # Each case is (class, question, tools that count as the RIGHT first reach).
 # "Right" is about the *first* tool: a good investigation interleaves several,
@@ -212,15 +217,20 @@ def _post(url: str, payload: dict | None) -> object:
         return json.loads(response.read())
 
 
-def _stream_tool_calls(
-    base: str, session_id: int, question: str
-) -> tuple[list, list, str]:
-    """Send one turn and return its tool names, the full calls, and any error.
+def _stream_turn(base: str, session_id: int, question: str) -> dict:
+    """Send one turn and return everything the SSE stream said about it.
 
     The **arguments** matter as much as the names now: a chart case has to check
     that `render_chart` named columns rather than retyping values, and the
     identity case has to check the emitted SQL resolved identity through the
     `author` table. Neither is visible in a list of tool names.
+
+    Returns
+    -------
+    dict
+        ``names``, ``calls`` (name + arguments), ``error``, the final ``answer``
+        text, ``rounds`` (rounds that called tools), ``tool_errors``,
+        the ``done`` frame's token counts and the turn's ``latency`` in seconds.
     """
     body = json.dumps({"content": question}).encode()
     request = urllib.request.Request(
@@ -228,23 +238,63 @@ def _stream_tool_calls(
         data=body,
         headers=_HEADERS,
     )
-    names: list[str] = []
-    calls: list[dict] = []
-    error = ""
+    turn: dict = {
+        "names": [],
+        "calls": [],
+        "error": "",
+        "answer": "",
+        "rounds": 0,
+        "tool_errors": 0,
+        "input_tokens": None,
+        "output_tokens": None,
+    }
+    in_results = True  # a tool_call right after a tool_result opens a new round
+    started = time.monotonic()
     with urllib.request.urlopen(request) as response:  # noqa: S310 -- localhost only
         for raw in response:
             line = raw.decode("utf-8", "replace").strip()
             if not line.startswith("data:"):
                 continue
             frame = json.loads(line[5:].strip())
-            if frame.get("type") == "tool_call":
-                names.append(frame["name"])
-                calls.append(
+            kind = frame.get("type")
+            if kind == "tool_call":
+                if in_results:
+                    turn["rounds"] += 1
+                    in_results = False
+                turn["names"].append(frame["name"])
+                turn["calls"].append(
                     {"name": frame["name"], "arguments": frame.get("arguments") or {}}
                 )
-            elif frame.get("type") == "error":
-                error = frame.get("message", "unknown error")
-    return names, calls, error
+            elif kind == "tool_result":
+                in_results = True
+                if _result_is_error(frame.get("result", "")):
+                    turn["tool_errors"] += 1
+            elif kind == "text_delta":
+                turn["answer"] += frame.get("text", "")
+            elif kind == "error":
+                turn["error"] = frame.get("message", "unknown error")
+            elif kind == "done":
+                turn["input_tokens"] = frame.get("input_tokens")
+                turn["output_tokens"] = frame.get("output_tokens")
+    turn["latency"] = time.monotonic() - started
+    return turn
+
+
+def _result_is_error(result: str) -> bool:
+    """Whether a ``tool_result`` frame carries the harness's ``{"error": ...}``."""
+    try:
+        value = json.loads(result)
+    except ValueError:
+        return False
+    return isinstance(value, dict) and "error" in value
+
+
+def _stream_tool_calls(
+    base: str, session_id: int, question: str
+) -> tuple[list, list, str]:
+    """Send one turn and return its tool names, the full calls, and any error."""
+    turn = _stream_turn(base, session_id, question)
+    return turn["names"], turn["calls"], turn["error"]
 
 
 def _obedience_notes(klass: str, calls: list[dict]) -> list[str]:
@@ -466,6 +516,261 @@ def _project_api(args) -> str:
     return f"{args.base.rstrip('/')}/api/projects/{args.slug}"
 
 
+# ---------------------------------------------------------------------------
+# Suites: JSON cases scored over k trials (plan 38 section 5.12)
+# ---------------------------------------------------------------------------
+
+
+TURN_COST_MARGIN = 0.30
+"""Worst-case cost of one turn, USD, for the ``--stop-above`` check."""
+
+
+def _load_suite(path: str) -> dict:
+    """Read a suite file: ``{suite, cases: [{id, question, expect}]}``."""
+    suite = json.loads(Path(path).read_text())
+    if not suite.get("cases"):
+        raise SystemExit(f"! {path}: no cases")
+    return suite
+
+
+def _check_case(expect: dict, turn: dict) -> list[str]:
+    """The failed expectations of one trial; empty means the trial passed.
+
+    ``tools_any``: at least one of these was called. ``tools_never``: none was.
+    ``args``: ``{tool: {key: regex}}``, every named tool call must have the key
+    matching (``re.search``) in at least one of its calls. ``cites``: regexes the
+    final answer must match. ``max_rounds``: tool rounds at most this many.
+    """
+    failures: list[str] = []
+    if turn["error"]:
+        failures.append(f"turn error: {turn['error'][:60]}")
+    names = set(turn["names"])
+    wanted = expect.get("tools_any") or []
+    if wanted and not names & set(wanted):
+        failures.append(f"none of {', '.join(wanted)} called")
+    for tool in expect.get("tools_never") or []:
+        if tool in names:
+            failures.append(f"{tool} called")
+    for tool, keys in (expect.get("args") or {}).items():
+        calls = [c["arguments"] for c in turn["calls"] if c["name"] == tool]
+        for key, pattern in keys.items():
+            if not any(re.search(pattern, str(c.get(key, ""))) for c in calls):
+                failures.append(f"{tool}.{key} !~ {pattern}")
+    for pattern in expect.get("cites") or []:
+        if not re.search(pattern, turn["answer"]):
+            failures.append(f"answer does not cite {pattern}")
+    limit = expect.get("max_rounds")
+    if limit is not None and turn["rounds"] > limit:
+        failures.append(f"{turn['rounds']} rounds > {limit}")
+    return failures
+
+
+def _turn_cost(args, session_id: int) -> float | None:
+    """The turn's spend from ``GET /api/usage/calls``, or None if unavailable.
+
+    Usage rows are written by a background thread, so poll until the sum is
+    stable across two reads.
+    """
+    url = (
+        f"{args.base.rstrip('/')}/api/usage/calls"
+        f"?project={args.slug}&chat_session={session_id}"
+    )
+    total: float | None = None
+    for _ in range(12):
+        time.sleep(0.5)
+        try:
+            items = _get_json(url).get("items", [])
+        except (urllib.error.URLError, OSError, ValueError):
+            return None
+        seen = sum(item.get("cost_usd") or 0.0 for item in items) if items else None
+        if seen is not None and seen == total:
+            return seen
+        total = seen
+    return total
+
+
+def _get_json(url: str) -> dict:
+    """GET a JSON object."""
+    request = urllib.request.Request(url, headers=_HEADERS)
+    with urllib.request.urlopen(request) as response:  # noqa: S310 -- localhost only
+        return json.loads(response.read())
+
+
+def _spent(args) -> float:
+    """The org's spend this month, from ``GET /api/budgets``."""
+    return _get_json(f"{args.base.rstrip('/')}/api/budgets")["org"]["spent_usd"]
+
+
+def _run_suite_pass(
+    args, provider: str | None, model: str | None, suite: dict, k: int
+) -> list[dict]:
+    """Run every case ``k`` times, a fresh session per trial; return trial dicts."""
+    session_body: dict = {}
+    if provider:
+        session_body["provider"] = provider
+    if model:
+        session_body["model"] = model
+    if args.mode:
+        session_body["mode"] = args.mode
+    trials: list[dict] = []
+    for case in suite["cases"]:
+        for trial in range(1, k + 1):
+            if args.stop_above is not None and (
+                _spent(args) + TURN_COST_MARGIN > args.stop_above
+            ):
+                print(
+                    f"! org spend would cross {args.stop_above}: stopping before "
+                    f"{case['id']} t{trial}",
+                    file=sys.stderr,
+                )
+                return trials
+            session = _post(f"{_project_api(args)}/chat/sessions", session_body or None)
+            turn = _stream_turn(_project_api(args), session["id"], case["question"])
+            failures = _check_case(case.get("expect") or {}, turn)
+            turn.update(
+                case=case["id"],
+                question=case["question"],
+                trial=trial,
+                session_id=session["id"],
+                failures=failures,
+                passed=not failures,
+                cost=_turn_cost(args, session["id"]),
+            )
+            trials.append(turn)
+            cost = f"${turn['cost']:.3f}" if turn["cost"] is not None else "$?"
+            print(
+                f"  {case['id']:4} t{trial} {'PASS' if turn['passed'] else 'FAIL'} "
+                f"{turn['rounds']}r {turn['latency']:.0f}s {cost} "
+                f"{'; '.join(failures)}",
+                flush=True,
+            )
+    return trials
+
+
+def _mean(values: list) -> float:
+    """Mean of the non-None values, 0.0 when there are none."""
+    values = [v for v in values if v is not None]
+    return sum(values) / len(values) if values else 0.0
+
+
+def _summarize(trials: list[dict]) -> dict:
+    """Aggregate trials: pass rate, pass^k, rounds, tokens, latency, errors."""
+    by_case: dict[str, list[dict]] = {}
+    for t in trials:
+        by_case.setdefault(t["case"], []).append(t)
+    calls = sum(len(t["names"]) for t in trials)
+    return {
+        "trials": len(trials),
+        "pass_rate": _mean([1.0 if t["passed"] else 0.0 for t in trials]),
+        "pass_k": _mean(
+            [1.0 if all(t["passed"] for t in ts) else 0.0 for ts in by_case.values()]
+        ),
+        "rounds": _mean([t["rounds"] for t in trials]),
+        "tokens": _mean(
+            [(t["input_tokens"] or 0) + (t["output_tokens"] or 0) for t in trials]
+        ),
+        "latency": _mean([t["latency"] for t in trials]),
+        "tool_error_rate": (sum(t["tool_errors"] for t in trials) / calls)
+        if calls
+        else 0.0,
+        "cost": _mean([t["cost"] for t in trials]),
+        "cost_total": sum(t["cost"] or 0.0 for t in trials),
+        "tools": Counter(n for t in trials for n in t["names"]),
+        "by_case": by_case,
+    }
+
+
+def _suite_markdown(
+    label: str, args, runs: list[dict], spent: tuple[float, float]
+) -> str:
+    """The Markdown report for the suites run against one target."""
+    per_suite = ", ".join(r["suite"] + "=" + str(r["k"]) for r in runs)
+    out = [
+        f"# Chat eval report - {label}",
+        "",
+        f"- Date: {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
+        f"- Portal: {args.base}, project `{args.slug}`, mode: {args.mode or '(portal default, none sent)'}",
+        f"- k per suite: {per_suite}, warm-up: {'yes (discarded)' if args.warmup else 'no'}",
+        f"- Org spend: {spent[0]:.4f} -> {spent[1]:.4f} USD (delta {spent[1] - spent[0]:.4f})",
+        "",
+    ]
+    for run in runs:
+        summ = _summarize(run["trials"])
+        out += [
+            f"## Suite `{run['suite']}` (k={run['k']})",
+            "",
+            f"- Pass rate: {summ['pass_rate']:.0%} of {summ['trials']} trials",
+            f"- pass^{run['k']}: {summ['pass_k']:.0%} of cases",
+            f"- Mean tool rounds: {summ['rounds']:.2f}",
+            f"- Mean tokens (in+out, last call): {summ['tokens']:.0f}",
+            f"- Mean latency: {summ['latency']:.1f}s",
+            f"- Tool-error rate: {summ['tool_error_rate']:.1%} of tool calls",
+            f"- Cost per turn: ${summ['cost']:.4f} (total ${summ['cost_total']:.2f})",
+            "- Tool counts: "
+            + ", ".join(f"{n} {c}" for n, c in summ["tools"].most_common()),
+            "",
+            "| case | passed | pass^k | rounds | tokens | latency | cost | failures |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+        for case_id, ts in summ["by_case"].items():
+            one = _summarize(ts)
+            fails = "; ".join(sorted({f for t in ts for f in t["failures"]}))
+            out.append(
+                f"| {case_id} | {sum(t['passed'] for t in ts)}/{len(ts)} "
+                f"| {'yes' if one['pass_k'] else 'no'} | {one['rounds']:.1f} "
+                f"| {one['tokens']:.0f} | {one['latency']:.0f}s "
+                f"| ${one['cost']:.3f} | {fails or '-'} |"
+            )
+        out.append("")
+    return "\n".join(out)
+
+
+def _suite_main(args, targets: list[tuple[str | None, str | None]]) -> int:
+    """Run ``--suite`` files over each target; write the report and sidecar."""
+    suites = [_load_suite(path) for path in args.suite]
+    suite_k = {name: int(n) for name, _, n in (a.partition("=") for a in args.suite_k)}
+    for provider, model in targets:
+        label = f"{provider or '(config default)'}{':' + model if model else ''}"
+        before = _spent(args)
+        if args.warmup:
+            print(f"warm-up (k=1, discarded) on {label}")
+            for suite in suites:
+                _run_suite_pass(args, provider, model, suite, 1)
+        runs = []
+        for suite in suites:
+            k = suite_k.get(suite["suite"], args.k)
+            print(f"suite {suite['suite']} k={k} on {label}")
+            trials = _run_suite_pass(args, provider, model, suite, k)
+            runs.append({"suite": suite["suite"], "k": k, "trials": trials})
+        report = _suite_markdown(label, args, runs, (before, _spent(args)))
+        out = Path(args.report)
+        out.write_text(report)
+        sidecar = out.with_suffix(".json")
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "target": label,
+                    "mode": args.mode,
+                    "k": args.k,
+                    "runs": [
+                        {
+                            **run,
+                            "trials": [
+                                {k: v for k, v in t.items() if k != "calls"}
+                                | {"tool_calls": t["calls"]}
+                                for t in run["trials"]
+                            ],
+                        }
+                        for run in runs
+                    ],
+                },
+                indent=2,
+            )
+        )
+        print(f"wrote {out} and {sidecar}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -491,6 +796,39 @@ def main() -> int:
     )
     parser.add_argument("--provider", default=None, help="Override [chat].provider.")
     parser.add_argument("--model", default=None)
+    parser.add_argument(
+        "--suite",
+        action="append",
+        help="A JSON suite (tests/fixtures/chat_eval/*.json). Repeatable. Switches "
+        "to k-trial scoring and a Markdown report.",
+    )
+    parser.add_argument("--mode", default=None, help="Chat mode; unset sends nothing.")
+    parser.add_argument("-k", type=int, default=3, help="Trials per case (suites).")
+    parser.add_argument(
+        "--suite-k",
+        action="append",
+        default=[],
+        metavar="NAME=N",
+        help="Trials for one suite, overriding -k. Repeatable.",
+    )
+    parser.add_argument(
+        "--stop-above",
+        type=float,
+        default=None,
+        metavar="USD",
+        help="Stop before any trial that could push the org's month spend above "
+        "this (checked against GET /api/budgets).",
+    )
+    parser.add_argument(
+        "--warmup",
+        action="store_true",
+        help="One discarded k=1 pass first, so on-read backfill is not scored.",
+    )
+    parser.add_argument(
+        "--report",
+        default="eval-report.md",
+        help="Markdown report path; the JSON transcript sidecar sits beside it.",
+    )
     args = parser.parse_args()
 
     try:
@@ -502,6 +840,13 @@ def main() -> int:
             '"${TMPDIR:-/tmp}/whygraph-dev" --port 8321'
         )
         return 2
+
+    if args.suite:
+        try:
+            return _suite_main(args, targets)
+        except (urllib.error.URLError, OSError) as exc:
+            print(f"! portal error: {exc}", file=sys.stderr)
+            return 2
 
     summary: list[tuple[str, str, int, int, list[tuple[str, bool]]]] = []
     for provider, model in targets:

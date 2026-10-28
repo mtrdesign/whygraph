@@ -191,6 +191,55 @@ class CodeGraph:
             return None
         return row[0] if row and row[0] else None
 
+    def has_file(self, path: str) -> bool:
+        """Whether CodeGraph indexed ``path``.
+
+        Unlike :meth:`file_hash`, which answers ``None`` both for a file that
+        is not indexed and for one whose hash is unknown, this tells the two
+        apart.
+
+        Parameters
+        ----------
+        path : str
+            Repository-relative file path, as in :attr:`Symbol.file_path`.
+
+        Returns
+        -------
+        bool
+            ``True`` when ``files`` has a row for ``path``.
+        """
+        row = self._conn.execute(
+            "SELECT 1 FROM files WHERE path = ? LIMIT 1", (path,)
+        ).fetchone()
+        return row is not None
+
+    def symbols_named(self, name: str, limit: int = 3) -> list[Symbol]:
+        """Symbols whose short name is exactly ``name``.
+
+        An exact, indexed match (``idx_nodes_name``), unlike :meth:`search`'s
+        substring scan, so it stays cheap on a large index.
+
+        Parameters
+        ----------
+        name : str
+            The short name, e.g. ``"run_turn"``; compared case-sensitively.
+        limit : int, optional
+            Maximum number of results (default 3).
+
+        Returns
+        -------
+        list[Symbol]
+            The matches, shortest qualified name first (ties by qualified
+            name, then path); empty when none.
+        """
+        rows = self._conn.execute(
+            f"{_NODE_SELECT} WHERE name = ? "
+            "ORDER BY length(qualified_name) ASC, qualified_name ASC, file_path ASC "
+            "LIMIT ?",
+            (name, limit),
+        ).fetchall()
+        return [Symbol.from_row(r) for r in rows]
+
     def symbol_by_id(self, node_id: str) -> Symbol | None:
         """Look a symbol up by its CodeGraph node id.
 

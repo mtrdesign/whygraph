@@ -60,14 +60,24 @@ from whygraph.chat.harness import (
     run_turn,
 )
 from whygraph.chat.areas import configured_areas
+from whygraph.chat.grounding import ground, with_references
 from whygraph.chat.modes import DEFAULT_MODE, MODE_IDS, MODES, render_starters
 from whygraph.chat.tools import ToolRegistry
 from whygraph.core import Config, ConfigError, get_config
 from whygraph.core.context import current_project
-from whygraph.core.usage import BUDGET_EXCEEDED, UsageBlocked, set_scope_field
+from whygraph.core.usage import (
+    BUDGET_EXCEEDED,
+    UsageBlocked,
+    set_scope_field,
+    usage_blocked,
+)
 from whygraph.db import get_session
 from whygraph.db.models import ChatMessage as ChatMessageRow
 from whygraph.db.models import ChatSession as ChatSessionRow
+from whygraph.db.models import Commit, Issue, PullRequest
+from whygraph.mcp.rationale_cache import lookup_exact
+from whygraph.mcp.targets import indexed_symbol_target, repo_root
+from whygraph.services.codegraph import CodeGraph, CodeGraphError, Symbol
 from whygraph.services.llm import LlmError, LlmKeyMissing
 from whygraph.services.llm.exceptions import is_unreachable
 from whygraph.services.llm.chat import (
@@ -843,7 +853,9 @@ def _load_history(session_id: int, start_id: int) -> list[ChatMessage]:
     reply as the conversation's last message.
 
     The system prompt is not among them — it is re-rendered per turn (see
-    :func:`whygraph.chat.harness.build_system_prompt`). Continued replies
+    :func:`whygraph.chat.harness.build_system_prompt`). A user row's stored
+    References block (``grounding``) is re-appended with
+    :func:`~whygraph.chat.grounding.with_references`. Continued replies
     are merged (:func:`_merge_continuations`), then the rows pass through
     :func:`_sanitize_history`, so an errored or orphaned row never reaches
     the provider.
@@ -861,11 +873,16 @@ def _load_history(session_id: int, start_id: int) -> list[ChatMessage]:
                 ToolCall(id=c["id"], name=c["name"], arguments=c["arguments"])
                 for c in json.loads(row.tool_calls)
             )
+            content = row.content
+            if row.role == "user" and row.grounding:
+                # The question's References block, byte for byte as the
+                # turn that computed it sent it, so the cached prefix holds.
+                content = with_references(content, row.grounding)
             history.append(
                 (
                     ChatMessage(
                         role=row.role,  # type: ignore[arg-type] -- constrained on write
-                        content=row.content,
+                        content=content,
                         tool_calls=calls,
                         tool_call_id=row.tool_call_id,
                         replay=json.loads(row.replay) if row.replay else None,
@@ -874,6 +891,112 @@ def _load_history(session_id: int, start_id: int) -> list[ChatMessage]:
                 )
             )
     return _sanitize_history(_merge_continuations(history))
+
+
+class _ReferenceLookups:
+    """The reference pre-pass's reads, for :func:`whygraph.chat.grounding.ground`.
+
+    Exact, indexed lookups only: CodeGraph by qualified or short name and by
+    path (never :meth:`CodeGraph.search`, a substring scan), the project DB
+    by primary key, and the rationale cache by its exact key with the target
+    from :func:`~whygraph.mcp.targets.indexed_symbol_target` (never
+    ``resolve_target``, which may re-sync CodeGraph - a write in a read
+    path). CodeGraph is opened on first use; :meth:`close` releases it.
+    """
+
+    def __init__(self) -> None:
+        self._graph: CodeGraph | None = None
+        self._graph_missing = False
+
+    def _open(self) -> CodeGraph | None:
+        if self._graph is None and not self._graph_missing:
+            try:
+                self._graph = CodeGraph.for_repository(
+                    repo_root(), codegraph_db=get_config().codegraph_db
+                )
+            except CodeGraphError:
+                self._graph_missing = True
+        return self._graph
+
+    @property
+    def indexed(self) -> bool:
+        return self._open() is not None
+
+    def symbol(self, qualified_name: str) -> Symbol | None:
+        return self._open().symbol(qualified_name)
+
+    def symbols_named(self, name: str, limit: int) -> list[Symbol]:
+        return self._open().symbols_named(name, limit)
+
+    def has_file(self, path: str) -> bool:
+        return self._open().has_file(path)
+
+    def rationale_cached(self, symbol: Symbol) -> bool:
+        target = indexed_symbol_target(symbol.qualified_name)
+        if target is None:
+            return False
+        identity = get_config().cache_identity("rationale")
+        return lookup_exact(target, *identity) is not None
+
+    def pull_request_state(self, number: int) -> str | None:
+        with get_session() as session:
+            row = session.get(PullRequest, number)
+            return None if row is None else row.state
+
+    def issue_state(self, number: int) -> str | None:
+        with get_session() as session:
+            row = session.get(Issue, number)
+            return None if row is None else row.state
+
+    def commit_shas(self, prefix: str, limit: int) -> list[str]:
+        # A range on the primary key: every SHA starting with `prefix`
+        # (lowercase hex) sorts between it and `prefix + "g"`.
+        with get_session() as session:
+            return list(
+                session.exec(
+                    select(Commit.sha)
+                    .where(Commit.sha >= prefix, Commit.sha < prefix + "g")
+                    .order_by(Commit.sha)
+                    .limit(limit)
+                )
+            )
+
+    def close(self) -> None:
+        if self._graph is not None:
+            self._graph.close()
+            self._graph = None
+
+
+def _ground_turn(job: "TurnJob", history: list[ChatMessage]) -> str | None:
+    """The reference pre-pass for a turn that wrote a new question.
+
+    Reads the newest user message of ``history`` (loaded before the block
+    exists, so it is the plain question), resolves what it names, and
+    stores the block on that row (``job.start_id``). Returns the block only
+    once it is stored, so the next turn's history replays exactly what this
+    turn sends. Never raises: a failure means no block, logged.
+    """
+    question = next((m for m in reversed(history) if m.role == "user"), None)
+    if question is None:
+        return None
+    lookups = _ReferenceLookups()
+    try:
+        suffix = ground(question.content, lookups, cancelled=job.cancel_event.is_set)
+        if suffix is None:
+            return None
+        with get_session() as session:
+            row = session.get(ChatMessageRow, job.start_id)
+            if row is None or row.role != "user":
+                return None
+            row.grounding = suffix
+            session.add(row)
+            session.commit()
+        return suffix
+    except Exception:  # noqa: BLE001 -- grounding is optional; the turn is not
+        _log.warning("storing the References block failed", exc_info=True)
+        return None
+    finally:
+        lookups.close()
 
 
 def _append_row(session_id: int, message: ChatMessageRow, *, now: str) -> int:
@@ -1106,6 +1229,10 @@ class TurnJob:
         Set by :meth:`stop`; the harness checks it.
     client : ChatClient or None
         The provider client, once built, for :meth:`stop` to abort.
+    ground : bool
+        The turn wrote a new question (a send or an edit), so it runs the
+        reference pre-pass. ``False`` on a Continue or a Regenerate, whose
+        question already carries its stored block.
     """
 
     def __init__(
@@ -1131,6 +1258,7 @@ class TurnJob:
         self.continue_from_assistant = continue_from_assistant
         self.cancel_event = threading.Event()
         self.client = None
+        self.ground = False
         self.queue: queue.Queue = queue.Queue()
 
     def start(self) -> None:
@@ -1328,6 +1456,11 @@ def _turn_frames(job: TurnJob) -> Iterator[str]:
 
     registry = ToolRegistry()
     history = _load_history(session_id, job.start_id)
+    # After the history load, while the new question's `grounding` is still
+    # NULL; a turn the budget already stops sends nothing to ground.
+    references = (
+        _ground_turn(job, history) if job.ground and usage_blocked() is None else None
+    )
 
     # One round's worth of buffered state. `round_usage` is set when the
     # round's provider call ends; its tool events still follow, and the next
@@ -1381,6 +1514,7 @@ def _turn_frames(job: TurnJob) -> Iterator[str]:
             registry=registry,
             effort=job.effort,
             mode=job.mode,
+            references=references,
             cancel=job.cancel_event,
             continue_from_assistant=job.continue_from_assistant,
         ):
@@ -1633,6 +1767,7 @@ def _start_turn(
         else:
             user_id = _persist_user_message(session_id, content or "", edit_of=edit_of)
             job.start_id = job.parent_id = user_id
+            job.ground = True
         job.effort = _resolve_effort(row.effort)
         job.mode = _resolve_mode(
             _message_mode(continue_of) if continue_of is not None else row.mode

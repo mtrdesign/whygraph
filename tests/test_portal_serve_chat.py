@@ -53,6 +53,8 @@ from whygraph.core.config import (
 )
 from whygraph.core.context import use_project
 from whygraph.db import get_session as project_session
+from whygraph.chat.grounding import with_references
+from whygraph.db.models import ChatMessage as ChatMessageRow
 from whygraph.db.models import ChatSession as ChatSessionRow
 from whygraph.portal import db as portal_db
 from whygraph.portal.models import Project, User
@@ -2500,3 +2502,135 @@ def test_fork_is_refused_while_a_turn_holds_the_lease(chat_client, monkeypatch) 
         chat_client.post(_url(sid, "/fork"), json={"message_id": q1}).status_code == 201
     )
     assert _transcript(chat_client, sid)["streaming"] is False
+
+
+# ---------------------------------------------------------------------------
+# The reference pre-pass (plan 38 §5.13.2)
+# ---------------------------------------------------------------------------
+
+
+class _Lookups:
+    """Pre-pass lookups over a few numbered PRs; no CodeGraph index."""
+
+    indexed = False
+
+    def __init__(self, prs=None, *, delay: float = 0.0, fail: bool = False) -> None:
+        self._prs = prs or {}
+        self._delay = delay
+        self._fail = fail
+        self.closed = False
+
+    def pull_request_state(self, number):
+        if self._fail:
+            raise RuntimeError("the forge table is gone")
+        time.sleep(self._delay)
+        return self._prs.get(number)
+
+    def issue_state(self, number):
+        return None
+
+    def commit_shas(self, prefix, limit):
+        return []
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _use_lookups(monkeypatch, **kwargs) -> list[_Lookups]:
+    """Swap the serve layer's lookups; returns every instance it builds."""
+    built: list[_Lookups] = []
+
+    def _factory():
+        built.append(_Lookups(**kwargs))
+        return built[-1]
+
+    monkeypatch.setattr(serve_chat, "_ReferenceLookups", _factory)
+    return built
+
+
+def _grounding_of(client, message_id: int) -> str | None:
+    with use_project(client.context()), project_session() as db:
+        return db.get(ChatMessageRow, message_id).grounding
+
+
+def test_references_are_stored_passed_and_replayed(chat_client, monkeypatch) -> None:
+    built = _use_lookups(monkeypatch, prs={412: "open"})
+    spy = _stub_harness(monkeypatch, _reply("a1"))
+    sid = _new_session(chat_client)["id"]
+    chat_client.post(_url(sid, "/messages"), json={"content": "what about #412?"})
+
+    suffix = spy.kwargs["references"]
+    assert json.loads(suffix) == [
+        {"text": "#412", "kind": "pull_request", "number": 412, "state": "open"}
+    ]
+    # The harness gets the plain question and appends the block itself.
+    assert [(m.role, m.content) for m in spy.history] == [("user", "what about #412?")]
+    assert len(built) == 1 and built[0].closed
+    q1 = _transcript(chat_client, sid)["messages"][0]
+    assert q1["content"] == "what about #412?"  # never in content or the UI
+    assert "grounding" not in q1
+    assert _grounding_of(chat_client, q1["id"]) == suffix
+
+    # The next turn replays it byte for byte; a question naming nothing
+    # stores and sends no block.
+    chat_client.post(_url(sid, "/messages"), json={"content": "and then?"})
+    asked = with_references("what about #412?", suffix)
+    assert [(m.role, m.content) for m in spy.history] == [
+        ("user", asked),
+        ("assistant", "a1"),
+        ("user", "and then?"),
+    ]
+    assert spy.kwargs["references"] is None
+    q2 = _transcript(chat_client, sid)["messages"][2]
+    assert _grounding_of(chat_client, q2["id"]) is None
+
+    # Regenerate reuses the stored block exactly once and computes nothing.
+    count = len(built)
+    chat_client.post(_url(sid, f"/messages/{q1['id']}/regenerate"))
+    assert [(m.role, m.content) for m in spy.history] == [("user", asked)]
+    assert spy.kwargs["references"] is None
+    assert len(built) == count
+
+    # An edit is a new question and is grounded afresh.
+    chat_client.post(
+        _url(sid, f"/messages/{q1['id']}/edit"), json={"content": "and #7?"}
+    )
+    assert spy.kwargs["references"] is None  # #7 resolves to nothing
+    assert len(built) == count + 1
+
+
+def test_continue_skips_the_pre_pass(chat_client, monkeypatch) -> None:
+    sid, q1, a1 = _truncated_session(chat_client, monkeypatch)
+    built = _use_lookups(monkeypatch, prs={1: "open"})
+    spy = _stub_harness(monkeypatch, _reply(" more"))
+    chat_client.post(_url(sid, f"/messages/{a1}/continue"))
+    assert spy.kwargs["references"] is None
+    assert built == []
+
+
+def test_a_failing_pre_pass_still_runs_the_turn(chat_client, monkeypatch) -> None:
+    built = _use_lookups(monkeypatch, fail=True)
+    spy = _stub_harness(monkeypatch, _reply("answered"))
+    sid = _new_session(chat_client)["id"]
+    response = chat_client.post(_url(sid, "/messages"), json={"content": "why #3?"})
+    assert [f["type"] for f in _frames(response)] == ["text_delta", "done"]
+    assert spy.kwargs["references"] is None
+    assert built[0].closed
+    q1 = _transcript(chat_client, sid)["messages"][0]
+    assert _grounding_of(chat_client, q1["id"]) is None
+
+
+def test_the_pre_pass_keeps_its_deadline(chat_client, monkeypatch) -> None:
+    _use_lookups(monkeypatch, prs={n: "open" for n in range(1, 5)}, delay=0.6)
+    spy = _stub_harness(monkeypatch, _reply("a"))
+    sid = _new_session(chat_client)["id"]
+    started = time.monotonic()
+    chat_client.post(_url(sid, "/messages"), json={"content": "#1 #2 #3 #4"})
+    elapsed = time.monotonic() - started
+    # Checked before each reference: 0, 0.6 and 1.2 s are inside 1.5 s.
+    assert [e["text"] for e in json.loads(spy.kwargs["references"])] == [
+        "#1",
+        "#2",
+        "#3",
+    ]
+    assert elapsed < 2.0 + 1.0

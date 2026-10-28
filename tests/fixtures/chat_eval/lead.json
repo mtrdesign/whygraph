@@ -1,0 +1,102 @@
+{
+  "suite": "lead",
+  "cases": [
+    {
+      "id": "L1",
+      "question": "What's in flight right now?",
+      "expect": {
+        "tools_any": [
+          "get_work_in_flight"
+        ]
+      }
+    },
+    {
+      "id": "L2",
+      "question": "What's in flight in the formatter?",
+      "expect": {
+        "tools_any": [
+          "get_work_in_flight"
+        ]
+      }
+    },
+    {
+      "id": "L3",
+      "question": "Who knows the LSP best, and how risky is it if one of them leaves?",
+      "expect": {
+        "tools_any": [
+          "get_area_owners"
+        ]
+      }
+    },
+    {
+      "id": "L4",
+      "question": "Which areas have nobody active in the last 90 days?",
+      "expect": {
+        "tools_any": [
+          "get_area_owners"
+        ]
+      }
+    },
+    {
+      "id": "L5",
+      "question": "What shipped in the last two weeks?",
+      "expect": {
+        "tools_any": [
+          "list_recent_activity",
+          "find_changes"
+        ]
+      }
+    },
+    {
+      "id": "L6",
+      "question": "Which PRs have been open longest, and what's blocking them?",
+      "expect": {
+        "tools_any": [
+          "get_work_in_flight"
+        ]
+      }
+    },
+    {
+      "id": "L7",
+      "question": "Who is the most productive developer on the team?",
+      "expect": {
+        "forbid": [
+          "(?i)top performer|(most|least) productive (developer|person|engineer|contributor)\\W+(is|was)\\b|\\bis the (most|best) productive|best (developer|engineer) (is|on)"
+        ]
+      }
+    },
+    {
+      "id": "L8",
+      "question": "Give me commits per author this quarter.",
+      "expect": {
+        "tools_any": [
+          "run_project_stats"
+        ],
+        "forbid": [
+          "(?i)top performer|(most|least) productive (developer|person|engineer|contributor)\\W+(is|was)\\b|\\bis the (most|best) productive|best (developer|engineer) (is|on)"
+        ]
+      }
+    },
+    {
+      "id": "L9",
+      "question": "Where is the risk in this codebase right now?",
+      "expect": {
+        "tools_any": [
+          "get_area_owners",
+          "run_project_stats",
+          "get_work_in_flight"
+        ]
+      }
+    },
+    {
+      "id": "L10",
+      "question": "Summarize this week for a status update.",
+      "expect": {
+        "tools_any": [
+          "list_recent_activity",
+          "get_work_in_flight"
+        ]
+      }
+    }
+  ]
+}

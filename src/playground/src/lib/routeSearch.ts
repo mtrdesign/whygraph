@@ -121,6 +121,7 @@ export const PROJECT_SETTINGS_SECTIONS = [
   "github",
   "hooks",
   "scanning",
+  "areas",
   "budgets",
   "agents",
   "access",

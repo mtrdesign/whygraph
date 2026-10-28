@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Controller, useForm, useWatch, type Control, type FieldPath } from "react-hook-form";
+import { Controller, useFieldArray, useForm, useWatch, type Control, type FieldPath, type UseFormReturn } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { TriangleAlertIcon } from "lucide-react";
+import { PlusIcon, TriangleAlertIcon, Trash2Icon } from "lucide-react";
 import {
   portalApi,
   portalKey,
@@ -30,6 +30,7 @@ import {
   type TaskName,
 } from "../../lib/configForm";
 import { isProduction, usePortalState, useReadOnly } from "../../lib/identity";
+import { errorMessage } from "../../lib/apiErrors";
 import { effortLabel, providerLabel } from "../../lib/labels";
 import {
   endpointOverride,
@@ -51,11 +52,13 @@ import { SettingsSection, type SettingsNavItem } from "../settings/SettingsLayou
 import { ErrorState } from "../state/ErrorState";
 import { FormSkeleton } from "../state/Skeletons";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
+import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
+import { Textarea } from "../ui/textarea";
 import { Field } from "./Field";
 import { ModelIdInput } from "./ModelIdInput";
 
@@ -73,7 +76,7 @@ type StoredConfig = Omit<ProjectConfigView, "import"> & {
  */
 export type ConfigScope = { kind: "project"; slug: string } | { kind: "global" };
 
-type SectionId = "models" | "github" | "hooks" | "scanning" | "limits";
+type SectionId = "models" | "github" | "hooks" | "scanning" | "limits" | "areas";
 
 /** Each section's form fields; a section's Save writes these and nothing else. */
 const SECTION_FIELDS: Record<SectionId, (keyof ConfigFormValues)[]> = {
@@ -82,6 +85,7 @@ const SECTION_FIELDS: Record<SectionId, (keyof ConfigFormValues)[]> = {
   hooks: ["hooks"],
   scanning: ["serveCodegraph"],
   limits: ["agentGenerations", "agentDescriptions"],
+  areas: ["areas"],
 };
 
 const pick = (v: ConfigFormValues, fields: (keyof ConfigFormValues)[]) =>
@@ -105,6 +109,7 @@ export function configSections(
       { id: "github", label: "GitHub" },
       ...(!production && source === "local" ? [{ id: "hooks", label: "Git hooks" }] : []),
       ...(!production && source === "local" ? [{ id: "scanning", label: "Scanning" }] : []),
+      { id: "areas", label: "Areas" },
     ];
   }
   return [
@@ -467,7 +472,7 @@ export function ConfigForm({
     const fields = SECTION_FIELDS[section];
     if (!(await trigger(fields as FieldPath<ConfigFormValues>[]))) return false;
     const merged = { ...base, ...pick(getValues(), fields) } as ConfigFormValues;
-    const next = valuesToLayer(layer, merged, { scan: isProject, limits: section === "limits" });
+    const next = valuesToLayer(layer, merged, { scan: isProject, limits: section === "limits", areas: section === "areas" });
     const saved = await put.mutateAsync({ config: next });
     // The answer is the stored layer: this section is clean even when the
     // refetch brings back an identical payload (no new `stored.data`).
@@ -853,6 +858,17 @@ export function ConfigForm({
         </SettingsSection>
       )}
 
+      {isProject && (
+        <AreasSection
+          slug={slug}
+          form={form}
+          readOnly={readOnly}
+          dirty={dirty("areas")}
+          onSave={() => saveSection("areas")}
+          onDiscard={() => discard("areas")}
+        />
+      )}
+
       {showLimits && (
         <SettingsSection
           id="limits"
@@ -900,6 +916,116 @@ export function ConfigForm({
         </SettingsSection>
       )}
     </>
+  );
+}
+
+/**
+ * The project's `[areas]`: named parts of the codebase (paths and labels) the chat
+ * assistant resolves a question about a feature to. Rows are typed in place;
+ * "Suggest from the tree" appends candidates and never saves.
+ */
+function AreasSection({
+  slug,
+  form,
+  readOnly,
+  dirty,
+  onSave,
+  onDiscard,
+}: {
+  slug: string;
+  form: UseFormReturn<ConfigFormValues>;
+  readOnly: boolean;
+  dirty: boolean;
+  onSave: () => Promise<unknown>;
+  onDiscard: () => void;
+}) {
+  const { control, register, getValues, formState } = form;
+  const { fields, append, remove } = useFieldArray({ control, name: "areas" });
+  const suggest = useMutation({ mutationFn: () => projectApi(slug).areasSuggest() });
+  const rowErrors = formState.errors.areas;
+  const tableError = rowErrors && !Array.isArray(rowErrors) ? rowErrors.root?.message ?? rowErrors.message : undefined;
+  const addSuggestions = async () => {
+    const { suggestions } = await suggest.mutateAsync();
+    const have = new Set(getValues("areas").map((r) => r.name.trim()));
+    for (const s of suggestions) {
+      if (have.has(s.name)) continue;
+      append({
+        name: s.name,
+        description: s.description,
+        pathsText: s.paths.join("\n"),
+        labelsText: s.labels.join("\n"),
+      });
+    }
+  };
+  return (
+    <SettingsSection
+      id="areas"
+      title="Areas"
+      description="Name the parts of this codebase (by path and by issue label) so a question about a feature resolves to the right code. Chat shows the areas to the model and can filter history by area."
+    >
+      <SectionForm
+        name="Areas"
+        dirty={dirty}
+        readOnly={readOnly}
+        onSave={onSave}
+        onDiscard={onDiscard}
+      >
+        {fields.length === 0 && <p className="text-sm text-muted-foreground">No areas yet.</p>}
+        {fields.map((f, i) => {
+          const err = Array.isArray(rowErrors) ? rowErrors[i] : undefined;
+          return (
+            <div key={f.id} role="group" aria-label={`Area ${i + 1}`} className="flex flex-col gap-3 rounded-lg border p-3">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="Name" hint="Lowercase letters, digits and dashes." error={err?.name?.message}>
+                  {(p) => <Input {...p} className="font-mono" {...register(`areas.${i}.name`)} />}
+                </Field>
+                <Field label="Description" hint="One line; optional." error={err?.description?.message}>
+                  {(p) => <Input {...p} {...register(`areas.${i}.description`)} />}
+                </Field>
+                <Field label="Paths" hint="One per line, relative to the repository; a folder ends in /." error={err?.pathsText?.message}>
+                  {(p) => <Textarea {...p} className="font-mono" {...register(`areas.${i}.pathsText`)} />}
+                </Field>
+                <Field label="Labels" hint="Issue and PR labels, one per line; optional." error={err?.labelsText?.message}>
+                  {(p) => <Textarea {...p} className="font-mono" {...register(`areas.${i}.labelsText`)} />}
+                </Field>
+              </div>
+              {!readOnly && (
+                <div>
+                  <Button type="button" variant="outline" size="sm" onClick={() => remove(i)} aria-label={`Remove area ${i + 1}`}>
+                    <Trash2Icon /> Remove
+                  </Button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {tableError && (
+          <p role="alert" className="text-xs text-destructive">
+            {tableError}
+          </p>
+        )}
+        {suggest.isError && (
+          <p role="alert" className="text-xs text-destructive">
+            {errorMessage(suggest.error)}
+          </p>
+        )}
+        {!readOnly && (
+          <div className="row-wrap gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => append({ name: "", description: "", pathsText: "", labelsText: "" })}
+            >
+              <PlusIcon /> Add area
+            </Button>
+            <Button type="button" variant="outline" size="sm" disabled={suggest.isPending} onClick={() => void addSuggestions()}>
+              Suggest from the tree
+            </Button>
+          </div>
+        )}
+      </SectionForm>
+    </SettingsSection>
   );
 }
 

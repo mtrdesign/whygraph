@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
@@ -231,11 +231,12 @@ describe("SettingsLayout", () => {
       "GitHub",
       "Git hooks",
       "Scanning",
+      "Areas",
       "Usage",
       "Agents",
       "Danger zone",
     ]);
-    for (const id of ["general", "models", "github", "hooks", "scanning", "budgets", "agents", "danger"]) {
+    for (const id of ["general", "models", "github", "hooks", "scanning", "areas", "budgets", "agents", "danger"]) {
       expect(document.getElementById(`settings-${id}`)).not.toBeNull();
     }
   });
@@ -313,6 +314,74 @@ describe("SectionForm", () => {
     expect(await within(region("Git hooks")).findByText("Saved")).toBeInTheDocument();
     expect(screen.getByLabelText("Default model model")).toHaveValue("x");
     expect(within(region("Models and keys")).getByRole("button", { name: "Save" })).toBeEnabled();
+  });
+
+  it("Areas: an untouched table round-trips exactly, another section never rewrites it", async () => {
+    const stored = {
+      areas: {
+        checkout: { description: "Cart and payment", paths: ["src/checkout/", "src/pay.py"], labels: ["Checkout"] },
+        docs: { paths: ["docs/"] },
+      },
+    };
+    handlers["GET /api/projects/alpha/config"] = () => ({ config: stored, secrets: secrets(), import: IMPORT, read_only: false });
+    const user = userEvent.setup();
+    mount("/p/alpha/settings");
+    await screen.findByTestId("config-form");
+    const areas = within(region("Areas"));
+    expect(areas.getAllByLabelText("Name").map((i) => (i as HTMLInputElement).value)).toEqual(["checkout", "docs"]);
+    expect(areas.getAllByLabelText("Paths")[0]).toHaveValue("src/checkout/\nsrc/pay.py");
+    // Saving another section sends the stored areas back untouched.
+    await user.click(within(region("Git hooks")).getByRole("checkbox", { name: /post-merge/ }));
+    await user.click(within(region("Git hooks")).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("PUT", "/api/projects/alpha/config")).toHaveLength(1));
+    expect(calls("PUT", "/api/projects/alpha/config")[0].body).toEqual({
+      config: { ...stored, scan: { hooks: ["post-commit", "post-rewrite", "post-checkout"] } },
+    });
+  });
+
+  it("Areas: Suggest appends rows without saving; Save writes the table; zero rows drops the key", async () => {
+    handlers["GET /api/projects/alpha/config"] = () => ({
+      config: { areas: { docs: { paths: ["docs/"] } } },
+      secrets: secrets(),
+      import: IMPORT,
+      read_only: false,
+    });
+    handlers["GET /api/projects/alpha/areas/suggest"] = () => ({
+      suggestions: [
+        { name: "docs", paths: ["docs/"], labels: [], description: "" },
+        { name: "chat", paths: ["src/whygraph/chat/"], labels: [], description: "" },
+      ],
+    });
+    const user = userEvent.setup();
+    mount("/p/alpha/settings");
+    await screen.findByTestId("config-form");
+    await user.click(within(region("Areas")).getByRole("button", { name: "Suggest from the tree" }));
+    await waitFor(() => expect(within(region("Areas")).getAllByLabelText("Name")).toHaveLength(2));
+    expect(calls("PUT", "/api/projects/alpha/config")).toHaveLength(0);
+    await user.click(within(region("Areas")).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("PUT", "/api/projects/alpha/config")).toHaveLength(1));
+    expect(calls("PUT", "/api/projects/alpha/config")[0].body).toEqual({
+      config: { areas: { docs: { paths: ["docs/"] }, chat: { paths: ["src/whygraph/chat/"] } } },
+    });
+    for (const _ of [0, 1]) await user.click(within(region("Areas")).getAllByRole("button", { name: /Remove area/ })[0]);
+    await user.click(within(region("Areas")).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("PUT", "/api/projects/alpha/config")).toHaveLength(2));
+    expect(calls("PUT", "/api/projects/alpha/config")[1].body).toEqual({ config: {} });
+  });
+
+  it("Areas: a row without a path is refused before anything is sent; no section at the global scope", async () => {
+    const user = userEvent.setup();
+    mount("/p/alpha/settings");
+    await screen.findByTestId("config-form");
+    await user.click(within(region("Areas")).getByRole("button", { name: "Add area" }));
+    await user.type(within(region("Areas")).getByLabelText("Name"), "web");
+    await user.click(within(region("Areas")).getByRole("button", { name: "Save" }));
+    expect(await within(region("Areas")).findByText("Add at least one path")).toBeInTheDocument();
+    expect(calls("PUT", "/api/projects/alpha/config")).toHaveLength(0);
+    cleanup();
+    mount("/settings");
+    await screen.findByTestId("config-form");
+    expect(screen.queryByRole("region", { name: "Areas" })).toBeNull();
   });
 
   it("asks before leaving with unsaved changes; Leave goes on", async () => {

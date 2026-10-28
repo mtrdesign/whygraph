@@ -574,6 +574,11 @@ export type AddProjectBody =
 /** A v2 config layer (`[llm]`, `[analyze]`, ... as nested tables). */
 export type ConfigDict = Record<string, unknown>;
 
+/** `GET .../areas/suggest`: at most 12 candidate `[areas]` entries. */
+export interface AreasSuggestResponse {
+  suggestions: { name: string; paths: string[]; labels: string[]; description: string }[];
+}
+
 export interface SecretStatus {
   set: boolean;
   hint: string | null;
@@ -1964,6 +1969,8 @@ export function projectApi(slug: string) {
     // Tests the key the project would use for a provider.
     keyTest: (provider: string) =>
       send<KeyTestResponse>("POST", `${base}/keys/${encodeURIComponent(provider)}/test`),
+    // Area suggestions from the commit history (refused for a linked project).
+    areasSuggest: () => get<AreasSuggestResponse>(`${base}/areas/suggest`),
     // Model-id suggestions for the key the project would use (always 200; linked projects get 403).
     models: (provider: string) => get<ModelListResponse>(`${base}/models/${encodeURIComponent(provider)}`),
     // Local mode only: tests the effective GitHub token against the project's remote.

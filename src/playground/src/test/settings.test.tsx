@@ -1017,3 +1017,35 @@ describe("connected portals and the project budget", () => {
     expect(within(row).getByRole("option", { name: "Contributor" })).toBeInTheDocument();
   });
 });
+
+describe("Chat mode", () => {
+  const modeSelect = () => within(region("Models and keys")).getByRole("combobox", { name: "Mode" });
+
+  it("at the project scope: PUTs [chat].mode, and an unknown stored id shows and saves", async () => {
+    handlers["GET /api/projects/alpha/config"] = () => ({
+      config: { chat: { mode: "future" } },
+      secrets: secrets(),
+      import: IMPORT,
+      read_only: false,
+    });
+    const user = userEvent.setup();
+    mount("/p/alpha/settings");
+    await screen.findByTestId("config-form");
+    expect(modeSelect()).toHaveTextContent("future (unknown)");
+    // An unknown stored id does not block saving a change elsewhere in the form.
+    await pick(user, "Effort", "Low");
+    await user.click(within(region("Models and keys")).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("PUT", "/api/projects/alpha/config")).toHaveLength(1));
+    expect(calls("PUT", "/api/projects/alpha/config")[0].body).toEqual({ config: { chat: { effort: "low", mode: "future" } } });
+    await pick(user, "Mode", "Lead");
+    await user.click(within(region("Models and keys")).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("PUT", "/api/projects/alpha/config")).toHaveLength(2));
+    expect(calls("PUT", "/api/projects/alpha/config")[1].body).toEqual({ config: { chat: { effort: "low", mode: "lead" } } });
+  });
+
+  it("at the defaults scope there is no Mode select", async () => {
+    mount("/settings");
+    await screen.findByTestId("config-form");
+    expect(within(region("Models and keys")).queryByRole("combobox", { name: "Mode" })).toBeNull();
+  });
+});

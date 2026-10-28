@@ -1,4 +1,5 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
+import { STARTER_PROMPTS } from "../components/chat/MessageThread";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
@@ -154,6 +155,11 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
   if (rest === "/node/rationale") return Promise.resolve(json(fake.rationale));
   if (rest === "/node/evidence") return Promise.resolve(json({ evidence: [] }));
   if (rest === "/history") return Promise.resolve(json({ evidence: [] }));
+  if (rest === "/chat/modes") {
+    return Promise.resolve(
+      json({ default: "engineer", modes: [{ id: "engineer", label: "Engineer", description: "", starters: [...STARTER_PROMPTS] }] }),
+    );
+  }
   if (rest === "/chat/providers") {
     if (fake.providersStatus) return Promise.resolve(json({ error: "boom", code: "x" }, fake.providersStatus));
     return Promise.resolve(json(fake.providers));

@@ -23,6 +23,7 @@ import {
   PROVIDERS,
   TASKS,
   EFFORT_LEVELS,
+  MODE_IDS,
   configFormSchema,
   layerToValues,
   valuesToLayer,
@@ -31,9 +32,10 @@ import {
 } from "../../lib/configForm";
 import { isProduction, usePortalState, useReadOnly } from "../../lib/identity";
 import { errorMessage } from "../../lib/apiErrors";
-import { effortLabel, providerLabel } from "../../lib/labels";
+import { effortLabel, modeLabel, providerLabel } from "../../lib/labels";
 import {
   endpointOverride,
+  inheritedChatModeText,
   inheritedEffortText,
   inheritedEndpointText,
   inheritedFrom,
@@ -188,6 +190,7 @@ function ModelRow({
   overridden,
   onReset,
   effortEmptyLabel,
+  modeEmptyLabel,
 }: {
   name: "defaultModel" | TaskName;
   label: string;
@@ -208,6 +211,8 @@ function ModelRow({
   onReset?: () => void;
   /** Set on the Chat row only: shows the Effort select, whose empty option reads this. */
   effortEmptyLabel?: string;
+  /** Set on the Chat row at project scope only: shows the Mode select, whose empty option reads this. */
+  modeEmptyLabel?: string;
 }) {
   const provider = (useWatch({ control, name: `${name}.provider` as FieldPath<ConfigFormValues> }) ?? "") as string;
   const listing = useQuery<ModelListResponse>({
@@ -288,6 +293,39 @@ function ModelRow({
                     ]}
                   />
                 )}
+              />
+            </div>
+          )}
+          {modeEmptyLabel !== undefined && (
+            <div className="flex flex-wrap items-center gap-2">
+              <label htmlFor={`${p.id}-mode`} className="text-xs text-muted-foreground">
+                Mode
+              </label>
+              <Controller
+                control={control}
+                name="chat.mode"
+                render={({ field }) => {
+                  const stored = (field.value ?? "") as string;
+                  return (
+                    <FormSelect
+                      id={`${p.id}-mode`}
+                      aria-label="Mode"
+                      title="Default mode for new chats in this project."
+                      className="w-full sm:w-64"
+                      value={stored}
+                      onChange={field.onChange}
+                      disabled={readOnly}
+                      items={[
+                        { value: "", label: modeEmptyLabel },
+                        // A stored id this build does not know stays visible, and saving keeps it.
+                        ...(stored !== "" && !(MODE_IDS as readonly string[]).includes(stored)
+                          ? [{ value: stored, label: `${stored} (unknown)` }]
+                          : []),
+                        ...MODE_IDS.map((id) => ({ value: id as string, label: modeLabel(id) })),
+                      ]}
+                    />
+                  );
+                }}
               />
             </div>
           )}
@@ -656,16 +694,17 @@ export function ConfigForm({
                 error={errors[t.id]?.model?.message ?? errors[t.id]?.provider?.message ?? errors[t.id]?.root?.message}
                 overridden={
                   isProject &&
-                  !!(values[t.id]?.provider || values[t.id]?.model || (t.id === "chat" && values.chat?.effort))
+                  !!(values[t.id]?.provider || values[t.id]?.model || (t.id === "chat" && (values.chat?.effort || values.chat?.mode)))
                 }
                 onReset={() =>
-                  resetFields([t.id, t.id === "chat" ? { provider: "", model: "", effort: "" } : { provider: "", model: "" }])
+                  resetFields([t.id, t.id === "chat" ? { provider: "", model: "", effort: "", mode: "" } : { provider: "", model: "" }])
                 }
                 effortEmptyLabel={
                   t.id === "chat"
                     ? inheritedEffortText({ projectLayer: isProject ? layer : null, orgLayer, mode })
                     : undefined
                 }
+                modeEmptyLabel={t.id === "chat" && isProject ? inheritedChatModeText() : undefined}
               />
             ))}
           </div>

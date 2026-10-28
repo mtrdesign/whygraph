@@ -25,6 +25,7 @@ import { providerLabel } from "../../lib/labels";
 import { MessageBubble, type AssistantTurn, type Turn, type UserTurn } from "./MessageBubble";
 import { Composer } from "./Composer";
 import { EffortSelect } from "./EffortSelect";
+import { ModeSelect } from "./ModeSelect";
 import { ModelSelect } from "./ModelSelect";
 import {
   applyReasoningDelta,
@@ -131,6 +132,8 @@ export function MessageThread({
   const [draft, setDraft] = useState<{ provider: string; model: string } | null>(null);
   // The draft's effort level (null = the default), sent when the first Send creates the session.
   const [draftEffort, setDraftEffort] = useState<string | null>(null);
+  // The draft's mode; null = not picked yet, so the server's default (`chatModes().default`) shows.
+  const [draftMode, setDraftMode] = useState<string | null>(null);
   // A failure with no turn to hang it on: the draft's session could not be created, an edit or regenerate
   // was turned away before it wrote anything, or a version switch failed.
   const [createError, setCreateError] = useState<unknown>(null);
@@ -174,6 +177,11 @@ export function MessageThread({
   // The same rule for the effort level; the default it falls back to is the chosen provider's.
   const effortChoice = session ? (session.effort ?? null) : draftEffort;
   const defaultEffort = providers.data?.find((p) => p.provider === choice?.provider)?.default_effort ?? null;
+
+  // The modes list; when it fails the thread is an engineer chat with today's starters, no banner.
+  const modes = useProjectQuery(["chat", "modes"], (api) => api.chatModes());
+  const modeChoice = session ? (session.mode ?? "engineer") : (draftMode ?? modes.data?.default ?? "engineer");
+  const starterPrompts = modes.data?.modes.find((m) => m.id === modeChoice)?.starters ?? STARTER_PROMPTS;
 
   // The provider list failed (ER-4): nothing can be chosen, so nothing is sent until it loads.
   const providersFailed = providers.isError && !providers.data;
@@ -229,10 +237,12 @@ export function MessageThread({
   const cannotSend = budgetBlocked || noKeys || noKeyProvider !== null || providersFailed;
 
   const update = useMutation({
-    mutationFn: (vars: { provider?: string; model?: string; effort?: string | null }) =>
+    mutationFn: (vars: { provider?: string; model?: string; effort?: string | null; mode?: string | null }) =>
       api.chatUpdateSession(currentId as number, vars),
-    onSuccess: () => {
+    onSuccess: (_data, vars) => {
       queryClient.invalidateQueries({ queryKey: chatSessionsKey(slug) });
+      // `default` follows the caller's latest session, so a mode change moves it.
+      if ("mode" in vars) void queryClient.invalidateQueries({ queryKey: key("chat", "modes") });
     },
   });
 
@@ -333,8 +343,10 @@ export function MessageThread({
             provider: choice?.provider || undefined,
             model: choice?.model || undefined,
             effort: draftEffort ?? undefined,
+            mode: modes.data ? modeChoice : undefined,
           });
           id = created.id;
+          void queryClient.invalidateQueries({ queryKey: key("chat", "modes") });
         } catch (err) {
           // No key after all (changed elsewhere): refetch so the draft flips to the no-key state.
           if (err instanceof ApiError && err.status === 409 && err.code === "no_llm_key") {
@@ -354,6 +366,7 @@ export function MessageThread({
           provider: choice?.provider ?? "",
           model: choice?.model ?? "",
           effort: draftEffort,
+          mode: modes.data ? modeChoice : null,
           created_at: "",
           updated_at: "",
           messages: [],
@@ -516,6 +529,7 @@ export function MessageThread({
       } finally {
         setStreaming(false);
         if (abortRef.current === controller) abortRef.current = null;
+        void queryClient.invalidateQueries({ queryKey: key("chat", "modes") });
         if (useUi.getState().streamingSessionId === sid) setStreamingSessionId(null);
         // Refetch so the persisted rows replace the local turn — the server
         // persisted as it went, including on abort, so this is authoritative.
@@ -662,7 +676,7 @@ export function MessageThread({
               </p>
             </div>
             <div className="flex w-full flex-col gap-2">
-              {STARTER_PROMPTS.map((text) => (
+              {starterPrompts.map((text) => (
                 <Button
                   key={text}
                   variant="outline"
@@ -739,6 +753,20 @@ export function MessageThread({
                 });
               }}
             />
+            {modes.data && (
+              <ModeSelect
+                value={modeChoice}
+                modes={modes.data.modes}
+                disabled={update.isPending || streaming || budgetBlocked}
+                onChange={(next) => {
+                  if (currentId === null) {
+                    setDraftMode(next);
+                    return;
+                  }
+                  update.mutate({ mode: next });
+                }}
+              />
+            )}
             <EffortSelect
               value={effortChoice}
               defaultEffort={defaultEffort}

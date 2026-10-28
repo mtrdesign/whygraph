@@ -29,6 +29,11 @@ export function effortLabel(level: string): string {
   return level === "xhigh" ? "Extra high" : level.charAt(0).toUpperCase() + level.slice(1);
 }
 
+/** A chat mode as the UI words it ("lead" reads "Lead"). */
+export function modeLabel(id: string): string {
+  return id.charAt(0).toUpperCase() + id.slice(1);
+}
+
 const SOURCE: Record<string, string> = {
   local: "Local folder",
   github: "GitHub",

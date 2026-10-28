@@ -129,7 +129,7 @@ describe("config form mapping", () => {
 
   it("keeps a model id that contains a slash intact by writing provider and model separately", () => {
     const v = layerToValues({});
-    v.chat = { provider: "openrouter", model: "anthropic/claude-x", effort: "" };
+    v.chat = { provider: "openrouter", model: "anthropic/claude-x", effort: "", mode: "" };
     expect(valuesToLayer({}, v, { scan: false })).toEqual({
       chat: { provider: "openrouter", model: "anthropic/claude-x" },
     });

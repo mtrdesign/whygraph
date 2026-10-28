@@ -41,7 +41,7 @@ Two things differ from a `whygraph.toml`:
   never sent to a project that overrides that provider's endpoint (its key card says so).
 - **Only some keys can be set.** The WhyGraph database is always in the portal's data directory (`projects/<org>/<slug>/whygraph.db`) and the
   CodeGraph index always at `<repo>/.codegraph/codegraph.db`. Importing a repository's `whygraph.toml` takes models, the
-  `[analyze]` / `[rationale]` / `[chat]` tuning keys, and `[scan].forge`, `remote`, `default_branch`,
+  `[analyze]` / `[rationale]` / `[chat]` tuning keys, the `[areas]` table, and `[scan].forge`, `remote`, `default_branch`,
   `hooks` and `serve_codegraph`. It never takes endpoints, database paths or the log file, drops any setting for the removed
   [`claude-cli` provider](llm-providers.md#claude-cli-removed), and reports what it dropped. Endpoints
   are set in the UI.
@@ -116,6 +116,13 @@ max_workers = 2               # parallel LLM calls in the diff-analyzer crawler
 # effort = "medium"          # default effort for chats with no level of their own:
                               # low | medium | high | xhigh | max (unset = the provider's default)
 
+# Named parts of the codebase, used by the chat assistant (see "Areas" below).
+# Up to 50 tables; each name is a lowercase slug.
+# [areas.billing]
+# description = "Invoices and payments"   # one line, at most 200 characters; optional
+# paths = ["src/billing/", "tests/billing"]  # required: 1-20 repo-relative posix paths
+# labels = ["billing", "payments"]         # optional: up to 20 issue / PR labels
+
 # Per-provider connection settings - key, endpoint, timeout. No model here:
 # pick models with [llm].model or a role's own model.
 [llm.anthropic]
@@ -149,7 +156,50 @@ timeout_sec = 120
 | `[analyze]` | The per-commit LLM diff descriptions written during a scan - provider, model, parallelism (`max_workers`), the truncation / per-file thresholds, and an [org-only agent limit](#agent-limits-organization-only). |
 | `[rationale]` | The `whygraph_rationale_brief` card - provider, model, how much of a squash-merged PR is rendered into the prompt, and an [org-only agent limit](#agent-limits-organization-only). |
 | `[chat]` | The [chat assistant](../guide/chat.md) - default provider and model for new sessions, plus the per-turn tool, generation, and context budgets, the output limit, continuations, and the default [effort](../guide/chat.md#effort). |
+| `[areas.<name>]` | Named [product areas](#areas): a set of paths and issue / PR labels the chat assistant can filter history by. Empty by default. |
 | `[llm.*]` | Per-provider **connection** settings - key, timeout, and `base_url` / `host` where relevant. Five adapters; only four can drive chat. See [LLM providers](llm-providers.md). |
+
+## Areas
+
+An area names part of your codebase so a question such as "what changed in billing?" resolves to the
+right code. Each `[areas.<name>]` table holds a `description`, a list of `paths` and a list of
+`labels`. The chat assistant sees the areas in its project overview, can pass `area` to
+[`find_changes`, `get_work_in_flight` and `get_area_owners`](../guide/chat.md#what-it-can-look-at), and
+the portal's Overview lists them. Areas are optional; with none configured those tools work on paths
+alone. In the portal you edit them under [Settings > Areas](../portal/projects.md#settings), where
+**Suggest areas** proposes some from where the last year's commits landed (nothing is saved until you
+save the section). Areas are set per project, never in the portal defaults, and a linked project has no Areas section (the platform owns its settings).
+
+```toml
+[areas.billing]
+description = "Invoices and payments"
+paths = ["src/billing/", "tests/billing"]
+labels = ["billing", "payments"]
+```
+
+What is accepted (anything else is refused when you save in the portal, and dropped with a warning
+when read from a `whygraph.toml`):
+
+- **At most 50 areas.** The name is a lowercase slug (`a-z`, `0-9`, `-`), at most 40 characters, and
+  `token` and `api_key` are reserved.
+- **Only the keys `description`, `paths` and `labels`.** An unknown key is an error.
+- **`description`** is one line of at most 200 characters.
+- **`paths`** is required: 1 to 20 entries of at most 256 characters, relative posix paths (no leading
+  `/`, no `\`, no `..`). An entry ending in `/` is a prefix; otherwise it matches that exact path or
+  anything under it.
+- **`labels`** is optional: up to 20 entries of at most 50 characters, matched case-insensitively
+  against issue and PR labels.
+- Entries are non-empty strings without control characters.
+
+Paths are only compared with the file paths recorded in history; nothing opens them.
+
+!!! note "Directory renames are not followed"
+    History is matched by the paths you list. If a directory was moved, add its old location to
+    `paths` to keep the earlier history in the area.
+
+!!! note "Ownership, not performance"
+    `get_area_owners` describes who knows the code under an area. It is not a ranking of people, and
+    the assistant is told not to present it as one.
 
 ## Agent limits (organization only)
 

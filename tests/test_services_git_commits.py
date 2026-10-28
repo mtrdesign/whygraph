@@ -164,3 +164,24 @@ def test_contains_matches_by_sha(tmp_path: Path) -> None:
     materialized = list(commits)
     assert materialized[0] in commits
     assert "not-a-commit" not in commits  # type: ignore[operator]
+
+
+def test_full_history_log_carries_the_long_timeout(tmp_path: Path) -> None:
+    from whygraph.services.git.commits import LOG_TIMEOUT
+
+    class Spy(Shell):
+        def __init__(self) -> None:
+            super().__init__()
+            self.timeouts: list[tuple[str, int | None]] = []
+
+        def run(self, cmd, **kwargs):  # noqa: ANN001, ANN201
+            self.timeouts.append((cmd.argv()[1], kwargs.get("timeout")))
+            return super().run(cmd, **kwargs)
+
+    root = _make_repo(tmp_path)
+    spy = Spy()
+    commits = Commits(root, "main", shell=spy)
+    len(commits)
+    list(commits)
+    assert ("rev-list", None) in spy.timeouts
+    assert ("log", LOG_TIMEOUT) in spy.timeouts

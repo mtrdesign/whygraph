@@ -27,6 +27,9 @@ from .commands import GitLogShortstatCmd, GitRevListCountCmd
 from .commit import Commit
 from .exceptions import GitError
 
+LOG_TIMEOUT = 600
+"""Seconds allowed for the full-history ``git log`` (the shell default is 30)."""
+
 
 class Commits(Collection[Commit]):
     """All commits reachable from a ref, as a reusable :class:`Collection`.
@@ -96,7 +99,11 @@ class Commits(Collection[Commit]):
 
     def __iter__(self) -> Iterator[Commit]:
         try:
-            return self._shell.run(GitLogShortstatCmd(self.ref), cwd=self.root)
+            return self._shell.run(
+                GitLogShortstatCmd(self.ref),
+                cwd=self.root,
+                timeout=LOG_TIMEOUT,
+            )
         except ShellError as exc:
             raise GitError(f"failed to enumerate commits on {self.ref!r}") from exc
 

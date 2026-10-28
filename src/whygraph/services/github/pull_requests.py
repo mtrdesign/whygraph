@@ -19,7 +19,13 @@ from collections.abc import Collection, Iterator, Sequence
 
 from whygraph.core import Shell, ShellError
 
-from .commands import GhApiGraphqlCmd, floor_for, paginate_graphql, parse_github_ts
+from .commands import (
+    GhApiGraphqlCmd,
+    floor_for,
+    is_gateway_timeout,
+    paginate_graphql,
+    parse_github_ts,
+)
 from .exceptions import GitHubError
 from .pull_request import PullRequest
 from .token import GH_TOKEN_ENV, token_env
@@ -50,26 +56,30 @@ _PR_FIELDS = """\
         }
 """
 
-_LIST_QUERY = (
-    """
-query($owner: String!, $name: String!, $cursor: String) {
-  repository(owner: $owner, name: $name) {
+
+def _list_query(size: int) -> str:
+    """Return the full PR listing query for a page of ``size`` PRs."""
+    return (
+        f"""
+query($owner: String!, $name: String!, $cursor: String) {{
+  repository(owner: $owner, name: $name) {{
     pullRequests(
-      first: 100
+      first: {size}
       after: $cursor
       states: [OPEN, CLOSED, MERGED]
-      orderBy: {field: UPDATED_AT, direction: DESC}
-    ) {
-      pageInfo { hasNextPage endCursor }
-      nodes {
+      orderBy: {{field: UPDATED_AT, direction: DESC}}
+    ) {{
+      pageInfo {{ hasNextPage endCursor }}
+      nodes {{
 """
-    + _PR_FIELDS
-    + """      }
+        + _PR_FIELDS
+        + """      }
     }
   }
 }
 """
-)
+    )
+
 
 _UPDATES_QUERY = """
 query($owner: String!, $name: String!, $cursor: String) {
@@ -93,6 +103,9 @@ DETAILS_BATCH = 20
 20 x (250 commits + 100 comments + 50 refs + 20 labels) stays far under
 GitHub's 500k-node limit and its 10 s query timeout.
 """
+
+MIN_DETAILS_BATCH = 5
+"""Smallest details batch a 502 / 504 halves down to (20, 10, 5)."""
 
 _COUNT_QUERY = """
 query($owner: String!, $name: String!) {
@@ -180,9 +193,10 @@ class PullRequests(Collection[PullRequest]):
     def __iter__(self) -> Iterator[PullRequest]:
         for node in paginate_graphql(
             self._shell,
-            query=_LIST_QUERY,
+            query="",
             path=("repository", "pullRequests"),
             variables={"owner": self.owner, "name": self.name},
+            query_for_size=_list_query,
         ):
             yield PullRequest.from_graphql_node(node)
 
@@ -241,31 +255,40 @@ class PullRequests(Collection[PullRequest]):
             If ``gh`` fails (including a number GitHub cannot resolve,
             which makes ``gh`` exit non-zero) or the response is malformed.
         """
-        nums = [int(n) for n in numbers]
-        for start in range(0, len(nums), DETAILS_BATCH):
-            batch = nums[start : start + DETAILS_BATCH]
-            aliases = "".join(
-                f"    pr{n}: pullRequest(number: {n}) {{\n{_PR_FIELDS}    }}\n"
-                for n in batch
-            )
-            query = (
-                "query($owner: String!, $name: String!) {\n"
-                "  repository(owner: $owner, name: $name) {\n"
-                f"{aliases}  }}\n}}\n"
-            )
+        pending = [int(n) for n in numbers]
+        size = DETAILS_BATCH
+        while pending:
+            batch, rest = pending[:size], pending[size:]
             try:
-                data = self._shell.run(
-                    GhApiGraphqlCmd(query, {"owner": self.owner, "name": self.name}),
-                    env=token_env(GH_TOKEN_ENV),
-                )
+                data = self._details(batch)
             except ShellError as exc:
+                if is_gateway_timeout(exc) and size > MIN_DETAILS_BATCH:
+                    size = max(size // 2, MIN_DETAILS_BATCH)
+                    continue
                 detail = exc.stderr.strip() or exc.stdout.strip()
                 raise GitHubError(f"gh api graphql failed: {detail}") from exc
+            pending = rest
             repo = (data or {}).get("repository") or {}
             for n in batch:
                 node = repo.get(f"pr{n}")
                 if node is not None:
                     yield PullRequest.from_graphql_node(node)
+
+    def _details(self, batch: Sequence[int]) -> dict:
+        """Run one aliased details request for ``batch``."""
+        aliases = "".join(
+            f"    pr{n}: pullRequest(number: {n}) {{\n{_PR_FIELDS}    }}\n"
+            for n in batch
+        )
+        query = (
+            "query($owner: String!, $name: String!) {\n"
+            "  repository(owner: $owner, name: $name) {\n"
+            f"{aliases}  }}\n}}\n"
+        )
+        return self._shell.run(
+            GhApiGraphqlCmd(query, {"owner": self.owner, "name": self.name}),
+            env=token_env(GH_TOKEN_ENV),
+        )
 
     def __contains__(self, item: object) -> bool:
         if not isinstance(item, PullRequest):

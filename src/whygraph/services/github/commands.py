@@ -10,6 +10,7 @@ hand-rolling argv strings.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Iterator, Mapping
 from datetime import datetime, timedelta, timezone
 from subprocess import CompletedProcess
@@ -63,6 +64,79 @@ class GhApiGraphqlCmd(ShellCommand[dict]):
             msgs = "; ".join(e.get("message", "") for e in payload["errors"])
             raise GitHubError(f"GraphQL errors: {msgs}")
         return payload.get("data") or {}
+
+
+_log = logging.getLogger(__name__)
+
+Tolerate = Callable[[dict], bool]
+"""Decides, from a failed call's decoded JSON answer, that it is not a failure."""
+
+
+def forbidden_under(field: str) -> Tolerate:
+    """Build a ``tolerate`` predicate for a scoped ``FORBIDDEN`` answer.
+
+    Parameters
+    ----------
+    field : str
+        A GraphQL field name, e.g. ``"reviewRequests"``.
+
+    Returns
+    -------
+    Callable[[dict], bool]
+        ``True`` when the answer carries ``data`` and **every** entry of
+        its ``errors`` has ``type: FORBIDDEN`` and a ``path`` through
+        ``field``. Any other error, or a mix, is not tolerated.
+    """
+
+    def tolerate(payload: dict) -> bool:
+        errors = payload.get("errors")
+        return (
+            isinstance(payload.get("data"), dict)
+            and isinstance(errors, list)
+            and bool(errors)
+            and all(
+                isinstance(e, dict)
+                and e.get("type") == "FORBIDDEN"
+                and field in (e.get("path") or [])
+                for e in errors
+            )
+        )
+
+    return tolerate
+
+
+def tolerated_data(exc: ShellError, tolerate: Tolerate | None) -> dict | None:
+    """Return the ``data`` of a failed ``gh api graphql`` call that is tolerable.
+
+    ``gh`` exits non-zero when the answer carries ``errors``, but its
+    stdout still holds the JSON, partial ``data`` included.
+
+    Parameters
+    ----------
+    exc : ShellError
+        The failed invocation.
+    tolerate : Callable[[dict], bool] or None
+        The predicate; ``None`` tolerates nothing.
+
+    Returns
+    -------
+    dict or None
+        The answer's ``data`` when tolerated (one warning is logged with
+        the error count), else ``None``.
+    """
+    if tolerate is None:
+        return None
+    try:
+        payload = json.loads(exc.stdout)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict) or not tolerate(payload):
+        return None
+    _log.warning(
+        "GitHub refused %d nested field(s) (FORBIDDEN); dropped them, kept the rest",
+        len(payload["errors"]),
+    )
+    return payload["data"]
 
 
 LOOKBACK = timedelta(minutes=10)
@@ -120,8 +194,12 @@ def floor_for(watermark: str) -> datetime:
 GATEWAY_TIMEOUTS = ("HTTP 502", "HTTP 504")
 """``gh`` stderr markers of a query GitHub gave up on (too heavy for its limit)."""
 
-PAGE_SIZES = (100, 50, 25)
-"""Page sizes tried in turn when a page times out upstream."""
+PAGE_SIZES = (50, 25, 10)
+"""Page sizes tried in turn when a page times out upstream.
+
+A 100-PR page of the full PR fields took 8-12 s on ``biomejs/biome`` (often a
+502); 50 took about 7 s.
+"""
 
 
 def is_gateway_timeout(exc: ShellError) -> bool:
@@ -147,6 +225,7 @@ def paginate_graphql(
     path: tuple[str, ...],
     variables: Mapping[str, str],
     query_for_size: Callable[[int], str] | None = None,
+    tolerate: Tolerate | None = None,
 ) -> Iterator[dict]:
     """Yield ``nodes`` from a paginated GraphQL connection.
 
@@ -173,9 +252,13 @@ def paginate_graphql(
     query_for_size : Callable[[int], str], optional
         Builds the query for a page size. When given, ``query`` is
         ignored; a ``HTTP 502`` / ``504`` retries the same cursor at the
-        next size of :data:`PAGE_SIZES` (100, 50, 25) and the reduced
+        next size of :data:`PAGE_SIZES` (50, 25, 10) and the reduced
         size stays for the rest of the crawl. Without it a failure
         raises at once.
+    tolerate : Callable[[dict], bool], optional
+        Checked on the decoded stdout of a failed call before anything
+        else (:func:`tolerated_data`); when it accepts the answer, the
+        page's ``data`` is used instead of raising.
 
     Notes
     -----
@@ -206,15 +289,19 @@ def paginate_graphql(
                 GhApiGraphqlCmd(text, request_vars), env=token_env(GH_TOKEN_ENV)
             )
         except ShellError as exc:
-            if (
+            data = tolerated_data(exc, tolerate)
+            if data is not None:
+                pass
+            elif (
                 query_for_size is not None
                 and is_gateway_timeout(exc)
                 and size_index + 1 < len(PAGE_SIZES)
             ):
                 size_index += 1
                 continue
-            detail = exc.stderr.strip() or exc.stdout.strip()
-            raise GitHubError(f"gh api graphql failed: {detail}") from exc
+            else:
+                detail = exc.stderr.strip() or exc.stdout.strip()
+                raise GitHubError(f"gh api graphql failed: {detail}") from exc
         conn: Any = data
         for key in path:
             conn = (conn or {}).get(key)

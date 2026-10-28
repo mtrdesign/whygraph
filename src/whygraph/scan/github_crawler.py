@@ -11,7 +11,9 @@ newest ``updatedAt`` seen). With a matching row the crawl is
 downloads PR content only for PRs whose ``updatedAt`` differs from the
 stored one, and rewrites only rows that changed. Without a matching row
 (first crawl, another repository, a database written by the old
-insert-only crawler) it is a *full walk*, newest-first.
+insert-only crawler, or a row stored below :data:`FORGE_FIELDS_VERSION`)
+it is a *full walk*, newest-first; the last case also rewrites rows whose
+``updatedAt`` is unchanged, once.
 
 :meth:`GitHubCrawler.work` runs in three phases so SQLite's write lock is
 never held across the network: (a) read the state in a short session,
@@ -47,12 +49,22 @@ _T = TypeVar("_T")
 
 WRITE_CHUNK = 500
 
+FORGE_FIELDS_VERSION = 1
+"""Version of the fields the crawl stores (``forge_crawl_state.fields_version``).
+
+A kind stored below it is walked in full and every row rewritten once,
+bypassing the ``updated_at`` equality skip, so a database written before
+the phase 2 fields (milestone, assignees, reviews, PR files, ...) is
+backfilled by one scan. Bump it whenever a crawl must re-read old rows.
+"""
+
 
 class _State(NamedTuple):
     """Plain copy of a ``forge_crawl_state`` row (ORM rows expire on commit)."""
 
     repo: str
     watermark: str | None
+    fields_version: int = 0
 
 
 def _chunks(items: list[_T], size: int) -> Iterator[list[_T]]:
@@ -61,7 +73,12 @@ def _chunks(items: list[_T], size: int) -> Iterator[list[_T]]:
 
 
 def _is_full(state: _State | None, repo: str) -> bool:
-    return state is None or state.repo != repo
+    return state is None or state.repo != repo or _is_stale(state)
+
+
+def _is_stale(state: _State | None) -> bool:
+    """Whether ``state`` was written before :data:`FORGE_FIELDS_VERSION`."""
+    return state is not None and state.fields_version < FORGE_FIELDS_VERSION
 
 
 def _incremental(state: _State | None, repo: str) -> bool:
@@ -104,7 +121,11 @@ class GitHubCrawler(Crawler):
         # commits (expiring ORM objects) and closes.
         with get_session() as session:
             states = {
-                s.kind: _State(repo=s.repo, watermark=s.watermark)
+                s.kind: _State(
+                    repo=s.repo,
+                    watermark=s.watermark,
+                    fields_version=s.fields_version,
+                )
                 for s in session.exec(select(ForgeCrawlState)).all()
             }
             stored_prs = dict(
@@ -119,6 +140,7 @@ class GitHubCrawler(Crawler):
         # (b) drain the network with NO session open
         pr_state, issue_state = states.get("pull_request"), states.get("issue")
         full_pr, full_issue = _is_full(pr_state, repo), _is_full(issue_state, repo)
+        force_pr, force_issue = _is_stale(pr_state), _is_stale(issue_state)
         if full_pr or full_issue:
             self.set_total(
                 (len(self._client.pull_requests) if full_pr else 0)
@@ -134,13 +156,21 @@ class GitHubCrawler(Crawler):
         for chunk in _chunks(prs, WRITE_CHUNK):
             with get_session() as session:
                 n, u = _upsert_prs(
-                    session, chunk, stored=stored_prs, fetched_at=fetched_at
+                    session,
+                    chunk,
+                    stored=stored_prs,
+                    fetched_at=fetched_at,
+                    force=force_pr,
                 )
             pr_new, pr_upd = pr_new + n, pr_upd + u
         for chunk in _chunks(issues, WRITE_CHUNK):
             with get_session() as session:
                 n, u = _upsert_issues(
-                    session, chunk, stored=stored_issues, fetched_at=fetched_at
+                    session,
+                    chunk,
+                    stored=stored_issues,
+                    fetched_at=fetched_at,
+                    force=force_issue,
                 )
             is_new, is_upd = is_new + n, is_upd + u
         with get_session() as session:
@@ -194,14 +224,18 @@ def _upsert_prs(
     *,
     stored: dict[int, str],
     fetched_at: str,
+    force: bool = False,
 ) -> tuple[int, int]:
-    """Write new and changed PRs; return ``(new, updated)``. Equal rows are skipped."""
+    """Write new and changed PRs; return ``(new, updated)``.
+
+    Equal rows are skipped unless ``force`` (a fields backfill rewrites them).
+    """
     new = updated = 0
     for pr in prs:
         if pr.number not in stored:
             session.add(_pr_to_row(pr, fetched_at=fetched_at))
             new += 1
-        elif stored[pr.number] == pr.updated_at:
+        elif not force and stored[pr.number] == pr.updated_at:
             continue
         else:
             session.merge(_pr_to_row(pr, fetched_at=fetched_at))
@@ -229,14 +263,18 @@ def _upsert_issues(
     *,
     stored: dict[int, str],
     fetched_at: str,
+    force: bool = False,
 ) -> tuple[int, int]:
-    """Write new and changed issues; return ``(new, updated)``."""
+    """Write new and changed issues; return ``(new, updated)``.
+
+    ``force`` rewrites rows whose ``updated_at`` is unchanged (a fields backfill).
+    """
     new = updated = 0
     for issue in issues:
         if issue.number not in stored:
             session.add(_issue_to_row(issue, fetched_at=fetched_at))
             new += 1
-        elif stored[issue.number] != issue.updated_at:
+        elif force or stored[issue.number] != issue.updated_at:
             session.merge(_issue_to_row(issue, fetched_at=fetched_at))
             updated += 1
     return new, updated
@@ -256,7 +294,13 @@ def _save_state(
         candidates.append(previous.watermark)
     watermark = max(candidates, key=parse_github_ts) if candidates else None
     session.merge(
-        ForgeCrawlState(kind=kind, repo=repo, watermark=watermark, crawled_at=now)
+        ForgeCrawlState(
+            kind=kind,
+            repo=repo,
+            watermark=watermark,
+            crawled_at=now,
+            fields_version=FORGE_FIELDS_VERSION,
+        )
     )
 
 
@@ -297,6 +341,21 @@ def _pr_to_row(dc: PullRequestDC, *, fetched_at: str) -> PullRequestRow:
                 for c in dc.comments
             ]
         ),
+        milestone=dc.milestone,
+        assignees=json.dumps(list(dc.assignees)),
+        review_decision=dc.review_decision,
+        latest_reviews=json.dumps(
+            [
+                {"author": r.author, "state": r.state, "submitted_at": r.submitted_at}
+                for r in dc.latest_reviews
+            ]
+        ),
+        review_requests=json.dumps(list(dc.review_requests)),
+        first_review_at=dc.first_review_at,
+        files=json.dumps(list(dc.files)),
+        additions=dc.additions,
+        deletions=dc.deletions,
+        changed_files=dc.changed_files,
     )
 
 
@@ -313,4 +372,7 @@ def _issue_to_row(dc: IssueDC, *, fetched_at: str) -> IssueRow:
         html_url=dc.html_url,
         labels=json.dumps(list(dc.labels)),
         fetched_at=fetched_at,
+        milestone=dc.milestone,
+        assignees=json.dumps(list(dc.assignees)),
+        state_reason=dc.state_reason,
     )

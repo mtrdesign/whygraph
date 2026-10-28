@@ -35,6 +35,12 @@ class Issue:
         Browser URL.
     labels : tuple[str, ...]
         Label names applied to the issue.
+    milestone : int or None
+        Milestone number, ``None`` when the issue has none.
+    assignees : tuple[str, ...]
+        Logins of the assignees (first 10).
+    state_reason : str or None
+        ``COMPLETED``, ``NOT_PLANNED``, ``REOPENED`` or ``None``.
     """
 
     number: int
@@ -47,6 +53,9 @@ class Issue:
     author: str | None
     html_url: str
     labels: tuple[str, ...]
+    milestone: int | None = None
+    assignees: tuple[str, ...] = ()
+    state_reason: str | None = None
 
     @classmethod
     def from_graphql_node(cls, node: dict) -> "Issue":
@@ -70,6 +79,7 @@ class Issue:
         """
         author = node.get("author") or {}
         label_nodes = ((node.get("labels") or {}).get("nodes")) or []
+        assignee_nodes = ((node.get("assignees") or {}).get("nodes")) or []
         return cls(
             number=int(node["number"]),
             title=node.get("title", ""),
@@ -81,4 +91,7 @@ class Issue:
             author=author.get("login") if author else None,
             html_url=node["url"],
             labels=tuple(lbl["name"] for lbl in label_nodes if lbl.get("name")),
+            milestone=(node.get("milestone") or {}).get("number"),
+            assignees=tuple(a["login"] for a in assignee_nodes if a and a.get("login")),
+            state_reason=node.get("stateReason"),
         )

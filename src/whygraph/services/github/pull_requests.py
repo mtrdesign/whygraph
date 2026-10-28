@@ -20,11 +20,14 @@ from collections.abc import Collection, Iterator, Sequence
 from whygraph.core import Shell, ShellError
 
 from .commands import (
+    PAGE_SIZES,
     GhApiGraphqlCmd,
     floor_for,
+    forbidden_under,
     is_gateway_timeout,
     paginate_graphql,
     parse_github_ts,
+    tolerated_data,
 )
 from .exceptions import GitHubError
 from .pull_request import PullRequest
@@ -54,10 +57,24 @@ _PR_FIELDS = """\
         comments(first: 100) {
           nodes { author { login } body createdAt }
         }
+        milestone { number }
+        assignees(first: 10) { nodes { login } }
+        reviewDecision
+        latestOpinionatedReviews(first: 10) {
+          nodes { author { login } state submittedAt }
+        }
+        reviewRequests(first: 10) {
+          nodes { requestedReviewer { ... on User { login } ... on Bot { login } } }
+        }
+        reviews(first: 5, states: [APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]) {
+          nodes { author { login } submittedAt }
+        }
+        files(first: 100) { nodes { path } }
+        additions deletions changedFiles
 """
 
 
-def _list_query(size: int) -> str:
+def _list_query(size: int = PAGE_SIZES[0]) -> str:
     """Return the full PR listing query for a page of ``size`` PRs."""
     return (
         f"""
@@ -97,11 +114,15 @@ query($owner: String!, $name: String!, $cursor: String) {
 }
 """
 
+_TOLERATE = forbidden_under("reviewRequests")
+"""A team review request an installation token cannot read is not a failure."""
+
 DETAILS_BATCH = 20
 """PRs per details request.
 
-20 x (250 commits + 100 comments + 50 refs + 20 labels) stays far under
-GitHub's 500k-node limit and its 10 s query timeout.
+20 x (250 commits + 100 comments + 100 files + 50 refs + 20 labels + up
+to 25 reviews and review requests) stays far under GitHub's 500k-node
+limit; a 502 / 504 halves it (see :data:`MIN_DETAILS_BATCH`).
 """
 
 MIN_DETAILS_BATCH = 5
@@ -197,6 +218,7 @@ class PullRequests(Collection[PullRequest]):
             path=("repository", "pullRequests"),
             variables={"owner": self.owner, "name": self.name},
             query_for_size=_list_query,
+            tolerate=_TOLERATE,
         ):
             yield PullRequest.from_graphql_node(node)
 
@@ -262,11 +284,15 @@ class PullRequests(Collection[PullRequest]):
             try:
                 data = self._details(batch)
             except ShellError as exc:
-                if is_gateway_timeout(exc) and size > MIN_DETAILS_BATCH:
+                data = tolerated_data(exc, _TOLERATE)
+                if data is not None:
+                    pass
+                elif is_gateway_timeout(exc) and size > MIN_DETAILS_BATCH:
                     size = max(size // 2, MIN_DETAILS_BATCH)
                     continue
-                detail = exc.stderr.strip() or exc.stdout.strip()
-                raise GitHubError(f"gh api graphql failed: {detail}") from exc
+                else:
+                    detail = exc.stderr.strip() or exc.stdout.strip()
+                    raise GitHubError(f"gh api graphql failed: {detail}") from exc
             pending = rest
             repo = (data or {}).get("repository") or {}
             for n in batch:

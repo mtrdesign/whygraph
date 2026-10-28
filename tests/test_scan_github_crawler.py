@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -15,7 +16,7 @@ from whygraph.scan import github_crawler
 from whygraph.scan.github_crawler import GitHubCrawler
 from whygraph.services.github import GitHubError
 from whygraph.services.github.issue import Issue as IssueDC
-from whygraph.services.github.pull_request import Comment
+from whygraph.services.github.pull_request import Comment, Review
 from whygraph.services.github.pull_request import PullRequest as PullRequestDC
 
 T0 = "2026-10-01T10:00:00Z"
@@ -488,3 +489,71 @@ def test_empty_repository_stores_null_watermark(
     assert client.pull_requests.iter_calls == client.issues.iter_calls == 1
     assert client.pull_requests.len_calls == client.issues.len_calls == 0
     assert client.pull_requests.since_marks == []
+
+
+def test_forge_fields_round_trip(whygraph_db_initialized: Path) -> None:
+    client = FakeClient(
+        prs=[
+            pr_dc(
+                1,
+                milestone=3,
+                assignees=("ann",),
+                review_decision="APPROVED",
+                latest_reviews=(Review("bob", "APPROVED", T1),),
+                review_requests=("cy",),
+                first_review_at=T1,
+                files=("a.py", "b/c.py"),
+                additions=5,
+                deletions=2,
+                changed_files=2,
+            )
+        ],
+        issues=[issue_dc(2, milestone=4, assignees=("ann",), state_reason="COMPLETED")],
+    )
+    crawl(client)
+    with get_session() as session:
+        pr, issue = session.get(PullRequest, 1), session.get(Issue, 2)
+        assert (pr.milestone, pr.review_decision, pr.first_review_at) == (
+            3,
+            "APPROVED",
+            T1,
+        )
+        assert json.loads(pr.assignees) == ["ann"]
+        assert json.loads(pr.review_requests) == ["cy"]
+        assert json.loads(pr.files) == ["a.py", "b/c.py"]
+        assert json.loads(pr.latest_reviews) == [
+            {"author": "bob", "state": "APPROVED", "submitted_at": T1}
+        ]
+        assert (pr.additions, pr.deletions, pr.changed_files) == (5, 2, 2)
+        assert (issue.milestone, issue.state_reason) == (4, "COMPLETED")
+        assert json.loads(issue.assignees) == ["ann"]
+
+
+def test_old_fields_version_backfills_once_past_the_updated_at_skip(
+    whygraph_db_initialized: Path,
+) -> None:
+    client = fresh_client()
+    crawl(client)
+    with get_session() as session:
+        for row in session.exec(select(ForgeCrawlState)).all():
+            row.fields_version = 0
+            session.add(row)
+    client.pull_requests.prs = [
+        pr_dc(p.number, p.updated_at, files=("x.py",)) for p in client.pull_requests.prs
+    ]
+    client.pull_requests.len_calls = 0
+
+    crawl(client)
+
+    assert client.pull_requests.len_calls == 1  # a full walk, not an incremental
+    assert client.pull_requests.since_marks == []
+    with get_session() as session:
+        assert json.loads(session.get(PullRequest, 5).files) == ["x.py"]
+    assert {s.fields_version for s in states().values()} == {
+        github_crawler.FORGE_FIELDS_VERSION
+    }
+
+    client.pull_requests.len_calls = 0
+    crawl(client)  # now current: incremental again
+    assert client.pull_requests.len_calls == 0
+    assert client.pull_requests.since_marks

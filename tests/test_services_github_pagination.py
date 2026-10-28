@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
@@ -182,6 +183,10 @@ class _Flaky(CmdShell):
         return super(CmdShell, self).run(cmd, env=env, **kwargs)
 
 
+def _size(query: str) -> int:
+    return int(re.search(r"pullRequests\(\s*first: (\d+)", query).group(1))
+
+
 def _gateway(code: int = 502) -> ShellError:
     return ShellError(["gh"], 1, "", f"gh: Something went wrong (HTTP {code})")
 
@@ -191,8 +196,8 @@ def test_pull_request_list_retries_a_502_at_half_the_page_size() -> None:
     shell = _Flaky([_gateway(), page])
     got = [pr.number for pr in PullRequests("o", "r", shell=shell)]
     assert got == [1, 2]
-    assert "first: 100" in shell.query(0)
-    assert "first: 50" in shell.query(1)
+    assert _size(shell.query(0)) == 50
+    assert _size(shell.query(1)) == 25
 
 
 def test_pull_request_list_keeps_the_reduced_size_for_the_next_page() -> None:
@@ -200,7 +205,7 @@ def test_pull_request_list_keeps_the_reduced_size_for_the_next_page() -> None:
     second = _page("pullRequests", [_node(2)])
     shell = _Flaky([_gateway(504), first, second])
     assert [pr.number for pr in PullRequests("o", "r", shell=shell)] == [1, 2]
-    assert "first: 50" in shell.query(2)
+    assert _size(shell.query(2)) == 25
     assert shell.args(2)["cursor"] == "c1"
 
 
@@ -208,7 +213,7 @@ def test_pull_request_list_fails_after_three_gateway_errors() -> None:
     shell = _Flaky([_gateway(), _gateway(), _gateway()])
     with pytest.raises(GitHubError, match="HTTP 502"):
         [*iter(PullRequests("o", "r", shell=shell))]
-    assert "first: 25" in shell.query(2)
+    assert _size(shell.query(2)) == 10
 
 
 def test_pull_request_list_does_not_retry_other_failures() -> None:
@@ -231,3 +236,115 @@ def test_by_numbers_splits_a_batch_on_a_gateway_error() -> None:
     assert got == nums
     assert "pr10:" in shell.query(1) and "pr11:" not in shell.query(1)
     assert "pr11:" in shell.query(2)
+
+
+def _forbidden(*paths: list, extra: dict | None = None) -> ShellError:
+    errors = [
+        {"type": "FORBIDDEN", "path": path, "message": "Resource not accessible"}
+        for path in paths
+    ]
+    errors += [extra] if extra else []
+    nodes = [{**_node(1), "reviewRequests": {"nodes": [None]}}, _node(2)]
+    out = json.dumps({"data": _page("pullRequests", nodes), "errors": errors})
+    return ShellError(["gh"], 1, out, "gh: Resource not accessible")
+
+
+_RR = ["repository", "pullRequests", "nodes", 0, "reviewRequests", "nodes", 0]
+
+
+def test_forbidden_review_requests_are_dropped_not_fatal(caplog) -> None:
+    shell = _Flaky([_forbidden(_RR, _RR)])
+    with caplog.at_level("WARNING"):
+        got = [*iter(PullRequests("o", "r", shell=shell))]
+    assert [pr.number for pr in got] == [1, 2]
+    assert got[0].review_requests == ()
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1 and "2" in warnings[0].getMessage()
+    assert len(shell.cmds) == 1
+
+
+def test_forbidden_elsewhere_or_mixed_errors_still_fail() -> None:
+    elsewhere = _forbidden(["repository", "pullRequests", "nodes", 0, "files"])
+    with pytest.raises(GitHubError):
+        [*iter(PullRequests("o", "r", shell=_Flaky([elsewhere])))]
+    mixed = _forbidden(_RR, extra={"type": "INTERNAL", "path": ["repository"]})
+    with pytest.raises(GitHubError):
+        [*iter(PullRequests("o", "r", shell=_Flaky([mixed])))]
+
+
+def test_by_numbers_tolerates_forbidden_review_requests() -> None:
+    out = json.dumps(
+        {
+            "data": {"repository": {"pr1": _node(1)}},
+            "errors": [
+                {
+                    "type": "FORBIDDEN",
+                    "path": ["repository", "pr1", "reviewRequests", "nodes", 0],
+                    "message": "x",
+                }
+            ],
+        }
+    )
+    shell = _Flaky([ShellError(["gh"], 1, out, "")])
+    assert [p.number for p in PullRequests("o", "r", shell=shell).by_numbers([1])] == [
+        1
+    ]
+
+
+def test_issues_never_tolerate_forbidden() -> None:
+    shell = _Flaky([_forbidden(_RR)])
+    with pytest.raises(GitHubError):
+        [*iter(Issues("o", "r", shell=shell))]
+
+
+def test_pr_parser_reads_the_new_fields() -> None:
+    node = {
+        **_node(7),
+        "author": {"login": "me"},
+        "milestone": {"number": 2},
+        "assignees": {"nodes": [{"login": "ann"}]},
+        "reviewDecision": "CHANGES_REQUESTED",
+        "latestOpinionatedReviews": {
+            "nodes": [
+                {
+                    "author": {"login": "bob"},
+                    "state": "CHANGES_REQUESTED",
+                    "submittedAt": "2026-02-01T00:00:00Z",
+                }
+            ]
+        },
+        "reviewRequests": {
+            "nodes": [
+                {"requestedReviewer": {"login": "cy"}},
+                {"requestedReviewer": {}},
+                None,
+            ]
+        },
+        "reviews": {
+            "nodes": [
+                {"author": {"login": "me"}, "submittedAt": "2026-01-02T00:00:00Z"},
+                {"author": {"login": "bob"}, "submittedAt": "2026-02-01T00:00:00Z"},
+                {"author": {"login": "ann"}, "submittedAt": "2026-01-05T00:00:00Z"},
+            ]
+        },
+        "files": {"nodes": [{"path": "a.py"}]},
+        "additions": 3,
+        "deletions": 1,
+        "changedFiles": 1,
+    }
+    pr = PullRequest.from_graphql_node(node)
+    assert (pr.milestone, pr.assignees, pr.review_decision) == (
+        2,
+        ("ann",),
+        "CHANGES_REQUESTED",
+    )
+    assert pr.review_requests == ("cy",)
+    assert pr.first_review_at == "2026-01-05T00:00:00Z"
+    assert pr.files == ("a.py",) and pr.changed_files == 1
+    bare = PullRequest.from_graphql_node(_node(8))
+    assert bare.first_review_at is None and bare.files == () and bare.milestone is None
+
+
+def test_pr_fields_have_no_team_fragment() -> None:
+    assert "Team" not in prs_mod._PR_FIELDS
+    assert "reviewRequests" in prs_mod._PR_FIELDS

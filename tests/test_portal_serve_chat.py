@@ -2154,15 +2154,15 @@ def test_mode_resolution_and_session_fields(chat_client, monkeypatch) -> None:
 
     # A mode-only PATCH leaves updated_at; a mode + title PATCH bumps it.
     before = chat_client.get(_url(sid)).json()["updated_at"]
-    patched = chat_client.patch(_url(sid), json={"mode": "onboarding"})
-    assert patched.json()["mode"] == "onboarding"
+    patched = chat_client.patch(_url(sid), json={"mode": "engineer"})
+    assert patched.json()["mode"] == "engineer"
     assert patched.json()["updated_at"] == before
     # The last-used mode follows the most recently active session.
     assert chat_client.get("/api/chat/modes").json()["default"] in MODE_IDS
     chat_client.post(_url(sid, "/messages"), json={"content": "q2"})
-    assert seen[-1] == "onboarding"
-    assert chat_client.get("/api/chat/modes").json()["default"] == "onboarding"
-    assert _new_session(chat_client)["mode"] == "onboarding"
+    assert seen[-1] == "engineer"
+    assert chat_client.get("/api/chat/modes").json()["default"] == "engineer"
+    assert _new_session(chat_client)["mode"] == "engineer"
 
     # An explicit null resets to the project's mode.
     assert chat_client.patch(_url(sid), json={"mode": None}).json()["mode"] == "lead"
@@ -2173,6 +2173,7 @@ def test_mode_resolution_and_session_fields(chat_client, monkeypatch) -> None:
         row.mode = "retired"
         db.add(row)
         db.commit()
+    assert chat_client.get(_url(sid)).json()["mode"] == "lead"
     chat_client.post(_url(sid, "/messages"), json={"content": "q3"})
     assert seen[-1] == "lead"
 
@@ -2182,6 +2183,41 @@ def test_mode_resolution_and_session_fields(chat_client, monkeypatch) -> None:
     response = chat_client.post("/api/chat/sessions", json={"mode": "turbo"})
     assert response.status_code == 400 and response.json()["code"] == "bad_mode"
     assert _new_session(chat_client, mode="engineer")["mode"] == "engineer"
+
+
+def test_a_session_stored_in_the_removed_onboarding_mode_runs_as_engineer(
+    chat_client, monkeypatch
+) -> None:
+    """Onboarding lost the phase 1 gate; its stored sessions load as the default."""
+    seen: list = []
+
+    def _record(*, client, history, registry=None, mode=None, **kwargs):
+        seen.append(mode)
+        yield from _reply("a")
+
+    monkeypatch.setattr(serve_chat, "make_chat_client", lambda *a, **k: object())
+    monkeypatch.setattr(serve_chat, "run_turn", _record)
+
+    sid = _new_session(chat_client)["id"]
+    with use_project(chat_client.context()), project_session() as db:
+        row = db.get(ChatSessionRow, sid)
+        row.mode = "onboarding"
+        db.add(row)
+        db.commit()
+
+    assert chat_client.get(_url(sid)).json()["mode"] == "engineer"
+    listed = chat_client.get("/api/chat/sessions").json()
+    assert {s["id"]: s["mode"] for s in listed}[sid] == "engineer"
+    assert chat_client.get("/api/chat/modes").json()["default"] == "engineer"
+    response = chat_client.post(_url(sid, "/messages"), json={"content": "q"})
+    assert response.status_code == 200
+    assert seen == ["engineer"]
+
+    # A new write of the retired id is refused like any unknown mode.
+    response = chat_client.patch(_url(sid), json={"mode": "onboarding"})
+    assert response.status_code == 400 and response.json()["code"] == "bad_mode"
+    response = chat_client.post("/api/chat/sessions", json={"mode": "onboarding"})
+    assert response.status_code == 400 and response.json()["code"] == "bad_mode"
 
 
 def test_a_continued_reply_is_one_message_next_turn(chat_client, monkeypatch) -> None:

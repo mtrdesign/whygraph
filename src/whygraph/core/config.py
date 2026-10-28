@@ -77,7 +77,7 @@ Mapped per provider: Anthropic ``output_config.effort``, OpenAI and
 DeepSeek ``reasoning_effort``, OpenRouter ``reasoning.effort``. Mirrors
 :data:`whygraph.services.llm.chat.EFFORT_LEVELS` (pinned by a test)."""
 
-MODE_IDS: tuple[str, ...] = ("engineer", "lead", "onboarding")
+MODE_IDS: tuple[str, ...] = ("engineer", "lead")
 """The chat modes a project can default to (``[chat].mode``).
 
 Pinned against the mode registry in ``whygraph.chat.modes`` by a test."""

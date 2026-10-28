@@ -195,14 +195,19 @@ def _session_dict(row: ChatSessionRow, *, message_count: int | None = None) -> d
     """Serialize a session row for the sidebar / detail responses.
 
     ``streaming`` is true while a reply is being written in the session.
+    A stored mode that no longer exists (a removed mode) reads as the mode
+    the next turn runs in, so the picker never shows a retired id.
     """
+    mode = row.mode
+    if mode is not None and mode not in MODE_IDS:
+        mode = _project_mode()
     payload = {
         "id": row.id,
         "title": row.title,
         "provider": row.provider,
         "model": row.model,
         "effort": row.effort,
-        "mode": row.mode,
+        "mode": mode,
         "streaming": _is_streaming(_lease_key(row.id)),
         "created_at": row.created_at,
         "updated_at": row.updated_at,

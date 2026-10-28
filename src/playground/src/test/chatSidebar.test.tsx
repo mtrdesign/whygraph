@@ -29,7 +29,6 @@ const MODES_BODY = {
   modes: [
     { id: "engineer", label: "Engineer", description: "Code questions.", starters: ["Eng starter A", "Eng starter B"] },
     { id: "lead", label: "Lead", description: "Delivery questions.", starters: ["Lead starter A"] },
-    { id: "onboarding", label: "Onboarding", description: "New to the repo.", starters: ["Onb starter A"] },
   ],
 };
 

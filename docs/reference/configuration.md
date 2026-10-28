@@ -116,7 +116,7 @@ max_workers = 2               # parallel LLM calls in the diff-analyzer crawler
 # effort = "medium"          # default effort for chats with no level of their own:
                               # low | medium | high | xhigh | max (unset = the provider's default)
 # mode = "engineer"          # project only: the mode a new chat starts in when you have no
-                              # earlier chat here. engineer | lead | onboarding
+                              # earlier chat here. engineer | lead
 
 # Named parts of the codebase, used by the chat assistant (see "Areas" below).
 # Up to 50 tables; each name is a lowercase slug.

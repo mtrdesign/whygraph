@@ -66,6 +66,7 @@ from whygraph.serve import graphdata
 from whygraph.services.codegraph import CodeGraph, CodeGraphError
 from whygraph.services.llm.chat import ToolSpec
 
+from .areas import configured_areas, overview_block, path_predicates, resolve_area
 from . import charts, files, graph_stats_sql, stats_sql
 
 _log = logging.getLogger(__name__)
@@ -256,8 +257,10 @@ _SPECS: tuple[ToolSpec, ...] = (
             "are AND-ed, case-insensitive substrings, matched against each "
             "commit's description / subject / body and against the TITLES of "
             "its pull requests. `path` accepts a DIRECTORY as well as a file "
-            "(unlike get_area_history) and follows rename chains. Pass at "
-            "least one of the two." + DESCRIPTION_AUTHORITY
+            "(unlike get_area_history) and follows rename chains. `area` "
+            "restricts to a configured area (see the overview); area paths "
+            "are matched by prefix and do not follow renames. Pass at least "
+            "one of query, path or area." + DESCRIPTION_AUTHORITY
         ),
         parameters={
             "type": "object",
@@ -275,6 +278,20 @@ _SPECS: tuple[ToolSpec, ...] = (
                     "description": (
                         "Repo-relative file OR directory to restrict to, e.g. "
                         "'src/whygraph/chat'."
+                    ),
+                },
+                "area": {
+                    "type": "string",
+                    "description": (
+                        "A configured area name from the overview's areas. "
+                        "Not with `path`."
+                    ),
+                },
+                "since_days": {
+                    "type": "integer",
+                    "description": (
+                        "Only commits from the last N days (1-3650). Not a "
+                        "filter on its own."
                     ),
                 },
                 "limit": {
@@ -329,7 +346,8 @@ _SPECS: tuple[ToolSpec, ...] = (
         description=(
             "Get repository-wide totals: commit / PR / issue counts, the date "
             "range of scanned history, when the last scan ran, how much of "
-            "the history has LLM descriptions, and the top contributors. "
+            "the history has LLM descriptions, and the top contributors, "
+            "plus the configured areas. "
             "These SIX FIXED NUMBERS and nothing else — it has no per-file, "
             "per-month, or per-PR breakdown, so for hotspot files, churn, "
             "velocity over time, or cycle time use run_project_stats. For the "
@@ -356,7 +374,11 @@ _SPECS: tuple[ToolSpec, ...] = (
                 "limit": {
                     "type": "integer",
                     "description": "Max entries per category. Default 10.",
-                }
+                },
+                "since_days": {
+                    "type": "integer",
+                    "description": "Only entries from the last N days (1-3650).",
+                },
             },
         },
     ),
@@ -718,10 +740,27 @@ def _get_area_history(path: str, limit: int = 10, include_renames: bool = True) 
 
 
 def _find_changes(
-    query: str | None = None, path: str | None = None, limit: int = 15
+    query: str | None = None,
+    path: str | None = None,
+    limit: int = 15,
+    area: str | None = None,
+    since_days: int | None = None,
 ) -> dict:
     """Handler for ``find_changes``."""
-    return _find_changes_resource(query=query, path=path, limit=limit)
+    predicates = None
+    if area and area.strip() and not (path and path.strip()):
+        # An unknown area raises WhyGraphError, which the registry turns into
+        # a tool result naming the configured areas.
+        resolved = resolve_area(area)
+        area, predicates = resolved.name, path_predicates(resolved)
+    return _find_changes_resource(
+        query=query,
+        path=path,
+        limit=limit,
+        area=area,
+        area_predicates=predicates,
+        since_days=since_days,
+    )
 
 
 def _get_commit(sha: str) -> dict:
@@ -742,13 +781,20 @@ def _get_issue(number: int) -> dict:
 
 
 def _get_repo_overview() -> dict:
-    """Handler for ``get_repo_overview``."""
-    return _repo_overview_resource()
+    """Handler for ``get_repo_overview``.
+
+    The configured areas ride along here, in the chat handler only: the MCP
+    resource and ``/api/v1`` stay unchanged.
+    """
+    overview = _repo_overview_resource()
+    if configured_areas():
+        overview = {**overview, "areas": overview_block()}
+    return overview
 
 
-def _list_recent_activity(limit: int = 10) -> dict:
+def _list_recent_activity(limit: int = 10, since_days: int | None = None) -> dict:
     """Handler for ``list_recent_activity``."""
-    return _recent_activity_resource(limit=int(limit))
+    return _recent_activity_resource(limit=int(limit), since_days=since_days)
 
 
 def _run_project_stats(sql: str) -> dict:

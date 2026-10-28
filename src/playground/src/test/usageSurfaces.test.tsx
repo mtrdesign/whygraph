@@ -451,6 +451,8 @@ describe("Chat under a hard stop", () => {
   beforeEach(() => {
     fake.routes["/api/projects/alpha/chat/providers"] = () =>
       json([{ provider: "openai", configured: true, default_model: "gpt", default: true }]);
+    fake.routes["/api/projects/alpha/chat/modes"] = () =>
+      json({ default: "engineer", modes: [{ id: "engineer", label: "Engineer", description: "", starters: [] }] });
   });
 
   it("replaces the composer with the notice, keeping the history readable", async () => {

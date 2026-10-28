@@ -5,7 +5,7 @@
 import type { QueryClient } from "@tanstack/react-query";
 import type { ConfigDict, KeyScope, KeyTestResult, SecretStatus } from "../api";
 import { CHAT_PROVIDER_TAGS, KEYED_PROVIDERS, TASKS, splitModel, type ModelPick, type TaskName } from "./configForm";
-import { effortLabel, providerLabel } from "./labels";
+import { effortLabel, modeLabel, providerLabel } from "./labels";
 
 const obj = (v: unknown): Record<string, unknown> =>
   v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
@@ -192,6 +192,14 @@ export function inheritedEffortText({
   const orgEffort = str(obj(orgLayer?.chat).effort);
   if (projectLayer && orgEffort) return `Inherited: ${effortLabel(orgEffort)} ${inheritedFrom(mode)}`;
   return projectLayer ? "Inherited: provider default" : "Provider default";
+}
+
+/**
+ * The empty option of the Chat row's Mode select (project scope only): `[chat].mode` has no
+ * portal-default layer, so an unset mode is Engineer.
+ */
+export function inheritedChatModeText(): string {
+  return `Default (${modeLabel("engineer")})`;
 }
 
 /** The placeholder of an empty endpoint: the inherited value, or the built-in default. */

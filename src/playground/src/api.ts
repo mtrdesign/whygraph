@@ -158,6 +158,20 @@ export interface ChatProvider {
   default_effort?: string | null;
 }
 
+/** One chat mode as `GET /chat/modes` lists it; starters already name the project's area. */
+export interface ChatModeInfo {
+  id: string;
+  label: string;
+  description: string;
+  starters: string[];
+}
+
+export interface ChatModes {
+  /** The caller's last-used mode, else the project's `[chat].mode`, else engineer. */
+  default: string;
+  modes: ChatModeInfo[];
+}
+
 export interface ChatModel {
   id: string;
   display_name: string;
@@ -184,6 +198,8 @@ export interface ChatSession {
   // Chat harness v2: the session's own effort level (null = inherit) and whether a turn holds its lease right now.
   effort?: string | null;
   streaming?: boolean;
+  // The session's chat mode (null on rows from before modes existed).
+  mode?: string | null;
 }
 
 export interface ChatToolCall {
@@ -212,6 +228,8 @@ export interface ChatMessage {
   // the output limit, `refusal` / `content_filter` = declined); `parent_id` is its place in the tree.
   finish_reason?: string | null;
   effort?: string | null;
+  // The mode the turn ran under (assistant rows; null on user / tool rows and old rows).
+  mode?: string | null;
   parent_id?: number | null;
   // The round's reasoning (summarized thinking), for display only; never copied or sent back.
   reasoning?: string | null;
@@ -2019,16 +2037,18 @@ export function projectApi(slug: string) {
 
     // ---- chat ---------------------------------------------------------------
     chatProviders: () => get<ChatProvider[]>(`${base}/chat/providers`),
+    chatModes: () => get<ChatModes>(`${base}/chat/modes`),
     chatModels: (provider: string) =>
       get<ChatModels>(`${base}/chat/models?provider=${encodeURIComponent(provider)}`),
     chatSessions: () => get<ChatSession[]>(`${base}/chat/sessions`),
-    chatCreateSession: (body: { provider?: string; model?: string; title?: string; effort?: string }) =>
+    chatCreateSession: (body: { provider?: string; model?: string; title?: string; effort?: string; mode?: string }) =>
       send<ChatSession>("POST", `${base}/chat/sessions`, body),
     chatTranscript: (id: number) => get<ChatTranscript>(`${base}/chat/sessions/${id}`),
     chatUpdateSession: (
       id: number,
       // `effort: null` resets the session to the default; leaving the key out leaves it alone.
-      body: { title?: string; provider?: string; model?: string; effort?: string | null },
+      // `mode: null` resets to the project's mode (else engineer).
+      body: { title?: string; provider?: string; model?: string; effort?: string | null; mode?: string | null },
     ) => send<ChatSession>("PATCH", `${base}/chat/sessions/${id}`, body),
     chatDeleteSession: async (id: number): Promise<void> => {
       const res = await request(`/api${base}/chat/sessions/${id}`, init("DELETE"));

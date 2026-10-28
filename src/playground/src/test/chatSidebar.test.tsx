@@ -21,9 +21,21 @@ interface Session {
   updated_at: string;
   message_count: number;
   effort?: string | null;
+  mode?: string | null;
 }
 
+const MODES_BODY = {
+  default: "engineer",
+  modes: [
+    { id: "engineer", label: "Engineer", description: "Code questions.", starters: ["Eng starter A", "Eng starter B"] },
+    { id: "lead", label: "Lead", description: "Delivery questions.", starters: ["Lead starter A"] },
+    { id: "onboarding", label: "Onboarding", description: "New to the repo.", starters: ["Onb starter A"] },
+  ],
+};
+
 interface Fake {
+  /** When set, `/chat/modes` answers with this status. */
+  modesStatus?: number;
   projects: Record<string, Record<string, unknown>>;
   sessions: Session[];
   calls: { path: string; method: string; body: unknown; signal?: AbortSignal | null }[];
@@ -116,6 +128,10 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     const p = fake.projects[slug];
     if (!p) return Promise.resolve(json({ error: "project not found", code: "not_found" }, 404));
     if (!rest) return Promise.resolve(json(p));
+    if (rest === "/chat/modes") {
+      if (fake.modesStatus) return Promise.resolve(json({ error: "boom", code: "x" }, fake.modesStatus));
+      return Promise.resolve(json(MODES_BODY));
+    }
     if (rest === "/chat/providers") {
       return Promise.resolve(
         json(fake.providers ?? [{ provider: "openai", configured: true, default_model: "gpt-x", default: true }]),
@@ -169,12 +185,13 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
         return Promise.resolve(turnStream(init));
       }
       if (method === "PATCH") {
-        const patch = body as { title?: string; effort?: string | null };
+        const patch = body as { title?: string; effort?: string | null; mode?: string | null };
         const title = patch.title;
         fake.sessions = fake.sessions.map((x) => {
           if (x.id !== id) return x;
           // An explicit null resets the level; an absent key leaves it alone (the real server tells them apart).
-          const next = "effort" in patch ? { ...x, effort: patch.effort } : x;
+          let next = "effort" in patch ? { ...x, effort: patch.effort } : x;
+          if ("mode" in patch) next = { ...next, mode: patch.mode };
           return title ? { ...next, title } : next;
         });
         return Promise.resolve(json(fake.sessions.find((x) => x.id === id)));
@@ -434,8 +451,8 @@ describe("the chat view", () => {
     const empty = await screen.findByTestId("chat-empty");
     expect(empty).toHaveTextContent("Ask about this codebase");
     const user = userEvent.setup();
-    await user.click(within(empty).getByRole("button", { name: STARTER_PROMPTS[1] }));
-    expect(screen.getByRole("textbox")).toHaveValue(STARTER_PROMPTS[1]);
+    await user.click(within(empty).getByRole("button", { name: "Eng starter B" }));
+    expect(screen.getByRole("textbox")).toHaveValue("Eng starter B");
     // Opening a new chat persists nothing.
     expect(fake.calls.some((c) => c.method === "POST")).toBe(false);
   });
@@ -452,7 +469,7 @@ describe("the chat view", () => {
     await waitFor(() => expect(fake.stream).not.toBeNull());
     const creates = fake.calls.filter((c) => c.method === "POST" && c.path === "/api/projects/alpha/chat/sessions");
     expect(creates).toHaveLength(1);
-    expect(creates[0].body).toEqual({ provider: "openai", model: "gpt-x" });
+    expect(creates[0].body).toEqual({ provider: "openai", model: "gpt-x", mode: "engineer" });
     const post = fake.calls.find((c) => c.path === "/api/projects/alpha/chat/sessions/7/messages");
     expect(post?.body).toEqual({ content: "why?" });
     await waitFor(() => expect(router.state.location.pathname).toBe("/p/alpha/chat/7"));
@@ -874,7 +891,7 @@ describe("the chat view: effort", () => {
     await user.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(fake.stream).not.toBeNull());
     const creates = fake.calls.filter((c) => c.method === "POST" && c.path === "/api/projects/alpha/chat/sessions");
-    expect(creates[0].body).toEqual({ provider: "openai", model: "gpt-x", effort: "xhigh" });
+    expect(creates[0].body).toEqual({ provider: "openai", model: "gpt-x", effort: "xhigh", mode: "engineer" });
     // The new session keeps the level the draft had.
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Effort" })).toHaveTextContent("Extra high"));
   });
@@ -934,5 +951,55 @@ describe("palette and shortcuts", () => {
     await userEvent.setup().keyboard("gc");
     expect(router.state.location.pathname).toBe("/p/alpha/scans");
     expect(sessionCalls()).toHaveLength(0);
+  });
+});
+
+describe("the chat view: mode", () => {
+  const patches = () => fake.calls.filter((c) => c.method === "PATCH" && c.path === "/api/projects/alpha/chat/sessions/3");
+  const pick = async (user: ReturnType<typeof userEvent.setup>, option: string) => {
+    await user.click(await screen.findByRole("combobox", { name: "Mode" }));
+    await user.click(await screen.findByRole("option", { name: option }));
+  };
+
+  it("PATCHes the mode on an existing session", async () => {
+    fake.sessions = [{ ...session(3, "Chat"), mode: "engineer" }];
+    mount("/p/alpha/chat/3");
+    const user = userEvent.setup();
+    expect(await screen.findByRole("combobox", { name: "Mode" })).toHaveTextContent("Engineer");
+    await pick(user, "Lead");
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0].body).toEqual({ mode: "lead" });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Mode" })).toHaveTextContent("Lead"));
+  });
+
+  it("shows the selected mode's starters on a draft and sends the mode on create", async () => {
+    mount("/p/alpha/chat");
+    const user = userEvent.setup();
+    const empty = await screen.findByTestId("chat-empty");
+    expect(await within(empty).findByRole("button", { name: "Eng starter A" })).toBeInTheDocument();
+    await pick(user, "Lead");
+    expect(within(empty).getByRole("button", { name: "Lead starter A" })).toBeInTheDocument();
+    expect(within(empty).queryByRole("button", { name: "Eng starter A" })).toBeNull();
+    expect(fake.calls.some((c) => c.method === "POST" || c.method === "PATCH")).toBe(false);
+    await user.type(await screen.findByRole("textbox"), "why?");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(fake.stream).not.toBeNull());
+    const create = fake.calls.find((c) => c.method === "POST" && c.path === "/api/projects/alpha/chat/sessions");
+    expect((create?.body as { mode?: string }).mode).toBe("lead");
+  });
+
+  it("starts on the server's default mode", async () => {
+    mount("/p/alpha/chat");
+    expect(await screen.findByRole("combobox", { name: "Mode" })).toHaveTextContent("Engineer");
+  });
+
+  it("falls back to today's starters with no select and no banner when the list fails", async () => {
+    fake.modesStatus = 500;
+    mount("/p/alpha/chat");
+    const empty = await screen.findByTestId("chat-empty");
+    expect(within(empty).getByRole("button", { name: STARTER_PROMPTS[0] })).toBeInTheDocument();
+    await screen.findByRole("combobox", { name: "Effort" });
+    expect(screen.queryByRole("combobox", { name: "Mode" })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

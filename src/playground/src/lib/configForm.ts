@@ -31,9 +31,13 @@ export interface ModelPick {
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 
-/** The Chat task's pick: a model, plus `[chat].effort` ("" = unset, inherit). */
+/** The chat modes (`MODE_IDS` in `core/config.py`), in the order the select lists them. */
+export const MODE_IDS = ["engineer", "lead", "onboarding"] as const;
+
+/** The Chat task's pick: a model, plus `[chat].effort` and `[chat].mode` ("" = unset, inherit). */
 export interface ChatPick extends ModelPick {
   effort: string;
+  mode: string;
 }
 
 /** One `[areas.<name>]` row as typed: paths and labels one per line. */
@@ -143,7 +147,7 @@ export function layerToValues(layer: ConfigDict): ConfigFormValues {
     defaultModel: splitModel(str(llm.model)),
     analyze: readTask(layer, "analyze"),
     rationale: readTask(layer, "rationale"),
-    chat: { ...readTask(layer, "chat"), effort: str(obj(layer.chat).effort) },
+    chat: { ...readTask(layer, "chat"), effort: str(obj(layer.chat).effort), mode: str(obj(layer.chat).mode) },
     openaiBaseUrl: str(obj(llm.openai).base_url),
     ollamaHost: str(obj(llm.ollama).host),
     forge: forgeOn(layer),
@@ -205,7 +209,11 @@ export function valuesToLayer(
     // that itself contains a slash (OpenRouter's) must not be re-split.
     setOrDrop(table, "provider", pick.provider);
     setOrDrop(table, "model", pick.model);
-    if (task === "chat") setOrDrop(table, "effort", (pick as ChatPick).effort);
+    if (task === "chat") {
+      setOrDrop(table, "effort", (pick as ChatPick).effort);
+      // Project-only on the server; the org-scope form never fills it, so it never sends it.
+      setOrDrop(table, "mode", (pick as ChatPick).mode);
+    }
     // The org-only limits are written by the org defaults form alone; a project
     // layer is never given them (the server refuses them there).
     if (opts.limits && (task === "rationale" || task === "analyze")) {
@@ -286,7 +294,7 @@ const pick = () => z.object({ provider: z.string(), model: modelText });
 
 const chatPick = () =>
   z
-    .object({ provider: z.string(), model: modelText, effort: effortText })
+    .object({ provider: z.string(), model: modelText, effort: effortText, mode: z.string() })
     .refine((p) => p.provider === "" || CHAT_PROVIDER_TAGS.includes(p.provider), {
       message: "This provider cannot run chat",
       path: ["provider"],

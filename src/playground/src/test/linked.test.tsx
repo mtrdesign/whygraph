@@ -1022,6 +1022,9 @@ describe("linked project pages", () => {
     expect(await screen.findByTestId("linked-name")).toHaveTextContent("Alpha");
     expect(screen.queryByRole("button", { name: "Rename" })).toBeNull();
     expect(screen.queryByText("Models and keys")).toBeNull();
+    // [areas] is the platform's too: no section, and the suggest route is never asked.
+    expect(screen.queryByRole("region", { name: "Areas" })).toBeNull();
+    expect(fake.calls.some((c) => c.path.includes("/areas/suggest"))).toBe(false);
     // The platform owns the rest, and says so (SET-4, plan section 0.3 #42).
     expect(screen.getByTestId("settings-managed")).toHaveTextContent("Change its settings there.");
     const nav = screen.getByRole("navigation", { name: "Settings sections" });

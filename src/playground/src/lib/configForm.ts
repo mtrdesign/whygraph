@@ -36,6 +36,29 @@ export interface ChatPick extends ModelPick {
   effort: string;
 }
 
+/** One `[areas.<name>]` row as typed: paths and labels one per line. */
+export interface AreaRow {
+  name: string;
+  description: string;
+  pathsText: string;
+  labelsText: string;
+}
+
+const lines = (text: string): string[] =>
+  text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "");
+const textLines = (v: unknown): string => (Array.isArray(v) ? v.map(String).join("\n") : "");
+
+/** The stored `[areas]` table as rows, in stored order. */
+export function areasFromLayer(layer: ConfigDict): AreaRow[] {
+  return Object.entries(obj(layer.areas)).map(([name, raw]) => {
+    const a = obj(raw);
+    return { name, description: str(a.description), pathsText: textLines(a.paths), labelsText: textLines(a.labels) };
+  });
+}
+
 export interface ConfigFormValues {
   defaultModel: ModelPick;
   analyze: ModelPick;
@@ -55,6 +78,8 @@ export interface ConfigFormValues {
   agentGenerations: string;
   /** `[analyze].agent_descriptions_per_hour`, as typed (blank = the default). Org defaults only. */
   agentDescriptions: string;
+  /** `[areas]`, project layer only. */
+  areas: AreaRow[];
 }
 
 /**
@@ -128,6 +153,7 @@ export function layerToValues(layer: ConfigDict): ConfigFormValues {
     keys: Object.fromEntries(KEYED_PROVIDERS.map((p) => [p, ""])),
     agentGenerations: limitText(obj(layer.rationale).agent_generations_per_hour),
     agentDescriptions: limitText(obj(layer.analyze).agent_descriptions_per_hour),
+    areas: areasFromLayer(layer),
   };
 }
 
@@ -155,7 +181,7 @@ function prune(root: Record<string, unknown>, key: string) {
 export function valuesToLayer(
   base: ConfigDict,
   v: ConfigFormValues,
-  opts: { scan: boolean; limits?: boolean },
+  opts: { scan: boolean; limits?: boolean; areas?: boolean },
 ): ConfigDict {
   const layer = structuredClone(base) as Record<string, Record<string, unknown>>;
 
@@ -208,6 +234,23 @@ export function valuesToLayer(
     }
     prune(layer, "scan");
   }
+  // Only the Areas section's save writes `[areas]`; zero rows removes the key.
+  if (opts.areas) {
+    const stored = obj(base.areas);
+    const table: Record<string, unknown> = {};
+    for (const row of v.areas) {
+      const before = obj(stored[row.name]);
+      const area: Record<string, unknown> = {};
+      // Keep a stored empty `description` / `labels` key, so an untouched row round-trips exactly.
+      if (row.description.trim() !== "" || "description" in before) area.description = row.description.trim();
+      area.paths = lines(row.pathsText);
+      const labels = lines(row.labelsText);
+      if (labels.length > 0 || "labels" in before) area.labels = labels;
+      table[row.name.trim()] = area;
+    }
+    if (Object.keys(table).length === 0) delete (layer as Record<string, unknown>).areas;
+    else (layer as Record<string, unknown>).areas = table;
+  }
   return layer;
 }
 
@@ -257,6 +300,13 @@ const agentLimit = z.string().refine(
   `Enter a whole number from 0 to ${formatNumber(MAX_AGENT_LIMIT)}, or leave it blank`,
 );
 
+const areaRow = z.object({
+  name: z.string().refine((n) => n.trim() !== "", "Give the area a name"),
+  description: z.string(),
+  pathsText: z.string().refine((t) => lines(t).length > 0, "Add at least one path"),
+  labelsText: z.string(),
+});
+
 export const configFormSchema = z.object({
   defaultModel: z
     .object({ provider: z.string(), model: modelText })
@@ -285,4 +335,8 @@ export const configFormSchema = z.object({
   keys: z.record(z.string(), z.string()),
   agentGenerations: agentLimit,
   agentDescriptions: agentLimit,
+  areas: z.array(areaRow).refine(
+    (rows) => new Set(rows.map((r) => r.name.trim())).size === rows.length,
+    "Area names must be unique",
+  ),
 });
